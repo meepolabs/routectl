@@ -21,7 +21,7 @@ use crate::commands::doctor_panels::compute_would_trim_panel;
 use crate::commands::parse_error_redaction::redact_config_load_error;
 use crate::commands::pricing::{is_subscription, missing_equivalence_dimensions};
 use crate::commands::probe::{PROBE_DEADLINE, probe_all};
-use crate::config_folder::{LegacyConfigDir, legacy_config_dir_from_env};
+use crate::config_folder::LegacyConfigDir;
 use crate::server::CompositeStore;
 use crate::server::ledger_reader::{
     BoundaryOutcome, LedgerCapabilityReader, SliceReader, classify_boundary,
@@ -39,8 +39,11 @@ use super::{
 /// ([`gather_context_no_network`]) is what keeps the two entry points from
 /// drifting -- a new context field is added once and both paths carry it; the
 /// only difference between the paths is this `probe_results` assignment.
-pub(super) async fn gather_context(config_path: &Path) -> DoctorContext {
-    let ctx = gather_context_no_network(config_path, GatherSources::Disk).await;
+pub(super) async fn gather_context(
+    config_path: &Path,
+    legacy_dirs: &[LegacyConfigDir],
+) -> DoctorContext {
+    let ctx = gather_context_no_network(config_path, GatherSources::Disk, legacy_dirs).await;
     let probe_results = gather_probe_results(&ctx.config).await;
     DoctorContext {
         probe_results,
@@ -62,9 +65,14 @@ pub(super) async fn gather_context(config_path: &Path) -> DoctorContext {
 /// validation findings. The version finding reads them too on the disk path;
 /// a served gather takes it from the accepted config instead, since the file
 /// on disk may hold an edit the daemon rejected.
+///
+/// `legacy_dirs` are the old config folders to list, usually
+/// [`crate::config_folder::legacy_config_dirs_from_env`]; the gather itself
+/// reads no environment variable for them.
 pub async fn gather_context_no_network(
     config_path: &Path,
     sources: GatherSources,
+    legacy_dirs: &[LegacyConfigDir],
 ) -> DoctorContext {
     let raw_config = std::fs::read_to_string(config_path).ok();
     let layers = match sources {
@@ -120,7 +128,11 @@ pub async fn gather_context_no_network(
     let orphan_secrets = gather_orphan_secrets(&config);
     let orphan_seats = gather_orphan_seats(&config, &seats);
     let would_trim = compute_would_trim_panel(&config, Local::now());
-    let legacy_folder = gather_legacy_folder(legacy_config_dir_from_env().as_ref(), config_path);
+    let legacy_folders = legacy_dirs
+        .iter()
+        .map(|legacy| gather_legacy_folder(legacy, config_path))
+        .filter(|folder| *folder != LegacyFolder::Absent)
+        .collect();
 
     DoctorContext {
         config,
@@ -147,32 +159,22 @@ pub async fn gather_context_no_network(
         reload_failure,
         parked_seats,
         overlay_soft_defects,
-        legacy_folder,
+        legacy_folders,
     }
 }
 
 /// List what the old config folder `legacy` still holds. A folder that holds
-/// `config_in_use` (after resolving symlinks) is the operator's explicit
-/// choice, not residue, so it reads as [`LegacyFolder::Absent`]. Every entry
-/// counts, temp and lock files included: the operator moves the folder's
-/// contents as a whole.
-pub(super) fn gather_legacy_folder(
-    legacy: Option<&LegacyConfigDir>,
-    config_in_use: &Path,
-) -> LegacyFolder {
-    let Some(LegacyConfigDir {
+/// `config_in_use` is the operator's explicit choice, not residue, so it
+/// reads as [`LegacyFolder::Absent`]; the config counts as held there when
+/// either the path as written or its symlink-resolved target sits directly in
+/// the folder. Every entry counts, temp and lock files included: the operator
+/// moves the folder's contents as a whole.
+pub(super) fn gather_legacy_folder(legacy: &LegacyConfigDir, config_in_use: &Path) -> LegacyFolder {
+    let LegacyConfigDir {
         path: legacy_dir,
         display,
-    }) = legacy
-    else {
-        return LegacyFolder::Absent;
-    };
-    let config_in_use =
-        std::fs::canonicalize(config_in_use).unwrap_or_else(|_| config_in_use.to_path_buf());
-    if config_in_use
-        .parent()
-        .is_some_and(|parent| same_dir(parent, legacy_dir))
-    {
+    } = legacy;
+    if holds_config_in_use(legacy_dir, config_in_use) {
         return LegacyFolder::Absent;
     }
     let inspect_error = |e: std::io::Error| LegacyFolder::InspectError {
@@ -204,6 +206,16 @@ pub(super) fn gather_legacy_folder(
         more,
         has_config,
     }
+}
+
+/// Whether `config_in_use`, as written or with symlinks resolved, sits
+/// directly in `folder`. The written path matters on its own: a `--config`
+/// naming `<folder>/config.toml` that links out of the folder still breaks if
+/// the folder is removed.
+fn holds_config_in_use(folder: &Path, config_in_use: &Path) -> bool {
+    let in_folder = |path: &Path| path.parent().is_some_and(|parent| same_dir(parent, folder));
+    in_folder(config_in_use)
+        || std::fs::canonicalize(config_in_use).is_ok_and(|resolved| in_folder(&resolved))
 }
 
 /// Whether `a` and `b` name the same folder, resolving symlinks where both

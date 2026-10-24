@@ -47,6 +47,7 @@ use std::time::Instant;
 
 use routectl_auth::LocalProbe;
 
+use crate::config_folder::LegacyConfigDir;
 use crate::server::reload_failure::ReloadFailureSnapshot;
 use routectl_auth::oauth::types::TokenRecord;
 use routectl_core::ProbeOutcome;
@@ -174,10 +175,11 @@ pub(crate) use self::served::{GatherSources, ParkedSeat, ResidentLearned, Served
 /// the number of repairs each drew, one bucket per count from zero to the
 /// per-request allowance. The report itself is unchanged.
 ///
-/// v19 -> v20: additive. The `config` section gains one `legacy folder` Warn
-/// when the folder routectl used before every OS shared one config folder
-/// (on macOS or Windows) still holds files (named, at most eight, plus a count of the
-/// rest), or when that folder could not be inspected.
+/// v19 -> v20: additive. The `config` section gains a `legacy folder` Warn
+/// for each folder routectl used before every OS shared one config folder
+/// (`%APPDATA%\routectl`, then `~/Library/Application Support/routectl`)
+/// that still holds files (named, at most eight, plus a count of the rest) or
+/// could not be inspected.
 const SCHEMA_VERSION: u32 = 20;
 
 /// A section-producer: pure mapping of the read-only [`DoctorContext`] to a
@@ -321,10 +323,11 @@ pub(crate) struct DoctorContext {
     /// Read off the overlay itself, so a hand edit that kept the revision
     /// still shows here.
     overlay_soft_defects: Vec<OverlaySoftDefect>,
-    /// What the folder routectl used before the shared config folder still
-    /// holds. routectl never reads it, so anything left there is
+    /// What each folder routectl used before the shared config folder still
+    /// holds, one row per candidate that is not [`LegacyFolder::Absent`], in
+    /// candidate order. routectl never reads them, so anything left there is
     /// residue the operator may still expect to be in use.
-    legacy_folder: LegacyFolder,
+    legacy_folders: Vec<LegacyFolder>,
 }
 
 /// The most entry names a [`LegacyFolder::Entries`] carries; the rest are
@@ -609,8 +612,8 @@ struct ImportResult {
 /// Run the doctor aggregator against `config_path` and render the report.
 /// Read-only and infallible in posture: a load or probe failure degrades to
 /// a finding, never a hard error. Returns the process exit code.
-pub async fn run(config_path: &Path, json: bool) -> i32 {
-    let ctx = gather_context(config_path).await;
+pub async fn run(config_path: &Path, legacy_dirs: &[LegacyConfigDir], json: bool) -> i32 {
+    let ctx = gather_context(config_path, legacy_dirs).await;
     let report = build_report(&ctx);
 
     if json {

@@ -1392,7 +1392,8 @@ fn build_axum_router(
     // the operator's incident window (the shell) still loads.
     let status_state =
         crate::handlers::status::StatusState::from_app(&state, config_path, daemon_meta)
-            .with_warm_report(warm_report);
+            .with_warm_report(warm_report)
+            .with_legacy_config_dirs(crate::config_folder::legacy_config_dirs_from_env());
     #[cfg(test)]
     let status_state = status_state.with_test_hooks(status_hooks);
     let status_allowlist = status_gate::StatusHostAllowlist::new(bound);

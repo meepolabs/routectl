@@ -16,115 +16,201 @@ fn home_with_blocked_legacy_folder() -> tempfile::TempDir {
     home
 }
 
-/// One row: name, `HOME`, `APPDATA`, expected old folder.
+fn appdata_dir(path: &str) -> LegacyConfigDir {
+    LegacyConfigDir {
+        path: PathBuf::from(path),
+        display: LEGACY_APPDATA_DISPLAY,
+    }
+}
+
+fn library_dir(path: &str) -> LegacyConfigDir {
+    LegacyConfigDir {
+        path: PathBuf::from(path),
+        display: LEGACY_LIBRARY_DISPLAY,
+    }
+}
+
+/// One row: name, `HOME`, `APPDATA`, expected old folders in order.
 type LegacyRow = (
     &'static str,
     Option<&'static str>,
     Option<&'static str>,
-    Option<LegacyConfigDir>,
+    Vec<LegacyConfigDir>,
 );
 
+#[cfg(unix)]
 #[test]
-fn legacy_config_dir_picks_one_candidate_from_appdata_then_home() {
-    let library = Some(LegacyConfigDir {
-        path: PathBuf::from("/home/u/Library/Application Support/routectl"),
-        display: LEGACY_LIBRARY_DISPLAY,
-    });
-    let appdata = Some(LegacyConfigDir {
-        path: PathBuf::from("/appdata/routectl"),
-        display: LEGACY_APPDATA_DISPLAY,
-    });
+fn legacy_config_dirs_lists_appdata_then_library_for_absolute_values() {
+    let library = || library_dir("/home/u/Library/Application Support/routectl");
+    let appdata = || appdata_dir("/appdata/routectl");
     let rows: [LegacyRow; 8] = [
         (
-            "appdata wins over home",
+            "both, appdata first",
             Some("/home/u"),
             Some("/appdata"),
-            appdata.clone(),
+            vec![appdata(), library()],
         ),
-        ("appdata alone", None, Some("/appdata"), appdata),
+        ("appdata alone", None, Some("/appdata"), vec![appdata()]),
+        ("appdata empty", Some("/home/u"), Some(""), vec![library()]),
         (
-            "appdata empty uses home",
-            Some("/home/u"),
-            Some(""),
-            library.clone(),
-        ),
-        (
-            "appdata relative uses home",
+            "appdata relative",
             Some("/home/u"),
             Some("rel"),
-            library.clone(),
+            vec![library()],
         ),
-        ("appdata unset uses home", Some("/home/u"), None, library),
-        ("home empty", Some(""), None, None),
-        ("home relative", Some("rel"), Some("rel"), None),
-        ("both unset", None, None, None),
+        (
+            "windows-style appdata is relative on unix",
+            Some("/home/u"),
+            Some("C:\\Users\\u\\AppData\\Roaming"),
+            vec![library()],
+        ),
+        ("appdata unset", Some("/home/u"), None, vec![library()]),
+        (
+            "home with a trailing slash",
+            Some("/home/u/"),
+            None,
+            vec![library()],
+        ),
+        (
+            "non-ascii home",
+            Some("/home/jos\u{e9}"),
+            None,
+            vec![library_dir(
+                "/home/jos\u{e9}/Library/Application Support/routectl",
+            )],
+        ),
     ];
     for (name, home, appdata, want) in rows {
-        let got = legacy_config_dir(home.map(OsStr::new), appdata.map(OsStr::new));
+        let got = legacy_config_dirs(home.map(OsStr::new), appdata.map(OsStr::new));
 
         assert_eq!(got, want, "row {name}");
     }
 }
 
+/// Values that are not absolute on any OS name no candidate.
 #[test]
-fn stranded_config_refuses_only_when_the_config_is_only_in_the_old_folder() {
-    // (name, plant new, plant old, stranded)
-    let rows = [
-        ("only old", false, true, true),
-        ("both", true, true, false),
-        ("neither", false, false, false),
-        ("only new", true, false, false),
+fn legacy_config_dirs_is_empty_without_an_absolute_value() {
+    let rows: [(&str, Option<&str>, Option<&str>); 4] = [
+        ("home empty", Some(""), None),
+        ("appdata empty", None, Some("")),
+        ("home and appdata relative", Some("rel"), Some("rel")),
+        ("both unset", None, None),
     ];
-    for (name, has_new, has_old, want_stranded) in rows {
+    for (name, home, appdata) in rows {
+        let got = legacy_config_dirs(home.map(OsStr::new), appdata.map(OsStr::new));
+
+        assert!(got.is_empty(), "row {name}: {got:?}");
+    }
+}
+
+/// Plant `config.toml` under each named candidate, in candidate order.
+fn candidates_with_configs(root: &Path, planted: [bool; 2]) -> Vec<LegacyConfigDir> {
+    let dirs = vec![
+        LegacyConfigDir {
+            path: root.join("appdata").join("routectl"),
+            display: LEGACY_APPDATA_DISPLAY,
+        },
+        LegacyConfigDir {
+            path: root.join("library").join("routectl"),
+            display: LEGACY_LIBRARY_DISPLAY,
+        },
+    ];
+    for (dir, plant_it) in dirs.iter().zip(planted) {
+        if plant_it {
+            plant(&dir.path.join("config.toml"));
+        }
+    }
+    dirs
+}
+
+#[test]
+fn refuse_stranded_config_refuses_only_when_the_config_is_only_in_an_old_folder() {
+    // (name, plant new, plant in [appdata, library], expected stranded index)
+    let rows: [(&str, bool, [bool; 2], Option<usize>); 6] = [
+        ("only appdata", false, [true, false], Some(0)),
+        ("only library", false, [false, true], Some(1)),
+        (
+            "both old folders, appdata named",
+            false,
+            [true, true],
+            Some(0),
+        ),
+        ("new and old", true, [true, true], None),
+        ("neither", false, [false, false], None),
+        ("only new", true, [false, false], None),
+    ];
+    for (name, has_new, planted, want) in rows {
         let tmp = tempfile::tempdir().unwrap();
         let new_cfg = tmp.path().join("new").join("routectl").join("config.toml");
-        let legacy = tmp.path().join("old").join("routectl");
+        let dirs = candidates_with_configs(tmp.path(), planted);
         if has_new {
             plant(&new_cfg);
         }
-        if has_old {
-            plant(&legacy.join("config.toml"));
-        }
 
-        let got = stranded_config(&new_cfg, &legacy);
+        let got = refuse_stranded_config(&new_cfg, &dirs);
 
-        match got {
-            Err(ConfigFolderError::Stranded { old, new }) if want_stranded => {
-                assert_eq!(old, legacy.join("config.toml"), "row {name}");
+        match (got, want) {
+            (Err(ConfigFolderError::Stranded { old, new }), Some(at)) => {
+                assert_eq!(old, dirs[at].path.join("config.toml"), "row {name}");
                 assert_eq!(new, new_cfg, "row {name}");
             }
-            Ok(()) if !want_stranded => {}
-            other => panic!("row {name}: {other:?}"),
+            (Ok(()), None) => {}
+            (other, _) => panic!("row {name}: {other:?}"),
+        }
+    }
+}
+
+/// The first candidate that cannot be inspected wins, even when a later one
+/// holds a config: an unknown is never read as absent.
+#[test]
+fn refuse_stranded_config_names_the_first_old_config_it_could_not_inspect() {
+    // (name, block appdata, block library, plant library config, blocked index)
+    let rows: [(&str, bool, bool, bool, usize); 3] = [
+        ("library blocked", false, true, false, 1),
+        (
+            "appdata blocked before a stranded library",
+            true,
+            false,
+            true,
+            0,
+        ),
+        ("both blocked", true, true, false, 0),
+    ];
+    for (name, block_appdata, block_library, library_config, want) in rows {
+        let tmp = tempfile::tempdir().unwrap();
+        let new_cfg = tmp.path().join("new").join("config.toml");
+        let dirs = candidates_with_configs(tmp.path(), [false, library_config]);
+        for (dir, block) in dirs.iter().zip([block_appdata, block_library]) {
+            if block {
+                plant(&dir.path);
+            }
+        }
+
+        let got = refuse_stranded_config(&new_cfg, &dirs);
+
+        match got {
+            Err(ConfigFolderError::Inspect { path, source }) => {
+                assert_eq!(path, dirs[want].path.join("config.toml"), "row {name}");
+                assert_eq!(
+                    source.kind(),
+                    std::io::ErrorKind::NotADirectory,
+                    "row {name}"
+                );
+            }
+            other => {
+                panic!("row {name}: an uninspectable folder must not read as absent: {other:?}")
+            }
         }
     }
 }
 
 #[test]
-fn stranded_config_names_the_old_config_it_could_not_inspect() {
-    let home = home_with_blocked_legacy_folder();
-    let new_cfg = home.path().join("new").join("config.toml");
-    let legacy = legacy_config_dir(Some(home.path().as_os_str()), None)
-        .unwrap()
-        .path;
-
-    let got = stranded_config(&new_cfg, &legacy);
-
-    match got {
-        Err(ConfigFolderError::Inspect { path, .. }) => {
-            assert_eq!(path, legacy.join("config.toml"));
-        }
-        other => panic!("an uninspectable folder must not read as absent: {other:?}"),
-    }
-}
-
-#[test]
-fn stranded_config_names_the_new_config_it_could_not_inspect() {
+fn refuse_stranded_config_names_the_new_config_it_could_not_inspect() {
     let home = home_with_blocked_legacy_folder();
     let new_cfg = home.path().join("Library").join("config.toml");
-    let legacy = home.path().join("old").join("routectl");
-    plant(&legacy.join("config.toml"));
+    let dirs = candidates_with_configs(home.path(), [true, false]);
 
-    let got = stranded_config(&new_cfg, &legacy);
+    let got = refuse_stranded_config(&new_cfg, &dirs);
 
     match got {
         Err(ConfigFolderError::Inspect { path, .. }) => assert_eq!(path, new_cfg),
@@ -132,33 +218,14 @@ fn stranded_config_names_the_new_config_it_could_not_inspect() {
     }
 }
 
-#[test]
-fn refuse_stranded_config_reports_an_uninspectable_old_folder() {
-    let home = home_with_blocked_legacy_folder();
-    let new_cfg = home
-        .path()
-        .join(".config")
-        .join("routectl")
-        .join("config.toml");
-    let legacy = legacy_config_dir(Some(home.path().as_os_str()), None).unwrap();
-
-    let got = refuse_stranded_config(&new_cfg, Some(&legacy.path));
-
-    match got {
-        Err(ConfigFolderError::Inspect { path, source }) => {
-            assert_eq!(path, legacy.path.join("config.toml"));
-            assert_eq!(source.kind(), std::io::ErrorKind::NotADirectory);
-        }
-        other => panic!("an uninspectable folder must not read as absent: {other:?}"),
-    }
-}
-
+/// With no candidate nothing is checked, so even an uninspectable new config
+/// passes.
 #[test]
 fn refuse_stranded_config_does_nothing_without_an_old_folder() {
-    let tmp = tempfile::tempdir().unwrap();
-    let new_cfg = tmp.path().join("absent.toml");
+    let home = home_with_blocked_legacy_folder();
+    let new_cfg = home.path().join("Library").join("config.toml");
 
-    assert!(refuse_stranded_config(&new_cfg, None).is_ok());
+    assert!(refuse_stranded_config(&new_cfg, &[]).is_ok());
 }
 
 #[test]

@@ -185,7 +185,7 @@ pub(super) fn section_config(ctx: &DoctorContext) -> Vec<Finding> {
                 .map(overlay_soft_defect_finding),
         )
         .collect();
-    findings.extend(legacy_folder_finding(&ctx.legacy_folder));
+    findings.extend(ctx.legacy_folders.iter().filter_map(legacy_folder_finding));
     if ctx.config_load_error.is_some() {
         findings.push(Finding {
             section: "config",
@@ -246,6 +246,10 @@ pub(super) fn section_config(ctx: &DoctorContext) -> Vec<Finding> {
 /// so each is control-char-filtered before it reaches the one-line human
 /// render.
 fn legacy_folder_finding(folder: &LegacyFolder) -> Option<Finding> {
+    // Named by variable, without `~`, `$` or `%`: one wording has to be
+    // right for every old folder on every OS, home path never printed.
+    const NEW_FOLDER: &str = "the folder routectl reads now (routectl under XDG_CONFIG_HOME \
+                              when that is set, else .config/routectl in your home folder)";
     let (detail, remediation) = match folder {
         LegacyFolder::Absent => return None,
         LegacyFolder::Entries {
@@ -256,8 +260,7 @@ fn legacy_folder_finding(folder: &LegacyFolder) -> Option<Finding> {
         } => (
             legacy_entries_detail(display, names, *more, *has_config),
             format!(
-                "move what you still need from {display} to ~/.config/routectl \
-                 (or $XDG_CONFIG_HOME/routectl), then remove the old folder"
+                "move what you still need from {display} to {NEW_FOLDER}, then remove the old folder"
             ),
         ),
         LegacyFolder::InspectError { display, kind } => (
@@ -265,7 +268,7 @@ fn legacy_folder_finding(folder: &LegacyFolder) -> Option<Finding> {
                 "could not list {display} ({kind}), so files routectl no longer reads may be \
                  left there"
             ),
-            format!("check the permissions on {display}"),
+            format!("check that {display} is a readable folder"),
         ),
     };
     Some(Finding {

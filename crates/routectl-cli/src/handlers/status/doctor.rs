@@ -150,6 +150,7 @@ async fn build_from_path(
     let writer_degraded = state.usage_health.writer_degraded();
     let capability_writes = state.usage_health.capability_writes();
     let gate = Arc::clone(&state.fidelity_gate);
+    let legacy_dirs = state.legacy_config_dirs().to_vec();
     let handle = tokio::runtime::Handle::current();
     // The snapshot is pinned now, so request time IS the read time.
     let as_of = now_utc_rfc3339();
@@ -165,6 +166,7 @@ async fn build_from_path(
             let ctx = handle.block_on(gather_context_no_network(
                 &config_path,
                 GatherSources::Served(Box::new(served)),
+                &legacy_dirs,
             ));
             let report = build_report_no_network(&ctx);
             let schema_version = report.schema_version;

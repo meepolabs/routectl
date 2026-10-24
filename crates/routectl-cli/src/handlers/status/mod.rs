@@ -49,6 +49,8 @@ use routectl_router::ActivationState;
 use serde::Serialize;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError as TryAcquire};
 
+use crate::config_folder::LegacyConfigDir;
+
 pub use types::{Panel, now_utc_rfc3339, utc_rfc3339, vocabulary};
 
 /// Re-exported for the assembled-daemon sidecar in `crate::server`, which drains
@@ -174,6 +176,9 @@ pub struct StatusState {
     fidelity_gate: Arc<field_verdict_log::FidelityGate>,
     /// What the boot capability warm did; fixed at construction.
     warm_report: WarmReport,
+    /// The old config folders the doctor panel lists, read from the
+    /// environment once at daemon start; none unless the daemon set them.
+    legacy_config_dirs: Vec<LegacyConfigDir>,
     /// Test-only observation and failure-injection seams for THIS daemon's status
     /// surface. Absent from every release build -- see [`test_hooks`].
     #[cfg(test)]
@@ -202,6 +207,7 @@ impl StatusState {
             usage_health,
             fidelity_gate: Arc::default(),
             warm_report: WarmReport::not_run(),
+            legacy_config_dirs: Vec::new(),
             #[cfg(test)]
             test_hooks: test_hooks::StatusTestHooks::default(),
         }
@@ -219,6 +225,19 @@ impl StatusState {
     /// The boot capability warm's report.
     pub const fn warm_report(&self) -> &WarmReport {
         &self.warm_report
+    }
+
+    /// Record the old config folders the doctor panel lists. A setter for the
+    /// same reason as [`Self::with_warm_report`].
+    #[must_use]
+    pub(crate) fn with_legacy_config_dirs(mut self, dirs: Vec<LegacyConfigDir>) -> Self {
+        self.legacy_config_dirs = dirs;
+        self
+    }
+
+    /// The old config folders the doctor panel lists.
+    pub(crate) fn legacy_config_dirs(&self) -> &[LegacyConfigDir] {
+        &self.legacy_config_dirs
     }
 
     /// Install this daemon's test-only status seams.

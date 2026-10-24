@@ -234,13 +234,14 @@ async fn a_served_version_finding_reads_the_accepted_config_not_the_disk_file() 
 
     let served = version_finding(
         build_report_no_network(
-            &gather_context_no_network(&config_path, GatherSources::Served(Box::new(inputs))).await,
+            &gather_context_no_network(&config_path, GatherSources::Served(Box::new(inputs)), &[])
+                .await,
         )
         .findings,
     );
     let disk = version_finding(
         build_report_no_network(
-            &gather_context_no_network(&config_path, GatherSources::Disk).await,
+            &gather_context_no_network(&config_path, GatherSources::Disk, &[]).await,
         )
         .findings,
     );
@@ -325,7 +326,8 @@ async fn a_served_gather_renders_one_warn_per_overlay_soft_defect() {
 
         // Act
         let context =
-            gather_context_no_network(&config_path, GatherSources::Served(Box::new(inputs))).await;
+            gather_context_no_network(&config_path, GatherSources::Served(Box::new(inputs)), &[])
+                .await;
         let report = build_report_no_network(&context);
 
         // Assert

@@ -630,10 +630,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let cli = Cli::parse();
     if cli.config.is_none() {
-        let legacy = routectl_cli::config_folder::legacy_config_dir_from_env();
         routectl_cli::config_folder::refuse_stranded_config(
             &resolve_config_path(None),
-            legacy.as_ref().map(|legacy| legacy.path.as_path()),
+            &routectl_cli::config_folder::legacy_config_dirs_from_env(),
         )?;
     }
 
@@ -723,7 +722,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             if let Ok(loaded) = load_config_with_overlay(cli.config.as_deref()) {
                 emit_staleness_hint_for(&loaded, json);
             }
-            std::process::exit(commands::doctor::run(&path, json).await);
+            let legacy_dirs = routectl_cli::config_folder::legacy_config_dirs_from_env();
+            std::process::exit(commands::doctor::run(&path, &legacy_dirs, json).await);
         }
         Cmd::Test { target, prompt } => {
             let config = load_config(cli.config.as_deref())?;

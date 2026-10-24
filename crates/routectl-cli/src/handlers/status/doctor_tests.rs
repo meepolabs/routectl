@@ -159,7 +159,7 @@ async fn build_panel_data_emits_the_field_verdict_snapshot_log() {
     .unwrap();
     let state = state_with_config(Some(config_path.clone()));
     let view = state.router.view();
-    let ctx = gather_context_no_network(&config_path, GatherSources::Disk).await;
+    let ctx = gather_context_no_network(&config_path, GatherSources::Disk, &[]).await;
     let report = build_report_no_network(&ctx);
 
     let events = routectl_testkit::capture_events(|| {
@@ -203,7 +203,7 @@ async fn panel_constant_tracks_the_no_network_report_schema_version() {
     )
     .unwrap();
 
-    let ctx = gather_context_no_network(&config_path, GatherSources::Disk).await;
+    let ctx = gather_context_no_network(&config_path, GatherSources::Disk, &[]).await;
     let report = build_report_no_network(&ctx);
     assert_eq!(report.schema_version, DOCTOR_SCHEMA_VERSION);
 }
@@ -535,9 +535,10 @@ async fn a_served_gather_reads_the_resident_registry_not_the_ledger() {
     let served = gather_context_no_network(
         &config_path,
         GatherSources::Served(Box::new(view.served_doctor_inputs(warm))),
+        &[],
     )
     .await;
-    let disk = gather_context_no_network(&config_path, GatherSources::Disk).await;
+    let disk = gather_context_no_network(&config_path, GatherSources::Disk, &[]).await;
 
     assert!(
         !absent_ledger.exists(),
@@ -717,5 +718,59 @@ async fn a_recorded_reload_failure_renders_one_warn_finding_on_the_served_report
     assert!(
         reload_findings(&without_failure).is_empty(),
         "{without_failure:?}"
+    );
+}
+
+/// The served panel lists the old folders the daemon recorded at start, not
+/// the ones the request-time environment names. Mutation check: pass `&[]`
+/// in place of the state's folders in `build_from_path` -> red here.
+#[tokio::test]
+async fn handler_lists_the_old_folders_the_state_carries() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.toml");
+    std::fs::write(
+        &config_path,
+        format!("version = {}\n", routectl_router::CURRENT_CONFIG_VERSION),
+    )
+    .unwrap();
+    let appdata = dir.path().join("ad");
+    let legacy_dirs = crate::config_folder::legacy_config_dirs(None, Some(appdata.as_os_str()));
+    std::fs::create_dir_all(appdata.join("routectl")).unwrap();
+    std::fs::write(appdata.join("routectl").join("usage.db"), b"x").unwrap();
+    let router = Router::new(Arc::new(Config::default()));
+    let app = AppState::for_test(Arc::new(ArcSwap::from_pointee(router)));
+    let state = Arc::new(
+        StatusState::from_app(&app, Some(config_path), DaemonMeta::for_test())
+            .with_legacy_config_dirs(legacy_dirs),
+    );
+
+    let resp = super::super::status_router()
+        .with_state(state)
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/status/doctor")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let json: Value = serde_json::from_slice(&bytes).unwrap();
+
+    let findings = json["data"]["report"]["findings"].as_array().unwrap();
+    let legacy: Vec<&Value> = findings
+        .iter()
+        .filter(|f| f["name"] == "legacy folder")
+        .collect();
+    assert_eq!(legacy.len(), 1, "{findings:?}");
+    let detail = legacy[0]["detail"].as_str().unwrap();
+    assert!(
+        detail.starts_with("%APPDATA%\\routectl still holds usage.db"),
+        "{detail}"
+    );
+    assert!(
+        !detail.contains(&*dir.path().to_string_lossy()),
+        "no absolute path in the served finding: {detail}"
     );
 }

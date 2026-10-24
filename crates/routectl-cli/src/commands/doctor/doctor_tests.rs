@@ -82,7 +82,7 @@ pub(super) fn ctx(
         reload_failure: None,
         parked_seats: Vec::new(),
         overlay_soft_defects: Vec::new(),
-        legacy_folder: LegacyFolder::Absent,
+        legacy_folders: Vec::new(),
     }
 }
 
@@ -1013,7 +1013,7 @@ async fn full_run_leaves_config_dir_byte_identical() {
     std::fs::set_permissions(&creds_path, std::fs::Permissions::from_mode(0o600)).unwrap();
 
     let before = snapshot_dir(tmp.path());
-    let code = run(&config_path, false).await;
+    let code = run(&config_path, &[], false).await;
     let after = snapshot_dir(tmp.path());
 
     assert_eq!(
@@ -1035,7 +1035,7 @@ async fn too_old_config_is_not_stamped_and_reports_fail() {
     let original = b"version = 1\n";
     std::fs::write(&config_path, original).unwrap();
 
-    let context = gather_context(&config_path).await;
+    let context = gather_context(&config_path, &[]).await;
     let report = build_report(&context);
 
     let after = std::fs::read(&config_path).unwrap();
@@ -1067,7 +1067,7 @@ async fn present_but_unparseable_config_yields_fail_end_to_end() {
     )
     .unwrap();
 
-    let context = gather_context(&config_path).await;
+    let context = gather_context(&config_path, &[]).await;
     let report = build_report(&context);
 
     let f = find(&report.findings, "version", "config schema");
@@ -2203,7 +2203,7 @@ async fn full_run_reports_an_orphan_seat_without_touching_the_store() {
     std::fs::set_permissions(&creds_path, std::fs::Permissions::from_mode(0o600)).unwrap();
 
     let before = snapshot_dir(tmp.path());
-    let context = gather_context_no_network(&config_path, GatherSources::Disk).await;
+    let context = gather_context_no_network(&config_path, GatherSources::Disk, &[]).await;
     let report = build_report_no_network(&context);
     let after = snapshot_dir(tmp.path());
 
@@ -2261,7 +2261,7 @@ async fn full_run_leaves_secret_dir_byte_identical() {
     std::fs::set_permissions(&orphan, std::fs::Permissions::from_mode(0o600)).unwrap();
 
     let before = snapshot_dir(tmp.path());
-    let context = gather_context(&config_path).await;
+    let context = gather_context(&config_path, &[]).await;
     let report = build_report(&context);
     let after = snapshot_dir(tmp.path());
 
@@ -2409,7 +2409,7 @@ fn rendered_report_leaks_neither_a_config_secret_nor_a_store_path() {
         reload_failure: None,
         parked_seats: Vec::new(),
         overlay_soft_defects: Vec::new(),
-        legacy_folder: LegacyFolder::Absent,
+        legacy_folders: Vec::new(),
     };
     let report = build_report(&context);
 
@@ -2534,7 +2534,7 @@ async fn gather_context_no_network_yields_no_probe_results() {
     std::fs::write(&creds_path, br#"{"schema_version":1,"providers":{}}"#).unwrap();
     std::fs::set_permissions(&creds_path, std::fs::Permissions::from_mode(0o600)).unwrap();
 
-    let context = gather_context_no_network(&config_path, GatherSources::Disk).await;
+    let context = gather_context_no_network(&config_path, GatherSources::Disk, &[]).await;
     assert!(
         context.probe_results.is_empty(),
         "the no-network gather must not populate probe results"
@@ -2613,8 +2613,8 @@ async fn network_and_no_network_gather_agree_outside_probe() {
     std::fs::write(&creds_path, br#"{"schema_version":1,"providers":{}}"#).unwrap();
     std::fs::set_permissions(&creds_path, std::fs::Permissions::from_mode(0o600)).unwrap();
 
-    let network = gather_context(&config_path).await;
-    let no_network = gather_context_no_network(&config_path, GatherSources::Disk).await;
+    let network = gather_context(&config_path, &[]).await;
+    let no_network = gather_context_no_network(&config_path, GatherSources::Disk, &[]).await;
 
     // Both contexts fed through the no-network builder must agree: the
     // shared gather body produced the same non-probe inputs on both paths.
@@ -4443,7 +4443,7 @@ async fn a_disk_gather_renders_one_warn_per_overlay_soft_defect() {
         .unwrap();
 
         // Act
-        let context = gather_context_no_network(&config_path, GatherSources::Disk).await;
+        let context = gather_context_no_network(&config_path, GatherSources::Disk, &[]).await;
         let report = build_report_no_network(&context);
 
         // Assert

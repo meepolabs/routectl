@@ -5,7 +5,7 @@ use std::io::ErrorKind;
 use std::path::Path;
 
 use crate::config_folder::{
-    LEGACY_APPDATA_DISPLAY, LEGACY_LIBRARY_DISPLAY, LegacyConfigDir, legacy_config_dir,
+    LEGACY_APPDATA_DISPLAY, LEGACY_LIBRARY_DISPLAY, LegacyConfigDir, legacy_config_dirs,
 };
 
 use super::gather::gather_legacy_folder;
@@ -16,7 +16,7 @@ use super::*;
 
 fn context_with(folder: LegacyFolder) -> DoctorContext {
     DoctorContext {
-        legacy_folder: folder,
+        legacy_folders: vec![folder],
         ..ctx(
             Config::default(),
             Some(&current_version_stamp()),
@@ -36,7 +36,15 @@ fn entries(names: &[&str], more: usize) -> LegacyFolder {
 }
 
 fn library_folder(home: &Path) -> LegacyConfigDir {
-    legacy_config_dir(Some(home.as_os_str()), None).expect("home is set")
+    let mut dirs = legacy_config_dirs(Some(home.as_os_str()), None);
+    assert_eq!(dirs.len(), 1, "home alone names one folder: {dirs:?}");
+    dirs.remove(0)
+}
+
+fn appdata_folder(appdata: &Path) -> LegacyConfigDir {
+    let mut dirs = legacy_config_dirs(None, Some(appdata.as_os_str()));
+    assert_eq!(dirs.len(), 1, "appdata alone names one folder: {dirs:?}");
+    dirs.remove(0)
 }
 
 fn legacy_findings(findings: &[Finding]) -> Vec<&Finding> {
@@ -119,7 +127,7 @@ fn entries_past_the_cap_list_eight_names_and_count_the_rest() {
 fn an_uninspectable_folder_is_its_own_warn() {
     let finding = the_legacy_finding(LegacyFolder::InspectError {
         display: LEGACY_LIBRARY_DISPLAY,
-        kind: ErrorKind::PermissionDenied,
+        kind: ErrorKind::NotADirectory,
     });
 
     assert_eq!(finding.status, Status::Warn);
@@ -132,6 +140,44 @@ fn an_uninspectable_folder_is_its_own_warn() {
         finding.detail.contains(LEGACY_LIBRARY_DISPLAY),
         "{}",
         finding.detail
+    );
+    assert_eq!(
+        finding.remediation.as_deref(),
+        Some("check that ~/Library/Application Support/routectl is a readable folder"),
+        "the fix holds for any error kind, not only a permission one"
+    );
+}
+
+/// Each old folder that still holds files is its own Warn, in candidate
+/// order. Mutation check: render only the first of `ctx.legacy_folders` in
+/// `section_config` -> red here.
+#[test]
+fn each_old_folder_with_files_is_its_own_warn() {
+    let appdata = LegacyFolder::Entries {
+        display: LEGACY_APPDATA_DISPLAY,
+        names: vec!["config.toml".to_string()],
+        more: 0,
+        has_config: true,
+    };
+    let context = DoctorContext {
+        legacy_folders: vec![appdata, entries(&["usage.db"], 0)],
+        ..context_with(LegacyFolder::Absent)
+    };
+
+    let findings = section_config(&context);
+
+    let details: Vec<&str> = legacy_findings(&findings)
+        .iter()
+        .map(|f| f.detail.as_str())
+        .collect();
+    assert_eq!(details.len(), 2, "{details:?}");
+    assert!(
+        details[0].starts_with(LEGACY_APPDATA_DISPLAY),
+        "{details:?}"
+    );
+    assert!(
+        details[1].starts_with(LEGACY_LIBRARY_DISPLAY),
+        "{details:?}"
     );
 }
 
@@ -220,7 +266,7 @@ fn gather_lists_the_old_folder_under_home_sorted() {
     plant(&legacy.path, &["usage.db", "config.toml"]);
     let in_use = home.path().join(".config/routectl/config.toml");
 
-    let folder = gather_legacy_folder(Some(&legacy), &in_use);
+    let folder = gather_legacy_folder(&legacy, &in_use);
 
     assert_eq!(folder, entries(&["config.toml", "usage.db"], 0));
     let finding = the_legacy_finding(folder);
@@ -246,11 +292,7 @@ fn gather_with_no_old_folder_is_absent() {
     let legacy = library_folder(home.path());
     let in_use = home.path().join(".config/routectl/config.toml");
 
-    assert_eq!(
-        gather_legacy_folder(Some(&legacy), &in_use),
-        LegacyFolder::Absent
-    );
-    assert_eq!(gather_legacy_folder(None, &in_use), LegacyFolder::Absent);
+    assert_eq!(gather_legacy_folder(&legacy, &in_use), LegacyFolder::Absent);
 }
 
 #[test]
@@ -260,7 +302,7 @@ fn gather_caps_names_at_eight_and_counts_the_rest() {
     let names = ["j", "i", "h", "g", "f", "e", "d", "c", "b", "a", "k"];
     plant(&legacy.path, &names);
 
-    let folder = gather_legacy_folder(Some(&legacy), &home.path().join("in-use.toml"));
+    let folder = gather_legacy_folder(&legacy, &home.path().join("in-use.toml"));
 
     assert_eq!(
         folder,
@@ -276,7 +318,7 @@ fn gather_treats_an_old_folder_holding_the_config_in_use_as_absent() {
     let legacy = library_folder(home.path());
     plant(&legacy.path, &["config.toml", "usage.db"]);
 
-    let folder = gather_legacy_folder(Some(&legacy), &legacy.path.join("config.toml"));
+    let folder = gather_legacy_folder(&legacy, &legacy.path.join("config.toml"));
 
     assert_eq!(folder, LegacyFolder::Absent);
 }
@@ -290,7 +332,7 @@ fn gather_reports_an_unlistable_folder_as_an_inspect_error() {
     std::fs::create_dir_all(legacy.path.parent().expect("parent")).expect("create parent");
     std::fs::write(&legacy.path, b"x").expect("plant a file where the folder goes");
 
-    let folder = gather_legacy_folder(Some(&legacy), &home.path().join("in-use.toml"));
+    let folder = gather_legacy_folder(&legacy, &home.path().join("in-use.toml"));
 
     assert_eq!(
         folder,
@@ -310,7 +352,7 @@ fn gather_with_an_empty_old_folder_is_absent() {
     plant(&legacy.path, &[]);
     assert!(legacy.path.is_dir(), "positive control: the folder exists");
 
-    let folder = gather_legacy_folder(Some(&legacy), &home.path().join("in-use.toml"));
+    let folder = gather_legacy_folder(&legacy, &home.path().join("in-use.toml"));
 
     assert_eq!(folder, LegacyFolder::Absent);
 }
@@ -327,7 +369,7 @@ fn gather_keeps_a_config_toml_pushed_past_the_cap() {
     planted.push("config.toml");
     plant(&legacy.path, &planted);
 
-    let folder = gather_legacy_folder(Some(&legacy), &home.path().join("in-use.toml"));
+    let folder = gather_legacy_folder(&legacy, &home.path().join("in-use.toml"));
 
     let LegacyFolder::Entries {
         names,
@@ -361,14 +403,10 @@ fn gather_keeps_a_config_toml_pushed_past_the_cap() {
 fn gather_names_an_appdata_folder_by_its_variable() {
     let home = tempfile::tempdir().expect("tempdir");
     let appdata = tempfile::tempdir().expect("tempdir");
-    let legacy = legacy_config_dir(
-        Some(home.path().as_os_str()),
-        Some(appdata.path().as_os_str()),
-    )
-    .expect("appdata is set");
+    let legacy = appdata_folder(appdata.path());
     plant(&legacy.path, &["usage.db"]);
 
-    let folder = gather_legacy_folder(Some(&legacy), &home.path().join("in-use.toml"));
+    let folder = gather_legacy_folder(&legacy, &home.path().join("in-use.toml"));
     let finding = the_legacy_finding(folder);
 
     let remediation = finding.remediation.clone().expect("remediation");
@@ -382,6 +420,13 @@ fn gather_names_an_appdata_folder_by_its_variable() {
         );
     }
     assert!(finding.detail.contains("usage.db"), "{}", finding.detail);
+    assert_eq!(
+        remediation,
+        "move what you still need from %APPDATA%\\routectl to the folder routectl reads now \
+         (routectl under XDG_CONFIG_HOME when that is set, else .config/routectl in your home \
+         folder), then remove the old folder",
+        "the destination is named by variable, never as a home path or an OS-specific one"
+    );
 }
 
 /// A default config that is a symlink into the old folder makes that folder
@@ -397,7 +442,64 @@ fn gather_treats_a_config_symlinked_into_the_old_folder_as_absent() {
     let in_use = new_dir.join("config.toml");
     std::os::unix::fs::symlink(legacy.path.join("config.toml"), &in_use).expect("symlink");
 
-    let folder = gather_legacy_folder(Some(&legacy), &in_use);
+    let folder = gather_legacy_folder(&legacy, &in_use);
 
     assert_eq!(folder, LegacyFolder::Absent);
+}
+
+/// A `--config` naming the old folder's `config.toml` keeps that folder in use
+/// even when the file links out of it: removing the folder would break the
+/// flag. Mutation check: drop the as-written parent check in
+/// `holds_config_in_use` -> red here.
+#[cfg(unix)]
+#[test]
+fn gather_treats_an_old_folder_config_symlinked_out_of_the_folder_as_absent() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let legacy = library_folder(home.path());
+    plant(&legacy.path, &["usage.db"]);
+    let dotfiles = home.path().join("dotfiles");
+    plant(&dotfiles, &["routectl.toml"]);
+    let in_use = legacy.path.join("config.toml");
+    std::os::unix::fs::symlink(dotfiles.join("routectl.toml"), &in_use).expect("symlink");
+
+    let folder = gather_legacy_folder(&legacy, &in_use);
+
+    assert_eq!(folder, LegacyFolder::Absent);
+}
+
+/// The context gather lists every old folder it is handed, in order, and
+/// drops the absent ones; it reads no environment for them. Mutation check:
+/// gather from `legacy_config_dirs_from_env()` in place of the argument ->
+/// red here.
+#[tokio::test]
+#[serial_test::serial]
+async fn context_gather_lists_each_old_folder_it_is_given() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let appdata = appdata_folder(&tmp.path().join("ad"));
+    let library = library_folder(&tmp.path().join("home"));
+    let empty = appdata_folder(&tmp.path().join("nothing-here"));
+    plant(&appdata.path, &["config.toml"]);
+    plant(&library.path, &["usage.db"]);
+    let config_path = tmp.path().join("in-use.toml");
+    std::fs::write(&config_path, current_version_stamp()).expect("write config");
+
+    let ctx = super::gather_context_no_network(
+        &config_path,
+        GatherSources::Disk,
+        &[appdata, empty, library],
+    )
+    .await;
+
+    assert_eq!(
+        ctx.legacy_folders,
+        vec![
+            LegacyFolder::Entries {
+                display: LEGACY_APPDATA_DISPLAY,
+                names: vec!["config.toml".to_string()],
+                more: 0,
+                has_config: true,
+            },
+            entries(&["usage.db"], 0),
+        ]
+    );
 }

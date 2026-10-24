@@ -1,13 +1,15 @@
 //! Real-binary checks of the config folder the CLI reads: a config left only
-//! in the old macOS folder (`$HOME/Library/Application Support/routectl`)
-//! stops every command before dispatch, naming both paths, and an explicit
-//! `--config` gets past the check. Also pins that the default lookup follows
-//! the shared core rule, where an empty `XDG_CONFIG_HOME` counts as unset,
-//! and that `doctor` lists files left in the old folder.
+//! in an old folder (`$HOME/Library/Application Support/routectl` or
+//! `$APPDATA/routectl`) stops every command before dispatch, naming both
+//! paths, and an explicit `--config` gets past the check. Also pins that the
+//! default lookup follows the shared core rule, where an empty
+//! `XDG_CONFIG_HOME` counts as unset, and that `doctor` lists files left in
+//! the old folders.
 //!
 //! Every spawn removes `XDG_CONFIG_HOME` (the workspace cargo config forces
-//! it), `ROUTECTL_CONFIG` and `APPDATA`, and points `HOME` and the working
-//! directory at a tempdir, so no real config folder is read or written.
+//! it) and `ROUTECTL_CONFIG`, points `HOME` and the working directory at a
+//! tempdir, and either removes `APPDATA` or points it inside that tempdir, so
+//! no real config folder is read or written.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -64,15 +66,33 @@ impl Home {
             .join("config.toml")
     }
 
-    fn run(&self, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_routectl"))
+    /// `<home>/ad`, the `APPDATA` value [`Self::run_with_appdata`] passes.
+    fn appdata(&self) -> PathBuf {
+        self.path().join("ad")
+    }
+
+    fn command(&self, args: &[&str]) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_routectl"));
+        command
             .args(args)
             .env_remove("XDG_CONFIG_HOME")
             .env_remove("ROUTECTL_CONFIG")
-            .env_remove("APPDATA")
             .env("HOME", self.path())
             .current_dir(self.path())
-            .stdin(Stdio::null())
+            .stdin(Stdio::null());
+        command
+    }
+
+    fn run(&self, args: &[&str]) -> Output {
+        self.command(args)
+            .env_remove("APPDATA")
+            .output()
+            .expect("spawn routectl binary")
+    }
+
+    fn run_with_appdata(&self, args: &[&str]) -> Output {
+        self.command(args)
+            .env("APPDATA", self.appdata())
             .output()
             .expect("spawn routectl binary")
     }
@@ -169,17 +189,17 @@ fn an_empty_xdg_config_home_counts_as_unset() {
 /// Each legacy-folder finding `doctor --config <new config>` renders, as its
 /// line joined with the `fix:` line under it.
 fn doctor_legacy_lines(home: &Home) -> Vec<String> {
-    let new = home.new_config();
+    legacy_lines_of(&home.run(&["doctor", "--config", home.new_config().to_str().unwrap()]))
+}
 
-    let out = home.run(&["doctor", "--config", new.to_str().unwrap()]);
-
+fn legacy_lines_of(out: &Output) -> Vec<String> {
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     assert!(
         stdout.contains("[Config validation]"),
         "positive control: doctor rendered its config section: {stdout}\n{}",
-        stderr_of(&out)
+        stderr_of(out)
     );
-    let output = format!("{stdout}{}", stderr_of(&out));
+    let output = format!("{stdout}{}", stderr_of(out));
     let lines: Vec<&str> = output.lines().collect();
     lines
         .iter()
@@ -225,4 +245,53 @@ fn doctor_with_an_empty_old_folder_shows_no_legacy_finding() {
     let lines = doctor_legacy_lines(&home);
 
     assert!(lines.is_empty(), "{lines:?}");
+}
+
+/// The refusal reads `APPDATA` itself: a config only in `$APPDATA/routectl`
+/// stops the command, naming that file. Mutation check: change the
+/// `"APPDATA"` literal in `legacy_config_dirs_from_env` -> red here.
+#[test]
+fn a_config_only_in_the_appdata_folder_stops_the_command() {
+    let home = Home {
+        tmp: tempfile::tempdir().unwrap(),
+    };
+    let old = home.appdata().join("routectl").join("config.toml");
+    std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+    std::fs::write(&old, format!("version = {CURRENT_CONFIG_VERSION}\n")).unwrap();
+
+    let out = home.run_with_appdata(&["config", "check"]);
+
+    let stderr = stderr_of(&out);
+    assert!(!out.status.success(), "{stderr}");
+    assert!(stderr.contains(&*old.to_string_lossy()), "{stderr}");
+    assert!(
+        stderr.contains(&*home.new_config().to_string_lossy()),
+        "{stderr}"
+    );
+    assert!(!home.new_config().exists(), "nothing was created");
+}
+
+/// `doctor` names a file left under `$APPDATA/routectl` by its variable.
+/// Mutation check: change the `"APPDATA"` literal in
+/// `legacy_config_dirs_from_env` -> red here.
+#[test]
+fn doctor_names_a_file_left_in_the_appdata_folder_by_its_variable() {
+    let home = Home::with_new_config_and_old_files(&[]);
+    let appdata_dir = home.appdata().join("routectl");
+    std::fs::create_dir_all(&appdata_dir).unwrap();
+    std::fs::write(appdata_dir.join("usage.db"), b"x").unwrap();
+
+    let out = home.run_with_appdata(&["doctor", "--config", home.new_config().to_str().unwrap()]);
+    let lines = legacy_lines_of(&out);
+
+    assert_eq!(lines.len(), 1, "one legacy finding: {lines:?}");
+    let line = &lines[0];
+    assert!(
+        line.contains("%APPDATA%\\routectl still holds usage.db"),
+        "{line}"
+    );
+    assert!(
+        !line.contains(&*home.path().to_string_lossy()),
+        "no absolute path in the finding: {line}"
+    );
 }

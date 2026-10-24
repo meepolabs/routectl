@@ -640,6 +640,7 @@ async fn served_overlay_defect_findings(swap: &Arc<ArcSwap<Router>>, config_path
     let context = crate::commands::doctor::gather_context_no_network(
         config_path,
         crate::commands::doctor::GatherSources::Served(Box::new(inputs)),
+        &[],
     )
     .await;
     crate::commands::doctor::build_report_no_network(&context)

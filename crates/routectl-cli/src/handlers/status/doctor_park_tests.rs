@@ -145,7 +145,7 @@ async fn the_served_doctor_warns_once_per_parked_seat_and_the_offline_doctor_nam
     let served = served_findings(router(true), config_path.clone()).await;
     let unparked = served_findings(router(false), config_path.clone()).await;
     let offline = build_report_no_network(
-        &gather_context_no_network(&config_path, GatherSources::Disk).await,
+        &gather_context_no_network(&config_path, GatherSources::Disk, &[]).await,
     );
     let offline: Vec<Value> = offline
         .findings

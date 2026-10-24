@@ -333,6 +333,7 @@ mod doctor_agreement {
         let served = gather_context_no_network(
             &config_path,
             GatherSources::Served(Box::new(view.served_doctor_inputs(WarmReport::not_run()))),
+            &[],
         )
         .await;
         let doctor = build_report_no_network(&served)

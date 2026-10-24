@@ -753,18 +753,30 @@ async fn whoami_lists_seats_grouped_by_provider() {
 // freshly-built binary path via `CARGO_BIN_EXE_routectl`, so no extra
 // dev-dependency (assert_cmd etc.) is needed.
 
+/// Point `XDG_CONFIG_HOME` and `HOME` at `dir` and drop `APPDATA`, so the
+/// spawned binary reads no real config folder, credentials or old folder.
+fn sandboxed<'a>(
+    command: &'a mut std::process::Command,
+    dir: &std::path::Path,
+) -> &'a mut std::process::Command {
+    command
+        .env("XDG_CONFIG_HOME", dir)
+        .env("HOME", dir)
+        .env_remove("APPDATA")
+}
+
 /// Run `routectl <args...>` with a sandboxed (empty) XDG dir and HOME and
 /// return `(exit_code, stderr)`. The sandbox keeps the spawned process from
 /// reading the developer's real credentials.json or old config folder.
 fn run_routectl(args: &[&str]) -> (i32, String) {
     let tmp = tempfile::tempdir().unwrap();
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_routectl"))
-        .args(args)
-        .env("XDG_CONFIG_HOME", tmp.path())
-        .env("HOME", tmp.path())
-        .env_remove("APPDATA")
-        .output()
-        .expect("spawn routectl binary");
+    let out = sandboxed(
+        &mut std::process::Command::new(env!("CARGO_BIN_EXE_routectl")),
+        tmp.path(),
+    )
+    .args(args)
+    .output()
+    .expect("spawn routectl binary");
     let code = out.status.code().unwrap_or(-1);
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     (code, stderr)
@@ -923,13 +935,13 @@ fn serve_cold_start_surfaces_did_you_mean_for_unknown_field() {
 /// where the assertion needs the stdout report.
 fn run_routectl_full(args: &[&str]) -> (i32, String, String) {
     let tmp = tempfile::tempdir().unwrap();
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_routectl"))
-        .args(args)
-        .env("XDG_CONFIG_HOME", tmp.path())
-        .env("HOME", tmp.path())
-        .env_remove("APPDATA")
-        .output()
-        .expect("spawn routectl binary");
+    let out = sandboxed(
+        &mut std::process::Command::new(env!("CARGO_BIN_EXE_routectl")),
+        tmp.path(),
+    )
+    .args(args)
+    .output()
+    .expect("spawn routectl binary");
     let code = out.status.code().unwrap_or(-1);
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
@@ -1005,13 +1017,13 @@ fn serve_rejects_semantically_invalid_config_fail_fast() {
 /// `xdg` (so a seeded credentials.json is visible and no real old config
 /// folder is) and return `(exit_code, stdout, stderr)`.
 fn run_routectl_with_xdg(xdg: &std::path::Path, args: &[&str]) -> (i32, String, String) {
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_routectl"))
-        .args(args)
-        .env("XDG_CONFIG_HOME", xdg)
-        .env("HOME", xdg)
-        .env_remove("APPDATA")
-        .output()
-        .expect("spawn routectl binary");
+    let out = sandboxed(
+        &mut std::process::Command::new(env!("CARGO_BIN_EXE_routectl")),
+        xdg,
+    )
+    .args(args)
+    .output()
+    .expect("spawn routectl binary");
     let code = out.status.code().unwrap_or(-1);
     (
         code,
@@ -1473,16 +1485,16 @@ fn high_consequence_config(dir: &std::path::Path) -> std::path::PathBuf {
 fn run_routectl_with_silent_stdin(xdg: &std::path::Path, args: &[&str]) -> (i32, String) {
     use std::process::Stdio;
 
-    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_routectl"))
-        .args(args)
-        .env("XDG_CONFIG_HOME", xdg)
-        .env("HOME", xdg)
-        .env_remove("APPDATA")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn routectl binary");
+    let mut child = sandboxed(
+        &mut std::process::Command::new(env!("CARGO_BIN_EXE_routectl")),
+        xdg,
+    )
+    .args(args)
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .spawn()
+    .expect("spawn routectl binary");
     // Held, never written to and never dropped before the wait: dropping it
     // would close the pipe and hand the child an EOF, which is the case that
     // already declined before the terminal gate existed.

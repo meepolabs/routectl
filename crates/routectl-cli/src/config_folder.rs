@@ -8,24 +8,25 @@
 //! (and `init` would scaffold a fresh one), so the CLI refuses to run until
 //! the operator moves the files or names a config explicitly.
 //!
-//! The old folder is derived from the variables alone, not from the OS, so
+//! The old folders are derived from the variables alone, not from the OS, so
 //! the refusal runs (and is tested) the same way everywhere; elsewhere it
-//! costs one stat of a path routectl never wrote.
+//! costs a stat of each path routectl never wrote.
 
 use std::ffi::OsStr;
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use routectl_core::config_dir::config_dir_from;
+
 const CONFIG_FILE: &str = "config.toml";
-const APP_DIR: &str = "routectl";
 
 /// How doctor names the old Windows folder without printing a home path.
 pub const LEGACY_APPDATA_DISPLAY: &str = "%APPDATA%\\routectl";
 /// How doctor names the old macOS folder without printing a home path.
 pub const LEGACY_LIBRARY_DISPLAY: &str = "~/Library/Application Support/routectl";
 
-/// The folder routectl used before the shared config folder.
+/// A folder routectl used before the shared config folder.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LegacyConfigDir {
     /// The folder on disk.
@@ -34,35 +35,38 @@ pub struct LegacyConfigDir {
     pub display: &'static str,
 }
 
-fn absolute(value: Option<&OsStr>) -> Option<&OsStr> {
-    value.filter(|value| Path::new(value).is_absolute())
+/// `<base>/routectl` when `base` is absolute, by the shared folder rule's own
+/// test, so an empty or relative base counts as unset here exactly as it does
+/// there.
+fn app_folder_under(base: &Path) -> Option<PathBuf> {
+    config_dir_from(Some(base.as_os_str()), None)
 }
 
-/// The one old-folder candidate for these variable values, with no
-/// environment access: `<appdata>/routectl` when `appdata` (`APPDATA`) is an
-/// absolute path, else `<home>/Library/Application Support/routectl` when
-/// `home` (`HOME`) is, else `None`. An empty or relative value counts as
-/// unset.
-pub fn legacy_config_dir(home: Option<&OsStr>, appdata: Option<&OsStr>) -> Option<LegacyConfigDir> {
-    if let Some(appdata) = absolute(appdata) {
-        return Some(LegacyConfigDir {
-            path: Path::new(appdata).join(APP_DIR),
+/// Every old-folder candidate for these variable values, with no environment
+/// access, in checking order: `<appdata>/routectl` when `appdata` (`APPDATA`)
+/// is an absolute path, then `<home>/Library/Application Support/routectl`
+/// when `home` (`HOME`) is. An empty or relative value counts as unset.
+pub fn legacy_config_dirs(home: Option<&OsStr>, appdata: Option<&OsStr>) -> Vec<LegacyConfigDir> {
+    let appdata = appdata
+        .and_then(|appdata| app_folder_under(Path::new(appdata)))
+        .map(|path| LegacyConfigDir {
+            path,
             display: LEGACY_APPDATA_DISPLAY,
         });
-    }
-    let home = absolute(home)?;
-    Some(LegacyConfigDir {
-        path: Path::new(home)
-            .join("Library")
-            .join("Application Support")
-            .join(APP_DIR),
-        display: LEGACY_LIBRARY_DISPLAY,
-    })
+    let library = home
+        .and_then(|home| {
+            app_folder_under(&Path::new(home).join("Library").join("Application Support"))
+        })
+        .map(|path| LegacyConfigDir {
+            path,
+            display: LEGACY_LIBRARY_DISPLAY,
+        });
+    appdata.into_iter().chain(library).collect()
 }
 
-/// [`legacy_config_dir`] over the process's `HOME` and `APPDATA`.
-pub fn legacy_config_dir_from_env() -> Option<LegacyConfigDir> {
-    legacy_config_dir(
+/// [`legacy_config_dirs`] over the process's `HOME` and `APPDATA`.
+pub fn legacy_config_dirs_from_env() -> Vec<LegacyConfigDir> {
+    legacy_config_dirs(
         std::env::var_os("HOME").as_deref(),
         std::env::var_os("APPDATA").as_deref(),
     )
@@ -132,31 +136,29 @@ fn exists(path: &Path) -> Result<bool, ConfigFolderError> {
         })
 }
 
-/// Refuse when the config is stranded: `new_cfg` does not exist and
-/// `legacy_dir` holds a `config.toml`. A path that cannot be inspected is an
-/// [`ConfigFolderError::Inspect`] naming it, never read as absent.
-pub fn stranded_config(new_cfg: &Path, legacy_dir: &Path) -> Result<(), ConfigFolderError> {
-    if exists(new_cfg)? {
-        return Ok(());
-    }
-    let old = legacy_dir.join(CONFIG_FILE);
-    if !exists(&old)? {
-        return Ok(());
-    }
-    Err(ConfigFolderError::Stranded {
-        old,
-        new: new_cfg.to_path_buf(),
-    })
-}
-
-/// Refuse to run when the default config `new_cfg` is stranded in
-/// `legacy_dir`, usually [`legacy_config_dir_from_env`]'s path. With no old
-/// folder there is nothing to refuse.
+/// Refuse to run when the default config `new_cfg` does not exist and one
+/// of `legacy_dirs` (usually [`legacy_config_dirs_from_env`]) holds a
+/// `config.toml`. The candidates are checked in order and the first stranded
+/// or uninspectable one wins. A path that cannot be inspected is an
+/// [`ConfigFolderError::Inspect`] naming it, never read as absent. With no
+/// candidate there is nothing to refuse and nothing is checked.
 pub fn refuse_stranded_config(
     new_cfg: &Path,
-    legacy_dir: Option<&Path>,
+    legacy_dirs: &[LegacyConfigDir],
 ) -> Result<(), ConfigFolderError> {
-    legacy_dir.map_or(Ok(()), |legacy_dir| stranded_config(new_cfg, legacy_dir))
+    if legacy_dirs.is_empty() || exists(new_cfg)? {
+        return Ok(());
+    }
+    for legacy in legacy_dirs {
+        let old = legacy.path.join(CONFIG_FILE);
+        if exists(&old)? {
+            return Err(ConfigFolderError::Stranded {
+                old,
+                new: new_cfg.to_path_buf(),
+            });
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
