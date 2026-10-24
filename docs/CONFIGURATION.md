@@ -119,8 +119,16 @@ put a second subscription seat.
 
 Save as `~/.config/routectl/config.toml` (or `$XDG_CONFIG_HOME/routectl/config.toml`)
 on every OS, including macOS, then `routectl config check`
-and `routectl serve`. On Windows that is `%USERPROFILE%\.config\routectl\config.toml`
-unless `XDG_CONFIG_HOME` is set. Credentials always arrive as references --
+and `routectl serve`. `XDG_CONFIG_HOME` is used only when it is an absolute
+path, and the home folder is `HOME` when that is an absolute path; an empty
+or relative value counts as unset. On Windows without an absolute `HOME` that
+is `%USERPROFILE%\.config\routectl\config.toml` unless `XDG_CONFIG_HOME`
+is an absolute path. When neither variable (nor `USERPROFILE` on Windows) is an absolute
+path, the CLI reads `.config/routectl/config.toml` under the working
+directory. A config left only in an old folder (`%APPDATA%\routectl` when
+`APPDATA` is an absolute path, then `~/Library/Application Support/routectl`,
+both checked on every OS) stops every command until you move it or pass
+`--config`. Credentials always arrive as references --
 `env://VAR`, `file:///abs/path` (owner-only, 0600), or
 `oauth://<provider>` (populated by `routectl login <provider>`);
 inline `literal:` values are rejected at parse and resolve. To add a

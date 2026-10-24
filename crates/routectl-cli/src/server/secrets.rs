@@ -41,9 +41,9 @@ impl CompositeStore {
     /// `oauth://` refs surface the true sanitized cause at request time
     /// and recover the moment the operator fixes the file (the file-watch
     /// reload clears the degrade marker; no restart). ONLY the genuine
-    /// no-config-dir case (neither `HOME` nor `XDG_CONFIG_HOME` set
-    /// non-empty) drops the arm (`OpenOutcome::NoConfigDir`), with a
-    /// `tracing::warn!`:
+    /// no-config-dir case (neither `XDG_CONFIG_HOME` nor the home folder,
+    /// `HOME` or `USERPROFILE` on Windows, is an absolute path) drops the
+    /// arm (`OpenOutcome::NoConfigDir`), with a `tracing::warn!`:
     /// configs that don't use `oauth://` refs continue to work; configs
     /// that do surface a clear `Error::Auth` at request time.
     pub async fn open_default() -> Result<Self> {
@@ -124,13 +124,15 @@ impl CompositeStore {
 
 /// Build the `Error::Auth` returned when an `oauth://` ref is resolved
 /// against a CompositeStore whose OAuth arm was dropped at construction
-/// (neither HOME nor XDG_CONFIG_HOME set non-empty). Centralized so the error message
-/// stays consistent across `get` / `set` / `delete` / `on_auth_failure`.
+/// (neither XDG_CONFIG_HOME nor the home folder is an absolute path).
+/// Centralized so the error message stays consistent across `get` / `set` /
+/// `delete` / `on_auth_failure`.
 fn oauth_unavailable_err() -> routectl_core::Error {
     routectl_core::Error::Auth(
-        "OAuth store unavailable: neither HOME nor XDG_CONFIG_HOME is set non-empty, so \
-         routectl cannot locate `credentials.json`. Use env:// / file:// / \
-         literal: refs, or set XDG_CONFIG_HOME and re-run."
+        "OAuth store unavailable: neither XDG_CONFIG_HOME nor the home folder (HOME, or \
+         USERPROFILE on Windows) is an absolute path, so routectl cannot locate \
+         `credentials.json`. Use env:// / file:// / literal: refs, or set \
+         XDG_CONFIG_HOME to an absolute path and re-run."
             .into(),
     )
 }

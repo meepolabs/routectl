@@ -611,12 +611,12 @@ async fn main() {
         // Every error that reaches here propagates from a `load_config*`
         // helper or is the config-folder refusal (`ConfigFolderError`, whose
         // text the redactor keeps verbatim) -- the loader inlines the
-        // offending config VALUE (a secret mistyped into a non-string field),
-        // user-controlled keys, and local paths. Route the Display string through the shared fail-safe
-        // redactor, the same one `doctor` and `config edit` use. It preserves
-        // a message it does not recognize as config-parse/IO verbatim, so a
-        // non-loader error stays actionable and its multi-line rendering
-        // survives.
+        // offending config VALUE (a secret mistyped into a non-string
+        // field), user-controlled keys, and local paths. Route the Display
+        // string through the shared fail-safe redactor, the same one
+        // `doctor` and `config edit` use. It preserves a message it does not
+        // recognize as config-parse/IO verbatim, so a non-loader error stays
+        // actionable and its multi-line rendering survives.
         eprintln!(
             "error: {}",
             commands::parse_error_redaction::redact_config_load_error(&e.to_string())

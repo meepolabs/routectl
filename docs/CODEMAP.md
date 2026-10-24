@@ -66,7 +66,10 @@ license.
 - `src/config_dir_census_tests.rs` -- the config-folder census: fails when a
   production source other than `config_dir.rs` and the cli's
   `config_folder.rs` names `XDG_CONFIG_HOME`, `APPDATA`, `USERPROFILE`, a
-  `.config` literal or `dirs::`, skipping test files and inline test modules
+  `.config` literal (followed by `"`, `/` or `\\`) or `dirs::`, skipping test
+  files and inline test modules. A small lexer finds each module's closing
+  line, ignoring braces in comments (nested too) and string, raw-string and
+  char literals, and panics on a module that never closes
 - `src/warn_dedup.rs` -- `CappedWarnSet<K>::admit`: the bounded warn-once
   dedup decision shared by the cli's `proxy::metrics::WarnOnce` and
   `server::cc_pin_drift` and the router's wire-check WARN. Decides only --
@@ -7843,15 +7846,18 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   (neither restart-required nor high-consequence -- `[fidelity]` has no
   active runtime behavior yet) and `[pools]` as high-consequence
   beside `[providers]`
-- `src/config_folder.rs` -- the refusal for a config left only in the old
-  folder: `legacy_config_dir(home, appdata)` (`<APPDATA>/routectl` when
-  `APPDATA` is absolute, else `$HOME/Library/Application Support/routectl`,
-  derived on every OS, as a `LegacyConfigDir` with a home-free `display`),
-  pure `stranded_config(new_cfg, legacy_dir)` (`try_exists`, so an
-  uninspectable path is an error), the `ConfigFolderError` (`Stranded` /
-  `Inspect`) texts naming the paths, and
-  `refuse_stranded_config`, which `main.rs` `run()` calls once before
-  dispatch unless `--config` / `ROUTECTL_CONFIG` names the file
+- `src/config_folder.rs` -- the refusal for a config left only in an old
+  folder: pure `legacy_config_dirs(home, appdata)` (every candidate in
+  checking order, `<APPDATA>/routectl` when `APPDATA` is absolute, then
+  `$HOME/Library/Application Support/routectl` when `HOME` is, chosen by
+  variable on every OS, each a `LegacyConfigDir` with a home-free
+  `display`), `legacy_config_dirs_from_env`, and
+  `refuse_stranded_config(new_cfg, &[LegacyConfigDir])` (no refusal when
+  `new_cfg` exists, else the first candidate holding `config.toml` or failing
+  `try_exists` wins), which `main.rs` `run()` calls once before dispatch
+  unless `--config` / `ROUTECTL_CONFIG` names the file. `ConfigFolderError`
+  (`Stranded` / `Inspect`) texts name both paths and say routectl moved
+  nothing
 - `src/lane_cell.rs` -- the one `(learned lane, capability)` cell builder for
   the read-only surfaces (the doctor capability matrix and the `/status/health`
   learned rows). `lane_metas(&Config, entries)` builds the
@@ -8719,9 +8725,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `$HOME/.config`
 - `tests/config_folder.rs` -- real-binary pins of the config folder: a
   config only in the old macOS folder stops `config check`, `serve`,
-  `doctor` and `init` naming both paths (init creates nothing), `--config`
-  gets past the check, and an empty `XDG_CONFIG_HOME` reads
-  `$HOME/.config/routectl/config.toml`
+  `doctor` and `init` naming both paths (init creates nothing), one only in
+  `$APPDATA/routectl` stops `config check`, `--config` gets past the check,
+  and an empty `XDG_CONFIG_HOME` reads `$HOME/.config/routectl/config.toml`.
+  `doctor` lists a file left in either old folder by its home-free name
+  (`~/Library/...` or `%APPDATA%\routectl`) and shows nothing for an empty
+  old folder
 - `tests/commands.rs` -- `test` / `config` / `login` subcommand integration
   tests
 - `tests/provider_add.rs` -- integration floor for `provider add`: drives the

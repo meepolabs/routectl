@@ -3,56 +3,77 @@ use std::path::PathBuf;
 
 use super::{config_dir_from, config_dir_or_relative_from, windows_home};
 
+/// The filesystem root, so every fixture below is absolute on the OS that
+/// runs it.
+const ROOT: &str = if cfg!(windows) { "C:\\" } else { "/" };
+
+/// `rel` under [`ROOT`].
+fn abs(rel: &str) -> String {
+    PathBuf::from(ROOT).join(rel).to_string_lossy().into_owned()
+}
+
+/// `rel` under [`ROOT`], with `routectl` joined on.
+fn folder(rel: &str) -> Option<PathBuf> {
+    Some(PathBuf::from(ROOT).join(rel).join("routectl"))
+}
+
 /// One row: name, `XDG_CONFIG_HOME`, `HOME`, expected folder.
 type Row = (
     &'static str,
-    Option<&'static str>,
-    Option<&'static str>,
+    Option<String>,
+    Option<String>,
     Option<PathBuf>,
 );
+
+fn s(value: &str) -> Option<String> {
+    Some(value.to_owned())
+}
 
 #[test]
 fn config_dir_from_resolves_each_variable_combination() {
     let cases: [Row; 9] = [
         (
             "xdg set wins over home",
-            Some("/xdg"),
-            Some("/home/u"),
-            Some(PathBuf::from("/xdg/routectl")),
+            Some(abs("xdg")),
+            Some(abs("home/u")),
+            folder("xdg"),
         ),
         (
             "xdg empty falls back to home",
-            Some(""),
-            Some("/home/u"),
-            Some(PathBuf::from("/home/u/.config/routectl")),
+            s(""),
+            Some(abs("home/u")),
+            folder("home/u/.config"),
         ),
         (
             "xdg unset falls back to home",
             None,
-            Some("/home/u"),
-            Some(PathBuf::from("/home/u/.config/routectl")),
+            Some(abs("home/u")),
+            folder("home/u/.config"),
         ),
-        ("home empty and xdg unset", None, Some(""), None),
-        ("both empty", Some(""), Some(""), None),
+        ("home empty and xdg unset", None, s(""), None),
+        ("both empty", s(""), s(""), None),
         ("both unset", None, None, None),
         (
             "xdg relative falls back to home",
-            Some("rel/xdg"),
-            Some("/home/u"),
-            Some(PathBuf::from("/home/u/.config/routectl")),
+            s("rel/xdg"),
+            Some(abs("home/u")),
+            folder("home/u/.config"),
         ),
-        ("home relative and xdg unset", None, Some("rel/home"), None),
+        ("home relative and xdg unset", None, s("rel/home"), None),
         (
             "xdg absolute wins over a relative home",
-            Some("/xdg"),
-            Some("rel/home"),
-            Some(PathBuf::from("/xdg/routectl")),
+            Some(abs("xdg")),
+            s("rel/home"),
+            folder("xdg"),
         ),
     ];
 
     for (name, xdg, home, expected) in cases {
         // Act
-        let got = config_dir_from(xdg.map(OsStr::new), home.map(OsStr::new));
+        let got = config_dir_from(
+            xdg.as_deref().map(OsStr::new),
+            home.as_deref().map(OsStr::new),
+        );
 
         // Assert
         assert_eq!(got, expected, "row: {name}");
@@ -85,21 +106,24 @@ fn config_dir_or_relative_from_falls_back_to_a_relative_folder() {
         ),
         (
             "both relative",
-            Some("rel/xdg"),
-            Some("rel/home"),
+            s("rel/xdg"),
+            s("rel/home"),
             Some(PathBuf::from(".config/routectl")),
         ),
         (
             "home set",
             None,
-            Some("/home/u"),
-            Some(PathBuf::from("/home/u/.config/routectl")),
+            Some(abs("home/u")),
+            folder("home/u/.config"),
         ),
     ];
 
     for (name, xdg, home, expected) in rows {
         // Act
-        let got = config_dir_or_relative_from(xdg.map(OsStr::new), home.map(OsStr::new));
+        let got = config_dir_or_relative_from(
+            xdg.as_deref().map(OsStr::new),
+            home.as_deref().map(OsStr::new),
+        );
 
         // Assert
         assert_eq!(Some(got), expected, "row: {name}");
@@ -107,30 +131,35 @@ fn config_dir_or_relative_from_falls_back_to_a_relative_folder() {
 }
 
 /// One row: name, `HOME`, `USERPROFILE`, expected home.
-type WindowsRow = (
-    &'static str,
-    Option<&'static str>,
-    Option<&'static str>,
-    Option<&'static str>,
-);
+type WindowsRow = (&'static str, Option<String>, Option<String>, Option<String>);
 
 #[test]
 fn windows_home_prefers_an_absolute_home_over_userprofile() {
     let rows: [WindowsRow; 5] = [
-        ("absolute home wins", Some("/h"), Some("/p"), Some("/h")),
+        (
+            "absolute home wins",
+            Some(abs("h")),
+            Some(abs("p")),
+            Some(abs("h")),
+        ),
         (
             "empty home uses userprofile",
-            Some(""),
-            Some("/p"),
-            Some("/p"),
+            s(""),
+            Some(abs("p")),
+            Some(abs("p")),
         ),
         (
             "relative home uses userprofile",
-            Some("rel"),
-            Some("/p"),
-            Some("/p"),
+            s("rel"),
+            Some(abs("p")),
+            Some(abs("p")),
         ),
-        ("unset home uses userprofile", None, Some("/p"), Some("/p")),
+        (
+            "unset home uses userprofile",
+            None,
+            Some(abs("p")),
+            Some(abs("p")),
+        ),
         ("both unset", None, None, None),
     ];
 
