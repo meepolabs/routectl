@@ -1018,20 +1018,28 @@ impl FieldVerdictRegistry {
     /// `generation`, and return the cleared row for the ledger.
     ///
     /// Claims no single-flight slot and releases none, so a sibling holding
-    /// `key`'s slot keeps it: its later commit observes afresh, and its value
-    /// is recorded under the incarnation that commit mints, so the forget
-    /// here cannot strand it.
+    /// `key`'s slot keeps it: its later commit observes afresh under the
+    /// incarnation that commit mints. A clear racing that commit can leave its
+    /// value recorded for an incarnation no longer resident, which
+    /// [`FieldValueStore::value_at`] never matches.
+    ///
+    /// Drops the identity's canary and value state only when a row was
+    /// actually removed: a removal that found nothing resident leaves them,
+    /// so a pre-flight suspension a canary disproof retained still stands.
     pub fn clear_accepted(
         &self,
         key: &FieldVerdictKey,
         generation: u64,
     ) -> Option<CapabilityClearedEvent> {
-        self.remove_accepted(key, generation)
+        self.remove_accepted(key, generation, false)
     }
 
     /// The body of every clear: the guarded removal, then the canary and
     /// value state of the identity, then the cleared row when an entry was
     /// actually removed.
+    ///
+    /// The state is dropped on every applied removal when `reset_if_absent`,
+    /// otherwise only on one that removed a row.
     ///
     /// A lease-refused, stale, or exhausted removal clears nothing and emits
     /// nothing: all three are refusals, so none may produce an event.
@@ -1039,6 +1047,7 @@ impl FieldVerdictRegistry {
         &self,
         key: &FieldVerdictKey,
         generation: u64,
+        reset_if_absent: bool,
     ) -> Option<CapabilityClearedEvent> {
         let removed = self.learned.remove_keyed_in_generation(
             generation,
@@ -1055,8 +1064,10 @@ impl FieldVerdictRegistry {
                 // The identity's verdict is gone: drop its canary/quorum state
                 // too, so a later re-learn starts a clean incarnation rather
                 // than inheriting a stale cadence, claim, or confirmation count.
-                self.canaries.reset(key);
-                self.values.forget(key);
+                if cleared || reset_if_absent {
+                    self.canaries.reset(key);
+                    self.values.forget(key);
+                }
                 if !cleared {
                     return None;
                 }
@@ -1333,7 +1344,9 @@ impl FieldRepairGuard<'_> {
     /// catalog-independent key is admitted from any generation.
     pub fn clear(mut self) -> Option<CapabilityClearedEvent> {
         self.settled = true;
-        let removed = self.registry.remove_accepted(&self.key, self.generation);
+        let removed = self
+            .registry
+            .remove_accepted(&self.key, self.generation, true);
         self.registry.release_slot(&self.key);
         removed
     }

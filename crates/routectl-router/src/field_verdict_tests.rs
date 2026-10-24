@@ -1173,6 +1173,78 @@ fn a_disproof_that_removed_nothing_keeps_the_identity_suspended() {
     );
 }
 
+/// An accepted-request clear that finds nothing resident leaves the canary
+/// state alone, so the suspension a disproof retained above is not lifted by
+/// the next accepted request on the same identity.
+///
+/// Mutation check: drop the `cleared ||` condition guarding the reset in
+/// `remove_accepted` so `clear_accepted` resets unconditionally, and this goes
+/// red.
+#[test]
+fn an_accepted_clear_that_removed_nothing_keeps_a_retained_suspension() {
+    let reg = registry();
+    let t0 = Instant::now();
+    let k = key("t");
+    plant_eligible(&reg, &k, t0);
+    let incarnation = reg.canaries().snapshot(&k).expect("resident").incarnation;
+    let claim = reg
+        .canaries()
+        .claim_due_canary(&k, incarnation)
+        .expect("claim admitted");
+    assert!(
+        reg.learned()
+            .remove_keyed(k.state_key(), &k.capability_key, &k.provider_kind),
+        "fixture premise: the row was resident before this removal",
+    );
+    assert!(
+        reg.record_canary_disproof(&k, claim, reg.learned().generation())
+            .is_none()
+    );
+    assert!(
+        reg.canaries()
+            .snapshot(&k)
+            .expect("fixture premise: the disproof retained the state")
+            .preflight_suspended,
+        "fixture premise: the disproof's suspension stands",
+    );
+
+    let cleared = reg.clear_accepted(&k, reg.learned().generation());
+
+    assert!(
+        cleared.is_none(),
+        "nothing was resident, so nothing was cleared"
+    );
+    assert!(
+        reg.canaries()
+            .snapshot(&k)
+            .expect("a clear that removed nothing must not drop the canary state")
+            .preflight_suspended,
+        "the retained suspension must still stand",
+    );
+}
+
+/// The positive control for the test above: with a row resident, the
+/// accepted-request clear removes it and drops the identity's canary state.
+#[test]
+fn an_accepted_clear_that_removes_a_row_drops_the_canary_state() {
+    let reg = registry();
+    let t0 = Instant::now();
+    let k = key("t");
+    plant_eligible(&reg, &k, t0);
+
+    let cleared = reg.clear_accepted(&k, reg.learned().generation());
+
+    assert!(
+        cleared.is_some(),
+        "the resident row is cleared and reported"
+    );
+    assert!(!reg.is_negative_acting(&k, t0), "the row is gone");
+    assert!(
+        reg.canaries().snapshot(&k).is_none(),
+        "and the canary state goes with it",
+    );
+}
+
 /// A confirmation REFUSED by the guarded mutation vouches for nothing, so the
 /// claim must settle INCONCLUSIVE, not Confirmed. Confirmed zeroes
 /// `modified_since_confirmation` -- the count of requests the verdict has
