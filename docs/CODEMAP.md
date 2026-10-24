@@ -61,8 +61,8 @@ license.
   `.config`, joined with `routectl`; empty or relative counts as unset; on
   Windows the home is `HOME` when absolute, else `USERPROFILE`), the env
   binding `config_dir`, and `config_dir_or_relative[_from]` (relative
-  `.config/routectl` when nothing resolves). Router, auth and the providers
-  cookie jar resolve through it
+  `.config/routectl` when nothing resolves). The cli, router, auth and the
+  providers cookie jar resolve through it
 - `src/config_dir_census_tests.rs` -- the config-folder census: fails when a
   production source other than `config_dir.rs` and the cli's
   `config_folder.rs` names `XDG_CONFIG_HOME`, `APPDATA`, `USERPROFILE`, a
@@ -1027,7 +1027,9 @@ license.
   arm stays only for enum completeness (unreachable once the factory sets the
   block)
 - `src/openai_responses/cookies.rs` -- persistent Cloudflare cookie jar
-  (allowlist-pinned to non-secret cookie names)
+  (allowlist-pinned to non-secret cookie names); `default_cookie_path` is
+  `ROUTECTL_COOKIE_FILE`, else `cookies/chatgpt.json` under the shared
+  `routectl_core::config_dir` folder
 - `src/openai_responses/request.rs` -- orchestrator: builds `ResponsesRequest`
   from `ChatRequest` via system/messages/tools/extras submodules; owns this
   lane's single `record_translation_lane_seen` site (bumped before the first
@@ -5252,8 +5254,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `0600` `file://` via `atomic_write` then re-reads-and-byte-verifies,
   removing the file on mismatch), `env_ref(var)` (verifies the var resolves
   non-empty NOW -> `env://` ref, stores nothing), `default_secret_dir()`
-  (`$XDG_CONFIG_HOME/routectl/secrets` else `~/.config/routectl/secrets`,
-  sibling of `credentials.json`), and
+  (`secrets` under the shared `routectl_core::config_dir` folder, sibling of
+  `credentials.json`; errors when no folder resolves), and
   `SecretCaptureError`/`SecretCaptureResult` (`#[non_exhaustive]`, mapped to
   `Error::Auth` at the CLI boundary via `From`). Consumed by `provider add`;
   source-preference policy (prompt vs env auto-detect) lives in the CLI, not
@@ -5270,8 +5272,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   credentials-map key (bare provider for the default seat, `provider#label`
   otherwise) and `CredentialsFile::seats_for_provider` enumerates a provider's
   seats (default first, then sorted labels)
-- `src/oauth/file_io.rs` -- atomic load/save of
-  `~/.config/routectl/credentials.json`; load is TOCTOU-safe (fstat + `0o600`
+- `src/oauth/file_io.rs` -- atomic load/save of `credentials.json` under the
+  shared `routectl_core::config_dir` folder (`default_path` errors when no
+  folder resolves); load is TOCTOU-safe (fstat + `0o600`
   enforcement on Unix), save serializes to pretty JSON and delegates the write
   to the crate's shared `atomic_write::write_0600_atomic` (temp file + fsync +
   rename + force-`0o600` + parent-dir fsync) -- every writer fault surfaces as
@@ -5850,7 +5853,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 
 ## routectl-cli
 
-- `src/main.rs` -- clap CLI entry point; `main` wraps `run` (which dispatches
+- `src/main.rs` -- clap CLI entry point; `resolve_config_path` defaults to
+  `config.toml` under `routectl_core::config_dir::config_dir_or_relative`, and
+  `run` calls `config_folder::refuse_stranded_config` before dispatch unless
+  `--config` / `ROUTECTL_CONFIG` names the file; `main` wraps `run` (which dispatches
   `serve` / `init` / `login` / `logout` / `refresh` / `whoami` / `doctor` /
   `test` / `config` / `provider` / `usage` subcommands) and on an error routes
   the message through
@@ -5859,7 +5865,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   then prints it via `Display` -- preserving the multi-line actionable
   config-load message rather than `Debug`-escaping it -- before exiting 1
 - `src/lib.rs` -- test-scaffolding facade (not a stable library API):
-  re-exposes `commands`, `handlers` (`#[doc(hidden)]`), `ingress`, `proxy`
+  re-exposes `commands`, `config_folder`, `handlers` (`#[doc(hidden)]`), `ingress`, `proxy`
   (`#[doc(hidden)]`), and `server` to the crate's own integration-test
   binaries; `config_classify` is crate-internal (`pub(crate)`, consumed only
   via `crate::config_classify::`)
@@ -6314,7 +6320,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   repeating it. No const here is a config knob (no `config_classify` section)
 - `src/server/secrets.rs` -- `CompositeStore` `SecretStore` dispatching
   `oauth://<provider>` to `OAuthStore` and `env://` / `file://` / `literal:`
-  to `MemoryStore`; degrades gracefully when no `HOME` / `XDG_CONFIG_HOME`
+  to `MemoryStore`; drops the oauth arm when no config folder resolves
+  (neither `XDG_CONFIG_HOME` nor the home folder is an absolute path)
 
 ### handlers
 
@@ -8326,7 +8333,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   human or `--json` and returns `overall_exit`. Data
   collection lives in `gather.rs`, the section producers in `sections.rs`, the
   capability matrix panel builder in `matrix.rs`, human rendering in
-  `render.rs`
+  `render.rs`. `run(config_path, legacy_dirs, json)` takes the old config
+  folders to list; `DoctorContext::legacy_folders` holds one `LegacyFolder`
+  (`Absent` / `Entries` / `InspectError`) per folder still holding files
 - `src/commands/doctor/matrix.rs` -- capability matrix panel builder:
   `build_capability_matrix_panel(&DoctorContext) -> CapabilityMatrixPanel`.
   Rows are LEARNED LANES (`StateKey` serialized `provider_entry#upstream`):
@@ -8410,7 +8419,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   ledger replay), `Served` -> the daemon's accepted state; then the raw-bytes read for
   the validation findings and, on the disk path only, the version preflight
   that never stamps the file, auth, secret checks,
-  orphan scan, would-trim panel, and the freshness inputs); `gather_context` =
+  orphan scan, would-trim panel, the freshness inputs, and
+  `gather_legacy_folder` per old folder, where a folder holding the config in
+  use reads as `Absent`); `gather_context(config_path, legacy_dirs)` =
   that body PLUS one `gather_probe_results` `probe_all` pass (the only
   `CompositeStore` dial), so the two entry points cannot drift. `gather_auth`
   takes read-only oauth probes + seats; `sanitize_store_open_error` reduces a
@@ -8514,6 +8525,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   (egress baseline), each detail naming the resolved figure and the
   `(kind, upstream)` selector; a `knobs: None` context collapses to the single
   `knobs_unavailable` Warn. NEVER `Fail`.
+  `legacy_folder_finding` adds one config-section `legacy folder` Warn per old
+  folder that still holds files or could not be listed, naming it only by its
+  home-free display.
   NEVER auto-fixes: every WARN/FAIL names the fix
 - `src/commands/doctor/render.rs` -- human-text rendering of the
   `DoctorReport`: `render_human` walks `SECTIONS` in render order (per-section
