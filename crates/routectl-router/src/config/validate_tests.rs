@@ -542,40 +542,62 @@ mod raw_config_preflight_tests {
         format!("version = {version}\n{body}")
     }
 
-    fn variant_name(err: &RawConfigPreflightError) -> &'static str {
-        match err {
-            RawConfigPreflightError::Version(_) => "Version",
-            RawConfigPreflightError::LegacyMitmCredentialSource(_) => "LegacyMitmCredentialSource",
-            RawConfigPreflightError::RetiredCapabilityKeys(_) => "RetiredCapabilityKeys",
-            RawConfigPreflightError::RemovedPaidProbeCaps(_) => "RemovedPaidProbeCaps",
-        }
+    /// One refusal class the driver can return: how to recognise its
+    /// variant, and the Display of the individual check that owns it, run on
+    /// the same fixture, so the driver is pinned to forward wording unchanged.
+    struct Refusal {
+        name: &'static str,
+        is_variant: fn(&RawConfigPreflightError) -> bool,
+        check_message: fn(&str) -> String,
     }
 
-    /// The Display of the individual check that owns `variant`, run on the
-    /// same fixture, so the driver is pinned to forward wording unchanged.
-    fn wrapped_check_message(variant: &str, raw: &str) -> String {
-        match variant {
-            "Version" => preflight_config_version(raw).unwrap_err().to_string(),
-            "LegacyMitmCredentialSource" => preflight_legacy_mitm_credential_source(raw)
-                .unwrap_err()
-                .to_string(),
-            "RetiredCapabilityKeys" => preflight_retired_capability_keys(raw)
-                .unwrap_err()
-                .to_string(),
-            "RemovedPaidProbeCaps" => preflight_removed_paid_probe_caps(raw)
-                .unwrap_err()
-                .to_string(),
-            other => panic!("unknown variant {other}"),
-        }
-    }
+    const VERSION_REFUSAL: Refusal = Refusal {
+        name: "Version",
+        is_variant: |e| matches!(e, RawConfigPreflightError::Version(_)),
+        check_message: |raw| preflight_config_version(raw).unwrap_err().to_string(),
+    };
 
-    fn assert_refused_as(row: &str, raw: &str, expected: &str) {
+    const LEGACY_MITM_REFUSAL: Refusal = Refusal {
+        name: "LegacyMitmCredentialSource",
+        is_variant: |e| matches!(e, RawConfigPreflightError::LegacyMitmCredentialSource(_)),
+        check_message: |raw| {
+            preflight_legacy_mitm_credential_source(raw)
+                .unwrap_err()
+                .to_string()
+        },
+    };
+
+    const RETIRED_KEYS_REFUSAL: Refusal = Refusal {
+        name: "RetiredCapabilityKeys",
+        is_variant: |e| matches!(e, RawConfigPreflightError::RetiredCapabilityKeys(_)),
+        check_message: |raw| {
+            preflight_retired_capability_keys(raw)
+                .unwrap_err()
+                .to_string()
+        },
+    };
+
+    const PAID_CAPS_REFUSAL: Refusal = Refusal {
+        name: "RemovedPaidProbeCaps",
+        is_variant: |e| matches!(e, RawConfigPreflightError::RemovedPaidProbeCaps(_)),
+        check_message: |raw| {
+            preflight_removed_paid_probe_caps(raw)
+                .unwrap_err()
+                .to_string()
+        },
+    };
+
+    fn assert_refused_as(row: &str, raw: &str, expected: &Refusal) {
         let err = preflight_raw_config(raw).expect_err(&format!("row `{row}` must be refused"));
 
-        assert_eq!(variant_name(&err), expected, "row `{row}`");
+        assert!(
+            (expected.is_variant)(&err),
+            "row `{row}`: expected {}, got {err:?}",
+            expected.name
+        );
         assert_eq!(
             err.to_string(),
-            wrapped_check_message(expected, raw),
+            (expected.check_message)(raw),
             "row `{row}`: driver Display must equal the wrapped check's"
         );
     }
@@ -594,22 +616,22 @@ mod raw_config_preflight_tests {
     fn each_refusal_class_maps_to_its_variant_with_the_checks_wording() {
         let current = super::CURRENT_CONFIG_VERSION;
         let rows = [
-            ("too old", at_version(current - 1, ""), "Version"),
-            ("too new", at_version(current + 1, ""), "Version"),
+            ("too old", at_version(current - 1, ""), &VERSION_REFUSAL),
+            ("too new", at_version(current + 1, ""), &VERSION_REFUSAL),
             (
                 "legacy mitm credential_source",
                 at_version(current, LEGACY_MITM),
-                "LegacyMitmCredentialSource",
+                &LEGACY_MITM_REFUSAL,
             ),
             (
                 "retired capability key",
                 at_version(current, RETIRED_KEY),
-                "RetiredCapabilityKeys",
+                &RETIRED_KEYS_REFUSAL,
             ),
             (
                 "paid probe caps",
                 at_version(current, PAID_CAPS),
-                "RemovedPaidProbeCaps",
+                &PAID_CAPS_REFUSAL,
             ),
         ];
 
@@ -625,22 +647,22 @@ mod raw_config_preflight_tests {
             (
                 "too old + legacy mitm",
                 at_version(current - 1, LEGACY_MITM),
-                "Version",
+                &VERSION_REFUSAL,
             ),
             (
                 "too old + retired key",
                 at_version(current - 1, RETIRED_KEY),
-                "Version",
+                &VERSION_REFUSAL,
             ),
             (
                 "legacy mitm + retired key",
                 at_version(current, &format!("{LEGACY_MITM}{RETIRED_KEY}")),
-                "LegacyMitmCredentialSource",
+                &LEGACY_MITM_REFUSAL,
             ),
             (
                 "retired key + paid caps",
                 at_version(current, &format!("{RETIRED_KEY}{PAID_CAPS}")),
-                "RetiredCapabilityKeys",
+                &RETIRED_KEYS_REFUSAL,
             ),
         ];
 

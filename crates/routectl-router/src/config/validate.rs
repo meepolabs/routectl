@@ -77,9 +77,9 @@ pub enum ConfigVersionError {
 /// integer, fall through as `Ok` -- the normal typed deserialize reports
 /// those with a precise syntax / type error. A MISSING `version` key is the
 /// one value this reads as legacy `1`: a config with no `version` predates
-/// the schema and so surfaces the too-old message. Callers wire this in at
-/// both cold startup (propagate the error, fail hard) and hot config reload
-/// (reject the reload, keep the prior router live).
+/// the schema and so surfaces the too-old message. Config loading reaches
+/// this through [`preflight_raw_config`], which owns the order of the
+/// raw-text checks and runs this one first.
 pub fn preflight_config_version(raw_toml: &str) -> Result<u32, ConfigVersionError> {
     // A TOML parse failure is not ours to report -- let the typed deserialize
     // surface the real syntax error.
@@ -164,10 +164,8 @@ pub struct LegacyMitmCredentialSourceError;
 /// parse error or any other unknown field, both of which fall through
 /// to the normal typed deserialize untouched.
 ///
-/// Same pattern as [`preflight_config_version`]; callers wire this in
-/// alongside it, before the typed deserialize, at both cold startup
-/// (propagate the error, fail hard) and hot config reload (reject the
-/// reload, keep the prior router live).
+/// Same pattern as [`preflight_config_version`]. [`preflight_raw_config`]
+/// runs it directly after the version check.
 pub fn preflight_legacy_mitm_credential_source(
     raw_toml: &str,
 ) -> Result<(), LegacyMitmCredentialSourceError> {
@@ -274,9 +272,9 @@ fn render_retired_paths(paths: &[String]) -> String {
 ///
 /// Same pattern as [`preflight_legacy_mitm_credential_source`]: TOML that
 /// does not parse falls through as `Ok` so the typed deserialize reports
-/// the real syntax error. Callers run this after
-/// [`preflight_config_version`], so a file at the preceding version is told
-/// to migrate rather than to delete keys by hand.
+/// the real syntax error. [`preflight_raw_config`] runs it only after
+/// [`preflight_config_version`] has passed, so a file at the preceding
+/// version is told to migrate rather than to delete keys by hand.
 pub fn preflight_retired_capability_keys(raw_toml: &str) -> Result<(), RetiredCapabilityKeysError> {
     let Ok(value) = toml::from_str::<toml::Value>(raw_toml) else {
         return Ok(());
