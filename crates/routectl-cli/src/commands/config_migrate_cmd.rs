@@ -18,7 +18,9 @@
 //!   2. Plan the pure ladder. A [`Refusal`] (behavior-bearing / malformed
 //!      retry lists, an egress allowlist, an unrelocatable `seat_selection`)
 //!      or a future-version file surfaces here with an explicit "nothing was
-//!      written" -- nothing has been.
+//!      written" -- nothing has been. The shared raw-config preflight then
+//!      runs on the ladder's candidate (the snapshot when nothing changes),
+//!      so a key no rung removes is refused by name with load's wording.
 //!   3. Enumerate stored OAuth seats READ-ONLY and plan phase 2 against the
 //!      pure candidate: for each provider entry whose BARE `oauth://` ref
 //!      covered more than one stored seat, the naming module derives the
@@ -72,8 +74,7 @@ use routectl_router::{
     ConfigWriteError, EditOutcome, MigrateError, MigrationPlan, OverlayError, OverlayWrite,
     Refusal, SeatPoolAccount, SeatPoolMove, WriteKind, apply_config_transforms,
     apply_seat_pool_move, bare_oauth_pool_candidates, edit_config_toml, models_routed_at,
-    parse_config, plan_migration, preflight_removed_paid_probe_caps,
-    preflight_retired_capability_keys, with_overlay_write_lock,
+    parse_config, plan_migration, preflight_raw_config, with_overlay_write_lock,
 };
 use toml_edit::DocumentMut;
 
@@ -447,8 +448,6 @@ pub async fn run_at(
 
     let doc = parse_document(&snapshot_text)?;
     let from_version = raw_version_of(&doc)?;
-    refuse_retired_keys_at_current(&snapshot_text, from_version, config_path, dry_run)?;
-    refuse_removed_paid_probe_caps(&snapshot_text, from_version, config_path, dry_run)?;
 
     // The v1 rung folds the operator's `[cache_pricing]` table (merged with
     // any legacy sidecar) into the catalog overlay; only a v1 file needs it.
@@ -464,6 +463,23 @@ pub async fn run_at(
     let plan = plan_migration(&doc, from_version, &cache_pricing, overlay_path)
         .map_err(|e| render_ladder_error(e, config_path, from_version, dry_run))?;
     let to_version = plan.to;
+
+    // The raw-text checks run on what the ladder produced, so a key a rung
+    // folds is not refused while one no rung removes still is. A `NoChange`
+    // plan leaves the snapshot as the text to check.
+    preflight_raw_config(plan.config_candidate().unwrap_or(&snapshot_text)).map_err(|e| {
+        audit_event(
+            config_path,
+            from_version,
+            to_version,
+            dry_run,
+            false,
+            false,
+            "invalid",
+            None,
+        );
+        Error::Config(e.to_string())
+    })?;
 
     // Phase 2, store-aware, composed ON TOP of the pure plan: the seat
     // inventory decides which bare refs stood for more than one seat. It runs
@@ -801,58 +817,6 @@ fn resumable_commit_error(e: &ConfigWriteError<CommitError>) -> Error {
         "the catalog overlay was migrated, but config.toml was not committed ({reason}); the \
          overlay change is durable -- rerun `config migrate` to finish stamping config.toml"
     ))
-}
-
-/// A file already at the current version has no rung left to fold a retired
-/// key, so one carrying such a key is refused up front with the key paths
-/// named. Without this, the shared gate would reject it later as a redacted
-/// unknown field that does not say which key to remove.
-fn refuse_retired_keys_at_current(
-    snapshot_text: &str,
-    from_version: u32,
-    config_path: &Path,
-    dry_run: bool,
-) -> Result<()> {
-    if from_version != CURRENT_CONFIG_VERSION {
-        return Ok(());
-    }
-    preflight_retired_capability_keys(snapshot_text).map_err(|e| {
-        audit_event(
-            config_path,
-            from_version,
-            from_version,
-            dry_run,
-            false,
-            false,
-            "invalid",
-            None,
-        );
-        Error::Config(e.to_string())
-    })
-}
-
-/// No rung removes `[fidelity] paid_probe_daily_caps`, so a file at ANY
-/// version carrying it is refused up front by name; otherwise the ladder would
-/// carry it forward and the shared gate would reject it as an unknown field.
-fn refuse_removed_paid_probe_caps(
-    snapshot_text: &str,
-    from_version: u32,
-    config_path: &Path,
-    dry_run: bool,
-) -> Result<()> {
-    preflight_removed_paid_probe_caps(snapshot_text).map_err(|e| {
-        audit_event(
-            config_path,
-            from_version,
-            from_version,
-            dry_run,
-            false,
-            false,
-            "invalid",
-            None,
-        );
-        Error::Config(e.to_string())
-    })
 }
 
 /// Read the file's raw `version` off the document: an absent key is legacy v1,
@@ -1384,6 +1348,9 @@ fn parse_document(text: &str) -> Result<DocumentMut> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use routectl_router::{
+        LegacyMitmCredentialSourceError, RawConfigPreflightError, RemovedPaidProbeCapsError,
+    };
 
     /// A clean v2 config (empty retry lists) with a valid provider/model/alias
     /// so the migrated v3 result passes the shared gate.
@@ -3096,6 +3063,7 @@ default = \"gpt\"
         assert!(text.contains("# operator note: keep me"), "{text}");
         // The committed file re-validates and loads with no legacy keys left.
         gate(&text).expect("the migrated config must pass the gate");
+        preflight_raw_config(&text).expect("the migrated config must pass the raw preflight");
     }
 
     #[tokio::test]
@@ -3150,6 +3118,8 @@ default = \"gpt\"
                 ),
                 "{row}"
             );
+            let driver = preflight_raw_config(&body).expect_err(row);
+            assert_eq!(err.to_string(), format!("config: {driver}"), "{row}");
             assert_eq!(std::fs::read(&f.config).unwrap(), before, "{row}");
             assert!(!f.overlay.exists(), "{row}: no overlay write");
         }
@@ -3161,7 +3131,14 @@ default = \"gpt\"
     async fn a_file_carrying_paid_probe_daily_caps_is_refused_by_name_at_any_version() {
         let removed = "[fidelity.paid_probe_daily_caps]\nfast = 5\n";
         let previous = format!("version = {}\n", CURRENT_CONFIG_VERSION - 1) + CLEAN_BODY;
-        for body in [latest_clean() + removed, previous + removed] {
+        let current = latest_clean() + removed;
+        assert_eq!(
+            preflight_raw_config(&current),
+            Err(RawConfigPreflightError::RemovedPaidProbeCaps(
+                RemovedPaidProbeCapsError
+            ))
+        );
+        for body in [current, previous + removed] {
             // Arrange
             let f = fixture(&body);
 
@@ -3174,9 +3151,103 @@ default = \"gpt\"
                 "config: config carries `[fidelity] paid_probe_daily_caps`: paid probes were \
                  removed; delete this key"
             );
+            assert_eq!(
+                err.to_string(),
+                format!(
+                    "config: {}",
+                    RawConfigPreflightError::RemovedPaidProbeCaps(RemovedPaidProbeCapsError)
+                )
+            );
             assert_eq!(read(&f.config), body);
             assert!(!f.overlay.exists(), "no overlay write");
         }
+    }
+
+    /// No rung removes `[mitm] credential_source` either, so an older file
+    /// carrying it gets load's actionable replacement message, not a redacted
+    /// unknown-field error from the migrated candidate's parse.
+    #[tokio::test]
+    async fn an_older_file_with_the_legacy_mitm_key_gets_the_actionable_refusal() {
+        // Arrange
+        let body = format!("version = {}\n", CURRENT_CONFIG_VERSION - 1)
+            + CLEAN_BODY
+            + "\n[mitm]\ncredential_source = \"forwarded\"\n";
+        let f = fixture(&body);
+
+        // Act
+        let err = f.migrate(false, true).await.expect_err("legacy mitm key");
+
+        // Assert
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "config: {}",
+                RawConfigPreflightError::LegacyMitmCredentialSource(
+                    LegacyMitmCredentialSourceError
+                )
+            )
+        );
+        assert!(
+            !err.to_string().contains("migrated config does not parse"),
+            "{err}"
+        );
+        assert_eq!(read(&f.config), body);
+        assert!(!f.overlay.exists(), "no overlay write");
+    }
+
+    /// The ladder refuses a future-version file before the raw preflight
+    /// runs, so the audit names the version, not a generic invalid config.
+    #[tokio::test]
+    async fn a_too_new_file_is_refused_by_the_ladder_not_the_preflight() {
+        // Arrange
+        let body = format!("version = {}\n", CURRENT_CONFIG_VERSION + 1) + CLEAN_BODY;
+        let f = fixture(&body);
+
+        // Act
+        let (result, events) =
+            routectl_testkit::with_capture(async { f.migrate(false, true).await }).await;
+
+        // Assert
+        result.expect_err("a future-version file must be refused");
+        let audit: Vec<_> = events
+            .iter()
+            .filter(|e| e.field("verb") == Some("migrate"))
+            .collect();
+        assert_eq!(audit.len(), 1, "exactly one migrate audit event");
+        assert_eq!(audit[0].field("outcome"), Some("version_too_new"));
+        assert_eq!(read(&f.config), body);
+    }
+
+    /// A raw-preflight refusal audits once as `invalid`, and `to_version` is
+    /// the version the plan targeted, as for a gate rejection.
+    #[tokio::test]
+    async fn a_preflight_refusal_emits_one_invalid_audit_event_naming_the_plan_target() {
+        // Arrange
+        let body = format!("version = {}\n", CURRENT_CONFIG_VERSION - 1)
+            + CLEAN_BODY
+            + "[fidelity.paid_probe_daily_caps]\nfast = 5\n";
+        let f = fixture(&body);
+
+        // Act
+        let (result, events) =
+            routectl_testkit::with_capture(async { f.migrate(false, true).await }).await;
+
+        // Assert
+        result.expect_err("paid caps must be refused");
+        let audit: Vec<_> = events
+            .iter()
+            .filter(|e| e.field("surface") == Some("cli") && e.field("verb") == Some("migrate"))
+            .collect();
+        assert_eq!(audit.len(), 1, "exactly one migrate audit event");
+        assert_eq!(audit[0].field("outcome"), Some("invalid"));
+        assert_eq!(
+            audit[0].field("from_version"),
+            Some((CURRENT_CONFIG_VERSION - 1).to_string().as_str())
+        );
+        assert_eq!(
+            audit[0].field("to_version"),
+            Some(CURRENT_CONFIG_VERSION.to_string().as_str())
+        );
     }
 
     #[test]
