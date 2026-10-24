@@ -21,6 +21,7 @@ use crate::commands::doctor_panels::compute_would_trim_panel;
 use crate::commands::parse_error_redaction::redact_config_load_error;
 use crate::commands::pricing::{is_subscription, missing_equivalence_dimensions};
 use crate::commands::probe::{PROBE_DEADLINE, probe_all};
+use crate::config_folder::legacy_config_dir;
 use crate::server::CompositeStore;
 use crate::server::ledger_reader::{
     BoundaryOutcome, LedgerCapabilityReader, SliceReader, classify_boundary,
@@ -29,8 +30,8 @@ use crate::server::ledger_reader::{
 use super::served::{GatherSources, GatheredLayers, served_layers};
 use super::{
     CapabilityConfig, CapabilityInputs, CapabilityMatrixSource, DoctorContext, EquivalenceBasis,
-    FreshnessInputs, KnobRow, MatrixOrigin, OutputCeilingSource, PricingRow, PricingRowSource,
-    PriorCell,
+    FreshnessInputs, KnobRow, LEGACY_FOLDER_NAME_CAP, LegacyFolder, MatrixOrigin,
+    OutputCeilingSource, PricingRow, PricingRowSource, PriorCell,
 };
 
 /// The network doctor gather: the no-network context PLUS one upstream
@@ -119,6 +120,10 @@ pub async fn gather_context_no_network(
     let orphan_secrets = gather_orphan_secrets(&config);
     let orphan_seats = gather_orphan_seats(&config, &seats);
     let would_trim = compute_would_trim_panel(&config, Local::now());
+    let legacy_folder = gather_legacy_folder(
+        legacy_config_dir(std::env::var_os("HOME").as_deref()).as_deref(),
+        config_path,
+    );
 
     DoctorContext {
         config,
@@ -145,6 +150,54 @@ pub async fn gather_context_no_network(
         reload_failure,
         parked_seats,
         overlay_soft_defects,
+        legacy_folder,
+    }
+}
+
+/// List what the old macOS config folder `legacy_dir` still holds. A folder
+/// that holds `config_in_use` is the operator's explicit choice, not residue,
+/// so it reads as [`LegacyFolder::Absent`]. Every entry counts, temp and lock
+/// files included: the operator moves the folder's contents as a whole.
+pub(super) fn gather_legacy_folder(
+    legacy_dir: Option<&Path>,
+    config_in_use: &Path,
+) -> LegacyFolder {
+    let Some(legacy_dir) = legacy_dir else {
+        return LegacyFolder::Absent;
+    };
+    if config_in_use
+        .parent()
+        .is_some_and(|parent| same_dir(parent, legacy_dir))
+    {
+        return LegacyFolder::Absent;
+    }
+    let entries = match std::fs::read_dir(legacy_dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return LegacyFolder::Absent,
+        Err(e) => return LegacyFolder::InspectError(e.kind()),
+    };
+    let mut names = Vec::new();
+    for entry in entries {
+        match entry {
+            Ok(entry) => names.push(entry.file_name().to_string_lossy().into_owned()),
+            Err(e) => return LegacyFolder::InspectError(e.kind()),
+        }
+    }
+    if names.is_empty() {
+        return LegacyFolder::Absent;
+    }
+    names.sort();
+    let more = names.len().saturating_sub(LEGACY_FOLDER_NAME_CAP);
+    names.truncate(LEGACY_FOLDER_NAME_CAP);
+    LegacyFolder::Entries { names, more }
+}
+
+/// Whether `a` and `b` name the same folder, resolving symlinks where both
+/// resolve and comparing the paths as written otherwise.
+fn same_dir(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
     }
 }
 

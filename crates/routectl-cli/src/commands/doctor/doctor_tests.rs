@@ -25,7 +25,7 @@ use super::sections::{
 };
 use super::*;
 
-fn token_record(expires_at: u64) -> TokenRecord {
+pub(super) fn token_record(expires_at: u64) -> TokenRecord {
     token_record_with_refresh(expires_at, "rtok")
 }
 
@@ -48,7 +48,7 @@ fn token_record_with_refresh(expires_at: u64, refresh: &str) -> TokenRecord {
     serde_json::from_value(json).expect("valid TokenRecord json")
 }
 
-fn ctx(
+pub(super) fn ctx(
     config: Config,
     raw_config: Option<&str>,
     probes: Vec<(&'static str, LocalProbe)>,
@@ -82,6 +82,7 @@ fn ctx(
         reload_failure: None,
         parked_seats: Vec::new(),
         overlay_soft_defects: Vec::new(),
+        legacy_folder: LegacyFolder::Absent,
     }
 }
 
@@ -265,7 +266,7 @@ fn version_too_old_fails_with_migrate_remediation() {
 /// The `version` stamp the running build writes, as raw config text: every
 /// fixture whose raw config must PASS the version preflight renders from the
 /// const, so a schema bump needs no fixture edit here.
-fn current_version_stamp() -> String {
+pub(super) fn current_version_stamp() -> String {
     format!("version = {CURRENT_CONFIG_VERSION}\n")
 }
 
@@ -689,8 +690,8 @@ fn capability_section_emits_no_finding_for_a_loaded_config() {
 }
 
 #[test]
-fn schema_version_is_nineteen() {
-    assert_eq!(SCHEMA_VERSION, 19);
+fn schema_version_is_twenty() {
+    assert_eq!(SCHEMA_VERSION, 20);
 
     let context = ctx(
         config_with_overrides(),
@@ -699,7 +700,7 @@ fn schema_version_is_nineteen() {
         Vec::new(),
     );
     let report = build_report(&context);
-    assert_eq!(report.schema_version, 19);
+    assert_eq!(report.schema_version, 20);
 
     // JSON mode carries the structured capability matrix panel; the
     // superseded override / prior / learned finding text is gone.
@@ -2408,6 +2409,7 @@ fn rendered_report_leaks_neither_a_config_secret_nor_a_store_path() {
         reload_failure: None,
         parked_seats: Vec::new(),
         overlay_soft_defects: Vec::new(),
+        legacy_folder: LegacyFolder::Absent,
     };
     let report = build_report(&context);
 
@@ -2571,7 +2573,7 @@ fn build_report_no_network_matches_network_minus_probe() {
     let network = build_report(&context);
     let no_net = build_report_no_network(&context);
 
-    assert_eq!(no_net.schema_version, 19);
+    assert_eq!(no_net.schema_version, 20);
     assert!(
         no_net.findings.iter().all(|f| f.section != "probe"),
         "no-network report must have no probe rows"

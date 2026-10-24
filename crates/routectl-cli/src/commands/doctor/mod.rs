@@ -38,6 +38,10 @@ mod recheck_backstop_matrix_tests;
 #[path = "precedence_matrix_tests.rs"]
 mod precedence_matrix_tests;
 
+#[cfg(test)]
+#[path = "legacy_folder_tests.rs"]
+mod legacy_folder_tests;
+
 use std::path::Path;
 use std::time::Instant;
 
@@ -169,7 +173,12 @@ pub(crate) use self::served::{GatherSources, ParkedSeat, ResidentLearned, Served
 /// spent (at most 256, plus `other`), and `repairs_per_request`: requests by
 /// the number of repairs each drew, one bucket per count from zero to the
 /// per-request allowance. The report itself is unchanged.
-const SCHEMA_VERSION: u32 = 19;
+///
+/// v19 -> v20: additive. The `config` section gains one `legacy folder` Warn
+/// when the folder routectl used on macOS before every OS shared one config
+/// folder still holds files (named, at most eight, plus a count of the
+/// rest), or when that folder could not be inspected.
+const SCHEMA_VERSION: u32 = 20;
 
 /// A section-producer: pure mapping of the read-only [`DoctorContext`] to a
 /// section's findings.
@@ -312,6 +321,33 @@ pub(crate) struct DoctorContext {
     /// Read off the overlay itself, so a hand edit that kept the revision
     /// still shows here.
     overlay_soft_defects: Vec<OverlaySoftDefect>,
+    /// What the folder routectl used on macOS before the shared config folder
+    /// still holds. routectl never reads it, so anything left there is
+    /// residue the operator may still expect to be in use.
+    legacy_folder: LegacyFolder,
+}
+
+/// The most entry names a [`LegacyFolder::Entries`] carries; the rest are
+/// counted in `more`.
+const LEGACY_FOLDER_NAME_CAP: usize = 8;
+
+/// The state of the old macOS config folder.
+#[derive(Debug, PartialEq, Eq)]
+enum LegacyFolder {
+    /// No usable `HOME`, no folder, an empty folder, or the folder holds the
+    /// config this run reads (an explicit `--config` there): nothing to warn
+    /// about.
+    Absent,
+    /// The folder holds entries routectl does not read.
+    Entries {
+        /// Sorted basenames, at most [`LEGACY_FOLDER_NAME_CAP`].
+        names: Vec<String>,
+        /// How many entries past the cap were left out of `names`.
+        more: usize,
+    },
+    /// The folder could not be listed. Only the error kind is kept: an
+    /// `io::Error` message can carry the absolute home path.
+    InspectError(std::io::ErrorKind),
 }
 
 /// Where one configured model's outbound `max_output_tokens` ceiling comes

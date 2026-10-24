@@ -18,8 +18,8 @@ use crate::server::reload_failure::ReloadFailureSnapshot;
 use super::gather::{SecretCheck, SecretPresence};
 use super::served::parked_seat_finding;
 use super::{
-    DoctorContext, EquivalenceBasis, FreshnessInputs, KnobRow, OutputCeilingSource, PricingRow,
-    PricingRowSource,
+    DoctorContext, EquivalenceBasis, FreshnessInputs, KnobRow, LegacyFolder, OutputCeilingSource,
+    PricingRow, PricingRowSource,
 };
 
 /// Probe section: one finding per configured provider, mapped from its
@@ -185,6 +185,7 @@ pub(super) fn section_config(ctx: &DoctorContext) -> Vec<Finding> {
                 .map(overlay_soft_defect_finding),
         )
         .collect();
+    findings.extend(legacy_folder_finding(&ctx.legacy_folder));
     if ctx.config_load_error.is_some() {
         findings.push(Finding {
             section: "config",
@@ -237,6 +238,57 @@ pub(super) fn section_config(ctx: &DoctorContext) -> Vec<Finding> {
     }
     findings.extend(ctx.secret_checks.iter().map(secret_finding));
     findings
+}
+
+/// The old macOS config folder as the operator writes it. Never the resolved
+/// path: the served panel must not carry the account's home directory.
+const LEGACY_FOLDER_DISPLAY: &str = "~/Library/Application Support/routectl";
+
+/// Files left in the old macOS config folder, or a folder that could not be
+/// listed. Basenames are operator-controlled, so each is control-char-filtered
+/// before it reaches the one-line human render.
+fn legacy_folder_finding(folder: &LegacyFolder) -> Option<Finding> {
+    let (detail, remediation) = match folder {
+        LegacyFolder::Absent => return None,
+        LegacyFolder::Entries { names, more } => (
+            legacy_entries_detail(names, *more),
+            format!(
+                "move what you still need from {LEGACY_FOLDER_DISPLAY} to ~/.config/routectl \
+                 (or $XDG_CONFIG_HOME/routectl), then remove the old folder"
+            ),
+        ),
+        LegacyFolder::InspectError(kind) => (
+            format!(
+                "could not list {LEGACY_FOLDER_DISPLAY} ({kind}), so files routectl no longer \
+                 reads may be left there"
+            ),
+            format!("check the permissions on {LEGACY_FOLDER_DISPLAY}"),
+        ),
+    };
+    Some(Finding {
+        section: "config",
+        name: "legacy folder".to_string(),
+        status: Status::Warn,
+        detail,
+        remediation: Some(remediation),
+    })
+}
+
+fn legacy_entries_detail(names: &[String], more: usize) -> String {
+    let listed = names
+        .iter()
+        .map(|name| sanitize_for_log_with_cap(name, MAX_REPORTED_LINE_CHARS))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut detail = format!("{LEGACY_FOLDER_DISPLAY} still holds {listed}");
+    if more > 0 {
+        detail.push_str(&format!(" and {more} more"));
+    }
+    detail.push_str("; routectl does not read them");
+    if names.iter().any(|name| name == "config.toml") {
+        detail.push_str(", and its config.toml is not the config in use");
+    }
+    detail
 }
 
 /// The daemon refused its last config / overlay reload and still serves the
