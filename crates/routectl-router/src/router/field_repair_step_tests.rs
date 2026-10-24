@@ -297,7 +297,10 @@ fn only_the_ranked_effort_rows_rerepair_their_field() {
         "premise: a ranked row"
     );
     for row in rows {
-        let ranked = matches!(row.transform, super::FieldTransform::RankedRewrite { .. });
+        let ranked = matches!(
+            row.transform,
+            super::super::FieldTransform::RankedRewrite { .. }
+        );
         assert_eq!(rerepairs_same_field(row), ranked, "{}", row.path);
     }
 }

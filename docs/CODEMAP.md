@@ -2881,7 +2881,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `clamp_lowers` says the ceiling is below the emitted limit), then DRAW,
   RELEASE every other candidate's guard, re-stamp the estimate through
   `dispatch::restamp_calibration_estimate`, and return the rejection status.
-  The plan and its steps live in `field_repair_step.rs`. The
+  The plan and its steps live in `field_repair_step.rs`, the edit and a
+  step's settlement in `field_repair_step_edit.rs`. The
   draw follows the mutation so a drop that removes nothing charges nothing, and
   every repaired-state flag is set only on the returned `Some`. A `drop_from`
   that unexpectedly removes nothing FAILS CLOSED -- returns `None`, having
@@ -2936,6 +2937,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   claimed for its own key), `commit_pending` (each pending step on the effort
   field commits the level the last of them wrote), `moved_on_by`,
   `settle_success`; `rerepairs_same_field` (the ranked effort rows)
+- `src/router/field_repair_step_edit.rs` -- `FieldEdit` (`for_rejection`
+  resolves a row's transform against the rejection that named it, `apply_to`,
+  `declared_kind`) and `RepairStep`'s settlement half: `repair_action` (the
+  WARN action token), `repair_teaches`, `commit`
 - `src/router/field_repair_step_apply.rs` -- `FieldRepairPlan::claim` (guard
   choice before a repair's mutation) and `install_step` (step installation after it)
 - `src/router/field_repair_effort.rs` -- child module of `field_repair`: the
@@ -3837,6 +3842,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   other, one declaration at the effort pointer)
 - `src/router/field_repair_parser_tests.rs` -- `include!`d fragment of
   `field_repair_tests.rs`: the parser-unlocalized counter and its class gate
+- `src/router/field_repair_responses_param_tests.rs` -- `include!`d fragment
+  of `field_repair_tests.rs`: parameter refusals on openai-responses (a
+  `temperature` refusal names no row; a refusal naming an operator payload
+  extra does not revert it)
 - `src/probe_scheduler/queue_status_tests.rs` -- `include!`d fragment of
   `queue_tests.rs`: the aggregate last-settlement and next-retry-in fields
 - `tests/preflight_behavior.rs` -- REAL-DISPATCH proofs that the pre-flight

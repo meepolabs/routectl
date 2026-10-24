@@ -162,9 +162,10 @@ pub(super) fn sent_levels<'r>(rows: impl IntoIterator<Item = &'r FieldRepairRow>
 /// Whether a ranked repair of a refusal drawn by an egress body whose thinking
 /// shape was `thinking` may be learned. Anthropic-family models refuse some
 /// levels only beside a disabled or between_tools thinking, and no capture
-/// says whether one with no thinking object refuses alike, so there only
-/// adaptive and enabled thinking learn. A lane whose body has no thinking
-/// object learns. A shape that could not be read learns nothing.
+/// says whether a body of theirs that omits `thinking` (`Absent`) refuses
+/// alike, so there only adaptive and enabled thinking learn. An egress whose
+/// body has no thinking object at all (`NoThinkingObject`) learns. A shape
+/// that could not be read learns nothing.
 pub(super) const fn ranked_step_mints(thinking: ThinkingShape) -> bool {
     match thinking {
         ThinkingShape::Adaptive | ThinkingShape::Enabled | ThinkingShape::NoThinkingObject => true,

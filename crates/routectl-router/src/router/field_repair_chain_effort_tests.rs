@@ -199,14 +199,16 @@ async fn a_refused_level_is_retried_at_the_nearest_lower_listed_level_and_learne
 
 /// The thinking shape the refused body sent decides whether the repaired
 /// level is learned: adaptive and enabled learn; disabled, between_tools and
-/// no thinking object repair the attempt and commit nothing, since the
-/// refusal may hold only beside that shape. The thinking object ships
-/// unchanged in every row.
+/// an Anthropic body that omits `thinking` (the `Absent` shape) repair the
+/// attempt and commit nothing, since the refusal may hold only beside that
+/// shape. An egress with no thinking object at all (openai-responses) is not
+/// a row here: it learns, and its rows are in the openai-responses chain
+/// fragment. The thinking object ships unchanged in every row.
 ///
 /// Mutation check: make `Disabled` mintable in `ranked_step_mints` -> red on
 /// `disabled`.
 #[tokio::test]
-async fn a_level_refused_beside_a_shape_it_may_depend_on_repairs_and_learns_nothing() {
+async fn a_refused_level_is_learned_only_beside_a_thinking_shape_it_cannot_depend_on() {
     let rows: [(&str, Option<serde_json::Value>, bool); 5] = [
         ("adaptive", Some(json!({"type": "adaptive"})), true),
         (

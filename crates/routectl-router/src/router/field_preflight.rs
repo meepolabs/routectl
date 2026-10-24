@@ -37,9 +37,11 @@
 //! whose rejection this stage could not have attributed is a target whose
 //! resident verdict this stage must not act on either. That covers the
 //! operator `force_supported` mask, the local-hop suppression, a provider kind
-//! outside the admitted set (`anthropic-api`, `bedrock`, `openai-compat`), and
-//! any lane with no classifiable egress base URL (which is how a Bedrock Mantle
-//! sub-lane is refused -- it reports none).
+//! outside the admitted set (`anthropic-api`, `bedrock`, `openai-compat`,
+//! `openai-responses`; an `openai-compat` lane carries every row but the
+//! ranked effort rows, an `openai-responses` lane the ranked effort rows
+//! alone), and any lane with no classifiable egress base URL (which is how a
+//! Bedrock Mantle sub-lane is refused -- it reports none).
 //!
 //! # Fail-open discipline
 //!
