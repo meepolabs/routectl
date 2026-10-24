@@ -1,7 +1,7 @@
 //! Building blocks shared by the `config.toml`-mutating commands
 //! (`config set`/`unset` in [`super::config_edit`], `provider add` in
 //! [`super::provider_add`], and the login auto-surface in
-//! [`super::login_surface`]): the raw version/legacy preflights, the
+//! [`super::login_surface`]): the raw-config preflight, the
 //! in-memory validation gate plus its error rendering, the pre-lock
 //! high-consequence confirmation prompt, and the document parse +
 //! provider-block insert every one of them writes through.
@@ -15,11 +15,7 @@
 use std::io::{IsTerminal as _, Write as _};
 
 use routectl_core::{Error, Result};
-use routectl_router::{
-    Config, ConfigWriteError, parse_config, preflight_config_version,
-    preflight_legacy_mitm_credential_source, preflight_removed_paid_probe_caps,
-    preflight_retired_capability_keys,
-};
+use routectl_router::{Config, ConfigWriteError, parse_config, preflight_raw_config};
 use toml_edit::{DocumentMut, Item, Table};
 
 use super::config::validation_report;
@@ -40,20 +36,13 @@ pub(crate) fn render_write_error(err: ConfigWriteError<RelockValidationError>) -
     Error::Config(err.to_string())
 }
 
-/// Raw preflights matching the loader: refuse a config whose version is out
-/// of bounds (older or newer than this build writes) before any edit
-/// touches it, then reject the removed `[mitm] credential_source` and
-/// `[fidelity] paid_probe_daily_caps` keys and the keys retired in config
-/// version 5, each with its actionable message.
-/// The version check runs first so a version 4 file is pointed at
-/// `config migrate`. The wording is single-sourced in the router's
-/// preflights, so the CLI and the loader never diverge.
+/// The raw-config preflight the loader runs, before any edit touches the
+/// file: [`preflight_raw_config`] refuses an out-of-range `version` (a too-old
+/// file is pointed at `config migrate`) and each removed or retired key with
+/// its actionable message. The router owns the checks and their wording, so
+/// the CLI and the loader never diverge.
 pub(crate) fn preflight(raw_text: &str) -> Result<()> {
-    preflight_config_version(raw_text).map_err(|e| Error::Config(e.to_string()))?;
-    preflight_legacy_mitm_credential_source(raw_text).map_err(|e| Error::Config(e.to_string()))?;
-    preflight_retired_capability_keys(raw_text).map_err(|e| Error::Config(e.to_string()))?;
-    preflight_removed_paid_probe_caps(raw_text).map_err(|e| Error::Config(e.to_string()))?;
-    Ok(())
+    preflight_raw_config(raw_text).map_err(|e| Error::Config(e.to_string()))
 }
 
 /// The shared validation gate: `parse_config` (free did-you-mean) then the
@@ -167,6 +156,46 @@ mod tests {
             "--yes must still proceed byte-identically",
         );
     }
+    #[test]
+    fn preflight_refuses_each_raw_class_with_the_router_drivers_message() {
+        use routectl_router::{CURRENT_CONFIG_VERSION, RawConfigPreflightError as Refusal};
+
+        let at = |version: u32, body: &str| format!("version = {version}\n{body}");
+        let current = CURRENT_CONFIG_VERSION;
+        type ClassMatcher = fn(&Refusal) -> bool;
+        let rows: [(&str, String, ClassMatcher); 5] = [
+            ("too old", at(current - 1, ""), |e| {
+                matches!(e, Refusal::Version(_))
+            }),
+            ("too new", at(current + 1, ""), |e| {
+                matches!(e, Refusal::Version(_))
+            }),
+            (
+                "legacy mitm credential_source",
+                at(current, "[mitm]\ncredential_source = \"forwarded\"\n"),
+                |e| matches!(e, Refusal::LegacyMitmCredentialSource(_)),
+            ),
+            ("retired capability key", at(current, "[bedrock]\n"), |e| {
+                matches!(e, Refusal::RetiredCapabilityKeys(_))
+            }),
+            (
+                "paid probe caps",
+                at(current, "[fidelity.paid_probe_daily_caps]\nx = 1\n"),
+                |e| matches!(e, Refusal::RemovedPaidProbeCaps(_)),
+            ),
+        ];
+
+        for (row, raw, is_class) in rows {
+            let driver = preflight_raw_config(&raw)
+                .expect_err(&format!("row `{row}`: the driver must refuse the fixture"));
+            assert!(is_class(&driver), "row `{row}`: wrong class {driver:?}");
+
+            let err = preflight(&raw).expect_err(&format!("row `{row}` must be refused"));
+
+            assert_eq!(err.to_string(), format!("config: {driver}"), "row `{row}`");
+        }
+    }
+
     #[test]
     fn preflight_refuses_paid_probe_daily_caps_by_name() {
         let clean = format!(

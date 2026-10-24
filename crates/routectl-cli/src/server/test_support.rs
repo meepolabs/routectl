@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use routectl_router::{CatalogOverlay, Config};
 use routectl_usage::{CHANNEL_CAPACITY, UsageHandle, UsageWriter};
+use tokio::sync::watch;
 
 /// Point a config's usage DB at a per-test tempdir so server tests
 /// never touch the real `~/.config/routectl/usage.db` (the
@@ -29,6 +30,15 @@ pub(super) async fn drain_usage_writer_strict(writer: UsageWriter) {
     tokio::task::spawn_blocking(move || writer.shutdown())
         .await
         .expect("the usage writer drain must not panic");
+}
+
+/// A shutdown receiver that never fires, for reload tests whose subject is not
+/// the shutdown race. The sender is leaked deliberately: dropping it would make
+/// `changed()` resolve immediately and abandon every boundary under test.
+pub(super) fn never_shutdown() -> watch::Receiver<()> {
+    let (tx, rx) = watch::channel(());
+    std::mem::forget(tx);
+    rx
 }
 
 /// An otherwise-empty overlay stamped at `revision`, for the reload /

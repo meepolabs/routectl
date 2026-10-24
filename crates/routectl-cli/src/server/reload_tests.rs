@@ -4,17 +4,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use super::*;
 use crate::server::reload_failure::ReloadFailure;
 use crate::server::serve::build_usage_writer;
-use crate::server::test_support::{drain_usage_writer_strict, isolate_usage_db};
+use crate::server::test_support::{drain_usage_writer_strict, isolate_usage_db, never_shutdown};
 use routectl_testkit::ScopedEnv;
-
-/// A shutdown receiver that never fires, for reload tests whose subject is not
-/// the shutdown race. The sender is leaked deliberately: dropping it would make
-/// `changed()` resolve immediately and abandon every boundary under test.
-fn never_shutdown() -> watch::Receiver<()> {
-    let (tx, rx) = watch::channel(());
-    std::mem::forget(tx);
-    rx
-}
 
 /// Trigger fan-out in isolation: drive `fan_out_reload_triggers` from an
 /// in-process channel standing in for the SIGHUP stream, with no signal, no
