@@ -2810,7 +2810,8 @@ retention_days = 90                     # prune rows older than this; default 90
   next config swap; no restart needed to turn accounting on or off.
 - `db_path` -- the SQLite database file. The default resolves the user
   config dir from `XDG_CONFIG_HOME` (else `$HOME/.config`), so no
-  literal `~` ever reaches SQLite. **Restart-required**: the writer
+  literal `~` ever reaches SQLite; each variable is used only when it is
+  an absolute path (an empty or relative value counts as unset). **Restart-required**: the writer
   opens the database at startup and holds the handle, so a `db_path`
   change is classified restart-required and is reported as
   `usage.db_path` on hot-reload rather than taking effect live.
@@ -2911,7 +2912,9 @@ tested_cc_version = "2.1.143"
   touching the config file.
 - `cert_dir` -- directory holding the locally-generated MITM CA + leaf
   certificates. Defaults under the same user config dir as `usage.db`
-  and `config.toml` (`XDG_CONFIG_HOME` else `$HOME/.config`).
+  and `config.toml` (`XDG_CONFIG_HOME` else `$HOME/.config`, each used
+  only when it is an absolute path; an empty or relative value counts as
+  unset).
 - `mitm_host` -- the TLS SNI / `Host` header the proxy expects from the
   client and presents to the upstream. Must be EXACTLY
   `api.anthropic.com` (a subdomain like `evil.api.anthropic.com` is
@@ -3130,7 +3133,9 @@ release. You do not normally need to touch it.
 
 **Layer 2: the overlay.** `catalog_overlay.json` -- next to
 `config.toml` and `credentials.json`, under
-`$XDG_CONFIG_HOME/routectl/` (falling back to `~/.config/routectl/`) --
+`$XDG_CONFIG_HOME/routectl/` (falling back to `~/.config/routectl/`;
+`XDG_CONFIG_HOME` and `HOME` are each used only when they are an absolute
+path, and an empty or relative value counts as unset) --
 holds per-selector overrides on top of the baked table. An overlay cell
 wins over the baked row field by field: a field it sets wins, a field it
 leaves unset inherits the baked value. A JSON `null` value for a

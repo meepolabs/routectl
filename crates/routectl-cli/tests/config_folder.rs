@@ -1,14 +1,15 @@
 //! Real-binary checks of the config folder the CLI reads: a config left only
 //! in an old folder (`$HOME/Library/Application Support/routectl` or
 //! `$APPDATA/routectl`) stops every command before dispatch, naming both
-//! paths, and an explicit `--config` gets past the check. Also pins that the
-//! default lookup follows the shared core rule, where an empty
-//! `XDG_CONFIG_HOME` counts as unset, and that `doctor` lists files left in
-//! the old folders, and that a running `serve` lists them on its served
-//! doctor panel.
+//! paths, and an explicit `--config` or `ROUTECTL_CONFIG` gets past the
+//! check. Also pins that the default lookup follows the shared core rule,
+//! where an empty `XDG_CONFIG_HOME` counts as unset, and that `doctor` lists
+//! files left in the old folders, and that a running `serve` lists them on
+//! its served doctor panel.
 //!
 //! Every spawn removes `XDG_CONFIG_HOME` (the workspace cargo config forces
-//! it) and `ROUTECTL_CONFIG`, points `HOME` and the working directory at a
+//! it) and `ROUTECTL_CONFIG` (one row then sets it to a path inside the
+//! tempdir), points `HOME` and the working directory at a
 //! tempdir, and either removes `APPDATA` or points it inside that tempdir, so
 //! no real config folder is read or written.
 
@@ -149,17 +150,50 @@ fn stranded_row_failure(args: &[&str]) -> Option<String> {
     (!why.is_empty()).then(|| why.join("; "))
 }
 
+/// How an explicit-config row names the stranded config.
+enum ExplicitConfig {
+    Flag,
+    Env,
+}
+
 #[test]
 fn an_explicit_config_gets_past_the_old_folder_check() {
+    let rows = [
+        ("--config", ExplicitConfig::Flag),
+        ("ROUTECTL_CONFIG", ExplicitConfig::Env),
+    ];
+    let failures: Vec<String> = rows
+        .iter()
+        .filter_map(|(name, how)| explicit_row_failure(how).map(|why| format!("{name}: {why}")))
+        .collect();
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Why `config check` with the stranded config named explicitly did not pass
+/// cleanly, or `None` when it did.
+fn explicit_row_failure(how: &ExplicitConfig) -> Option<String> {
     let home = Home::with_stranded_config();
     let old = home.old_config();
+    let mut command = match how {
+        ExplicitConfig::Flag => {
+            home.command(&["--config", old.to_str().unwrap(), "config", "check"])
+        }
+        ExplicitConfig::Env => {
+            let mut command = home.command(&["config", "check"]);
+            command.env("ROUTECTL_CONFIG", &old);
+            command
+        }
+    };
 
-    let out = home.run(&["--config", old.to_str().unwrap(), "config", "check"]);
+    let out = command
+        .env_remove("APPDATA")
+        .output()
+        .expect("spawn routectl binary");
 
     let stderr = stderr_of(&out);
-    assert!(out.status.success(), "{stderr}");
-    assert!(!stderr.contains("moved nothing"), "{stderr}");
-    assert!(!stderr.contains("old folder"), "{stderr}");
+    let passed =
+        out.status.success() && !stderr.contains("moved nothing") && !stderr.contains("old folder");
+    (!passed).then(|| format!("status {}: {stderr}", out.status))
 }
 
 #[test]

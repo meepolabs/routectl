@@ -8334,8 +8334,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   collection lives in `gather.rs`, the section producers in `sections.rs`, the
   capability matrix panel builder in `matrix.rs`, human rendering in
   `render.rs`. `run(config_path, legacy_dirs, json)` takes the old config
-  folders to list; `DoctorContext::legacy_folders` holds one `LegacyFolder`
-  (`Absent` / `Entries` / `InspectError`) per folder still holding files
+  folders to list; `DoctorContext::legacy_folders` drops `Absent` folders and
+  holds one `LegacyFolder` (`Entries` / `InspectError`) per old folder that
+  still holds files or could not be listed
 - `src/commands/doctor/matrix.rs` -- capability matrix panel builder:
   `build_capability_matrix_panel(&DoctorContext) -> CapabilityMatrixPanel`.
   Rows are LEARNED LANES (`StateKey` serialized `provider_entry#upstream`):
@@ -8419,7 +8420,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   ledger replay), `Served` -> the daemon's accepted state; then the raw-bytes read for
   the validation findings and, on the disk path only, the version preflight
   that never stamps the file, auth, secret checks,
-  orphan scan, would-trim panel, the freshness inputs, and
+  orphan scan, would-trim panel and the freshness inputs; on both paths,
   `gather_legacy_folder` per old folder, where a folder holding the config in
   use reads as `Absent`); `gather_context(config_path, legacy_dirs)` =
   that body PLUS one `gather_probe_results` `probe_all` pass (the only
@@ -8743,11 +8744,14 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `tests/config_folder.rs` -- real-binary pins of the config folder: a
   config only in the old macOS folder stops `config check`, `serve`,
   `doctor` and `init` naming both paths (init creates nothing), one only in
-  `$APPDATA/routectl` stops `config check`, `--config` gets past the check,
+  `$APPDATA/routectl` stops `config check`, `--config` and
+  `ROUTECTL_CONFIG` each get past the check (one table row each),
   and an empty `XDG_CONFIG_HOME` reads `$HOME/.config/routectl/config.toml`.
   `doctor` lists a file left in either old folder by its home-free name
   (`~/Library/...` or `%APPDATA%\routectl`) and shows nothing for an empty
-  old folder
+  old folder; `served_doctor_names_a_file_left_in_the_appdata_folder` pins
+  that a running `serve` lists a file left in `$APPDATA/routectl` on its
+  served doctor panel
 - `tests/commands.rs` -- `test` / `config` / `login` subcommand integration
   tests
 - `tests/provider_add.rs` -- integration floor for `provider add`: drives the
