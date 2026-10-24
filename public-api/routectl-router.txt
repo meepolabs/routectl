@@ -1167,6 +1167,70 @@ impl<T> typenum::type_operators::Same for routectl_router::ProviderEntry
 pub type routectl_router::ProviderEntry::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::ProviderEntry where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::ProviderEntry::into_shared(self) -> Shared
+pub enum routectl_router::config::RawConfigPreflightError
+pub routectl_router::config::RawConfigPreflightError::LegacyMitmCredentialSource(routectl_router::LegacyMitmCredentialSourceError)
+pub routectl_router::config::RawConfigPreflightError::RemovedPaidProbeCaps(routectl_router::RemovedPaidProbeCapsError)
+pub routectl_router::config::RawConfigPreflightError::RetiredCapabilityKeys(routectl_router::RetiredCapabilityKeysError)
+pub routectl_router::config::RawConfigPreflightError::Version(routectl_router::ConfigVersionError)
+impl core::clone::Clone for routectl_router::RawConfigPreflightError
+pub fn routectl_router::RawConfigPreflightError::clone(&self) -> routectl_router::RawConfigPreflightError
+impl core::cmp::Eq for routectl_router::RawConfigPreflightError
+impl core::cmp::PartialEq for routectl_router::RawConfigPreflightError
+pub fn routectl_router::RawConfigPreflightError::eq(&self, &routectl_router::RawConfigPreflightError) -> bool
+impl core::error::Error for routectl_router::RawConfigPreflightError
+pub fn routectl_router::RawConfigPreflightError::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
+impl core::fmt::Debug for routectl_router::RawConfigPreflightError
+pub fn routectl_router::RawConfigPreflightError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for routectl_router::RawConfigPreflightError
+pub fn routectl_router::RawConfigPreflightError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for routectl_router::RawConfigPreflightError
+impl core::marker::Freeze for routectl_router::RawConfigPreflightError
+impl core::marker::Send for routectl_router::RawConfigPreflightError
+impl core::marker::Sync for routectl_router::RawConfigPreflightError
+impl core::marker::Unpin for routectl_router::RawConfigPreflightError
+impl core::marker::UnsafeUnpin for routectl_router::RawConfigPreflightError
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::RawConfigPreflightError
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::RawConfigPreflightError
+impl<Q, K> equivalent::Equivalent<K> for routectl_router::RawConfigPreflightError where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_router::RawConfigPreflightError::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_router::RawConfigPreflightError where U: core::convert::From<T>
+pub fn routectl_router::RawConfigPreflightError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::RawConfigPreflightError where U: core::convert::Into<T>
+pub type routectl_router::RawConfigPreflightError::Error = core::convert::Infallible
+pub fn routectl_router::RawConfigPreflightError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::RawConfigPreflightError where U: core::convert::TryFrom<T>
+pub type routectl_router::RawConfigPreflightError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::RawConfigPreflightError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::RawConfigPreflightError where T: core::clone::Clone
+pub type routectl_router::RawConfigPreflightError::Owned = T
+pub fn routectl_router::RawConfigPreflightError::clone_into(&self, &mut T)
+pub fn routectl_router::RawConfigPreflightError::to_owned(&self) -> T
+impl<T> alloc::string::ToString for routectl_router::RawConfigPreflightError where T: core::fmt::Display + ?core::marker::Sized
+pub fn routectl_router::RawConfigPreflightError::to_string(&self) -> alloc::string::String
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::RawConfigPreflightError where T: core::clone::Clone
+pub fn routectl_router::RawConfigPreflightError::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::RawConfigPreflightError where T: 'static + ?core::marker::Sized
+pub fn routectl_router::RawConfigPreflightError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::RawConfigPreflightError where T: ?core::marker::Sized
+pub fn routectl_router::RawConfigPreflightError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::RawConfigPreflightError where T: ?core::marker::Sized
+pub fn routectl_router::RawConfigPreflightError::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::RawConfigPreflightError where T: core::clone::Clone
+pub unsafe fn routectl_router::RawConfigPreflightError::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::RawConfigPreflightError
+pub fn routectl_router::RawConfigPreflightError::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::RawConfigPreflightError where T: core::clone::Clone
+pub fn routectl_router::RawConfigPreflightError::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::RawConfigPreflightError
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::RawConfigPreflightError where T: ?core::marker::Sized
+pub fn routectl_router::RawConfigPreflightError::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::RawConfigPreflightError::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::RawConfigPreflightError
+impl<T> tracing::instrument::WithSubscriber for routectl_router::RawConfigPreflightError
+impl<T> typenum::type_operators::Same for routectl_router::RawConfigPreflightError
+pub type routectl_router::RawConfigPreflightError::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::RawConfigPreflightError where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::RawConfigPreflightError::into_shared(self) -> Shared
 pub enum routectl_router::config::ReasoningDialect
 pub routectl_router::config::ReasoningDialect::Deepseek
 pub routectl_router::config::ReasoningDialect::Openai
@@ -3240,6 +3304,7 @@ pub const routectl_router::config::PREFIX_QUORUM: u32
 pub fn routectl_router::config::is_config_provider_kind(&str) -> bool
 pub fn routectl_router::config::preflight_config_version(&str) -> core::result::Result<u32, routectl_router::ConfigVersionError>
 pub fn routectl_router::config::preflight_legacy_mitm_credential_source(&str) -> core::result::Result<(), routectl_router::LegacyMitmCredentialSourceError>
+pub fn routectl_router::config::preflight_raw_config(&str) -> core::result::Result<(), routectl_router::RawConfigPreflightError>
 pub fn routectl_router::config::preflight_removed_paid_probe_caps(&str) -> core::result::Result<(), routectl_router::RemovedPaidProbeCapsError>
 pub fn routectl_router::config::preflight_retired_capability_keys(&str) -> core::result::Result<(), routectl_router::RetiredCapabilityKeysError>
 pub fn routectl_router::config::validate_cache_pricing_retired(&routectl_router::config::Config) -> core::result::Result<(), alloc::string::String>
@@ -9465,6 +9530,70 @@ impl<T> typenum::type_operators::Same for routectl_router::ProviderEntry
 pub type routectl_router::ProviderEntry::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::ProviderEntry where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::ProviderEntry::into_shared(self) -> Shared
+pub enum routectl_router::RawConfigPreflightError
+pub routectl_router::RawConfigPreflightError::LegacyMitmCredentialSource(routectl_router::LegacyMitmCredentialSourceError)
+pub routectl_router::RawConfigPreflightError::RemovedPaidProbeCaps(routectl_router::RemovedPaidProbeCapsError)
+pub routectl_router::RawConfigPreflightError::RetiredCapabilityKeys(routectl_router::RetiredCapabilityKeysError)
+pub routectl_router::RawConfigPreflightError::Version(routectl_router::ConfigVersionError)
+impl core::clone::Clone for routectl_router::RawConfigPreflightError
+pub fn routectl_router::RawConfigPreflightError::clone(&self) -> routectl_router::RawConfigPreflightError
+impl core::cmp::Eq for routectl_router::RawConfigPreflightError
+impl core::cmp::PartialEq for routectl_router::RawConfigPreflightError
+pub fn routectl_router::RawConfigPreflightError::eq(&self, &routectl_router::RawConfigPreflightError) -> bool
+impl core::error::Error for routectl_router::RawConfigPreflightError
+pub fn routectl_router::RawConfigPreflightError::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
+impl core::fmt::Debug for routectl_router::RawConfigPreflightError
+pub fn routectl_router::RawConfigPreflightError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for routectl_router::RawConfigPreflightError
+pub fn routectl_router::RawConfigPreflightError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for routectl_router::RawConfigPreflightError
+impl core::marker::Freeze for routectl_router::RawConfigPreflightError
+impl core::marker::Send for routectl_router::RawConfigPreflightError
+impl core::marker::Sync for routectl_router::RawConfigPreflightError
+impl core::marker::Unpin for routectl_router::RawConfigPreflightError
+impl core::marker::UnsafeUnpin for routectl_router::RawConfigPreflightError
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::RawConfigPreflightError
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::RawConfigPreflightError
+impl<Q, K> equivalent::Equivalent<K> for routectl_router::RawConfigPreflightError where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_router::RawConfigPreflightError::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_router::RawConfigPreflightError where U: core::convert::From<T>
+pub fn routectl_router::RawConfigPreflightError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::RawConfigPreflightError where U: core::convert::Into<T>
+pub type routectl_router::RawConfigPreflightError::Error = core::convert::Infallible
+pub fn routectl_router::RawConfigPreflightError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::RawConfigPreflightError where U: core::convert::TryFrom<T>
+pub type routectl_router::RawConfigPreflightError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::RawConfigPreflightError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::RawConfigPreflightError where T: core::clone::Clone
+pub type routectl_router::RawConfigPreflightError::Owned = T
+pub fn routectl_router::RawConfigPreflightError::clone_into(&self, &mut T)
+pub fn routectl_router::RawConfigPreflightError::to_owned(&self) -> T
+impl<T> alloc::string::ToString for routectl_router::RawConfigPreflightError where T: core::fmt::Display + ?core::marker::Sized
+pub fn routectl_router::RawConfigPreflightError::to_string(&self) -> alloc::string::String
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::RawConfigPreflightError where T: core::clone::Clone
+pub fn routectl_router::RawConfigPreflightError::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::RawConfigPreflightError where T: 'static + ?core::marker::Sized
+pub fn routectl_router::RawConfigPreflightError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::RawConfigPreflightError where T: ?core::marker::Sized
+pub fn routectl_router::RawConfigPreflightError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::RawConfigPreflightError where T: ?core::marker::Sized
+pub fn routectl_router::RawConfigPreflightError::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::RawConfigPreflightError where T: core::clone::Clone
+pub unsafe fn routectl_router::RawConfigPreflightError::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::RawConfigPreflightError
+pub fn routectl_router::RawConfigPreflightError::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::RawConfigPreflightError where T: core::clone::Clone
+pub fn routectl_router::RawConfigPreflightError::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::RawConfigPreflightError
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::RawConfigPreflightError where T: ?core::marker::Sized
+pub fn routectl_router::RawConfigPreflightError::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::RawConfigPreflightError::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::RawConfigPreflightError
+impl<T> tracing::instrument::WithSubscriber for routectl_router::RawConfigPreflightError
+impl<T> typenum::type_operators::Same for routectl_router::RawConfigPreflightError
+pub type routectl_router::RawConfigPreflightError::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::RawConfigPreflightError where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::RawConfigPreflightError::into_shared(self) -> Shared
 pub enum routectl_router::ReasoningDialect
 pub routectl_router::ReasoningDialect::Deepseek
 pub routectl_router::ReasoningDialect::Openai
@@ -18663,6 +18792,7 @@ pub fn routectl_router::persist_catalog_import_baseline(&std::path::Path, &str, 
 pub fn routectl_router::plan_migration(&toml_edit::document::DocumentMut, u32, &alloc::collections::btree::map::BTreeMap<alloc::string::String, routectl_router::catalog::CachePricingOverride>, &std::path::Path) -> core::result::Result<routectl_router::MigrationPlan, routectl_router::MigrateError>
 pub fn routectl_router::preflight_config_version(&str) -> core::result::Result<u32, routectl_router::ConfigVersionError>
 pub fn routectl_router::preflight_legacy_mitm_credential_source(&str) -> core::result::Result<(), routectl_router::LegacyMitmCredentialSourceError>
+pub fn routectl_router::preflight_raw_config(&str) -> core::result::Result<(), routectl_router::RawConfigPreflightError>
 pub fn routectl_router::preflight_removed_paid_probe_caps(&str) -> core::result::Result<(), routectl_router::RemovedPaidProbeCapsError>
 pub fn routectl_router::preflight_retired_capability_keys(&str) -> core::result::Result<(), routectl_router::RetiredCapabilityKeysError>
 pub fn routectl_router::propose_steady_state_trim(&routectl_core::schema::ChatRequest, &routectl_router::SteadyStateTrimParams) -> core::option::Option<routectl_router::SteadyStateTrimPlan>

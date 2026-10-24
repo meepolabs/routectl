@@ -242,14 +242,21 @@ pub fn message_safe_key(key: &str) -> String {
     routectl_core::sanitize_for_log_with_cap(key, MAX_MESSAGE_KEY_CHARS)
 }
 
+/// The config version the keys refused by
+/// [`preflight_retired_capability_keys`] were retired in. Pinned apart from
+/// [`CURRENT_CONFIG_VERSION`]: the retirement stays a version 5 fact after a
+/// later schema bump.
+const CAPABILITY_KEYS_RETIRED_IN: u32 = 5;
+
 fn render_retired_paths(paths: &[String]) -> String {
+    let predecessor = CAPABILITY_KEYS_RETIRED_IN - 1;
     paths
         .iter()
         .map(|path| {
             let path = message_safe_key(path);
             format!(
-                "`{path}` was retired in config version 5; remove it (a version 4 file is \
-                 converted by `routectl config migrate`)"
+                "`{path}` was retired in config version {CAPABILITY_KEYS_RETIRED_IN}; remove it \
+                 (a version {predecessor} file is converted by `routectl config migrate`)"
             )
         })
         .collect::<Vec<_>>()
@@ -320,6 +327,49 @@ fn retired_entry_keys(value: &toml::Value, section: &str, keys: &[&str]) -> Vec<
         })
         .flatten()
         .collect()
+}
+
+/// A refusal from [`preflight_raw_config`]: the first raw-text check that
+/// rejected the config. `Display` is the wrapped check's own message,
+/// unchanged, so every caller surfaces the same wording.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum RawConfigPreflightError {
+    /// The schema version is too old or too new for this build.
+    #[error(transparent)]
+    Version(ConfigVersionError),
+
+    /// The config carries the removed `[mitm] credential_source` key.
+    #[error(transparent)]
+    LegacyMitmCredentialSource(LegacyMitmCredentialSourceError),
+
+    /// The config carries keys retired in an earlier schema version.
+    #[error(transparent)]
+    RetiredCapabilityKeys(RetiredCapabilityKeysError),
+
+    /// The config carries the removed `[fidelity] paid_probe_daily_caps` key.
+    #[error(transparent)]
+    RemovedPaidProbeCaps(RemovedPaidProbeCapsError),
+}
+
+/// Run every raw-text config check, before `Config`'s typed deserialize, in
+/// a fixed order: [`preflight_config_version`],
+/// [`preflight_legacy_mitm_credential_source`],
+/// [`preflight_retired_capability_keys`], then
+/// [`preflight_removed_paid_probe_caps`]. The first refusal is returned and
+/// the later checks do not run. Version comes first so an older file is told
+/// to migrate rather than to delete keys by hand.
+///
+/// TOML that does not parse passes every check, so the typed deserialize
+/// reports the real syntax error.
+pub fn preflight_raw_config(raw: &str) -> Result<(), RawConfigPreflightError> {
+    preflight_config_version(raw).map_err(RawConfigPreflightError::Version)?;
+    preflight_legacy_mitm_credential_source(raw)
+        .map_err(RawConfigPreflightError::LegacyMitmCredentialSource)?;
+    preflight_retired_capability_keys(raw)
+        .map_err(RawConfigPreflightError::RetiredCapabilityKeys)?;
+    preflight_removed_paid_probe_caps(raw)
+        .map_err(RawConfigPreflightError::RemovedPaidProbeCaps)?;
+    Ok(())
 }
 
 #[cfg(test)]

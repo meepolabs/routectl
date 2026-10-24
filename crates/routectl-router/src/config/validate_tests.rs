@@ -527,3 +527,133 @@ mod removed_paid_probe_caps_preflight_tests {
         assert!(preflight_removed_paid_probe_caps("[fidelity\npaid_probe_daily_caps = 1").is_ok());
     }
 }
+
+mod raw_config_preflight_tests {
+    use super::{
+        RawConfigPreflightError, preflight_config_version, preflight_legacy_mitm_credential_source,
+        preflight_raw_config, preflight_removed_paid_probe_caps, preflight_retired_capability_keys,
+    };
+
+    const LEGACY_MITM: &str = "[mitm]\ncredential_source = \"forwarded\"\n";
+    const RETIRED_KEY: &str = "[bedrock]\n";
+    const PAID_CAPS: &str = "[fidelity.paid_probe_daily_caps]\nanthropic = 5\n";
+
+    fn at_version(version: u32, body: &str) -> String {
+        format!("version = {version}\n{body}")
+    }
+
+    fn variant_name(err: &RawConfigPreflightError) -> &'static str {
+        match err {
+            RawConfigPreflightError::Version(_) => "Version",
+            RawConfigPreflightError::LegacyMitmCredentialSource(_) => "LegacyMitmCredentialSource",
+            RawConfigPreflightError::RetiredCapabilityKeys(_) => "RetiredCapabilityKeys",
+            RawConfigPreflightError::RemovedPaidProbeCaps(_) => "RemovedPaidProbeCaps",
+        }
+    }
+
+    /// The Display of the individual check that owns `variant`, run on the
+    /// same fixture, so the driver is pinned to forward wording unchanged.
+    fn wrapped_check_message(variant: &str, raw: &str) -> String {
+        match variant {
+            "Version" => preflight_config_version(raw).unwrap_err().to_string(),
+            "LegacyMitmCredentialSource" => preflight_legacy_mitm_credential_source(raw)
+                .unwrap_err()
+                .to_string(),
+            "RetiredCapabilityKeys" => preflight_retired_capability_keys(raw)
+                .unwrap_err()
+                .to_string(),
+            "RemovedPaidProbeCaps" => preflight_removed_paid_probe_caps(raw)
+                .unwrap_err()
+                .to_string(),
+            other => panic!("unknown variant {other}"),
+        }
+    }
+
+    fn assert_refused_as(row: &str, raw: &str, expected: &str) {
+        let err = preflight_raw_config(raw).expect_err(&format!("row `{row}` must be refused"));
+
+        assert_eq!(variant_name(&err), expected, "row `{row}`");
+        assert_eq!(
+            err.to_string(),
+            wrapped_check_message(expected, raw),
+            "row `{row}`: driver Display must equal the wrapped check's"
+        );
+    }
+
+    #[test]
+    fn a_clean_current_config_passes() {
+        let raw = at_version(
+            super::CURRENT_CONFIG_VERSION,
+            "[mitm]\n[fidelity]\n[providers.p]\nkind = \"anthropic-api\"\n",
+        );
+
+        assert_eq!(preflight_raw_config(&raw), Ok(()));
+    }
+
+    #[test]
+    fn each_refusal_class_maps_to_its_variant_with_the_checks_wording() {
+        let current = super::CURRENT_CONFIG_VERSION;
+        let rows = [
+            ("too old", at_version(current - 1, ""), "Version"),
+            ("too new", at_version(current + 1, ""), "Version"),
+            (
+                "legacy mitm credential_source",
+                at_version(current, LEGACY_MITM),
+                "LegacyMitmCredentialSource",
+            ),
+            (
+                "retired capability key",
+                at_version(current, RETIRED_KEY),
+                "RetiredCapabilityKeys",
+            ),
+            (
+                "paid probe caps",
+                at_version(current, PAID_CAPS),
+                "RemovedPaidProbeCaps",
+            ),
+        ];
+
+        for (row, raw, expected) in rows {
+            assert_refused_as(row, &raw, expected);
+        }
+    }
+
+    #[test]
+    fn the_first_refusal_in_check_order_wins() {
+        let current = super::CURRENT_CONFIG_VERSION;
+        let rows = [
+            (
+                "too old + legacy mitm",
+                at_version(current - 1, LEGACY_MITM),
+                "Version",
+            ),
+            (
+                "too old + retired key",
+                at_version(current - 1, RETIRED_KEY),
+                "Version",
+            ),
+            (
+                "legacy mitm + retired key",
+                at_version(current, &format!("{LEGACY_MITM}{RETIRED_KEY}")),
+                "LegacyMitmCredentialSource",
+            ),
+            (
+                "retired key + paid caps",
+                at_version(current, &format!("{RETIRED_KEY}{PAID_CAPS}")),
+                "RetiredCapabilityKeys",
+            ),
+        ];
+
+        for (row, raw, expected) in rows {
+            assert_refused_as(row, &raw, expected);
+        }
+    }
+
+    #[test]
+    fn unparseable_toml_falls_through_to_the_typed_deserialize() {
+        assert_eq!(
+            preflight_raw_config("[mitm\ncredential_source = = 1\n"),
+            Ok(())
+        );
+    }
+}
