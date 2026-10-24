@@ -20,7 +20,8 @@
 //!     Cloudflare bypass cookies out of the running operator's home).
 //!   - [`default_cookie_path`] -- resolve the on-disk path. Honors
 //!     `ROUTECTL_COOKIE_FILE` so tests can isolate; otherwise defaults
-//!     to `$HOME/.config/routectl/cookies/chatgpt.json`.
+//!     to `cookies/chatgpt.json` under the routectl config folder
+//!     (`$XDG_CONFIG_HOME/routectl`, else `$HOME/.config/routectl`).
 //!
 //! Codex CLI parity reference:
 //! `codex-rs/codex-client/src/chatgpt_cloudflare_cookies.rs`. Codex
@@ -59,25 +60,22 @@ fn is_allowed_cloudflare_cookie_name(name: &str) -> bool {
     CLOUDFLARE_COOKIE_NAMES.contains(&name) || name.starts_with("cf_chl_")
 }
 
-/// Default on-disk path for the persisted Cloudflare cookie jar.
-/// Returns `None` only when neither `ROUTECTL_COOKIE_FILE` nor `HOME`
-/// is set, in which case the provider runs without persistence.
+/// Default on-disk path for the persisted Cloudflare cookie jar: a
+/// non-empty `ROUTECTL_COOKIE_FILE`, else `cookies/chatgpt.json` under the
+/// routectl config folder. Returns `None` only when neither that override
+/// nor `XDG_CONFIG_HOME` nor `HOME` is set non-empty, in which case the
+/// provider runs without persistence.
 pub fn default_cookie_path() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("ROUTECTL_COOKIE_FILE")
         && !p.is_empty()
     {
         return Some(PathBuf::from(p));
     }
-    let home = std::env::var_os("HOME")?;
-    if home.is_empty() {
-        return None;
-    }
-    let mut p = PathBuf::from(home);
-    p.push(".config");
-    p.push("routectl");
-    p.push("cookies");
-    p.push("chatgpt.json");
-    Some(p)
+    Some(
+        routectl_core::config_dir::config_dir()?
+            .join("cookies")
+            .join("chatgpt.json"),
+    )
 }
 
 /// Build a fresh empty jar. Caller plugs the Arc into
@@ -333,6 +331,29 @@ mod tests {
         let _cookie_file = ScopedEnv::set("ROUTECTL_COOKIE_FILE", "/tmp/routectl-cookie-test.json");
         let p = default_cookie_path().expect("path");
         assert_eq!(p, Path::new("/tmp/routectl-cookie-test.json"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn default_cookie_path_honors_xdg_config_home() {
+        // Arrange
+        let xdg = tempfile::tempdir().expect("xdg tempdir");
+        let home = tempfile::tempdir().expect("home tempdir");
+        let _cookie_file = ScopedEnv::unset("ROUTECTL_COOKIE_FILE");
+        let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", xdg.path());
+        let _home = ScopedEnv::set("HOME", home.path());
+
+        // Act
+        let p = default_cookie_path().expect("path");
+
+        // Assert
+        assert_eq!(
+            p,
+            xdg.path()
+                .join("routectl")
+                .join("cookies")
+                .join("chatgpt.json")
+        );
     }
 
     #[test]

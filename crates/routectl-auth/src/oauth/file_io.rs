@@ -49,20 +49,14 @@ use crate::oauth::{OAuthError, OAuthResult};
 
 /// Default path: `$XDG_CONFIG_HOME/routectl/credentials.json`, falling
 /// back to `~/.config/routectl/credentials.json`. Returns an error if
-/// neither `XDG_CONFIG_HOME` nor `HOME` is set (rare; unset HOME on
-/// Linux indicates a broken environment).
+/// neither `XDG_CONFIG_HOME` nor `HOME` is set non-empty (rare; an unset
+/// or empty HOME on Linux indicates a broken environment).
 pub fn default_path() -> OAuthResult<PathBuf> {
-    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME")
-        && !xdg.is_empty()
-    {
-        return Ok(PathBuf::from(xdg).join("routectl").join("credentials.json"));
-    }
-    let home = std::env::var("HOME")
-        .map_err(|_| OAuthError::Internal("neither XDG_CONFIG_HOME nor HOME is set".into()))?;
-    Ok(PathBuf::from(home)
-        .join(".config")
-        .join("routectl")
-        .join("credentials.json"))
+    routectl_core::config_dir::config_dir()
+        .map(|dir| dir.join("credentials.json"))
+        .ok_or_else(|| {
+            OAuthError::Internal("neither XDG_CONFIG_HOME nor HOME is set non-empty".into())
+        })
 }
 
 /// Load the credentials file. NotFound -> empty file (first-run).
@@ -653,5 +647,22 @@ mod tests {
             // TODO: Audit that the environment access only happens in single-threaded code.
             None => unsafe { std::env::remove_var("XDG_CONFIG_HOME") },
         }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn credentials_default_path_errors_when_home_is_empty_and_xdg_unset() {
+        // Arrange
+        let _xdg = routectl_testkit::ScopedEnv::unset("XDG_CONFIG_HOME");
+        let _home = routectl_testkit::ScopedEnv::set("HOME", "");
+
+        // Act
+        let result = crate::oauth::credentials_default_path();
+
+        // Assert
+        assert!(
+            result.is_err(),
+            "an empty HOME must not resolve a relative credentials path, got {result:?}"
+        );
     }
 }

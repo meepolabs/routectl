@@ -93,13 +93,14 @@ async fn cookie_backed_client_does_not_follow_cross_host_redirect() {
     assert_lane_refuses_cross_host_redirect().await;
 }
 
-/// The cookie-less fallback branch (`build_no_redirect`): with neither
-/// `ROUTECTL_COOKIE_FILE` nor `HOME` set, no jar path resolves and
-/// construction takes the plain builder.
+/// The cookie-less fallback branch (`build_no_redirect`): with none of
+/// `ROUTECTL_COOKIE_FILE`, `XDG_CONFIG_HOME` and `HOME` set, no jar path
+/// resolves and construction takes the plain builder.
 #[tokio::test]
 #[serial_test::serial]
 async fn cookie_less_client_does_not_follow_cross_host_redirect() {
     let _cookie_file = ScopedEnv::unset("ROUTECTL_COOKIE_FILE");
+    let _xdg = ScopedEnv::unset("XDG_CONFIG_HOME");
     let _home = ScopedEnv::unset("HOME");
     assert!(
         cookies::default_cookie_path().is_none(),

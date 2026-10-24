@@ -56,6 +56,11 @@ license.
   closed `TranslationReason` (`HostedToolWithheld`, `TranslationRejected`)
   carrying only the date-stripped `TranslationKey`, never a label, URL or
   header; deduped, first-seen order; skipped for background probes
+- `src/config_dir.rs` -- the shared routectl config-folder rule: pure
+  `config_dir_from` (non-empty `XDG_CONFIG_HOME`, else non-empty `HOME` +
+  `.config`, joined with `routectl`), the env binding `config_dir`, and
+  `config_dir_or_relative` (relative `.config/routectl` when nothing
+  resolves). Router, auth and the providers cookie jar resolve through it
 - `src/warn_dedup.rs` -- `CappedWarnSet<K>::admit`: the bounded warn-once
   dedup decision shared by the cli's `proxy::metrics::WarnOnce` and
   `server::cc_pin_drift` and the router's wire-check WARN. Decides only --

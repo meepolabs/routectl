@@ -119,19 +119,19 @@ pub type SecretCaptureResult<T> = std::result::Result<T, SecretCaptureError>;
 
 /// Default secret directory: `$XDG_CONFIG_HOME/routectl/secrets`, falling
 /// back to `~/.config/routectl/secrets`. Sibling of `credentials.json`.
+///
+/// # Errors
+///
+/// [`SecretCaptureError::DirResolution`] when neither `XDG_CONFIG_HOME`
+/// nor `HOME` is set non-empty.
 pub fn default_secret_dir() -> SecretCaptureResult<PathBuf> {
-    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME")
-        && !xdg.is_empty()
-    {
-        return Ok(PathBuf::from(xdg).join("routectl").join("secrets"));
-    }
-    let home = std::env::var("HOME").map_err(|_| {
-        SecretCaptureError::DirResolution("neither XDG_CONFIG_HOME nor HOME is set".into())
-    })?;
-    Ok(PathBuf::from(home)
-        .join(".config")
-        .join("routectl")
-        .join("secrets"))
+    routectl_core::config_dir::config_dir()
+        .map(|dir| dir.join("secrets"))
+        .ok_or_else(|| {
+            SecretCaptureError::DirResolution(
+                "neither XDG_CONFIG_HOME nor HOME is set non-empty".into(),
+            )
+        })
 }
 
 /// A routectl-managed directory of owner-only secret files.
@@ -733,5 +733,22 @@ mod tests {
         assert_eq!(dir, PathBuf::from("/home/tester/.config/routectl/secrets"));
         restore_env("XDG_CONFIG_HOME", prev_xdg);
         restore_env("HOME", prev_home);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn default_secret_dir_errors_when_home_is_empty_and_xdg_unset() {
+        // Arrange
+        let _xdg = routectl_testkit::ScopedEnv::unset("XDG_CONFIG_HOME");
+        let _home = routectl_testkit::ScopedEnv::set("HOME", "");
+
+        // Act
+        let result = default_secret_dir();
+
+        // Assert
+        assert!(
+            matches!(result, Err(SecretCaptureError::DirResolution(_))),
+            "an empty HOME must not resolve a relative secrets dir, got {result:?}"
+        );
     }
 }

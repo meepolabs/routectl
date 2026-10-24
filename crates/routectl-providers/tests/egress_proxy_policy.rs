@@ -292,6 +292,7 @@ impl Lane {
             )],
             Self::ResponsesCookieLess | Self::ResponsesProbe => vec![
                 ScopedEnv::unset("ROUTECTL_COOKIE_FILE"),
+                ScopedEnv::unset("XDG_CONFIG_HOME"),
                 ScopedEnv::unset("HOME"),
             ],
             _ => Vec::new(),

@@ -479,6 +479,10 @@ pub const routectl_core::capability::WEB_SEARCH: &str
 pub const routectl_core::capability::WELL_KNOWN_CAPABILITY_KEYS: &[&str]
 pub fn routectl_core::capability::is_known_evidence_class(&str) -> bool
 pub fn routectl_core::capability::normalize_capability_key(&str, &str) -> alloc::string::String
+pub mod routectl_core::config_dir
+pub fn routectl_core::config_dir::config_dir() -> core::option::Option<std::path::PathBuf>
+pub fn routectl_core::config_dir::config_dir_from(core::option::Option<&std::ffi::os_str::OsStr>, core::option::Option<&std::ffi::os_str::OsStr>) -> core::option::Option<std::path::PathBuf>
+pub fn routectl_core::config_dir::config_dir_or_relative() -> std::path::PathBuf
 pub mod routectl_core::content_part
 pub enum routectl_core::content_part::ContentPart
 pub routectl_core::content_part::ContentPart::Known(routectl_core::content_part::KnownContentPart)

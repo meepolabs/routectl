@@ -136,12 +136,11 @@ final gate, not a tight inner loop.
 `.cargo/config.toml` forces `XDG_CONFIG_HOME` to `target/test-xdg`
 (resolved against the workspace root) for every process cargo runs, so
 under `cargo test` and `cargo run` every path resolved from
-`XDG_CONFIG_HOME` -- config, credentials, secrets, the usage db --
-lands there, never under `~/.config/routectl`.
-`crates/routectl-cli/tests/test_env_isolation.rs` pins it. The one
-exception is the OpenAI-responses Cloudflare cookie jar, which resolves
-from `HOME` (`~/.config/routectl/cookies/chatgpt.json`), not from
-`XDG_CONFIG_HOME`; set `ROUTECTL_COOKIE_FILE` to point it elsewhere.
+`XDG_CONFIG_HOME` -- config, credentials, secrets, the usage db, the
+OpenAI-responses Cloudflare cookie jar -- lands there, never under
+`~/.config/routectl`.
+`crates/routectl-cli/tests/test_env_isolation.rs` pins it.
+`ROUTECTL_COOKIE_FILE` still points the cookie jar elsewhere.
 The path is relative to the config file, so each git worktree gets its
 own sandbox under its own `target/`, independent of `CARGO_TARGET_DIR`.
 The sandbox persists between runs, and `cargo run` and `cargo test`

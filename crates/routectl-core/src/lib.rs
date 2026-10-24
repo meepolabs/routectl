@@ -11,6 +11,7 @@ pub mod cache_control;
 pub mod cache_decision;
 pub mod capability;
 pub(crate) mod cloud_project;
+pub mod config_dir;
 pub mod content_part;
 pub mod context_reduction;
 mod converse_errors;

@@ -27,8 +27,9 @@
 //! unreadable file). The operator fixes the file, the existing file-watch
 //! reload runs `reload_from_disk`, a clean load clears `load_error`, and
 //! the store is live again -- with no restart. Only the genuine
-//! no-config-dir case (neither `HOME` nor `XDG_CONFIG_HOME` set) drops the
-//! arm, via `open_default_degradable` returning `OpenOutcome::NoConfigDir`.
+//! no-config-dir case (neither `HOME` nor `XDG_CONFIG_HOME` set non-empty)
+//! drops the arm, via `open_default_degradable` returning
+//! `OpenOutcome::NoConfigDir`.
 //! The CLI login/whoami/refresh/logout path keeps using the fail-fast
 //! `open`/`open_default`, which hard-fail on a broken file by design.
 
@@ -87,7 +88,7 @@ pub enum LocalProbe {
 /// Outcome of [`OAuthStore::open_default_degradable`]. A resolvable
 /// config path ALWAYS yields `Present` (the store may be degraded -- see
 /// [`OAuthStore::open_or_degraded`]); only a genuinely absent config
-/// directory (neither `HOME` nor `XDG_CONFIG_HOME` set) yields
+/// directory (neither `HOME` nor `XDG_CONFIG_HOME` set non-empty) yields
 /// `NoConfigDir`, the one case where `serve` drops the oauth arm.
 ///
 /// Deliberately NOT a typed open-error enum: a degraded store keeps its
@@ -97,8 +98,8 @@ pub enum OpenOutcome {
     /// A store handle to wire into the composite. Live on a clean or
     /// missing file; degraded (present-but-erroring) on a broken one.
     Present(OAuthStore),
-    /// No config directory could be located (no `HOME`, no
-    /// `XDG_CONFIG_HOME`). The composite drops the oauth arm silently --
+    /// No config directory could be located (neither `HOME` nor
+    /// `XDG_CONFIG_HOME` set non-empty). The composite drops the oauth arm silently --
     /// configs that only use `env://` / `file://` / `literal:` still run.
     NoConfigDir,
 }
@@ -320,7 +321,7 @@ impl OAuthStore {
     /// failing startup on a broken credentials file. A resolvable path
     /// ALWAYS yields `Present` (the store may be degraded -- see
     /// `open_or_degraded`); only a genuinely absent config directory
-    /// (neither `HOME` nor `XDG_CONFIG_HOME` set) yields `NoConfigDir`,
+    /// (neither `HOME` nor `XDG_CONFIG_HOME` set non-empty) yields `NoConfigDir`,
     /// the one case where the composite drops the oauth arm entirely.
     pub async fn open_default_degradable() -> OAuthResult<OpenOutcome> {
         let Ok(path) = file_io::default_path() else {
