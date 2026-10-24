@@ -35,8 +35,7 @@ pub(crate) use validate::message_safe_key;
 pub use validate::{
     CURRENT_CONFIG_VERSION, ConfigVersionError, LegacyMitmCredentialSourceError,
     RawConfigPreflightError, RemovedPaidProbeCapsError, RetiredCapabilityKeysError,
-    VersionTooNewError, preflight_config_version, preflight_legacy_mitm_credential_source,
-    preflight_raw_config, preflight_removed_paid_probe_caps, preflight_retired_capability_keys,
+    VersionTooNewError, preflight_config_version, preflight_raw_config,
     validate_cache_pricing_retired,
 };
 

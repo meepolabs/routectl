@@ -1167,7 +1167,7 @@ impl<T> typenum::type_operators::Same for routectl_router::ProviderEntry
 pub type routectl_router::ProviderEntry::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::ProviderEntry where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::ProviderEntry::into_shared(self) -> Shared
-pub enum routectl_router::config::RawConfigPreflightError
+#[non_exhaustive] pub enum routectl_router::config::RawConfigPreflightError
 pub routectl_router::config::RawConfigPreflightError::LegacyMitmCredentialSource(routectl_router::LegacyMitmCredentialSourceError)
 pub routectl_router::config::RawConfigPreflightError::RemovedPaidProbeCaps(routectl_router::RemovedPaidProbeCapsError)
 pub routectl_router::config::RawConfigPreflightError::RetiredCapabilityKeys(routectl_router::RetiredCapabilityKeysError)
@@ -3303,10 +3303,7 @@ pub const routectl_router::config::ENVELOPE_QUORUM: u32
 pub const routectl_router::config::PREFIX_QUORUM: u32
 pub fn routectl_router::config::is_config_provider_kind(&str) -> bool
 pub fn routectl_router::config::preflight_config_version(&str) -> core::result::Result<u32, routectl_router::ConfigVersionError>
-pub fn routectl_router::config::preflight_legacy_mitm_credential_source(&str) -> core::result::Result<(), routectl_router::LegacyMitmCredentialSourceError>
 pub fn routectl_router::config::preflight_raw_config(&str) -> core::result::Result<(), routectl_router::RawConfigPreflightError>
-pub fn routectl_router::config::preflight_removed_paid_probe_caps(&str) -> core::result::Result<(), routectl_router::RemovedPaidProbeCapsError>
-pub fn routectl_router::config::preflight_retired_capability_keys(&str) -> core::result::Result<(), routectl_router::RetiredCapabilityKeysError>
 pub fn routectl_router::config::validate_cache_pricing_retired(&routectl_router::config::Config) -> core::result::Result<(), alloc::string::String>
 pub mod routectl_router::pool_build
 pub enum routectl_router::pool_build::PoolOmissionReason
@@ -9530,7 +9527,7 @@ impl<T> typenum::type_operators::Same for routectl_router::ProviderEntry
 pub type routectl_router::ProviderEntry::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::ProviderEntry where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::ProviderEntry::into_shared(self) -> Shared
-pub enum routectl_router::RawConfigPreflightError
+#[non_exhaustive] pub enum routectl_router::RawConfigPreflightError
 pub routectl_router::RawConfigPreflightError::LegacyMitmCredentialSource(routectl_router::LegacyMitmCredentialSourceError)
 pub routectl_router::RawConfigPreflightError::RemovedPaidProbeCaps(routectl_router::RemovedPaidProbeCapsError)
 pub routectl_router::RawConfigPreflightError::RetiredCapabilityKeys(routectl_router::RetiredCapabilityKeysError)
@@ -18791,10 +18788,7 @@ pub fn routectl_router::per_block_breakpoint_warnings(&routectl_router::config::
 pub fn routectl_router::persist_catalog_import_baseline(&std::path::Path, &str, &routectl_router::ShrinkCounts, alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::string::String>)
 pub fn routectl_router::plan_migration(&toml_edit::document::DocumentMut, u32, &alloc::collections::btree::map::BTreeMap<alloc::string::String, routectl_router::catalog::CachePricingOverride>, &std::path::Path) -> core::result::Result<routectl_router::MigrationPlan, routectl_router::MigrateError>
 pub fn routectl_router::preflight_config_version(&str) -> core::result::Result<u32, routectl_router::ConfigVersionError>
-pub fn routectl_router::preflight_legacy_mitm_credential_source(&str) -> core::result::Result<(), routectl_router::LegacyMitmCredentialSourceError>
 pub fn routectl_router::preflight_raw_config(&str) -> core::result::Result<(), routectl_router::RawConfigPreflightError>
-pub fn routectl_router::preflight_removed_paid_probe_caps(&str) -> core::result::Result<(), routectl_router::RemovedPaidProbeCapsError>
-pub fn routectl_router::preflight_retired_capability_keys(&str) -> core::result::Result<(), routectl_router::RetiredCapabilityKeysError>
 pub fn routectl_router::propose_steady_state_trim(&routectl_core::schema::ChatRequest, &routectl_router::SteadyStateTrimParams) -> core::option::Option<routectl_router::SteadyStateTrimPlan>
 pub fn routectl_router::provider_kind_for_oauth_id(&str) -> core::option::Option<&'static str>
 pub fn routectl_router::rebuild_capabilities_into(&dyn routectl_router::CapabilityLedgerReader, &routectl_router::LearnedCapabilityRegistry, &alloc::collections::btree::map::BTreeMap<alloc::string::String, routectl_router::ProviderEntry>) -> routectl_router::CapabilityRebuildSummary

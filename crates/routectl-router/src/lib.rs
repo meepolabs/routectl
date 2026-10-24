@@ -151,9 +151,7 @@ pub use config::{
     ReductionConfig, RegistryEntry, RemovedPaidProbeCapsError, RetiredCapabilityKeysError,
     RetryPolicy, SeatQuotaConfig, ServerAuth, ServerConfig, TrimConfig, UsageConfig,
     VersionTooNewError, WindowGateConfig, WireCheckConfig, is_config_provider_kind,
-    preflight_config_version, preflight_legacy_mitm_credential_source, preflight_raw_config,
-    preflight_removed_paid_probe_caps, preflight_retired_capability_keys,
-    validate_cache_pricing_retired,
+    preflight_config_version, preflight_raw_config, validate_cache_pricing_retired,
 };
 #[cfg(feature = "bedrock")]
 pub use config::{BedrockApiShapeConfig, BedrockCredsConfig, BedrockMantleConfig};

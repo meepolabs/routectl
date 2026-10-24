@@ -143,8 +143,8 @@ const LEGACY_MITM_CREDENTIAL_SOURCE_REPLACEMENT_BLOCK: &str = "[providers.anthro
      base_url = \"https://api.anthropic.com\"\n\
      credential_source = \"forwarded\"";
 
-/// Error from [`preflight_legacy_mitm_credential_source`]: the config
-/// still carries the removed `[mitm] credential_source` key.
+/// Refusal carried by [`RawConfigPreflightError::LegacyMitmCredentialSource`]:
+/// the config still carries the removed `[mitm] credential_source` key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error(
     "config carries the removed `[mitm] credential_source` key -- a forwarded credential is \
@@ -182,8 +182,8 @@ pub fn preflight_legacy_mitm_credential_source(
     Ok(())
 }
 
-/// Error from [`preflight_removed_paid_probe_caps`]: the config still
-/// carries the removed `[fidelity] paid_probe_daily_caps` key.
+/// Refusal carried by [`RawConfigPreflightError::RemovedPaidProbeCaps`]: the
+/// config still carries the removed `[fidelity] paid_probe_daily_caps` key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error(
     "config carries `[fidelity] paid_probe_daily_caps`: paid probes were removed; delete this key"
@@ -218,10 +218,10 @@ const RETIRED_PROVIDER_ALLOWLIST_KEY: &str = "allowed_betas";
 /// The retired top-level Bedrock egress-allowlist table.
 const RETIRED_BEDROCK_TABLE: &str = "bedrock";
 
-/// Error from [`preflight_retired_capability_keys`]: the config still
-/// carries one or more keys retired in config version 5. Holds the dotted
-/// key paths only -- never the values, which an operator may have pasted
-/// anything into.
+/// Refusal carried by [`RawConfigPreflightError::RetiredCapabilityKeys`]: the
+/// config still carries one or more capability keys a past schema version
+/// retired. Holds the dotted key paths only -- never the values, which an
+/// operator may have pasted anything into.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{}", render_retired_paths(.paths))]
 pub struct RetiredCapabilityKeysError {
@@ -244,7 +244,7 @@ pub fn message_safe_key(key: &str) -> String {
 
 /// The config version the keys refused by
 /// [`preflight_retired_capability_keys`] were retired in. Pinned apart from
-/// [`CURRENT_CONFIG_VERSION`]: the retirement stays a version 5 fact after a
+/// [`CURRENT_CONFIG_VERSION`] so the retirement version stays fixed after a
 /// later schema bump.
 const CAPABILITY_KEYS_RETIRED_IN: u32 = 5;
 
@@ -264,19 +264,19 @@ fn render_retired_paths(paths: &[String]) -> String {
 }
 
 /// Read the RAW TOML text, before `Config`'s full deserialize runs, and
-/// collect every key retired in config version 5: the top-level `bedrock`
-/// table, `providers.<name>.allowed_betas`,
+/// collect every key retired in [`CAPABILITY_KEYS_RETIRED_IN`]: the
+/// top-level `bedrock` table, `providers.<name>.allowed_betas`,
 /// `providers.<name>.unsupported_features`, and
-/// `models.<nick>.unsupported_features`. A version 4 file carrying them is
-/// converted by `config migrate`; a version 5 file carrying them was
-/// hand-edited back, and running migrate on it is a no-op, so the message
-/// names the key to remove instead.
+/// `models.<nick>.unsupported_features`. A file at the preceding version
+/// carrying them is converted by `config migrate`; a file at the retirement
+/// version or later carrying them was hand-edited back, and running migrate
+/// on it is a no-op, so the message names the key to remove instead.
 ///
 /// Same pattern as [`preflight_legacy_mitm_credential_source`]: TOML that
 /// does not parse falls through as `Ok` so the typed deserialize reports
 /// the real syntax error. Callers run this after
-/// [`preflight_config_version`], so a version 4 file is told to migrate
-/// rather than to delete keys by hand.
+/// [`preflight_config_version`], so a file at the preceding version is told
+/// to migrate rather than to delete keys by hand.
 pub fn preflight_retired_capability_keys(raw_toml: &str) -> Result<(), RetiredCapabilityKeysError> {
     let Ok(value) = toml::from_str::<toml::Value>(raw_toml) else {
         return Ok(());
@@ -332,7 +332,11 @@ fn retired_entry_keys(value: &toml::Value, section: &str, keys: &[&str]) -> Vec<
 /// A refusal from [`preflight_raw_config`]: the first raw-text check that
 /// rejected the config. `Display` is the wrapped check's own message,
 /// unchanged, so every caller surfaces the same wording.
+///
+/// New refusal variants may be added as further keys are refused by name, so
+/// a `match` outside this crate needs a wildcard arm.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum RawConfigPreflightError {
     /// The schema version is too old or too new for this build.
     #[error(transparent)]
@@ -352,12 +356,11 @@ pub enum RawConfigPreflightError {
 }
 
 /// Run every raw-text config check, before `Config`'s typed deserialize, in
-/// a fixed order: [`preflight_config_version`],
-/// [`preflight_legacy_mitm_credential_source`],
-/// [`preflight_retired_capability_keys`], then
-/// [`preflight_removed_paid_probe_caps`]. The first refusal is returned and
-/// the later checks do not run. Version comes first so an older file is told
-/// to migrate rather than to delete keys by hand.
+/// a fixed order: [`preflight_config_version`], then the removed
+/// `[mitm] credential_source` key, then the retired capability keys, then
+/// the removed `[fidelity] paid_probe_daily_caps` key. The first refusal is
+/// returned and the later checks do not run. Version comes first so an older
+/// file is told to migrate rather than to delete keys by hand.
 ///
 /// TOML that does not parse passes every check, so the typed deserialize
 /// reports the real syntax error.

@@ -15,7 +15,7 @@ use routectl_providers::anthropic_api::{
 };
 use routectl_router::{
     CURRENT_CONFIG_VERSION, ResolvedModel, beta_capability_key, parse_config,
-    preflight_config_version, preflight_retired_capability_keys,
+    preflight_config_version, preflight_raw_config,
 };
 
 use super::*;
@@ -83,7 +83,7 @@ fn lane_config(unsupported: &[&str]) -> Config {
         preflight_config_version(&text).expect("version preflight"),
         CURRENT_CONFIG_VERSION
     );
-    preflight_retired_capability_keys(&text).expect("no retired key in the test config");
+    preflight_raw_config(&text).expect("raw-config preflight");
     parse_config(&text).expect("valid test config")
 }
 
