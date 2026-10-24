@@ -2,7 +2,8 @@
 //! in the old macOS folder (`$HOME/Library/Application Support/routectl`)
 //! stops every command before dispatch, naming both paths, and an explicit
 //! `--config` gets past the check. Also pins that the default lookup follows
-//! the shared core rule, where an empty `XDG_CONFIG_HOME` counts as unset.
+//! the shared core rule, where an empty `XDG_CONFIG_HOME` counts as unset,
+//! and that `doctor` lists files left in the old folder.
 //!
 //! Every spawn removes `XDG_CONFIG_HOME` (the workspace cargo config forces
 //! it), `ROUTECTL_CONFIG` and `APPDATA`, and points `HOME` and the working
@@ -10,6 +11,8 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+
+use routectl_router::CURRENT_CONFIG_VERSION;
 
 struct Home {
     tmp: tempfile::TempDir,
@@ -22,7 +25,23 @@ impl Home {
         };
         let old = home.old_config();
         std::fs::create_dir_all(old.parent().unwrap()).unwrap();
-        std::fs::write(&old, "version = 5\n").unwrap();
+        std::fs::write(&old, format!("version = {CURRENT_CONFIG_VERSION}\n")).unwrap();
+        home
+    }
+
+    /// A valid config in the new folder, and `planted` in the old folder.
+    fn with_new_config_and_old_files(planted: &[&str]) -> Self {
+        let home = Self {
+            tmp: tempfile::tempdir().unwrap(),
+        };
+        let new = home.new_config();
+        std::fs::create_dir_all(new.parent().unwrap()).unwrap();
+        std::fs::write(&new, format!("version = {CURRENT_CONFIG_VERSION}\n")).unwrap();
+        let old_dir = home.old_config().parent().unwrap().to_path_buf();
+        std::fs::create_dir_all(&old_dir).unwrap();
+        for name in planted {
+            std::fs::write(old_dir.join(name), b"x").unwrap();
+        }
         home
     }
 
@@ -123,7 +142,11 @@ fn an_empty_xdg_config_home_counts_as_unset() {
         .join("routectl")
         .join("config.toml");
     std::fs::create_dir_all(config.parent().unwrap()).unwrap();
-    std::fs::write(&config, "version = 5\n[server]\nprt = 8080\n").unwrap();
+    std::fs::write(
+        &config,
+        format!("version = {CURRENT_CONFIG_VERSION}\n[server]\nprt = 8080\n"),
+    )
+    .unwrap();
 
     let out = Command::new(env!("CARGO_BIN_EXE_routectl"))
         .args(["config", "check"])
@@ -141,4 +164,65 @@ fn an_empty_xdg_config_home_counts_as_unset() {
         stderr.contains("did you mean `port`?"),
         "the config under $HOME/.config must be the one read: {stderr}"
     );
+}
+
+/// Each legacy-folder finding `doctor --config <new config>` renders, as its
+/// line joined with the `fix:` line under it.
+fn doctor_legacy_lines(home: &Home) -> Vec<String> {
+    let new = home.new_config();
+
+    let out = home.run(&["doctor", "--config", new.to_str().unwrap()]);
+
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(
+        stdout.contains("[Config validation]"),
+        "positive control: doctor rendered its config section: {stdout}\n{}",
+        stderr_of(&out)
+    );
+    let output = format!("{stdout}{}", stderr_of(&out));
+    let lines: Vec<&str> = output.lines().collect();
+    lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.contains("legacy folder"))
+        .map(|(at, line)| match lines.get(at + 1) {
+            Some(next) if next.trim_start().starts_with("fix:") => format!("{line}\n{next}"),
+            _ => (*line).to_owned(),
+        })
+        .collect()
+}
+
+/// Mutation check: replace the legacy gather in the doctor context gather
+/// with `LegacyFolder::Absent` -> red here.
+#[test]
+fn doctor_lists_a_file_left_in_the_old_folder_by_its_home_free_name() {
+    let home = Home::with_new_config_and_old_files(&["usage.db"]);
+
+    let lines = doctor_legacy_lines(&home);
+
+    assert_eq!(lines.len(), 1, "one legacy finding: {lines:?}");
+    let line = &lines[0];
+    assert!(line.contains("WARN"), "{line}");
+    assert!(
+        line.contains("~/Library/Application Support/routectl"),
+        "{line}"
+    );
+    assert!(line.contains("usage.db"), "{line}");
+    assert!(
+        line.contains("fix: move"),
+        "the remediation is checked too: {line}"
+    );
+    assert!(
+        !line.contains(&*home.path().to_string_lossy()),
+        "no absolute path in the finding: {line}"
+    );
+}
+
+#[test]
+fn doctor_with_an_empty_old_folder_shows_no_legacy_finding() {
+    let home = Home::with_new_config_and_old_files(&[]);
+
+    let lines = doctor_legacy_lines(&home);
+
+    assert!(lines.is_empty(), "{lines:?}");
 }

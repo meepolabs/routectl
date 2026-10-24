@@ -240,29 +240,32 @@ pub(super) fn section_config(ctx: &DoctorContext) -> Vec<Finding> {
     findings
 }
 
-/// The old macOS config folder as the operator writes it. Never the resolved
-/// path: the served panel must not carry the account's home directory.
-const LEGACY_FOLDER_DISPLAY: &str = "~/Library/Application Support/routectl";
-
-/// Files left in the old macOS config folder, or a folder that could not be
-/// listed. Basenames are operator-controlled, so each is control-char-filtered
-/// before it reaches the one-line human render.
+/// Files left in the old config folder, or a folder that could not be listed.
+/// The folder is named only by its home-free display: the served panel must
+/// not carry the account's home directory. Basenames are operator-controlled,
+/// so each is control-char-filtered before it reaches the one-line human
+/// render.
 fn legacy_folder_finding(folder: &LegacyFolder) -> Option<Finding> {
     let (detail, remediation) = match folder {
         LegacyFolder::Absent => return None,
-        LegacyFolder::Entries { names, more } => (
-            legacy_entries_detail(names, *more),
+        LegacyFolder::Entries {
+            display,
+            names,
+            more,
+            has_config,
+        } => (
+            legacy_entries_detail(display, names, *more, *has_config),
             format!(
-                "move what you still need from {LEGACY_FOLDER_DISPLAY} to ~/.config/routectl \
+                "move what you still need from {display} to ~/.config/routectl \
                  (or $XDG_CONFIG_HOME/routectl), then remove the old folder"
             ),
         ),
-        LegacyFolder::InspectError(kind) => (
+        LegacyFolder::InspectError { display, kind } => (
             format!(
-                "could not list {LEGACY_FOLDER_DISPLAY} ({kind}), so files routectl no longer \
-                 reads may be left there"
+                "could not list {display} ({kind}), so files routectl no longer reads may be \
+                 left there"
             ),
-            format!("check the permissions on {LEGACY_FOLDER_DISPLAY}"),
+            format!("check the permissions on {display}"),
         ),
     };
     Some(Finding {
@@ -274,18 +277,18 @@ fn legacy_folder_finding(folder: &LegacyFolder) -> Option<Finding> {
     })
 }
 
-fn legacy_entries_detail(names: &[String], more: usize) -> String {
+fn legacy_entries_detail(display: &str, names: &[String], more: usize, has_config: bool) -> String {
     let listed = names
         .iter()
         .map(|name| sanitize_for_log_with_cap(name, MAX_REPORTED_LINE_CHARS))
         .collect::<Vec<_>>()
         .join(", ");
-    let mut detail = format!("{LEGACY_FOLDER_DISPLAY} still holds {listed}");
+    let mut detail = format!("{display} still holds {listed}");
     if more > 0 {
         detail.push_str(&format!(" and {more} more"));
     }
     detail.push_str("; routectl does not read them");
-    if names.iter().any(|name| name == "config.toml") {
+    if has_config {
         detail.push_str(", and its config.toml is not the config in use");
     }
     detail

@@ -175,8 +175,8 @@ pub(crate) use self::served::{GatherSources, ParkedSeat, ResidentLearned, Served
 /// per-request allowance. The report itself is unchanged.
 ///
 /// v19 -> v20: additive. The `config` section gains one `legacy folder` Warn
-/// when the folder routectl used on macOS before every OS shared one config
-/// folder still holds files (named, at most eight, plus a count of the
+/// when the folder routectl used before every OS shared one config folder
+/// (on macOS or Windows) still holds files (named, at most eight, plus a count of the
 /// rest), or when that folder could not be inspected.
 const SCHEMA_VERSION: u32 = 20;
 
@@ -321,8 +321,8 @@ pub(crate) struct DoctorContext {
     /// Read off the overlay itself, so a hand edit that kept the revision
     /// still shows here.
     overlay_soft_defects: Vec<OverlaySoftDefect>,
-    /// What the folder routectl used on macOS before the shared config folder
-    /// still holds. routectl never reads it, so anything left there is
+    /// What the folder routectl used before the shared config folder still
+    /// holds. routectl never reads it, so anything left there is
     /// residue the operator may still expect to be in use.
     legacy_folder: LegacyFolder,
 }
@@ -331,23 +331,31 @@ pub(crate) struct DoctorContext {
 /// counted in `more`.
 const LEGACY_FOLDER_NAME_CAP: usize = 8;
 
-/// The state of the old macOS config folder.
+/// The state of the old config folder.
 #[derive(Debug, PartialEq, Eq)]
 enum LegacyFolder {
-    /// No usable `HOME`, no folder, an empty folder, or the folder holds the
-    /// config this run reads (an explicit `--config` there): nothing to warn
-    /// about.
+    /// No old folder, an empty folder, or the folder holds the config this
+    /// run reads (an explicit `--config` there): nothing to warn about.
     Absent,
     /// The folder holds entries routectl does not read.
     Entries {
+        /// A home-free name for the folder, safe to print.
+        display: &'static str,
         /// Sorted basenames, at most [`LEGACY_FOLDER_NAME_CAP`].
         names: Vec<String>,
         /// How many entries past the cap were left out of `names`.
         more: usize,
+        /// Whether the folder holds a `config.toml`, listed or past the cap.
+        has_config: bool,
     },
     /// The folder could not be listed. Only the error kind is kept: an
     /// `io::Error` message can carry the absolute home path.
-    InspectError(std::io::ErrorKind),
+    InspectError {
+        /// A home-free name for the folder, safe to print.
+        display: &'static str,
+        /// Why the listing failed.
+        kind: std::io::ErrorKind,
+    },
 }
 
 /// Where one configured model's outbound `max_output_tokens` ceiling comes

@@ -21,7 +21,7 @@ use crate::commands::doctor_panels::compute_would_trim_panel;
 use crate::commands::parse_error_redaction::redact_config_load_error;
 use crate::commands::pricing::{is_subscription, missing_equivalence_dimensions};
 use crate::commands::probe::{PROBE_DEADLINE, probe_all};
-use crate::config_folder::legacy_config_dir_from_env;
+use crate::config_folder::{LegacyConfigDir, legacy_config_dir_from_env};
 use crate::server::CompositeStore;
 use crate::server::ledger_reader::{
     BoundaryOutcome, LedgerCapabilityReader, SliceReader, classify_boundary,
@@ -120,12 +120,7 @@ pub async fn gather_context_no_network(
     let orphan_secrets = gather_orphan_secrets(&config);
     let orphan_seats = gather_orphan_seats(&config, &seats);
     let would_trim = compute_would_trim_panel(&config, Local::now());
-    let legacy_folder = gather_legacy_folder(
-        legacy_config_dir_from_env()
-            .as_ref()
-            .map(|legacy| legacy.path.as_path()),
-        config_path,
-    );
+    let legacy_folder = gather_legacy_folder(legacy_config_dir_from_env().as_ref(), config_path);
 
     DoctorContext {
         config,
@@ -156,42 +151,59 @@ pub async fn gather_context_no_network(
     }
 }
 
-/// List what the old macOS config folder `legacy_dir` still holds. A folder
-/// that holds `config_in_use` is the operator's explicit choice, not residue,
-/// so it reads as [`LegacyFolder::Absent`]. Every entry counts, temp and lock
-/// files included: the operator moves the folder's contents as a whole.
+/// List what the old config folder `legacy` still holds. A folder that holds
+/// `config_in_use` (after resolving symlinks) is the operator's explicit
+/// choice, not residue, so it reads as [`LegacyFolder::Absent`]. Every entry
+/// counts, temp and lock files included: the operator moves the folder's
+/// contents as a whole.
 pub(super) fn gather_legacy_folder(
-    legacy_dir: Option<&Path>,
+    legacy: Option<&LegacyConfigDir>,
     config_in_use: &Path,
 ) -> LegacyFolder {
-    let Some(legacy_dir) = legacy_dir else {
+    let Some(LegacyConfigDir {
+        path: legacy_dir,
+        display,
+    }) = legacy
+    else {
         return LegacyFolder::Absent;
     };
+    let config_in_use =
+        std::fs::canonicalize(config_in_use).unwrap_or_else(|_| config_in_use.to_path_buf());
     if config_in_use
         .parent()
         .is_some_and(|parent| same_dir(parent, legacy_dir))
     {
         return LegacyFolder::Absent;
     }
+    let inspect_error = |e: std::io::Error| LegacyFolder::InspectError {
+        display,
+        kind: e.kind(),
+    };
     let entries = match std::fs::read_dir(legacy_dir) {
         Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return LegacyFolder::Absent,
-        Err(e) => return LegacyFolder::InspectError(e.kind()),
+        Err(e) => return inspect_error(e),
     };
     let mut names = Vec::new();
     for entry in entries {
         match entry {
             Ok(entry) => names.push(entry.file_name().to_string_lossy().into_owned()),
-            Err(e) => return LegacyFolder::InspectError(e.kind()),
+            Err(e) => return inspect_error(e),
         }
     }
     if names.is_empty() {
         return LegacyFolder::Absent;
     }
     names.sort();
+    let has_config = names.iter().any(|name| name == "config.toml");
     let more = names.len().saturating_sub(LEGACY_FOLDER_NAME_CAP);
     names.truncate(LEGACY_FOLDER_NAME_CAP);
-    LegacyFolder::Entries { names, more }
+    LegacyFolder::Entries {
+        display,
+        names,
+        more,
+        has_config,
+    }
 }
 
 /// Whether `a` and `b` name the same folder, resolving symlinks where both

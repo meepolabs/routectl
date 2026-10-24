@@ -57,10 +57,16 @@ license.
   carrying only the date-stripped `TranslationKey`, never a label, URL or
   header; deduped, first-seen order; skipped for background probes
 - `src/config_dir.rs` -- the shared routectl config-folder rule: pure
-  `config_dir_from` (non-empty `XDG_CONFIG_HOME`, else non-empty `HOME` +
-  `.config`, joined with `routectl`), the env binding `config_dir`, and
-  `config_dir_or_relative` (relative `.config/routectl` when nothing
-  resolves). Router, auth and the providers cookie jar resolve through it
+  `config_dir_from` (absolute `XDG_CONFIG_HOME`, else absolute home +
+  `.config`, joined with `routectl`; empty or relative counts as unset; on
+  Windows the home is `HOME` when absolute, else `USERPROFILE`), the env
+  binding `config_dir`, and `config_dir_or_relative[_from]` (relative
+  `.config/routectl` when nothing resolves). Router, auth and the providers
+  cookie jar resolve through it
+- `src/config_dir_census_tests.rs` -- the config-folder census: fails when a
+  production source other than `config_dir.rs` and the cli's
+  `config_folder.rs` names `XDG_CONFIG_HOME`, `APPDATA`, `USERPROFILE`, a
+  `.config` literal or `dirs::`, skipping test files and inline test modules
 - `src/warn_dedup.rs` -- `CappedWarnSet<K>::admit`: the bounded warn-once
   dedup decision shared by the cli's `proxy::metrics::WarnOnce` and
   `server::cc_pin_drift` and the router's wire-check WARN. Decides only --
@@ -7838,10 +7844,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   active runtime behavior yet) and `[pools]` as high-consequence
   beside `[providers]`
 - `src/config_folder.rs` -- the refusal for a config left only in the old
-  macOS folder: `legacy_config_dir(home)` (`$HOME/Library/Application
-  Support/routectl`, derived on every OS), pure `stranded_config(new_cfg,
-  legacy_dir)` (`try_exists`, so an uninspectable path is an error), the
-  `StrandedConfigError` / `LegacyInspectError` texts naming both paths, and
+  folder: `legacy_config_dir(home, appdata)` (`<APPDATA>/routectl` when
+  `APPDATA` is absolute, else `$HOME/Library/Application Support/routectl`,
+  derived on every OS, as a `LegacyConfigDir` with a home-free `display`),
+  pure `stranded_config(new_cfg, legacy_dir)` (`try_exists`, so an
+  uninspectable path is an error), the `ConfigFolderError` (`Stranded` /
+  `Inspect`) texts naming the paths, and
   `refuse_stranded_config`, which `main.rs` `run()` calls once before
   dispatch unless `--config` / `ROUTECTL_CONFIG` names the file
 - `src/lane_cell.rs` -- the one `(learned lane, capability)` cell builder for

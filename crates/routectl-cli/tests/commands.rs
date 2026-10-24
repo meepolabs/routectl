@@ -753,14 +753,16 @@ async fn whoami_lists_seats_grouped_by_provider() {
 // freshly-built binary path via `CARGO_BIN_EXE_routectl`, so no extra
 // dev-dependency (assert_cmd etc.) is needed.
 
-/// Run `routectl <args...>` with a sandboxed (empty) XDG dir and return
-/// `(exit_code, stderr)`. The sandbox keeps the spawned process from
-/// reading the developer's real credentials.json.
+/// Run `routectl <args...>` with a sandboxed (empty) XDG dir and HOME and
+/// return `(exit_code, stderr)`. The sandbox keeps the spawned process from
+/// reading the developer's real credentials.json or old config folder.
 fn run_routectl(args: &[&str]) -> (i32, String) {
     let tmp = tempfile::tempdir().unwrap();
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_routectl"))
         .args(args)
         .env("XDG_CONFIG_HOME", tmp.path())
+        .env("HOME", tmp.path())
+        .env_remove("APPDATA")
         .output()
         .expect("spawn routectl binary");
     let code = out.status.code().unwrap_or(-1);
@@ -915,8 +917,8 @@ fn serve_cold_start_surfaces_did_you_mean_for_unknown_field() {
     );
 }
 
-/// Run `routectl <args...>` with a sandboxed (empty) XDG dir and return
-/// `(exit_code, stdout, stderr)`. `check`'s rendered error list prints to
+/// Run `routectl <args...>` with a sandboxed (empty) XDG dir and HOME and
+/// return `(exit_code, stdout, stderr)`. `check`'s rendered error list prints to
 /// stdout; [`run_routectl`] captures only stderr, so this variant is used
 /// where the assertion needs the stdout report.
 fn run_routectl_full(args: &[&str]) -> (i32, String, String) {
@@ -924,6 +926,8 @@ fn run_routectl_full(args: &[&str]) -> (i32, String, String) {
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_routectl"))
         .args(args)
         .env("XDG_CONFIG_HOME", tmp.path())
+        .env("HOME", tmp.path())
+        .env_remove("APPDATA")
         .output()
         .expect("spawn routectl binary");
     let code = out.status.code().unwrap_or(-1);
@@ -997,13 +1001,15 @@ fn serve_rejects_semantically_invalid_config_fail_fast() {
 // the real binary so the assertions cover what an operator actually reads,
 // including the exit code the block must never move.
 
-/// Run `routectl <args...>` with `XDG_CONFIG_HOME` pointed at `xdg` (so a
-/// seeded credentials.json is visible) and return `(exit_code, stdout,
-/// stderr)`.
+/// Run `routectl <args...>` with `XDG_CONFIG_HOME` and `HOME` pointed at
+/// `xdg` (so a seeded credentials.json is visible and no real old config
+/// folder is) and return `(exit_code, stdout, stderr)`.
 fn run_routectl_with_xdg(xdg: &std::path::Path, args: &[&str]) -> (i32, String, String) {
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_routectl"))
         .args(args)
         .env("XDG_CONFIG_HOME", xdg)
+        .env("HOME", xdg)
+        .env_remove("APPDATA")
         .output()
         .expect("spawn routectl binary");
     let code = out.status.code().unwrap_or(-1);
@@ -1470,6 +1476,8 @@ fn run_routectl_with_silent_stdin(xdg: &std::path::Path, args: &[&str]) -> (i32,
     let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_routectl"))
         .args(args)
         .env("XDG_CONFIG_HOME", xdg)
+        .env("HOME", xdg)
+        .env_remove("APPDATA")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
