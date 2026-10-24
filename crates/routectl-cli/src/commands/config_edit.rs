@@ -6,11 +6,12 @@
 //! (a stale schema version, an unknown key, a value that fails the shared
 //! validation gate) leaves the file byte-identical:
 //!
-//!   1. RAW version preflight on the snapshot bytes FIRST -- a config whose
-//!      `version` is out of bounds (older or newer than this build writes)
-//!      is refused here with the single-sourced `preflight_config_version`
-//!      message, before any shared-loader call. A too-old file is never
-//!      migrated in place. The legacy-key preflight runs raw alongside it.
+//!   1. RAW preflight on the snapshot bytes FIRST, through the shared
+//!      `edit_pipeline::preflight` (the same raw checks the loader runs):
+//!      an out-of-bounds `version` (older or newer than this build writes)
+//!      is refused first, then the removed and retired keys, each with its
+//!      single-sourced message, before any shared-loader call. A too-old
+//!      file is never migrated in place.
 //!   2. Schema-driven path validation ([`validate_config_path`]); `set`
 //!      requires a scalar leaf (a table target is rejected), while `unset`
 //!      may also target a whole table node to drop an override block.

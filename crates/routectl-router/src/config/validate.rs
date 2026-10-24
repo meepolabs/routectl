@@ -71,11 +71,12 @@ pub enum ConfigVersionError {
 /// `config migrate` and, crucially, never mutates the file -- the loader no
 /// longer migrates on load.
 ///
-/// This preflight only ever speaks about the `version` key, so it never
-/// masks a genuine error behind a version message. TOML that fails to parse
-/// at all, or a `version` that is present but is not a plain non-negative
-/// integer, fall through as `Ok` -- the normal typed deserialize reports
-/// those with a precise syntax / type error. A MISSING `version` key is the
+/// An out-of-range integer `version` deliberately takes precedence over
+/// every other refusal or typed error in the same file: a too-old file is
+/// pointed at `config migrate` first. TOML that fails to parse at all, or a
+/// `version` that is present but is not a plain non-negative integer, fall
+/// through as `Ok` -- the normal typed deserialize reports those with a
+/// precise syntax / type error. A MISSING `version` key is the
 /// one value this reads as legacy `1`: a config with no `version` predates
 /// the schema and so surfaces the too-old message. Config loading reaches
 /// this through [`preflight_raw_config`], which owns the order of the
@@ -160,9 +161,10 @@ pub struct LegacyMitmCredentialSourceError;
 /// config carrying that key still fails at load (`deny_unknown_fields`
 /// rejects it), but with serde's generic "unknown field" message, which
 /// does not tell the operator what replaces it. This preflight exists
-/// only to make that ONE failure actionable -- it never masks a genuine
-/// parse error or any other unknown field, both of which fall through
-/// to the normal typed deserialize untouched.
+/// only to make that ONE failure actionable. TOML that does not parse,
+/// and a config without the legacy key, fall through untouched; when the
+/// legacy key is present, its actionable refusal is reported first, ahead
+/// of any other unknown field or typed error in the same file.
 ///
 /// Same pattern as [`preflight_config_version`]. [`preflight_raw_config`]
 /// runs it directly after the version check.
