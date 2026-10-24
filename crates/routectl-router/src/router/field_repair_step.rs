@@ -598,12 +598,28 @@ impl<'a> FieldRepairPlan<'a> {
     /// non-settling walk must NOT clear: the removal would be invisible to the
     /// ledger, so the next warm rebuild would resurrect a verdict this process
     /// had already dropped.
-    pub(in crate::router) fn settle_success(mut self) -> Vec<CapabilityClearedEvent> {
-        self.candidates
-            .iter_mut()
-            .filter_map(|candidate| candidate.guard.take()?.clear())
-            .collect()
+    ///
+    /// Also names every key whose guard ran its removal, event or not, so the
+    /// same settlement does not remove one of them again.
+    pub(in crate::router) fn settle_success(mut self) -> SuccessClears {
+        let mut clears = SuccessClears::default();
+        for candidate in &mut self.candidates {
+            let Some(guard) = candidate.guard.take() else {
+                continue;
+            };
+            clears.events.extend(guard.clear());
+            clears.keys.extend(candidate.key.clone());
+        }
+        clears
     }
+}
+
+/// What an unrepaired success cleared: the ledger rows of the verdicts it
+/// removed, and every key its guards ran a removal on.
+#[derive(Default)]
+pub(in crate::router) struct SuccessClears {
+    pub(in crate::router) events: Vec<CapabilityClearedEvent>,
+    pub(in crate::router) keys: Vec<FieldVerdictKey>,
 }
 
 /// Every step still pending when the plan goes is dropped unproven: the same

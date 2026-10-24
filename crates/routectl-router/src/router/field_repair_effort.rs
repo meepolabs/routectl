@@ -185,11 +185,13 @@ impl Router {
     ///
     /// Only where field repair may learn on the lane at all, and only while
     /// the target clamps no effort: a clamped wire value is not the level
-    /// the body names.
+    /// the body names. A key in `removed` already ran its removal in this
+    /// settlement and is not removed again.
     pub(in crate::router) fn clear_accepted_effort(
         &self,
         target: &DispatchTarget,
         sent: &ChatRequest,
+        removed: &[FieldVerdictKey],
     ) -> Option<CapabilityClearedEvent> {
         if !self.config.capability.enabled {
             return None;
@@ -206,6 +208,9 @@ impl Router {
         let table = self.field_repair_table().for_kind(provider_kind);
         let row = super::present_rows(table, sent).find(is_ranked)?;
         let key = FieldVerdictKey::new(target.learned_lane.as_ref()?, row.path, provider_kind)?;
+        if removed.contains(&key) {
+            return None;
+        }
         self.field_verdicts()
             .clear_accepted(&key, self.registry_generation())
     }

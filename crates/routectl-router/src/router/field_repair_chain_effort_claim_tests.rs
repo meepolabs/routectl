@@ -411,20 +411,35 @@ async fn assert_xhigh_goes_out_as_sent(router: &Router, seat: &ChainSeat) {
     );
 }
 
+/// One request on the complete walk, or on the stream walk drained to its
+/// end: its meta and whether it was served.
+async fn dispatch_on(
+    router: &Router,
+    req: ChatRequest,
+    stream: bool,
+) -> (crate::router::DispatchMeta, bool) {
+    if !stream {
+        let dispatched = router
+            .complete_with_options(req, RouterOptions::new())
+            .await;
+        return (dispatched.meta, dispatched.result.is_ok());
+    }
+    let opened = router.stream_with_options(req, RouterOptions::new()).await;
+    let served = match opened.result {
+        Ok(body) => body.collect::<Vec<_>>().await.iter().all(Result::is_ok),
+        Err(_) => false,
+    };
+    (opened.meta, served)
+}
+
 /// Two requests teach opposite levels on one lane and the store keeps only
 /// the later: A's `xhigh` is refused and learns `xhigh -> high`; B sends
 /// `high`, refused listing only `max, xhigh`, is retried at `xhigh` and
-/// served, which learns `high -> xhigh` and, since `xhigh` was just
-/// accepted, clears A's `xhigh` verdict in the same settlement. A third
-/// `xhigh` request then goes out at `xhigh`, once, and is served.
-///
-/// Mutation checks: drop the accepted-effort clear in
-/// `settle_field_success` -> red (the third request is pre-flighted to
-/// `high`, stops at the repeat, and the refusal reaches the client); key the
-/// clear on the client's level, which is the level B's step refused, -> red
-/// (`high` is cleared instead of `xhigh`).
-#[tokio::test]
-async fn a_level_accepted_in_a_later_request_clears_the_verdict_that_refused_it() {
+/// served (on the complete walk, or on the stream walk at first content),
+/// which learns `high -> xhigh` and, since `xhigh` was just accepted,
+/// clears A's `xhigh` verdict in the same settlement. A third `xhigh`
+/// request then goes out at `xhigh`, once, and is served.
+async fn assert_a_later_acceptance_clears_the_refusing_verdict(stream: bool) {
     let seat = ChainSeat::new(
         Egress::Anthropic,
         refuse_xhigh_once_then_high_listing_higher,
@@ -441,15 +456,9 @@ async fn a_level_accepted_in_a_later_request_clears_the_verdict_that_refused_it(
     );
     acknowledge(&router, &taught);
 
-    let inverse = router
-        .complete_with_options(effort_req("high", adaptive()), RouterOptions::new())
-        .await;
+    let (meta, served) = dispatch_on(&router, effort_req("high", adaptive()), stream).await;
 
-    assert!(
-        inverse.result.is_ok(),
-        "{:?}",
-        inverse.result.as_ref().err()
-    );
+    assert!(served, "stream {stream}");
     let sent: Vec<_> = seat.bodies()[2..]
         .iter()
         .map(|b| sent_effort(b).map(str::to_string))
@@ -460,14 +469,75 @@ async fn a_level_accepted_in_a_later_request_clears_the_verdict_that_refused_it(
         "premise: high refused, xhigh served",
     );
     assert_eq!(
-        verdicts(&inverse.meta),
+        verdicts(&meta),
         vec![(key(HIGH_PATH), Some(VerdictValue::Shape("xhigh")))],
     );
-    assert_eq!(cleared_keys(&inverse.meta), [key(XHIGH_PATH)]);
+    assert_eq!(cleared_keys(&meta), [key(XHIGH_PATH)], "stream {stream}");
     assert_eq!(resident_effort_keys(&router), [key(HIGH_PATH)]);
-    acknowledge(&router, &inverse);
+    acknowledge_meta(&router, &meta);
 
     assert_xhigh_goes_out_as_sent(&router, &seat).await;
+}
+
+/// [`assert_a_later_acceptance_clears_the_refusing_verdict`] on the complete
+/// walk.
+///
+/// Mutation checks: drop the accepted-effort clear in
+/// `settle_field_success` -> red (the third request is pre-flighted to
+/// `high`, stops at the repeat, and the refusal reaches the client); key the
+/// clear on the client's level, which is the level B's step refused, -> red
+/// (`high` is cleared instead of `xhigh`).
+#[tokio::test]
+async fn a_level_accepted_in_a_later_request_clears_the_verdict_that_refused_it() {
+    assert_a_later_acceptance_clears_the_refusing_verdict(false).await;
+}
+
+/// The same on the stream walk, which settles at first content.
+///
+/// Mutation check: pass the client's request as the accepted body at the
+/// stream walk's `on_success` -> red (`high` is cleared instead of `xhigh`)
+/// while the complete row stays green.
+#[tokio::test]
+async fn a_level_accepted_at_first_content_clears_the_verdict_that_refused_it() {
+    assert_a_later_acceptance_clears_the_refusing_verdict(true).await;
+}
+
+/// A token count proves nothing about whether a completion accepts a level:
+/// with a `high -> medium` verdict resident (learned, not yet acknowledged,
+/// so it drives no pre-flight), a settling count of a `high` request reaches
+/// the upstream at `high` and is counted, and the verdict stays.
+///
+/// Mutation check: run the accepted-effort clear on the count surface -> red
+/// (`high` is cleared).
+#[tokio::test]
+async fn a_token_count_at_a_level_keeps_that_levels_verdict() {
+    let seat = ChainSeat::new(Egress::Anthropic, refuse_high_once_and_every_xhigh);
+    let router = anthropic_router(&seat, &wire_checked(ONE_ATTEMPT));
+    let adaptive = || Some(json!({"type": "adaptive"}));
+    let taught = router
+        .complete_with_options(effort_req("high", adaptive()), RouterOptions::new())
+        .await;
+    assert_eq!(
+        verdicts(&taught.meta),
+        vec![(key(HIGH_PATH), Some(VerdictValue::Shape("medium")))],
+        "premise: high learns medium",
+    );
+
+    let counted = router
+        .count_tokens_with_meta(effort_req("high", adaptive()))
+        .await;
+
+    assert!(counted.result.is_ok(), "{:?}", counted.result.err());
+    assert_eq!(
+        seat.bodies()[2..]
+            .iter()
+            .map(|b| sent_effort(b).map(str::to_string))
+            .collect::<Vec<_>>(),
+        [Some("high".to_string())],
+        "premise: one count at high",
+    );
+    assert!(cleared_keys(&counted.meta).is_empty());
+    assert_eq!(resident_effort_keys(&router), [key(HIGH_PATH)]);
 }
 
 /// The inverse of a level the pre-flight wrote: with `xhigh -> high`
@@ -625,6 +695,75 @@ async fn an_unrepaired_success_at_a_level_clears_that_levels_verdict() {
         let stays: Vec<_> = stays.iter().map(|path| key(path)).collect();
         assert_eq!(resident_effort_keys(&router), stays, "{name}");
     }
+}
+
+/// The incarnation the learned registry hands its next mutation, read by
+/// removing `capability` (resident nowhere) on `lane`; the read itself
+/// consumes one.
+fn next_incarnation(router: &Router, lane: &str, capability: &str) -> u64 {
+    match router.learned_capabilities.remove_keyed_in_generation(
+        router.registry_generation(),
+        lane,
+        capability,
+        ANTHROPIC_API_KIND,
+    ) {
+        crate::learned_capability::GenerationOutcome::Applied {
+            value: false,
+            incarnation,
+            ..
+        } => incarnation,
+        _ => panic!("premise: the sentinel key holds nothing"),
+    }
+}
+
+/// An unrepaired success whose admitted effort candidate held a resident
+/// verdict removes that key once: the guard's clear removes the lapsed
+/// `high -> medium` verdict, and the accepted-level clear of the same `high`
+/// does not take the registry lock to remove it again. The request makes
+/// three registry mutations: the lapsed verdict's re-probe settles, and each
+/// admitted row (`max_tokens`, `high`) runs its guard's clear.
+///
+/// Mutation check: hand `clear_accepted_effort` no removed keys in
+/// `settle_field_success` -> red (two mutations).
+#[tokio::test]
+async fn an_unrepaired_success_removes_its_admitted_effort_verdict_once() {
+    let seat = ChainSeat::new(Egress::Anthropic, refuse_high_once_and_every_xhigh);
+    let router = anthropic_router(&seat, &wire_checked(ONE_ATTEMPT));
+    let adaptive = || Some(json!({"type": "adaptive"}));
+    let taught = router
+        .complete_with_options(effort_req("high", adaptive()), RouterOptions::new())
+        .await;
+    let [event] = taught.meta.learned_capabilities.as_slice() else {
+        panic!("premise: high learns one verdict");
+    };
+    assert_eq!(event.capability_key, key(HIGH_PATH), "premise");
+    let lane = event.state_key.clone();
+    assert!(
+        matches!(
+            router.learned_capabilities.expire_keyed_in_generation(
+                router.registry_generation(),
+                &lane,
+                &event.capability_key,
+                ANTHROPIC_API_KIND,
+                std::time::Instant::now(),
+            ),
+            crate::learned_capability::GenerationOutcome::Applied { value: true, .. }
+        ),
+        "premise: the high verdict lapsed",
+    );
+    let sentinel = key(LOW_PATH);
+    let before = next_incarnation(&router, &lane, &sentinel);
+
+    let served = router
+        .complete_with_options(effort_req("high", adaptive()), RouterOptions::new())
+        .await;
+
+    let after = next_incarnation(&router, &lane, &sentinel);
+    assert!(served.result.is_ok(), "{:?}", served.result.as_ref().err());
+    assert!(served.meta.field_repairs.is_empty(), "premise: unrepaired");
+    assert_eq!(cleared_keys(&served.meta), [key(HIGH_PATH)]);
+    assert!(resident_effort_keys(&router).is_empty());
+    assert_eq!(after - before - 1, 3, "registry mutations");
 }
 
 /// Refuse `high` listing `low, medium` at position 0 only, every `xhigh`

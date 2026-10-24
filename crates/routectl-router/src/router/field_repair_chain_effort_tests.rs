@@ -98,7 +98,11 @@ fn effort_req(effort: &str, thinking: Option<serde_json::Value>) -> ChatRequest 
 /// Acknowledge every verdict `dispatched` learned as durably written, so it
 /// may act on the next request.
 fn acknowledge(router: &Router, dispatched: &crate::router::Dispatched) {
-    for event in &dispatched.meta.learned_capabilities {
+    acknowledge_meta(router, &dispatched.meta);
+}
+
+fn acknowledge_meta(router: &Router, meta: &crate::router::DispatchMeta) {
+    for event in &meta.learned_capabilities {
         assert!(
             router.acknowledge_durable_field_confirmation(
                 &event.state_key,

@@ -8,6 +8,7 @@ use std::time::Instant;
 use routectl_core::ChatRequest;
 
 use crate::feature_keys::derive_feature_keys;
+use crate::field_verdict::FieldVerdictKey;
 
 use super::super::field_repair::FieldRepairPlan;
 use super::super::replay_repair::settle_replay_repair;
@@ -68,16 +69,17 @@ impl AttemptLearning<'_> {
         meta: &mut DispatchMeta,
     ) {
         let Some(mut plan) = self.field_plan.take() else {
-            self.clear_sent_effort(false, sent, target, meta);
+            self.clear_sent_effort(sent, target, &[], meta);
             return;
         };
-        let effort_committed = plan.has_pending_effort();
         if plan.has_applied() {
             self.commit_field_steps(&mut plan, req, meta);
+            self.clear_sent_effort(sent, target, &[], meta);
         } else {
-            meta.cleared_capabilities.extend(plan.settle_success());
+            let clears = plan.settle_success();
+            meta.cleared_capabilities.extend(clears.events);
+            self.clear_sent_effort(sent, target, &clears.keys, meta);
         }
-        self.clear_sent_effort(effort_committed, sent, target, meta);
     }
 
     /// Clear the verdict of the effort level the accepted body `sent`
@@ -85,23 +87,23 @@ impl AttemptLearning<'_> {
     /// commits `.X = Y` and then clears `.Y` leaves no window where its own
     /// commit is undone, and two requests committing `.X = Y` and `.Y = X`
     /// cannot both keep their verdict, since each clears the other's key
-    /// after its own commit.
+    /// after its own commit. A key in `removed` was already removed by this
+    /// settlement's own guard.
     ///
-    /// A token count proves nothing about a completion's effort, so the
-    /// count surface clears only when a settling effort step it held just
-    /// committed with the level it sent.
+    /// Never on the count surface: verdicts carry no surface, and a token
+    /// count proves nothing about whether a completion accepts the level.
     fn clear_sent_effort(
         &self,
-        effort_committed: bool,
         sent: &ChatRequest,
         target: &DispatchTarget,
+        removed: &[FieldVerdictKey],
         meta: &mut DispatchMeta,
     ) {
-        if self.count_surface && !effort_committed {
+        if self.count_surface {
             return;
         }
         meta.cleared_capabilities
-            .extend(self.router.clear_accepted_effort(target, sent));
+            .extend(self.router.clear_accepted_effort(target, sent, removed));
     }
 
     /// Commit every pending step when a repaired retry was refused for a
@@ -128,10 +130,10 @@ impl AttemptLearning<'_> {
         };
         let provider_kind = rejection.target.provider_kind.unwrap_or("");
         if plan.moved_on_by(rejection.native_class, rejection.err, provider_kind) {
-            let effort_committed = plan.has_pending_effort();
+            let effort_proven = plan.has_pending_effort();
             self.commit_field_steps(&mut plan, rejection.client_req, meta);
-            if effort_committed {
-                self.clear_sent_effort(true, sent, rejection.target, meta);
+            if effort_proven {
+                self.clear_sent_effort(sent, rejection.target, &[], meta);
             }
         }
         self.field_plan = Some(plan);

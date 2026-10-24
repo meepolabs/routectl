@@ -3583,7 +3583,7 @@ fn an_unrepaired_success_clears_every_admitted_rows_resident_verdict() {
     plant_lapsed(&router, "m0", PREFIX_PATH);
     let plan = carry_for(&router, &req_both_rows(ALIAS), "m0");
 
-    let cleared = plan.settle_success();
+    let cleared = plan.settle_success().events;
 
     assert_eq!(
         cleared.len(),
