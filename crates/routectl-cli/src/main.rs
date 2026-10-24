@@ -443,13 +443,19 @@ enum ConfigCmd {
     Example,
     /// Migrate a legacy `config.toml` forward to the current schema version,
     /// re-validating the result through the same shared gate as `config set`
-    /// before an atomic write. A v1 file chains v1->v2->v3 (folding the
-    /// retired `[cache_pricing]` table into the catalog overlay); a v2 file
-    /// migrates v2->v3, retiring the per-status `retry_allowlist` /
-    /// `retry_denylist` keys. A config whose retry lists carry behavior that
-    /// cannot be folded losslessly is refused with hand-edit guidance and
-    /// nothing is written. The write requires acknowledgement -- an
-    /// interactive `y`, or `--yes` when non-interactive.
+    /// before an atomic write. Every rung from the file's version runs in
+    /// order: v1->v2 folds the retired `[cache_pricing]` table into the
+    /// catalog overlay; v2->v3 retires the per-status `retry_allowlist` /
+    /// `retry_denylist` keys; v3->v4 moves a provider's `seat_selection` onto
+    /// a `[pools.<name>]` block; v4->v5 folds `unsupported_features` into
+    /// `[capability.overrides]` and drops empty `allowed_betas` /
+    /// `allowed_body_fields` lists and an emptied `[bedrock]` table. A file
+    /// already at version 5 that still carries `allowed_betas`,
+    /// `unsupported_features` or a top-level `[bedrock]` table is refused,
+    /// naming each key to remove. A config carrying behavior a rung cannot
+    /// fold losslessly is refused with hand-edit guidance and nothing is
+    /// written. The write requires acknowledgement: an interactive `y`, or
+    /// `--yes` when non-interactive.
     Migrate {
         /// Render the exact rewritten candidate plus a change summary without
         /// writing anything (needs no acknowledgement). The candidate is

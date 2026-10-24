@@ -662,6 +662,8 @@ list with more narrative.
 
 ### Fixed
 
+- **`config migrate --help` names the whole migration ladder.** The help described only the v1->v2->v3 rungs. It now names every rung through v4->v5 with what each one folds, and says that a file already at version 5 still carrying `allowed_betas`, `unsupported_features` or a top-level `[bedrock]` table is refused with each key named.
+
 - **Bedrock Converse forwards a client's structured-output format.** Converse treated the client's whole `output_config` as a key routectl manages and dropped it, so an Anthropic client's `output_config.format` never reached the model on that lane while the same request on anthropic-api kept it. The client's `format` now merges into the `output_config` routectl composes, beside any effort, and wins over a `response_format` conversion as it does on anthropic-api. It is read only from an Anthropic Messages client or a library caller; another dialect's `output_config` counts as `foreign_dialect_extra`.
 
 - **Bedrock Invoke refuses a top-level cache marker it cannot place instead of dropping it.** When moving a caller's top-level `cache_control` onto a content block would break the breakpoint rules (more than four, or a 5m breakpoint ahead of a 1h one), the Invoke target now refuses the request locally as `cache-breakpoint-cap` or `cache-ttl-order`, counts it once on `rc_request_refused_local_total` for its lane, and the chain moves to its next target; before, the marker was silently removed and the request was sent without it.

@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use routectl_cli::commands::config_migrate_cmd::{self, MigrateResult};
+use routectl_router::CURRENT_CONFIG_VERSION;
 use tokio::net::TcpListener;
 
 mod common;
@@ -507,6 +508,36 @@ fn migrate_force_alias_still_skips_confirmation_and_warns() {
             routectl_router::CURRENT_CONFIG_VERSION
         )),
         "the alias must skip the confirm and write the current version: {text}"
+    );
+}
+
+#[test]
+fn migrate_help_names_every_rung_and_the_retired_key_refusal() {
+    let bin = env!("CARGO_BIN_EXE_routectl");
+    let out = std::process::Command::new(bin)
+        .args(["config", "migrate", "--help"])
+        .output()
+        .expect("run `config migrate --help`");
+
+    assert!(out.status.success(), "help must exit 0");
+    let help = String::from_utf8_lossy(&out.stdout);
+    for from in 1..CURRENT_CONFIG_VERSION {
+        let rung = format!("v{from}->v{}", from + 1);
+        assert!(help.contains(&rung), "help must name rung {rung}:\n{help}");
+    }
+    for retired in ["allowed_betas", "unsupported_features", "[bedrock]"] {
+        assert!(
+            help.contains(retired),
+            "help must name the retired {retired}:\n{help}"
+        );
+    }
+    assert!(
+        help.contains("--yes"),
+        "help must list its options:\n{help}"
+    );
+    assert!(
+        !help.contains("--force"),
+        "the deprecated alias stays hidden:\n{help}"
     );
 }
 
