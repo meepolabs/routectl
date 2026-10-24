@@ -2,11 +2,10 @@
 //! operator surface that names them.
 //!
 //! A dispatch target's learned lane is minted at chain expansion from the
-//! provider entry that egresses and the upstream it sends. Doctor,
-//! `probe --capabilities` and the status health panel need those same lanes
-//! without dispatching; minting them again from raw config at each surface
-//! lets a surface drift from the key dispatch actually learns under. This is
-//! the one projection they read:
+//! provider entry that egresses and the upstream it sends. Doctor and the
+//! status health panel need those same lanes without dispatching; minting
+//! them again from raw config at each surface lets a surface drift from the
+//! key dispatch actually learns under. This is the one projection they read:
 //!
 //! - [`Router::learned_lane_projection`] reads each lane off the installed
 //!   router's own dispatch targets, built by the same constructors chain

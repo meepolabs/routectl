@@ -1,9 +1,9 @@
 //! `routectl capability purge <lane> <capability>` -- ask the running daemon
 //! to drop one learned-capability entry.
 //!
-//! The lane is the learned identity exactly as doctor and `routectl probe`
-//! print it: `provider_entry#upstream`, the `[providers]` entry that egresses
-//! the request and the upstream model id it sends. It is parsed through the
+//! The lane is the learned identity exactly as doctor prints it:
+//! `provider_entry#upstream`, the `[providers]` entry that egresses the
+//! request and the upstream model id it sends. It is parsed through the
 //! router's single lane parser before anything leaves this process, so a
 //! target spelled any other way (a bare nickname, say) is refused here with a
 //! message rather than reported by the daemon as "nothing to purge".

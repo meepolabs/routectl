@@ -31,8 +31,7 @@ release cut. Highlights, roughly in dependency order:
   reachability probes.
 - **Learned capability system** -- per-target capability registry
   learned from live rejections and response evidence, persisted in
-  the usage ledger and rebuilt at boot; consented active probes
-  (`probe --capabilities`); operator overrides
+  the usage ledger and rebuilt at boot; operator overrides
   (`[capability.overrides]`); a doctor truth-matrix panel and
   staleness hints.
 - **Read-only status dashboard** -- `GET /` single-file dashboard +

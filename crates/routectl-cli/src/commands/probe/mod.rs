@@ -31,10 +31,6 @@ use routectl_router::{Config, Finding, ProviderEntry, Status, build_provider, ov
 
 use crate::server::CompositeStore;
 
-pub mod canary;
-pub mod capabilities;
-pub mod resolve;
-
 /// UNSTABLE report schema version for `--json`. Bumped only when the JSON
 /// shape changes in a way a consumer would care about.
 const SCHEMA_VERSION: u32 = 1;

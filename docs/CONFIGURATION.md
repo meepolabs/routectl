@@ -3920,9 +3920,9 @@ routectl capability purge <lane> <capability>
 routectl capability purge anthropic#claude-sonnet-4-5 web_search
 ```
 
-`<lane>` is the learned lane exactly as `routectl doctor` and
-`routectl probe` print it: `<provider>#<upstream>`, the `[providers]`
-entry that egresses the request and the upstream model id it sends.
+`<lane>` is the learned lane exactly as `routectl doctor` prints it:
+`<provider>#<upstream>`, the `[providers]` entry that egresses the
+request and the upstream model id it sends.
 Learned facts key on that pair rather than on a `[models]` nickname, so
 every nickname for the same upstream on the same provider shares one
 entry, and one purge clears it for all of them. For a pooled model the

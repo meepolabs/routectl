@@ -33,19 +33,6 @@ fn provider_value_parser() -> PossibleValuesParser {
     PossibleValuesParser::new(routectl_auth::oauth::known_provider_ids())
 }
 
-/// Build a clap value-parser that accepts exactly the four v1 capability
-/// keys the probe can exercise. Driven by `ProbeCapability::ALL` so the
-/// accepted `--only` tokens stay in lockstep with the probe's capability
-/// set: an unknown token is rejected by clap with the valid set listed in
-/// the error.
-fn capability_value_parser() -> PossibleValuesParser {
-    PossibleValuesParser::new(
-        commands::probe::capabilities::ProbeCapability::ALL
-            .iter()
-            .map(|cap| cap.capability_key()),
-    )
-}
-
 #[derive(Debug, Parser)]
 #[command(
     name = "routectl",
@@ -149,41 +136,6 @@ enum Cmd {
     Doctor {
         /// Emit the report as JSON (`{schema_version, findings, panels}`)
         /// instead of the human battery. The schema is UNSTABLE.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Actively probe a scoped model's true capabilities by dispatching a
-    /// small, bounded set of canary calls straight at the provider (never
-    /// through the router or a serving handler) and settling the learned-
-    /// capability ledger from the structural evidence. Prints a cost estimate
-    /// and asks for confirmation before any call unless `--yes` is given; the
-    /// estimate prints either way. Scope the probe to exactly one target with
-    /// `--alias` (a model nickname) or `--provider` (a configured provider).
-    #[command(group(
-        clap::ArgGroup::new("probe_target")
-            .args(["alias", "provider"])
-            .required(true),
-    ))]
-    Probe {
-        /// Run the capability probe. Currently the only probe mode.
-        #[arg(long, required = true)]
-        capabilities: bool,
-        /// Target a `[models.X]` nickname (resolves both the provider and the
-        /// upstream model id the canaries hit).
-        #[arg(long)]
-        alias: Option<String>,
-        /// Target a `[providers.X]` key (model id resolved from the single
-        /// selectable model referencing it).
-        #[arg(long)]
-        provider: Option<String>,
-        /// Restrict the probe to a comma-separated subset of the four
-        /// capabilities; omit to probe all of them.
-        #[arg(long, value_delimiter = ',', value_parser = capability_value_parser())]
-        only: Vec<String>,
-        /// Skip the confirmation prompt. The cost estimate still prints.
-        #[arg(long)]
-        yes: bool,
-        /// Emit the report as JSON (schema UNSTABLE) instead of text.
         #[arg(long)]
         json: bool,
     },
@@ -764,20 +716,6 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 emit_staleness_hint_for(&loaded, json);
             }
             std::process::exit(commands::doctor::run(&path, json).await);
-        }
-        Cmd::Probe {
-            capabilities: _,
-            alias,
-            provider,
-            only,
-            yes,
-            json,
-        } => {
-            let config_path = resolve_config_path(cli.config.as_deref());
-            std::process::exit(
-                commands::probe::capabilities::run(&config_path, provider, alias, &only, yes, json)
-                    .await,
-            );
         }
         Cmd::Test { target, prompt } => {
             let config = load_config(cli.config.as_deref())?;
