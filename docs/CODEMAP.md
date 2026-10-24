@@ -1524,7 +1524,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `classifiable_egress_base_url()` is the base URL an entry actually egresses
   to when its configured fields alone determine it (`anthropic-api` and
   standard-lane `openai-compat`: the configured base URL; native `bedrock`: the
-  runtime URL derived from `region`; a Mantle sub-lane or any other kind:
+  runtime URL derived from `region`; `openai-responses`: the configured base URL,
+  else `default_responses_base(auth_kind)`; a Mantle sub-lane or any other kind:
   `None`), read by the field stages' attributability decision; `cache_capability()`
   fails closed for anthropic-api on a non-default base URL, plus
   `auto_emit_top_level_breakpoint()` and the per-block front-marker trio
@@ -2761,8 +2762,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `src/router/replay_strip_tests.rs`
 - `src/router/field_repair.rs` -- the reactive L0 envelope-field repair the
   three dispatch arms drive, and the counterpart of `replay_repair` for the
-  field kind. Owns `FIELD_REPAIRS`, the CLOSED path-to-surface table (eight
-  grounded rows today, all `Envelope`: the `thinking.enabled.display` Drop; the
+  field kind. Owns `FIELD_REPAIRS`, the CLOSED path-to-surface table (fourteen
+  grounded rows today, all `Envelope`: one `output_config.effort.<level>`
+  `RankedRewrite` over `FieldSurface::Effort` per effort level, its carriers
+  and ranked repair in `field_repair_effort.rs`; the `thinking.enabled.display` Drop; the
   `thinking.type.enabled` / `thinking.type.disabled` Rewrites over
   `FieldSurface::AnthropicThinkingType`; the `temperature`, `top_p`,
   `presence_penalty` and `frequency_penalty` Drops over
@@ -2774,7 +2777,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   count_tokens_validates }` -- the qualified dotted path a real captured
   rejection named, the private `FieldSurface` enum naming the request-side
   carriers that produce that wire field, the `FieldTransform` (`Drop`,
-  `Rewrite { accepted }` over a closed accepted set, or `Ceiling`, which only
+  `Rewrite { accepted }` over a closed accepted set, `RankedRewrite { rank }`
+  over the closed effort rank, or `Ceiling`, which only
   ever lowers a limit; the value slot is `ValueSlot::Shape` / `ValueSlot::Ceiling`
   via `value_slot_for_capability_key`), the `TransformClass` deciding which
   pre-flight gates an application of that row must clear, and whether a free
@@ -2836,7 +2840,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   (`learned_capability::negative_lapsed`).
   `Router::plan_field_carry` admits BEFORE dispatch and without
   touching the request, in this order: kill switch -> an admitted kind
-  (`anthropic-api`, `bedrock`, `openai-compat`) -> NOT a forwarded-credential
+  (`anthropic-api`, `bedrock`, `openai-compat`, `openai-responses`; the
+  per-kind row view is `FieldRepairTable::for_kind`) -> NOT a forwarded-credential
   target -> `field_repair::attributable_field_lane` (entry present, admitted
   kind, a `ProviderEntry::classifiable_egress_base_url`, NOT
   `field_verdict::loopback_target_suppresses_minting` over it) -> the entry's
@@ -2868,33 +2873,12 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   let an override turn a 429 or 503 into a field repair.
   `Router::rejection_names_field_surface` is its surface-filtered form, kept
   for the probe re-check's `probe_failure_class`.
-  `FieldRepairPlan::apply_named` owns the whole effect transactionally, ordered
-  select-check-mutate-charge-release: SELECT the admitted candidate the
-  rejection names (refusing outright when it names none), re-check presence,
-  CHECK the allowance (`RepairBudget::check_or_mark_refusal`), apply the row's
-  transform as the
-  private `FieldEdit` the rejection's `RejectionValue` resolves it to (drop the
-  row's carriers: both for `AnthropicThinkingDisplay`, since otherwise the
-  egress re-derives it, and the one canonical field for a sampling row; rewrite it
-  to the one accepted value the rejection named; or clamp the emitted limit to
-  the named ceiling through `FieldSurface::clamp_to`, only when
-  `clamp_lowers` says the ceiling is below the emitted limit), then DRAW,
-  RELEASE every other candidate's guard, re-stamp the estimate through
-  `dispatch::restamp_calibration_estimate`, and return the rejection status.
-  The plan and its steps live in `field_repair_step.rs`, the edit and a
-  step's settlement in `field_repair_step_edit.rs`. The
-  draw follows the mutation so a drop that removes nothing charges nothing, and
-  every repaired-state flag is set only on the returned `Some`. A `drop_from`
-  that unexpectedly removes nothing FAILS CLOSED -- returns `None`, having
-  mutated and charged nothing -- with a `debug_assert` naming the divergence;
-  release behavior deliberately does not rest on that assertion being compiled,
-  and a `cfg(not(debug_assertions))` test exercises the branch through a
-  test-only divergent surface. `commit_pending` settles each REPAIRED row
-  alone (the rejection named it and the retry is evidence about it);
-  `settle_success`
-  clears EVERY admitted row (an unrepaired success means every carried field was
-  accepted) and so returns a `Vec` rather than an `Option`; both are no-ops
-  without a guard, release-by-drop otherwise. A commit teaches only a repair
+  The repair itself is `FieldRepairPlan::apply_named` (all or nothing; the
+  ordering and its fail-closed branch are documented there): rejection-to-row
+  selection, `commit_pending` and `settle_success` in `field_repair_step.rs`,
+  the guard claim before the mutation and the step's installation after it in
+  `field_repair_step_apply.rs`, and the `FieldEdit` plus a step's settlement in
+  `field_repair_step_edit.rs`. A `mintable` step's commit teaches only a repair
   that wrote a value (rewrite or ceiling, carried as the verdict's value) or
   dropped an unsupported field. The WARN action token is closed:
   `field_drop_repair`, `field_lossy_drop_repair` (a value-refused drop),
@@ -2912,8 +2896,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   recorder, bumping the attempted and per-lane lossy counters);
   `note_field_repair_succeeded` bumps succeeded / learned, and
   `emit_field_repair` fires one content-free WARN per repair. `rejected_field` reads the class first
-  (`class_can_name_a_field`: `BadRequest`, or the lifted openai
-  `unsupported_parameter` on `openai-compat`) and then
+  (`class_can_name_a_field`: `BadRequest`, the lifted openai
+  `unsupported_parameter` on `openai-compat`, or the lifted
+  `unsupported_value` on `openai-responses`) and then
   `rejection_parser::parse_rejection` over the error's carried parse. Under
   `cfg(test)` the `provisional` module's thread-local injection replaces the
   parser, which is how `field_repair_tests.rs` covers every arm downstream of
@@ -3246,7 +3231,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   (error, effective and native class, target, client request) carrying the
   `RejectionSite` `settle_failed_attempt` returned (`provenance`, `in_egress: Option<bool>`,
   `matched_edit`, the unmasked `locator`, the `sent` slot, the `pending`
-  rejection index), plus `transcript_rejection`; a rejection laid to a
+  rejection index, and the `SentEffort` / `ThinkingShape` the egress body
+  sent), plus `transcript_rejection`; a rejection laid to a
   defective transcript returns `Proceed` before any proposer and
   `observe_generic` hands it to `Router::observe_transcript_rejection`. A site
   whose `matched_edit` is not `None` short-circuits
@@ -3255,9 +3241,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `EditSite::RequiredFieldDefault` that was not undone falls through to the
   proposers, `RejectionSite::unreverted_reaches_proposers`, since the upstream
   may refuse routectl's own value and a learned repair can supply another;
-  `ranks_injected_effort`, a matched `EffortInjection` the rejection refuses
-  as a ranked level; and `rerepairs_declared_field`, a matched `FieldRepair`
-  whose named row is a ranked effort row);
+  and `ranks_declared_effort`, every matched edit made at an
+  `EffortInjection` / `Preflight` / `FieldRepair` site
+  (`MatchedEdit::made_only_at`) with the rejection naming a ranked effort row);
   otherwise it builds a read-only
   `RejectionInput` and runs `arbitrate`: the ONE precedence, the static
   `ARBITRATION_ORDER` of `Proposer`s (no trait objects) over the closed
@@ -3460,7 +3446,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   changes the response or fails the attempt
 - `src/router/wire_rejection.rs` -- `Router::settle_failed_attempt`,
   `PendingWireRejection`, `emit_wire_rejections`, `read_count_rejection_site`:
-  the wire side of a failed attempt
+  the wire side of a failed attempt; `effort_and_thinking` reads the sent
+  effort level and thinking shape off the egress body per dialect
 - `src/router/wire_response.rs` -- the response leg of the live wire check:
   `ResponseCheck` (public, opaque), carried on `DispatchMeta::response_check`
   from the serving attempt; the ingress renderer hands it the client document
@@ -3571,7 +3558,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   the LANE rather than the verdict: `CapabilityDisabled` is the global kill switch
   (`[capability] enabled = false`), so it holds for every verdict at once, and
   `UnsupportedLane` means the target's kind is not one field repair admits
-  (`anthropic-api`, `bedrock`, `openai-compat`) or it has no attributable base URL
+  (`anthropic-api`, `bedrock`, `openai-compat`, `openai-responses`) or it has no attributable base URL
   (a forwarded credential read off the entry, a local hop, or no classifiable
   egress base URL) -- such a verdict is real but can never fire, so no per-key
   reason about it would be actionable. `MaskedByOverride` follows them, since it is
@@ -3887,14 +3874,12 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   dialect it was captured on, tier 2 cites a public URL) and a body that is that
   dialect's error envelope (Anthropic `{type:"error",error:{type,message}}`,
   bedrock-runtime flat `{message}`, OpenAI `{error:{message,type,param,code}}`)
-- `tests/effort_capture.rs` -- welds the effort rejection fixtures to
-  their capture record `tests/fixtures/effort_capture.json` (keyed
-  `<dialect>/<case>`; `lane`, `model`, `request_shape`, `status`, `message`):
-  the record covers exactly the pinned cases, each fixture's status and
-  verbatim message equal the record's, its note names the record's model, and
-  the sent effort level reads from `request_shape` at exactly one wire path
-  (`output_config.effort`, `additionalModelRequestFields.output_config.effort`,
-  `reasoning.effort`)
+- `tests/effort_capture.rs` -- welds the effort rejection fixtures to their
+  capture record `tests/fixtures/effort_capture.json` across the four request
+  dialects (Messages, Invoke, Converse, Responses): status, verbatim message,
+  note naming model and capture date, lane per directory, `request_shape`
+  roots, and the sent effort level and thinking shape each read at its
+  dialect's own wire path and no other
 - `src/router/probe_terminal_state_tests.rs` -- tombstones, their own capacity
   bound, stale settlement, and the lane's last-outcome stamp
 - `src/router/probe_breaker_tests.rs` -- breaker non-interference: a probe
@@ -4527,7 +4512,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   the repaired retry succeeded, `clear` drops a resident verdict through
   `remove_keyed_in_generation` when the field was accepted and returns a
   `CapabilityClearedEvent`, and `release` (plus an unsettled `Drop`) frees the
-  slot without learning. Both settlements take their event's
+  slot without learning. `FieldVerdictRegistry::clear_accepted` is the
+  slot-less clear for a field a request proved accepted outside any guard it
+  holds, sharing the guard's removal body. Both settlements take their event's
   `persistence_generation` from their own `Applied` outcome, so the row sorts
   after a boundary the daemon is committing rather than being dropped as older
   than it. A valid `field:` key is catalog-INDEPENDENT, so settlements cross a
