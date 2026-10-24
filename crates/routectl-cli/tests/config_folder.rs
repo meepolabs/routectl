@@ -4,17 +4,27 @@
 //! paths, and an explicit `--config` gets past the check. Also pins that the
 //! default lookup follows the shared core rule, where an empty
 //! `XDG_CONFIG_HOME` counts as unset, and that `doctor` lists files left in
-//! the old folders.
+//! the old folders, and that a running `serve` lists them on its served
+//! doctor panel.
 //!
 //! Every spawn removes `XDG_CONFIG_HOME` (the workspace cargo config forces
 //! it) and `ROUTECTL_CONFIG`, points `HOME` and the working directory at a
 //! tempdir, and either removes `APPDATA` or points it inside that tempdir, so
 //! no real config folder is read or written.
 
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 use routectl_router::CURRENT_CONFIG_VERSION;
+use serde_json::Value;
+
+/// Give-up bound for the daemon to begin serving.
+const READY_DEADLINE: Duration = Duration::from_secs(30);
+
+/// Per-request socket timeout.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 struct Home {
     tmp: tempfile::TempDir,
@@ -293,5 +303,112 @@ fn doctor_names_a_file_left_in_the_appdata_folder_by_its_variable() {
     assert!(
         !line.contains(&*home.path().to_string_lossy()),
         "no absolute path in the finding: {line}"
+    );
+}
+
+/// A `routectl serve` child, killed and reaped by its own handle on drop so a
+/// failing assertion cannot leak a daemon holding the port.
+struct Daemon {
+    child: Child,
+    port: u16,
+}
+
+impl Drop for Daemon {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+impl Daemon {
+    fn await_serving(&mut self) {
+        let until = Instant::now() + READY_DEADLINE;
+        while Instant::now() < until {
+            if let Some(status) = self.child.try_wait().expect("poll child") {
+                let mut stderr = String::new();
+                if let Some(mut pipe) = self.child.stderr.take() {
+                    let _ = pipe.read_to_string(&mut stderr);
+                }
+                panic!("the daemon exited during startup with {status}: {stderr}");
+            }
+            if matches!(try_get(self.port, "/health"), Some((200, _))) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        panic!("the daemon never began serving on port {}", self.port);
+    }
+}
+
+/// One HTTP/1.0 GET over a plain socket: `(status, body)`, or `None` when the
+/// daemon is not answering yet.
+fn try_get(port: u16, path: &str) -> Option<(u16, String)> {
+    let mut socket = std::net::TcpStream::connect(("127.0.0.1", port)).ok()?;
+    socket.set_read_timeout(Some(REQUEST_TIMEOUT)).ok()?;
+    let request = format!("GET {path} HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\n\r\n");
+    socket.write_all(request.as_bytes()).ok()?;
+    let mut response = String::new();
+    socket.read_to_string(&mut response).ok()?;
+    let status = response.split_whitespace().nth(1)?.parse().ok()?;
+    let body = response
+        .split_once("\r\n\r\n")
+        .map_or_else(String::new, |(_, body)| body.to_string());
+    Some((status, body))
+}
+
+/// A loopback port the OS handed out as free a moment ago.
+fn free_port() -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+    listener.local_addr().expect("bound address").port()
+}
+
+/// The served doctor panel lists the old folders `serve` read at start.
+/// Mutation check: drop the `.with_legacy_config_dirs(...)` call where the
+/// serve path builds its status state -> red here.
+#[test]
+fn served_doctor_names_a_file_left_in_the_appdata_folder() {
+    let home = Home::with_new_config_and_old_files(&[]);
+    let appdata_dir = home.appdata().join("routectl");
+    std::fs::create_dir_all(&appdata_dir).unwrap();
+    std::fs::write(appdata_dir.join("usage.db"), b"x").unwrap();
+    let port = free_port();
+    let child = home
+        .command(&[
+            "--config",
+            home.new_config().to_str().unwrap(),
+            "serve",
+            "--port",
+            &port.to_string(),
+        ])
+        .env("APPDATA", home.appdata())
+        .env("RUST_LOG", "error")
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn routectl serve");
+    let mut daemon = Daemon { child, port };
+    daemon.await_serving();
+
+    let (status, body) = try_get(port, "/status/doctor").expect("/status/doctor answers");
+
+    assert_eq!(status, 200, "{body}");
+    let panel: Value = serde_json::from_str(&body).expect("doctor panel is JSON");
+    assert!(panel["unavailable"].is_null(), "{panel}");
+    let findings = panel["data"]["report"]["findings"]
+        .as_array()
+        .expect("findings array");
+    let legacy: Vec<&Value> = findings
+        .iter()
+        .filter(|f| f["name"] == "legacy folder")
+        .collect();
+    assert_eq!(legacy.len(), 1, "{findings:?}");
+    let detail = legacy[0]["detail"].as_str().unwrap();
+    assert!(
+        detail.starts_with("%APPDATA%\\routectl still holds usage.db"),
+        "{detail}"
+    );
+    assert!(
+        !body.contains(&*home.path().to_string_lossy()),
+        "no absolute path anywhere in the panel: {body}"
     );
 }

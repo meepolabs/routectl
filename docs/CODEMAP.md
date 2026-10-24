@@ -6667,7 +6667,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   + resolved `usage_db_path`/`config_path`, plus a `DaemonMetaHandle` read
   facade -- see `daemon_meta.rs`) via `from_app`, plus the daemon-lifetime
   `FidelityGate` and the boot `WarmReport` (`with_warm_report` at serve,
-  `warm_report()` read by the doctor panel; `not_run` otherwise), so a status
+  `warm_report()` read by the doctor panel; `not_run` otherwise) and the old
+  config folders read once at start (`with_legacy_config_dirs` at serve,
+  `legacy_config_dirs()` read by the doctor panel; empty otherwise), so a status
   handler is structurally incapable of mutation, of reaching a raw
   `Router`/`.config`/dispatch, or of touching the forwarding seam;
   `PanelObservability`/`PanelCounters` are the per-panel last-availability +
@@ -7017,9 +7019,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `src/handlers/status/doctor.rs` -- `/status/doctor`, strictly NO network.
   Runs only the no-network doctor sections via
   `commands::doctor::gather_context_no_network(config_path,
-  GatherSources::Served(..))` (inputs from the facade's
+  GatherSources::Served(..), &legacy_dirs)` (inputs from the facade's
   `served_doctor_inputs(*state.warm_report())`, so a poll parses no config,
-  loads no overlay file and replays no ledger) +
+  loads no overlay file and replays no ledger; `legacy_dirs` are the old
+  folders `StatusState` carries) +
   `build_report_no_network(&ctx)` (never
   `gather_probe_results`/`section_probe`); the async gather runs
   under `guard_panel`'s `spawn_blocking` via `Handle::current().block_on`.
@@ -8399,7 +8402,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   and `pricing::missing_equivalence_dimensions` into the `EquivalenceBasis`
   tri-state, which is what the row's second clause reports (why the usage
   report's `equivalent_cost_usd` reads absent) and never its price.
-  `gather_context_no_network(config_path, sources)` is the SINGLE shared
+  `gather_context_no_network(config_path, sources, legacy_dirs)` is the SINGLE shared
   gather body; `sources` (`served.rs`) picks the config / overlay / learned
   layers: `Disk` -> `disk_layers` (per-layer
   `server::parse_config_only` + `server::load_overlay_default` so the

@@ -423,8 +423,8 @@ fn gather_names_an_appdata_folder_by_its_variable() {
     assert_eq!(
         remediation,
         "move what you still need from %APPDATA%\\routectl to the folder routectl reads now \
-         (routectl under XDG_CONFIG_HOME when that is set, else .config/routectl in your home \
-         folder), then remove the old folder",
+         (routectl under XDG_CONFIG_HOME when that is an absolute path, else .config/routectl \
+         in your home folder), then remove the old folder",
         "the destination is named by variable, never as a home path or an OS-specific one"
     );
 }

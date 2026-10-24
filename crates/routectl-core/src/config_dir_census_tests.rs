@@ -304,6 +304,7 @@ fn braces_inside_comments_and_literals_do_not_close_a_test_module() {
         ("char", "let c = '}';"),
         ("escaped quote char", "let c = ['\\'','}'];"),
         ("non-ascii char", "let c = ['\u{e9}','}'];"),
+        ("lifetime", "fn f<'a>() {}"),
         ("line comment", "// }"),
         ("block comment", "/* } */"),
         ("nested block comment", "/* a /* b */ } */"),

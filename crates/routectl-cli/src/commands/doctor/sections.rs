@@ -249,7 +249,8 @@ fn legacy_folder_finding(folder: &LegacyFolder) -> Option<Finding> {
     // Named by variable, without `~`, `$` or `%`: one wording has to be
     // right for every old folder on every OS, home path never printed.
     const NEW_FOLDER: &str = "the folder routectl reads now (routectl under XDG_CONFIG_HOME \
-                              when that is set, else .config/routectl in your home folder)";
+                              when that is an absolute path, else .config/routectl in your \
+                              home folder)";
     let (detail, remediation) = match folder {
         LegacyFolder::Absent => return None,
         LegacyFolder::Entries {
