@@ -206,22 +206,30 @@ mod mantle {
         }
     }
 
+    /// The compat Mantle egress's config, dialing `base_url`.
+    fn compat_config(base_url: String) -> OpenAiCompatConfig {
+        OpenAiCompatConfig {
+            id: SEAT.into(),
+            base_url,
+            api_key: String::new(),
+            header_extras: Vec::new(),
+            payload_extras: None,
+            reasoning_dialect: ReasoningDialect::OpenAi,
+            history_reasoning: HistoryReasoning::Auto,
+            user_agent: None,
+            strict_translation: false,
+            mantle: Some(mantle_auth()),
+        }
+    }
+
     /// The sub-lane's real Mantle egress, dialing the mock origin.
     fn provider(lane: SubLane, origin: &MockServer) -> Arc<dyn Provider> {
         match lane {
             SubLane::Anthropic => anthropic_provider(origin),
-            SubLane::Compat => Arc::new(OpenAiCompatProvider::new(OpenAiCompatConfig {
-                id: SEAT.into(),
-                base_url: format!("{}/openai/v1", origin.uri()),
-                api_key: String::new(),
-                header_extras: Vec::new(),
-                payload_extras: None,
-                reasoning_dialect: ReasoningDialect::OpenAi,
-                history_reasoning: HistoryReasoning::Auto,
-                user_agent: None,
-                strict_translation: false,
-                mantle: Some(mantle_auth()),
-            })),
+            SubLane::Compat => Arc::new(OpenAiCompatProvider::new(compat_config(format!(
+                "{}/openai/v1",
+                origin.uri()
+            )))),
             SubLane::Responses => {
                 let mut cfg = OpenAiResponsesConfig::new_with_auth(
                     SEAT,
@@ -238,9 +246,11 @@ mod mantle {
     /// `base`, an `https://<host>/<path>` URL, as plain http to `<host>` on
     /// `port`.
     fn plain_http_on_port(base: &str, port: u16) -> String {
-        let rest = base.strip_prefix("https://").expect("an https base");
-        let (host, path) = rest.split_once('/').expect("a base with a path");
-        format!("http://{host}:{port}/{path}")
+        let mut url = reqwest::Url::parse(base).expect("a base URL");
+        assert_eq!(url.scheme(), "https", "an https base");
+        url.set_scheme("http").expect("https to http is allowed");
+        url.set_port(Some(port)).expect("a host that takes a port");
+        url.to_string()
     }
 
     /// The anthropic Mantle egress dials the Mantle host its region derives,
@@ -428,12 +438,7 @@ mod mantle {
     async fn replay_and_preflight(replay: Replay) {
         let name = replay.lane.kind();
         // Arrange
-        let origin = origin(
-            replay.lane,
-            Some(replay.refused.clone()),
-            captured(replay.capture),
-        )
-        .await;
+        let origin = origin(replay.lane, Some(replay.refused), captured(replay.capture)).await;
         let (config, dir) = mantle_config(replay.lane);
         let db_path = config.usage.db_path.clone();
         let router = mantle_router(&config, replay.lane, &origin);
@@ -506,18 +511,9 @@ mod mantle {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn compat_mantle_drops_its_captured_parameter_and_preflights_the_next_turn() {
         let replay = replay_of(SubLane::Compat);
-        let sent = OpenAiCompatProvider::new(OpenAiCompatConfig {
-            id: SEAT.into(),
-            base_url: "https://bedrock-mantle.invalid/openai/v1".into(),
-            api_key: String::new(),
-            header_extras: Vec::new(),
-            payload_extras: None,
-            reasoning_dialect: ReasoningDialect::OpenAi,
-            history_reasoning: HistoryReasoning::Auto,
-            user_agent: None,
-            strict_translation: false,
-            mantle: Some(mantle_auth()),
-        })
+        let sent = OpenAiCompatProvider::new(compat_config(
+            "https://bedrock-mantle.invalid/openai/v1".into(),
+        ))
         .normalize_request(&routectl_core::ChatRequest {
             model: SubLane::Compat.upstream().into(),
             top_p: Some(0.5),
