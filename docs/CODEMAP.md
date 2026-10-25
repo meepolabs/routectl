@@ -3036,7 +3036,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `preflight_lane_admits` (kill switch and lane only -- the forwarded-credential
   refusal is NOT repeated here; it belongs to the shared attributability
   decision below and reports `unattributable_target`),
-  `preflight_identity` (attribution plus the `FieldVerdictKey`), and
+  `preflight_identity` (attribution, read once per target by
+  `plan_field_preflight`, plus the `FieldVerdictKey`; an attributable entry
+  whose kind or egress no longer matches the target is refused once for the
+  whole target by `preflight_lane_disagreement`), and
   `preflight_authorization_for` (mask, eligibility, quorum, opt-in) -- each
   returning the closed-set token its refusal reports, and `unchanged_record` is a
   free function rather than a method because it reads nothing from the router.
@@ -3722,10 +3725,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   The beta context comes from the per-target `attempt_req`. `&self` bookkeeping
   only: dials nothing, awaits nothing
 - `src/router/probe_seat.rs` -- `ProbeSeat`, `probe_seat_for`,
-  `probe_entry_is_attributable`: which seat a probe
+  `probe_entry_lane`, `probe_lane_carries`: which seat a probe
   identity's lane names (the first resolved model or pooled member egressing
-  that provider entry with that upstream) and whether a rejection from it is
-  attributable
+  that provider entry with that upstream), whether a rejection from it is
+  attributable, and whether that lane's view carries the probed row
 - `src/router/probe_failure_class.rs` -- one closed mapping off the SHARED
   `routectl_core` classifier: what a failure means for free validation. Fails
   closed; reasoning in module docs

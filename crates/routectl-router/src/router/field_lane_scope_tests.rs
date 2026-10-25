@@ -155,6 +155,21 @@ fn an_unknown_egress_carries_no_row() {
     }
 }
 
+/// A local answer sent nothing upstream, so no row is carried on it or named
+/// by a rejection there, whatever the kind.
+///
+/// Mutation check: map `EgressKind::Local` to the kind's scope in
+/// `RowScope::of_lane` -> red.
+#[test]
+fn a_local_egress_carries_no_row() {
+    for kind in [ANTHROPIC_API, BEDROCK, OPENAI_COMPAT, OPENAI_RESPONSES] {
+        assert!(
+            lane_paths(kind, Some(EgressKind::Local)).is_empty(),
+            "{kind}"
+        );
+    }
+}
+
 /// The committed `rejections/<dir>/<case>.json` fixture as an upstream error.
 fn fixture_error(dir: &str, case: &str) -> Error {
     let file = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))

@@ -2414,8 +2414,9 @@ confirm that cap for the selector. Without it, a caller that omits
 lane field repair acts on, routectl retries that request at the limit
 the 400 names and learns it, so the key then only saves the first
 refusal per lane (and the one after each decay). On a lane field repair
-does not act on (a Mantle sub-lane, a loopback `base_url`, a forwarded
-client credential), the 400 reaches the client every time.
+does not act on (a Mantle sub-lane, where no row is admitted yet; a
+loopback `base_url`; a forwarded client credential), the 400 reaches the
+client every time.
 Check `routectl doctor`'s **Model knobs** section first: if it reports the
 ceiling as catalog-filled at the right figure, this key is redundant.
 

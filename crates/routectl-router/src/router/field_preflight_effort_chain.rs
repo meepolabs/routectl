@@ -40,7 +40,7 @@ impl Router {
     fn follow_effort_chain<'a>(
         &'a self,
         planned: &mut ChatRequest,
-        target: &DispatchTarget,
+        target: PreflightTarget<'_>,
         table: FieldRepairTable,
         surface: DispatchSurface,
         mut sent: u8,

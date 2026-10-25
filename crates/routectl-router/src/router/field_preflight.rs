@@ -98,8 +98,8 @@ use crate::field_verdict_value::VerdictValue;
 use super::class_observe::DispatchSurface;
 use super::edit_declare::{declare_field_edit, fidelity_dialect};
 use super::field_repair::{
-    FieldRepairRow, FieldRepairTable, FieldSurface, FieldTransform, TransformClass,
-    field_repair_admits_kind, is_ranked, present_rows,
+    AttributableLane, FieldRepairRow, FieldRepairTable, FieldSurface, FieldTransform,
+    TransformClass, field_repair_admits_kind, is_ranked, present_rows,
 };
 use super::rejection_parser::{NamedRejection, RejectionKind};
 use super::repair_budget::RepairBudget;
@@ -140,17 +140,25 @@ pub(super) const FIELD_PREFLIGHT_WRITER_UNHEALTHY: &str = "capability_writer_unh
 pub(super) const FIELD_PREFLIGHT_UNSUPPORTED_LANE: &str = "unsupported_lane";
 
 /// Reason token: this stage could not attribute a rejection from the target to
-/// a routectl-owned seat. Three causes, all decided by the one shared
-/// decision (`field_repair::attributable_field_lane`):
+/// a routectl-owned seat. Reported per carried row when the one shared
+/// decision (`field_repair::attributable_field_lane`) refuses the entry:
 ///
 /// - the target authenticates with a FORWARDED client credential, so one
 ///   client's rejection must not mint a verdict steering every other client;
-/// - the target's entry has no classifiable egress base URL (a Mantle
-///   sub-lane whose region names no endpoint, among others);
+/// - the entry is gone, or on a kind field repair does not act on;
+/// - the entry has no classifiable egress base URL;
 /// - the URL it carries names a local hop.
 ///
-/// Also reported when the entry no longer matches the target's kind or
-/// egress: a reload repointed it under a target expanded from the old one.
+/// Reported ONCE for the whole target, before any row is read, when the
+/// entry is attributable but no longer matches the target's kind or egress:
+/// a reload re-kinded it, or repointed it between a Mantle sub-lane and its
+/// direct sibling in either direction, under a target expanded from the old
+/// one.
+///
+/// A Mantle entry whose region names no endpoint is refused by the shared
+/// decision, but its target's own view is the empty Mantle one, so it
+/// reports [`FIELD_PREFLIGHT_NO_GROUNDED_FIELD`] instead. Config validation
+/// rejects such a region at load, so a running router never holds one.
 pub(super) const FIELD_PREFLIGHT_UNATTRIBUTABLE_TARGET: &str = "unattributable_target";
 
 /// Reason token: an operator `force_supported` override masks this field's
@@ -472,7 +480,22 @@ impl Router {
         target: &DispatchTarget,
         surface: DispatchSurface,
     ) -> (ChatRequest, Vec<FieldPreflight>, FieldPreflightPlan<'a>) {
-        let table = self.preflight_view(target);
+        // THE shared attributability read, once per target, so no stage of
+        // this walk can refuse a target the reactive arm would act on, or act
+        // on one it would refuse.
+        let lane = crate::router::field_repair::attributable_field_lane(
+            &self.config,
+            &target.provider_name,
+            target.use_forwarded_credential,
+        );
+        if let Some(reason) = self.preflight_lane_disagreement(target, lane.as_ref()) {
+            return (
+                original_req.clone(),
+                vec![unchanged_record(target, None, None, reason)],
+                FieldPreflightPlan::default(),
+            );
+        }
+        let table = self.preflight_view(target, lane.as_ref());
         let mut rows = present_rows(table, original_req).peekable();
         if rows.peek().is_none() {
             return (
@@ -504,12 +527,25 @@ impl Router {
             // being starved of re-verification.
             let can_claim_canary = plan.canary.is_none();
             let sent = ranked_level_bit(&row);
-            let decided =
-                self.plan_one_row(&mut planned, target, row, surface, can_claim_canary, sent);
+            let decided = self.plan_one_row(
+                &mut planned,
+                (target, lane.as_ref()),
+                row,
+                surface,
+                can_claim_canary,
+                sent,
+            );
             let chains = decided.record.acted && is_ranked(&row);
             plan.absorb(&mut records, decided);
             if chains {
-                for hop in self.follow_effort_chain(&mut planned, target, table, surface, sent) {
+                let hops = self.follow_effort_chain(
+                    &mut planned,
+                    (target, lane.as_ref()),
+                    table,
+                    surface,
+                    sent,
+                );
+                for hop in hops {
                     plan.absorb(&mut records, hop);
                 }
             }
@@ -529,10 +565,13 @@ impl Router {
     /// free. A row denied it still ticks its own cadence and stays DUE, so being
     /// second in the closed table delays a re-verification by one request rather
     /// than starving it.
+    ///
+    /// The target's lane is the one [`Self::plan_field_preflight`] read for
+    /// the whole walk, already checked to agree with the target.
     fn plan_one_row<'a>(
         &'a self,
         planned: &mut ChatRequest,
-        target: &DispatchTarget,
+        (target, lane): PreflightTarget<'_>,
         row: FieldRepairRow,
         surface: DispatchSurface,
         can_claim_canary: bool,
@@ -546,7 +585,7 @@ impl Router {
         let Some(provider_kind) = self.preflight_lane_admits(target) else {
             return refuse(FIELD_PREFLIGHT_UNSUPPORTED_LANE);
         };
-        let key = match self.preflight_identity(target, row.path, provider_kind) {
+        let key = match preflight_identity(target, lane, row.path, provider_kind) {
             Ok(key) => key,
             Err(reason) => return refuse(reason),
         };
@@ -785,18 +824,38 @@ impl Router {
         Ok(key)
     }
 
+    /// The refusal a target reports whole, before any row is read, when the
+    /// entry's attributable `lane` no longer matches it: a reload re-kinded
+    /// the entry, or repointed it between a Mantle sub-lane and its direct
+    /// sibling (in either direction), under a target expanded from the old
+    /// one. Neither lane's view is the target's, so no row is considered.
+    ///
+    /// Only once the lane gates admit, so a kill switch or an unadmitted kind
+    /// keeps reporting its own reason per row.
+    fn preflight_lane_disagreement(
+        &self,
+        target: &DispatchTarget,
+        lane: Option<&AttributableLane<'_>>,
+    ) -> Option<&'static str> {
+        let provider_kind = self.preflight_lane_admits(target)?;
+        let lane = lane?;
+        (!lane.matches_target(provider_kind, target.egress_kind))
+            .then_some(FIELD_PREFLIGHT_UNATTRIBUTABLE_TARGET)
+    }
+
     /// The rows this planner considers for `target`: the view of the entry's
-    /// own lane when the shared attributability read admits it, else the view
-    /// the target itself names, so an unattributable target still reports its
-    /// refusal per carried row. A lane whose view is empty carries nothing and
-    /// reports no grounded field.
-    fn preflight_view(&self, target: &DispatchTarget) -> FieldRepairTable {
+    /// own attributable `lane` when there is one, else the view the target
+    /// itself names, so an unattributable target still reports its refusal
+    /// per carried row. A lane whose view is empty carries nothing and
+    /// reports no grounded field; so does an unattributable target whose own
+    /// egress is a Mantle sub-lane.
+    fn preflight_view(
+        &self,
+        target: &DispatchTarget,
+        lane: Option<&AttributableLane<'_>>,
+    ) -> FieldRepairTable {
         let table = self.field_repair_table();
-        match crate::router::field_repair::attributable_field_lane(
-            &self.config,
-            &target.provider_name,
-            target.use_forwarded_credential,
-        ) {
+        match lane {
             Some(lane) => table.for_lane(lane.provider_kind, Some(lane.egress)),
             None => table.for_lane(target.provider_kind.unwrap_or(""), target.egress_kind),
         }
@@ -809,7 +868,7 @@ impl Router {
     /// The forwarded-credential refusal is deliberately NOT repeated here. It
     /// lives in the shared attributability decision
     /// (`field_repair::attributable_field_lane`), which
-    /// `preflight_identity` calls with this target's own flag, so every stage
+    /// `plan_field_preflight` calls with this target's own flag, so every stage
     /// draws its verdict from one refusal set rather than from a local copy.
     ///
     /// What is CHECKED is the verdict, not the absence of a copy: a parity test
@@ -829,39 +888,6 @@ impl Router {
             return None;
         }
         Some(provider_kind)
-    }
-
-    /// The ATTRIBUTION gates plus the field identity, mirroring the reactive
-    /// admission rather than paraphrasing it: read the base URL from the
-    /// operator's own provider entry (the target carries none), refuse both a
-    /// lane that reports no classifiable egress URL and a URL naming a local
-    /// hop, and refuse an entry whose kind or egress no longer matches the
-    /// target's. A rejection this stage could not have attributed to the
-    /// upstream is a verdict this stage must not act on proactively either.
-    ///
-    /// `Err(reason)` carries the closed-set token the refusal reports.
-    fn preflight_identity(
-        &self,
-        target: &DispatchTarget,
-        path: &'static str,
-        provider_kind: &'static str,
-    ) -> Result<FieldVerdictKey, &'static str> {
-        // THE shared attributability read, so this stage cannot refuse a
-        // target the reactive arm would act on, or act on one it would refuse.
-        let lane = crate::router::field_repair::attributable_field_lane(
-            &self.config,
-            &target.provider_name,
-            target.use_forwarded_credential,
-        )
-        .ok_or(FIELD_PREFLIGHT_UNATTRIBUTABLE_TARGET)?;
-        if !lane.matches_target(provider_kind, target.egress_kind) {
-            return Err(FIELD_PREFLIGHT_UNATTRIBUTABLE_TARGET);
-        }
-        let lane = target
-            .learned_lane
-            .as_ref()
-            .ok_or(FIELD_PREFLIGHT_NO_IDENTITY)?;
-        FieldVerdictKey::new(lane, path, provider_kind).ok_or(FIELD_PREFLIGHT_NO_IDENTITY)
     }
 
     /// The VERDICT gates for one row's class: the operator mask, eligibility,
@@ -1087,6 +1113,33 @@ struct GateInputs<'g> {
     class: TransformClass,
     generation: u64,
     now: Instant,
+}
+
+/// A target and its entry's attributable lane, as [`Router::plan_field_preflight`]
+/// read the lane once for the whole walk.
+type PreflightTarget<'t> = (&'t DispatchTarget, Option<&'t AttributableLane<'t>>);
+
+/// The ATTRIBUTION gate plus the field identity, mirroring the reactive
+/// admission rather than paraphrasing it: refuse a target whose entry the
+/// shared attributability read did not admit (`lane` is `None`: a forwarded
+/// credential, no classifiable egress URL, or a URL naming a local hop). A
+/// rejection this stage could not have attributed to the upstream is a
+/// verdict this stage must not act on proactively either. The lane's
+/// agreement with the target was checked once for the walk.
+///
+/// `Err(reason)` carries the closed-set token the refusal reports.
+fn preflight_identity(
+    target: &DispatchTarget,
+    lane: Option<&AttributableLane<'_>>,
+    path: &'static str,
+    provider_kind: &'static str,
+) -> Result<FieldVerdictKey, &'static str> {
+    lane.ok_or(FIELD_PREFLIGHT_UNATTRIBUTABLE_TARGET)?;
+    let lane = target
+        .learned_lane
+        .as_ref()
+        .ok_or(FIELD_PREFLIGHT_NO_IDENTITY)?;
+    FieldVerdictKey::new(lane, path, provider_kind).ok_or(FIELD_PREFLIGHT_NO_IDENTITY)
 }
 
 /// The decision for a row this request RESTORED as its canary.

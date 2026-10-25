@@ -179,10 +179,10 @@ pub(super) struct NamedRejection {
 }
 
 /// Name the closed-table row a rejection rejected, or `None` when the kind
-/// has no parser, the row is outside the view of `egress`'s lane, the status cannot carry a field rejection, the body did
-/// not parse, no arm localizes a path, or the path has no row. A path ending
-/// in an array index names one element, not the field a row describes, so it
-/// has no row either.
+/// has no parser, the row is outside the view of `egress`'s lane, the status
+/// cannot carry a field rejection, the body did not parse, no arm localizes a
+/// path, or the path has no row. A path ending in an array index names one
+/// element, not the field a row describes, so it has no row either.
 ///
 /// A refusal of the effort field names the row of the level `sent`, the one
 /// the refused attempt's egress body carried, never a level read from the

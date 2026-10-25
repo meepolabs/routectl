@@ -314,15 +314,27 @@ impl Router {
         // entry, immediately before the dial. Activation checked the entry it
         // resolved then; a reload can have replaced that entry with an
         // unclassifiable, loopback, or forwarded-credential one since, and a
-        // probe must never
-        // dial a target whose rejection it could not attribute.
+        // probe must never dial a target whose rejection it could not
+        // attribute.
         //
         // MIRRORS activation's refusal set, entry-for-entry. A recheck that
         // covered fewer cases than activation would let exactly the reload
         // that changed a lane's attributability slip a queued job through:
         // the job was admitted against the old entry and nothing else looks
         // again.
-        if !self.probe_entry_is_attributable(&seat.provider_name, &seat.upstream) {
+        let Some(lane) = self.probe_entry_lane(&seat.provider_name, &seat.upstream) else {
+            return FreeValidatorOutcome::Unavailable;
+        };
+        // Capture is not lane-scoped, so the entry the seat names now must
+        // still be the identity's kind and its view must carry the row: a
+        // count on another lane is no evidence about this lane's negative.
+        // Before the gate, so a refusal spends no rate token.
+        if !super::probe_seat::probe_lane_carries(
+            self.field_repair_table(),
+            key,
+            &lane,
+            payload.field_path(),
+        ) {
             return FreeValidatorOutcome::Unavailable;
         }
         // The SAME per-attempt gate every real dispatch passes, in its PROBE
@@ -370,10 +382,7 @@ impl Router {
                 self.field_repair_table(),
                 &err,
                 key.provider_kind(),
-                self.config
-                    .providers
-                    .get(key.lane().provider_entry())
-                    .map(crate::config::ProviderEntry::egress_kind),
+                Some(lane.egress),
                 payload.field_path(),
             )
             .map_or_else(

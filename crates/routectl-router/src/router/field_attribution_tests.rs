@@ -240,9 +240,11 @@ fn config_for(provider_toml: Option<&str>) -> Config {
 }
 
 /// Mutation check: drop the anthropic Mantle arm of
-/// `classifiable_egress_base_url` -> red on the anthropic Mantle row; replace a
-/// Mantle arm's `.ok()` with an `unwrap_or_else` naming a fixed host -> red on
-/// that sub-lane's bad-region row.
+/// `classifiable_egress_base_url` -> red on the anthropic Mantle row; replace
+/// a Mantle arm's body with
+/// `Some(Cow::Owned(mantle_anthropic_base(&m.region).unwrap_or_else(|_|
+/// "https://bedrock-mantle.invalid".into())))` (that arm's own base function)
+/// -> red on that sub-lane's bad-region row.
 #[test]
 fn the_attributability_decision_matches_the_table_for_every_kind() {
     for row in rows() {
@@ -385,10 +387,10 @@ fn grounded_request() -> routectl_core::ChatRequest {
 /// re-kinded that entry to another admitted kind: both stages must refuse, since
 /// the verdict key would carry a kind the entry no longer has.
 ///
-/// Mutation check: remove the `lane.provider_kind != provider_kind` comparison
-/// in `plan_field_carry` -> the reactive assertion reds (a plan is produced);
-/// remove it in `preflight_identity` -> the pre-flight assertion reds (the
-/// planner reaches the verdict read and reports `not_eligible`).
+/// Mutation check: drop the `matches_target` check in `plan_field_carry` ->
+/// the reactive assertion reds (a plan is produced); in
+/// `Router::preflight_lane_disagreement` -> the pre-flight assertion reds (the
+/// planner reaches the verdict read per row and reports `not_eligible`).
 #[test]
 fn a_target_of_an_old_kind_on_a_re_kinded_entry_plans_nothing() {
     // Arrange
@@ -416,19 +418,26 @@ fn a_target_of_an_old_kind_on_a_re_kinded_entry_plans_nothing() {
 
     // Assert
     assert!(reactive.is_none(), "the reactive arm admits no plan");
-    let decisions: Vec<(bool, &str)> = records.iter().map(|r| (r.acted, r.reason)).collect();
     assert_eq!(
-        decisions,
-        vec![
-            (
-                false,
-                super::super::field_preflight::FIELD_PREFLIGHT_UNATTRIBUTABLE_TARGET
-            );
-            2
-        ],
-        "the pre-flight planner refuses each carried row (display, max_tokens) on \
-         attribution, before any verdict read",
+        preflight_decisions(&records),
+        vec![(
+            false,
+            None,
+            super::super::field_preflight::FIELD_PREFLIGHT_UNATTRIBUTABLE_TARGET
+        )],
+        "the pre-flight planner refuses the whole target on attribution, before \
+         any row or verdict is read",
     );
+}
+
+/// Each pre-flight record as `(acted, field_path, reason)`.
+fn preflight_decisions(
+    records: &[super::super::FieldPreflight],
+) -> Vec<(bool, Option<&'static str>, &'static str)> {
+    records
+        .iter()
+        .map(|record| (record.acted, record.field_path, record.reason))
+        .collect()
 }
 
 /// A request carrying the grounded effort row at `high`, beside the grounded
@@ -444,29 +453,65 @@ fn effort_request() -> routectl_core::ChatRequest {
 }
 
 /// A target expanded from a Mantle entry, read after a reload repointed that
-/// entry to its direct sibling under the same name: the kind still agrees, the
-/// egress does not, so no stage may apply the direct lane's scope or verdicts
-/// to it. The clear runs over a resident verdict on the sent level, so it
-/// would remove one if the check were absent.
+/// entry to its direct sibling under the same name, and the converse (a direct
+/// target on an entry now Mantle): the kind still agrees, the egress does not,
+/// so no stage may apply the entry's scope or verdicts to the target. The
+/// clear runs over a resident verdict on the sent level, so it would remove
+/// one if the check were absent.
 ///
 /// Mutation check: compare only the kind in place of `matches_target` in
-/// `plan_field_carry` -> red (a plan); in `preflight_identity` -> red
-/// (`not_eligible`); in `clear_accepted_effort` -> red (a cleared event).
+/// `plan_field_carry` -> red on the Mantle-target row (a plan); in
+/// `Router::preflight_lane_disagreement` -> red on both rows (`not_eligible`
+/// per row on the Mantle-target row, `no_grounded_field` on the
+/// direct-target row); in `clear_accepted_effort` -> red on the Mantle-target
+/// row (a cleared event).
 #[cfg(feature = "bedrock")]
 #[test]
 fn a_mantle_target_on_an_entry_repointed_to_its_direct_sibling_plans_nothing() {
+    use routectl_core::wire_check::EgressKind;
+    let cases = [
+        (
+            "Mantle target, entry now direct",
+            ANTHROPIC_MANTLE,
+            EgressKind::AnthropicApiMantle,
+            ANTHROPIC_REMOTE,
+        ),
+        (
+            "direct target, entry now Mantle",
+            ANTHROPIC_REMOTE,
+            EgressKind::AnthropicApi,
+            ANTHROPIC_MANTLE,
+        ),
+    ];
+    for (name, expanded_from, expanded_egress, current) in cases {
+        a_target_on_a_repointed_entry_plans_nothing(name, expanded_from, expanded_egress, current);
+    }
+}
+
+/// One row of [`a_mantle_target_on_an_entry_repointed_to_its_direct_sibling_plans_nothing`].
+#[cfg(feature = "bedrock")]
+fn a_target_on_a_repointed_entry_plans_nothing(
+    name: &str,
+    expanded_from: &str,
+    expanded_egress: routectl_core::wire_check::EgressKind,
+    current: &str,
+) {
     // Arrange
-    let stale_target = target_on(&router_on(ANTHROPIC_MANTLE));
-    assert_eq!(stale_target.provider_kind, Some("anthropic-api"), "premise");
+    let stale_target = target_on(&router_on(expanded_from));
+    assert_eq!(
+        stale_target.provider_kind,
+        Some("anthropic-api"),
+        "{name}: premise"
+    );
     assert_eq!(
         stale_target.egress_kind,
-        Some(routectl_core::wire_check::EgressKind::AnthropicApiMantle),
-        "premise",
+        Some(expanded_egress),
+        "{name}: premise"
     );
-    let router = router_on(ANTHROPIC_REMOTE);
+    let router = router_on(current);
     assert!(
         attributable_field_lane(&router.config, PROVIDER, false).is_some(),
-        "premise: the current entry is itself attributable",
+        "{name}: premise: the current entry is itself attributable",
     );
     let lane = stale_target.learned_lane.clone().expect("a lane");
     super::super::probe_test_support::plant_acting_negative(
@@ -492,25 +537,37 @@ fn a_mantle_target_on_an_entry_repointed_to_its_direct_sibling_plans_nothing() {
     let cleared = router.clear_accepted_effort(&stale_target, &req, &[]);
 
     // Assert
-    assert!(reactive.is_none(), "the reactive arm admits no plan");
-    assert!(!records.is_empty(), "premise: the planner recorded rows");
     assert!(
-        records.iter().all(|record| !record.acted
-            && record.reason
-                == super::super::field_preflight::FIELD_PREFLIGHT_UNATTRIBUTABLE_TARGET),
-        "the pre-flight refuses each row on attribution: {:?}",
-        records.iter().map(|r| r.reason).collect::<Vec<_>>(),
+        reactive.is_none(),
+        "{name}: the reactive arm admits no plan"
     );
-    assert!(cleared.is_none(), "the ranked clear removes nothing");
+    assert_eq!(
+        preflight_decisions(&records),
+        vec![(
+            false,
+            None,
+            super::super::field_preflight::FIELD_PREFLIGHT_UNATTRIBUTABLE_TARGET
+        )],
+        "{name}: the pre-flight refuses the whole target on attribution",
+    );
+    assert!(
+        cleared.is_none(),
+        "{name}: the ranked clear removes nothing"
+    );
 }
 
 /// A Mantle entry whose region names no endpoint is unattributable and plans
 /// nothing, while the same entry in a canonical region is attributable: the
 /// refusal is the region's, not the sub-lane's.
 ///
-/// Mutation check: replace the anthropic Mantle arm's `.ok()` with
-/// `.unwrap_or_else(|_| "https://bedrock-mantle.invalid".into())` -> red on the
-/// attribution assertion.
+/// The `lane.is_none()` assertion carries the mutation below. The plan
+/// assertion holds either way while the sub-lane's allowlist is empty, and
+/// becomes discriminating once a row is admitted there.
+///
+/// Mutation check: replace the anthropic Mantle arm's body with
+/// `Some(Cow::Owned(mantle_anthropic_base(&m.region).unwrap_or_else(|_|
+/// "https://bedrock-mantle.invalid".into())))` -> red on the attribution
+/// assertion.
 #[cfg(feature = "bedrock")]
 #[test]
 fn a_mantle_entry_in_a_region_that_names_no_endpoint_plans_nothing() {
@@ -574,6 +631,10 @@ fn a_target_with_a_kind_and_no_egress_plans_nothing() {
 
     // Assert
     assert!(reactive.is_none(), "the reactive arm plans nothing");
+    assert!(
+        !records.is_empty(),
+        "premise: the planner recorded a decision"
+    );
     assert!(
         records.iter().all(|record| !record.acted
             && record.reason

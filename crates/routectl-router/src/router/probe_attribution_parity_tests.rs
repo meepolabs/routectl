@@ -31,7 +31,7 @@
 //! reasons, rather than read as attribution verdicts.
 
 use std::sync::Arc;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use routectl_core::{ChatRequest, Provider};
@@ -53,6 +53,8 @@ use super::probe_test_support::{
 };
 use super::{DispatchTarget, Router};
 use crate::config::{AliasValue, Config, CredentialSource, ModelEntry, ProviderEntry};
+use crate::field_verdict::FieldVerdictKey;
+use crate::probe_scheduler::{FreeValidatorOutcome, ProbePayload, ProbeValidator};
 use crate::resolved::ResolvedModel;
 
 /// The `[providers]` key and the model nickname every fixture below uses.
@@ -263,6 +265,16 @@ fn complete_mantle_entry(mut entry: ProviderEntry, base_url: &str) -> ProviderEn
 /// reactive admission claims an in-flight slot, activation queues a job), and a
 /// shared one would let the order of the checks decide their answers.
 fn fixture(shape: &Shape) -> (Router, DispatchTarget) {
+    fixture_with(
+        shape,
+        Arc::new(OkProvider {
+            count_calls: AtomicUsize::new(0),
+        }),
+    )
+}
+
+/// [`fixture`], dispatching to `provider`.
+fn fixture_with(shape: &Shape, provider: Arc<dyn Provider>) -> (Router, DispatchTarget) {
     let mut config = Config::default();
     let mut entry = ProviderEntry::anthropic_api("literal:k")
         .with_base_url(shape.base_url)
@@ -284,9 +296,6 @@ fn fixture(shape: &Shape) -> (Router, DispatchTarget) {
         AliasValue::Single(NICKNAME.to_string()),
     );
 
-    let provider: Arc<dyn Provider> = Arc::new(OkProvider {
-        count_calls: AtomicUsize::new(0),
-    });
     let mut router = Router::new(Arc::new(config));
     let model = Arc::new(ResolvedModel::new(
         NICKNAME,
@@ -401,15 +410,47 @@ fn activation_admits(shape: &Shape, req: &ChatRequest) -> bool {
 /// why its answer has to match the other three.
 fn pre_dial_recheck_admits(shape: &Shape, _req: &ChatRequest) -> bool {
     let (router, target) = fixture(shape);
-    router.probe_entry_is_attributable(&target.provider_name, &target.upstream)
+    router
+        .probe_entry_lane(&target.provider_name, &target.upstream)
+        .is_some()
 }
 
 /// One stage's verdict for one shape: does this stage consider the target
 /// attributable?
 type StageVerdict = fn(&Shape, &ChatRequest) -> bool;
 
-/// The stages whose verdict reads attribution alone, whatever the lane's view.
-const PROBE_STAGES: [&str; 2] = ["activation", "pre-dial recheck"];
+/// One field stage under the parity table.
+struct Stage {
+    name: &'static str,
+    admits: StageVerdict,
+    /// Whether the stage's verdict reads attribution alone, whatever the
+    /// lane's view. An acting stage also declines a lane whose view carries
+    /// no row, which its verdict cannot tell from a refusal at attribution.
+    reads_attribution_only: bool,
+}
+
+const STAGES: [Stage; 4] = [
+    Stage {
+        name: "reactive",
+        admits: reactive_admits,
+        reads_attribution_only: false,
+    },
+    Stage {
+        name: "pre-flight",
+        admits: preflight_admits,
+        reads_attribution_only: false,
+    },
+    Stage {
+        name: "activation",
+        admits: activation_admits,
+        reads_attribution_only: true,
+    },
+    Stage {
+        name: "pre-dial recheck",
+        admits: pre_dial_recheck_admits,
+        reads_attribution_only: true,
+    },
+];
 
 #[test]
 fn every_field_stage_reaches_the_same_attributability_verdict() {
@@ -421,20 +462,19 @@ fn every_field_stage_reaches_the_same_attributability_verdict() {
         "premise: the table must carry both verdicts"
     );
 
-    let stages: [(&str, StageVerdict); 4] = [
-        ("reactive", reactive_admits),
-        ("pre-flight", preflight_admits),
-        ("activation", activation_admits),
-        ("pre-dial recheck", pre_dial_recheck_admits),
-    ];
     for shape in SHAPES {
         // The acting stages decline an empty view after attribution, which no
         // verdict of theirs can tell from a refusal at it; that shape's
         // attribution and declines are asserted below.
-        let stages = stages
+        let stages = STAGES
             .iter()
-            .filter(|(stage, _)| !shape.empty_view || PROBE_STAGES.contains(stage));
-        for &(stage, admits) in stages {
+            .filter(|stage| !shape.empty_view || stage.reads_attribution_only);
+        for stage in stages {
+            let Stage {
+                name: stage,
+                admits,
+                ..
+            } = stage;
             assert_eq!(
                 admits(shape, &req),
                 shape.attributable,
@@ -447,14 +487,17 @@ fn every_field_stage_reaches_the_same_attributability_verdict() {
     }
 }
 
-/// The Mantle sub-lane is attributable at all four stages, and its empty lane
-/// view is why the two acting stages then decline: the reactive arm plans
-/// nothing and the pre-flight reports `no_grounded_field` for a request whose
-/// rows the direct sibling's view presents.
+/// The Mantle sub-lane is attributable to the shared decision and to both
+/// probe stages, and its empty lane view is why the two acting stages then
+/// decline: the reactive arm plans nothing and the pre-flight reports
+/// `no_grounded_field` for a request whose rows the direct sibling's view
+/// presents.
 ///
-/// The acting stages read attribution through the shared decision before they
-/// scope, so their attribution verdict is that decision's answer for the
-/// target's entry; their declines are asserted separately, with their reasons.
+/// With the sub-lane's allowlist empty the acting stages cannot show
+/// attribution themselves, so for them this asserts the shared decision they
+/// read and their declines, each with its reason. The acting-stage assertion
+/// becomes discriminating once a row is admitted on that Mantle sub-lane,
+/// when the shape can join the parity loop above.
 ///
 /// Mutation check: map the Mantle egresses to their kind's scope in
 /// `RowScope::of_lane` -> red (the reactive arm plans, the pre-flight passes
@@ -510,4 +553,75 @@ fn the_mantle_sub_lane_is_attributable_and_declined_on_its_empty_view() {
         router.plan_field_preflight(&req, &target, DispatchSurface::Complete);
     let reasons: Vec<&str> = records.iter().map(|record| record.reason).collect();
     assert_eq!(reasons, vec![FIELD_PREFLIGHT_NO_GROUNDED_FIELD]);
+}
+
+/// The free re-check of `fixture(shape)`'s lane, keyed under `provider_kind`
+/// with a resident negative on the re-check row: its outcome and how many
+/// counts it dialed.
+async fn recheck_on(shape: &Shape, provider_kind: &str) -> (FreeValidatorOutcome, usize) {
+    let provider = Arc::new(OkProvider {
+        count_calls: AtomicUsize::new(0),
+    });
+    let (router, target) = fixture_with(shape, Arc::clone(&provider) as Arc<dyn Provider>);
+    let lane = target
+        .learned_lane
+        .as_ref()
+        .expect("a fixture target mints a lane");
+    plant_acting_negative(&router, lane, RECHECK_PATH, provider_kind);
+    let key = FieldVerdictKey::new(lane, RECHECK_PATH, provider_kind).expect("identity");
+    let payload = ProbePayload::new(RECHECK_PATH, "summarized".to_string(), &[], &[], false)
+        .expect("a modeled value within every bound");
+    let outcome = router
+        .run_free_validator_for_tests(&key, &payload, ProbeValidator::CountTokens)
+        .await;
+    (outcome, provider.count_calls.load(Ordering::SeqCst))
+}
+
+/// The pre-dial recheck dials only when the entry the seat names is still
+/// the identity's kind AND that lane's view carries the probed row. Capture
+/// is not lane-scoped, so a negative keyed on a row the Mantle view omits
+/// must not be cleared by a count on that lane, and an identity of a kind the
+/// entry no longer has must not be cleared by a count of another kind. The
+/// direct lane, whose view carries the row, is the positive control.
+///
+/// Mutation check: drop the `lane_rows().any(..)` half of
+/// `probe_lane_carries` -> red on the Mantle row (it dials and settles); drop
+/// the `provider_kind` half -> red on the re-kinded row.
+#[tokio::test]
+async fn the_pre_dial_recheck_dials_only_where_the_lane_carries_the_row() {
+    let direct = &SHAPES[0];
+    assert!(direct.attributable && !direct.empty_view, "premise");
+    #[cfg_attr(not(feature = "bedrock"), allow(unused_mut))]
+    let mut cases = vec![
+        (
+            "direct lane, its own kind",
+            direct,
+            "anthropic-api",
+            (FreeValidatorOutcome::Settled, 1),
+        ),
+        (
+            "an identity of a kind the entry no longer has",
+            direct,
+            "bedrock",
+            (FreeValidatorOutcome::Unavailable, 0),
+        ),
+    ];
+    #[cfg(feature = "bedrock")]
+    cases.push((
+        "Mantle lane, whose view omits the row",
+        SHAPES
+            .iter()
+            .find(|shape| shape.bedrock_mantle)
+            .expect("the table carries the Mantle shape"),
+        "anthropic-api",
+        (FreeValidatorOutcome::Unavailable, 0),
+    ));
+
+    for (name, shape, provider_kind, expected) in cases {
+        assert!(
+            pre_dial_recheck_admits(shape, &grounding_request()),
+            "{name}: premise: the entry is attributable",
+        );
+        assert_eq!(recheck_on(shape, provider_kind).await, expected, "{name}");
+    }
 }

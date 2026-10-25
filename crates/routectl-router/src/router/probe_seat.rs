@@ -1,5 +1,5 @@
-//! Which seat a probe identity names, and whether that seat is one this
-//! stage may attribute a rejection to.
+//! Which seat a probe identity names, whether that seat is one this stage
+//! may attribute a rejection to, and whether its lane carries the probed row.
 //!
 //! Both questions are read from the operator's OWN `[providers]` entry rather
 //! than from a dispatch target, and the attributability predicate is called by
@@ -9,6 +9,7 @@
 use crate::field_verdict::FieldVerdictKey;
 
 use super::Router;
+use super::field_repair::{AttributableLane, FieldRepairTable};
 
 /// One resolved probe target: the seat actually selected for an identity.
 pub(super) struct ProbeSeat {
@@ -41,7 +42,20 @@ impl std::fmt::Debug for ProbeSeat {
 }
 
 impl Router {
-    /// The provider kind a probe on `provider_name`'s CURRENT entry, sending
+    /// The provider kind of the lane [`Self::probe_lane`] admits on
+    /// `provider_name`'s CURRENT entry, sending `upstream` -- or `None` when
+    /// this stage may not probe it.
+    pub(super) fn probe_lane_kind(
+        &self,
+        provider_name: &str,
+        use_forwarded_credential: bool,
+        upstream: &str,
+    ) -> Option<&'static str> {
+        self.probe_lane(provider_name, use_forwarded_credential, upstream)
+            .map(|lane| lane.provider_kind)
+    }
+
+    /// The lane a probe on `provider_name`'s CURRENT entry, sending
     /// `upstream`, would act on -- or `None` when this stage may not probe it.
     ///
     /// THE refusal predicate both probe stages call: activation, and the
@@ -57,46 +71,48 @@ impl Router {
     ///   authenticate with a FORWARDED client credential, is of a kind field
     ///   repair acts on, egresses to a classifiable base URL (a Mantle
     ///   sub-lane's is the endpoint its region derives), and that base is not
-    ///   LOOPBACK -- the same read the
-    ///   reactive arm and the pre-flight planner attribute through;
+    ///   LOOPBACK -- the same read the reactive arm and the pre-flight planner
+    ///   attribute through;
     /// - a FREE token count for that kind and upstream (the count walk's own
     ///   `seat_can_count_tokens`): a kind with none has no validator to ask, so
     ///   the probe could only no-op.
     ///
     /// `use_forwarded_credential` is the caller's own fact: activation reads it
     /// off the dispatch target, the recheck off the entry (see
-    /// [`Self::probe_entry_is_attributable`]).
-    pub(super) fn probe_lane_kind(
+    /// [`Self::probe_entry_lane`]).
+    fn probe_lane(
         &self,
         provider_name: &str,
         use_forwarded_credential: bool,
         upstream: &str,
-    ) -> Option<&'static str> {
+    ) -> Option<AttributableLane<'_>> {
         let lane = super::field_repair::attributable_field_lane(
             &self.config,
             provider_name,
             use_forwarded_credential,
         )?;
         super::count_tokens::seat_can_count_tokens(Some(lane.provider_kind), upstream)
-            .then_some(lane.provider_kind)
+            .then_some(lane)
     }
 
-    /// Whether a probe on `provider_name`'s CURRENT entry, sending `upstream`,
-    /// is one [`Self::probe_lane_kind`] admits, reading the forwarded fact off
-    /// the entry.
+    /// The lane [`Self::probe_lane`] admits on `provider_name`'s CURRENT
+    /// entry, sending `upstream`, reading the forwarded fact off the entry.
     ///
     /// The pre-dial recheck has no dispatch target, so the forwarded fact comes
     /// from the operator's ENTRY -- through the same accessor the chain derives
     /// `DispatchTarget::use_forwarded_credential` from, so the two sources
     /// cannot disagree about the same provider.
-    pub(super) fn probe_entry_is_attributable(&self, provider_name: &str, upstream: &str) -> bool {
+    pub(super) fn probe_entry_lane(
+        &self,
+        provider_name: &str,
+        upstream: &str,
+    ) -> Option<AttributableLane<'_>> {
         let use_forwarded_credential = self
             .config
             .providers
             .get(provider_name)
             .is_some_and(|entry| entry.forwarded_base_url().is_some());
-        self.probe_lane_kind(provider_name, use_forwarded_credential, upstream)
-            .is_some()
+        self.probe_lane(provider_name, use_forwarded_credential, upstream)
     }
 
     /// The resolved seat a probe identity's lane names.
@@ -140,4 +156,22 @@ impl Router {
                     }),
             })
     }
+}
+
+/// Whether a re-check of `key`'s negative on `field_path` may dial through
+/// `lane`: the lane is still the identity's kind, and its view carries the
+/// row. Probe capture is not lane-scoped, so without this a count on a lane
+/// whose view holds no such row could clear a negative it says nothing
+/// about.
+pub(super) fn probe_lane_carries(
+    table: FieldRepairTable,
+    key: &FieldVerdictKey,
+    lane: &AttributableLane<'_>,
+    field_path: &str,
+) -> bool {
+    lane.provider_kind == key.provider_kind()
+        && table
+            .for_lane(lane.provider_kind, Some(lane.egress))
+            .lane_rows()
+            .any(|row| row.path == field_path)
 }

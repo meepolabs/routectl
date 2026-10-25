@@ -86,11 +86,11 @@ pub enum PreflightBlockedReason {
     /// a GLOBAL setting, and the remedy is flipping it rather than providing evidence.
     CapabilityDisabled,
     /// The target's lane is not one this stage acts on: its provider kind is not
-    /// one field repair admits (`anthropic-api`, `bedrock`, `openai-compat`), or it
-    /// has no attributable base URL (a forwarded credential, a local hop, or no
-    /// classifiable egress base URL, as on a Mantle sub-lane whose region names
-    /// no endpoint). A verdict on such a lane
-    /// is REAL (the registry holds it from a reactive repair or a ledger replay), but
+    /// one field repair admits (`anthropic-api`, `bedrock`, `openai-compat`,
+    /// `openai-responses`), or it has no attributable base URL (a forwarded
+    /// credential, a local hop, or no classifiable egress base URL, as on a Mantle
+    /// sub-lane whose region names no endpoint). A verdict on such a lane is REAL
+    /// (the registry holds it from a reactive repair or a ledger replay), but
     /// pre-flight will never fire on it.
     UnsupportedLane,
     /// An operator `[capability.overrides]` cell forces this capability SUPPORTED

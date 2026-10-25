@@ -274,8 +274,8 @@ Surfaces: [openai-compat](#openai-compat-surface) -
   default, the legacy thinking budget is fitted under the lowered
   value, and the repair is lossless (`field_ceiling_fill_repair`).
   Lowering a client value is lossy (`field_ceiling_repair`). Field
-  repair does not act on a Mantle sub-lane, whose egress URL is not
-  its configured one.
+  repair does not act on a Mantle sub-lane yet: no row is admitted on
+  one until a refusal captured on that sub-lane grounds it.
 
 - **Anthropic `tool_choice` rejects bare-string OpenAI shape**.
   Bedrock validators 400 on `tool_choice: "auto"` (OpenAI) where

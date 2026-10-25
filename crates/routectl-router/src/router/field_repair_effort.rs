@@ -254,20 +254,35 @@ pub(super) const OPENAI_RESPONSES_MANTLE_ROWS: &[&str] = &[];
 impl RowScope {
     /// The scope of a lane of `provider_kind` sending with `egress`.
     ///
-    /// A Mantle egress answers its own allowlist; every other egress keeps
+    /// A Mantle egress answers its own allowlist; every direct egress keeps
     /// its provider kind's scope, so a Mantle lane can only narrow what its
-    /// direct sibling carries. An unknown egress carries nothing.
+    /// direct sibling carries. An unknown egress, and a local answer that
+    /// sent nothing upstream, carry nothing. Exhaustive over the egress kinds,
+    /// so a new one has to choose its scope here.
     pub(super) fn of_lane(provider_kind: &str, egress: Option<EgressKind>) -> Self {
+        let Some(egress) = egress else {
+            return Self::Admitted(&[]);
+        };
         match egress {
-            None => Self::Admitted(&[]),
-            Some(EgressKind::AnthropicApiMantle) => Self::Admitted(ANTHROPIC_API_MANTLE_ROWS),
-            Some(EgressKind::OpenaiCompatMantle) => Self::Admitted(OPENAI_COMPAT_MANTLE_ROWS),
-            Some(EgressKind::OpenaiResponsesMantle) => Self::Admitted(OPENAI_RESPONSES_MANTLE_ROWS),
-            Some(_) => match provider_kind {
-                kind::OPENAI_COMPAT => Self::WithoutRanked,
-                kind::OPENAI_RESPONSES => Self::RankedOnly,
-                _ => Self::All,
-            },
+            EgressKind::AnthropicApi
+            | EgressKind::BedrockInvoke
+            | EgressKind::BedrockConverse
+            | EgressKind::OpenaiCompat
+            | EgressKind::OpenaiResponses
+            | EgressKind::Gemini => Self::kind_scope(provider_kind),
+            EgressKind::AnthropicApiMantle => Self::Admitted(ANTHROPIC_API_MANTLE_ROWS),
+            EgressKind::OpenaiCompatMantle => Self::Admitted(OPENAI_COMPAT_MANTLE_ROWS),
+            EgressKind::OpenaiResponsesMantle => Self::Admitted(OPENAI_RESPONSES_MANTLE_ROWS),
+            EgressKind::Local => Self::Admitted(&[]),
+        }
+    }
+
+    /// The scope a direct lane of `provider_kind` carries.
+    fn kind_scope(provider_kind: &str) -> Self {
+        match provider_kind {
+            kind::OPENAI_COMPAT => Self::WithoutRanked,
+            kind::OPENAI_RESPONSES => Self::RankedOnly,
+            _ => Self::All,
         }
     }
 

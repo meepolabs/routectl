@@ -358,7 +358,8 @@ There it can also lower the `max_tokens` routectl fills in for a client
 that sent none (see
 [`max_output_tokens`](CONFIGURATION.md#max_output_tokens-optionu32-default-none));
 lowering that fill is lossless, since the client asked for no particular
-limit. Field repair does not act on a Mantle sub-lane.
+limit. Field repair does not act on a Mantle sub-lane yet: no row is
+admitted on one until a refusal captured on that sub-lane grounds it.
 
 **Example provider + model:**
 
