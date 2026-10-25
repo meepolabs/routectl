@@ -235,16 +235,25 @@ mod mantle {
         }
     }
 
-    /// The anthropic Mantle egress dials the Mantle host on the mock's port
-    /// and resolves that host to the mock.
+    /// `base`, an `https://<host>/<path>` URL, as plain http to `<host>` on
+    /// `port`.
+    fn plain_http_on_port(base: &str, port: u16) -> String {
+        let rest = base.strip_prefix("https://").expect("an https base");
+        let (host, path) = rest.split_once('/').expect("a base with a path");
+        format!("http://{host}:{port}/{path}")
+    }
+
+    /// The anthropic Mantle egress dials the Mantle host its region derives,
+    /// on the mock's port, and resolves that host to the mock.
     fn anthropic_provider(origin: &MockServer) -> Arc<dyn Provider> {
         let addr = *origin.address();
         let cfg = AnthropicApiConfig {
             id: SEAT.into(),
             auth: Arc::new(routectl_core::StaticToken::new(String::new())),
-            base_url: format!(
-                "http://bedrock-mantle.{REGION}.api.aws:{}/anthropic",
-                addr.port()
+            base_url: plain_http_on_port(
+                &routectl_providers::mantle::mantle_anthropic_base(REGION)
+                    .expect("a canonical region"),
+                addr.port(),
             ),
             anthropic_version: "2023-06-01".into(),
             auth_kind: AuthKind::ApiKey,
@@ -353,6 +362,8 @@ mod mantle {
         /// the pre-flighted next turn carry it.
         sent: Value,
         repaired: Value,
+        /// The value the verdict persists, `None` for a row that persists
+        /// none.
         ledger: Option<&'static str>,
     }
 
@@ -372,6 +383,7 @@ mod mantle {
                 repaired: json!(64_000),
                 ledger: Some("ceiling:64000"),
             },
+            // Not the captured `request_shape`: the mock keys only on `top_p`.
             Replay {
                 lane: SubLane::Compat,
                 body: json!({
@@ -403,77 +415,133 @@ mod mantle {
         ]
     }
 
-    /// On each Mantle sub-lane, the captured refusal of an admitted row draws
-    /// exactly one repaired retry, the client gets 200, the verdict is minted,
-    /// and the next turn leaves already repaired, drawing no refusal.
+    fn replay_of(lane: SubLane) -> Replay {
+        replays()
+            .into_iter()
+            .find(|replay| replay.lane.kind() == lane.kind())
+            .expect("one replay per sub-lane")
+    }
+
+    /// The captured refusal of an admitted row draws exactly one repaired
+    /// retry, the client gets 200, the verdict is minted, and the next turn
+    /// leaves already repaired, drawing no refusal.
+    async fn replay_and_preflight(replay: Replay) {
+        let name = replay.lane.kind();
+        // Arrange
+        let origin = origin(
+            replay.lane,
+            Some(replay.refused.clone()),
+            captured(replay.capture),
+        )
+        .await;
+        let (config, dir) = mantle_config(replay.lane);
+        let db_path = config.usage.db_path.clone();
+        let router = mantle_router(&config, replay.lane, &origin);
+        let daemon = spawn_daemon(config, dir, router).await;
+
+        // Act: the first turn draws the refusal and one repaired retry.
+        let first = post(&daemon, replay.lane, &replay.body).await;
+
+        // Assert
+        assert_eq!(
+            first,
+            reqwest::StatusCode::OK,
+            "{name}: the repaired retry served"
+        );
+        let fields: Vec<Value> = wire_bodies(&origin).await.iter().map(replay.read).collect();
+        assert_eq!(
+            fields,
+            vec![replay.sent.clone(), replay.repaired.clone()],
+            "{name}: one refused attempt as sent, one repaired retry",
+        );
+        await_acknowledged(&daemon, &db_path, replay.lane, replay.path).await;
+        let values = ledger_values(&db_path, replay.lane, replay.path);
+        assert_eq!(
+            values.iter().map(Option::as_deref).collect::<Vec<_>>(),
+            vec![replay.ledger],
+            "{name}: one verdict row on the ledger, with the value it persists",
+        );
+
+        // Act: the second turn, same body.
+        let second = post(&daemon, replay.lane, &replay.body).await;
+
+        // Assert
+        assert_eq!(second, reqwest::StatusCode::OK, "{name}");
+        let fields: Vec<Value> = wire_bodies(&origin).await.iter().map(replay.read).collect();
+        assert_eq!(
+            fields,
+            vec![
+                replay.sent.clone(),
+                replay.repaired.clone(),
+                replay.repaired.clone()
+            ],
+            "{name}: the second turn went out once, already repaired",
+        );
+        let counters = daemon.live_router().field_repair_counters();
+        assert_eq!(
+            counters.repair_attempted, 1,
+            "{name}: one repair, on the first turn"
+        );
+        assert_eq!(counters.repair_succeeded, 1, "{name}");
+        assert_eq!(
+            counters.preflight_actions, 1,
+            "{name}: the second turn preflighted"
+        );
+        daemon.shutdown().await;
+    }
+
+    /// The anthropic Mantle ceiling row.
     ///
-    /// Mutation check: empty a Mantle allowlist const -> red on that sub-lane
-    /// (the refusal reaches the client).
+    /// Mutation check: empty `ANTHROPIC_API_MANTLE_ROWS` -> red (the refusal
+    /// reaches the client).
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn each_mantle_sub_lane_repairs_its_captured_refusal_and_preflights_the_next_turn() {
-        for replay in replays() {
-            let name = replay.lane.kind();
-            // Arrange
-            let origin = origin(
-                replay.lane,
-                Some(replay.refused.clone()),
-                captured(replay.capture),
-            )
-            .await;
-            let (config, dir) = mantle_config(replay.lane);
-            let db_path = config.usage.db_path.clone();
-            let router = mantle_router(&config, replay.lane, &origin);
-            let daemon = spawn_daemon(config, dir, router).await;
+    async fn anthropic_mantle_repairs_its_captured_ceiling_and_preflights_the_next_turn() {
+        replay_and_preflight(replay_of(SubLane::Anthropic)).await;
+    }
 
-            // Act: the first turn draws the refusal and one repaired retry.
-            let first = post(&daemon, replay.lane, &replay.body).await;
+    /// The compat Mantle drop row.
+    ///
+    /// Mutation check: empty `OPENAI_COMPAT_MANTLE_ROWS` -> red (the refusal
+    /// reaches the client).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn compat_mantle_drops_its_captured_parameter_and_preflights_the_next_turn() {
+        let replay = replay_of(SubLane::Compat);
+        let sent = OpenAiCompatProvider::new(OpenAiCompatConfig {
+            id: SEAT.into(),
+            base_url: "https://bedrock-mantle.invalid/openai/v1".into(),
+            api_key: String::new(),
+            header_extras: Vec::new(),
+            payload_extras: None,
+            reasoning_dialect: ReasoningDialect::OpenAi,
+            history_reasoning: HistoryReasoning::Auto,
+            user_agent: None,
+            strict_translation: false,
+            mantle: Some(mantle_auth()),
+        })
+        .normalize_request(&routectl_core::ChatRequest {
+            model: SubLane::Compat.upstream().into(),
+            top_p: Some(0.5),
+            ..Default::default()
+        })
+        .expect("the egress builds a body");
+        assert_eq!(
+            sent["top_p"],
+            json!(0.5),
+            "premise: the compat egress sends top_p for {}; if its model profile now \
+             drops sampling params for this vendor-prefixed id, this replay can no \
+             longer draw the refusal",
+            SubLane::Compat.upstream(),
+        );
+        replay_and_preflight(replay).await;
+    }
 
-            // Assert
-            assert_eq!(
-                first,
-                reqwest::StatusCode::OK,
-                "{name}: the repaired retry served"
-            );
-            let fields: Vec<Value> = wire_bodies(&origin).await.iter().map(replay.read).collect();
-            assert_eq!(
-                fields,
-                vec![replay.sent.clone(), replay.repaired.clone()],
-                "{name}: one refused attempt as sent, one repaired retry",
-            );
-            await_acknowledged(&daemon, &db_path, replay.lane, replay.path).await;
-            let values = ledger_values(&db_path, replay.lane, replay.path);
-            assert_eq!(values.len(), 1, "{name}: one verdict row on the ledger");
-            if let Some(value) = replay.ledger {
-                assert_eq!(values[0].as_deref(), Some(value), "{name}");
-            }
-
-            // Act: the second turn, same body.
-            let second = post(&daemon, replay.lane, &replay.body).await;
-
-            // Assert
-            assert_eq!(second, reqwest::StatusCode::OK, "{name}");
-            let fields: Vec<Value> = wire_bodies(&origin).await.iter().map(replay.read).collect();
-            assert_eq!(
-                fields,
-                vec![
-                    replay.sent.clone(),
-                    replay.repaired.clone(),
-                    replay.repaired.clone()
-                ],
-                "{name}: the second turn went out once, already repaired",
-            );
-            let counters = daemon.live_router().field_repair_counters();
-            assert_eq!(
-                counters.repair_attempted, 1,
-                "{name}: one repair, on the first turn"
-            );
-            assert_eq!(counters.repair_succeeded, 1, "{name}");
-            assert_eq!(
-                counters.preflight_actions, 1,
-                "{name}: the second turn preflighted"
-            );
-            daemon.shutdown().await;
-        }
+    /// The Responses Mantle ranked row.
+    ///
+    /// Mutation check: empty `OPENAI_RESPONSES_MANTLE_ROWS` -> red (the
+    /// refusal reaches the client).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn responses_mantle_lowers_its_captured_effort_and_preflights_the_next_turn() {
+        replay_and_preflight(replay_of(SubLane::Responses)).await;
     }
 
     /// Each sub-lane's pass-through control: a refusal captured on that
