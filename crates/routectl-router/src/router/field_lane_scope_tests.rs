@@ -328,3 +328,56 @@ fn a_mantle_capture_names_its_admitted_row_on_its_own_sub_lane() {
         );
     }
 }
+
+/// The temperature refusal captured on compat Mantle carries the
+/// `unsupported_value` code, which the openai-compat classifier lifts out of
+/// `BadRequest` and the field class gate does not pass on that kind, so it
+/// names no row on compat Mantle or on direct compat: the reason
+/// `temperature` is not admitted on compat Mantle. The same body with the
+/// `unsupported_parameter` code names the row on the direct lane, the
+/// positive control.
+///
+/// Mutation check: admit `unsupported_value` on openai-compat in
+/// `class_can_name_a_field` -> red on the direct-compat row.
+#[test]
+fn a_compat_temperature_refusal_coded_unsupported_value_names_no_row() {
+    let body = |code: &str| {
+        serde_json::json!({"error": {
+            "code": code,
+            "message": "Unsupported value: 'temperature' does not support 0.5 with this model. \
+                        Only the default (1) value is supported.",
+            "param": "temperature",
+            "type": "invalid_request_error",
+        }})
+        .to_string()
+    };
+    let named = |code: &str, egress: EgressKind| {
+        let err = Error::upstream_full(
+            "p",
+            400,
+            body(code),
+            None,
+            Some("invalid_request_error".into()),
+            Some(code.into()),
+        );
+        let class = routectl_core::failure_class::classify(&err, Some(OPENAI_COMPAT)).class;
+        super::rejected_field(
+            FieldRepairTable::grounded_only(),
+            &class,
+            &err,
+            OPENAI_COMPAT,
+            Some(egress),
+            SentEffort::Unknown,
+        )
+        .map(|named| named.row.path)
+    };
+
+    assert_eq!(
+        named("unsupported_parameter", EgressKind::OpenaiCompat),
+        Some("temperature"),
+        "control: the parameter code names the row on direct compat",
+    );
+    for egress in [EgressKind::OpenaiCompat, EgressKind::OpenaiCompatMantle] {
+        assert_eq!(named("unsupported_value", egress), None, "{egress:?}");
+    }
+}
