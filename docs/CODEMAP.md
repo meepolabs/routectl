@@ -8418,11 +8418,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `server::parse_config_only` + `server::load_overlay_default` so the
   capability panel degrades one layer without the other, plus the read-only
   ledger replay), `Served` -> the daemon's accepted state; then the raw-bytes read for
-  the validation findings and, on the disk path only, the version preflight
-  that never stamps the file, auth, secret checks,
-  orphan scan, would-trim panel and the freshness inputs; on both paths,
-  `gather_legacy_folder` per old folder, where a folder holding the config in
-  use reads as `Absent`); `gather_context(config_path, legacy_dirs)` =
+  the validation findings, then on both paths auth, secret checks, orphan
+  scan, would-trim panel, the freshness inputs and `gather_legacy_folder` per
+  old folder, where a folder holding the config in use reads as `Absent`; the
+  version preflight that never stamps the file is applied in `sections.rs`
+  from `accepted_config_version`); `gather_context(config_path, legacy_dirs)` =
   that body PLUS one `gather_probe_results` `probe_all` pass (the only
   `CompositeStore` dial), so the two entry points cannot drift. `gather_auth`
   takes read-only oauth probes + seats; `sanitize_store_open_error` reduces a
