@@ -560,14 +560,17 @@ fn a_target_on_a_repointed_entry_plans_nothing(
 /// nothing, while the same entry in a canonical region is attributable: the
 /// refusal is the region's, not the sub-lane's.
 ///
-/// The `lane.is_none()` assertion carries the mutation below. The plan
-/// assertion holds either way while the sub-lane's allowlist is empty, and
-/// becomes discriminating once a row is admitted there.
+/// The `lane.is_none()` assertion carries the mutation below. The plan and
+/// pre-flight assertions hold either way while the sub-lane's allowlist is
+/// empty, and become discriminating once a row is admitted there; the
+/// pre-flight one pins the reason a bad region reports (`no_grounded_field`,
+/// from the target's own view, not `unattributable_target`).
 ///
 /// Mutation check: replace the anthropic Mantle arm's body with
 /// `Some(Cow::Owned(mantle_anthropic_base(&m.region).unwrap_or_else(|_|
 /// "https://bedrock-mantle.invalid".into())))` -> red on the attribution
-/// assertion.
+/// assertion; read the direct egress in the unattributable branch of
+/// `preflight_view` -> red on the pre-flight assertion.
 #[cfg(feature = "bedrock")]
 #[test]
 fn a_mantle_entry_in_a_region_that_names_no_endpoint_plans_nothing() {
@@ -588,9 +591,24 @@ fn a_mantle_entry_in_a_region_that_names_no_endpoint_plans_nothing() {
         std::time::Instant::now(),
     );
 
+    let (_planned, records, _plan) = router.plan_field_preflight(
+        &grounded_request(),
+        &target,
+        super::super::class_observe::DispatchSurface::Complete,
+    );
+
     // Assert
     assert!(lane.is_none(), "no host, no attribution");
     assert!(plan.is_none(), "and nothing is planned");
+    assert_eq!(
+        preflight_decisions(&records),
+        vec![(
+            false,
+            None,
+            super::super::field_preflight::FIELD_PREFLIGHT_NO_GROUNDED_FIELD
+        )],
+        "the pre-flight reads the target's own empty Mantle view",
+    );
 }
 
 /// A target that names its provider kind but no egress resolves no row and
