@@ -296,29 +296,92 @@ fn every_classified_kind_is_config_nameable() {
 }
 
 // ---------------------------------------------------------------------------
-// No repo gitleaks config
+// Repo gitleaks config scope
 // ---------------------------------------------------------------------------
 //
-// Same subject as the block above, from the commit-time side. The CI secret
-// scan runs gitleaks' default rules and ignores any repo config, but the
-// local pre-commit hook loads a `.gitleaks.toml` at the repo root on its
-// own, so one would quietly let an allowlist exempt (say) the public driver
-// fixture corpus locally while CI still scans it. A false positive is fixed
-// by rewriting the value, never by a repo allowlist.
+// Same subject as the block above, from the commit-time side. The local
+// pre-commit hook loads the root `.gitleaks.toml`: default rules plus one
+// extra rule, with one exact public value exempted. A path allowlist would
+// quietly skip whole files locally, and a loose value pattern would exempt
+// more than that one value, so both are pinned here.
 
 #[test]
-fn the_repo_root_carries_no_gitleaks_config() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+fn the_repo_gitleaks_config_exempts_one_exact_value_and_no_paths() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.gitleaks.toml");
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("control: read {}: {e}", path.display()));
+    let config: toml::Table =
+        toml::from_str(&text).unwrap_or_else(|e| panic!("parse {}: {e}", path.display()));
 
+    assert_eq!(
+        config.get("extend").and_then(|e| e.get("useDefault")),
+        Some(&toml::Value::Boolean(true)),
+        "{} must inherit gitleaks' default rules",
+        path.display()
+    );
+    assert_no_paths_key(&config, "<root>");
     assert!(
-        root.join(".pre-commit-config.yaml").is_file(),
-        "control: {} must be the repo root that holds the commit gate config",
-        root.display()
+        !config.contains_key("allowlists"),
+        "only the global [allowlist] may exempt anything",
+    );
+    for rule in config
+        .get("rules")
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        assert!(
+            rule.get("allowlist").is_none() && rule.get("allowlists").is_none(),
+            "only the global [allowlist] may exempt anything: {rule:?}",
+        );
+    }
+
+    let allowlist = config
+        .get("allowlist")
+        .and_then(toml::Value::as_table)
+        .expect("the global [allowlist] holds the one exempted value");
+    assert_eq!(
+        allowlist.get("regexTarget").and_then(toml::Value::as_str),
+        Some("secret"),
+        "the allowlist must match the extracted secret, not the line or match",
+    );
+    let regexes: Vec<&str> = allowlist
+        .get("regexes")
+        .and_then(toml::Value::as_array)
+        .expect("allowlist.regexes")
+        .iter()
+        .map(|v| v.as_str().expect("allowlist regex is a string"))
+        .collect();
+    assert_eq!(
+        regexes.len(),
+        1,
+        "exactly one allowlisted value: {regexes:?}"
     );
     assert!(
-        !root.join(".gitleaks.toml").exists(),
-        "{} must not exist: the secret scans run gitleaks' default rules, \
-         and a repo config would exempt paths or values from the local scan",
-        root.join(".gitleaks.toml").display()
+        regexes[0].starts_with('^') && regexes[0].ends_with('$'),
+        "the allowlisted value must be anchored with ^...$: {:?}",
+        regexes[0]
     );
+}
+
+fn assert_no_paths_key(table: &toml::Table, at: &str) {
+    for (key, child) in table {
+        assert_ne!(
+            key, "paths",
+            "{at} carries a `paths` allowlist: every file must be scanned",
+        );
+        assert_no_paths_in_value(child, &format!("{at}.{key}"));
+    }
+}
+
+fn assert_no_paths_in_value(value: &toml::Value, at: &str) {
+    match value {
+        toml::Value::Table(table) => assert_no_paths_key(table, at),
+        toml::Value::Array(items) => {
+            for (i, child) in items.iter().enumerate() {
+                assert_no_paths_in_value(child, &format!("{at}[{i}]"));
+            }
+        }
+        _ => {}
+    }
 }

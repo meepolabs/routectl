@@ -63,9 +63,12 @@ repos:
   # `jwt` finding the action caught. Keep this rev equal to GITLEAKS_VERSION
   # in the shared security-floor action's floor.sh, at the release that
   # .github/workflows/security.yml pins, so local and CI scan with the same
-  # detection rules; bump it when that pin moves. There is no repo gitleaks
-  # config: this hook runs gitleaks' default config, and the shared action
-  # runs the same rules with the default path skips removed.
+  # detection rules; bump it when that pin moves. This hook also loads the
+  # repo-root .gitleaks.toml: the default rules plus one extra rule for
+  # GOCSPX- Google client secrets (absent from the defaults) and one
+  # value-scoped allowlist entry, with no path allowlist. The shared action
+  # ignores that file: it runs the default rules with the default path skips
+  # removed.
   - repo: https://github.com/gitleaks/gitleaks
     rev: v8.30.1
     hooks:

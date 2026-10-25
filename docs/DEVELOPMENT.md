@@ -207,7 +207,10 @@ treat the list below as a same-order summary, not a substitute for
 reading it. In order: a toolchain preflight, the gitleaks staged-secret
 scan (its `rev` pins the binary, equal to the gitleaks version the shared
 `meepolabs/meepolabs-conventions` security-floor action pins, which
-`.github/workflows/security.yml` runs; there is no repo gitleaks config),
+`.github/workflows/security.yml` runs; it also loads the root
+`.gitleaks.toml`, which adds a `GOCSPX-` Google client-secret rule the
+defaults lack and exempts one exact public value, with no path allowlist;
+the CI scan ignores that file),
 an internal-identifier scan and its
 self-test, a
 log-sink inventory (the escaping formatter is the only production
