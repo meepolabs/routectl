@@ -8917,11 +8917,14 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `tests/scrub_gate_provider_shapes.rs` -- drift detector over the
   sentinel-delimited `PROVIDER_SHAPE_KINDS` / `PROVIDER_SHAPE_EXCLUDED`
   classification block in `scripts/scrub-fixture.sh`
-  ; ALSO asserts the root `.gitleaks.toml` (loaded by the local pre-commit
-  hook) extends the default rules and its only allowlist is the global one,
-  carrying only `description` / `regexTarget = "secret"` / `regexes`, where
-  `regexes` is exactly the `^...$`-anchored `CLIENT_SECRET` read from
-  `routectl-auth/src/oauth/providers/antigravity.rs`
+  ; ALSO pins the root `.gitleaks.toml` the local pre-commit hook loads: only
+  `[extend]` / `[allowlist]` / `[[rules]]` at the top level, `[extend]`
+  exactly `useDefault = true`, `[[rules]]` exactly the one
+  `google-oauth-client-secret` rule, and the global allowlist carrying only
+  `description` / `regexTarget = "secret"` / `regexes`, with `regexes`
+  exactly the `^...$`-anchored `CLIENT_SECRET` read from
+  `routectl-auth/src/oauth/providers/antigravity.rs`; and asserts no root
+  `.gitleaksignore` exists
 - `tests/cross_mode_pair.rs` -- pins the committed cross-mode fixture pair
   (`driver/anthropic-api/plain-turn-01` and its `-fp` twin): asserts each
   half's `meta.client.connection_mode`, the MITM seam header and

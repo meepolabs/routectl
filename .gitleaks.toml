@@ -1,8 +1,13 @@
 # gitleaks config for the local pre-commit hook.
 #
 # Inherits the default ruleset, adds one rule the defaults lack, and
-# exempts one exact public value. There is no path allowlist: every
-# file is scanned. The CI secret scan does not read this file.
+# exempts one exact public value. There is no repo path allowlist;
+# only gitleaks' built-in default path skips still apply locally
+# (images, fonts, binary documents, the Go, JS, and Python lockfiles,
+# node_modules/ and vendored trees, and any path containing
+# "gitleaks.toml", this file included). Cargo.lock and target/ are
+# scanned. The CI secret scan does not read this file, and it removes
+# the default path skips too.
 #
 # Keep this file conservative: every allowlist entry is a place where
 # a real secret could hide undetected. Prefer fixing the false
@@ -17,7 +22,7 @@ description = "The public Antigravity installed-app client secret"
 # Value-scoped: exempts ONLY the exact Antigravity installed-app client
 # secret. It is a public value baked into the desktop client binary,
 # present in 30+ public repos. Google treats it as non-confidential
-# under the installed-app client type -- same rationale as the hardcoded
+# under the installed-app client type, the same rationale as the hardcoded
 # client_ids the Anthropic/codex flows carry. The global allowlist is
 # required here (not just a rule-scoped one) because the default
 # generic-api-key rule also matches the "client_secret = ..." context.

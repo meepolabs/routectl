@@ -29,7 +29,7 @@
 //! and the full set this weld needs is no longer compiled in.
 
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// Sentinels bounding the declared block. Renaming either in the shell
 /// without updating them here turns the parse into a loud failure rather
@@ -300,19 +300,35 @@ fn every_classified_kind_is_config_nameable() {
 // ---------------------------------------------------------------------------
 //
 // Same subject as the block above, from the commit-time side. The local
-// pre-commit hook loads the root `.gitleaks.toml`: default rules plus one
-// extra rule, with one exact public value exempted. A path allowlist would
-// quietly skip whole files locally, and a loose value pattern would exempt
-// more than that one value, so the exemption is pinned to the value the
-// Antigravity flow actually ships.
+// pre-commit hook loads the root `.gitleaks.toml` (default rules plus one
+// extra rule, with one exact public value exempted) and honors a root
+// `.gitleaksignore`. Anything else in either file could disable a default
+// rule, skip paths, or exempt more than that one value locally, so the
+// whole shape is pinned here.
 
 const ANTIGRAVITY_SOURCE_PATH: &str = "crates/routectl-auth/src/oauth/providers/antigravity.rs";
+const GITLEAKS_ROOT_KEYS: [&str; 3] = ["allowlist", "extend", "rules"];
 const GLOBAL_ALLOWLIST_KEYS: [&str; 3] = ["description", "regexTarget", "regexes"];
 
+fn repo_root() -> PathBuf {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    assert!(
+        root.join(".pre-commit-config.yaml").is_file(),
+        "control: {} must be the repo root that holds the commit gate config",
+        root.display()
+    );
+    root
+}
+
+fn load_repo_gitleaks_config() -> toml::Table {
+    let path = repo_root().join(".gitleaks.toml");
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("control: read {}: {e}", path.display()));
+    toml::from_str(&text).unwrap_or_else(|e| panic!("parse {}: {e}", path.display()))
+}
+
 fn antigravity_client_secret() -> String {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .join(ANTIGRAVITY_SOURCE_PATH);
+    let path = repo_root().join(ANTIGRAVITY_SOURCE_PATH);
     let source =
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     let values: Vec<&str> = source
@@ -333,65 +349,75 @@ fn antigravity_client_secret() -> String {
     values[0].to_owned()
 }
 
+fn table_keys(table: &toml::Table) -> BTreeSet<&str> {
+    table.keys().map(String::as_str).collect()
+}
+
 #[test]
-fn the_repo_gitleaks_config_exempts_one_exact_value_and_no_paths() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.gitleaks.toml");
-    let text = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("control: read {}: {e}", path.display()));
-    let config: toml::Table =
-        toml::from_str(&text).unwrap_or_else(|e| panic!("parse {}: {e}", path.display()));
-
+fn the_repo_gitleaks_config_extends_the_defaults_with_only_the_gocspx_rule() {
+    let config = load_repo_gitleaks_config();
     assert_eq!(
-        config.get("extend").and_then(|e| e.get("useDefault")),
-        Some(&toml::Value::Boolean(true)),
-        "{} must inherit gitleaks' default rules",
-        path.display()
+        table_keys(&config),
+        BTreeSet::from(GITLEAKS_ROOT_KEYS),
+        "the root .gitleaks.toml may only carry [extend], [allowlist], and [[rules]]",
     );
-    assert!(
-        !config.contains_key("allowlists"),
-        "only the global [allowlist] may exempt anything",
-    );
-    for rule in config
-        .get("rules")
-        .and_then(toml::Value::as_array)
-        .into_iter()
-        .flatten()
-    {
-        assert!(
-            rule.get("allowlist").is_none() && rule.get("allowlists").is_none(),
-            "only the global [allowlist] may exempt anything: {rule:?}",
-        );
-    }
 
+    let extend: toml::Table = toml::from_str("useDefault = true").expect("literal");
+    assert_eq!(
+        config.get("extend").and_then(toml::Value::as_table),
+        Some(&extend),
+        "[extend] must inherit every default rule and nothing else",
+    );
+
+    let gocspx_rule: toml::Table = toml::from_str(
+        r#"
+        id = "google-oauth-client-secret"
+        description = "Google OAuth client secret (GOCSPX- prefix)"
+        regex = 'GOCSPX-[A-Za-z0-9_-]{20,}'
+        keywords = ["GOCSPX-"]
+        "#,
+    )
+    .expect("literal");
+    assert_eq!(
+        config.get("rules"),
+        Some(&toml::Value::Array(vec![toml::Value::Table(gocspx_rule)])),
+        "[[rules]] must be exactly the one GOCSPX- rule, with no allowlist or \
+         override of a default rule id",
+    );
+}
+
+#[test]
+fn the_repo_gitleaks_config_exempts_only_the_antigravity_client_secret() {
+    let config = load_repo_gitleaks_config();
     let allowlist = config
         .get("allowlist")
         .and_then(toml::Value::as_table)
         .expect("the global [allowlist] holds the one exempted value");
-    let extra_keys: Vec<&String> = allowlist
-        .keys()
-        .filter(|key| !GLOBAL_ALLOWLIST_KEYS.contains(&key.as_str()))
-        .collect();
-    assert!(
-        extra_keys.is_empty(),
-        "the global [allowlist] may only carry {GLOBAL_ALLOWLIST_KEYS:?}; \
-         {extra_keys:?} would exempt paths, commits, or words from the scan",
+    assert_eq!(
+        table_keys(allowlist),
+        BTreeSet::from(GLOBAL_ALLOWLIST_KEYS),
+        "any other [allowlist] key would exempt paths, commits, or words from the scan",
     );
     assert_eq!(
         allowlist.get("regexTarget").and_then(toml::Value::as_str),
         Some("secret"),
         "the allowlist must match the extracted secret, not the line or match",
     );
-    let regexes: Vec<&str> = allowlist
-        .get("regexes")
-        .and_then(toml::Value::as_array)
-        .expect("allowlist.regexes")
-        .iter()
-        .map(|v| v.as_str().expect("allowlist regex is a string"))
-        .collect();
+
     let exact_value = format!("^{}$", antigravity_client_secret());
     assert_eq!(
-        regexes,
-        [exact_value.as_str()],
+        allowlist.get("regexes"),
+        Some(&toml::Value::Array(vec![toml::Value::String(exact_value)])),
         "the allowlist must exempt only the exact Antigravity client secret",
+    );
+}
+
+#[test]
+fn the_repo_root_carries_no_gitleaksignore() {
+    let ignore = repo_root().join(".gitleaksignore");
+    assert!(
+        !ignore.exists(),
+        "{} must not exist: the local hook would skip every fingerprint it lists",
+        ignore.display()
     );
 }

@@ -209,8 +209,9 @@ scan (its `rev` pins the binary, equal to the gitleaks version the shared
 `meepolabs/meepolabs-conventions` security-floor action pins, which
 `.github/workflows/security.yml` runs; it also loads the root
 `.gitleaks.toml`, which adds a `GOCSPX-` Google client-secret rule the
-defaults lack and exempts one exact public value, with no path allowlist;
-the CI scan ignores that file),
+defaults lack and exempts one exact public value, with no repo path
+allowlist, though gitleaks' built-in default path skips still apply; the CI
+scan ignores that file and removes those skips),
 an internal-identifier scan and its
 self-test, a
 log-sink inventory (the escaping formatter is the only production

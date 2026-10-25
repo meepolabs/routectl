@@ -66,9 +66,9 @@ repos:
   # detection rules; bump it when that pin moves. This hook also loads the
   # repo-root .gitleaks.toml: the default rules plus one extra rule for
   # GOCSPX- Google client secrets (absent from the defaults) and one
-  # value-scoped allowlist entry, with no path allowlist. The shared action
-  # ignores that file: it runs the default rules with the default path skips
-  # removed.
+  # value-scoped allowlist entry, with no repo path allowlist (gitleaks'
+  # built-in default path skips still apply here). The shared action ignores
+  # that file: it runs the default rules with the default path skips removed.
   - repo: https://github.com/gitleaks/gitleaks
     rev: v8.30.1
     hooks:
