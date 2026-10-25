@@ -607,13 +607,21 @@ async fn a_lane_that_recovers_after_deferrals_still_dials() {
     );
 }
 
+/// The lane-carries recheck refuses BEFORE the gate: a refused probe sends
+/// nothing, so it must spend none of the operator's rate budget. Closed
+/// breaker, so the gate would admit and debit if it were reached first.
+/// `a_probe_through_a_closed_breaker_does_charge_its_rpm_token` is the
+/// positive control that this fixture does charge a dialing probe.
+///
+/// Refused by the kind clause: a `bedrock` identity on an `anthropic-api`
+/// entry, whose seat and attributable lane both resolve. The view clause
+/// alone cannot refuse on this fixture, since a direct anthropic-api lane's
+/// view carries every row.
+///
+/// Mutation check: drop the `provider_kind` half of `probe_lane_carries` ->
+/// red (the probe dials and charges its token).
 #[tokio::test]
-async fn a_recheck_refused_by_its_lane_view_charges_no_rpm_token() {
-    // The lane-carries recheck refuses BEFORE the gate: a refused probe sends
-    // nothing, so it must spend none of the operator's rate budget. Closed
-    // breaker, so the gate would admit and debit if it were reached first.
-    // `a_probe_through_a_closed_breaker_does_charge_its_rpm_token` is the
-    // positive control that this fixture does charge a dialing probe.
+async fn a_recheck_refused_by_its_lane_kind_charges_no_rpm_token() {
     let provider = Arc::new(OkProvider {
         count_calls: AtomicUsize::new(0),
     });
@@ -626,6 +634,16 @@ async fn a_recheck_refused_by_its_lane_view_charges_no_rpm_token() {
     .expect("identity");
     let payload = ProbePayload::new(GROUNDED_PATH, "summarized".to_string(), &[], &[], false)
         .expect("a modeled value within every bound");
+    let seat = router
+        .probe_seat_for(&key)
+        .expect("premise: the identity's lane resolves a seat");
+    let lane = router
+        .probe_entry_lane(&seat.provider_name, &seat.upstream)
+        .expect("premise: the seat's entry is an attributable lane");
+    assert_eq!(
+        lane.provider_kind, "anthropic-api",
+        "premise: the entry's kind is not the identity's"
+    );
     let before = router
         .gate_status_for_tests("m1")
         .rpm_available
@@ -651,6 +669,6 @@ async fn a_recheck_refused_by_its_lane_view_charges_no_rpm_token() {
         .expect("bucket still enabled");
     assert!(
         (after - before).abs() < 0.5,
-        "a recheck refused by its lane view must charge NO rpm token: {before} -> {after}",
+        "a recheck refused by its lane kind must charge NO rpm token: {before} -> {after}",
     );
 }

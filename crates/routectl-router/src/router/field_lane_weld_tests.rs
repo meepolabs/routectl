@@ -3,7 +3,8 @@
 //! record (`tests/fixtures/mantle_capture.json`) holds an entry whose committed
 //! fixture the existing grammar on that egress resolves to that row, through
 //! the same class gate a live rejection passes, and whose one repaired retry
-//! changed the refused field the way the row's transform does and succeeded.
+//! succeeded with the refused field dropped for a drop row, or sent at a
+//! different value for every other transform.
 //! The census runs the other way too: every record entry names a row its
 //! egress admits.
 
@@ -50,8 +51,8 @@ enum WeldError {
     /// A record entry naming no committed fixture.
     MissingFixture { key: String },
     /// A committed fixture that cannot be read or parsed, or whose body has
-    /// no `error.message`.
-    UnreadableFixture { key: String },
+    /// no `error.message`; `reason` says which.
+    UnreadableFixture { key: String, reason: String },
     /// A fixture whose status or message is not the record's.
     FixtureDisagrees { key: String },
     /// A record entry whose model is not the one its request sent, or whose
@@ -62,9 +63,26 @@ enum WeldError {
     ResolvesElsewhere { key: String, got: Option<String> },
     /// A record entry whose repaired retry did not succeed.
     NoRepairedSuccess { key: String },
-    /// A record entry whose repaired body leaves the refused field as the
-    /// refused body sent it.
+    /// A record entry whose refused request did not send the field its
+    /// refusal names, so the record contradicts its own capture.
+    RefusedFieldNotSent { key: String },
+    /// A record entry whose repaired body does not drop the refused field
+    /// (a drop row) or send it at a different value (every other transform).
     RepairNotApplied { key: String },
+}
+
+impl WeldError {
+    /// This failure with any free-text reason blanked, so planted rows match
+    /// on the cause and key alone.
+    fn keyed(self) -> Self {
+        match self {
+            Self::UnreadableFixture { key, .. } => Self::UnreadableFixture {
+                key,
+                reason: String::new(),
+            },
+            other => other,
+        }
+    }
 }
 
 /// What reading a fixture found: `Ok(None)` when no file is committed under
@@ -111,14 +129,22 @@ pub(super) fn corpus_fixture(key: &str) -> FixtureRead {
 /// The upstream error a fixture's body becomes on the egress: its status and
 /// body, with the `error.type` and `error.code` tokens the egress lifts from
 /// a nested envelope, so the classifier reads what it reads in production.
-pub(super) fn fixture_error(fixture: &Value) -> Option<(Error, String)> {
-    let status = u16::try_from(fixture["status"].as_u64()?).ok()?;
-    let body = fixture["body"].as_str()?.to_string();
-    let envelope: Value = serde_json::from_str(&body).ok()?;
+/// `Err` says which part of the fixture is missing or malformed.
+pub(super) fn fixture_error(fixture: &Value) -> Result<(Error, String), String> {
+    let status = fixture["status"]
+        .as_u64()
+        .and_then(|status| u16::try_from(status).ok())
+        .ok_or("no HTTP status")?;
+    let body = fixture["body"]
+        .as_str()
+        .ok_or("no body string")?
+        .to_string();
+    let envelope: Value =
+        serde_json::from_str(&body).map_err(|err| format!("body is not JSON: {err}"))?;
     let token = |field: &str| envelope["error"][field].as_str().map(str::to_owned);
-    let message = token("message")?;
+    let message = token("message").ok_or("no error.message")?;
     let err = Error::upstream_full("mantle", status, body, None, token("type"), token("code"));
-    Some((err, message))
+    Ok((err, message))
 }
 
 /// The row the grammar on `egress` names for the refusal `err`, drawn by a
@@ -143,21 +169,35 @@ fn resolved_row(
     .map(|named| named.row)
 }
 
+/// What the repaired retry did to the field the refusal `err` locates in
+/// `sent`.
+#[derive(Debug, PartialEq, Eq)]
+enum RepairCheck {
+    /// Dropped for a drop row; sent at a different value for every other
+    /// transform.
+    Applied,
+    /// The refused request did not send the field its refusal names.
+    NotSent,
+    /// The repaired body does not repair the field as `row` does, or the
+    /// refusal names no wire path to compare.
+    NotApplied,
+}
+
 /// Whether `repaired` changed the field the refusal `err` locates in `sent`
-/// the way `row` repairs it: dropped for a drop row, a different value for
-/// every other transform.
+/// the way `row` repairs it: dropped for a drop row, sent at a different
+/// value for every other transform.
 fn repair_applied(
     row: &FieldRepairRow,
     err: &Error,
     kind: &str,
     sent: &Value,
     repaired: &Value,
-) -> bool {
+) -> RepairCheck {
     let Some(rejected) = super::super::class_observe::upstream_facts(err)
         .status
         .and_then(|status| rejected_wire_path(kind, status, err.parsed_body()))
     else {
-        return false;
+        return RepairCheck::NotApplied;
     };
     let at = |body: &'_ Value| -> Option<Value> {
         rejected
@@ -167,11 +207,20 @@ fn repair_applied(
             .cloned()
     };
     let (before, after) = (at(sent), at(repaired));
-    before.is_some()
-        && match row.transform {
-            FieldTransform::Drop => after.is_none(),
-            _ => after.is_some() && after != before,
-        }
+    if before.is_none() {
+        return RepairCheck::NotSent;
+    }
+    let applied = match row.transform {
+        FieldTransform::Drop => after.is_none(),
+        FieldTransform::Rewrite { .. }
+        | FieldTransform::Ceiling
+        | FieldTransform::RankedRewrite { .. } => after.is_some() && after != before,
+    };
+    if applied {
+        RepairCheck::Applied
+    } else {
+        RepairCheck::NotApplied
+    }
 }
 
 /// Whether the entry's model is the one its request sent, and its fixture's
@@ -203,11 +252,14 @@ fn check_entry(
         .and_then(egress_of_label)
         .filter(|egress| sibling_kind(*egress) == Some(dir))
         .ok_or_else(|| WeldError::ForeignEgress { key: owned() })?;
+    let unreadable = |reason| WeldError::UnreadableFixture {
+        key: owned(),
+        reason,
+    };
     let fixture = fixture(key)
-        .map_err(|_| WeldError::UnreadableFixture { key: owned() })?
+        .map_err(unreadable)?
         .ok_or_else(|| WeldError::MissingFixture { key: owned() })?;
-    let (err, message) =
-        fixture_error(&fixture).ok_or_else(|| WeldError::UnreadableFixture { key: owned() })?;
+    let (err, message) = fixture_error(&fixture).map_err(unreadable)?;
     if fixture["status"] != entry["status"] || entry["message"].as_str() != Some(&message) {
         return Err(WeldError::FixtureDisagrees { key: owned() });
     }
@@ -225,16 +277,17 @@ fn check_entry(
     if !(200..300).contains(&repaired) || !entry["repaired_request_shape"].is_object() {
         return Err(WeldError::NoRepairedSuccess { key: owned() });
     }
-    if !repair_applied(
+    match repair_applied(
         row,
         &err,
         dir,
         &entry["request_shape"],
         &entry["repaired_request_shape"],
     ) {
-        return Err(WeldError::RepairNotApplied { key: owned() });
+        RepairCheck::Applied => Ok(()),
+        RepairCheck::NotSent => Err(WeldError::RefusedFieldNotSent { key: owned() }),
+        RepairCheck::NotApplied => Err(WeldError::RepairNotApplied { key: owned() }),
     }
-    Ok(())
 }
 
 /// Every weld failure of `allowlists` against `record`, and how many record
@@ -376,15 +429,19 @@ fn a_planted_admission_without_its_evidence_is_named_by_its_cause() {
         "not a fixture",
     )
     .expect("fixture written");
+    let a_directory = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(a_directory.path().join(format!("{TOP_P}.json")))
+        .expect("a directory where the fixture file goes");
     let corpus = &corpus_fixture;
     let from_unparsable = &|key: &str| read_fixture(unparsable.path(), key);
+    let from_a_directory = &|key: &str| read_fixture(a_directory.path(), key);
     let without_message = &|key: &str| {
         edited_fixture(key, |fixture| {
             fixture["body"] = json!(r#"{"error":{"code":"unsupported_parameter"}}"#);
         })
     };
     let altered_status = &|key: &str| edited_fixture(key, |fixture| fixture["status"] = json!(422));
-    let rows: [Planted; 15] = [
+    let rows: [Planted; 19] = [
         (
             "an allowlist path the record does not hold",
             &[(EgressKind::OpenaiCompatMantle, &["top_p", "temperature"])],
@@ -419,14 +476,30 @@ fn a_planted_admission_without_its_evidence_is_named_by_its_cause() {
             &compat_top_p,
             top_p_only(),
             from_unparsable,
-            WeldError::UnreadableFixture { key: TOP_P.into() },
+            WeldError::UnreadableFixture {
+                key: TOP_P.into(),
+                reason: String::new(),
+            },
+        ),
+        (
+            "a fixture path that is a directory, not a file",
+            &compat_top_p,
+            top_p_only(),
+            from_a_directory,
+            WeldError::UnreadableFixture {
+                key: TOP_P.into(),
+                reason: String::new(),
+            },
         ),
         (
             "a fixture whose body has no error.message",
             &compat_top_p,
             top_p_only(),
             without_message,
-            WeldError::UnreadableFixture { key: TOP_P.into() },
+            WeldError::UnreadableFixture {
+                key: TOP_P.into(),
+                reason: String::new(),
+            },
         ),
         (
             "a fixture whose status is not the record's",
@@ -508,6 +581,50 @@ fn a_planted_admission_without_its_evidence_is_named_by_its_cause() {
             WeldError::RepairNotApplied { key: TOP_P.into() },
         ),
         (
+            "a drop row whose repaired shape rewrites the field, 200",
+            &compat_top_p,
+            planted_record(&[(
+                TOP_P,
+                edited_entry(TOP_P, |entry| {
+                    entry["repaired_request_shape"]["top_p"] = json!(0.7);
+                }),
+            )]),
+            corpus,
+            WeldError::RepairNotApplied { key: TOP_P.into() },
+        ),
+        (
+            "a ceiling row whose repaired shape omits the limit, 200",
+            &anthropic_ceiling,
+            planted_record(&[(
+                CEILING,
+                edited_entry(CEILING, |entry| {
+                    entry["repaired_request_shape"]
+                        .as_object_mut()
+                        .expect("a repaired shape")
+                        .remove("max_tokens");
+                }),
+            )]),
+            corpus,
+            WeldError::RepairNotApplied {
+                key: CEILING.into(),
+            },
+        ),
+        (
+            "a record whose refused request did not send the refused field",
+            &compat_top_p,
+            planted_record(&[(
+                TOP_P,
+                edited_entry(TOP_P, |entry| {
+                    entry["request_shape"]
+                        .as_object_mut()
+                        .expect("a request shape")
+                        .remove("top_p");
+                }),
+            )]),
+            corpus,
+            WeldError::RefusedFieldNotSent { key: TOP_P.into() },
+        ),
+        (
             "a ceiling row whose repaired shape sends the refused limit, 200",
             &anthropic_ceiling,
             planted_record(&[(
@@ -550,6 +667,7 @@ fn a_planted_admission_without_its_evidence_is_named_by_its_cause() {
         let (failures, _) = weld(allowlists, &record, fixture);
 
         // Assert
-        assert_eq!(failures, vec![expected], "{name}");
+        let keyed: Vec<WeldError> = failures.into_iter().map(WeldError::keyed).collect();
+        assert_eq!(keyed, vec![expected], "{name}");
     }
 }

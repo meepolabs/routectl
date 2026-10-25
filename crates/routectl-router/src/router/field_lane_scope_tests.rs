@@ -351,19 +351,14 @@ fn a_compat_temperature_refusal_coded_unsupported_value_names_no_row() {
     .expect("the fixture is committed");
     let (captured, _) =
         super::lane_weld_tests::fixture_error(&fixture).expect("the fixture is an upstream error");
-    let recoded = {
+    let (recoded, _) = {
         let mut envelope: serde_json::Value =
             serde_json::from_str(fixture["body"].as_str().expect("a body"))
                 .expect("the body is JSON");
         envelope["error"]["code"] = serde_json::json!("unsupported_parameter");
-        Error::upstream_full(
-            "p",
-            400,
-            envelope.to_string(),
-            None,
-            Some("invalid_request_error".into()),
-            Some("unsupported_parameter".into()),
-        )
+        let mut recoded = fixture.clone();
+        recoded["body"] = serde_json::json!(envelope.to_string());
+        super::lane_weld_tests::fixture_error(&recoded).expect("the recoded fixture is an error")
     };
     let named = |err: &Error, egress: EgressKind| {
         let class = routectl_core::failure_class::classify(err, Some(OPENAI_COMPAT)).class;
