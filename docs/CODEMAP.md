@@ -1541,8 +1541,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   to when its configured fields alone determine it (`anthropic-api` and
   standard-lane `openai-compat`: the configured base URL; native `bedrock`: the
   runtime URL derived from `region`; `openai-responses`: the configured base URL,
-  else `default_responses_base(auth_kind)`; a Mantle sub-lane or any other kind:
-  `None`), read by the field stages' attributability decision; `cache_capability()`
+  else `default_responses_base(auth_kind)`; a `bedrock_mantle` block on any of
+  the three Mantle lanes: the Mantle base its region derives,
+  `mantle_anthropic_base` or `mantle_openai_base`; a bare `bedrock-mantle`
+  auth-kind marker, a region that fails admission, or any other kind: `None`),
+  read by the field stages' attributability decision; `cache_capability()`
   fails closed for anthropic-api on a non-default base URL, plus
   `auto_emit_top_level_breakpoint()` and the per-block front-marker trio
   `auto_emit_per_block_breakpoints()` / `per_block_breakpoints_enabled()`
@@ -2862,8 +2865,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   per-lane row view is `FieldRepairTable::for_lane`) -> NOT a forwarded-credential
   target -> `field_repair::attributable_field_lane` (entry present, admitted
   kind, a `ProviderEntry::classifiable_egress_base_url`, NOT
-  `field_verdict::loopback_target_suppresses_minting` over it) -> the entry's
-  kind and egress agree with the target's -> then, PER PRESENT ROW, settlement
+  `field_verdict::loopback_target_suppresses_minting` over it; the admitted
+  `AttributableLane { provider_kind, egress, base_url }`) -> the entry's
+  kind and egress agree with the target's (`AttributableLane::matches_target`)
+  -> then, PER PRESENT ROW, settlement
   mode -> `field_verdict::FieldVerdictKey` -> the single-flight guard, yielding
   one `FieldRepairCandidate` per row that survives (`None` when none does).
   Every present row is admitted rather than only the first, because the
@@ -2953,7 +2958,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   view `FieldRepairTable::for_lane` applies (ranked effort rows off
   openai-compat, ranked rows alone on openai-responses, each Bedrock Mantle
   egress exactly its own allowlist const, each row grounded by a refusal
-  captured on that sub-lane, and no row for an unknown egress) to
+  captured on that sub-lane, and no row for an unknown or local egress) to
   `present_rows`, pre-flight and rejection resolution
   (tests: `src/router/field_repair_effort_tests.rs`, the rank weld included;
   `src/router/field_lane_scope_tests.rs`, the literal per-egress row sets and
@@ -3039,8 +3044,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   the forwarded-credential refusal is NOT repeated here, it belongs to the
   shared attributability decision `plan_field_preflight` reads once per
   target, and reports `unattributable_target`),
-  `preflight_lane_disagreement` (an attributable entry whose kind or egress no longer matches the target, refused once for the
-  whole target), `preflight_identity` (the attribution refusal per row plus the
+  `preflight_lane_disagreement` (an attributable entry whose kind or egress
+  no longer matches the target, refused once for the whole target),
+  `preflight_identity` (the attribution refusal per row plus the
   `FieldVerdictKey`), and `preflight_authorization_for` (mask, eligibility,
   quorum, opt-in) -- each returning the closed-set token its refusal reports.
   `preflight_identity` and `unchanged_record` are free functions rather than
@@ -3395,7 +3401,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   module `//!` doc; the walk's wire behavior is covered in
   `src/router/count_tokens_wire_tests.rs`
 - `src/router/rejection_parser.rs` -- `parse_rejection` -> `NamedRejection`,
-  `RejectionKind`: per-dialect parse of an upstream rejection envelope; also
+  `RejectionKind`: per-dialect parse of an upstream rejection envelope,
+  resolved against the lane view `FieldRepairTable::for_lane` keyed on the
+  attempt's egress (a row outside that view names nothing); also
   `localized_field` -> `LocalizedField` and `FieldIdentity` (tests:
   `src/router/rejection_parser_identity_tests.rs`)
 - `src/router/rejection_parser_beta.rs` -- child module of
@@ -3475,7 +3483,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/router/wire_rejection.rs` -- `Router::settle_failed_attempt`,
   `PendingWireRejection`, `emit_wire_rejections`, `read_count_rejection_site`:
   the wire side of a failed attempt; `effort_and_thinking` reads the sent
-  effort level and thinking shape off the egress body per dialect
+  effort level and thinking shape off the egress body per dialect (the
+  Responses arm covers the direct and the Mantle egress alike)
 - `src/router/wire_response.rs` -- the response leg of the live wire check:
   `ResponseCheck` (public, opaque), carried on `DispatchMeta::response_check`
   from the serving attempt; the ingress renderer hands it the client document
@@ -3701,10 +3710,13 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   dial, a negative replaced while the probe was out gets no clear, and the job
   resolves only after the acknowledgement reports the `cleared` row durable and
   the incarnation-guarded removal applied; otherwise it is `Retryable` with no
-  tombstone and `clear_persistence_failures_total` counts it. A rejection the
-  parser attributes to the very field under test as UNSUPPORTED
-  (`probe_failure_class::rechecked_field_rejection`) refreshes the negative in
-  place and spends the free step
+  tombstone and `clear_persistence_failures_total` counts it. Before the gate
+  spends a rate token, the pre-dial recheck re-reads the seat's lane
+  (`probe_entry_lane`) and dials only when `probe_lane_carries` holds: the lane
+  is still the identity's kind and its view carries the probed row. A rejection
+  the parser attributes to the very field under test as UNSUPPORTED, within
+  the probed lane's view (`probe_failure_class::rechecked_field_rejection`),
+  refreshes the negative in place and spends the free step
 - `src/router/probe_clear_ack.rs` -- the CRATE-BOUNDARY contract for persisting
   a probe-settled clear, on the `capability_health.rs` pattern: the async
   `ProbeClearAcknowledgement` trait the writer-owning crate implements, the
@@ -3811,18 +3823,26 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/router/probe_attribution_parity_tests.rs` -- all FOUR field stages
   (reactive carry, pre-flight planner, probe activation, pre-dial recheck) must
   reach the SAME attributability verdict. A behavioral parity TABLE, one row per
-  provider shape (the production Anthropic default and a remote mirror admitting;
-  loopback, forwarded credential, a reload-removed entry, and -- under `bedrock`
-  -- a Mantle sub-lane refusing), each row driven through every stage on its own
+  provider shape (admitting: the production Anthropic default, a remote mirror,
+  and under `bedrock` a Mantle sub-lane; refusing: loopback, forwarded
+  credential, a reload-removed entry), each row driven through every stage on its own
   fresh router. Catches a stage narrowing or widening its verdict on a fact the
   table VARIES: base URL, credential source, entry presence, Mantle sub-lane. The
-  Mantle row is the one a raw base-url read gets WRONG rather than merely narrow,
-  since its configured base IS that default; its fixture clears `api_key_ref` and
+  Mantle row is the one a raw base-url read gets WRONG, since its configured
+  base IS the Anthropic default while it egresses to the Mantle endpoint its
+  region derives; its fixture clears `api_key_ref` and
   runs the production `validate_provider_bedrock_mantle` so the entry is one an
   operator could write, then pins the base as non-loopback so the row cannot
-  collapse into the loopback row. Scope limits, stated in the module doc: a
-  decision keyed on another entry fact needs a new discriminating row, and a local
-  check merely RESTATING part of the shared set changes no verdict
+  collapse into the loopback row.
+  `the_mantle_sub_lane_is_attributable_and_reads_its_own_allowlist` pins that
+  lane's attributed base and its view (`max_tokens` alone, not the direct
+  sibling's re-check row), and
+  `the_pre_dial_recheck_dials_only_where_the_lane_carries_the_row` pins
+  `probe_lane_carries` (no dial on the Mantle lane or for a re-kinded
+  identity; the direct lane dials as the control). Scope limits, stated in the
+  module doc: a decision keyed on another entry fact needs a new discriminating
+  row, and a local check merely RESTATING part of the shared set changes no
+  verdict
 - `src/router/field_preflight_action_tests.rs` -- `include!`d fragment of
   `field_preflight_tests.rs`: the pre-flight adopted-row action counter and
   the one-WARN-per-request contract
