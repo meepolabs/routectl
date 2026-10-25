@@ -668,6 +668,8 @@ list with more narrative.
 
 ### Fixed
 
+- **Bedrock Mantle's `openai.`-prefixed reasoning models get the OpenAI reasoning-model shaping.** The model profile table matched bare ids only, so on the Mantle Chat Completions lane `openai.gpt-5.6-terra` kept its sampling parameters and was sent `max_tokens`, which it refuses before any other field; a client sending an output limit got a 400 on every request. A leading `openai.` is now ignored when looking up a profile, so these ids drop sampling parameters and send `max_completion_tokens` exactly as their bare ids do. See [docs/PROVIDER-QUIRKS.md](docs/PROVIDER-QUIRKS.md#openai--o-series--gpt-5).
+
 - **`config migrate --help` names the whole migration ladder.** The help described only the v1->v2->v3 rungs. It now names every rung through v4->v5 with what each one folds, and says that a file already at version 5 still carrying `allowed_betas`, `unsupported_features` or a top-level `[bedrock]` table is refused with each key named.
 
 - **Bedrock Converse forwards a client's structured-output format.** Converse treated the client's whole `output_config` as a key routectl manages and dropped it, so an Anthropic client's `output_config.format` never reached the model on that lane while the same request on anthropic-api kept it. The client's `format` now merges into the `output_config` routectl composes, beside any effort, and wins over a `response_format` conversion as it does on anthropic-api. It is read only from an Anthropic Messages client or a library caller; another dialect's `output_config` counts as `foreign_dialect_extra`.

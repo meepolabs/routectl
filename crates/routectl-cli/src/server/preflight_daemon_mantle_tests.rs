@@ -70,30 +70,26 @@ mod mantle {
             }
         }
 
-        fn state_key(self) -> String {
-            format!("{SEAT}#{}", self.upstream())
-        }
-
         /// The 2xx the origin answers with once the refused field is gone.
-        fn success(self) -> ResponseTemplate {
+        fn success(self, upstream: &str) -> ResponseTemplate {
             match self {
                 Self::Anthropic => ResponseTemplate::new(200).set_body_json(json!({
                     "id": "msg_mantle", "type": "message", "role": "assistant",
-                    "model": self.upstream(),
+                    "model": upstream,
                     "content": [{"type": "text", "text": "ok"}],
                     "stop_reason": "end_turn",
                     "usage": {"input_tokens": 3, "output_tokens": 1}
                 })),
                 Self::Compat => ResponseTemplate::new(200).set_body_json(json!({
                     "id": "c1", "object": "chat.completion", "created": 1_700_000_000_i64,
-                    "model": self.upstream(), "system_fingerprint": null,
+                    "model": upstream, "system_fingerprint": null,
                     "choices": [{"index": 0, "finish_reason": "stop",
                                  "message": {"role": "assistant", "content": "ok"}}],
                     "usage": {"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4}
                 })),
                 Self::Responses => ResponseTemplate::new(200)
                     .insert_header("content-type", "text/event-stream")
-                    .set_body_string(responses_stream(self.upstream())),
+                    .set_body_string(responses_stream(upstream)),
             }
         }
     }
@@ -147,10 +143,17 @@ mod mantle {
         ResponseTemplate::new(status).set_body_raw(body, "application/json")
     }
 
+    /// The ledger key of the lane serving `upstream`.
+    fn state_key(upstream: &str) -> String {
+        format!("{SEAT}#{upstream}")
+    }
+
     /// An origin answering `refusal` to any body matching `refused` (every
-    /// body when `None`) and the sub-lane's 2xx to everything else.
+    /// body when `None`) and the sub-lane's 2xx, naming `upstream`, to
+    /// everything else.
     async fn origin(
         lane: SubLane,
+        upstream: &str,
         refused: Option<Value>,
         refusal: ResponseTemplate,
     ) -> MockServer {
@@ -166,14 +169,15 @@ mod mantle {
         .await;
         Mock::given(method("POST"))
             .and(path(lane.wire_path()))
-            .respond_with(lane.success())
+            .respond_with(lane.success(upstream))
             .mount(&server)
             .await;
         server
     }
 
-    /// A config whose one entry is the sub-lane's Mantle entry in `REGION`.
-    fn mantle_config(lane: SubLane) -> (Arc<Config>, tempfile::TempDir) {
+    /// A config whose one entry is the sub-lane's Mantle entry in `REGION`,
+    /// serving `upstream`.
+    fn mantle_config(lane: SubLane, upstream: &str) -> (Arc<Config>, tempfile::TempDir) {
         let key_ref = crate::test_secret::file_ref("mantle-daemon-key");
         let toml_text = format!(
             "\n[providers.{SEAT}]\nkind = \"{}\"\napi_key_ref = \"\"\n\n\
@@ -182,10 +186,9 @@ mod mantle {
             lane.kind()
         );
         let mut config: Config = toml::from_str(&toml_text).expect("valid mantle test toml");
-        config.models.insert(
-            MANTLE_NICKNAME.to_string(),
-            ModelEntry::new(SEAT, lane.upstream()),
-        );
+        config
+            .models
+            .insert(MANTLE_NICKNAME.to_string(), ModelEntry::new(SEAT, upstream));
         for alias in [MANTLE_ALIAS, "default"] {
             config.aliases.insert(
                 alias.to_string(),
@@ -280,7 +283,12 @@ mod mantle {
         Arc::new(AnthropicApiProvider::new(cfg).with_host_resolved_to_for_tests(addr))
     }
 
-    fn mantle_router(config: &Arc<Config>, lane: SubLane, origin: &MockServer) -> Router {
+    fn mantle_router(
+        config: &Arc<Config>,
+        lane: SubLane,
+        upstream: &str,
+        origin: &MockServer,
+    ) -> Router {
         let mut router = Router::new(Arc::clone(config));
         router.install_resolved_models(BTreeMap::from([(
             MANTLE_NICKNAME.to_string(),
@@ -288,7 +296,7 @@ mod mantle {
                 MANTLE_NICKNAME.to_string(),
                 SEAT.to_string(),
                 provider(lane, origin),
-                lane.upstream().to_string(),
+                upstream.to_string(),
             )),
         )]));
         router
@@ -318,8 +326,9 @@ mod mantle {
             .collect()
     }
 
-    /// The persisted value of every ledger row for `path` on `lane`.
-    fn ledger_values(db_path: &std::path::Path, lane: SubLane, path: &str) -> Vec<Option<String>> {
+    /// The persisted value of every ledger row for `path` on the lane serving
+    /// `upstream`.
+    fn ledger_values(db_path: &std::path::Path, upstream: &str, path: &str) -> Vec<Option<String>> {
         let key = format!("{}{}{path}", "fie", "ld:");
         let Ok(db) = routectl_usage::open_readonly(db_path) else {
             return Vec::new();
@@ -331,7 +340,7 @@ mod mantle {
                  WHERE lane_key = ?1 AND capability = ?2 ORDER BY id",
             )
             .expect("prepare");
-        stmt.query_map([lane.state_key().as_str(), key.as_str()], |r| r.get(0))
+        stmt.query_map([state_key(upstream).as_str(), key.as_str()], |r| r.get(0))
             .expect("query")
             .collect::<std::result::Result<_, _>>()
             .expect("rows read")
@@ -343,11 +352,11 @@ mod mantle {
     async fn await_acknowledged(
         daemon: &Daemon,
         db_path: &std::path::Path,
-        lane: SubLane,
+        upstream: &str,
         path: &str,
     ) {
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        while ledger_values(db_path, lane, path).is_empty()
+        while ledger_values(db_path, upstream, path).is_empty()
             || daemon.confirmations().in_flight() > 0
         {
             assert!(
@@ -363,6 +372,7 @@ mod mantle {
     /// field off a wire body.
     struct Replay {
         lane: SubLane,
+        upstream: &'static str,
         body: Value,
         refused: Value,
         capture: &'static str,
@@ -381,6 +391,7 @@ mod mantle {
         [
             Replay {
                 lane: SubLane::Anthropic,
+                upstream: SubLane::Anthropic.upstream(),
                 body: json!({
                     "model": MANTLE_ALIAS, "max_tokens": 1_000_000, "stream": false,
                     "messages": [{"role": "user", "content": "hi"}],
@@ -394,8 +405,11 @@ mod mantle {
                 ledger: Some("ceiling:64000"),
             },
             // Not the captured `request_shape`: the mock keys only on `top_p`.
+            // The refusal body is the gpt-5.6-terra capture and names no
+            // model; a gpt-6-family capture will replace it.
             Replay {
                 lane: SubLane::Compat,
+                upstream: "openai.gpt-6-sol",
                 body: json!({
                     "model": MANTLE_ALIAS, "max_tokens": 16, "top_p": 0.5,
                     "messages": [{"role": "user", "content": "hi"}],
@@ -410,6 +424,7 @@ mod mantle {
             },
             Replay {
                 lane: SubLane::Responses,
+                upstream: SubLane::Responses.upstream(),
                 body: json!({
                     "model": MANTLE_ALIAS, "input": "hi", "max_output_tokens": 16,
                     "reasoning": {"effort": "minimal"},
@@ -438,10 +453,16 @@ mod mantle {
     async fn replay_and_preflight(replay: Replay) {
         let name = replay.lane.kind();
         // Arrange
-        let origin = origin(replay.lane, Some(replay.refused), captured(replay.capture)).await;
-        let (config, dir) = mantle_config(replay.lane);
+        let origin = origin(
+            replay.lane,
+            replay.upstream,
+            Some(replay.refused),
+            captured(replay.capture),
+        )
+        .await;
+        let (config, dir) = mantle_config(replay.lane, replay.upstream);
         let db_path = config.usage.db_path.clone();
-        let router = mantle_router(&config, replay.lane, &origin);
+        let router = mantle_router(&config, replay.lane, replay.upstream, &origin);
         let daemon = spawn_daemon(config, dir, router).await;
 
         // Act: the first turn draws the refusal and one repaired retry.
@@ -459,8 +480,8 @@ mod mantle {
             vec![replay.sent.clone(), replay.repaired.clone()],
             "{name}: one refused attempt as sent, one repaired retry",
         );
-        await_acknowledged(&daemon, &db_path, replay.lane, replay.path).await;
-        let values = ledger_values(&db_path, replay.lane, replay.path);
+        await_acknowledged(&daemon, &db_path, replay.upstream, replay.path).await;
+        let values = ledger_values(&db_path, replay.upstream, replay.path);
         assert_eq!(
             values.iter().map(Option::as_deref).collect::<Vec<_>>(),
             vec![replay.ledger],
@@ -515,7 +536,7 @@ mod mantle {
             "https://bedrock-mantle.invalid/openai/v1".into(),
         ))
         .normalize_request(&routectl_core::ChatRequest {
-            model: SubLane::Compat.upstream().into(),
+            model: replay.upstream.into(),
             top_p: Some(0.5),
             ..Default::default()
         })
@@ -523,12 +544,66 @@ mod mantle {
         assert_eq!(
             sent["top_p"],
             json!(0.5),
-            "premise: the compat egress sends top_p for {}; if its model profile now \
-             drops sampling params for this vendor-prefixed id, this replay can no \
-             longer draw the refusal",
-            SubLane::Compat.upstream(),
+            "premise: the compat egress sends top_p for {}; a model whose profile \
+             drops sampling params never draws this refusal, so the replay needs \
+             one whose profile keeps them",
+            replay.upstream,
         );
         replay_and_preflight(replay).await;
+    }
+
+    /// A compat Mantle reasoning model refuses `max_tokens` before any other
+    /// field. A client sending an output limit and `top_p` is served on the
+    /// first attempt: the egress sends the limit as `max_completion_tokens`
+    /// and drops `top_p`, so no refusal is drawn and nothing is learned.
+    ///
+    /// Mutation check: stop `profile_for` stripping the `openai.` vendor
+    /// segment -> red (the refusal reaches the client).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn compat_mantle_reasoning_model_sends_its_output_limit_renamed_on_the_first_attempt() {
+        let lane = SubLane::Compat;
+        let upstream = lane.upstream();
+        // Arrange
+        let origin = origin(
+            lane,
+            upstream,
+            Some(json!({"max_tokens": 16})),
+            captured("openai-compat/unsupported-parameter-max-tokens-mantle"),
+        )
+        .await;
+        let (config, dir) = mantle_config(lane, upstream);
+        let db_path = config.usage.db_path.clone();
+        let router = mantle_router(&config, lane, upstream, &origin);
+        let daemon = spawn_daemon(config, dir, router).await;
+        let body = json!({
+            "model": MANTLE_ALIAS, "max_completion_tokens": 16, "top_p": 0.5,
+            "messages": [{"role": "user", "content": "hi"}],
+        });
+
+        // Act
+        let status = post(&daemon, lane, &body).await;
+
+        // Assert
+        assert_eq!(
+            status,
+            reqwest::StatusCode::OK,
+            "served on the first attempt"
+        );
+        let wire = wire_bodies(&origin).await;
+        assert_eq!(wire.len(), 1, "one dial, no retry: {wire:?}");
+        assert_eq!(wire[0]["max_completion_tokens"], json!(16), "{}", wire[0]);
+        assert!(wire[0].get("max_tokens").is_none(), "{}", wire[0]);
+        assert!(wire[0].get("top_p").is_none(), "{}", wire[0]);
+        let counters = daemon.live_router().field_repair_counters();
+        assert_eq!(counters.repair_attempted, 0, "nothing repaired");
+        assert_eq!(counters.preflight_actions, 0, "nothing preflighted");
+        for path in ["max_tokens", "top_p"] {
+            assert!(
+                ledger_values(&db_path, upstream, path).is_empty(),
+                "no verdict on {path}"
+            );
+        }
+        daemon.shutdown().await;
     }
 
     /// The Responses Mantle ranked row.
@@ -575,9 +650,9 @@ mod mantle {
         for (lane, capture, body) in controls {
             let name = lane.kind();
             // Arrange
-            let origin = origin(lane, None, captured(capture)).await;
-            let (config, dir) = mantle_config(lane);
-            let router = mantle_router(&config, lane, &origin);
+            let origin = origin(lane, lane.upstream(), None, captured(capture)).await;
+            let (config, dir) = mantle_config(lane, lane.upstream());
+            let router = mantle_router(&config, lane, lane.upstream(), &origin);
             let daemon = spawn_daemon(config, dir, router).await;
 
             // Act

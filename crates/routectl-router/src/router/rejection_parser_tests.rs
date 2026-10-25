@@ -389,6 +389,13 @@ fn every_committed_rejection_fixture_resolves_to_a_row_or_is_reported_unresolved
             "openai-compat/unsupported-parameter-frequency-penalty-mantle",
             Outcome::Row("frequency_penalty", SelfIdentifying, UnsupportedField),
         ),
+        // The grammar reads the `max_tokens` path, but the compat Mantle lane
+        // admits no row on it: the egress's reasoning-model rename is what
+        // keeps this refusal from being drawn.
+        (
+            "openai-compat/unsupported-parameter-max-tokens-mantle",
+            Outcome::Row("max_tokens", SelfIdentifying, UnsupportedField),
+        ),
         // The grammar reads the row, but its `unsupported_value` code takes
         // the refusal out of the class the field gate passes on openai-compat,
         // so `rejected_field` refuses a live rejection with this envelope

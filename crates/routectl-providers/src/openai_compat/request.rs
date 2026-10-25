@@ -971,6 +971,25 @@ mod tests {
         );
     }
 
+    /// Bedrock Mantle names OpenAI models with an `openai.` vendor segment;
+    /// the reasoning-model shaping still applies.
+    #[test]
+    fn openai_shapes_vendor_prefixed_reasoning_model_like_its_bare_id() {
+        let req = simple_req("openai.gpt-5.6-terra");
+        let body = normalize(
+            "test",
+            &req,
+            ReasoningDialect::OpenAi,
+            HistoryReasoning::Auto,
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(body["max_completion_tokens"], 512, "got: {body}");
+        assert!(body.get("max_tokens").is_none(), "got: {body}");
+        assert!(body.get("top_p").is_none(), "got: {body}");
+    }
+
     /// Non-reasoning models keep `max_tokens` unchanged and must not gain
     /// a `max_completion_tokens` key.
     #[test]

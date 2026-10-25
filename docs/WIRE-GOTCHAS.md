@@ -79,7 +79,8 @@ Surfaces: [openai-compat](#openai-compat-surface) -
   served. The static drop table (`model_profile.rs` `PROFILES` and
   `SAMPLING_DROP` in `openai_compat/dialects/util.rs`) and the
   `max_tokens` -> `max_completion_tokens` rename stay as shipped seeds
-  for the models they list. `logprobs` and `top_logprobs` have no row.
+  for the models they list, `openai.`-prefixed (Bedrock Mantle) ids
+  included. `logprobs` and `top_logprobs` have no row.
   The grounding envelopes are under
   `crates/routectl-router/tests/fixtures/rejections/openai-compat/`.
 

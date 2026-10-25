@@ -130,14 +130,22 @@ pub const PROFILES: &[ModelProfile] = &[
 /// Default profile reference for models not in `PROFILES`.
 pub static DEFAULT_PROFILE: ModelProfile = ModelProfile::DEFAULT;
 
+/// The vendor segment Bedrock Mantle puts in front of OpenAI model ids.
+/// Only this exact segment is stripped: a generic `<word>.` strip would cut
+/// dotted versions such as `gpt-5.4` down to their tail.
+const OPENAI_VENDOR_PREFIX: &str = "openai.";
+
 /// Look up the profile for `model_id`. Returns the first matching row
 /// in [`PROFILES`], or [`DEFAULT_PROFILE`] if none match.
 ///
-/// Matching is case-insensitive.
+/// Matching is case-insensitive. A leading `openai.` vendor segment is
+/// ignored, so a vendor-prefixed id (Bedrock Mantle's `openai.gpt-5.6-terra`)
+/// resolves to the same profile as its bare id.
 pub fn profile_for(model_id: &str) -> &'static ModelProfile {
     let lower = model_id.to_ascii_lowercase();
+    let bare = lower.strip_prefix(OPENAI_VENDOR_PREFIX).unwrap_or(&lower);
     for p in PROFILES {
-        if p.matches(&lower) {
+        if p.matches(bare) {
             return p;
         }
     }
@@ -243,6 +251,34 @@ mod tests {
     fn case_insensitive_match() {
         let p = profile_for("O3-MINI");
         assert!(p.drops_sampling_params);
+    }
+
+    #[test]
+    fn openai_vendor_prefixed_id_resolves_to_its_bare_ids_profile() {
+        let cases = [
+            ("openai.gpt-5.6-terra", "gpt-5.6-terra", true),
+            ("openai.gpt-5.4", "gpt-5.4", false),
+            ("openai.gpt-5-chat-latest", "gpt-5-chat-latest", false),
+            ("openai.o3-mini", "o3-mini", true),
+            ("OPENAI.GPT-5", "gpt-5", true),
+            ("openai.gpt-oss-120b", "gpt-oss-120b", false),
+        ];
+        for (prefixed, bare, drops) in cases {
+            let p = profile_for(prefixed);
+            assert!(
+                std::ptr::eq(p, profile_for(bare)),
+                "{prefixed}: resolves to a different row than {bare}"
+            );
+            assert_eq!(p.drops_sampling_params, drops, "{prefixed}");
+        }
+    }
+
+    #[test]
+    fn only_the_openai_vendor_segment_is_stripped() {
+        // A different vendor segment is not a known alias: `anthropic.o3`
+        // must not reach the `o3` prefix row.
+        let p = profile_for("anthropic.o3-mini");
+        assert!(std::ptr::eq(p, profile_for("totally-unknown-model-xyz")));
     }
 
     #[test]
