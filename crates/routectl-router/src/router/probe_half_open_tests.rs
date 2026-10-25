@@ -619,7 +619,7 @@ async fn a_lane_that_recovers_after_deferrals_still_dials() {
 /// view carries every row.
 ///
 /// Mutation check: drop the `provider_kind` half of `probe_lane_carries` ->
-/// red (the probe dials and charges its token).
+/// red (the recheck settles instead of refusing).
 #[tokio::test]
 async fn a_recheck_refused_by_its_lane_kind_charges_no_rpm_token() {
     let provider = Arc::new(OkProvider {

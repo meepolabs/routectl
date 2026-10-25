@@ -3035,7 +3035,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   and never the state: the verdict stays resident, acting, and confirmed.
   The gate chain is split across four helpers rather than one long function --
   `preflight_lane_admits` (kill switch and lane only: returns the admitted
-  provider kind, or `None`, which its caller reports as `unsupported_lane`;
+  provider kind, or `None`, which the per-row gate reports as `unsupported_lane`;
   the forwarded-credential refusal is NOT repeated here, it belongs to the
   shared attributability decision `plan_field_preflight` reads once per
   target, and reports `unattributable_target`),

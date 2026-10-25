@@ -50,8 +50,8 @@ enum WeldError {
     ForeignEgress { key: String },
     /// A record entry naming no committed fixture.
     MissingFixture { key: String },
-    /// A committed fixture that cannot be read or parsed, or whose body has
-    /// no `error.message`; `reason` says which.
+    /// A committed fixture that cannot be read or parsed, or that lacks a
+    /// field the weld reads; `reason` says which.
     UnreadableFixture { key: String, reason: String },
     /// A fixture whose status or message is not the record's.
     FixtureDisagrees { key: String },
