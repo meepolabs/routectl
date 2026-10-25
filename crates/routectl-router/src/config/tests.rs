@@ -764,9 +764,10 @@ fn mantle_entry(kind: &str, region: &str) -> ProviderEntry {
 ///
 /// Mutation check: drop the anthropic Mantle arm -> red on the anthropic
 /// us-west-2 row (it falls to `anthropic_api_base_url`, `None`); replace a
-/// Mantle arm's body with
-/// `Some(Cow::Owned(mantle_anthropic_base(&m.region).unwrap_or_else(|_|
-/// "https://bedrock-mantle.invalid".into())))` (that arm's own base function)
+/// Mantle arm's body with `Some(std::borrow::Cow::Owned(<base>(&m.region)
+/// .unwrap_or_else(|_| "https://bedrock-mantle.invalid".into())))`, where
+/// `<base>` is that arm's own base function
+/// (`routectl_providers::mantle::mantle_anthropic_base` on the anthropic arm)
 /// -> red on that sub-lane's bad-region row.
 #[cfg(feature = "bedrock")]
 #[test]

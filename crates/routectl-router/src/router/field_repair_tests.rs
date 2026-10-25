@@ -1616,7 +1616,7 @@ async fn a_remote_target_on_the_same_lane_repairs_on_every_walk() {
 
 #[cfg(feature = "bedrock")]
 #[tokio::test]
-async fn a_bedrock_mantle_target_performs_no_field_repair_on_any_walk() {
+async fn a_bedrock_mantle_target_never_repairs_a_row_its_lane_view_omits() {
     // A mantle entry is `kind = "anthropic-api"` and is attributable through
     // the Mantle endpoint its region derives, but its lane view holds only the
     // rows a refusal captured on Mantle grounds, and the direct sibling's rows

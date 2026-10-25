@@ -3,22 +3,24 @@
 //! record (`tests/fixtures/mantle_capture.json`) holds an entry whose committed
 //! fixture the existing grammar on that egress resolves to that row, through
 //! the same class gate a live rejection passes, and whose one repaired retry
-//! succeeded. The census runs the other way too: every record entry names a
-//! row its egress admits.
+//! changed the refused field the way the row's transform does and succeeded.
+//! The census runs the other way too: every record entry names a row its
+//! egress admits.
 
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use routectl_core::Error;
 use routectl_core::failure_class::classify;
 use routectl_core::wire_check::EgressKind;
 use serde_json::{Value, json};
 
+use super::super::rejection_parser::rejected_wire_path;
 use super::super::wire_rejection::effort_and_thinking;
 use super::effort::{
     ANTHROPIC_API_MANTLE_ROWS, OPENAI_COMPAT_MANTLE_ROWS, OPENAI_RESPONSES_MANTLE_ROWS,
 };
-use super::{FieldRepairTable, rejected_field};
+use super::{FieldRepairRow, FieldRepairTable, FieldTransform, rejected_field};
 
 const CAPTURE: &str = include_str!("../../tests/fixtures/mantle_capture.json");
 
@@ -47,14 +49,27 @@ enum WeldError {
     ForeignEgress { key: String },
     /// A record entry naming no committed fixture.
     MissingFixture { key: String },
+    /// A committed fixture that cannot be read or parsed, or whose body has
+    /// no `error.message`.
+    UnreadableFixture { key: String },
     /// A fixture whose status or message is not the record's.
     FixtureDisagrees { key: String },
+    /// A record entry whose model is not the one its request sent, or whose
+    /// fixture note does not open with that model and the capture date.
+    ModelDisagrees { key: String },
     /// A fixture the grammar on the entry's egress resolves to another row,
     /// or to none.
     ResolvesElsewhere { key: String, got: Option<String> },
     /// A record entry whose repaired retry did not succeed.
     NoRepairedSuccess { key: String },
+    /// A record entry whose repaired body leaves the refused field as the
+    /// refused body sent it.
+    RepairNotApplied { key: String },
 }
+
+/// What reading a fixture found: `Ok(None)` when no file is committed under
+/// the key, `Err` when one is but cannot be read or parsed.
+pub(super) type FixtureRead = Result<Option<Value>, String>;
 
 /// The provider kind whose grammar a Mantle egress's refusals are read with.
 fn sibling_kind(egress: EgressKind) -> Option<&'static str> {
@@ -76,16 +91,27 @@ fn rejections_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/rejections")
 }
 
-/// The committed `rejections/<key>.json`, or `None` when there is none.
-fn corpus_fixture(key: &str) -> Option<Value> {
-    let text = std::fs::read_to_string(rejections_dir().join(format!("{key}.json"))).ok()?;
-    serde_json::from_str(&text).ok()
+/// The `<key>.json` fixture under `dir`.
+fn read_fixture(dir: &Path, key: &str) -> FixtureRead {
+    let text = match std::fs::read_to_string(dir.join(format!("{key}.json"))) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err.to_string()),
+    };
+    serde_json::from_str(&text)
+        .map(Some)
+        .map_err(|err| err.to_string())
+}
+
+/// The committed `rejections/<key>.json`.
+pub(super) fn corpus_fixture(key: &str) -> FixtureRead {
+    read_fixture(&rejections_dir(), key)
 }
 
 /// The upstream error a fixture's body becomes on the egress: its status and
 /// body, with the `error.type` and `error.code` tokens the egress lifts from
 /// a nested envelope, so the classifier reads what it reads in production.
-fn fixture_error(fixture: &Value) -> Option<(Error, String)> {
+pub(super) fn fixture_error(fixture: &Value) -> Option<(Error, String)> {
     let status = u16::try_from(fixture["status"].as_u64()?).ok()?;
     let body = fixture["body"].as_str()?.to_string();
     let envelope: Value = serde_json::from_str(&body).ok()?;
@@ -95,33 +121,80 @@ fn fixture_error(fixture: &Value) -> Option<(Error, String)> {
     Some((err, message))
 }
 
-/// The row the grammar on `egress` names for `fixture`, drawn by a request
-/// that sent `request_shape`: the live resolver, behind the class gate.
+/// The row the grammar on `egress` names for the refusal `err`, drawn by a
+/// request that sent `request_shape`: the live resolver, behind the class
+/// gate.
 fn resolved_row(
-    fixture: &Value,
+    err: &Error,
     kind: &str,
     egress: EgressKind,
     request_shape: &Value,
-) -> Option<&'static str> {
-    let (err, _) = fixture_error(fixture)?;
-    let class = classify(&err, Some(kind)).class;
+) -> Option<&'static FieldRepairRow> {
+    let class = classify(err, Some(kind)).class;
     let (sent, _) = effort_and_thinking(egress, request_shape);
     rejected_field(
         FieldRepairTable::grounded_only(),
         &class,
-        &err,
+        err,
         kind,
         Some(egress),
         sent,
     )
-    .map(|named| named.row.path)
+    .map(|named| named.row)
+}
+
+/// Whether `repaired` changed the field the refusal `err` locates in `sent`
+/// the way `row` repairs it: dropped for a drop row, a different value for
+/// every other transform.
+fn repair_applied(
+    row: &FieldRepairRow,
+    err: &Error,
+    kind: &str,
+    sent: &Value,
+    repaired: &Value,
+) -> bool {
+    let Some(rejected) = super::super::class_observe::upstream_facts(err)
+        .status
+        .and_then(|status| rejected_wire_path(kind, status, err.parsed_body()))
+    else {
+        return false;
+    };
+    let at = |body: &'_ Value| -> Option<Value> {
+        rejected
+            .locator
+            .segments()
+            .try_fold(body, |value, segment| value.get(segment))
+            .cloned()
+    };
+    let (before, after) = (at(sent), at(repaired));
+    before.is_some()
+        && match row.transform {
+            FieldTransform::Drop => after.is_none(),
+            _ => after.is_some() && after != before,
+        }
+}
+
+/// Whether the entry's model is the one its request sent, and its fixture's
+/// note opens naming that model and the capture date.
+fn names_its_capture(dir: &str, entry: &Value, fixture: &Value) -> bool {
+    let (Some(model), Some(date)) = (
+        entry["model"].as_str(),
+        entry["date"].as_str().and_then(|date| date.get(..10)),
+    ) else {
+        return false;
+    };
+    let opening = format!("Tier 1, captured on {dir} ({date}, {model}, ");
+    entry["request_shape"]["model"].as_str() == Some(model)
+        && fixture["note"]
+            .as_str()
+            .is_some_and(|note| note.starts_with(&opening))
 }
 
 /// Check one record entry against its fixture, its grammar and its retry.
 fn check_entry(
     key: &str,
     entry: &Value,
-    fixture: impl Fn(&str) -> Option<Value>,
+    fixture: impl Fn(&str) -> FixtureRead,
 ) -> Result<(), WeldError> {
     let owned = || key.to_string();
     let dir = key.split_once('/').map_or(key, |(dir, _)| dir);
@@ -130,23 +203,36 @@ fn check_entry(
         .and_then(egress_of_label)
         .filter(|egress| sibling_kind(*egress) == Some(dir))
         .ok_or_else(|| WeldError::ForeignEgress { key: owned() })?;
-    let fixture = fixture(key).ok_or_else(|| WeldError::MissingFixture { key: owned() })?;
-    let agrees = fixture_error(&fixture).is_some_and(|(_, message)| {
-        fixture["status"] == entry["status"] && entry["message"].as_str() == Some(&message)
-    });
-    if !agrees {
+    let fixture = fixture(key)
+        .map_err(|_| WeldError::UnreadableFixture { key: owned() })?
+        .ok_or_else(|| WeldError::MissingFixture { key: owned() })?;
+    let (err, message) =
+        fixture_error(&fixture).ok_or_else(|| WeldError::UnreadableFixture { key: owned() })?;
+    if fixture["status"] != entry["status"] || entry["message"].as_str() != Some(&message) {
         return Err(WeldError::FixtureDisagrees { key: owned() });
     }
-    let got = resolved_row(&fixture, dir, egress, &entry["request_shape"]);
-    if got != entry["row"].as_str() {
-        return Err(WeldError::ResolvesElsewhere {
-            key: owned(),
-            got: got.map(str::to_string),
-        });
+    if !names_its_capture(dir, entry, &fixture) {
+        return Err(WeldError::ModelDisagrees { key: owned() });
     }
+    let resolved = resolved_row(&err, dir, egress, &entry["request_shape"]);
+    let row = resolved
+        .filter(|row| entry["row"].as_str() == Some(row.path))
+        .ok_or_else(|| WeldError::ResolvesElsewhere {
+            key: owned(),
+            got: resolved.map(|row| row.path.to_string()),
+        })?;
     let repaired = entry["repaired_status"].as_u64().unwrap_or_default();
     if !(200..300).contains(&repaired) || !entry["repaired_request_shape"].is_object() {
         return Err(WeldError::NoRepairedSuccess { key: owned() });
+    }
+    if !repair_applied(
+        row,
+        &err,
+        dir,
+        &entry["request_shape"],
+        &entry["repaired_request_shape"],
+    ) {
+        return Err(WeldError::RepairNotApplied { key: owned() });
     }
     Ok(())
 }
@@ -156,7 +242,7 @@ fn check_entry(
 fn weld(
     allowlists: Allowlists,
     record: &Value,
-    fixture: impl Fn(&str) -> Option<Value> + Copy,
+    fixture: impl Fn(&str) -> FixtureRead + Copy,
 ) -> (Vec<WeldError>, usize) {
     let cases = record["cases"].as_object().cloned().unwrap_or_default();
     let recorded: BTreeSet<(String, String)> = cases
@@ -239,38 +325,71 @@ fn committed_entry(key: &str) -> Value {
 
 const TOP_P: &str = "openai-compat/unsupported-parameter-top-p-mantle";
 const PRESENCE: &str = "openai-compat/unsupported-parameter-presence-penalty-mantle";
+const CEILING: &str = "anthropic-api/max-tokens-above-model-limit-mantle";
+const RANKED: &str = "openai-responses/reasoning-effort-minimal-unsupported-mantle";
+
+/// `key`'s committed entry with `edit` applied.
+fn edited_entry(key: &str, edit: impl FnOnce(&mut Value)) -> Value {
+    let mut entry = committed_entry(key);
+    edit(&mut entry);
+    entry
+}
+
+/// The committed fixture for `key` with `edit` applied.
+fn edited_fixture(key: &str, edit: fn(&mut Value)) -> FixtureRead {
+    corpus_fixture(key).map(|fixture| {
+        fixture.map(|mut fixture| {
+            edit(&mut fixture);
+            fixture
+        })
+    })
+}
+
+/// One planted weld: what it plants, the allowlists it is checked against,
+/// the record, where its fixtures are read, and the one failure it draws.
+type Planted<'a> = (
+    &'static str,
+    Allowlists<'a>,
+    Value,
+    &'a dyn Fn(&str) -> FixtureRead,
+    WeldError,
+);
 
 /// Each way an admission can come loose from its evidence is caught and
 /// named, against allowlists of its own, so the weld goes red whatever the
 /// production allowlists hold.
 #[test]
 fn a_planted_admission_without_its_evidence_is_named_by_its_cause() {
+    // Arrange
     let compat_top_p: [(EgressKind, &[&str]); 1] = [(EgressKind::OpenaiCompatMantle, &["top_p"])];
-    let missing_fixture = {
-        let mut entry = committed_entry(TOP_P);
-        entry["row"] = json!("top_p");
-        planted_record(&[("openai-compat/no-such-capture-mantle", entry)])
+    let anthropic_ceiling: [(EgressKind, &[&str]); 1] =
+        [(EgressKind::AnthropicApiMantle, &["max_tokens"])];
+    let responses_minimal: [(EgressKind, &[&str]); 1] = [(
+        EgressKind::OpenaiResponsesMantle,
+        &["output_config.effort.minimal"],
+    )];
+    let top_p_only = || planted_record(&[(TOP_P, committed_entry(TOP_P))]);
+    let unparsable = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir(unparsable.path().join("openai-compat")).expect("dialect dir");
+    std::fs::write(
+        unparsable.path().join(format!("{TOP_P}.json")),
+        "not a fixture",
+    )
+    .expect("fixture written");
+    let corpus = &corpus_fixture;
+    let from_unparsable = &|key: &str| read_fixture(unparsable.path(), key);
+    let without_message = &|key: &str| {
+        edited_fixture(key, |fixture| {
+            fixture["body"] = json!(r#"{"error":{"code":"unsupported_parameter"}}"#);
+        })
     };
-    let resolves_elsewhere = planted_record(&[(PRESENCE, {
-        let mut entry = committed_entry(PRESENCE);
-        entry["row"] = json!("top_p");
-        entry
-    })]);
-    let failed_retry = planted_record(&[(TOP_P, {
-        let mut entry = committed_entry(TOP_P);
-        entry["repaired_status"] = json!(400);
-        entry
-    })]);
-    let foreign_egress = planted_record(&[(TOP_P, {
-        let mut entry = committed_entry(TOP_P);
-        entry["egress"] = json!("openai-compat");
-        entry
-    })]);
-    let rows: [(&str, Allowlists, Value, WeldError); 6] = [
+    let altered_status = &|key: &str| edited_fixture(key, |fixture| fixture["status"] = json!(422));
+    let rows: [Planted; 15] = [
         (
             "an allowlist path the record does not hold",
             &[(EgressKind::OpenaiCompatMantle, &["top_p", "temperature"])],
-            planted_record(&[(TOP_P, committed_entry(TOP_P))]),
+            top_p_only(),
+            corpus,
             WeldError::PathMissingFromRecord {
                 egress: "openai-compat-mantle".into(),
                 path: "temperature".into(),
@@ -279,21 +398,88 @@ fn a_planted_admission_without_its_evidence_is_named_by_its_cause() {
         (
             "a record entry no allowlist admits",
             &[(EgressKind::OpenaiCompatMantle, &[])],
-            planted_record(&[(TOP_P, committed_entry(TOP_P))]),
+            top_p_only(),
+            corpus,
             WeldError::RecordNotAdmitted { key: TOP_P.into() },
         ),
         (
             "a record entry with no fixture",
             &compat_top_p,
-            missing_fixture,
+            planted_record(&[(
+                "openai-compat/no-such-capture-mantle",
+                committed_entry(TOP_P),
+            )]),
+            corpus,
             WeldError::MissingFixture {
                 key: "openai-compat/no-such-capture-mantle".into(),
             },
         ),
         (
+            "a fixture that does not parse",
+            &compat_top_p,
+            top_p_only(),
+            from_unparsable,
+            WeldError::UnreadableFixture { key: TOP_P.into() },
+        ),
+        (
+            "a fixture whose body has no error.message",
+            &compat_top_p,
+            top_p_only(),
+            without_message,
+            WeldError::UnreadableFixture { key: TOP_P.into() },
+        ),
+        (
+            "a fixture whose status is not the record's",
+            &compat_top_p,
+            top_p_only(),
+            altered_status,
+            WeldError::FixtureDisagrees { key: TOP_P.into() },
+        ),
+        (
+            "a record model that is not the one its request sent",
+            &compat_top_p,
+            planted_record(&[(
+                TOP_P,
+                edited_entry(TOP_P, |entry| {
+                    entry["request_shape"]["model"] = json!("openai.gpt-5.4");
+                }),
+            )]),
+            corpus,
+            WeldError::ModelDisagrees { key: TOP_P.into() },
+        ),
+        (
+            "a record model the fixture note does not name",
+            &compat_top_p,
+            planted_record(&[(
+                TOP_P,
+                edited_entry(TOP_P, |entry| {
+                    entry["model"] = json!("openai.gpt-5.4");
+                    entry["request_shape"]["model"] = json!("openai.gpt-5.4");
+                }),
+            )]),
+            corpus,
+            WeldError::ModelDisagrees { key: TOP_P.into() },
+        ),
+        (
+            "a record date the fixture note does not name",
+            &compat_top_p,
+            planted_record(&[(
+                TOP_P,
+                edited_entry(TOP_P, |entry| {
+                    entry["date"] = json!("2026-10-24T03:26:42+00:00");
+                }),
+            )]),
+            corpus,
+            WeldError::ModelDisagrees { key: TOP_P.into() },
+        ),
+        (
             "a fixture that resolves to another row",
             &compat_top_p,
-            resolves_elsewhere,
+            planted_record(&[(
+                PRESENCE,
+                edited_entry(PRESENCE, |entry| entry["row"] = json!("top_p")),
+            )]),
+            corpus,
             WeldError::ResolvesElsewhere {
                 key: PRESENCE.into(),
                 got: Some("presence_penalty".into()),
@@ -302,58 +488,68 @@ fn a_planted_admission_without_its_evidence_is_named_by_its_cause() {
         (
             "a record whose repaired retry did not succeed",
             &compat_top_p,
-            failed_retry,
+            planted_record(&[(
+                TOP_P,
+                edited_entry(TOP_P, |entry| entry["repaired_status"] = json!(400)),
+            )]),
+            corpus,
             WeldError::NoRepairedSuccess { key: TOP_P.into() },
+        ),
+        (
+            "a drop row whose repaired shape still carries the field, 200",
+            &compat_top_p,
+            planted_record(&[(
+                TOP_P,
+                edited_entry(TOP_P, |entry| {
+                    entry["repaired_request_shape"] = entry["request_shape"].clone();
+                }),
+            )]),
+            corpus,
+            WeldError::RepairNotApplied { key: TOP_P.into() },
+        ),
+        (
+            "a ceiling row whose repaired shape sends the refused limit, 200",
+            &anthropic_ceiling,
+            planted_record(&[(
+                CEILING,
+                edited_entry(CEILING, |entry| {
+                    entry["repaired_request_shape"] = entry["request_shape"].clone();
+                }),
+            )]),
+            corpus,
+            WeldError::RepairNotApplied {
+                key: CEILING.into(),
+            },
+        ),
+        (
+            "a ranked row whose repaired shape sends the refused level, 200",
+            &responses_minimal,
+            planted_record(&[(
+                RANKED,
+                edited_entry(RANKED, |entry| {
+                    entry["repaired_request_shape"] = entry["request_shape"].clone();
+                }),
+            )]),
+            corpus,
+            WeldError::RepairNotApplied { key: RANKED.into() },
         ),
         (
             "a record entry on a direct egress",
             &[(EgressKind::OpenaiCompat, &["top_p"])],
-            foreign_egress,
+            planted_record(&[(
+                TOP_P,
+                edited_entry(TOP_P, |entry| entry["egress"] = json!("openai-compat")),
+            )]),
+            corpus,
             WeldError::ForeignEgress { key: TOP_P.into() },
         ),
     ];
 
-    for (name, allowlists, record, expected) in rows {
+    for (name, allowlists, record, fixture, expected) in rows {
         // Act
-        let (failures, _) = weld(allowlists, &record, corpus_fixture);
+        let (failures, _) = weld(allowlists, &record, fixture);
 
         // Assert
         assert_eq!(failures, vec![expected], "{name}");
     }
-}
-
-/// The weld reads a fixture's message and status against its record entry,
-/// and resolves the fixture on the entry's own egress: the same compat
-/// refusal names its row on compat Mantle once admitted there, and on no
-/// other Mantle egress, so a mismatched egress cannot pass.
-#[test]
-fn a_fixture_resolves_only_on_the_egress_that_admits_its_row() {
-    // Arrange
-    let entry = committed_entry(TOP_P);
-    let fixture = corpus_fixture(TOP_P).expect("the fixture is committed");
-    let mut altered = fixture.clone();
-    altered["status"] = json!(422);
-
-    // Act
-    let on_compat_mantle = resolved_row(
-        &fixture,
-        "openai-compat",
-        EgressKind::OpenaiCompatMantle,
-        &entry["request_shape"],
-    );
-    let on_responses_mantle = resolved_row(
-        &fixture,
-        "openai-compat",
-        EgressKind::OpenaiResponsesMantle,
-        &entry["request_shape"],
-    );
-    let disagreeing = check_entry(TOP_P, &entry, |_| Some(altered.clone()));
-
-    // Assert
-    assert_eq!(on_compat_mantle, Some("top_p"));
-    assert_eq!(on_responses_mantle, None);
-    assert_eq!(
-        disagreeing,
-        Err(WeldError::FixtureDisagrees { key: TOP_P.into() })
-    );
 }

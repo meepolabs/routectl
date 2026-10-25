@@ -389,6 +389,13 @@ fn every_committed_rejection_fixture_resolves_to_a_row_or_is_reported_unresolved
             "openai-compat/unsupported-parameter-frequency-penalty-mantle",
             Outcome::Row("frequency_penalty", SelfIdentifying, UnsupportedField),
         ),
+        // The grammar reads the row, but its `unsupported_value` code takes
+        // the refusal out of the class the field gate passes on openai-compat,
+        // so no live rejection with this envelope reaches the parser.
+        (
+            "openai-compat/unsupported-value-temperature-mantle",
+            Outcome::Row(TEMPERATURE_PATH, SelfIdentifying, InvalidValue),
+        ),
         // A model the Responses API does not serve, `param` null: the
         // responses Mantle pass-through control.
         (

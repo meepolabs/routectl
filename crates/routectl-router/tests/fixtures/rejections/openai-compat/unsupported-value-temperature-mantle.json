@@ -1,0 +1,6 @@
+{
+  "note": "Tier 1, captured on openai-compat (2026-10-25, openai.gpt-5.6-terra, Bedrock Mantle chat completions lane, /openai/v1/chat/completions): temperature 0.5 sent to a reasoning model that takes only the default 1; error.code is unsupported_value and error.param names the field. error.message is verbatim; the envelope keeps the captured key order. lifted_type is the error.type routectl lifts from the body.",
+  "status": 400,
+  "lifted_type": "invalid_request_error",
+  "body": "{\"error\":{\"code\":\"unsupported_value\",\"message\":\"Unsupported value: 'temperature' does not support 0.5 with this model. Only the default (1) value is supported.\",\"param\":\"temperature\",\"type\":\"invalid_request_error\"}}"
+}

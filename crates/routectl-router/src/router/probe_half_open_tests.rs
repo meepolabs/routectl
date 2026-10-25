@@ -23,7 +23,7 @@ use super::probe_test_support::{
 };
 use crate::field_verdict::FieldVerdictKey;
 use crate::probe_scheduler::{
-    FreeValidatorOutcome, PROBE_BACKOFF_CEILING, PROBE_MAX_ATTEMPTS, ProbeValidator,
+    FreeValidatorOutcome, PROBE_BACKOFF_CEILING, PROBE_MAX_ATTEMPTS, ProbePayload, ProbeValidator,
 };
 
 #[tokio::test]
@@ -604,5 +604,53 @@ async fn a_lane_that_recovers_after_deferrals_still_dials() {
         outcome,
         FreeValidatorOutcome::Settled,
         "and settles the question normally"
+    );
+}
+
+#[tokio::test]
+async fn a_recheck_refused_by_its_lane_view_charges_no_rpm_token() {
+    // The lane-carries recheck refuses BEFORE the gate: a refused probe sends
+    // nothing, so it must spend none of the operator's rate budget. Closed
+    // breaker, so the gate would admit and debit if it were reached first.
+    // `a_probe_through_a_closed_breaker_does_charge_its_rpm_token` is the
+    // positive control that this fixture does charge a dialing probe.
+    let provider = Arc::new(OkProvider {
+        count_calls: AtomicUsize::new(0),
+    });
+    let router = remote_router_with_rpm(provider.clone(), 60, Some(1));
+    let key = FieldVerdictKey::new(
+        &crate::router::probe_test_support::lane("m1"),
+        GROUNDED_PATH,
+        "bedrock",
+    )
+    .expect("identity");
+    let payload = ProbePayload::new(GROUNDED_PATH, "summarized".to_string(), &[], &[], false)
+        .expect("a modeled value within every bound");
+    let before = router
+        .gate_status_for_tests("m1")
+        .rpm_available
+        .expect("premise: the RPM bucket must be ENABLED, or this pins nothing");
+
+    let outcome = router
+        .run_free_validator_for_tests(&key, &payload, ProbeValidator::CountTokens)
+        .await;
+
+    assert_eq!(
+        outcome,
+        FreeValidatorOutcome::Unavailable,
+        "premise: the entry is anthropic-api, so a bedrock identity's row is not carried",
+    );
+    assert_eq!(
+        provider.count_calls.load(Ordering::SeqCst),
+        0,
+        "nothing dialed"
+    );
+    let after = router
+        .gate_status_for_tests("m1")
+        .rpm_available
+        .expect("bucket still enabled");
+    assert!(
+        (after - before).abs() < 0.5,
+        "a recheck refused by its lane view must charge NO rpm token: {before} -> {after}",
     );
 }

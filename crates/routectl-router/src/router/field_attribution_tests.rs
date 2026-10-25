@@ -241,9 +241,10 @@ fn config_for(provider_toml: Option<&str>) -> Config {
 
 /// Mutation check: drop the anthropic Mantle arm of
 /// `classifiable_egress_base_url` -> red on the anthropic Mantle row; replace
-/// a Mantle arm's body with
-/// `Some(Cow::Owned(mantle_anthropic_base(&m.region).unwrap_or_else(|_|
-/// "https://bedrock-mantle.invalid".into())))` (that arm's own base function)
+/// a Mantle arm's body with `Some(std::borrow::Cow::Owned(<base>(&m.region)
+/// .unwrap_or_else(|_| "https://bedrock-mantle.invalid".into())))`, where
+/// `<base>` is that arm's own base function
+/// (`routectl_providers::mantle::mantle_anthropic_base` on the anthropic arm)
 /// -> red on that sub-lane's bad-region row.
 #[test]
 fn the_attributability_decision_matches_the_table_for_every_kind() {
@@ -467,7 +468,7 @@ fn effort_request() -> routectl_core::ChatRequest {
 /// row (a cleared event).
 #[cfg(feature = "bedrock")]
 #[test]
-fn a_mantle_target_on_an_entry_repointed_to_its_direct_sibling_plans_nothing() {
+fn a_target_on_an_entry_repointed_between_mantle_and_direct_plans_nothing() {
     use routectl_core::wire_check::EgressKind;
     let cases = [
         (
@@ -488,7 +489,7 @@ fn a_mantle_target_on_an_entry_repointed_to_its_direct_sibling_plans_nothing() {
     }
 }
 
-/// One row of [`a_mantle_target_on_an_entry_repointed_to_its_direct_sibling_plans_nothing`].
+/// One row of [`a_target_on_an_entry_repointed_between_mantle_and_direct_plans_nothing`].
 #[cfg(feature = "bedrock")]
 fn a_target_on_a_repointed_entry_plans_nothing(
     name: &str,
@@ -566,9 +567,9 @@ fn a_target_on_a_repointed_entry_plans_nothing(
 /// view and reports that row unattributable.
 ///
 /// Mutation check: replace the anthropic Mantle arm's body with
-/// `Some(Cow::Owned(mantle_anthropic_base(&m.region).unwrap_or_else(|_|
-/// "https://bedrock-mantle.invalid".into())))` -> red on the attribution,
-/// plan and pre-flight assertions; read the direct egress in the
+/// `Some(std::borrow::Cow::Owned(routectl_providers::mantle::mantle_anthropic_base(
+/// &m.region).unwrap_or_else(|_| "https://bedrock-mantle.invalid".into())))` -> red
+/// on the attribution, plan and pre-flight assertions; read the direct egress in the
 /// unattributable branch of `preflight_view` -> red on the pre-flight
 /// assertion (the direct view also reports the display row).
 #[cfg(feature = "bedrock")]

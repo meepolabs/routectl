@@ -175,8 +175,10 @@ fn a_local_egress_carries_no_row() {
     }
 }
 
-/// The committed `rejections/<dir>/<case>.json` fixture as an upstream error.
-fn fixture_error(dir: &str, case: &str) -> Error {
+/// The committed `rejections/<dir>/<case>.json` fixture as an upstream error
+/// carrying its status and body only, without the `error.type` and
+/// `error.code` tokens an egress lifts.
+fn unlifted_fixture_error(dir: &str, case: &str) -> Error {
     let file = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/rejections")
         .join(dir)
@@ -216,8 +218,8 @@ fn named_path(
 /// `RowScope::of_lane` -> red on each Mantle row.
 #[test]
 fn a_refusal_names_its_row_on_the_direct_lane_and_none_on_its_mantle_sibling() {
-    let compat = fixture_error("openai-compat", "unsupported-parameter-temperature");
-    let thinking = fixture_error("anthropic-api", "thinking-type-disabled-unsupported");
+    let compat = unlifted_fixture_error("openai-compat", "unsupported-parameter-temperature");
+    let thinking = unlifted_fixture_error("anthropic-api", "thinking-type-disabled-unsupported");
     let cases = [
         (
             "compat sampling refusal",
@@ -264,7 +266,7 @@ fn a_refusal_names_its_row_on_the_direct_lane_and_none_on_its_mantle_sibling() {
 /// `RowScope::of_lane` -> red on the Mantle assertion.
 #[test]
 fn a_compat_refusal_on_compat_mantle_counts_as_unlocalized() {
-    let err = fixture_error("openai-compat", "unsupported-parameter-temperature");
+    let err = unlifted_fixture_error("openai-compat", "unsupported-parameter-temperature");
     let unlocalized = |egress| {
         Router::rejection_localizes_no_field(
             FieldRepairTable::grounded_only(),
@@ -283,8 +285,7 @@ fn a_compat_refusal_on_compat_mantle_counts_as_unlocalized() {
 }
 
 /// Each admitted Mantle row is named on its sub-lane by the refusal captured
-/// there, and that same refusal names nothing on another Mantle sub-lane of
-/// the same dialect: the admission is the sub-lane's own.
+/// there.
 ///
 /// Mutation check: empty an allowlist const -> red on that sub-lane's row.
 #[test]
@@ -293,7 +294,7 @@ fn a_mantle_capture_names_its_admitted_row_on_its_own_sub_lane() {
     let cases = [
         (
             "anthropic Mantle ceiling",
-            fixture_error("anthropic-api", "max-tokens-above-model-limit-mantle"),
+            unlifted_fixture_error("anthropic-api", "max-tokens-above-model-limit-mantle"),
             ANTHROPIC_API,
             EgressKind::AnthropicApiMantle,
             SentEffort::Unknown,
@@ -301,7 +302,7 @@ fn a_mantle_capture_names_its_admitted_row_on_its_own_sub_lane() {
         ),
         (
             "compat Mantle sampling drop",
-            fixture_error("openai-compat", "unsupported-parameter-top-p-mantle"),
+            unlifted_fixture_error("openai-compat", "unsupported-parameter-top-p-mantle"),
             OPENAI_COMPAT,
             EgressKind::OpenaiCompatMantle,
             SentEffort::Unknown,
@@ -309,7 +310,7 @@ fn a_mantle_capture_names_its_admitted_row_on_its_own_sub_lane() {
         ),
         (
             "responses Mantle ranked effort",
-            fixture_error(
+            unlifted_fixture_error(
                 "openai-responses",
                 "reasoning-effort-minimal-unsupported-mantle",
             ),
@@ -329,42 +330,47 @@ fn a_mantle_capture_names_its_admitted_row_on_its_own_sub_lane() {
     }
 }
 
-/// The temperature refusal captured on compat Mantle carries the
-/// `unsupported_value` code, which the openai-compat classifier lifts out of
-/// `BadRequest` and the field class gate does not pass on that kind, so it
-/// names no row on compat Mantle or on direct compat: the reason
-/// `temperature` is not admitted on compat Mantle. The same body with the
+/// The temperature refusal captured on compat Mantle, with the `error.type`
+/// and `error.code` tokens the egress lifts, classifies as
+/// `FeatureUnsupported` with the `unsupported_value` code on openai-compat,
+/// which the field class gate does not pass, so it names no row on compat
+/// Mantle or on direct compat. The same envelope with the
 /// `unsupported_parameter` code names the row on the direct lane, the
 /// positive control.
 ///
 /// Mutation check: admit `unsupported_value` on openai-compat in
-/// `class_can_name_a_field` -> red on the direct-compat row.
+/// `class_can_name_a_field` -> red on the captured envelope's direct-compat
+/// row (compat Mantle still names none: its view omits `temperature`).
 #[test]
 fn a_compat_temperature_refusal_coded_unsupported_value_names_no_row() {
-    let body = |code: &str| {
-        serde_json::json!({"error": {
-            "code": code,
-            "message": "Unsupported value: 'temperature' does not support 0.5 with this model. \
-                        Only the default (1) value is supported.",
-            "param": "temperature",
-            "type": "invalid_request_error",
-        }})
-        .to_string()
-    };
-    let named = |code: &str, egress: EgressKind| {
-        let err = Error::upstream_full(
+    // Arrange
+    let fixture = super::lane_weld_tests::corpus_fixture(
+        "openai-compat/unsupported-value-temperature-mantle",
+    )
+    .expect("the fixture reads")
+    .expect("the fixture is committed");
+    let (captured, _) =
+        super::lane_weld_tests::fixture_error(&fixture).expect("the fixture is an upstream error");
+    let recoded = {
+        let mut envelope: serde_json::Value =
+            serde_json::from_str(fixture["body"].as_str().expect("a body"))
+                .expect("the body is JSON");
+        envelope["error"]["code"] = serde_json::json!("unsupported_parameter");
+        Error::upstream_full(
             "p",
             400,
-            body(code),
+            envelope.to_string(),
             None,
             Some("invalid_request_error".into()),
-            Some(code.into()),
-        );
-        let class = routectl_core::failure_class::classify(&err, Some(OPENAI_COMPAT)).class;
+            Some("unsupported_parameter".into()),
+        )
+    };
+    let named = |err: &Error, egress: EgressKind| {
+        let class = routectl_core::failure_class::classify(err, Some(OPENAI_COMPAT)).class;
         super::rejected_field(
             FieldRepairTable::grounded_only(),
             &class,
-            &err,
+            err,
             OPENAI_COMPAT,
             Some(egress),
             SentEffort::Unknown,
@@ -372,12 +378,23 @@ fn a_compat_temperature_refusal_coded_unsupported_value_names_no_row() {
         .map(|named| named.row.path)
     };
 
+    // Act
+    let class = routectl_core::failure_class::classify(&captured, Some(OPENAI_COMPAT)).class;
+
+    // Assert
+    assert!(
+        matches!(
+            &class,
+            FailureClass::FeatureUnsupported { capability } if capability == "unsupported_value"
+        ),
+        "premise: the captured envelope classifies as unsupported_value, got {class:?}",
+    );
     assert_eq!(
-        named("unsupported_parameter", EgressKind::OpenaiCompat),
+        named(&recoded, EgressKind::OpenaiCompat),
         Some("temperature"),
         "control: the parameter code names the row on direct compat",
     );
     for egress in [EgressKind::OpenaiCompat, EgressKind::OpenaiCompatMantle] {
-        assert_eq!(named("unsupported_value", egress), None, "{egress:?}");
+        assert_eq!(named(&captured, egress), None, "{egress:?}");
     }
 }

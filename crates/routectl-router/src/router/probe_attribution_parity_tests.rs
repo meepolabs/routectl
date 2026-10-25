@@ -439,6 +439,17 @@ const STAGES: [Stage; 4] = [
 /// shape's view carries, the Mantle sub-lane's included, so an acting stage
 /// reads attribution there and not an empty view.
 fn parity_request() -> ChatRequest {
+    assert!(
+        super::FieldRepairTable::default()
+            .for_lane(
+                "anthropic-api",
+                Some(routectl_core::wire_check::EgressKind::AnthropicApiMantle),
+            )
+            .lane_rows()
+            .any(|row| row.path == "max_tokens"),
+        "premise: the anthropic Mantle allowlist (ANTHROPIC_API_MANTLE_ROWS) admits \
+         max_tokens, or the Mantle row's acting stages read an empty view",
+    );
     let mut req = grounding_request();
     req.max_tokens = Some(64);
     req
