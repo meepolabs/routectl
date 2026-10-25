@@ -243,6 +243,11 @@ fn every_committed_rejection_fixture_resolves_to_a_row_or_is_reported_unresolved
             "anthropic-api/effort-parameter-unsupported-haiku-4-5",
             Outcome::NotLocalized,
         ),
+        // Its Mantle capture, the anthropic Mantle pass-through control.
+        (
+            "anthropic-api/effort-parameter-unsupported-control-mantle",
+            Outcome::NotLocalized,
+        ),
         (
             "anthropic-api/effort-xhigh-unsupported-opus-4-5",
             Outcome::Row(EFFORT_XHIGH, SelfIdentifying, InvalidValue),
@@ -256,6 +261,10 @@ fn every_committed_rejection_fixture_resolves_to_a_row_or_is_reported_unresolved
         (
             "anthropic-api/effort-xhigh-thinking-disabled-opus-5-5",
             Outcome::Row(THINKING_DISABLED_PATH, SelfIdentifying, UnsupportedField),
+        ),
+        (
+            "anthropic-api/max-tokens-above-model-limit-mantle",
+            Outcome::Row(MAX_TOKENS_PATH, SelfIdentifying, InvalidValue),
         ),
         (
             "anthropic-api/max-tokens-above-model-limit-messages",
@@ -336,6 +345,12 @@ fn every_committed_rejection_fixture_resolves_to_a_row_or_is_reported_unresolved
             "bedrock/thinking-type-enabled-unsupported",
             Outcome::Row("thinking.type.enabled", SelfIdentifying, UnsupportedField),
         ),
+        // A model the route does not serve, `param` null: the compat Mantle
+        // pass-through control.
+        (
+            "openai-compat/model-unsupported-on-route-control-mantle",
+            Outcome::NotLocalized,
+        ),
         // Range errors that name the parameter only in prose, with a null or
         // absent `param`.
         (
@@ -355,12 +370,30 @@ fn every_committed_rejection_fixture_resolves_to_a_row_or_is_reported_unresolved
             Outcome::Row("top_p", SelfIdentifying, UnsupportedField),
         ),
         (
+            "openai-compat/unsupported-parameter-top-p-mantle",
+            Outcome::Row("top_p", SelfIdentifying, UnsupportedField),
+        ),
+        (
             "openai-compat/unsupported-parameter-presence-penalty",
+            Outcome::Row("presence_penalty", SelfIdentifying, UnsupportedField),
+        ),
+        (
+            "openai-compat/unsupported-parameter-presence-penalty-mantle",
             Outcome::Row("presence_penalty", SelfIdentifying, UnsupportedField),
         ),
         (
             "openai-compat/unsupported-parameter-frequency-penalty",
             Outcome::Row("frequency_penalty", SelfIdentifying, UnsupportedField),
+        ),
+        (
+            "openai-compat/unsupported-parameter-frequency-penalty-mantle",
+            Outcome::Row("frequency_penalty", SelfIdentifying, UnsupportedField),
+        ),
+        // A model the Responses API does not serve, `param` null: the
+        // responses Mantle pass-through control.
+        (
+            "openai-responses/model-unsupported-api-control-mantle",
+            Outcome::NotLocalized,
         ),
         // `reasoning.effort` is the Responses spelling of the effort field.
         (
@@ -377,6 +410,14 @@ fn every_committed_rejection_fixture_resolves_to_a_row_or_is_reported_unresolved
         ),
         (
             "openai-responses/reasoning-effort-minimal-unsupported-codex",
+            Outcome::Row(
+                "output_config.effort.minimal",
+                SelfIdentifying,
+                InvalidValue,
+            ),
+        ),
+        (
+            "openai-responses/reasoning-effort-minimal-unsupported-mantle",
             Outcome::Row(
                 "output_config.effort.minimal",
                 SelfIdentifying,

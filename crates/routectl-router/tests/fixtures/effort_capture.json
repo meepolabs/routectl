@@ -1,5 +1,5 @@
 {
-  "note": "Effort rejection captures (2026-10-22 and 2026-10-23), one entry per effort rejection fixture, keyed by its <dialect>/<case> path under rejections/. lane is the carrier the request went to; model is the model id sent. request_shape is the sent wire body projected onto its effort field and its thinking object, at their wire paths: output_config.effort (Messages and InvokeModel), additionalModelRequestFields.output_config.effort (Converse), reasoning.effort (Responses). Every entry carries exactly one effort path. A request_shape with no thinking key means no thinking object was sent; a thinking key holds the thinking object as sent. Everything else in the sent body is left out: in particular the InvokeModel opus-4-5 pair differs only by the effort anthropic_beta flag, which the beta case's fixture note names. status and message are the captured status and the verbatim upstream message; the fixture body is the full envelope.",
+  "note": "Effort rejection captures (2026-10-22, 2026-10-23 and 2026-10-25), one entry per effort rejection fixture, keyed by its <dialect>/<case> path under rejections/. lane is the carrier the request went to; model is the model id sent. request_shape is the sent wire body projected onto its effort field and its thinking object, at their wire paths: output_config.effort (Messages and InvokeModel), additionalModelRequestFields.output_config.effort (Converse), reasoning.effort (Responses). Every entry carries exactly one effort path. A request_shape with no thinking key means no thinking object was sent; a thinking key holds the thinking object as sent. Everything else in the sent body is left out: in particular the InvokeModel opus-4-5 pair differs only by the effort anthropic_beta flag, which the beta case's fixture note names. status and message are the captured status and the verbatim upstream message; the fixture body is the full envelope.",
   "cases": {
     "anthropic-api/effort-invalid-value-openrouter": {
       "lane": "openrouter-anthropic",
@@ -172,6 +172,17 @@
       },
       "status": 400,
       "message": "Unsupported value: 'minimal' is not supported with the 'gpt-5.6-terra' model. Supported values are: 'none', 'low', 'medium', 'high', 'xhigh', and 'max'."
+    },
+    "openai-responses/reasoning-effort-minimal-unsupported-mantle": {
+      "lane": "mantle-responses",
+      "model": "openai.gpt-5.4",
+      "request_shape": {
+        "reasoning": {
+          "effort": "minimal"
+        }
+      },
+      "status": 400,
+      "message": "Unsupported value: 'minimal' is not supported with the 'openai.gpt-5.4' model. Supported values are: 'none', 'low', 'medium', 'high', 'xhigh', and 'max'."
     }
   }
 }

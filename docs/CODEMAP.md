@@ -2952,12 +2952,13 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   carrier-preserving rewrite (`write_effort`), plus `RowScope`, the per-lane
   view `FieldRepairTable::for_lane` applies (ranked effort rows off
   openai-compat, ranked rows alone on openai-responses, each Bedrock Mantle
-  egress exactly its own allowlist const, empty until a refusal captured on
-  that sub-lane grounds a row, and no row for an unknown egress) to
+  egress exactly its own allowlist const, each row grounded by a refusal
+  captured on that sub-lane, and no row for an unknown egress) to
   `present_rows`, pre-flight and rejection resolution
   (tests: `src/router/field_repair_effort_tests.rs`, the rank weld included;
   `src/router/field_lane_scope_tests.rs`, the literal per-egress row sets and
-  Mantle parse scoping),
+  Mantle parse scoping; `src/router/field_lane_weld_tests.rs`, each Mantle
+  allowlist welded to `tests/fixtures/mantle_capture.json`),
   and the ranked repair: `ranked_replacement` (nearest lower listed level, else
   nearest higher, never a sent one), `ranked_pick` (the refused level,
   written level and `PickDirection` a ranked rewrite's record names),

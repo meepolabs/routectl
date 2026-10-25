@@ -242,14 +242,21 @@ pub(super) enum RowScope {
     Admitted(&'static [&'static str]),
 }
 
-/// The row paths a Bedrock Mantle Anthropic Messages lane carries.
-pub(super) const ANTHROPIC_API_MANTLE_ROWS: &[&str] = &[];
+/// The row paths a Bedrock Mantle Anthropic Messages lane carries. Each is
+/// welded to a committed capture and its repaired retry in
+/// `tests/fixtures/mantle_capture.json`.
+pub(super) const ANTHROPIC_API_MANTLE_ROWS: &[&str] = &["max_tokens"];
 
-/// The row paths a Bedrock Mantle Chat Completions lane carries.
-pub(super) const OPENAI_COMPAT_MANTLE_ROWS: &[&str] = &[];
+/// The row paths a Bedrock Mantle Chat Completions lane carries. Each is
+/// welded to a committed capture and its repaired retry in
+/// `tests/fixtures/mantle_capture.json`.
+pub(super) const OPENAI_COMPAT_MANTLE_ROWS: &[&str] =
+    &["top_p", "presence_penalty", "frequency_penalty"];
 
-/// The row paths a Bedrock Mantle Responses lane carries.
-pub(super) const OPENAI_RESPONSES_MANTLE_ROWS: &[&str] = &[];
+/// The row paths a Bedrock Mantle Responses lane carries. Each is welded to a
+/// committed capture and its repaired retry in
+/// `tests/fixtures/mantle_capture.json`.
+pub(super) const OPENAI_RESPONSES_MANTLE_ROWS: &[&str] = &["output_config.effort.minimal"];
 
 impl RowScope {
     /// The scope of a lane of `provider_kind` sending with `egress`.

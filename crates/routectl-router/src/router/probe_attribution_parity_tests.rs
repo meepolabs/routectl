@@ -24,11 +24,11 @@
 //! plausible narrowings are about which base URL counts, and a single admitting
 //! row would let one of them through. The Mantle row is the shape a raw base-url
 //! read gets WRONG, since its configured base IS that default while it egresses
-//! to the Mantle endpoint its region derives. It is attributable, and its lane
-//! view carries no row, so the two acting stages decline it AFTER attribution:
-//! the reactive arm on its empty view and the pre-flight with
-//! `no_grounded_field`. Those declines are asserted on their own, with their
-//! reasons, rather than read as attribution verdicts.
+//! to the Mantle endpoint its region derives. It is attributable, and the
+//! request every stage reads carries `max_tokens`, a row its narrow lane view
+//! admits, so the acting stages show that attribution themselves. Its view
+//! omits the re-check row, and the decline that follows from that is asserted
+//! on its own, with its reason.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -73,9 +73,6 @@ struct Shape {
     /// answers `None` for it, and the fixture asserts that premise.
     #[cfg(feature = "bedrock")]
     bedrock_mantle: bool,
-    /// Whether the admitted lane's view carries no row, so the acting stages
-    /// decline after attribution rather than at it.
-    empty_view: bool,
     /// Whether the `[providers]` entry is DROPPED after the dispatch target has
     /// been expanded from it -- a reload removing the entry under a target that
     /// already carries its provider kind and forwarded flag.
@@ -95,7 +92,6 @@ const SHAPES: &[Shape] = &[
         credential_source: CredentialSource::Own,
         #[cfg(feature = "bedrock")]
         bedrock_mantle: false,
-        empty_view: false,
         entry_removed_after_expansion: false,
         attributable: true,
     },
@@ -105,7 +101,6 @@ const SHAPES: &[Shape] = &[
         credential_source: CredentialSource::Own,
         #[cfg(feature = "bedrock")]
         bedrock_mantle: false,
-        empty_view: false,
         entry_removed_after_expansion: false,
         attributable: true,
     },
@@ -115,7 +110,6 @@ const SHAPES: &[Shape] = &[
         credential_source: CredentialSource::Own,
         #[cfg(feature = "bedrock")]
         bedrock_mantle: false,
-        empty_view: false,
         entry_removed_after_expansion: false,
         attributable: false,
     },
@@ -125,7 +119,6 @@ const SHAPES: &[Shape] = &[
         credential_source: CredentialSource::Forwarded,
         #[cfg(feature = "bedrock")]
         bedrock_mantle: false,
-        empty_view: false,
         entry_removed_after_expansion: false,
         attributable: false,
     },
@@ -135,7 +128,6 @@ const SHAPES: &[Shape] = &[
         credential_source: CredentialSource::Own,
         #[cfg(feature = "bedrock")]
         bedrock_mantle: false,
-        empty_view: false,
         entry_removed_after_expansion: true,
         attributable: false,
     },
@@ -156,7 +148,6 @@ const SHAPES: &[Shape] = &[
         base_url: MANTLE_BASE_URL,
         credential_source: CredentialSource::Own,
         bedrock_mantle: true,
-        empty_view: true,
         entry_removed_after_expansion: false,
         attributable: true,
     },
@@ -423,38 +414,39 @@ type StageVerdict = fn(&Shape, &ChatRequest) -> bool;
 struct Stage {
     name: &'static str,
     admits: StageVerdict,
-    /// Whether the stage's verdict reads attribution alone, whatever the
-    /// lane's view. An acting stage also declines a lane whose view carries
-    /// no row, which its verdict cannot tell from a refusal at attribution.
-    reads_attribution_only: bool,
 }
 
 const STAGES: [Stage; 4] = [
     Stage {
         name: "reactive",
         admits: reactive_admits,
-        reads_attribution_only: false,
     },
     Stage {
         name: "pre-flight",
         admits: preflight_admits,
-        reads_attribution_only: false,
     },
     Stage {
         name: "activation",
         admits: activation_admits,
-        reads_attribution_only: true,
     },
     Stage {
         name: "pre-dial recheck",
         admits: pre_dial_recheck_admits,
-        reads_attribution_only: true,
     },
 ];
 
+/// The grounding request, also carrying `max_tokens`: a row every admitting
+/// shape's view carries, the Mantle sub-lane's included, so an acting stage
+/// reads attribution there and not an empty view.
+fn parity_request() -> ChatRequest {
+    let mut req = grounding_request();
+    req.max_tokens = Some(64);
+    req
+}
+
 #[test]
 fn every_field_stage_reaches_the_same_attributability_verdict() {
-    let req = grounding_request();
+    let req = parity_request();
     // Premise: the table discriminates. A table that was all-admitting or
     // all-refusing would be satisfied by a stage answering one constant.
     assert!(
@@ -463,18 +455,11 @@ fn every_field_stage_reaches_the_same_attributability_verdict() {
     );
 
     for shape in SHAPES {
-        // The acting stages decline an empty view after attribution, which no
-        // verdict of theirs can tell from a refusal at it; that shape's
-        // attribution and declines are asserted below.
-        let stages = STAGES
-            .iter()
-            .filter(|stage| !shape.empty_view || stage.reads_attribution_only);
-        for stage in stages {
-            let Stage {
-                name: stage,
-                admits,
-                ..
-            } = stage;
+        for Stage {
+            name: stage,
+            admits,
+        } in &STAGES
+        {
             assert_eq!(
                 admits(shape, &req),
                 shape.attributable,
@@ -487,33 +472,27 @@ fn every_field_stage_reaches_the_same_attributability_verdict() {
     }
 }
 
-/// The Mantle sub-lane is attributable to the shared decision and to both
-/// probe stages, and its empty lane view is why the two acting stages then
-/// decline: the reactive arm plans nothing and the pre-flight reports
-/// `no_grounded_field` for a request whose rows the direct sibling's view
-/// presents.
-///
-/// With the sub-lane's allowlist empty the acting stages cannot show
-/// attribution themselves, so for them this asserts the shared decision they
-/// read and their declines, each with its reason. The acting-stage assertion
-/// becomes discriminating once a row is admitted on that Mantle sub-lane,
-/// when the shape can join the parity loop above.
+/// The Mantle sub-lane is attributable at the shared decision, and its view is
+/// its own allowlist: the request's `max_tokens` is presented on it while the
+/// re-check row the direct sibling presents is not, so the reactive arm
+/// plans and the pre-flight reports only the admitted row.
 ///
 /// Mutation check: map the Mantle egresses to their kind's scope in
-/// `RowScope::of_lane` -> red (the reactive arm plans, the pre-flight passes
-/// `no_grounded_field`); drop the anthropic Mantle arm of
-/// `classifiable_egress_base_url` -> red on attribution.
+/// `RowScope::of_lane` -> red (the Mantle view presents the re-check row);
+/// empty `ANTHROPIC_API_MANTLE_ROWS` -> red (the reactive arm plans nothing);
+/// drop the anthropic Mantle arm of `classifiable_egress_base_url` -> red on
+/// attribution.
 #[cfg(feature = "bedrock")]
 #[test]
-fn the_mantle_sub_lane_is_attributable_and_declined_on_its_empty_view() {
+fn the_mantle_sub_lane_is_attributable_and_reads_its_own_allowlist() {
     let shape = SHAPES
         .iter()
         .find(|shape| shape.bedrock_mantle)
         .expect("the table carries the Mantle shape");
-    let req = grounding_request();
-    assert!(shape.empty_view && shape.attributable, "premise");
+    let req = parity_request();
+    assert!(shape.attributable, "premise");
 
-    // Attribution, at every stage.
+    // Attribution.
     let (router, target) = fixture(shape);
     let lane = super::field_repair::attributable_field_lane(
         &router.config,
@@ -525,34 +504,27 @@ fn the_mantle_sub_lane_is_attributable_and_declined_on_its_empty_view() {
         lane.base_url,
         "https://bedrock-mantle.us-west-2.api.aws/anthropic"
     );
-    assert!(activation_admits(shape, &req), "activation admits");
-    assert!(
-        pre_dial_recheck_admits(shape, &req),
-        "the pre-dial recheck admits"
-    );
 
-    // The view, empty on the lane and not on its direct sibling.
+    // The view: the admitted row, and not the direct sibling's re-check row.
     let table = router.field_repair_table();
-    let rows = |egress| {
+    let paths = |egress| -> Vec<&str> {
         super::field_repair::present_rows(table.for_lane(lane.provider_kind, Some(egress)), &req)
-            .count()
+            .map(|row| row.path)
+            .collect()
     };
-    assert_eq!(rows(lane.egress), 0, "the Mantle view presents no row");
+    assert_eq!(paths(lane.egress), vec!["max_tokens"]);
     assert!(
-        rows(routectl_core::wire_check::EgressKind::AnthropicApi) > 0,
-        "control: the direct sibling's view presents the request's rows",
+        paths(routectl_core::wire_check::EgressKind::AnthropicApi).contains(&RECHECK_PATH),
+        "control: the direct sibling's view presents the re-check row",
     );
 
-    // The declines, each with its reason.
-    assert!(
-        !reactive_admits(shape, &req),
-        "the reactive arm plans nothing"
-    );
+    // The acting stages, each on the admitted row alone.
+    assert!(reactive_admits(shape, &req), "the reactive arm plans");
     let (router, target) = fixture(shape);
     let (_planned, records, _plan) =
         router.plan_field_preflight(&req, &target, DispatchSurface::Complete);
-    let reasons: Vec<&str> = records.iter().map(|record| record.reason).collect();
-    assert_eq!(reasons, vec![FIELD_PREFLIGHT_NO_GROUNDED_FIELD]);
+    let paths: Vec<Option<&str>> = records.iter().map(|record| record.field_path).collect();
+    assert_eq!(paths, vec![Some("max_tokens")]);
 }
 
 /// The free re-check of `fixture(shape)`'s lane, keyed under `provider_kind`
@@ -590,7 +562,7 @@ async fn recheck_on(shape: &Shape, provider_kind: &str) -> (FreeValidatorOutcome
 #[tokio::test]
 async fn the_pre_dial_recheck_dials_only_where_the_lane_carries_the_row() {
     let direct = &SHAPES[0];
-    assert!(direct.attributable && !direct.empty_view, "premise");
+    assert!(direct.attributable, "premise");
     #[cfg_attr(not(feature = "bedrock"), allow(unused_mut))]
     let mut cases = vec![
         (

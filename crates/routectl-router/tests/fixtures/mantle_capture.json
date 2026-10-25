@@ -1,0 +1,155 @@
+{
+  "note": "Bedrock Mantle refusal captures (2026-10-25 UTC), one entry per refusal fixture that grounds a row admitted on a Mantle sub-lane, keyed by its <dialect>/<case> path under rejections/. egress is the Mantle sub-lane the request went to; row is the closed-table row the refusal grounds there; model is the model id sent. request_shape is the full sent body; repaired_request_shape is the full body of the one repaired retry; repaired_status is its status. status and message are the captured status and the verbatim upstream message; the fixture body is the full envelope. Pass-through controls have no entry.",
+  "cases": {
+    "anthropic-api/max-tokens-above-model-limit-mantle": {
+      "egress": "anthropic-api-mantle",
+      "row": "max_tokens",
+      "model": "anthropic.claude-haiku-4-5",
+      "date": "2026-10-25T03:22:55+00:00",
+      "request_shape": {
+        "model": "anthropic.claude-haiku-4-5",
+        "max_tokens": 1000000,
+        "messages": [
+          {
+            "role": "user",
+            "content": "hi"
+          }
+        ]
+      },
+      "status": 400,
+      "message": "max_tokens: 1000000 > 64000, which is the maximum allowed number of output tokens for anthropic.claude-haiku-4-5",
+      "repaired_request_shape": {
+        "model": "anthropic.claude-haiku-4-5",
+        "max_tokens": 16,
+        "messages": [
+          {
+            "role": "user",
+            "content": "hi"
+          }
+        ]
+      },
+      "repaired_status": 200
+    },
+    "openai-compat/unsupported-parameter-frequency-penalty-mantle": {
+      "egress": "openai-compat-mantle",
+      "row": "frequency_penalty",
+      "model": "openai.gpt-5.6-terra",
+      "date": "2026-10-25T03:26:43+00:00",
+      "request_shape": {
+        "model": "openai.gpt-5.6-terra",
+        "max_completion_tokens": 16,
+        "messages": [
+          {
+            "role": "user",
+            "content": "hi"
+          }
+        ],
+        "reasoning_effort": "high",
+        "frequency_penalty": 0.5
+      },
+      "status": 400,
+      "message": "Unsupported parameter: 'frequency_penalty' is not supported with this model.",
+      "repaired_request_shape": {
+        "model": "openai.gpt-5.6-terra",
+        "max_completion_tokens": 16,
+        "messages": [
+          {
+            "role": "user",
+            "content": "hi"
+          }
+        ],
+        "reasoning_effort": "high"
+      },
+      "repaired_status": 200
+    },
+    "openai-compat/unsupported-parameter-presence-penalty-mantle": {
+      "egress": "openai-compat-mantle",
+      "row": "presence_penalty",
+      "model": "openai.gpt-5.6-terra",
+      "date": "2026-10-25T03:26:42+00:00",
+      "request_shape": {
+        "model": "openai.gpt-5.6-terra",
+        "max_completion_tokens": 16,
+        "messages": [
+          {
+            "role": "user",
+            "content": "hi"
+          }
+        ],
+        "reasoning_effort": "high",
+        "presence_penalty": 0.5
+      },
+      "status": 400,
+      "message": "Unsupported parameter: 'presence_penalty' is not supported with this model.",
+      "repaired_request_shape": {
+        "model": "openai.gpt-5.6-terra",
+        "max_completion_tokens": 16,
+        "messages": [
+          {
+            "role": "user",
+            "content": "hi"
+          }
+        ],
+        "reasoning_effort": "high"
+      },
+      "repaired_status": 200
+    },
+    "openai-compat/unsupported-parameter-top-p-mantle": {
+      "egress": "openai-compat-mantle",
+      "row": "top_p",
+      "model": "openai.gpt-5.6-terra",
+      "date": "2026-10-25T03:26:42+00:00",
+      "request_shape": {
+        "model": "openai.gpt-5.6-terra",
+        "max_completion_tokens": 16,
+        "messages": [
+          {
+            "role": "user",
+            "content": "hi"
+          }
+        ],
+        "reasoning_effort": "high",
+        "top_p": 0.5
+      },
+      "status": 400,
+      "message": "Unsupported parameter: 'top_p' is not supported with this model.",
+      "repaired_request_shape": {
+        "model": "openai.gpt-5.6-terra",
+        "max_completion_tokens": 16,
+        "messages": [
+          {
+            "role": "user",
+            "content": "hi"
+          }
+        ],
+        "reasoning_effort": "high"
+      },
+      "repaired_status": 200
+    },
+    "openai-responses/reasoning-effort-minimal-unsupported-mantle": {
+      "egress": "openai-responses-mantle",
+      "row": "output_config.effort.minimal",
+      "model": "openai.gpt-5.4",
+      "date": "2026-10-25T03:23:38+00:00",
+      "request_shape": {
+        "model": "openai.gpt-5.4",
+        "max_output_tokens": 16,
+        "input": "hi",
+        "reasoning": {
+          "effort": "minimal"
+        }
+      },
+      "status": 400,
+      "message": "Unsupported value: 'minimal' is not supported with the 'openai.gpt-5.4' model. Supported values are: 'none', 'low', 'medium', 'high', 'xhigh', and 'max'.",
+      "repaired_request_shape": {
+        "model": "openai.gpt-5.4",
+        "max_output_tokens": 16,
+        "input": "hi",
+        "reasoning": {
+          "effort": "low"
+        }
+      },
+      "repaired_status": 200
+    }
+  }
+}

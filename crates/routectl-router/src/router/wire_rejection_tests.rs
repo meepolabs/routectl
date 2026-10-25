@@ -1017,12 +1017,12 @@ mod sent_effort_and_thinking {
                 thinking: ThinkingShape::Unknown,
             },
             Row {
-                name: "openai-responses on Mantle is not read",
+                name: "openai-responses on Mantle reads its Responses spelling",
                 egress: EgressKind::OpenaiResponsesMantle,
                 build: |_| json!({"reasoning": {"effort": "high"}}),
                 req: || anthropic_request(None, None),
-                effort: SentEffort::Unknown,
-                thinking: ThinkingShape::Unknown,
+                effort: rank("high"),
+                thinking: ThinkingShape::NoThinkingObject,
             },
             // A number names no level, so it is out of rank rather than absent:
             // the body did carry an effort.

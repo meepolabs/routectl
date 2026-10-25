@@ -1307,11 +1307,12 @@ fn a_localhost_named_target_falls_open_as_unattributable() {
 
 #[cfg(feature = "bedrock")]
 #[test]
-fn a_bedrock_mantle_target_falls_open_on_its_empty_lane_view() {
+fn a_bedrock_mantle_target_falls_open_on_rows_its_lane_view_omits() {
     // The mantle lane is attributable through its region-derived egress, but
-    // its lane view admits no row until a refusal captured on Mantle grounds
-    // one, so a request carrying a grounded field reports no grounded field
-    // here and is sent untouched, as the reactive arm also declines it.
+    // its lane view admits only the rows a refusal captured on Mantle grounds.
+    // The thinking display row is not one of them, so a request carrying only
+    // that row reports no grounded field here and is sent untouched, as the
+    // reactive arm also declines it.
     let mut config = chain_config(ALIAS, 1, ANTHROPIC);
     let mut entry = config
         .providers
@@ -1335,7 +1336,10 @@ fn a_bedrock_mantle_target_falls_open_on_its_empty_lane_view() {
 
     let (planned, decision) = plan(&router, &req_on(ALIAS), "m0");
 
-    assert!(!decision.acted, "the mantle lane view carries no row");
+    assert!(
+        !decision.acted,
+        "the mantle lane view omits the display row"
+    );
     assert_eq!(decision.reason, FIELD_PREFLIGHT_NO_GROUNDED_FIELD);
     assert!(carries_field(&planned));
 }

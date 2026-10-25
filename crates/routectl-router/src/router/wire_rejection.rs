@@ -259,7 +259,8 @@ fn read_site(
 /// The effort level and thinking shape `sent`, the body that went out on an
 /// `egress` lane, carries where that egress spells them: at the root of an
 /// Anthropic Messages body, inside the Converse field bag, and at
-/// `reasoning.effort` on OpenAI Responses, which has no thinking object.
+/// `reasoning.effort` on OpenAI Responses (direct or through Mantle), which
+/// has no thinking object.
 /// Every other egress is unknown for both, so nothing downstream acts on a
 /// shape it cannot read.
 pub(super) fn effort_and_thinking(egress: EgressKind, sent: &Value) -> (SentEffort, ThinkingShape) {
@@ -270,14 +271,13 @@ pub(super) fn effort_and_thinking(egress: EgressKind, sent: &Value) -> (SentEffo
             .map_or((SentEffort::Absent, ThinkingShape::Absent), |bag| {
                 anthropic_effort_and_thinking(bag)
             }),
-        EgressKind::OpenaiResponses => (
+        EgressKind::OpenaiResponses | EgressKind::OpenaiResponsesMantle => (
             sent_effort_of(sent.get("reasoning").and_then(|r| r.get("effort"))),
             ThinkingShape::NoThinkingObject,
         ),
         EgressKind::AnthropicApiMantle
         | EgressKind::OpenaiCompat
         | EgressKind::OpenaiCompatMantle
-        | EgressKind::OpenaiResponsesMantle
         | EgressKind::Gemini
         | EgressKind::Local => (SentEffort::Unknown, ThinkingShape::Unknown),
     }

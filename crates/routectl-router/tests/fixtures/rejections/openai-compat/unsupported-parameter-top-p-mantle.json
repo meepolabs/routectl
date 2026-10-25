@@ -1,0 +1,6 @@
+{
+  "note": "Tier 1, captured on openai-compat (2026-10-25, openai.gpt-5.6-terra, Bedrock Mantle chat completions lane, /openai/v1/chat/completions): top_p 0.5 sent to a reasoning model that does not take it; error.code is unsupported_parameter. error.message is verbatim; the envelope keeps the captured key order. lifted_type is the error.type routectl lifts from the body.",
+  "status": 400,
+  "lifted_type": "invalid_request_error",
+  "body": "{\"error\":{\"code\":\"unsupported_parameter\",\"message\":\"Unsupported parameter: 'top_p' is not supported with this model.\",\"param\":\"top_p\",\"type\":\"invalid_request_error\"}}"
+}

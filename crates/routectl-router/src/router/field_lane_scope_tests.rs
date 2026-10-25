@@ -108,37 +108,42 @@ fn each_direct_egress_carries_its_kinds_literal_row_set() {
 }
 
 /// Each Mantle egress reads exactly its own allowlist, never its direct
-/// sibling's rows, and each allowlist is empty: no Mantle refusal has been
-/// captured to ground a row there.
+/// sibling's rows, and each allowlist is the literal set of rows a refusal
+/// captured on that sub-lane grounds.
 ///
 /// Mutation check: map a Mantle egress to its kind's scope in
-/// `RowScope::of_lane` -> red on that sub-lane.
+/// `RowScope::of_lane` -> red on that sub-lane; add or drop a path in an
+/// allowlist const -> red on that sub-lane.
 #[test]
-fn each_mantle_egress_carries_exactly_its_empty_allowlist() {
-    let cases: [(&str, &str, EgressKind, &[&str]); 3] = [
+fn each_mantle_egress_carries_exactly_its_allowlist() {
+    type Case<'a> = (&'a str, &'a str, EgressKind, &'a [&'a str], &'a [&'a str]);
+    let cases: [Case; 3] = [
         (
             "anthropic-api Mantle",
             ANTHROPIC_API,
             EgressKind::AnthropicApiMantle,
             ANTHROPIC_API_MANTLE_ROWS,
+            &["max_tokens"],
         ),
         (
             "openai-compat Mantle",
             OPENAI_COMPAT,
             EgressKind::OpenaiCompatMantle,
             OPENAI_COMPAT_MANTLE_ROWS,
+            &["top_p", "presence_penalty", "frequency_penalty"],
         ),
         (
             "openai-responses Mantle",
             OPENAI_RESPONSES,
             EgressKind::OpenaiResponsesMantle,
             OPENAI_RESPONSES_MANTLE_ROWS,
+            &["output_config.effort.minimal"],
         ),
     ];
 
-    for (name, kind, egress, allowlist) in cases {
-        assert!(allowlist.is_empty(), "{name}: the allowlist is empty");
-        assert_eq!(lane_paths(kind, Some(egress)), set(allowlist), "{name}");
+    for (name, kind, egress, allowlist, literal) in cases {
+        assert_eq!(set(allowlist), set(literal), "{name}: the allowlist");
+        assert_eq!(lane_paths(kind, Some(egress)), set(literal), "{name}");
     }
 }
 
@@ -204,19 +209,15 @@ fn named_path(
 }
 
 /// One grammar per kind, one scope per egress: a refusal a direct lane
-/// resolves to its row resolves to none on that lane's Mantle sibling, though
-/// both share the sibling's dialect.
+/// resolves to a row its Mantle sibling does not admit resolves to none on
+/// that sibling, though both share the sibling's dialect.
 ///
 /// Mutation check: map the Mantle egresses to their kind's scope in
 /// `RowScope::of_lane` -> red on each Mantle row.
 #[test]
 fn a_refusal_names_its_row_on_the_direct_lane_and_none_on_its_mantle_sibling() {
     let compat = fixture_error("openai-compat", "unsupported-parameter-temperature");
-    let ranked = fixture_error(
-        "openai-responses",
-        "reasoning-effort-minimal-unsupported-codex",
-    );
-    let minimal = SentEffort::Rank(EffortRank::of_token("minimal").expect("a rank member"));
+    let thinking = fixture_error("anthropic-api", "thinking-type-disabled-unsupported");
     let cases = [
         (
             "compat sampling refusal",
@@ -228,13 +229,13 @@ fn a_refusal_names_its_row_on_the_direct_lane_and_none_on_its_mantle_sibling() {
             "temperature",
         ),
         (
-            "ranked responses refusal",
-            &ranked,
-            OPENAI_RESPONSES,
-            EgressKind::OpenaiResponses,
-            EgressKind::OpenaiResponsesMantle,
-            minimal,
-            "output_config.effort.minimal",
+            "anthropic thinking refusal",
+            &thinking,
+            ANTHROPIC_API,
+            EgressKind::AnthropicApi,
+            EgressKind::AnthropicApiMantle,
+            SentEffort::Unknown,
+            "thinking.type.disabled",
         ),
     ];
 
@@ -254,7 +255,10 @@ fn a_refusal_names_its_row_on_the_direct_lane_and_none_on_its_mantle_sibling() {
 
 /// A refusal the Mantle scope resolves to no row is counted as one the
 /// parser did not localize there, and the same refusal on the direct lane is
-/// not: the blindness count reads the lane's own view.
+/// not: the blindness count reads the lane's own view. `temperature` is not
+/// admitted on compat Mantle: the one temperature refusal captured there
+/// arrives with the `unsupported_value` code, which the field class gate does
+/// not pass on openai-compat, so it grounds nothing.
 ///
 /// Mutation check: map the compat Mantle egress to its kind's scope in
 /// `RowScope::of_lane` -> red on the Mantle assertion.
@@ -276,4 +280,51 @@ fn a_compat_refusal_on_compat_mantle_counts_as_unlocalized() {
         "control: the direct lane localizes it",
     );
     assert!(unlocalized(EgressKind::OpenaiCompatMantle));
+}
+
+/// Each admitted Mantle row is named on its sub-lane by the refusal captured
+/// there, and that same refusal names nothing on another Mantle sub-lane of
+/// the same dialect: the admission is the sub-lane's own.
+///
+/// Mutation check: empty an allowlist const -> red on that sub-lane's row.
+#[test]
+fn a_mantle_capture_names_its_admitted_row_on_its_own_sub_lane() {
+    let minimal = SentEffort::Rank(EffortRank::of_token("minimal").expect("a rank member"));
+    let cases = [
+        (
+            "anthropic Mantle ceiling",
+            fixture_error("anthropic-api", "max-tokens-above-model-limit-mantle"),
+            ANTHROPIC_API,
+            EgressKind::AnthropicApiMantle,
+            SentEffort::Unknown,
+            "max_tokens",
+        ),
+        (
+            "compat Mantle sampling drop",
+            fixture_error("openai-compat", "unsupported-parameter-top-p-mantle"),
+            OPENAI_COMPAT,
+            EgressKind::OpenaiCompatMantle,
+            SentEffort::Unknown,
+            "top_p",
+        ),
+        (
+            "responses Mantle ranked effort",
+            fixture_error(
+                "openai-responses",
+                "reasoning-effort-minimal-unsupported-mantle",
+            ),
+            OPENAI_RESPONSES,
+            EgressKind::OpenaiResponsesMantle,
+            minimal,
+            "output_config.effort.minimal",
+        ),
+    ];
+
+    for (name, err, kind, egress, sent, row) in cases {
+        assert_eq!(
+            named_path(&err, kind, Some(egress), sent),
+            Some(row),
+            "{name}"
+        );
+    }
 }

@@ -2168,6 +2168,10 @@ mod effort_tests;
 mod lane_scope_tests;
 
 #[cfg(test)]
+#[path = "field_lane_weld_tests.rs"]
+mod lane_weld_tests;
+
+#[cfg(test)]
 mod table_tests {
     use super::*;
     use routectl_core::capability::SignalTier;

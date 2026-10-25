@@ -1618,11 +1618,11 @@ async fn a_remote_target_on_the_same_lane_repairs_on_every_walk() {
 #[tokio::test]
 async fn a_bedrock_mantle_target_performs_no_field_repair_on_any_walk() {
     // A mantle entry is `kind = "anthropic-api"` and is attributable through
-    // the Mantle endpoint its region derives, but its lane view is empty: no
-    // refusal captured on Mantle grounds a row there, and the direct sibling's
-    // rows are not borrowed. So the reactive plan admits no candidate, even an
-    // injected rejection naming a grounded row has nothing to repair, and
-    // nothing is minted.
+    // the Mantle endpoint its region derives, but its lane view holds only the
+    // rows a refusal captured on Mantle grounds, and the direct sibling's rows
+    // are not borrowed. The display row is not admitted there, so the reactive
+    // plan admits no candidate for it, even an injected rejection naming it
+    // has nothing to repair, and nothing is minted.
     let _injection = provisional::inject(REJECTED_PATH);
     for surface in [
         "complete",
@@ -1657,7 +1657,7 @@ async fn a_bedrock_mantle_target_performs_no_field_repair_on_any_walk() {
         );
         assert!(
             !verdict_resident(&router, "m0"),
-            "{surface}: and nothing may be minted on an empty lane view",
+            "{surface}: and nothing may be minted for a row the lane view omits",
         );
     }
 }

@@ -234,6 +234,11 @@ mod effort_templates {
                 effort(SelfIdentifying, InvalidValue, None, five),
             ),
             ("anthropic-api/effort-parameter-unsupported-haiku-4-5", None),
+            // The same refusal captured on Mantle, its pass-through control.
+            (
+                "anthropic-api/effort-parameter-unsupported-control-mantle",
+                None,
+            ),
             (
                 "anthropic-api/effort-xhigh-thinking-disabled-opus-5-5",
                 Some((
@@ -517,6 +522,8 @@ mod responses_effort {
         let six = MINIMAL | LOW | MEDIUM | HIGH | XHIGH | MAX;
         let without_minimal = LOW | MEDIUM | HIGH | XHIGH | MAX;
         let expected: BTreeMap<String, Option<Reading>> = [
+            // A model refusal with a null `error.param` names no field.
+            ("model-unsupported-api-control-mantle", None),
             ("reasoning-effort-invalid-value-codex", effort("bogus", six)),
             (
                 "reasoning-effort-invalid-value-codex-gpt-5-6",
@@ -529,6 +536,11 @@ mod responses_effort {
             // The refused level is echoed and absent from the list.
             (
                 "reasoning-effort-minimal-unsupported-codex",
+                effort("minimal", without_minimal),
+            ),
+            // The same template, byte for byte, on Mantle.
+            (
+                "reasoning-effort-minimal-unsupported-mantle",
                 effort("minimal", without_minimal),
             ),
         ]
