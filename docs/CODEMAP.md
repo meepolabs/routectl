@@ -2865,8 +2865,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   per-lane row view is `FieldRepairTable::for_lane`) -> NOT a forwarded-credential
   target -> `field_repair::attributable_field_lane` (entry present, admitted
   kind, a `ProviderEntry::classifiable_egress_base_url`, NOT
-  `field_verdict::loopback_target_suppresses_minting` over it; the admitted
-  `AttributableLane { provider_kind, egress, base_url }`) -> the entry's
+  `field_verdict::loopback_target_suppresses_minting` over it), yielding
+  `AttributableLane { provider_kind, egress, base_url }` -> the entry's
   kind and egress agree with the target's (`AttributableLane::matches_target`)
   -> then, PER PRESENT ROW, settlement
   mode -> `field_verdict::FieldVerdictKey` -> the single-flight guard, yielding
@@ -2985,7 +2985,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/router/field_preflight.rs` -- the canonical PRE-DISPATCH envelope-field
   planner all three dispatch walks share, and the proactive counterpart of
   `field_repair`'s reactive arm. `Router::plan_field_preflight(original_req,
-  target, surface, budget)` takes the request by shared reference and returns
+  target, surface)` takes the request by shared reference and returns
   an owned `(ChatRequest, Vec<FieldPreflight>, FieldPreflightPlan)` triple --
   ONE decision record per CONSIDERED closed-table row -- so
   mutating the caller's
@@ -2995,8 +2995,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   position: after the layered overlays and the strip interceptor, before
   provider translation, the context reduction, and the calibration stamp --
   so the planned body is the one both a remote count and every local read of
-  the request measure. It scans EVERY present row
-  (`field_repair::present_rows`) rather than the first: a request can carry
+  the request measure. It scans EVERY present row of the lane's view
+  (`field_repair::present_rows` over `Router::preflight_view`: the entry's
+  attributable lane, else the target's own kind and egress) rather than the
+  first: a request can carry
   rows of two transform classes at once, and each clears its own gates. A
   verdict the free re-check owns (`negative_recovers_only_by_recheck`) is never
   canaried, since an unrepaired success would clear it. Each
@@ -3045,7 +3047,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   shared attributability decision `plan_field_preflight` reads once per
   target, and reports `unattributable_target`),
   `preflight_lane_disagreement` (an attributable entry whose kind or egress
-  no longer matches the target, refused once for the whole target),
+  no longer matches the target, refused once for the whole target; the rows
+  then scanned come from `Router::preflight_view`),
   `preflight_identity` (the attribution refusal per row plus the
   `FieldVerdictKey`), and `preflight_authorization_for` (mask, eligibility,
   quorum, opt-in) -- each returning the closed-set token its refusal reports.
@@ -3403,7 +3406,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/router/rejection_parser.rs` -- `parse_rejection` -> `NamedRejection`,
   `RejectionKind`: per-dialect parse of an upstream rejection envelope,
   resolved against the lane view `FieldRepairTable::for_lane` keyed on the
-  attempt's egress (a row outside that view names nothing); also
+  lane's provider kind and egress (a row outside that view names nothing); also
   `localized_field` -> `LocalizedField` and `FieldIdentity` (tests:
   `src/router/rejection_parser_identity_tests.rs`)
 - `src/router/rejection_parser_beta.rs` -- child module of
