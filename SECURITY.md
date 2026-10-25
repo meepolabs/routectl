@@ -31,9 +31,11 @@ the defaults are conservative:
 - **Read-only observability.** The dashboard (`GET /`) and the
   `/status` panels are structurally read-only: no mutation routes
   exist, and test-enforced scans keep write handles out of that code.
-- **Supply chain.** CI runs `cargo-deny` (advisories + licenses) and
-  gitleaks secret scanning; release checksums are signed with
-  sigstore cosign (keyless) and verifiable with `cosign verify-blob`.
+- **Supply chain.** CI runs `cargo-deny` (advisories + licenses), and
+  the shared `meepolabs/meepolabs-conventions` security floor runs
+  gitleaks secret scanning and an osv-scanner dependency scan; release
+  checksums are signed with sigstore cosign (keyless) and verifiable
+  with `cosign verify-blob`.
 
 ## Scope notes
 

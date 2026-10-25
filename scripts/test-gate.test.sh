@@ -403,16 +403,16 @@ assert_wiring "the CI public-api job continues on error and ends by running the 
 
 assert_wiring "the required job does not depend on the public-api job" \
     required_skips_public_api "$CI_WORKFLOW" \
-    's/^      - osv-scan$/&\n      - public-api/' \
-    's/^      - osv-scan$/      - "public-api"/' \
+    's/^      - internal-ids$/&\n      - public-api/' \
+    's/^      - internal-ids$/      - "public-api"/' \
     's/^    needs:$/    needs: [check]/'
 
 assert_wiring "no job the required job needs runs the public-API check" \
     required_needs_do_not_run_public_api "$CI_WORKFLOW" \
-    's#^        run: osv-scanner scan source -r \.$#&\n      - run: bash scripts/public-api.sh --check all#' \
-    's#^        run: osv-scanner scan source -r \.$#&\n      - run: bash scripts/test-gate.sh public-api#' \
-    's#^        run: osv-scanner scan source -r \.$#&\n      - run: bash scripts/public-api-report.sh#' \
-    's/^      - osv-scan$/&\n      - no-such-job/' \
+    's#^        run: bash scripts/check-internal-ids\.test\.sh$#&\n      - run: bash scripts/public-api.sh --check all#' \
+    's#^        run: bash scripts/check-internal-ids\.test\.sh$#&\n      - run: bash scripts/test-gate.sh public-api#' \
+    's#^        run: bash scripts/check-internal-ids\.test\.sh$#&\n      - run: bash scripts/public-api-report.sh#' \
+    's/^      - internal-ids$/&\n      - no-such-job/' \
     '/^    needs:$/,/^    steps:$/{/^      - /d}'
 
 assert_wiring "no pre-commit hook runs the public-API check" \

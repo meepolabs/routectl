@@ -57,7 +57,6 @@ readonly ENV_PREFLIGHT='bash scripts/assert-aws-lc-env.sh'
 
 # <workflow file name>:<job id> -- why the job needs no preflight.
 readonly EXEMPT_JOBS=(
-    "ci.yml:osv-scan -- runs only the pinned osv-scanner binary over lockfiles"
     "release.yml:release -- downloads, signs, and publishes built artifacts"
 )
 

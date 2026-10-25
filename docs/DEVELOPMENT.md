@@ -205,8 +205,10 @@ The full detail of every leg -- exact command, flags, and skip/fail
 conditions -- lives in the config itself, each leg named as it runs;
 treat the list below as a same-order summary, not a substitute for
 reading it. In order: a toolchain preflight, the gitleaks staged-secret
-scan (its `rev` pins the binary, in lockstep with `GITLEAKS_VERSION` in
-`.github/workflows/gitleaks.yml`), an internal-identifier scan and its
+scan (its `rev` pins the binary, equal to the gitleaks version the shared
+`meepolabs/meepolabs-conventions` security-floor action pins, which
+`.github/workflows/security.yml` runs; there is no repo gitleaks config),
+an internal-identifier scan and its
 self-test, a
 log-sink inventory (the escaping formatter is the only production
 subscriber), a navigation-doc check that fails on a new source file with

@@ -1,0 +1,29 @@
+name: security
+
+on:
+  push:
+    branches: [develop]
+  pull_request:
+    branches: [main, develop]
+  schedule:
+    - cron: '17 13 * * 6'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Never cancel a push run: it is the only scan of that push.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  security-floor:
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: meepolabs/meepolabs-conventions/actions/security-floor@6db5944702af137942b6668c9bf6a7d2e030a5a9  # v0.1.1

@@ -206,7 +206,7 @@ assert_reject "checkout job without the preflight that never runs cargo" \
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
-      - run: osv-scanner scan source -r .
+      - run: ./scan-lockfiles
 ')" \
     'job scan does not run the preflight'
 
@@ -252,28 +252,28 @@ assert_reject "run block whose first line is not the preflight" \
 ')" \
     'job build does not run the preflight'
 
-EXEMPT_JOB='  osv-scan:
+EXEMPT_JOB='  release:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
-      - run: osv-scanner scan source -r .
+      - run: gh release upload v1 routectl.tar.gz
 '
 
 assert_pass "listed exempt job without the preflight" \
-    "$(named_workflow exempt ci.yml "$HEADER$PINNED_ENV$JOBS$EXEMPT_JOB")"
+    "$(named_workflow exempt release.yml "$HEADER$PINNED_ENV$JOBS$EXEMPT_JOB")"
 
 assert_reject "listed exempt job that runs cargo" \
-    "$(named_workflow exempt-cargo ci.yml "$HEADER$PINNED_ENV$JOBS"'  osv-scan:
+    "$(named_workflow exempt-cargo release.yml "$HEADER$PINNED_ENV$JOBS"'  release:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
       - run: cargo audit
 ')" \
-    'exempt job osv-scan runs cargo'
+    'exempt job release runs cargo'
 
 assert_reject "exemption naming a job the workflow no longer defines" \
-    "$(named_workflow stale-exemption ci.yml "$HEADER$PINNED_ENV$JOBS")" \
-    'exemption names job osv-scan, which this workflow does not define'
+    "$(named_workflow stale-exemption release.yml "$HEADER$PINNED_ENV$JOBS")" \
+    'exemption names job release, which this workflow does not define'
 
 # The literal $GITHUB_ENV is the workflow text under test, not a shell expansion.
 # shellcheck disable=SC2016

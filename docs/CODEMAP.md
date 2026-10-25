@@ -8917,12 +8917,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `tests/scrub_gate_provider_shapes.rs` -- drift detector over the
   sentinel-delimited `PROVIDER_SHAPE_KINDS` / `PROVIDER_SHAPE_EXCLUDED`
   classification block in `scripts/scrub-fixture.sh`
-  ; ALSO carries the gitleaks path-allowlist scope block: pins the allowlist
-  entry set exactly and asserts the committed driver fixture corpus stays OUT
-  of every allowlist surface (singular, plural, and rule-scoped), matched
-  against representative FILE paths because that is what gitleaks evaluates,
-  with a positive control that the same matcher fires on the allowlisted
-  live-capture root
+  ; ALSO asserts the repo root carries no `.gitleaks.toml`, so no repo
+  allowlist can exempt files or values from the local secret scan
 - `tests/cross_mode_pair.rs` -- pins the committed cross-mode fixture pair
   (`driver/anthropic-api/plain-turn-01` and its `-fp` twin): asserts each
   half's `meta.client.connection_mode`, the MITM seam header and
