@@ -358,8 +358,14 @@ There it can also lower the `max_tokens` routectl fills in for a client
 that sent none (see
 [`max_output_tokens`](CONFIGURATION.md#max_output_tokens-optionu32-default-none));
 lowering that fill is lossless, since the client asked for no particular
-limit. Field repair does not act on a Mantle sub-lane yet: no row is
-admitted on one until a refusal captured on that sub-lane grounds it.
+limit. On a Bedrock Mantle sub-lane field repair acts only on the rows
+a refusal captured on that sub-lane grounds: this ceiling on the Anthropic
+lane; the `top_p`, `presence_penalty` and `frequency_penalty` drops on
+the Chat Completions lane (`temperature` is not admitted: its refusal
+there carries the `unsupported_value` code, which field repair does not
+act on for `openai-compat`); the `minimal` effort level on the Responses
+lane. Chat Completions `reasoning_effort` is a known gap on Mantle: no
+reader parses its refusal wording.
 
 **Example provider + model:**
 

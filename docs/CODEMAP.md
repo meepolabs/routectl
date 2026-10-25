@@ -8730,7 +8730,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   and `preflight_daemon_effort_tests.rs` (an adaptive turn's `xhigh` refused
   with the committed `Supported levels` capture over a real anthropic-api
   egress is retried at `high` and learned with its value on the ledger; the
-  next turn leaves pre-flighted at `high` and draws no refusal)
+  next turn leaves pre-flighted at `high` and draws no refusal), and
+  `preflight_daemon_mantle_tests.rs` (on each Bedrock Mantle sub-lane, a real
+  Mantle egress against a mock origin answering the committed Mantle capture:
+  an admitted row draws one repaired retry, is learned and pre-flighted on the
+  next turn; each sub-lane's control capture is forwarded unrepaired and
+  counted unlocalized)
 - `tests/preflight_observability_e2e.rs` -- hermetic runtime acceptance for the
   pre-flight observability floor: a real `serve_on_listener` daemon on an
   OS-assigned loopback port, a per-test tempdir usage ledger, and a provider

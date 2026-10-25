@@ -273,9 +273,13 @@ Surfaces: [openai-compat](#openai-compat-surface) -
   not the client's `max_tokens`, so the egress keeps declaring its own
   default, the legacy thinking budget is fitted under the lowered
   value, and the repair is lossless (`field_ceiling_fill_repair`).
-  Lowering a client value is lossy (`field_ceiling_repair`). Field
-  repair does not act on a Mantle sub-lane yet: no row is admitted on
-  one until a refusal captured on that sub-lane grounds it.
+  Lowering a client value is lossy (`field_ceiling_repair`). On a
+  Bedrock Mantle sub-lane field repair acts only on the rows a refusal
+  captured on that sub-lane grounds: this ceiling on the Anthropic lane;
+  the `top_p`, `presence_penalty` and `frequency_penalty` drops on the
+  Chat Completions lane; the `minimal` effort level on the Responses
+  lane. Chat Completions `reasoning_effort` and `temperature` (refused
+  with `unsupported_value`) are not admitted there.
 
 - **Anthropic `tool_choice` rejects bare-string OpenAI shape**.
   Bedrock validators 400 on `tool_choice: "auto"` (OpenAI) where

@@ -1264,6 +1264,17 @@ does not refresh them, so they are unsuitable for a long-running daemon.
 present in TOML but the binary was built without `bedrock`, config load
 fails with a clean feature-gated-field error.
 
+Field repair on this lane acts only on the rows a refusal captured on
+Mantle grounds: the `max_tokens` ceiling. Its thinking and effort rows are
+not admitted (the only Claude model served in the captured region accepts
+every thinking shape and takes no effort), and `presence_penalty` /
+`frequency_penalty` never reach the wire here, since the Anthropic egress
+drops both before sending. Learned field-repair history is keyed on the provider entry name and
+upstream model, not on the region or host, so a `region` change, or switching
+an entry between a direct endpoint and this sub-table under the same name,
+keeps that history exactly like a `base_url` repoint; decay re-checks each
+verdict.
+
 ## `[providers.X.bedrock_mantle]` -- Bedrock mantle OpenAI lanes
 
 The same `[providers.X.bedrock_mantle]` sub-table reaches the mantle
@@ -1397,6 +1408,22 @@ and are DEV-ONLY -- the lane does not refresh them.
 Both lanes require the `bedrock` build feature; the `bedrock_mantle` key
 on an OpenAI provider fails config load with a clean feature-gated-field
 error when the binary was built without it.
+
+Field repair on these lanes acts only on the rows a refusal captured on
+that lane grounds. The Chat Completions lane drops `top_p`,
+`presence_penalty` and `frequency_penalty` when the model refuses them.
+`temperature` is not admitted there: the model that refuses it answers
+with the `unsupported_value` code, which the field repair does not act on
+for `openai-compat`, so that refusal reaches the client. Top-level
+`reasoning_effort` is not a repairable field on that lane (its refusal
+wording has no reader). The Responses lane rewrites a refused
+`reasoning.effort` of `minimal` to the nearest level the refusal lists,
+and learns it; its sampling refusals name a parameter the Responses reader
+does not localize, so they are forwarded. Learned field-repair history is keyed on the provider entry name and
+upstream model, not on the region or host, so a `region` change, or switching
+an entry between a direct endpoint and this sub-table under the same name,
+keeps that history exactly like a `base_url` repoint; decay re-checks each
+verdict.
 
 ## `[providers.X]` Gemini (`kind = "gemini"`)
 
@@ -2414,9 +2441,13 @@ confirm that cap for the selector. Without it, a caller that omits
 lane field repair acts on, routectl retries that request at the limit
 the 400 names and learns it, so the key then only saves the first
 refusal per lane (and the one after each decay). On a lane field repair
-does not act on (a Mantle sub-lane, where no row is admitted yet; a
-loopback `base_url`; a forwarded client credential), the 400 reaches the
-client every time.
+does not act on (a loopback `base_url`; a forwarded client credential),
+the 400 reaches the client every time. On a Bedrock Mantle lane field
+repair acts on the rows a refusal captured on that sub-lane grounds: the
+`max_tokens` ceiling on the Anthropic lane; `top_p`, `presence_penalty`
+and `frequency_penalty` on the Chat Completions lane; the `minimal`
+effort level on the Responses lane. Chat Completions `reasoning_effort` is
+a known gap there: its refusal wording has no reader, so it is forwarded.
 Check `routectl doctor`'s **Model knobs** section first: if it reports the
 ceiling as catalog-filled at the right figure, this key is redundant.
 
