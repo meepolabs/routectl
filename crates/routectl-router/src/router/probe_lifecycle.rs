@@ -317,11 +317,11 @@ impl Router {
         // probe must never dial a target whose rejection it could not
         // attribute.
         //
-        // MIRRORS activation's refusal set, entry-for-entry. A recheck that
-        // covered fewer cases than activation would let exactly the reload
-        // that changed a lane's attributability slip a queued job through:
-        // the job was admitted against the old entry and nothing else looks
-        // again.
+        // MIRRORS activation's refusal set, entry-for-entry, and then
+        // narrows to lane scope below. A recheck that covered fewer cases
+        // than activation would let exactly the reload that changed a lane's
+        // attributability slip a queued job through: the job was admitted
+        // against the old entry and nothing else looks again.
         let Some(lane) = self.probe_entry_lane(&seat.provider_name, &seat.upstream) else {
             return FreeValidatorOutcome::Unavailable;
         };

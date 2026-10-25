@@ -1266,12 +1266,12 @@ fails with a clean feature-gated-field error.
 
 Field repair on this lane acts only on the rows a refusal captured on
 Mantle grounds: the `max_tokens` ceiling. Its thinking and effort rows are
-not admitted (the only Claude model served in the captured region accepts
-every thinking shape and takes no effort), and `presence_penalty` /
-`frequency_penalty` never reach the wire here, since the Anthropic egress
-drops both before sending. Learned field-repair history is keyed on the provider entry name and
-upstream model, not on the region or host, so a `region` change, or switching
-an entry between a direct endpoint and this sub-table under the same name,
+not admitted (no refusal captured on this lane grounds a thinking or
+effort row), and `presence_penalty` / `frequency_penalty` never reach the
+wire here, since the Anthropic egress drops both before sending. Learned
+field-repair history is keyed on the provider entry name and upstream
+model, not on the region or host, so a `region` change, or switching an
+entry between a direct endpoint and this sub-table under the same name,
 keeps that history exactly like a `base_url` repoint; decay re-checks each
 verdict.
 
@@ -1419,11 +1419,11 @@ for `openai-compat`, so that refusal reaches the client. Top-level
 wording has no reader). The Responses lane rewrites a refused
 `reasoning.effort` of `minimal` to the nearest level the refusal lists,
 and learns it; its sampling refusals name a parameter the Responses reader
-does not localize, so they are forwarded. Learned field-repair history is keyed on the provider entry name and
-upstream model, not on the region or host, so a `region` change, or switching
-an entry between a direct endpoint and this sub-table under the same name,
-keeps that history exactly like a `base_url` repoint; decay re-checks each
-verdict.
+does not localize, so they are forwarded. Learned field-repair history
+is keyed on the provider entry name and upstream model, not on the region
+or host, so a `region` change, or switching an entry between a direct
+endpoint and this sub-table under the same name, keeps that history
+exactly like a `base_url` repoint; decay re-checks each verdict.
 
 ## `[providers.X]` Gemini (`kind = "gemini"`)
 
@@ -2446,8 +2446,11 @@ the 400 reaches the client every time. On a Bedrock Mantle lane field
 repair acts on the rows a refusal captured on that sub-lane grounds: the
 `max_tokens` ceiling on the Anthropic lane; `top_p`, `presence_penalty`
 and `frequency_penalty` on the Chat Completions lane; the `minimal`
-effort level on the Responses lane. Chat Completions `reasoning_effort` is
-a known gap there: its refusal wording has no reader, so it is forwarded.
+effort level on the Responses lane. No ceiling row is admitted on the
+Chat Completions and Responses Mantle lanes, so a token-limit 400 there
+reaches the client every time and this key is the only remedy. Chat
+Completions `reasoning_effort` is a known gap there: its refusal wording
+has no reader, so it is forwarded.
 Check `routectl doctor`'s **Model knobs** section first: if it reports the
 ceiling as catalog-filled at the right figure, this key is redundant.
 

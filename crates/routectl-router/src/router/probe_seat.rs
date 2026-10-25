@@ -1,10 +1,11 @@
 //! Which seat a probe identity names, whether that seat is one this stage
 //! may attribute a rejection to, and whether its lane carries the probed row.
 //!
-//! Both questions are read from the operator's OWN `[providers]` entry rather
-//! than from a dispatch target, and the attributability predicate is called by
-//! activation AND by the recheck immediately before the dial, so both draw the
-//! forwarded, unclassifiable-egress, and loopback refusals from one set.
+//! All three questions are read from the operator's OWN `[providers]` entry
+//! rather than from a dispatch target, and the attributability predicate is
+//! called by activation AND by the recheck immediately before the dial, so
+//! both draw the forwarded, unclassifiable-egress, and loopback refusals from
+//! one set.
 
 use crate::field_verdict::FieldVerdictKey;
 

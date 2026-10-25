@@ -609,7 +609,7 @@ therefore emits one DEBUG per row per target it planned.
 | `action` | `field_preflight_drop`, `field_preflight_rewrite`, or `field_preflight_ceiling` (the acting decision's own reason token), attached ONLY to a record that acted -- labelling a fail-open with it would name an action the walk did not take |
 | `acted` | DEBUG only: whether this decision rewrote the request |
 | `state_key` | Sanitized `[providers]` state key of the target the decision was planned for |
-| `field_path` | The closed-table qualified dotted path the decision considered, or `none` when the request carried no grounded field |
+| `field_path` | The closed-table qualified dotted path the decision considered, or `none` when the request carried no grounded field or on the whole-target `unattributable_target` record (an attributable entry whose kind or egress no longer matches the target) |
 | `transform_class` | `envelope` or `prefix_impacting` -- what decided which gates the decision had to clear. `none` only for a decision that considered no row |
 | `reason` | Closed-set token naming why the decision acted or fell open (below) |
 | `provenance_phase` | Detection phase of the acting verdict the decision rested on (`f1` / `f2` / `f3`), or `none` for a decision no authorization permitted |

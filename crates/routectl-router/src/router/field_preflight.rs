@@ -156,9 +156,11 @@ pub(super) const FIELD_PREFLIGHT_UNSUPPORTED_LANE: &str = "unsupported_lane";
 /// one.
 ///
 /// A Mantle entry whose region names no endpoint is refused by the shared
-/// decision, but its target's own view is the empty Mantle one, so it
-/// reports [`FIELD_PREFLIGHT_NO_GROUNDED_FIELD`] instead. Config validation
-/// rejects such a region at load, so a running router never holds one.
+/// decision and read through its target's own Mantle view: it reports this
+/// for each carried row that view admits, and
+/// [`FIELD_PREFLIGHT_NO_GROUNDED_FIELD`] when the request carries none.
+/// Config validation rejects such a region at load, so a running router
+/// never holds one.
 pub(super) const FIELD_PREFLIGHT_UNATTRIBUTABLE_TARGET: &str = "unattributable_target";
 
 /// Reason token: an operator `force_supported` override masks this field's
@@ -846,9 +848,10 @@ impl Router {
     /// The rows this planner considers for `target`: the view of the entry's
     /// own attributable `lane` when there is one, else the view the target
     /// itself names, so an unattributable target still reports its refusal
-    /// per carried row. A lane whose view is empty carries nothing and
-    /// reports no grounded field; so does an unattributable target whose own
-    /// egress is a Mantle sub-lane.
+    /// per carried row. A request carrying no row of the view reports no
+    /// grounded field; an unattributable target whose own egress is a Mantle
+    /// sub-lane reads that sub-lane's view, so it reports only the rows its
+    /// allowlist admits.
     fn preflight_view(
         &self,
         target: &DispatchTarget,

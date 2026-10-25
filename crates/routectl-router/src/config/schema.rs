@@ -3112,9 +3112,10 @@ pub fn default_responses_base(auth_kind: OpenaiResponsesAuthKind) -> String {
         // factory's `bedrock_mantle` branch and returns before this
         // fallback; the non-mantle path then rejects a bare `bedrock-mantle`
         // marker with a Config error (in every build and for unvalidated
-        // callers) before any base_url is resolved, and
-        // `ProviderEntry::classifiable_egress_base_url` answers `None` for
-        // the marker before calling here. No path reaches here.
+        // callers) before any base_url is resolved.
+        // `ProviderEntry::classifiable_egress_base_url` answers a host from
+        // its `bedrock_mantle` block arm and `None` for a bare marker, both
+        // before calling here. No path reaches here.
         OpenaiResponsesAuthKind::BedrockMantle => {
             unreachable!("bedrock-mantle base_url is derived in the factory mantle branch")
         }

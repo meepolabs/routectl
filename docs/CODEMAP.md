@@ -3033,17 +3033,17 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   to arbitrate. Positive-only membership, not tier precedence.
   A masked decision suppresses the ACTION
   and never the state: the verdict stays resident, acting, and confirmed.
-  The gate chain is split across three helpers rather than one long function --
+  The gate chain is split across four helpers rather than one long function --
   `preflight_lane_admits` (kill switch and lane only -- the forwarded-credential
   refusal is NOT repeated here; it belongs to the shared attributability
-  decision below and reports `unattributable_target`),
-  `preflight_identity` (attribution, read once per target by
-  `plan_field_preflight`, plus the `FieldVerdictKey`; an attributable entry
-  whose kind or egress no longer matches the target is refused once for the
-  whole target by `preflight_lane_disagreement`), and
-  `preflight_authorization_for` (mask, eligibility, quorum, opt-in) -- each
-  returning the closed-set token its refusal reports, and `unchanged_record` is a
-  free function rather than a method because it reads nothing from the router.
+  decision `plan_field_preflight` reads once per target, and reports
+  `unattributable_target`), `preflight_lane_disagreement` (an attributable
+  entry whose kind or egress no longer matches the target, refused once for the
+  whole target), `preflight_identity` (the attribution refusal per row plus the
+  `FieldVerdictKey`), and `preflight_authorization_for` (mask, eligibility,
+  quorum, opt-in) -- each returning the closed-set token its refusal reports.
+  `preflight_identity` and `unchanged_record` are free functions rather than
+  methods because they read nothing from the router.
   Past those gates the CADENCE decides between two outcomes for that row. Only
   `DispatchSurface::Complete` ticks `FieldCanaryRegistry::tick_cadence`, and the
   exclusion sits upstream of both the tick and the claim rather than filtering a
