@@ -533,7 +533,7 @@ mod responses_effort {
                 "reasoning-effort-invalid-value-mantle",
                 effort("bogus", without_minimal),
             ),
-            // The model's own list: the schema's six without max.
+            // The model's own list, low through xhigh: it omits both minimal and max.
             (
                 "reasoning-effort-max-unsupported-mantle",
                 effort("max", LOW | MEDIUM | HIGH | XHIGH),
