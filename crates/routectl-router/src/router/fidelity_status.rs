@@ -528,12 +528,14 @@ impl Router {
     /// Whether the lane this verdict's target sits on is one the pre-flight planner
     /// acts on at all.
     ///
-    /// Derived from the same two predicates the planner reads:
-    /// `preflight_lane_admits` (the provider kind must be one field repair
-    /// admits) and the shared attributability decision `plan_field_preflight`
-    /// reads once per target (the entry must carry an attributable base URL,
-    /// not a forwarded credential, a local hop, or none). A status read has no
-    /// `DispatchTarget`, so the forwarded fact is read off the operator's entry
+    /// Reads only the shared attributability decision
+    /// (`field_repair::attributable_field_lane`) that `plan_field_preflight`
+    /// reads once per target: the entry exists, is of a kind field repair
+    /// admits, and carries an attributable base URL (not a forwarded
+    /// credential, a local hop, or none). The capability kill switch is not
+    /// read here; the caller checks it first and reports its own reason. A
+    /// status read has no `DispatchTarget`, so the forwarded fact is read off
+    /// the operator's entry
     /// through the same accessor the chain derives
     /// `DispatchTarget::use_forwarded_credential` from, which keeps the two from
     /// disagreeing about the same provider.

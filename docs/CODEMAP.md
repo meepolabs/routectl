@@ -3034,11 +3034,12 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   A masked decision suppresses the ACTION
   and never the state: the verdict stays resident, acting, and confirmed.
   The gate chain is split across four helpers rather than one long function --
-  `preflight_lane_admits` (kill switch and lane only -- the forwarded-credential
-  refusal is NOT repeated here; it belongs to the shared attributability
-  decision `plan_field_preflight` reads once per target, and reports
-  `unattributable_target`), `preflight_lane_disagreement` (an attributable
-  entry whose kind or egress no longer matches the target, refused once for the
+  `preflight_lane_admits` (kill switch and lane only: returns the admitted
+  provider kind, or `None`, which its caller reports as `unsupported_lane`;
+  the forwarded-credential refusal is NOT repeated here, it belongs to the
+  shared attributability decision `plan_field_preflight` reads once per
+  target, and reports `unattributable_target`),
+  `preflight_lane_disagreement` (an attributable entry whose kind or egress no longer matches the target, refused once for the
   whole target), `preflight_identity` (the attribution refusal per row plus the
   `FieldVerdictKey`), and `preflight_authorization_for` (mask, eligibility,
   quorum, opt-in) -- each returning the closed-set token its refusal reports.

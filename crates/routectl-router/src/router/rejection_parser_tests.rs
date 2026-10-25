@@ -391,7 +391,8 @@ fn every_committed_rejection_fixture_resolves_to_a_row_or_is_reported_unresolved
         ),
         // The grammar reads the row, but its `unsupported_value` code takes
         // the refusal out of the class the field gate passes on openai-compat,
-        // so no live rejection with this envelope reaches the parser.
+        // so a live rejection with this envelope never reaches
+        // `rejected_field` and names no row.
         (
             "openai-compat/unsupported-value-temperature-mantle",
             Outcome::Row(TEMPERATURE_PATH, SelfIdentifying, InvalidValue),

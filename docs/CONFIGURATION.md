@@ -2448,7 +2448,9 @@ repair acts on the rows a refusal captured on that sub-lane grounds: the
 and `frequency_penalty` on the Chat Completions lane; the `minimal`
 effort level on the Responses lane. No ceiling row is admitted on the
 Chat Completions and Responses Mantle lanes, so a token-limit 400 there
-reaches the client every time and this key is the only remedy. Chat
+reaches the client. This key does not apply on those two lanes: their
+egresses never inject a limit and send only the caller's own value, so
+the remedy is for the caller to lower its `max_tokens`. Chat
 Completions `reasoning_effort` is a known gap there: its refusal wording
 has no reader, so it is forwarded.
 Check `routectl doctor`'s **Model knobs** section first: if it reports the
