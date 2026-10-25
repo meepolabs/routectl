@@ -667,6 +667,11 @@ fn a_planted_admission_without_its_evidence_is_named_by_its_cause() {
         let (failures, _) = weld(allowlists, &record, fixture);
 
         // Assert
+        for failure in &failures {
+            if let WeldError::UnreadableFixture { reason, .. } = failure {
+                assert!(!reason.is_empty(), "{name}: an unreadable fixture says why");
+            }
+        }
         let keyed: Vec<WeldError> = failures.into_iter().map(WeldError::keyed).collect();
         assert_eq!(keyed, vec![expected], "{name}");
     }
