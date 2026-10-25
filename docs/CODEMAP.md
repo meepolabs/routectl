@@ -8759,7 +8759,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   Mantle egress against a mock origin answering the committed Mantle capture:
   an admitted row draws one repaired retry, is learned and pre-flighted on the
   next turn; each sub-lane's control capture is forwarded unrepaired and
-  counted unlocalized)
+  counted unlocalized; a reasoning model's renamed output limit is served on
+  the first attempt with no refusal)
 - `tests/preflight_observability_e2e.rs` -- hermetic runtime acceptance for the
   pre-flight observability floor: a real `serve_on_listener` daemon on an
   OS-assigned loopback port, a per-test tempdir usage ledger, and a provider

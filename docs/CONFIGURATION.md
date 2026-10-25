@@ -1420,9 +1420,9 @@ with the `unsupported_value` code, which the field repair does not act on
 for `openai-compat`, so that refusal reaches the client. Top-level
 `reasoning_effort` is not a repairable field on that lane (its refusal
 wording has no reader). The Responses lane rewrites a refused
-`reasoning.effort` of `minimal` to the nearest level the refusal lists,
-and learns it; its sampling refusals name a parameter the Responses reader
-does not localize, so they are forwarded. Learned field-repair history
+`reasoning.effort` of `minimal` or `max` to the nearest level the refusal
+lists, and learns it; its sampling refusals name a parameter the Responses
+reader does not localize, so they are forwarded. Learned field-repair history
 is keyed on the provider entry name and upstream model, not on the region
 or host, so a `region` change, or switching an entry between a direct
 endpoint and this sub-table under the same name, keeps that history
@@ -2449,9 +2449,9 @@ the 400 reaches the client every time. On a Bedrock Mantle lane field
 repair acts on the rows a refusal captured on that sub-lane grounds: the
 `max_tokens` ceiling on the Anthropic lane; `top_p`, `presence_penalty`
 and `frequency_penalty` on the Chat Completions lane; the `minimal`
-effort level on the Responses lane. No ceiling row is admitted on the
-Chat Completions and Responses Mantle lanes, so a token-limit 400 there
-reaches the client. This key does not apply on those two lanes: their
+and `max` effort levels on the Responses lane. No ceiling row is
+admitted on the Chat Completions and Responses Mantle lanes, so a
+token-limit 400 there reaches the client. This key does not apply on those two lanes: their
 egresses never inject a limit and send only the caller's own value, so
 the remedy is for the caller to lower its `max_tokens`. Chat
 Completions `reasoning_effort` is a known gap there: its refusal wording

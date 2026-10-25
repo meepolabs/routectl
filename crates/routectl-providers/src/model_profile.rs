@@ -49,8 +49,9 @@ pub struct ModelProfile {
     pub kind: MatchKind,
 
     /// Drop `temperature`, `top_p`, presence/frequency penalties, and
-    /// logprobs from the outgoing request body. Set for OpenAI o-series
-    /// and DeepSeek `reasoner` variants which 400 on these params.
+    /// logprobs from the outgoing request body. Set for the reasoning
+    /// models in [`PROFILES`] (OpenAI o-series, gpt-5, gpt-6 and DeepSeek
+    /// `reasoner` variants) which 400 on these params.
     /// Read by `openai_compat::request`.
     pub drops_sampling_params: bool,
 }

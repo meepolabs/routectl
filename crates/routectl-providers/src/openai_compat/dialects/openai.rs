@@ -1,5 +1,6 @@
 //! Vanilla OpenAI: `reasoning.effort` -> top-level `reasoning_effort`,
-//! and o-series / GPT-5 drop sampling params (driven by `ModelProfile`).
+//! and o-series / GPT-5 / GPT-6 drop sampling params (driven by
+//! `ModelProfile`).
 //! Reasoning is not surfaced in the response body, so no response/chunk
 //! lifting is needed.
 
@@ -42,10 +43,11 @@ impl Dialect for OpenAiDialect {
         }
         if profile_for(&req.model).drops_sampling_params {
             drop_sampling_params(obj, tap);
-            // Real OpenAI rejects `max_tokens` on o-series / gpt-5 reasoning
-            // models and requires `max_completion_tokens`. The OpenAI ingress
-            // renames the inbound `max_completion_tokens` to canonical
-            // `max_tokens`; restore it here for reasoning models only.
+            // Real OpenAI rejects `max_tokens` on o-series / gpt-5 / gpt-6
+            // reasoning models and requires `max_completion_tokens`. The
+            // OpenAI ingress renames the inbound `max_completion_tokens` to
+            // canonical `max_tokens`; restore it here for reasoning models
+            // only.
             // Baked seed verdict: the refusal arrives alongside the sampling
             // refusals (one key named per 400, one repair plan per request),
             // and no learned verdict renames a field; `max_tokens` is the
