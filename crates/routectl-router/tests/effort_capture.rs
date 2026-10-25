@@ -85,7 +85,7 @@ struct Sent {
 }
 
 /// Every record entry, in record key order.
-const SENT: [Sent; 16] = [
+const SENT: [Sent; 17] = [
     Sent {
         key: "anthropic-api/effort-invalid-value-openrouter",
         captured: FIRST_CAPTURE_DATE,
@@ -168,6 +168,12 @@ const SENT: [Sent; 16] = [
         key: "openai-responses/reasoning-effort-invalid-value-mantle",
         captured: FIRST_CAPTURE_DATE,
         effort: "bogus",
+        thinking: None,
+    },
+    Sent {
+        key: "openai-responses/reasoning-effort-max-unsupported-mantle",
+        captured: "2026-10-25",
+        effort: "max",
         thinking: None,
     },
     Sent {

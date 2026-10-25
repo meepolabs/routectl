@@ -533,6 +533,11 @@ mod responses_effort {
                 "reasoning-effort-invalid-value-mantle",
                 effort("bogus", without_minimal),
             ),
+            // The model's own list: the schema's six without max.
+            (
+                "reasoning-effort-max-unsupported-mantle",
+                effort("max", LOW | MEDIUM | HIGH | XHIGH),
+            ),
             // The refused level is echoed and absent from the list.
             (
                 "reasoning-effort-minimal-unsupported-codex",

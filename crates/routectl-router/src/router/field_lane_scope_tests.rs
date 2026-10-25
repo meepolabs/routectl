@@ -137,7 +137,7 @@ fn each_mantle_egress_carries_exactly_its_allowlist() {
             OPENAI_RESPONSES,
             EgressKind::OpenaiResponsesMantle,
             OPENAI_RESPONSES_MANTLE_ROWS,
-            &["output_config.effort.minimal"],
+            &["output_config.effort.minimal", "output_config.effort.max"],
         ),
     ];
 
@@ -291,6 +291,7 @@ fn a_compat_refusal_on_compat_mantle_counts_as_unlocalized() {
 #[test]
 fn a_mantle_capture_names_its_admitted_row_on_its_own_sub_lane() {
     let minimal = SentEffort::Rank(EffortRank::of_token("minimal").expect("a rank member"));
+    let max = SentEffort::Rank(EffortRank::of_token("max").expect("a rank member"));
     let cases = [
         (
             "anthropic Mantle ceiling",
@@ -318,6 +319,17 @@ fn a_mantle_capture_names_its_admitted_row_on_its_own_sub_lane() {
             EgressKind::OpenaiResponsesMantle,
             minimal,
             "output_config.effort.minimal",
+        ),
+        (
+            "responses Mantle ranked effort, max",
+            unlifted_fixture_error(
+                "openai-responses",
+                "reasoning-effort-max-unsupported-mantle",
+            ),
+            OPENAI_RESPONSES,
+            EgressKind::OpenaiResponsesMantle,
+            max,
+            "output_config.effort.max",
         ),
     ];
 

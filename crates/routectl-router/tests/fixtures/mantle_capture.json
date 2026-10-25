@@ -126,6 +126,31 @@
       },
       "repaired_status": 200
     },
+    "openai-responses/reasoning-effort-max-unsupported-mantle": {
+      "egress": "openai-responses-mantle",
+      "row": "output_config.effort.max",
+      "model": "openai.gpt-5.4",
+      "date": "2026-10-25T15:14:31+00:00",
+      "request_shape": {
+        "model": "openai.gpt-5.4",
+        "max_output_tokens": 16,
+        "input": "hi",
+        "reasoning": {
+          "effort": "max"
+        }
+      },
+      "status": 400,
+      "message": "Unsupported value: 'max' is not supported with the 'openai.gpt-5.4' model. Supported values are: 'none', 'low', 'medium', 'high', and 'xhigh'.",
+      "repaired_request_shape": {
+        "model": "openai.gpt-5.4",
+        "max_output_tokens": 16,
+        "input": "hi",
+        "reasoning": {
+          "effort": "xhigh"
+        }
+      },
+      "repaired_status": 200
+    },
     "openai-responses/reasoning-effort-minimal-unsupported-mantle": {
       "egress": "openai-responses-mantle",
       "row": "output_config.effort.minimal",

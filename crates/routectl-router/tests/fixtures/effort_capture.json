@@ -162,6 +162,17 @@
       "status": 400,
       "message": "Invalid value: 'bogus'. Supported values are: 'none', 'low', 'medium', 'high', 'xhigh', and 'max'."
     },
+    "openai-responses/reasoning-effort-max-unsupported-mantle": {
+      "lane": "mantle-responses",
+      "model": "openai.gpt-5.4",
+      "request_shape": {
+        "reasoning": {
+          "effort": "max"
+        }
+      },
+      "status": 400,
+      "message": "Unsupported value: 'max' is not supported with the 'openai.gpt-5.4' model. Supported values are: 'none', 'low', 'medium', 'high', and 'xhigh'."
+    },
     "openai-responses/reasoning-effort-minimal-unsupported-codex": {
       "lane": "codex",
       "model": "gpt-5.6-terra",

@@ -423,6 +423,11 @@ fn every_committed_rejection_fixture_resolves_to_a_row_or_is_reported_unresolved
             "openai-responses/reasoning-effort-invalid-value-mantle",
             unresolved(EFFORT_PATH, SelfIdentifying, InvalidValue),
         ),
+        // A level the model does not take, though the route's schema does.
+        (
+            "openai-responses/reasoning-effort-max-unsupported-mantle",
+            Outcome::Row("output_config.effort.max", SelfIdentifying, InvalidValue),
+        ),
         (
             "openai-responses/reasoning-effort-minimal-unsupported-codex",
             Outcome::Row(

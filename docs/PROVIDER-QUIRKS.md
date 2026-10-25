@@ -363,8 +363,8 @@ a refusal captured on that sub-lane grounds: this ceiling on the Anthropic
 lane; the `top_p`, `presence_penalty` and `frequency_penalty` drops on
 the Chat Completions lane (`temperature` is not admitted: its refusal
 there carries the `unsupported_value` code, which field repair does not
-act on for `openai-compat`); the `minimal` effort level on the Responses
-lane. Chat Completions `reasoning_effort` is a known gap on Mantle: no
+act on for `openai-compat`); the `minimal` and `max` effort levels on the
+Responses lane. Chat Completions `reasoning_effort` is a known gap on Mantle: no
 reader parses its refusal wording.
 
 **Example provider + model:**

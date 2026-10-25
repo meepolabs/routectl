@@ -256,7 +256,8 @@ pub(super) const OPENAI_COMPAT_MANTLE_ROWS: &[&str] =
 /// The row paths a Bedrock Mantle Responses lane carries. Each is welded to a
 /// committed capture and its repaired retry in
 /// `tests/fixtures/mantle_capture.json`.
-pub(super) const OPENAI_RESPONSES_MANTLE_ROWS: &[&str] = &["output_config.effort.minimal"];
+pub(super) const OPENAI_RESPONSES_MANTLE_ROWS: &[&str] =
+    &["output_config.effort.minimal", "output_config.effort.max"];
 
 impl RowScope {
     /// The scope of a lane of `provider_kind` sending with `egress`.

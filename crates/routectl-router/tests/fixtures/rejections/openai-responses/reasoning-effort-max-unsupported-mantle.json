@@ -1,0 +1,6 @@
+{
+  "note": "Tier 1, captured on openai-responses (2026-10-25, openai.gpt-5.4, Bedrock Mantle Responses lane, /openai/v1/responses): reasoning.effort max, a schema value this model does not take. The model id in the message is echoed from the request; the listed values, in rank order, leave out max, which the route's schema list carries; error.code is unsupported_value. error.message is verbatim; the envelope keeps the captured key order. lifted_type is the error.type routectl lifts from the body.",
+  "status": 400,
+  "lifted_type": "invalid_request_error",
+  "body": "{\"error\":{\"code\":\"unsupported_value\",\"message\":\"Unsupported value: 'max' is not supported with the 'openai.gpt-5.4' model. Supported values are: 'none', 'low', 'medium', 'high', and 'xhigh'.\",\"param\":\"reasoning.effort\",\"type\":\"invalid_request_error\"}}"
+}

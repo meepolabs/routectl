@@ -387,7 +387,7 @@ mod mantle {
         ledger: Option<&'static str>,
     }
 
-    fn replays() -> [Replay; 3] {
+    fn replays() -> [Replay; 4] {
         [
             Replay {
                 lane: SubLane::Anthropic,
@@ -439,14 +439,29 @@ mod mantle {
                 repaired: json!("low"),
                 ledger: Some("shape:low"),
             },
+            Replay {
+                lane: SubLane::Responses,
+                upstream: SubLane::Responses.upstream(),
+                body: json!({
+                    "model": MANTLE_ALIAS, "input": "hi", "max_output_tokens": 16,
+                    "reasoning": {"effort": "max"},
+                }),
+                refused: json!({"reasoning": {"effort": "max"}}),
+                capture: "openai-responses/reasoning-effort-max-unsupported-mantle",
+                path: "output_config.effort.max",
+                read: |body| body["reasoning"]["effort"].clone(),
+                sent: json!("max"),
+                repaired: json!("xhigh"),
+                ledger: Some("shape:xhigh"),
+            },
         ]
     }
 
-    fn replay_of(lane: SubLane) -> Replay {
+    fn replay_of(path: &str) -> Replay {
         replays()
             .into_iter()
-            .find(|replay| replay.lane.kind() == lane.kind())
-            .expect("one replay per sub-lane")
+            .find(|replay| replay.path == path)
+            .expect("one replay per admitted row")
     }
 
     /// The captured refusal of an admitted row draws exactly one repaired
@@ -524,7 +539,7 @@ mod mantle {
     /// reaches the client).
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn anthropic_mantle_repairs_its_captured_ceiling_and_preflights_the_next_turn() {
-        replay_and_preflight(replay_of(SubLane::Anthropic)).await;
+        replay_and_preflight(replay_of("max_tokens")).await;
     }
 
     /// The compat Mantle drop row.
@@ -533,7 +548,7 @@ mod mantle {
     /// reaches the client).
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn compat_mantle_drops_its_captured_parameter_and_preflights_the_next_turn() {
-        let replay = replay_of(SubLane::Compat);
+        let replay = replay_of("top_p");
         let sent = OpenAiCompatProvider::new(compat_config(
             "https://bedrock-mantle.invalid/openai/v1".into(),
         ))
@@ -607,13 +622,24 @@ mod mantle {
         daemon.shutdown().await;
     }
 
-    /// The Responses Mantle ranked row.
+    /// The Responses Mantle ranked row that picks a higher level.
     ///
     /// Mutation check: empty `OPENAI_RESPONSES_MANTLE_ROWS` -> red (the
     /// refusal reaches the client).
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn responses_mantle_lowers_its_captured_effort_and_preflights_the_next_turn() {
-        replay_and_preflight(replay_of(SubLane::Responses)).await;
+        replay_and_preflight(replay_of("output_config.effort.minimal")).await;
+    }
+
+    /// The Responses Mantle ranked row that picks a lower level: the refusal
+    /// lists the model's levels, and the nearest one below the refused level
+    /// is sent.
+    ///
+    /// Mutation check: drop `"output_config.effort.max"` from
+    /// `OPENAI_RESPONSES_MANTLE_ROWS` -> red (the refusal reaches the client).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn responses_mantle_lowers_its_captured_max_effort_and_preflights_the_next_turn() {
+        replay_and_preflight(replay_of("output_config.effort.max")).await;
     }
 
     /// Each sub-lane's pass-through control: a refusal captured on that

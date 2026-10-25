@@ -1266,9 +1266,12 @@ fails with a clean feature-gated-field error.
 
 Field repair on this lane acts only on the rows a refusal captured on
 Mantle grounds: the `max_tokens` ceiling. Its thinking and effort rows are
-not admitted (no refusal captured on this lane grounds a thinking or
-effort row), and `presence_penalty` / `frequency_penalty` never reach the
-wire here, since the Anthropic egress drops both before sending. Learned
+not admitted, and `presence_penalty` / `frequency_penalty` never reach the
+wire here, since the Anthropic egress drops both before sending. Some
+models refuse `thinking.type: enabled` on Mantle that accept it on the
+direct Anthropic endpoint; since that refusal is not repaired here, set
+[`supports_adaptive_thinking`](#supports_adaptive_thinking-bool-default-false)
+on such a model so enabled thinking is sent as adaptive. Learned
 field-repair history is keyed on the provider entry name and upstream
 model, not on the region or host, so a `region` change, or switching an
 entry between a direct endpoint and this sub-table under the same name,

@@ -278,8 +278,8 @@ Surfaces: [openai-compat](#openai-compat-surface) -
   Bedrock Mantle sub-lane field repair acts only on the rows a refusal
   captured on that sub-lane grounds: this ceiling on the Anthropic lane;
   the `top_p`, `presence_penalty` and `frequency_penalty` drops on the
-  Chat Completions lane; the `minimal` effort level on the Responses
-  lane. Chat Completions `reasoning_effort` and `temperature` (refused
+  Chat Completions lane; the `minimal` and `max` effort levels on the
+  Responses lane. Chat Completions `reasoning_effort` and `temperature` (refused
   with `unsupported_value`) are not admitted there.
 
 - **Anthropic `tool_choice` rejects bare-string OpenAI shape**.
