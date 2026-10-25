@@ -23,8 +23,12 @@
 //! production Anthropic default and an operator's remote mirror) because the
 //! plausible narrowings are about which base URL counts, and a single admitting
 //! row would let one of them through. The Mantle row is the shape a raw base-url
-//! read gets WRONG rather than merely narrow, since its configured base IS that
-//! default.
+//! read gets WRONG, since its configured base IS that default while it egresses
+//! to the Mantle endpoint its region derives. It is attributable, and its lane
+//! view carries no row, so the two acting stages decline it AFTER attribution:
+//! the reactive arm on its empty view and the pre-flight with
+//! `no_grounded_field`. Those declines are asserted on their own, with their
+//! reasons, rather than read as attribution verdicts.
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
@@ -67,6 +71,9 @@ struct Shape {
     /// answers `None` for it, and the fixture asserts that premise.
     #[cfg(feature = "bedrock")]
     bedrock_mantle: bool,
+    /// Whether the admitted lane's view carries no row, so the acting stages
+    /// decline after attribution rather than at it.
+    empty_view: bool,
     /// Whether the `[providers]` entry is DROPPED after the dispatch target has
     /// been expanded from it -- a reload removing the entry under a target that
     /// already carries its provider kind and forwarded flag.
@@ -75,9 +82,10 @@ struct Shape {
     attributable: bool,
 }
 
-/// The parity table. Two admitting shapes, and refusing ones that each refuse
-/// for a DIFFERENT reason (loopback, forwarded credential, vanished entry, and
-/// -- where the build can construct one -- a Bedrock Mantle sub-lane).
+/// The parity table. Admitting shapes (two direct bases and, where the build
+/// can construct one, a Bedrock Mantle sub-lane), and refusing ones that each
+/// refuse for a DIFFERENT reason (loopback, forwarded credential, vanished
+/// entry).
 const SHAPES: &[Shape] = &[
     Shape {
         name: "the Anthropic default base, routectl's own credential",
@@ -85,6 +93,7 @@ const SHAPES: &[Shape] = &[
         credential_source: CredentialSource::Own,
         #[cfg(feature = "bedrock")]
         bedrock_mantle: false,
+        empty_view: false,
         entry_removed_after_expansion: false,
         attributable: true,
     },
@@ -94,6 +103,7 @@ const SHAPES: &[Shape] = &[
         credential_source: CredentialSource::Own,
         #[cfg(feature = "bedrock")]
         bedrock_mantle: false,
+        empty_view: false,
         entry_removed_after_expansion: false,
         attributable: true,
     },
@@ -103,6 +113,7 @@ const SHAPES: &[Shape] = &[
         credential_source: CredentialSource::Own,
         #[cfg(feature = "bedrock")]
         bedrock_mantle: false,
+        empty_view: false,
         entry_removed_after_expansion: false,
         attributable: false,
     },
@@ -112,6 +123,7 @@ const SHAPES: &[Shape] = &[
         credential_source: CredentialSource::Forwarded,
         #[cfg(feature = "bedrock")]
         bedrock_mantle: false,
+        empty_view: false,
         entry_removed_after_expansion: false,
         attributable: false,
     },
@@ -121,13 +133,14 @@ const SHAPES: &[Shape] = &[
         credential_source: CredentialSource::Own,
         #[cfg(feature = "bedrock")]
         bedrock_mantle: false,
+        empty_view: false,
         entry_removed_after_expansion: true,
         attributable: false,
     },
-    // The Mantle row is the one a raw base-url read gets WRONG rather than
-    // merely narrow: its configured base is the Anthropic default, so a stage
-    // reading the base URL directly reads a remote Anthropic host and admits an
-    // upstream that is in fact Bedrock.
+    // The Mantle row is the one a raw base-url read gets WRONG: its configured
+    // base is the Anthropic default, so a stage reading the base URL directly
+    // reads a remote Anthropic host, while every stage must read the Mantle
+    // endpoint its region derives.
     //
     // The base is spelled EXPLICITLY as that default rather than borrowed from a
     // sibling row, because it is the discriminating fact: pointed anywhere else
@@ -141,8 +154,9 @@ const SHAPES: &[Shape] = &[
         base_url: MANTLE_BASE_URL,
         credential_source: CredentialSource::Own,
         bedrock_mantle: true,
+        empty_view: true,
         entry_removed_after_expansion: false,
-        attributable: false,
+        attributable: true,
     },
 ];
 
@@ -150,7 +164,7 @@ const SHAPES: &[Shape] = &[
 /// truth for its endpoint, so the production validator requires this exact
 /// value. Spelled here, not shared with the plain-default row, because the whole
 /// point of the Mantle row is that this base reads as a legitimate remote
-/// Anthropic host while the upstream is Bedrock.
+/// Anthropic host while the upstream is Bedrock Mantle.
 #[cfg(feature = "bedrock")]
 const MANTLE_BASE_URL: &str = "https://api.anthropic.com";
 
@@ -170,10 +184,11 @@ const MANTLE_BASE_URL: &str = "https://api.anthropic.com";
 /// - the production validator accepts it, so the row is not an unreachable shape;
 /// - the sub-lane is attached, else the row duplicates the plain-default row;
 /// - `api_key_ref` is empty, the invariant the validator enforces;
-/// - the base is the production Anthropic default AND not loopback, so the row's
-///   refusal comes from the Mantle exclusion rather than from loopback
-///   suppression -- which is what keeps it distinct from the loopback row;
-/// - `anthropic_api_base_url()` answers `None`, the fact every stage reads.
+/// - the base is the production Anthropic default AND not loopback, so a stage
+///   reading the configured base instead of the derived one would still admit
+///   it -- which is what keeps it distinct from the loopback row;
+/// - `anthropic_api_base_url()` answers `None`, so the row's admission comes
+///   from the region-derived egress every stage reads, not from that base.
 #[cfg(feature = "bedrock")]
 fn complete_mantle_entry(mut entry: ProviderEntry, base_url: &str) -> ProviderEntry {
     if let ProviderEntry::AnthropicApi {
@@ -230,8 +245,8 @@ fn complete_mantle_entry(mut entry: ProviderEntry, base_url: &str) -> ProviderEn
     }
     assert!(
         ProviderEntry::anthropic_api_base_url(&entry).is_none(),
-        "premise: a mantle entry must carry no attributable anthropic-api base \
-         URL, which is the fact every stage reads"
+        "premise: a mantle entry carries no direct anthropic-api base URL, so its \
+         admission rests on the region-derived egress"
     );
     entry
 }
@@ -393,6 +408,9 @@ fn pre_dial_recheck_admits(shape: &Shape, _req: &ChatRequest) -> bool {
 /// attributable?
 type StageVerdict = fn(&Shape, &ChatRequest) -> bool;
 
+/// The stages whose verdict reads attribution alone, whatever the lane's view.
+const PROBE_STAGES: [&str; 2] = ["activation", "pre-dial recheck"];
+
 #[test]
 fn every_field_stage_reaches_the_same_attributability_verdict() {
     let req = grounding_request();
@@ -410,7 +428,13 @@ fn every_field_stage_reaches_the_same_attributability_verdict() {
         ("pre-dial recheck", pre_dial_recheck_admits),
     ];
     for shape in SHAPES {
-        for (stage, admits) in stages {
+        // The acting stages decline an empty view after attribution, which no
+        // verdict of theirs can tell from a refusal at it; that shape's
+        // attribution and declines are asserted below.
+        let stages = stages
+            .iter()
+            .filter(|(stage, _)| !shape.empty_view || PROBE_STAGES.contains(stage));
+        for &(stage, admits) in stages {
             assert_eq!(
                 admits(shape, &req),
                 shape.attributable,
@@ -421,4 +445,69 @@ fn every_field_stage_reaches_the_same_attributability_verdict() {
             );
         }
     }
+}
+
+/// The Mantle sub-lane is attributable at all four stages, and its empty lane
+/// view is why the two acting stages then decline: the reactive arm plans
+/// nothing and the pre-flight reports `no_grounded_field` for a request whose
+/// rows the direct sibling's view presents.
+///
+/// The acting stages read attribution through the shared decision before they
+/// scope, so their attribution verdict is that decision's answer for the
+/// target's entry; their declines are asserted separately, with their reasons.
+///
+/// Mutation check: map the Mantle egresses to their kind's scope in
+/// `RowScope::of_lane` -> red (the reactive arm plans, the pre-flight passes
+/// `no_grounded_field`); drop the anthropic Mantle arm of
+/// `classifiable_egress_base_url` -> red on attribution.
+#[cfg(feature = "bedrock")]
+#[test]
+fn the_mantle_sub_lane_is_attributable_and_declined_on_its_empty_view() {
+    let shape = SHAPES
+        .iter()
+        .find(|shape| shape.bedrock_mantle)
+        .expect("the table carries the Mantle shape");
+    let req = grounding_request();
+    assert!(shape.empty_view && shape.attributable, "premise");
+
+    // Attribution, at every stage.
+    let (router, target) = fixture(shape);
+    let lane = super::field_repair::attributable_field_lane(
+        &router.config,
+        &target.provider_name,
+        target.use_forwarded_credential,
+    )
+    .expect("the shared decision the acting stages read admits the Mantle lane");
+    assert_eq!(
+        lane.base_url,
+        "https://bedrock-mantle.us-west-2.api.aws/anthropic"
+    );
+    assert!(activation_admits(shape, &req), "activation admits");
+    assert!(
+        pre_dial_recheck_admits(shape, &req),
+        "the pre-dial recheck admits"
+    );
+
+    // The view, empty on the lane and not on its direct sibling.
+    let table = router.field_repair_table();
+    let rows = |egress| {
+        super::field_repair::present_rows(table.for_lane(lane.provider_kind, Some(egress)), &req)
+            .count()
+    };
+    assert_eq!(rows(lane.egress), 0, "the Mantle view presents no row");
+    assert!(
+        rows(routectl_core::wire_check::EgressKind::AnthropicApi) > 0,
+        "control: the direct sibling's view presents the request's rows",
+    );
+
+    // The declines, each with its reason.
+    assert!(
+        !reactive_admits(shape, &req),
+        "the reactive arm plans nothing"
+    );
+    let (router, target) = fixture(shape);
+    let (_planned, records, _plan) =
+        router.plan_field_preflight(&req, &target, DispatchSurface::Complete);
+    let reasons: Vec<&str> = records.iter().map(|record| record.reason).collect();
+    assert_eq!(reasons, vec![FIELD_PREFLIGHT_NO_GROUNDED_FIELD]);
 }

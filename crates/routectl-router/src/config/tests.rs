@@ -738,9 +738,71 @@ key_ref = "env://AWS_BEARER_TOKEN_BEDROCK"
     assert_eq!(
         entry.anthropic_api_base_url(),
         None,
-        "the mantle sub-lane egresses through Bedrock, which Stage 1 excludes, so its \
-         configured base must not be reported to the mint suppression",
+        "the mantle sub-lane egresses through Bedrock, so its configured base must not be \
+         reported as a direct Anthropic one",
     );
+}
+
+/// One `[providers.m]` Mantle entry of `kind` in `region`.
+#[cfg(feature = "bedrock")]
+fn mantle_entry(kind: &str, region: &str) -> ProviderEntry {
+    toml::from_str::<Config>(&format!(
+        "[providers.m]\nkind = \"{kind}\"\napi_key_ref = \"\"\n\
+         bedrock_mantle = {{ region = \"{region}\", creds = {{ kind = \"bearer-key\", \
+         key_ref = \"env://AWS_BEARER_TOKEN_BEDROCK\" }} }}\n"
+    ))
+    .expect("parse mantle lane")
+    .providers
+    .remove("m")
+    .expect("mantle provider")
+}
+
+/// Each Mantle sub-lane egresses to the base its region derives, the one the
+/// factory dials, and a region that fails admission names none. Compared
+/// against literals so a drifted derivation is caught here rather than echoed
+/// back by it.
+///
+/// Mutation check: drop the anthropic Mantle arm -> red on the anthropic
+/// us-west-2 row (it falls to `anthropic_api_base_url`, `None`); replace a
+/// Mantle arm's `.ok()` with `.unwrap_or_else(|_| "https://bedrock-mantle.invalid".into())`
+/// -> red on that sub-lane's bad-region row.
+#[cfg(feature = "bedrock")]
+#[test]
+fn classifiable_egress_base_url_answers_each_mantle_sub_lane() {
+    #[cfg_attr(not(feature = "openai-responses"), allow(unused_mut))]
+    let mut rows = vec![
+        (
+            "anthropic-api",
+            "us-west-2",
+            Some("https://bedrock-mantle.us-west-2.api.aws/anthropic"),
+        ),
+        ("anthropic-api", "not-a-region", None),
+        (
+            "openai-compat",
+            "us-west-2",
+            Some("https://bedrock-mantle.us-west-2.api.aws/openai/v1"),
+        ),
+        ("openai-compat", "not-a-region", None),
+    ];
+    #[cfg(feature = "openai-responses")]
+    rows.extend([
+        (
+            "openai-responses",
+            "us-west-2",
+            Some("https://bedrock-mantle.us-west-2.api.aws/openai/v1"),
+        ),
+        ("openai-responses", "not-a-region", None),
+    ]);
+
+    for (kind, region, expected) in rows {
+        let entry = mantle_entry(kind, region);
+        assert_eq!(entry.kind_str(), kind, "premise: {kind} parsed as itself");
+        assert_eq!(
+            entry.classifiable_egress_base_url().as_deref(),
+            expected,
+            "{kind} Mantle in {region}",
+        );
+    }
 }
 
 #[test]
@@ -763,9 +825,10 @@ api_key_ref = "literal:sk-test"
 }
 
 /// An `openai-responses` entry egresses to its configured `base_url`, else to
-/// the `auth_kind` default, and the Mantle sub-lane names no classifiable
-/// egress. The default rows compare against literals so a drifted default is
-/// caught here, not echoed back by the function under test.
+/// the `auth_kind` default, and a bare `bedrock-mantle` marker, which the
+/// factory refuses to build, names none. The default rows compare against
+/// literals so a drifted default is caught here, not echoed back by the
+/// function under test.
 #[cfg(feature = "openai-responses")]
 #[test]
 fn classifiable_egress_base_url_answers_openai_responses_lanes() {
@@ -798,12 +861,12 @@ fn classifiable_egress_base_url_answers_openai_responses_lanes() {
         ),
     ];
     // `auth_kind` is omitted, so it defaults to chatgpt-oauth: only the
-    // block itself can make this row answer `None`.
+    // block itself can make this row answer the Mantle base.
     #[cfg(feature = "bedrock")]
     let rows = {
         let mut rows = rows;
         rows.push((
-            "a bedrock_mantle block answers None",
+            "a bedrock_mantle block answers its region's Mantle base",
             toml::from_str::<Config>(
                 "[providers.m]\n\
              kind = \"openai-responses\"\n\
@@ -815,7 +878,7 @@ fn classifiable_egress_base_url_answers_openai_responses_lanes() {
             .providers
             .remove("m")
             .expect("mantle provider"),
-            None,
+            Some("https://bedrock-mantle.us-east-1.api.aws/openai/v1"),
         ));
         rows
     };

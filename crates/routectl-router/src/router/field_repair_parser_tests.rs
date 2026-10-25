@@ -528,6 +528,7 @@ fn a_rejection_whose_class_cannot_name_a_field_is_not_counted_as_blind() {
             &FailureClass::BadRequest,
             &named,
             ANTHROPIC_API_KIND,
+            crate::router::field_repair::direct_egress(ANTHROPIC_API_KIND),
         ),
         "premise: a BadRequest the parser named a row from is not blindness",
     );
@@ -537,6 +538,7 @@ fn a_rejection_whose_class_cannot_name_a_field_is_not_counted_as_blind() {
             &FailureClass::BadRequest,
             &unnamed,
             ANTHROPIC_API_KIND,
+            crate::router::field_repair::direct_egress(ANTHROPIC_API_KIND),
         ),
         "and the same class with nothing named IS blindness -- so the predicate \
          genuinely turns on the resolution for an admitted class",
@@ -568,7 +570,8 @@ fn a_rejection_whose_class_cannot_name_a_field_is_not_counted_as_blind() {
                 crate::router::FieldRepairTable::default(),
                 &class,
                 &named,
-                ANTHROPIC_API_KIND
+                ANTHROPIC_API_KIND,
+                crate::router::field_repair::direct_egress(ANTHROPIC_API_KIND),
             ),
             "{class:?} says nothing about the request envelope, so it is not evidence \
              about the parser",

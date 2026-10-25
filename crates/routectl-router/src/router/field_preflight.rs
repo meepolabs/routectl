@@ -40,8 +40,9 @@
 //! outside the admitted set (`anthropic-api`, `bedrock`, `openai-compat`,
 //! `openai-responses`; an `openai-compat` lane carries every row but the
 //! ranked effort rows, an `openai-responses` lane the ranked effort rows
-//! alone), and any lane with no classifiable egress base URL (which is how a
-//! Bedrock Mantle sub-lane is refused -- it reports none).
+//! alone), and any lane with no classifiable egress base URL. A Bedrock Mantle
+//! sub-lane classifies through its region-derived endpoint and reads its own
+//! lane view, which carries only rows grounded on that sub-lane.
 //!
 //! # Fail-open discipline
 //!
@@ -144,9 +145,12 @@ pub(super) const FIELD_PREFLIGHT_UNSUPPORTED_LANE: &str = "unsupported_lane";
 ///
 /// - the target authenticates with a FORWARDED client credential, so one
 ///   client's rejection must not mint a verdict steering every other client;
-/// - the target's entry has no classifiable egress base URL (a Bedrock
-///   Mantle sub-lane reports none and is refused here);
+/// - the target's entry has no classifiable egress base URL (a Mantle
+///   sub-lane whose region names no endpoint, among others);
 /// - the URL it carries names a local hop.
+///
+/// Also reported when the entry no longer matches the target's kind or
+/// egress: a reload repointed it under a target expanded from the old one.
 pub(super) const FIELD_PREFLIGHT_UNATTRIBUTABLE_TARGET: &str = "unattributable_target";
 
 /// Reason token: an operator `force_supported` override masks this field's
@@ -468,10 +472,7 @@ impl Router {
         target: &DispatchTarget,
         surface: DispatchSurface,
     ) -> (ChatRequest, Vec<FieldPreflight>, FieldPreflightPlan<'a>) {
-        let table = target.provider_kind.map_or_else(
-            || self.field_repair_table(),
-            |provider_kind| self.field_repair_table().for_kind(provider_kind),
-        );
+        let table = self.preflight_view(target);
         let mut rows = present_rows(table, original_req).peekable();
         if rows.peek().is_none() {
             return (
@@ -784,6 +785,23 @@ impl Router {
         Ok(key)
     }
 
+    /// The rows this planner considers for `target`: the view of the entry's
+    /// own lane when the shared attributability read admits it, else the view
+    /// the target itself names, so an unattributable target still reports its
+    /// refusal per carried row. A lane whose view is empty carries nothing and
+    /// reports no grounded field.
+    fn preflight_view(&self, target: &DispatchTarget) -> FieldRepairTable {
+        let table = self.field_repair_table();
+        match crate::router::field_repair::attributable_field_lane(
+            &self.config,
+            &target.provider_name,
+            target.use_forwarded_credential,
+        ) {
+            Some(lane) => table.for_lane(lane.provider_kind, Some(lane.egress)),
+            None => table.for_lane(target.provider_kind.unwrap_or(""), target.egress_kind),
+        }
+    }
+
     /// The LANE gates, shared with the reactive admission's exclusions: the
     /// capability kill switch and the provider kinds field repair admits.
     /// `Some(provider_kind)` when the lane admits.
@@ -815,12 +833,11 @@ impl Router {
 
     /// The ATTRIBUTION gates plus the field identity, mirroring the reactive
     /// admission rather than paraphrasing it: read the base URL from the
-    /// operator's own provider entry (the target carries none), and refuse both
-    /// a lane that reports no classifiable egress URL -- which is how a Bedrock
-    /// Mantle sub-lane is refused, since its accessor answers `None` -- and a
-    /// URL naming a local hop. A rejection this stage could not have
-    /// attributed to the upstream is a verdict this stage must not act on
-    /// proactively either.
+    /// operator's own provider entry (the target carries none), refuse both a
+    /// lane that reports no classifiable egress URL and a URL naming a local
+    /// hop, and refuse an entry whose kind or egress no longer matches the
+    /// target's. A rejection this stage could not have attributed to the
+    /// upstream is a verdict this stage must not act on proactively either.
     ///
     /// `Err(reason)` carries the closed-set token the refusal reports.
     fn preflight_identity(
@@ -837,7 +854,7 @@ impl Router {
             target.use_forwarded_credential,
         )
         .ok_or(FIELD_PREFLIGHT_UNATTRIBUTABLE_TARGET)?;
-        if lane.provider_kind != provider_kind {
+        if !lane.matches_target(provider_kind, target.egress_kind) {
             return Err(FIELD_PREFLIGHT_UNATTRIBUTABLE_TARGET);
         }
         let lane = target

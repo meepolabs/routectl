@@ -1436,6 +1436,7 @@ impl Router {
             &cf.class,
             err,
             provider_kind,
+            target.egress_kind,
         ) {
             return;
         }

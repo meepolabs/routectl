@@ -361,12 +361,18 @@ fn an_effort_only_request_admits_its_row_on_anthropic_api() {
 /// canonical effort there admits no effort candidate, plans no pre-flight on
 /// one and resolves no rejection to one; every other row stays in the view.
 ///
-/// Mutation check: make `RowScope::of_kind` answer `All` for openai-compat ->
+/// Mutation check: make `RowScope::of_lane` answer `All` for openai-compat ->
 /// red.
 #[test]
 fn the_openai_compat_view_carries_no_effort_row() {
-    let compat = FieldRepairTable::grounded_only().for_kind("openai-compat");
-    let anthropic = FieldRepairTable::grounded_only().for_kind("anthropic-api");
+    let compat = FieldRepairTable::grounded_only().for_lane(
+        "openai-compat",
+        crate::router::field_repair::direct_egress("openai-compat"),
+    );
+    let anthropic = FieldRepairTable::grounded_only().for_lane(
+        "anthropic-api",
+        crate::router::field_repair::direct_egress("anthropic-api"),
+    );
     let mut req = base_req();
     req.reasoning = canonical_effort("high");
     req.temperature = Some(0.5);
@@ -461,11 +467,14 @@ fn an_openai_compat_lane_admits_no_effort_candidate() {
 /// to no row. The parser does not localize that param either, so the view is
 /// asserted on its own through `present_rows`.
 ///
-/// Mutation check: make `RowScope::of_kind` answer `All` for openai-responses
+/// Mutation check: make `RowScope::of_lane` answer `All` for openai-responses
 /// -> red on the present rows and the row count.
 #[test]
 fn the_openai_responses_view_carries_only_the_effort_rows() {
-    let responses = FieldRepairTable::grounded_only().for_kind("openai-responses");
+    let responses = FieldRepairTable::grounded_only().for_lane(
+        "openai-responses",
+        crate::router::field_repair::direct_egress("openai-responses"),
+    );
     let mut req = base_req();
     req.reasoning = canonical_effort("high");
     req.temperature = Some(0.5);
@@ -505,6 +514,7 @@ fn the_openai_responses_view_carries_only_the_effort_rows() {
         let named = parse_rejection(
             responses,
             "openai-responses",
+            crate::router::field_repair::direct_egress("openai-responses"),
             400,
             body.parsed(),
             SentEffort::Rank(rank("high")),
@@ -774,8 +784,10 @@ fn a_refused_effort_field_resolves_to_its_row_and_makes_no_edit() {
     for (name, kind, body) in cases {
         let body = routectl_core::UpstreamBody::new(body.to_string());
         let named = parse_rejection(
-            FieldRepairTable::grounded_only().for_kind(kind),
+            FieldRepairTable::grounded_only()
+                .for_lane(kind, crate::router::field_repair::direct_egress(kind)),
             kind,
+            crate::router::field_repair::direct_egress(kind),
             400,
             body.parsed(),
             SentEffort::Rank(rank("high")),

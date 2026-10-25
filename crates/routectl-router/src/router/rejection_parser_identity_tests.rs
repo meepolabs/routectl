@@ -283,6 +283,7 @@ fn a_rejection_with_a_row_carries_the_row_tier_and_folds_onto_the_row_identity()
         let Some(named) = parse_rejection(
             FieldRepairTable::default(),
             &kind,
+            crate::router::field_repair::direct_egress(&kind),
             status,
             parsed.parsed(),
             crate::router::learn_engine::SentEffort::Unknown,
@@ -326,6 +327,7 @@ fn a_self_identifying_rejection_on_a_path_with_no_row_still_names_its_field() {
         parse_rejection(
             FieldRepairTable::default(),
             ANTHROPIC,
+            crate::router::field_repair::direct_egress(ANTHROPIC),
             400,
             parsed.parsed(),
             crate::router::learn_engine::SentEffort::Unknown

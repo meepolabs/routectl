@@ -318,6 +318,7 @@ async fn an_unsupported_max_tokens_refusal_resolves_the_row_and_makes_no_edit() 
         &class,
         &err,
         "openai-compat",
+        crate::router::field_repair::direct_egress("openai-compat"),
         crate::router::learn_engine::SentEffort::Unknown,
     )
     .expect("premise: the refusal names a row");

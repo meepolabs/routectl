@@ -39,6 +39,15 @@ const RESPONSES_LOOPBACK: &str = "kind = \"openai-responses\"\napi_key_ref = \"l
 #[cfg(all(feature = "openai-responses", feature = "bedrock"))]
 const RESPONSES_MANTLE: &str = "kind = \"openai-responses\"\napi_key_ref = \"\"\n\
      bedrock_mantle = { region = \"us-east-1\", creds = { kind = \"default-chain\" } }\n";
+#[cfg(feature = "bedrock")]
+const ANTHROPIC_MANTLE_BAD_REGION: &str = "kind = \"anthropic-api\"\napi_key_ref = \"\"\n\
+     bedrock_mantle = { region = \"not-a-region\", creds = { kind = \"default-chain\" } }\n";
+#[cfg(feature = "bedrock")]
+const COMPAT_MANTLE_BAD_REGION: &str = "kind = \"openai-compat\"\napi_key_ref = \"\"\n\
+     bedrock_mantle = { region = \"not-a-region\", creds = { kind = \"default-chain\" } }\n";
+#[cfg(all(feature = "openai-responses", feature = "bedrock"))]
+const RESPONSES_MANTLE_BAD_REGION: &str = "kind = \"openai-responses\"\napi_key_ref = \"\"\n\
+     bedrock_mantle = { region = \"not-a-region\", creds = { kind = \"default-chain\" } }\n";
 #[cfg(feature = "gemini")]
 const GEMINI_REMOTE: &str = "kind = \"gemini\"\napi_key_ref = \"literal:k\"\n";
 
@@ -142,11 +151,29 @@ fn rows() -> Vec<Row> {
             name: "anthropic-api, Mantle sub-lane",
             provider_toml: Some(ANTHROPIC_MANTLE),
             forwarded: false,
+            expect: Some((
+                "anthropic-api",
+                "https://bedrock-mantle.us-west-2.api.aws/anthropic",
+            )),
+        },
+        Row {
+            name: "anthropic-api, Mantle sub-lane in a region that names no endpoint",
+            provider_toml: Some(ANTHROPIC_MANTLE_BAD_REGION),
+            forwarded: false,
             expect: None,
         },
         Row {
             name: "openai-compat, Mantle sub-lane",
             provider_toml: Some(COMPAT_MANTLE),
+            forwarded: false,
+            expect: Some((
+                "openai-compat",
+                "https://bedrock-mantle.us-west-2.api.aws/openai/v1",
+            )),
+        },
+        Row {
+            name: "openai-compat, Mantle sub-lane in a region that names no endpoint",
+            provider_toml: Some(COMPAT_MANTLE_BAD_REGION),
             forwarded: false,
             expect: None,
         },
@@ -179,12 +206,23 @@ fn rows() -> Vec<Row> {
         },
     ]);
     #[cfg(all(feature = "openai-responses", feature = "bedrock"))]
-    rows.push(Row {
-        name: "openai-responses, Mantle sub-lane",
-        provider_toml: Some(RESPONSES_MANTLE),
-        forwarded: false,
-        expect: None,
-    });
+    rows.extend([
+        Row {
+            name: "openai-responses, Mantle sub-lane",
+            provider_toml: Some(RESPONSES_MANTLE),
+            forwarded: false,
+            expect: Some((
+                "openai-responses",
+                "https://bedrock-mantle.us-east-1.api.aws/openai/v1",
+            )),
+        },
+        Row {
+            name: "openai-responses, Mantle sub-lane in a region that names no endpoint",
+            provider_toml: Some(RESPONSES_MANTLE_BAD_REGION),
+            forwarded: false,
+            expect: None,
+        },
+    ]);
     #[cfg(feature = "gemini")]
     rows.push(Row {
         name: "gemini, own credential",
@@ -201,6 +239,10 @@ fn config_for(provider_toml: Option<&str>) -> Config {
     })
 }
 
+/// Mutation check: drop the anthropic Mantle arm of
+/// `classifiable_egress_base_url` -> red on the anthropic Mantle row; replace a
+/// Mantle arm's `.ok()` with an `unwrap_or_else` naming a fixed host -> red on
+/// that sub-lane's bad-region row.
 #[test]
 fn the_attributability_decision_matches_the_table_for_every_kind() {
     for row in rows() {
@@ -215,6 +257,7 @@ fn the_attributability_decision_matches_the_table_for_every_kind() {
             |AttributableLane {
                  provider_kind,
                  base_url,
+                 ..
              }| (*provider_kind, base_url.as_ref()),
         );
         assert_eq!(observed, row.expect, "{}", row.name);
@@ -240,14 +283,14 @@ fn each_refusing_row_parses_into_the_kind_it_names() {
         ];
         #[cfg(feature = "bedrock")]
         premises.extend([
-            (ANTHROPIC_MANTLE, "anthropic-api"),
-            (COMPAT_MANTLE, "openai-compat"),
+            (ANTHROPIC_MANTLE_BAD_REGION, "anthropic-api"),
+            (COMPAT_MANTLE_BAD_REGION, "openai-compat"),
             (BEDROCK_UNADMITTED_REGION, "bedrock"),
         ]);
         #[cfg(feature = "openai-responses")]
         premises.push((RESPONSES_LOOPBACK, "openai-responses"));
         #[cfg(all(feature = "openai-responses", feature = "bedrock"))]
-        premises.push((RESPONSES_MANTLE, "openai-responses"));
+        premises.push((RESPONSES_MANTLE_BAD_REGION, "openai-responses"));
         premises
     };
     for (provider_toml, kind) in premises {
@@ -386,4 +429,181 @@ fn a_target_of_an_old_kind_on_a_re_kinded_entry_plans_nothing() {
         "the pre-flight planner refuses each carried row (display, max_tokens) on \
          attribution, before any verdict read",
     );
+}
+
+/// A request carrying the grounded effort row at `high`, beside the grounded
+/// fields of [`grounded_request`].
+#[cfg(feature = "bedrock")]
+fn effort_request() -> routectl_core::ChatRequest {
+    let mut req = grounded_request();
+    req.reasoning = Some(routectl_core::ReasoningConfig {
+        effort: Some("high".into()),
+        ..Default::default()
+    });
+    req
+}
+
+/// A target expanded from a Mantle entry, read after a reload repointed that
+/// entry to its direct sibling under the same name: the kind still agrees, the
+/// egress does not, so no stage may apply the direct lane's scope or verdicts
+/// to it. The clear runs over a resident verdict on the sent level, so it
+/// would remove one if the check were absent.
+///
+/// Mutation check: compare only the kind in place of `matches_target` in
+/// `plan_field_carry` -> red (a plan); in `preflight_identity` -> red
+/// (`not_eligible`); in `clear_accepted_effort` -> red (a cleared event).
+#[cfg(feature = "bedrock")]
+#[test]
+fn a_mantle_target_on_an_entry_repointed_to_its_direct_sibling_plans_nothing() {
+    // Arrange
+    let stale_target = target_on(&router_on(ANTHROPIC_MANTLE));
+    assert_eq!(stale_target.provider_kind, Some("anthropic-api"), "premise");
+    assert_eq!(
+        stale_target.egress_kind,
+        Some(routectl_core::wire_check::EgressKind::AnthropicApiMantle),
+        "premise",
+    );
+    let router = router_on(ANTHROPIC_REMOTE);
+    assert!(
+        attributable_field_lane(&router.config, PROVIDER, false).is_some(),
+        "premise: the current entry is itself attributable",
+    );
+    let lane = stale_target.learned_lane.clone().expect("a lane");
+    super::super::probe_test_support::plant_acting_negative(
+        &router,
+        &lane,
+        "output_config.effort.high",
+        "anthropic-api",
+    );
+    let req = effort_request();
+
+    // Act
+    let reactive = router.plan_field_carry(
+        &stale_target,
+        &req,
+        super::FieldSettlementMode::Settling,
+        std::time::Instant::now(),
+    );
+    let (_planned, records, _plan) = router.plan_field_preflight(
+        &req,
+        &stale_target,
+        super::super::class_observe::DispatchSurface::Complete,
+    );
+    let cleared = router.clear_accepted_effort(&stale_target, &req, &[]);
+
+    // Assert
+    assert!(reactive.is_none(), "the reactive arm admits no plan");
+    assert!(!records.is_empty(), "premise: the planner recorded rows");
+    assert!(
+        records.iter().all(|record| !record.acted
+            && record.reason
+                == super::super::field_preflight::FIELD_PREFLIGHT_UNATTRIBUTABLE_TARGET),
+        "the pre-flight refuses each row on attribution: {:?}",
+        records.iter().map(|r| r.reason).collect::<Vec<_>>(),
+    );
+    assert!(cleared.is_none(), "the ranked clear removes nothing");
+}
+
+/// A Mantle entry whose region names no endpoint is unattributable and plans
+/// nothing, while the same entry in a canonical region is attributable: the
+/// refusal is the region's, not the sub-lane's.
+///
+/// Mutation check: replace the anthropic Mantle arm's `.ok()` with
+/// `.unwrap_or_else(|_| "https://bedrock-mantle.invalid".into())` -> red on the
+/// attribution assertion.
+#[cfg(feature = "bedrock")]
+#[test]
+fn a_mantle_entry_in_a_region_that_names_no_endpoint_plans_nothing() {
+    // Arrange
+    let router = router_on(ANTHROPIC_MANTLE_BAD_REGION);
+    let target = target_on(&router);
+    assert!(
+        attributable_field_lane(&router_on(ANTHROPIC_MANTLE).config, PROVIDER, false).is_some(),
+        "control: the canonical region is attributable",
+    );
+
+    // Act
+    let lane = attributable_field_lane(&router.config, PROVIDER, false);
+    let plan = router.plan_field_carry(
+        &target,
+        &grounded_request(),
+        super::FieldSettlementMode::Settling,
+        std::time::Instant::now(),
+    );
+
+    // Assert
+    assert!(lane.is_none(), "no host, no attribution");
+    assert!(plan.is_none(), "and nothing is planned");
+}
+
+/// A target that names its provider kind but no egress resolves no row and
+/// plans nothing, on an entry whose own lane would plan: the scope cannot tell
+/// which sub-lane the target sends with, so it fails closed.
+///
+/// Mutation check: drop the egress comparison from
+/// `AttributableLane::matches_target` -> red (a plan, and pre-flight records
+/// past attribution).
+#[test]
+fn a_target_with_a_kind_and_no_egress_plans_nothing() {
+    // Arrange
+    let router = router_on(ANTHROPIC_REMOTE);
+    let mut target = target_on(&router);
+    let req = grounded_request();
+    let plan = |target: &super::super::DispatchTarget| {
+        router.plan_field_carry(
+            target,
+            &req,
+            super::FieldSettlementMode::NonSettling,
+            std::time::Instant::now(),
+        )
+    };
+    assert!(
+        plan(&target).is_some(),
+        "control: the egress-bearing target plans"
+    );
+    target.egress_kind = None;
+    assert_eq!(target.provider_kind, Some("anthropic-api"), "premise");
+
+    // Act
+    let reactive = plan(&target);
+    let (_planned, records, _plan) = router.plan_field_preflight(
+        &req,
+        &target,
+        super::super::class_observe::DispatchSurface::Complete,
+    );
+
+    // Assert
+    assert!(reactive.is_none(), "the reactive arm plans nothing");
+    assert!(
+        records.iter().all(|record| !record.acted
+            && record.reason
+                == super::super::field_preflight::FIELD_PREFLIGHT_UNATTRIBUTABLE_TARGET),
+        "the pre-flight acts on nothing: {:?}",
+        records.iter().map(|r| r.reason).collect::<Vec<_>>(),
+    );
+}
+
+/// An attributable Mantle anthropic lane on a claude upstream is
+/// probe-eligible, which stays inert only while no grounded row is
+/// count-validated: a probe captures count-validated rows alone. A grounded
+/// row turning count-validated makes Mantle probes live, and this pin is
+/// where that surfaces.
+///
+/// Mutation check: set `count_tokens_validates: true` on one grounded row ->
+/// red on the second assertion.
+#[cfg(feature = "bedrock")]
+#[test]
+fn a_mantle_anthropic_lane_is_probe_eligible_and_no_grounded_row_is_count_validated() {
+    let router = router_on(ANTHROPIC_MANTLE);
+
+    let kind = router.probe_lane_kind(PROVIDER, false, "claude-sonnet-4-5");
+
+    assert_eq!(kind, Some("anthropic-api"));
+    let validated: Vec<&str> = super::FieldRepairTable::grounded_only()
+        .rows()
+        .iter()
+        .filter(|row| row.count_tokens_validates)
+        .map(|row| row.path)
+        .collect();
+    assert!(validated.is_empty(), "{validated:?}");
 }

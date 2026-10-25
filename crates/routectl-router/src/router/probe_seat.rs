@@ -4,7 +4,7 @@
 //! Both questions are read from the operator's OWN `[providers]` entry rather
 //! than from a dispatch target, and the attributability predicate is called by
 //! activation AND by the recheck immediately before the dial, so both draw the
-//! forwarded, Mantle, and loopback refusals from one set.
+//! forwarded, unclassifiable-egress, and loopback refusals from one set.
 
 use crate::field_verdict::FieldVerdictKey;
 
@@ -55,8 +55,9 @@ impl Router {
     /// - the shared attributability decision
     ///   (`field_repair::attributable_field_lane`): the entry exists, does not
     ///   authenticate with a FORWARDED client credential, is of a kind field
-    ///   repair acts on, egresses to a classifiable base URL (which excludes a
-    ///   Mantle sub-lane), and that base is not LOOPBACK -- the same read the
+    ///   repair acts on, egresses to a classifiable base URL (a Mantle
+    ///   sub-lane's is the endpoint its region derives), and that base is not
+    ///   LOOPBACK -- the same read the
     ///   reactive arm and the pre-flight planner attribute through;
     /// - a FREE token count for that kind and upstream (the count walk's own
     ///   `seat_can_count_tokens`): a kind with none has no validator to ask, so

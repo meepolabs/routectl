@@ -113,12 +113,20 @@ fn no_closed_table_row_resolves_a_generic_capability_in_any_repair_kind() {
             let classified = classify(&err, Some(kind));
             let table = crate::router::FieldRepairTable::default();
             let in_view = table
-                .for_kind(kind)
+                .for_lane(kind, crate::router::field_repair::direct_egress(kind))
                 .lane_rows()
                 .any(|lane_row| lane_row.path == row.path);
 
             assert_eq!(
-                rejected_field(table, &classified.class, &err, kind, sent).is_some(),
+                rejected_field(
+                    table,
+                    &classified.class,
+                    &err,
+                    kind,
+                    crate::router::field_repair::direct_egress(kind),
+                    sent
+                )
+                .is_some(),
                 in_view,
                 "control: {kind} ({shape}) names `{}` to the field parser under {:?} exactly \
                  when the kind's view carries the row",

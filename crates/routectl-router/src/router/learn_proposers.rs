@@ -39,6 +39,7 @@ impl Proposer for FieldRowProposer {
             input.native_class,
             input.err,
             input.target.provider_kind.unwrap_or(""),
+            input.target.egress_kind,
             RejectionSite::sent_effort_of(input.site.as_ref()),
         )?;
         Some(Proposal::FieldRow {

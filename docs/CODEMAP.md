@@ -2859,11 +2859,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `Router::plan_field_carry` admits BEFORE dispatch and without
   touching the request, in this order: kill switch -> an admitted kind
   (`anthropic-api`, `bedrock`, `openai-compat`, `openai-responses`; the
-  per-kind row view is `FieldRepairTable::for_kind`) -> NOT a forwarded-credential
+  per-lane row view is `FieldRepairTable::for_lane`) -> NOT a forwarded-credential
   target -> `field_repair::attributable_field_lane` (entry present, admitted
   kind, a `ProviderEntry::classifiable_egress_base_url`, NOT
   `field_verdict::loopback_target_suppresses_minting` over it) -> the entry's
-  kind agrees with the target's -> then, PER PRESENT ROW, settlement
+  kind and egress agree with the target's -> then, PER PRESENT ROW, settlement
   mode -> `field_verdict::FieldVerdictKey` -> the single-flight guard, yielding
   one `FieldRepairCandidate` per row that survives (`None` when none does).
   Every present row is admitted rather than only the first, because the
@@ -2949,10 +2949,15 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/router/field_repair_effort.rs` -- child module of `field_repair`: the
   `FieldSurface::Effort(level)` carrier reads (`emitted_effort`,
   `effort_present`, off while the target sets `effort_levels`) and the
-  carrier-preserving rewrite (`write_effort`), plus `RowScope`, the per-kind
-  view `FieldRepairTable::for_kind` applies (ranked effort rows off
-  openai-compat, ranked rows alone on openai-responses) to `present_rows`, pre-flight and rejection resolution
-  (tests: `src/router/field_repair_effort_tests.rs`, the rank weld included),
+  carrier-preserving rewrite (`write_effort`), plus `RowScope`, the per-lane
+  view `FieldRepairTable::for_lane` applies (ranked effort rows off
+  openai-compat, ranked rows alone on openai-responses, each Bedrock Mantle
+  egress exactly its own allowlist const, empty until a refusal captured on
+  that sub-lane grounds a row, and no row for an unknown egress) to
+  `present_rows`, pre-flight and rejection resolution
+  (tests: `src/router/field_repair_effort_tests.rs`, the rank weld included;
+  `src/router/field_lane_scope_tests.rs`, the literal per-egress row sets and
+  Mantle parse scoping),
   and the ranked repair: `ranked_replacement` (nearest lower listed level, else
   nearest higher, never a sent one), `ranked_pick` (the refused level,
   written level and `PickDirection` a ranked rewrite's record names),
@@ -2999,9 +3004,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   whose rejection this stage could not attribute is one whose verdict it must
   not act on): capability kill switch -> an admitted kind -> the shared
   `field_repair::attributable_field_lane` (NOT a forwarded-credential target,
-  a classifiable egress base URL -- a Bedrock Mantle sub-lane reports none and
-  is refused here -- and NOT `loopback_target_suppresses_minting`) -> the
-  entry's kind agrees with the target's ->
+  a classifiable egress base URL -- a Bedrock Mantle sub-lane's is the
+  endpoint its region derives -- and NOT `loopback_target_suppresses_minting`)
+  -> the entry's kind and egress agree with the target's ->
   `FieldVerdictKey` -> NOT `override_forces_supported` for the identity's own
   capability key, through the same two-tier resolver the act and learn sides
   share -> `FieldVerdictRegistry::preflight_authorization` -> that

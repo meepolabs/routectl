@@ -312,8 +312,9 @@ impl Router {
         };
         // Re-check attributability against the ACTUALLY SELECTED provider
         // entry, immediately before the dial. Activation checked the entry it
-        // resolved then; a reload can have replaced that entry with a Mantle,
-        // loopback, or forwarded-credential one since, and a probe must never
+        // resolved then; a reload can have replaced that entry with an
+        // unclassifiable, loopback, or forwarded-credential one since, and a
+        // probe must never
         // dial a target whose rejection it could not attribute.
         //
         // MIRRORS activation's refusal set, entry-for-entry. A recheck that
@@ -369,6 +370,10 @@ impl Router {
                 self.field_repair_table(),
                 &err,
                 key.provider_kind(),
+                self.config
+                    .providers
+                    .get(key.lane().provider_entry())
+                    .map(crate::config::ProviderEntry::egress_kind),
                 payload.field_path(),
             )
             .map_or_else(

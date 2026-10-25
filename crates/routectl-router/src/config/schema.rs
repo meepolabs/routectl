@@ -2103,15 +2103,14 @@ impl ProviderEntry {
     /// fails closed rather than silently classifying a lane this stage has
     /// captured no rejection envelope for.
     ///
-    /// The BEDROCK MANTLE sub-lane returns `None` for the same reason, and it is
-    /// the case a bare variant match gets wrong: a mantle entry leaves
-    /// `base_url` at the Anthropic default and validation REQUIRES that, while
-    /// the factory derives the real endpoint from `bedrock_mantle.region`. So
-    /// the configured value is not the effective egress -- reading it would
-    /// classify a Bedrock upstream as a remote Anthropic one and let it mint a
-    /// verdict, which Stage 1 excludes. Refusing here keeps that exclusion a
-    /// property of this accessor rather than of Bedrock capability-key
-    /// normalization, which is untouched.
+    /// The BEDROCK MANTLE sub-lane returns `None`, and it is the case a bare
+    /// variant match gets wrong: a mantle entry leaves `base_url` at the
+    /// Anthropic default and validation REQUIRES that, while the factory
+    /// derives the real endpoint from `bedrock_mantle.region`. So the
+    /// configured value is not the effective egress, and a caller keyed on a
+    /// direct Anthropic base must not read a Bedrock upstream as one. The
+    /// Mantle endpoint itself is [`Self::classifiable_egress_base_url`]'s
+    /// answer, not this accessor's.
     pub fn anthropic_api_base_url(&self) -> Option<&str> {
         match self {
             #[cfg(feature = "bedrock")]
@@ -2127,36 +2126,50 @@ impl ProviderEntry {
     /// The base URL this entry actually egresses to, when the configured
     /// fields alone determine it; `None` when they do not.
     ///
-    /// - `anthropic-api`: [`Self::anthropic_api_base_url`], so the Mantle
-    ///   sub-lane answers `None`;
-    /// - `openai-compat`: the configured `base_url`, except on the Mantle
-    ///   sub-lane, whose `base_url` is left empty and whose endpoint the
-    ///   factory derives from `bedrock_mantle.region`;
+    /// - `anthropic-api`: [`Self::anthropic_api_base_url`]; on the Mantle
+    ///   sub-lane, the Anthropic-vocabulary Mantle base derived from
+    ///   `bedrock_mantle.region`, the same derivation the factory dials;
+    /// - `openai-compat`: the configured `base_url`; on the Mantle sub-lane,
+    ///   whose `base_url` is left empty, the OpenAI-vocabulary Mantle base
+    ///   derived from `bedrock_mantle.region`;
     /// - native `bedrock`: the runtime endpoint derived from `region`, the
-    ///   same derivation the provider dials; a region that fails admission
-    ///   names no endpoint and answers `None`;
+    ///   same derivation the provider dials;
     /// - `openai-responses`: the configured `base_url`, else the `auth_kind`
-    ///   default the factory dials; `None` for a `bedrock_mantle` block, whose
-    ///   endpoint the factory derives from `bedrock_mantle.region`, and for a
+    ///   default the factory dials; on a `bedrock_mantle` block, the
+    ///   OpenAI-vocabulary Mantle base derived from its region; `None` for a
     ///   bare `bedrock-mantle` marker, which the factory refuses to build;
     /// - every other kind: `None`. Their egress is not classified here, so a
     ///   caller keying a decision on it fails closed.
+    ///
+    /// Every region-derived arm answers `None` for a region that fails
+    /// admission: it names no endpoint the factory could dial.
     pub fn classifiable_egress_base_url(&self) -> Option<std::borrow::Cow<'_, str>> {
         match self {
+            #[cfg(feature = "bedrock")]
+            Self::AnthropicApi {
+                bedrock_mantle: Some(m),
+                ..
+            } => routectl_providers::mantle::mantle_anthropic_base(&m.region)
+                .ok()
+                .map(std::borrow::Cow::Owned),
             Self::AnthropicApi { .. } => self
                 .anthropic_api_base_url()
                 .map(std::borrow::Cow::Borrowed),
             #[cfg(feature = "bedrock")]
             Self::OpenaiCompat {
-                bedrock_mantle: Some(_),
+                bedrock_mantle: Some(m),
                 ..
-            } => None,
+            } => routectl_providers::mantle::mantle_openai_base(&m.region)
+                .ok()
+                .map(std::borrow::Cow::Owned),
             Self::OpenaiCompat { base_url, .. } => Some(std::borrow::Cow::Borrowed(base_url)),
             #[cfg(all(feature = "openai-responses", feature = "bedrock"))]
             Self::OpenaiResponses {
-                bedrock_mantle: Some(_),
+                bedrock_mantle: Some(m),
                 ..
-            } => None,
+            } => routectl_providers::mantle::mantle_openai_base(&m.region)
+                .ok()
+                .map(std::borrow::Cow::Owned),
             #[cfg(feature = "openai-responses")]
             Self::OpenaiResponses {
                 auth_kind: OpenaiResponsesAuthKind::BedrockMantle,

@@ -37,7 +37,7 @@ use std::fmt;
 
 use routectl_core::capability::SignalTier;
 use routectl_core::provider_kind::config as kind;
-use routectl_core::wire_check::WirePath;
+use routectl_core::wire_check::{EgressKind, WirePath};
 use routectl_core::{ParsedErrorBody, is_safe_token, strip_converse_errors_prefix};
 
 use super::field_repair::{FieldRepairRow, FieldRepairTable, FieldTransform};
@@ -179,7 +179,7 @@ pub(super) struct NamedRejection {
 }
 
 /// Name the closed-table row a rejection rejected, or `None` when the kind
-/// has no parser, the status cannot carry a field rejection, the body did
+/// has no parser, the row is outside the view of `egress`'s lane, the status cannot carry a field rejection, the body did
 /// not parse, no arm localizes a path, or the path has no row. A path ending
 /// in an array index names one element, not the field a row describes, so it
 /// has no row either.
@@ -190,6 +190,7 @@ pub(super) struct NamedRejection {
 pub(super) fn parse_rejection(
     table: FieldRepairTable,
     provider_kind: &str,
+    egress: Option<EgressKind>,
     status: u16,
     parsed: Option<&ParsedErrorBody>,
     sent: SentEffort,
@@ -198,7 +199,7 @@ pub(super) fn parse_rejection(
     if localized.ends_in_index {
         return None;
     }
-    let table = table.for_kind(provider_kind);
+    let table = table.for_lane(provider_kind, egress);
     if is_effort_field(&localized.segments) {
         return ranked_rejection(table, &localized, sent);
     }

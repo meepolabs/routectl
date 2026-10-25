@@ -88,7 +88,8 @@ pub enum PreflightBlockedReason {
     /// The target's lane is not one this stage acts on: its provider kind is not
     /// one field repair admits (`anthropic-api`, `bedrock`, `openai-compat`), or it
     /// has no attributable base URL (a forwarded credential, a local hop, or no
-    /// classifiable egress base URL, as on a Bedrock Mantle sub-lane). A verdict on such a lane
+    /// classifiable egress base URL, as on a Mantle sub-lane whose region names
+    /// no endpoint). A verdict on such a lane
     /// is REAL (the registry holds it from a reactive repair or a ledger replay), but
     /// pre-flight will never fire on it.
     UnsupportedLane,

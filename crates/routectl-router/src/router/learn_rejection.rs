@@ -167,6 +167,7 @@ impl AttemptLearning<'_> {
             rejection.native_class,
             rejection.err,
             rejection.target.provider_kind.unwrap_or(""),
+            rejection.target.egress_kind,
             RejectionSite::sent_effort_of(rejection.site.as_ref()),
         )
     }

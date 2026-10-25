@@ -83,7 +83,8 @@ pub(super) fn probe_outcome_for_class(
 }
 
 /// The attribution tier when `err` rejects the very field a re-check carried
-/// at `field_path`, as an UNSUPPORTED field, or `None` for any other failure.
+/// at `field_path`, as an UNSUPPORTED field, or `None` for any other failure
+/// or a field outside the view of the probed lane's `egress`.
 ///
 /// Read through the same resolver the reactive repair uses, on the NATIVE
 /// class, so a probe re-confirms a negative on exactly the evidence that could
@@ -93,6 +94,7 @@ pub(super) fn rechecked_field_rejection(
     table: super::field_repair::FieldRepairTable,
     err: &routectl_core::Error,
     provider_kind: &str,
+    egress: Option<routectl_core::wire_check::EgressKind>,
     field_path: &str,
 ) -> Option<routectl_core::capability::SignalTier> {
     let row = table.row_for_path(field_path)?;
@@ -103,6 +105,7 @@ pub(super) fn rechecked_field_rejection(
         &native,
         err,
         provider_kind,
+        egress,
     )?;
     (named.kind == super::rejection_parser::RejectionKind::UnsupportedField).then_some(named.tier)
 }

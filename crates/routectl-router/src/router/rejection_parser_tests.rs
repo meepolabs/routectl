@@ -72,6 +72,7 @@ fn outcome_sent(kind: &str, status: u16, body: &str, sent: SentEffort) -> Outcom
     if let Some(named) = parse_rejection(
         crate::router::FieldRepairTable::default(),
         kind,
+        crate::router::field_repair::direct_egress(kind),
         status,
         body.parsed(),
         sent,
@@ -649,6 +650,7 @@ fn near_miss_messages_resolve_to_no_row() {
             parse_rejection(
                 crate::router::FieldRepairTable::default(),
                 kind,
+                crate::router::field_repair::direct_egress(kind),
                 400,
                 parsed.parsed(),
                 SentEffort::Unknown
@@ -665,6 +667,7 @@ fn near_miss_messages_resolve_to_no_row() {
         parse_rejection(
             crate::router::FieldRepairTable::default(),
             ANTHROPIC,
+            crate::router::field_repair::direct_egress(ANTHROPIC),
             400,
             control.parsed(),
             SentEffort::Unknown
@@ -735,6 +738,7 @@ fn each_arm_assigns_its_tier() {
         if let Some(named) = parse_rejection(
             crate::router::FieldRepairTable::default(),
             kind,
+            crate::router::field_repair::direct_egress(kind),
             400,
             body.parsed(),
             SentEffort::Unknown,
@@ -855,6 +859,7 @@ fn a_path_ending_in_an_index_names_no_row() {
         parse_rejection(
             crate::router::FieldRepairTable::default(),
             ANTHROPIC,
+            crate::router::field_repair::direct_egress(ANTHROPIC),
             400,
             control.parsed(),
             SentEffort::Unknown
@@ -875,6 +880,7 @@ fn a_path_ending_in_an_index_names_no_row() {
             parse_rejection(
                 crate::router::FieldRepairTable::default(),
                 ANTHROPIC,
+                crate::router::field_repair::direct_egress(ANTHROPIC),
                 400,
                 body.parsed(),
                 SentEffort::Unknown
@@ -936,6 +942,7 @@ fn openai_responses_localizes_no_structured_param_but_the_effort_one() {
             parse_rejection(
                 crate::router::FieldRepairTable::default(),
                 kind,
+                crate::router::field_repair::direct_egress(kind),
                 400,
                 body.parsed(),
                 SentEffort::Unknown,
@@ -985,6 +992,7 @@ fn the_unsupported_parameter_template_must_match_exactly() {
             parse_rejection(
                 crate::router::FieldRepairTable::default(),
                 OPENAI_COMPAT,
+                crate::router::field_repair::direct_egress(OPENAI_COMPAT),
                 400,
                 body.parsed(),
                 SentEffort::Unknown
@@ -1018,6 +1026,7 @@ fn indices_and_the_converse_field_bag_canonicalize_onto_the_row() {
         let named = parse_rejection(
             crate::router::FieldRepairTable::default(),
             kind,
+            crate::router::field_repair::direct_egress(kind),
             400,
             body.parsed(),
             SentEffort::Unknown,
@@ -1042,6 +1051,7 @@ fn the_converse_field_bag_is_only_removed_on_bedrock() {
         parse_rejection(
             crate::router::FieldRepairTable::default(),
             ANTHROPIC,
+            crate::router::field_repair::direct_egress(ANTHROPIC),
             400,
             body.parsed(),
             SentEffort::Unknown
@@ -1063,6 +1073,7 @@ fn a_non_ascii_or_over_long_param_resolves_to_none() {
             parse_rejection(
                 crate::router::FieldRepairTable::default(),
                 OPENAI_COMPAT,
+                crate::router::field_repair::direct_egress(OPENAI_COMPAT),
                 400,
                 body.parsed(),
                 SentEffort::Unknown
@@ -1076,6 +1087,7 @@ fn a_non_ascii_or_over_long_param_resolves_to_none() {
         parse_rejection(
             crate::router::FieldRepairTable::default(),
             OPENAI_COMPAT,
+            crate::router::field_repair::direct_egress(OPENAI_COMPAT),
             400,
             control.parsed(),
             SentEffort::Unknown
@@ -1093,6 +1105,7 @@ fn the_named_row_is_a_table_entry_holding_no_body_bytes() {
     let named = parse_rejection(
         crate::router::FieldRepairTable::default(),
         ANTHROPIC,
+        crate::router::field_repair::direct_egress(ANTHROPIC),
         400,
         body.parsed(),
         SentEffort::Unknown,
@@ -1126,6 +1139,7 @@ fn an_over_cap_or_absent_parse_resolves_to_none() {
         parse_rejection(
             crate::router::FieldRepairTable::default(),
             ANTHROPIC,
+            crate::router::field_repair::direct_egress(ANTHROPIC),
             400,
             over_cap.parsed(),
             SentEffort::Unknown
@@ -1136,6 +1150,7 @@ fn an_over_cap_or_absent_parse_resolves_to_none() {
         parse_rejection(
             crate::router::FieldRepairTable::default(),
             ANTHROPIC,
+            crate::router::field_repair::direct_egress(ANTHROPIC),
             400,
             None::<&ParsedErrorBody>,
             SentEffort::Unknown
@@ -1152,6 +1167,7 @@ fn a_kind_or_status_without_a_parser_resolves_to_none() {
         parse_rejection(
             crate::router::FieldRepairTable::default(),
             ANTHROPIC,
+            crate::router::field_repair::direct_egress(ANTHROPIC),
             422,
             anthropic.parsed(),
             SentEffort::Unknown
@@ -1164,6 +1180,7 @@ fn a_kind_or_status_without_a_parser_resolves_to_none() {
         parse_rejection(
             crate::router::FieldRepairTable::default(),
             "gemini",
+            crate::router::field_repair::direct_egress("gemini"),
             400,
             anthropic.parsed(),
             SentEffort::Unknown
@@ -1174,6 +1191,7 @@ fn a_kind_or_status_without_a_parser_resolves_to_none() {
         parse_rejection(
             crate::router::FieldRepairTable::default(),
             "gemini",
+            crate::router::field_repair::direct_egress("gemini"),
             400,
             openai.parsed(),
             SentEffort::Unknown
@@ -1184,6 +1202,7 @@ fn a_kind_or_status_without_a_parser_resolves_to_none() {
         parse_rejection(
             crate::router::FieldRepairTable::default(),
             ANTHROPIC,
+            crate::router::field_repair::direct_egress(ANTHROPIC),
             500,
             anthropic.parsed(),
             SentEffort::Unknown
@@ -1194,6 +1213,7 @@ fn a_kind_or_status_without_a_parser_resolves_to_none() {
         parse_rejection(
             crate::router::FieldRepairTable::default(),
             ANTHROPIC,
+            crate::router::field_repair::direct_egress(ANTHROPIC),
             429,
             anthropic.parsed(),
             SentEffort::Unknown
@@ -1212,6 +1232,7 @@ fn an_anthropic_message_outside_an_invalid_request_error_resolves_to_none() {
         parse_rejection(
             crate::router::FieldRepairTable::default(),
             ANTHROPIC,
+            crate::router::field_repair::direct_egress(ANTHROPIC),
             400,
             body.parsed(),
             SentEffort::Unknown
@@ -1334,6 +1355,7 @@ fn the_accepted_value_fills_only_for_exactly_one_named_member() {
         let named = parse_rejection(
             crate::router::FieldRepairTable::default(),
             ANTHROPIC,
+            crate::router::field_repair::direct_egress(ANTHROPIC),
             400,
             body.parsed(),
             SentEffort::Unknown,
@@ -1383,6 +1405,7 @@ fn a_drop_row_never_carries_an_accepted_value() {
     let named = parse_rejection(
         crate::router::FieldRepairTable::default(),
         ANTHROPIC,
+        crate::router::field_repair::direct_egress(ANTHROPIC),
         400,
         body.parsed(),
         SentEffort::Unknown,
@@ -1405,6 +1428,7 @@ fn the_thinking_enabled_fixture_names_the_adaptive_rewrite() {
     let named = parse_rejection(
         crate::router::FieldRepairTable::grounded_only(),
         BEDROCK,
+        crate::router::field_repair::direct_egress(BEDROCK),
         status,
         body.parsed(),
         SentEffort::Unknown,
@@ -1436,6 +1460,7 @@ fn each_thinking_disabled_fixture_names_its_rewrite_on_the_disabled_row() {
         let named = parse_rejection(
             crate::router::FieldRepairTable::grounded_only(),
             kind,
+            crate::router::field_repair::direct_egress(kind),
             status,
             body.parsed(),
             SentEffort::Unknown,
@@ -1732,6 +1757,7 @@ fn named_value(kind: &str, body: &str) -> Option<(&'static str, Option<Rejection
     parse_rejection(
         crate::router::FieldRepairTable::default(),
         kind,
+        crate::router::field_repair::direct_egress(kind),
         400,
         body.parsed(),
         SentEffort::Unknown,

@@ -1,4 +1,4 @@
-//! The effort field's closed-table surface and its per-kind scope.
+//! The effort field's closed-table surface and its per-lane scope.
 //!
 //! One row per effort level, `output_config.effort.<level>`, each PRESENT when
 //! the effort the request emits is exactly that level. A ranked rewrite writes
@@ -15,6 +15,7 @@
 
 use routectl_core::ChatRequest;
 use routectl_core::provider_kind::config as kind;
+use routectl_core::wire_check::EgressKind;
 use routectl_providers::effort::VALID_EFFORT_TOKENS;
 
 use crate::field_verdict::FieldVerdictKey;
@@ -202,10 +203,12 @@ impl Router {
             &target.provider_name,
             target.use_forwarded_credential,
         )?;
-        if lane.provider_kind != provider_kind {
+        if !lane.matches_target(provider_kind, target.egress_kind) {
             return None;
         }
-        let table = self.field_repair_table().for_kind(provider_kind);
+        let table = self
+            .field_repair_table()
+            .for_lane(provider_kind, Some(lane.egress));
         let row = super::present_rows(table, sent).find(is_ranked)?;
         let key = FieldVerdictKey::new(target.learned_lane.as_ref()?, row.path, provider_kind)?;
         if removed.contains(&key) {
@@ -221,8 +224,7 @@ pub(in crate::router) const fn is_ranked(row: &FieldRepairRow) -> bool {
     matches!(row.transform, FieldTransform::RankedRewrite { .. })
 }
 
-/// Which closed-table rows a lane of one provider kind may carry or have a
-/// rejection resolve to.
+/// Which closed-table rows a lane may carry or have a rejection resolve to.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum RowScope {
     /// Every row.
@@ -234,23 +236,47 @@ pub(super) enum RowScope {
     /// The ranked effort rows alone: the kind's only grounded refusals are of
     /// an effort level, so no other row may be carried or named there.
     RankedOnly,
+    /// Exactly the rows at these paths: a lane whose admitted rows are each
+    /// grounded by a refusal captured on that lane itself, never borrowed
+    /// from a sibling lane that shares its wire dialect.
+    Admitted(&'static [&'static str]),
 }
 
+/// The row paths a Bedrock Mantle Anthropic Messages lane carries.
+pub(super) const ANTHROPIC_API_MANTLE_ROWS: &[&str] = &[];
+
+/// The row paths a Bedrock Mantle Chat Completions lane carries.
+pub(super) const OPENAI_COMPAT_MANTLE_ROWS: &[&str] = &[];
+
+/// The row paths a Bedrock Mantle Responses lane carries.
+pub(super) const OPENAI_RESPONSES_MANTLE_ROWS: &[&str] = &[];
+
 impl RowScope {
-    /// The scope of a lane of `provider_kind`.
-    pub(super) fn of_kind(provider_kind: &str) -> Self {
-        match provider_kind {
-            kind::OPENAI_COMPAT => Self::WithoutRanked,
-            kind::OPENAI_RESPONSES => Self::RankedOnly,
-            _ => Self::All,
+    /// The scope of a lane of `provider_kind` sending with `egress`.
+    ///
+    /// A Mantle egress answers its own allowlist; every other egress keeps
+    /// its provider kind's scope, so a Mantle lane can only narrow what its
+    /// direct sibling carries. An unknown egress carries nothing.
+    pub(super) fn of_lane(provider_kind: &str, egress: Option<EgressKind>) -> Self {
+        match egress {
+            None => Self::Admitted(&[]),
+            Some(EgressKind::AnthropicApiMantle) => Self::Admitted(ANTHROPIC_API_MANTLE_ROWS),
+            Some(EgressKind::OpenaiCompatMantle) => Self::Admitted(OPENAI_COMPAT_MANTLE_ROWS),
+            Some(EgressKind::OpenaiResponsesMantle) => Self::Admitted(OPENAI_RESPONSES_MANTLE_ROWS),
+            Some(_) => match provider_kind {
+                kind::OPENAI_COMPAT => Self::WithoutRanked,
+                kind::OPENAI_RESPONSES => Self::RankedOnly,
+                _ => Self::All,
+            },
         }
     }
 
-    pub(super) const fn admits(self, row: &FieldRepairRow) -> bool {
+    pub(super) fn admits(self, row: &FieldRepairRow) -> bool {
         match self {
             Self::All => true,
             Self::WithoutRanked => !is_ranked(row),
             Self::RankedOnly => is_ranked(row),
+            Self::Admitted(paths) => paths.contains(&row.path),
         }
     }
 }

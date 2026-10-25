@@ -36,6 +36,7 @@ mod ranked_resolution {
         parse_rejection(
             crate::router::FieldRepairTable::default(),
             kind,
+            crate::router::field_repair::direct_egress(kind),
             400,
             body.parsed(),
             sent,

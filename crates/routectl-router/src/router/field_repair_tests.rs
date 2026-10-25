@@ -1617,14 +1617,12 @@ async fn a_remote_target_on_the_same_lane_repairs_on_every_walk() {
 #[cfg(feature = "bedrock")]
 #[tokio::test]
 async fn a_bedrock_mantle_target_performs_no_field_repair_on_any_walk() {
-    // The sub-lane a bare variant match gets wrong. A mantle entry is
-    // `kind = "anthropic-api"` and leaves `base_url` at the Anthropic default
-    // (validation requires that), while the factory derives the real endpoint
-    // from `bedrock_mantle.region` -- so the configured base reads as an
-    // attributable remote Anthropic host when the effective egress is Bedrock.
-    // Stage 1 excludes Bedrock, so this target must not repair or mint, and the
-    // exclusion lives in the base-URL accessor rather than in Bedrock
-    // capability-key normalization, which is untouched.
+    // A mantle entry is `kind = "anthropic-api"` and is attributable through
+    // the Mantle endpoint its region derives, but its lane view is empty: no
+    // refusal captured on Mantle grounds a row there, and the direct sibling's
+    // rows are not borrowed. So the reactive plan admits no candidate, even an
+    // injected rejection naming a grounded row has nothing to repair, and
+    // nothing is minted.
     let _injection = provisional::inject(REJECTED_PATH);
     for surface in [
         "complete",
@@ -1659,7 +1657,7 @@ async fn a_bedrock_mantle_target_performs_no_field_repair_on_any_walk() {
         );
         assert!(
             !verdict_resident(&router, "m0"),
-            "{surface}: and nothing may be minted for a Bedrock egress",
+            "{surface}: and nothing may be minted on an empty lane view",
         );
     }
 }

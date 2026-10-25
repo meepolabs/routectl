@@ -1179,7 +1179,7 @@ pub(super) fn closed_table() -> &'static [FieldRepairRow] {
 #[derive(Clone, Copy, Debug)]
 pub struct FieldRepairTable {
     rows: &'static [FieldRepairRow],
-    /// Which rows a lane may carry or name; see [`Self::for_kind`].
+    /// Which rows a lane may carry or name; see [`Self::for_lane`].
     scope: RowScope,
 }
 
@@ -1250,12 +1250,17 @@ impl FieldRepairTable {
         self.rows
     }
 
-    /// The view a lane of `provider_kind` reads: the rows its requests can
-    /// carry and its rejections can name. A row outside the view admits no
-    /// candidate, plans no pre-flight and resolves no rejection there.
-    pub(super) fn for_kind(self, provider_kind: &str) -> Self {
+    /// The view a lane of `provider_kind` sending with `egress` reads: the
+    /// rows its requests can carry and its rejections can name. A row outside
+    /// the view admits no candidate, plans no pre-flight and resolves no
+    /// rejection there. An unknown egress reads an empty view.
+    pub(super) fn for_lane(
+        self,
+        provider_kind: &str,
+        egress: Option<routectl_core::wire_check::EgressKind>,
+    ) -> Self {
         Self {
-            scope: RowScope::of_kind(provider_kind),
+            scope: RowScope::of_lane(provider_kind, egress),
             ..self
         }
     }
@@ -1325,7 +1330,7 @@ pub(super) fn recheck_payloads(
 /// and by the lane gates that call [`field_repair_admits_kind`].
 ///
 /// `openai-responses` is admitted for its effort refusals alone: its lane
-/// view carries only the ranked effort rows ([`FieldRepairTable::for_kind`]).
+/// view carries only the ranked effort rows ([`FieldRepairTable::for_lane`]).
 /// Absent on purpose: `gemini`.
 const FIELD_REPAIR_KINDS: &[&str] = &[
     ANTHROPIC_API_KIND,
@@ -1353,12 +1358,29 @@ pub(super) fn field_repair_admits_kind(provider_kind: &str) -> bool {
     FIELD_REPAIR_KINDS.contains(&provider_kind)
 }
 
-/// What the attributability decision admitted: the entry's kind and the base
-/// URL it egresses to.
+/// What the attributability decision admitted: the entry's kind, the egress
+/// it sends with, and the base URL it egresses to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct AttributableLane<'a> {
     pub(super) provider_kind: &'static str,
+    pub(super) egress: routectl_core::wire_check::EgressKind,
     pub(super) base_url: std::borrow::Cow<'a, str>,
+}
+
+impl AttributableLane<'_> {
+    /// Whether a dispatch target expanded as `target_kind` sending with
+    /// `target_egress` is still this lane. A reload may re-kind an entry, or
+    /// repoint it between a Mantle sub-lane and its direct sibling under the
+    /// same name, beneath a target expanded from the old entry; the verdict
+    /// key carries the target's kind and the row scope the egress, so both
+    /// must agree before either is keyed on.
+    pub(super) fn matches_target(
+        &self,
+        target_kind: &str,
+        target_egress: Option<routectl_core::wire_check::EgressKind>,
+    ) -> bool {
+        self.provider_kind == target_kind && target_egress == Some(self.egress)
+    }
 }
 
 /// THE single attributability decision every field stage makes: the reactive
@@ -1377,8 +1399,9 @@ pub(super) struct AttributableLane<'a> {
 /// - the operator's OWN `[providers]` entry for `provider_name` exists;
 /// - that entry's kind is one of [`FIELD_REPAIR_KINDS`];
 /// - the entry's effective egress is classifiable from its configured fields
-///   (`ProviderEntry::classifiable_egress_base_url`). The Mantle sub-lanes
-///   are excluded here: their configured base URL is not where they egress;
+///   (`ProviderEntry::classifiable_egress_base_url`). A Mantle sub-lane
+///   answers the endpoint its region derives, not its configured base URL,
+///   and a region that names no endpoint answers nothing;
 /// - that base URL does not name a LOOPBACK destination.
 ///
 /// The forwarded fact is a PARAMETER rather than a per-site check because its
@@ -1411,6 +1434,7 @@ pub(super) fn attributable_field_lane<'a>(
     }
     Some(AttributableLane {
         provider_kind,
+        egress: entry.egress_kind(),
         base_url,
     })
 }
@@ -1548,6 +1572,7 @@ pub(super) fn rejected_field(
     class: &FailureClass,
     err: &Error,
     provider_kind: &str,
+    egress: Option<routectl_core::wire_check::EgressKind>,
     sent: SentEffort,
 ) -> Option<NamedRejection> {
     if !class_can_name_a_field(class, provider_kind) {
@@ -1558,7 +1583,30 @@ pub(super) fn rejected_field(
         return named;
     }
     let status = super::class_observe::upstream_facts(err).status?;
-    parse_rejection(table, provider_kind, status, err.parsed_body(), sent)
+    parse_rejection(
+        table,
+        provider_kind,
+        egress,
+        status,
+        err.parsed_body(),
+        sent,
+    )
+}
+
+/// The egress of the direct lane of `provider_kind`, the one a test naming
+/// only a kind means: Invoke for `bedrock`, never a Mantle sub-lane.
+#[cfg(test)]
+pub(super) fn direct_egress(provider_kind: &str) -> Option<routectl_core::wire_check::EgressKind> {
+    use routectl_core::provider_kind::config as kind;
+    use routectl_core::wire_check::EgressKind;
+    match provider_kind {
+        kind::ANTHROPIC_API => Some(EgressKind::AnthropicApi),
+        kind::BEDROCK => Some(EgressKind::BedrockInvoke),
+        kind::OPENAI_COMPAT => Some(EgressKind::OpenaiCompat),
+        kind::OPENAI_RESPONSES => Some(EgressKind::OpenaiResponses),
+        kind::GEMINI => Some(EgressKind::Gemini),
+        _ => None,
+    }
 }
 
 /// Whether a failure class, on a lane of `provider_kind`, can carry a
@@ -1723,16 +1771,15 @@ impl Router {
             &target.provider_name,
             target.use_forwarded_credential,
         )?;
-        // A reload may have re-kinded the entry under a target expanded from
-        // the old one; the verdict key carries the target's kind, so the two
-        // must agree before anything is keyed on it.
-        if lane.provider_kind != provider_kind {
+        if !lane.matches_target(provider_kind, target.egress_kind) {
             return None;
         }
         // The identities come from the CLOSED TABLE plus the request, never
         // from upstream text: every row whose surface this attempt actually
         // carries, in table source order.
-        let table = self.field_repair_table().for_kind(provider_kind);
+        let table = self
+            .field_repair_table()
+            .for_lane(provider_kind, Some(lane.egress));
         let generation = self.registry_generation();
         let candidates: Vec<FieldRepairCandidate<'a>> = present_rows(table, attempt_req)
             .filter_map(|row| {
@@ -1808,9 +1855,17 @@ impl Router {
         native_class: &FailureClass,
         err: &Error,
         provider_kind: &str,
+        egress: Option<routectl_core::wire_check::EgressKind>,
     ) -> Option<NamedRejection> {
-        rejected_field(table, native_class, err, provider_kind, SentEffort::Unknown)
-            .filter(|named| named.row.surface == surface)
+        rejected_field(
+            table,
+            native_class,
+            err,
+            provider_kind,
+            egress,
+            SentEffort::Unknown,
+        )
+        .filter(|named| named.row.surface == surface)
     }
 
     /// Whether a rejection eligible to name a field localized NO field path from
@@ -1823,10 +1878,18 @@ impl Router {
         native_class: &FailureClass,
         err: &Error,
         provider_kind: &str,
+        egress: Option<routectl_core::wire_check::EgressKind>,
     ) -> bool {
         class_can_name_a_field(native_class, provider_kind)
-            && rejected_field(table, native_class, err, provider_kind, SentEffort::Unknown)
-                .is_none()
+            && rejected_field(
+                table,
+                native_class,
+                err,
+                provider_kind,
+                egress,
+                SentEffort::Unknown,
+            )
+            .is_none()
     }
 
     /// Record that the field repair fired for this request, for the
@@ -2101,6 +2164,10 @@ mod field_learner_disjointness_tests;
 mod effort_tests;
 
 #[cfg(test)]
+#[path = "field_lane_scope_tests.rs"]
+mod lane_scope_tests;
+
+#[cfg(test)]
 mod table_tests {
     use super::*;
     use routectl_core::capability::SignalTier;
@@ -2368,6 +2435,7 @@ mod table_tests {
                     &FailureClass::BadRequest,
                     &rejection_naming(unknown, "Extra inputs are not permitted"),
                     ANTHROPIC_API_KIND,
+                    crate::router::field_repair::direct_egress(ANTHROPIC_API_KIND),
                     crate::router::learn_engine::SentEffort::Unknown,
                 )
                 .is_none(),
@@ -2383,6 +2451,7 @@ mod table_tests {
                 &FailureClass::BadRequest,
                 &rejection_naming("thinking.enabled.display", "Extra inputs are not permitted"),
                 ANTHROPIC_API_KIND,
+                crate::router::field_repair::direct_egress(ANTHROPIC_API_KIND),
                 crate::router::learn_engine::SentEffort::Unknown,
             )
             .is_some(),
@@ -2600,6 +2669,7 @@ mod table_tests {
             &FailureClass::BadRequest,
             &captured,
             ANTHROPIC_API_KIND,
+            crate::router::field_repair::direct_egress(ANTHROPIC_API_KIND),
             crate::router::learn_engine::SentEffort::Unknown,
         )
         .expect("the captured display rejection names its row");
@@ -2623,6 +2693,7 @@ mod table_tests {
                 &FailureClass::BadRequest,
                 &captured,
                 ANTHROPIC_API_KIND,
+                crate::router::field_repair::direct_egress(ANTHROPIC_API_KIND),
                 crate::router::learn_engine::SentEffort::Unknown
             )
             .is_some(),
@@ -2634,6 +2705,7 @@ mod table_tests {
                 &FailureClass::BadRequest,
                 &captured,
                 "gemini",
+                crate::router::field_repair::direct_egress("gemini"),
                 crate::router::learn_engine::SentEffort::Unknown
             )
             .is_none(),
@@ -2659,6 +2731,7 @@ mod table_tests {
                     &FailureClass::BadRequest,
                     &unparsed,
                     ANTHROPIC_API_KIND,
+                    crate::router::field_repair::direct_egress(ANTHROPIC_API_KIND),
                     crate::router::learn_engine::SentEffort::Unknown
                 )
                 .is_none(),
@@ -2685,6 +2758,7 @@ mod table_tests {
                 &FailureClass::BadRequest,
                 &captured,
                 ANTHROPIC_API_KIND,
+                crate::router::field_repair::direct_egress(ANTHROPIC_API_KIND),
                 crate::router::learn_engine::SentEffort::Unknown
             )
             .is_none(),
@@ -2755,6 +2829,7 @@ mod table_tests {
                 &FailureClass::RateLimited,
                 &Error::upstream("p", 429, "{}"),
                 ANTHROPIC_API_KIND,
+                crate::router::field_repair::direct_egress(ANTHROPIC_API_KIND),
                 crate::router::learn_engine::SentEffort::Unknown,
             )
             .is_none(),

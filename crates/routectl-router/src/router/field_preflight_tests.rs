@@ -1307,11 +1307,11 @@ fn a_localhost_named_target_falls_open_as_unattributable() {
 
 #[cfg(feature = "bedrock")]
 #[test]
-fn a_bedrock_mantle_target_falls_open_as_unattributable() {
-    // The mantle lane reports NO attributable Anthropic API base URL (its
-    // accessor answers None by construction), which is exactly how the
-    // reactive admission refuses it. Asserting through the same accessor keeps
-    // the two refusals resting on one fact rather than two lookalike checks.
+fn a_bedrock_mantle_target_falls_open_on_its_empty_lane_view() {
+    // The mantle lane is attributable through its region-derived egress, but
+    // its lane view admits no row until a refusal captured on Mantle grounds
+    // one, so a request carrying a grounded field reports no grounded field
+    // here and is sent untouched, as the reactive arm also declines it.
     let mut config = chain_config(ALIAS, 1, ANTHROPIC);
     let mut entry = config
         .providers
@@ -1326,8 +1326,8 @@ fn a_bedrock_mantle_target_falls_open_as_unattributable() {
         });
     }
     assert!(
-        crate::config::ProviderEntry::anthropic_api_base_url(&entry).is_none(),
-        "fixture premise: a mantle entry carries no attributable anthropic-api base URL",
+        entry.classifiable_egress_base_url().is_some(),
+        "fixture premise: a mantle entry egresses to a classifiable Mantle base",
     );
     config.providers.insert("p0".to_string(), entry);
     let (router, _seen) = install(config, 1, Answer::ServeImmediately);
@@ -1335,8 +1335,8 @@ fn a_bedrock_mantle_target_falls_open_as_unattributable() {
 
     let (planned, decision) = plan(&router, &req_on(ALIAS), "m0");
 
-    assert!(!decision.acted, "the mantle lane is not this stage's lane");
-    assert_eq!(decision.reason, FIELD_PREFLIGHT_UNATTRIBUTABLE_TARGET);
+    assert!(!decision.acted, "the mantle lane view carries no row");
+    assert_eq!(decision.reason, FIELD_PREFLIGHT_NO_GROUNDED_FIELD);
     assert!(carries_field(&planned));
 }
 

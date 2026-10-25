@@ -377,6 +377,7 @@ impl<'a> FieldRepairPlan<'a> {
             native_class,
             rejection,
             provider_kind,
+            super::direct_egress(provider_kind),
             super::super::learn_engine::SentEffort::Unknown,
         )?;
         self.apply_named(

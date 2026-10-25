@@ -186,6 +186,7 @@ mod responses_param_refusals {
                 &classify(&refused, Some("openai-responses")).class,
                 &refused,
                 "openai-responses",
+                crate::router::field_repair::direct_egress("openai-responses"),
                 crate::router::learn_engine::SentEffort::Unknown,
             );
             let target = router
