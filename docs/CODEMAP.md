@@ -8918,9 +8918,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   sentinel-delimited `PROVIDER_SHAPE_KINDS` / `PROVIDER_SHAPE_EXCLUDED`
   classification block in `scripts/scrub-fixture.sh`
   ; ALSO asserts the root `.gitleaks.toml` (loaded by the local pre-commit
-  hook) extends the default rules, carries no `paths` allowlist anywhere, and
-  its only allowlist is the global one: a single `^...$`-anchored regex with
-  `regexTarget = "secret"`
+  hook) extends the default rules and its only allowlist is the global one,
+  carrying only `description` / `regexTarget = "secret"` / `regexes`, where
+  `regexes` is exactly the `^...$`-anchored `CLIENT_SECRET` read from
+  `routectl-auth/src/oauth/providers/antigravity.rs`
 - `tests/cross_mode_pair.rs` -- pins the committed cross-mode fixture pair
   (`driver/anthropic-api/plain-turn-01` and its `-fp` twin): asserts each
   half's `meta.client.connection_mode`, the MITM seam header and

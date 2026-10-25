@@ -303,7 +303,35 @@ fn every_classified_kind_is_config_nameable() {
 // pre-commit hook loads the root `.gitleaks.toml`: default rules plus one
 // extra rule, with one exact public value exempted. A path allowlist would
 // quietly skip whole files locally, and a loose value pattern would exempt
-// more than that one value, so both are pinned here.
+// more than that one value, so the exemption is pinned to the value the
+// Antigravity flow actually ships.
+
+const ANTIGRAVITY_SOURCE_PATH: &str = "crates/routectl-auth/src/oauth/providers/antigravity.rs";
+const GLOBAL_ALLOWLIST_KEYS: [&str; 3] = ["description", "regexTarget", "regexes"];
+
+fn antigravity_client_secret() -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(ANTIGRAVITY_SOURCE_PATH);
+    let source =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let values: Vec<&str> = source
+        .lines()
+        .filter_map(|line| line.strip_prefix("const CLIENT_SECRET: &str = \""))
+        .filter_map(|rest| rest.strip_suffix("\";"))
+        .collect();
+    assert_eq!(
+        values.len(),
+        1,
+        "{ANTIGRAVITY_SOURCE_PATH} must declare exactly one CLIENT_SECRET literal: {values:?}"
+    );
+    assert!(
+        values[0].starts_with("GOCSPX-"),
+        "control: the Antigravity client secret has the rule's prefix: {:?}",
+        values[0]
+    );
+    values[0].to_owned()
+}
 
 #[test]
 fn the_repo_gitleaks_config_exempts_one_exact_value_and_no_paths() {
@@ -319,7 +347,6 @@ fn the_repo_gitleaks_config_exempts_one_exact_value_and_no_paths() {
         "{} must inherit gitleaks' default rules",
         path.display()
     );
-    assert_no_paths_key(&config, "<root>");
     assert!(
         !config.contains_key("allowlists"),
         "only the global [allowlist] may exempt anything",
@@ -340,6 +367,15 @@ fn the_repo_gitleaks_config_exempts_one_exact_value_and_no_paths() {
         .get("allowlist")
         .and_then(toml::Value::as_table)
         .expect("the global [allowlist] holds the one exempted value");
+    let extra_keys: Vec<&String> = allowlist
+        .keys()
+        .filter(|key| !GLOBAL_ALLOWLIST_KEYS.contains(&key.as_str()))
+        .collect();
+    assert!(
+        extra_keys.is_empty(),
+        "the global [allowlist] may only carry {GLOBAL_ALLOWLIST_KEYS:?}; \
+         {extra_keys:?} would exempt paths, commits, or words from the scan",
+    );
     assert_eq!(
         allowlist.get("regexTarget").and_then(toml::Value::as_str),
         Some("secret"),
@@ -352,36 +388,10 @@ fn the_repo_gitleaks_config_exempts_one_exact_value_and_no_paths() {
         .iter()
         .map(|v| v.as_str().expect("allowlist regex is a string"))
         .collect();
+    let exact_value = format!("^{}$", antigravity_client_secret());
     assert_eq!(
-        regexes.len(),
-        1,
-        "exactly one allowlisted value: {regexes:?}"
+        regexes,
+        [exact_value.as_str()],
+        "the allowlist must exempt only the exact Antigravity client secret",
     );
-    assert!(
-        regexes[0].starts_with('^') && regexes[0].ends_with('$'),
-        "the allowlisted value must be anchored with ^...$: {:?}",
-        regexes[0]
-    );
-}
-
-fn assert_no_paths_key(table: &toml::Table, at: &str) {
-    for (key, child) in table {
-        assert_ne!(
-            key, "paths",
-            "{at} carries a `paths` allowlist: every file must be scanned",
-        );
-        assert_no_paths_in_value(child, &format!("{at}.{key}"));
-    }
-}
-
-fn assert_no_paths_in_value(value: &toml::Value, at: &str) {
-    match value {
-        toml::Value::Table(table) => assert_no_paths_key(table, at),
-        toml::Value::Array(items) => {
-            for (i, child) in items.iter().enumerate() {
-                assert_no_paths_in_value(child, &format!("{at}[{i}]"));
-            }
-        }
-        _ => {}
-    }
 }
