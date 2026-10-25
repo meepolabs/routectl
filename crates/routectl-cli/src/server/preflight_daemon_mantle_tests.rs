@@ -405,11 +405,13 @@ mod mantle {
                 ledger: Some("ceiling:64000"),
             },
             // Not the captured `request_shape`: the mock keys only on `top_p`.
-            // The refusal body is the gpt-5.6-terra capture and names no
-            // model; a gpt-6-family capture will replace it.
+            // The refusal body is replayed from a captured Mantle refusal and
+            // names no model. gpt-5.4 itself accepts `top_p`; it is served
+            // here because its profile keeps sampling params, so the replay
+            // pins the repair path, not that model's behavior.
             Replay {
                 lane: SubLane::Compat,
-                upstream: "openai.gpt-6-sol",
+                upstream: "openai.gpt-5.4",
                 body: json!({
                     "model": MANTLE_ALIAS, "max_tokens": 16, "top_p": 0.5,
                     "messages": [{"role": "user", "content": "hi"}],
@@ -544,9 +546,8 @@ mod mantle {
         assert_eq!(
             sent["top_p"],
             json!(0.5),
-            "premise: the compat egress sends top_p for {}; a model whose profile \
-             drops sampling params never draws this refusal, so the replay needs \
-             one whose profile keeps them",
+            "premise: the compat egress sends top_p for {}; the replayed refusal \
+             is drawn only on a model whose profile keeps sampling params",
             replay.upstream,
         );
         replay_and_preflight(replay).await;

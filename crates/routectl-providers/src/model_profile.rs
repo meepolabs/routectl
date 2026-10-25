@@ -118,6 +118,13 @@ pub const PROFILES: &[ModelProfile] = &[
         kind: MatchKind::Prefix,
         drops_sampling_params: true,
     },
+    // GPT-6 reasoning line (`gpt-6-sol`, `gpt-6.1-sol`, `gpt-6-astra`,
+    // `gpt-6-luna`): refuses `max_tokens` and `top_p`.
+    ModelProfile {
+        pattern: "gpt-6",
+        kind: MatchKind::Prefix,
+        drops_sampling_params: true,
+    },
     // DeepSeek reasoner variants. Substring so `reasoner-r2`, `coder-reasoner`,
     // etc. are all picked up automatically.
     ModelProfile {
@@ -220,6 +227,26 @@ mod tests {
         // which still falls through to the gpt-5 catch-all).
         let p = profile_for("gpt-5.3-codex");
         assert!(p.drops_sampling_params);
+    }
+
+    #[test]
+    fn openai_gpt6_family_drops_sampling_params() {
+        let gpt6 = profile_for("gpt-6-sol");
+        for id in [
+            "gpt-6-sol",
+            "gpt-6.1-sol",
+            "gpt-6-astra",
+            "openai.gpt-6-luna",
+            "OPENAI.GPT-6-SOL",
+        ] {
+            let p = profile_for(id);
+            assert!(p.drops_sampling_params, "{id}");
+            assert!(std::ptr::eq(p, gpt6), "{id}: resolves to the gpt-6 row");
+        }
+        // The gpt-6 row sits after every gpt-5 row and changes none of them.
+        assert!(!profile_for("gpt-5.4").drops_sampling_params);
+        assert!(!profile_for("openai.gpt-5.4").drops_sampling_params);
+        assert!(!std::ptr::eq(profile_for("gpt-5"), gpt6));
     }
 
     #[test]

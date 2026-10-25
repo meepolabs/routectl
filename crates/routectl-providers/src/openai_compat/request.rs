@@ -990,6 +990,27 @@ mod tests {
         assert!(body.get("top_p").is_none(), "got: {body}");
     }
 
+    /// Every served gpt-6 id refuses `max_tokens` and `top_p`.
+    #[test]
+    fn openai_shapes_vendor_prefixed_gpt6_as_a_reasoning_model() {
+        let req = simple_req("openai.gpt-6-sol");
+        let body = normalize(
+            "test",
+            &req,
+            ReasoningDialect::OpenAi,
+            HistoryReasoning::Auto,
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(body["max_completion_tokens"], 512, "got: {body}");
+        assert!(body.get("max_tokens").is_none(), "got: {body}");
+        assert!(body.get("top_p").is_none(), "got: {body}");
+        assert!(body.get("temperature").is_none(), "got: {body}");
+        assert!(body.get("presence_penalty").is_none(), "got: {body}");
+        assert!(body.get("frequency_penalty").is_none(), "got: {body}");
+    }
+
     /// Non-reasoning models keep `max_tokens` unchanged and must not gain
     /// a `max_completion_tokens` key.
     #[test]
