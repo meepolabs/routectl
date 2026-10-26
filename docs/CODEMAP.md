@@ -527,7 +527,9 @@ license.
   them share one cap while a gemini-only build carries none of it;
   `push_distinct_lazily` / `is_full` are narrowed further to `anthropic-api`,
   their only caller. The per-request tally types stay per translator
-- `src/model_profile.rs` -- per-model quirks table (drops_sampling_params, etc.)
+- `src/model_profile.rs` -- `uses_modern_chat_shape`, the OpenAI chat-lane
+  shape rule (sampling params dropped, `max_tokens` sent as
+  `max_completion_tokens`); read only by the openai and deepseek dialects
 - `src/wire_declare.rs` -- egress-side wire-tap reporting for openai-compat,
   openai-responses, gemini and the anthropic-api / Bedrock egresses:
   `serialize_and_deposit` (serialize the body once, deposit those bytes into
@@ -562,8 +564,10 @@ license.
   egresses) and the one effort/budget table (`budget_from_level`,
   `level_from_budget`)
 - `src/managed_keys.rs` -- `is_managed_key`, `client_extras_for` /
-  `ClientExtras`, `readable_extra`, `ForeignDialectExtraTally`: which extras
-  keys an egress merge may forward, by egress and ingress dialect
+  `ClientExtras` (keyed by `MatchingIngress`: `Http(provenance)`, or
+  `LibraryOnly` for the gemini egress), `readable_extra`,
+  `ForeignDialectExtraTally`: which extras keys an egress merge may forward,
+  by egress and ingress dialect
 - `src/header_trace.rs` -- lazily-gated header-trace helpers shared by every
   egress provider; centralizes the `ROUTECTL_TRACE_HEADERS` gate plus the
   redaction layer for dir-2 (routectl -> upstream) and dir-3 (upstream ->
@@ -801,7 +805,8 @@ license.
   normalizer leaves the body `anthropic_beta` carrier to each egress
 - `src/anthropic_api/extras.rs` -- `compose_thinking`, `build_output_config`,
   `merge_provider_extras`, `normalize_claude_sampling`: Anthropic-shape
-  thinking, effort and post-merge body passes
+  thinking, effort and post-merge body passes; a legacy `enabled` budget is
+  fitted by `clamp_budget_to_legacy_window`
 - `src/anthropic_api/output_schema.rs` -- surgical repair of the ONE field
   Anthropic requires on every object in `output_config.format.schema`:
   `inject_additional_properties_false` walks the ASSEMBLED body (after the
@@ -931,8 +936,9 @@ license.
 
 - `src/openai_compat/dialects/mod.rs` -- `Dialect` trait +
   `ReasoningDialect::as_dyn` dispatch table
-- `src/openai_compat/dialects/openai.rs` -- vanilla OpenAI o-series:
-  `reasoning_effort` param, drops sampling params per profile
+- `src/openai_compat/dialects/openai.rs` -- vanilla OpenAI:
+  `reasoning_effort` param, drops sampling params for ids
+  `uses_modern_chat_shape` matches
 - `src/openai_compat/dialects/deepseek.rs` -- DeepSeek: lift
   `reasoning_content`, strip echo-back; in preserve mode, empty
   `reasoning_content` on reasoning-less tool-call turns; effort from budget
@@ -947,7 +953,7 @@ license.
 - `src/openai_compat/dialects/util.rs` -- helpers shared between dialect impls
   (lift, strip, preserve, drop_sampling_params, think-tag regex,
   `reasoning_enabled_for_wire` reasoning-signal predicate,
-  `insert_reasoning_effort` clamp-result emitter shared by the openai,
+  `insert_reasoning_effort` `wire_effort`-result emitter shared by the openai,
   deepseek and vllm dialects)
 
 ### openai_compat/wire_lift
@@ -1170,7 +1176,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   oneof), `UsageMetadata` incl.
   `cachedContentTokenCount` / `thoughtsTokenCount`)
 - `src/gemini/request.rs` -- `ChatRequest` -> Gemini body: `translate`,
-  `provider_body` (full-body assembly incl. extras source selection), system,
+  `provider_body` (full-body assembly incl. extras selection through
+  `client_extras_for` with `MatchingIngress::LibraryOnly`), system,
   contents, tools, thinking, and response-format builders, `merge_payload_extras`
 - `src/gemini/request_drop_counter_tests.rs` -- `include!`d into
   `request.rs`'s `tests` module: the three-assertion pinning set per counted
@@ -1482,8 +1489,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `MatrixReplaySummary` (rows = learned lanes `provider_entry#upstream` with
   their mapped nicknames and provider kind; cells = verdict + source + layer +
   routing action + age + the resident learned entry's epoch-ms first-seen /
-  last-seen / expiry, plus `overrode_layer`, resolved through the
-  precedence seam's display mode, with
+  last-seen / expiry and encoded `value`, plus `overrode_layer`, resolved
+  through the precedence seam's display mode, with
   `MatrixNicknameAction` (nickname, verdict, layer, action) listed whenever the
   lane's nicknames disagree on the verdict or the action; availability
   tri-state available/empty/unavailable so a read failure can never render as
@@ -1634,11 +1641,12 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `max_thinking_budget`, `max_output_tokens`), ONE `RetiredModelKnobsError`
   holding every `models.<nick>.<key>` path sorted, one line each naming its
   replacement and ending "delete the key", with no version or migrate
-  wording. The four non-version checks are crate-internal; only `preflight_config_version` stays public beside the
-  driver. Unparseable TOML passes every check so the typed deserialize reports
-  the real syntax error. Callers: the shared loader (`parse_config_only`), the
-  CLI edit-pipeline `preflight`, and `config migrate` (on the post-ladder
-  candidate)
+  wording (`RawConfigPreflightError::RetiredModelKnobs`). The four
+  non-version checks are crate-internal; only `preflight_config_version`
+  stays public beside the driver. Unparseable TOML passes every check so the
+  typed deserialize reports the real syntax error. Callers: the shared loader
+  (`parse_config_only`), the CLI edit-pipeline `preflight`, and `config
+  migrate` (on the post-ladder candidate)
 - `src/config_error.rs` -- the single production `Config` parse funnel
   `parse_config(text) -> Result<Config, String>` (re-exported from the crate
   root; consumed by `serve`/hot-reload load and every CLI config load) plus
@@ -3995,8 +4003,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   tableless providers),
   `expire_learned_on_override_change`/`override_identity_for` (targeted expiry
   on override-cell change, only when the change applies to every nickname on
-  the entry's lane; a one-nickname change is left to the per-target filter), `learned_capability_snapshot` and
-  `learned_seed_clear_snapshot` (the status read-model), and `learned_replay` (the crate-internal `&self` delegate handing
+  the entry's lane; a one-nickname change is left to the per-target filter),
+  `learned_capability_snapshot` (each row carrying the value restated for its
+  incarnation) and `learned_seed_clear_snapshot` (the status read-model), and
+  `learned_replay` (the crate-internal `&self` delegate handing
   the dispatch arm the `ReplayLearnRegistry` for its carry-slot claim)
 - `src/router/beta_report_learn.rs` -- learning from the engine's beta repair:
   `install_beta_assembly` (fresh `BetaAssemblyReport` slot per provider call)
@@ -4361,10 +4371,13 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   that happens only in the reload owner sweep and at boot replay, and a stray
   version counts toward the cap until then. `owned_snapshot(current_kind)` is
   the display read (only each lane's current-kind version; a row recorded under
-  the empty kind is never returned);
+  the empty kind is never returned), `owned_recorded_snapshot` the same rows
+  with kind and incarnation so a value can be attached per lifecycle;
   `recorded_snapshot` / `RecordedLearnedEntry` carry the kind, the entry's
   `incarnation`, and a `value` slot (always `None` out of the registry, which
-  holds no values) for the owner sweep and the boundary restatement: `generation` / `advance_generation` /
+  holds no values) for the owner sweep and the boundary restatement;
+  `RecordedLearnedEntry::into_entry` lifts that value onto the surface row's
+  `LearnedRegistryEntry.value`; `generation` / `advance_generation` /
   `commit_boundary_transition` (promotes the pending generation, or advances,
   plus the catalog-scoped prune under one acquisition), the `*_in_generation`
   entry points returning `GenerationOutcome::{Applied{value,generation}, Stale}`
@@ -6901,13 +6914,13 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   deadline inside the blocking closure and `collect` installs a single
   `DeadlineGuard` on the per-request connection, so all four reads share one
   budget and an overrun sheds `query_timeout` instead of starving a worker
-- `src/handlers/status/health.rs` -- `/status/health` (schema_version 7).
+- `src/handlers/status/health.rs` -- `/status/health` (schema_version 8).
   Snapshots the router through the read-only facade ONCE (`router.view()`) and
   reads `route_targets` + `learned_capabilities` from that single view,
   mapping to `HealthPanel` (per-target
   `state_key`/`learned_lane`/`nickname`/`provider_name`/`upstream`/`seat_label`/`circuit`/`rpm_available`/`half_open_probe_in_flight`/`open_since_ms`/`last_outcome`/`last_outcome_at_ms`/`park_reason`/`parked_until_ms`
   + learned rows keyed by lane, joined to targets on `learned_lane`
-  `state_key`/`capability_key`/`verdict`/`signal_tier`/`observations`/`phase`/`source`/`last_seen_ms`/`action`/`layer`/`overrode_layer`/`age_ms`/`expires_at_ms`,
+  `state_key`/`capability_key`/`verdict`/`signal_tier`/`observations`/`phase`/`source`/`last_seen_ms`/`action`/`layer`/`overrode_layer`/`age_ms`/`expires_at_ms`/`value`,
   each resolved through `lane_cell::{ResolvedEntry, lapse_deadline_ms}`
   (epoch-ms of the last observation from the single pinned snapshot clock,
   future-dated clamps to a zero age), where the `verdict` token -- `verified`
@@ -7344,7 +7357,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   checks: a capability-writes card (the three counters, never summed) and the
   capability matrix -- a state line, the replay tally, and a default-closed
   lane-by-capability table (lane, kind, nicknames, then `verdict (layer)`
-  cells whose tooltip carries the source, action, and learned timestamps).
+  cells whose tooltip carries the source, action, learned timestamps and
+  learned value).
   Also carries
   `BUILDERS`, the per-tab `buildX` registry the render dispatch reads
 - `src/handlers/status/dash_90_chrome.js` -- dashboard SCRIPT part 13 of 13:
@@ -7913,7 +7927,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   overrode_layer, nicknames_agree}` give the lane-wide view, each `None` when
   the nicknames disagree. `resolve_entries(&CellSources) -> Vec<ResolvedEntry>`
   resolves every resident entry on its own lane row (entry plus lane-wide
-  action, layer, overrode_layer). `entry_stamps` maps a learned entry's
+  action, layer, overrode_layer, and `value` from `encoded_value`, the
+  verdict's `shape:<v>` / `ceiling:<n>` token). `entry_stamps` maps a
+  learned entry's
   instants to epoch ms through the pinned `(now, now_ms)` anchor, and
   `lapse_deadline_ms` gives a negative's runtime lapse instant (decay
   deadline, or `RECHECK_BACKSTOP` past it when re-check owned)
@@ -8393,7 +8409,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   the display-only age and stale flag (a prior-layer cell is stale when any
   nickname on the lane has a stale prior), and the
   learned entry's epoch-ms timestamps mapped through the reader's pinned
-  `now`/`now_ms` anchor pair. The shipped beta seed is its own layer: its
+  `now`/`now_ms` anchor pair, and its `value` via `lane_cell::encoded_value`.
+  The shipped beta seed is its own layer: its
   flags become `beta:<flag>` columns whenever a lane
   of the seed's kind exists, and a covered cell resolves `seed` (withhold) or,
   under a replayed seed-clear marker, cleared (allow). Lane-keyed coverage
@@ -8403,7 +8420,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `recheck_backstop_matrix_tests.rs`, and the seam tiers dispatch applies
   ahead of the learned layer (a pinned beta flag, a Converse lane that cannot
   carry a client flag, the tier each winner beat) in
-  `precedence_matrix_tests.rs`
+  `precedence_matrix_tests.rs`, and the cell value (JSON, grid, and the key
+  copied into a `force_supported` override) in `value_matrix_tests.rs`
 - `src/commands/doctor/served.rs` -- the served gather's inputs.
   `GatherSources::{Disk, Served(Box<ServedInputs>)}` selects the layers;
   `ServedInputs` (built only by the status facade's `served_doctor_inputs`)
@@ -8447,7 +8465,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   layers: `Disk` -> `disk_layers` (per-layer
   `server::parse_config_only` + `server::load_overlay_default` so the
   capability panel degrades one layer without the other, plus the read-only
-  ledger replay), `Served` -> the daemon's accepted state; then the raw-bytes read for
+  ledger replay: `rebuild_capabilities_with_values`, each
+  `owned_recorded_snapshot` row given its replayed value before
+  `into_entry`; pinned by the `#[path]`-included `gather_value_tests.rs`),
+  `Served` -> the daemon's accepted state; then the raw-bytes read for
   the validation findings, then on both paths auth, secret checks, orphan
   scan, would-trim panel, the freshness inputs and `gather_legacy_folder` per
   old folder, where a folder holding the config in use reads as `Absent`; the
@@ -8906,9 +8927,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   replay harness's three decisions: the `meta.ingress_kind` adapter lookup
   (identity round-trip against `IngressAdapter::id()`, fail-closed on an
   unknown token, unpinned-not-defaulted on the empty one), the per-model
-  enrichment rebuild (an adaptive-generation capture replays under the adaptive
-  wire shape, its bare-default control under the legacy one, and the residual
-  skip list still catches the models whose overlay no fixture field pins), and
+  enrichment skip (a pre-adaptive Anthropic capture replays under the
+  legacy wire shape, and the residual skip list still catches the models
+  whose overlay no fixture field pins), and
   the value-bounded failure reporter (no prompt text, no prefix of one, no
   container contents, allowlist fails closed, path and kind preserved)
 - `tests/scrub_gate_provider_shapes.rs` -- drift detector over the
