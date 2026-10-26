@@ -514,7 +514,7 @@ fn a_planted_admission_without_its_evidence_is_named_by_its_cause() {
             planted_record(&[(
                 TOP_P,
                 edited_entry(TOP_P, |entry| {
-                    entry["request_shape"]["model"] = json!("openai.gpt-5.4");
+                    entry["request_shape"]["model"] = json!("llama-3.3-70b");
                 }),
             )]),
             corpus,
@@ -526,8 +526,8 @@ fn a_planted_admission_without_its_evidence_is_named_by_its_cause() {
             planted_record(&[(
                 TOP_P,
                 edited_entry(TOP_P, |entry| {
-                    entry["model"] = json!("openai.gpt-5.4");
-                    entry["request_shape"]["model"] = json!("openai.gpt-5.4");
+                    entry["model"] = json!("llama-3.3-70b");
+                    entry["request_shape"]["model"] = json!("llama-3.3-70b");
                 }),
             )]),
             corpus,

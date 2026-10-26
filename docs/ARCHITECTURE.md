@@ -33,10 +33,10 @@ for TOML configuration see [CONFIGURATION.md](CONFIGURATION.md).
     `streamGenerateContent`) with api-key or Cloud Code OAuth
     (`oauth://antigravity`) auth modes.
 
-  `model_profile.rs` is the per-model quirks table (edit here when a
-  model needs new behavior). `effort.rs` and `header_trace.rs` are
-  the shared helpers for effort clamping and 4-direction header
-  tracing.
+  `model_profile.rs` holds the OpenAI chat-lane rule (which ids drop
+  sampling params and send `max_completion_tokens`). `effort.rs` and
+  `header_trace.rs` are the shared helpers for effort clamping and
+  4-direction header tracing.
 
 - `crates/routectl-router/` -- alias resolution, fallback chain
   walker, retry policy, capability filter (`[capability.overrides]`),

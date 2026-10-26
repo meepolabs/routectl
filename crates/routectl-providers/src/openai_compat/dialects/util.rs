@@ -435,12 +435,6 @@ fn lower_reasoning_details_to_text(details: &Value, provider_id: &str) -> String
 
 /// Set of OpenAI/DeepSeek-style request fields that reasoning-only
 /// models reject. Applied via [`drop_sampling_params`].
-///
-/// Baked seed verdict: the host refuses these one key per 400 while field
-/// repair makes one edit per target, so a request sending two of them would
-/// fail permanently without learning if this list were left to repair.
-/// SEED-VERDICT: acceptance-seed -- the host names one refused key per 400
-/// and repair makes one edit per target, so two keys fail and teach nothing.
 pub(super) const SAMPLING_DROP: &[&str] = &[
     "temperature",
     "top_p",

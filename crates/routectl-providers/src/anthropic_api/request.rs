@@ -545,13 +545,12 @@ impl DeferredOutputConfigDiagnostics {
 /// and the seams do not diverge; if that ever changes, re-splitting is a
 /// change to this one function and its three call sites.
 ///
-/// Baked seed verdict: the host names one key per 400 and field repair makes
-/// one edit per target, so a conventional body carrying both would fail
-/// permanently without learning. Uncounted: only the `response_format`
-/// conversion is a representability loss, and it is counted where it runs.
-/// SEED-VERDICT: acceptance-seed -- the host names one extra format key per 400
-/// and repair makes one edit per target, so the conventional body carrying both
-/// fails and teaches nothing.
+/// Baked seed verdict: the field-repair table has no row for either format
+/// key, so a refusal naming one resolves to nothing and is never repaired or
+/// learned. Uncounted: only the `response_format` conversion is a
+/// representability loss, and it is counted where it runs.
+/// SEED-VERDICT: acceptance-seed -- the field-repair table has no row for the
+/// output format keys, so a refusal naming one is never repaired or learned.
 pub(crate) fn drop_unrepresentable_output_format_keys(
     obj: &mut serde_json::Map<String, Value>,
 ) -> DroppedFormatKeys {

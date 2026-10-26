@@ -773,11 +773,11 @@ const OAUTH_OWN_ANTHROPIC_LANE: &str = "oauth-own-anthropic";
 /// Returns the top-level keys it removed, so the dispatch site can declare
 /// them.
 ///
-/// Baked seed verdict: the seat refuses either key, one per 400, and field
-/// repair makes one edit per target, so a request sending both would need two
-/// edits on one target and would fail permanently without learning.
-/// SEED-VERDICT: acceptance-seed -- the seat names one refused key per 400
-/// and repair makes one edit per target, so both keys fail and teach nothing.
+/// Baked seed verdict: the seat words its refusal as a deprecation of the
+/// key, and the rejection parser has no template for that text, so the
+/// refusal localizes no field and field repair never sees it.
+/// SEED-VERDICT: acceptance-seed -- the rejection parser has no template for
+/// the seat's deprecation text, so its refusal names no repairable field.
 pub(super) fn normalize_claude_sampling(provider_id: &str, body: &mut Value) -> Vec<&'static str> {
     let Some(obj) = body.as_object_mut() else {
         return Vec::new();

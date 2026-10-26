@@ -509,10 +509,12 @@ removing a build cache mid-gate breaks the run, so check `pgrep -a
 
 4. **Pick the right fix site**:
 
-   - **Model has new quirks** (drops some param, requires effort,
-     uses adaptive thinking): add a row to
-     `crates/routectl-providers/src/model_profile.rs::PROFILES`.
-     One row, declarative, compiler validates the shape.
+   - **Model refuses a sampling param**: on an `openai-compat` lane,
+     learned field repair drops a refused `temperature`, `top_p` or
+     penalty per lane. The OpenAI chat-lane rule
+     (`crates/routectl-providers/src/model_profile.rs::uses_modern_chat_shape`)
+     is a fixed id predicate, not a per-model table; it is not the
+     place for a new model's quirk.
 
    - **Provider returns a previously-unseen wire format**: drop a new
      file in `crates/routectl-providers/src/openai_compat/dialects/`,
@@ -543,20 +545,7 @@ Step-by-step example: "OpenAI launches o5-mini on OpenRouter."
    "openai/o5-mini",
    ```
 
-2. Append to `PROFILES` in
-   `crates/routectl-providers/src/model_profile.rs`:
-   ```rust
-   ModelProfile {
-       pattern: "o5",
-       kind: MatchKind::Prefix,
-       drops_sampling_params: true,
-   },
-   ```
-
-3. Add a unit test in `model_profile.rs::tests` mirroring
-   `openai_o3_mini_matches_prefix`.
-
-4. Run the live matrix gate. Done.
+2. Run the live matrix gate. Done.
 
 ## Adding a new egress provider
 

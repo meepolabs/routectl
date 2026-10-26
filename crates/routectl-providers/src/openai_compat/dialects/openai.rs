@@ -1,6 +1,6 @@
 //! Vanilla OpenAI: `reasoning.effort` -> top-level `reasoning_effort`,
-//! and o-series / GPT-5 / GPT-6 drop sampling params (driven by
-//! `ModelProfile`).
+//! and ids served the modern chat shape drop sampling params and send
+//! `max_tokens` as `max_completion_tokens` (see `uses_modern_chat_shape`).
 //! Reasoning is not surfaced in the response body, so no response/chunk
 //! lifting is needed.
 
@@ -13,7 +13,7 @@ use super::super::dialect::ReasoningDialect;
 use super::Dialect;
 use super::util::{drop_sampling_params, insert_reasoning_effort};
 use crate::effort::clamp_effort_to_supported;
-use crate::model_profile::profile_for;
+use crate::model_profile::uses_modern_chat_shape;
 
 /// Vanilla OpenAI reasoning dialect (see module docs).
 pub struct OpenAiDialect;
@@ -41,19 +41,10 @@ impl Dialect for OpenAiDialect {
                 tap,
             );
         }
-        if profile_for(&req.model).drops_sampling_params {
+        if uses_modern_chat_shape(&req.model) {
             drop_sampling_params(obj, tap);
-            // Real OpenAI rejects `max_tokens` on o-series / gpt-5 / gpt-6
-            // reasoning models and requires `max_completion_tokens`. The
-            // OpenAI ingress renames the inbound `max_completion_tokens` to
-            // canonical `max_tokens`; restore it here for reasoning models
-            // only.
-            // Baked seed verdict: the refusal arrives alongside the sampling
-            // refusals (one key named per 400, one repair plan per request),
-            // and no learned verdict renames a field; `max_tokens` is the
-            // output ceiling's path, not a field to drop or move.
-            // SEED-VERDICT: acceptance-seed -- no learned verdict renames a
-            // field, so reasoning models get the renamed ceiling before send.
+            // The OpenAI ingress renames the inbound `max_completion_tokens`
+            // to canonical `max_tokens`; the modern shape restores it.
             if let Some(v) = obj.remove("max_tokens") {
                 obj.insert("max_completion_tokens".into(), v);
                 declare_max_tokens_rename(tap);

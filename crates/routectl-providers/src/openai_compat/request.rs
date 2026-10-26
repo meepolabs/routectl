@@ -884,7 +884,7 @@ mod tests {
 
     #[test]
     fn openai_passthrough_normal_model() {
-        let req = simple_req("gpt-4o");
+        let req = simple_req("llama-3.3-70b");
         let body = normalize(
             "test",
             &req,
@@ -894,7 +894,7 @@ mod tests {
             false,
         )
         .unwrap();
-        // temperature preserved for non-reasoning models
+        // temperature preserved for ids outside the modern chat shape
         assert!(body.get("temperature").is_some());
         assert!(body.get("reasoning").is_none());
         assert!(body.get("provider_extras").is_none());
@@ -1011,11 +1011,11 @@ mod tests {
         assert!(body.get("frequency_penalty").is_none(), "got: {body}");
     }
 
-    /// Non-reasoning models keep `max_tokens` unchanged and must not gain
-    /// a `max_completion_tokens` key.
+    /// An id outside the modern chat shape keeps `max_tokens` unchanged and
+    /// must not gain a `max_completion_tokens` key.
     #[test]
-    fn openai_keeps_max_tokens_for_non_reasoning_model() {
-        let req = simple_req("gpt-4o"); // max_tokens = 512, not a reasoning model
+    fn openai_keeps_max_tokens_outside_the_modern_chat_shape() {
+        let req = simple_req("llama-3.3-70b"); // max_tokens = 512
         let body = normalize(
             "test",
             &req,
@@ -1028,7 +1028,7 @@ mod tests {
         assert_eq!(body["max_tokens"], 512);
         assert!(
             body.get("max_completion_tokens").is_none(),
-            "non-reasoning model must not gain max_completion_tokens; got: {body}"
+            "an id outside the modern shape must not gain max_completion_tokens; got: {body}"
         );
     }
 

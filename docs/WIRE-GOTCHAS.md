@@ -74,13 +74,21 @@ Surfaces: [openai-compat](#openai-compat-surface) -
   when the body carries several. For `temperature`, `top_p`,
   `presence_penalty` and `frequency_penalty` the refusal resolves to a
   field-repair drop row: one retry without the parameter, learned for
-  the lane when the retry succeeds. Field repair makes one plan per
-  request, so a body carrying two refused parameters would never be
-  served. The static drop table (`model_profile.rs` `PROFILES` and
-  `SAMPLING_DROP` in `openai_compat/dialects/util.rs`) and the
-  `max_tokens` -> `max_completion_tokens` rename stay as shipped seeds
-  for the models they list, `openai.`-prefixed (Bedrock Mantle) ids
-  included. `logprobs` and `top_logprobs` have no row.
+  the lane when the retry succeeds; a body carrying several refused
+  parameters is repaired one parameter per retry. Ids the OpenAI
+  chat-lane rule matches never reach that refusal:
+  `uses_modern_chat_shape` in `model_profile.rs` (the id, lowercased
+  with at most one leading `openai.` removed, starts with `gpt-`, `o1`,
+  `o3` or `o4`, or the lowercased id contains `reasoner`) drops
+  `SAMPLING_DROP` (`openai_compat/dialects/util.rs`) before send, and
+  the OpenAI dialect also sends `max_tokens` as `max_completion_tokens`.
+  Every `gpt-` id matches, `gpt-4o` and `gpt-oss-*` included. The rule
+  is static: no learned verdict renames a field and `logprobs` /
+  `top_logprobs` have no row. It acts only in the `openai` and
+  `deepseek` dialects (DeepSeek drops, never renames); `vllm`,
+  `raw-think-tag`, `openrouter` and `passthrough` leave the body alone.
+  Newer OpenAI models (gpt-5.6 and later) are better served on a
+  Responses lane.
   The grounding envelopes are under
   `crates/routectl-router/tests/fixtures/rejections/openai-compat/`.
 

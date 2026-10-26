@@ -1,7 +1,7 @@
 //! DeepSeek: `reasoning_content` field on responses (lifted to
 //! `reasoning_details[format=deepseek-v1]`); echoed assistant
 //! `reasoning_content` in history triggers 400 (stripped on outgoing).
-//! Reasoner variants drop sampling params (per `ModelProfile`).
+//! Reasoner variants drop sampling params (see `uses_modern_chat_shape`).
 //!
 //! Reasoning effort derivation:
 //! When the canonical request has `reasoning.effort` set, it is forwarded
@@ -22,7 +22,7 @@ use super::util::{
     lift_delta_reasoning_content, lift_reasoning_content_field, preserve_history_reasoning_content,
 };
 use crate::effort::clamp_effort_to_supported;
-use crate::model_profile::profile_for;
+use crate::model_profile::uses_modern_chat_shape;
 
 /// DeepSeek reasoning dialect (see module docs).
 pub struct DeepSeekDialect;
@@ -54,7 +54,7 @@ impl Dialect for DeepSeekDialect {
         // evidence the rule could be relearned; it stays until there is.
         // SEED-VERDICT: acceptance-seed -- no recorded refusal from this host
         // exists to ground a learned repair, so the sampling drop stays baked.
-        if profile_for(&req.model).drops_sampling_params {
+        if uses_modern_chat_shape(&req.model) {
             drop_sampling_params(obj, tap);
         }
         if let Some(effort) = derive_reasoning_effort(req) {

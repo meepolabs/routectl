@@ -13,11 +13,10 @@
 //!   cargo check -p routectl-providers --no-default-features \
 //!     --features openai-compat,anthropic-api
 //!
-//! Per-model quirks (e.g. "drop temperature for o3-mini",
-//! "use adaptive thinking for Opus 4.7+") live in `model_profile` as a
-//! single declarative table. Only the openai-compat egress reads it
-//! today, so it is gated on that feature to stay dead-code-free in lean
-//! single-feature builds.
+//! The OpenAI chat-lane rule (which model ids drop sampling params and send
+//! `max_completion_tokens`) lives in `model_profile` as one predicate. Only
+//! the openai-compat egress reads it, so it is gated on that feature to stay
+//! dead-code-free in lean single-feature builds.
 
 // A build with no provider feature is not a supported target: this crate
 // exists to hold provider implementations, and every provider feature is

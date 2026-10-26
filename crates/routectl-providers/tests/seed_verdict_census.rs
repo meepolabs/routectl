@@ -47,7 +47,7 @@ const EXPECTED_SEED_MARKERS: &[(&str, &str, SeedTag)] = &[
     (PROVIDERS, "bedrock/converse/extras.rs", Structural),
     (PROVIDERS, "bedrock/invoke.rs", AcceptanceSeed),
     (PROVIDERS, "gemini/cloudcode.rs", AcceptanceSeed),
-    (PROVIDERS, "model_profile.rs", AcceptanceSeed),
+    (PROVIDERS, "model_profile.rs", Structural),
     (
         PROVIDERS,
         "openai_compat/dialects/deepseek.rs",
@@ -58,12 +58,6 @@ const EXPECTED_SEED_MARKERS: &[(&str, &str, SeedTag)] = &[
         "openai_compat/dialects/deepseek.rs",
         AcceptanceSeed,
     ),
-    (
-        PROVIDERS,
-        "openai_compat/dialects/openai.rs",
-        AcceptanceSeed,
-    ),
-    (PROVIDERS, "openai_compat/dialects/util.rs", AcceptanceSeed),
     (PROVIDERS, "openai_compat/dialects/util.rs", AcceptanceSeed),
     (
         PROVIDERS,
@@ -530,7 +524,7 @@ fn a_drop_reason_wrapped_across_inner_doc_lines_reads_without_the_bang() {
 
 /// Comments in the production sweep stating a baked seed verdict. Each is
 /// one comment however many paragraphs it spans.
-const BAKED_BLOCK_TOTAL: usize = 58;
+const BAKED_BLOCK_TOTAL: usize = 56;
 
 fn baked(source: &str) -> Vec<BakedBlock> {
     expect_seed(baked_blocks_in("test-crate", "area/item.rs", source))

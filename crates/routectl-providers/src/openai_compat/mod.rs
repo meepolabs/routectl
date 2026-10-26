@@ -1882,6 +1882,10 @@ mod parse_once_tests;
 #[path = "wire_tap_tests.rs"]
 mod wire_tap_tests;
 
+#[cfg(test)]
+#[path = "chat_shape_wire_tests.rs"]
+mod chat_shape_wire_tests;
+
 #[cfg(all(test, feature = "bedrock"))]
 mod mantle_header_tests {
     use super::{HistoryReasoning, OpenAiCompatConfig, OpenAiCompatProvider, ReasoningDialect};

@@ -60,6 +60,7 @@ overlays merge, what's reserved.
   ([retired `[cache_pricing]`](#retired-cache_pricing))
 - [Learned capability tempo (`[capability]`)](#learned-capability-tempo-capability)
 - [Fidelity pre-flight opt-in (`[fidelity]`)](#fidelity-pre-flight-opt-in-fidelity)
+- [OpenAI chat-lane rule (`reasoning_dialect`)](#openai-chat-lane-rule-reasoning_dialect)
 
 **Operating the daemon**
 - [Log knobs (`[log]`)](#log-knobs-log)
@@ -2404,6 +2405,49 @@ provider = "bedrock"
 upstream = "us.anthropic.claude-haiku-4-5-v1:0"
 # inherits provider's 60s; no per-model override
 ```
+
+## OpenAI chat-lane rule (`reasoning_dialect`)
+
+On an `openai-compat` model whose `reasoning_dialect` is `openai` (the
+default) or `deepseek`, one fixed rule decides which upstream ids get the
+modern chat-completions shape. An id matches when, lowercased with at most
+one leading `openai.` removed, it starts with `gpt-`, `o1`, `o3` or `o4`,
+or when the lowercased id contains `reasoner`. A matching id leaves with
+`temperature`, `top_p`, `presence_penalty`, `frequency_penalty`,
+`logprobs` and `top_logprobs` removed; on the `openai` dialect its
+`max_tokens` also goes out as `max_completion_tokens` (the `deepseek`
+dialect keeps `max_tokens`).
+
+| upstream id | modern shape |
+|---|---|
+| `o1-mini`, `o3`, `o4-mini` | yes |
+| `gpt-4o`, `gpt-5-chat-latest`, `gpt-5.4`, `gpt-5.5`, `gpt-6-sol` | yes |
+| `gpt-oss-120b`, `openai.gpt-5.6-terra`, `OPENAI.GPT-5` | yes |
+| `deepseek-reasoner` | yes |
+| `gpt5`, `openai/gpt-5`, `openai.openai.gpt-5` | no |
+| `deepseek-chat`, `llama-3.3-70b`, `claude-opus-4-7` | no |
+
+There is no key to change the rule. The `vllm`, `raw-think-tag`,
+`openrouter` and `passthrough` dialects never apply it, so a self-hosted
+`gpt-oss-*` that should keep its sampling params sets
+`reasoning_dialect = "vllm"` on its model:
+
+```toml
+[providers.local-vllm]
+kind        = "openai-compat"
+base_url    = "http://127.0.0.1:8000/v1"
+api_key_ref = "env://LOCAL_VLLM_KEY"
+
+[models.gpt-oss-local]
+provider          = "local-vllm"
+upstream          = "gpt-oss-120b"
+reasoning_dialect = "vllm"
+```
+
+For gpt-5.6 and later, prefer a Responses lane (`kind = "openai-responses"`)
+over chat completions. An id outside the rule that refuses a sampling
+parameter is handled by learned field repair instead; see
+[PROVIDER-QUIRKS.md](PROVIDER-QUIRKS.md#openai--o-series--gpt-5).
 
 ## history_reasoning (reasoning echo-back)
 

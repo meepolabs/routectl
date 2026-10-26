@@ -406,12 +406,12 @@ mod mantle {
             },
             // Not the captured `request_shape`: the mock keys only on `top_p`.
             // The refusal body is replayed from a captured Mantle refusal and
-            // names no model. gpt-5.4 itself accepts `top_p`; it is served
-            // here because its profile keeps sampling params, so the replay
-            // pins the repair path, not that model's behavior.
+            // names no model. The upstream is an id outside the modern OpenAI
+            // chat shape, so the egress still sends `top_p` and the replay
+            // pins the repair path, not any one model's behavior.
             Replay {
                 lane: SubLane::Compat,
-                upstream: "openai.gpt-5.4",
+                upstream: "llama-3.3-70b",
                 body: json!({
                     "model": MANTLE_ALIAS, "max_tokens": 16, "top_p": 0.5,
                     "messages": [{"role": "user", "content": "hi"}],
@@ -562,7 +562,7 @@ mod mantle {
             sent["top_p"],
             json!(0.5),
             "premise: the compat egress sends top_p for {}; the replayed refusal \
-             is drawn only on a model whose profile keeps sampling params",
+             is drawn only on an id outside the modern chat shape",
             replay.upstream,
         );
         replay_and_preflight(replay).await;
@@ -573,7 +573,7 @@ mod mantle {
     /// first attempt: the egress sends the limit as `max_completion_tokens`
     /// and drops `top_p`, so no refusal is drawn and nothing is learned.
     ///
-    /// Mutation check: stop `profile_for` stripping the `openai.` vendor
+    /// Mutation check: stop `uses_modern_chat_shape` stripping the `openai.` vendor
     /// segment -> red (the refusal reaches the client).
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn compat_mantle_reasoning_model_sends_its_output_limit_renamed_on_the_first_attempt() {

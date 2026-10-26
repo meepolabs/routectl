@@ -196,7 +196,7 @@ async fn first_party_body_and_content_type_match_the_json_builder() {
         .mount(&server)
         .await;
     let provider = OpenAiCompatProvider::new(config(&server.uri(), ReasoningDialect::OpenAi));
-    let mut req = request("gpt-4o");
+    let mut req = request("llama-3.3-70b");
     req.temperature = Some(0.25);
     let mut expected_body = provider.normalize_request(&req).expect("normalize");
     expected_body["stream"] = Value::Bool(false);
@@ -358,7 +358,7 @@ fn site_rows() -> Vec<SiteRow> {
             },
             quiet: || ChatRequest {
                 temperature: Some(0.5),
-                ..request("gpt-4o")
+                ..request("llama-3.3-70b")
             },
             site: EditSite::SamplingParamsStrip,
             pattern: "/temperature",
@@ -373,7 +373,7 @@ fn site_rows() -> Vec<SiteRow> {
             },
             quiet: || ChatRequest {
                 max_tokens: Some(64),
-                ..request("gpt-4o")
+                ..request("llama-3.3-70b")
             },
             site: EditSite::MaxTokensRename,
             pattern: "/max_completion_tokens",
