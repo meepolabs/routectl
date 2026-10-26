@@ -30,7 +30,7 @@ use super::HistoryReasoning;
 use super::dialect::ReasoningDialect;
 use super::dialects::util::strip_history_reasoning;
 use crate::managed_keys::{
-    ClientExtras, Dialect, client_extras_for, declare_foreign_keys, is_managed_key,
+    ClientExtras, Dialect, MatchingIngress, client_extras_for, declare_foreign_keys, is_managed_key,
 };
 use crate::translation_drop_metrics::ClientFingerprintStripTally;
 
@@ -517,7 +517,7 @@ fn select_client_extras<'a>(
     let client_extras = client_extras_for(
         req,
         Dialect::OpenAiCompat,
-        RequestProvenance::OpenaiIngress,
+        MatchingIngress::Http(RequestProvenance::OpenaiIngress),
         &TRANSLATED_EXTRAS_KEYS,
     );
     let (metadata, foreign): (Vec<&str>, Vec<&str>) = client_extras

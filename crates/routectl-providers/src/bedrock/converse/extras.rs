@@ -22,7 +22,8 @@ use crate::anthropic_api::request::{
 };
 use crate::anthropic_api::types::WireThinking;
 use crate::managed_keys::{
-    Dialect, ForeignDialectExtraTally, client_extras_for, is_managed_key, readable_extra,
+    Dialect, ForeignDialectExtraTally, MatchingIngress, client_extras_for, is_managed_key,
+    readable_extra,
 };
 
 use super::super::betas::{operator_floor, union_and_deposit_betas, withhold_betas};
@@ -231,7 +232,7 @@ fn insert_provider_extras(
     let client_extras = client_extras_for(
         req,
         Dialect::BedrockConverse,
-        RequestProvenance::AnthropicIngress,
+        MatchingIngress::Http(RequestProvenance::AnthropicIngress),
         &[crate::bedrock::CLIENT_FINGERPRINT_METADATA_KEY],
     );
     foreign.record(&client_extras.foreign_keys);

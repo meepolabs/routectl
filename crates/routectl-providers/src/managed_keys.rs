@@ -18,16 +18,28 @@
 //! in its ingress's vocabulary, so it forwards only to the egress that speaks
 //! that vocabulary.
 
-#[cfg(any(feature = "anthropic-api", feature = "openai-compat"))]
+#[cfg(any(
+    feature = "anthropic-api",
+    feature = "openai-compat",
+    feature = "gemini"
+))]
 use std::borrow::Cow;
 
-#[cfg(any(feature = "anthropic-api", feature = "openai-compat"))]
+#[cfg(any(
+    feature = "anthropic-api",
+    feature = "openai-compat",
+    feature = "gemini"
+))]
 use serde_json::{Map, Value};
 
 use routectl_core::is_canonical_request_key;
 #[cfg(any(feature = "anthropic-api", feature = "openai-compat"))]
 use routectl_core::wire_check::{EditKind, EditSite, WireTap};
-#[cfg(any(feature = "anthropic-api", feature = "openai-compat"))]
+#[cfg(any(
+    feature = "anthropic-api",
+    feature = "openai-compat",
+    feature = "gemini"
+))]
 use routectl_core::{ChatRequest, RequestProvenance};
 
 /// The extras merge whose managed set a key is checked against.
@@ -105,7 +117,11 @@ pub fn is_managed_key(dialect: Dialect, key: &str) -> bool {
 
 /// The client extras one egress may merge for a request, split by where the
 /// request came from.
-#[cfg(any(feature = "anthropic-api", feature = "openai-compat"))]
+#[cfg(any(
+    feature = "anthropic-api",
+    feature = "openai-compat",
+    feature = "gemini"
+))]
 #[derive(Debug)]
 pub struct ClientExtras<'a> {
     /// The bag to hand the egress's merge. Borrowed whole when the request
@@ -117,6 +133,27 @@ pub struct ClientExtras<'a> {
     pub foreign_keys: Vec<&'a str>,
 }
 
+/// The HTTP ingress, if any, whose clients spell their extras in an egress's
+/// vocabulary.
+#[cfg(any(
+    feature = "anthropic-api",
+    feature = "openai-compat",
+    feature = "gemini"
+))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MatchingIngress {
+    /// Requests of this provenance speak the egress's dialect. A managed-key
+    /// spelling from a client of another dialect is kept for the egress's
+    /// merge to refuse, exactly as it refuses one from this ingress.
+    Http(RequestProvenance),
+    /// No HTTP ingress speaks the egress's dialect; only a library caller
+    /// does. An HTTP client's key that shares a managed key's spelling was
+    /// addressed to another vendor, so it is foreign like any other key
+    /// rather than refused as an override.
+    #[cfg(feature = "gemini")]
+    LibraryOnly,
+}
+
 /// Split `req.provider_extras` for an egress whose vocabulary is spoken by
 /// the `matching` ingress.
 ///
@@ -124,19 +161,24 @@ pub struct ClientExtras<'a> {
 /// spelled for this egress, so both forward unchanged. Every other provenance,
 /// including any variant added later, keeps only:
 ///
-/// - keys the egress handles itself whatever their source: those its
-///   managed-key predicate refuses, and `handled_by_egress` (a key it
-///   translates into another field, or withholds under its own count). The
-///   egress's own handling of them stays identical across provenances.
+/// - keys the egress handles itself whatever their source: `handled_by_egress`
+///   (a key it translates into another field, or withholds under its own
+///   count) and, when an HTTP ingress matches, those its managed-key
+///   predicate refuses. The egress's own handling of them stays identical
+///   across provenances.
 /// - the operator's `payload_extras`, with the operator's value, so a client
 ///   contribution merged under an operator key does not ride along.
 ///
 /// Any other key is foreign and lands in `foreign_keys`.
-#[cfg(any(feature = "anthropic-api", feature = "openai-compat"))]
+#[cfg(any(
+    feature = "anthropic-api",
+    feature = "openai-compat",
+    feature = "gemini"
+))]
 pub fn client_extras_for<'a>(
     req: &'a ChatRequest,
     egress: Dialect,
-    matching: RequestProvenance,
+    matching: MatchingIngress,
     handled_by_egress: &[&str],
 ) -> ClientExtras<'a> {
     let dispatched = req.provider_extras.as_ref();
@@ -156,7 +198,12 @@ pub fn client_extras_for<'a>(
     let mut kept = Map::new();
     let mut foreign_keys = Vec::new();
     for (key, value) in dispatched {
-        if is_managed_key(egress, key) || handled_by_egress.contains(&key.as_str()) {
+        let refused_as_managed = match matching {
+            MatchingIngress::Http(_) => is_managed_key(egress, key),
+            #[cfg(feature = "gemini")]
+            MatchingIngress::LibraryOnly => false,
+        };
+        if refused_as_managed || handled_by_egress.contains(&key.as_str()) {
             kept.insert(key.clone(), value.clone());
             continue;
         }
@@ -198,7 +245,10 @@ pub fn readable_extra<'a>(
     key: &str,
 ) -> ReadableExtra<'a> {
     let dispatched = req.provider_extras.as_ref().and_then(|e| e.get(key));
-    if speaks_egress_dialect(req.routectl_internal.provenance, matching) {
+    if speaks_egress_dialect(
+        req.routectl_internal.provenance,
+        MatchingIngress::Http(matching),
+    ) {
         return ReadableExtra {
             value: dispatched,
             foreign: false,
@@ -238,15 +288,23 @@ pub fn declare_foreign_keys(tap: Option<&WireTap>, foreign_keys: &[&str]) {
 
 /// Whether a request of `provenance` carries extras spelled for an egress
 /// whose vocabulary the `matching` ingress speaks.
-#[cfg(any(feature = "anthropic-api", feature = "openai-compat"))]
-fn speaks_egress_dialect(provenance: RequestProvenance, matching: RequestProvenance) -> bool {
-    provenance == RequestProvenance::Library || provenance == matching
+#[cfg(any(
+    feature = "anthropic-api",
+    feature = "openai-compat",
+    feature = "gemini"
+))]
+fn speaks_egress_dialect(provenance: RequestProvenance, matching: MatchingIngress) -> bool {
+    provenance == RequestProvenance::Library || matching == MatchingIngress::Http(provenance)
 }
 
 /// The operator's `payload_extras` object, if any. Callers consult it only
 /// for keys the attempt's merged `provider_extras` still carries, so a
 /// dispatch-time strip that removed a key is never undone by this layer.
-#[cfg(any(feature = "anthropic-api", feature = "openai-compat"))]
+#[cfg(any(
+    feature = "anthropic-api",
+    feature = "openai-compat",
+    feature = "gemini"
+))]
 fn operator_payload_extras(req: &ChatRequest) -> Option<&Map<String, Value>> {
     req.routectl_internal
         .operator_payload_extras

@@ -46,7 +46,7 @@ use routectl_core::{
     TranslationReason,
 };
 
-use crate::managed_keys::{Dialect, client_extras_for};
+use crate::managed_keys::{Dialect, MatchingIngress, client_extras_for};
 
 // `MessageContent`, `ReasoningDetail`, and `ReasoningDetailKind` are
 // referenced by the inline test modules below via `use super::*;`; the
@@ -988,7 +988,7 @@ pub(crate) fn normalize_deferring_format_key_warn(
     let client_extras = client_extras_for(
         req,
         Dialect::AnthropicApi,
-        RequestProvenance::AnthropicIngress,
+        MatchingIngress::Http(RequestProvenance::AnthropicIngress),
         &[],
     );
     foreign.record(&client_extras.foreign_keys);

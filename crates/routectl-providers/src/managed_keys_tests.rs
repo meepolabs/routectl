@@ -606,3 +606,209 @@ fn universe_covers_every_predicate_arm() {
         "arm keys outside the universe: {missing:?}"
     );
 }
+
+/// One egress's `client_extras_for` configuration, with a key of each kind
+/// its split treats differently.
+#[cfg(any(
+    feature = "anthropic-api",
+    feature = "openai-compat",
+    feature = "gemini"
+))]
+struct SplitRow {
+    egress: &'static str,
+    dialect: Dialect,
+    handled_by_egress: &'static [&'static str],
+    managed_key: &'static str,
+}
+
+#[cfg(any(
+    feature = "anthropic-api",
+    feature = "openai-compat",
+    feature = "gemini"
+))]
+fn split_rows() -> Vec<SplitRow> {
+    vec![
+        #[cfg(feature = "anthropic-api")]
+        SplitRow {
+            egress: "anthropic-api",
+            dialect: Dialect::AnthropicApi,
+            handled_by_egress: &[],
+            managed_key: "thinking",
+        },
+        #[cfg(feature = "openai-compat")]
+        SplitRow {
+            egress: "openai-compat",
+            dialect: Dialect::OpenAiCompat,
+            handled_by_egress: &["output_config"],
+            managed_key: "temperature",
+        },
+        #[cfg(feature = "bedrock")]
+        SplitRow {
+            egress: "bedrock-converse",
+            dialect: Dialect::BedrockConverse,
+            handled_by_egress: &["metadata"],
+            managed_key: "inferenceConfig",
+        },
+        #[cfg(feature = "gemini")]
+        SplitRow {
+            egress: "gemini",
+            dialect: Dialect::Gemini,
+            handled_by_egress: &["metadata"],
+            managed_key: "generationConfig",
+        },
+    ]
+}
+
+#[cfg(any(
+    feature = "anthropic-api",
+    feature = "openai-compat",
+    feature = "gemini"
+))]
+const HTTP_PROVENANCES: [routectl_core::RequestProvenance; 3] = [
+    routectl_core::RequestProvenance::AnthropicIngress,
+    routectl_core::RequestProvenance::OpenaiIngress,
+    routectl_core::RequestProvenance::ResponsesIngress,
+];
+
+/// A request of `provenance` whose dispatched extras carry a managed key, a
+/// handled key (when the row has one) and an unrelated client key.
+#[cfg(any(
+    feature = "anthropic-api",
+    feature = "openai-compat",
+    feature = "gemini"
+))]
+fn split_request(
+    row: &SplitRow,
+    provenance: routectl_core::RequestProvenance,
+) -> routectl_core::ChatRequest {
+    let mut extras = serde_json::Map::new();
+    extras.insert(row.managed_key.into(), serde_json::json!({"zz": 1}));
+    for key in row.handled_by_egress {
+        extras.insert((*key).into(), serde_json::json!({"zz": 2}));
+    }
+    extras.insert("zz_client_key".into(), serde_json::json!(3));
+    let mut req = routectl_core::ChatRequest {
+        provider_extras: Some(serde_json::Value::Object(extras)),
+        ..Default::default()
+    };
+    req.routectl_internal.provenance = provenance;
+    req
+}
+
+#[cfg(any(
+    feature = "anthropic-api",
+    feature = "openai-compat",
+    feature = "gemini"
+))]
+fn forwarded_keys(split: &super::ClientExtras<'_>) -> BTreeSet<String> {
+    split
+        .forwardable
+        .as_deref()
+        .and_then(serde_json::Value::as_object)
+        .map(|o| o.keys().cloned().collect())
+        .unwrap_or_default()
+}
+
+#[test]
+#[cfg(feature = "gemini")]
+fn with_no_matching_ingress_every_http_client_key_but_a_handled_one_is_foreign() {
+    for row in split_rows() {
+        for provenance in HTTP_PROVENANCES {
+            // Arrange
+            let label = format!("{} from {provenance:?}", row.egress);
+            let req = split_request(&row, provenance);
+
+            // Act
+            let split = super::client_extras_for(
+                &req,
+                row.dialect,
+                super::MatchingIngress::LibraryOnly,
+                row.handled_by_egress,
+            );
+
+            // Assert
+            let expected_kept: BTreeSet<String> = row
+                .handled_by_egress
+                .iter()
+                .map(|k| (*k).to_string())
+                .collect();
+            assert_eq!(forwarded_keys(&split), expected_kept, "{label}");
+            let mut expected_foreign = vec![row.managed_key, "zz_client_key"];
+            expected_foreign.sort_unstable();
+            assert_eq!(split.foreign_keys, expected_foreign, "{label}");
+        }
+    }
+}
+
+#[test]
+#[cfg(any(
+    feature = "anthropic-api",
+    feature = "openai-compat",
+    feature = "gemini"
+))]
+fn with_a_matching_ingress_another_dialects_managed_key_is_kept_for_the_merge_to_refuse() {
+    for row in split_rows() {
+        for matching in HTTP_PROVENANCES {
+            for provenance in HTTP_PROVENANCES.into_iter().filter(|p| *p != matching) {
+                // Arrange
+                let label = format!("{} matching {matching:?} from {provenance:?}", row.egress);
+                let req = split_request(&row, provenance);
+
+                // Act
+                let split = super::client_extras_for(
+                    &req,
+                    row.dialect,
+                    super::MatchingIngress::Http(matching),
+                    row.handled_by_egress,
+                );
+
+                // Assert
+                let mut expected_kept: BTreeSet<String> = row
+                    .handled_by_egress
+                    .iter()
+                    .map(|k| (*k).to_string())
+                    .collect();
+                expected_kept.insert(row.managed_key.to_string());
+                assert_eq!(forwarded_keys(&split), expected_kept, "{label}");
+                assert_eq!(split.foreign_keys, vec!["zz_client_key"], "{label}");
+            }
+        }
+    }
+}
+
+#[test]
+#[cfg(any(
+    feature = "anthropic-api",
+    feature = "openai-compat",
+    feature = "gemini"
+))]
+fn a_library_caller_forwards_its_extras_whole_under_either_matching_input() {
+    let matchings = [
+        #[cfg(feature = "gemini")]
+        super::MatchingIngress::LibraryOnly,
+        super::MatchingIngress::Http(routectl_core::RequestProvenance::AnthropicIngress),
+    ];
+    for row in split_rows() {
+        for matching in matchings {
+            // Arrange
+            let label = format!("{} with {matching:?}", row.egress);
+            let req = split_request(&row, routectl_core::RequestProvenance::Library);
+
+            // Act
+            let split =
+                super::client_extras_for(&req, row.dialect, matching, row.handled_by_egress);
+
+            // Assert
+            assert!(
+                matches!(split.forwardable, Some(std::borrow::Cow::Borrowed(_))),
+                "{label}"
+            );
+            assert_eq!(
+                split.forwardable.as_deref(),
+                req.provider_extras.as_ref(),
+                "{label}"
+            );
+            assert!(split.foreign_keys.is_empty(), "{label}");
+        }
+    }
+}

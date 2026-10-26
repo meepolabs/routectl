@@ -10,18 +10,15 @@
 //!     carrying `functionResponse` parts. Gemini receives tool results as a
 //!     user turn (not a separate "tool" role).
 
-use std::borrow::Cow;
 use std::collections::HashMap;
 
 use serde_json::Value;
 
 use routectl_core::cache_control::{BreakpointPosition, CacheBreakpointSource};
-use routectl_core::{
-    ChatRequest, ReasoningDetail, RefusalReason, RequestProvenance, Result, sanitize_for_log,
-};
+use routectl_core::{ChatRequest, ReasoningDetail, RefusalReason, Result, sanitize_for_log};
 use routectl_core::{ContentPart, KnownContentPart, MessageContent, Role, ToolDef};
 
-use crate::managed_keys::{Dialect, is_managed_key};
+use crate::managed_keys::{Dialect, MatchingIngress, client_extras_for, is_managed_key};
 use crate::translation_drop_metrics::{
     ClientFingerprintStripTally, record_translation_drop, record_translation_lane_seen,
     record_translation_policy_action,
@@ -166,16 +163,32 @@ pub fn translate(provider_id: &str, req: &ChatRequest) -> Result<GenerateContent
 /// withholding it and then failing -- counts exactly once. The ingress-extras
 /// withhold is reported there too, for the same reason.
 pub(super) fn provider_body(provider_id: &str, req: &ChatRequest) -> Result<Value> {
+    let client_extras = client_extras_for(
+        req,
+        Dialect::Gemini,
+        MatchingIngress::LibraryOnly,
+        &[CLIENT_METADATA_KEY],
+    );
     let mut fingerprint = ClientFingerprintStripTally::default();
-    let body = assemble_provider_body(provider_id, req, &mut fingerprint);
+    let body = assemble_provider_body(
+        provider_id,
+        req,
+        client_extras.forwardable.as_deref(),
+        &mut fingerprint,
+    );
     flush_fingerprint_tally(&fingerprint);
-    report_withheld_ingress_extras(provider_id, req);
+    report_withheld_ingress_extras(provider_id, &client_extras.foreign_keys);
     body
 }
 
+/// `extras` is the layer [`client_extras_for`] chose for this request: a
+/// library caller's own `provider_extras`, or for a request that arrived
+/// through an HTTP ingress (none speaks this dialect) only the operator's
+/// `payload_extras` still dispatched on this attempt.
 fn assemble_provider_body(
     provider_id: &str,
     req: &ChatRequest,
+    extras: Option<&Value>,
     fingerprint: &mut ClientFingerprintStripTally,
 ) -> Result<Value> {
     let translated = translate_counted(provider_id, req, fingerprint)?;
@@ -187,75 +200,22 @@ fn assemble_provider_body(
     // The merge is shallow: an entry colliding with a routectl-managed key --
     // including the whole `generationConfig` object -- is dropped with a WARN,
     // so no field nested inside one is reachable. See `managed_keys::is_managed_key`.
-    if let Some(extras) = forwardable_extras(req) {
-        merge_payload_extras(provider_id, &mut body, &extras);
+    if let Some(extras) = extras {
+        merge_payload_extras(provider_id, &mut body, extras);
     }
     strip_client_metadata(provider_id, req, &mut body, fingerprint);
     Ok(body)
 }
 
-/// The extras layer this request may forward to Gemini, chosen by where the
-/// request came from. A library caller built its `provider_extras` itself and
-/// is trusted with them. Every other provenance arrived through an HTTP
-/// ingress that speaks another vendor's dialect, so its swept extras are
-/// addressed to that vendor, and only the operator's own `payload_extras`
-/// forward -- including any provenance added later, until it opts in with an
-/// arm of its own.
-fn forwardable_extras(req: &ChatRequest) -> Option<Cow<'_, Value>> {
-    match req.routectl_internal.provenance {
-        RequestProvenance::Library => req.provider_extras.as_ref().map(Cow::Borrowed),
-        _ => operator_extras_still_dispatched(req).map(Cow::Owned),
-    }
-}
-
-/// The operator's `payload_extras`, restricted to the keys the attempt's
-/// merged `provider_extras` still carries: a dispatch-time strip that removed
-/// a key from this attempt must not see the operator layer put it back.
-fn operator_extras_still_dispatched(req: &ChatRequest) -> Option<Value> {
-    let dispatched = req.provider_extras.as_ref()?.as_object()?;
-    let operator = req
-        .routectl_internal
-        .operator_payload_extras
-        .as_deref()?
-        .as_object()?;
-    let kept: serde_json::Map<String, Value> = operator
-        .iter()
-        .filter(|(k, _)| dispatched.contains_key(*k))
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect();
-    Some(Value::Object(kept))
-}
-
-/// Top-level extras keys of a non-library request that did not survive the
-/// operator-only selection: absent from the operator layer, or carrying a
-/// client contribution the operator's value does not. `metadata` is left to
-/// [`strip_client_metadata`], which counts it on the fingerprint tally.
-/// Sorted, so the diagnostic is deterministic.
-fn withheld_ingress_keys(req: &ChatRequest) -> Vec<&str> {
-    if matches!(req.routectl_internal.provenance, RequestProvenance::Library) {
-        return Vec::new();
-    }
-    let Some(dispatched) = req.provider_extras.as_ref().and_then(Value::as_object) else {
-        return Vec::new();
-    };
-    let operator = req.routectl_internal.operator_payload_extras.as_deref();
-    let mut keys: Vec<&str> = dispatched
-        .iter()
-        .filter(|(k, _)| k.as_str() != CLIENT_METADATA_KEY)
-        .filter(|(k, v)| operator.and_then(|o| o.get(k.as_str())) != Some(*v))
-        .map(|(k, _)| k.as_str())
-        .collect();
-    keys.sort_unstable();
-    keys
-}
-
 /// Withheld by routectl, not by the wire: Gemini would accept these keys.
-/// One count and one DEBUG per request, naming only sanitized keys -- a value
-/// may be a credential (`mcp_servers[].authorization_token`), so none is
-/// ever logged.
+/// `keys` are the request's foreign keys: absent from the operator layer, or
+/// carrying a client contribution the operator's value does not. `metadata`
+/// is never among them; [`strip_client_metadata`] counts it on the
+/// fingerprint tally. One count and one DEBUG per request, naming only
+/// sanitized keys -- a value may be a credential
+/// (`mcp_servers[].authorization_token`), so none is ever logged.
 /// TRANSLATION-DROP: policy-action class=ingress_extra_withheld test=anthropic_ingress_mcp_servers_never_reach_the_gemini_body_and_count_one_withhold
-fn report_withheld_ingress_extras(provider_id: &str, req: &ChatRequest) {
-    let keys = withheld_ingress_keys(req);
+fn report_withheld_ingress_extras(provider_id: &str, keys: &[&str]) {
     if keys.is_empty() {
         return;
     }
@@ -1782,7 +1742,9 @@ fn mime_from_filename(filename: &str) -> &'static str {
 mod tests {
     use super::*;
     use crate::sampling_drop_guard::test_support::{sampling_drops, sole_sampling_drop};
-    use routectl_core::{CacheControl, ChatRequest, Message, MessageContent, Role};
+    use routectl_core::{
+        CacheControl, ChatRequest, Message, MessageContent, RequestProvenance, Role,
+    };
     use routectl_core::{SystemBlock, SystemContent};
     use serde_json::json;
     use tracing_test::traced_test;

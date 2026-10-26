@@ -301,6 +301,66 @@ fn an_operator_managed_key_on_an_ingress_request_is_still_refused_and_counted() 
     assert_eq!(withheld, 0, "an operator key is refused, not withheld");
 }
 
+/// Single-source pin for a managed-key spelling from a client: no HTTP
+/// ingress speaks this dialect, so it was addressed to another vendor and is
+/// withheld, not refused as an override.
+#[test]
+fn a_client_generation_config_on_an_ingress_request_is_withheld_not_a_managed_key_conflict() {
+    // Arrange
+    let req = dispatched(
+        RequestProvenance::OpenaiIngress,
+        json!({"generationConfig": {"topK": 7, "tell": FUTURE_TELL}}),
+        None,
+    );
+    let before = gemini_policy_action_count("provider_extra_managed_key_conflict");
+
+    // Act
+    let (body, events, withheld, fingerprint) = body_events_and_deltas(&req);
+
+    // Assert
+    let after = gemini_policy_action_count("provider_extra_managed_key_conflict");
+    assert!(
+        !rendered(&body).contains(FUTURE_TELL),
+        "{}",
+        rendered(&body)
+    );
+    assert_eq!(withheld, 1, "a foreign client key is withheld");
+    assert_eq!(after - before, 0, "and never counted as an override");
+    assert_eq!(fingerprint, 0);
+    assert_eq!(
+        field(withheld_records(&events)[0], "keys"),
+        Some("generationConfig")
+    );
+}
+
+#[test]
+fn a_client_part_under_an_operator_managed_key_counts_both_the_withhold_and_the_conflict() {
+    // Arrange: the union carries the client's sub-key beside the operator's.
+    let req = dispatched(
+        RequestProvenance::AnthropicIngress,
+        json!({"generationConfig": {"topK": 40, "tell": FUTURE_TELL}}),
+        Some(json!({"generationConfig": {"topK": 40}})),
+    );
+    let before = gemini_policy_action_count("provider_extra_managed_key_conflict");
+
+    // Act
+    let (body, _, withheld, _) = body_events_and_deltas(&req);
+
+    // Assert
+    let after = gemini_policy_action_count("provider_extra_managed_key_conflict");
+    let wire = rendered(&body);
+    assert!(
+        !wire.contains(FUTURE_TELL) && !wire.contains("\"topK\":40"),
+        "{wire}"
+    );
+    assert_eq!(withheld, 1, "the client contribution was withheld");
+    assert_eq!(
+        after - before,
+        1,
+        "the operator value was refused as an override"
+    );
+}
+
 #[test]
 fn an_operator_key_removed_from_the_dispatched_union_is_not_reintroduced() {
     // Arrange: a dispatch-time strip removed the operator's key from the
