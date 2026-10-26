@@ -401,6 +401,9 @@
     if (cell.expires_at_ms !== null && cell.expires_at_ms !== undefined) {
       parts.push('expires ' + fmtTs(cell.expires_at_ms));
     }
+    if (cell.first_seen_ms !== null && cell.first_seen_ms !== undefined) {
+      parts.push('value ' + (cell.value || '-'));
+    }
     return parts.join(' - ');
   }
 

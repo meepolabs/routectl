@@ -28,7 +28,7 @@ use super::{Panel, StatusState, guard_panel, now_utc_rfc3339};
 use crate::lane_cell::{ResolvedEntry, lapse_deadline_ms};
 
 /// Wire-shape version of the health panel payload.
-pub const SCHEMA_VERSION: u32 = 7;
+pub const SCHEMA_VERSION: u32 = 8;
 
 /// Per-target health plus learned negatives for the routing surface, and the
 /// live wire check's rows inside the status window.
@@ -125,6 +125,9 @@ struct LearnedNegative {
     /// Epoch-ms the negative lapses into a re-verification under the runtime
     /// lapse rule; `None` for a verified positive, which never decays.
     expires_at_ms: Option<i64>,
+    /// The value the verdict applies (`shape:<v>` / `ceiling:<n>`); `None`
+    /// for a verdict that writes none (a drop, a catalog key).
+    value: Option<String>,
 }
 
 /// Map the internal `CircuitPhase` to its snake_case wire token. Owned by
@@ -210,6 +213,7 @@ fn map_learned(resolved: ResolvedEntry, now: Instant, now_ms: i64) -> LearnedNeg
         action,
         layer,
         overrode_layer,
+        value,
     } = resolved;
     let expires_at_ms = lapse_deadline_ms(&entry, (now, now_ms));
     let age = now.saturating_duration_since(entry.first_seen);
@@ -230,6 +234,7 @@ fn map_learned(resolved: ResolvedEntry, now: Instant, now_ms: i64) -> LearnedNeg
         overrode_layer,
         age_ms: i64::try_from(age.as_millis()).unwrap_or(i64::MAX),
         expires_at_ms,
+        value,
     }
 }
 

@@ -120,7 +120,8 @@ pub enum MatrixAvailability {
 /// entry, so they are present only when one exists -- including when an
 /// override or prior wins the cell, since the learned entry still exists
 /// underneath. `expires_at_ms` is a negative's decay deadline and is `None`
-/// for a positive, which never decays. `age_ms` is the shown learned
+/// for a positive, which never decays. `value` is the learned verdict's
+/// encoded value, read off the same entry. `age_ms` is the shown learned
 /// cell's age since last seen; `stale` flags a verified cell older than the
 /// operator staleness hint or a prior stamp past the same threshold.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -147,6 +148,10 @@ pub struct MatrixCell {
     pub last_seen_ms: Option<i64>,
     /// When a resident learned negative's decay window lapses (epoch ms).
     pub expires_at_ms: Option<i64>,
+    /// The value the resident learned verdict applies, in its persisted token
+    /// form (`shape:<v>` / `ceiling:<n>`); `None` when no learned entry backs
+    /// the cell or its verdict writes none (a drop, a catalog key).
+    pub value: Option<String>,
     /// Each nickname's own resolution, sorted by nickname, when `verdict` or
     /// `action` is `mixed`; empty when every nickname on the lane agrees.
     pub nickname_actions: Vec<MatrixNicknameAction>,

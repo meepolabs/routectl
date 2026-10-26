@@ -338,7 +338,7 @@
     chip.textContent = row.capability_key;
     var seen = ageSince(row.last_seen_ms, nowMs);
     chip.title = row.capability_key + ' - ' + row.source + ' evidence' +
-      (seen === '-' ? '' : ', last seen ' + seen + ' ago');
+      (seen === '-' ? '' : ', last seen ' + seen + ' ago') + ', value ' + (row.value || '-');
     return chip;
   }
 

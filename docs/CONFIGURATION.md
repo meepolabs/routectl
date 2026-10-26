@@ -3798,6 +3798,27 @@ unsupported = ["web_search"]
 force_supported = ["prompt_caching"]
 ```
 
+**Masking a learned verdict you read in `doctor` or `/status/health`.**
+Copy the capability key exactly as the matrix column (or the status row's
+`capability_key`) shows it; that string is the override key, envelope-field
+verdicts included. The override's target is the `[providers]` entry, the
+part of the lane before `#`, not the lane itself: for a verdict learned on
+lane `anthropic#claude-opus-5-5` write `[capability.overrides."anthropic"]`
+(or `"anthropic:<nickname>"` to scope it to one model). A learned verdict
+carries a value (`shape:<v>` for a rewrite, `ceiling:<n>` for an output
+limit; `-` for a drop or a catalog key), shown beside the key; the override
+names only the key. Effort levels are learned one key per level, so to send
+every effort level as the client wrote it on a lane, list each level's key
+the lane learned:
+
+```toml
+[capability.overrides."anthropic"]
+force_supported = [
+  "field:output_config.effort.max",
+  "field:output_config.effort.xhigh",
+]
+```
+
 Besides the tool-type and well-known keys, the request side derives
 `forced_tool_choice` whenever `tool_choice` forces a tool call (Anthropic
 `any` / a named `tool`, OpenAI `required` / a named `function`, Converse
@@ -4624,7 +4645,12 @@ Two structured panels render after the sections:
   one that had an opinion, or null), the routing action dispatch takes
   (`drop` / `route_away` / `strip` / `withhold` / `reprobe` / `allow` /
   `none`), the learned entry's first-seen / last-seen / expiry times, its
-  age, and a staleness flag. A pinned beta flag reads `forced_supported`
+  age, a staleness flag, and `value`: the value the learned verdict applies
+  (`shape:<v>` / `ceiling:<n>`), null when no learned entry backs the cell or
+  its verdict writes none (a drop, a catalog key). The text grid ends each
+  cell a learned entry backs in ` value=<token>` (`value=-` when there is
+  none); its age and times are in the JSON (`--json`) and the dashboard
+  only. A pinned beta flag reads `forced_supported`
   from layer `pin` with action `allow` whatever the learned layer holds; a
   client beta flag on a Converse lane whose model refuses the beta field
   reads `unrepresentable` from layer `representability` with action
@@ -4644,7 +4670,7 @@ Two structured panels render after the sections:
   learned `beta:` negative shows action `withhold` rather than `strip` or
   `route_away`.
 
-  The running daemon's `/status/health` (schema 7) lists the same resident
+  The running daemon's `/status/health` (schema 8) lists the same resident
   learned entries under `learned_negatives`, one row per entry (a
   `verified` positive included), each resolved the same way against the
   served config. Beside `state_key`, `capability_key`, `verdict`,
@@ -4656,7 +4682,7 @@ Two structured panels render after the sections:
   negative lapses into a re-verification under the runtime rule, its decay
   deadline or, for a negative only the free token-count re-check can
   clear, that deadline plus a 48-hour backstop; null for a `verified`
-  positive. The matrix's `expires_at_ms` stays the raw decay deadline. The
+  positive; and `value`, the same token the matrix cell carries. The matrix's `expires_at_ms` stays the raw decay deadline. The
   health rows consult no catalog priors, so where a learned verdict has no
   opinion (an inferred negative awaiting corroboration, an advisory live
   F3 negative) or beat a prior, the matrix can show a `prior` layer the

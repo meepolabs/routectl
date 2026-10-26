@@ -42,6 +42,10 @@ mod precedence_matrix_tests;
 #[path = "legacy_folder_tests.rs"]
 mod legacy_folder_tests;
 
+#[cfg(test)]
+#[path = "value_matrix_tests.rs"]
+mod value_matrix_tests;
+
 use std::path::Path;
 use std::time::Instant;
 
@@ -185,7 +189,11 @@ pub(crate) use self::served::{GatherSources, ParkedSeat, ResidentLearned, Served
 /// is no longer a `[models.X]` setting): every row is the catalog fill or the
 /// egress baseline, and the catalog row's detail names
 /// `routectl catalog set ... max_output_tokens` as the way to correct it.
-const SCHEMA_VERSION: u32 = 21;
+///
+/// v21 -> v22: additive. Every capability matrix cell gains `value`, the
+/// value the resident learned verdict applies (`shape:<v>` / `ceiling:<n>`),
+/// `null` when no learned entry backs the cell or its verdict writes none.
+const SCHEMA_VERSION: u32 = 22;
 
 /// A section-producer: pure mapping of the read-only [`DoctorContext`] to a
 /// section's findings.

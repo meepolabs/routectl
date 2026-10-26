@@ -120,7 +120,10 @@ banner, no retry signal -- silently mislabeled data.
   nicknames, the pooled model on one row per member -- and each row's lane
   text must be exactly what `routectl capability purge` accepts.
 - Hover a learned cell: the tooltip names its source, its routing action,
-  and its first-seen / last-seen / expiry times. An unknown cell reads `-`.
+  its first-seen / last-seen / expiry times, and its value (`value
+  ceiling:<n>` / `value shape:<v>`, or `value -` for a verdict that writes
+  none, such as a dropped field). An unknown cell reads `-`, and a cell no
+  learned entry backs names no value.
 - The replay line names rows read, replayed, and every skip reason. Seed a
   row whose provider entry the config no longer has and confirm the owner
   skip count moves.
@@ -150,6 +153,10 @@ banner, no retry signal -- silently mislabeled data.
   nickname on a lane the ledger holds a negative for means the client joined
   learned rows on the runtime `state_key` instead of the target's
   `learned_lane`.
+- Seed a learned output ceiling (`ceiling:<n>`) on a lane. Hover its chip:
+  the tooltip ends in `value ceiling:<n>`; a chip for a capability whose
+  verdict writes no value ends in `value -`. The chip text stays the bare
+  capability key, the one to copy into `force_supported`.
 - A `verified` row on the same lane must not render as a chip. Seed it with a
   recognized `evidence_class` (for example `schema_parse`): replay skips a
   `verified` row whose class is missing or unrecognized, so a row seeded

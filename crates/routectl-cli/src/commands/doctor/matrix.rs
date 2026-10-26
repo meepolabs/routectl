@@ -40,8 +40,8 @@ use routectl_router::{
 use super::sections::staleness_threshold_days;
 use super::{CapabilityMatrixSource, DoctorContext, MatrixOrigin, PriorCell};
 use crate::lane_cell::{
-    CellSources, LaneCell, LaneMeta, LearnedSnapshot, NicknameCell, entry_stamps, lane_metas,
-    resolve_cell,
+    CellSources, LaneCell, LaneMeta, LearnedSnapshot, NicknameCell, encoded_value, entry_stamps,
+    lane_metas, resolve_cell,
 };
 
 /// Milliseconds per day, for converting a cell's last-seen age to whole days
@@ -256,6 +256,7 @@ fn build_cell(
         first_seen_ms: stamps.map(|s| s.first_seen),
         last_seen_ms: stamps.map(|s| s.last_seen),
         expires_at_ms: stamps.and_then(|s| s.expires_at),
+        value: cell.entry.and_then(encoded_value),
         nickname_actions,
     }
 }

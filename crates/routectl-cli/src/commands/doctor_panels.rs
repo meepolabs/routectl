@@ -239,9 +239,24 @@ fn matrix_state_line(availability: &MatrixAvailability, source: MatrixSource) ->
 /// for an unknown (no-signal) cell. A cell whose nicknames disagree on the
 /// verdict or the action renders `mixed(nickname=action,...)` instead,
 /// because no single verdict describes it; each entry adds `[verdict]` when
-/// the verdicts differ. The precise age and timestamps live on the
-/// serialized DTO, not the compact human grid.
+/// the verdicts differ. A cell a resident learned entry backs then ends in
+/// ` value=<token>` (`value=-` when the verdict writes none), the value being
+/// lane-wide. The precise age and timestamps live on the serialized DTO, not
+/// the compact human grid.
 fn cell_token(cell: &MatrixCell) -> String {
+    let token = signal_token(cell);
+    if cell.first_seen_ms.is_none() {
+        return token;
+    }
+    let value = cell
+        .value
+        .as_deref()
+        .map_or_else(|| "-".to_string(), routectl_core::sanitize_for_log);
+    format!("{token} value={value}")
+}
+
+/// [`cell_token`] without the learned value.
+fn signal_token(cell: &MatrixCell) -> String {
     let verdict_mixed = cell.verdict == VERDICT_MIXED;
     if verdict_mixed || cell.action == ACTION_MIXED {
         let actions: Vec<String> = cell

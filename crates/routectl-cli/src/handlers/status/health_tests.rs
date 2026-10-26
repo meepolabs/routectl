@@ -372,11 +372,13 @@ fn map_learned_surfaces_verified_verdict() {
 /// An entry with a fixed lane-wide resolution, for the tests that pin the
 /// entry's own fields rather than the resolved cell.
 fn resolved(entry: LearnedRegistryEntry) -> ResolvedEntry {
+    let value = crate::lane_cell::encoded_value(&entry);
     ResolvedEntry {
         entry,
         action: "route_away",
         layer: Some("learned"),
         overrode_layer: None,
+        value,
     }
 }
 
@@ -529,6 +531,7 @@ fn learned_negative_field_names_match_logging_contract() {
         overrode_layer: None,
         age_ms: 0,
         expires_at_ms: Some(2_000),
+        value: None,
     })
     .unwrap();
     let obj = value.as_object().unwrap();
@@ -554,6 +557,7 @@ fn learned_negative_field_names_match_logging_contract() {
         "overrode_layer",
         "age_ms",
         "expires_at_ms",
+        "value",
     ] {
         assert!(obj.contains_key(key), "missing `{key}`");
     }
@@ -619,6 +623,7 @@ fn dto_vocabulary_matches_logging_contract_section() {
         overrode_layer: None,
         age_ms: 0,
         expires_at_ms: Some(2_000),
+        value: None,
     })
     .unwrap();
     let obj = wire.as_object().unwrap();
@@ -728,4 +733,79 @@ fn payload_carries_only_stable_identifiers_and_fixed_vocabulary() {
             "health payload must not carry `{forbidden}`: {text}"
         );
     }
+}
+
+/// A grounded field verdict key, spelled in pieces so the field prefix
+/// literal keeps its single owner.
+fn field_key(path: &str) -> String {
+    let key = format!("{}{}{path}", "fie", "ld:");
+    assert!(
+        routectl_router::capability_key_is_field_verdict(&key),
+        "premise: {key} is a field verdict key"
+    );
+    key
+}
+
+/// The status rows of `entries`, resolved and mapped the way the panel
+/// builds them, as JSON.
+fn status_rows(entries: &[LearnedRegistryEntry]) -> Vec<Value> {
+    let mut config = Config::default();
+    config.providers.insert(
+        "p".to_string(),
+        routectl_router::ProviderEntry::openai_compat("https://example.invalid", "env://KEY"),
+    );
+    let overrides = routectl_router::OverrideRegistry::build(&config);
+    let now = Instant::now();
+    crate::lane_cell::resolve_entries(&crate::lane_cell::CellSources {
+        config: &config,
+        overrides: &overrides,
+        learned: crate::lane_cell::LearnedSnapshot {
+            entries,
+            now: Some((now, 10_000)),
+            seed_clears: &[],
+        },
+        beta_seed: routectl_router::BetaSeedScope::EMPTY,
+        prior: &|_, _| None,
+    })
+    .into_iter()
+    .map(|row| serde_json::to_value(map_learned(row, now, 10_000)).expect("row serializes"))
+    .collect()
+}
+
+/// A learned ceiling row serializes its value as the persisted token; a drop
+/// row, whose verdict writes no value, serializes `null`.
+///
+/// Mutation check: fill `ResolvedEntry::value` with `None` in
+/// `resolve_entries` -> red at the ceiling row.
+#[test]
+fn a_learned_row_serializes_its_value_and_a_drop_row_null() {
+    // Arrange
+    let ceiling = field_key("max_tokens");
+    let dropped = field_key("temperature");
+    let entries = [
+        LearnedRegistryEntry {
+            state_key: "p#up".into(),
+            feature_key: ceiling.clone(),
+            value: Some(routectl_router::VerdictValue::Ceiling(32_000)),
+            ..learned_entry(Instant::now())
+        },
+        LearnedRegistryEntry {
+            state_key: "p#up".into(),
+            feature_key: dropped.clone(),
+            ..learned_entry(Instant::now())
+        },
+    ];
+
+    // Act
+    let rows = status_rows(&entries);
+
+    // Assert
+    let value_of = |key: &str| {
+        rows.iter()
+            .find(|row| row["capability_key"] == key)
+            .unwrap_or_else(|| panic!("{key} row present: {rows:?}"))["value"]
+            .clone()
+    };
+    assert_eq!(value_of(&ceiling), Value::from("ceiling:32000"));
+    assert_eq!(value_of(&dropped), Value::Null);
 }

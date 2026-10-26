@@ -20,8 +20,8 @@ use routectl_core::capability::Verdict;
 use routectl_router::{
     ACTION_MIXED, BetaSeedScope, CellContext, Config, DisplayInputs, Layer, LearnedInput,
     LearnedLaneProjection, LearnedRegistryEntry, ModelEntry, OverrideRegistry, ProviderEntry,
-    RECHECK_BACKSTOP, Resolution, SeedCell, SeedClearMarker, StateKey, beta_seed_state_for_key,
-    operator_pins_capability, resolve_display,
+    RECHECK_BACKSTOP, Resolution, SeedCell, SeedClearMarker, StateKey, VerdictValue,
+    beta_seed_state_for_key, operator_pins_capability, resolve_display,
 };
 
 /// One configured model that dispatches to a lane.
@@ -256,6 +256,9 @@ pub struct ResolvedEntry {
     pub action: &'static str,
     pub layer: Option<&'static str>,
     pub overrode_layer: Option<&'static str>,
+    /// The value the learned verdict applies, encoded (`shape:<v>` /
+    /// `ceiling:<n>`); `None` when the verdict writes none.
+    pub value: Option<String>,
 }
 
 /// Resolve the cell of every entry in `sources.learned`, in entry order:
@@ -278,9 +281,16 @@ pub fn resolve_entries(sources: &CellSources) -> Vec<ResolvedEntry> {
                 action: cell.action().unwrap_or(ACTION_MIXED),
                 layer: cell.layer(),
                 overrode_layer: cell.overrode_layer(),
+                value: encoded_value(entry),
             })
         })
         .collect()
+}
+
+/// The value a learned entry's verdict applies, in its persisted token form
+/// (`shape:<v>` / `ceiling:<n>`); `None` when the verdict writes none.
+pub fn encoded_value(entry: &LearnedRegistryEntry) -> Option<String> {
+    entry.value.as_ref().map(VerdictValue::encode)
 }
 
 /// The lane-wide tier inputs every nickname on the lane shares.
