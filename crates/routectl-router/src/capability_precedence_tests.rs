@@ -466,6 +466,7 @@ fn entry(
         },
         source,
         recheck_owned: false,
+        value: None,
     }
 }
 

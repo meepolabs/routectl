@@ -332,6 +332,7 @@ fn map_learned_renames_feature_key_to_capability_key() {
         phase: FailurePhase::F2,
         source: EvidenceSource::Live,
         recheck_owned: false,
+        value: None,
     };
     let mapped = map_learned(resolved(entry), Instant::now(), 10_000);
     assert_eq!(mapped.state_key, "anthropic#claude-opus-wire");
@@ -361,6 +362,7 @@ fn map_learned_surfaces_verified_verdict() {
         phase: FailurePhase::F3,
         source: EvidenceSource::Live,
         recheck_owned: false,
+        value: None,
     };
     let mapped = map_learned(resolved(entry), Instant::now(), 10_000);
     assert_eq!(mapped.verdict, "verified");
@@ -392,6 +394,7 @@ fn learned_entry(last_seen: Instant) -> LearnedRegistryEntry {
         phase: FailurePhase::F1,
         source: EvidenceSource::Live,
         recheck_owned: false,
+        value: None,
     }
 }
 
@@ -711,6 +714,7 @@ fn payload_carries_only_stable_identifiers_and_fixed_vocabulary() {
                 phase: FailurePhase::F1,
                 source: EvidenceSource::Live,
                 recheck_owned: false,
+                value: None,
             }),
             Instant::now(),
             1_000,

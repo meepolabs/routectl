@@ -13,7 +13,7 @@ use routectl_router::{
     BetaSeedScope, CATALOG_VERSION, CapabilityEventRow, CapabilityRebuildSummary, CatalogOverlay,
     Config, EffectiveRow, LearnedCapabilityRegistry, MatrixReplaySummary, PricingSource,
     ProviderEntry, ReplayTombstone, Source, StateKey, catalog_import_state_default_path,
-    derive_effective_view, effective_pricing, load_last_import, rebuild_capabilities_into,
+    derive_effective_view, effective_pricing, load_last_import, rebuild_capabilities_with_values,
     today_epoch_day,
 };
 
@@ -434,7 +434,10 @@ pub(super) fn gather_capability_matrix(
 
 /// Replay an already-read post-boundary slice into a bare registry bounded by
 /// `beta_seed` and classify what stayed resident, carrying the replay tally
-/// and the seed-clear markers the replay recorded either way.
+/// and the seed-clear markers the replay recorded either way. Each resident
+/// row carries the value its identity's latest replayed row restored: the
+/// replay retires an entry whose value changed, so that is the resident
+/// lifecycle's value.
 fn replay_matrix_slice(
     config: &Config,
     reader: &LedgerCapabilityReader,
@@ -445,9 +448,13 @@ fn replay_matrix_slice(
     let slice = SliceReader::new(tombstone, rows);
     let registry = LearnedCapabilityRegistry::from_capability_config(&config.capability);
     registry.set_seed_scope(beta_seed);
-    let summary = rebuild_capabilities_into(&slice, &registry, &config.providers);
+    let (summary, values) = rebuild_capabilities_with_values(&slice, &registry, &config.providers);
     let replay = replay_summary(&summary, reader.loaded_rows());
-    let entries = registry.owned_snapshot(|lane| lane_provider_kind(config, lane));
+    let entries: Vec<_> = registry
+        .owned_recorded_snapshot(|lane| lane_provider_kind(config, lane))
+        .into_iter()
+        .map(|recorded| values.attach(recorded).into_entry())
+        .collect();
     let seed_clears = registry.seed_clear_snapshot();
     if entries.is_empty() {
         CapabilityMatrixSource::Empty {
@@ -901,3 +908,7 @@ pub(super) fn gather_orphan_seats(config: &Config, seats: &[(String, TokenRecord
     orphans.sort();
     orphans
 }
+
+#[cfg(test)]
+#[path = "gather_value_tests.rs"]
+mod value_tests;

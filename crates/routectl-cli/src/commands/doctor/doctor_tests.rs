@@ -3561,6 +3561,7 @@ mod matrix_panel {
             phase: FailurePhase::F1,
             source,
             recheck_owned: false,
+            value: None,
         }
     }
 

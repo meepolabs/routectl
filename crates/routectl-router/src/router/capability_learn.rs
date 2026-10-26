@@ -691,11 +691,18 @@ impl Router {
     /// A version another kind wrote (an outgoing Router's late write after a
     /// kind-flip reload) is left out: it never acts for this Router, and the
     /// next owner sweep removes it.
+    ///
+    /// Each row carries the value its verdict applies at the incarnation the
+    /// row was captured at (see [`Router::with_restated_value`]); a value the
+    /// store holds for a later lifecycle is never attributed to it.
     pub fn learned_capability_snapshot(
         &self,
     ) -> Vec<crate::learned_capability::LearnedRegistryEntry> {
         self.learned_capabilities
-            .owned_snapshot(|state_key| self.provider_kind_for_state_key(state_key))
+            .owned_recorded_snapshot(|state_key| self.provider_kind_for_state_key(state_key))
+            .into_iter()
+            .map(|recorded| self.with_restated_value(recorded).into_entry())
+            .collect()
     }
 
     /// Read-only snapshot of every resident seed-clear marker, in key order.

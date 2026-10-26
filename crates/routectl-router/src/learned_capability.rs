@@ -445,8 +445,7 @@ pub enum ProbeOutcome {
     OtherError,
 }
 
-/// Snapshot row -- the shape consumed by later features (status / doctor)
-/// without a retrofit, so the field set is fixed by contract.
+/// Snapshot row -- the shape the status and doctor surfaces consume.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LearnedRegistryEntry {
     /// The serialized learned lane (`provider_entry#upstream`) this entry
@@ -480,6 +479,10 @@ pub struct LearnedRegistryEntry {
     /// a negative lapses [`RECHECK_BACKSTOP`] after `expires_at` rather than
     /// at it.
     pub recheck_owned: bool,
+    /// The value the verdict applies, read for the exact incarnation this row
+    /// was captured at. `None` out of the registry, which holds no values, and
+    /// for every row whose repair row writes none (a drop, a catalog key).
+    pub value: Option<VerdictValue>,
 }
 
 /// A snapshot row together with the provider kind of the write that created
@@ -503,6 +506,19 @@ pub struct RecordedLearnedEntry {
     /// Always `None` out of the registry, which holds no values; filled only
     /// for a field verdict whose repair row writes one.
     pub value: Option<VerdictValue>,
+}
+
+impl RecordedLearnedEntry {
+    /// The row in the surface shape, with [`Self::value`] lifted onto it.
+    /// Carries a value only when one was attached first, as
+    /// `Router::with_restated_value` does for this row's incarnation.
+    #[must_use]
+    pub fn into_entry(self) -> LearnedRegistryEntry {
+        LearnedRegistryEntry {
+            value: self.value,
+            ..self.entry
+        }
+    }
 }
 
 /// One cleared seed cell: a `beta:` key on a lane whose shipped seed no longer
@@ -1647,7 +1663,8 @@ impl LearnedCapabilityRegistry {
     /// act on: each entry recorded under the kind `current_kind` resolves for
     /// its lane.
     ///
-    /// The read for every display surface. The registry can hold one version
+    /// The version selection every display surface reads, through
+    /// [`Self::owned_recorded_snapshot`]. The registry can hold one version
     /// per kind for a `(lane, capability)`, and only the current kind's acts,
     /// so a surface reading [`Self::snapshot`] would report a verdict no
     /// dispatch acts on and could list the same cell twice.
@@ -1659,6 +1676,19 @@ impl LearnedCapabilityRegistry {
         &self,
         current_kind: impl Fn(&str) -> &'k str,
     ) -> Vec<LearnedRegistryEntry> {
+        self.owned_recorded_snapshot(current_kind)
+            .into_iter()
+            .map(|recorded| recorded.entry)
+            .collect()
+    }
+
+    /// [`Self::owned_snapshot`], each row read together with the kind and
+    /// incarnation it was captured at, so a value can be resolved for exactly
+    /// that lifecycle.
+    pub fn owned_recorded_snapshot<'k>(
+        &self,
+        current_kind: impl Fn(&str) -> &'k str,
+    ) -> Vec<RecordedLearnedEntry> {
         self.note_snapshot_read();
         self.entries
             .read()
@@ -1666,7 +1696,7 @@ impl LearnedCapabilityRegistry {
             .filter(|(key, _)| {
                 !key.provider_kind.is_empty() && key.provider_kind == current_kind(&key.state_key)
             })
-            .map(|(key, entry)| Self::snapshot_row(self.field_repair_table(), key, entry))
+            .map(|(key, entry)| Self::recorded_row(self.field_repair_table(), key, entry))
             .collect()
     }
 
@@ -1698,6 +1728,7 @@ impl LearnedCapabilityRegistry {
             phase: entry.phase,
             source: entry.source,
             recheck_owned: key.recheck_owned(table),
+            value: None,
         }
     }
 

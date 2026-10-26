@@ -45,6 +45,7 @@ fn entry(feature_key: &str, verdict: Verdict, source: EvidenceSource) -> Learned
         },
         source,
         recheck_owned: false,
+        value: None,
     }
 }
 

@@ -21,6 +21,7 @@ fn resident_negative(at: Instant) -> LearnedRegistryEntry {
         phase: FailurePhase::F1,
         source: EvidenceSource::Live,
         recheck_owned: false,
+        value: None,
     }
 }
 
