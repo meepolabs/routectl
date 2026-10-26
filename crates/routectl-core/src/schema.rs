@@ -259,10 +259,10 @@ pub struct ResponsesPassthroughItem {
 /// struct, so the fields are flat (no shared sub-struct) by design.
 ///
 /// Library consumers constructing a `ChatRequest` directly never set the
-/// carrier, so every field must read its `Default` value as "not
-/// resolved": an `Option` is `None` (the egress falls back to its own
-/// `self.cfg.*` value), a collection is empty, a flag is false, and
-/// `max_output_tokens` is the `0` sentinel.
+/// carrier, so each field's `Default` must be correct for a request the
+/// router never touched: an `Option` is `None` (the egress falls back to
+/// its own `self.cfg.*` value), a collection is empty, a flag is false,
+/// and `max_output_tokens` is the `0` sentinel.
 ///
 /// The whole carrier is `#[serde(skip)]` on `ChatRequest`, so NO field
 /// here ever reaches a wire, a config file, or a persisted body -- that
