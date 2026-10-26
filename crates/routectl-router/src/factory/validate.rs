@@ -277,40 +277,6 @@ pub fn validate_bedrock_invoke_model_family(config: &crate::config::Config) -> R
     }
 }
 
-/// Validate the `[models.X] effort_levels` allowlist across every
-/// configured model.
-///
-/// Each element must be one of the six known effort vocabulary tokens
-/// (the union of the Anthropic-shape and OpenAI-shape vocabularies):
-/// `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. Individual
-/// egresses clamp to their own subset at dispatch time; the validator
-/// here catches operator typos before any request is processed.
-///
-/// An empty `effort_levels` list is valid (means pass-through -- the
-/// egress accepts whatever effort the caller supplied).
-///
-/// Returns `Err(Error::Config(...))` on the first model entry that
-/// contains an unknown effort token, naming the model nickname and
-/// the offending token.
-///
-/// Call once per process startup BEFORE building any providers.
-pub fn validate_reasoning_defaults(config: &crate::config::Config) -> Result<()> {
-    use routectl_core::Error;
-    use routectl_providers::effort::VALID_EFFORT_TOKENS;
-
-    for (nickname, entry) in &config.models {
-        for level in &entry.effort_levels {
-            if !VALID_EFFORT_TOKENS.contains(&level.as_str()) {
-                return Err(Error::Config(format!(
-                    "[models.{nickname}] effort_levels contains unknown value {level:?}; \
-                     valid values are: minimal, low, medium, high, xhigh, max"
-                )));
-            }
-        }
-    }
-    Ok(())
-}
-
 /// The four config-facing classes a `[providers.X.class_overrides]` remap
 /// may target. All four are terminal, non-retrying classes under the
 /// baked defaults (see `class_policy::baked_class_defaults`) -- a remap
@@ -480,9 +446,8 @@ pub fn validate_alias_patterns(config: &crate::config::Config) -> Result<()> {
 ///     dispatch path also carries a runtime depth cap as belt-and-
 ///     suspenders, but cycles caught here never reach it.
 ///
-/// Call once per process startup AFTER `validate_reasoning_defaults`
-/// and BEFORE `build_resolved_models`. Glob keys (`claude-*` etc.)
-/// are validated identically to exact keys -- the chain target must
+/// Call once per process startup BEFORE `build_resolved_models`. Glob keys
+/// (`claude-*` etc.) are validated identically to exact keys -- the chain target must
 /// still be a known nickname or alias key even though the alias key
 /// matches a pattern.
 pub fn validate_alias_chain_targets(config: &crate::config::Config) -> Result<()> {
@@ -1802,9 +1767,6 @@ pub fn collect_config_validation(config: &Config) -> ConfigValidation {
     if let Err(e) = validate_bedrock_invoke_model_family(config) {
         errors.push(bare_validation_message(e));
     }
-    if let Err(e) = validate_reasoning_defaults(config) {
-        errors.push(bare_validation_message(e));
-    }
     if let Err(e) = validate_alias_chain_targets(config) {
         errors.push(bare_validation_message(e));
     }
@@ -1879,7 +1841,6 @@ pub fn collect_config_validation(config: &Config) -> ConfigValidation {
     let mut warnings = class_policy_warnings(config);
     warnings.extend(super::warnings::codex_identity_warnings(config));
     warnings.extend(super::warnings::per_block_breakpoint_warnings(config));
-    warnings.extend(super::warnings::unread_thinking_budget_warnings(config));
     warnings.extend(super::warnings::cloudcode_host_warnings(config));
     warnings.extend(super::warnings::cloudcode_model_warnings(config));
     warnings.extend(super::beta_floor_warnings::beta_floor_override_warnings(

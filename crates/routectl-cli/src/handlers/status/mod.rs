@@ -920,9 +920,9 @@ mod tests {
             );
         }
         // Each panel carries its OWN schema_version (usage 3, health 7,
-        // doctor 20, config 3).
+        // doctor 21, config 3).
         assert_eq!(panels["health"]["schema_version"], 7);
         assert_eq!(panels["config"]["schema_version"], 3);
-        assert_eq!(panels["doctor"]["schema_version"], 20);
+        assert_eq!(panels["doctor"]["schema_version"], 21);
     }
 }

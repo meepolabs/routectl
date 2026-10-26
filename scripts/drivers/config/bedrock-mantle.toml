@@ -80,37 +80,30 @@ creds  = { kind = "profile", name = "routectl-cell" }
 [models.mantle-claude-opus-5-5]
 provider = "mantle-anthropic"
 upstream = "anthropic.claude-opus-5-5"
-supports_adaptive_thinking = true
 
 [models.mantle-claude-opus-5]
 provider = "mantle-anthropic"
 upstream = "anthropic.claude-opus-5"
-supports_adaptive_thinking = true
 
 [models.mantle-claude-sonnet-5]
 provider = "mantle-anthropic"
 upstream = "anthropic.claude-sonnet-5"
-supports_adaptive_thinking = true
 
 [models.mantle-claude-mythos-5]
 provider = "mantle-anthropic"
 upstream = "anthropic.claude-mythos-5"
-supports_adaptive_thinking = true
 
 [models.mantle-claude-fable-5]
 provider = "mantle-anthropic"
 upstream = "anthropic.claude-fable-5"
-supports_adaptive_thinking = true
 
 [models.mantle-claude-opus-4-8]
 provider = "mantle-anthropic"
 upstream = "anthropic.claude-opus-4-8"
-supports_adaptive_thinking = true
 
 [models.mantle-claude-opus-4-7]
 provider = "mantle-anthropic"
 upstream = "anthropic.claude-opus-4-7"
-supports_adaptive_thinking = true
 
 [models.mantle-claude-haiku-4-5]
 provider = "mantle-anthropic"

@@ -1376,11 +1376,7 @@ pub async fn build_resolved_models_reported(
 
                 let overrides = BedrockModelOverrides {
                     model_id: entry.upstream.clone(),
-                    adaptive_thinking: if entry.supports_adaptive_thinking {
-                        Some(true)
-                    } else {
-                        None
-                    },
+                    adaptive_thinking: None,
                     additional_model_request_fields: entry.additional_request_fields.clone(),
                 };
                 match build_provider_with_bedrock_model_override(
@@ -1521,19 +1517,10 @@ fn apply_model_knobs(
     nickname: &str,
     entry: &crate::config::ModelEntry,
 ) -> ResolvedModel {
-    // The nickname is an operator-written `[models.X]` table key and both
-    // warns below render it (field plus message body) on SUCCESSFUL builds,
+    // The nickname is an operator-written `[models.X]` table key and the
+    // warn below renders it (field plus message body) on SUCCESSFUL builds,
     // so it is bound sanitized once here rather than at each use.
     let model_safe = routectl_core::sanitize_for_log(nickname);
-    if entry.supports_adaptive_thinking {
-        resolved = resolved.with_supports_adaptive_thinking(true);
-    }
-    if !entry.effort_levels.is_empty() {
-        resolved = resolved.with_effort_levels(entry.effort_levels.clone());
-    }
-    if entry.max_thinking_budget > 0 {
-        resolved = resolved.with_max_thinking_budget(entry.max_thinking_budget);
-    }
     if let Some(d) = entry.reasoning_dialect {
         resolved = resolved.with_reasoning_dialect(d);
     }
@@ -1554,16 +1541,6 @@ fn apply_model_knobs(
             );
         } else {
             resolved = resolved.with_stream_first_byte_timeout_ms(ms);
-        }
-    }
-    if let Some(tokens) = entry.max_output_tokens {
-        if tokens == 0 {
-            tracing::warn!(
-                model = %model_safe,
-                "[models.{model_safe}] max_output_tokens = 0 would 400 every anthropic-shape request; ignoring the override"
-            );
-        } else {
-            resolved = resolved.with_max_output_tokens(tokens);
         }
     }
     if let Some(label) = entry.reported_model.as_ref() {
@@ -1644,16 +1621,16 @@ fn pool_reports(
 /// `tier` is fixed to `None` (the 5m default), matching the ONE tier the
 /// dispatch-path pricing call has ever priced against.
 ///
-/// Also the OUTPUT-CEILING FILL site. A model whose config left
-/// `max_output_tokens` unset (the resolved `0` sentinel) takes the ceiling the
-/// merged row confirms for its selector, so a common Claude upstream gets its
-/// real ceiling without an operator writing one. The fill happens HERE rather
-/// than in `apply_model_knobs` because the effective row -- the only place the
-/// catalog figure exists -- is resolved on this pass; the precedence
-/// `config > catalog > egress baseline` then falls out of the egress's own
-/// existing ladder with no provider-side change. A configured value is never
-/// touched: the fill is gated on the sentinel, so what the operator wrote
-/// survives byte-for-byte.
+/// Also the OUTPUT-CEILING FILL site. A model's `max_output_tokens` (the
+/// resolved `0` sentinel until here) takes the ceiling the merged row
+/// confirms for its selector -- the catalog prior, which an operator corrects
+/// with `routectl catalog set ... max_output_tokens`. The fill happens HERE
+/// because the effective row -- the only place the catalog figure exists --
+/// is resolved on this pass; the precedence `catalog > egress baseline` then
+/// falls out of the egress's own existing ladder with no provider-side
+/// change, and a learned ceiling lowers the result at dispatch. The fill is
+/// gated on the sentinel, so a model the caller already stamped keeps its
+/// value.
 #[must_use]
 pub fn apply_catalog_overlay(
     models: BTreeMap<String, Arc<ResolvedModel>>,

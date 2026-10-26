@@ -324,36 +324,6 @@ mod build_resolved_models_tests {
     }
 
     #[tokio::test]
-    async fn zero_max_output_tokens_is_skipped_not_set() {
-        // `max_output_tokens = 0` would produce a body the upstream
-        // 400s. The resolver must WARN and leave the field at its
-        // unset sentinel (0), never call the setter.
-        let store: std::sync::Arc<dyn SecretStore> = std::sync::Arc::new(MemoryStore);
-        let cfg = config_with_models(
-            vec![(
-                "anthropic",
-                ProviderEntry::anthropic_api(crate::test_secret::file_ref("k")),
-            )],
-            vec![(
-                "opus",
-                ModelEntry {
-                    max_output_tokens: Some(0),
-                    ..ModelEntry::new("anthropic", "claude-opus-4-7")
-                },
-            )],
-        );
-        let (models, failed) = build_resolved_models(&cfg, store.clone(), BuildOptions::default())
-            .await
-            .expect("ok");
-        assert!(failed.is_empty(), "expected no failures: {failed:?}");
-        let opus = models.get("opus").expect("opus entry");
-        assert_eq!(
-            opus.max_output_tokens, 0,
-            "zero must be skipped, leaving the unset sentinel 0"
-        );
-    }
-
-    #[tokio::test]
     async fn nonzero_and_none_timeout_knobs_behave_as_before() {
         // Non-zero values set the field; absent values leave it unset.
         let store: std::sync::Arc<dyn SecretStore> = std::sync::Arc::new(MemoryStore);
@@ -366,8 +336,7 @@ mod build_resolved_models_tests {
                 (
                     "set",
                     ModelEntry::new("anthropic", "claude-opus-4-7")
-                        .with_stream_first_byte_timeout_ms(5_000)
-                        .with_max_output_tokens(32_000),
+                        .with_stream_first_byte_timeout_ms(5_000),
                 ),
                 ("unset", ModelEntry::new("anthropic", "claude-haiku-4-5")),
             ],
@@ -378,7 +347,7 @@ mod build_resolved_models_tests {
         assert!(failed.is_empty(), "expected no failures: {failed:?}");
         let set = models.get("set").expect("set entry");
         assert_eq!(set.stream_first_byte_timeout_ms, Some(5_000));
-        assert_eq!(set.max_output_tokens, 32_000);
+        assert_eq!(set.max_output_tokens, 0);
         let unset = models.get("unset").expect("unset entry");
         assert!(unset.stream_first_byte_timeout_ms.is_none());
         assert_eq!(unset.max_output_tokens, 0);
@@ -978,7 +947,7 @@ mod build_resolved_models_tests {
 
     // -------------------------------------------------------------------
     // The output-ceiling fill: `max_output_tokens` taken from the resolved
-    // catalog row when, and only when, the config left it unset.
+    // catalog row.
     // -------------------------------------------------------------------
 
     /// One anthropic-api provider plus one model on `upstream`, built through
@@ -1024,36 +993,11 @@ mod build_resolved_models_tests {
             .expect("the baked table confirms a ceiling for this selector");
         assert_eq!(
             model.max_output_tokens, confirmed,
-            "a model whose config sets no max_output_tokens must carry the \
-             ceiling its resolved catalog row confirms"
+            "a model must carry the ceiling its resolved catalog row confirms"
         );
         assert_ne!(
             model.max_output_tokens, 0,
             "the unset sentinel must not survive the fill"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_configured_ceiling_wins_over_the_catalog_byte_for_byte() {
-        // 32000 is deliberately NOT any baked figure: an operator lowering the
-        // ceiling for a low-cap deployment must not have it raised back.
-        const CONFIGURED: u32 = 32_000;
-        let model = stamped_one_model(
-            "opus",
-            ModelEntry::new("anthropic", "claude-opus-4-6").with_max_output_tokens(CONFIGURED),
-            &CatalogOverlay::default(),
-        )
-        .await;
-
-        assert_eq!(
-            model.max_output_tokens, CONFIGURED,
-            "the operator's own max_output_tokens must survive the fill verbatim"
-        );
-        assert_ne!(
-            model.output_ceiling_tokens(),
-            Some(CONFIGURED),
-            "the catalog must be confirming a DIFFERENT ceiling, else this test \
-             would pass without the config-wins gate doing anything"
         );
     }
 
@@ -1142,11 +1086,9 @@ mod build_resolved_models_tests {
     }
 
     #[tokio::test]
-    async fn the_startup_provenance_read_names_exactly_the_filled_models() {
-        // The startup line's source of truth. Three models: one filled, one
-        // pinned by config, one whose row confirms nothing -- only the first
-        // may be reported, because the line's whole purpose is naming figures
-        // the operator did NOT write.
+    async fn the_startup_provenance_read_names_every_model_with_a_catalog_ceiling() {
+        // The startup line's source of truth. Every model whose row confirms
+        // a ceiling is reported; one whose row confirms nothing is not.
         // `pooled` routes at a POOL: its `provider_name` is the pool name,
         // which is not a provider kind, so a config-only re-derivation of the
         // predicate would silently omit it.
@@ -1170,10 +1112,6 @@ mod build_resolved_models_tests {
         cfg.models.insert(
             "filled".into(),
             ModelEntry::new("anthropic", "claude-opus-4-6"),
-        );
-        cfg.models.insert(
-            "pinned".into(),
-            ModelEntry::new("anthropic", "claude-opus-4-6").with_max_output_tokens(32_000),
         );
         cfg.models
             .insert("neither".into(), ModelEntry::new("vendor", "deepseek-v3"));
@@ -1200,11 +1138,8 @@ mod build_resolved_models_tests {
         assert_eq!(
             names,
             vec!["filled", "pooled"],
-            "only the models the fill actually changed may be reported"
+            "every model with a catalog ceiling, and only those, is reported"
         );
-        for (_, ceiling) in &reported {
-            assert_ne!(*ceiling, 32_000, "a pinned value must not be reported");
-        }
     }
 }
 

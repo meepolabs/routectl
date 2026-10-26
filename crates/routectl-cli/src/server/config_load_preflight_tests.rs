@@ -37,7 +37,7 @@ fn clean_config() -> String {
 }
 
 /// One fixture per raw refusal class, with the driver variant it must map to.
-fn refusal_rows() -> [(&'static str, String, ClassMatcher); 5] {
+fn refusal_rows() -> [(&'static str, String, ClassMatcher); 6] {
     let current = CURRENT_CONFIG_VERSION;
     [
         ("too old", at_version(current - 1, ""), |e| {
@@ -60,6 +60,11 @@ fn refusal_rows() -> [(&'static str, String, ClassMatcher); 5] {
             "paid probe caps",
             at_version(current, "[fidelity.paid_probe_daily_caps]\nfast = 5\n"),
             |e| matches!(e, Refusal::RemovedPaidProbeCaps(_)),
+        ),
+        (
+            "removed model key",
+            at_version(current, "[models.m]\neffort_levels = [\"low\"]\n"),
+            |e| matches!(e, Refusal::RetiredModelKnobs(_)),
         ),
     ]
 }

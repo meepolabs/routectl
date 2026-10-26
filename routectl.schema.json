@@ -645,18 +645,10 @@
     },
     "ModelEntry": {
       "additionalProperties": false,
-      "description": "One row in the `[models]` table. Carries the nickname-to-upstream\nbinding plus per-model knobs.\n\nFields that vary per-model belong here. Fields that vary per-\ntransport (auth, base URL, runtime gates) stay on `[providers.X]`.\nTwo fields, `header_extras` and `payload_extras`, live BOTH here and\non every provider variant; the dispatch layer merges them per\nrequest (model wins on key collision; see `Router` merge helpers).\n\nPER-MODEL KNOB RELAY (read before adding a knob here).\nA per-model value the egress reads passes through FOUR struct\ndefinitions, each a deliberate layer, not a redundant copy:\n\n  1. `ModelEntry`                (this struct, config.rs) -- TOML\n     deserialization target; `#[serde(deny_unknown_fields)]`.\n  2. `crate::resolved::ResolvedModel`   -- startup-resolved per\n     nickname; adds the `Arc<dyn Provider>` and may transform the\n     type (e.g. `Vec<String>` -> `Arc<[String]>` for `effort_levels`).\n  3. `crate::router::DispatchTarget`    -- per-request dispatch hop;\n     adds `state_key`, makes `provider` optional.\n  4. `routectl_core::RoutectlInternal`  -- the transport-internal\n     carrier on `ChatRequest`; the egress reads the value here.\n     `apply_layered_overlays` (router.rs) copies it from the\n     `DispatchTarget`.\n\nVerbatim pass-through fields (`supports_adaptive_thinking`,\n`effort_levels`, `max_thinking_budget`, `max_output_tokens`) are\nrelayed unchanged at each hop -- adding one means editing all four\ndefinitions plus the `factory.rs` `ModelEntry` -> `ResolvedModel`\nmapping and the `apply_layered_overlays` copy. The hop is the price\nof the config-crate (TOML serde shape) / core-crate (wire-internal)\nseparation: `reasoning_dialect` / `history_reasoning` even change\ntype at the core boundary (config-side enum -> `Core*` enum via the\n`From` impls below), so a single shared struct cannot span both\ncrates without inverting the `core <- router` dependency.",
+      "description": "One row in the `[models]` table. Carries the nickname-to-upstream\nbinding plus per-model knobs.\n\nFields that vary per-model belong here. Fields that vary per-\ntransport (auth, base URL, runtime gates) stay on `[providers.X]`.\nTwo fields, `header_extras` and `payload_extras`, live BOTH here and\non every provider variant; the dispatch layer merges them per\nrequest (model wins on key collision; see `Router` merge helpers).\n\nPER-MODEL VALUE RELAY (read before adding a per-model value here).\nA per-model value the egress reads passes through FOUR struct\ndefinitions, each a deliberate layer, not a redundant copy:\n\n  1. `ModelEntry`                (this struct, config.rs) -- TOML\n     deserialization target; `#[serde(deny_unknown_fields)]`.\n  2. `crate::resolved::ResolvedModel`   -- startup-resolved per\n     nickname; adds the `Arc<dyn Provider>` and may transform the\n     type.\n  3. `crate::router::DispatchTarget`    -- per-request dispatch hop;\n     adds `state_key`, makes `provider` optional.\n  4. `routectl_core::RoutectlInternal`  -- the transport-internal\n     carrier on `ChatRequest`; the egress reads the value here.\n     `apply_layered_overlays` (router.rs) copies it from the\n     `DispatchTarget`.\n\nThe output-token ceiling is NOT configured here: `ResolvedModel`'s\n`max_output_tokens` carries the catalog prior (filled by\n`factory::apply_catalog_overlay`), and a learned ceiling lowers what\nthe egress sends at dispatch. The hop is the price\nof the config-crate (TOML serde shape) / core-crate (wire-internal)\nseparation: `reasoning_dialect` / `history_reasoning` even change\ntype at the core boundary (config-side enum -> `Core*` enum via the\n`From` impls below), so a single shared struct cannot span both\ncrates without inverting the `core <- router` dependency.",
       "properties": {
         "additional_request_fields": {
           "description": "Bedrock Converse `additionalModelRequestFields` -- vendor-\nspecific knobs that don't have a top-level Converse slot. The\nBedrock Invoke egress also reads this map for non-routectl-\nmanaged body fields. Other egresses ignore it."
-        },
-        "effort_levels": {
-          "default": [],
-          "description": "Ordered list of effort levels the operator declares this model\naccepts. Validated at startup: every element must be one of\n`minimal`, `low`, `medium`, `high`, `xhigh`, `max` (the union\nof the Anthropic-shape vocabulary and the OpenAI-shape\nvocabulary; individual egresses clamp to their own subset).\n\nAn empty list means pass-through -- the egress emits whatever\neffort the caller supplied without operator-side filtering. A\nnon-empty list clamps the caller's effort to the nearest declared\nlevel. A caller effort of `none` (reasoning off) is never clamped\nto a positive level.\n\nDefault: empty (pass-through).",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
         },
         "header_extras": {
           "additionalProperties": {
@@ -675,22 +667,6 @@
             }
           ],
           "description": "Per-model openai-compat outgoing-history reasoning policy.\nLives ONLY on `[models.X]` (no provider fallback). See\n[`HistoryReasoning`] docs for v3-vs-v4 motivation."
-        },
-        "max_output_tokens": {
-          "description": "Operator-declared per-model ceiling on the `max_tokens` value\nthe Anthropic-shape egresses (anthropic-api, bedrock-invoke)\ninject when the caller omits the field. `None` (the default)\nfalls through to the hardcoded baseline of 64000.\n\nSet this for models whose upstream-documented ceiling is below\nthe baseline to avoid a 400 on the upstream's per-model\nvalidation. Examples: Anthropic Opus 4 / 4.1 (32000), Sonnet 3.5\n(8000), DeepSeek V3 anthropic-api surface (8000). See\ndocs/CONFIGURATION.md.\n\nOnly consumed by Anthropic-shape egresses (anthropic-api +\nbedrock-invoke); openai-compat, openai-responses, and\nbedrock-converse forward omission cleanly (good-translator\nprinciple: do not inject where the upstream already handles it).",
-          "format": "uint32",
-          "minimum": 0,
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "max_thinking_budget": {
-          "default": 0,
-          "description": "Maximum thinking-token budget the operator allows for this\nmodel, in tokens. `0` (the default) means no operator cap --\nthe egress uses whatever budget the caller requested or its own\ndefault. Non-zero values are forwarded as the ceiling for the\negress budget negotiation.",
-          "format": "uint32",
-          "minimum": 0,
-          "type": "integer"
         },
         "payload_extras": {
           "description": "Extras merged into the outbound request body. Combined with the\nprovider's `payload_extras` at dispatch time via a deep recursive\nmerge (model wins on leaf collision; nested objects merge\nrecursively). Lands on canonical `req.provider_extras`; each\negress merges that into the wire body via its existing path."
@@ -730,11 +706,6 @@
             "integer",
             "null"
           ]
-        },
-        "supports_adaptive_thinking": {
-          "default": false,
-          "description": "Whether this model supports the Anthropic adaptive thinking shape\n(Opus 4.7+). Projected via apply_layered_overlays into\nRoutectlInternal.supports_adaptive_thinking; the AnthropicApi\negress reads it at request time. `false` (the default) uses the\nstandard fixed-budget shape or no thinking at all.",
-          "type": "boolean"
         },
         "upstream": {
           "description": "Upstream model id. Forwarded to the provider verbatim. For\nBedrock this becomes the `BedrockConfig.model_id` value (the\nAWS inference profile id, e.g.\n`us.anthropic.claude-haiku-4-5-20251001-v1:0`). For OpenAI-\ncompatible egresses it is the wire `model` field.",
@@ -2102,7 +2073,7 @@
         "$ref": "#/$defs/ProviderEntry"
       },
       "default": {},
-      "description": "Provider definitions keyed by operator-facing name. Carries\ntransport-side knobs only (auth, base URL, headers, runtime\ngates). Per-model knobs (`supports_adaptive_thinking`,\n`effort_levels`, `max_thinking_budget`, `reasoning_dialect`,\n`history_reasoning`, `additional_request_fields`) live on\n`[models.X]` in v0.6.0.",
+      "description": "Provider definitions keyed by operator-facing name. Carries\ntransport-side knobs only (auth, base URL, headers, runtime\ngates). Per-model knobs (`reasoning_dialect`, `history_reasoning`,\n`additional_request_fields`) live on `[models.X]` in v0.6.0.",
       "type": "object"
     },
     "reduction": {

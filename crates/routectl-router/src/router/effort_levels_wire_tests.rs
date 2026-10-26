@@ -1,9 +1,7 @@
-//! `[models.X] effort_levels` from TOML through the factory, the dispatch
-//! overlay and the REAL egress to the bytes a wiremock upstream receives.
-//! An entry that omits the key forwards the caller's effort unclamped; an
-//! explicit list clamps. Covers the anthropic-api adaptive shape
-//! (`output_config.effort`) and the openai-compat default dialect
-//! (top-level `reasoning_effort`).
+//! A caller's effort from a TOML-built model through the factory, the
+//! dispatch overlay and the REAL egress to the bytes a wiremock upstream
+//! receives: no config key clamps it, so it reaches the openai-compat
+//! default dialect (top-level `reasoning_effort`) unchanged.
 
 use std::sync::Arc;
 
@@ -17,79 +15,27 @@ use crate::config::Config;
 use crate::factory::{BuildOptions, build_resolved_models};
 use crate::router::{Router, RouterOptions};
 
-/// The egress kinds under test: the TOML provider block, the success body
-/// the upstream answers with, and where the effort lands on the wire.
-#[derive(Clone, Copy, Debug)]
-enum Lane {
-    AnthropicApi,
-    OpenaiCompat,
+fn ok_body() -> Value {
+    json!({
+        "id": "chatcmpl-ok",
+        "object": "chat.completion",
+        "created": 0,
+        "model": "upstream-model",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "ok"},
+            "finish_reason": "stop"
+        }],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+    })
 }
 
-impl Lane {
-    fn provider_toml(self, base_url: &str, key_ref: &str) -> String {
-        match self {
-            Self::AnthropicApi => format!(
-                "kind = \"anthropic-api\"\nbase_url = \"{base_url}\"\napi_key_ref = \"{key_ref}\"\n"
-            ),
-            Self::OpenaiCompat => format!(
-                "kind = \"openai-compat\"\nbase_url = \"{base_url}/v1\"\napi_key_ref = \"{key_ref}\"\n"
-            ),
-        }
-    }
-
-    /// `supports_adaptive_thinking` puts the anthropic-api effort on the
-    /// wire as a string (`output_config.effort`); the legacy shape turns it
-    /// into a token budget instead.
-    const fn model_knobs(self) -> &'static str {
-        match self {
-            Self::AnthropicApi => "supports_adaptive_thinking = true\n",
-            Self::OpenaiCompat => "",
-        }
-    }
-
-    fn ok_body(self) -> Value {
-        match self {
-            Self::AnthropicApi => json!({
-                "id": "msg_ok",
-                "type": "message",
-                "role": "assistant",
-                "model": "upstream-model",
-                "stop_reason": "end_turn",
-                "usage": {"input_tokens": 1, "output_tokens": 1},
-                "content": [{"type": "text", "text": "ok"}]
-            }),
-            Self::OpenaiCompat => json!({
-                "id": "chatcmpl-ok",
-                "object": "chat.completion",
-                "created": 0,
-                "model": "upstream-model",
-                "choices": [{
-                    "index": 0,
-                    "message": {"role": "assistant", "content": "ok"},
-                    "finish_reason": "stop"
-                }],
-                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
-            }),
-        }
-    }
-
-    fn wire_effort(self, body: &Value) -> Option<&str> {
-        let field = match self {
-            Self::AnthropicApi => body.pointer("/output_config/effort"),
-            Self::OpenaiCompat => body.get("reasoning_effort"),
-        };
-        field.and_then(Value::as_str)
-    }
-}
-
-/// Parse a one-provider, one-model config from TOML, so an omitted
-/// `effort_levels` takes the serde default rather than a builder default.
-fn config_toml(lane: Lane, base_url: &str, effort_levels_line: &str) -> Config {
+/// Parse a one-provider, one-model openai-compat config from TOML, so the
+/// model takes its serde defaults rather than builder defaults.
+fn config_toml(base_url: &str) -> Config {
     let key_ref = crate::test_secret::file_ref("test-key");
     let toml_text = format!(
-        "[providers.p]\n{provider}\n[models.m]\nprovider = \"p\"\nupstream = \"upstream-model\"\n{knobs}{effort_levels_line}\n",
-        provider = lane.provider_toml(base_url, &key_ref),
-        knobs = lane.model_knobs(),
+        "[providers.p]\nkind = \"openai-compat\"\nbase_url = \"{base_url}/v1\"\napi_key_ref = \"{key_ref}\"\n\n[models.m]\nprovider = \"p\"\nupstream = \"upstream-model\"\n"
     );
     toml::from_str(&toml_text).expect("test config parses")
 }
@@ -130,96 +76,37 @@ fn effort_req(effort: &str) -> ChatRequest {
 
 /// Dispatch one request carrying `caller_effort` and return the effort the
 /// upstream received, with the outbound body for failure messages.
-async fn wire_effort_for(
-    lane: Lane,
-    effort_levels_line: &str,
-    caller_effort: &str,
-) -> (Option<String>, Value) {
+async fn wire_effort_for(caller_effort: &str) -> (Option<String>, Value) {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(lane.ok_body()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(ok_body()))
         .mount(&server)
         .await;
-    let router = router_for(config_toml(lane, &server.uri(), effort_levels_line)).await;
+    let router = router_for(config_toml(&server.uri())).await;
 
     let d = router
         .complete_with_options(effort_req(caller_effort), RouterOptions::default())
         .await;
 
-    assert!(
-        d.result.is_ok(),
-        "{lane:?}: dispatch failed: {:?}",
-        d.result.err()
-    );
+    assert!(d.result.is_ok(), "dispatch failed: {:?}", d.result.err());
     let reqs = server.received_requests().await.expect("received requests");
-    assert_eq!(reqs.len(), 1, "{lane:?}: exactly one upstream request");
+    assert_eq!(reqs.len(), 1, "exactly one upstream request");
     let body: Value = serde_json::from_slice(&reqs[0].body).expect("outbound body is JSON");
-    (lane.wire_effort(&body).map(str::to_string), body)
+    let effort = body
+        .get("reasoning_effort")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    (effort, body)
 }
-
-struct Row {
-    name: &'static str,
-    lane: Lane,
-    effort_levels_line: &'static str,
-    caller_effort: &'static str,
-    wire_effort: &'static str,
-}
-
-const ROWS: &[Row] = &[
-    Row {
-        name: "anthropic-api, key omitted, max passes through",
-        lane: Lane::AnthropicApi,
-        effort_levels_line: "",
-        caller_effort: "max",
-        wire_effort: "max",
-    },
-    Row {
-        name: "anthropic-api, key omitted, xhigh passes through",
-        lane: Lane::AnthropicApi,
-        effort_levels_line: "",
-        caller_effort: "xhigh",
-        wire_effort: "xhigh",
-    },
-    Row {
-        name: "anthropic-api, explicit low/medium/high, max clamps to high",
-        lane: Lane::AnthropicApi,
-        effort_levels_line: "effort_levels = [\"low\", \"medium\", \"high\"]",
-        caller_effort: "max",
-        wire_effort: "high",
-    },
-    Row {
-        name: "openai-compat, key omitted, max passes through",
-        lane: Lane::OpenaiCompat,
-        effort_levels_line: "",
-        caller_effort: "max",
-        wire_effort: "max",
-    },
-    Row {
-        name: "openai-compat, key omitted, xhigh passes through",
-        lane: Lane::OpenaiCompat,
-        effort_levels_line: "",
-        caller_effort: "xhigh",
-        wire_effort: "xhigh",
-    },
-    Row {
-        name: "openai-compat, explicit low/medium/high, max clamps to high",
-        lane: Lane::OpenaiCompat,
-        effort_levels_line: "effort_levels = [\"low\", \"medium\", \"high\"]",
-        caller_effort: "max",
-        wire_effort: "high",
-    },
-];
 
 #[tokio::test]
-async fn effort_levels_from_config_decides_the_effort_on_the_wire() {
+async fn the_callers_effort_reaches_the_wire_unclamped() {
     let mut failures = Vec::new();
-    for row in ROWS {
-        let (got, body) =
-            wire_effort_for(row.lane, row.effort_levels_line, row.caller_effort).await;
-        if got.as_deref() != Some(row.wire_effort) {
+    for caller_effort in ["max", "xhigh"] {
+        let (got, body) = wire_effort_for(caller_effort).await;
+        if got.as_deref() != Some(caller_effort) {
             failures.push(format!(
-                "{}: expected wire effort {:?}, got {got:?}; body = {body}",
-                row.name, row.wire_effort
+                "{caller_effort}: expected it on the wire, got {got:?}; body = {body}"
             ));
         }
     }

@@ -42,7 +42,7 @@ overlays merge, what's reserved.
 **Models and routing**
 - [Model routing (`[aliases]`)](#model-routing-aliases)
 - [Model directory (`[models]`)](#model-directory-models)
-- [Per-model knobs](#per-model-knobs) (reasoning, effort, output caps)
+- [Per-model knobs](#per-model-knobs) (removed model keys, output ceiling)
 - [history_reasoning](#history_reasoning-reasoning-echo-back)
 - [Retry and fallback defaults](#retry-and-fallback-defaults)
 - [Proactive context-window gate (`[window_gate]`)](#proactive-context-window-gate-window_gate)
@@ -619,14 +619,10 @@ semantics in the [field-assignment table](#field-assignment-table).
 | `provider`                     | `[models.X]`        | required; refs a `[providers]` key                                     |
 | `upstream`                     | `[models.X]`        | required                                                               |
 | `selectable`                   | `[models.X]`        | default true                                                           |
-| `supports_adaptive_thinking`   | `[models.X]`        | bool, default false; true overrides enabled thinking to adaptive       |
-| `effort_levels`                | `[models.X]`        | array<string>, default [] (pass-through); non-empty = clamp            |
-| `max_thinking_budget`          | `[models.X]`        | u32, default 0 (no cap); declared model budget ceiling in tokens; anthropic-api + bedrock-invoke + bedrock-converse only |
 | `reasoning_dialect`            | `[models.X]`        | model-only (NO provider fallback)                                      |
 | `history_reasoning`            | `[models.X]`        | model-only (NO provider fallback)                                      |
 | `additional_request_fields`    | `[models.X]`        | model-only (Bedrock Converse / Invoke bag)                             |
 | `stream_first_byte_timeout_ms` | `[models.X]`        | model > provider > global                                              |
-| `max_output_tokens`            | `[models.X]`        | Option<u32>, default None (-> catalog fill, else 64000 baseline); the filled `max_tokens` on anthropic-api + bedrock-invoke, the legacy thinking budget there and on bedrock-converse; a learned ceiling lowers the sent `max_tokens`, never raises it |
 | `reported_model`               | `[models.X]`        | Option<String>, default None (-> echo client's requested alias); override for the response `model` label |
 | `visible_routectl_provider`    | `[models.X]`        | bool, default true; set false to drop the `routectl_provider` field from the client response (opaque proxy) |
 | `header_extras`                | BOTH                | model wins on key collision; `anthropic-beta` comma-unions (see below) |
@@ -1269,9 +1265,9 @@ Mantle grounds: the `max_tokens` ceiling. Its thinking and effort rows are
 not admitted, and `presence_penalty` / `frequency_penalty` never reach the
 wire here, since the Anthropic egress drops both before sending. Some
 models refuse `thinking.type: enabled` on Mantle that accept it on the
-direct Anthropic endpoint; since that refusal is not repaired here, set
-[`supports_adaptive_thinking`](#supports_adaptive_thinking-bool-default-false)
-on such a model so enabled thinking is sent as adaptive. Learned
+direct Anthropic endpoint; since that refusal is not repaired here, the
+client must send adaptive thinking to such a model (routectl forwards the
+client's `thinking` object as sent). Learned
 field-repair history is keyed on the provider entry name and upstream
 model, not on the region or host, so a `region` change, or switching an
 entry between a direct endpoint and this sub-table under the same name,
@@ -2212,175 +2208,47 @@ how that decision is named.
 
 ## Per-model knobs
 
-### Reasoning capability declaration
+### Removed model keys
 
-Three fields on `[models.X]` declare what reasoning a model supports.
-The router and egresses read them at dispatch time; callers never set
-these fields directly.
+`supports_adaptive_thinking`, `effort_levels`, `max_thinking_budget` and
+`max_output_tokens` are no longer `[models.X]` keys. A config that still
+carries any of them is refused at load, reload, `config migrate` and every
+config edit, with one message listing every `models.<nick>.<key>` path
+(values are never echoed), what now decides that behavior, and "delete the
+key". No `config migrate` rung removes them; delete the lines by hand.
 
-#### `supports_adaptive_thinking` (bool, default false)
+| Removed key                  | What decides it now                                                           |
+|------------------------------|-------------------------------------------------------------------------------|
+| `supports_adaptive_thinking` | client thinking is forwarded; effort alone adds no thinking                   |
+| `effort_levels`              | refused effort levels are learned per lane                                    |
+| `max_thinking_budget`        | client thinking budgets are forwarded                                         |
+| `max_output_tokens`          | an omitted limit uses the learned ceiling, else the catalog prior, else 64000 |
 
-An operator override on the Anthropic-shape egresses (`anthropic-api`,
-`bedrock-invoke`, `bedrock-converse`). What it changes depends on what
-the client sent.
-
-A client that sends its own `thinking` object (the Anthropic Messages
-ingress) has that object forwarded as sent, `display` included, whatever
-its `type`. With the key `false` or unset, routectl has no opinion on the
-type: an `enabled`, `adaptive`, `disabled`, `between_tools` or unknown type
-is forwarded as sent
-(`client_thinking_shapes_forward_verbatim`,
-`an_unset_knob_forwards_client_adaptive_as_adaptive`; Converse:
-`the_client_thinking_object_reaches_the_bag_as_sent`). An explicit
-`false` behaves exactly like unset. Two edits still apply whatever the
-key says: [`max_thinking_budget`](#max_thinking_budget-u32-default-0)
-lowers a forwarded `enabled` budget, and a `tool_choice` that forces tool
-use removes `enabled` or `adaptive` thinking (see
-[WIRE-GOTCHAS.md](WIRE-GOTCHAS.md#anthropic-api-surface)).
-
-With the key `true`:
-
-- A client `enabled` object is rewritten to `adaptive`; its
-  `budget_tokens` is removed (the adaptive shape has no budget field) and
-  its `display` is kept
-  (`the_adaptive_knob_turns_client_enabled_into_adaptive_keeping_display`;
-  Converse: `the_forwarded_thinking_overrides_are_declared`). Other types
-  forward as sent (the "between_tools, knob set" and "disabled, knob set"
-  rows of `client_thinking_shapes_forward_verbatim`).
-- A client that sends a positive effort and NO `thinking` object still
-  gets synthesized adaptive thinking, the effort beside it:
-
-  ```json
-  { "thinking": { "type": "adaptive" }, "output_config": { "effort": "high" } }
-  ```
-
-  (`sent_none_with_the_knob_keeps_the_synthesized_adaptive_shape`).
-  Without the key, or with no effort or effort `"none"`, a request with
-  no `thinking` object ships no thinking
-  (`sent_none_emits_thinking_only_for_the_knob_with_a_positive_effort`).
-- When the shipped thinking is `adaptive` and the request carries no
-  effort, routectl supplies `output_config.effort = "medium"`, whether the
-  client sent `adaptive` itself or the key converted its `enabled` object.
-  With the key unset nothing is supplied (the "client adaptive, no effort"
-  and "knob-converted enabled, no effort" rows of
-  `the_effort_on_the_wire_per_thinking_shape_and_operator_knob`; Converse:
-  `the_adaptive_knob_supplies_an_effort_only_when_the_client_sent_none`).
-
-A client effort is never rewritten to match the thinking shape: an
-`output_config.effort` ships as sent beside whatever thinking ships,
-`disabled` included, and only a non-empty [`effort_levels`](#effort_levels)
-re-clamps it (the "xhigh beside disabled ships as sent" and "explicit
-list clamps xhigh beside disabled" rows of
-`the_effort_on_the_wire_per_thinking_shape_and_operator_knob`; Converse:
-`the_client_effort_reaches_the_bag_as_sent`).
-
-Requests from the other ingresses carry no native `thinking` object, so
-the egress translates canonical reasoning: with the key `true` it emits
-the adaptive shape above, otherwise the legacy fixed-budget shape:
-
-```json
-{ "thinking": { "type": "enabled", "budget_tokens": 16000 } }
-```
-
-(the "translated adaptive carries its canonical effort" and "translated
-legacy shape carries no effort" rows of the same table).
-
-You do not need the key for a model that refuses `enabled` thinking:
-routectl repairs that 400 and learns the adaptive shape per lane (see
+A client's Anthropic `thinking` object (`enabled`, `adaptive`, `disabled`,
+`between_tools`, `display` included) is forwarded as sent; a model that
+refuses `enabled` thinking is repaired and learned per lane (see
 [PROVIDER-QUIRKS.md](PROVIDER-QUIRKS.md#anthropic-opus-47-and-any-future-adaptive-thinking-models)).
-Setting it skips the first refused attempt. Set `true` only for models
-that accept the adaptive shape (Anthropic Opus 4.7+): a model that refuses
-adaptive thinking answers it with a 400 that routectl does not repair.
+A request with an effort and no `thinking` object ships no thinking. An
+effort level reaches the upstream unclamped until a refusal teaches the
+lane which level to use instead. An `enabled` budget is forwarded whatever
+its size; a budget routectl translates from another dialect is fitted under
+the output ceiling below.
 
-#### `effort_levels` (array of strings, default [])
+#### Output ceiling (`max_tokens` fill)
 
-Ordered list of effort levels the operator declares this model accepts.
-Every element must be one of the full vocabulary:
-
-```
-minimal | low | medium | high | xhigh | max
-```
-
-The validator at config-load rejects tokens outside that set. The list is
-an acceptance fact about the model, not a cost cap; declare it only for a
-model that rejects some levels. Three cases:
-
-- **Empty (the default, or `effort_levels = []`): pass-through.** The
-  egress emits whatever effort the caller supplied, `xhigh` and `max`
-  included, without operator-side filtering.
-- **Non-empty: clamp.** Clamping applies on ALL egresses: when a caller
-  supplies an effort value not in the model's `effort_levels`, the egress
-  clamps to the nearest supported level (rounding toward the most capable
-  supported level when the requested level is above the declared maximum,
-  and to the least capable when it is below the minimum). An explicit
-  `["low", "medium", "high"]` turns a caller's `max` into `high`.
-- **Caller effort `"none"`: reasoning off.** `reasoning.effort = "none"`
-  is not a level and is never clamped to one, whatever the list holds:
-  the egress omits the effort field or emits its own disable form. An
-  Anthropic client's own `output_config.effort` of `"none"` reaches an
-  Anthropic-shape upstream as sent, beside the thinking it sent.
-
-A non-empty `effort_levels` also turns effort learning off for the model.
-routectl learns a refused effort level from the upstream's rejection and
-rewrites later requests to the level that worked, but with a clamp in
-place the level on the wire is the clamped one, not the one the request
-carried, so no effort level is repaired, rewritten before dispatch, or
-learned while the list is set. Leave it empty to let routectl learn which
-levels the model accepts.
-
-#### `max_thinking_budget` (u32, default 0)
-
-Declares the model's maximum thinking-token budget in tokens. `0` means
-"not a budget-capped model" -- the egress falls back to its own
-inference-time defaults. Non-zero values cap an `enabled` thinking budget
-DOWN: a budget routectl translates from canonical reasoning, before the
-upstream's own budget window clamp runs
-(`max_thinking_budget_nonzero_clamps_budget_down`), and a client's own
-forwarded `budget_tokens` above the cap
-(`the_operator_budget_cap_lowers_only_a_larger_forwarded_enabled_budget`).
-A forwarded budget at or below the cap, including one below Anthropic's
-1024 minimum, ships as sent; only a translated budget is raised to the
-minimum (`a_sub_floor_budget_is_forwarded_on_sent_and_floored_on_translation`).
-
-Only consumed by the Anthropic-shape thinking builder: `anthropic-api`,
-`bedrock-invoke` (which delegates body construction to the same
-normalizer), and `bedrock-converse` (which reuses the same thinking
-builder). The other egresses (`gemini`, `openai-compat`,
-`openai-responses`) never read it -- setting it on a model of those
-kinds has no effect, and config validation says so: an advisory warning
-naming the model and its kind is emitted at load time (`routectl config
-check` and every serve boot). Steer those models with `effort_levels`
-and the caller's own budget instead.
-
-It is never a cost cap on adaptive thinking: the adaptive shape has no
-budget field, and when `supports_adaptive_thinking = true` converts an
-`enabled` object its budget is removed, not capped (the "enabled on an
-adaptive model" row of
-`each_forwarded_thinking_override_declares_only_what_it_changed`). Steer
-adaptive thinking with `effort_levels`.
-
-#### `max_output_tokens` (Option<u32>, default None)
-
-Per-model ceiling on the `max_tokens` value the Anthropic-shape egresses
-(`anthropic-api`, `bedrock-invoke`) inject when the caller omits the
-field. `None` (the default) does NOT go straight to the hardcoded
-baseline: routectl first fills the ceiling the model's own catalog row
-confirms, so a common Claude upstream gets its real ceiling without any
-entry here.
-
-Resolution chain at dispatch:
+The `max_tokens` value the Anthropic-shape egresses (`anthropic-api`,
+`bedrock-invoke`) send when the caller omits the field resolves at
+dispatch:
 
 1. `request.max_tokens` -- caller-supplied value always wins.
-2. `[models.X].max_output_tokens` -- operator override, taken verbatim.
-   The catalog never raises or lowers a value you wrote.
-3. The two-layer catalog (baked ceilings, corrected by the catalog
+2. The two-layer catalog (baked ceilings, corrected by the catalog
    overlay) for the model's `(provider kind, upstream)` pair, filled at
-   chain-build time when this key is unset -- but ONLY from a cell that
-   pins one figure. A glob spanning models with genuinely different
-   ceilings fills nothing rather than guessing, so a low-ceiling upstream
-   the catalog cannot resolve unambiguously still needs this key (or an
-   overlay cell via `routectl catalog set`).
-4. `64000` -- hardcoded baseline.
+   chain-build time -- but ONLY from a cell that pins one figure. A glob
+   spanning models with genuinely different ceilings fills nothing rather
+   than guessing. Correct or add a figure with
+   `routectl catalog set <selector> max_output_tokens=<n>` (see
+   [`routectl catalog set`](#routectl-catalog-set--routectl-catalog-disable)).
+3. `64000` -- hardcoded baseline.
 
 A learned output ceiling then caps the result. When a lane has learned
 the model's limit from a refusal that named it (see
@@ -2389,85 +2257,58 @@ above that ceiling is lowered to it before the request is sent, whether
 it came from the client or, on `anthropic-api` and `bedrock-invoke`,
 from this chain. `bedrock-converse` sends no `maxTokens` the client did
 not send, so there only a client value is lowered: with none, nothing
-is capped, including the value that sizes its legacy thinking budget.
-A value at or below the ceiling ships unchanged: a learned ceiling never
-raises a limit, and it never replaces a lower value you configured here.
-The ceiling recovers by decay only: it lapses after
+is capped and no limit appears on the wire. A value at or below the
+ceiling ships unchanged: a learned ceiling never raises a limit. The
+ceiling recovers by decay only: it lapses after
 [`decay_hours`](#learned-capability-tempo-capability) and the next
 refusal learns it again. Lowering a client value is recorded as a lossy
 repair; lowering the value routectl filled in is not, since the client
 asked for no particular limit.
 
-`routectl doctor`'s **Model knobs** section names which of these resolved
-for every configured model, and one startup line names the models whose
-ceiling came from the catalog.
+`routectl doctor`'s **Model knobs** section names, for every configured
+model, whether its ceiling is the catalog fill or the egress baseline, and
+one startup line names the models whose ceiling came from the catalog.
 
 **Spend note.** Reasoning tokens bill as output, and on the legacy
-(`supports_adaptive_thinking = false`) thinking path three budgets track
-the resolved ceiling because they pass through Anthropic's
-`budget_tokens < max_tokens` window clamp:
+`enabled` thinking path a budget routectl translates from canonical
+reasoning tracks the resolved ceiling, because it passes through
+Anthropic's `budget_tokens < max_tokens` window clamp:
+`reasoning.effort = "max"` becomes the ceiling minus one,
+`reasoning.enabled = true` with no effort or budget becomes half the
+ceiling, and a caller `reasoning.max_tokens` above the ceiling is capped
+at `ceiling - 1`. Every other standard effort level (`minimal` through
+`xhigh`) resolves through an exact effort-to-budget table and is
+unaffected.
 
-1. `reasoning.effort = "max"` -- ceiling minus one, whenever the model's
-   [`effort_levels`](#effort_levels) admits `"max"`: under the empty
-   default (pass-through) it always does. A declared list that stops
-   below `max` (for example `["low", "medium", "high"]`) rewrites `max`
-   to `high`, whose exact table budget (24576) the ceiling never enters.
-2. `reasoning.enabled = true` with no effort or budget -- half the
-   ceiling.
-3. A caller-supplied `reasoning.max_tokens` ABOVE the previous ceiling --
-   it was capped at `ceiling - 1`, so a higher ceiling admits more of the
-   caller's ask.
-
-Every standard effort level (`minimal` through `xhigh`) resolves through
-an exact effort-to-budget table and is unaffected, as is any caller whose
-own `reasoning.max_tokens` already fit under the previous ceiling. Set
-this key to pin the previous figure.
-
-Only Anthropic-shape egresses (`anthropic-api` and `bedrock-invoke`)
+Only the Anthropic-shape egresses (`anthropic-api` and `bedrock-invoke`)
 send this value as `max_tokens`. `bedrock-converse` reads it only to size
-the legacy thinking budget: on that path the three budgets above are
-fitted under it on Converse too, and Converse still sends no `maxTokens`
-the client did not send. The other egresses (`openai-compat`,
-`openai-responses`) forward a caller-supplied
-`max_tokens` under their own wire name (`openai-responses` emits it as
-`max_output_tokens`) and forward caller omission cleanly without
-injection (good-translator principle: do not inject where the upstream
-already handles it). Exception: the `openai-responses` codex OAuth lane
-(`chatgpt.com/backend-api/codex`) omits `max_output_tokens` entirely --
-codex's request contract has no such field and the backend rejects the
-drift.
+the legacy thinking budget and still sends no `maxTokens` the client did
+not send. The other egresses (`openai-compat`, `openai-responses`)
+forward a caller-supplied `max_tokens` under their own wire name
+(`openai-responses` emits it as `max_output_tokens`) and forward caller
+omission cleanly without injection (good-translator principle: do not
+inject where the upstream already handles it). Exception: the
+`openai-responses` codex OAuth lane (`chatgpt.com/backend-api/codex`)
+omits `max_output_tokens` entirely -- codex's request contract has no
+such field and the backend rejects the drift.
 
-Set this when an Anthropic-shape egress points at a model whose upstream
-`max_tokens` cap is below the resolved ceiling AND the catalog does not
-confirm that cap for the selector. Without it, a caller that omits
-`max_tokens` draws a 400 from the upstream's per-model validation. On a
-lane field repair acts on, routectl retries that request at the limit
-the 400 names and learns it, so the key then only saves the first
-refusal per lane (and the one after each decay). On a lane field repair
-does not act on (a loopback `base_url`; a forwarded client credential),
-the 400 reaches the client every time. On a Bedrock Mantle lane field
-repair acts on the rows a refusal captured on that sub-lane grounds: the
-`max_tokens` ceiling on the Anthropic lane; `top_p`, `presence_penalty`
-and `frequency_penalty` on the Chat Completions lane; the `minimal`
-and `max` effort levels on the Responses lane. No ceiling row is
-admitted on the Chat Completions and Responses Mantle lanes, so a
-token-limit 400 there reaches the client. This key does not apply on
-those two lanes: their egresses never inject a limit and send only the
-caller's own value, so
-the remedy is for the caller to lower its `max_tokens`. Chat
-Completions `reasoning_effort` is a known gap there: its refusal wording
-has no reader, so it is forwarded.
-Check `routectl doctor`'s **Model knobs** section first: if it reports the
-ceiling as catalog-filled at the right figure, this key is redundant.
-
-```toml
-[models.opus-legacy]
-provider          = "anthropic-default"
-upstream          = "claude-opus-4"
-# Older Opus 4 caps max_tokens at 32000; lower the baseline so callers
-# omitting max_tokens do not 400.
-max_output_tokens = 32000
-```
+A caller that omits `max_tokens` on a model whose real cap is below the
+resolved ceiling draws one 400 from the upstream's per-model validation.
+On a lane field repair acts on, routectl retries that request at the
+limit the 400 names and learns it, so later requests go out at the
+learned ceiling; a catalog figure (`routectl catalog set`) saves even the
+first refusal. On a lane field repair does not act on (a loopback
+`base_url`; a forwarded client credential), set the catalog figure. On a
+Bedrock Mantle lane field repair acts on the rows a refusal captured on
+that sub-lane grounds: the `max_tokens` ceiling on the Anthropic lane;
+`top_p`, `presence_penalty` and `frequency_penalty` on the Chat
+Completions lane; the `minimal` and `max` effort levels on the Responses
+lane. No ceiling row is admitted on the Chat Completions and Responses
+Mantle lanes, so a token-limit 400 there reaches the client; their
+egresses never inject a limit and send only the caller's own value, so
+the remedy is for the caller to lower its `max_tokens`. Chat Completions
+`reasoning_effort` is a known gap there: its refusal wording has no
+reader, so it is forwarded.
 
 #### `reported_model` (Option<String>, default None) -- response `model` label
 
@@ -2555,8 +2396,6 @@ stream_first_byte_timeout_ms = 60000          # provider default
 [models.opus47]
 provider                     = "bedrock"
 upstream                     = "us.anthropic.claude-opus-4-7-v1:0"
-supports_adaptive_thinking   = true
-effort_levels                = ["low", "medium", "high", "xhigh", "max"]
 header_extras                = { "anthropic-beta" = "context-1m-2025-08-07" }
 stream_first_byte_timeout_ms = 300000         # opus override
 
@@ -2564,7 +2403,6 @@ stream_first_byte_timeout_ms = 300000         # opus override
 provider = "bedrock"
 upstream = "us.anthropic.claude-haiku-4-5-v1:0"
 # inherits provider's 60s; no per-model override
-# effort_levels defaults to [] (caller effort passes through unclamped)
 ```
 
 ## history_reasoning (reasoning echo-back)
@@ -4764,7 +4602,7 @@ The battery sections, in render order:
 | Capability (`capability`) | The learned-capability findings NOT absorbed by the capability matrix panel below: a WARN when the config layer could not be parsed (so the panel is honestly degraded rather than silently empty). Never emits a FAIL, so it can never flip the exit code. |
 | Catalog freshness (`freshness`) | Three advisory rows on how current the catalog data is: the baked catalog version and snapshot date, the freshest overlay verification stamp and its age, and the last SUCCESSFUL `catalog import` with its row counts. A stale overlay or import is a WARN pointing at `catalog import`; never a FAIL. |
 | Cost pricing (`pricing`) | One row per configured model naming WHERE its cost rates come from -- an operator `[registry]` row (taken verbatim), the baked catalog's own rates (the auto-fill when `[registry]` is silent), a managed subscription (billed by seat, no per-token rate), or unpriced (neither layer has rates, so usage reports no cost for it). Every priced row names the resolved per-million input / output rates; a dimension the winning layer left unset reads `unset`, never `$0`, and a `[registry]` row that sets no rate at all says it prices nothing. A subscription row adds a second clause naming its API-EQUIVALENCE basis: the bill is by seat either way, but `usage` values that seat's traffic at API-equivalent rates only when every dimension resolves one, so the row says whether that basis is complete and, when it is not, which dimensions are unpriced (cache read and the two cache-write buckets are `[registry]`-only, so a catalog basis always lacks them) or that neither layer prices the upstream at all. If the catalog overlay could not be loaded the whole section collapses to one WARN: the overlay supersedes baked rates, so reporting the baked figure could name a rate the bill does not use. Never FAILs, so it can never move the exit code. |
-| Model knobs (`knobs`) | One row per configured model naming WHERE its outbound `max_output_tokens` ceiling comes from -- the operator's own `[models.X]` value (which the catalog never overrides), the catalog fill (when `[models.X]` sets none and the model's resolved cell confirms one figure), or neither (the Anthropic-shape egresses then use their built-in baseline and every other egress forwards caller omission untouched). Every row names the resolved ceiling and the `(kind, upstream)` selector it was resolved for. If the catalog overlay could not be loaded the whole section collapses to one WARN: the overlay both corrects and disables baked ceilings, so reporting the baked figure could name a ceiling the router does not use. Never FAILs, so it can never move the exit code. |
+| Model knobs (`knobs`) | One row per configured model naming WHERE its outbound `max_output_tokens` ceiling comes from -- the catalog fill (when the model's resolved cell confirms one figure; the row names `routectl catalog set ... max_output_tokens` as the correction), or neither (the Anthropic-shape egresses then use their built-in baseline and every other egress forwards caller omission untouched). Every row names the resolved ceiling and the `(kind, upstream)` selector it was resolved for. If the catalog overlay could not be loaded the whole section collapses to one WARN: the overlay both corrects and disables baked ceilings, so reporting the baked figure could name a ceiling the router does not use. Never FAILs, so it can never move the exit code. |
 
 Two structured panels render after the sections:
 

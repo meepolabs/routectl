@@ -259,8 +259,8 @@ Surfaces: [openai-compat](#openai-compat-surface) -
 - **`max_tokens` is required, so routectl fills it, and the fill can be
   refused.** The Messages API 400s a body without `max_tokens`, so the
   `anthropic-api` egress (Mantle included) and Bedrock Invoke send the
-  client's value, else the per-model ceiling the router resolves
-  (`[models.X] max_output_tokens`, else the catalog), else 64000
+  client's value, else the per-model ceiling the router resolves (the
+  catalog prior, lowered by a learned ceiling), else 64000
   (`resolve_max_tokens` in `anthropic_api/extras.rs`). The fill is
   declared as a required-field default. A model whose output limit is
   lower answers `max_tokens: SENT > N, which is the maximum allowed
@@ -419,12 +419,11 @@ Surfaces: [openai-compat](#openai-compat-surface) -
     `count_tokens_body_carries_the_forwarded_thinking`,
     `the_client_thinking_object_reaches_the_bag_as_sent`; known types stay
     byte-identical to the committed driver captures,
-    `committed_driver_captures_reach_the_wire_byte_identical`). Only the
-    operator overrides edit it (`forward_client_thinking`:
-    `supports_adaptive_thinking` and `max_thinking_budget`, see
-    [CONFIGURATION.md](CONFIGURATION.md#supports_adaptive_thinking-bool-default-false)),
-    and each edit is declared
-    (`each_forwarded_thinking_override_declares_only_what_it_changed`).
+    `committed_driver_captures_reach_the_wire_byte_identical`). No config
+    key edits it any more (see
+    [CONFIGURATION.md](CONFIGURATION.md#removed-model-keys)); a forcing
+    `tool_choice` and a learned thinking repair are the only edits, and
+    each is declared.
     A native `budget_tokens` below Anthropic's 1024 minimum is NOT raised:
     the upstream judges it, where a budget routectl translates from
     canonical reasoning is still floored
@@ -443,9 +442,8 @@ Surfaces: [openai-compat](#openai-compat-surface) -
     (`the_plain_turn_ships_its_effort_with_no_output_config_edit`,
     `the_plain_turn_ships_its_effort_on_bedrock_invoke`,
     `the_plain_turn_capture_keeps_its_effort_beside_disabled_thinking`).
-    Only a non-empty `effort_levels` re-clamps it, and routectl supplies
-    an effort only beside adaptive thinking that has none
-    (`the_effort_on_the_wire_per_thinking_shape_and_operator_knob`).
+    No config key re-clamps it; only a learned effort repair rewrites a
+    level the lane refused.
   - **The sampling clamp reads the shipped type.** Anthropic accepts
     only `temperature: 1.0` and no `top_p` while thinking is active, so
     the clamp keys off the emitted `thinking.type`, never the canonical

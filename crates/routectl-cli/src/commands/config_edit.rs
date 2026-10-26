@@ -406,6 +406,25 @@ default = \"gpt\"
         assert_no_write(&current_base(), "server.nope", "1");
     }
 
+    /// A removed per-model key is no longer a settable path: `set` on a
+    /// clean file refuses it and writes nothing. The control path on the
+    /// same model goes through.
+    #[test]
+    fn a_removed_model_key_is_not_settable_and_leaves_file_unchanged() {
+        for knob in [
+            "supports_adaptive_thinking",
+            "effort_levels",
+            "max_thinking_budget",
+            "max_output_tokens",
+        ] {
+            assert_no_write(&current_base(), &format!("models.gpt.{knob}"), "1");
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_config(dir.path(), &current_base());
+        set(&path, "models.gpt.upstream", "gpt-4.1").expect("control: a live model key applies");
+    }
+
     #[test]
     fn array_target_leaves_file_unchanged() {
         assert_no_write(&current_base(), "fidelity.prefix_impact_opt_in", "429");

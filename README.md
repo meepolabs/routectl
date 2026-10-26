@@ -177,7 +177,6 @@ reasoning_dialect = "deepseek"   # a MODEL knob, not a provider one
 [models.heavy]
 provider = "anthropic-api-key"
 upstream = "claude-opus-4-20250514"
-supports_adaptive_thinking = true
 
 [aliases]
 # An alias key must not equal the nickname it points at -- alias

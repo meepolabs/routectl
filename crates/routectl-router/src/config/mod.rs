@@ -35,7 +35,7 @@ pub(crate) use validate::message_safe_key;
 pub use validate::{
     CURRENT_CONFIG_VERSION, ConfigVersionError, LegacyMitmCredentialSourceError,
     RawConfigPreflightError, RemovedPaidProbeCapsError, RetiredCapabilityKeysError,
-    VersionTooNewError, preflight_config_version, preflight_raw_config,
+    RetiredModelKnobsError, VersionTooNewError, preflight_config_version, preflight_raw_config,
     validate_cache_pricing_retired,
 };
 
@@ -68,10 +68,8 @@ pub struct Config {
 
     /// Provider definitions keyed by operator-facing name. Carries
     /// transport-side knobs only (auth, base URL, headers, runtime
-    /// gates). Per-model knobs (`supports_adaptive_thinking`,
-    /// `effort_levels`, `max_thinking_budget`, `reasoning_dialect`,
-    /// `history_reasoning`, `additional_request_fields`) live on
-    /// `[models.X]` in v0.6.0.
+    /// gates). Per-model knobs (`reasoning_dialect`, `history_reasoning`,
+    /// `additional_request_fields`) live on `[models.X]` in v0.6.0.
     #[serde(default)]
     pub providers: BTreeMap<String, ProviderEntry>,
 
@@ -307,15 +305,12 @@ kind        = "anthropic-api"
 api_key_ref = "env://ANTHROPIC_API_KEY"
 
 [models.opus-or]
-provider      = "openrouter"
-upstream      = "anthropic/claude-opus-4-7-20260301"
-effort_levels = []
+provider = "openrouter"
+upstream = "anthropic/claude-opus-4-7-20260301"
 
 [models.opus-direct]
-provider                   = "anthropic"
-upstream                   = "claude-opus-4-7-20260301"
-supports_adaptive_thinking = true
-effort_levels              = ["minimal", "low", "medium", "high", "xhigh", "max"]
+provider = "anthropic"
+upstream = "claude-opus-4-7-20260301"
 
 [aliases]
 "claude-opus-*" = "opus-direct"

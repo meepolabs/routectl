@@ -286,25 +286,15 @@ pub(super) fn disk_layers(config_path: &Path) -> GatheredLayers {
 /// selector `derive_effective_view` uses, and the ceiling is read off it
 /// through the shared `output_ceiling_tokens` accessor -- so the row cannot
 /// claim a source the factory's fill would not produce for the same config.
-///
-/// Config is checked FIRST and short-circuits, matching the precedence the
-/// dispatch path resolves in: an operator's own value wins whole, so what the
-/// catalog would have said is not a fact about what gets sent.
 pub(super) fn derive_knob_rows(config: &Config, overlay: &CatalogOverlay) -> Vec<KnobRow> {
     derive_effective_view(config, overlay)
         .models
         .into_iter()
         .map(|cell| {
-            let configured = config
-                .models
-                .get(&cell.nickname)
-                .and_then(|entry| entry.max_output_tokens)
-                .filter(|ceiling| *ceiling > 0);
-            let source = match (configured, cell.row.output_ceiling_tokens()) {
-                (Some(ceiling), _) => OutputCeilingSource::Config(ceiling),
-                (None, Some(ceiling)) => OutputCeilingSource::Catalog(ceiling),
-                (None, None) => OutputCeilingSource::Default,
-            };
+            let source = cell
+                .row
+                .output_ceiling_tokens()
+                .map_or(OutputCeilingSource::Default, OutputCeilingSource::Catalog);
             KnobRow {
                 nickname: cell.nickname,
                 provider_kind: cell.provider_kind,

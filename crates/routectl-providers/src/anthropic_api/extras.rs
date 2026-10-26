@@ -33,16 +33,15 @@ use super::tools::forced_tool_choice_type;
 use super::types::{OutputConfig, ThinkingConfig, WireThinking};
 
 /// Hardcoded baseline `max_tokens` value injected on outbound
-/// Anthropic-shape requests when the caller omits the field AND the
-/// per-model `[models.X].max_output_tokens` override is unset. The
+/// Anthropic-shape requests when the caller omits the field AND no
+/// per-model ceiling is known (no catalog prior, no learned ceiling). The
 /// Anthropic Messages API requires `max_tokens` and 400s on omission;
 /// 64000 is above the 64K ceiling of Sonnet 4.5/4.6 and Opus 4.5 and
 /// within Opus 4.7's 128K window.
 ///
-/// Operators with known-low-cap models (Anthropic Opus 4 / 4.1 at
-/// 32000, Sonnet 3.5 / DeepSeek V3 at 8000) should set
-/// `[models.X].max_output_tokens` to avoid an upstream 400 on the
-/// per-model ceiling check. See docs/CONFIGURATION.md.
+/// A model whose real ceiling is lower gets it from the catalog prior
+/// (`routectl catalog set ... max_output_tokens`) or learns it from the
+/// upstream's refusal. See docs/CONFIGURATION.md.
 pub const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 64_000;
 
 /// Resolve the `max_tokens` the request is sized to: caller's request
@@ -148,8 +147,7 @@ pub fn reclamp_client_effort(sent: &str, effort_levels: &[String]) -> String {
 ///
 /// The `adaptive` flag comes from
 /// `req.routectl_internal.supports_adaptive_thinking`, set by the
-/// router from the operator-declared `[models.X]
-/// supports_adaptive_thinking` capability.
+/// router, which no longer has a config key for it and relays `false`.
 ///
 /// On the legacy `Enabled` path, `req.routectl_internal.max_thinking_budget`
 /// is applied as an operator-declared ceiling BEFORE Anthropic's own

@@ -690,8 +690,8 @@ fn capability_section_emits_no_finding_for_a_loaded_config() {
 }
 
 #[test]
-fn schema_version_is_twenty() {
-    assert_eq!(SCHEMA_VERSION, 20);
+fn schema_version_is_twenty_one() {
+    assert_eq!(SCHEMA_VERSION, 21);
 
     let context = ctx(
         config_with_overrides(),
@@ -700,7 +700,7 @@ fn schema_version_is_twenty() {
         Vec::new(),
     );
     let report = build_report(&context);
-    assert_eq!(report.schema_version, 20);
+    assert_eq!(report.schema_version, 21);
 
     // JSON mode carries the structured capability matrix panel; the
     // superseded override / prior / learned finding text is gone.
@@ -2573,7 +2573,7 @@ fn build_report_no_network_matches_network_minus_probe() {
     let network = build_report(&context);
     let no_net = build_report_no_network(&context);
 
-    assert_eq!(no_net.schema_version, 20);
+    assert_eq!(no_net.schema_version, 21);
     assert!(
         no_net.findings.iter().all(|f| f.section != "probe"),
         "no-network report must have no probe rows"
@@ -4179,17 +4179,14 @@ mod seeded_matrix_surfaces {
     }
 }
 
-/// The knobs section names each configured model's `max_output_tokens` SOURCE.
-/// Naming the wrong one sends an operator to the wrong knob: a row reading
-/// "from [models.X]" for a catalog-filled model would have them hunt a config
-/// value that is not there, and the reverse would have them believe the catalog
-/// is about to raise a ceiling they pinned themselves.
+/// The knobs section names each configured model's `max_output_tokens` SOURCE,
+/// and the catalog row names the command that corrects it: the output ceiling
+/// is not a `[models.X]` setting, so pointing there would send an operator to
+/// a key the loader refuses.
 #[test]
 fn knobs_section_names_each_models_output_ceiling_source_by_nickname() {
-    // Arrange: three models, one per state.
-    //   `pinned`  -- an operator max_output_tokens -> Config.
-    //   `filled`  -- a Claude upstream the baked catalog confirms, config
-    //                silent -> Catalog.
+    // Arrange: one model per state.
+    //   `filled`  -- a Claude upstream the baked catalog confirms -> Catalog.
     //   `neither` -- an openai-compat upstream whose only matching cell is
     //                output-ambiguous -> Default.
     let mut cfg = Config::default();
@@ -4200,10 +4197,6 @@ fn knobs_section_names_each_models_output_ceiling_source_by_nickname() {
     cfg.providers.insert(
         "vendor".to_string(),
         ProviderEntry::openai_compat("https://example.invalid", "env://VENDOR_KEY"),
-    );
-    cfg.models.insert(
-        "pinned".to_string(),
-        ModelEntry::new("anthropic", "claude-opus-4-6").with_max_output_tokens(32_000),
     );
     cfg.models.insert(
         "filled".to_string(),
@@ -4221,29 +4214,25 @@ fn knobs_section_names_each_models_output_ceiling_source_by_nickname() {
     // Assert: one row per configured model, each naming its own source.
     assert_eq!(
         findings.len(),
-        3,
+        2,
         "one row per configured model: {findings:?}"
-    );
-
-    let pinned = find(&findings, "knobs", "pinned");
-    assert!(
-        pinned.detail.contains("32000") && pinned.detail.contains("from [models.pinned]"),
-        "an operator-pinned row must name its own value and source: {}",
-        pinned.detail
     );
 
     let filled = find(&findings, "knobs", "filled");
     assert!(
-        filled.detail.contains("filled from the catalog"),
-        "a catalog-filled row must name the catalog: {}",
+        filled.detail.contains("filled from the catalog")
+            && filled
+                .detail
+                .contains("`routectl catalog set ... max_output_tokens`"),
+        "a catalog-filled row must name the catalog and how to correct it: {}",
         filled.detail
     );
-    assert!(
-        !filled.detail.contains("32000"),
-        "the catalog row must report the CATALOG figure, not the sibling \
-         model's pinned one: {}",
-        filled.detail
-    );
+    for f in &findings {
+        assert!(
+            !f.detail.contains("[models."),
+            "no row points at config: {f:?}"
+        );
+    }
 
     let neither = find(&findings, "knobs", "neither");
     assert!(

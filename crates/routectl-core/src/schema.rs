@@ -332,16 +332,16 @@ pub struct RoutectlInternal {
     /// pre-passthrough behavior.
     pub stainless_headers: Vec<(String, String)>,
     /// Whether the dispatched model supports adaptive (extended)
-    /// thinking. Threaded through from `[models.X]
-    /// supports_adaptive_thinking` via `ResolvedModel` ->
-    /// `DispatchTarget`. Egresses that need to choose between a budget-
+    /// thinking. Threaded through `ResolvedModel` -> `DispatchTarget`; no
+    /// config key sets it, so the router always relays `false`. Egresses that need to choose between a budget-
     /// tokens path and a flat enable/disable read this field.
     /// Defaults to `false` so library consumers constructing
     /// `ChatRequest` directly never see an unexpected budget-tokens path.
     pub supports_adaptive_thinking: bool,
     /// Operator-declared effort levels for this model (e.g.
-    /// `["low", "medium", "high"]`). Threaded through from
-    /// `[models.X] effort_levels` via `ResolvedModel` -> `DispatchTarget`.
+    /// `["low", "medium", "high"]`). Threaded through `ResolvedModel` ->
+    /// `DispatchTarget`; no config key sets it, so the router always relays
+    /// the empty list.
     /// OpenAI-shape egresses clamp `req.reasoning.effort` to the nearest
     /// supported level before emitting. Empty means passthrough -- emit
     /// whatever the caller sent without validation.
@@ -357,12 +357,11 @@ pub struct RoutectlInternal {
     /// negotiation; the budget is clamped DOWN to this value before
     /// Anthropic's window clamp runs.
     ///
-    /// Threaded through from `[models.X] max_thinking_budget` via
-    /// `ResolvedModel` -> `DispatchTarget`.
+    /// Threaded through `ResolvedModel` -> `DispatchTarget`; no config
+    /// key sets it, so the router always relays `0`.
     pub max_thinking_budget: u32,
-    /// The per-model output ceiling the router resolves from
-    /// `[models.X].max_output_tokens`, else the catalog ceiling; on every
-    /// egress. Consumed by the Anthropic-shape egresses (anthropic-api,
+    /// The per-model output ceiling the router resolves on every egress:
+    /// the catalog prior, lowered by a learned ceiling. Consumed by the Anthropic-shape egresses (anthropic-api,
     /// bedrock-invoke) as the wire `max_tokens` when the client sent none,
     /// and by Converse's legacy thinking window, which fits a budget under
     /// it. Converse sends no `max_tokens` the client did not

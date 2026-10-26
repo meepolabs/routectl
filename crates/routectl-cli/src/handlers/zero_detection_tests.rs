@@ -155,14 +155,6 @@ fn plain_model() -> ModelEntry {
     ModelEntry::new(PROVIDER, UPSTREAM)
 }
 
-fn adaptive_thinking_model() -> ModelEntry {
-    plain_model().with_supports_adaptive_thinking(true)
-}
-
-fn thinking_budget_capped_model() -> ModelEntry {
-    plain_model().with_max_thinking_budget(4096)
-}
-
 // ---------------------------------------------------------------------------
 // Upstream answers
 // ---------------------------------------------------------------------------
@@ -807,28 +799,6 @@ fn anthropic_cases() -> Vec<Case> {
             anthropic_complete(),
             anthropic_provider,
         ),
-        Case {
-            model: adaptive_thinking_model,
-            ..case(
-                "anthropic/enabled-thinking-on-adaptive-model",
-                Ingress::Anthropic,
-                json!({"model": ALIAS, "max_tokens": 16000, "messages": hi,
-                       "thinking": {"type": "enabled", "budget_tokens": 8192}}),
-                anthropic_complete(),
-                anthropic_provider,
-            )
-        },
-        Case {
-            model: thinking_budget_capped_model,
-            ..case(
-                "anthropic/thinking-budget-above-operator-cap",
-                Ingress::Anthropic,
-                json!({"model": ALIAS, "max_tokens": 16000, "messages": hi,
-                       "thinking": {"type": "enabled", "budget_tokens": 8192}}),
-                anthropic_complete(),
-                anthropic_provider,
-            )
-        },
     ]
 }
 

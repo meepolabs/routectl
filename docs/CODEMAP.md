@@ -1628,8 +1628,12 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `allowed_betas` / `unsupported_features`, model `unsupported_features`) by
   dotted path only, never values (`RetiredCapabilityKeysError`), then the
   removed `[fidelity] paid_probe_daily_caps` key, naming no successor
-  (`RemovedPaidProbeCapsError`). The three non-version checks are
-  crate-internal; only `preflight_config_version` stays public beside the
+  (`RemovedPaidProbeCapsError`), then the removed per-model keys in
+  `RETIRED_MODEL_KNOBS` (`supports_adaptive_thinking`, `effort_levels`,
+  `max_thinking_budget`, `max_output_tokens`), ONE `RetiredModelKnobsError`
+  holding every `models.<nick>.<key>` path sorted, one line each naming its
+  replacement and ending "delete the key", with no version or migrate
+  wording. The four non-version checks are crate-internal; only `preflight_config_version` stays public beside the
   driver. Unparseable TOML passes every check so the typed deserialize reports
   the real syntax error. Callers: the shared loader (`parse_config_only`), the
   CLI edit-pipeline `preflight`, and `config migrate` (on the post-ladder
@@ -1875,10 +1879,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   runs the two-layer catalog merge once at chain-build/load time and stamps
   the result onto each `ResolvedModel::effective_row`, so the dispatch path
   never re-runs the merge per request, and is ALSO the output-ceiling fill site
-  (a model whose config left `max_output_tokens` at the `0` sentinel takes the
+  (a model whose `max_output_tokens` is still the `0` sentinel takes the
   merged row's confirmed ceiling via `output_ceiling_tokens`, making the
-  dispatch precedence config > catalog > egress baseline with no
-  routectl-providers change); calls the row-reading `validate_*`
+  dispatch precedence catalog > egress baseline, lowered by a learned ceiling,
+  with no routectl-providers change); calls the row-reading `validate_*`
   guards from `validate.rs` at construction time; the `AnthropicApi` arm, when
   `bedrock_mantle` is `Some` (cfg `bedrock`), derives `base_url` from
   `mantle::mantle_anthropic_base(region)`, resolves the AWS credential via
@@ -2007,15 +2011,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `[providers.X]` row and flags a cloud-code-lane entry whose `upstream` hits
   `routectl_providers::gemini::deprecated_alias_replacement`, naming the
   verified replacement -- the auth-mode gate is load-bearing, since the same
-  ids stay current on the api-key lane (advisory only);
-  `unread_thinking_budget_warnings` flags a `[models.X] max_thinking_budget`
-  set on a model whose egress never reads the cap, resolving the model's kind
-  through `model_egress_kind` (a `provider` value naming a `[pools]` block
-  answers by its first resolvable member) and asking
-  `routectl_providers::anthropic_api::egress_reads_max_thinking_budget` rather
-  than listing kinds locally (advisory only). Units live in the
-  `#[path]`-included `warnings_tests.rs` (gemini-gated) and
-  `warnings_thinking_budget_tests.rs` (kind-agnostic)
+  ids stay current on the api-key lane (advisory only). Units live in the
+  `#[path]`-included `warnings_tests.rs` (gemini-gated)
 - `src/factory/beta_floor_warnings.rs` -- `beta_floor_override_warnings`,
   the `config check` advisory for an `unsupported` `beta:<flag>` override on
   an anthropic-api provider naming a flag the egress re-adds after the
@@ -2598,8 +2595,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `install_catalog_overlay` (the
   single writer of the RETAINED accepted overlay and its revision stamp), the
   `catalog_version` / `overlay_revision` / `catalog_overlay` getters,
-  `catalog_filled_output_ceilings` (the startup-provenance read: nicknames whose
-  `max_output_tokens` came from the catalog, off the INSTALLED table so a
+  `catalog_filled_output_ceilings` (the startup-provenance read: every
+  nickname whose resolved cell confirms a ceiling, off the INSTALLED table so a
   pool-backed model is not silently omitted) and
   `rebuild_learned_from_ledger` (the boot warm-rebuild seam: delegates to
   `capability_rebuild::rebuild_capabilities_into` over the PRIVATE learned
@@ -8355,8 +8352,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   whose subscription arm carries the API-equivalence tri-state
   `EquivalenceBasis{Complete,Incomplete{missing},Unresolved}`, plus the
   `Option<Vec<KnobRow>>` output-ceiling attribution rows -- also `None` when
-  the overlay could not be loaded -- and their three-state
-  `OutputCeilingSource{Config,Catalog,Default}`) holds every
+  the overlay could not be loaded -- and their two-state
+  `OutputCeilingSource{Catalog,Default}`) holds every
   read-only input, gathered once. `build_report`/`build_report_no_network` run
   the producers over a context, flatten, and deterministically sort (section,
   name, status) via `build_report_over` into `DoctorReport { schema_version,
@@ -8429,8 +8426,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   or the replay
 - `src/commands/doctor/gather.rs` -- doctor data collection.
   `derive_knob_rows(config, overlay)` resolves one `KnobRow` per `[models.X]`
-  entry: config `max_output_tokens` checked FIRST (an operator value wins
-  whole), else the resolved cell's ceiling through the shared
+  entry: the resolved cell's ceiling through the shared
   `EffectiveRow::output_ceiling_tokens` accessor the factory's fill reads, else
   `Default`. Same overlay gating as pricing -- an unreadable overlay leaves
   `knobs: None`, since the overlay both corrects and disables baked ceilings.
@@ -8555,9 +8551,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   instead. NEVER `Fail`, so it can never move the exit code.
   `section_knobs`/`knob_finding` are the ceiling sibling of that pair: one
   informational `Pass` per configured model naming whether its outbound
-  `max_output_tokens` came from `[models.X]`, the catalog fill, or neither
-  (egress baseline), each detail naming the resolved figure and the
-  `(kind, upstream)` selector; a `knobs: None` context collapses to the single
+  `max_output_tokens` came from the catalog fill (naming `routectl catalog set`
+  as the correction) or neither (egress baseline), each detail naming the
+  resolved figure and the `(kind, upstream)` selector; a `knobs: None` context collapses to the single
   `knobs_unavailable` Warn. NEVER `Fail`.
   `legacy_folder_finding` adds one config-section `legacy folder` Warn per old
   folder that still holds files or could not be listed, naming it only by its

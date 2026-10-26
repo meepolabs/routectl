@@ -3,15 +3,12 @@
 //!
 //! Breaking change: `thinking` and `effort` fields were removed from
 //! `ModelEntry`. TOMLs carrying those keys must fail at parse time.
-//! The new capability fields are `supports_adaptive_thinking`,
-//! `effort_levels`, and `max_thinking_budget`.
 
 use super::{AliasValue, Config, HistoryReasoning, ModelEntry, ReasoningDialect};
 use std::collections::BTreeMap;
 
 /// A model entry with only the two required fields gets the correct
-/// defaults: supports_adaptive_thinking=false,
-/// effort_levels=[] (pass-through), max_thinking_budget=0.
+/// defaults.
 #[test]
 fn model_entry_required_fields_only() {
     let toml_text = r#"
@@ -24,43 +21,10 @@ upstream = "claude-haiku-4-5-20251001"
     assert_eq!(m.provider, "anthropic");
     assert_eq!(m.upstream, "claude-haiku-4-5-20251001");
     assert!(m.selectable, "default selectable = true");
-    assert!(!m.supports_adaptive_thinking, "default false");
-    assert!(
-        m.effort_levels.is_empty(),
-        "default effort_levels is empty (pass-through); got {:?}",
-        m.effort_levels
-    );
-    assert_eq!(m.max_thinking_budget, 0, "default max_thinking_budget");
     assert!(m.reasoning_dialect.is_none());
     assert!(m.history_reasoning.is_none());
     assert!(m.header_extras.is_empty());
     assert!(m.payload_extras.is_none());
-}
-
-/// New capability fields parse correctly and round-trip through serde.
-#[test]
-fn model_entry_new_capability_fields_round_trip() {
-    let toml_text = r#"
-[models.opus]
-provider = "anthropic"
-upstream = "claude-opus-4-7"
-supports_adaptive_thinking = true
-effort_levels = ["low", "medium", "high", "xhigh"]
-max_thinking_budget = 8000
-"#;
-    let cfg: Config = toml::from_str(toml_text).expect("parse");
-    let m = cfg.models.get("opus").expect("opus entry");
-    assert!(m.supports_adaptive_thinking);
-    assert_eq!(
-        m.effort_levels,
-        vec![
-            "low".to_string(),
-            "medium".to_string(),
-            "high".to_string(),
-            "xhigh".to_string(),
-        ]
-    );
-    assert_eq!(m.max_thinking_budget, 8000);
 }
 
 /// TOMLs carrying the old `thinking` key must fail at parse time.
@@ -315,33 +279,13 @@ selectable = false
     assert!(!m.selectable);
 }
 
-/// `ModelEntry::new` defaults match the TOML defaults: selectable=true,
-/// supports_adaptive_thinking=false, effort_levels=[] (pass-through),
-/// max_thinking_budget=0.
+/// `ModelEntry::new` defaults match the TOML defaults: selectable=true.
 #[test]
 fn model_entry_builder_defaults_match_toml_defaults() {
     let m = ModelEntry::new("p", "u");
     assert_eq!(m.provider, "p");
     assert_eq!(m.upstream, "u");
     assert!(m.selectable);
-    assert!(!m.supports_adaptive_thinking);
-    assert!(m.effort_levels.is_empty());
-    assert_eq!(m.max_thinking_budget, 0);
-}
-
-/// Builder methods for the new capability fields work correctly.
-#[test]
-fn model_entry_capability_builders() {
-    let m = ModelEntry::new("p", "u")
-        .with_supports_adaptive_thinking(true)
-        .with_effort_levels(vec!["low".into(), "high".into(), "max".into()])
-        .with_max_thinking_budget(16000);
-    assert!(m.supports_adaptive_thinking);
-    assert_eq!(
-        m.effort_levels,
-        vec!["low".to_string(), "high".to_string(), "max".to_string()]
-    );
-    assert_eq!(m.max_thinking_budget, 16000);
 }
 
 #[test]

@@ -3163,6 +3163,45 @@ default = \"gpt\"
         }
     }
 
+    /// No rung removes the per-model keys, so a version-4 file carrying them
+    /// climbs the ladder and the post-ladder preflight refuses it by name:
+    /// nothing is written to either file.
+    #[tokio::test]
+    async fn a_v4_file_carrying_removed_model_keys_is_refused_by_name_byte_identical() {
+        // Arrange
+        const KNOB_LINES: &str =
+            "upstream = \"gpt-4o\"\neffort_levels = [\"low\"]\nmax_output_tokens = 8000\n";
+        let body = v4_with_legacy().replace("upstream = \"gpt-4o\"\n", KNOB_LINES);
+        let f = fixture(&body);
+
+        // Act
+        let err = f
+            .migrate(false, true)
+            .await
+            .expect_err("removed model keys");
+
+        // Assert
+        let same_keys_current = latest_clean().replace("upstream = \"gpt-4o\"\n", KNOB_LINES);
+        let driver = preflight_raw_config(&same_keys_current).expect_err("the driver refuses");
+        assert!(matches!(
+            driver,
+            RawConfigPreflightError::RetiredModelKnobs(_)
+        ));
+        assert_eq!(err.to_string(), format!("config: {driver}"));
+        assert!(
+            err.to_string()
+                .contains("`models.gpt.effort_levels` is no longer a model setting"),
+            "{err}"
+        );
+        assert!(
+            err.to_string()
+                .contains("`models.gpt.max_output_tokens` is no longer a model setting"),
+            "{err}"
+        );
+        assert_eq!(read(&f.config), body);
+        assert!(!f.overlay.exists(), "no overlay write");
+    }
+
     /// No rung removes `[mitm] credential_source` either, so an older file
     /// carrying it gets load's actionable replacement message, not a redacted
     /// unknown-field error from the migrated candidate's parse.

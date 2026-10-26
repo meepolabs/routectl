@@ -2011,12 +2011,14 @@ struct DispatchTarget {
     /// Concrete provider instance.
     provider: Option<Arc<dyn Provider>>,
     /// Whether the model supports adaptive (extended) thinking.
-    /// Threaded from `ResolvedModel.supports_adaptive_thinking` so
+    /// Threaded from `ResolvedModel.supports_adaptive_thinking` (always
+    /// `false`: no config key sets it) so
     /// `apply_layered_overlays` can set `RoutectlInternal` without
     /// reaching back into `ResolvedModel`.
     supports_adaptive_thinking: bool,
-    /// Operator-declared effort levels for this model. Threaded from
-    /// `ResolvedModel.effort_levels`. Empty means passthrough (emit
+    /// Effort levels for this model. Threaded from
+    /// `ResolvedModel.effort_levels`, always empty: no config key sets it.
+    /// Empty means passthrough (emit
     /// caller's effort verbatim). Non-empty: OpenAI-shape egresses
     /// clamp `req.reasoning.effort` to the nearest supported level.
     ///
@@ -2061,21 +2063,15 @@ struct DispatchTarget {
     history_reasoning: Option<HistoryReasoning>,
     /// Per-model `stream_first_byte_timeout_ms`.
     stream_first_byte_timeout_ms: Option<u64>,
-    /// Operator-declared maximum thinking-token budget for this model.
-    /// Threaded from `ResolvedModel.max_thinking_budget`. Zero means no
-    /// operator cap; `apply_layered_overlays` writes this to
-    /// `RoutectlInternal.max_thinking_budget` unconditionally, but only
-    /// the Anthropic-shape thinking builder reads it there (`anthropic-api`
-    /// plus both Bedrock shapes -- see
-    /// `routectl_providers::anthropic_api::MAX_THINKING_BUDGET_READER_KINDS`).
-    /// On any other kind the value reaches dispatch and is discarded,
-    /// which `unread_thinking_budget_warnings` reports at load time.
+    /// Maximum thinking-token budget for this model. Threaded from
+    /// `ResolvedModel.max_thinking_budget`, always zero (no cap): no config
+    /// key sets it. `apply_layered_overlays` writes this to
+    /// `RoutectlInternal.max_thinking_budget` unconditionally.
     max_thinking_budget: u32,
-    /// Operator-declared per-model `max_tokens` ceiling for the
-    /// Anthropic-shape egresses. Threaded from
-    /// `ResolvedModel.max_output_tokens`. Zero means no model
-    /// override -- `apply_layered_overlays` then fills the egress
-    /// baseline for an egress that sends the field.
+    /// Per-model `max_tokens` ceiling for the Anthropic-shape egresses:
+    /// the catalog prior, threaded from `ResolvedModel.max_output_tokens`.
+    /// Zero means no ceiling known -- `apply_layered_overlays` then fills
+    /// the egress baseline for an egress that sends the field.
     max_output_tokens: u32,
     /// Operator-declared label echoed back in the response `model`
     /// field. Threaded from `ResolvedModel.reported_model`. `None`
@@ -2403,8 +2399,8 @@ impl Router {
         self.admit_quota_seats();
     }
 
-    /// The nicknames whose outbound output-token ceiling came from the catalog
-    /// rather than from config, each with the ceiling that was filled, in
+    /// The nicknames whose outbound output-token ceiling came from the catalog,
+    /// each with the ceiling that was filled, in
     /// nickname order.
     ///
     /// Read off the INSTALLED table, not re-derived from config: the fill runs
@@ -2413,21 +2409,12 @@ impl Router {
     /// provider kind). A config-only re-derivation would silently report
     /// nothing for exactly the models a pool serves.
     ///
-    /// A model is reported iff its `[models.X] max_output_tokens` is unset (or
-    /// the ignored `0`) AND its resolved cell confirms a ceiling -- the same
-    /// two conditions the fill itself is gated on, so this can only name a
-    /// model the fill actually changed.
+    /// A model is reported iff its resolved cell confirms a ceiling: no config
+    /// key sets the output ceiling, so the fill applies to every such model.
     #[must_use]
     pub fn catalog_filled_output_ceilings(&self) -> Vec<(&str, u32)> {
         self.resolved_models
             .iter()
-            .filter(|(nickname, _)| {
-                self.config
-                    .models
-                    .get(*nickname)
-                    .and_then(|entry| entry.max_output_tokens)
-                    .is_none_or(|configured| configured == 0)
-            })
             .filter_map(|(nickname, model)| {
                 Some((nickname.as_str(), model.output_ceiling_tokens()?))
             })

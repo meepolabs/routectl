@@ -329,6 +329,73 @@ fn retired_entry_keys(value: &toml::Value, section: &str, keys: &[&str]) -> Vec<
         .collect()
 }
 
+/// Each removed per-model key with what now decides the behavior it used to
+/// set. Sorted by key, which is also the order a model's paths render in.
+const RETIRED_MODEL_KNOBS: [(&str, &str); 4] = [
+    (
+        "effort_levels",
+        "refused effort levels are learned per lane",
+    ),
+    (
+        "max_output_tokens",
+        "an omitted limit uses the learned ceiling, else the catalog prior \
+         (`routectl catalog set ... max_output_tokens`), else 64000",
+    ),
+    (
+        "max_thinking_budget",
+        "client thinking budgets are forwarded",
+    ),
+    (
+        "supports_adaptive_thinking",
+        "client thinking is forwarded; effort alone adds no thinking",
+    ),
+];
+
+/// Refusal carried by [`RawConfigPreflightError::RetiredModelKnobs`]: one or
+/// more `[models.<nick>]` entries still carry a removed per-model key. Holds
+/// the dotted key paths only -- never the values.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{}", render_retired_model_knobs(.paths))]
+pub struct RetiredModelKnobsError {
+    /// Dotted `models.<nick>.<key>` path of every removed key found, sorted.
+    pub paths: Vec<String>,
+}
+
+fn render_retired_model_knobs(paths: &[String]) -> String {
+    paths
+        .iter()
+        .map(|path| {
+            let replacement = RETIRED_MODEL_KNOBS
+                .iter()
+                .find(|(knob, _)| path.rsplit('.').next() == Some(*knob))
+                .map_or("", |(_, replacement)| *replacement);
+            let path = message_safe_key(path);
+            format!("`{path}` is no longer a model setting: {replacement}; delete the key")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Read the RAW TOML text and collect every removed per-model key (see
+/// [`RETIRED_MODEL_KNOBS`]) into ONE refusal, so an operator sees every line
+/// to delete at once rather than serde's generic "unknown field" for the
+/// first. No rung removes these keys, so the message names neither a version
+/// nor `config migrate`. TOML that does not parse falls through as `Ok` so
+/// the typed deserialize reports the real syntax error.
+pub fn preflight_retired_model_knobs(raw_toml: &str) -> Result<(), RetiredModelKnobsError> {
+    let Ok(value) = toml::from_str::<toml::Value>(raw_toml) else {
+        return Ok(());
+    };
+    let knobs = RETIRED_MODEL_KNOBS.map(|(knob, _)| knob);
+    let mut paths = retired_entry_keys(&value, "models", &knobs);
+    paths.sort();
+    if paths.is_empty() {
+        Ok(())
+    } else {
+        Err(RetiredModelKnobsError { paths })
+    }
+}
+
 /// A refusal from [`preflight_raw_config`]: the first raw-text check that
 /// rejected the config. `Display` is the wrapped check's own message,
 /// unchanged, so every caller surfaces the same wording.
@@ -353,14 +420,19 @@ pub enum RawConfigPreflightError {
     /// The config carries the removed `[fidelity] paid_probe_daily_caps` key.
     #[error(transparent)]
     RemovedPaidProbeCaps(RemovedPaidProbeCapsError),
+
+    /// A `[models.<nick>]` entry carries a removed per-model key.
+    #[error(transparent)]
+    RetiredModelKnobs(RetiredModelKnobsError),
 }
 
 /// Run every raw-text config check, before `Config`'s typed deserialize, in
 /// a fixed order: [`preflight_config_version`], then the removed
 /// `[mitm] credential_source` key, then the retired capability keys, then
-/// the removed `[fidelity] paid_probe_daily_caps` key. The first refusal is
-/// returned and the later checks do not run. Version comes first so an older
-/// file is told to migrate rather than to delete keys by hand.
+/// the removed `[fidelity] paid_probe_daily_caps` key, then the removed
+/// per-model keys. The first refusal is returned and the later checks do not
+/// run. Version comes first so an older file is told to migrate rather than
+/// to delete keys by hand.
 ///
 /// TOML that does not parse passes every check, so the typed deserialize
 /// reports the real syntax error.
@@ -372,6 +444,7 @@ pub fn preflight_raw_config(raw: &str) -> Result<(), RawConfigPreflightError> {
         .map_err(RawConfigPreflightError::RetiredCapabilityKeys)?;
     preflight_removed_paid_probe_caps(raw)
         .map_err(RawConfigPreflightError::RemovedPaidProbeCaps)?;
+    preflight_retired_model_knobs(raw).map_err(RawConfigPreflightError::RetiredModelKnobs)?;
     Ok(())
 }
 

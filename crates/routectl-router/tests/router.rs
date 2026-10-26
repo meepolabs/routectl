@@ -454,15 +454,11 @@ mod max_output_tokens_resolution {
         }
     }
 
-    fn config_with_model_override(entry: ProviderEntry, model_override: Option<u32>) -> Config {
+    fn config_with_provider(entry: ProviderEntry) -> Config {
         let mut providers = BTreeMap::new();
         providers.insert("p1".into(), entry);
         let mut models = BTreeMap::new();
-        let mut entry = ModelEntry::new("p1", "u");
-        if let Some(t) = model_override {
-            entry = entry.with_max_output_tokens(t);
-        }
-        models.insert("m".into(), entry);
+        models.insert("m".into(), ModelEntry::new("p1", "u"));
         let mut aliases = BTreeMap::new();
         aliases.insert("alias".into(), AliasValue::Single("m".into()));
         Config {
@@ -486,14 +482,7 @@ mod max_output_tokens_resolution {
         model_override: u32,
     ) -> (Router, Arc<CaptureProvider>) {
         let capture = CaptureProvider::new("p1");
-        let cfg = config_with_model_override(
-            entry,
-            if model_override > 0 {
-                Some(model_override)
-            } else {
-                None
-            },
-        );
+        let cfg = config_with_provider(entry);
         let mut router = Router::new(Arc::new(cfg));
         let mut resolved: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
         let mut rm = ResolvedModel::new("m", "p1", capture.clone() as Arc<dyn Provider>, "u");

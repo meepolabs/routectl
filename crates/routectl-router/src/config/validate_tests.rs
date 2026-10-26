@@ -3,7 +3,8 @@ use super::*;
 mod config_version_tests {
     use super::{
         CURRENT_CONFIG_VERSION, Config, ConfigVersionError, preflight_config_version,
-        preflight_retired_capability_keys, validate_cache_pricing_retired,
+        preflight_retired_capability_keys, preflight_retired_model_knobs,
+        validate_cache_pricing_retired,
     };
 
     #[test]
@@ -27,6 +28,11 @@ mod config_version_tests {
             preflight_retired_capability_keys(example),
             Ok(()),
             "example config must not carry a retired key"
+        );
+        assert_eq!(
+            preflight_retired_model_knobs(example),
+            Ok(()),
+            "example config must not carry a removed model key"
         );
 
         #[cfg(all(feature = "bedrock", feature = "openai-responses"))]
@@ -53,6 +59,7 @@ mod config_version_tests {
             Ok(CURRENT_CONFIG_VERSION),
             "lean example config must preflight at the current schema version"
         );
+        assert_eq!(preflight_retired_model_knobs(example), Ok(()));
         let config: Config =
             toml::from_str(example).expect("lean example config must parse as Config");
         assert_eq!(config.version, CURRENT_CONFIG_VERSION);
@@ -528,15 +535,148 @@ mod removed_paid_probe_caps_preflight_tests {
     }
 }
 
+mod retired_model_knobs_preflight_tests {
+    use super::{CURRENT_CONFIG_VERSION, RETIRED_MODEL_KNOBS, preflight_retired_model_knobs};
+
+    fn current_with(body: &str) -> String {
+        format!("version = {CURRENT_CONFIG_VERSION}\n{body}")
+    }
+
+    /// Every removed key, each set to a value carrying `sentinel`, on one
+    /// model entry.
+    fn all_knobs(nick: &str, sentinel: &str) -> String {
+        format!(
+            "[models.{nick}]\nprovider = \"p\"\nupstream = \"u\"\n\
+             supports_adaptive_thinking = \"{sentinel}\"\n\
+             effort_levels = [\"{sentinel}\"]\n\
+             max_thinking_budget = \"{sentinel}\"\n\
+             max_output_tokens = \"{sentinel}\"\n"
+        )
+    }
+
+    #[test]
+    fn a_model_without_removed_keys_passes() {
+        let body = "[models.m]\nprovider = \"p\"\nupstream = \"u\"\n\
+                    reasoning_dialect = \"openai\"\n[providers.p]\nkind = \"openai-compat\"\n";
+
+        assert_eq!(preflight_retired_model_knobs(&current_with(body)), Ok(()));
+    }
+
+    #[test]
+    fn two_models_carrying_every_key_yield_one_sorted_line_per_path() {
+        // Arrange: `zeta` first in the document, so sorting is observable.
+        let body = format!("{}{}", all_knobs("zeta", "s1"), all_knobs("alpha", "s2"));
+
+        // Act
+        let err = preflight_retired_model_knobs(&current_with(&body)).expect_err("refused");
+        let msg = err.to_string();
+
+        // Assert
+        let expected_paths: Vec<String> = ["alpha", "zeta"]
+            .iter()
+            .flat_map(|nick| {
+                [
+                    "effort_levels",
+                    "max_output_tokens",
+                    "max_thinking_budget",
+                    "supports_adaptive_thinking",
+                ]
+                .map(|knob| format!("models.{nick}.{knob}"))
+            })
+            .collect();
+        assert_eq!(err.paths, expected_paths);
+        let lines: Vec<&str> = msg.lines().collect();
+        assert_eq!(lines.len(), 8, "{msg}");
+        for (line, path) in lines.iter().zip(&expected_paths) {
+            assert!(line.starts_with(&format!("`{path}` ")), "{line}");
+        }
+    }
+
+    #[test]
+    fn each_line_names_its_replacement_and_ends_delete_the_key() {
+        let msg = preflight_retired_model_knobs(&current_with(&all_knobs("m", "x")))
+            .expect_err("refused")
+            .to_string();
+
+        for (knob, replacement) in RETIRED_MODEL_KNOBS {
+            let line = msg
+                .lines()
+                .find(|line| line.starts_with(&format!("`models.m.{knob}`")))
+                .unwrap_or_else(|| panic!("no line for {knob}: {msg}"));
+            assert!(line.contains(replacement), "{knob}: {line}");
+            assert!(line.ends_with("; delete the key"), "{knob}: {line}");
+        }
+        assert!(
+            msg.contains("`routectl catalog set ... max_output_tokens`"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn the_message_names_no_version_and_no_migrate() {
+        let msg = preflight_retired_model_knobs(&current_with(&all_knobs("m", "x")))
+            .expect_err("refused")
+            .to_string();
+
+        for word in ["version", "migrate"] {
+            assert!(!msg.to_lowercase().contains(word), "{word}: {msg}");
+        }
+    }
+
+    #[test]
+    fn values_never_reach_the_message() {
+        // Arrange: a sentinel no path or replacement text contains.
+        let sentinel = "SENTINEL-VALUE-7f3a";
+        let raw = current_with(&all_knobs("m", sentinel));
+        assert!(raw.contains(sentinel), "control: the fixture carries it");
+
+        // Act
+        let msg = preflight_retired_model_knobs(&raw)
+            .expect_err("refused")
+            .to_string();
+
+        // Assert
+        assert!(!msg.contains(sentinel), "{msg}");
+        assert_eq!(msg.lines().count(), 4, "{msg}");
+    }
+
+    #[test]
+    fn a_control_byte_in_a_nickname_never_reaches_the_message() {
+        let body = "[models.\"m\\u001b\\r\\n\"]\neffort_levels = []\n";
+
+        let msg = preflight_retired_model_knobs(&current_with(body))
+            .expect_err("refused")
+            .to_string();
+
+        for byte in ['\u{1b}', '\r', '\n'] {
+            assert!(!msg.contains(byte), "{byte:?} survived in {msg:?}");
+        }
+        assert!(
+            msg.starts_with("`models.m???.effort_levels` is no longer"),
+            "{msg:?}"
+        );
+    }
+
+    #[test]
+    fn malformed_toml_falls_through_to_the_typed_parse() {
+        assert_eq!(
+            preflight_retired_model_knobs("[models.m\neffort_levels = = 1\n"),
+            Ok(())
+        );
+    }
+}
+
 mod raw_config_preflight_tests {
     use super::{
         RawConfigPreflightError, preflight_config_version, preflight_legacy_mitm_credential_source,
         preflight_raw_config, preflight_removed_paid_probe_caps, preflight_retired_capability_keys,
+        preflight_retired_model_knobs,
     };
 
     const LEGACY_MITM: &str = "[mitm]\ncredential_source = \"forwarded\"\n";
     const RETIRED_KEY: &str = "[bedrock]\n";
     const PAID_CAPS: &str = "[fidelity.paid_probe_daily_caps]\nanthropic = 5\n";
+    const MODEL_KNOB: &str = "[models.m]\neffort_levels = [\"low\"]\n";
 
     fn at_version(version: u32, body: &str) -> String {
         format!("version = {version}\n{body}")
@@ -587,6 +727,12 @@ mod raw_config_preflight_tests {
         },
     };
 
+    const MODEL_KNOBS_REFUSAL: Refusal = Refusal {
+        name: "RetiredModelKnobs",
+        is_variant: |e| matches!(e, RawConfigPreflightError::RetiredModelKnobs(_)),
+        check_message: |raw| preflight_retired_model_knobs(raw).unwrap_err().to_string(),
+    };
+
     fn assert_refused_as(row: &str, raw: &str, expected: &Refusal) {
         let err = preflight_raw_config(raw).expect_err(&format!("row `{row}` must be refused"));
 
@@ -633,6 +779,11 @@ mod raw_config_preflight_tests {
                 at_version(current, PAID_CAPS),
                 &PAID_CAPS_REFUSAL,
             ),
+            (
+                "removed model key",
+                at_version(current, MODEL_KNOB),
+                &MODEL_KNOBS_REFUSAL,
+            ),
         ];
 
         for (row, raw, expected) in rows {
@@ -663,6 +814,16 @@ mod raw_config_preflight_tests {
                 "retired key + paid caps",
                 at_version(current, &format!("{RETIRED_KEY}{PAID_CAPS}")),
                 &RETIRED_KEYS_REFUSAL,
+            ),
+            (
+                "too old + removed model key",
+                at_version(current - 1, MODEL_KNOB),
+                &VERSION_REFUSAL,
+            ),
+            (
+                "paid caps + removed model key",
+                at_version(current, &format!("{PAID_CAPS}{MODEL_KNOB}")),
+                &PAID_CAPS_REFUSAL,
             ),
         ];
 

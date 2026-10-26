@@ -1022,14 +1022,9 @@ fn knob_finding(row: &KnobRow) -> Finding {
         safe(&row.upstream)
     );
     let detail = match row.source {
-        OutputCeilingSource::Config(ceiling) => format!(
-            "max_output_tokens {ceiling} from [models.{}] -- {selector}; the catalog never \
-             overrides an operator value",
-            safe(&row.nickname)
-        ),
         OutputCeilingSource::Catalog(ceiling) => format!(
-            "max_output_tokens {ceiling} filled from the catalog ([models.X] sets none) -- \
-             {selector}; set max_output_tokens to pin your own"
+            "max_output_tokens {ceiling} filled from the catalog -- {selector}; correct it with \
+             `routectl catalog set ... max_output_tokens`"
         ),
         OutputCeilingSource::Default => format!(
             "max_output_tokens unset and the catalog confirms no ceiling -- {selector}; the \

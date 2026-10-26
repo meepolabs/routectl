@@ -1,6 +1,6 @@
 // The max_tokens ceiling row against the limit routectl fills for a client
 // that sent none: an anthropic-api seat assembles the real Messages body, so
-// the refused value is the operator's fill, the rejection matches the egress's
+// the refused value is routectl's own fill, the rejection matches the egress's
 // own declaration of that default, and every assertion reads the body an
 // upstream would receive.
 // An `include!`d FRAGMENT of `field_repair_tests.rs`.
@@ -19,8 +19,8 @@ mod ceiling_fill {
     );
     /// The limit the capture names.
     const NAMED_LIMIT: u32 = 128_000;
-    /// The operator's `max_output_tokens`, the value the capture was refused
-    /// for, so the seat refuses the very body the upstream refused.
+    /// The model's stamped `max_output_tokens`, the value the capture was
+    /// refused for, so the seat refuses the very body the upstream refused.
     const FILLED: u32 = 1_000_000;
     const TOML: &str = "[wire_check]\nfirst_n = 8\nsample_one_in = 1\n\
          [retry]\nmax_attempts = 1\ninitial_backoff_ms = 0\njitter_ms = 0\n\n\
@@ -425,31 +425,29 @@ mod fill_presence {
     }
 
     /// The request one dispatch hands a seat on `provider_toml`, its model
-    /// `upstream` and its optional `[models.m0] max_output_tokens`, after the
-    /// catalog fill stamps the resolved model.
+    /// `upstream` and an optional ceiling already stamped on the resolved
+    /// model (which the catalog fill then leaves alone), after the catalog
+    /// fill stamps the resolved model.
     async fn dispatched(
         provider_toml: &str,
         upstream: &str,
-        operator: Option<u32>,
+        stamped: Option<u32>,
         client: Option<u32>,
     ) -> ChatRequest {
-        dispatched_with(provider_toml, upstream, operator, client, None).await
+        dispatched_with(provider_toml, upstream, stamped, client, None).await
     }
 
     /// [`dispatched`] for a request carrying `reasoning` canonically.
     async fn dispatched_with(
         provider_toml: &str,
         upstream: &str,
-        operator: Option<u32>,
+        stamped: Option<u32>,
         client: Option<u32>,
         reasoning: Option<ReasoningConfig>,
     ) -> ChatRequest {
-        let mut toml_text = format!(
+        let toml_text = format!(
             "[providers.p0]\n{provider_toml}\n[models.m0]\nprovider = \"p0\"\nupstream = \"{upstream}\"\n"
         );
-        if let Some(tokens) = operator {
-            toml_text.push_str(&format!("max_output_tokens = {tokens}\n"));
-        }
         let mut config: Config = toml::from_str(&toml_text).expect("valid test toml");
         config
             .aliases
@@ -459,7 +457,7 @@ mod fill_presence {
         });
         let mut model =
             ResolvedModel::new("m0", "p0", Arc::clone(&seat) as Arc<dyn Provider>, upstream);
-        if let Some(tokens) = operator {
+        if let Some(tokens) = stamped {
             model = model.with_max_output_tokens(tokens);
         }
         let models = crate::factory::apply_catalog_overlay(
@@ -532,24 +530,18 @@ mod fill_presence {
             ),
             ("anthropic-api, catalog", ANTHROPIC, CATALOGED, None, true),
             (
-                "anthropic-api, operator",
+                "anthropic-api, stamped",
                 ANTHROPIC,
                 CATALOGED,
                 Some(8000),
                 true,
             ),
             ("openai-compat, no override", OPENAI, "gpt-x", None, false),
-            (
-                "openai-compat, operator",
-                OPENAI,
-                "gpt-x",
-                Some(8000),
-                false,
-            ),
+            ("openai-compat, stamped", OPENAI, "gpt-x", Some(8000), false),
         ];
 
-        for (name, provider, upstream, operator, present) in rows {
-            let req = dispatched(provider, upstream, operator, None).await;
+        for (name, provider, upstream, stamped, present) in rows {
+            let req = dispatched(provider, upstream, stamped, None).await;
 
             assert_eq!(
                 super::super::FieldSurface::MaxTokens.present_in(&req),
@@ -570,13 +562,13 @@ mod fill_presence {
         };
         let rows = [
             ("invoke, catalog", bedrock("invoke"), None, true),
-            ("invoke, operator", bedrock("invoke"), Some(8000), true),
+            ("invoke, stamped", bedrock("invoke"), Some(8000), true),
             ("converse, catalog", bedrock("converse"), None, false),
-            ("converse, operator", bedrock("converse"), Some(8000), false),
+            ("converse, stamped", bedrock("converse"), Some(8000), false),
         ];
 
-        for (name, provider, operator, present) in rows {
-            let req = dispatched(&provider, OVERLAID_BEDROCK, operator, None).await;
+        for (name, provider, stamped, present) in rows {
+            let req = dispatched(&provider, OVERLAID_BEDROCK, stamped, None).await;
 
             assert_eq!(
                 super::super::FieldSurface::MaxTokens.present_in(&req),
@@ -596,18 +588,19 @@ mod fill_presence {
     }
 
     /// The fill reproduces the egress's own ladder: a client value, else the
-    /// operator's, else the catalog's, else the baseline, byte for byte.
+    /// model's stamped ceiling, else the catalog's, else the baseline, byte
+    /// for byte.
     #[tokio::test]
-    async fn the_anthropic_body_limit_is_the_operator_then_catalog_then_baseline_value() {
+    async fn the_anthropic_body_limit_is_the_stamped_then_catalog_then_baseline_value() {
         let rows = [
             ("client", CATALOGED, Some(8000), Some(1234), 1234),
-            ("operator", CATALOGED, Some(8000), None, 8000),
+            ("stamped", CATALOGED, Some(8000), None, 8000),
             ("catalog", CATALOGED, None, None, 128_000),
             ("baseline", "claude-unlisted", None, None, 64_000),
         ];
 
-        for (name, upstream, operator, client, sent) in rows {
-            let req = dispatched(ANTHROPIC, upstream, operator, client).await;
+        for (name, upstream, stamped, client, sent) in rows {
+            let req = dispatched(ANTHROPIC, upstream, stamped, client).await;
 
             assert_eq!(anthropic_body_limit(&req), json!(sent), "{name}");
         }
@@ -615,17 +608,17 @@ mod fill_presence {
 
     #[cfg(feature = "bedrock")]
     #[tokio::test]
-    async fn the_invoke_body_limit_is_the_operator_then_catalog_then_baseline_value() {
+    async fn the_invoke_body_limit_is_the_stamped_then_catalog_then_baseline_value() {
         use routectl_providers::bedrock::{BedrockApiShape, BedrockConfig, BedrockCreds};
         let provider = "kind = \"bedrock\"\nregion = \"us-east-1\"\ncreds = { kind = \"default-chain\" }\napi_shape = \"invoke\"\n";
         let rows = [
-            ("operator", OVERLAID_BEDROCK, Some(8000), 8000),
+            ("stamped", OVERLAID_BEDROCK, Some(8000), 8000),
             ("catalog", OVERLAID_BEDROCK, None, OVERLAID_CEILING),
             ("baseline", "anthropic.claude-unlisted-v1:0", None, 64_000),
         ];
 
-        for (name, upstream, operator, sent) in rows {
-            let req = dispatched(provider, upstream, operator, None).await;
+        for (name, upstream, stamped, sent) in rows {
+            let req = dispatched(provider, upstream, stamped, None).await;
             let cfg = BedrockConfig {
                 id: "bedrock:p0".into(),
                 region: "us-east-1".into(),
@@ -649,14 +642,14 @@ mod fill_presence {
     }
 
     /// Converse sends no limit the client did not, yet its legacy thinking
-    /// window still fits the operator's ceiling: the knob reaches the budget
+    /// window still fits the model's ceiling: the carrier reaches the budget
     /// with no fill marker on the request.
     ///
     /// Mutation check: zero the slot on an egress that does not fill
     /// `max_tokens` -> red (the window widens to the egress baseline).
     #[cfg(feature = "bedrock")]
     #[tokio::test]
-    async fn the_converse_thinking_budget_fits_the_operator_ceiling_with_no_client_limit() {
+    async fn the_converse_thinking_budget_fits_the_stamped_ceiling_with_no_client_limit() {
         use routectl_providers::bedrock::{BedrockApiShape, BedrockConfig, BedrockCreds};
         let provider = "kind = \"bedrock\"\nregion = \"us-east-1\"\ncreds = { kind = \"default-chain\" }\napi_shape = \"converse\"\n";
         let rows = [

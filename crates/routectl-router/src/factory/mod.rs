@@ -30,12 +30,11 @@ pub use validate::{
     ConfigValidation, MAX_POOL_MEMBERS, collect_config_validation, resolved_codex_version,
     validate_alias_chain_targets, validate_alias_patterns, validate_class_policy,
     validate_codex_version, validate_managed_anthropic_credential, validate_mitm_config,
-    validate_pools, validate_provider_credential_sources, validate_reasoning_defaults,
-    validate_registry_patterns,
+    validate_pools, validate_provider_credential_sources, validate_registry_patterns,
 };
 #[cfg(feature = "bedrock")]
 pub use validate_region::validate_aws_regions;
 pub use warnings::{
     class_policy_warnings, cloudcode_host_warnings, cloudcode_model_warnings,
-    codex_identity_warnings, per_block_breakpoint_warnings, unread_thinking_budget_warnings,
+    codex_identity_warnings, per_block_breakpoint_warnings,
 };

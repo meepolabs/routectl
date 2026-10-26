@@ -56,52 +56,42 @@ creds     = { kind = "profile", name = "routectl-cell" }
 [models.invoke-claude-haiku-5-5]
 provider = "bedrock"
 upstream = "us.anthropic.claude-haiku-5-5"
-supports_adaptive_thinking = true
 
 [models.invoke-claude-sonnet-5-5]
 provider = "bedrock"
 upstream = "us.anthropic.claude-sonnet-5-5"
-supports_adaptive_thinking = true
 
 [models.invoke-claude-opus-5-5]
 provider = "bedrock"
 upstream = "us.anthropic.claude-opus-5-5"
-supports_adaptive_thinking = true
 
 [models.invoke-claude-fable-5-1]
 provider = "bedrock"
 upstream = "us.anthropic.claude-fable-5-1"
-supports_adaptive_thinking = true
 
 [models.invoke-claude-mythos-5-1]
 provider = "bedrock"
 upstream = "us.anthropic.claude-mythos-5-1"
-supports_adaptive_thinking = true
 
 [models.invoke-claude-opus-5]
 provider = "bedrock"
 upstream = "us.anthropic.claude-opus-5"
-supports_adaptive_thinking = true
 
 [models.invoke-claude-sonnet-5]
 provider = "bedrock"
 upstream = "us.anthropic.claude-sonnet-5"
-supports_adaptive_thinking = true
 
 [models.invoke-claude-fable-5]
 provider = "bedrock"
 upstream = "us.anthropic.claude-fable-5"
-supports_adaptive_thinking = true
 
 [models.invoke-claude-opus-4-8]
 provider = "bedrock"
 upstream = "us.anthropic.claude-opus-4-8"
-supports_adaptive_thinking = true
 
 [models.invoke-claude-opus-4-7]
 provider = "bedrock"
 upstream = "us.anthropic.claude-opus-4-7"
-supports_adaptive_thinking = true
 
 [models.invoke-claude-opus-4-6]
 provider = "bedrock"
@@ -130,22 +120,18 @@ upstream = "us.anthropic.claude-opus-4-1-20250805-v1:0"
 [models.invoke-claude-fable-5-global]
 provider = "bedrock"
 upstream = "global.anthropic.claude-fable-5"
-supports_adaptive_thinking = true
 
 [models.invoke-claude-opus-5-5-global]
 provider = "bedrock"
 upstream = "global.anthropic.claude-opus-5-5"
-supports_adaptive_thinking = true
 
 [models.invoke-claude-opus-4-8-global]
 provider = "bedrock"
 upstream = "global.anthropic.claude-opus-4-8"
-supports_adaptive_thinking = true
 
 [models.invoke-claude-sonnet-5-5-global]
 provider = "bedrock"
 upstream = "global.anthropic.claude-sonnet-5-5"
-supports_adaptive_thinking = true
 
 [models.invoke-claude-haiku-4-5-global]
 provider = "bedrock"

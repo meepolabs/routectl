@@ -180,7 +180,12 @@ pub(crate) use self::served::{GatherSources, ParkedSeat, ResidentLearned, Served
 /// (`%APPDATA%\routectl`, then `~/Library/Application Support/routectl`)
 /// that still holds files (named, at most eight, plus a count of the rest) or
 /// could not be inspected.
-const SCHEMA_VERSION: u32 = 20;
+///
+/// v20 -> v21: the `knobs` section loses its config state (the output ceiling
+/// is no longer a `[models.X]` setting): every row is the catalog fill or the
+/// egress baseline, and the catalog row's detail names
+/// `routectl catalog set ... max_output_tokens` as the way to correct it.
+const SCHEMA_VERSION: u32 = 21;
 
 /// A section-producer: pure mapping of the read-only [`DoctorContext`] to a
 /// section's findings.
@@ -379,15 +384,12 @@ struct KnobRow {
     source: OutputCeilingSource,
 }
 
-/// The three states a [`KnobRow`] can report, in the precedence order the
-/// dispatch path resolves them: config wins, else the catalog fill, else the
-/// Anthropic-shape egress's own hardcoded baseline.
+/// The two states a [`KnobRow`] can report, in the precedence order the
+/// factory resolves them: the catalog fill, else the Anthropic-shape egress's
+/// own hardcoded baseline. A learned ceiling lowers either at dispatch.
 enum OutputCeilingSource {
-    /// The operator wrote `[models.X] max_output_tokens`; the catalog never
-    /// touches it.
-    Config(u32),
-    /// The config left the ceiling unset and the model's resolved catalog cell
-    /// confirmed one, so the factory filled it.
+    /// The model's resolved catalog cell confirmed a ceiling, so the factory
+    /// filled it.
     Catalog(u32),
     /// Neither layer supplies a ceiling: the Anthropic-shape egresses fall
     /// through to their hardcoded baseline and every other egress forwards

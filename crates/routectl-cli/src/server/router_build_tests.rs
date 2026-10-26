@@ -130,7 +130,7 @@ async fn no_captured_startup_line_carries_control_bytes_from_operator_keys() {
          [models.\"evil\\nmodel\\u001B[31m\"]\n\
          provider = \"evil\\nkey\\u001B[31m\"\n\
          upstream = \"some-upstream\"\n\
-         max_output_tokens = 0\n",
+         stream_first_byte_timeout_ms = 0\n",
     )
     .expect("config must parse");
     let _usage_dir = isolate_usage_db(&mut config);

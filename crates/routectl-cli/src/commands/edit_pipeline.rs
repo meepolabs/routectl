@@ -163,7 +163,7 @@ mod tests {
         let at = |version: u32, body: &str| format!("version = {version}\n{body}");
         let current = CURRENT_CONFIG_VERSION;
         type ClassMatcher = fn(&Refusal) -> bool;
-        let rows: [(&str, String, ClassMatcher); 5] = [
+        let rows: [(&str, String, ClassMatcher); 6] = [
             ("too old", at(current - 1, ""), |e| {
                 matches!(e, Refusal::Version(_))
             }),
@@ -182,6 +182,11 @@ mod tests {
                 "paid probe caps",
                 at(current, "[fidelity.paid_probe_daily_caps]\nx = 1\n"),
                 |e| matches!(e, Refusal::RemovedPaidProbeCaps(_)),
+            ),
+            (
+                "removed model key",
+                at(current, "[models.m]\nmax_output_tokens = 8000\n"),
+                |e| matches!(e, Refusal::RetiredModelKnobs(_)),
             ),
         ];
 

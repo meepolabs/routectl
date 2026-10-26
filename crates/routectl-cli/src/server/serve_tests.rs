@@ -1001,8 +1001,8 @@ async fn a_refused_mitm_boot_never_opens_the_usage_ledger() {
 }
 
 /// A config with one anthropic-api provider and one model per nickname, each on
-/// a Claude upstream the baked catalog confirms a ceiling for and none setting
-/// `max_output_tokens` -- so every model is a catalog fill.
+/// a Claude upstream the baked catalog confirms a ceiling for -- so every model
+/// is a catalog fill.
 #[cfg(test)]
 fn config_with_ceiling_filled_models(nicknames: &[String]) -> Config {
     use routectl_router::{ModelEntry, ProviderEntry};

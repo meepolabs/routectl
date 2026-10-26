@@ -236,31 +236,6 @@ max_body_bytes = 67108864
     assert_eq!(cfg.server.max_body_bytes, 67_108_864);
 }
 
-/// Per-model `max_output_tokens` defaults to None when omitted and
-/// round-trips when set.
-#[test]
-fn model_entry_max_output_tokens_round_trip() {
-    use crate::config::Config;
-    let toml_text = r#"
-[models.opus4]
-provider = "anthropic"
-upstream = "claude-opus-4"
-max_output_tokens = 32000
-"#;
-    let cfg: Config = toml::from_str(toml_text).expect("parse");
-    let m = cfg.models.get("opus4").expect("entry");
-    assert_eq!(m.max_output_tokens, Some(32000));
-
-    let toml_default = r#"
-[models.haiku]
-provider = "anthropic"
-upstream = "claude-haiku-4-5"
-"#;
-    let cfg: Config = toml::from_str(toml_default).expect("parse");
-    let m = cfg.models.get("haiku").expect("entry");
-    assert!(m.max_output_tokens.is_none(), "default must be None");
-}
-
 /// A typo on the per-model `max_output_tokens` knob surfaces at
 /// parse time (the per-model table opts into `deny_unknown_fields`).
 #[test]

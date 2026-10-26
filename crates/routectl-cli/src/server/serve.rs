@@ -115,16 +115,16 @@ fn in_use_catalog_selectors(config: &Config) -> Vec<(String, String)> {
 }
 
 /// Emit ONE aggregate startup line naming the models whose outbound
-/// output-token ceiling came from the catalog rather than from config, so an
-/// operator can see a figure they did not write before it shows up on the wire.
+/// output-token ceiling came from the catalog, so an operator can see the
+/// figure before it shows up on the wire.
 ///
 /// Emitted here rather than inside `apply_catalog_overlay` on purpose: that
 /// function also runs on every hot reload and in a great many unit tests, so a
 /// line there would be reload noise and test log spam. This is a startup-only
 /// observation of the table that is about to go live.
 ///
-/// Silent when nothing was filled -- the common case for a config that sets
-/// every ceiling, and for one whose models resolve no catalog ceiling at all.
+/// Silent when nothing was filled -- a config whose models resolve no catalog
+/// ceiling at all.
 ///
 /// The list is BOUNDED: a config with hundreds of models must not turn one
 /// startup line into a scrolling wall, so the line names the first
@@ -147,8 +147,7 @@ fn log_catalog_filled_output_ceilings(router: &routectl_router::Router) {
     tracing::info!(
         filled_count = filled.len(),
         models = %listed,
-        "output-token ceilings filled from the catalog for {} model(s) that set no \
-         [models.X] max_output_tokens: {listed}{}",
+        "output-token ceilings filled from the catalog for {} model(s): {listed}{}",
         filled.len(),
         if filled.len() > MAX_LISTED_FILLED_CEILINGS {
             " (list truncated)"

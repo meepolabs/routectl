@@ -9,7 +9,9 @@
 //!   - `nickname`, `provider_name`, `provider`, `upstream`: identity
 //!     + transport (see field docs for details).
 //!   - `supports_adaptive_thinking`, `effort_levels`, `max_thinking_budget`:
-//!     per-model capability knobs projected from `[models.X]`.
+//!     relay slots no config key sets any more; they hold their defaults.
+//!   - `max_output_tokens`: the output ceiling carrier (catalog prior,
+//!     learned ceiling at dispatch).
 //!   - `reasoning_dialect` / `history_reasoning`: per-model
 //!     openai-compat knobs (v0.6.0 moved off `[providers.X]`).
 //!   - `header_extras` / `payload_extras`: per-model overlays merged
@@ -53,18 +55,18 @@ pub struct ResolvedModel {
     pub upstream: String,
     /// Whether the model supports adaptive (extended) thinking. When
     /// true, the egress may use `budget_tokens` to cap thinking tokens
-    /// instead of a flat enable/disable toggle. Projected from
-    /// `[models.X] supports_adaptive_thinking`.
+    /// instead of a flat enable/disable toggle. No config key sets it; it
+    /// holds `false`.
     pub supports_adaptive_thinking: bool,
     /// Operator-declared effort levels for this model (e.g.
-    /// `["minimal", "low", "medium", "high"]`). Projected from
-    /// `[models.X] effort_levels`. Empty when not configured.
+    /// `["minimal", "low", "medium", "high"]`). No config key sets it; it
+    /// holds the empty (pass-through) list.
     ///
     /// `Arc<[String]>` so cloning at dispatch time is a refcount bump
     /// rather than a heap allocation.
     pub effort_levels: Arc<[String]>,
-    /// Maximum thinking budget in tokens. `0` means no explicit cap
-    /// configured. Projected from `[models.X] max_thinking_budget`.
+    /// Maximum thinking budget in tokens. `0` means no cap. No config key
+    /// sets it; it holds `0`.
     pub max_thinking_budget: u32,
     /// Per-model openai-compat reasoning dialect (v0.6.0 moved off
     /// `[providers.X]`). `None` means fall back to the provider's
@@ -84,12 +86,12 @@ pub struct ResolvedModel {
     /// Per-model first-content timeout for streaming responses. Wins
     /// over per-provider + global tiers when set.
     pub stream_first_byte_timeout_ms: Option<u64>,
-    /// Operator-declared per-model ceiling for the `max_tokens` value
-    /// the Anthropic-shape egresses (anthropic-api, bedrock-invoke)
-    /// inject on omitted-by-caller requests. `0` is the sentinel for
-    /// "no model override" -- the egress then falls through to its
-    /// hardcoded 64000 baseline. Projected from
-    /// `[models.X] max_output_tokens`.
+    /// Per-model ceiling for the `max_tokens` value the Anthropic-shape
+    /// egresses (anthropic-api, bedrock-invoke) inject on omitted-by-caller
+    /// requests: the catalog prior, filled by
+    /// `factory::apply_catalog_overlay`; a learned ceiling lowers it at
+    /// dispatch. `0` is the sentinel for "no ceiling known" -- the egress
+    /// then falls through to its hardcoded 64000 baseline.
     pub max_output_tokens: u32,
     /// Operator-declared label echoed back in the response `model`
     /// field. `None` makes the response echo the client's requested
@@ -218,7 +220,7 @@ impl ResolvedModel {
     }
 
     /// Set the per-model `max_output_tokens` ceiling. `0` is the
-    /// sentinel for "no model override" -- the consuming Anthropic-
+    /// sentinel for "no ceiling known" -- the consuming Anthropic-
     /// shape egresses fall through to their hardcoded 64000 baseline.
     pub const fn with_max_output_tokens(mut self, tokens: u32) -> Self {
         self.max_output_tokens = tokens;

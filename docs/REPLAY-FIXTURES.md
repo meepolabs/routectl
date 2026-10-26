@@ -721,9 +721,10 @@ reason that was not a bug.
 Two knobs are reconstructed differently because their derivability
 differs:
 
-- `supports_adaptive_thinking` IS derivable per fixture. Production makes
-  it an explicit `[models.X]` opt-in (Anthropic's adaptive rollout has no
-  clean naming pattern), but the adaptive generation rejects the legacy
+- `supports_adaptive_thinking` IS derivable per fixture. Fixtures predating
+  the removal of the `[models.X]` key were captured under it (Anthropic's
+  adaptive rollout has no clean naming pattern), and the adaptive
+  generation rejects the legacy
   `thinking.type=enabled` shape with a 400, and the capture rig only emits
   a fixture for a request whose trace shows a successful upstream
   response. A fixture on an adaptive-generation model was therefore
@@ -781,9 +782,8 @@ fixture's outcome is whether anything outside `messages[]` diverges:
 - **`output_config`** -- captured bodies carrying
   `output_config: {"effort": "xhigh"}` alongside
   `thinking: {"type": "disabled"}`. The egress forwards a client's
-  `output_config.effort` as sent beside any thinking type, re-clamping it
-  only against an explicit, non-empty `effort_levels`
-  (`reconcile_output_config_effort`), so it emits that pairing. A replay
+  `output_config.effort` as sent beside any thinking type, so it emits
+  that pairing. A replay
   divergence here is a replay-path or enrichment gap, not an effort rule.
 
 The 115 failures are the fixtures that carry a `model` or `output_config`

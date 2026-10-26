@@ -989,6 +989,70 @@ mod converse_ceiling {
         );
     }
 
+    /// Converse forwards an omitted `max_tokens`: an acting learned ceiling on
+    /// the lane lowers a client value above it but never makes an omitted limit
+    /// appear on the wire. The client request after it is the positive
+    /// control, proving the ceiling acts on this lane.
+    ///
+    /// Mutation check: make `emitted_max_tokens` answer the slot or the
+    /// baseline when the egress does not fill (the `(None, false, _)` arm) ->
+    /// red (pre-flight writes a limit the client never sent).
+    #[tokio::test]
+    async fn an_acting_learned_ceiling_never_adds_a_limit_to_an_omitted_converse_request() {
+        // Arrange: learn the ceiling and acknowledge it, so it acts.
+        let seat = ConverseSeat::new(Seat::CapsThenServes);
+        let router = converse_router(&[&seat]);
+        let (meta, served) = dispatch(&router, false, client_req(CLIENT_MAX_TOKENS)).await;
+        assert!(served, "premise: the repair served");
+        let event = meta.learned_capabilities[0].clone();
+        assert!(
+            router.acknowledge_durable_field_confirmation(
+                &event.state_key,
+                &event.capability_key,
+                &event.provider_kind,
+                event.persistence_generation,
+                event.incarnation,
+                event.observations,
+            ),
+            "premise: the durable write acknowledges the confirmation",
+        );
+        let mut omitted = client_req(CLIENT_MAX_TOKENS);
+        omitted.max_tokens = None;
+        omitted.routectl_internal.ingress_wire = None;
+
+        // Act
+        let (omitted_meta, omitted_served) = dispatch(&router, false, omitted).await;
+        let (control_meta, control_served) =
+            dispatch(&router, false, client_req(CLIENT_MAX_TOKENS)).await;
+
+        // Assert
+        assert!(omitted_served && control_served);
+        let bodies = seat.bodies();
+        assert_eq!(bodies.len(), 4, "one attempt each after the learning pair");
+        assert!(
+            bodies[2]["inferenceConfig"].get("maxTokens").is_none(),
+            "an omitted limit stays omitted: {}",
+            bodies[2]["inferenceConfig"],
+        );
+        assert!(omitted_meta.field_repairs.is_empty());
+        assert!(
+            !omitted_meta
+                .field_preflight
+                .iter()
+                .any(|record| record.field_path == Some("max_tokens") && record.acted),
+            "no pre-flight ceiling acts on an omitted limit",
+        );
+        assert_eq!(
+            bodies[3]["inferenceConfig"]["maxTokens"],
+            json!(NAMED_LIMIT),
+            "control: the learned ceiling lowers a client value before sending",
+        );
+        assert!(
+            control_meta.field_repairs.is_empty(),
+            "control: no refusal first"
+        );
+    }
+
     #[tokio::test]
     async fn a_ceiling_refusal_after_streamed_content_is_not_repaired() {
         let seat = ConverseSeat::new(Seat::StreamsThenRefuses);

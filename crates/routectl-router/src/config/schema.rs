@@ -856,7 +856,7 @@ pub struct RegistryEntry {
 /// on every provider variant; the dispatch layer merges them per
 /// request (model wins on key collision; see `Router` merge helpers).
 ///
-/// PER-MODEL KNOB RELAY (read before adding a knob here).
+/// PER-MODEL VALUE RELAY (read before adding a per-model value here).
 /// A per-model value the egress reads passes through FOUR struct
 /// definitions, each a deliberate layer, not a redundant copy:
 ///
@@ -864,7 +864,7 @@ pub struct RegistryEntry {
 ///      deserialization target; `#[serde(deny_unknown_fields)]`.
 ///   2. `crate::resolved::ResolvedModel`   -- startup-resolved per
 ///      nickname; adds the `Arc<dyn Provider>` and may transform the
-///      type (e.g. `Vec<String>` -> `Arc<[String]>` for `effort_levels`).
+///      type.
 ///   3. `crate::router::DispatchTarget`    -- per-request dispatch hop;
 ///      adds `state_key`, makes `provider` optional.
 ///   4. `routectl_core::RoutectlInternal`  -- the transport-internal
@@ -872,11 +872,10 @@ pub struct RegistryEntry {
 ///      `apply_layered_overlays` (router.rs) copies it from the
 ///      `DispatchTarget`.
 ///
-/// Verbatim pass-through fields (`supports_adaptive_thinking`,
-/// `effort_levels`, `max_thinking_budget`, `max_output_tokens`) are
-/// relayed unchanged at each hop -- adding one means editing all four
-/// definitions plus the `factory.rs` `ModelEntry` -> `ResolvedModel`
-/// mapping and the `apply_layered_overlays` copy. The hop is the price
+/// The output-token ceiling is NOT configured here: `ResolvedModel`'s
+/// `max_output_tokens` carries the catalog prior (filled by
+/// `factory::apply_catalog_overlay`), and a learned ceiling lowers what
+/// the egress sends at dispatch. The hop is the price
 /// of the config-crate (TOML serde shape) / core-crate (wire-internal)
 /// separation: `reasoning_dialect` / `history_reasoning` even change
 /// type at the core boundary (config-side enum -> `Core*` enum via the
@@ -905,38 +904,6 @@ pub struct ModelEntry {
     /// references one.
     #[serde(default = "default_true")]
     pub selectable: bool,
-
-    /// Whether this model supports the Anthropic adaptive thinking shape
-    /// (Opus 4.7+). Projected via apply_layered_overlays into
-    /// RoutectlInternal.supports_adaptive_thinking; the AnthropicApi
-    /// egress reads it at request time. `false` (the default) uses the
-    /// standard fixed-budget shape or no thinking at all.
-    #[serde(default)]
-    pub supports_adaptive_thinking: bool,
-
-    /// Ordered list of effort levels the operator declares this model
-    /// accepts. Validated at startup: every element must be one of
-    /// `minimal`, `low`, `medium`, `high`, `xhigh`, `max` (the union
-    /// of the Anthropic-shape vocabulary and the OpenAI-shape
-    /// vocabulary; individual egresses clamp to their own subset).
-    ///
-    /// An empty list means pass-through -- the egress emits whatever
-    /// effort the caller supplied without operator-side filtering. A
-    /// non-empty list clamps the caller's effort to the nearest declared
-    /// level. A caller effort of `none` (reasoning off) is never clamped
-    /// to a positive level.
-    ///
-    /// Default: empty (pass-through).
-    #[serde(default = "default_effort_levels")]
-    pub effort_levels: Vec<String>,
-
-    /// Maximum thinking-token budget the operator allows for this
-    /// model, in tokens. `0` (the default) means no operator cap --
-    /// the egress uses whatever budget the caller requested or its own
-    /// default. Non-zero values are forwarded as the ceiling for the
-    /// egress budget negotiation.
-    #[serde(default)]
-    pub max_thinking_budget: u32,
 
     /// Per-model openai-compat reasoning dialect. Lives ONLY on
     /// `[models.X]` (no provider fallback) -- v0.6.0 moved the field
@@ -993,24 +960,6 @@ pub struct ModelEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_first_byte_timeout_ms: Option<u64>,
 
-    /// Operator-declared per-model ceiling on the `max_tokens` value
-    /// the Anthropic-shape egresses (anthropic-api, bedrock-invoke)
-    /// inject when the caller omits the field. `None` (the default)
-    /// falls through to the hardcoded baseline of 64000.
-    ///
-    /// Set this for models whose upstream-documented ceiling is below
-    /// the baseline to avoid a 400 on the upstream's per-model
-    /// validation. Examples: Anthropic Opus 4 / 4.1 (32000), Sonnet 3.5
-    /// (8000), DeepSeek V3 anthropic-api surface (8000). See
-    /// docs/CONFIGURATION.md.
-    ///
-    /// Only consumed by Anthropic-shape egresses (anthropic-api +
-    /// bedrock-invoke); openai-compat, openai-responses, and
-    /// bedrock-converse forward omission cleanly (good-translator
-    /// principle: do not inject where the upstream already handles it).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_output_tokens: Option<u32>,
-
     /// Operator-declared label echoed back in the response `model`
     /// field for this model. `None` (the default) makes the response
     /// echo the client's requested alias (`req.model`); `Some(label)`
@@ -1039,44 +988,16 @@ impl ModelEntry {
             provider: provider.into(),
             upstream: upstream.into(),
             selectable: true,
-            supports_adaptive_thinking: false,
-            effort_levels: default_effort_levels(),
-            max_thinking_budget: 0,
             reasoning_dialect: None,
             history_reasoning: None,
             additional_request_fields: None,
             header_extras: BTreeMap::new(),
             payload_extras: None,
             stream_first_byte_timeout_ms: None,
-            max_output_tokens: None,
             reported_model: None,
             visible_routectl_provider: true,
         }
     }
-    /// Set whether this model supports the Anthropic adaptive thinking
-    /// shape. Projected via apply_layered_overlays into
-    /// RoutectlInternal.supports_adaptive_thinking; the AnthropicApi
-    /// egress reads it at request time.
-    pub const fn with_supports_adaptive_thinking(mut self, b: bool) -> Self {
-        self.supports_adaptive_thinking = b;
-        self
-    }
-
-    /// Set the operator-declared effort-level allowlist for this model.
-    /// An empty vec means pass-through. Elements are validated at startup
-    /// by `validate_reasoning_defaults`.
-    pub fn with_effort_levels(mut self, levels: Vec<String>) -> Self {
-        self.effort_levels = levels;
-        self
-    }
-
-    /// Set the maximum thinking-token budget cap for this model.
-    /// `0` means no operator cap.
-    pub const fn with_max_thinking_budget(mut self, budget: u32) -> Self {
-        self.max_thinking_budget = budget;
-        self
-    }
-
     /// Set the reasoning dialect that governs how thinking is expressed on the wire.
     pub const fn with_reasoning_dialect(mut self, d: ReasoningDialect) -> Self {
         self.reasoning_dialect = Some(d);
@@ -1120,21 +1041,6 @@ impl ModelEntry {
         self
     }
 
-    /// Set the per-model `max_output_tokens` ceiling consumed by
-    /// Anthropic-shape egresses (anthropic-api, bedrock-invoke) when
-    /// the caller omits `max_tokens`. `None` falls through to the
-    /// hardcoded baseline of 64000. A value of 0 is operator error
-    /// (the egress would produce a body the upstream 400s); flagged
-    /// in debug builds.
-    pub fn with_max_output_tokens(mut self, tokens: u32) -> Self {
-        debug_assert!(
-            tokens > 0,
-            "max_output_tokens must be > 0; 0 would 400 every anthropic-api request",
-        );
-        self.max_output_tokens = Some(tokens);
-        self
-    }
-
     /// Set the client-visible label echoed in the response `model`
     /// field. Free-form string; an empty string is treated as unset
     /// at stamp time (falls through to the client's requested alias).
@@ -1154,13 +1060,6 @@ impl ModelEntry {
 
 const fn default_true() -> bool {
     true
-}
-
-/// Default effort-level allowlist for a model entry: empty, so the
-/// caller's effort reaches the upstream unclamped. Operators declare a
-/// list only for a model that rejects some levels.
-const fn default_effort_levels() -> Vec<String> {
-    Vec::new()
 }
 
 /// Value of one entry in the `[aliases]` table. Either a single model
