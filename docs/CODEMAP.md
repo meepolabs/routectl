@@ -1627,7 +1627,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   migrate`, never mutated on load) rather than a confusing unknown-field
   error; `validate_cache_pricing_retired` rejects a non-empty
   `[cache_pricing]` at v2+ as a hand-edited inconsistency.
-  `preflight_raw_config(raw_toml)` -> `RawConfigPreflightError`
+  `preflight_raw_config(raw_toml) -> Result<(), RawConfigPreflightError>`
   (`#[non_exhaustive]`, `Display` is the wrapped check's own message) is THE
   public raw-text driver every caller runs once, first refusal wins, in a
   fixed order: version, then the removed `[mitm] credential_source` key
@@ -8893,8 +8893,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   SSE events (asserts terminal-event ordering)
 - `tests/replay_egress.rs` -- replay-driven egress contract test; walks
   `tests/fixtures/captured/`, parses each captured ingress request through the
-  adapter named by `meta.ingress_kind`, reapplies the per-model router
-  enrichment, drives it through the matching egress provider's
+  adapter named by `meta.ingress_kind`, drives the canonical request
+  directly through the matching egress provider's
   `normalize_request`, and structurally diffs the upstream-bound body against
   the on-disk `outgoing_request.json` (anthropic / openai-compat /
   openai-responses). Failures report path + kind + value SHAPE only; a fixture
