@@ -19,8 +19,8 @@ once; jump to the doc that matches your task.
   the lossless cache-safe context-reduction primitive
   (`context_reduction.rs`)
 - `routectl-providers` -- concrete provider impls (`openai_compat`,
-  `anthropic_api`, `bedrock`, `openai_responses`, `gemini`) plus the per-model
-  quirks table (`model_profile.rs`), the per-dialect reasoning
+  `anthropic_api`, `bedrock`, `openai_responses`, `gemini`) plus the OpenAI
+  chat-lane shape rule (`model_profile.rs`), the per-dialect reasoning
   files (`openai_compat/dialects/*.rs`), and the shared
   `effort.rs` / `header_trace.rs` helpers
 - `routectl-router` -- alias resolution, fallback chain, retry

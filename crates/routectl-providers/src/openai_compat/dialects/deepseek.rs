@@ -337,7 +337,7 @@ mod tests {
     }
 
     // effort:"none" is reasoning-OFF: no reasoning_effort may reach the wire,
-    // and it must NOT be clamped up to the lowest supported level.
+    // and it must NOT be replaced by a positive level.
     #[test]
     fn none_effort_omits_reasoning_effort() {
         // Arrange: effort "none", nothing else set.

@@ -711,9 +711,10 @@ Surfaces: [openai-compat](#openai-compat-surface) -
   from the client's `max_tokens` alone (`build_inference_config` in
   `bedrock/converse/request.rs`) and sends none when the client sent
   none, so only a client value is ever clamped there, and the clamp is
-  lossy. The per-model ceiling slot still sizes the legacy thinking
-  budget in the bag
-  (`the_converse_thinking_budget_fits_the_operator_ceiling_with_no_client_limit`).
+  lossy. The output ceiling stamped on the request (the catalog prior,
+  lowered by a learned ceiling) still sizes the legacy thinking budget
+  in the bag
+  (`the_converse_thinking_budget_fits_the_stamped_ceiling_with_no_client_limit`).
   The grounding envelopes are
   `crates/routectl-router/tests/fixtures/rejections/bedrock/temperature-field-unsupported.json`
   and `max-tokens-above-model-limit.json` beside it. Invoke's refusal is

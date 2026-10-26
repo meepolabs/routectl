@@ -431,7 +431,7 @@ fn lower_reasoning_details_to_text(details: &Value, provider_id: &str) -> String
 
 /// Set of OpenAI/DeepSeek-style request fields that reasoning-only
 /// models reject. Applied via [`drop_sampling_params`].
-pub(super) const SAMPLING_DROP: &[&str] = &[
+pub(in crate::openai_compat) const SAMPLING_DROP: &[&str] = &[
     "temperature",
     "top_p",
     "presence_penalty",
@@ -656,7 +656,7 @@ mod tests {
 
     /// `effort: "none"` is reasoning-OFF: no effort is derived, so the
     /// DeepSeek/vLLM egresses emit no `reasoning_effort` at all rather than
-    /// clamping "none" up to the lowest supported level.
+    /// sending a positive level in its place.
     #[test]
     fn derive_reasoning_effort_none_when_effort_is_none_token() {
         use routectl_core::{ChatRequest, ReasoningConfig};

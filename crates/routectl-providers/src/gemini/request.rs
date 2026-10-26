@@ -2764,6 +2764,25 @@ mod tests {
         );
     }
 
+    #[test]
+    fn generation_config_omits_max_output_tokens_the_client_did_not_send() {
+        let mut req = ChatRequest {
+            model: "gemini-2.5-pro".into(),
+            messages: vec![make_user("hi")].into(),
+            temperature: Some(0.7),
+            ..Default::default()
+        };
+        req.routectl_internal.max_output_tokens = 8192;
+
+        let gc = translate("gemini:test", &req)
+            .expect("translate ok")
+            .generation_config
+            .expect("generation_config");
+
+        assert_eq!(gc.temperature, Some(0.7));
+        assert_eq!(gc.max_output_tokens, None);
+    }
+
     fn req_with_reasoning(r: routectl_core::ReasoningConfig) -> ChatRequest {
         ChatRequest {
             model: "gemini-2.5-pro".into(),

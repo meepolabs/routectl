@@ -1955,10 +1955,8 @@ pub struct CountedTokens {
 /// literal (legacy path). The dispatch loop reads from this struct
 /// directly so the per-mode resolver only runs once per request.
 ///
-/// Hop 3 of 4 in the per-model knob relay -- see the `PER-MODEL KNOB
-/// RELAY` note on `crate::config::ModelEntry` before adding a field
-/// that the egress reads. `apply_layered_overlays` (this file) copies
-/// the verbatim pass-through fields onto `RoutectlInternal` (hop 4).
+/// `apply_layered_overlays` (`overlays.rs`) copies the fields the egress
+/// reads from here onto `RoutectlInternal` on every attempt.
 #[derive(Clone)]
 struct DispatchTarget {
     /// Operator-facing provider name (a key in `[providers]`).

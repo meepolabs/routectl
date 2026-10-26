@@ -457,7 +457,7 @@ mod tests {
     // A contradictory canonical request -- effort:"none" alongside
     // enabled:true -- must resolve to OFF. The explicit "none" is the disable
     // intent; letting enabled:true win would ship enable_thinking=true while
-    // the clamp omits reasoning_effort, billing the caller for declined
+    // reasoning_effort is omitted, billing the caller for declined
     // thinking.
     #[test]
     fn none_effort_beats_enabled_true() {

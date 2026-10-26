@@ -55,7 +55,7 @@ Resolution priority:
 - `stream_first_byte_timeout_ms`: `[models.X]` > `[providers.X]` > `[retry]` > unset (no cap)
 - `request_timeout_ms`: `[providers.X]` > `[retry]` > unset (no per-model tier)
 
-**Why opt-in per model, not auto-detect by name:** Anthropic's adaptive-thinking rollout has no clean naming pattern, so a TOML opt-in is more reliable than a regex match.
+**No model setting for adaptive thinking:** routectl forwards the client's thinking shape and learns per lane which shape a model takes, so no `[models.X]` key is needed.
 
 ### DeepSeek v4 / v4.1 (api.deepseek.com, example-deepseek-host, NIM, vLLM-hosted, anywhere)
 

@@ -188,9 +188,9 @@ pub struct ChatRequest {
     /// invisible to TOML/JSON.
     ///
     /// Despite the "transport-internal" framing, this also ferries
-    /// resolved per-model CONFIG values (the openai-compat
-    /// reasoning_dialect + history_reasoning, merged header_extras, the
-    /// adaptive-thinking flag, etc.) -- not just opaque transport state.
+    /// resolved per-model values (the openai-compat reasoning_dialect +
+    /// history_reasoning, merged header_extras, the output ceiling) -- not
+    /// just opaque transport state.
     /// The router populates it from `ResolvedModel` right before calling
     /// `provider.complete(req)` / `provider.stream(req)` so the
     /// `Provider` trait signature stays stable across all five concrete
@@ -244,27 +244,25 @@ pub struct ResponsesPassthroughItem {
     pub item: Value,
 }
 
-/// Transport-internal carrier for resolved-model knobs the dispatch
+/// Transport-internal carrier for resolved-model values the dispatch
 /// layer hands to the egress without bouncing through the wire. In
-/// practice it carries resolved per-model CONFIG values (reasoning
-/// dialect, history-reasoning policy, merged header_extras,
-/// adaptive-thinking flag) alongside any pure-transport state. See
+/// practice it carries resolved per-model values (reasoning dialect,
+/// history-reasoning policy, merged header_extras, the output ceiling)
+/// alongside any pure-transport state. See
 /// `ChatRequest::routectl_internal` for the contract.
 ///
-/// Hop 4 (final) of the per-model knob relay: a `[models.X]` value
-/// reaches the egress here after passing through `ModelEntry` ->
-/// `ResolvedModel` -> `DispatchTarget` in the `routectl-router` crate.
-/// The router's `apply_layered_overlays` populates these fields right
-/// before dispatch. Adding a knob the egress reads means editing all
-/// four definitions; the relay exists because this crate (wire-
-/// internal) and the config crate (TOML serde shape) stay decoupled,
-/// and `reasoning_dialect` / `history_reasoning` even change enum type
-/// at this boundary. The egress reads each field directly off this
+/// The router's `apply_layered_overlays` rebuilds this carrier from
+/// `Default` on every attempt, right before dispatch, carrying the
+/// ingress-captured fields across. `max_output_tokens` is not a
+/// `[models.X]` setting: it is the catalog prior, lowered by a learned
+/// ceiling at dispatch. The egress reads each field directly off this
 /// struct, so the fields are flat (no shared sub-struct) by design.
 ///
-/// Every field is `Option` so an egress can fall back to its own
-/// `self.cfg.*` value when the carrier is empty (library consumers
-/// constructing a `ChatRequest` directly never set the carrier).
+/// Library consumers constructing a `ChatRequest` directly never set the
+/// carrier, so every field must read its `Default` value as "not
+/// resolved": an `Option` is `None` (the egress falls back to its own
+/// `self.cfg.*` value), a collection is empty, a flag is false, and
+/// `max_output_tokens` is the `0` sentinel.
 ///
 /// The whole carrier is `#[serde(skip)]` on `ChatRequest`, so NO field
 /// here ever reaches a wire, a config file, or a persisted body -- that

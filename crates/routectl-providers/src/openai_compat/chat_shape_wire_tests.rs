@@ -6,9 +6,17 @@ use routectl_core::wire_check::{EditKind, EditSite, Leg, WireTap};
 use routectl_core::{ChatRequest, Message, MessageContent, Provider, Role};
 use serde_json::{Value, json};
 
+use super::dialects::util::SAMPLING_DROP;
 use super::{HistoryReasoning, OpenAiCompatConfig, OpenAiCompatProvider, ReasoningDialect};
 
-const SAMPLING_KEYS: [&str; 2] = ["temperature", "top_p"];
+const SAMPLING_KEYS: [&str; 6] = [
+    "temperature",
+    "top_p",
+    "presence_penalty",
+    "frequency_penalty",
+    "logprobs",
+    "top_logprobs",
+];
 
 fn provider(dialect: ReasoningDialect) -> OpenAiCompatProvider {
     OpenAiCompatProvider::new(OpenAiCompatConfig {
@@ -42,6 +50,10 @@ fn sampled_request(model: &str) -> ChatRequest {
         .into(),
         temperature: Some(0.5),
         top_p: Some(0.9),
+        presence_penalty: Some(0.1),
+        frequency_penalty: Some(0.2),
+        logprobs: Some(true),
+        top_logprobs: Some(3),
         max_tokens: Some(64),
         ..Default::default()
     };
@@ -64,6 +76,17 @@ fn shaped(dialect: ReasoningDialect, model: &str) -> (Value, Vec<(EditSite, Stri
         .map(|e| (e.site(), e.path().to_string(), e.kind()))
         .collect();
     (body, edits)
+}
+
+fn assert_sampling_dropped(name: &str, body: &Value, edits: &[(EditSite, String, EditKind)]) {
+    for key in SAMPLING_KEYS {
+        assert!(body.get(key).is_none(), "{name}: {key} must leave: {body}");
+        let path = format!("/{key}");
+        assert!(
+            edits.contains(&(EditSite::SamplingParamsStrip, path, EditKind::Remove)),
+            "{name}: {key} drop declared: {edits:?}"
+        );
+    }
 }
 
 fn declares(edits: &[(EditSite, String, EditKind)], site: EditSite) -> bool {
@@ -93,14 +116,7 @@ fn assert_unchanged(name: &str, body: &Value, edits: &[(EditSite, String, EditKi
 fn the_openai_dialect_sends_gpt_4o_in_the_modern_shape() {
     let (body, edits) = shaped(ReasoningDialect::OpenAi, "gpt-4o");
 
-    for key in SAMPLING_KEYS {
-        assert!(body.get(key).is_none(), "{key} must leave: {body}");
-        let path = format!("/{key}");
-        assert!(
-            edits.contains(&(EditSite::SamplingParamsStrip, path, EditKind::Remove)),
-            "{key} drop declared: {edits:?}"
-        );
-    }
+    assert_sampling_dropped("gpt-4o", &body, &edits);
     assert!(body.get("max_tokens").is_none(), "{body}");
     assert_eq!(body["max_completion_tokens"], json!(64), "{body}");
     for (path, kind) in [
@@ -118,10 +134,7 @@ fn the_openai_dialect_sends_gpt_4o_in_the_modern_shape() {
 fn the_deepseek_dialect_drops_sampling_for_a_reasoner_without_renaming() {
     let (body, edits) = shaped(ReasoningDialect::DeepSeek, "deepseek-reasoner");
 
-    for key in SAMPLING_KEYS {
-        assert!(body.get(key).is_none(), "{key} must leave: {body}");
-    }
-    assert!(declares(&edits, EditSite::SamplingParamsStrip), "{edits:?}");
+    assert_sampling_dropped("deepseek-reasoner", &body, &edits);
     assert_eq!(body["max_tokens"], json!(64), "{body}");
     assert!(body.get("max_completion_tokens").is_none(), "{body}");
     assert!(!declares(&edits, EditSite::MaxTokensRename), "{edits:?}");
@@ -141,4 +154,14 @@ fn ids_and_dialects_outside_the_modern_shape_send_the_body_unchanged() {
         let (body, edits) = shaped(dialect, model);
         assert_unchanged(name, &body, &edits);
     }
+}
+
+#[test]
+fn the_pinned_sampling_keys_are_exactly_the_dropped_set() {
+    let mut pinned = SAMPLING_KEYS.to_vec();
+    let mut dropped = SAMPLING_DROP.to_vec();
+    pinned.sort_unstable();
+    dropped.sort_unstable();
+
+    assert_eq!(pinned, dropped);
 }
