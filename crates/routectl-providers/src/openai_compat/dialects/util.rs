@@ -31,7 +31,7 @@ use crate::openai_compat::util::build_reasoning_detail;
 /// Both disable intents are checked BEFORE any enable signal. An `effort` of
 /// "none" is a reasoning-OFF request, so it outranks a contradictory
 /// `enabled: true` or a stray budget: were it not to, `enable_thinking` would
-/// go on the wire as `true` while the clamp omits `reasoning_effort` -- the
+/// go on the wire as `true` while `wire_effort` omits `reasoning_effort` -- the
 /// caller billed for thinking it explicitly declined.
 ///
 /// Shared by the DeepSeek and vLLM dialects; hoisted here so they cannot drift.
@@ -45,35 +45,31 @@ pub(super) fn reasoning_enabled_for_wire(req: &ChatRequest) -> bool {
     r.enabled == Some(true) || r.effort.is_some() || r.max_tokens.is_some()
 }
 
-/// Insert `reasoning_effort` into the outgoing body iff the clamp produced a
-/// level. A `None` clamp is reasoning-OFF (`effort: "none"`): the field is
-/// omitted rather than substituted with a positive level.
+/// Insert `reasoning_effort` into the outgoing body iff `effort` is a level.
+/// `None` is reasoning-OFF (`effort: "none"`): the field is omitted rather
+/// than substituted with a positive level.
 ///
 /// Shared by the OpenAI, DeepSeek and vLLM dialects so the omit contract has
 /// exactly one implementation.
 ///
-/// Declares the insert as an Add, plus a Rewrite when the clamp replaced
-/// the requested level (an owned value), so a client that sent the field
-/// flat sees its changed level explained.
+/// Declares the insert as an Add.
 pub(super) fn insert_reasoning_effort(
     obj: &mut serde_json::Map<String, Value>,
-    clamped: Option<std::borrow::Cow<'_, str>>,
+    effort: Option<&str>,
     tap: Option<&WireTap>,
 ) {
-    let Some(effort) = clamped else {
+    let Some(effort) = effort else {
         return;
     };
     if let Some(tap) = tap {
-        let path = "/reasoning_effort";
-        crate::wire_declare::declare(tap, EditSite::EffortInjection, path, EditKind::Add);
-        if matches!(effort, std::borrow::Cow::Owned(_)) {
-            crate::wire_declare::declare(tap, EditSite::EffortInjection, path, EditKind::Rewrite);
-        }
+        crate::wire_declare::declare(
+            tap,
+            EditSite::EffortInjection,
+            "/reasoning_effort",
+            EditKind::Add,
+        );
     }
-    obj.insert(
-        "reasoning_effort".into(),
-        Value::String(effort.into_owned()),
-    );
+    obj.insert("reasoning_effort".into(), Value::String(effort.to_string()));
 }
 
 /// Derive a `reasoning_effort` string from the canonical reasoning config.

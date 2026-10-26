@@ -2483,7 +2483,6 @@ async fn bedrock_invoke_forwards_client_betas_through_anthropic_ingress() {
         header_extras: Vec::new(),
         anthropic_beta: vec![],
         additional_model_request_fields: None,
-        adaptive_thinking: None,
     };
 
     // Act: run the canonical request through the Bedrock-Invoke
@@ -2948,7 +2947,6 @@ async fn converse_request_body_has_camel_case_inference_config() {
         header_extras: Vec::new(),
         anthropic_beta: Vec::new(),
         additional_model_request_fields: None,
-        adaptive_thinking: None,
     };
 
     // Act: translate canonical -> Converse body.
@@ -3035,7 +3033,6 @@ async fn converse_request_includes_tool_config_for_tool_defs() {
         header_extras: Vec::new(),
         anthropic_beta: Vec::new(),
         additional_model_request_fields: None,
-        adaptive_thinking: None,
     };
 
     // Act
@@ -3193,7 +3190,6 @@ async fn converse_request_system_with_cache_control_emits_cache_point_block() {
         header_extras: Vec::new(),
         anthropic_beta: Vec::new(),
         additional_model_request_fields: None,
-        adaptive_thinking: None,
     };
 
     // Act
@@ -4196,7 +4192,6 @@ mod bedrock_beta_withhold {
                 header_extras: Vec::new(),
                 anthropic_beta: Vec::new(),
                 additional_model_request_fields: None,
-                adaptive_thinking: None,
             };
             let resolved = auth::resolve(&creds, REGION).await.expect("resolve");
             let provider = BedrockProvider::new(cfg, resolved)

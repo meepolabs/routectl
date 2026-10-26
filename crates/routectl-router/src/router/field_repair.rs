@@ -128,9 +128,8 @@ pub(super) enum FieldSurface {
     /// Anthropic-shape egress would emit is exactly the held refused type.
     ///
     /// Presence reads the COMPOSED type
-    /// (`routectl_providers::anthropic_api::emitted_thinking_type`, with the
-    /// operator's `supports_adaptive_thinking` the egress itself is handed), not
-    /// the final body: a later body pass can still strip `thinking` (a forced
+    /// (`routectl_providers::anthropic_api::emitted_thinking_type`), not the
+    /// final body: a later body pass can still strip `thinking` (a forced
     /// tool choice, a context-management cache miss). A client
     /// `output_config.effort` of "none" does not change the type: the egress
     /// forwards that effort as sent beside whatever type ships. That gap is
@@ -692,13 +691,9 @@ const ADAPTIVE_THINKING_TYPE: &str = "adaptive";
 /// the verdict.
 pub(super) const COMPANION_EFFORT: &str = "low";
 
-/// The thinking type an Anthropic-shape egress composes for `req`, with the
-/// operator knob that egress is handed.
+/// The thinking type an Anthropic-shape egress composes for `req`.
 fn emitted_thinking_type(req: &ChatRequest) -> Option<String> {
-    routectl_providers::anthropic_api::emitted_thinking_type(
-        req,
-        req.routectl_internal.supports_adaptive_thinking,
-    )
+    routectl_providers::anthropic_api::emitted_thinking_type(req)
 }
 
 /// The thinking type a `thinking.type.<type>` row value names.

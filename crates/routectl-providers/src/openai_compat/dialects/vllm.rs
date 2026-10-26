@@ -22,7 +22,7 @@ use super::util::{
     derive_reasoning_effort, insert_reasoning_effort, lift_delta_reasoning_content,
     lift_reasoning_content_field, preserve_history_reasoning_content, reasoning_enabled_for_wire,
 };
-use crate::effort::clamp_effort_to_supported;
+use crate::effort::wire_effort;
 
 /// vLLM-served thinking-model reasoning dialect (see module docs).
 pub struct VllmDialect;
@@ -69,11 +69,7 @@ impl Dialect for VllmDialect {
         }
         let tap = crate::wire_declare::tap(req);
         if let Some(effort) = derive_reasoning_effort(req) {
-            insert_reasoning_effort(
-                obj,
-                clamp_effort_to_supported(&effort, &req.routectl_internal.effort_levels),
-                tap,
-            );
+            insert_reasoning_effort(obj, wire_effort(&effort), tap);
         }
         // History-reasoning shaping (strip vs preserve) is owned by
         // the egress runtime; see DeepSeekDialect::apply_request for

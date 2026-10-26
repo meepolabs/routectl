@@ -147,7 +147,6 @@ pub async fn build_provider_with_options(
 #[derive(Debug, Clone, Default)]
 pub(super) struct BedrockModelOverrides {
     pub model_id: String,
-    pub adaptive_thinking: Option<bool>,
     pub additional_model_request_fields: Option<serde_json::Value>,
 }
 
@@ -595,8 +594,8 @@ async fn build_provider_inner(
                     routectl_providers::bedrock::auth::resolve(&bedrock_creds, region).await?;
                 (bedrock_creds, resolved)
             };
-            // v0.6.0: model_id, adaptive_thinking, and
-            // additional_model_request_fields all come from the model
+            // v0.6.0: model_id and additional_model_request_fields both
+            // come from the model
             // entry override. The factory pumps them in via
             // `BedrockModelOverrides` from `build_resolved_models`.
             let overrides = bedrock_overrides.unwrap_or_default();
@@ -613,7 +612,6 @@ async fn build_provider_inner(
                     .collect(),
                 anthropic_beta: anthropic_beta.clone(),
                 additional_model_request_fields: overrides.additional_model_request_fields,
-                adaptive_thinking: overrides.adaptive_thinking,
             };
             Ok(Arc::new(BedrockProvider::new(cfg, resolved)?))
         }
@@ -1376,7 +1374,6 @@ pub async fn build_resolved_models_reported(
 
                 let overrides = BedrockModelOverrides {
                     model_id: entry.upstream.clone(),
-                    adaptive_thinking: None,
                     additional_model_request_fields: entry.additional_request_fields.clone(),
                 };
                 match build_provider_with_bedrock_model_override(

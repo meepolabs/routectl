@@ -109,7 +109,6 @@ fn built_body(messages: Vec<Message>) -> Value {
         header_extras: Vec::new(),
         anthropic_beta: Vec::new(),
         additional_model_request_fields: None,
-        adaptive_thinking: None,
     };
     let req = routectl_core::ChatRequest {
         model: "anthropic.claude-haiku-4-5".into(),

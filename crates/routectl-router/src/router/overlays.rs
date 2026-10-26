@@ -157,9 +157,6 @@ pub(super) fn apply_layered_overlays(
     internal.responses_input_passthrough = captured_responses_input_passthrough;
     internal.anthropic_thinking_display = captured_anthropic_thinking_display;
     internal.anthropic_thinking = captured_anthropic_thinking;
-    internal.supports_adaptive_thinking = target.supports_adaptive_thinking;
-    internal.effort_levels = target.effort_levels.clone();
-    internal.max_thinking_budget = target.max_thinking_budget;
     internal.withheld_betas = std::sync::Arc::clone(&target.withheld_betas);
     // Per-model `max_tokens` ceiling, on every egress: zero means none is
     // known. Anthropic-shape egresses fill the wire field from it (else

@@ -631,7 +631,6 @@ mod fill_presence {
                 header_extras: Vec::new(),
                 anthropic_beta: Vec::new(),
                 additional_model_request_fields: None,
-                adaptive_thinking: None,
             };
 
             let body = routectl_providers::bedrock::invoke::normalize_request(&cfg, &req)
@@ -684,7 +683,6 @@ mod fill_presence {
                 header_extras: Vec::new(),
                 anthropic_beta: Vec::new(),
                 additional_model_request_fields: None,
-                adaptive_thinking: Some(false),
             };
 
             let body = routectl_providers::bedrock::converse::normalize_request(&cfg, &req)

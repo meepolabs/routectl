@@ -18,7 +18,7 @@ use routectl_core::wire_check::{EditKind, EditSite};
 
 use crate::anthropic_api::request::{
     AnthropicFormat, DroppedFormatKeys, build_output_config, client_sent_output_config_effort,
-    compose_thinking, is_active_thinking_type, reclamp_client_effort,
+    compose_thinking, is_active_thinking_type,
 };
 use crate::anthropic_api::types::WireThinking;
 use crate::managed_keys::{
@@ -68,7 +68,7 @@ pub(super) fn build_additional_fields(
     // silently shadowed. Do not reorder these calls or relax the
     // `or_insert_with` semantics.
     let mut foreign = ForeignDialectExtraTally::default();
-    insert_thinking(cfg, req, &mut bag);
+    insert_thinking(req, &mut bag);
     // After `insert_thinking`, which writes `output_config` wholesale, and
     // before the `response_format` conversion, whose `or_insert` then leaves
     // the client's format in place.
@@ -458,13 +458,12 @@ fn omit_output_config_for_non_claude(
 /// reasoning. `display` rides verbatim and an absent one stays absent:
 /// Converse accepted and honored the field on `enabled` and `adaptive`
 /// when measured live, and the upstream default is model-dependent.
-fn insert_thinking(cfg: &BedrockConfig, req: &ChatRequest, bag: &mut Map<String, Value>) {
-    let adaptive = cfg.adaptive_thinking.unwrap_or(false);
-    let thinking = compose_thinking(req, adaptive, crate::anthropic_api::wire_edits::tap_of(req));
+fn insert_thinking(req: &ChatRequest, bag: &mut Map<String, Value>) {
+    let thinking = compose_thinking(req);
     if let Some(v) = thinking.as_ref().and_then(|t| serde_json::to_value(t).ok()) {
         bag.insert("thinking".to_string(), v);
     }
-    if let Some(effort) = output_config_effort(req, thinking.as_ref(), adaptive) {
+    if let Some(effort) = output_config_effort(req, thinking.as_ref()) {
         bag.insert(
             "output_config".to_string(),
             serde_json::json!({"effort": effort}),
@@ -477,28 +476,15 @@ fn insert_thinking(cfg: &BedrockConfig, req: &ChatRequest, bag: &mut Map<String,
 /// Without an Anthropic client's thinking carrier, the Anthropic egress's
 /// `build_output_config` decides it (adaptive thinking only). With one, the
 /// client's effort is forwarded as sent beside whatever thinking type it
-/// sent, including "none"; an explicit non-empty `effort_levels` is the only
-/// thing that re-clamps it. A carrier request with no effort gets one only
-/// from the adaptive knob, which pairs its adaptive shape with one.
-fn output_config_effort(
-    req: &ChatRequest,
-    thinking: Option<&WireThinking>,
-    adaptive: bool,
-) -> Option<String> {
+/// sent, including "none"; a carrier request with no effort gets none.
+fn output_config_effort(req: &ChatRequest, thinking: Option<&WireThinking>) -> Option<String> {
     if matches!(
         req.routectl_internal.anthropic_thinking,
         AnthropicThinking::NotCaptured
     ) {
-        return build_output_config(req, thinking, adaptive).map(|oc| oc.effort);
+        return build_output_config(req, thinking).map(|oc| oc.effort);
     }
-    match req.reasoning.as_ref().and_then(|r| r.effort.as_deref()) {
-        Some(sent) => Some(reclamp_client_effort(
-            sent,
-            &req.routectl_internal.effort_levels,
-        )),
-        None if adaptive => build_output_config(req, thinking, adaptive).map(|oc| oc.effort),
-        None => None,
-    }
+    req.reasoning.as_ref().and_then(|r| r.effort.clone())
 }
 
 /// Merge anthropic_beta from canonical (header-lifted by the Anthropic
@@ -883,7 +869,6 @@ mod tests {
             header_extras: Vec::new(),
             anthropic_beta: Vec::new(),
             additional_model_request_fields: None,
-            adaptive_thinking: None,
         }
     }
 
@@ -1021,46 +1006,6 @@ mod tests {
             bag.get("thinking").and_then(|v| v.get("type")),
             Some(&serde_json::Value::String("enabled".into())),
             "thinking must survive when toolChoice is absent, got: {bag:?}"
-        );
-    }
-
-    #[test]
-    fn adaptive_forced_tool_choice_strips_thinking_and_output_config_effort() {
-        // Arrange: adaptive thinking emits both `thinking:{type:adaptive}`
-        // AND `output_config:{effort}` into the bag. A forcing toolChoice
-        // must strip BOTH -- output_config.effort is only valid alongside
-        // adaptive thinking, so an orphaned effort 400s on Anthropic.
-        let mut cfg = fake_cfg();
-        cfg.adaptive_thinking = Some(true);
-        let req = req_with_thinking();
-        let tc = ConverseToolChoice::Tool {
-            tool: ConverseSpecificTool {
-                name: "web_search".into(),
-            },
-        };
-
-        // Act
-        let bag = build_additional_fields(
-            &cfg,
-            &req,
-            Some(&tc),
-            &mut ClientFingerprintStripTally::default(),
-        );
-
-        // Assert: thinking gone AND the orphaned output_config.effort gone.
-        assert!(
-            bag_thinking_absent(&bag),
-            "thinking must be stripped on adaptive forced tool_choice, got: {bag:?}"
-        );
-        let effort_present = bag
-            .as_ref()
-            .and_then(|v| v.as_object())
-            .and_then(|o| o.get("output_config"))
-            .and_then(|oc| oc.get("effort"))
-            .is_some();
-        assert!(
-            !effort_present,
-            "output_config.effort must be stripped alongside thinking, got: {bag:?}"
         );
     }
 
@@ -1276,12 +1221,6 @@ mod tests {
         req
     }
 
-    fn cfg_with_shape(adaptive: bool) -> BedrockConfig {
-        let mut cfg = fake_cfg();
-        cfg.adaptive_thinking = Some(adaptive);
-        cfg
-    }
-
     fn bag_for(cfg: &BedrockConfig, req: &ChatRequest) -> serde_json::Value {
         build_additional_fields(cfg, req, None, &mut ClientFingerprintStripTally::default())
             .expect("thinking fills the bag")
@@ -1298,52 +1237,46 @@ mod tests {
             .unwrap_or_default()
     }
 
-    /// Both thinking shapes, each display state a caller can send: the bag's
-    /// `thinking` object is byte-identical to the direct-Anthropic
-    /// serialization of the same request, so a present display rides
-    /// verbatim and an absent one stays absent (never defaulted). Converse
-    /// accepted and honored `display` on both the `enabled` shape
-    /// (sonnet-4-6, opus-4-6) and the `adaptive` shape when measured live.
+    /// Each display state a caller can send: the bag's `thinking` object is
+    /// byte-identical to the direct-Anthropic serialization of the same
+    /// request, so a present display rides verbatim and an absent one stays
+    /// absent (never defaulted). Converse accepted and honored `display` on
+    /// the `enabled` shape (sonnet-4-6, opus-4-6) when measured live.
     #[test]
-    fn converse_bag_forwards_display_verbatim_on_both_thinking_shapes() {
-        for adaptive in [false, true] {
-            for display in [None, Some("summarized"), Some("omitted")] {
-                // Arrange
-                let cfg = cfg_with_shape(adaptive);
-                let req = req_with_display(display);
-                let direct = serde_json::to_value(
-                    crate::anthropic_api::request::build_thinking(&req, adaptive)
-                        .expect("thinking is active"),
-                )
-                .expect("thinking serializes");
+    fn converse_bag_forwards_display_verbatim_on_the_enabled_shape() {
+        for display in [None, Some("summarized"), Some("omitted")] {
+            // Arrange
+            let cfg = fake_cfg();
+            let req = req_with_display(display);
+            let direct = serde_json::to_value(
+                crate::anthropic_api::request::build_thinking(&req).expect("thinking is active"),
+            )
+            .expect("thinking serializes");
 
-                // Act
-                let bag = bag_for(&cfg, &req);
+            // Act
+            let bag = bag_for(&cfg, &req);
 
-                // Assert
-                let expected_type = if adaptive { "adaptive" } else { "enabled" };
-                assert_eq!(
-                    bag["thinking"]["type"], expected_type,
-                    "precondition: the {expected_type} shape must be the one under test"
-                );
-                assert_eq!(
-                    bag["thinking"], direct,
-                    "Converse must carry the same thinking bytes as the direct path \
-                     (adaptive={adaptive}, display={display:?})"
-                );
-                assert_eq!(
-                    bag["thinking"].get("display").and_then(|d| d.as_str()),
-                    display,
-                    "display must be forwarded verbatim, absent staying absent \
-                     (adaptive={adaptive})"
-                );
-                assert!(
-                    !bag_betas(&bag)
-                        .iter()
-                        .any(|b| b == THINKING_DISPLAY_UPDATES_BETA),
-                    "only `updates` earns the display beta; got: {bag}"
-                );
-            }
+            // Assert
+            assert_eq!(
+                bag["thinking"]["type"], "enabled",
+                "precondition: the enabled shape must be the one under test"
+            );
+            assert_eq!(
+                bag["thinking"], direct,
+                "Converse must carry the same thinking bytes as the direct path \
+                 (display={display:?})"
+            );
+            assert_eq!(
+                bag["thinking"].get("display").and_then(|d| d.as_str()),
+                display,
+                "display must be forwarded verbatim, absent staying absent"
+            );
+            assert!(
+                !bag_betas(&bag)
+                    .iter()
+                    .any(|b| b == THINKING_DISPLAY_UPDATES_BETA),
+                "only `updates` earns the display beta; got: {bag}"
+            );
         }
     }
 
@@ -1371,25 +1304,23 @@ mod tests {
     /// naming it cannot drop it.
     #[test]
     fn updates_display_unions_its_beta_past_a_withheld_entry_naming_it() {
-        for adaptive in [false, true] {
-            // Arrange
-            let cfg = cfg_with_shape(adaptive);
-            let mut req = req_with_display(Some("updates"));
-            req.anthropic_beta = vec![THINKING_DISPLAY_UPDATES_BETA.to_string()];
-            req.routectl_internal.withheld_betas =
-                std::iter::once(THINKING_DISPLAY_UPDATES_BETA.to_string()).collect();
+        // Arrange
+        let cfg = fake_cfg();
+        let mut req = req_with_display(Some("updates"));
+        req.anthropic_beta = vec![THINKING_DISPLAY_UPDATES_BETA.to_string()];
+        req.routectl_internal.withheld_betas =
+            std::iter::once(THINKING_DISPLAY_UPDATES_BETA.to_string()).collect();
 
-            // Act
-            let bag = bag_for(&cfg, &req);
+        // Act
+        let bag = bag_for(&cfg, &req);
 
-            // Assert
-            assert_eq!(bag["thinking"]["display"], "updates");
-            assert_eq!(
-                bag_betas(&bag),
-                vec![THINKING_DISPLAY_UPDATES_BETA.to_string()],
-                "the updates beta must ride exactly once (adaptive={adaptive}); got: {bag}"
-            );
-        }
+        // Assert
+        assert_eq!(bag["thinking"]["display"], "updates");
+        assert_eq!(
+            bag_betas(&bag),
+            vec![THINKING_DISPLAY_UPDATES_BETA.to_string()],
+            "the updates beta must ride exactly once; got: {bag}"
+        );
     }
 
     /// A client that already sent the beta (header-lifted) gets it once,

@@ -132,7 +132,6 @@ async fn bedrock_model(nickname: &str, model_id: &str, origin: &str) -> Arc<Reso
         header_extras: Vec::new(),
         anthropic_beta: Vec::new(),
         additional_model_request_fields: None,
-        adaptive_thinking: None,
     };
     let resolved = auth::resolve(&creds, REGION)
         .await

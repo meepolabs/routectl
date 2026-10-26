@@ -1,8 +1,7 @@
 //! The `thinking` an Anthropic-shape body carries, per ingress carrier
-//! state: an Anthropic client's own object rides through as sent, changed
-//! only by an explicit operator knob; a client that sent no thinking gets
-//! none unless the adaptive knob synthesizes it; everything else is
-//! translated from canonical reasoning. A forced tool choice strips only
+//! state: an Anthropic client's own object rides through as sent; a client
+//! that sent no thinking gets none, whatever effort it sent; everything else
+//! is translated from canonical reasoning. A forced tool choice strips only
 //! active thinking.
 //!
 //! Requests are built the way the Anthropic ingress builds them (see
@@ -91,8 +90,8 @@ fn canonical_reasoning(t: &Value) -> Option<ReasoningConfig> {
     Some(reasoning)
 }
 
-pub(super) fn body(req: &ChatRequest, adaptive: bool) -> Value {
-    normalize("p", req, adaptive, false, None, false, true).expect("normalize")
+pub(super) fn body(req: &ChatRequest) -> Value {
+    normalize("p", req, false, None, false, true).expect("normalize")
 }
 
 fn assert_verbatim(sent: &Value, wire: &Value, row: &str) {
@@ -129,7 +128,7 @@ fn committed_driver_captures_reach_the_wire_byte_identical() {
         let req = ingress_request(Some(ingress["thinking"].clone()), effort, max_tokens);
 
         // Act
-        let wire = body(&req, false);
+        let wire = body(&req);
 
         // Assert
         assert_verbatim(&ingress["thinking"], &wire["thinking"], case);
@@ -140,121 +139,56 @@ fn committed_driver_captures_reach_the_wire_byte_identical() {
     }
 }
 
-/// Shapes the canonical translation cannot produce reach the wire as sent,
-/// with or without the adaptive knob.
+/// Shapes the canonical translation cannot produce reach the wire as sent.
 #[test]
 fn client_thinking_shapes_forward_verbatim() {
     let rows = [
         (
             "adaptive",
             json!({"type": "adaptive", "display": "summarized"}),
-            false,
         ),
-        ("between_tools", json!({"type": "between_tools"}), false),
-        (
-            "between_tools, knob set",
-            json!({"type": "between_tools"}),
-            true,
-        ),
+        ("between_tools", json!({"type": "between_tools"})),
         (
             "unknown type and key",
             json!({"type": "future_mode", "level": 3}),
-            false,
         ),
-        ("disabled, knob set", json!({"type": "disabled"}), true),
     ];
-    for (row, thinking, adaptive) in rows {
+    for (row, thinking) in rows {
         let req = ingress_request(Some(thinking.clone()), Some("high"), 64_000);
 
-        let wire = body(&req, adaptive);
+        let wire = body(&req);
 
         assert_verbatim(&thinking, &wire["thinking"], row);
     }
 }
 
+/// A client that sent no thinking gets none, whatever effort it sent: an
+/// effort alone never synthesizes thinking.
 #[test]
-fn sent_none_emits_thinking_only_for_the_knob_with_a_positive_effort() {
-    let rows: [(&str, Option<&str>, bool, Option<&str>); 5] = [
-        ("knob unset, effort high", Some("high"), false, None),
-        ("knob unset, no effort", None, false, None),
-        (
-            "knob set, effort high",
-            Some("high"),
-            true,
-            Some("adaptive"),
-        ),
-        ("knob set, no effort", None, true, None),
-        ("knob set, effort none", Some("none"), true, None),
+fn sent_none_emits_no_thinking_for_any_effort() {
+    let rows: [(&str, Option<&str>); 3] = [
+        ("effort high", Some("high")),
+        ("no effort", None),
+        ("effort none", Some("none")),
     ];
-    for (row, effort, adaptive, expected) in rows {
+    for (row, effort) in rows {
         let req = ingress_request(None, effort, 64_000);
 
-        let wire = body(&req, adaptive);
+        let wire = body(&req);
 
-        assert_eq!(
-            wire.pointer("/thinking/type").and_then(Value::as_str),
-            expected,
-            "{row}: {wire}"
-        );
-        if expected.is_none() {
-            assert!(wire.get("thinking").is_none(), "{row}: no thinking key");
-        }
+        assert!(wire.get("thinking").is_none(), "{row}: {wire}");
     }
 }
 
 #[test]
-fn sent_none_with_the_knob_keeps_the_synthesized_adaptive_shape() {
-    let req = ingress_request(None, Some("high"), 64_000);
-
-    let wire = body(&req, true);
-
-    assert_eq!(wire["thinking"], json!({"type": "adaptive"}));
-    assert_eq!(wire["output_config"]["effort"], "high");
-}
-
-#[test]
-fn the_adaptive_knob_turns_client_enabled_into_adaptive_keeping_display() {
-    let thinking = json!({"type": "enabled", "budget_tokens": 8192, "display": "summarized"});
-    let req = ingress_request(Some(thinking), Some("high"), 64_000);
-
-    let wire = body(&req, true);
-
-    assert_eq!(
-        wire["thinking"],
-        json!({"type": "adaptive", "display": "summarized"})
-    );
-    assert_eq!(wire["output_config"]["effort"], "high");
-}
-
-#[test]
-fn an_unset_knob_forwards_client_adaptive_as_adaptive() {
+fn client_adaptive_forwards_as_adaptive() {
     let thinking = json!({"type": "adaptive"});
     let req = ingress_request(Some(thinking.clone()), Some("medium"), 64_000);
 
-    let wire = body(&req, false);
+    let wire = body(&req);
 
-    assert_verbatim(&thinking, &wire["thinking"], "adaptive, knob unset");
+    assert_verbatim(&thinking, &wire["thinking"], "adaptive");
     assert_eq!(wire["output_config"]["effort"], "medium");
-}
-
-#[test]
-fn the_operator_budget_cap_lowers_only_a_larger_forwarded_enabled_budget() {
-    let rows: [(&str, u32, u64); 4] = [
-        ("cap below budget", 4096, 4096),
-        ("cap zero", 0, 8192),
-        ("cap above budget", 16_384, 8192),
-        ("cap equal to budget", 8192, 8192),
-    ];
-    for (row, cap, expected) in rows {
-        let thinking = json!({"type": "enabled", "budget_tokens": 8192});
-        let mut req = ingress_request(Some(thinking), None, 64_000);
-        req.routectl_internal.max_thinking_budget = cap;
-
-        let wire = body(&req, false);
-
-        assert_eq!(wire["thinking"]["type"], "enabled", "{row}");
-        assert_eq!(wire["thinking"]["budget_tokens"], expected, "{row}");
-    }
 }
 
 #[test]
@@ -269,8 +203,8 @@ fn a_sub_floor_budget_is_forwarded_on_sent_and_floored_on_translation() {
     translated.routectl_internal.anthropic_thinking = AnthropicThinking::NotCaptured;
 
     // Act
-    let sent_wire = body(&sent, false);
-    let translated_wire = body(&translated, false);
+    let sent_wire = body(&sent);
+    let translated_wire = body(&translated);
 
     // Assert
     assert_eq!(sent_wire["thinking"]["budget_tokens"], 500);
@@ -282,7 +216,7 @@ fn count_tokens_body_carries_the_forwarded_thinking() {
     let thinking = json!({"type": "between_tools"});
     let req = ingress_request(Some(thinking.clone()), None, 64_000);
 
-    let count_body = crate::anthropic_api::build_count_tokens_body(&body(&req, false));
+    let count_body = crate::anthropic_api::build_count_tokens_body(&body(&req));
 
     assert_verbatim(&thinking, &count_body["thinking"], "count_tokens");
 }
@@ -303,7 +237,6 @@ fn bedrock_invoke_body_carries_the_forwarded_thinking() {
         header_extras: Vec::new(),
         anthropic_beta: Vec::new(),
         additional_model_request_fields: None,
-        adaptive_thinking: None,
     };
     let thinking = json!({"type": "between_tools"});
     let req = ingress_request(Some(thinking.clone()), None, 64_000);
@@ -337,7 +270,7 @@ fn forcing_tool_use(mut req: ChatRequest) -> ChatRequest {
 fn stripped(mut req: ChatRequest) -> (Value, Vec<(EditKind, String)>) {
     let tap = WireTap::admitted();
     req.routectl_internal.wire_tap = Some(tap.clone());
-    let wire = body(&req, false);
+    let wire = body(&req);
     let edits = tap
         .take_request()
         .edits(Leg::Request)
@@ -406,13 +339,13 @@ fn forced_tool_use_keeps_inactive_thinking_and_the_caller_sampling() {
     }
 }
 
-/// `(row, request, adaptive knob, thinking type on the body, effort on the body)`.
-type StripEffortRow<'a> = (&'a str, ChatRequest, bool, Option<&'a str>, Option<&'a str>);
+/// `(row, request, thinking type on the body, effort on the body)`.
+type StripEffortRow<'a> = (&'a str, ChatRequest, Option<&'a str>, Option<&'a str>);
 
 /// Through the whole body: under a forced tool choice the client's own
 /// `output_config.effort` ships as sent whatever happens to its thinking,
-/// and an effort routectl would have composed for adaptive thinking never
-/// ships once that thinking is stripped.
+/// and an effort routectl would have composed for its thinking never ships
+/// once that thinking is stripped.
 #[test]
 fn a_forced_tool_strip_keeps_the_client_effort_and_composes_none() {
     let mut translated = ingress_request(None, None, 64_000);
@@ -425,53 +358,48 @@ fn a_forced_tool_strip_keeps_the_client_effort_and_composes_none() {
         (
             "client effort beside stripped adaptive",
             ingress_request(Some(json!({"type": "adaptive"})), Some("xhigh"), 64_000),
-            false,
             None,
             Some("xhigh"),
         ),
         (
-            "client effort beside knob-converted, stripped enabled",
+            "client effort beside stripped enabled",
             ingress_request(
                 Some(json!({"type": "enabled", "budget_tokens": 4096})),
                 Some("max"),
                 64_000,
             ),
-            true,
             None,
             Some("max"),
         ),
         (
             "client effort beside kept disabled",
             ingress_request(Some(json!({"type": "disabled"})), Some("xhigh"), 64_000),
-            false,
             Some("disabled"),
             Some("xhigh"),
         ),
         (
-            "no client effort beside knob-converted, stripped enabled",
+            "no client effort beside stripped enabled",
             ingress_request(
                 Some(json!({"type": "enabled", "budget_tokens": 4096})),
                 None,
                 64_000,
             ),
-            true,
             None,
             None,
         ),
         (
-            "translated effort beside stripped adaptive",
+            "translated effort beside stripped translated thinking",
             translated,
-            true,
             None,
             None,
         ),
     ];
-    for (row, req, adaptive, thinking_type, effort) in rows {
+    for (row, req, thinking_type, effort) in rows {
         // Arrange
         let req = forcing_tool_use(req);
 
         // Act
-        let wire = body(&req, adaptive);
+        let wire = body(&req);
 
         // Assert
         assert_eq!(
@@ -505,7 +433,7 @@ fn the_forced_tool_strip_logs_the_forcing_type_once() {
 
         // Act
         let events = routectl_testkit::capture_events(|| {
-            body(&req, false);
+            body(&req);
         });
 
         // Assert

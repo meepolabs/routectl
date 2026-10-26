@@ -86,13 +86,6 @@ pub enum EditSite {
     ThinkingSamplingClamp,
     /// Provider: thinking removed because `tool_choice` forces tool use.
     ThinkingStripForcedToolUse,
-    /// Provider: a client's `enabled` thinking turned into `adaptive` for a
-    /// model the operator marks as supporting adaptive thinking, its budget
-    /// dropped.
-    AdaptiveThinkingOverride,
-    /// Provider: a client's thinking budget lowered to the operator's
-    /// per-model cap.
-    ThinkingBudgetCap,
     /// Provider: the body `stream` flag removed.
     StreamStrip,
     /// Provider: `anthropic_beta` removed from the body.
@@ -178,7 +171,7 @@ pub enum EditSite {
 
 impl EditSite {
     /// Every site, in declaration order.
-    pub const ALL: [Self; 52] = [
+    pub const ALL: [Self; 50] = [
         Self::ModelRename,
         Self::OperatorPayloadExtras,
         Self::ContextReduction,
@@ -195,8 +188,6 @@ impl EditSite {
         Self::SamplingReconcile,
         Self::ThinkingSamplingClamp,
         Self::ThinkingStripForcedToolUse,
-        Self::AdaptiveThinkingOverride,
-        Self::ThinkingBudgetCap,
         Self::StreamStrip,
         Self::AnthropicBetaStrip,
         Self::EffortInjection,
@@ -252,8 +243,6 @@ impl EditSite {
             Self::SamplingReconcile => "sampling_reconcile",
             Self::ThinkingSamplingClamp => "thinking_sampling_clamp",
             Self::ThinkingStripForcedToolUse => "thinking_strip_forced_tool_use",
-            Self::AdaptiveThinkingOverride => "adaptive_thinking_override",
-            Self::ThinkingBudgetCap => "thinking_budget_cap",
             Self::StreamStrip => "stream_strip",
             Self::AnthropicBetaStrip => "anthropic_beta_strip",
             Self::EffortInjection => "effort_injection",

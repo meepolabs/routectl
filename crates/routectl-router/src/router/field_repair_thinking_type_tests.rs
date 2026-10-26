@@ -281,17 +281,12 @@ fn assert_adaptive_retry(body: &serde_json::Value, effort: &str, label: &str) {
 #[test]
 fn the_thinking_type_surface_is_present_only_when_the_egress_emits_enabled() {
     let surface = super::FieldSurface::AnthropicThinkingType("enabled");
-    let adaptive_knob = || {
-        let mut req = anthropic_enabled_req();
-        req.routectl_internal.supports_adaptive_thinking = true;
-        req
-    };
     let unthinking = || {
         let mut req = thinking_req(routectl_core::AnthropicThinking::NotCaptured);
         req.reasoning = None;
         req
     };
-    let rows: [(&str, ChatRequest, bool); 7] = [
+    let rows: [(&str, ChatRequest, bool); 6] = [
         ("native enabled", anthropic_enabled_req(), true),
         ("translated enabled", cross_dialect_enabled_req(), true),
         (
@@ -310,11 +305,6 @@ fn the_thinking_type_surface_is_present_only_when_the_egress_emits_enabled() {
             false,
         ),
         ("translated, no reasoning", unthinking(), false),
-        (
-            "operator converts enabled to adaptive",
-            adaptive_knob(),
-            false,
-        ),
     ];
 
     for (name, req, present) in rows {

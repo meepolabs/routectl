@@ -2010,21 +2010,6 @@ struct DispatchTarget {
     upstream: String,
     /// Concrete provider instance.
     provider: Option<Arc<dyn Provider>>,
-    /// Whether the model supports adaptive (extended) thinking.
-    /// Threaded from `ResolvedModel.supports_adaptive_thinking` (always
-    /// `false`: no config key sets it) so
-    /// `apply_layered_overlays` can set `RoutectlInternal` without
-    /// reaching back into `ResolvedModel`.
-    supports_adaptive_thinking: bool,
-    /// Effort levels for this model. Threaded from
-    /// `ResolvedModel.effort_levels`, always empty: no config key sets it.
-    /// Empty means passthrough (emit
-    /// caller's effort verbatim). Non-empty: OpenAI-shape egresses
-    /// clamp `req.reasoning.effort` to the nearest supported level.
-    ///
-    /// `Arc<[String]>` so cloning per dispatch attempt is a refcount
-    /// bump rather than a heap allocation.
-    effort_levels: std::sync::Arc<[String]>,
     /// Capability keys the feature filter decided to STRIP in place for
     /// this target rather than route away from -- the strip-vs-route
     /// verdict for a learned acting negative whose policy
@@ -2063,11 +2048,6 @@ struct DispatchTarget {
     history_reasoning: Option<HistoryReasoning>,
     /// Per-model `stream_first_byte_timeout_ms`.
     stream_first_byte_timeout_ms: Option<u64>,
-    /// Maximum thinking-token budget for this model. Threaded from
-    /// `ResolvedModel.max_thinking_budget`, always zero (no cap): no config
-    /// key sets it. `apply_layered_overlays` writes this to
-    /// `RoutectlInternal.max_thinking_budget` unconditionally.
-    max_thinking_budget: u32,
     /// Per-model `max_tokens` ceiling for the Anthropic-shape egresses:
     /// the catalog prior, threaded from `ResolvedModel.max_output_tokens`.
     /// Zero means no ceiling known -- `apply_layered_overlays` then fills
@@ -3380,8 +3360,8 @@ mod tests;
 mod resolved_models_tests;
 
 #[cfg(test)]
-#[path = "effort_levels_wire_tests.rs"]
-mod effort_levels_wire_tests;
+#[path = "effort_wire_tests.rs"]
+mod effort_wire_tests;
 
 #[cfg(test)]
 #[path = "has_forwarded_provider_tests.rs"]

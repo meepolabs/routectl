@@ -17,7 +17,7 @@ use crate::bedrock::{BedrockApiShape, BedrockConfig, BedrockCreds};
 
 const CALLER_TEMPERATURE: f64 = 0.3;
 
-fn cfg(adaptive: bool) -> BedrockConfig {
+fn cfg() -> BedrockConfig {
     BedrockConfig {
         id: "bedrock:test-converse".into(),
         region: "us-west-2".into(),
@@ -28,12 +28,11 @@ fn cfg(adaptive: bool) -> BedrockConfig {
         header_extras: Vec::new(),
         anthropic_beta: Vec::new(),
         additional_model_request_fields: None,
-        adaptive_thinking: Some(adaptive),
     }
 }
 
-fn converse_body(req: &routectl_core::ChatRequest, adaptive: bool) -> Value {
-    normalize_request(&cfg(adaptive), req).expect("translate")
+fn converse_body(req: &routectl_core::ChatRequest) -> Value {
+    normalize_request(&cfg(), req).expect("translate")
 }
 
 fn bag(body: &Value) -> &Value {
@@ -72,7 +71,7 @@ fn the_client_thinking_object_reaches_the_bag_as_sent() {
         let req = ingress_request(Some(thinking.clone()), None, 1200);
 
         // Act
-        let body = converse_body(&req, false);
+        let body = converse_body(&req);
 
         // Assert
         assert_eq!(bag(&body)["thinking"], thinking, "{body}");
@@ -96,92 +95,57 @@ fn the_plain_turn_capture_keeps_its_effort_beside_disabled_thinking() {
     let req = ingress_request(Some(ingress["thinking"].clone()), effort, max_tokens);
 
     // Act
-    let body = converse_body(&req, false);
+    let body = converse_body(&req);
 
     // Assert
     assert_eq!(bag(&body)["thinking"], ingress["thinking"], "{body}");
     assert_eq!(bag_effort(&body), effort, "{body}");
 }
 
-/// `(row, thinking sent, effort sent, effort_levels, effort on the bag)`.
-type EffortRow<'a> = (
-    &'a str,
-    Option<Value>,
-    Option<&'a str>,
-    &'a [&'a str],
-    Option<&'a str>,
-);
+/// `(row, thinking sent, effort sent, effort on the bag)`.
+type EffortRow<'a> = (&'a str, Option<Value>, Option<&'a str>, Option<&'a str>);
 
 #[test]
 fn the_client_effort_reaches_the_bag_as_sent() {
-    let levels =
-        |l: &[&str]| -> std::sync::Arc<[String]> { l.iter().map(|s| (*s).to_string()).collect() };
     let rows: &[EffortRow] = &[
         (
             "adaptive, no list",
             Some(json!({"type": "adaptive"})),
             Some("xhigh"),
-            &[],
             Some("xhigh"),
         ),
         (
             "enabled, no list",
             Some(json!({"type": "enabled", "budget_tokens": 4096})),
             Some("max"),
-            &[],
             Some("max"),
         ),
         (
             "disabled, no list",
             Some(json!({"type": "disabled"})),
             Some("high"),
-            &[],
             Some("high"),
         ),
         (
             "adaptive, none",
             Some(json!({"type": "adaptive"})),
             Some("none"),
-            &[],
             Some("none"),
-        ),
-        (
-            "adaptive, none, explicit list",
-            Some(json!({"type": "adaptive"})),
-            Some("none"),
-            &["low", "medium", "high"],
-            Some("none"),
-        ),
-        (
-            "adaptive, explicit list re-clamps",
-            Some(json!({"type": "adaptive"})),
-            Some("max"),
-            &["low", "medium", "high"],
-            Some("high"),
-        ),
-        (
-            "disabled, explicit list re-clamps",
-            Some(json!({"type": "disabled"})),
-            Some("xhigh"),
-            &["low", "high"],
-            Some("high"),
         ),
         (
             "adaptive, no effort",
             Some(json!({"type": "adaptive"})),
             None,
-            &[],
             None,
         ),
-        ("no thinking, effort", None, Some("low"), &[], Some("low")),
+        ("no thinking, effort", None, Some("low"), Some("low")),
     ];
-    for (row, thinking, effort, list, expected) in rows {
+    for (row, thinking, effort, expected) in rows {
         // Arrange
-        let mut req = ingress_request(thinking.clone(), *effort, 64_000);
-        req.routectl_internal.effort_levels = levels(list);
+        let req = ingress_request(thinking.clone(), *effort, 64_000);
 
         // Act
-        let body = converse_body(&req, false);
+        let body = converse_body(&req);
 
         // Assert
         assert_eq!(bag_effort(&body), *expected, "{row}: {body}");
@@ -193,35 +157,9 @@ fn the_client_effort_reaches_the_bag_as_sent() {
     }
 }
 
-/// The adaptive knob is the one source of an effort the client did not
-/// send: its adaptive shape needs one.
-#[test]
-fn the_adaptive_knob_supplies_an_effort_only_when_the_client_sent_none() {
-    // Arrange
-    let silent = ingress_request(
-        Some(json!({"type": "enabled", "budget_tokens": 4096})),
-        None,
-        64_000,
-    );
-    let explicit = ingress_request(
-        Some(json!({"type": "enabled", "budget_tokens": 4096})),
-        Some("low"),
-        64_000,
-    );
-
-    // Act
-    let silent_body = converse_body(&silent, true);
-    let explicit_body = converse_body(&explicit, true);
-
-    // Assert
-    assert_eq!(bag(&silent_body)["thinking"]["type"], "adaptive");
-    assert!(bag_effort(&silent_body).is_some(), "{silent_body}");
-    assert_eq!(bag_effort(&explicit_body), Some("low"), "{explicit_body}");
-}
-
-/// A probe-sized request on a lane without the adaptive knob: the canonical
-/// translation would emit no thinking here, but the client's adaptive object
-/// ships, so the clamp must read the bag.
+/// A probe-sized request: the canonical translation would emit no thinking
+/// here, but the client's adaptive object ships, so the clamp must read the
+/// bag.
 #[test]
 fn an_adaptive_carrier_on_a_legacy_lane_pins_temperature() {
     // Arrange
@@ -229,7 +167,7 @@ fn an_adaptive_carrier_on_a_legacy_lane_pins_temperature() {
     req.temperature = Some(CALLER_TEMPERATURE);
 
     // Act
-    let body = converse_body(&req, false);
+    let body = converse_body(&req);
 
     // Assert
     assert_eq!(bag(&body)["thinking"]["type"], "adaptive", "{body}");
@@ -242,7 +180,7 @@ fn adaptive_thinking_without_a_client_temperature_ships_no_temperature() {
     let req = ingress_request(Some(json!({"type": "adaptive"})), Some("high"), 64_000);
 
     // Act
-    let body = converse_body(&req, true);
+    let body = converse_body(&req);
 
     // Assert
     assert_eq!(bag(&body)["thinking"]["type"], "adaptive", "{body}");
@@ -265,7 +203,7 @@ fn inactive_thinking_types_keep_the_caller_temperature() {
         req.temperature = Some(CALLER_TEMPERATURE);
 
         // Act
-        let body = converse_body(&req, false);
+        let body = converse_body(&req);
 
         // Assert
         assert_eq!(bag(&body)["thinking"], thinking, "{body}");
@@ -303,7 +241,7 @@ fn forced_tool_use_strips_active_thinking_once_and_restores_the_caller_sampling(
         req.top_p = Some(0.9);
 
         // Act
-        let (body, edits) = declared(req, false, &[EditSite::ThinkingStripForcedToolUse]);
+        let (body, edits) = declared(req, &[EditSite::ThinkingStripForcedToolUse]);
 
         // Assert
         assert!(bag(&body).get("thinking").is_none(), "{thinking}: {body}");
@@ -337,7 +275,7 @@ fn forced_tool_use_keeps_inactive_thinking_with_the_client_effort() {
         req.temperature = Some(CALLER_TEMPERATURE);
 
         // Act
-        let (body, edits) = declared(req, false, &[EditSite::ThinkingStripForcedToolUse]);
+        let (body, edits) = declared(req, &[EditSite::ThinkingStripForcedToolUse]);
 
         // Assert
         assert_eq!(bag(&body)["thinking"], thinking, "{body}");
@@ -350,8 +288,8 @@ fn forced_tool_use_keeps_inactive_thinking_with_the_client_effort() {
     }
 }
 
-/// `(row, thinking sent, effort sent, adaptive knob, effort on the bag)`.
-type StrippedEffortRow<'a> = (&'a str, Value, Option<&'a str>, bool, Option<&'a str>);
+/// `(row, thinking sent, effort sent, effort on the bag)`.
+type StrippedEffortRow<'a> = (&'a str, Value, Option<&'a str>, Option<&'a str>);
 
 /// The strip takes `output_config.effort` with it only when routectl
 /// composed the effort; the client's own effort stays.
@@ -362,37 +300,21 @@ fn forced_tool_use_drops_only_a_routectl_composed_effort() {
             "client effort beside adaptive",
             json!({"type": "adaptive"}),
             Some("xhigh"),
-            false,
             Some("xhigh"),
         ),
         (
             "client effort beside enabled",
             json!({"type": "enabled", "budget_tokens": 4096}),
             Some("low"),
-            false,
             Some("low"),
         ),
-        (
-            "effort the adaptive knob inserted",
-            json!({"type": "enabled", "budget_tokens": 4096}),
-            None,
-            true,
-            None,
-        ),
     ];
-    for (row, thinking, effort, knob, expected) in rows {
+    for (row, thinking, effort, expected) in rows {
         // Arrange
         let req = forcing_tool_use(ingress_request(Some(thinking.clone()), *effort, 64_000));
-        if *knob {
-            let unforced = ingress_request(Some(thinking.clone()), *effort, 64_000);
-            assert!(
-                bag_effort(&converse_body(&unforced, true)).is_some(),
-                "{row}: precondition: the knob composes an effort"
-            );
-        }
 
         // Act
-        let body = converse_body(&req, *knob);
+        let body = converse_body(&req);
 
         // Assert
         assert!(bag(&body).get("thinking").is_none(), "{row}: {body}");
@@ -402,13 +324,12 @@ fn forced_tool_use_drops_only_a_routectl_composed_effort() {
 
 fn declared(
     req: routectl_core::ChatRequest,
-    adaptive: bool,
     sites: &[EditSite],
 ) -> (Value, Vec<(EditSite, String)>) {
     let mut req = req;
     let tap = WireTap::admitted();
     req.routectl_internal.wire_tap = Some(tap.clone());
-    let body = converse_body(&req, adaptive);
+    let body = converse_body(&req);
     let edits = tap
         .take_request()
         .edits(Leg::Request)
@@ -417,53 +338,4 @@ fn declared(
         .map(|edit| (edit.site(), edit.path().to_string()))
         .collect();
     (body, edits)
-}
-
-/// The operator overrides Converse applies to a forwarded object are
-/// declared on the attempt's tap, as on the anthropic-api body.
-#[test]
-fn the_forwarded_thinking_overrides_are_declared() {
-    // Arrange
-    let converted = ingress_request(
-        Some(json!({"type": "enabled", "budget_tokens": 8192})),
-        Some("high"),
-        64_000,
-    );
-    let mut capped = converted.clone();
-    capped.routectl_internal.max_thinking_budget = 4096;
-    let untouched = ingress_request(Some(json!({"type": "adaptive"})), Some("high"), 64_000);
-
-    // Act
-    let sites = [
-        EditSite::AdaptiveThinkingOverride,
-        EditSite::ThinkingBudgetCap,
-    ];
-    let (converted_body, converted_edits) = declared(converted, true, &sites);
-    let (capped_body, capped_edits) = declared(capped, false, &sites);
-    let (_, untouched_edits) = declared(untouched, true, &sites);
-
-    // Assert
-    assert_eq!(
-        bag(&converted_body)["thinking"],
-        json!({"type": "adaptive"})
-    );
-    assert_eq!(
-        converted_edits,
-        vec![
-            (EditSite::AdaptiveThinkingOverride, "/thinking/type".into()),
-            (
-                EditSite::AdaptiveThinkingOverride,
-                "/thinking/budget_tokens".into()
-            ),
-        ]
-    );
-    assert_eq!(bag(&capped_body)["thinking"]["budget_tokens"], 4096);
-    assert_eq!(
-        capped_edits,
-        vec![(
-            EditSite::ThinkingBudgetCap,
-            "/thinking/budget_tokens".into()
-        )]
-    );
-    assert!(untouched_edits.is_empty(), "{untouched_edits:?}");
 }

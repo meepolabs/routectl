@@ -12,7 +12,7 @@ use routectl_core::{ChatRequest, Result};
 use super::super::dialect::ReasoningDialect;
 use super::Dialect;
 use super::util::{drop_sampling_params, insert_reasoning_effort};
-use crate::effort::clamp_effort_to_supported;
+use crate::effort::wire_effort;
 use crate::model_profile::uses_modern_chat_shape;
 
 /// Vanilla OpenAI reasoning dialect (see module docs).
@@ -34,12 +34,8 @@ impl Dialect for OpenAiDialect {
         let tap = crate::wire_declare::tap(req);
         if let Some(effort) = req.reasoning.as_ref().and_then(|r| r.effort.as_deref()) {
             // Vanilla OpenAI has no disable token, so omission is the disable
-            // form -- a `None` clamp must never become a positive level.
-            insert_reasoning_effort(
-                obj,
-                clamp_effort_to_supported(effort, &req.routectl_internal.effort_levels),
-                tap,
-            );
+            // form -- a `None` effort must never become a positive level.
+            insert_reasoning_effort(obj, wire_effort(effort), tap);
         }
         if uses_modern_chat_shape(&req.model) {
             drop_sampling_params(obj, tap);

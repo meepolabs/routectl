@@ -3,10 +3,7 @@
 //! One row per effort level, `output_config.effort.<level>`, each PRESENT when
 //! the effort the request emits is exactly that level. A ranked rewrite writes
 //! the replacement level only into carriers that already hold the refused one,
-//! so it never turns thinking on for a request that sent an effort alone. While
-//! the target sets a non-empty `effort_levels` the egress clamps the effort
-//! after this read, so the wire value is not the one a verdict would key on and
-//! every effort row reads absent.
+//! so it never turns thinking on for a request that sent an effort alone.
 //!
 //! A refused level is replaced by the nearest lower level the refusal listed,
 //! else the nearest higher one, never by a level the request already sent. A
@@ -35,10 +32,9 @@ pub(super) fn emitted_effort(req: &ChatRequest) -> Option<&str> {
     }
 }
 
-/// Whether `req` emits exactly `level` as its effort, read only while the
-/// target clamps nothing.
+/// Whether `req` emits exactly `level` as its effort.
 pub(super) fn effort_present(req: &ChatRequest, level: &str) -> bool {
-    req.routectl_internal.effort_levels.is_empty() && emitted_effort(req) == Some(level)
+    emitted_effort(req) == Some(level)
 }
 
 /// Write `value` into each effort carrier of `req` that holds `refused`: the

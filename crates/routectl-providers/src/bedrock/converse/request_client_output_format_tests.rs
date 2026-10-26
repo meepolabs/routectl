@@ -20,11 +20,11 @@ use crate::bedrock::{BedrockApiShape, BedrockConfig, BedrockCreds};
 
 const MANAGED_KEY_CONFLICT: &str = "provider_extra_managed_key_conflict";
 
-fn cfg(adaptive: bool) -> BedrockConfig {
-    cfg_for("anthropic.claude-sonnet-4-6", adaptive)
+fn cfg() -> BedrockConfig {
+    cfg_for("anthropic.claude-sonnet-4-6")
 }
 
-fn cfg_for(model_id: &str, adaptive: bool) -> BedrockConfig {
+fn cfg_for(model_id: &str) -> BedrockConfig {
     BedrockConfig {
         id: "bedrock:test-converse".into(),
         region: "us-west-2".into(),
@@ -35,7 +35,6 @@ fn cfg_for(model_id: &str, adaptive: bool) -> BedrockConfig {
         header_extras: Vec::new(),
         anthropic_beta: Vec::new(),
         additional_model_request_fields: None,
-        adaptive_thinking: Some(adaptive),
     }
 }
 
@@ -69,42 +68,6 @@ fn managed_key_conflict_count() -> u64 {
         .map_or(0, |e| e.action_count)
 }
 
-/// A client-native format with no `response_format` reaches the bag beside
-/// the effort routectl composes, and only the format comes from the client's
-/// object: the sent effort is re-clamped against `effort_levels` to a value
-/// the client did not send, and a sibling member stays withheld.
-#[test]
-fn client_output_config_format_ships_beside_the_composed_effort() {
-    // Arrange
-    let format = json!({
-        "type": "json_schema",
-        "schema": {"type": "object", "additionalProperties": false}
-    });
-    let mut req = request_with_client_output_config(
-        Some(json!({"type": "adaptive"})),
-        Some("xhigh"),
-        json!({
-            "effort": "xhigh",
-            "task_budget": {"tokens": 4096},
-            "format": format.clone()
-        }),
-    );
-    req.routectl_internal.effort_levels = ["low", "high"]
-        .iter()
-        .map(|level| (*level).to_string())
-        .collect();
-
-    // Act
-    let bag = shipped_bag(&cfg(true), &req);
-
-    // Assert
-    assert_eq!(
-        bag["output_config"],
-        json!({"effort": "high", "format": format}),
-        "{bag}"
-    );
-}
-
 /// A format-only client `output_config` with no thinking carrier creates the
 /// bag's `output_config` rather than needing an effort to merge into.
 #[test]
@@ -114,7 +77,7 @@ fn client_output_config_format_ships_without_any_effort() {
     let req = request_with_client_output_config(None, None, json!({"format": format.clone()}));
 
     // Act
-    let bag = shipped_bag(&cfg(false), &req);
+    let bag = shipped_bag(&cfg(), &req);
 
     // Assert
     assert_eq!(bag["output_config"], json!({"format": format}), "{bag}");
@@ -145,7 +108,7 @@ fn client_output_config_format_wins_over_a_response_format_conversion() {
     }));
 
     // Act
-    let bag = shipped_bag(&cfg(false), &req);
+    let bag = shipped_bag(&cfg(), &req);
 
     // Assert
     assert_eq!(
@@ -179,7 +142,7 @@ fn client_output_config_format_passes_the_final_bag_repairs() {
     );
 
     // Act
-    let bag = shipped_bag(&cfg(false), &req);
+    let bag = shipped_bag(&cfg(), &req);
 
     // Assert
     let format = bag["output_config"]["format"]
@@ -218,9 +181,9 @@ fn client_output_config_without_a_format_ships_the_bag_unchanged_and_counted() {
     let before = managed_key_conflict_count();
 
     // Act
-    let bag = shipped_bag(&cfg(true), &with_members);
+    let bag = shipped_bag(&cfg(), &with_members);
     let after = managed_key_conflict_count();
-    let control_bag = shipped_bag(&cfg(true), &without_config);
+    let control_bag = shipped_bag(&cfg(), &without_config);
 
     // Assert
     assert_eq!(bag, control_bag);
@@ -268,7 +231,7 @@ fn response_format_name_and_strict_count_once_on_the_converse_lane() {
             format_keys_drop_count("bedrock-converse"),
             format_keys_drop_count("anthropic"),
         );
-        let bag = shipped_bag(&cfg(false), &req);
+        let bag = shipped_bag(&cfg(), &req);
         let after = (
             format_keys_drop_count("bedrock-converse"),
             format_keys_drop_count("anthropic"),
@@ -317,7 +280,7 @@ fn converse_response_format_key_loss_counts_nothing_when_no_conversion_loses_a_k
     for (row, req, ships_client_format) in rows {
         // Act
         let before = format_keys_drop_count("bedrock-converse");
-        let bag = shipped_bag(&cfg(false), &req);
+        let bag = shipped_bag(&cfg(), &req);
         let after = format_keys_drop_count("bedrock-converse");
 
         // Assert
@@ -399,7 +362,7 @@ fn a_non_claude_converse_bag_omits_output_config_and_counts_once() {
     for id in NON_CLAUDE_IDS {
         for (shape, req) in output_config_shapes() {
             // Arrange
-            let cfg = cfg_for(id, false);
+            let cfg = cfg_for(id);
             let before = (
                 output_config_drop_count("bedrock-converse"),
                 output_config_drop_count("anthropic"),
@@ -441,7 +404,7 @@ fn a_non_claude_output_config_with_effort_and_format_counts_once() {
     // Arrange
     let mut req = effort_only_request();
     req.response_format = Some(json!({"type": "json_object"}));
-    let cfg = cfg_for("us.amazon.nova-2-lite-v1:0", false);
+    let cfg = cfg_for("us.amazon.nova-2-lite-v1:0");
     let before = output_config_drop_count("bedrock-converse");
 
     // Act
@@ -460,7 +423,7 @@ fn claude_and_profile_arn_converse_bags_keep_output_config() {
     for id in [CLAUDE_ID, PROFILE_ARN] {
         for (shape, req) in output_config_shapes() {
             // Arrange
-            let cfg = cfg_for(id, false);
+            let cfg = cfg_for(id);
             let before = output_config_drop_count("bedrock-converse");
 
             // Act
@@ -491,7 +454,7 @@ fn the_non_claude_output_config_omission_is_declared() {
     req.routectl_internal.wire_tap = Some(tap.clone());
 
     // Act
-    let _ = shipped_bag(&cfg_for("us.amazon.nova-2-lite-v1:0", false), &req);
+    let _ = shipped_bag(&cfg_for("us.amazon.nova-2-lite-v1:0"), &req);
 
     // Assert
     let edits: Vec<(EditSite, String)> = tap

@@ -323,7 +323,6 @@ async fn bedrock_invoke_router(origin: &str) -> Router {
         header_extras: Vec::new(),
         anthropic_beta: Vec::new(),
         additional_model_request_fields: None,
-        adaptive_thinking: None,
     };
     let resolved = auth::resolve(&creds, BEDROCK_REGION)
         .await

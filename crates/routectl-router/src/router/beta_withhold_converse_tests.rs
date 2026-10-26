@@ -364,7 +364,6 @@ fn converse_bag(req: &ChatRequest, model_id: &str, floor: &[&str]) -> Value {
         header_extras: Vec::new(),
         anthropic_beta: owned(floor),
         additional_model_request_fields: None,
-        adaptive_thinking: None,
     };
     let provider = BedrockProvider::new(cfg, ResolvedCreds::Bearer { key: bearer() })
         .expect("canonical region");

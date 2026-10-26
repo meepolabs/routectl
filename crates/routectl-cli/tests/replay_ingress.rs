@@ -27,10 +27,9 @@
 //! variant (or the test driver wraps the JSON in a synthetic event
 //! stream).
 //!
-//! Per-model router enrichment is reconstructed for each fixture (see
-//! `common::replay::replay_resolved_model`); the residual set of models
-//! whose enrichment cannot be reconstructed is bypassed -- see the
-//! "Corpus scope" section in `docs/REPLAY-FIXTURES.md`.
+//! The set of models whose replay needs a per-model overlay no fixture
+//! field pins is bypassed -- see the "Corpus scope" section in
+//! `docs/REPLAY-FIXTURES.md`.
 //!
 //! The captured/ corpus is per-contributor and gitignored. An absent
 //! root prints one `SKIP ingress_replay_all: ...` line and passes; a
@@ -57,7 +56,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use common::replay::{
     Fixture, FixtureOutcome, ReplayTally, bounded_body_diff, enrichment_skip_reason,
-    load_local_corpus, local_root, parse_enriched_canonical, unpinned_ingress_skip_reason,
+    load_local_corpus, local_root, parse_fixture_canonical, unpinned_ingress_skip_reason,
 };
 
 /// Description of which path + content-type the egress provider hits
@@ -178,7 +177,7 @@ async fn run_non_stream_fixture(fixture: &Fixture) -> Result<FixtureOutcome, Str
 
     // Parse before mounting: an unpinned or unknown ingress dialect
     // decides the fixture's fate without a wiremock server ever starting.
-    let Some(canonical) = parse_enriched_canonical(fixture)? else {
+    let Some(canonical) = parse_fixture_canonical(fixture)? else {
         return Ok(FixtureOutcome::Skipped(unpinned_ingress_skip_reason()));
     };
 

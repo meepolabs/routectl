@@ -469,7 +469,6 @@ fn bedrock_invoke_cfg() -> BedrockConfig {
         // asserts comes from the translation under test.
         anthropic_beta: Vec::new(),
         additional_model_request_fields: None,
-        adaptive_thinking: None,
     }
 }
 

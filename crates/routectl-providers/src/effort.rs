@@ -1,143 +1,38 @@
-//! Shared effort-clamping helper for OpenAI-shape egresses.
+//! Shared effort helpers for the egresses.
 //!
-//! OpenAI-compatible upstreams (openai, codex, deepseek, vllm) each
-//! declare a finite set of valid `reasoning_effort` strings. The
-//! canonical `ChatRequest.reasoning.effort` field may carry values
-//! beyond that set (e.g. "xhigh" or "max" from claude-code). Without
-//! clamping, the upstream rejects with 400.
-//!
-//! This module provides a single helper, `clamp_effort_to_supported`,
-//! that maps an arbitrary effort string to the nearest supported level.
-//! It returns `Option`: `None` means the caller asked for reasoning-OFF
-//! (`effort: "none"`) and the egress must OMIT the effort field rather
-//! than substitute a positive level. Anthropic-shape egresses
-//! (anthropic_api, bedrock) accept "xhigh" and "max" verbatim and MUST
-//! NOT call this helper for that purpose.
-
-#[cfg(any(
-    feature = "openai-compat",
-    feature = "anthropic-api",
-    feature = "bedrock",
-    feature = "openai-responses"
-))]
-use std::borrow::Cow;
+//! `wire_effort` is the one place the reasoning-OFF decision lives for the
+//! egresses that translate the canonical effort: `effort: "none"` omits the
+//! effort field rather than substituting a positive level, and every other
+//! token rides as sent. The budget tables map effort levels to and from
+//! Anthropic-style thinking budgets.
 
 /// The six canonical effort tokens, in rank order from lowest to
 /// highest. This is the single source of truth for the valid effort
-/// vocabulary; `validate_reasoning_defaults` in `routectl-router`
-/// imports this constant instead of maintaining a separate copy.
+/// vocabulary; the router's effort repair rows import this constant
+/// instead of maintaining a separate copy.
 pub const VALID_EFFORT_TOKENS: [&str; 6] = ["minimal", "low", "medium", "high", "xhigh", "max"];
 
-/// Standard effort rank order. Identical to VALID_EFFORT_TOKENS --
-/// maintained as a separate slice reference so `clamp_effort_to_supported`
-/// can continue to work with a `&[&str]` reference and carry its
-/// rank-ordering semantics explicitly. Both must stay in sync; the
-/// unit test `effort_tokens_and_rank_order_in_sync` enforces that.
-#[cfg(any(
-    feature = "openai-compat",
-    feature = "anthropic-api",
-    feature = "bedrock",
-    feature = "openai-responses"
-))]
-const RANK_ORDER: &[&str] = &VALID_EFFORT_TOKENS;
-
-/// Resolve `requested` against the model's declared supported levels.
+/// The effort a translating egress emits for the caller's `requested`.
 ///
 /// Returns `None` when the caller's intent is reasoning-OFF (`requested ==
 /// "none"`): every egress that TRANSLATES the canonical effort interprets
 /// `None` as "omit the effort field" (or emit its own disable form), so a
-/// client that explicitly declined thinking is never billed for it. Returns
-/// `Some(level)` otherwise. An effort the client sent on the anthropic-api
-/// `output_config` carrier is not translated: that egress forwards it as sent,
-/// "none" included, and passes "none" through its re-clamp unchanged.
-///
-/// Rank order for clamping:
-///
-///   minimal < low < medium < high < xhigh < max
-///
-/// Rules:
-///   - `requested == "none"` -> `None` (reasoning-OFF; omit, never substitute
-///     a positive level). This is the single place the "none" -> omit
-///     decision lives so the translating egresses stay consistent.
-///   - If `supported` is empty, return `Some(requested)` unchanged (passthrough).
-///   - If `supported` contains `requested`, return `Some(requested)` unchanged.
-///   - Otherwise, pick the highest supported level that is <= requested
-///     on the rank order above.
-///   - If no supported level is <= requested (e.g., requested="minimal"
-///     but supported only contains ["high"]), pick the lowest supported
-///     level.
-///   - A genuinely unknown, intent-bearing token (not "none", not on the
-///     rank order -- e.g. "turbo") is PASSED THROUGH verbatim with a
-///     `tracing::warn!`, never clamped down to the lowest supported level.
-///     Clamping an unknown DOWN would silently invert caller intent; the
-///     upstream may reject it, but routectl does not fabricate a level.
-///   - Emits `tracing::debug!` whenever a clamp actually changes the value,
-///     with fields `requested`, `applied`, and `supported`.
+/// client that explicitly declined thinking is never billed for it. Any other
+/// token, including one outside [`VALID_EFFORT_TOKENS`], is returned as sent:
+/// the upstream judges it, and a refused level is repaired per lane. An
+/// effort the client sent on the anthropic-api `output_config` carrier is not
+/// translated: that egress forwards it as sent, "none" included.
 #[cfg(any(
     feature = "openai-compat",
     feature = "anthropic-api",
     feature = "bedrock",
     feature = "openai-responses"
 ))]
-pub(crate) fn clamp_effort_to_supported<'a>(
-    requested: &'a str,
-    supported: &[String],
-) -> Option<Cow<'a, str>> {
-    // Reasoning-OFF: never substitute a positive level. Signal "omit" so the
-    // egress drops the effort field (or emits its own disable form). "none" is
-    // deliberately absent from RANK_ORDER -- it is not a positive level.
+pub(crate) fn wire_effort(requested: &str) -> Option<&str> {
     if routectl_core::ReasoningConfig::is_off_effort(requested) {
         return None;
     }
-
-    // Empty supported list -> passthrough semantics.
-    if supported.is_empty() {
-        return Some(Cow::Borrowed(requested));
-    }
-
-    // Fast path: the requested level is already in the supported set.
-    if supported.iter().any(|s| s == requested) {
-        return Some(Cow::Borrowed(requested));
-    }
-
-    // Locate the requested level in the canonical rank order.
-    let requested_rank = RANK_ORDER.iter().position(|&r| r == requested);
-
-    let Some(req_rank) = requested_rank else {
-        // Unknown, intent-bearing effort string. Pass it through verbatim
-        // rather than clamping to the lowest supported level: clamping an
-        // unknown DOWN silently inverts caller intent. The upstream may
-        // reject it, but routectl never fabricates a level.
-        tracing::warn!(
-            requested = requested,
-            supported = ?supported,
-            "effort string is not in the standard rank order; passing through verbatim"
-        );
-        return Some(Cow::Borrowed(requested));
-    };
-
-    // Find the highest supported level whose rank is <= requested rank.
-    // Iterate RANK_ORDER in reverse (high to low) and pick the first
-    // supported entry that fits.
-    let clamped = RANK_ORDER[..=req_rank]
-        .iter()
-        .rev()
-        .find(|&&r| supported.iter().any(|s| s == r))
-        .copied();
-
-    let applied = match clamped {
-        Some(c) => c,
-        // Nothing <= requested is supported: pick the lowest supported level.
-        None => lowest_supported(supported),
-    };
-
-    tracing::debug!(
-        requested = requested,
-        applied = %applied,
-        supported = ?supported,
-        "effort clamped to model's declared supported levels"
-    );
-    Some(Cow::Owned(applied.to_owned()))
+    Some(requested)
 }
 
 /// Exact effort-level -> `budget_tokens` lookup. Returns `None` for any
@@ -145,9 +40,8 @@ pub(crate) fn clamp_effort_to_supported<'a>(
 /// estimate rather than guess. This is the forward direction of the
 /// effort<->budget bijection; `level_from_budget` is the reverse.
 ///
-/// The table is independent of `VALID_EFFORT_TOKENS` / `RANK_ORDER`:
-/// it carries a "none" level (budget 0) and exact per-level budgets
-/// that the clamp path deliberately does not model.
+/// The table is independent of `VALID_EFFORT_TOKENS`:
+/// it carries a "none" level (budget 0) and exact per-level budgets.
 #[cfg(any(feature = "gemini", feature = "anthropic-api"))]
 pub(crate) fn budget_from_level(level: &str) -> Option<u32> {
     match level {
@@ -189,35 +83,6 @@ pub(crate) const fn level_from_budget(budget: u32) -> &'static str {
     }
 }
 
-/// Return the lowest-ranked string in `supported` by the standard rank
-/// order. Falls back to the first element for strings not in the order.
-///
-/// Precondition: `supported` is non-empty. Callers must ensure this
-/// before invoking (every call site checks `supported.is_empty()`
-/// earlier and returns early).
-#[cfg(any(
-    feature = "openai-compat",
-    feature = "anthropic-api",
-    feature = "bedrock",
-    feature = "openai-responses"
-))]
-fn lowest_supported(supported: &[String]) -> &str {
-    debug_assert!(
-        !supported.is_empty(),
-        "lowest_supported called with empty slice -- precondition violated"
-    );
-    supported
-        .iter()
-        .min_by_key(|s| {
-            RANK_ORDER
-                .iter()
-                .position(|&r| r == s.as_str())
-                .unwrap_or(usize::MAX)
-        })
-        .map(std::string::String::as_str)
-        .expect("supported is non-empty -- precondition violated")
-}
-
 /// Pure JSON utility: remove `output_config.effort` from `obj`, and
 /// drop the now-empty `output_config` object only if removing `effort`
 /// actually removed something. Any orthogonal sibling (e.g.
@@ -241,13 +106,6 @@ pub(crate) fn drop_orphaned_output_config_effort(
 
 #[cfg(test)]
 mod tests {
-    #[cfg(any(
-        feature = "openai-compat",
-        feature = "anthropic-api",
-        feature = "bedrock",
-        feature = "openai-responses"
-    ))]
-    use super::VALID_EFFORT_TOKENS;
     #[cfg(any(feature = "gemini", feature = "anthropic-api"))]
     use super::budget_from_level;
     #[cfg(feature = "openai-responses")]
@@ -258,10 +116,9 @@ mod tests {
         feature = "bedrock",
         feature = "openai-responses"
     ))]
-    use super::{RANK_ORDER, clamp_effort_to_supported};
+    use super::wire_effort;
 
-    // VALID_EFFORT_TOKENS and RANK_ORDER must stay in sync: same elements,
-    // same order. If either is updated, the other must follow.
+    // A positive token is returned verbatim.
     #[cfg(any(
         feature = "openai-compat",
         feature = "anthropic-api",
@@ -269,51 +126,13 @@ mod tests {
         feature = "openai-responses"
     ))]
     #[test]
-    fn effort_tokens_and_rank_order_in_sync() {
-        assert_eq!(
-            VALID_EFFORT_TOKENS.as_slice(),
-            RANK_ORDER,
-            "VALID_EFFORT_TOKENS and RANK_ORDER must be identical slices"
-        );
-    }
-
-    // Helper to build a Vec<String> from a slice of &str.
-    #[cfg(any(
-        feature = "openai-compat",
-        feature = "anthropic-api",
-        feature = "bedrock",
-        feature = "openai-responses"
-    ))]
-    fn levels(ls: &[&str]) -> Vec<String> {
-        ls.iter().map(|s| (*s).to_string()).collect()
-    }
-
-    // Empty supported -> requested returned verbatim (passthrough).
-    #[cfg(any(
-        feature = "openai-compat",
-        feature = "anthropic-api",
-        feature = "bedrock",
-        feature = "openai-responses"
-    ))]
-    #[test]
-    fn empty_supported_returns_requested() {
-        assert_eq!(
-            clamp_effort_to_supported("max", &[]).as_deref(),
-            Some("max")
-        );
-        assert_eq!(
-            clamp_effort_to_supported("xhigh", &[]).as_deref(),
-            Some("xhigh")
-        );
-        assert_eq!(
-            clamp_effort_to_supported("anything", &[]).as_deref(),
-            Some("anything")
-        );
+    fn positive_effort_returns_verbatim() {
+        assert_eq!(wire_effort("max"), Some("max"));
+        assert_eq!(wire_effort("xhigh"), Some("xhigh"));
     }
 
     // "none" is reasoning-OFF: the helper returns None so every egress omits
-    // the effort field. It must NEVER resolve to a positive level, with or
-    // without a supported cap.
+    // the effort field. It must NEVER resolve to a positive level.
     #[cfg(any(
         feature = "openai-compat",
         feature = "anthropic-api",
@@ -321,106 +140,11 @@ mod tests {
         feature = "openai-responses"
     ))]
     #[test]
-    fn none_maps_to_omit_regardless_of_supported() {
-        assert_eq!(clamp_effort_to_supported("none", &[]), None);
-        let sup = levels(&["low", "medium", "high"]);
-        assert_eq!(clamp_effort_to_supported("none", &sup), None);
-        // Even when the only supported level is the lowest, "none" still omits
-        // rather than clamping up to it (the original inversion bug).
-        let only_low = levels(&["low"]);
-        assert_eq!(clamp_effort_to_supported("none", &only_low), None);
+    fn none_maps_to_omit() {
+        assert_eq!(wire_effort("none"), None);
     }
 
-    // Requested level is in supported -> verbatim, no allocation.
-    #[cfg(any(
-        feature = "openai-compat",
-        feature = "anthropic-api",
-        feature = "bedrock",
-        feature = "openai-responses"
-    ))]
-    #[test]
-    fn requested_in_supported_returns_verbatim() {
-        let sup = levels(&["low", "medium", "high"]);
-        assert_eq!(
-            clamp_effort_to_supported("high", &sup).as_deref(),
-            Some("high")
-        );
-        assert_eq!(
-            clamp_effort_to_supported("low", &sup).as_deref(),
-            Some("low")
-        );
-    }
-
-    // requested="max", supported=["low","medium","high"] -> "high".
-    #[cfg(any(
-        feature = "openai-compat",
-        feature = "anthropic-api",
-        feature = "bedrock",
-        feature = "openai-responses"
-    ))]
-    #[test]
-    fn max_clamps_to_high() {
-        let sup = levels(&["low", "medium", "high"]);
-        assert_eq!(
-            clamp_effort_to_supported("max", &sup).as_deref(),
-            Some("high")
-        );
-    }
-
-    // requested="xhigh", supported=["low","medium","high"] -> "high".
-    #[cfg(any(
-        feature = "openai-compat",
-        feature = "anthropic-api",
-        feature = "bedrock",
-        feature = "openai-responses"
-    ))]
-    #[test]
-    fn xhigh_clamps_to_high() {
-        let sup = levels(&["low", "medium", "high"]);
-        assert_eq!(
-            clamp_effort_to_supported("xhigh", &sup).as_deref(),
-            Some("high")
-        );
-    }
-
-    // requested="minimal", supported=["medium","high"] -> "medium"
-    // (nothing <= minimal in supported, so pick lowest = "medium").
-    #[cfg(any(
-        feature = "openai-compat",
-        feature = "anthropic-api",
-        feature = "bedrock",
-        feature = "openai-responses"
-    ))]
-    #[test]
-    fn minimal_below_all_supported_picks_lowest() {
-        let sup = levels(&["medium", "high"]);
-        assert_eq!(
-            clamp_effort_to_supported("minimal", &sup).as_deref(),
-            Some("medium")
-        );
-    }
-
-    // requested="low", supported=["medium","high"] -> "medium"
-    // (nothing <= low in supported, so pick lowest = "medium").
-    #[cfg(any(
-        feature = "openai-compat",
-        feature = "anthropic-api",
-        feature = "bedrock",
-        feature = "openai-responses"
-    ))]
-    #[test]
-    fn low_below_all_supported_picks_lowest() {
-        let sup = levels(&["medium", "high"]);
-        assert_eq!(
-            clamp_effort_to_supported("low", &sup).as_deref(),
-            Some("medium")
-        );
-    }
-
-    // Unknown, intent-bearing effort string with non-empty supported ->
-    // passthrough verbatim (NOT clamped down to lowest, which would invert
-    // intent). The upstream may reject it, but routectl never fabricates a
-    // level.
+    // A token outside the known vocabulary rides as sent.
     #[cfg(any(
         feature = "openai-compat",
         feature = "anthropic-api",
@@ -429,68 +153,10 @@ mod tests {
     ))]
     #[test]
     fn unknown_effort_passes_through_verbatim() {
-        let sup = levels(&["low", "medium"]);
         assert_eq!(
-            clamp_effort_to_supported("turbo", &sup).as_deref(),
+            wire_effort("turbo"),
             Some("turbo"),
-            "an unknown token must pass through, not clamp down to lowest"
-        );
-    }
-
-    // Clamp from a mid-level works correctly.
-    #[cfg(any(
-        feature = "openai-compat",
-        feature = "anthropic-api",
-        feature = "bedrock",
-        feature = "openai-responses"
-    ))]
-    #[test]
-    fn high_clamps_to_medium_when_only_low_medium_supported() {
-        let sup = levels(&["low", "medium"]);
-        assert_eq!(
-            clamp_effort_to_supported("high", &sup).as_deref(),
-            Some("medium")
-        );
-    }
-
-    // Single-element supported list: everything (except "none") maps to it.
-    #[cfg(any(
-        feature = "openai-compat",
-        feature = "anthropic-api",
-        feature = "bedrock",
-        feature = "openai-responses"
-    ))]
-    #[test]
-    fn single_element_supported_always_returns_it() {
-        let sup = levels(&["medium"]);
-        assert_eq!(
-            clamp_effort_to_supported("max", &sup).as_deref(),
-            Some("medium")
-        );
-        assert_eq!(
-            clamp_effort_to_supported("minimal", &sup).as_deref(),
-            Some("medium")
-        );
-        assert_eq!(
-            clamp_effort_to_supported("medium", &sup).as_deref(),
-            Some("medium")
-        );
-    }
-
-    // minimal < low: low clamps down to minimal when minimal is sole option.
-    #[cfg(any(
-        feature = "openai-compat",
-        feature = "anthropic-api",
-        feature = "bedrock",
-        feature = "openai-responses"
-    ))]
-    #[test]
-    fn low_clamps_down_when_only_minimal_supported() {
-        let sup = levels(&["minimal"]);
-        // low > minimal; highest <= low in supported is minimal.
-        assert_eq!(
-            clamp_effort_to_supported("low", &sup).as_deref(),
-            Some("minimal")
+            "an unknown token must pass through"
         );
     }
 

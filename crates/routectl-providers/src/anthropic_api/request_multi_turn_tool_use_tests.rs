@@ -73,7 +73,7 @@ fn assistant_message_with_tool_calls_emits_tool_use_blocks() {
         ..Default::default()
     };
 
-    let body = normalize("test-anthropic", &req, false, false, None, false, true).unwrap();
+    let body = normalize("test-anthropic", &req, false, None, false, true).unwrap();
     let messages = body.get("messages").and_then(|v| v.as_array()).unwrap();
     let assistant = messages
         .iter()
@@ -139,7 +139,7 @@ fn strips_unsigned_thinking_block_keeps_other_blocks() {
         ..Default::default()
     };
 
-    let body = normalize("test-anthropic", &req, false, false, None, false, true).unwrap();
+    let body = normalize("test-anthropic", &req, false, None, false, true).unwrap();
     let messages = body.get("messages").and_then(|v| v.as_array()).unwrap();
     let assistant = messages
         .iter()
@@ -215,7 +215,7 @@ fn passes_through_when_all_thinking_signed() {
         ..Default::default()
     };
 
-    let body = normalize("test-anthropic", &req, false, false, None, false, true).unwrap();
+    let body = normalize("test-anthropic", &req, false, None, false, true).unwrap();
     let assistant = body
         .get("messages")
         .and_then(|v| v.as_array())
@@ -271,7 +271,7 @@ fn drops_assistant_message_when_only_block_was_unsigned_thinking() {
         ..Default::default()
     };
 
-    let body = normalize("test-anthropic", &req, false, false, None, false, true).unwrap();
+    let body = normalize("test-anthropic", &req, false, None, false, true).unwrap();
     let messages = body.get("messages").and_then(|v| v.as_array()).unwrap();
     // The empty-after-strip assistant message is gone; only the
     // two user messages remain.
@@ -324,7 +324,7 @@ fn keeps_message_with_only_unsigned_thinking_when_tool_calls_present() {
         .into(),
         ..Default::default()
     };
-    let body = normalize("test-anthropic", &req, false, false, None, false, true).unwrap();
+    let body = normalize("test-anthropic", &req, false, None, false, true).unwrap();
     let messages = body.get("messages").and_then(|v| v.as_array()).unwrap();
     let assistant = messages
         .iter()
@@ -392,7 +392,7 @@ fn emits_debug_event_when_stripping_occurs() {
     };
 
     let captured = routectl_testkit::capture_events(|| {
-        normalize("provider-x", &req, false, false, None, false, true).expect("normalize succeeds");
+        normalize("provider-x", &req, false, None, false, true).expect("normalize succeeds");
     });
 
     let strip_event = captured
@@ -462,7 +462,7 @@ fn tool_message_without_tool_call_id_is_rejected() {
         .into(),
         ..Default::default()
     };
-    let err = normalize("test-anthropic", &req, false, false, None, false, true).unwrap_err();
+    let err = normalize("test-anthropic", &req, false, None, false, true).unwrap_err();
     assert!(
         err.to_string().contains("tool_call_id"),
         "must mention tool_call_id; got: {err}"
@@ -546,7 +546,7 @@ fn empty_tool_result_id_is_refused_only_where_the_egress_builds_the_block() {
         };
 
         // Act
-        let out = normalize("test-anthropic", &req, false, false, None, false, true);
+        let out = normalize("test-anthropic", &req, false, None, false, true);
 
         // Assert
         if let Some(block) = forwarded {
@@ -612,7 +612,7 @@ fn unsigned_thinking_block_is_stripped_not_rejected() {
     };
     // Must NOT error: the new behavior is to strip the unsigned
     // block, not reject the request.
-    let body = normalize("test-anthropic", &req, false, false, None, false, true).expect(
+    let body = normalize("test-anthropic", &req, false, None, false, true).expect(
         "normalize must accept the request and strip the unsigned block; \
          a hard reject would regress the cross-provider fallback path",
     );
@@ -649,7 +649,7 @@ fn assistant_tool_call_with_unparseable_arguments_wraps_under_underscore() {
         .into(),
         ..Default::default()
     };
-    let body = normalize("test-anthropic", &req, false, false, None, false, true).unwrap();
+    let body = normalize("test-anthropic", &req, false, None, false, true).unwrap();
     let messages = body.get("messages").and_then(|v| v.as_array()).unwrap();
     let assistant = messages
         .iter()
@@ -688,7 +688,7 @@ fn normalize_recomputes_sampling_after_tool_choice_forces_use_strip() {
         }),
         ..Default::default()
     };
-    let body = normalize("test", &req, false, false, None, false, true).unwrap();
+    let body = normalize("test", &req, false, None, false, true).unwrap();
     assert!(
         body.get("thinking").is_none(),
         "thinking must be stripped when tool_choice forces tool use; got: {body}"
@@ -701,46 +701,6 @@ fn normalize_recomputes_sampling_after_tool_choice_forces_use_strip() {
         body.get("top_p").and_then(Value::as_f64),
         Some(0.9),
         "top_p must be re-emitted per the else-branch once thinking is stripped; got: {body}"
-    );
-}
-
-/// With `adaptive = true`, the wire shape is the
-/// Opus 4.7+ form -- `thinking: {type:"adaptive"}` (no
-/// `budget_tokens`) plus a top-level `output_config: {effort:...}`
-/// carrying the canonical `reasoning.effort` string verbatim.
-#[test]
-fn adaptive_emits_adaptive_shape_with_output_config() {
-    use routectl_core::ReasoningConfig;
-    let req = ChatRequest {
-        model: "claude-opus-4-7".into(),
-        messages: vec![user_msg("hi")].into(),
-        max_tokens: Some(1024),
-        reasoning: Some(ReasoningConfig {
-            effort: Some("xhigh".into()),
-            max_tokens: Some(8000),
-            exclude: None,
-            enabled: Some(true),
-        }),
-        ..Default::default()
-    };
-    let body = normalize("test-anthropic", &req, true, false, None, false, true).unwrap();
-
-    // thinking serializes to {"type":"adaptive"} -- no budget_tokens.
-    let thinking = body.get("thinking").expect("thinking field present");
-    assert_eq!(thinking["type"], "adaptive");
-    assert!(
-        thinking.get("budget_tokens").is_none(),
-        "adaptive shape must not carry budget_tokens, got {thinking:?}"
-    );
-
-    // output_config carries the effort verbatim.
-    let oc = body.get("output_config").expect("output_config present");
-    assert_eq!(oc["effort"], "xhigh");
-
-    // No client temperature, so active thinking ships none.
-    assert!(
-        body.get("temperature").is_none(),
-        "no temperature is invented under adaptive thinking, got {body:?}"
     );
 }
 
@@ -763,7 +723,7 @@ fn reasoning_effort_composes_thinking_and_does_not_leak() {
         ..Default::default()
     };
 
-    let body = normalize("test-anthropic", &req, false, false, None, false, true).unwrap();
+    let body = normalize("test-anthropic", &req, false, None, false, true).unwrap();
 
     // Thinking composed from the effort string.
     let thinking = body.get("thinking").expect("thinking field present");
@@ -793,7 +753,7 @@ fn reasoning_effort_none_disables_thinking_and_does_not_leak() {
         ..Default::default()
     };
 
-    let body = normalize("test-anthropic", &req, false, false, None, false, true).unwrap();
+    let body = normalize("test-anthropic", &req, false, None, false, true).unwrap();
 
     // Disabled thinking emits the disabled shape, not a budget.
     let thinking = body.get("thinking").expect("thinking field present");
@@ -825,7 +785,7 @@ fn legacy_thinking_unchanged_when_flag_false() {
         }),
         ..Default::default()
     };
-    let body = normalize("test-anthropic", &req, false, false, None, false, true).unwrap();
+    let body = normalize("test-anthropic", &req, false, None, false, true).unwrap();
 
     let thinking = body.get("thinking").expect("thinking field present");
     assert_eq!(thinking["type"], "enabled");
@@ -866,18 +826,17 @@ fn effort_max_maps_to_window_ceiling_legacy_path() {
         }),
         ..Default::default()
     };
-    let body = normalize("test-anthropic", &req, false, false, None, false, true).unwrap();
+    let body = normalize("test-anthropic", &req, false, None, false, true).unwrap();
     let thinking = body.get("thinking").unwrap();
     assert_eq!(thinking["type"], "enabled");
     // table("max")=128000 clamped to window ceiling max_tokens-1 = 1999.
     assert_eq!(thinking["budget_tokens"], 1999);
 }
 
-/// `reasoning.effort = "none"` produces `Disabled` on both
-/// paths. The adaptive flag does not coerce a Disabled into an
-/// Adaptive -- if the caller said no thinking, we honor it.
+/// `reasoning.effort = "none"` produces `Disabled`: if the caller said
+/// no thinking, we honor it.
 #[test]
-fn disabled_thinking_unchanged_under_adaptive_flag() {
+fn effort_none_emits_disabled_thinking() {
     use routectl_core::ReasoningConfig;
     let req = ChatRequest {
         model: "claude-opus-4-7".into(),
@@ -891,69 +850,10 @@ fn disabled_thinking_unchanged_under_adaptive_flag() {
         }),
         ..Default::default()
     };
-    let body = normalize("test-anthropic", &req, true, false, None, false, true).unwrap();
+    let body = normalize("test-anthropic", &req, false, None, false, true).unwrap();
     let thinking = body.get("thinking").unwrap();
     assert_eq!(thinking["type"], "disabled");
     assert!(body.get("output_config").is_none());
-}
-
-/// The barefoot adaptive case -- `reasoning.enabled = true`
-/// with no effort and no budget, under the adaptive knob. Adaptive
-/// shape applies; effort defaults to "medium", the one path where
-/// routectl supplies the fallback string.
-#[test]
-fn adaptive_defaults_effort_to_medium_when_unset() {
-    use routectl_core::ReasoningConfig;
-    let req = ChatRequest {
-        model: "claude-opus-4-7".into(),
-        messages: vec![user_msg("hi")].into(),
-        max_tokens: Some(1024),
-        reasoning: Some(ReasoningConfig {
-            effort: None,
-            max_tokens: None,
-            exclude: None,
-            enabled: Some(true),
-        }),
-        ..Default::default()
-    };
-    let body = normalize("test-anthropic", &req, true, false, None, false, true).unwrap();
-    assert_eq!(body["thinking"]["type"], "adaptive");
-    assert_eq!(body["output_config"]["effort"], "medium");
-}
-
-/// When `adaptive = true` AND the caller sets an
-/// explicit `reasoning.max_tokens`, the budget is dropped (the
-/// adaptive wire shape has no field for it) and a tracing::warn
-/// fires at normalize time. We can't easily assert the warn in a
-/// unit test without `tracing-test`, but we CAN pin that the
-/// resulting body is the adaptive shape with the caller's
-/// effort string (or "medium" fallback), with no budget_tokens
-/// leaking into the wire.
-#[test]
-fn adaptive_drops_max_tokens_silently() {
-    use routectl_core::ReasoningConfig;
-    let req = ChatRequest {
-        model: "claude-opus-4-7".into(),
-        messages: vec![user_msg("hi")].into(),
-        max_tokens: Some(1024),
-        reasoning: Some(ReasoningConfig {
-            effort: Some("low".into()),
-            max_tokens: Some(8000),
-            exclude: None,
-            enabled: Some(true),
-        }),
-        ..Default::default()
-    };
-    let body = normalize("test-anthropic", &req, true, false, None, false, true).unwrap();
-    assert_eq!(body["thinking"]["type"], "adaptive");
-    // budget_tokens MUST NOT leak into the adaptive shape.
-    assert!(
-        body["thinking"].get("budget_tokens").is_none(),
-        "adaptive shape must not carry budget_tokens, got {body:?}"
-    );
-    // The caller's effort string survives even though the budget
-    // was dropped.
-    assert_eq!(body["output_config"]["effort"], "low");
 }
 
 /// Real claude-code probe shape: `max_tokens=64` + operator
@@ -977,7 +877,7 @@ fn small_max_tokens_drops_legacy_thinking() {
         }),
         ..Default::default()
     };
-    let body = normalize("test-anthropic", &req, false, false, None, false, true).unwrap();
+    let body = normalize("test-anthropic", &req, false, None, false, true).unwrap();
     assert!(
         body.get("thinking").is_none(),
         "thinking must be absent on probe-sized legacy requests, got {body:?}"
@@ -1005,7 +905,7 @@ fn small_max_tokens_drops_legacy_thinking_effort_medium() {
         }),
         ..Default::default()
     };
-    let body = normalize("test-anthropic", &req, false, false, None, false, true).unwrap();
+    let body = normalize("test-anthropic", &req, false, None, false, true).unwrap();
     assert!(
         body.get("thinking").is_none(),
         "thinking must be absent on effort=medium probe-sized legacy requests, got {body:?}"
@@ -1032,7 +932,7 @@ fn small_max_tokens_drops_legacy_thinking_effort_xhigh() {
         }),
         ..Default::default()
     };
-    let body = normalize("test-anthropic", &req, false, false, None, false, true).unwrap();
+    let body = normalize("test-anthropic", &req, false, None, false, true).unwrap();
     assert!(
         body.get("thinking").is_none(),
         "thinking must be absent on effort=xhigh probe-sized legacy requests, got {body:?}"
@@ -1059,32 +959,8 @@ fn small_max_tokens_drops_thinking_with_explicit_budget() {
         }),
         ..Default::default()
     };
-    let body = normalize("test-anthropic", &req, false, false, None, false, true).unwrap();
+    let body = normalize("test-anthropic", &req, false, None, false, true).unwrap();
     assert!(body.get("thinking").is_none());
-}
-
-/// The adaptive shape is unaffected by the legacy floor: probe-
-/// sized `max_tokens` still receives adaptive thinking because
-/// the wire has no `budget_tokens` field and no Anthropic minimum
-/// to violate. Pins that the new gate is legacy-only.
-#[test]
-fn small_max_tokens_keeps_adaptive() {
-    use routectl_core::ReasoningConfig;
-    let req = ChatRequest {
-        model: "claude-opus-4-7".into(),
-        messages: vec![user_msg("hi")].into(),
-        max_tokens: Some(64),
-        reasoning: Some(ReasoningConfig {
-            effort: Some("high".into()),
-            max_tokens: None,
-            exclude: None,
-            enabled: Some(true),
-        }),
-        ..Default::default()
-    };
-    let body = normalize("test-anthropic", &req, true, false, None, false, true).unwrap();
-    assert_eq!(body["thinking"]["type"], "adaptive");
-    assert_eq!(body["output_config"]["effort"], "high");
 }
 
 /// `effort="high"` on `max_tokens=1100` looks up the exact table
@@ -1108,7 +984,7 @@ fn effort_budget_ceiling_clamped_in_carryable_band() {
         }),
         ..Default::default()
     };
-    let body = normalize("test-anthropic", &req, false, false, None, false, true).unwrap();
+    let body = normalize("test-anthropic", &req, false, None, false, true).unwrap();
     assert_eq!(body["thinking"]["type"], "enabled");
     assert_eq!(body["thinking"]["budget_tokens"], 1099);
 }
@@ -1131,7 +1007,7 @@ fn exactly_1025_max_tokens_keeps_thinking() {
         }),
         ..Default::default()
     };
-    let body = normalize("test-anthropic", &req, false, false, None, false, true).unwrap();
+    let body = normalize("test-anthropic", &req, false, None, false, true).unwrap();
     assert_eq!(body["thinking"]["type"], "enabled");
     assert_eq!(body["thinking"]["budget_tokens"], 1024);
 }
@@ -1157,7 +1033,7 @@ fn explicit_budget_above_max_tokens_capped_to_max_minus_one() {
         }),
         ..Default::default()
     };
-    let body = normalize("test-anthropic", &req, false, false, None, false, true).unwrap();
+    let body = normalize("test-anthropic", &req, false, None, false, true).unwrap();
     assert_eq!(body["thinking"]["type"], "enabled");
     assert_eq!(body["thinking"]["budget_tokens"], 1099);
     // Anthropic invariant: max_tokens > budget_tokens.
@@ -1185,7 +1061,7 @@ fn explicit_budget_below_floor_clamped_up_to_min() {
         }),
         ..Default::default()
     };
-    let body = normalize("test-anthropic", &req, false, false, None, false, true).unwrap();
+    let body = normalize("test-anthropic", &req, false, None, false, true).unwrap();
     assert_eq!(body["thinking"]["type"], "enabled");
     assert_eq!(body["thinking"]["budget_tokens"], 1024);
 }
@@ -1209,7 +1085,7 @@ fn explicit_disable_wins_over_small_max_tokens() {
         }),
         ..Default::default()
     };
-    let body = normalize("test-anthropic", &req, false, false, None, false, true).unwrap();
+    let body = normalize("test-anthropic", &req, false, None, false, true).unwrap();
     assert_eq!(body["thinking"]["type"], "disabled");
 }
 
@@ -1225,7 +1101,7 @@ fn tool_choice_string_auto_translates_to_anthropic_object() {
         tool_choice: Some(json!("auto")),
         ..Default::default()
     };
-    let body = normalize("test", &req, false, false, None, false, true).unwrap();
+    let body = normalize("test", &req, false, None, false, true).unwrap();
     assert_eq!(body["tool_choice"], json!({"type":"auto"}));
 }
 
@@ -1237,7 +1113,7 @@ fn tool_choice_string_required_translates_to_any() {
         tool_choice: Some(json!("required")),
         ..Default::default()
     };
-    let body = normalize("test", &req, false, false, None, false, true).unwrap();
+    let body = normalize("test", &req, false, None, false, true).unwrap();
     assert_eq!(body["tool_choice"], json!({"type":"any"}));
 }
 
@@ -1249,7 +1125,7 @@ fn tool_choice_string_none_drops_field() {
         tool_choice: Some(json!("none")),
         ..Default::default()
     };
-    let body = normalize("test", &req, false, false, None, false, true).unwrap();
+    let body = normalize("test", &req, false, None, false, true).unwrap();
     assert!(
         body.get("tool_choice").is_none() || body["tool_choice"].is_null(),
         "expected tool_choice dropped, got: {body:?}"
@@ -1283,7 +1159,7 @@ fn tool_choice_none_with_tools_strips_tools_too() {
         )]),
         ..Default::default()
     };
-    let body = normalize("test", &req, false, false, None, false, true).unwrap();
+    let body = normalize("test", &req, false, None, false, true).unwrap();
     assert!(
         body.get("tool_choice").is_none() || body["tool_choice"].is_null(),
         "expected tool_choice dropped, got: {body:?}"
@@ -1302,7 +1178,7 @@ fn tool_choice_function_object_translates_to_anthropic_tool() {
         tool_choice: Some(json!({"type":"function","function":{"name":"get_weather"}})),
         ..Default::default()
     };
-    let body = normalize("test", &req, false, false, None, false, true).unwrap();
+    let body = normalize("test", &req, false, None, false, true).unwrap();
     assert_eq!(
         body["tool_choice"],
         json!({"type":"tool","name":"get_weather"})
@@ -1327,7 +1203,7 @@ fn tool_choice_already_anthropic_shape_passes_through_verbatim() {
             tool_choice: Some(tc.clone()),
             ..Default::default()
         };
-        let body = normalize("test", &req, false, false, None, false, true).unwrap();
+        let body = normalize("test", &req, false, None, false, true).unwrap();
         assert_eq!(body["tool_choice"], tc, "expected passthrough for {tc:?}");
     }
 }
@@ -1344,7 +1220,7 @@ fn tool_choice_unknown_object_passes_through_verbatim() {
         tool_choice: Some(weird.clone()),
         ..Default::default()
     };
-    let body = normalize("test", &req, false, false, None, false, true).unwrap();
+    let body = normalize("test", &req, false, None, false, true).unwrap();
     assert_eq!(body["tool_choice"], weird);
 }
 
@@ -1369,7 +1245,7 @@ fn structured_output_format_merges_from_provider_extras() {
         })),
         ..Default::default()
     };
-    let body = normalize("test", &req, false, false, None, false, true).unwrap();
+    let body = normalize("test", &req, false, None, false, true).unwrap();
     assert_eq!(body["output_config"]["format"]["type"], "json_schema");
     assert_eq!(body["output_config"]["format"]["schema"]["type"], "object");
 }
@@ -1388,10 +1264,7 @@ fn output_config_effort_forwarded_on_non_adaptive_provider() {
         })),
         ..Default::default()
     };
-    let body = normalize(
-        "test", &req, /* adaptive= */ false, false, None, false, true,
-    )
-    .unwrap();
+    let body = normalize("test", &req, false, None, false, true).unwrap();
     assert_eq!(body["output_config"], json!({"effort": "high"}), "{body}");
     assert!(body.get("thinking").is_none(), "{body}");
 }
@@ -1415,44 +1288,11 @@ fn output_config_effort_and_sibling_format_forwarded_on_non_adaptive() {
         })),
         ..Default::default()
     };
-    let body = normalize(
-        "test", &req, /* adaptive= */ false, false, None, false, true,
-    )
-    .unwrap();
+    let body = normalize("test", &req, false, None, false, true).unwrap();
     let oc = body.get("output_config").expect("output_config preserved");
     assert_eq!(oc["effort"], "high", "{oc}");
     assert_eq!(oc["format"]["type"], "json_schema");
     assert_eq!(oc["format"]["schema"]["required"][0], "x");
-}
-
-/// Adaptive providers (Opus 4.7 with supports_adaptive_thinking=true)
-/// preserve `output_config.effort` beside the adaptive thinking they
-/// compose from `reasoning`.
-#[test]
-fn output_config_effort_preserved_on_adaptive_provider() {
-    use routectl_core::ReasoningConfig;
-    let req = ChatRequest {
-        model: "claude-opus-4-7".into(),
-        messages: vec![user_msg("hi")].into(),
-        max_tokens: Some(64),
-        reasoning: Some(ReasoningConfig {
-            effort: Some("high".into()),
-            max_tokens: None,
-            exclude: None,
-            enabled: Some(true),
-        }),
-        provider_extras: Some(json!({
-            "output_config": {"effort": "high"}
-        })),
-        ..Default::default()
-    };
-    let body = normalize(
-        "test", &req, /* adaptive= */ true, false, None, false, true,
-    )
-    .unwrap();
-    assert_eq!(body["thinking"]["type"], "adaptive");
-    let oc = body.get("output_config").expect("output_config preserved");
-    assert_eq!(oc["effort"], "high");
 }
 
 // -----------------------------------------------------------------
@@ -1497,7 +1337,7 @@ fn tool_choice_any_with_thinking_strips_thinking() {
     let req = req_with_thinking_and_tool_choice(Some(json!({"type": "any"})));
 
     // Act
-    let body = normalize("test", &req, false, false, None, false, true).unwrap();
+    let body = normalize("test", &req, false, None, false, true).unwrap();
 
     // Assert: thinking dropped, tool_choice preserved verbatim.
     assert!(
@@ -1514,7 +1354,7 @@ fn tool_choice_tool_with_thinking_strips_thinking() {
         req_with_thinking_and_tool_choice(Some(json!({"type": "tool", "name": "web_search"})));
 
     // Act
-    let body = normalize("test", &req, false, false, None, false, true).unwrap();
+    let body = normalize("test", &req, false, None, false, true).unwrap();
 
     // Assert: thinking dropped, tool_choice preserved verbatim.
     assert!(
@@ -1529,17 +1369,12 @@ fn tool_choice_tool_with_thinking_strips_thinking() {
 
 #[test]
 fn adaptive_thinking_forced_tool_choice_strips_thinking_and_output_config_effort() {
-    // Arrange: the adaptive-thinking path pairs `thinking:
-    // {type:adaptive}` with a composed `output_config: {effort}`.
-    // A forcing tool_choice strips the thinking, and the effort composed
-    // only for it is never added.
+    // Arrange: a forcing tool_choice strips the thinking, and no effort
+    // is composed for it.
     let req = req_with_thinking_and_tool_choice(Some(json!({"type": "tool", "name": "ws"})));
 
-    // Act: adaptive=true so build_output_config emits output_config.effort.
-    let body = normalize(
-        "test", &req, /* adaptive= */ true, false, None, false, true,
-    )
-    .unwrap();
+    // Act
+    let body = normalize("test", &req, false, None, false, true).unwrap();
 
     // Assert: thinking dropped AND no composed effort.
     assert!(
@@ -1567,10 +1402,7 @@ fn forced_tool_choice_strips_effort_but_preserves_sibling_format() {
     }));
 
     // Act
-    let body = normalize(
-        "test", &req, /* adaptive= */ true, false, None, false, true,
-    )
-    .unwrap();
+    let body = normalize("test", &req, false, None, false, true).unwrap();
 
     // Assert: thinking + effort gone, format preserved.
     assert!(body.get("thinking").is_none(), "thinking stripped: {body}");
@@ -1589,7 +1421,7 @@ fn tool_choice_auto_with_thinking_keeps_thinking() {
 
     // translate_tool_choice normalizes bare "auto" -> {"type":"auto"},
     // which does not force tool use.
-    let body = normalize("test", &req, false, false, None, false, true).unwrap();
+    let body = normalize("test", &req, false, None, false, true).unwrap();
 
     assert_eq!(body["tool_choice"], json!({"type": "auto"}));
     assert_eq!(body["thinking"]["type"], "enabled");
@@ -1601,7 +1433,7 @@ fn tool_choice_none_with_thinking_keeps_thinking() {
     // wire AND drops the tools array; thinking is unaffected.
     let req = req_with_thinking_and_tool_choice(Some(json!("none")));
 
-    let body = normalize("test", &req, false, false, None, false, true).unwrap();
+    let body = normalize("test", &req, false, None, false, true).unwrap();
 
     assert!(
         body.get("tool_choice").is_none() || body["tool_choice"].is_null(),
@@ -1615,7 +1447,7 @@ fn no_tool_choice_with_thinking_keeps_thinking() {
     // Regression guard: absent tool_choice never triggers the strip.
     let req = req_with_thinking_and_tool_choice(None);
 
-    let body = normalize("test", &req, false, false, None, false, true).unwrap();
+    let body = normalize("test", &req, false, None, false, true).unwrap();
 
     assert!(body.get("tool_choice").is_none() || body["tool_choice"].is_null());
     assert_eq!(body["thinking"]["type"], "enabled");
@@ -1633,7 +1465,7 @@ fn tool_choice_any_without_thinking_no_op() {
         ..Default::default()
     };
 
-    let body = normalize("test", &req, false, false, None, false, true).unwrap();
+    let body = normalize("test", &req, false, None, false, true).unwrap();
 
     assert!(body.get("thinking").is_none());
     assert_eq!(body["tool_choice"], json!({"type": "any"}));
@@ -1732,8 +1564,7 @@ fn preserve_history_reasoning_keeps_unsigned_thinking_for_anthropic_api() {
     let mut body = None;
     let captured = routectl_testkit::capture_events(|| {
         body = Some(
-            normalize("deepseek", &req, false, false, None, false, true)
-                .expect("normalize succeeds"),
+            normalize("deepseek", &req, false, None, false, true).expect("normalize succeeds"),
         );
     });
     let body = body.expect("normalize ran");
@@ -1772,8 +1603,7 @@ fn strip_mode_still_strips_unsigned_thinking() {
     );
 
     // Act.
-    let body =
-        normalize("anthropic", &req, false, false, None, false, true).expect("normalize succeeds");
+    let body = normalize("anthropic", &req, false, None, false, true).expect("normalize succeeds");
 
     // Assert: unsigned thinking removed, text + tool_use survive.
     let blocks = assistant_blocks(&body);
@@ -1795,8 +1625,8 @@ fn auto_and_unset_default_to_strip() {
         let req = req_with_hr(hr, assistant_with_thinking(None));
 
         // Act.
-        let body = normalize("anthropic", &req, false, false, None, false, true)
-            .expect("normalize succeeds");
+        let body =
+            normalize("anthropic", &req, false, None, false, true).expect("normalize succeeds");
 
         // Assert.
         let blocks = assistant_blocks(&body);
@@ -1819,8 +1649,8 @@ fn signed_thinking_passes_through_in_all_modes() {
         let req = req_with_hr(Some(hr), assistant_with_thinking(Some(&sig)));
 
         // Act.
-        let body = normalize("anthropic", &req, false, false, None, false, true)
-            .expect("normalize succeeds");
+        let body =
+            normalize("anthropic", &req, false, None, false, true).expect("normalize succeeds");
 
         // Assert.
         let blocks = assistant_blocks(&body);
@@ -1863,191 +1693,19 @@ fn tool_call_id_reject_stays_unconditional_under_preserve() {
     };
     req.routectl_internal.history_reasoning = Some(CoreHistoryReasoning::Preserve);
 
-    let err = normalize("deepseek", &req, false, false, None, false, true).unwrap_err();
+    let err = normalize("deepseek", &req, false, None, false, true).unwrap_err();
     assert!(
         err.to_string().contains("tool_call_id"),
         "must reject missing tool_call_id even under Preserve; got: {err}"
     );
 }
 
-/// `routectl_internal` field path consulted: when `supports_adaptive_thinking`
-/// is read from `req.routectl_internal` and is `true`, the adaptive wire
-/// shape is emitted. This pins that normalize reads the canonical internal
-/// carrier rather than a hardcoded literal passed by the caller.
+/// An explicit budget inside Anthropic's window passes through unchanged.
 #[test]
-fn normalize_reads_supports_adaptive_thinking_from_routectl_internal() {
+fn explicit_budget_inside_the_window_passes_unchanged() {
     use routectl_core::ReasoningConfig;
 
-    let mut req = ChatRequest {
-        model: "claude-opus-4-7".into(),
-        messages: vec![user_msg("hello")].into(),
-        max_tokens: Some(8192),
-        reasoning: Some(ReasoningConfig {
-            effort: Some("high".into()),
-            max_tokens: None,
-            exclude: None,
-            enabled: Some(true),
-        }),
-        ..Default::default()
-    };
-    // Set the flag via the routectl_internal carrier (not a parameter).
-    req.routectl_internal.supports_adaptive_thinking = true;
-
-    let body = normalize(
-        "test",
-        &req,
-        req.routectl_internal.supports_adaptive_thinking,
-        false,
-        None,
-        false,
-        true,
-    )
-    .expect("normalize must succeed");
-
-    let thinking = body.get("thinking").expect("thinking field present");
-    assert_eq!(
-        thinking["type"], "adaptive",
-        "routectl_internal.supports_adaptive_thinking=true must yield adaptive shape"
-    );
-    assert!(
-        thinking.get("budget_tokens").is_none(),
-        "adaptive shape must not carry budget_tokens"
-    );
-}
-
-/// The `supports_adaptive_thinking` flag drives the Anthropic egress
-/// thinking wire-shape. This flag has NO code-level per-model source: it
-/// is set by the operator in config. A mis-set flag produces a
-/// fallback-inducing 400 on the upstream. This test pins the
-/// wire-shape-follows-flag invariant (not a per-model capability mapping):
-/// the flag value alone determines adaptive vs. legacy shape.
-///
-/// Invariant:
-///   supports_adaptive_thinking=true  -> adaptive wire shape
-///   supports_adaptive_thinking=false -> legacy wire shape
-#[test]
-fn per_model_adaptive_thinking_wire_shape_contract() {
-    use routectl_core::ReasoningConfig;
-
-    struct Row {
-        model: &'static str,
-        adaptive: bool,
-        expect_adaptive_shape: bool,
-    }
-
-    let rows = [
-        Row {
-            model: "claude-opus-4-8",
-            adaptive: true,
-            expect_adaptive_shape: true,
-        },
-        Row {
-            model: "claude-opus-4-7",
-            adaptive: true,
-            expect_adaptive_shape: true,
-        },
-        Row {
-            model: "claude-haiku-4-5",
-            adaptive: false,
-            expect_adaptive_shape: false,
-        },
-    ];
-
-    for row in &rows {
-        let mut req = ChatRequest {
-            model: row.model.into(),
-            messages: vec![user_msg("hi")].into(),
-            max_tokens: Some(8192),
-            reasoning: Some(ReasoningConfig {
-                effort: Some("high".into()),
-                max_tokens: None,
-                exclude: None,
-                enabled: Some(true),
-            }),
-            ..Default::default()
-        };
-        req.routectl_internal.supports_adaptive_thinking = row.adaptive;
-
-        let body = normalize(
-            "test",
-            &req,
-            req.routectl_internal.supports_adaptive_thinking,
-            false,
-            None,
-            false,
-            true,
-        )
-        .unwrap_or_else(|e| panic!("normalize failed for {}: {e}", row.model));
-
-        let thinking = body
-            .get("thinking")
-            .unwrap_or_else(|| panic!("thinking field absent for {}", row.model));
-
-        if row.expect_adaptive_shape {
-            assert_eq!(
-                thinking["type"], "adaptive",
-                "model {} with adaptive=true must emit adaptive shape",
-                row.model
-            );
-            assert!(
-                thinking.get("budget_tokens").is_none(),
-                "adaptive shape must not carry budget_tokens ({})",
-                row.model
-            );
-        } else {
-            assert_ne!(
-                thinking["type"], "adaptive",
-                "model {} with adaptive=false must NOT emit adaptive shape",
-                row.model
-            );
-            assert!(
-                thinking.get("budget_tokens").is_some() || thinking["type"] == "enabled",
-                "non-adaptive shape must be legacy enabled for {} (got: {})",
-                row.model,
-                thinking
-            );
-        }
-    }
-}
-
-/// Operator cap applied: max_thinking_budget=2000 with max_tokens=10000
-/// clamps the budget DOWN to 2000 before Anthropic's window clamp runs.
-#[test]
-fn max_thinking_budget_nonzero_clamps_budget_down() {
-    use routectl_core::ReasoningConfig;
-
-    let mut req = ChatRequest {
-        model: "claude-sonnet-4-6".into(),
-        messages: vec![user_msg("hello")].into(),
-        max_tokens: Some(10000),
-        reasoning: Some(ReasoningConfig {
-            effort: None,
-            max_tokens: Some(8000),
-            exclude: None,
-            enabled: Some(true),
-        }),
-        ..Default::default()
-    };
-    // Operator cap of 2000 < caller's explicit 8000.
-    req.routectl_internal.max_thinking_budget = 2000;
-
-    let body =
-        normalize("test", &req, false, false, None, false, true).expect("normalize must succeed");
-    let thinking = body.get("thinking").expect("thinking field present");
-    assert_eq!(thinking["type"], "enabled");
-    assert_eq!(
-        thinking["budget_tokens"], 2000,
-        "max_thinking_budget=2000 must cap the explicit budget of 8000 down to 2000"
-    );
-}
-
-/// No operator cap: max_thinking_budget=0 passes the budget through
-/// unchanged (only Anthropic's window clamp applies).
-#[test]
-fn max_thinking_budget_zero_no_op() {
-    use routectl_core::ReasoningConfig;
-
-    let mut req = ChatRequest {
+    let req = ChatRequest {
         model: "claude-sonnet-4-6".into(),
         messages: vec![user_msg("hello")].into(),
         max_tokens: Some(10000),
@@ -2059,17 +1717,14 @@ fn max_thinking_budget_zero_no_op() {
         }),
         ..Default::default()
     };
-    // Zero = no operator cap.
-    req.routectl_internal.max_thinking_budget = 0;
 
-    let body =
-        normalize("test", &req, false, false, None, false, true).expect("normalize must succeed");
+    let body = normalize("test", &req, false, None, false, true).expect("normalize must succeed");
     let thinking = body.get("thinking").expect("thinking field present");
     assert_eq!(thinking["type"], "enabled");
     // budget=3000 fits in [1024, 9999] unchanged.
     assert_eq!(
         thinking["budget_tokens"], 3000,
-        "max_thinking_budget=0 must not alter the budget; got {thinking:?}"
+        "an in-window budget must not be altered; got {thinking:?}"
     );
 }
 
@@ -2125,8 +1780,7 @@ fn emit_reasoning_blocks_warns_on_non_anthropic_format() {
     let mut body_out: Option<Value> = None;
     let captured = routectl_testkit::capture_events(|| {
         body_out = Some(
-            normalize("prov-test", &req, false, false, None, false, true)
-                .expect("normalize must succeed"),
+            normalize("prov-test", &req, false, None, false, true).expect("normalize must succeed"),
         );
     });
     let _body = body_out.expect("normalize ran");
@@ -2192,7 +1846,7 @@ fn drops_top_p_when_temperature_also_set() {
     };
 
     // Act
-    let body = normalize("test-anthropic", &req, false, false, None, false, true).unwrap();
+    let body = normalize("test-anthropic", &req, false, None, false, true).unwrap();
 
     // Assert
     assert_eq!(body["temperature"], 0.7);
@@ -2216,7 +1870,7 @@ fn keeps_top_p_when_temperature_unset() {
     };
 
     // Act
-    let body = normalize("test-anthropic", &req, false, false, None, false, true).unwrap();
+    let body = normalize("test-anthropic", &req, false, None, false, true).unwrap();
 
     // Assert
     assert_eq!(body["top_p"], 0.9);
@@ -2240,7 +1894,7 @@ fn keeps_temperature_when_top_p_unset() {
     };
 
     // Act
-    let body = normalize("test-anthropic", &req, false, false, None, false, true).unwrap();
+    let body = normalize("test-anthropic", &req, false, None, false, true).unwrap();
 
     // Assert
     assert_eq!(body["temperature"], 0.3);
@@ -2271,7 +1925,7 @@ fn drops_top_p_under_active_thinking_without_adding_temperature() {
     };
 
     // Act
-    let body = normalize("test-anthropic", &req, true, false, None, false, true).unwrap();
+    let body = normalize("test-anthropic", &req, false, None, false, true).unwrap();
 
     // Assert
     assert!(
@@ -2288,58 +1942,9 @@ fn drops_top_p_under_active_thinking_without_adding_temperature() {
 // The late output_config.effort pass.
 //
 // `reconcile_output_config_effort` runs after the provider_extras merge
-// and reads the assembled body: a sent effort is re-clamped only against
-// an explicit effort_levels, and adaptive thinking with no effort gets one.
+// and reads the assembled body: a sent effort ships as sent, and adaptive
+// thinking with no effort gets the canonical one.
 // -----------------------------------------------------------------
-
-/// Adaptive model whose `provider_extras` carries an
-/// `output_config: {format: ...}` with NO `effort` sub-key. The
-/// assembled body has `thinking.type == adaptive`, so the late
-/// pass must insert the canonical effort (clamped) while preserving the
-/// sibling `format`.
-#[test]
-fn adaptive_reinjects_effort_when_provider_extras_omits_it() {
-    use routectl_core::ReasoningConfig;
-    use serde_json::json;
-    let mut req = ChatRequest {
-        model: "claude-opus-4-7".into(),
-        messages: vec![user_msg("hi")].into(),
-        max_tokens: Some(1024),
-        reasoning: Some(ReasoningConfig {
-            effort: Some("high".into()),
-            max_tokens: None,
-            exclude: None,
-            enabled: Some(true),
-        }),
-        provider_extras: Some(json!({
-            "output_config": {
-                "format": {"type": "json_schema", "schema": {"type": "object"}}
-            }
-        })),
-        ..Default::default()
-    };
-    req.routectl_internal.effort_levels = std::sync::Arc::from(vec![
-        "low".to_string(),
-        "medium".to_string(),
-        "high".to_string(),
-    ]);
-
-    let body =
-        normalize("test", &req, true, false, None, false, true).expect("normalize must succeed");
-
-    assert_eq!(body["thinking"]["type"], "adaptive");
-    let oc = body
-        .get("output_config")
-        .expect("output_config present on adaptive path");
-    assert_eq!(
-        oc["effort"], "high",
-        "the canonical effort must be inserted when provider_extras omits it; got: {oc}"
-    );
-    assert_eq!(
-        oc["format"]["type"], "json_schema",
-        "sibling format must be preserved; got: {oc}"
-    );
-}
 
 /// (tool_choice latent) Adaptive thinking + a forcing `tool_choice`
 /// (`type:"tool"`). The thinking is stripped before `output_config` is
@@ -2362,8 +1967,7 @@ fn adaptive_forced_tool_choice_composes_no_effort() {
         ..Default::default()
     };
 
-    let body =
-        normalize("test", &req, true, false, None, false, true).expect("normalize must succeed");
+    let body = normalize("test", &req, false, None, false, true).expect("normalize must succeed");
 
     assert!(
         body.get("thinking").is_none(),
@@ -2374,42 +1978,5 @@ fn adaptive_forced_tool_choice_composes_no_effort() {
             .and_then(|oc| oc.get("effort"))
             .is_none(),
         "no effort is composed for stripped thinking, got: {body}"
-    );
-}
-
-/// (positive regression-pin) A normal adaptive request whose effort
-/// exceeds the operator cap: the effort is present AND clamped to the
-/// cap.
-#[test]
-fn adaptive_effort_over_cap_clamped() {
-    use routectl_core::ReasoningConfig;
-    let mut req = ChatRequest {
-        model: "claude-opus-4-7".into(),
-        messages: vec![user_msg("hi")].into(),
-        max_tokens: Some(1024),
-        reasoning: Some(ReasoningConfig {
-            effort: Some("max".into()),
-            max_tokens: None,
-            exclude: None,
-            enabled: Some(true),
-        }),
-        ..Default::default()
-    };
-    req.routectl_internal.effort_levels = std::sync::Arc::from(vec![
-        "low".to_string(),
-        "medium".to_string(),
-        "high".to_string(),
-    ]);
-
-    let body =
-        normalize("test", &req, true, false, None, false, true).expect("normalize must succeed");
-
-    assert_eq!(body["thinking"]["type"], "adaptive");
-    let oc = body
-        .get("output_config")
-        .expect("output_config present on adaptive path");
-    assert_eq!(
-        oc["effort"], "high",
-        "effort must be present and clamped to the operator cap; got: {oc}"
     );
 }

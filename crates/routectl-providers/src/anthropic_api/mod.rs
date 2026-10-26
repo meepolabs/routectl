@@ -123,11 +123,6 @@ pub use extras::DEFAULT_MAX_OUTPUT_TOKENS;
 /// The `thinking.type` this egress composes for a request, for a caller
 /// that must reason about the shape before the body is built.
 pub use extras::emitted_thinking_type;
-/// Which provider kinds read the operator-declared thinking-budget cap.
-/// Re-exported from the module that consumes the field so config
-/// validation can answer "does this model's egress read the knob" without
-/// keeping a second list of kinds.
-pub use extras::{MAX_THINKING_BUDGET_READER_KINDS, egress_reads_max_thinking_budget};
 
 #[async_trait]
 impl Provider for AnthropicApiProvider {
@@ -139,7 +134,6 @@ impl Provider for AnthropicApiProvider {
         request::normalize(
             &self.cfg.id,
             req,
-            req.routectl_internal.supports_adaptive_thinking,
             self.cfg.context_management,
             if self.cfg.context_management {
                 Some(&*self.thinking_cache)

@@ -2241,7 +2241,6 @@ mod converse_front_only {
             header_extras: Vec::new(),
             anthropic_beta: Vec::new(),
             additional_model_request_fields: None,
-            adaptive_thinking: None,
         };
         let cache_points = |req: &ChatRequest| {
             let body = routectl_providers::bedrock::converse::normalize_request(&cfg, req)
@@ -2409,7 +2408,6 @@ mod converse_front_only {
             header_extras: Vec::new(),
             anthropic_beta: Vec::new(),
             additional_model_request_fields: None,
-            adaptive_thinking: None,
         };
         let ttl_marker = |ttl: &str| serde_json::json!({"type": "ephemeral", "ttl": ttl});
         let rows = [

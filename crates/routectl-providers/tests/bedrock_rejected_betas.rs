@@ -62,7 +62,6 @@ fn provider_for(
         header_extras: Vec::new(),
         anthropic_beta,
         additional_model_request_fields: None,
-        adaptive_thinking: None,
     };
     let resolved = ResolvedCreds::Bearer {
         key: "test-key".into(),

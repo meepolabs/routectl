@@ -12,13 +12,6 @@
 //! `reasoning.max_tokens` above the prior ceiling (clamped to `ceiling - 1`, so
 //! raising the ceiling un-clamps it).
 //!
-//! `effort: "max"` reaches the window clamp only while the model's
-//! `effort_levels` admits it: the tests here leave
-//! `RoutectlInternal::effort_levels` empty, which is the pass-through case and
-//! the shipped `[models.X]` default, whereas an explicit list such as
-//! `["low", "medium", "high"]` clamps `max` down to `high` (24576 flat, no
-//! ceiling coupling at all).
-//!
 //! These are pinned because the fill is silent at the request boundary: an
 //! operator who never wrote a ceiling has no local artifact naming the figure
 //! their thinking budget is now a fraction of.
@@ -35,32 +28,17 @@ const BASELINE_CEILING: u32 = 64_000;
 const FILLED_CEILING: u32 = 128_000;
 
 /// The legacy-path budget for a request that omits `max_tokens` and carries
-/// `reasoning`, under a router-injected ceiling of `ceiling`. `effort_levels`
-/// is left EMPTY (the pass-through case) so the requested effort reaches
-/// `budget_from_level` unclamped -- see
-/// [`effort_max_under_an_explicit_allowlist_is_clamped_to_high`] for what an
-/// operator-declared list does instead.
+/// `reasoning`, under a router-injected ceiling of `ceiling`.
 fn derived_budget(ceiling: u32, reasoning: ReasoningConfig) -> u32 {
-    derived_budget_with_levels(ceiling, reasoning, &[])
-}
-
-/// [`derived_budget`] with the model's `[models.X] effort_levels` allowlist
-/// spelled out.
-fn derived_budget_with_levels(
-    ceiling: u32,
-    reasoning: ReasoningConfig,
-    effort_levels: &[&str],
-) -> u32 {
     let mut internal = RoutectlInternal::default();
     internal.max_output_tokens = ceiling;
-    internal.effort_levels = effort_levels.iter().map(|l| (*l).to_string()).collect();
     let req = ChatRequest {
         max_tokens: None,
         reasoning: Some(reasoning),
         routectl_internal: internal,
         ..Default::default()
     };
-    match build_thinking(&req, false).expect("reasoning activates thinking") {
+    match build_thinking(&req).expect("reasoning activates thinking") {
         ThinkingConfig::Enabled { budget_tokens, .. } => budget_tokens,
         other => panic!("expected the legacy Enabled shape, got {other:?}"),
     }
@@ -71,9 +49,7 @@ fn effort_max_derives_a_budget_that_tracks_the_injected_ceiling() {
     // `max` has a table entry (128000), but it exceeds both ceilings, so
     // Anthropic's `budget < max_tokens` clamp is what decides -- making this
     // the path where a catalog-filled ceiling doubles the thinking budget, and
-    // with it the reasoning tokens billed as output. Requires the model's
-    // effort_levels to admit `max`; `derived_budget` leaves the list empty,
-    // which is the pass-through case.
+    // with it the reasoning tokens billed as output.
     let baseline = derived_budget(
         BASELINE_CEILING,
         ReasoningConfig {
@@ -95,31 +71,6 @@ fn effort_max_derives_a_budget_that_tracks_the_injected_ceiling() {
         filled,
         baseline * 2 + 1,
         "a catalog-filled ceiling doubles the derived budget at effort=max"
-    );
-}
-
-#[test]
-fn effort_max_under_an_explicit_allowlist_is_clamped_to_high() {
-    // The precondition on the effort=max path: `max` only reaches the window
-    // clamp when the model's effort_levels admit it. An operator list that
-    // stops at `high` rewrites it to `high`, whose exact table budget is
-    // ceiling-independent -- so such a model sees no effort=max spend change
-    // from the fill at all, and the spend note has to say so.
-    const CAPPED_AT_HIGH: [&str; 3] = ["low", "medium", "high"];
-    let at_max = || ReasoningConfig {
-        effort: Some("max".into()),
-        ..Default::default()
-    };
-
-    assert_eq!(
-        derived_budget_with_levels(BASELINE_CEILING, at_max(), &CAPPED_AT_HIGH),
-        24_576,
-        "an allowlist ending at high clamps max -> high, taking the flat table budget"
-    );
-    assert_eq!(
-        derived_budget_with_levels(FILLED_CEILING, at_max(), &CAPPED_AT_HIGH),
-        24_576,
-        "and that budget does not move with the ceiling"
     );
 }
 

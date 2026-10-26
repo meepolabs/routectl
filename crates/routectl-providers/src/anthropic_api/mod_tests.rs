@@ -4147,52 +4147,6 @@ fn beta_occurrences(header: &str, flag: &str) -> usize {
     header.split(',').filter(|b| b.trim() == flag).count()
 }
 
-/// An adaptive-thinking request composes `output_config.effort`, so the
-/// union adds `EFFORT_BETA` exactly once. Asserted against the flag's own
-/// occurrence count rather than the floor length: an effort body
-/// legitimately widens the list past `floor.len()`.
-#[test]
-fn adaptive_effort_body_gains_the_effort_beta_exactly_once() {
-    let provider = AnthropicApiProvider::new(oauth_cfg(Vec::new(), None));
-    let mut req = ChatRequest {
-        model: "claude-opus-4-7".into(),
-        max_tokens: Some(4096),
-        reasoning: Some(routectl_core::ReasoningConfig {
-            effort: Some("high".into()),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
-    req.routectl_internal.supports_adaptive_thinking = true;
-
-    let body = provider.normalize_request(&req).expect("normalize");
-    assert!(
-        body["output_config"].get("effort").is_some(),
-        "precondition: adaptive thinking must compose output_config.effort; got: {body}"
-    );
-
-    let value = outbound_header_value_for_body(&provider, &req, "anthropic-beta", Some(&body))
-        .expect("the OAuth lane must produce a beta header");
-    assert_eq!(
-        beta_occurrences(&value, routectl_core::identity::anthropic::EFFORT_BETA),
-        1,
-        "the effort beta must appear exactly once; got: {value}"
-    );
-    // The floor is preserved in order, with the effort flag appended.
-    let betas: Vec<&str> = value.split(',').map(str::trim).collect();
-    for flag in routectl_core::identity::anthropic::default_claude_code_anthropic_betas() {
-        assert!(
-            betas.contains(flag),
-            "the union must not drop floor flag {flag}; got: {value}"
-        );
-    }
-    assert_eq!(
-        betas.last(),
-        Some(&routectl_core::identity::anthropic::EFFORT_BETA),
-        "the capability union appends after the floor; got: {value}"
-    );
-}
-
 /// The union reads the ASSEMBLED body, so an `output_config.effort` that
 /// arrives through the `provider_extras` forward-compat sweep triggers it
 /// too -- exactly once, with no reorder of the floor.
@@ -4206,12 +4160,12 @@ fn adaptive_effort_body_gains_the_effort_beta_exactly_once() {
 #[test]
 fn provider_extras_effort_body_gains_the_effort_beta_exactly_once() {
     let provider = AnthropicApiProvider::new(oauth_cfg(Vec::new(), None));
-    let mut req = ChatRequest {
+    let req = ChatRequest {
         model: "claude-opus-4-7".into(),
         max_tokens: Some(4096),
-        // The composed adaptive effort is deliberately DIFFERENT from the
-        // extras value below, so a merge that silently dropped the extras
-        // would fail the value assertion.
+        // The canonical effort is deliberately DIFFERENT from the extras
+        // value below, so a merge that silently dropped the extras would
+        // fail the value assertion.
         reasoning: Some(routectl_core::ReasoningConfig {
             effort: Some("low".into()),
             ..Default::default()
@@ -4221,7 +4175,6 @@ fn provider_extras_effort_body_gains_the_effort_beta_exactly_once() {
         })),
         ..Default::default()
     };
-    req.routectl_internal.supports_adaptive_thinking = true;
 
     let body = provider.normalize_request(&req).expect("normalize");
     assert_eq!(
@@ -4280,13 +4233,13 @@ fn body_with_format_and_effort_gains_both_capability_betas() {
 }
 
 /// A body that ships no effort gains NO beta. A `tool_choice` that forces
-/// tool use strips the adaptive `thinking` routectl would have paired an
-/// effort with, so no effort is composed and the shipped body does not carry
-/// the gated field and must not claim the flag.
+/// tool use strips the `thinking` routectl composes, so no effort is
+/// composed and the shipped body does not carry the gated field and must not
+/// claim the flag.
 #[test]
 fn effort_never_composed_for_stripped_thinking_gains_no_effort_beta() {
     let provider = AnthropicApiProvider::new(oauth_cfg(Vec::new(), None));
-    let mut req = ChatRequest {
+    let req = ChatRequest {
         model: "claude-opus-4-7".into(),
         max_tokens: Some(4096),
         reasoning: Some(routectl_core::ReasoningConfig {
@@ -4296,7 +4249,6 @@ fn effort_never_composed_for_stripped_thinking_gains_no_effort_beta() {
         tool_choice: Some(serde_json::json!({"type": "any"})),
         ..Default::default()
     };
-    req.routectl_internal.supports_adaptive_thinking = true;
 
     let body = provider.normalize_request(&req).expect("normalize");
     assert!(

@@ -66,7 +66,6 @@ fn cfg(carrier: Carrier, seam: Seam) -> BedrockConfig {
             Seam::OperatorExtras => Some(extras_with_mcp_servers_and_adjacent()),
             Seam::ClientBody | Seam::ProviderExtras => None,
         },
-        adaptive_thinking: None,
     }
 }
 

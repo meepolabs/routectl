@@ -2,7 +2,7 @@
 //! and `replay_ingress.rs`): the two fixture-root locators, the
 //! loader-vector to `HeaderMap` bridge, the per-fixture outcome enum,
 //! the ingress-adapter lookup keyed on `meta.ingress_kind`, the
-//! model-enrichment reconstruction + residual skip-reason helper, and
+//! residual enrichment skip-reason helper, and
 //! the value-bounded divergence summary the drivers report failures
 //! through.
 //!
@@ -14,15 +14,13 @@
 //! match arms).
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use axum::http::{HeaderMap, HeaderName, HeaderValue};
 use routectl_cli::ingress::IngressAdapter;
 use routectl_cli::ingress::anthropic::AnthropicIngress;
 use routectl_cli::ingress::openai::OpenAiIngress;
 use routectl_cli::ingress::openai_responses::ResponsesIngress;
-use routectl_core::{ChatRequest, Provider};
-use routectl_router::ResolvedModel;
+use routectl_core::ChatRequest;
 use serde_json::Value;
 
 use super::json_diff::{Divergence, DivergenceKind, diff_all};
@@ -188,8 +186,6 @@ impl ReplayTally {
 ///
 /// The rule for membership: a knob stays here only when its value is a
 /// free operator choice in `[models.X]` that `meta.json` does not record.
-/// A knob the harness can reconstruct from the fixture (see
-/// [`replay_resolved_model`]) is NOT grounds for a skip.
 ///
 /// Today the sole member is the DeepSeek reasoning family, which depends
 /// on `history_reasoning`: `Auto` strips outgoing reasoning history and
@@ -201,18 +197,6 @@ impl ReplayTally {
 /// (`deepseek-v4`, `deepseek/deepseek-chat`, ...) all hit.
 pub const ENRICHMENT_DEPENDENT_MODELS: &[&str] = &["deepseek"];
 
-/// Model substrings that get `supports_adaptive_thinking = true` when the
-/// replay rebuilds their enrichment.
-///
-/// Production does NOT derive this from the model id -- it is an explicit
-/// `[models.X]` opt-in, because Anthropic's adaptive rollout has no clean
-/// naming pattern. The replay can still reconstruct it per fixture: the
-/// adaptive generation REJECTS the legacy `thinking.type=enabled` shape
-/// with a 400, and the capture rig only writes a fixture for a request
-/// whose trace shows a successful upstream response, so a fixture on one
-/// of these models was necessarily captured with the flag on.
-pub const ADAPTIVE_THINKING_MODELS: &[&str] = &["opus-4-7", "opus-4-8", "sonnet-4-7", "sonnet-4-8"];
-
 fn model_matches(model: &str, needles: &[&str]) -> bool {
     let lc = model.to_ascii_lowercase();
     needles.iter().any(|needle| lc.contains(needle))
@@ -220,7 +204,7 @@ fn model_matches(model: &str, needles: &[&str]) -> bool {
 
 /// Residual enrichment filter: skip a fixture whose model needs an
 /// overlay value the replay can neither read off the fixture nor derive.
-/// Returns `None` for everything [`replay_resolved_model`] can rebuild.
+/// Returns `None` for every other fixture.
 pub fn enrichment_skip_reason(fixture: &Fixture) -> Option<String> {
     let model = fixture.meta.model.as_deref()?;
     if !model_matches(model, ENRICHMENT_DEPENDENT_MODELS) {
@@ -230,81 +214,6 @@ pub fn enrichment_skip_reason(fixture: &Fixture) -> Option<String> {
         "model `{model}` needs a `history_reasoning` overlay that no fixture field pins; \
          replay cannot tell a captured `Preserve` from a captured `Auto`",
     ))
-}
-
-/// Provider binding for the enrichment-only [`ResolvedModel`] below. The
-/// resolved model exists to carry the four per-model knobs into
-/// [`with_replay_enrichment`]; nothing dispatches through this provider,
-/// so every trait method that would reach a network is unreachable.
-struct EnrichmentOnlyProvider;
-
-#[async_trait::async_trait]
-impl Provider for EnrichmentOnlyProvider {
-    fn id(&self) -> &'static str {
-        "replay-enrichment-only"
-    }
-    fn normalize_request(&self, _: &ChatRequest) -> routectl_core::Result<serde_json::Value> {
-        unreachable!("replay enrichment never normalizes through this provider")
-    }
-    fn normalize_response(
-        &self,
-        _: serde_json::Value,
-    ) -> routectl_core::Result<routectl_core::ChatResponse> {
-        unreachable!("replay enrichment never normalizes through this provider")
-    }
-    async fn complete(&self, _: ChatRequest) -> routectl_core::Result<routectl_core::ChatResponse> {
-        unreachable!("replay enrichment never dispatches through this provider")
-    }
-    async fn stream(
-        &self,
-        _: ChatRequest,
-    ) -> routectl_core::Result<
-        futures::stream::BoxStream<'static, routectl_core::Result<routectl_core::ChatChunk>>,
-    > {
-        unreachable!("replay enrichment never dispatches through this provider")
-    }
-}
-
-/// Rebuild the `ResolvedModel` the router would have resolved for this
-/// fixture's model, so the replay's canonical request carries the same
-/// per-model knobs the egress saw at capture time.
-///
-/// Only the four knobs the egress reads off `routectl_internal` are
-/// reconstructed; every other field stays at its `ResolvedModel::new`
-/// default, which is also the config default:
-///
-/// - `supports_adaptive_thinking`: derived per [`ADAPTIVE_THINKING_MODELS`].
-/// - `max_thinking_budget`: left at `0` (no operator cap), the default an
-///   unconfigured `[models.X]` produces.
-/// - `reasoning_dialect` / `history_reasoning`: left at `None` (fall back
-///   to the egress default). The one family whose captured body depends
-///   on a non-default value is filtered by [`enrichment_skip_reason`]
-///   instead of guessed at here.
-pub fn replay_resolved_model(fixture: &Fixture) -> ResolvedModel {
-    let model = fixture.meta.model.as_deref().unwrap_or_default();
-    let provider: Arc<dyn Provider> = Arc::new(EnrichmentOnlyProvider);
-    ResolvedModel::new("replay", "replay", provider, model)
-        .with_supports_adaptive_thinking(model_matches(model, ADAPTIVE_THINKING_MODELS))
-        .with_max_thinking_budget(0)
-}
-
-/// Project a resolved model's per-model knobs onto a freshly parsed
-/// canonical request, mirroring the four fields the router's dispatch-time
-/// overlay writes before the egress sees the request. Without this the
-/// replay drives every fixture through a `routectl_internal` at its
-/// library-consumer defaults, and a fixture captured under any non-default
-/// knob diverges for a reason that is not a bug.
-///
-/// Reads the SAME `ResolvedModel` fields the router overlay reads, so a
-/// knob added there and not here shows up as a replay divergence rather
-/// than as silent drift.
-pub fn with_replay_enrichment(model: &ResolvedModel, mut req: ChatRequest) -> ChatRequest {
-    req.routectl_internal.supports_adaptive_thinking = model.supports_adaptive_thinking;
-    req.routectl_internal.max_thinking_budget = model.max_thinking_budget;
-    req.routectl_internal.effort_levels = model.effort_levels.clone();
-    req.routectl_internal.reasoning_dialect = model.reasoning_dialect.map(Into::into);
-    req.routectl_internal.history_reasoning = model.history_reasoning.map(Into::into);
-    req
 }
 
 static ANTHROPIC_INGRESS: AnthropicIngress = AnthropicIngress;
@@ -336,10 +245,9 @@ pub fn ingress_for_kind(kind: &str) -> Result<Option<&'static dyn IngressAdapter
 }
 
 /// Parse a fixture's captured inbound request through the ingress the
-/// fixture was captured on, then overlay the per-model enrichment the
-/// router would have applied. `Ok(None)` when the fixture pins no
+/// fixture was captured on. `Ok(None)` when the fixture pins no
 /// `ingress_kind`; the caller turns that into a skip.
-pub fn parse_enriched_canonical(fixture: &Fixture) -> Result<Option<ChatRequest>, String> {
+pub fn parse_fixture_canonical(fixture: &Fixture) -> Result<Option<ChatRequest>, String> {
     let Some(ingress) = ingress_for_kind(&fixture.meta.ingress_kind)? else {
         return Ok(None);
     };
@@ -350,10 +258,7 @@ pub fn parse_enriched_canonical(fixture: &Fixture) -> Result<Option<ChatRequest>
             &serde_json::to_vec(&fixture.ingress_request).expect("wire serializes"),
         )
         .map_err(|e| format!("{} ingress parse_request failed: {e}", ingress.id()))?;
-    Ok(Some(with_replay_enrichment(
-        &replay_resolved_model(fixture),
-        canonical,
-    )))
+    Ok(Some(canonical))
 }
 
 /// Skip reason for a fixture that pins no `ingress_kind`. One phrasing

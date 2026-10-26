@@ -59,7 +59,6 @@ pub fn normalize_request(cfg: &BedrockConfig, req: &ChatRequest) -> Result<Value
     let assembled = crate::anthropic_api::request::normalize_deferring_format_key_warn(
         &cfg.id,
         req,
-        cfg.adaptive_thinking.unwrap_or(false),
         // Bedrock does not emulate context_management beta; no cache.
         false,
         None,
@@ -786,7 +785,6 @@ mod tests {
             // `top_p` is a routectl-managed key the merge drops; `top_k`
             // is a long-tail Anthropic-only knob it forwards.
             additional_model_request_fields: Some(json!({"top_k": 40})),
-            adaptive_thinking: None,
         }
     }
 
@@ -1296,35 +1294,6 @@ mod tests {
             ]
         })];
         assert!(validate_lowered_breakpoints(&five, &five_msgs).is_err());
-    }
-    /// through `normalize_request` -> `anthropic_api::request::normalize`
-    /// and produces the Opus 4.7+ wire shape (no `budget_tokens`,
-    /// top-level `output_config.effort`). This is the integration
-    /// point that lets a Bedrock provider opt into adaptive thinking
-    /// without touching the shared anthropic_api normalizer's
-    /// signature beyond the `bool` flag.
-    #[test]
-    fn adaptive_thinking_propagates_from_bedrock_cfg() {
-        use routectl_core::ReasoningConfig;
-        let mut cfg = fake_cfg();
-        cfg.adaptive_thinking = Some(true);
-
-        let mut req = user_req();
-        req.reasoning = Some(ReasoningConfig {
-            effort: Some("high".into()),
-            max_tokens: Some(2000),
-            exclude: None,
-            enabled: Some(true),
-        });
-        let body = normalize_request(&cfg, &req).unwrap();
-
-        // thinking is the adaptive shape (no budget_tokens) and the
-        // effort moves to top-level output_config.
-        assert_eq!(body["thinking"]["type"], "adaptive");
-        assert!(body["thinking"].get("budget_tokens").is_none());
-        assert_eq!(body["output_config"]["effort"], "high");
-        // Bedrock-required version still set.
-        assert_eq!(body["anthropic_version"], json!("bedrock-2023-05-31"));
     }
 
     /// Structured output (`output_config.format`) flows through

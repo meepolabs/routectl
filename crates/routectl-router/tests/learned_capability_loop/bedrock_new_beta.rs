@@ -213,7 +213,6 @@ impl Lane {
             header_extras: Vec::new(),
             anthropic_beta: operator.floor.iter().map(|f| (*f).to_string()).collect(),
             additional_model_request_fields: None,
-            adaptive_thinking: None,
         };
         let resolved = auth::resolve(&creds, REGION).await.expect("resolve");
         let provider = BedrockProvider::new(cfg, resolved)

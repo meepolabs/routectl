@@ -31,7 +31,7 @@
 //!   fail-closed reader.
 //! - [`harness`] -- shared scaffolding (the two fixture-root locators,
 //!   header-vec to `HeaderMap` bridge, per-fixture outcome enum,
-//!   `meta.ingress_kind` adapter lookup, per-model enrichment rebuild)
+//!   `meta.ingress_kind` adapter lookup, residual enrichment skip)
 //!   used by the `replay_egress.rs` / `replay_ingress.rs` test drivers.
 
 #![allow(dead_code, unused_imports)]
@@ -62,11 +62,10 @@ pub use gated_lanes::{
     read_gated_lanes, read_gated_lanes_at,
 };
 pub use harness::{
-    ADAPTIVE_THINKING_MODELS, ENRICHMENT_DEPENDENT_MODELS, FixtureOutcome, ReplayTally,
-    bounded_body_diff, divergence_count, diverges_only_in_messages, driver_root,
-    enrichment_skip_reason, headers_from_pairs, ingress_for_kind, load_local_corpus, local_root,
-    parse_enriched_canonical, replay_resolved_model, system_turn_lift_skip_reason,
-    unpinned_ingress_skip_reason, with_replay_enrichment,
+    ENRICHMENT_DEPENDENT_MODELS, FixtureOutcome, ReplayTally, bounded_body_diff, divergence_count,
+    diverges_only_in_messages, driver_root, enrichment_skip_reason, headers_from_pairs,
+    ingress_for_kind, load_local_corpus, local_root, parse_fixture_canonical,
+    system_turn_lift_skip_reason, unpinned_ingress_skip_reason,
 };
 pub use json_diff::{
     DEFAULT_HEADER_ALLOW_SKIP, Divergence, DivergenceKind, assert_headers_equal,

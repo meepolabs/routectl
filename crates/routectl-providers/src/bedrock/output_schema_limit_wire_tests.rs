@@ -100,7 +100,6 @@ async fn bedrock_provider(
         anthropic_beta: Vec::new(),
         additional_model_request_fields: operator_output_config
             .map(|output_config| json!({"output_config": output_config})),
-        adaptive_thinking: None,
     };
     let resolved = auth::resolve(&creds, "us-east-1").await.expect("resolve");
     let mut provider = BedrockProvider::new(cfg, resolved).expect("canonical region");

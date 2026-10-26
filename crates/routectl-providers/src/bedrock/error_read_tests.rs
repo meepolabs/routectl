@@ -26,7 +26,6 @@ async fn provider_at(server: &MockServer, shape: BedrockApiShape) -> BedrockProv
         header_extras: Vec::new(),
         anthropic_beta: Vec::new(),
         additional_model_request_fields: None,
-        adaptive_thinking: None,
     };
     let resolved = auth::resolve(&creds, "us-east-1").await.expect("resolve");
     let mut provider = BedrockProvider::new(cfg, resolved).expect("canonical region");

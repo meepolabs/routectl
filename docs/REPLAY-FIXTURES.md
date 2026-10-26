@@ -707,40 +707,24 @@ against its own dialect's captured response.
 
 ### Per-model enrichment
 
-The replay drivers rebuild the per-model knobs the router would have
-overlaid onto `routectl_internal` before the egress saw the canonical
-request. The rebuild constructs a `ResolvedModel` through its existing
-`with_*` builders and projects the four egress-read knobs
-(`supports_adaptive_thinking`, `max_thinking_budget`, `effort_levels`,
-`reasoning_dialect` / `history_reasoning`) onto the parsed request. Without
-it, every fixture replayed at the library-consumer defaults
-(`supports_adaptive_thinking=false`, `max_thinking_budget=0`, both dialect
-knobs `None`) and any capture taken under a non-default knob diverged for a
-reason that was not a bug.
+The router overlays per-model knobs onto `routectl_internal` before the
+egress sees the canonical request. The only such knobs the egress still
+reads are `reasoning_dialect` and `history_reasoning`, and the replay
+drivers parse each fixture straight through its ingress with both left at
+`None` (the egress default). No thinking or effort knob is reconstructed:
+the egress forwards the client's thinking and effort as sent, so the
+captured body carries everything the replay needs for them.
 
-Two knobs are reconstructed differently because their derivability
-differs:
-
-- `supports_adaptive_thinking` IS derivable per fixture. Fixtures predating
-  the removal of the `[models.X]` key were captured under it (Anthropic's
-  adaptive rollout has no clean naming pattern), and the adaptive
-  generation rejects the legacy
-  `thinking.type=enabled` shape with a 400, and the capture rig only emits
-  a fixture for a request whose trace shows a successful upstream
-  response. A fixture on an adaptive-generation model was therefore
-  necessarily captured with the flag on. The driver's
-  `ADAPTIVE_THINKING_MODELS` list carries those model substrings.
-- `history_reasoning` is NOT derivable. `Auto` strips outgoing reasoning
-  history and `Preserve` emits it; the captured body shows which was in
-  force but no `meta.json` field records the operator's choice, so
-  guessing would turn a config difference into a wire-shape failure.
+`history_reasoning` is NOT derivable. `Auto` strips outgoing reasoning
+history and `Preserve` emits it; the captured body shows which was in
+force but no `meta.json` field records the operator's choice, so guessing
+would turn a config difference into a wire-shape failure.
 
 `ENRICHMENT_DEPENDENT_MODELS` is the residual skip list for exactly that
 undeterminable case -- today the DeepSeek reasoning family (`deepseek`).
 Skipped fixtures land in the `skipped` count of the test summary, not
 `failed`. A model belongs on that list only when a knob it needs is a free
-operator choice `meta.json` does not pin; anything the rebuild can
-reconstruct is not grounds for a skip.
+operator choice `meta.json` does not pin.
 
 ### Failure reporting is value-bounded
 

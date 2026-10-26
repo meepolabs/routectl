@@ -38,7 +38,7 @@ fn base(extra: Value) -> ChatRequest {
 /// Assemble the Anthropic body through the shared normalizer with a tap.
 fn assemble(req: ChatRequest) -> (Value, Vec<DeclaredEdit>) {
     let (req, tap) = tapped(req);
-    let body = request::normalize("wire-edits-test", &req, true, false, None, true, true)
+    let body = request::normalize("wire-edits-test", &req, false, None, true, true)
         .expect("fixture assembles");
     (body, tap.take_request().edits(Leg::Request).to_vec())
 }
@@ -115,13 +115,11 @@ const ASSEMBLY_ROWS: &[AssemblyRow] = &[
         name: "thinking strip when tool_choice forces tool use",
         site: EditSite::ThinkingStripForcedToolUse,
         firing: || {
-            let mut req = base(json!({
+            base(json!({
                 "reasoning": {"effort": "high"},
                 "tools": [{"name": "f", "input_schema": {"type": "object"}}],
                 "tool_choice": {"type": "tool", "name": "f"},
-            }));
-            req.routectl_internal.supports_adaptive_thinking = true;
-            req
+            }))
         },
         idle: || {
             base(json!({
@@ -151,7 +149,9 @@ const ASSEMBLY_ROWS: &[AssemblyRow] = &[
         site: EditSite::EffortInjection,
         firing: || {
             let mut req = base(adaptive("high"));
-            req.routectl_internal.supports_adaptive_thinking = true;
+            req.routectl_internal.anthropic_thinking = AnthropicThinking::Sent(
+                ThinkingObject::from_client(json!({"type": "adaptive"})).expect("object"),
+            );
             req
         },
         idle: || base(json!({})),
@@ -322,118 +322,6 @@ fn the_hosted_tool_withhold_never_declares_the_tools_container() {
     );
 }
 
-/// A request carrying the client's own `thinking` object, as the Anthropic
-/// ingress captures it.
-fn forwarding(thinking: Value, max_thinking_budget: u32) -> ChatRequest {
-    let mut req = base(json!({"max_tokens": 16000}));
-    req.routectl_internal.anthropic_thinking =
-        AnthropicThinking::Sent(ThinkingObject::from_client(thinking).expect("object"));
-    req.routectl_internal.max_thinking_budget = max_thinking_budget;
-    req
-}
-
-struct ForwardRow {
-    name: &'static str,
-    adaptive: bool,
-    thinking: Value,
-    max_thinking_budget: u32,
-    sent: Value,
-    override_edits: &'static [(EditKind, &'static str)],
-    cap_edits: &'static [(EditKind, &'static str)],
-}
-
-#[test]
-fn each_forwarded_thinking_override_declares_only_what_it_changed() {
-    let rows = [
-        ForwardRow {
-            name: "enabled on an adaptive model",
-            adaptive: true,
-            thinking: json!({"type": "enabled", "budget_tokens": 8192}),
-            max_thinking_budget: 0,
-            sent: json!({"type": "adaptive"}),
-            override_edits: &[
-                (EditKind::Rewrite, "/thinking/type"),
-                (EditKind::Remove, "/thinking/budget_tokens"),
-            ],
-            cap_edits: &[],
-        },
-        ForwardRow {
-            name: "budgetless enabled on an adaptive model",
-            adaptive: true,
-            thinking: json!({"type": "enabled"}),
-            max_thinking_budget: 0,
-            sent: json!({"type": "adaptive"}),
-            override_edits: &[(EditKind::Rewrite, "/thinking/type")],
-            cap_edits: &[],
-        },
-        ForwardRow {
-            name: "adaptive on an adaptive model",
-            adaptive: true,
-            thinking: json!({"type": "adaptive"}),
-            max_thinking_budget: 0,
-            sent: json!({"type": "adaptive"}),
-            override_edits: &[],
-            cap_edits: &[],
-        },
-        ForwardRow {
-            name: "budget above the operator cap",
-            adaptive: false,
-            thinking: json!({"type": "enabled", "budget_tokens": 8192}),
-            max_thinking_budget: 4096,
-            sent: json!({"type": "enabled", "budget_tokens": 4096}),
-            override_edits: &[],
-            cap_edits: &[(EditKind::Rewrite, "/thinking/budget_tokens")],
-        },
-        ForwardRow {
-            name: "budget equal to the operator cap",
-            adaptive: false,
-            thinking: json!({"type": "enabled", "budget_tokens": 4096}),
-            max_thinking_budget: 4096,
-            sent: json!({"type": "enabled", "budget_tokens": 4096}),
-            override_edits: &[],
-            cap_edits: &[],
-        },
-        ForwardRow {
-            name: "budget with no operator cap",
-            adaptive: false,
-            thinking: json!({"type": "enabled", "budget_tokens": 8192}),
-            max_thinking_budget: 0,
-            sent: json!({"type": "enabled", "budget_tokens": 8192}),
-            override_edits: &[],
-            cap_edits: &[],
-        },
-    ];
-    for row in rows {
-        let (req, tap) = tapped(forwarding(row.thinking, row.max_thinking_budget));
-
-        let body = request::normalize(
-            "wire-edits-test",
-            &req,
-            row.adaptive,
-            false,
-            None,
-            true,
-            true,
-        )
-        .expect("fixture assembles");
-        let edits = tap.take_request().edits(Leg::Request).to_vec();
-
-        assert_eq!(body["thinking"], row.sent, "{}: sent thinking", row.name);
-        assert_eq!(
-            edits_of(&edits, EditSite::AdaptiveThinkingOverride),
-            owned(row.override_edits),
-            "{}: adaptive override",
-            row.name
-        );
-        assert_eq!(
-            edits_of(&edits, EditSite::ThinkingBudgetCap),
-            owned(row.cap_edits),
-            "{}: budget cap",
-            row.name
-        );
-    }
-}
-
 #[test]
 fn an_untapped_assembly_produces_the_same_body() {
     let req = base(json!({
@@ -443,8 +331,8 @@ fn an_untapped_assembly_produces_the_same_body() {
         "tool_choice": {"type": "any"},
     }));
 
-    let untapped = request::normalize("wire-edits-test", &req, true, false, None, true, true)
-        .expect("assembles");
+    let untapped =
+        request::normalize("wire-edits-test", &req, false, None, true, true).expect("assembles");
     let (tapped_body, _) = assemble(req);
 
     assert_eq!(untapped, tapped_body);

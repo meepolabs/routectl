@@ -252,12 +252,6 @@ fn assistant_with_reasoning() -> ChatRequest {
     req
 }
 
-/// `req` on a model that declares only `low` and `high`.
-fn clamped(mut req: ChatRequest) -> ChatRequest {
-    req.routectl_internal.effort_levels = vec!["low".to_string(), "high".to_string()].into();
-    req
-}
-
 fn with_effort(model: &str, effort: &str) -> ChatRequest {
     let mut req = request(model);
     req.reasoning = Some(ReasoningConfig {
@@ -387,15 +381,6 @@ fn site_rows() -> Vec<SiteRow> {
             site: EditSite::EffortInjection,
             pattern: "/reasoning_effort",
             kind: EditKind::Add,
-        },
-        SiteRow {
-            name: "effort clamped to a supported level",
-            dialect: ReasoningDialect::OpenAi,
-            fires: || clamped(with_effort("o3-mini", "medium")),
-            quiet: || clamped(with_effort("o3-mini", "low")),
-            site: EditSite::EffortInjection,
-            pattern: "/reasoning_effort",
-            kind: EditKind::Rewrite,
         },
         SiteRow {
             name: "effort withheld",

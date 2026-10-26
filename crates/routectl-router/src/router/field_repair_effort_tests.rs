@@ -285,60 +285,26 @@ fn target(router: &Router, req: &ChatRequest) -> DispatchTarget {
         .expect("one target")
 }
 
-/// While the target clamps the effort itself, no effort row is present for a
-/// request carrying any level: no feature key, no pre-flight decision and no
-/// reactive candidate. The same request with no clamp carries the row.
+/// Every level in the effort vocabulary carries its own row and keys the
+/// request, so a refusal of any level can be learned.
 ///
-/// Mutation check: drop the `effort_levels` check in `effort_present` -> red.
+/// Mutation check: make `effort_present` return `false` -> red.
 #[test]
-fn a_target_clamping_the_effort_carries_no_effort_row() {
-    let router = router();
+fn every_effort_level_carries_its_row_and_feature_key() {
     for level in VALID_EFFORT_TOKENS {
-        let unclamped = effort_only(level);
-        let mut clamped = effort_only(level);
-        clamped.routectl_internal.effort_levels = Arc::from(["low".to_string()].as_slice());
+        let req = effort_only(level);
         let path = format!("{EFFORT_FIELD}.{level}");
         let key = crate::field_capability::field_capability_key(&path).expect("a qualified path");
 
         assert_eq!(
-            present_effort_paths(FieldRepairTable::grounded_only(), &unclamped),
+            present_effort_paths(FieldRepairTable::grounded_only(), &req),
             vec![path.as_str()],
-            "control: {level} is carried without a clamp",
+            "{level} carries its row",
         );
         assert!(
-            grounded_field_feature_keys(FieldRepairTable::grounded_only(), &unclamped)
-                .contains(&key),
-            "control: {level} keys the request without a clamp",
+            grounded_field_feature_keys(FieldRepairTable::grounded_only(), &req).contains(&key),
+            "{level} keys the request",
         );
-        assert!(
-            present_effort_paths(FieldRepairTable::grounded_only(), &clamped).is_empty(),
-            "{level}: no row while clamped",
-        );
-        assert!(
-            !grounded_field_feature_keys(FieldRepairTable::grounded_only(), &clamped)
-                .contains(&key),
-            "{level}: no feature key while clamped",
-        );
-        let target = target(&router, &clamped);
-        let candidates = router
-            .plan_field_carry(
-                &target,
-                &clamped,
-                FieldSettlementMode::Settling,
-                Instant::now(),
-            )
-            .map_or_else(Vec::new, |plan| plan.candidate_paths());
-        assert!(
-            candidates.is_empty(),
-            "{level}: no reactive candidate while clamped: {candidates:?}",
-        );
-        let (planned, records, _plan) =
-            router.plan_field_preflight(&clamped, &target, DispatchSurface::Complete);
-        assert!(
-            records.iter().all(|record| record.field_path.is_none()),
-            "{level}: no pre-flight decision on any row: {records:?}",
-        );
-        assert_eq!(planned.provider_extras, clamped.provider_extras);
     }
 }
 

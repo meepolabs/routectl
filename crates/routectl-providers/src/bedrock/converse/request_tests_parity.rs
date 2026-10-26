@@ -32,7 +32,6 @@ fn fake_cfg() -> BedrockConfig {
         header_extras: Vec::new(),
         anthropic_beta: Vec::new(),
         additional_model_request_fields: None,
-        adaptive_thinking: None,
     }
 }
 
@@ -254,40 +253,15 @@ fn response_format_json_object_maps_to_output_config_format_bag() {
     );
 }
 
-#[test]
-fn response_format_coexists_with_adaptive_effort_in_bag() {
-    // Arrange: adaptive thinking writes output_config.effort; a
-    // response_format must merge its format sibling without clobbering it.
-    let mut cfg = fake_cfg();
-    cfg.adaptive_thinking = Some(true);
-    let req = ChatRequest {
-        model: "anthropic.claude-sonnet-4-5".into(),
-        messages: vec![user_msg("hi")].into(),
-        max_tokens: Some(2048),
-        reasoning: Some(reasoning_enabled()),
-        response_format: Some(json!({"type": "json_object"})),
-        ..Default::default()
-    };
-
-    // Act
-    let body = normalize_request(&cfg, &req).unwrap();
-
-    // Assert: both effort and format present under output_config.
-    let oc = &body["additionalModelRequestFields"]["output_config"];
-    assert_eq!(oc["format"]["type"], "json_object", "got: {body}");
-    assert_eq!(oc["effort"], "medium", "got: {body}");
-}
-
-/// `effort: "none"` is reasoning-OFF. On the Converse adaptive path the
-/// disable form is `thinking: {type: "disabled"}`; no positive
+/// `effort: "none"` is reasoning-OFF. On Converse the disable form is
+/// `thinking: {type: "disabled"}`; no positive
 /// `output_config.effort` may accompany it. Without this pin, the shared
 /// clamp helper could resolve "none" to the lowest supported level and bill
 /// the caller for thinking it explicitly declined.
 #[test]
 fn none_effort_emits_disabled_thinking_and_no_output_config_effort() {
-    // Arrange: adaptive thinking enabled on the provider, effort "none".
-    let mut cfg = fake_cfg();
-    cfg.adaptive_thinking = Some(true);
+    // Arrange: effort "none".
+    let cfg = fake_cfg();
     let req = ChatRequest {
         model: "anthropic.claude-sonnet-4-5".into(),
         messages: vec![user_msg("hi")].into(),

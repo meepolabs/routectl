@@ -420,7 +420,6 @@ mod converse_ceiling {
                     header_extras: Vec::new(),
                     anthropic_beta: Vec::new(),
                     additional_model_request_fields: None,
-                    adaptive_thinking: None,
                 },
                 seat,
                 bodies: Mutex::new(Vec::new()),

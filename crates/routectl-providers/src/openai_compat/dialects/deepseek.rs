@@ -21,7 +21,7 @@ use super::util::{
     derive_reasoning_effort, drop_sampling_params, insert_reasoning_effort,
     lift_delta_reasoning_content, lift_reasoning_content_field, preserve_history_reasoning_content,
 };
-use crate::effort::clamp_effort_to_supported;
+use crate::effort::wire_effort;
 use crate::model_profile::uses_modern_chat_shape;
 
 /// DeepSeek reasoning dialect (see module docs).
@@ -58,11 +58,7 @@ impl Dialect for DeepSeekDialect {
             drop_sampling_params(obj, tap);
         }
         if let Some(effort) = derive_reasoning_effort(req) {
-            insert_reasoning_effort(
-                obj,
-                clamp_effort_to_supported(&effort, &req.routectl_internal.effort_levels),
-                tap,
-            );
+            insert_reasoning_effort(obj, wire_effort(&effort), tap);
         }
         // History-reasoning shaping (strip vs preserve) is owned by
         // the egress runtime in `request::normalize`, gated by the

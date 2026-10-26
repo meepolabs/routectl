@@ -557,9 +557,10 @@ license.
   derive the status of an error object inside an HTTP-200 body (only
   `400..=599` trusted, else 502), shared by the gemini and openai-compat
   stream parsers
-- `src/effort.rs` -- shared effort helpers: `clamp_effort_to_supported`
-  (caller effort against per-model `effort_levels`) and the one
-  effort/budget table (`budget_from_level`, `level_from_budget`)
+- `src/effort.rs` -- shared effort helpers: `VALID_EFFORT_TOKENS`,
+  `wire_effort` (the one `none` = omit decision for the translating
+  egresses) and the one effort/budget table (`budget_from_level`,
+  `level_from_budget`)
 - `src/managed_keys.rs` -- `is_managed_key`, `client_extras_for` /
   `ClientExtras`, `readable_extra`, `ForeignDialectExtraTally`: which extras
   keys an egress merge may forward, by egress and ingress dialect
@@ -755,8 +756,8 @@ license.
   breakpoint validation (`validate_breakpoints`); re-exports
   `translate_tool`, `translate_system`, `lift_legacy_system_stripped`,
   `build_output_config`, `is_active_thinking_type` and (cfg `bedrock`)
-  `compose_thinking`, `reclamp_client_effort`,
-  `client_sent_output_config_effort` for the Bedrock egress;
+  `compose_thinking`, `client_sent_output_config_effort` for the Bedrock
+  egress;
   also owns
   `drop_unrepresentable_output_format_keys`, the assembled-body scrub of the
   `output_config.format` keys Anthropic rejects (`name`, `strict`) -- that
@@ -2950,7 +2951,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   choice before a repair's mutation) and `install_step` (step installation after it)
 - `src/router/field_repair_effort.rs` -- child module of `field_repair`: the
   `FieldSurface::Effort(level)` carrier reads (`emitted_effort`,
-  `effort_present`, off while the target sets `effort_levels`) and the
+  `effort_present`) and the
   carrier-preserving rewrite (`write_effort`), plus `RowScope`, the per-lane
   view `FieldRepairTable::for_lane` applies (ranked effort rows off
   openai-compat, ranked rows alone on openai-responses, each Bedrock Mantle
@@ -8647,8 +8648,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `tests/common/replay/harness.rs` -- the two fixture roots (`local_root`,
   `driver_root`), `headers_from_pairs`, `FixtureOutcome`, the
   `meta.ingress_kind` adapter lookup (`ingress_for_kind`,
-  `parse_enriched_canonical`), the per-model enrichment rebuild
-  (`with_replay_enrichment`, `enrichment_skip_reason`), and the
+  `parse_fixture_canonical`), the residual enrichment skip
+  (`enrichment_skip_reason`), and the
   value-bounded failure reporter (`bounded_body_diff`,
   `diverges_only_in_messages`), and the live-box run verdict
   (`load_local_corpus`: absent root is a named SKIP, present-but-empty

@@ -139,15 +139,14 @@ fn the_body_keeps_caller_sampling_for_inactive_forwarded_types() {
         let mut req = ingress_request(Some(thinking.clone()), None, 64_000);
         req.temperature = Some(CALLER_TEMPERATURE);
 
-        let wire = body(&req, false);
+        let wire = body(&req);
 
         assert_eq!(wire["thinking"], thinking);
         assert_eq!(wire["temperature"], CALLER_TEMPERATURE, "{thinking}");
     }
 }
 
-/// The client's adaptive object rides to a lane whose knob is unset, on a
-/// probe-sized request where the canonical translation would emit no
+/// The client's adaptive object rides on a probe-sized request where the canonical translation would emit no
 /// thinking at all. The body still carries adaptive thinking, so the clamp
 /// must see the emitted type, not the translation.
 #[test]
@@ -157,7 +156,7 @@ fn an_adaptive_carrier_on_a_non_adaptive_lane_pins_temperature() {
     req.temperature = Some(CALLER_TEMPERATURE);
 
     // Act
-    let wire = body(&req, false);
+    let wire = body(&req);
 
     // Assert
     assert_eq!(wire["thinking"]["type"], "adaptive");
@@ -174,7 +173,7 @@ fn active_thinking_without_a_client_temperature_ships_no_temperature() {
         let req = ingress_request(Some(thinking.clone()), Some("high"), 64_000);
 
         // Act
-        let wire = body(&req, false);
+        let wire = body(&req);
 
         // Assert
         assert_eq!(wire["thinking"]["type"], thinking["type"], "{wire}");
@@ -200,86 +199,49 @@ fn effort(level: &str) -> Option<ReasoningConfig> {
 #[test]
 fn the_public_read_equals_the_emitted_thinking_type() {
     let sent = |t: Value, e: Option<&str>| ingress_request(Some(t), e, 64_000);
-    let rows: Vec<(&str, ChatRequest, bool)> = vec![
+    let rows: Vec<(&str, ChatRequest)> = vec![
         (
             "sent enabled",
             sent(json!({"type": "enabled", "budget_tokens": 8192}), None),
-            false,
-        ),
-        (
-            "sent enabled, knob",
-            sent(
-                json!({"type": "enabled", "budget_tokens": 8192}),
-                Some("high"),
-            ),
-            true,
         ),
         (
             "sent adaptive",
             sent(json!({"type": "adaptive"}), Some("high")),
-            false,
         ),
         (
             "sent disabled, effort",
             sent(json!({"type": "disabled"}), Some("high")),
-            false,
         ),
         (
             "sent between_tools",
             sent(json!({"type": "between_tools"}), None),
-            true,
         ),
-        (
-            "sent unknown",
-            sent(json!({"type": "future_mode"}), None),
-            false,
-        ),
-        (
-            "sent no type",
-            sent(json!({"budget_tokens": 2048}), None),
-            false,
-        ),
+        ("sent unknown", sent(json!({"type": "future_mode"}), None)),
+        ("sent no type", sent(json!({"budget_tokens": 2048}), None)),
         (
             "sent none, effort",
             ingress_request(None, Some("high"), 64_000),
-            false,
         ),
-        (
-            "sent none, effort, knob",
-            ingress_request(None, Some("high"), 64_000),
-            true,
-        ),
-        ("sent none, knob", ingress_request(None, None, 64_000), true),
-        ("translated effort", translated(effort("high")), false),
-        ("translated effort, knob", translated(effort("high")), true),
-        ("translated effort none", translated(effort("none")), true),
+        ("sent none", ingress_request(None, None, 64_000)),
+        ("translated effort", translated(effort("high"))),
+        ("translated effort none", translated(effort("none"))),
         (
             "sent adaptive, effort none",
             sent(json!({"type": "adaptive"}), Some("none")),
-            false,
         ),
-        (
-            "sent adaptive, effort none, knob",
-            sent(json!({"type": "adaptive"}), Some("none")),
-            true,
-        ),
-        ("translated nothing", translated(None), false),
-        (
-            "translated probe-sized",
-            {
-                let mut r = translated(effort("high"));
-                r.max_tokens = Some(64);
-                r
-            },
-            false,
-        ),
+        ("translated nothing", translated(None)),
+        ("translated probe-sized", {
+            let mut r = translated(effort("high"));
+            r.max_tokens = Some(64);
+            r
+        }),
     ];
     let rows = rows.into_iter().chain(forced_tool_rows());
     let mut emitted_types = std::collections::BTreeSet::new();
-    for (row, req, adaptive) in rows {
-        let read = emitted_thinking_type(&req, adaptive);
+    for (row, req) in rows {
+        let read = emitted_thinking_type(&req);
 
-        let wire = body(&req, adaptive);
+        let wire = body(&req);
 
         let on_wire = wire
             .pointer("/thinking/type")
@@ -320,13 +282,12 @@ fn forcing(mut req: ChatRequest, tool_choice: Value) -> ChatRequest {
 
 /// Forced and unforced tool choices beside active and inactive thinking
 /// types, for the equality table.
-fn forced_tool_rows() -> Vec<(&'static str, ChatRequest, bool)> {
+fn forced_tool_rows() -> Vec<(&'static str, ChatRequest)> {
     let sent = |t: Value| ingress_request(Some(t), Some("high"), 64_000);
     vec![
         (
             "forced any, sent adaptive",
             forcing(sent(json!({"type": "adaptive"})), json!("required")),
-            false,
         ),
         (
             "forced tool, sent enabled",
@@ -334,40 +295,33 @@ fn forced_tool_rows() -> Vec<(&'static str, ChatRequest, bool)> {
                 sent(json!({"type": "enabled", "budget_tokens": 4096})),
                 json!({"type": "tool", "name": "calc"}),
             ),
-            false,
         ),
         (
-            "forced function, knob-converted enabled",
+            "forced function, sent enabled",
             forcing(
                 sent(json!({"type": "enabled", "budget_tokens": 4096})),
                 json!({"type": "function", "function": {"name": "calc"}}),
             ),
-            true,
         ),
         (
             "forced bare name, translated effort",
             forcing(translated(effort("high")), json!("calc")),
-            true,
         ),
         (
             "forced any, sent disabled",
             forcing(sent(json!({"type": "disabled"})), json!({"type": "any"})),
-            false,
         ),
         (
             "forced any, sent between_tools",
             forcing(sent(json!({"type": "between_tools"})), json!("required")),
-            false,
         ),
         (
             "forced any, sent unknown",
             forcing(sent(json!({"type": "future_mode"})), json!("required")),
-            false,
         ),
         (
             "auto, sent adaptive",
             forcing(sent(json!({"type": "adaptive"})), json!("auto")),
-            false,
         ),
     ]
 }
@@ -424,9 +378,9 @@ fn a_context_cache_miss_is_the_one_case_the_read_over_reports() {
     let empty_cache = RwLock::new(lru::LruCache::new(NonZeroUsize::new(8).expect("cap")));
 
     // Act
-    let read = emitted_thinking_type(&req, false);
-    let wire = super::normalize("p", &req, false, true, Some(&empty_cache), false, true)
-        .expect("normalize");
+    let read = emitted_thinking_type(&req);
+    let wire =
+        super::normalize("p", &req, true, Some(&empty_cache), false, true).expect("normalize");
 
     // Assert
     assert_eq!(read.as_deref(), Some("adaptive"));

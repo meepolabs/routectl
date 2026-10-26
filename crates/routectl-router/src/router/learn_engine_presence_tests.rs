@@ -149,7 +149,6 @@ mod closed_table_presence {
             header_extras: Vec::new(),
             anthropic_beta: Vec::new(),
             additional_model_request_fields: None,
-            adaptive_thinking: None,
         }
     }
 

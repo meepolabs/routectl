@@ -65,7 +65,7 @@ fn base_req() -> ChatRequest {
 }
 
 fn assemble(req: &ChatRequest) -> serde_json::Value {
-    normalize("test", req, false, false, None, false, true).expect("normalize must succeed")
+    normalize("test", req, false, None, false, true).expect("normalize must succeed")
 }
 
 // ---------------------------------------------------------------------------
@@ -99,9 +99,9 @@ fn every_assembled_request_counts_toward_the_lane_denominator() {
 
     // Act
     let before = lane_seen_count();
-    let _ = normalize("test", &clean, false, false, None, false, true)
-        .expect("the clean request assembles");
-    let _ = normalize("test", &rejected, false, false, None, false, true)
+    let _ =
+        normalize("test", &clean, false, None, false, true).expect("the clean request assembles");
+    let _ = normalize("test", &rejected, false, None, false, true)
         .expect_err("the malformed request is rejected");
     let after = lane_seen_count();
 
@@ -286,7 +286,7 @@ fn a_request_that_strips_then_fails_assembly_still_counts_the_policy_action() {
 
     // Act
     let before = fingerprint_strip_count();
-    let outcome = normalize("test", &req, false, false, None, false, true);
+    let outcome = normalize("test", &req, false, None, false, true);
     let after = fingerprint_strip_count();
 
     // Assert
@@ -378,7 +378,7 @@ fn an_unrecognized_response_format_still_counts_when_assembly_fails() {
 
     // Act
     let before = response_format_drop_count();
-    let outcome = normalize("test", &req, false, false, None, false, true);
+    let outcome = normalize("test", &req, false, None, false, true);
     let after = response_format_drop_count();
 
     // Assert
@@ -494,7 +494,7 @@ fn response_format_name_still_counts_when_assembly_fails() {
 
     // Act
     let before = format_keys_drop_count();
-    let outcome = normalize("test", &req, false, false, None, false, true);
+    let outcome = normalize("test", &req, false, None, false, true);
     let after = format_keys_drop_count();
 
     // Assert

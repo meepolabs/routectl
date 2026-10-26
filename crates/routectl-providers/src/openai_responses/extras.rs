@@ -37,7 +37,7 @@ use routectl_core::{ChatRequest, ReasoningConfig};
 
 use super::AuthKind;
 use super::types::{ResponsesReasoning, ResponsesRequest, TextControls};
-use crate::effort::{clamp_effort_to_supported, level_from_budget};
+use crate::effort::{level_from_budget, wire_effort};
 use crate::translation_drop_metrics::record_translation_drop;
 use crate::wire_declare::declare;
 
@@ -85,29 +85,14 @@ pub(super) fn apply_reasoning(
         Some(r) => {
             // Explicit effort wins. When no effort is set but a budget is,
             // map the budget to the nearest effort band (the Responses API
-            // takes effort, not a budget) rather than dropping it. A clamp
-            // that returns `None` (reasoning-OFF) leaves effort unset.
+            // takes effort, not a budget) rather than dropping it. A
+            // reasoning-OFF level (`None`) leaves effort unset.
             let effort = match r.effort.as_deref() {
-                Some(e) => clamp_effort_to_supported(e, &req.routectl_internal.effort_levels).map(
-                    |clamped| {
-                        if matches!(clamped, std::borrow::Cow::Owned(_))
-                            && let Some(tap) = tap
-                        {
-                            declare(
-                                tap,
-                                EditSite::EffortInjection,
-                                "/reasoning/effort",
-                                EditKind::Rewrite,
-                            );
-                        }
-                        clamped.into_owned()
-                    },
-                ),
-                None => r.max_tokens.and_then(|budget| {
-                    let level = level_from_budget(budget);
-                    clamp_effort_to_supported(level, &req.routectl_internal.effort_levels)
-                        .map(std::borrow::Cow::into_owned)
-                }),
+                Some(e) => wire_effort(e).map(str::to_string),
+                None => r
+                    .max_tokens
+                    .and_then(|budget| wire_effort(level_from_budget(budget)))
+                    .map(str::to_string),
             };
             (effort, r.enabled, r.max_tokens)
         }

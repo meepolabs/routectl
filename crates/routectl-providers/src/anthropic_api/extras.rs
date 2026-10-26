@@ -3,10 +3,9 @@
 //! Two concerns live here. (1) The emitted `thinking`: `compose_thinking`
 //! forwards an Anthropic client's own object and otherwise falls back to
 //! the canonical `req.reasoning` -> Anthropic `thinking` mapping, where
-//! `build_thinking` selects the wire
-//! shape (legacy `Enabled { budget_tokens }` vs Opus 4.7+ `Adaptive`),
-//! clamps the budget into Anthropic's `[1024, max_tokens-1]` window,
-//! and applies the operator per-model cap. `shipped_thinking` then
+//! `build_thinking` emits the legacy `Enabled { budget_tokens }` shape and
+//! clamps the budget into Anthropic's `[1024, max_tokens-1]` window.
+//! `shipped_thinking` then
 //! applies the passes that remove composed thinking (a forcing
 //! `tool_choice`, a context-management cache miss), so the body and the
 //! public `emitted_thinking_type` read share one answer, and
@@ -16,17 +15,13 @@
 //! body reconciliation: `merge_provider_extras` layers forward-compat
 //! extras in while shielding routectl-managed keys
 //! (`managed_keys::is_managed_key`), and `reconcile_output_config_effort`
-//! re-clamps a sent `output_config.effort` against an explicit
-//! `effort_levels` and supplies one beside adaptive thinking that has
-//! none.
+//! supplies the canonical effort beside adaptive thinking that has none.
 
 use serde_json::Value;
 
-use routectl_core::provider_kind::config as kind;
-use routectl_core::wire_check::{EditKind, EditSite, WireTap};
 use routectl_core::{AnthropicThinking, ChatRequest, ThinkingObject, sanitize_for_log};
 
-use crate::effort::{budget_from_level, clamp_effort_to_supported};
+use crate::effort::{budget_from_level, wire_effort};
 use crate::managed_keys::{Dialect, is_managed_key};
 
 use super::tools::forced_tool_choice_type;
@@ -98,10 +93,8 @@ pub(super) fn effort_ratio(effort: &str) -> f64 {
     match effort {
         // `max` arrived with the Opus 4.7+ adaptive thinking shape,
         // but the legacy `Enabled { budget_tokens }` path may still
-        // see it on a non-adaptive provider. 0.99 leaves 1% of
-        // max_tokens for the visible response so the request is
-        // accepted; in practice operators who want `max` should set
-        // `supports_adaptive_thinking = true` on the model config.
+        // see it. 0.99 leaves 1% of max_tokens for the visible response
+        // so the request is accepted.
         "max" => 0.99,
         "xhigh" => 0.95,
         "high" => 0.80,
@@ -113,57 +106,20 @@ pub(super) fn effort_ratio(effort: &str) -> f64 {
 }
 
 /// The `output_config.effort` routectl supplies beside adaptive thinking
-/// that carries none: the canonical `req.reasoning.effort`, re-clamped by
-/// [`reclamp_client_effort`]; absent that, "medium" when `adaptive` (the
-/// operator's `supports_adaptive_thinking` override, which converts the
-/// shape and so owes it an effort); absent both, nothing.
-fn adaptive_effort(req: &ChatRequest, adaptive: bool) -> Option<String> {
-    match req.reasoning.as_ref().and_then(|r| r.effort.as_deref()) {
-        Some(effort) => Some(reclamp_client_effort(
-            effort,
-            &req.routectl_internal.effort_levels,
-        )),
-        None if adaptive => Some("medium".to_string()),
-        None => None,
-    }
+/// that carries none: the canonical `req.reasoning.effort`, as sent.
+fn adaptive_effort(req: &ChatRequest) -> Option<String> {
+    req.reasoning.as_ref().and_then(|r| r.effort.clone())
 }
 
-/// `sent` clamped to an explicit `effort_levels`; an empty list, or an
-/// effort the clamp has no level for ("none"), passes through as sent.
-pub fn reclamp_client_effort(sent: &str, effort_levels: &[String]) -> String {
-    if effort_levels.is_empty() {
-        return sent.to_string();
-    }
-    clamp_effort_to_supported(sent, effort_levels)
-        .map_or_else(|| sent.to_string(), std::borrow::Cow::into_owned)
-}
-
-/// Decide which `ThinkingConfig` variant (if any) to emit. The
-/// `adaptive` flag selects the wire shape: when `true` AND thinking
-/// would otherwise be `Enabled`, returns `Adaptive` instead (the
-/// caller pairs that with a top-level `output_config`); when `false`,
-/// returns the legacy `Enabled { budget_tokens }` shape; `Disabled`
-/// is always returned verbatim regardless of the flag.
-///
-/// The `adaptive` flag comes from
-/// `req.routectl_internal.supports_adaptive_thinking`, set by the
-/// router, which no longer has a config key for it and relays `false`.
-///
-/// On the legacy `Enabled` path, `req.routectl_internal.max_thinking_budget`
-/// is applied as an operator-declared ceiling BEFORE Anthropic's own
-/// `[1024, max_tokens-1]` window clamp. Zero means no operator cap.
+/// Translate canonical reasoning into the `ThinkingConfig` to emit, if
+/// any: `Disabled` for reasoning-off, else the legacy
+/// `Enabled { budget_tokens }` shape when the caller asked for thinking and
+/// the resolved `max_tokens` leaves room for Anthropic's minimum budget.
 ///
 /// `thinking.display` comes from
 /// `req.routectl_internal.anthropic_thinking_display` when the ingress
 /// captured one, and from `reasoning.exclude` otherwise.
-///
-/// Note on `max_tokens` + adaptive: Anthropic's adaptive thinking wire
-/// shape has no field for an explicit budget -- the model picks its
-/// own from the effort string. If a caller sets both
-/// `reasoning.max_tokens` AND the model is adaptive, the budget is
-/// dropped (with a tracing::debug at the call site). The caller's
-/// effort string still travels to `output_config.effort`.
-pub fn build_thinking(req: &ChatRequest, adaptive: bool) -> Option<ThinkingConfig> {
+pub fn build_thinking(req: &ChatRequest) -> Option<ThinkingConfig> {
     let r = req.reasoning.as_ref()?;
 
     if r.is_off() {
@@ -196,26 +152,6 @@ pub fn build_thinking(req: &ChatRequest, adaptive: bool) -> Option<ThinkingConfi
         return None;
     }
 
-    if adaptive {
-        // Opus 4.7+ wire shape. budget_tokens is gone; effort moves
-        // to top-level output_config (handled by build_output_config).
-        // If the caller set both an explicit budget AND the model is
-        // adaptive, the budget gets dropped because there's no wire
-        // field for it. Logged at DEBUG: a client library that always
-        // sends `reasoning.max_tokens` trips this on every request, and
-        // the discard is the documented adaptive contract.
-        if r.max_tokens.is_some() {
-            tracing::debug!(
-                budget_tokens = r.max_tokens,
-                "reasoning.max_tokens dropped on adaptive thinking path; \
-                 Anthropic's adaptive shape has no budget field -- \
-                 the model picks its own budget from output_config.effort. \
-                 Set reasoning.effort to steer instead."
-            );
-        }
-        return Some(ThinkingConfig::Adaptive { display });
-    }
-
     // Legacy wire shape constraint: Anthropic requires
     // `budget_tokens >= 1024` AND `max_tokens > budget_tokens`. Probe-
     // sized requests (claude-code title gen, topic summaries) routinely
@@ -229,9 +165,9 @@ pub fn build_thinking(req: &ChatRequest, adaptive: bool) -> Option<ThinkingConfi
             reasoning_effort = ?r.effort,
             reasoning_max_tokens = ?r.max_tokens,
             "anthropic legacy thinking shape requires max_tokens > 1024; \
-             dropping thinking for this probe-sized request. Set \
-             supports_adaptive_thinking=true on the model config for Opus 4.7+ \
-             to avoid the budget-vs-max_tokens coupling, or send max_tokens > 1024."
+             dropping thinking for this probe-sized request. Send adaptive \
+             thinking to avoid the budget-vs-max_tokens coupling, or send \
+             max_tokens > 1024."
         );
         return None;
     }
@@ -252,14 +188,8 @@ pub fn build_thinking(req: &ChatRequest, adaptive: bool) -> Option<ThinkingConfi
     //     the ceiling (`max - 1`) is always at least 1024 and the
     //     floor never collides with the ceiling.
     let max = resolve_max_tokens(req);
-    // Operator-declared per-model ceiling. Non-zero values cap the
-    // budget DOWN before Anthropic's own `[1024, max_tokens-1]` window
-    // clamp runs. Zero means no operator cap -- Anthropic's clamp is
-    // the only guard.
-    let operator_cap = operator_thinking_cap(req);
 
     if let Some(budget) = r.max_tokens {
-        let budget = apply_operator_cap(budget, operator_cap);
         return Some(ThinkingConfig::Enabled {
             budget_tokens: clamp_budget_to_legacy_window(budget, max, BudgetSource::Explicit),
             display,
@@ -267,23 +197,21 @@ pub fn build_thinking(req: &ChatRequest, adaptive: bool) -> Option<ThinkingConfi
     }
     if let Some(effort) = r.effort.as_deref() {
         // `effort != "none"` here (the `is_off` return above excludes it),
-        // so the clamp always yields `Some`; fall back to the raw effort
-        // defensively if that ever changes.
-        let clamped = clamp_effort_to_supported(effort, &req.routectl_internal.effort_levels)
-            .unwrap_or(std::borrow::Cow::Borrowed(effort));
+        // so `wire_effort` always yields `Some`; fall back to the raw
+        // effort defensively if that ever changes.
+        let level = wire_effort(effort).unwrap_or(effort);
         // Prefer the exact effort->budget table; fall back to the
         // proportional estimate only for a level outside the table so
         // an unexpected string never regresses to a zero budget.
-        let budget = budget_from_level(clamped.as_ref())
-            .unwrap_or_else(|| ((max as f64) * effort_ratio(clamped.as_ref())).max(1.0) as u32);
-        let budget = apply_operator_cap(budget, operator_cap);
+        let budget = budget_from_level(level)
+            .unwrap_or_else(|| ((max as f64) * effort_ratio(level)).max(1.0) as u32);
         return Some(ThinkingConfig::Enabled {
             budget_tokens: clamp_budget_to_legacy_window(budget, max, BudgetSource::Derived),
             display,
         });
     }
     // r.enabled == Some(true) without budget or effort.
-    let budget = apply_operator_cap(max / 2, operator_cap);
+    let budget = max / 2;
     Some(ThinkingConfig::Enabled {
         budget_tokens: clamp_budget_to_legacy_window(budget, max, BudgetSource::Derived),
         display,
@@ -296,59 +224,11 @@ pub fn build_thinking(req: &ChatRequest, adaptive: bool) -> Option<ThinkingConfi
 /// the caller asked for a specific number and we are about to ignore
 /// it -- worth a log line; `Derived` means routectl computed the
 /// number from `effort_ratio` or the `enabled=true` half-of-max
-/// fallback, and the operator's per-model config implicitly opted in.
+/// fallback.
 #[derive(Copy, Clone)]
 enum BudgetSource {
     Explicit,
     Derived,
-}
-
-/// The `kind = "..."` provider tokens whose egress reads
-/// `req.routectl_internal.max_thinking_budget`. THE single source for
-/// that question: the field is read in exactly one place
-/// (`operator_thinking_cap`, consulted by `build_thinking` and by
-/// `compose_thinking`'s forwarded-budget cap), and every lane that reaches
-/// it does so through this module -- `anthropic-api` directly, Bedrock on
-/// both shapes (Invoke delegates body construction to
-/// `anthropic_api::request::normalize`; Converse calls `build_thinking`
-/// itself). Config validation reads this list so an
-/// operator setting the knob on a kind that never consults it gets a
-/// diagnostic instead of silence.
-///
-/// A curated const rather than a derivation, because the consumption is
-/// per-lane: the reading code is one function shared by three egresses,
-/// so nothing in it names a provider kind to project from. The
-/// `extras_budget_reader_kinds_tests` sibling welds the list back to the
-/// tree -- it re-derives the reader set from the call sites on disk and
-/// fails when a lane starts or stops reading the knob without this list
-/// moving with it.
-pub const MAX_THINKING_BUDGET_READER_KINDS: &[&str] = &[kind::ANTHROPIC_API, kind::BEDROCK];
-
-/// Whether an egress of `provider_kind` reads the operator-declared
-/// `max_thinking_budget`, per [`MAX_THINKING_BUDGET_READER_KINDS`]. An
-/// unknown token answers `false`: a kind this crate has no egress for
-/// cannot be reading the field.
-#[must_use]
-pub fn egress_reads_max_thinking_budget(provider_kind: &str) -> bool {
-    MAX_THINKING_BUDGET_READER_KINDS.contains(&provider_kind)
-}
-
-/// The operator-declared per-model thinking-budget cap; zero means none.
-const fn operator_thinking_cap(req: &ChatRequest) -> u32 {
-    req.routectl_internal.max_thinking_budget
-}
-
-/// Apply the operator-declared per-model thinking-budget cap. When
-/// `operator_cap` is non-zero, the budget is clamped DOWN to that
-/// ceiling before Anthropic's own `[1024, max_tokens-1]` window clamp
-/// runs. Zero is the sentinel for "no operator cap" and returns the
-/// budget unchanged.
-fn apply_operator_cap(budget: u32, operator_cap: u32) -> u32 {
-    if operator_cap > 0 {
-        budget.min(operator_cap)
-    } else {
-        budget
-    }
 }
 
 /// Bring `budget` into Anthropic's `[1024, max_tokens-1]` window for
@@ -377,33 +257,15 @@ fn clamp_budget_to_legacy_window(budget: u32, max: u32, source: BudgetSource) ->
 /// ingress carrier `req.routectl_internal.anthropic_thinking`:
 ///
 /// - `Sent`: the client's object as sent, plus `display` from its own
-///   carrier, changed only by an explicit operator knob (see
-///   `forward_client_thinking`).
-/// - `SentNone`: no thinking, unless `adaptive` is set and the client sent
-///   a positive effort, which keeps the synthesized adaptive shape an
-///   operator who set the knob already gets.
+///   carrier (see `forward_client_thinking`).
+/// - `SentNone`: no thinking; an effort alone never adds any.
 /// - `NotCaptured`: translated from canonical reasoning by
 ///   `build_thinking`.
-///
-/// `adaptive` is the operator's `supports_adaptive_thinking` knob, the same
-/// value `build_thinking` takes. An override applied to a forwarded object
-/// is declared on `tap`.
-pub fn compose_thinking(
-    req: &ChatRequest,
-    adaptive: bool,
-    tap: Option<&WireTap>,
-) -> Option<WireThinking> {
+pub fn compose_thinking(req: &ChatRequest) -> Option<WireThinking> {
     match &req.routectl_internal.anthropic_thinking {
-        AnthropicThinking::Sent(object) => {
-            Some(forward_client_thinking(req, object, adaptive, tap))
-        }
-        AnthropicThinking::SentNone if adaptive && has_positive_effort(req) => {
-            build_thinking(req, true).map(WireThinking::Translated)
-        }
+        AnthropicThinking::Sent(object) => Some(forward_client_thinking(req, object)),
         AnthropicThinking::SentNone => None,
-        AnthropicThinking::NotCaptured => {
-            build_thinking(req, adaptive).map(WireThinking::Translated)
-        }
+        AnthropicThinking::NotCaptured => build_thinking(req).map(WireThinking::Translated),
     }
 }
 
@@ -432,14 +294,12 @@ pub(super) enum ThinkingStrip {
 /// `web_search` beside adaptive thinking.
 ///
 /// The second value names the pass that removed thinking, for the caller
-/// to declare and log; `tap` receives only `compose_thinking`'s overrides.
+/// to declare and log.
 pub(super) fn shipped_thinking(
     req: &ChatRequest,
-    adaptive: bool,
     context_cache_missed: bool,
-    tap: Option<&WireTap>,
 ) -> (Option<WireThinking>, Option<ThinkingStrip>) {
-    let Some(composed) = compose_thinking(req, adaptive, tap) else {
+    let Some(composed) = compose_thinking(req) else {
         return (None, None);
     };
     if context_cache_missed {
@@ -454,10 +314,9 @@ pub(super) fn shipped_thinking(
     (Some(composed), None)
 }
 
-/// The `thinking.type` an Anthropic-shape egress emits for `req` when
-/// `adaptive` is the value it passes for the operator's
-/// `supports_adaptive_thinking` knob; `None` when the body carries no
-/// `thinking`, or a forwarded object carries no string `type`.
+/// The `thinking.type` an Anthropic-shape egress emits for `req`; `None`
+/// when the body carries no `thinking`, or a forwarded object carries no
+/// string `type`.
 ///
 /// Reads `shipped_thinking`, the computation body assembly uses, so a
 /// forcing `tool_choice` is reflected. One input is out of reach: whether
@@ -467,8 +326,8 @@ pub(super) fn shipped_thinking(
 /// over-report a type the body then omits, and cannot report one the body
 /// ships differently.
 #[must_use]
-pub fn emitted_thinking_type(req: &ChatRequest, adaptive: bool) -> Option<String> {
-    shipped_thinking(req, adaptive, false, None)
+pub fn emitted_thinking_type(req: &ChatRequest) -> Option<String> {
+    shipped_thinking(req, false)
         .0
         .as_ref()
         .and_then(WireThinking::thinking_type)
@@ -494,96 +353,28 @@ pub fn client_sent_output_config_effort(req: &ChatRequest) -> bool {
         .is_some()
 }
 
-fn has_positive_effort(req: &ChatRequest) -> bool {
-    req.reasoning
-        .as_ref()
-        .is_some_and(|r| r.effort.is_some() && !r.is_off())
-}
-
 /// The client's own `thinking` object for the wire. Nothing is clamped
 /// into Anthropic's legacy budget window: the upstream judges what the
-/// client sent. The two operator overrides:
-///
-/// - `adaptive` turns an `enabled` object into `adaptive`, dropping
-///   `budget_tokens` (the adaptive shape has no budget field).
-/// - A nonzero `max_thinking_budget` lowers a forwarded `enabled` budget
-///   above it.
-fn forward_client_thinking(
-    req: &ChatRequest,
-    object: &ThinkingObject,
-    adaptive: bool,
-    tap: Option<&WireTap>,
-) -> WireThinking {
+/// client sent. Only `display` is set, from its own carrier.
+fn forward_client_thinking(req: &ChatRequest, object: &ThinkingObject) -> WireThinking {
     let mut wire = object.as_object().clone();
-    if object.thinking_type() == Some("enabled") {
-        if adaptive {
-            wire.insert("type".to_string(), Value::String("adaptive".to_string()));
-            super::wire_edits::declare(
-                tap,
-                EditSite::AdaptiveThinkingOverride,
-                "/thinking/type",
-                EditKind::Rewrite,
-            );
-            if let Some(budget) = wire.remove("budget_tokens") {
-                super::wire_edits::declare(
-                    tap,
-                    EditSite::AdaptiveThinkingOverride,
-                    "/thinking/budget_tokens",
-                    EditKind::Remove,
-                );
-                tracing::debug!(
-                    budget_tokens = %budget,
-                    "client thinking.budget_tokens dropped: supports_adaptive_thinking \
-                     turns enabled thinking into adaptive, which has no budget field"
-                );
-            }
-        } else {
-            cap_forwarded_budget(&mut wire, operator_thinking_cap(req), tap);
-        }
-    }
     if let Some(display) = &req.routectl_internal.anthropic_thinking_display {
         wire.insert("display".to_string(), Value::String(display.clone()));
     }
     WireThinking::Forwarded(wire)
 }
 
-fn cap_forwarded_budget(
-    wire: &mut serde_json::Map<String, Value>,
-    operator_cap: u32,
-    tap: Option<&WireTap>,
-) {
-    let Some(budget) = wire.get("budget_tokens").and_then(Value::as_u64) else {
-        return;
-    };
-    if operator_cap > 0 && budget > u64::from(operator_cap) {
-        wire.insert("budget_tokens".to_string(), Value::from(operator_cap));
-        super::wire_edits::declare(
-            tap,
-            EditSite::ThinkingBudgetCap,
-            "/thinking/budget_tokens",
-            EditKind::Rewrite,
-        );
-        tracing::debug!(
-            requested_budget = budget,
-            capped_to = operator_cap,
-            "client thinking.budget_tokens lowered to the operator max_thinking_budget"
-        );
-    }
-}
-
 /// Pair adaptive thinking with a top-level `output_config`. Returns
 /// `Some(OutputConfig)` only when the emitted thinking type is `adaptive`
 /// and `adaptive_effort` has an effort for it; otherwise `None`.
-/// `adaptive` is the operator's `supports_adaptive_thinking` knob.
 pub fn build_output_config(
     req: &ChatRequest,
     thinking: Option<&WireThinking>,
-    adaptive: bool,
 ) -> Option<OutputConfig> {
     if thinking.and_then(WireThinking::thinking_type) != Some("adaptive") {
         return None;
     }
-    adaptive_effort(req, adaptive).map(|effort| OutputConfig { effort })
+    adaptive_effort(req).map(|effort| OutputConfig { effort })
 }
 
 // ---------------------------------------------------------------------------
@@ -629,40 +420,23 @@ pub(super) fn merge_provider_extras(id: &str, body: &mut Value, extras: Option<&
 /// `merge_provider_extras` has laid the client's `output_config` over the
 /// composed one. The client's effort is forwarded as sent beside whatever
 /// thinking type ships, "none" included; the upstream judges the pairing.
-///
-/// - Effort present: re-clamped only against an explicit, non-empty
-///   `effort_levels` ([`reclamp_client_effort`]).
-/// - Effort absent beside adaptive thinking: supplied by `adaptive_effort`
-///   (a sent `output_config` holding only `format` replaces the composed
-///   object wholesale). Nothing is supplied beside any other type.
-///
-/// `adaptive` is the operator's `supports_adaptive_thinking` knob.
-pub(super) fn reconcile_output_config_effort(req: &ChatRequest, body: &mut Value, adaptive: bool) {
-    let effort_levels = &req.routectl_internal.effort_levels;
-    let wants_effort = body_has_adaptive_thinking(body);
-    let Some(obj) = body.as_object_mut() else {
-        return;
-    };
-    let sent = obj
+/// An effort absent beside adaptive thinking is supplied by
+/// `adaptive_effort` (a sent `output_config` holding only `format` replaces
+/// the composed object wholesale). Nothing is supplied beside any other
+/// type.
+pub(super) fn reconcile_output_config_effort(req: &ChatRequest, body: &mut Value) {
+    let sent = body
         .get("output_config")
         .and_then(|oc| oc.get("effort"))
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    let effort = match sent {
-        Some(sent) => {
-            let clamped = reclamp_client_effort(&sent, effort_levels);
-            if clamped == sent {
-                return;
-            }
-            clamped
-        }
-        None if wants_effort => {
-            let Some(effort) = adaptive_effort(req, adaptive) else {
-                return;
-            };
-            effort
-        }
-        None => return,
+        .and_then(Value::as_str);
+    if sent.is_some() || !body_has_adaptive_thinking(body) {
+        return;
+    }
+    let Some(effort) = adaptive_effort(req) else {
+        return;
+    };
+    let Some(obj) = body.as_object_mut() else {
+        return;
     };
     let oc = obj
         .entry("output_config")
@@ -695,7 +469,7 @@ fn body_has_adaptive_thinking(body: &Value) -> bool {
 /// adaptive-thinking directive Anthropic gates behind `EFFORT_BETA`.
 ///
 /// Reads the ASSEMBLED body: `merge_provider_extras` and
-/// `reconcile_output_config_effort` add or re-clamp `output_config.effort`
+/// `reconcile_output_config_effort` add `output_config.effort`
 /// after translation, so `req.reasoning` is not a reliable signal for what
 /// ships.
 pub(super) fn body_has_output_config_effort(body: &Value) -> bool {
@@ -828,7 +602,7 @@ mod tests {
         };
 
         // Act
-        let thinking = build_thinking(&req, false);
+        let thinking = build_thinking(&req);
 
         // Assert
         assert!(
@@ -841,49 +615,6 @@ mod tests {
             ),
             "expected exact table budget 24576, got {thinking:?}"
         );
-    }
-
-    /// A client library that always sends `reasoning.max_tokens` trips the
-    /// adaptive budget discard on every request, so the line is DEBUG and
-    /// fires exactly once per request.
-    #[test]
-    fn adaptive_budget_discard_logs_once_at_debug() {
-        // Arrange
-        let req = ChatRequest {
-            max_tokens: Some(100_000),
-            reasoning: Some(ReasoningConfig {
-                effort: Some("high".into()),
-                max_tokens: Some(4096),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-
-        // Act
-        let mut thinking = None;
-        let events = routectl_testkit::capture_events(|| {
-            thinking = build_thinking(&req, true);
-        });
-
-        // Assert
-        assert!(
-            matches!(thinking, Some(ThinkingConfig::Adaptive { .. })),
-            "adaptive path must still emit adaptive thinking, got {thinking:?}"
-        );
-        let discards: Vec<_> = events
-            .iter()
-            .filter(|e| {
-                e.message
-                    .contains("reasoning.max_tokens dropped on adaptive thinking path")
-            })
-            .collect();
-        assert_eq!(
-            discards.len(),
-            1,
-            "one discard line expected; got {events:?}"
-        );
-        assert_eq!(discards[0].level, tracing::Level::DEBUG);
-        assert_eq!(discards[0].field("budget_tokens"), Some("4096"));
     }
 
     // -- normalize_claude_sampling helper matrix -----------------------
@@ -1027,9 +758,3 @@ mod thinking_display_tests;
 #[cfg(test)]
 #[path = "extras_ceiling_budget_coupling_tests.rs"]
 mod ceiling_budget_coupling_tests;
-
-// Weld: `MAX_THINKING_BUDGET_READER_KINDS` vs the egress lanes that
-// actually reach the budget read.
-#[cfg(test)]
-#[path = "extras_budget_reader_kinds_tests.rs"]
-mod budget_reader_kinds_tests;

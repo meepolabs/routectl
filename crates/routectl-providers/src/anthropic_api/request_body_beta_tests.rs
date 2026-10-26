@@ -36,7 +36,7 @@ fn shared_normalizer_leaves_the_body_beta_carrier_to_the_egress() {
         "json_schema": {"name": "out", "schema": {"type": "object"}},
     }));
 
-    let body = normalize("p", &req, false, false, None, false, true).unwrap();
+    let body = normalize("p", &req, false, None, false, true).unwrap();
     assert!(
         body["output_config"].get("format").is_some(),
         "precondition: the response_format lift must land output_config.format; got: {body}"
@@ -58,7 +58,7 @@ fn caller_requested_structured_outputs_beta_survives_the_body_carrier() {
     ]);
     req.response_format = Some(json!({"type": "json_object"}));
 
-    let body = normalize("p", &req, false, false, None, false, true).unwrap();
+    let body = normalize("p", &req, false, None, false, true).unwrap();
     assert_eq!(
         body["anthropic_beta"],
         json!(["structured-outputs-2025-12-15", "context-1m-2025-08-07"]),
@@ -70,6 +70,6 @@ fn caller_requested_structured_outputs_beta_survives_the_body_carrier() {
 #[test]
 fn body_without_output_config_format_gains_no_structured_outputs_beta() {
     let req = req_with_betas(vec!["context-1m-2025-08-07".into()]);
-    let body = normalize("p", &req, false, false, None, false, true).unwrap();
+    let body = normalize("p", &req, false, None, false, true).unwrap();
     assert_eq!(body["anthropic_beta"], json!(["context-1m-2025-08-07"]));
 }

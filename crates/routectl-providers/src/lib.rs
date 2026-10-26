@@ -100,7 +100,7 @@ pub(crate) mod http_client;
 ))]
 pub(crate) mod probe;
 
-// Shared effort-clamping helper for OpenAI-shape egresses. Unconditional (no
+// Shared effort helpers for the egresses. Unconditional (no
 // feature gate) because its ungated surface is dependency-free and is exported
 // to `routectl-router`, which imports `VALID_EFFORT_TOKENS` (the single source
 // of truth for the valid effort vocabulary) regardless of which provider

@@ -1,5 +1,5 @@
 //! Unit coverage for the replay harness's two selection decisions:
-//! which per-model enrichment a fixture replays under, and which ingress
+//! which fixtures the residual enrichment filter skips, and which ingress
 //! adapter parses its captured inbound body.
 //!
 //! Both are driven off hand-built fixtures rather than the captured
@@ -12,7 +12,7 @@ use std::fs;
 use std::path::Path;
 
 use routectl_cli::ingress::IngressAdapter;
-use routectl_core::{ChatRequest, Provider, StaticToken};
+use routectl_core::{Provider, StaticToken};
 use routectl_providers::anthropic_api::{
     AnthropicApiConfig, AnthropicApiProvider, AuthKind, CloakConfig,
 };
@@ -20,11 +20,9 @@ use serde_json::{Value, json};
 use tempfile::tempdir;
 
 use common::replay::{
-    ADAPTIVE_THINKING_MODELS, ENRICHMENT_DEPENDENT_MODELS, FIXTURE_SCHEMA_VERSION, Fixture,
-    bounded_body_diff, diff_all, divergence_count, diverges_only_in_messages,
-    enrichment_skip_reason, headers_from_pairs, ingress_for_kind, load_fixture,
-    parse_enriched_canonical, replay_resolved_model, system_turn_lift_skip_reason,
-    with_replay_enrichment,
+    ENRICHMENT_DEPENDENT_MODELS, FIXTURE_SCHEMA_VERSION, Fixture, bounded_body_diff, diff_all,
+    divergence_count, diverges_only_in_messages, enrichment_skip_reason, ingress_for_kind,
+    load_fixture, parse_fixture_canonical, system_turn_lift_skip_reason,
 };
 
 // ---------------------------------------------------------------------------
@@ -33,8 +31,7 @@ use common::replay::{
 
 /// A thinking-enabled Anthropic Messages request. `max_tokens` sits well
 /// above Anthropic's 1024 thinking floor so the legacy `Enabled` shape is
-/// reachable -- that is what makes the adaptive-vs-legacy divergence
-/// observable at all.
+/// reachable.
 fn thinking_ingress_body(model: &str) -> Value {
     json!({
         "model": model,
@@ -105,26 +102,11 @@ fn anthropic_egress() -> AnthropicApiProvider {
 }
 
 /// The `thinking.type` the Anthropic egress puts on the wire for this
-/// fixture -- the one body field that tells an adaptive replay apart from
-/// a bare-default one.
-fn wire_thinking_type(fixture: &Fixture, enriched: bool) -> String {
-    let canonical = if enriched {
-        parse_enriched_canonical(fixture)
-            .expect("ingress dispatch resolves")
-            .expect("fixture pins an ingress_kind")
-    } else {
-        // Bare-default control: same parse, no enrichment overlay.
-        let ingress = ingress_for_kind(&fixture.meta.ingress_kind)
-            .expect("ingress dispatch resolves")
-            .expect("fixture pins an ingress_kind");
-        let headers = headers_from_pairs(&fixture.ingress_request_headers);
-        ingress
-            .parse_request(
-                &headers,
-                &serde_json::to_vec(&fixture.ingress_request).unwrap(),
-            )
-            .expect("captured body parses")
-    };
+/// fixture.
+fn wire_thinking_type(fixture: &Fixture) -> String {
+    let canonical = parse_fixture_canonical(fixture)
+        .expect("ingress dispatch resolves")
+        .expect("fixture pins an ingress_kind");
     let body = anthropic_egress()
         .normalize_request(&canonical)
         .expect("normalize_request succeeds");
@@ -139,53 +121,7 @@ fn wire_thinking_type(fixture: &Fixture, enriched: bool) -> String {
 // Enrichment: the closed skip
 // ---------------------------------------------------------------------------
 
-/// The regression this closes: an adaptive-thinking model used to be
-/// skipped wholesale, taking the entire loadable corpus with it. It now
-/// replays, and it replays under the adaptive wire shape the capture was
-/// taken on.
-#[test]
-fn adaptive_thinking_model_replays_under_the_adaptive_wire_shape() {
-    // Arrange
-    let tmp = tempdir().unwrap();
-    let fixture = write_fixture_dir(tmp.path(), "opus", "anthropic", "claude-opus-4-7");
-
-    // Act
-    let skip = enrichment_skip_reason(&fixture);
-    let enriched_shape = wire_thinking_type(&fixture, true);
-
-    // Assert
-    assert!(
-        skip.is_none(),
-        "adaptive-thinking model must no longer be skipped, got: {skip:?}"
-    );
-    assert_eq!(
-        enriched_shape, "adaptive",
-        "enriched replay must emit the adaptive thinking shape"
-    );
-}
-
-/// Positive control for the assertion above: without the enrichment
-/// overlay the SAME fixture emits the legacy shape, so the adaptive
-/// result is attributable to the overlay and not to the fixture body.
-#[test]
-fn the_same_fixture_emits_the_legacy_shape_without_the_enrichment_overlay() {
-    // Arrange
-    let tmp = tempdir().unwrap();
-    let fixture = write_fixture_dir(tmp.path(), "opus", "anthropic", "claude-opus-4-7");
-
-    // Act
-    let bare_shape = wire_thinking_type(&fixture, false);
-
-    // Assert
-    assert_eq!(
-        bare_shape, "enabled",
-        "bare-default replay must emit the legacy thinking shape"
-    );
-}
-
-/// A pre-4.7 Anthropic model is NOT adaptive: the overlay must leave it
-/// on the legacy shape, or the narrowing would have swapped one wrong
-/// answer for another.
+/// A pre-4.7 Anthropic model replays on the legacy shape it was sent.
 #[test]
 fn pre_adaptive_anthropic_model_replays_under_the_legacy_wire_shape() {
     // Arrange
@@ -193,7 +129,7 @@ fn pre_adaptive_anthropic_model_replays_under_the_legacy_wire_shape() {
     let fixture = write_fixture_dir(tmp.path(), "sonnet", "anthropic", "claude-sonnet-4-5");
 
     // Act
-    let shape = wire_thinking_type(&fixture, true);
+    let shape = wire_thinking_type(&fixture);
 
     // Assert
     assert!(enrichment_skip_reason(&fixture).is_none());
@@ -267,65 +203,6 @@ fn fixture_without_a_pinned_model_does_not_skip() {
     assert!(skip.is_none(), "absent model must not match: {skip:?}");
 }
 
-/// The rebuilt `ResolvedModel` is what carries the knobs onto the
-/// canonical request; pin the two it actually sets so a future overlay
-/// field cannot quietly change which shape the replay drives.
-#[test]
-fn rebuilt_resolved_model_sets_adaptive_flag_and_leaves_dialect_knobs_unset() {
-    // Arrange
-    let tmp = tempdir().unwrap();
-    let adaptive = write_fixture_dir(tmp.path(), "a", "anthropic", "claude-opus-4-8");
-    let legacy = write_fixture_dir(tmp.path(), "b", "anthropic", "claude-haiku-4-5");
-
-    // Act
-    let adaptive_model = replay_resolved_model(&adaptive);
-    let legacy_model = replay_resolved_model(&legacy);
-
-    // Assert
-    assert!(adaptive_model.supports_adaptive_thinking);
-    assert!(!legacy_model.supports_adaptive_thinking);
-    assert_eq!(adaptive_model.max_thinking_budget, 0);
-    assert!(adaptive_model.reasoning_dialect.is_none());
-    assert!(adaptive_model.history_reasoning.is_none());
-}
-
-/// The overlay must project the resolved model's knobs onto the request,
-/// not merely be called: assert the field the egress reads.
-#[test]
-fn enrichment_overlay_projects_the_adaptive_flag_onto_the_canonical_request() {
-    // Arrange
-    let tmp = tempdir().unwrap();
-    let fixture = write_fixture_dir(tmp.path(), "a", "anthropic", "claude-opus-4-8");
-    let model = replay_resolved_model(&fixture);
-    let bare = ChatRequest::default();
-    assert!(
-        !bare.routectl_internal.supports_adaptive_thinking,
-        "control: a bare canonical request starts non-adaptive"
-    );
-
-    // Act
-    let enriched = with_replay_enrichment(&model, bare);
-
-    // Assert
-    assert!(enriched.routectl_internal.supports_adaptive_thinking);
-}
-
-/// Every substring in the adaptive set must actually be recognized by the
-/// matcher it feeds; a typo there would silently downgrade a whole model
-/// generation back to the legacy shape.
-#[test]
-fn every_adaptive_substring_produces_an_adaptive_resolved_model() {
-    let tmp = tempdir().unwrap();
-    for (i, needle) in ADAPTIVE_THINKING_MODELS.iter().enumerate() {
-        let model = format!("claude-{needle}");
-        let fixture = write_fixture_dir(tmp.path(), &format!("f{i}"), "anthropic", &model);
-        assert!(
-            replay_resolved_model(&fixture).supports_adaptive_thinking,
-            "adaptive substring `{needle}` did not match model `{model}`"
-        );
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Ingress dispatch
 // ---------------------------------------------------------------------------
@@ -396,8 +273,8 @@ fn fixture_with_empty_ingress_kind_yields_no_canonical_request() {
     let pinned = write_fixture_dir(tmp.path(), "pinned", "anthropic", "claude-sonnet-4-5");
 
     // Act
-    let unpinned_result = parse_enriched_canonical(&unpinned).expect("empty is not an error");
-    let pinned_result = parse_enriched_canonical(&pinned).expect("anthropic resolves");
+    let unpinned_result = parse_fixture_canonical(&unpinned).expect("empty is not an error");
+    let pinned_result = parse_fixture_canonical(&pinned).expect("anthropic resolves");
 
     // Assert
     assert!(unpinned_result.is_none());
@@ -416,7 +293,7 @@ fn fixture_with_unknown_ingress_kind_fails_the_parse_naming_the_value() {
     let fixture = write_fixture_dir(tmp.path(), "bogus", "bedrock-ingress", "claude-sonnet-4-5");
 
     // Act
-    let err = parse_enriched_canonical(&fixture).expect_err("unknown kind must fail closed");
+    let err = parse_fixture_canonical(&fixture).expect_err("unknown kind must fail closed");
 
     // Assert
     assert!(

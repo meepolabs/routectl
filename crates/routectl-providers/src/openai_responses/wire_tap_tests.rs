@@ -164,12 +164,6 @@ async fn both_sends_declare_the_forced_stream_flag_only_against_the_request() {
     }
 }
 
-/// `req` on a model that declares only `low` and `high`.
-fn clamped(mut req: ChatRequest) -> ChatRequest {
-    req.routectl_internal.effort_levels = vec!["low".to_string(), "high".to_string()].into();
-    req
-}
-
 fn with_effort(effort: &str) -> ChatRequest {
     ChatRequest {
         reasoning: Some(ReasoningConfig {
@@ -299,14 +293,6 @@ fn site_rows() -> Vec<SiteRow> {
             EditSite::ReasoningSummaryDefault,
             "/reasoning/summary",
             EditKind::Add,
-        ),
-        row(
-            "effort clamped to a supported level",
-            || clamped(with_effort("medium")),
-            || clamped(with_effort("low")),
-            EditSite::EffortInjection,
-            "/reasoning/effort",
-            EditKind::Rewrite,
         ),
         row(
             "effort none withholds reasoning",

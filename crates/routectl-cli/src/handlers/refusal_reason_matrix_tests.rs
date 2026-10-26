@@ -674,7 +674,6 @@ async fn invoke_then_compat_router(base: &str) -> Router {
         header_extras: Vec::new(),
         anthropic_beta: Vec::new(),
         additional_model_request_fields: None,
-        adaptive_thinking: None,
     };
     let resolved = bedrock_auth::resolve(&creds, INVOKE_REGION)
         .await

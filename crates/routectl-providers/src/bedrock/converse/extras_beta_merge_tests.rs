@@ -29,7 +29,6 @@ fn merged_bag(floor: &[&str], client: &[&str]) -> Map<String, Value> {
         header_extras: Vec::new(),
         anthropic_beta: owned(floor),
         additional_model_request_fields: None,
-        adaptive_thinking: None,
     };
     let req = ChatRequest {
         anthropic_beta: owned(client),

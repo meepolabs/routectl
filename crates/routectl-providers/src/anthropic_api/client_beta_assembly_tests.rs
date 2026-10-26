@@ -114,7 +114,6 @@ fn bedrock_cfg(api_shape: BedrockApiShape) -> BedrockConfig {
         header_extras: Vec::new(),
         anthropic_beta: owned(&[CONFIG_PIN]),
         additional_model_request_fields: None,
-        adaptive_thinking: None,
     }
 }
 

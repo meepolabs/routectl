@@ -466,7 +466,7 @@ fn every_replay_fixture_transcript_passes_pairing_validation() {
     let mut validated = 0_usize;
     let mut with_tools = 0_usize;
     for fixture in &fixtures {
-        let Some(req) = common::replay::parse_enriched_canonical(fixture)
+        let Some(req) = common::replay::parse_fixture_canonical(fixture)
             .unwrap_or_else(|e| panic!("{}: {e}", fixture.name))
         else {
             continue;

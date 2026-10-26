@@ -552,10 +552,10 @@ const TIER_TWO: &[TierTwoRow] = &[
         anchor: "body_implied_betas",
         crate_root: CrateRoot::Providers,
         gate: Gate::CloakLaneBodyCarriesEffort,
-        reason: "the adaptive-thinking effort directive is composed only for routectl's own seat, \
-                 so the beta it requires is unioned on that lane alone; one-way, so a \
-                 caller-supplied effort beta with no field is left untouched",
-        test: "adaptive_effort_body_gains_the_effort_beta_exactly_once",
+        reason: "an effort directive on the assembled body requires its beta, which is \
+                 unioned on routectl's own seat alone; one-way, so a caller-supplied \
+                 effort beta with no field is left untouched",
+        test: "provider_extras_effort_body_gains_the_effort_beta_exactly_once",
         known_loss: None,
     },
     TierTwoRow {

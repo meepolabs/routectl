@@ -377,10 +377,9 @@ pub enum ThinkingConfig {
     /// operator steers via top-level `output_config.effort` (a string
     /// like "low" | "medium" | "high" | "xhigh" | "max"). No
     /// `budget_tokens` field. Older Claude models (4.5/4.6 family)
-    /// still want the `Enabled` shape, so this variant only ships
-    /// when `req.routectl_internal.supports_adaptive_thinking` is `true`
-    /// -- the request normalizer in `request.rs` decides which variant
-    /// to emit per-call.
+    /// still want the `Enabled` shape, so the canonical translation in
+    /// `extras.rs` never emits this variant; an adaptive object reaches
+    /// the wire only as a client sent it.
     Adaptive {
         /// See [`ThinkingConfig::Enabled`]'s `display`.
         #[serde(default, skip_serializing_if = "Option::is_none")]

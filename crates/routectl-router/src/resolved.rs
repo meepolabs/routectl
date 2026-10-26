@@ -8,8 +8,6 @@
 //!
 //!   - `nickname`, `provider_name`, `provider`, `upstream`: identity
 //!     + transport (see field docs for details).
-//!   - `supports_adaptive_thinking`, `effort_levels`, `max_thinking_budget`:
-//!     relay slots no config key sets any more; they hold their defaults.
 //!   - `max_output_tokens`: the output ceiling carrier (catalog prior,
 //!     learned ceiling at dispatch).
 //!   - `reasoning_dialect` / `history_reasoning`: per-model
@@ -53,21 +51,6 @@ pub struct ResolvedModel {
     pub provider: Arc<dyn Provider>,
     /// Wire value of the `model` field on outbound requests.
     pub upstream: String,
-    /// Whether the model supports adaptive (extended) thinking. When
-    /// true, the egress may use `budget_tokens` to cap thinking tokens
-    /// instead of a flat enable/disable toggle. No config key sets it; it
-    /// holds `false`.
-    pub supports_adaptive_thinking: bool,
-    /// Operator-declared effort levels for this model (e.g.
-    /// `["minimal", "low", "medium", "high"]`). No config key sets it; it
-    /// holds the empty (pass-through) list.
-    ///
-    /// `Arc<[String]>` so cloning at dispatch time is a refcount bump
-    /// rather than a heap allocation.
-    pub effort_levels: Arc<[String]>,
-    /// Maximum thinking budget in tokens. `0` means no cap. No config key
-    /// sets it; it holds `0`.
-    pub max_thinking_budget: u32,
     /// Per-model openai-compat reasoning dialect (v0.6.0 moved off
     /// `[providers.X]`). `None` means fall back to the provider's
     /// existing default (`ReasoningDialect::OpenAi` today).
@@ -145,9 +128,6 @@ impl ResolvedModel {
             provider_name: provider_name.into(),
             provider,
             upstream: upstream.into(),
-            supports_adaptive_thinking: false,
-            effort_levels: Arc::default(),
-            max_thinking_budget: 0,
             reasoning_dialect: None,
             history_reasoning: None,
             header_extras: BTreeMap::new(),
@@ -160,24 +140,6 @@ impl ResolvedModel {
             seats: None,
             effective_row: EffectiveRow::Missing,
         }
-    }
-
-    /// Set the adaptive-thinking support flag.
-    pub const fn with_supports_adaptive_thinking(mut self, val: bool) -> Self {
-        self.supports_adaptive_thinking = val;
-        self
-    }
-
-    /// Set the effort-level allowlist.
-    pub fn with_effort_levels(mut self, levels: Vec<String>) -> Self {
-        self.effort_levels = Arc::from(levels.as_slice());
-        self
-    }
-
-    /// Set the maximum thinking-token budget.
-    pub const fn with_max_thinking_budget(mut self, budget: u32) -> Self {
-        self.max_thinking_budget = budget;
-        self
     }
 
     /// Set the reasoning dialect.
@@ -335,12 +297,6 @@ impl std::fmt::Debug for ResolvedModel {
             .field("provider_name", &self.provider_name)
             .field("provider_id", &self.provider.id())
             .field("upstream", &self.upstream)
-            .field(
-                "supports_adaptive_thinking",
-                &self.supports_adaptive_thinking,
-            )
-            .field("effort_levels", &self.effort_levels)
-            .field("max_thinking_budget", &self.max_thinking_budget)
             .field("reasoning_dialect", &self.reasoning_dialect)
             .field("history_reasoning", &self.history_reasoning)
             .field(
@@ -414,25 +370,9 @@ mod tests {
         assert_eq!(m.nickname, "haiku");
         assert_eq!(m.provider_name, "anthropic");
         assert_eq!(m.upstream, "claude-haiku-4-5");
-        assert!(!m.supports_adaptive_thinking);
-        assert!(m.effort_levels.is_empty());
-        assert_eq!(m.max_thinking_budget, 0);
         let d = format!("{m:?}");
         assert!(d.contains("haiku"));
         assert!(d.contains("stub-test"));
-    }
-
-    #[test]
-    fn with_capability_fields_set_correctly() {
-        let p: Arc<dyn Provider> = Arc::new(StubProvider { id: "stub".into() });
-        let levels = vec!["low".into(), "medium".into(), "high".into()];
-        let m = ResolvedModel::new("x", "p", p, "u")
-            .with_supports_adaptive_thinking(true)
-            .with_effort_levels(levels.clone())
-            .with_max_thinking_budget(16000);
-        assert!(m.supports_adaptive_thinking);
-        assert_eq!(&*m.effort_levels, levels.as_slice());
-        assert_eq!(m.max_thinking_budget, 16000);
     }
 
     #[test]
