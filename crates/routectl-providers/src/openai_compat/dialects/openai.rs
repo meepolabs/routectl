@@ -112,7 +112,8 @@ mod tests {
     }
 
     // effort:"none" is reasoning-OFF: vanilla OpenAI has no disable token, so
-    // reasoning_effort must be OMITTED -- never replaced by a positive level.
+    // reasoning_effort must be OMITTED. It is never replaced by a positive
+    // level.
     #[test]
     fn none_effort_omits_reasoning_effort() {
         let mut req = user_req("gpt-5");

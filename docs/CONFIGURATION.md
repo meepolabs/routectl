@@ -1370,10 +1370,12 @@ provider = "mantle-compat"
 upstream = "openai.gpt-oss-20b"   # bare model id
 ```
 
-The [OpenAI chat-lane rule](#openai-chat-lane-rule-reasoning_dialect) applies
-here as on any `openai-compat` provider: `openai.gpt-oss-20b` matches it, so
-its sampling params are dropped and `max_tokens` goes out as
-`max_completion_tokens`.
+This example uses the default `openai` reasoning dialect, so the
+[OpenAI chat-lane rule](#openai-chat-lane-rule-reasoning_dialect) applies:
+`openai.gpt-oss-20b` matches it, so its sampling params are dropped and
+`max_tokens` goes out as `max_completion_tokens`. The rule is consulted only
+by the `openai` and `deepseek` dialects, and the `deepseek` dialect keeps
+`max_tokens`.
 
 `base_url` is optional on an `openai-compat` provider only when the
 mantle sub-table is present (the region derives the endpoint). A

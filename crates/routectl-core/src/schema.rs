@@ -189,8 +189,8 @@ pub struct ChatRequest {
     ///
     /// Despite the "transport-internal" framing, this also ferries
     /// resolved per-model values (the openai-compat reasoning_dialect +
-    /// history_reasoning, merged header_extras, the output ceiling) -- not
-    /// just opaque transport state.
+    /// history_reasoning, merged header_extras, the output ceiling). It is
+    /// not just opaque transport state.
     /// The router populates it from `ResolvedModel` right before calling
     /// `provider.complete(req)` / `provider.stream(req)` so the
     /// `Provider` trait signature stays stable across all five concrete
