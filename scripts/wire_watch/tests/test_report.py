@@ -85,7 +85,7 @@ LEARNED_ROW = {
     "state_key": "mock#planted-upstream", "capability_key": "web_search", "verdict": "broken",
     "signal_tier": "self-identifying", "observations": 1, "phase": "f1", "source": "live",
     "last_seen_ms": 1, "action": "route_away", "layer": "learned", "overrode_layer": None,
-    "age_ms": 0, "expires_at_ms": 2,
+    "age_ms": 0, "expires_at_ms": 2, "value": None,
 }
 
 DETAIL_STRINGS = os.path.join(rc.REPO, "crates", "routectl-providers", "tests", "fixtures",
