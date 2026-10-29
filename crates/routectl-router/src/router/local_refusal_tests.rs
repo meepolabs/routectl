@@ -428,7 +428,7 @@ fn advisor_request() -> ChatRequest {
 
 #[tokio::test]
 async fn a_strict_strip_refusal_counts_exactly_once() {
-    for surface in SURFACES {
+    for surface in ALL_SURFACES {
         let router = router_over(
             ProviderEntry::anthropic_api("literal:k"),
             Arc::new(AnsweringProvider::default()),

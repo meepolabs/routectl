@@ -3313,6 +3313,10 @@ mod scripted_provider_support;
 mod stream_commit_tests;
 
 #[cfg(test)]
+#[path = "dispatch_divergence_tests.rs"]
+mod dispatch_divergence_tests;
+
+#[cfg(test)]
 #[path = "probe_activation_boundary_tests.rs"]
 mod probe_activation_boundary_tests;
 
