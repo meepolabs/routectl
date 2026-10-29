@@ -435,8 +435,8 @@ license.
   (`rate-limited`/`auth`/`bad-request`/`content-policy`/`context-window`/`server-error`/`timeout`/`network-error`/`overloaded`/`feature-unsupported`;
   `Unknown` -> `None` = "unclassified") shared by the ledger `resolved_class`
   column, the `/status` `errors_by_class` JSON keys, and the `[retry.classes]`
-  config tokens -- the config handler (`handlers/status/config.rs`) and
-  `config_migrate.rs` delegate to it, and a tripwire test in `class_policy.rs`
+  config tokens -- the config handler (`handlers/status/config.rs`) delegates
+  to it, and a tripwire test in `class_policy.rs`
   pins it to `ConfigFailureClass`'s serde kebab output. `LastOutcome` (serde
   snake_case
   `ok`/`rate_limited`/`timeout`/`transport_error`/`http_4xx`/`http_5xx`/`circuit_open`)
@@ -1646,10 +1646,15 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   validation: `version: u32` schema-stamps the file (`CURRENT_CONFIG_VERSION
   == 5`); `preflight_config_version(raw_toml)` reads `version` off the RAW
   TOML before the `deny_unknown_fields` typed deserialize, failing closed with
-  `ConfigVersionError` (too-new -> upgrade the binary; too-old -> `config
-  migrate`, never mutated on load) rather than a confusing unknown-field
-  error; `validate_cache_pricing_retired` rejects a non-empty
-  `[cache_pricing]` at v2+ as a hand-edited inconsistency.
+  `ConfigVersionError` {TooNew -> upgrade the binary; TooOld / Missing (no
+  `version` key at all) -> `CONFIG_VERSION_REMEDIATION`, never mutated on
+  load} rather than a confusing unknown-field error.
+  `CONFIG_VERSION_REMEDIATION` (crate-root re-export) is the one remediation
+  string (move the old file aside, run `routectl init`, see
+  `docs/CONFIGURATION.md`) both refusals end with and doctor reads, so the
+  advice cannot drift; `validate_cache_pricing_retired` rejects a non-empty
+  `[cache_pricing]` at the current version as a hand-edited inconsistency
+  (remove the table by hand).
   `preflight_raw_config(raw_toml) -> Result<(), RawConfigPreflightError>`
   (`#[non_exhaustive]`, `Display` is the wrapped check's own message) is THE
   public raw-text driver every caller runs once, first refusal wins, in a
@@ -1657,7 +1662,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   (`LegacyMitmCredentialSourceError`, naming the provider-block replacement),
   then each key retired in `CAPABILITY_KEYS_RETIRED_IN` (5: `bedrock`, provider
   `allowed_betas` / `unsupported_features`, model `unsupported_features`) by
-  dotted path only, never values (`RetiredCapabilityKeysError`), then the
+  dotted path only, never values, each told to remove it by hand
+  (`RetiredCapabilityKeysError`), then the
   removed `[fidelity] paid_probe_daily_caps` key, naming no successor
   (`RemovedPaidProbeCapsError`), then the removed per-model keys in
   `RETIRED_MODEL_KNOBS` (`supports_adaptive_thinking`, `effort_levels`,
@@ -1668,8 +1674,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   non-version checks are crate-internal; only `preflight_config_version`
   stays public beside the driver. Unparseable TOML passes every check so the
   typed deserialize reports the real syntax error. Callers: the shared loader
-  (`parse_config_only`), the CLI edit-pipeline `preflight`, and `config
-  migrate` (on the post-ladder candidate)
+  (`parse_config_only`) and the CLI edit-pipeline `preflight`
 - `src/config_error.rs` -- the single production `Config` parse funnel
   `parse_config(text) -> Result<Config, String>` (re-exported from the crate
   root; consumed by `serve`/hot-reload load and every CLI config load) plus
@@ -1696,13 +1701,12 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   (which owns validation and returns `EditOutcome::{Modified,Unchanged}` or
   its own error, surfaced transparently as `Edit(E)`), and atomically writes
   only on `Modified`. `write_config_atomic` (mode-preserving temp + fsync +
-  rename + parent-dir fsync, extracted from `config_migrate`) lives here --
+  rename + parent-dir fsync) lives here --
   the one atomic config writer in the workspace. `EditResult` reports
   `committed_len`, deliberately NOT the document bytes (config.toml can hold
   `literal:` secrets; the audit contract forbids logging values). The lock is
   never held across interactive prompts (callers confirm first); consumers:
-  `config set`/`unset`, the `config migrate` migrator (its v2->v3 commit
-  rung), and the onboarding wizard
+  `config set`/`unset`, `init`, and the login config surface
 - `src/config_path.rs` -- schema-driven dotted-path validator:
   `validate_config_path(dotted) -> Result<PathShape{Scalar,Table}, PathError>`
   walks the OnceLock'd `schema_for!(Config)` object graph segment by segment
@@ -1747,7 +1751,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `schemars::schema_for!(Config)` as pretty JSON with a trailing newline
   (deterministic). Stamps two root markers: `x-routectl-config-version` (=
   `CURRENT_CONFIG_VERSION`, metadata only -- NOT a hard constraint on the
-  `version` field, so editors keep accepting older migratable configs) and
+  `version` field; routectl itself refuses any other version at load) and
   `x-generated` (the `@generated by `cargo run --bin gen_schema`` warning). A
   golden test (`committed_schema_matches_render`, gated on the
   `bedrock`+`openai-responses`+`gemini` features) diffs the committed file
@@ -1770,115 +1774,6 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   overlay), overriding only the leaf the operator set. Both
   `ConfigFailureClass` and `ClassPolicy` derive `schemars::JsonSchema` so they
   surface in the committed `routectl.schema.json`
-- `src/config_migrate.rs` -- the config schema migration ladder as a PURE
-  planning phase (no on-disk mutation until the caller commits).
-  `plan_migration(&DocumentMut, raw_version, &cache_pricing, overlay_path) ->
-  Result<MigrationPlan, MigrateError>` runs every ladder transform in memory
-  and every refusal/conflict check up front, so a returned plan means all
-  validation has passed and nothing has been written. `MigrationPlan { from,
-  to, write_kind: WriteKind, removed_keys, steps }` carries a human-readable
-  `removed_keys` summary plus the `write_kind`, which FOLDS the write payloads
-  into its variants so the illegal "candidate present but nothing to write"
-  state is unrepresentable: `WriteKind` is `NoChange` / `ConfigOnly(String)`
-  (the fully-migrated config text) / `ConfigAndOverlay(String, OverlayWrite)`
-  (config text + the pending overlay fold to commit FIRST).
-  `MigrationPlan::config_candidate() -> Option<&str>` and `overlay_candidate()
-  -> Option<&OverlayWrite>` are read-models over `write_kind` (no separate
-  `Option` fields to `.expect()` a cross-field invariant against).
-  `OverlayWrite { base_revision, cells }` is a pending revision-checked
-  overlay save. `plan_v1_overlay` (private) computes the v1 `[cache_pricing]`
-  -> catalog-overlay fold WITHOUT writing: it loads the overlay (a read),
-  validates + merges candidate cells, and returns `Some(OverlayWrite)`
-  (new/edited cells), `None` (idempotent no-op -- every candidate already
-  matches), or `Err(Conflict)` (a pre-existing DIFFERENT overlay value fails
-  closed, for ANY key). `apply_config_transforms(&mut DocumentMut,
-  raw_version) -> Result<Vec<StepOutcome>, Refusal>` is the pure document-only
-  ladder (v1->v2 via `apply_v1_to_v2_doc` stamping the LITERAL `2` and
-  dropping `[cache_pricing]`, then v2->v3, then v3->v4, then v4->v5) on a
-  scratch copy, committing to the caller's document only when every rung
-  succeeds -- both `plan_migration` (on a clone, to build the candidate)
-  and the caller's commit closure (on the re-read document under the write
-  lock) call it, so the committed bytes reproduce exactly what planning gated.
-  `migrate_v2_to_v3(&mut DocumentMut) -> Result<StepOutcome, Refusal>` retires
-  the per-status `retry_allowlist`/`retry_denylist` keys, stamping `version =
-  3` and dropping both keys only when they carry NO behavior, else
-  `Refusal::BehaviorBearing` (non-empty lists have no lossless
-  `[retry.classes.*]` fold, carrying rendered per-code guidance) /
-  `Refusal::Malformed` (a non-`u16` entry, refused rather than silently
-  dropped) with the document byte-untouched.
-  `migrate_v3_to_v4(&mut DocumentMut) -> Result<StepOutcome, Refusal>` stamps
-  the LITERAL `4` and relocates every provider-level `seat_selection` onto a
-  `[pools.<name>]` block whose sole member is that entry, taking the pool name
-  from `seat_naming::pool_name` (never a rule restated here). An entry that
-  itself HOLDS that plain family name vacates it, renamed to
-  `seat_naming::family_default_rename`'s `<family>-default`. Refuses with
-  `Refusal::SeatSelectionRelocation` -- document byte-untouched -- when a
-  present knob has no derivable pool (no `oauth://` ref to name a family, an
-  unusable family token, or a derived pool name held by a provider entry, a
-  model nickname, or a hand-authored pool block), when a rename target is held
-  by a different entry, or when two entries derive
-  the SAME pool name (`colliding_pool_derivations`: grouping them would merge
-  accounts the operator kept separate and drop all but one `seat_selection`).
-  A file carrying no such knob
-  is a version stamp only. NO store access: the rung runs twice (plan + locked
-  re-read), so the store-aware half lives in the command instead.
-  `bare_oauth_pool_candidates(&DocumentMut) -> Vec<BareOauthRef{entry, family}>`
-  is the PURE input that half reads -- every provider entry carrying a BARE
-  `oauth://` ref, in document order. `apply_seat_pool_move(&mut DocumentMut,
-  &SeatPoolMove{entry, rename_to, pool, accounts: Vec<SeatPoolAccount{entry_name,
-  secret_ref, already_present}>})` is its write primitive: renames the entry
-  when `rename_to` is set (`rename_provider_entry`, key decor and header
-  comment preserved, models following it), clones the entry
-  once per labelled seat with that seat's ref, unions the member list onto
-  `[pools.<pool>]`, relocates the knob, and -- when the move materializes
-  accounts -- REPOINTS every `[models.X] provider` naming the entry at the pool
-  (`repoint_models_at`, the same rewrite both the rename and the pool move
-  use). ORDER IS LOAD-BEARING: the rename runs first and takes the models with
-  it, so the pool repoint then moves them off the RENAMED name; the other order
-  would leave models naming a provider key that no longer exists.
-  `SeatPoolMove::member_name()` is the post-rename member name.
-  The repoint is what preserves DISPATCH BREADTH: a
-  v3 bare ref expanded to every stored seat, a v4 one means the default seat
-  alone, so a model left on the entry would silently drop from N seats to 1.
-  An accounts-free move (the single-seat `seat_selection` relocation) leaves
-  model references alone -- one member, identical breadth, and a member inherits
-  its pool's strategy through `Config::seat_selection_for` either way.
-  Idempotent over its own output, rename included.
-  `MigrationPlan::renamed_entries: Vec<(from, to)>` reports the pure rung's
-  renames for the operator-facing change summary (`collect_renamed_entries`,
-  derived purely from the original document). `upsert_pool_members(&mut DocumentMut, pool,
-  members)` is the member-union primitive underneath it, exported because the
-  login auto-surface grows the same pools: it creates `pools` and the block
-  when absent, unions members without duplicating (within one call's list as
-  well as against the block's existing members), and leaves everything else
-  on the block (an existing `seat_selection`, an `accepts_new_logins` marker)
-  verbatim -- so a rerun changes no byte and two writers never need to know
-  what the other wrote. `models_routed_at(&DocumentMut, entry) ->
-  Vec<String>` is the read-only counterpart, for the change summary the
-  operator confirms.
-  `migrate_v4_to_v5(&mut DocumentMut) -> Result<StepOutcome, Refusal>` stamps
-  the LITERAL `5`: folds every provider/model `unsupported_features` into its
-  `[capability.overrides.<spec>].unsupported` cell, removes EMPTY egress
-  allowlists (`allowed_betas` / `allowed_body_fields`) and drops `[bedrock]`
-  only when nothing is left in it. Every refusal precedes any mutation:
-  `Refusal::EgressAllowlist` (a non-empty allowlist, reported as
-  `PresentAllowlist{path, entry_count}`, never the values),
-  `Refusal::OverrideShape` (a fold destination of the wrong shape) and
-  `Refusal::CapabilityConflict` (a folded value already in the cell's
-  `force_supported`). `RefusalSource`
-  (`Allowlist`/`Denylist`/`Both`) names which retired key(s) bore the cause.
-  `MigrationError` (`InvalidSelector`/`InvalidOverride`/`Conflict`/`Overlay`)
-  is the overlay-fold error; `MigrateError` (`V1ToV2(#[from] MigrationError)`,
-  `Refused(Refusal)`, `VersionTooNew{found, supported}`) is the planner's
-  error. `StepOutcome{from_version, to_version}` records what each rung
-  stamped. `LATEST_MIGRATION_VERSION` (a LITERAL, compile-time-asserted `>=
-  CURRENT_CONFIG_VERSION`) is the highest version the ladder can produce --
-  deliberately NOT the const, so a bare bump of `CURRENT_CONFIG_VERSION`
-  without a matching rung fails the build. The two-file commit (overlay first,
-  config last as the visible completion marker) is NOT literally atomic
-  without a journal; it is recoverable instead -- a crash between phases
-  leaves config.toml at its old version, so a rerun re-plans (the overlay fold
-  is now a no-op) and completes the config stamp
 - `src/factory/mod.rs` -- provider-factory module root; declares the private
   `build`/`validate`/`warnings` submodules (plus the cfg(`openai-responses`)
   `installation_id` submodule) and re-exports the crate-facing surface
@@ -2878,8 +2773,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   without the reader of the other noticing. Two anonymous
   `const _: () = assert!(...)` items beside those definitions pin
   `MINIMUM_CONFIRMATIONS <= ENVELOPE_QUORUM` and
-  `ENVELOPE_QUORUM < PREFIX_QUORUM` (the repo-standard compile-assertion shape --
-  see `config_migrate`'s migration-ladder guard); rustc evaluates every `const`
+  `ENVELOPE_QUORUM < PREFIX_QUORUM` (the repo-standard compile-assertion
+  shape); rustc evaluates every `const`
   item's initializer when it compiles the crate, so they need NO consumer, no
   reference, and no name, and an anonymous item cannot trip `dead_code` so no
   lint expectation either. The floor assertion reads
@@ -4375,19 +4270,14 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   (plain provider-family name), `account_entry_name` (`<family>-default` /
   `<family>-<label>`), `seat_secret_ref`, `plan_pool_materialization` (every
   name one family's seats take, with `already_present` / `pool_exists` so
-  re-deriving over its own output is a no-op), `family_default_rename` (the
-  name an entry keyed by its OWN family must move to so the pool can take the
-  family name -- pure, occupancy checked by each caller against the namespace
-  it can see), `plan_entry_materialization` -> `EntryMaterialization
-  {renamed_entry, pool}` (the migration's derivation: the pool plus the
-  vacating rename, with the entry that is vacating discounted from the
-  pool-name collision check), `plan_new_seat` (the typed
+  re-deriving over its own output is a no-op), `plan_new_seat` (the typed
   resolver: which `accepts_new_logins` pool serves `oauth://<provider>` and
   what entry a new seat takes), `growth_pools_for_family`. Exact mapping or
   refuse -- `SeatNamingError` {UnusableToken, ReservedLabel,
   DuplicateGeneratedName, EntryNameTaken, PoolNameTaken, AmbiguousPool}, never
-  a lossy normalization, because the migration pass and the login writer must
-  agree byte-for-byte on generated names
+  a lossy normalization, because login reconciles against existing config by
+  `oauth://` ref, which is only correct while every login of a seat derives the
+  same names from the same inputs
 - `src/pool_build.rs` -- the typed outcome of compiling a `[pools.<name>]`
   block: `PoolOutcome` {Ready(shared seat set + omissions) / Unavailable},
   `PoolReport` (pool, models routed at it, configured vs usable member counts,
@@ -5164,8 +5054,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   the model-scoped cell, then the provider-scoped cell (model wins). A dead-key
   WARN fires per override key that normalization rewrites (dead: it could
   never match). `validate_capability_overrides` (wired into
-  `factory::collect_config_validation`, so `serve` load, `config check`, and
-  the `config migrate` gate all see it) fails a config where one `(target,
+  `factory::collect_config_validation`, so `serve` load and `config check`
+  both see it) fails a config where one `(target,
   capability)` cell carries contradictory `RouteAway` + `ForceSupported`
   verdicts, naming the cell and both sources; identical duplicates pass.
   `snapshot()` returns rows. The routing consult that reads this model lives
@@ -7681,7 +7571,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 ### commands
 
 - `src/commands/mod.rs` -- groups CLI subcommand entry points (init, test,
-  prompt_size, config, migrate, provider add, provider probe, doctor, login,
+  prompt_size, config, provider add, provider probe, doctor, login,
   logout, refresh, whoami, usage, catalog, catalog_import; `serve` lives in
   `crate::server`)
 - `src/commands/config.rs` -- `routectl config check/show/example` (secret
@@ -7734,9 +7624,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `--raw`/`--no-redact` escape hatch
 - `src/commands/config_edit.rs` -- `routectl config set/unset`: the write
   pipeline through the shared gate. Order: RAW version preflight FIRST
-  (refuses `version < CURRENT_CONFIG_VERSION` byte-identically BEFORE any
-  shared-loader call -- the loader preflight-rejects a too-old file and only
-  `config migrate` migrates it; also rejects too-new) via the shared
+  (refuses a missing `version` or `version < CURRENT_CONFIG_VERSION`
+  byte-identically BEFORE any shared-loader call, with the shared
+  `CONFIG_VERSION_REMEDIATION`; also rejects too-new) via the shared
   `edit_pipeline::preflight`, which also refuses the removed and retired keys;
   `validate_config_path` (unknown segments error with siblings pre-mutation;
   `Table` targets allowed only for unset); scalar inference
@@ -7750,94 +7640,6 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   field names and emits ONE value-free `tracing::info` audit
   (surface/verb/path/restart_required/high_consequence); a no-op writes and
   logs nothing
-- `src/commands/config_migrate_cmd.rs` -- `routectl config migrate`: brings a
-  legacy `config.toml` forward to `CURRENT_CONFIG_VERSION` through the shared
-  `routectl_router::plan_migration` PURE planner, committing through the same
-  `edit_config_toml` write primitive as `config set`. Order
-  (check-before-write end to end): snapshot + raw `version` read; PLAN the
-  migration purely (`plan_migration` -> `MigrationPlan`, no disk mutation -- a
-  `Refusal` / future-version file surfaces here with a truthful "nothing was
-  written"); then `preflight_raw_config` on the post-ladder candidate (the
-  snapshot for a `NoChange` plan), so a key a rung folds is not refused while
-  one no rung removes still is; then plan PHASE 2, the store-aware half the pure ladder cannot
-  own (it runs twice, and the committed bytes must reproduce what planning
-  gated) -- `enumerate_seats` opens the credential store READ-ONLY through
-  `OAuthStore::open` and keys its seats by provider family, and
-  `plan_seat_materialization` turns each `bare_oauth_pool_candidates` entry
-  whose family holds MORE THAN ONE seat into a `SeatPoolMove` via
-  `seat_naming::plan_entry_materialization` (byte-for-byte the names the login
-  writer generates, INCLUDING the `rename_to` a family-named entry needs --
-  `[providers.anthropic]` carrying `oauth://anthropic` vacates the name to
-  `anthropic-default` so `[pools.anthropic]` can take it, the shape earlier
-  quickstarts taught; a fully-satisfied move is dropped so a rerun reports no
-  pending write, and a pending rename is never "satisfied"). A single-seat family is a structural no-op by construction
-  (at v4 a bare ref means the default seat). An unreadable store refuses the
-  WHOLE migration (`seat_enumeration_refusal`, path-free via
-  `sanitize_store_open_error`) rather than stamp the version alone and silently
-  narrow the ref; a `SeatNamingError` surfaces unsoftened (a `<family>-default`
-  rename target held by a DIFFERENT credential is `EntryNameTaken`). Two further
-  fail-closed classes live in `SeatMaterializationRefusal`:
-  `FamilyFanOut` (2+ provider entries carry a bare `oauth://<family>` ref for
-  ONE family -- merging them would group entries that may name deliberately
-  distinct egresses into one pool and dispatch every account's bearer to all of
-  them; the message names every claimant entry) and `ExistingPool` (the derived
-  pool name is held by a `[pools.*]` block the FILE carried, read off the
-  ORIGINAL document by `pool_block_names` so phase 1's own relocated pool is
-  still growable -- an operator-authored pool's membership is never grown by
-  the migration). `combined_candidate`
-  composes phase 1 + phase 2 into ONE candidate text (phase 2 composes onto the
-  ORIGINAL document for a `NoChange` plan, so a hand-authored already-current
-  file carrying a bare multi-seat ref is still handled); only when BOTH phases
-  are empty does the run short-circuit to `AlreadyCurrent`; gate the combined
-  candidate through the shared
-  `parse_config` + `validation_report` suite (a parse failure is stripped of
-  its verbatim source-line preview via
-  `redact_parse_error`/`is_source_snippet_row` first -- the offending config
-  line may carry a `literal:` credential, so only the header line/column +
-  message kind are kept); `--dry-run` renders the candidate + the
-  `change_summary` (the plan's `removed_keys`, its `renamed_entries`, and the
-  per-move `seat_materialization_summary` -- a rename phase 2 also narrates is
-  reported once, in the richer line that names the pool and the repointed
-  models beside it) and writes nothing (no temp copy -- planning never
-  touched the real files); otherwise ACKNOWLEDGE every real write
-  (`confirm_migration` -- interactive `y` / `--yes`, with `--force` kept one
-  release as a deprecated hidden alias for `--yes`;
-  non-interactive-without-acknowledgement refuses) -- ONE acknowledgement for
-  the whole combined change, including a same-version seat materialization, AFTER the
-  gate and BEFORE any write; then `commit_plan`
-  (takes the plan BY VALUE, moving the overlay cells) writes the overlay FIRST
-  via `commit_overlay` -> `with_overlay_write_lock` (the revision check runs
-  INSIDE the advisory lock, so a concurrent `catalog` writer can neither slip
-  between the check and the rename nor be silently overwritten) and
-  `config.toml` LAST as the visible completion marker (via `edit_config_toml`,
-  whose closure re-applies the SAME `apply_config_transforms` the plan gated
-  plus the SAME phase-2 moves, under the write lock against the original
-  snapshot). The seats are RE-ENUMERATED immediately before that locked write
-  and phase 2 re-planned against them: a mismatch is
-  `CommitError::InventoryChanged`, so a login or logout between the shown diff
-  and the commit refuses instead of landing a diff that no longer describes the
-  store. Two-file commit is
-  recoverable, not atomic: a config-side failure AFTER the overlay landed is
-  reported as resumable (`resumable_commit_error`/`CommitFailure`, outcome
-  `incomplete`) and NEVER claims "nothing was written"; a rerun re-plans
-  (overlay fold now a no-op) and completes.
-  The v1 rung's `[cache_pricing]` input comes from `load_v1_cache_pricing`,
-  which deserializes ONLY that table (merged with any legacy
-  `pricing_verifications.json` stamp), so a v1 file still carrying keys the
-  current schema retired reaches the ladder instead of failing the typed parse.
-  `MigrateResult::{AlreadyCurrent,DryRun,Migrated{from_version},Aborted}`; a
-  `Refusal` / future-version file / gate failure / conflict surfaces as `Err`.
-  Emits ONE value-free audit event (surface/verb/from/to
-  version/dry_run/ack/force/outcome/refusal_kind/path -- never candidate bytes
-  or a config value); `outcome` is one of
-  `no_change`/`refused`/`version_too_new`/`v1_migration_failed`/`invalid`/`dry_run`/`aborted`/`written`/`incomplete`/`conflict`/`write_failed`
-  (`CommitFailure.outcome` labels the commit-phase failure by variant:
-  `incomplete` once the overlay landed, `conflict` for a genuine revision /
-  base-bytes conflict, the neutral `write_failed` otherwise) and
-  `acknowledged` is true ONLY after a real interactive `y` (never synthesized
-  -- a `--yes` write records `acknowledged=false`). `run_at` takes the overlay
-  AND credentials paths explicitly so tests point the config, the overlay and
-  the credential store at a temp dir
 - `src/commands/config_effective.rs` -- `routectl config show --effective`
   render layer over `routectl_router::derive_effective_view`: the plain
   redacted dump (unchanged), then provenance-annotated sections for the two
@@ -7847,14 +7649,21 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `src/commands/edit_pipeline.rs` -- building blocks shared by the
   config.toml-mutating commands (`config set/unset`, `provider add`, the login
   auto-surface, `init`): `preflight`, one call to
-  `routectl_router::preflight_raw_config` (the same driver the loader runs), the in-memory
+  `routectl_router::preflight_raw_config` (the same driver the loader runs;
+  refuses an out-of-range or missing `version`), the in-memory
   `parse_config` + `collect_config_validation` gate plus its error rendering,
   the pre-lock high-consequence confirmation prompt (`--yes` bypasses; a
   non-TTY stdin declines without reading, so a silent pipe cannot hang any
   mutating command), and `parse_document` +
   `insert_provider_block` (format-preserving `[providers.<name>]`
   insert/replace, deterministic so a write closure reproduces under the lock
-  exactly what planning gated). One home so every mutating command refuses
+  exactly what planning gated), and `upsert_pool_members(&mut DocumentMut,
+  pool, members)`, the login auto-surface's member-union primitive: creates
+  `pools` and the block when absent, unions members without duplicating
+  (within one call's list as well as against the block's existing members),
+  and leaves everything else on the block (`seat_selection`, an
+  `accepts_new_logins` marker) verbatim, so a rerun changes no byte. One home
+  so every mutating command refuses
   stale/legacy files, re-validates candidates, and prompts on egress-defining
   edits identically
 - `src/commands/provider_env.rs` -- conventional per-provider-kind credential
@@ -8332,20 +8141,13 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   cold-start buckets, lanes, then exactly one `verdict:` line and
   `PROVENANCE_NOTICE`; the title is sanitized to one line
 - `src/commands/catalog/` -- `routectl catalog`, split into a
-  command-entry facade plus three concern modules; every original
-  `commands::catalog::{list,verify,set,disable,export,build_list_data,render_table,print_pickup_note,verify_at,set_at,PricingVerifications,load_verifications,CatalogWriteError}`
+  command-entry facade plus two concern modules; every original
+  `commands::catalog::{list,verify,set,disable,export,build_list_data,render_table,print_pickup_note,verify_at,set_at,CatalogWriteError}`
   path is preserved via re-exports.
-  - `mod.rs` -- command entry + module doc (subcommand overview +
-    legacy-sidecar rationale) and the re-export facade; owns
+  - `mod.rs` -- command entry + module doc (subcommand overview) and the
+    re-export facade; owns
     `today_verified_at` (the one shared UTC `verified_at` stamp every writer
     reads).
-  - `verifications.rs` -- legacy `pricing_verifications.json` READ side only
-    (`PricingVerifications`, `load_verifications`), migration input consumed
-    by the v1 -> v2 config migration (`config migrate` reads the sidecar beside
-    the config file and folds historical stamps into the v1 rung's
-    `cache_pricing` before the migrator moves them into the catalog
-    overlay; `server::load_effective_config` no longer migrates -- it
-    preflight-rejects a too-old config); nothing writes the sidecar anymore.
   - `render.rs` -- `list` rendering: `overlay_summary_line` header (revision +
     counts by source + disabled count) then the EFFECTIVE catalog (the
     two-layer merge of the baked table with `catalog_overlay.json`,
@@ -8618,7 +8420,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   their `*_finding`/`*_remediation` helpers, each a pure mapping of the
   gathered `DoctorContext` to findings: inventory via `compute_activation`
   (route-referenced-but-unusable -> WARN + login remediation), version via
-  `preflight_config_version` (too-old -> FAIL + `config migrate`, too-new ->
+  `preflight_config_version` (too-old or missing -> FAIL +
+  `CONFIG_VERSION_REMEDIATION`, too-new ->
   FAIL + upgrade, present-but-broken -> FAIL not all-PASS), config via the
   shared `validation_report` (BOTH halves rendered -- each error a `Fail`, each
   advisory a `Warn` through the same `sanitize_for_log_with_cap` seam, and the single
