@@ -3831,6 +3831,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   one `build_router` behind the per-shape wrappers (base URL, breaker
   threshold, RPM limit, lane count, model beta floor),
   `plant_eligible_verdict`, and the provider doubles
+- `src/router/scripted_provider_support.rs` -- `ScriptedProvider`, the
+  depositing test provider shared by the wire-rejection, rejection-location
+  and declared-edit revert sidecars
 - `src/router/probe_scheduling_tests.rs` -- activation and lifecycle from the
   scheduler side, plus the pre-flight/activation composition
 - `src/router/probe_activation_boundary_tests.rs` -- the admitted boundary,

@@ -7,18 +7,13 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
-use futures::stream::{self, BoxStream, StreamExt};
-use parking_lot::Mutex;
 use routectl_core::wire_check::{IngressDialect, IngressWire};
-use routectl_core::{
-    ChatChunk, ChatRequest, ChatResponse, ChunkChoice, ChunkDelta, Error, Provider, Result,
-    TokenCount, ToolDef,
-};
+use routectl_core::{ChatRequest, Error, Provider, ToolDef};
 use serde_json::{Value, json};
 
 use super::super::field_repair::{TEST_UNSUPPORTED_PATH, TEST_UNSUPPORTED_SENTINEL};
+use super::super::scripted_provider_support::{Answer, ScriptedProvider, Shape};
 use super::RejectionSite;
 use crate::config::Config;
 use crate::resolved::ResolvedModel;
@@ -46,94 +41,6 @@ const INVOKE: &str = "kind = \"bedrock\"\nregion = \"us-east-1\"\n\
                       creds = { kind = \"default-chain\" }\napi_shape = \"invoke\"\n";
 const OPENAI_RESPONSES: &str = "kind = \"openai-responses\"\napi_key_ref = \"literal:k\"\n";
 const GEMINI: &str = "kind = \"gemini\"\napi_key_ref = \"literal:k\"\n";
-
-/// How the test provider builds the body it deposits from the client's.
-type Shape = fn(&ChatRequest, Value) -> Value;
-/// How the test provider answers an attempt, given the request.
-type Answer = fn(&ChatRequest) -> Result<()>;
-
-/// A provider that, like a real egress, deposits the body it sent into the
-/// attempt's tap (unless it has no `shape`), then answers as told. Counts the
-/// upstream calls it took and keeps the messages each one carried.
-struct ScriptedProvider {
-    shape: Option<Shape>,
-    answer: Answer,
-    calls: AtomicUsize,
-    messages: Mutex<Vec<Value>>,
-}
-
-impl ScriptedProvider {
-    fn new(shape: Option<Shape>, answer: Answer) -> Arc<Self> {
-        Arc::new(Self {
-            shape,
-            answer,
-            calls: AtomicUsize::new(0),
-            messages: Mutex::new(Vec::new()),
-        })
-    }
-
-    fn calls(&self) -> usize {
-        self.calls.load(Ordering::SeqCst)
-    }
-
-    fn run(&self, req: &ChatRequest) -> Result<()> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        self.messages
-            .lock()
-            .push(serde_json::to_value(&*req.messages).expect("serialize messages"));
-        if let (Some(shape), Some(tap), Some(ingress)) = (
-            self.shape,
-            req.routectl_internal.wire_tap.as_ref(),
-            req.routectl_internal.ingress_wire.as_ref(),
-        ) {
-            let client: Value = serde_json::from_slice(&ingress.bytes).expect("ingress json");
-            let sent = shape(req, client);
-            tap.deposit(serde_json::to_vec(&sent).expect("serialize").into());
-        }
-        (self.answer)(req)
-    }
-}
-
-#[async_trait::async_trait]
-impl Provider for ScriptedProvider {
-    fn id(&self) -> &'static str {
-        "scripted"
-    }
-    fn normalize_request(&self, _: &ChatRequest) -> Result<Value> {
-        Ok(json!({}))
-    }
-    fn normalize_response(&self, _: Value) -> Result<ChatResponse> {
-        Err(Error::normalize_response("scripted", "unused"))
-    }
-    async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
-        self.run(&req).map(|()| ChatResponse::default())
-    }
-    async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
-        self.run(&req)
-            .map(|()| stream::iter([Ok(content_chunk())]).boxed())
-    }
-    async fn count_tokens(&self, req: ChatRequest) -> Result<TokenCount> {
-        self.run(&req).map(|()| TokenCount {
-            input_tokens: 1,
-            extras: serde_json::Map::new(),
-        })
-    }
-}
-
-fn content_chunk() -> ChatChunk {
-    ChatChunk {
-        choices: vec![ChunkChoice {
-            index: 0,
-            delta: ChunkDelta {
-                content: Some("ok".into()),
-                ..Default::default()
-            },
-            finish_reason: None,
-            matched_stop_sequence: None,
-        }],
-        ..Default::default()
-    }
-}
 
 /// A router whose alias walks one target, `provider` on an entry configured
 /// by `provider_block`, one call per attempt.

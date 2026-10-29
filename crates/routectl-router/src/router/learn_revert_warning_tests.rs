@@ -17,7 +17,7 @@ use crate::wire_check_state::FieldRepairOutcome;
 #[tokio::test]
 async fn the_warning_fires_once_per_lane_path_and_site() {
     for surface in SURFACES {
-        let provider = ScriptedProvider::new(faithful, refuse_op_key_while_carried);
+        let provider = ScriptedProvider::new(Some(faithful), refuse_op_key_while_carried);
         let block = format!("{ANTHROPIC}{OPERATOR_EXTRA}");
         let router = router(&block, false, &[Arc::clone(&provider)]);
 
@@ -39,7 +39,7 @@ async fn the_warning_fires_once_per_lane_path_and_site() {
 #[tokio::test]
 async fn a_revert_is_not_remembered_by_the_next_request() {
     for surface in SURFACES {
-        let provider = ScriptedProvider::new(faithful, refuse_op_key_while_carried);
+        let provider = ScriptedProvider::new(Some(faithful), refuse_op_key_while_carried);
         let block = format!("{ANTHROPIC}{OPERATOR_EXTRA}");
         let router = router(&block, false, &[Arc::clone(&provider)]);
 

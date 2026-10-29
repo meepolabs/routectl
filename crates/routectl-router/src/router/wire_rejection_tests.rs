@@ -7,13 +7,11 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use futures::stream::{self, BoxStream, StreamExt};
 use routectl_core::wire_check::{
     EgressKind, IngressDialect, IngressWire, Lane, RejectionProvenance,
 };
 use routectl_core::{
-    BetaAssembly, ChatChunk, ChatRequest, ChatResponse, Choice, ChunkChoice, ChunkDelta, Error,
-    Message, MessageContent, Provider, Result, Role,
+    BetaAssembly, ChatRequest, Error, Message, MessageContent, Provider, Result, Role,
 };
 use serde_json::{Value, json};
 
@@ -25,6 +23,7 @@ use super::super::field_repair::{
     TEST_UNSUPPORTED_SENTINEL,
 };
 use super::super::rejection_parser::rejected_wire_path;
+use super::super::scripted_provider_support::{Answer, ScriptedProvider, Shape};
 use super::PendingWireRejection;
 use crate::config::Config;
 use crate::resolved::ResolvedModel;
@@ -35,93 +34,6 @@ const ALIAS: &str = "a";
 const NEVER_SAMPLED: &str = "first_n = 0\nsample_one_in = 1000";
 const WARN_TARGET: &str = "routectl_router::wire_check";
 const UNREPAIRED_WARN: &str = "upstream rejected a request field and it was not repaired";
-
-/// How the test provider builds the body it deposits from the client's.
-type Shape = fn(&ChatRequest, Value) -> Value;
-/// How the test provider answers an attempt, given the request.
-type Answer = fn(&ChatRequest) -> Result<()>;
-
-/// A provider that, like a real egress, deposits the body it sent into the
-/// attempt's tap, then answers as told.
-struct ScriptedProvider {
-    shape: Shape,
-    answer: Answer,
-}
-
-impl ScriptedProvider {
-    fn boxed(shape: Shape, answer: Answer) -> Arc<dyn Provider> {
-        Arc::new(Self { shape, answer })
-    }
-
-    fn run(&self, req: &ChatRequest) -> Result<()> {
-        if let (Some(tap), Some(ingress)) = (
-            req.routectl_internal.wire_tap.as_ref(),
-            req.routectl_internal.ingress_wire.as_ref(),
-        ) {
-            let client: Value = serde_json::from_slice(&ingress.bytes).expect("ingress json");
-            let sent = (self.shape)(req, client);
-            tap.deposit(serde_json::to_vec(&sent).expect("serialize").into());
-        }
-        (self.answer)(req)
-    }
-}
-
-#[async_trait::async_trait]
-impl Provider for ScriptedProvider {
-    fn id(&self) -> &'static str {
-        "scripted"
-    }
-    fn normalize_request(&self, _: &ChatRequest) -> Result<Value> {
-        Ok(json!({}))
-    }
-    fn normalize_response(&self, _: Value) -> Result<ChatResponse> {
-        Err(Error::normalize_response("scripted", "unused"))
-    }
-    async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
-        self.run(&req).map(|()| ok_response())
-    }
-    async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
-        self.run(&req)
-            .map(|()| stream::iter([Ok(content_chunk())]).boxed())
-    }
-}
-
-fn ok_response() -> ChatResponse {
-    ChatResponse {
-        choices: vec![Choice {
-            logprobs: None,
-            index: 0,
-            message: Message {
-                refusal: None,
-                role: Role::Assistant,
-                content: MessageContent::Text("ok".into()),
-                reasoning: None,
-                reasoning_details: vec![],
-                name: None,
-                tool_call_id: None,
-                tool_calls: None,
-            },
-            finish_reason: Some("stop".into()),
-            matched_stop_sequence: None,
-        }],
-        ..Default::default()
-    }
-}
-
-fn content_chunk() -> ChatChunk {
-    ChatChunk {
-        choices: vec![ChunkChoice {
-            index: 0,
-            delta: ChunkDelta {
-                content: Some("ok".into()),
-                ..Default::default()
-            },
-            finish_reason: None,
-            matched_stop_sequence: None,
-        }],
-        ..Default::default()
-    }
-}
 
 /// An anthropic-api 400 whose message names `path` with `reason`.
 fn rejection(path: &str, reason: &str) -> Error {

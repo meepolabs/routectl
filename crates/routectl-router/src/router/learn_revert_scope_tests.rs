@@ -31,7 +31,7 @@ fn refuse_op_key_then_test_row(req: &ChatRequest) -> Result<()> {
 #[tokio::test]
 async fn a_later_repair_does_not_credit_a_revert_whose_retry_failed() {
     for surface in SURFACES {
-        let provider = ScriptedProvider::new(faithful, refuse_op_key_then_test_row);
+        let provider = ScriptedProvider::new(Some(faithful), refuse_op_key_then_test_row);
         let block = format!("{ANTHROPIC}{OPERATOR_EXTRA}");
         let router = router(&block, false, &[Arc::clone(&provider)]);
         let mut req = anthropic_request();
@@ -170,7 +170,7 @@ fn refuse_op_key_then_cache_marker(req: &ChatRequest) -> Result<()> {
 #[tokio::test]
 async fn a_target_reverts_at_most_once() {
     for surface in SURFACES {
-        let provider = ScriptedProvider::new(faithful, refuse_op_key_then_cache_marker);
+        let provider = ScriptedProvider::new(Some(faithful), refuse_op_key_then_cache_marker);
         let block = format!("{ANTHROPIC}{OPERATOR_EXTRA}");
         let router = router(&block, true, &[Arc::clone(&provider)]);
 
@@ -207,7 +207,7 @@ async fn a_spent_repair_budget_leaves_the_rejection_unrepaired() {
     const TARGETS: usize = REPAIRS_PER_REQUEST as usize + 1;
     for surface in SURFACES {
         let providers: Vec<_> = (0..TARGETS)
-            .map(|_| ScriptedProvider::new(faithful, refuse_op_key_then_unavailable))
+            .map(|_| ScriptedProvider::new(Some(faithful), refuse_op_key_then_unavailable))
             .collect();
         let block = format!("{ANTHROPIC}{OPERATOR_EXTRA}");
         let router = router(&block, false, &providers);
@@ -383,8 +383,8 @@ async fn another_unrevertible_site_still_proceeds_without_a_proposer() {
 const ANTHROPIC_VERSION: &str = "anthropic_version";
 
 /// A faithful body that also carries routectl's `anthropic_version`.
-fn with_anthropic_version(req: &ChatRequest) -> Value {
-    let mut body = faithful(req);
+fn with_anthropic_version(req: &ChatRequest, client: Value) -> Value {
+    let mut body = faithful(req, client);
     body[ANTHROPIC_VERSION] = json!("routectl-version");
     body
 }

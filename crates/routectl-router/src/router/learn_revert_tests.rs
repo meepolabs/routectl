@@ -10,18 +10,14 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
-use futures::stream::{self, BoxStream, StreamExt};
-use routectl_core::wire_check::{DeclaredEdit, IngressDialect, IngressWire};
-use routectl_core::{
-    ChatChunk, ChatRequest, ChatResponse, ChunkChoice, ChunkDelta, Error, Provider, Result,
-    SystemContent, TokenCount, ToolDef,
-};
+use routectl_core::wire_check::{IngressDialect, IngressWire};
+use routectl_core::{ChatRequest, Error, Provider, Result, SystemContent, ToolDef};
 use routectl_testkit::CapturedEvent;
 use serde_json::{Value, json};
 
 use super::super::field_repair::{TEST_UNSUPPORTED_PATH, TEST_UNSUPPORTED_SENTINEL};
+use super::super::scripted_provider_support::{Answer, ScriptedProvider, Shape};
 use crate::config::Config;
 use crate::resolved::ResolvedModel;
 use crate::router::{Router, RouterOptions};
@@ -46,99 +42,6 @@ const OP_KEY_PATH: &str = "metadata.op_key";
 const MASKED_OP_KEY: &str = "/metadata/*";
 /// A client key carrying an ECMA-48 escape.
 const CONTROL_KEY: &str = "op\u{1b}[31mkey";
-
-/// How the test provider builds the body it deposits, given the request.
-type Shape = fn(&ChatRequest) -> Value;
-/// How the test provider answers an attempt, given the request.
-type Answer = fn(&ChatRequest) -> Result<()>;
-
-/// A provider that, like a real egress, deposits the body it sent into the
-/// attempt's tap, then answers as told. Counts the upstream calls it took.
-struct ScriptedProvider {
-    shape: Shape,
-    answer: Answer,
-    /// An edit the provider declares on every attempt, as an egress
-    /// declaring its own body change would.
-    declares: Option<DeclaredEdit>,
-    calls: AtomicUsize,
-}
-
-impl ScriptedProvider {
-    fn new(shape: Shape, answer: Answer) -> Arc<Self> {
-        Arc::new(Self {
-            shape,
-            answer,
-            declares: None,
-            calls: AtomicUsize::new(0),
-        })
-    }
-
-    fn declaring(shape: Shape, answer: Answer, edit: DeclaredEdit) -> Arc<Self> {
-        Arc::new(Self {
-            shape,
-            answer,
-            declares: Some(edit),
-            calls: AtomicUsize::new(0),
-        })
-    }
-
-    fn calls(&self) -> usize {
-        self.calls.load(Ordering::SeqCst)
-    }
-
-    fn run(&self, req: &ChatRequest) -> Result<()> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        if let Some(tap) = req.routectl_internal.wire_tap.as_ref() {
-            let sent = (self.shape)(req);
-            tap.deposit(serde_json::to_vec(&sent).expect("serialize").into());
-            if let Some(edit) = self.declares.as_ref() {
-                tap.declare(edit.clone());
-            }
-        }
-        (self.answer)(req)
-    }
-}
-
-#[async_trait::async_trait]
-impl Provider for ScriptedProvider {
-    fn id(&self) -> &'static str {
-        "scripted"
-    }
-    fn normalize_request(&self, _: &ChatRequest) -> Result<Value> {
-        Ok(json!({}))
-    }
-    fn normalize_response(&self, _: Value) -> Result<ChatResponse> {
-        Err(Error::normalize_response("scripted", "unused"))
-    }
-    async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
-        self.run(&req).map(|()| ChatResponse::default())
-    }
-    async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
-        self.run(&req)
-            .map(|()| stream::iter([Ok(content_chunk())]).boxed())
-    }
-    async fn count_tokens(&self, req: ChatRequest) -> Result<TokenCount> {
-        self.run(&req).map(|()| TokenCount {
-            input_tokens: 7,
-            ..Default::default()
-        })
-    }
-}
-
-fn content_chunk() -> ChatChunk {
-    ChatChunk {
-        choices: vec![ChunkChoice {
-            index: 0,
-            delta: ChunkDelta {
-                content: Some("ok".into()),
-                ..Default::default()
-            },
-            finish_reason: None,
-            matched_stop_sequence: None,
-        }],
-        ..Default::default()
-    }
-}
 
 /// A router whose alias walks one target per provider, each on a
 /// `[providers.pN]` entry configured by `provider_block`, one call per
@@ -214,13 +117,7 @@ fn anthropic_request() -> ChatRequest {
 /// The client's body as a fidelity egress sends it: the model the request
 /// names, its extras merged at the top level, its system blocks and tools,
 /// and its top-level cache marker.
-fn faithful(req: &ChatRequest) -> Value {
-    let ingress = req
-        .routectl_internal
-        .ingress_wire
-        .as_ref()
-        .expect("ingress");
-    let mut body: Value = serde_json::from_slice(&ingress.bytes).expect("ingress json");
+fn faithful(req: &ChatRequest, mut body: Value) -> Value {
     body["model"] = json!(req.model);
     if let Some(extras) = req.provider_extras.as_ref().and_then(Value::as_object) {
         for (key, value) in extras {
@@ -244,8 +141,8 @@ fn faithful(req: &ChatRequest) -> Value {
 
 /// A faithful body whose operator extra went out with another value than
 /// the request holds, so the request's slot is not the wire's.
-fn rewritten_on_the_wire(req: &ChatRequest) -> Value {
-    let mut body = faithful(req);
+fn rewritten_on_the_wire(req: &ChatRequest, client: Value) -> Value {
+    let mut body = faithful(req, client);
     if body["metadata"][OP_KEY].is_string() {
         body["metadata"][OP_KEY] = json!("wire-only");
     }
@@ -253,8 +150,8 @@ fn rewritten_on_the_wire(req: &ChatRequest) -> Value {
 }
 
 /// A faithful body that lost the operator-edited key on the way out.
-fn op_key_dropped(req: &ChatRequest) -> Value {
-    let mut body = faithful(req);
+fn op_key_dropped(req: &ChatRequest, client: Value) -> Value {
+    let mut body = faithful(req, client);
     if let Some(metadata) = body["metadata"].as_object_mut() {
         metadata.remove(OP_KEY);
     }
@@ -262,13 +159,8 @@ fn op_key_dropped(req: &ChatRequest) -> Value {
 }
 
 /// The client's body with nothing routectl added.
-fn client_only(req: &ChatRequest) -> Value {
-    let ingress = req
-        .routectl_internal
-        .ingress_wire
-        .as_ref()
-        .expect("ingress");
-    serde_json::from_slice(&ingress.bytes).expect("ingress json")
+fn client_only(_: &ChatRequest, client: Value) -> Value {
+    client
 }
 
 // ---------------------------------------------------------------------------
@@ -493,7 +385,7 @@ async fn run_rows(rows: &[Row]) {
     for surface in SURFACES {
         for row in rows {
             let name = format!("{surface:?} {}", row.name);
-            let provider = ScriptedProvider::new(row.shape, row.answer);
+            let provider = ScriptedProvider::new(Some(row.shape), row.answer);
             let block = format!("{ANTHROPIC}{}", row.extras);
             let router = router(&block, row.cache, &[Arc::clone(&provider)]);
 
@@ -591,7 +483,7 @@ async fn a_declared_revertible_edit_is_reverted_and_the_retry_repairs_the_reject
 #[tokio::test]
 async fn an_operator_extra_rewriting_a_client_value_is_reverted_to_that_value() {
     for surface in SURFACES {
-        let provider = ScriptedProvider::new(faithful, |req| {
+        let provider = ScriptedProvider::new(Some(faithful), |req| {
             let rewritten = req
                 .provider_extras
                 .as_ref()

@@ -3304,6 +3304,10 @@ mod probe_scheduling_tests;
 mod probe_test_support;
 
 #[cfg(test)]
+#[path = "scripted_provider_support.rs"]
+mod scripted_provider_support;
+
+#[cfg(test)]
 #[path = "probe_activation_boundary_tests.rs"]
 mod probe_activation_boundary_tests;
 
