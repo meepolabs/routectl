@@ -1012,13 +1012,11 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Cold-start config load, via the SINGLE shared loader
-/// (`server::load_effective_config`) also used by the hot-reload path, so
-/// cold start and reload parse, preflight, and validate a config the same
-/// way.
+/// Cold-start config load via `server::load_effective_config`, which shares
+/// its parse, preflight, and validate body with the hot-reload path, so
+/// cold start and reload treat a config the same way.
 ///
-/// Discards the loaded catalog overlay: the subcommands that call this
-/// (`test`, `config check/show`, `usage`, `rc`) never consult it.
+/// Discards the loaded catalog overlay for callers that never consult it.
 /// `Cmd::Serve`, `Cmd::PromptSize`, and `Cmd::Catalog`'s `list` verb -- the
 /// callers that DO need the overlay (list renders the two-layer merge) --
 /// use [`load_config_with_overlay`] instead.
