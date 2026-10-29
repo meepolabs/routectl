@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::router::precontent::precontent_kind;
+use crate::router::stream_commit::is_content_bearing;
 use async_trait::async_trait;
 use routectl_core::{
     AnthropicUnifiedQuota, ChunkChoice, ChunkDelta, ReasoningDetail, ReasoningDetailKind, Role,

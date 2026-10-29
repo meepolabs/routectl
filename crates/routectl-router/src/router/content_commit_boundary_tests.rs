@@ -10,6 +10,7 @@
 use super::*;
 use crate::config::Config;
 use crate::resolved::ResolvedModel;
+use crate::router::stream_commit::is_content_bearing;
 use async_trait::async_trait;
 use futures::stream::{BoxStream, StreamExt};
 use routectl_core::{

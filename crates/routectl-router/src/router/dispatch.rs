@@ -11,14 +11,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use futures::stream::{BoxStream, StreamExt};
-use parking_lot::Mutex;
 use routectl_core::wire_check::IngressDialect;
 use routectl_core::{
     CacheControl, ChatChunk, ChatRequest, ChatResponse, Error, FrontSlot, Provider, RefusalReason,
     ReplayScheme, Result,
     cache_control::{MAX_BREAKPOINTS, system_block_is_wire_eligible, validate_source},
     context_reduction::{ReductionDelta, ReductionOutcome, apply_json_minify},
-    failure_class::{ClassifiedFailure, FailureClass, LastOutcome, MatchedBy, classify},
+    failure_class::{ClassifiedFailure, FailureClass, MatchedBy},
     sanitize_for_log, scan_caller_prefix_advisory,
 };
 use serde_json::Value;
@@ -50,16 +49,16 @@ use super::field_repair::emit_field_repair;
 use super::learn_engine::{AttemptLearning, FailureDecision, Rejection};
 use super::local_refusal::ingress_dialect_of;
 use super::outcome_rule::{
-    BreakerOutcome, SameProvider, breaker_outcome, class_debits, probe_fast_fail,
-    rate_limit_reset_hint, retry_cap_for, same_provider_retry,
+    SameProvider, breaker_outcome, class_debits, probe_fast_fail, rate_limit_reset_hint,
+    retry_cap_for, same_provider_retry,
 };
 use super::overlays::apply_layered_overlays;
-use super::precontent::{is_empty_reasoning_only, precontent_summary};
 use super::probe_payload_capture::ProbeFieldCapture;
 use super::repair_budget::RepairBudget;
 use super::runtime_gate::{
     LearnedProbeGuard, ProbeAdmissionSet, is_probe_request, log_probe_fast_fail,
 };
+use super::stream_commit::{try_stream_with_first_content, wrap_with_breaker_accounting};
 use super::stream_evidence::StreamEvidence;
 use super::transcript_defect::{
     egress_pairing_refusal, is_transcript_rejection, record_transcript_defect,
@@ -2798,310 +2797,6 @@ async fn run_with_timeout(
             }
         }
         None => provider.complete(req.clone()).await,
-    }
-}
-
-/// Wrap an upstream stream so the breaker records success on clean
-/// completion (None / EOS) and settles the FIRST error that bubbles out of
-/// the stream once; subsequent errors do not double-count. A non-probe
-/// stream records that error as a failure whatever its class. A probe
-/// stream (`is_probe`) settles it by the shared rule (`breaker_outcome`):
-/// a probe's 429/529 leaves the breaker untouched, as it does before
-/// content; otherwise a debiting class takes the threshold-gated debit, a
-/// non-debiting class takes none, and a probe never parks.
-///
-/// For a half-open PROBE the call site already closed the breaker on
-/// first content, so a mid-stream failure here re-trips it and a
-/// clean completion / consumer cancellation is a benign re-zeroing of the
-/// just-closed breaker. For a HEALTHY (closed) breaker the call site did
-/// NOT touch the breaker, so this wrap is where mid-stream failures
-/// accumulate toward the threshold (and a clean completion resets the
-/// counter). Consumer cancellation before any error is treated as success
-/// in both cases.
-///
-/// Also the streaming quota seam: `quota_feed` is offered every Ok chunk on
-/// its way through and takes the reading off the FIRST one carrying it, which
-/// is the only chunk that carries it. This wrap is where that happens because
-/// it is the last router-owned point before the caller consumes the stream --
-/// the reading is gone by end-of-stream.
-fn wrap_with_breaker_accounting(
-    inner: BoxStream<'static, Result<ChatChunk>>,
-    state: Option<Arc<Mutex<crate::runtime_state::ProviderState>>>,
-    provider_kind: Option<&'static str>,
-    quota_feed: crate::quota::feed::FirstChunkFeed,
-    is_probe: bool,
-    policy: RetryPolicy,
-) -> BoxStream<'static, Result<ChatChunk>> {
-    use futures::stream::StreamExt as _;
-    struct BreakerAccounting {
-        state: Option<Arc<Mutex<crate::runtime_state::ProviderState>>>,
-        settled: bool,
-    }
-
-    impl BreakerAccounting {
-        const fn new(state: Option<Arc<Mutex<crate::runtime_state::ProviderState>>>) -> Self {
-            Self {
-                state,
-                settled: false,
-            }
-        }
-
-        fn with_state(&self, f: impl FnOnce(&mut crate::runtime_state::ProviderState)) {
-            let Some(st) = &self.state else {
-                return;
-            };
-            f(&mut st.lock());
-        }
-
-        fn record_success(&mut self) {
-            if self.settled {
-                return;
-            }
-            self.settled = true;
-            self.with_state(|state| state.record_success(Instant::now()));
-        }
-
-        fn settle_error(&mut self, e: &Error, ctx: &FrameErrorContext) {
-            if self.settled {
-                return;
-            }
-            self.settled = true;
-            let class = classify(e, ctx.provider_kind).class;
-            let outcome = if ctx.is_probe {
-                breaker_outcome(e, &class, rate_limit_reset_hint(e, &ctx.policy), true)
-            } else {
-                BreakerOutcome::Debit
-            };
-            match outcome {
-                BreakerOutcome::None => {}
-                BreakerOutcome::Debit => self.with_state(|state| {
-                    state.record_failure(Instant::now(), LastOutcome::from_failure_class(&class));
-                }),
-                BreakerOutcome::Park(cooldown) => {
-                    self.with_state(|state| state.force_open(Instant::now(), cooldown));
-                }
-            }
-        }
-    }
-
-    struct FrameErrorContext {
-        provider_kind: Option<&'static str>,
-        is_probe: bool,
-        policy: RetryPolicy,
-    }
-
-    impl Drop for BreakerAccounting {
-        fn drop(&mut self) {
-            // Clean completion OR consumer cancellation before any error:
-            // both record success. For a probe stream the breaker is
-            // already closed (call-site first-content close), so this is a
-            // no-op re-zeroing; for a healthy-breaker stream this resets
-            // any accumulated failure count on a fully-consumed success.
-            if !self.settled {
-                self.record_success();
-            }
-        }
-    }
-
-    let mut accounting = BreakerAccounting::new(state);
-    let mut quota_feed = quota_feed;
-    let ctx = FrameErrorContext {
-        provider_kind,
-        is_probe,
-        policy,
-    };
-    let s = async_stream::stream! {
-        let mut inner = inner;
-        while let Some(item) = inner.next().await {
-            match &item {
-                Ok(chunk) => quota_feed.offer(chunk),
-                Err(e) => accounting.settle_error(e, &ctx),
-            }
-            yield item;
-        }
-        accounting.record_success();
-    };
-    Box::pin(s)
-}
-
-/// Upper bound on the content-free leading chunks that are NOT
-/// empty-reasoning-only (see `is_empty_reasoning_only`), counted while
-/// waiting for the first content-bearing one. A healthy stream opens with
-/// at most a handful of metadata chunks (a role delta, an id/model stamp);
-/// a stream that exceeds this before emitting content is treated as a
-/// pre-content failure rather than buffering unboundedly. Empty-reasoning
-/// chunks are not counted, and each consecutive run of them is buffered as
-/// its first chunk only, so the buffer holds at most twice this many
-/// entries; `stream_first_byte_timeout_ms` bounds a stream that never
-/// sends anything else.
-const MAX_PRECONTENT_CHUNKS: usize = 8;
-
-/// True when `chunk` carries client-visible generated content: non-empty
-/// text or reasoning text, typed reasoning blocks, tool-call requests, or
-/// opaque SSE blocks. Content-free metadata -- a leading role delta,
-/// id/model/upstream_meta stamps, a usage-only tail, a bare finish_reason,
-/// or empty choices -- returns false: those are not the content-commit
-/// boundary and may still be followed by a fallback to a sibling provider.
-///
-/// Opaque carriers count as content: they are client-visible unknown block
-/// data that cannot be mixed with a different provider's output, so once one
-/// arrives the provider is committed exactly as a text chunk commits it.
-fn is_content_bearing(chunk: &ChatChunk) -> bool {
-    if !chunk.opaque_events.is_empty() {
-        return true;
-    }
-    chunk.choices.iter().any(|choice| {
-        let delta = &choice.delta;
-        delta.content.as_deref().is_some_and(|t| !t.is_empty())
-            || delta.reasoning.as_deref().is_some_and(|t| !t.is_empty())
-            || !delta.reasoning_details.is_empty()
-            || delta
-                .tool_calls
-                .as_ref()
-                .is_some_and(|calls| !calls.is_empty())
-    })
-}
-
-/// Open the upstream stream and pull chunks until the first CONTENT-bearing
-/// one (see `is_content_bearing`). The hard non-retry boundary is first
-/// content, not stream-open: leading content-free chunks (a `delta.role`
-/// opener, id/model metadata) are buffered, so a fallbackable error, EOS, or
-/// buffer overflow in the [stream-open, first-content] window still walks to
-/// the next provider. If a content chunk arrives, return a `BoxStream` that
-/// yields the buffered metadata (in order, upstream_meta preserved), then the
-/// first content chunk, then the rest of the upstream stream -- mid-stream
-/// errors propagate.
-///
-/// The buffer is never exposed to the client before content commits: the API
-/// cannot both surface those chunks and re-enter the outer fallback loop.
-///
-/// `policy.stream_first_byte_timeout_ms` (when set) caps the wait for
-/// stream-open PLUS the entire pre-content pull loop, so leading content-free
-/// chunks neither reset nor satisfy it -- a role-then-hang still trips the
-/// first-content timeout and falls over. Expiry surfaces as a status-0
-/// upstream error which is fallbackable per `should_fallback`.
-///
-/// Also emits a debug-level first-activity log the moment the upstream
-/// response headers arrive, ahead of the pre-content pull below (see the
-/// `attempt_start` comment inside).
-async fn try_stream_with_first_content(
-    provider_name: &str,
-    upstream_model: &str,
-    provider: Arc<dyn Provider>,
-    req: ChatRequest,
-    policy: &RetryPolicy,
-) -> Result<BoxStream<'static, Result<ChatChunk>>> {
-    // Per-attempt clock for the first-activity mark below -- NOT the
-    // request-level clock `UsageCapture::start` uses for `ttfb_ms`
-    // (that lives in a higher crate this one cannot see). For the
-    // common case (no prior fallback hop on this request) the two are
-    // within noise of each other, so `elapsed_ms` here is directly
-    // comparable to the ledger's `ttfb_ms` to derive the first-activity
-    // -> first-content gap. A request that fell back through one
-    // or more dead chain entries first will show extra unaccounted time
-    // on the ttfb side that this attempt's clock does not carry -- that
-    // is chain-walk overhead, a separate concern from the prefill gap
-    // this instrumentation targets.
-    let attempt_start = Instant::now();
-    let open_and_first = async {
-        let mut upstream = provider.stream(req).await?;
-        // First sign of upstream life: response headers arrived (every
-        // egress's `stream()` awaits `client.execute()` -- which
-        // resolves once the status line + headers are in -- BEFORE
-        // constructing the lazy body-byte stream below). Distinct from
-        // the first-CONTENT mark (`mark_first_byte` in
-        // `ingress_handle.rs`), which additionally waits out any
-        // upstream `message_start`/`ping` events the SSE parser
-        // swallows. One site here covers every provider (Anthropic,
-        // Bedrock, gemini, openai-compat, openai-responses) since they
-        // all share this `stream()` -> execute -> byte-stream shape.
-        // Debug-only; no bodies/prompts/PII, structured fields only.
-        // Manual capture recipe: docs/LOGGING.md, "Stream first-activity
-        // mark" -- run with ROUTECTL_LOG=routectl_router=debug and issue
-        // a streaming request; this line's `elapsed_ms` is the gap
-        // between upstream headers and the existing first-content
-        // ttfb_ms mark.
-        tracing::debug!(
-            provider = provider_name,
-            upstream = upstream_model,
-            elapsed_ms = attempt_start.elapsed().as_millis() as u64,
-            "stream first-activity: upstream response headers received",
-        );
-        // Buffer content-free leading chunks (role opener, id/model
-        // metadata) until the first content-bearing one. Bounded: a
-        // stream that never produces content must not buffer forever.
-        let mut buffered: Vec<ChatChunk> = Vec::new();
-        let mut counted = 0usize;
-        loop {
-            match upstream.next().await {
-                Some(Ok(chunk)) if is_content_bearing(&chunk) => {
-                    // Commit: buffered metadata (order + upstream_meta
-                    // preserved) -> first content -> upstream tail.
-                    let head = std::mem::take(&mut buffered);
-                    let merged = futures::stream::iter(head.into_iter().map(Ok))
-                        .chain(futures::stream::once(async move { Ok(chunk) }))
-                        .chain(upstream);
-                    return Ok(merged.boxed());
-                }
-                Some(Ok(chunk)) if is_empty_reasoning_only(&chunk) => {
-                    if !buffered.last().is_some_and(is_empty_reasoning_only) {
-                        buffered.push(chunk);
-                    }
-                    // Uncounted chunks leave the loop unbounded: an upstream
-                    // that is always ready would never return Pending, and the
-                    // first-content timeout around this future could not fire.
-                    tokio::task::consume_budget().await;
-                }
-                Some(Ok(chunk)) => {
-                    if counted >= MAX_PRECONTENT_CHUNKS {
-                        // Buffer overflow before any content: a
-                        // pre-content failure. Discard the buffer (nothing
-                        // reached the client) and fall over. Fallbackable
-                        // per `should_fallback`; the breaker records it.
-                        let summary = precontent_summary(buffered.iter().chain([&chunk]));
-                        return Err(Error::Streaming(format!(
-                            "{provider_name} emitted more than {MAX_PRECONTENT_CHUNKS} \
-                             content-free chunks before any content (buffered: {summary})",
-                        )));
-                    }
-                    counted += 1;
-                    buffered.push(chunk);
-                }
-                Some(Err(e)) => return Err(e),
-                // Upstream ended before any content (empty stream, or only
-                // content-free chunks). This is NOT a successful empty
-                // completion -- a healthy provider always emits content
-                // (even a role opener is followed by content or an error).
-                // Discard the buffer and treat as a fallbackable streaming
-                // error so the chain walks to the next provider AND the
-                // breaker records a failed probe. Without this, an upstream
-                // that closes before producing content would be reported as
-                // a successful completion to both the client and the
-                // router's health accounting.
-                None => {
-                    let summary = precontent_summary(&buffered);
-                    return Err(Error::Streaming(format!(
-                        "{provider_name} stream closed before any content arrived \
-                         (buffered: {summary})",
-                    )));
-                }
-            }
-        }
-    };
-
-    match policy.stream_first_byte_timeout_ms {
-        Some(ms) => match tokio::time::timeout(Duration::from_millis(ms), open_and_first).await {
-            Ok(r) => r,
-            Err(_) => Err(Error::upstream(
-                provider_name,
-                0,
-                format!(
-                    "stream first-content timeout after {ms}ms; content-free leading \
-                     chunks (role opener, id/model metadata) do not satisfy the deadline"
-                ),
-            )),
-        },
-        None => open_and_first.await,
     }
 }
 

@@ -71,6 +71,7 @@ mod runtime_gate;
 mod state_slots;
 mod status;
 mod sticky;
+mod stream_commit;
 mod stream_evidence;
 mod transcript_defect;
 mod window_gate;

@@ -4069,6 +4069,12 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `observe_response_evidence` on the caller's Router and returns whether the
   detectors read it (false when spoiled, unended, already taken, or refused
   by that Router's config)
+- `src/router/stream_commit.rs` -- the streaming dispatch helpers:
+  `try_stream_with_first_content` (pre-content guard: buffers content-free
+  leading chunks, bounded by `MAX_PRECONTENT_CHUNKS` and the first-content
+  timeout, until `is_content_bearing` commits the provider) and
+  `wrap_with_breaker_accounting` (settles the breaker once per committed
+  stream and offers each Ok chunk to the quota feed)
 - `src/router/capability_owner_sweep.rs` -- `owns_learned_entry` (does this
   Router's config own a `RecordedLearnedEntry`) and
   `sweep_unowned_learned_entries`, which removes (through the generation
