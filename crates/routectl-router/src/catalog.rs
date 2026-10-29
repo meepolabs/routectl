@@ -971,9 +971,7 @@ pub const fn stale_after_days() -> i64 {
 pub enum Source {
     /// The compiled-in baked catalog table.
     Baked,
-    /// An overlay cell imported by a later refresh pipeline, or migrated
-    /// from a legacy `[cache_pricing]` / `pricing_verifications.json`
-    /// entry.
+    /// An overlay cell written by `catalog import`.
     Import,
     /// An overlay cell an operator wrote directly (later user-edit verbs).
     User,

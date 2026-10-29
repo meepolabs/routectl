@@ -15,7 +15,8 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use routectl_auth::{MemoryStore, SecretStore};
 use routectl_router::{
-    CURRENT_CONFIG_VERSION, Config, RawConfigPreflightError as Refusal, preflight_raw_config,
+    CURRENT_CONFIG_VERSION, Config, ConfigVersionError, RawConfigPreflightError as Refusal,
+    preflight_raw_config,
 };
 use routectl_testkit::ScopedEnv;
 
@@ -37,11 +38,16 @@ fn clean_config() -> String {
 }
 
 /// One fixture per raw refusal class, with the driver variant it must map to.
-fn refusal_rows() -> [(&'static str, String, ClassMatcher); 6] {
+fn refusal_rows() -> [(&'static str, String, ClassMatcher); 7] {
     let current = CURRENT_CONFIG_VERSION;
     [
+        (
+            "version missing",
+            "[server]\nhost = \"127.0.0.1\"\nport = 0\n".to_string(),
+            |e| matches!(e, Refusal::Version(ConfigVersionError::Missing { .. })),
+        ),
         ("too old", at_version(current - 1, ""), |e| {
-            matches!(e, Refusal::Version(_))
+            matches!(e, Refusal::Version(ConfigVersionError::TooOld { .. }))
         }),
         ("too new", at_version(current + 1, ""), |e| {
             matches!(e, Refusal::Version(_))

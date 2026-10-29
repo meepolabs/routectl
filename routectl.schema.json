@@ -2007,7 +2007,7 @@
         "$ref": "#/$defs/CachePricingOverride"
       },
       "default": {},
-      "description": "Operator-facing LEGACY `[cache_pricing]` field-level override table\nfor the baked catalog economics rows (`crate::catalog`). Slated for\nretirement once its data migrates into the catalog overlay\n(`crate::catalog_overlay`). Each\nkey is a `\"provider_kind:model_glob\"` selector (e.g.\n`\"openai-compat:grok-*\"`); each value is a sparse\n[`crate::catalog::CachePricingOverride`] -- only the fields the\noperator wants to correct, the rest inheriting the baked-in value.\nAn empty / omitted block is the norm; this exists to patch a cell\nthat drifted before a routectl release can re-bake it. An override\nthat sets `wm` below the conservative sentinel must carry\n`override_acknowledges_cost_risk = true` or the merge is rejected by\nthe consuming cost gate. The selector keys are NOT validated against\nthe baked table here (an unmatched selector is simply inert).",
+      "description": "RETIRED `[cache_pricing]` table. Cache pricing lives in the catalog\noverlay (`crate::catalog_overlay`); this field is parsed only so a\nnon-empty table is refused by name\n([`crate::config::validate_cache_pricing_retired`]) instead of\nsurfacing as an unknown-key error. An empty or omitted table is the\nonly accepted form.",
       "type": "object"
     },
     "calibration": {

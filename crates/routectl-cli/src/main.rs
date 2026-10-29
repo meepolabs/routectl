@@ -1013,10 +1013,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Cold-start config load, via the SINGLE shared loader
-/// (`server::load_effective_config`) also used by
-/// the hot-reload path -- closes the pre-existing split-brain where only
-/// this path merged the `pricing_verifications.json` sidecar /
-/// `[cache_pricing]` overrides and loaded the catalog overlay.
+/// (`server::load_effective_config`) also used by the hot-reload path, so
+/// cold start and reload parse, preflight, and validate a config the same
+/// way.
 ///
 /// Discards the loaded catalog overlay: the subcommands that call this
 /// (`test`, `config check/show`, `usage`, `rc`) never consult it.
@@ -1085,7 +1084,7 @@ fn emit_staleness_hint_for(loaded: &server::LoadedConfig, is_json: bool) {
     );
 }
 
-/// Cold-start config load that PARSES and migrates but SKIPS the fail-fast
+/// Cold-start config load that PARSES but SKIPS the fail-fast
 /// semantic validation gate. Only `config check` uses this: it runs the full
 /// shared validator suite itself and renders every error with a source line,
 /// so it must receive a parseable-but-semantically-invalid config intact

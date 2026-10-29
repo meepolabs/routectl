@@ -217,20 +217,12 @@ pub struct Config {
     #[serde(default)]
     pub wire_check: WireCheckConfig,
 
-    /// Operator-facing LEGACY `[cache_pricing]` field-level override table
-    /// for the baked catalog economics rows (`crate::catalog`). Slated for
-    /// retirement once its data migrates into the catalog overlay
-    /// (`crate::catalog_overlay`). Each
-    /// key is a `"provider_kind:model_glob"` selector (e.g.
-    /// `"openai-compat:grok-*"`); each value is a sparse
-    /// [`crate::catalog::CachePricingOverride`] -- only the fields the
-    /// operator wants to correct, the rest inheriting the baked-in value.
-    /// An empty / omitted block is the norm; this exists to patch a cell
-    /// that drifted before a routectl release can re-bake it. An override
-    /// that sets `wm` below the conservative sentinel must carry
-    /// `override_acknowledges_cost_risk = true` or the merge is rejected by
-    /// the consuming cost gate. The selector keys are NOT validated against
-    /// the baked table here (an unmatched selector is simply inert).
+    /// RETIRED `[cache_pricing]` table. Cache pricing lives in the catalog
+    /// overlay (`crate::catalog_overlay`); this field is parsed only so a
+    /// non-empty table is refused by name
+    /// ([`crate::config::validate_cache_pricing_retired`]) instead of
+    /// surfacing as an unknown-key error. An empty or omitted table is the
+    /// only accepted form.
     #[serde(default)]
     pub cache_pricing: BTreeMap<String, crate::catalog::CachePricingOverride>,
 

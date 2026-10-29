@@ -644,7 +644,7 @@ fn the_planned_delta_parses_and_validates_as_config() {
 /// login write for any of its seats, whether the pool is pinned or
 /// growth-marked.
 #[test]
-fn the_migrated_config_shape_plans_nothing_for_either_of_its_seats() {
+fn the_multi_seat_pool_shape_plans_nothing_for_either_of_its_seats() {
     // Arrange
     let mut doc: toml_edit::DocumentMut = "version = 4\n\
          [providers.anthropic-managed]\n\
@@ -662,7 +662,7 @@ fn the_migrated_config_shape_plans_nothing_for_either_of_its_seats() {
         "anthropic",
         &["anthropic-managed", "anthropic-work"],
     );
-    let pinned: Config = toml::from_str(&doc.to_string()).expect("migrated config parses");
+    let pinned: Config = toml::from_str(&doc.to_string()).expect("multi-seat config parses");
     let grown: Config = toml::from_str(&doc.to_string().replace(
         "[pools.anthropic]",
         "[pools.anthropic]\naccepts_new_logins = true",
@@ -675,7 +675,7 @@ fn the_migrated_config_shape_plans_nothing_for_either_of_its_seats() {
             let planned = plan(&config, "anthropic", label).expect("plans");
             assert!(
                 matches!(planned, SurfacePlan::Nothing { .. }),
-                "the migrated shape must need no login write; label {label:?} got {planned:?}"
+                "the multi-seat shape must need no login write; label {label:?} got {planned:?}"
             );
             assert!(render_delta(&planned).is_empty());
         }
@@ -695,7 +695,7 @@ fn a_login_id_with_no_provider_shape_is_an_error_not_a_plan() {
 /// account entry is planned -- the pool half is skipped with the note, never
 /// joined and never marked.
 #[test]
-fn a_new_label_over_the_migrated_shape_plans_the_entry_only_and_notes_the_pinned_pool() {
+fn a_new_label_over_a_pinned_pool_plans_the_entry_only_and_notes_the_pinned_pool() {
     // Arrange: one seat, pool included, marker absent.
     let mut doc: toml_edit::DocumentMut = "version = 4\n\
          [providers.anthropic-managed]\n\
@@ -709,9 +709,9 @@ fn a_new_label_over_the_migrated_shape_plans_the_entry_only_and_notes_the_pinned
         "anthropic",
         &["anthropic-managed"],
     );
-    let config: Config = toml::from_str(&doc.to_string()).expect("migrated config parses");
+    let config: Config = toml::from_str(&doc.to_string()).expect("multi-seat config parses");
 
-    // Act: a label the migrated config carries no entry for.
+    // Act: a label the config carries no entry for.
     let write = expect_write(plan(&config, "anthropic", Some("work")).expect("plans"));
 
     // Assert: the entry surfaces ...

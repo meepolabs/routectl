@@ -35,12 +35,13 @@
 //! `crate::config_write::write_config_atomic`). [`save`] additionally
 //! compares the on-disk `revision` against an
 //! `expected_revision` before writing: a caller working from a stale
-//! snapshot gets an explicit conflict instead of a silent lost update (the
-//! bug being replaced: `routectl-cli/src/commands/catalog.rs`'s sidecar
-//! writer does a bare load-modify-write with no revision check and no
-//! fsync/0600). NOTE: `save` on its own still holds no lock, so a caller
-//! that bypasses [`with_overlay_write_lock`] and calls `load`/`save`
-//! directly can still race the window between load and rename. Every
+//! snapshot gets an explicit conflict instead of a silent lost update. A
+//! bare load-modify-write would let two writers each read revision N and
+//! the later rename discard the earlier one's change; the revision check
+//! turns that into a refusal. NOTE: `save` on its own still holds no
+//! lock, so a caller that bypasses [`with_overlay_write_lock`] and calls
+//! `load`/`save` directly can still race the window between load and
+//! rename. Every
 //! writer that goes through [`with_overlay_write_lock`] is closed to that
 //! race: the advisory lock is held across the whole load -> mutate -> save
 //! sequence, so two truly concurrent callers serialize instead of racing.

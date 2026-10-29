@@ -382,6 +382,51 @@ default = \"no-such-model\"
 }
 
 // -----------------------------------------------------------------
+// Version preflight: a config this build no longer reads is refused before
+// any candidate is built, any login runs, or any byte is written.
+// -----------------------------------------------------------------
+
+#[tokio::test]
+async fn an_unsupported_config_version_is_refused_before_any_side_effect() {
+    let rows = [
+        (
+            "previous version",
+            format!("version = {}\n{BASE_BODY}", CURRENT_CONFIG_VERSION - 1),
+        ),
+        ("version missing", BASE_BODY.to_string()),
+    ];
+
+    for (row, body) in rows {
+        // Arrange: an oauth kind, whose success path runs the login seam.
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_config(dir.path(), &body);
+        let before = std::fs::read(&path).unwrap();
+        let io = FakeIo::default();
+
+        // Act
+        let err = run_with_io(&path, args("anthropic", "claude-sub"), &io)
+            .await
+            .expect_err(&format!("row `{row}`: the version must be refused"));
+
+        // Assert
+        assert!(
+            err.to_string()
+                .contains(routectl_router::CONFIG_VERSION_REMEDIATION),
+            "row `{row}`: err: {err}"
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "row `{row}`: the config must stay byte-identical"
+        );
+        assert!(
+            io.login_calls.lock().unwrap().is_empty(),
+            "row `{row}`: no login may run"
+        );
+    }
+}
+
+// -----------------------------------------------------------------
 // Missing credential: a key-requiring kind with no secret flag errors
 // actionably (and never hangs -- no prompt in this command).
 // -----------------------------------------------------------------

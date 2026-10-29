@@ -703,7 +703,7 @@ fn the_only_operator_reachable_failure_is_the_post_commit_one() {
 /// operator action.
 #[test]
 fn a_fresh_login_never_joins_or_marks_a_pinned_family_pool() {
-    // Arrange: the migrate-shaped config -- a pool with members and NO
+    // Arrange: an explicit pinned-pool config -- a pool with members and NO
     // growth marker -- and no entry yet carrying the labelled seat's ref.
     let dir = tempfile::tempdir().expect("tempdir");
     let pinned = base_with_default_seat().replace("accepts_new_logins = true\n", "");
@@ -782,7 +782,7 @@ fn the_pinned_pool_block_survives_a_fresh_login_byte_for_byte() {
 /// end: a NEW label plans the entry only; an EXISTING seat still plans
 /// nothing.
 #[test]
-fn a_login_over_migrate_output_writes_the_entry_and_leaves_the_unmarked_pool_alone() {
+fn a_login_over_an_explicit_pinned_pool_writes_the_entry_and_leaves_the_pool_alone() {
     // Arrange: suffixed account entries plus the plain-named pool listing
     // them, no marker.
     let mut doc: toml_edit::DocumentMut = format!(
@@ -799,16 +799,16 @@ fn a_login_over_migrate_output_writes_the_entry_and_leaves_the_unmarked_pool_alo
         "anthropic",
         &["anthropic-managed"],
     );
-    let migrated = doc.to_string();
+    let pinned = doc.to_string();
     assert!(
-        !migrated.contains("accepts_new_logins"),
+        !pinned.contains("accepts_new_logins"),
         "no growth marker -- that is what makes this the pinned case"
     );
 
     let dir = tempfile::tempdir().expect("tempdir");
-    let path = write_config(dir.path(), &migrated);
+    let path = write_config(dir.path(), &pinned);
 
-    // Act: a login for a label the migrated config does not carry.
+    // Act: a login for a label the config does not carry.
     let outcome = surface(&path, "anthropic", Some("work"), true).expect("the entry writes");
 
     // Assert: entry only.
@@ -824,11 +824,11 @@ fn a_login_over_migrate_output_writes_the_entry_and_leaves_the_unmarked_pool_alo
     assert_eq!(
         config.pools.get("anthropic").expect("pool").members,
         ["anthropic-managed"],
-        "the migrated pool must gain no member"
+        "the pinned pool must gain no member"
     );
     assert!(!text.contains("accepts_new_logins"), "{text}");
 
-    // And the seat the migration already wired stays a no-op.
+    // And the seat the pool already lists stays a no-op.
     let before = read(&path);
     assert_eq!(
         surface(&path, "anthropic", None, true).expect("re-login"),

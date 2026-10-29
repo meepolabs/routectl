@@ -65,8 +65,8 @@ fn load_rejects_a_refused_version_and_leaves_it_byte_identical() {
 #[test]
 #[serial_test::serial]
 fn load_leaves_a_current_version_config_unchanged() {
-    // Arrange: a v2 config, plus a sidecar file that the load must NOT
-    // fold in (the load no longer merges sidecars at any version).
+    // Arrange: a current-version config, plus a sidecar file that the load
+    // must NOT fold in (the load no longer merges sidecars at any version).
     let dir = tempfile::tempdir().expect("tempdir");
     let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
     let cfg_path = dir.path().join("config.toml");

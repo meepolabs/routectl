@@ -98,8 +98,8 @@ mod config_version_tests {
     }
 
     /// One row per input class the preflight distinguishes. Unparseable TOML
-    /// and a non-integer `version` fall through as `Ok` so the typed
-    /// deserialize reports the precise syntax / type error.
+    /// and a `version` that is not an integer fitting `u32` fall through as
+    /// `Ok` so the typed deserialize reports the precise syntax / type error.
     #[test]
     fn preflight_classifies_each_version_shape() {
         let body = "[server]\nhost = \"x\"\n";
@@ -115,6 +115,21 @@ mod config_version_tests {
             .collect();
         rows.extend([
             ("absent key".to_string(), body.to_string(), Verdict::Missing),
+            (
+                "explicit zero".to_string(),
+                format!("version = 0\n{body}"),
+                Verdict::TooOld(0),
+            ),
+            (
+                "negative version".to_string(),
+                format!("version = -1\n{body}"),
+                Verdict::Accept(1),
+            ),
+            (
+                "version above u32".to_string(),
+                format!("version = 4294967296\n{body}"),
+                Verdict::Accept(1),
+            ),
             (
                 "unparseable toml".to_string(),
                 "this is = = not valid toml".to_string(),
