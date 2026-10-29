@@ -31,13 +31,22 @@ pub const POLL_CADENCE: Duration = Duration::from_millis(20);
 
 /// Poll `GET {base_url}/health` until it returns success or
 /// [`READY_DEADLINE`] elapses, panicking on the deadline.
+pub async fn await_health(base_url: &str) {
+    assert!(
+        healthy_within_deadline(base_url).await,
+        "the test server did not become healthy at {base_url}"
+    );
+}
+
+/// Poll `GET {base_url}/health` until it returns success (`true`) or
+/// [`READY_DEADLINE`] elapses (`false`).
 ///
 /// Every attempt (and the cadence pause after it) is bounded by the
 /// REMAINING deadline, not just checked between attempts: a server that
 /// completes the TCP accept but never sends response headers would
 /// otherwise park `send()` on reqwest's own (default: none) timeout and
 /// stall the shard far past the deadline.
-pub async fn await_health(base_url: &str) {
+pub async fn healthy_within_deadline(base_url: &str) -> bool {
     let client = reqwest::Client::new();
     let deadline = Instant::now() + READY_DEADLINE;
     while Instant::now() < deadline {
@@ -45,11 +54,11 @@ pub async fn await_health(base_url: &str) {
         if let Ok(Ok(response)) = tokio::time::timeout_at(deadline, attempt).await
             && response.status().is_success()
         {
-            return;
+            return true;
         }
         sleep_until_cadence_or_deadline(deadline).await;
     }
-    panic!("the test server did not become healthy at {base_url}");
+    false
 }
 
 /// Wait one poll cadence, but never past `deadline` -- so the pause

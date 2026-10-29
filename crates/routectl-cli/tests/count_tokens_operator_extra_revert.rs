@@ -12,8 +12,10 @@
 
 mod common;
 
+use std::io::Read;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
+use std::thread::JoinHandle;
 
 use routectl_router::CURRENT_CONFIG_VERSION as CURRENT;
 use serde_json::{Value, json};
@@ -26,18 +28,48 @@ const EXTRA_KEY: &str = "mcp_servers";
 const COUNT_PATH: &str = "/v1/messages/count_tokens";
 const COUNTED: u64 = 42;
 
-/// A child `routectl serve`, killed and reaped however the test exits.
-struct ServeChild(Child);
+/// A child `routectl serve`, killed and reaped however the test exits. Its
+/// stderr drains on a reader thread so a chatty child never blocks on a full
+/// pipe, and a boot failure can show the daemon's own words.
+struct ServeChild {
+    child: Child,
+    stderr: Option<JoinHandle<String>>,
+}
 
-impl Drop for ServeChild {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+impl ServeChild {
+    /// Kill the child, then collect everything it wrote to stderr. The kill
+    /// closes the pipe's write end, so the reader thread is sure to finish.
+    fn stop_and_read_stderr(&mut self) -> String {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        self.stderr
+            .take()
+            .map(|reader| {
+                reader
+                    .join()
+                    .unwrap_or_else(|_| "<stderr reader panicked>".to_owned())
+            })
+            .unwrap_or_default()
     }
 }
 
+impl Drop for ServeChild {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn drain(mut stderr: impl Read + Send + 'static) -> JoinHandle<String> {
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = stderr.read_to_end(&mut bytes);
+        String::from_utf8_lossy(&bytes).into_owned()
+    })
+}
+
 fn spawn_serve(home: &Path, config: &Path) -> ServeChild {
-    let child = Command::new(BIN)
+    let mut child = Command::new(BIN)
         .arg("--config")
         .arg(config)
         .arg("serve")
@@ -47,10 +79,11 @@ fn spawn_serve(home: &Path, config: &Path) -> ServeChild {
         .env("RUST_LOG", "error")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .unwrap_or_else(|e| panic!("spawn {BIN} serve: {e}"));
-    ServeChild(child)
+    let stderr = child.stderr.take().map(drain);
+    ServeChild { child, stderr }
 }
 
 /// A loopback port that was free a moment ago; the child binds it itself.
@@ -142,9 +175,14 @@ async fn count_tokens_endpoint_reverts_a_rejected_operator_extra() {
     let config_path = config_dir.join("config.toml");
     let port = free_port();
     std::fs::write(&config_path, config_text(port, &upstream.uri())).expect("write config");
-    let _daemon = spawn_serve(home.path(), &config_path);
+    let mut daemon = spawn_serve(home.path(), &config_path);
     let base = format!("http://127.0.0.1:{port}");
-    common::readiness::await_health(&base).await;
+    let healthy = common::readiness::healthy_within_deadline(&base).await;
+    assert!(
+        healthy,
+        "the daemon did not become healthy at {base}; stderr:\n{}",
+        daemon.stop_and_read_stderr()
+    );
 
     // Act
     let resp = reqwest::Client::new()

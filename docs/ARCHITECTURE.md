@@ -113,7 +113,7 @@ Configuration splits into two layers that compose at dispatch time:
 
 Two fields live on BOTH layers and merge per request:
 `header_extras` and `payload_extras`. The router runs the merge
-(`apply_layered_overlays` in `routectl-router/src/router.rs`) before
+(`apply_layered_overlays` in `routectl-router/src/router/overlays.rs`) before
 calling `provider.complete(req)` / `provider.stream(req)`, so the
 `Provider` trait surface stays stable across all five concrete
 providers. For the field-assignment table, merge semantics, and
