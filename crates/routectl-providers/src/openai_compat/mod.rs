@@ -577,10 +577,9 @@ impl Provider for OpenAiCompatProvider {
                     // providers (e.g. OpenCode-Go) emit cost-tracking
                     // trailer chunks after it, which we must not try to
                     // parse as ChatChunk.
-                    if dialect == ReasoningDialect::RawThinkTag
-                        && let Some(pending) = think_acc.take_pending() {
-                            yield Ok(flush_pending_chunk(&pending));
-                        }
+                    if let Some(flushed) = take_think_flush(dialect, &mut think_acc) {
+                        yield Ok(flushed);
+                    }
                     return;
                 }
                 if trimmed.is_empty() {
@@ -663,6 +662,9 @@ impl Provider for OpenAiCompatProvider {
                         yield Ok(chunk);
                     }
                     Err(e) => {
+                        if let Some(flushed) = take_think_flush(dialect, &mut think_acc) {
+                            yield Ok(flushed);
+                        }
                         yield Err(e);
                         return;
                     }
@@ -672,11 +674,10 @@ impl Provider for OpenAiCompatProvider {
             // `[DONE]` path returns above). Flush any RawThinkTag pending
             // buffer FIRST -- those held-back bytes are real visible
             // content the client must receive regardless of truncation.
-            if dialect == ReasoningDialect::RawThinkTag
-                && let Some(pending) = think_acc.take_pending() {
-                    had_output = true;
-                    yield Ok(flush_pending_chunk(&pending));
-                }
+            if let Some(flushed) = take_think_flush(dialect, &mut think_acc) {
+                had_output = true;
+                yield Ok(flushed);
+            }
             // Then classify the tail: a clean FIN with neither `[DONE]`
             // nor a `finish_reason` is truncation, not completion.
             match classify_stream_tail(&choice_tails) {
@@ -756,6 +757,18 @@ const fn mantle_auth_mode(creds: &crate::bedrock::auth::ResolvedCreds) -> &'stat
         crate::bedrock::auth::ResolvedCreds::Bearer { .. } => "bearer",
         crate::bedrock::auth::ResolvedCreds::Sigv4 { .. } => "sigv4",
     }
+}
+
+/// Drain the RawThinkTag accumulator's held-back bytes (a possible
+/// `<think>` prefix) as a visible content chunk. The bytes belong to
+/// events already accepted, so an end of stream (`[DONE]`, EOF, or an
+/// unusable event) emits them before anything that follows.
+fn take_think_flush(dialect: ReasoningDialect, acc: &mut ThinkTagAccumulator) -> Option<ChatChunk> {
+    if dialect != ReasoningDialect::RawThinkTag {
+        return None;
+    }
+    acc.take_pending()
+        .map(|pending| flush_pending_chunk(&pending))
 }
 
 /// Build a content-only `ChatChunk` from the ThinkTagAccumulator's

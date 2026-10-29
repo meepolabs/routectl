@@ -563,21 +563,35 @@ async fn stream_closed_after_finish_reason_without_done_ends_cleanly() {
     assert!(items.iter().all(Result::is_ok), "items: {items:?}");
 }
 
+macro_rules! malformed {
+    () => {
+        "data: {\"id\":\"c1\",\"choices\":[\n\n"
+    };
+}
+
+macro_rules! in_band_error {
+    () => {
+        "data: {\"error\":{\"message\":\"overloaded\",\"type\":\"server_error\"}}\n\n"
+    };
+}
+
+fn assert_event_error(name: &str, item: &routectl_core::Result<routectl_core::ChatChunk>) {
+    match item {
+        Err(routectl_core::Error::Upstream { body, .. })
+            if body == "openai-compat: stream ended without a terminal event" =>
+        {
+            panic!("{name}: the event's own error, not the missing-terminal one");
+        }
+        Err(_) => {}
+        Ok(chunk) => panic!("{name}: expected an error, got {chunk:?}"),
+    }
+}
+
 /// An event the stream cannot use (malformed JSON, or an in-band upstream
 /// error envelope) ends the stream with that one error: nothing after it is
 /// emitted, neither a later valid event nor the missing-terminal error.
 #[tokio::test]
 async fn stream_error_event_is_the_last_item() {
-    macro_rules! malformed {
-        () => {
-            "data: {\"id\":\"c1\",\"choices\":[\n\n"
-        };
-    }
-    macro_rules! in_band_error {
-        () => {
-            "data: {\"error\":{\"message\":\"overloaded\",\"type\":\"server_error\"}}\n\n"
-        };
-    }
     macro_rules! content_then_done {
         () => {
             concat!(
@@ -604,15 +618,45 @@ async fn stream_error_event_is_the_last_item() {
 
         assert_eq!(items.len(), 1, "{name}: exactly one item; items: {items:?}");
         assert_eq!(streamed_content(&items), "", "{name}");
-        match &items[0] {
-            Err(routectl_core::Error::Upstream { body, .. })
-                if body == "openai-compat: stream ended without a terminal event" =>
-            {
-                panic!("{name}: the event's own error, not the missing-terminal one");
-            }
-            Err(_) => {}
-            Ok(chunk) => panic!("{name}: expected an error, got {chunk:?}"),
-        }
+        assert_event_error(name, &items[0]);
+    }
+}
+
+/// On a RawThinkTag stream, bytes held back as a possible `<think>` prefix
+/// are real content: an unusable event flushes them, then ends the stream
+/// with its own error.
+#[tokio::test]
+async fn raw_think_tag_error_event_flushes_pending_then_ends() {
+    macro_rules! partial_tag {
+        () => {
+            "data: {\"id\":\"t1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello<thi\"},\"finish_reason\":null}]}\n\n"
+        };
+    }
+    let rows: [(&str, &'static str); 2] = [
+        (
+            "partial tag then malformed",
+            concat!(partial_tag!(), malformed!()),
+        ),
+        (
+            "partial tag then in-band error",
+            concat!(partial_tag!(), in_band_error!()),
+        ),
+    ];
+
+    for (name, body) in rows {
+        let items = stream_items(body, ReasoningDialect::RawThinkTag).await;
+
+        assert_eq!(items.len(), 3, "{name}: items: {items:?}");
+        let content = |i: usize| {
+            items[i]
+                .as_ref()
+                .ok()
+                .and_then(|c| c.choices.first())
+                .and_then(|choice| choice.delta.content.clone())
+        };
+        assert_eq!(content(0).as_deref(), Some("hello"), "{name}");
+        assert_eq!(content(1).as_deref(), Some("<thi"), "{name}");
+        assert_event_error(name, &items[2]);
     }
 }
 

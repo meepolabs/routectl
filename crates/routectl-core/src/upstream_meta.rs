@@ -179,8 +179,24 @@ impl UpstreamMeta {
             usage_from_vendor_endpoint: self
                 .usage_from_vendor_endpoint
                 .or(other.usage_from_vendor_endpoint),
-            openai_chat: self.openai_chat.or(other.openai_chat),
+            openai_chat: match (self.openai_chat, other.openai_chat) {
+                (Some(mine), Some(theirs)) => Some(mine.merge(theirs)),
+                (mine, theirs) => mine.or(theirs),
+            },
         }
+    }
+
+    /// This carrier with the OpenAI Chat `system_fingerprint` removed: the
+    /// envelope is dropped once no field of it remains, and the carrier
+    /// itself becomes `None` once it holds nothing at all.
+    #[must_use]
+    pub fn without_system_fingerprint(mut self) -> Option<Self> {
+        if let Some(envelope) = self.openai_chat.as_mut()
+            && envelope.clear_system_fingerprint()
+        {
+            self.openai_chat = None;
+        }
+        (self != Self::default()).then_some(self)
     }
 }
 
@@ -376,6 +392,24 @@ pub struct OpenAiChatEnvelope {
     pub system_fingerprint: Option<String>,
 }
 
+impl OpenAiChatEnvelope {
+    /// Combine two envelopes that describe the same chunk. Each field is
+    /// taken from `self` when present there, otherwise from `other`.
+    #[must_use]
+    pub fn merge(self, other: Self) -> Self {
+        Self {
+            system_fingerprint: self.system_fingerprint.or(other.system_fingerprint),
+        }
+    }
+
+    /// Remove the `system_fingerprint`, leaving every other field. Returns
+    /// true when the envelope then carries nothing.
+    pub fn clear_system_fingerprint(&mut self) -> bool {
+        self.system_fingerprint = None;
+        *self == Self::default()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -522,6 +556,87 @@ mod tests {
             Some(UsageInputSource::ExplicitFinal)
         );
         assert!(!merged.has_quota_family());
+    }
+
+    fn envelope(fingerprint: Option<&str>) -> OpenAiChatEnvelope {
+        OpenAiChatEnvelope {
+            system_fingerprint: fingerprint.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn envelope_merge_takes_each_field_from_self_then_other() {
+        let rows = [
+            ("both set", Some("fp_a"), Some("fp_b"), Some("fp_a")),
+            ("self only", Some("fp_a"), None, Some("fp_a")),
+            ("other only", None, Some("fp_b"), Some("fp_b")),
+        ];
+        for (name, mine, theirs, expected) in rows {
+            // Act
+            let merged = envelope(mine).merge(envelope(theirs));
+
+            // Assert
+            assert_eq!(merged.system_fingerprint.as_deref(), expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn meta_merge_combines_two_envelopes_field_by_field() {
+        // Arrange
+        let empty_envelope = UpstreamMeta {
+            openai_chat: Some(OpenAiChatEnvelope::default()),
+            ..Default::default()
+        };
+        let fp = UpstreamMeta::from_system_fingerprint("fp_x".into());
+
+        // Act
+        let merged = empty_envelope.merge(fp);
+
+        // Assert
+        assert_eq!(merged.system_fingerprint(), Some("fp_x"));
+    }
+
+    #[test]
+    fn clearing_the_only_envelope_field_reports_it_empty() {
+        // Arrange
+        let mut fp_only = envelope(Some("fp_x"));
+        let mut already_empty = OpenAiChatEnvelope::default();
+
+        // Act
+        let fp_only_empty = fp_only.clear_system_fingerprint();
+        let already_empty_empty = already_empty.clear_system_fingerprint();
+
+        // Assert
+        assert!(fp_only_empty);
+        assert_eq!(fp_only, OpenAiChatEnvelope::default());
+        assert!(already_empty_empty);
+    }
+
+    #[test]
+    fn clearing_the_fingerprint_drops_an_emptied_envelope_and_keeps_other_families() {
+        let rows = [
+            (
+                "fingerprint only",
+                UpstreamMeta::from_system_fingerprint("fp_x".into()),
+                None,
+            ),
+            (
+                "fingerprint and usage source",
+                UpstreamMeta::from_system_fingerprint("fp_x".into()).merge(
+                    UpstreamMeta::from_usage_input_source(UsageInputSource::ExplicitFinal),
+                ),
+                Some(UpstreamMeta::from_usage_input_source(
+                    UsageInputSource::ExplicitFinal,
+                )),
+            ),
+        ];
+        for (name, meta, expected) in rows {
+            // Act
+            let cleared = meta.without_system_fingerprint();
+
+            // Assert
+            assert_eq!(cleared, expected, "{name}");
+        }
     }
 
     #[test]

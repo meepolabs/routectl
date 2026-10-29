@@ -375,10 +375,10 @@ impl StreamedFingerprint {
             return;
         };
         if self.last.as_deref() == Some(fp) {
-            meta.openai_chat = None;
-            if *meta == UpstreamMeta::default() {
-                chunk.upstream_meta = None;
-            }
+            chunk.upstream_meta = chunk
+                .upstream_meta
+                .take()
+                .and_then(UpstreamMeta::without_system_fingerprint);
         } else {
             self.last = Some(fp.to_string());
         }
