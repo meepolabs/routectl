@@ -6,24 +6,21 @@
 //! K-floor, context-reduction + auto-cache injection, and forwarded-
 //! credential handling for both `complete` and `stream`.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use futures::stream::{BoxStream, StreamExt};
 use routectl_core::wire_check::IngressDialect;
 use routectl_core::{
-    CacheControl, ChatChunk, ChatRequest, ChatResponse, Error, FrontSlot, Provider, RefusalReason,
-    ReplayScheme, Result,
-    cache_control::{MAX_BREAKPOINTS, system_block_is_wire_eligible, validate_source},
-    context_reduction::{ReductionDelta, ReductionOutcome, apply_json_minify},
+    ChatChunk, ChatRequest, ChatResponse, Error, Provider, ReplayScheme, Result,
     failure_class::{ClassifiedFailure, FailureClass, MatchedBy},
     sanitize_for_log, scan_caller_prefix_advisory,
 };
 use serde_json::Value;
 
 use crate::catalog::{CatalogRow, EffectiveRow};
-use crate::config::{CacheCapability, RetryPolicy};
+use crate::config::RetryPolicy;
 use crate::context_trim::{
     SteadyStateTrimParams, collect_near_lossless_marks, estimate_total_tokens,
     near_lossless_candidate, propose_steady_state_trim, trimmed_prefix_fingerprint,
@@ -31,19 +28,21 @@ use crate::context_trim::{
 use crate::cost_gate::{break_even_k, emission_break_even_k};
 
 use super::beta_report_learn::install_beta_assembly;
-use super::cache_plan::{AutoCacheRequestPlan, CacheDecision, CacheInjection};
+use super::cache_plan::{AutoCacheRequestPlan, apply_auto_cache_placement, cache_target_gates};
 use super::capability_learn::LearnDedupeKey;
 use super::capability_observe::{
     EvidencePolicy, UntranslatedCapabilities, install_translation_report,
 };
 use super::class_observe::{
-    DispatchSurface, UpstreamFacts, class_label, matched_by_label, upstream_facts,
+    DispatchSurface, UpstreamFacts, apply_remap, class_label, matched_by_label, upstream_facts,
+    upstream_status_for_remap,
 };
 use super::credential_park::{log_gate_refusal, merge_gate_refusal};
-use super::dispatch_loop::{CommitCtx, Deadline, SurfaceAdapter};
-use super::edit_declare::{
-    declare_cache_placement, declare_model_rename, declare_reduction, fidelity_dialect,
+use super::dispatch_loop::{
+    CommitCtx, Deadline, SurfaceAdapter, apply_context_reduction, forwarded_terminal_status,
+    log_forwarded_auth_terminal, missing_forwarded_bearer_error, next_is_sibling_seat,
 };
+use super::edit_declare::{declare_cache_placement, declare_model_rename, fidelity_dialect};
 use super::feature_filter::{StripDecision, emit_feature_unsupported};
 use super::field_preflight::emit_field_preflight;
 use super::field_repair::emit_field_repair;
@@ -51,10 +50,12 @@ use super::learn_engine::{AttemptLearning, FailureDecision, Rejection};
 use super::local_refusal::ingress_dialect_of;
 use super::outcome_rule::{
     breaker_outcome, class_debits, probe_fast_fail, rate_limit_reset_hint, retry_cap_for,
+    should_fallback,
 };
 use super::overlays::apply_layered_overlays;
 use super::probe_payload_capture::ProbeFieldCapture;
 use super::repair_budget::RepairBudget;
+use super::replay_repair::replay_rejection_body_free;
 use super::runtime_gate::{
     LearnedProbeGuard, ProbeAdmissionSet, is_probe_request, log_probe_fast_fail,
 };
@@ -140,33 +141,6 @@ fn join_schemes(schemes: &[ReplayScheme]) -> String {
         .join(",")
 }
 
-/// A body-free rebuild of a classified reasoning-replay rejection, or
-/// `None` when the class is anything else (leaving the original error
-/// untouched -- no clone on the common path). The upstream body of a
-/// replay rejection is a rejection envelope that can echo a reasoning
-/// artifact fragment, and the generic retry/fallback logs below
-/// debug-render the `Error`. The rebuilt `Upstream` keeps the status and
-/// the already-structured classifier tokens every downstream consumer
-/// reads, dropping ONLY the body.
-pub(super) fn replay_rejection_body_free(
-    err: &Error,
-    class: &FailureClass,
-    provider: &str,
-) -> Option<Error> {
-    if !Router::is_replay_rejection_class(class) {
-        return None;
-    }
-    let facts = upstream_facts(err);
-    Some(Error::upstream_full(
-        provider,
-        facts.status.unwrap_or(0),
-        "",
-        None,
-        facts.upstream_type.map(str::to_string),
-        facts.upstream_code.map(str::to_string),
-    ))
-}
-
 /// Bring `meta.calib_estimated_tokens` back in line with `attempt_req` after
 /// a dispatch-path mutation shrank the payload.
 ///
@@ -187,7 +161,7 @@ pub(super) fn restamp_calibration_estimate(attempt_req: &ChatRequest, meta: &mut
 
 /// The non-streaming surface: one `complete()` call per attempt, bounded by
 /// the composed `request_timeout_ms`, committed when the response arrives.
-pub(super) struct CompleteAdapter;
+struct CompleteAdapter;
 
 /// The expiry text of a `complete()` attempt deadline.
 fn complete_timed_out(ms: u64) -> String {
@@ -1656,392 +1630,6 @@ pub(super) fn would_trim_k_floor_for_meta(
     }
 }
 
-/// Run context reduction for one dispatch attempt: decide effectiveness,
-/// minify, stamp `meta.reduction_strategy`, accumulate the counter ledger,
-/// and emit the `context_reduction` debug log. Shared by the completion and
-/// streaming dispatch paths so both stay byte-identical and observe
-/// identically.
-///
-/// Must be called AFTER overlays and strictly BEFORE auto-cache so any
-/// auto-emitted breakpoint covers the REDUCED bytes. `apply_json_minify`
-/// computes the caller frozen floor itself (off this pre-auto-emit clone) and
-/// only touches the mutable tail; it fails closed (no mutation on any doubt).
-/// Effective only when the global switch is on AND the provider did not
-/// explicitly opt out (`None` inherits the global).
-///
-/// Call site invariant: ONCE per chain-entry preparation, OUTSIDE the
-/// same-target retry loop. A retry re-sends the request this call prepared,
-/// so counting inside that loop would bill the same removed bytes twice;
-/// walking to the next fallback entry prepares a fresh clone, which is a
-/// genuinely new measurement and aggregates.
-pub(super) fn apply_context_reduction(
-    config: &crate::config::Config,
-    provider_cfg: Option<&crate::config::ProviderEntry>,
-    provider_name: &str,
-    model: &str,
-    wire: Option<IngressDialect>,
-    attempt_req: &mut ChatRequest,
-    meta: &mut DispatchMeta,
-) {
-    let effective = config.reduction.enabled
-        && provider_cfg.and_then(crate::config::ProviderEntry::reduction_enabled) != Some(false);
-    let before = wire.map(|_| Arc::clone(&attempt_req.messages));
-    let outcome = if effective {
-        Some(apply_json_minify(attempt_req))
-    } else {
-        None
-    };
-    if let (Some(ReductionOutcome::Applied(_)), Some(before)) = (&outcome, &before) {
-        declare_reduction(attempt_req, wire, before);
-    }
-    let token = reduction_strategy_token(effective, outcome.as_ref());
-    meta.reduction_strategy = Some(token);
-    // Both payload-carrying outcomes describe a pass that actually examined
-    // the tail, so both feed the ledger: `NothingToStrip` is a measured zero
-    // for `strings_minified` / `bytes_saved` while still accounting for every
-    // skipped and rejected target. `NoMutableTail` examined nothing and a
-    // disabled pass never ran, so neither contributes -- the counters stay
-    // `None` unless some dispatched target reduced.
-    if let Some(ReductionOutcome::Applied(delta) | ReductionOutcome::NothingToStrip(delta)) =
-        &outcome
-    {
-        accumulate_reduction_counters(meta, delta);
-    }
-    if let Some(ReductionOutcome::Applied(delta)) = &outcome {
-        tracing::debug!(
-            provider = %routectl_core::sanitize_for_log(provider_name),
-            model = %routectl_core::sanitize_for_log(model),
-            strategy = token,
-            strings_minified = delta.strings_minified,
-            bytes_saved = delta.bytes_saved,
-            est_tokens_saved = delta.est_tokens_saved,
-            "context_reduction",
-        );
-    }
-}
-
-/// Fold one reduction pass's ledger into `meta`'s four counters.
-///
-/// Additive across the fallback-entry preparations of one chain walk: a
-/// `None` counter initializes from zero (so the first contributing entry
-/// leaves a measured value, including a measured `Some(0)`), and later
-/// entries saturate on top. Saturation over wrap keeps a counter monotone
-/// under any pathological chain length -- a pinned ceiling is readable
-/// evidence, a wrapped count is a lie.
-fn accumulate_reduction_counters(meta: &mut DispatchMeta, delta: &ReductionDelta) {
-    fn add(slot: &mut Option<u64>, n: usize) {
-        *slot = Some(slot.unwrap_or(0).saturating_add(n as u64));
-    }
-    add(
-        &mut meta.reduction_strings_compressed,
-        delta.strings_minified,
-    );
-    add(&mut meta.reduction_strings_skipped, delta.strings_skipped);
-    add(&mut meta.reduction_strings_rejected, delta.strings_rejected);
-    add(&mut meta.reduction_bytes_saved, delta.bytes_saved);
-}
-
-/// Map a context-reduction decision to its stable operator-facing token.
-/// These tokens are a CONTRACT (recorded in the usage DB and emitted in the
-/// `context_reduction` log): do not rename or repurpose them, only add new
-/// ones. The `skipped:` prefix groups the variants where reduction did not
-/// mutate the request.
-///
-/// | condition                          | token                     |
-/// |------------------------------------|---------------------------|
-/// | reduction not effective            | `skipped:disabled`        |
-/// | `ReductionOutcome::Applied`        | `applied`                 |
-/// | `ReductionOutcome::NoMutableTail`  | `skipped:no-tail`         |
-/// | `ReductionOutcome::NothingToStrip(_)` | `skipped:nothing-to-strip`|
-/// | unrecognized future outcome        | `skipped:unknown`         |
-///
-/// `effective == false` short-circuits to `skipped:disabled` WITHOUT calling
-/// `apply_json_minify`, so `outcome` is only consulted when reduction ran.
-pub(super) const fn reduction_strategy_token(
-    effective: bool,
-    outcome: Option<&ReductionOutcome>,
-) -> &'static str {
-    if !effective {
-        return "skipped:disabled";
-    }
-    match outcome {
-        Some(ReductionOutcome::Applied(_)) => "applied",
-        Some(ReductionOutcome::NoMutableTail) => "skipped:no-tail",
-        Some(ReductionOutcome::NothingToStrip(_)) => "skipped:nothing-to-strip",
-        // `ReductionOutcome` is `#[non_exhaustive]`; a future variant we do
-        // not yet map means reduction RAN but produced an outcome this build
-        // does not recognize -- which is distinct from "disabled", so record
-        // it as its own token. `None` only happens when `effective == false`,
-        // already handled above.
-        _ => "skipped:unknown",
-    }
-}
-
-/// Config inputs the placement step reads per dispatch target. Grouped so
-/// the two call sites (completion + streaming) pass one value and cannot
-/// drift in argument order.
-#[derive(Debug, Clone, Copy)]
-pub(super) struct CacheTargetGates {
-    /// The target provider's prompt-cache capability, `None` when the
-    /// provider is absent from the table (fail closed).
-    capability: Option<CacheCapability>,
-    /// Per-provider `auto_emit_top_level_breakpoint`, resolved (absent
-    /// inherits the global switch).
-    terminal_enabled: bool,
-    /// Whether the target's EGRESS can carry a per-block marker to the
-    /// wire (`ProviderEntry::supports_per_block_breakpoints`) -- the front
-    /// marker's capability gate, distinct from the operator switch below.
-    front_supported: bool,
-    /// Per-provider `auto_emit_per_block_breakpoints`, resolved through
-    /// `ProviderEntry::per_block_breakpoints_enabled` (absent takes the
-    /// kind-level default). Operator INTENT: placement also requires
-    /// `front_supported`.
-    front_enabled: bool,
-}
-
-/// Resolve the per-target cache gates from the target's `[providers.X]`
-/// entry. An absent entry fails closed on every gate (no capability, no
-/// per-block support, no default to read). One resolver so the completion
-/// and streaming call sites cannot resolve the knobs differently.
-pub(super) fn cache_target_gates(
-    provider_cfg: Option<&crate::config::ProviderEntry>,
-) -> CacheTargetGates {
-    CacheTargetGates {
-        capability: provider_cfg.map(crate::config::ProviderEntry::cache_capability),
-        terminal_enabled: provider_cfg
-            .and_then(crate::config::ProviderEntry::auto_emit_top_level_breakpoint)
-            .unwrap_or(true),
-        front_supported: provider_cfg
-            .is_some_and(crate::config::ProviderEntry::supports_per_block_breakpoints),
-        front_enabled: provider_cfg
-            .is_some_and(crate::config::ProviderEntry::per_block_breakpoints_enabled),
-    }
-}
-
-/// Decide-and-maybe-inject the auto-cache markers on the PER-ATTEMPT
-/// clone, TRANSACTIONALLY: both candidate markers are applied to one
-/// throwaway clone, the complete breakpoint sequence is validated ONCE,
-/// and the candidate is then committed whole or discarded whole. Mutates
-/// ONLY `attempt_req`, never the original request. Never returns `Err`
-/// and never panics: any doubt degrades to "dispatch the un-injected
-/// clone".
-///
-/// Two markers, independently gated:
-///
-/// - FRONT -- a per-block `cache_control` on the resolved
-///   [`FrontSlot`] (the last wire-eligible system block, else the last
-///   custom tool). Requires BOTH the provider's
-///   `auto_emit_per_block_breakpoints` (operator intent) AND
-///   `supports_per_block_breakpoints` (wire capability: anthropic-api and
-///   Bedrock Converse, where the egress translates the marker into a
-///   `cachePoint` block). `CacheCapability` does NOT gate it -- that
-///   struct describes the TOP-LEVEL field only.
-/// - TERMINAL -- the top-level `cache_control` field. Gated by the
-///   provider's `auto_emit_top_level_breakpoint` and by
-///   `supports_top_level_cache_control`, exactly as before.
-///
-/// The global `[cache] auto_emit_top_level_breakpoint` switch is the
-/// master kill for dispatch-path auto-emission and withholds BOTH
-/// markers, so an operator who has auto-emit off today never starts
-/// receiving a front marker.
-///
-/// Rollback is by construction: the pre-cache request is never mutated
-/// until the candidate validates, so a discarded candidate preserves
-/// every overlay / strip / minify change AND every cache-placement slot
-/// (tools, system, messages, top-level) with no restore bookkeeping. On
-/// validation failure both provisionally-emitted markers record
-/// [`CacheInjection::ValidationRolledBack`]; a marker already skipped
-/// keeps its own reason.
-///
-/// Called once per chain entry, AFTER `apply_layered_overlays` (so
-/// injection is the last dispatch-time touch of any cache marker) and
-/// before the inner retry loop, so all retries on a target reuse
-/// byte-identical bytes. A fallback target starts from a fresh clone of
-/// the canonical request, so a discarded candidate on one target cannot
-/// contaminate the next. Byte identity is therefore per-TARGET: identical
-/// across retries of one target, and never promised across two targets of a
-/// fallback chain, which may legitimately differ on emit-vs-skip.
-///
-/// `caller_supplied` is evaluated FIRST as a request-level fact: a request
-/// that already carries caller breakpoints is independent of which target /
-/// provider is selected, so it takes precedence over every per-target /
-/// config `auto_skipped:*` reason (global / provider kill-switch, capability).
-///
-/// `k_suppressed` is the per-target verdict of `Router::k_emission_suppressed`,
-/// consulted once at the call site. It withholds BOTH markers as a shared
-/// reason, checked immediately AFTER `shared_skip_reason` so
-/// `caller_supplied` and `global_disabled` keep their precedence -- both are
-/// already short-circuits inside the gate itself, so the ordering here only
-/// pins that the recorded TOKEN stays theirs.
-pub(super) fn apply_auto_cache_placement(
-    attempt_req: &mut ChatRequest,
-    plan: &AutoCacheRequestPlan,
-    gates: CacheTargetGates,
-    k_suppressed: bool,
-) -> CacheDecision {
-    if let Some(reason) = shared_skip_reason(plan) {
-        return CacheDecision {
-            front: reason,
-            terminal: reason,
-        };
-    }
-    if k_suppressed {
-        return CacheDecision {
-            front: CacheInjection::SkippedKBelowBreakEven,
-            terminal: CacheInjection::SkippedKBelowBreakEven,
-        };
-    }
-
-    let mut front = if !gates.front_enabled {
-        CacheInjection::SkippedProviderDisabled
-    } else if !gates.front_supported {
-        // An explicit opt-in on a kind whose egress cannot carry a
-        // per-block marker is INERT, not honored: emitting here would ship
-        // a marker the wire drops (openai-compat WARNs and 400s under
-        // strict_translation) while recording a false `auto_emitted`.
-        CacheInjection::SkippedNoCapability
-    } else if plan.volatile_high_veto {
-        CacheInjection::SkippedVolatileHigh
-    } else if plan.front_slot.is_none() {
-        CacheInjection::SkippedNoPlacementRegion
-    } else {
-        CacheInjection::Emitted
-    };
-    let terminal = if !gates.terminal_enabled {
-        CacheInjection::SkippedProviderDisabled
-    } else if !gates
-        .capability
-        .is_some_and(|c| c.supports_top_level_cache_control)
-    {
-        CacheInjection::SkippedNoCapability
-    } else if plan.volatile_high_veto {
-        CacheInjection::SkippedVolatileHigh
-    } else {
-        CacheInjection::Emitted
-    };
-
-    let intended = usize::from(front == CacheInjection::Emitted)
-        + usize::from(terminal == CacheInjection::Emitted);
-    if intended == 0 {
-        return CacheDecision { front, terminal };
-    }
-    // Defensive drift guard: no-caller implies 0 today, so +2 is always
-    // within MAX. Kept so a future change that injects alongside caller
-    // markers cannot silently exceed the cap.
-    if plan.caller_breakpoint_count.saturating_add(intended) > MAX_BREAKPOINTS {
-        return CacheDecision {
-            front: cap_skip(front),
-            terminal: cap_skip(terminal),
-        };
-    }
-
-    // The candidate is a throwaway clone: nothing observable is mutated
-    // until it validates, which IS the rollback.
-    let mut candidate = attempt_req.clone();
-    if let (CacheInjection::Emitted, Some(slot)) = (front, plan.front_slot) {
-        // The slot index was resolved off the ORIGINAL request; a
-        // dispatch-time step (strip, a payload overlay) may have reshaped
-        // system / tools since. Placement fails closed rather than
-        // marking a different element than the one that was selected.
-        if !place_front_marker(&mut candidate, slot) {
-            front = CacheInjection::SkippedNoPlacementRegion;
-        }
-    }
-    if terminal == CacheInjection::Emitted {
-        candidate.cache_control = Some(CacheControl::ephemeral_5m());
-    }
-    if front != CacheInjection::Emitted && terminal != CacheInjection::Emitted {
-        return CacheDecision { front, terminal };
-    }
-
-    if validate_source(&candidate).is_ok() {
-        *attempt_req = candidate;
-        CacheDecision { front, terminal }
-    } else {
-        CacheDecision {
-            front: rollback_skip(front),
-            terminal: rollback_skip(terminal),
-        }
-    }
-}
-
-/// Request-level reasons that withhold BOTH markers, in precedence order.
-/// `None` means the request itself is eligible and the per-marker gates
-/// decide.
-///
-/// The high-confidence volatile veto is NOT here: it is applied per marker
-/// so it keeps its existing precedence BELOW the per-target config and
-/// capability gates, leaving the terminal marker's recorded token
-/// unchanged from before per-marker placement existed.
-const fn shared_skip_reason(plan: &AutoCacheRequestPlan) -> Option<CacheInjection> {
-    if plan.has_caller_breakpoints {
-        return Some(CacheInjection::SkippedCallerSupplied);
-    }
-    if !plan.global_auto_emit_enabled {
-        return Some(CacheInjection::SkippedGlobalDisabled);
-    }
-    None
-}
-
-/// Fold a per-marker decision through the breakpoint-cap refusal: a
-/// marker that was going to be emitted records the cap, a marker already
-/// skipped keeps its own reason.
-const fn cap_skip(decision: CacheInjection) -> CacheInjection {
-    match decision {
-        CacheInjection::Emitted => CacheInjection::SkippedBreakpointCap,
-        other => other,
-    }
-}
-
-/// Fold a per-marker decision through a whole-candidate validation
-/// failure: a marker that was applied to the discarded candidate records
-/// the rollback, a marker already skipped keeps its own reason.
-const fn rollback_skip(decision: CacheInjection) -> CacheInjection {
-    match decision {
-        CacheInjection::Emitted => CacheInjection::ValidationRolledBack,
-        other => other,
-    }
-}
-
-/// Write an ephemeral_5m marker into `slot` on `req`. Returns false when
-/// the slot no longer resolves to the element that was selected (a
-/// reshaped system / tools array), leaving `req` untouched.
-///
-/// CONSTRAINT (accepted, measured rather than fixed): a marker on a system
-/// block that a downstream egress DROPS -- the billing-attribution strip in
-/// `routectl-providers` `system_filter` removes a Claude Code attribution
-/// block -- silently never reaches the wire. Coupling this placement to
-/// that providers-crate predicate would invert the crate dependency; the
-/// divergence is diagnosable instead by comparing the recorded decision
-/// against the observed `detect_prompt_caching` outcome.
-fn place_front_marker(req: &mut ChatRequest, slot: FrontSlot) -> bool {
-    match slot {
-        FrontSlot::LastSystemBlock { block_index } => {
-            let Some(routectl_core::SystemContent::Blocks(blocks)) = req.system.as_mut() else {
-                return false;
-            };
-            let Some(block) = blocks.get_mut(block_index) else {
-                return false;
-            };
-            if !system_block_is_wire_eligible(block) {
-                return false;
-            }
-            block.cache_control = Some(CacheControl::ephemeral_5m());
-            true
-        }
-        FrontSlot::LastCustomTool { tool_index } => {
-            let Some(tools) = req.tools.as_mut() else {
-                return false;
-            };
-            let Some(routectl_core::ToolDef::Custom(tool)) = tools.get_mut(tool_index) else {
-                return false;
-            };
-            tool.cache_control = Some(CacheControl::ephemeral_5m());
-            true
-        }
-    }
-}
-
 /// Resolve the client-visible response `model` label for a served
 /// dispatch target. Returns the target's `reported_model` override
 /// when set to a non-empty string, otherwise the client's requested
@@ -2072,91 +1660,6 @@ pub(super) const fn probe_fast_fail_status(err: &Error) -> Option<u16> {
         } => Some(*s),
         _ => None,
     }
-}
-
-/// The upstream status of a forwarded-credential auth/rate failure that
-/// is TERMINAL for a forwarded (pure-passthrough) request: 401
-/// (unauthorized), 403 (forbidden), 429 (rate limited). `None` for every
-/// other error class.
-///
-/// A request-scoped forwarded token has no refresh path (routectl cannot
-/// rotate a credential it does not own) and no sibling credential to fall
-/// back to, so on such a status the router must bypass BOTH the
-/// `on_auth_failure` refresh-and-retry AND the fallback-chain hop, and
-/// surface the upstream response verbatim -- Claude Code owns its own
-/// retry/backoff. Scoped to a forwarded TARGET ONLY: the caller gates
-/// this on the current dispatch target's `use_forwarded_credential`
-/// flag, so a coexisting own-credential target in the same chain keeps
-/// the existing one-shot auth-refresh + fallback behavior unchanged.
-/// Same-request TRANSPORT retries (5xx / network / status-0, which
-/// reuse the same token) are NOT in this set, so they fall through to
-/// the normal predicates untouched. Pattern-mirrors
-/// `probe_fast_fail_status`: a pure decision helper; the caller owns
-/// the `return` that short-circuits.
-pub(super) const fn forwarded_terminal_status(err: &Error) -> Option<u16> {
-    match err {
-        Error::Upstream {
-            status: s @ (401 | 403 | 429),
-            ..
-        } => Some(*s),
-        _ => None,
-    }
-}
-
-/// WARN when a forwarded-token upstream auth/rate failure is surfaced
-/// verbatim (terminal: no refresh-retry, no fallback hop). SAFE
-/// dimensions ONLY: the upstream `status`, a fixed `credential_source`
-/// token, and a boolean derived from whether an inbound session key was
-/// captured -- NEVER the forwarded token itself, in a field or the
-/// message. Mirrors `log_probe_fast_fail`: log-only, the caller owns the
-/// short-circuiting `return`.
-pub(super) fn log_forwarded_auth_terminal(status: u16, has_client_session_id: bool) {
-    tracing::warn!(
-        status,
-        credential_source = "forwarded",
-        has_client_session_id,
-        "forwarded-token upstream auth failure surfaced verbatim; \
-         bypassing on_auth_failure refresh and provider fallback",
-    );
-}
-
-/// Missing-bearer terminal guard. `None` when `target` does not use a
-/// forwarded credential, or the client's bearer WAS captured; `Some`
-/// carries a clean terminal [`Error::Validation`] for the caller to
-/// return immediately -- BEFORE any upstream touch of this target.
-///
-/// A forwarded target with no captured bearer (seam header absent,
-/// capture gates closed, or the client simply never sent an
-/// `Authorization` header) has no credential to authenticate with; an
-/// upstream dispatch would either fail with a confusing anonymous
-/// request or -- worse -- silently succeed against the wrong identity
-/// if the egress falls back to some other implicit auth. Refusing here
-/// gives the client an unambiguous 4xx instead of a passed-through
-/// upstream 401. Per-target (the caller checks this inside the chain
-/// loop, once per target about to be dispatched), so a mixed chain that
-/// never reaches a forwarded target is unaffected. Emits a WARN with
-/// SAFE dimensions only (reason, credential_source, provider_kind --
-/// never the token, host, or provider name), mirroring the shape of the
-/// deleted whole-chain gate's refusal log.
-pub(super) fn missing_forwarded_bearer_error(
-    target: &DispatchTarget,
-    req: &ChatRequest,
-) -> Option<Error> {
-    if !target.use_forwarded_credential || req.routectl_internal.forwarded_bearer.is_some() {
-        return None;
-    }
-    tracing::warn!(
-        reason = "missing_forwarded_bearer",
-        credential_source = "forwarded",
-        provider_kind = target.provider_kind.unwrap_or("unknown"),
-        "forwarded target has no captured client bearer; refusing before egress",
-    );
-    Some(Error::Validation(
-        "forwarded target has no captured client bearer to authenticate this request \
-         (reason=missing_forwarded_bearer)"
-            .to_string(),
-        RefusalReason::ForwardedBearerMissing,
-    ))
 }
 
 /// A count_tokens CAPABILITY signal -- the selected target is
@@ -2269,104 +1772,22 @@ fn emit_class_decision(obs: &ClassDecisionObs<'_>) {
     }
 }
 
-/// The upstream HTTP status carried by `err`, for the per-provider class
-/// remap lookup ONLY: `Some` for an [`Error::Upstream`] status in
-/// `400..=599`, `None` for status 0 and every non-upstream variant. This
-/// seam consults the target's own `class_overrides`, never `policy`.
-pub(super) fn upstream_status_for_remap(err: &Error) -> Option<u16> {
-    match err {
-        Error::Upstream { status, .. } if (400..=599).contains(status) => Some(*status),
-        _ => None,
-    }
-}
+#[cfg(test)]
+use std::collections::BTreeMap;
 
-/// Apply the operator's per-provider status remap on top of the
-/// classifier's native decision. A `status` that keys into `overrides`
-/// replaces the class with the operator's override, keeping the NATIVE
-/// `matched_by` -- the remap changes WHICH class was decided, not HOW the
-/// classifier itself matched. No status, or no matching key (including
-/// the empty-map default), returns `native` unchanged. Returns the
-/// effective `ClassifiedFailure` plus whether a remap fired.
-pub(super) fn apply_remap(
-    native: ClassifiedFailure,
-    status: Option<u16>,
-    overrides: &BTreeMap<u16, FailureClass>,
-) -> (ClassifiedFailure, bool) {
-    match status.and_then(|s| overrides.get(&s)) {
-        Some(class) => (
-            ClassifiedFailure {
-                class: class.clone(),
-                matched_by: native.matched_by,
-            },
-            true,
-        ),
-        None => (native, false),
-    }
-}
+#[cfg(test)]
+use routectl_core::{
+    CacheControl, RefusalReason,
+    cache_control::MAX_BREAKPOINTS,
+    context_reduction::{ReductionDelta, ReductionOutcome, apply_json_minify},
+};
 
-pub(super) fn should_fallback(
-    err: &Error,
-    class: &FailureClass,
-    policy: &RetryPolicy,
-    is_probe: bool,
-    transcript_rejection: bool,
-) -> bool {
-    // Availability-probe fast-fail: a probe (max_tokens <=
-    // probe_max_tokens) that hits a rate-limit (429) or overload (529)
-    // does not fall back. Every OTHER error class -- generic 5xx,
-    // network/status-0, Streaming, and every 4xx including the
-    // Bedrock-style max_tokens=1 400 -- falls through to the normal
-    // predicate below, so real fallback is untouched.
-    if probe_fast_fail(err, is_probe).is_some() {
-        return false;
-    }
-    // An unknown provider id in the chain is a config-shaped fault the
-    // caller routes past: always fallbackable, independent of class.
-    if let Error::UnknownProvider(_) = err {
-        return true;
-    }
-    // The request's own transcript explains the rejection, and the next
-    // target is sent the same transcript.
-    if transcript_rejection {
-        return false;
-    }
-    policy.resolved_class(class).1
-}
-
-pub(super) fn add_jitter(base: Duration, jitter_ms: u64) -> Duration {
-    if jitter_ms == 0 {
-        return base;
-    }
-    // Non-cryptographic jitter from the wall clock's sub-millisecond
-    // bits. Suitable for retry-spreading; not for anything else.
-    use std::time::SystemTime;
-    let nanos = SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.subsec_nanos() as u64);
-    base.saturating_add(Duration::from_millis(nanos % jitter_ms))
-}
-
-pub(super) fn mul_duration(d: Duration, factor: f64) -> Duration {
-    let nanos = d.as_nanos() as f64 * factor;
-    Duration::from_nanos(nanos.min(u64::MAX as f64) as u64)
-}
-
-/// Whether the chain entry AFTER `chain_idx` is another seat of the SAME
-/// pooled model as `target` -- i.e. a sibling seat a probe may fail over to
-/// before fast-failing. All seats of one pool share the model `Arc`
-/// (`dispatch_target_for_seat` clones the same `Arc<ResolvedModel>`), while
-/// distinct chain entries carry distinct model Arcs, so pointer identity is
-/// the exact same-pool discriminant.
-pub(super) fn next_is_sibling_seat(
-    chain: &[DispatchTarget],
-    chain_idx: usize,
-    target: &DispatchTarget,
-) -> bool {
-    chain
-        .get(chain_idx + 1)
-        .is_some_and(|next| std::sync::Arc::ptr_eq(&next.model, &target.model))
-}
-
+#[cfg(test)]
+use super::cache_plan::{CacheInjection, CacheTargetGates, place_front_marker};
+#[cfg(test)]
+use super::dispatch_loop::reduction_strategy_token;
+#[cfg(test)]
+use crate::config::CacheCapability;
 #[cfg(test)]
 use crate::config::{AliasValue, Config};
 #[cfg(test)]

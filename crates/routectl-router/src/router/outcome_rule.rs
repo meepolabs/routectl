@@ -206,6 +206,35 @@ pub(super) fn should_retry_same_provider(
     attempts_made < cap
 }
 
+pub(super) fn should_fallback(
+    err: &Error,
+    class: &FailureClass,
+    policy: &RetryPolicy,
+    is_probe: bool,
+    transcript_rejection: bool,
+) -> bool {
+    // Availability-probe fast-fail: a probe (max_tokens <=
+    // probe_max_tokens) that hits a rate-limit (429) or overload (529)
+    // does not fall back. Every OTHER error class -- generic 5xx,
+    // network/status-0, Streaming, and every 4xx including the
+    // Bedrock-style max_tokens=1 400 -- falls through to the normal
+    // predicate below, so real fallback is untouched.
+    if probe_fast_fail(err, is_probe).is_some() {
+        return false;
+    }
+    // An unknown provider id in the chain is a config-shaped fault the
+    // caller routes past: always fallbackable, independent of class.
+    if let Error::UnknownProvider(_) = err {
+        return true;
+    }
+    // The request's own transcript explains the rejection, and the next
+    // target is sent the same transcript.
+    if transcript_rejection {
+        return false;
+    }
+    policy.resolved_class(class).1
+}
+
 #[cfg(test)]
 #[path = "outcome_rule_tests.rs"]
 mod outcome_rule_tests;

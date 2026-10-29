@@ -888,7 +888,7 @@ fn is_auto_cache_marker(value: &Value) -> bool {
 /// top-level terminal one.
 ///
 /// `apply_auto_cache_placement`
-/// (`crates/routectl-router/src/router/dispatch.rs`) writes exactly two
+/// (`crates/routectl-router/src/router/cache_plan.rs`) writes exactly two
 /// slots -- one `place_front_marker` call against a single `FrontSlot`, and
 /// one assignment to the top-level `cache_control` -- so a third
 /// same-shaped addition on one fixture is not this transform.
@@ -1375,7 +1375,7 @@ static ANTHROPIC_FIDELITY_EXCEPTIONS: [Exception; 8] = [
                  sent: the top-level field (the TERMINAL marker) and/or the `cache_control` \
                  leaf of the last wire-eligible `system[]` block, else the last custom tool \
                  (the FRONT marker). Confirmed at `apply_auto_cache_placement` \
-                 (crates/routectl-router/src/router/dispatch.rs), which assigns \
+                 (crates/routectl-router/src/router/cache_plan.rs), which assigns \
                  `CacheControl::ephemeral_5m()` to the top-level field and places the front \
                  marker through `place_front_marker` in the same file, both on a throwaway \
                  per-attempt clone that is committed only once the full breakpoint sequence \
@@ -1399,7 +1399,7 @@ static ANTHROPIC_FIDELITY_EXCEPTIONS: [Exception; 8] = [
                  stays unexplained -- a matcher sees one divergence at a time and cannot count. \
                  In-place addition that moves no positions, hence a MATCHER.",
         site_symbol: "apply_auto_cache_placement",
-        site_path: "crates/routectl-router/src/router/dispatch.rs",
+        site_path: "crates/routectl-router/src/router/cache_plan.rs",
         path_predicate: is_auto_cache_marker_path,
         applies_to: None,
         max_per_fixture: Some(MAX_AUTO_CACHE_MARKERS),

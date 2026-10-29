@@ -478,7 +478,7 @@ fn the_scrub_removes_the_body_and_preserves_the_status_type_and_code() {
     .class;
 
     // Act
-    let scrubbed = super::dispatch::replay_rejection_body_free(&rejection, &class, "p")
+    let scrubbed = super::replay_repair::replay_rejection_body_free(&rejection, &class, "p")
         .expect("a classified replay rejection must rebuild body-free");
 
     // Assert -- the body is gone, and the status plus both tokens survive

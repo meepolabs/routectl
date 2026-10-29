@@ -13,7 +13,7 @@ use routectl_core::{
     failure_class::{FailureClass, LastOutcome, classify},
 };
 
-use super::dispatch::{apply_remap, upstream_status_for_remap};
+use super::class_observe::{apply_remap, upstream_status_for_remap};
 use super::outcome_rule::{BreakerOutcome, breaker_outcome, reset_hint_clamped_to};
 use super::precontent::{is_empty_reasoning_only, precontent_summary};
 

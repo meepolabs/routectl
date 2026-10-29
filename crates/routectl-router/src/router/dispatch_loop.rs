@@ -13,34 +13,36 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use routectl_core::wire_check::WireTap;
-use routectl_core::{ChatRequest, Error, Provider, Result, TranslationReport, sanitize_for_log};
+use routectl_core::context_reduction::{ReductionDelta, ReductionOutcome, apply_json_minify};
+use routectl_core::wire_check::{IngressDialect, WireTap};
+use routectl_core::{
+    ChatRequest, Error, Provider, RefusalReason, Result, TranslationReport, sanitize_for_log,
+};
 
 use crate::config::RetryPolicy;
 
 use super::beta_report_learn::install_beta_assembly;
-use super::cache_plan::AutoCacheRequestPlan;
+use super::cache_plan::{AutoCacheRequestPlan, apply_auto_cache_placement, cache_target_gates};
 use super::capability_learn::LearnDedupeKey;
 use super::capability_observe::{UntranslatedCapabilities, install_translation_report};
-use super::class_observe::{DispatchSurface, upstream_facts};
-use super::credential_park::{log_gate_refusal, merge_gate_refusal};
-use super::dispatch::{
-    add_jitter, apply_auto_cache_placement, apply_context_reduction, apply_remap,
-    cache_target_gates, forwarded_terminal_status, log_forwarded_auth_terminal,
-    missing_forwarded_bearer_error, mul_duration, next_is_sibling_seat, replay_rejection_body_free,
-    should_fallback, upstream_status_for_remap,
+use super::class_observe::{
+    DispatchSurface, apply_remap, upstream_facts, upstream_status_for_remap,
 };
-use super::edit_declare::{declare_cache_placement, declare_model_rename, fidelity_dialect};
+use super::credential_park::{log_gate_refusal, merge_gate_refusal};
+use super::edit_declare::{
+    declare_cache_placement, declare_model_rename, declare_reduction, fidelity_dialect,
+};
 use super::feature_filter::StripDecision;
 use super::learn_engine::{AttemptLearning, FailureDecision, Rejection};
 use super::local_refusal::ingress_dialect_of;
 use super::outcome_rule::{
     SameProvider, breaker_outcome, class_debits, probe_fast_fail, rate_limit_reset_hint,
-    same_provider_retry,
+    same_provider_retry, should_fallback,
 };
 use super::overlays::apply_layered_overlays;
 use super::probe_payload_capture::ProbeFieldCapture;
 use super::repair_budget::RepairBudget;
+use super::replay_repair::replay_rejection_body_free;
 use super::runtime_gate::{
     LearnedProbeGuard, ProbeAdmissionSet, is_probe_request, log_probe_fast_fail,
 };
@@ -68,13 +70,13 @@ impl Deadline {
 }
 
 /// An attempt's deadline expired before its provider call resolved.
-pub(super) struct DeadlineFired(pub(super) Deadline);
+struct DeadlineFired(Deadline);
 
 impl DeadlineFired {
     /// The status-0 upstream error the walk records for the expired attempt,
     /// attributed to the config-key provider name the chain walks so it lines
     /// up with gate errors and `routectl_provider`, never `provider.id()`.
-    pub(super) fn error(self, provider_name: &str) -> Error {
+    fn error(self, provider_name: &str) -> Error {
         Error::upstream(provider_name, 0, (self.0.describe)(self.0.ms))
     }
 }
@@ -918,4 +920,244 @@ impl Router {
 
         Err(adapter.exhausted(last_err, &req.model))
     }
+}
+
+/// Run context reduction for one dispatch attempt: decide effectiveness,
+/// minify, stamp `meta.reduction_strategy`, accumulate the counter ledger,
+/// and emit the `context_reduction` debug log. Shared by the completion and
+/// streaming dispatch paths so both stay byte-identical and observe
+/// identically.
+///
+/// Must be called AFTER overlays and strictly BEFORE auto-cache so any
+/// auto-emitted breakpoint covers the REDUCED bytes. `apply_json_minify`
+/// computes the caller frozen floor itself (off this pre-auto-emit clone) and
+/// only touches the mutable tail; it fails closed (no mutation on any doubt).
+/// Effective only when the global switch is on AND the provider did not
+/// explicitly opt out (`None` inherits the global).
+///
+/// Call site invariant: ONCE per chain-entry preparation, OUTSIDE the
+/// same-target retry loop. A retry re-sends the request this call prepared,
+/// so counting inside that loop would bill the same removed bytes twice;
+/// walking to the next fallback entry prepares a fresh clone, which is a
+/// genuinely new measurement and aggregates.
+pub(super) fn apply_context_reduction(
+    config: &crate::config::Config,
+    provider_cfg: Option<&crate::config::ProviderEntry>,
+    provider_name: &str,
+    model: &str,
+    wire: Option<IngressDialect>,
+    attempt_req: &mut ChatRequest,
+    meta: &mut DispatchMeta,
+) {
+    let effective = config.reduction.enabled
+        && provider_cfg.and_then(crate::config::ProviderEntry::reduction_enabled) != Some(false);
+    let before = wire.map(|_| Arc::clone(&attempt_req.messages));
+    let outcome = if effective {
+        Some(apply_json_minify(attempt_req))
+    } else {
+        None
+    };
+    if let (Some(ReductionOutcome::Applied(_)), Some(before)) = (&outcome, &before) {
+        declare_reduction(attempt_req, wire, before);
+    }
+    let token = reduction_strategy_token(effective, outcome.as_ref());
+    meta.reduction_strategy = Some(token);
+    // Both payload-carrying outcomes describe a pass that actually examined
+    // the tail, so both feed the ledger: `NothingToStrip` is a measured zero
+    // for `strings_minified` / `bytes_saved` while still accounting for every
+    // skipped and rejected target. `NoMutableTail` examined nothing and a
+    // disabled pass never ran, so neither contributes -- the counters stay
+    // `None` unless some dispatched target reduced.
+    if let Some(ReductionOutcome::Applied(delta) | ReductionOutcome::NothingToStrip(delta)) =
+        &outcome
+    {
+        accumulate_reduction_counters(meta, delta);
+    }
+    if let Some(ReductionOutcome::Applied(delta)) = &outcome {
+        tracing::debug!(
+            provider = %routectl_core::sanitize_for_log(provider_name),
+            model = %routectl_core::sanitize_for_log(model),
+            strategy = token,
+            strings_minified = delta.strings_minified,
+            bytes_saved = delta.bytes_saved,
+            est_tokens_saved = delta.est_tokens_saved,
+            "context_reduction",
+        );
+    }
+}
+
+/// Fold one reduction pass's ledger into `meta`'s four counters.
+///
+/// Additive across the fallback-entry preparations of one chain walk: a
+/// `None` counter initializes from zero (so the first contributing entry
+/// leaves a measured value, including a measured `Some(0)`), and later
+/// entries saturate on top. Saturation over wrap keeps a counter monotone
+/// under any pathological chain length -- a pinned ceiling is readable
+/// evidence, a wrapped count is a lie.
+fn accumulate_reduction_counters(meta: &mut DispatchMeta, delta: &ReductionDelta) {
+    fn add(slot: &mut Option<u64>, n: usize) {
+        *slot = Some(slot.unwrap_or(0).saturating_add(n as u64));
+    }
+    add(
+        &mut meta.reduction_strings_compressed,
+        delta.strings_minified,
+    );
+    add(&mut meta.reduction_strings_skipped, delta.strings_skipped);
+    add(&mut meta.reduction_strings_rejected, delta.strings_rejected);
+    add(&mut meta.reduction_bytes_saved, delta.bytes_saved);
+}
+
+/// Map a context-reduction decision to its stable operator-facing token.
+/// These tokens are a CONTRACT (recorded in the usage DB and emitted in the
+/// `context_reduction` log): do not rename or repurpose them, only add new
+/// ones. The `skipped:` prefix groups the variants where reduction did not
+/// mutate the request.
+///
+/// | condition                          | token                     |
+/// |------------------------------------|---------------------------|
+/// | reduction not effective            | `skipped:disabled`        |
+/// | `ReductionOutcome::Applied`        | `applied`                 |
+/// | `ReductionOutcome::NoMutableTail`  | `skipped:no-tail`         |
+/// | `ReductionOutcome::NothingToStrip(_)` | `skipped:nothing-to-strip`|
+/// | unrecognized future outcome        | `skipped:unknown`         |
+///
+/// `effective == false` short-circuits to `skipped:disabled` WITHOUT calling
+/// `apply_json_minify`, so `outcome` is only consulted when reduction ran.
+pub(super) const fn reduction_strategy_token(
+    effective: bool,
+    outcome: Option<&ReductionOutcome>,
+) -> &'static str {
+    if !effective {
+        return "skipped:disabled";
+    }
+    match outcome {
+        Some(ReductionOutcome::Applied(_)) => "applied",
+        Some(ReductionOutcome::NoMutableTail) => "skipped:no-tail",
+        Some(ReductionOutcome::NothingToStrip(_)) => "skipped:nothing-to-strip",
+        // `ReductionOutcome` is `#[non_exhaustive]`; a future variant we do
+        // not yet map means reduction RAN but produced an outcome this build
+        // does not recognize -- which is distinct from "disabled", so record
+        // it as its own token. `None` only happens when `effective == false`,
+        // already handled above.
+        _ => "skipped:unknown",
+    }
+}
+
+/// The upstream status of a forwarded-credential auth/rate failure that
+/// is TERMINAL for a forwarded (pure-passthrough) request: 401
+/// (unauthorized), 403 (forbidden), 429 (rate limited). `None` for every
+/// other error class.
+///
+/// A request-scoped forwarded token has no refresh path (routectl cannot
+/// rotate a credential it does not own) and no sibling credential to fall
+/// back to, so on such a status the router must bypass BOTH the
+/// `on_auth_failure` refresh-and-retry AND the fallback-chain hop, and
+/// surface the upstream response verbatim -- Claude Code owns its own
+/// retry/backoff. Scoped to a forwarded TARGET ONLY: the caller gates
+/// this on the current dispatch target's `use_forwarded_credential`
+/// flag, so a coexisting own-credential target in the same chain keeps
+/// the existing one-shot auth-refresh + fallback behavior unchanged.
+/// Same-request TRANSPORT retries (5xx / network / status-0, which
+/// reuse the same token) are NOT in this set, so they fall through to
+/// the normal predicates untouched. Pattern-mirrors
+/// `probe_fast_fail_status`: a pure decision helper; the caller owns
+/// the `return` that short-circuits.
+pub(super) const fn forwarded_terminal_status(err: &Error) -> Option<u16> {
+    match err {
+        Error::Upstream {
+            status: s @ (401 | 403 | 429),
+            ..
+        } => Some(*s),
+        _ => None,
+    }
+}
+
+/// WARN when a forwarded-token upstream auth/rate failure is surfaced
+/// verbatim (terminal: no refresh-retry, no fallback hop). SAFE
+/// dimensions ONLY: the upstream `status`, a fixed `credential_source`
+/// token, and a boolean derived from whether an inbound session key was
+/// captured -- NEVER the forwarded token itself, in a field or the
+/// message. Mirrors `log_probe_fast_fail`: log-only, the caller owns the
+/// short-circuiting `return`.
+pub(super) fn log_forwarded_auth_terminal(status: u16, has_client_session_id: bool) {
+    tracing::warn!(
+        status,
+        credential_source = "forwarded",
+        has_client_session_id,
+        "forwarded-token upstream auth failure surfaced verbatim; \
+         bypassing on_auth_failure refresh and provider fallback",
+    );
+}
+
+/// Missing-bearer terminal guard. `None` when `target` does not use a
+/// forwarded credential, or the client's bearer WAS captured; `Some`
+/// carries a clean terminal [`Error::Validation`] for the caller to
+/// return immediately -- BEFORE any upstream touch of this target.
+///
+/// A forwarded target with no captured bearer (seam header absent,
+/// capture gates closed, or the client simply never sent an
+/// `Authorization` header) has no credential to authenticate with; an
+/// upstream dispatch would either fail with a confusing anonymous
+/// request or -- worse -- silently succeed against the wrong identity
+/// if the egress falls back to some other implicit auth. Refusing here
+/// gives the client an unambiguous 4xx instead of a passed-through
+/// upstream 401. Per-target (the caller checks this inside the chain
+/// loop, once per target about to be dispatched), so a mixed chain that
+/// never reaches a forwarded target is unaffected. Emits a WARN with
+/// SAFE dimensions only (reason, credential_source, provider_kind --
+/// never the token, host, or provider name), mirroring the shape of the
+/// deleted whole-chain gate's refusal log.
+pub(super) fn missing_forwarded_bearer_error(
+    target: &DispatchTarget,
+    req: &ChatRequest,
+) -> Option<Error> {
+    if !target.use_forwarded_credential || req.routectl_internal.forwarded_bearer.is_some() {
+        return None;
+    }
+    tracing::warn!(
+        reason = "missing_forwarded_bearer",
+        credential_source = "forwarded",
+        provider_kind = target.provider_kind.unwrap_or("unknown"),
+        "forwarded target has no captured client bearer; refusing before egress",
+    );
+    Some(Error::Validation(
+        "forwarded target has no captured client bearer to authenticate this request \
+         (reason=missing_forwarded_bearer)"
+            .to_string(),
+        RefusalReason::ForwardedBearerMissing,
+    ))
+}
+
+pub(super) fn add_jitter(base: Duration, jitter_ms: u64) -> Duration {
+    if jitter_ms == 0 {
+        return base;
+    }
+    // Non-cryptographic jitter from the wall clock's sub-millisecond
+    // bits. Suitable for retry-spreading; not for anything else.
+    use std::time::SystemTime;
+    let nanos = SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos() as u64);
+    base.saturating_add(Duration::from_millis(nanos % jitter_ms))
+}
+
+pub(super) fn mul_duration(d: Duration, factor: f64) -> Duration {
+    let nanos = d.as_nanos() as f64 * factor;
+    Duration::from_nanos(nanos.min(u64::MAX as f64) as u64)
+}
+
+/// Whether the chain entry AFTER `chain_idx` is another seat of the SAME
+/// pooled model as `target` -- i.e. a sibling seat a probe may fail over to
+/// before fast-failing. All seats of one pool share the model `Arc`
+/// (`dispatch_target_for_seat` clones the same `Arc<ResolvedModel>`), while
+/// distinct chain entries carry distinct model Arcs, so pointer identity is
+/// the exact same-pool discriminant.
+pub(super) fn next_is_sibling_seat(
+    chain: &[DispatchTarget],
+    chain_idx: usize,
+    target: &DispatchTarget,
+) -> bool {
+    chain
+        .get(chain_idx + 1)
+        .is_some_and(|next| std::sync::Arc::ptr_eq(&next.model, &target.model))
 }

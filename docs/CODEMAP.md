@@ -2665,7 +2665,13 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   committed attempt hands the adapter. Boolean surface differences are
   `const fn` rows on `class_observe::DispatchSurface`
   (`strict_reject_walks`, `unknown_provider_walks`, `health_error_walks`,
-  `sleeps_between_attempts`, `records_success_on_commit`)
+  `sleeps_between_attempts`, `records_success_on_commit`). Also owns the
+  walk's shared shaping and retry helpers: `apply_context_reduction` (+
+  `reduction_strategy_token`), the forwarded-credential guards
+  (`missing_forwarded_bearer_error`, `forwarded_terminal_status`,
+  `log_forwarded_auth_terminal`), `add_jitter`/`mul_duration` and
+  `next_is_sibling_seat`; `dispatch` and `count_tokens` import them from
+  here, and the loop imports nothing from `dispatch`
 - `src/router/dispatch.rs` -- the dispatch retry state machine (the module
   exempt from the line-size target: `complete`/`stream` are one retry loop and
   the lossy-trim live-cut lands here). Public API:
@@ -2677,7 +2683,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   and then walk the resolved
   chain (from `chain::dispatch_chain_for_request`) attempting each
   `DispatchTarget`, retrying within a provider per `RetryPolicy` with
-  exponential backoff (`add_jitter`/`mul_duration`); both error arms take
+  exponential backoff (`dispatch_loop::add_jitter`/`mul_duration`); both error arms take
   their park/debit decision from `outcome_rule` (`breaker_outcome`, applied
   through `apply_breaker_outcome`), and the complete arm also takes its
   same-provider retry from it (a small honored reset becomes the next sleep's floor; a
@@ -2699,9 +2705,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   attempt; `policy_for` + `compose_attempt_policy` resolve the per-attempt
   policy. Failure-class routing threads
   `routectl_core::failure_class::classify` through every error arm:
-  `apply_remap(native, status, overrides)` (status via
+  `class_observe::apply_remap(native, status, overrides)` (status via
   `upstream_status_for_remap`) applies the target's `class_overrides` keeping
-  the native `matched_by`, then `should_fallback` (with
+  the native `matched_by`, then `outcome_rule::should_fallback` (with
   `probe_fast_fail_status`, shared with `outcome_rule`) decides the chain hop
   and `outcome_rule` the breaker and same-provider retry outcome. Class-decision
   observability: `emit_class_observability` emits one `emit_class_decision`
@@ -2737,7 +2743,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   it already computes, so the evidence lands on every dispatched attempt
   rather than only on trim-triggering ones (last-writer-wins across a chain
   walk leaves the served attempt's estimate). The
-  dispatch-path context reducer (`apply_context_reduction`, the single helper
+  dispatch-path context reducer (`dispatch_loop::apply_context_reduction`, the single helper
   both the completion and streaming loops call: `apply_json_minify` +
   `reduction_strategy_token` -> `DispatchMeta.reduction_strategy`, plus
   `accumulate_reduction_counters` folding the pass's `ReductionDelta` into the
@@ -2745,7 +2751,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `reduction_bytes_saved` counters -- additive across fallback-entry
   preparations, never re-counted by a same-target retry) runs after
   overlays and before the TRANSACTIONAL auto-cache placement helper
-  `apply_auto_cache_placement` -- shared by both dispatch surfaces, gated by
+  `cache_plan::apply_auto_cache_placement` -- shared by both dispatch surfaces, gated by
   `cache_plan::AutoCacheRequestPlan` plus the per-target `cache_target_gates`
   (`CacheTargetGates`: terminal capability + switch, front wire-support +
   switch), applying the FRONT per-block marker
@@ -2758,12 +2764,12 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `count_tokens`. The same above-the-loop position also hosts the
   once-per-client-request `prefix_rewrite::Router::observe_prefix_epoch` call on
   both paths. Forwarded-credential handling:
-  `missing_forwarded_bearer_error` refuses a `use_forwarded_credential` target
+  `dispatch_loop::missing_forwarded_bearer_error` refuses a `use_forwarded_credential` target
   with no client bearer BEFORE egress and ends the request (the one terminal
   pre-dispatch refusal: a strict strip refusal, a rolled-back strip hazard and
   the Gemini pairing refusal leave the target unsent and walk on),
   `resolve_reported_model` keeps the
-  client's requested model verbatim, and `forwarded_terminal_status` +
+  client's requested model verbatim, and `dispatch_loop::forwarded_terminal_status` +
   `log_forwarded_auth_terminal` surface a 401/403/429 on a forwarded
   credential verbatim (no refresh, no fallback). The class/remap helpers are
   `pub(super)`, shared with `count_tokens` and `feature_filter`; the pure
@@ -2773,7 +2779,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   strip-repair branch lives here too: a fixed one-shot correctness arm
   (bounded additive, never nested across fallback) that on a classified
   replay rejection admits via `replay_repair`, swaps to the stripped variant,
-  and retries once; `replay_rejection_body_free` rebuilds the rejection with
+  and retries once; `replay_repair::replay_rejection_body_free` rebuilds the rejection with
   no upstream body before generic logging, and `emit_replay_degradation`
   (`pub(super)`, also called by the token-count walk) fires one degradation
   WARN per recorded repair, each carrying the request's `repair_count`. Within `run_walk` and `stream_inner`
@@ -2804,7 +2810,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `DispatchMeta.cleared_capabilities`, unsettled `Drop` on an unrelated error)
   and records each repair in `DispatchMeta.replay_degradations` through
   `record_replay_repair` -> `ReplayRepairHandle`, settled by
-  `settle_replay_repair`; owns
+  `settle_replay_repair`; owns `replay_rejection_body_free` (the body-free
+  rebuild of a classified replay rejection, shared by the walks and the
+  learner) and
   `strip_replay_artifacts_recalibrating`, THE dispatch-path strip entry point,
   which re-stamps `DispatchMeta.calib_estimated_tokens` whenever a strip
   actually shrank the payload. The raw lane-directional strip it wraps is
@@ -3275,7 +3283,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `UpstreamFacts` (+ `upstream_facts`, the safe-facts extractor that carries
   only numeric status and structured classifier tokens, never
   body/prompt/header/Display text), `class_label` (fail-closed low-cardinality
-  `FailureClass` token), and `matched_by_label`. All `pub(super)`, imported by
+  `FailureClass` token), `matched_by_label`, and the per-provider class
+  remap (`upstream_status_for_remap`, `apply_remap`). All `pub(super)`, imported by
   `dispatch`, `count_tokens`, and `feature_filter`; the shared leaf keeps
   `feature_filter` from importing out of `dispatch`, so the import edge
   between them is one-way
@@ -4152,7 +4161,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   persists a `cleared` ledger row and a warm rebuild removes the same resident
   negative on boot rather than resurrecting it; NO ledger write here,
   mirroring `CapabilityLearnEvent` / `CapabilityObserveEvent`
-- `src/router/cache_plan.rs` -- the pure-read auto-cache request plan:
+- `src/router/cache_plan.rs` -- the pure-read auto-cache request plan and
+  the transactional per-attempt placement it feeds (`cache_target_gates` ->
+  `CacheTargetGates`, `apply_auto_cache_placement`, `place_front_marker`):
   `AutoCacheRequestPlan` (per-request frozen-floor / volatile-veto /
   global-switch gate plus the `front_slot: Option<FrontSlot>` anchor fact
   from `front_breakpoint_slot`, built once), `CacheInjection` (variants ->
@@ -4164,7 +4175,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   identity is documented per-TARGET, not per-request: a session-derived
   verdict is deliberately NOT a plan field. The
   placement CALL (`apply_auto_cache_placement`) stays in the dispatch
-  module
+  walk
 - `src/router/precontent.rs` -- content-free labels for chunks the
   streaming pre-content guard buffers: `is_empty_reasoning_only` (the
   uncounted single-choice thinking-liveness shape), `precontent_kind` (role >
@@ -4230,7 +4241,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   only a non-probe hint above the cap) and `same_provider_retry(surface, ..) -> SameProvider { No, Retry {
   sleep_floor } }` (streams and token counts never retry the same provider; a
   completion retries under the hard cap and the class predicate unless the
-  attempt parked)
+  attempt parked); `should_fallback` (the chain-hop predicate: probe fast-fail
+  and transcript rejections stay, an unknown provider always walks)
 - `src/router/runtime_gate.rs` -- breaker/RPM gate + probe-slot admission
   RAII: `admit_dispatch`/`admit_probe_dispatch` (admission returns the
   half-open ownership guard, which also carries the seat's credential

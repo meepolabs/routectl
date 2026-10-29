@@ -37,11 +37,12 @@ use std::time::Instant;
 use routectl_core::capability::REASONING_REPLAY;
 use routectl_core::failure_class::{FailureClass, ReplayAttempt};
 use routectl_core::{
-    ChatRequest, ReasoningDetail, ReplayScheme, Replayability, is_replayable, scheme_of,
+    ChatRequest, Error, ReasoningDetail, ReplayScheme, Replayability, is_replayable, scheme_of,
 };
 
 use crate::learned_replay::{ReplayLearnKey, ReplayProbeGuard};
 
+use super::class_observe::upstream_facts;
 use super::edit_declare::{declare_replay_strip, replay_strip_ids};
 use super::{
     CapabilityClearedEvent, CapabilityLearnEvent, DispatchMeta, DispatchTarget, ReplayDegradation,
@@ -338,6 +339,33 @@ fn nonportable_schemes(req: &ChatRequest, lane: ReplayScheme) -> Vec<ReplaySchem
 
 fn is_portable(format: Option<&str>, lane: ReplayScheme) -> bool {
     matches!(is_replayable(scheme_of(format), lane), Replayability::Carry)
+}
+
+/// A body-free rebuild of a classified reasoning-replay rejection, or
+/// `None` when the class is anything else (leaving the original error
+/// untouched -- no clone on the common path). The upstream body of a
+/// replay rejection is a rejection envelope that can echo a reasoning
+/// artifact fragment, and the generic retry/fallback logs below
+/// debug-render the `Error`. The rebuilt `Upstream` keeps the status and
+/// the already-structured classifier tokens every downstream consumer
+/// reads, dropping ONLY the body.
+pub(super) fn replay_rejection_body_free(
+    err: &Error,
+    class: &FailureClass,
+    provider: &str,
+) -> Option<Error> {
+    if !Router::is_replay_rejection_class(class) {
+        return None;
+    }
+    let facts = upstream_facts(err);
+    Some(Error::upstream_full(
+        provider,
+        facts.status.unwrap_or(0),
+        "",
+        None,
+        facts.upstream_type.map(str::to_string),
+        facts.upstream_code.map(str::to_string),
+    ))
 }
 
 #[cfg(test)]

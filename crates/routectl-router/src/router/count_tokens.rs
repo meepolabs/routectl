@@ -49,12 +49,14 @@ use routectl_core::{ChatRequest, Error, Result, TokenCount, sanitize_for_log};
 use super::beta_report_learn::install_beta_assembly;
 use super::capability_learn::LearnDedupeKey;
 use super::capability_observe::UntranslatedCapabilities;
-use super::class_observe::{DispatchSurface, class_label, matched_by_label, upstream_facts};
-use super::credential_park::{log_gate_refusal, merge_gate_refusal};
-use super::dispatch::{
-    apply_remap, emit_replay_degradation, forwarded_terminal_status, is_capability_error,
-    log_forwarded_auth_terminal, missing_forwarded_bearer_error, replay_rejection_body_free,
+use super::class_observe::{
+    DispatchSurface, apply_remap, class_label, matched_by_label, upstream_facts,
     upstream_status_for_remap,
+};
+use super::credential_park::{log_gate_refusal, merge_gate_refusal};
+use super::dispatch::{emit_replay_degradation, is_capability_error};
+use super::dispatch_loop::{
+    forwarded_terminal_status, log_forwarded_auth_terminal, missing_forwarded_bearer_error,
 };
 use super::field_preflight::emit_field_preflight;
 use super::field_repair::{FieldSettlementMode, emit_field_repair};
@@ -62,6 +64,7 @@ use super::learn_engine::{AttemptLearning, FailureDecision, Rejection};
 use super::local_refusal::ingress_dialect_of;
 use super::outcome_rule::{BreakerOutcome, breaker_outcome, rate_limit_reset_hint};
 use super::repair_budget::RepairBudget;
+use super::replay_repair::replay_rejection_body_free;
 use super::runtime_gate::{LearnedProbeGuard, is_probe_request};
 use super::transcript_defect::{is_transcript_rejection, record_transcript_defect};
 use super::{

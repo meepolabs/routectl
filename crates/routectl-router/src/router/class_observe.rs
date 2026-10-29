@@ -5,8 +5,10 @@
 //! excludes any body, prompt, header, token, or free-form upstream message
 //! text so nothing sensitive can leak into an observability field.
 
+use std::collections::BTreeMap;
+
 use routectl_core::Error;
-use routectl_core::failure_class::{FailureClass, MatchedBy};
+use routectl_core::failure_class::{ClassifiedFailure, FailureClass, MatchedBy};
 
 /// Which dispatch surface an error arm belongs to. Carried as a stable
 /// `surface` field on the router's class-decision observability events so
@@ -141,5 +143,40 @@ pub(super) const fn matched_by_label(matched_by: MatchedBy) -> &'static str {
         MatchedBy::Variant => "variant",
         MatchedBy::Status => "status",
         MatchedBy::UpstreamType => "upstream_type",
+    }
+}
+
+/// The upstream HTTP status carried by `err`, for the per-provider class
+/// remap lookup ONLY: `Some` for an [`Error::Upstream`] status in
+/// `400..=599`, `None` for status 0 and every non-upstream variant. This
+/// seam consults the target's own `class_overrides`, never `policy`.
+pub(super) fn upstream_status_for_remap(err: &Error) -> Option<u16> {
+    match err {
+        Error::Upstream { status, .. } if (400..=599).contains(status) => Some(*status),
+        _ => None,
+    }
+}
+
+/// Apply the operator's per-provider status remap on top of the
+/// classifier's native decision. A `status` that keys into `overrides`
+/// replaces the class with the operator's override, keeping the NATIVE
+/// `matched_by` -- the remap changes WHICH class was decided, not HOW the
+/// classifier itself matched. No status, or no matching key (including
+/// the empty-map default), returns `native` unchanged. Returns the
+/// effective `ClassifiedFailure` plus whether a remap fired.
+pub(super) fn apply_remap(
+    native: ClassifiedFailure,
+    status: Option<u16>,
+    overrides: &BTreeMap<u16, FailureClass>,
+) -> (ClassifiedFailure, bool) {
+    match status.and_then(|s| overrides.get(&s)) {
+        Some(class) => (
+            ClassifiedFailure {
+                class: class.clone(),
+                matched_by: native.matched_by,
+            },
+            true,
+        ),
+        None => (native, false),
     }
 }

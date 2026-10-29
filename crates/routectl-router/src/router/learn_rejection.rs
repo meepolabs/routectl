@@ -8,11 +8,11 @@ use routectl_core::ChatRequest;
 use routectl_core::wire_check::EditSite;
 
 use super::super::DispatchMeta;
-use super::super::dispatch::replay_rejection_body_free;
 use super::super::field_repair::{is_ranked, rejected_field};
 use super::super::learn_revert::answer_declared_edit;
 use super::super::rejection_parser::NamedRejection;
 use super::super::repair_budget::RepairBudget;
+use super::super::replay_repair::replay_rejection_body_free;
 use super::learn_beta_repair::EngineSink;
 use super::{
     Arbitration, AttemptLearning, FailureDecision, Rejection, RejectionInput, RejectionSite,

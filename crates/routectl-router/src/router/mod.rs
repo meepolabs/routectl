@@ -3277,9 +3277,11 @@ use chain::{dispatch_target_for_seat, into_one_dispatch_target};
 #[cfg(test)]
 use class_observe::DispatchSurface;
 #[cfg(test)]
-use dispatch::{should_fallback, would_trim_k_floor_for_meta};
+use dispatch::would_trim_k_floor_for_meta;
 #[cfg(test)]
 use futures::stream::StreamExt;
+#[cfg(test)]
+use outcome_rule::should_fallback;
 #[cfg(test)]
 use outcome_rule::{retry_cap_for, should_retry_same_provider};
 #[cfg(test)]

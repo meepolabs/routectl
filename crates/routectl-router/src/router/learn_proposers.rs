@@ -9,10 +9,10 @@ use crate::capability_matcher::resolve_requested_capability;
 
 use super::Router;
 use super::class_observe::upstream_facts;
-use super::dispatch::replay_rejection_body_free;
 use super::field_repair::rejected_field;
 use super::learn_engine::{Proposal, Proposer, RejectionInput, RejectionSite};
 use super::rejection_parser::rejected_beta_flags;
+use super::replay_repair::replay_rejection_body_free;
 
 /// Proposes the reasoning-replay strip when the attempt carried replay
 /// artifacts and the EFFECTIVE (remapped) class is the proven replay
