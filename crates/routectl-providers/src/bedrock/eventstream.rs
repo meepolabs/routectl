@@ -729,45 +729,49 @@ mod tests {
         }
     }
 
-    /// A frame with a corrupted `total_length` causes smithy to
-    /// return Err. Without the recovery this would kill the stream.
-    /// Instead, we emit a WARN with hex dump, skip exactly the
-    /// advertised length (or clear buffer if smaller), reset the
-    /// decoder, and continue. The next valid frame yields normally.
+    /// A bad-CRC frame mid-stream ends the Invoke stream with a
+    /// client-visible streaming error. The text delta before it is
+    /// emitted; the identically shaped delta after it never is.
     #[tokio::test]
-    async fn malformed_frame_skip_continues_stream() {
-        // Build a valid frame, then corrupt its CRC bytes (the last
-        // 4 bytes) so smithy fails its CRC check on decode.
-        let inner = r#"{"type":"ping"}"#;
-        let b64 = B64_STANDARD.encode(inner.as_bytes());
-        let payload = format!(r#"{{"bytes":"{b64}"}}"#);
-        let frame_good = make_frame("chunk", &payload);
-        let mut buf_good = Vec::new();
-        aws_smithy_eventstream::frame::write_message_to(&frame_good, &mut buf_good).unwrap();
+    async fn malformed_frame_ends_stream_with_error() {
+        let text_frame = |text: &str| -> Vec<u8> {
+            let inner = format!(
+                r#"{{"type":"content_block_delta","index":0,"delta":{{"type":"text_delta","text":"{text}"}}}}"#
+            );
+            let b64 = B64_STANDARD.encode(inner.as_bytes());
+            let payload = format!(r#"{{"bytes":"{b64}"}}"#);
+            let mut buf = Vec::new();
+            aws_smithy_eventstream::frame::write_message_to(
+                &make_frame("chunk", &payload),
+                &mut buf,
+            )
+            .unwrap();
+            buf
+        };
+        let mut bad = text_frame("lost");
+        let n = bad.len();
+        bad[n - 4] ^= 0xFF;
+        bad[n - 3] ^= 0xFF;
 
-        // Corrupt frame: same total_length, but flip the message CRC
-        // bytes (last 4 bytes of the frame). Smithy's frame decoder
-        // reads the message-CRC at the end and Errors on mismatch,
-        // exercising the skip path.
-        let mut buf_bad = buf_good.clone();
-        let n = buf_bad.len();
-        buf_bad[n - 4] ^= 0xFF;
-        buf_bad[n - 3] ^= 0xFF;
+        let mut wire = text_frame("before");
+        wire.extend_from_slice(&bad);
+        wire.extend_from_slice(&text_frame("after"));
+        let byte_stream = futures::stream::iter(vec![Ok(Bytes::from(wire))]);
+        let items: Vec<_> = invoke_stream("test-bedrock".to_string(), byte_stream)
+            .collect()
+            .await;
 
-        // Sequence: bad frame, good frame.
-        let mut combined = buf_bad;
-        combined.extend_from_slice(&buf_good);
-        let byte_stream = futures::stream::iter(vec![Ok(Bytes::from(combined))]);
-        let mut chunks = invoke_stream("test-bedrock".to_string(), byte_stream);
-
-        // We should NOT see an Err from the stream -- the bad frame
-        // is skipped (with a WARN) and the good frame's `ping`
-        // produces no chunks but doesn't fail. Without the recovery
-        // this would yield an Err on the bad frame's CRC mismatch.
-        while let Some(item) = chunks.next().await {
-            if let Err(e) = item {
-                panic!("regression: stream errored instead of skipping: {e:?}");
+        let texts: Vec<String> = items
+            .iter()
+            .filter_map(|i| i.as_ref().ok())
+            .filter_map(|c| c.choices.first()?.delta.content.clone())
+            .collect();
+        assert_eq!(texts, vec!["before".to_string()], "items: {items:?}");
+        match items.last() {
+            Some(Err(Error::Streaming(msg))) => {
+                assert!(msg.contains("frame decode failed"), "got: {msg}");
             }
+            other => panic!("stream must end with a decode error; got {other:?}"),
         }
     }
 

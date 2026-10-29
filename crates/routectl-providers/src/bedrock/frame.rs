@@ -10,9 +10,9 @@
 //! AWS event objects).
 //!
 //! This module owns the byte loop, the prelude/length/DoS invariants,
-//! the decode-error recovery, the EOF truncation checks, and -- crucially
-//! -- the log-hygiene policy on the error-skip path (prelude-only at
-//! WARN, full payload hex only at TRACE). Centralizing the policy here
+//! the fail-closed handling of frame decode errors, the EOF truncation
+//! checks, and -- crucially -- the log-hygiene policy on the decode-error
+//! path (prelude-only at WARN, full payload hex only at TRACE). Centralizing the policy here
 //! keeps it from drifting between the two decoders. Per-provider code
 //! receives a decoded, validated `Message` and never touches raw frame
 //! bytes.
@@ -93,10 +93,17 @@ impl FrameLabel {
         }
     }
 
-    const fn warn_skip(self) -> &'static str {
+    const fn warn_decode_failed(self) -> &'static str {
         match self {
-            Self::Invoke => "bedrock eventstream frame decode failed; skipping frame",
-            Self::Converse => "bedrock converse-stream frame decode failed; skipping frame",
+            Self::Invoke => "bedrock eventstream frame decode failed; ending stream",
+            Self::Converse => "bedrock converse-stream frame decode failed; ending stream",
+        }
+    }
+
+    fn decode_failed(self, e: &impl std::fmt::Display) -> String {
+        match self {
+            Self::Invoke => format!("bedrock eventstream frame decode failed: {e}"),
+            Self::Converse => format!("bedrock converse-stream frame decode failed: {e}"),
         }
     }
 
@@ -238,8 +245,13 @@ fn truncate_on_char_boundary(s: &str, max: usize) -> String {
 /// Drive an AWS-eventstream byte stream through a per-provider handler,
 /// emitting `ChatChunk`s. Partial frames buffer internally until enough
 /// bytes arrive; the advertised-length DoS guard, prelude-tracking, and
-/// decode-error recovery all live here so both Bedrock egresses share one
+/// decode-error handling all live here so both Bedrock egresses share one
 /// hardened implementation.
+///
+/// Any frame decode or CRC failure ends the stream with
+/// `Error::Streaming`. The eventstream has no resync marker and HTTP body
+/// chunk boundaries do not align with frame boundaries, so after a bad
+/// frame there is no trustworthy position to resume from.
 pub fn decode_frames<S, H>(
     provider_id: String,
     byte_stream: S,
@@ -350,29 +362,6 @@ where
                         break;
                     }
                     Err(e) => {
-                        // Skip the failed frame instead of killing the
-                        // stream. A single transient bad frame should not
-                        // conflate with a stream-wide failure and force the
-                        // client to restart the whole response.
-                        //
-                        // Recovery: read the advertised `total_length` from
-                        // `buffer[0..4]` (already DoS-capped at the top of
-                        // the loop), drain that many bytes (or clear the
-                        // whole buffer if it's smaller than the advertised
-                        // length), reset the decoder, and continue.
-                        //
-                        // When `smithy_has_prelude_buffered` is true, smithy
-                        // already consumed the 12-byte prelude on a prior
-                        // Incomplete return and we drained it from `buffer`.
-                        // So `buffer[0..4]` is now the START OF THE HEADERS
-                        // section, NOT a frame `total_length` -- reading it
-                        // as an advertised length yields garbage and would
-                        // drive a mis-aligned `split_to`. In that state the
-                        // only safe recovery is to clear the buffer (treat
-                        // advertised as 0); the upstream marks a new frame
-                        // boundary on the next send, so at most one extra
-                        // frame is lost.
-                        //
                         // Log hygiene: the 12-byte prelude (always
                         // non-content: total_length, headers_length,
                         // prelude_crc) is safe to emit at WARN for
@@ -380,6 +369,9 @@ where
                         // carry model output and must NOT go to a
                         // third-party log SaaS at WARN; it is gated at TRACE
                         // instead.
+                        //
+                        // Once smithy holds the prelude internally,
+                        // `buffer[0..4]` is header bytes, not a length.
                         let advertised = if !smithy_has_prelude_buffered && buffer.len() >= 4 {
                             u32::from_be_bytes([
                                 buffer[0], buffer[1], buffer[2], buffer[3],
@@ -387,7 +379,6 @@ where
                         } else {
                             0
                         };
-                        // Log only the 12-byte prelude at WARN.
                         let prelude_len = 12_usize.min(buffer.len());
                         let prelude_hex: String = buffer[..prelude_len]
                             .iter()
@@ -400,11 +391,8 @@ where
                             frame_len = advertised,
                             prelude_hex = %prelude_hex,
                             "{}",
-                            label.warn_skip()
+                            label.warn_decode_failed()
                         );
-                        // Full hex dump (up to 256 bytes) at TRACE only, so
-                        // payload bytes never reach a third-party log SaaS
-                        // by default.
                         if tracing::enabled!(tracing::Level::TRACE) {
                             let dump_len = advertised.min(256).min(buffer.len());
                             let hex: String = buffer[..dump_len]
@@ -420,25 +408,8 @@ where
                                 label.trace_dump()
                             );
                         }
-
-                        // Skip past the failed frame.
-                        if advertised > 0 && buffer.len() >= advertised {
-                            // Full malformed frame in buffer -- drain
-                            // exactly the advertised length so frame N+1
-                            // stays aligned.
-                            let _ = buffer.split_to(advertised);
-                        } else {
-                            // Partial or zero-length: drop everything we
-                            // have. The upstream marks a new frame boundary
-                            // on every send, so the worst case is one extra
-                            // frame lost.
-                            buffer.clear();
-                        }
-                        // Reset the decoder so its internal `prelude_read`
-                        // state and our flag align.
-                        decoder = MessageFrameDecoder::new();
-                        smithy_has_prelude_buffered = false;
-                        continue;
+                        yield Err(Error::Streaming(label.decode_failed(&e)));
+                        return;
                     }
                 }
             }
@@ -791,64 +762,83 @@ mod tests {
         );
     }
 
-    /// A frame that splits at the 12-byte prelude boundary and then
-    /// delivers corrupt continuation bytes drives smithy's `decode_frame`
-    /// into its `Err` arm while we have already drained the prelude
-    /// (`smithy_has_prelude_buffered == true`). In that state `buffer[0..4]`
-    /// is the HEADERS section, not a frame `total_length`, so the recovery
-    /// must NOT read it as an advertised length. The fix forces
-    /// `advertised = 0` whenever the prelude is buffered, so the recovery
-    /// clears the buffer and realigns on the next frame boundary instead of
-    /// `split_to`-ing a garbage count.
-    ///
-    /// This test exercises that exact code path (corrupt body after a
-    /// prelude-only chunk) and asserts the driver recovers -- it neither
-    /// panics nor surfaces a fatal error, and a following intact frame
-    /// still reaches the handler. It does NOT assert the precise byte count
-    /// drained on recovery: the old (buggy) and new code both eventually
-    /// re-sync because the upstream marks a fresh frame boundary on each
-    /// send, so the only observable difference is "one extra frame lost"
-    /// under specific garbage-length values -- a best-effort recovery
-    /// property, not a hard alignment invariant, and not cleanly
-    /// distinguishable without coupling to smithy's internal CRC behavior.
-    #[tokio::test]
-    async fn error_with_prelude_buffered_recovers_cleanly() {
-        // A valid frame, split so chunk 1 is exactly the 12-byte prelude.
-        let good = encode("messageStart", r#"{"role":"assistant"}"#);
-        assert!(good.len() > 12, "frame must exceed its 12B prelude");
-        let prelude = &good[..12];
-        // Corrupt continuation: same LENGTH as the real frame body (so
-        // smithy attempts a full decode rather than waiting for more
-        // bytes) but byte-flipped so the trailing message CRC fails and
-        // decode_frame returns Err while smithy_has_prelude_buffered is
-        // true.
-        let corrupt_tail: Vec<u8> = good[12..].iter().map(|b| b ^ 0xFF).collect();
-        // A following intact frame must still reach the handler after
-        // recovery realigns the buffer.
-        let recovery = encode("messageStop", r#"{"stopReason":"end_turn"}"#);
-
-        let byte_stream = futures::stream::iter(vec![
-            Ok(Bytes::copy_from_slice(prelude)),
-            Ok(Bytes::from(corrupt_tail)),
-            Ok(Bytes::from(recovery)),
-        ]);
-
+    /// Drain `decode_frames` and return every item it yielded plus the
+    /// event-types that reached the handler.
+    async fn run_driver(
+        chunks: Vec<Vec<u8>>,
+        label: FrameLabel,
+    ) -> (Vec<Result<ChatChunk>>, Vec<String>) {
+        let byte_stream = futures::stream::iter(chunks.into_iter().map(|c| Ok(Bytes::from(c))));
         let (tx, rx) = std::sync::mpsc::channel();
         let handler = RecordingHandler { tx };
-        let mut chunks =
-            decode_frames("test".to_string(), byte_stream, handler, FrameLabel::Invoke);
+        let items: Vec<_> = decode_frames("test".to_string(), byte_stream, handler, label)
+            .collect()
+            .await;
+        (items, rx.try_iter().collect())
+    }
 
-        // The corrupt frame is skipped (no fatal error reaches the client).
-        while let Some(item) = chunks.next().await {
-            if let Err(e) = item {
-                panic!("decode-error recovery must not surface a fatal error: {e:?}");
+    /// A frame whose message CRC is flipped: structurally intact, so the
+    /// decoder reads it in full and fails on the checksum.
+    fn encode_with_bad_crc(event_type: &str, payload_json: &str) -> Vec<u8> {
+        let mut buf = encode(event_type, payload_json);
+        let n = buf.len();
+        buf[n - 4] ^= 0xFF;
+        buf[n - 3] ^= 0xFF;
+        buf
+    }
+
+    fn assert_single_decode_error(items: &[Result<ChatChunk>], label_fragment: &str) {
+        assert_eq!(items.len(), 1, "expected exactly one item, got {items:?}");
+        match &items[0] {
+            Err(Error::Streaming(msg)) => {
+                assert!(msg.contains("frame decode failed"), "got: {msg}");
+                assert!(msg.contains(label_fragment), "label not applied: {msg}");
             }
+            other => panic!("expected Streaming decode error, got {other:?}"),
         }
-        let seen: Vec<String> = rx.try_iter().collect();
-        assert!(
-            seen.contains(&"messageStop".to_string()),
-            "after a prelude-buffered decode error, the next intact frame \
-             must still decode; got {seen:?}"
-        );
+    }
+
+    /// Corrupt continuation bytes after a prelude-only chunk fail the
+    /// decode while the prelude is already held by the decoder. The stream
+    /// must end with the error; the intact frame in the next chunk must
+    /// never reach the handler.
+    #[tokio::test]
+    async fn decode_error_with_prelude_buffered_ends_stream() {
+        let good = encode("messageStart", r#"{"role":"assistant"}"#);
+        assert!(good.len() > 12, "frame must exceed its 12B prelude");
+        let prelude = good[..12].to_vec();
+        let corrupt_tail: Vec<u8> = good[12..].iter().map(|b| b ^ 0xFF).collect();
+        let after = encode("messageStop", r#"{"stopReason":"end_turn"}"#);
+
+        let (items, seen) =
+            run_driver(vec![prelude, corrupt_tail, after], FrameLabel::Invoke).await;
+
+        assert_single_decode_error(&items, "eventstream frame");
+        assert!(seen.is_empty(), "no frame may reach the handler: {seen:?}");
+    }
+
+    /// A bad-CRC frame followed by a valid frame split mid-body across two
+    /// chunks ends the stream at the bad frame; no part of the following
+    /// frame is parsed or handed to the handler. One row per label because
+    /// the label is the only lane-specific input to the driver.
+    #[tokio::test]
+    async fn bad_crc_frame_ends_stream_before_split_following_frame() {
+        let cases = [
+            ("invoke", FrameLabel::Invoke, "eventstream frame"),
+            ("converse", FrameLabel::Converse, "converse-stream frame"),
+        ];
+        for (row, label, fragment) in cases {
+            let bad = encode_with_bad_crc("contentBlockDelta", r#"{"text":"lost"}"#);
+            let next = encode("contentBlockDelta", r#"{"text":"after"}"#);
+            let (head, tail) = next.split_at(next.len() / 2);
+
+            let (items, seen) = run_driver(vec![bad, head.to_vec(), tail.to_vec()], label).await;
+
+            assert_single_decode_error(&items, fragment);
+            assert!(
+                seen.is_empty(),
+                "row {row}: frame reached handler: {seen:?}"
+            );
+        }
     }
 }

@@ -844,6 +844,51 @@ async fn mid_stream_exception_frame_terminates_converse_stream_with_error() {
     }
 }
 
+/// A bad-CRC frame mid-stream ends the Converse stream with a
+/// client-visible streaming error; the text delta after it is never
+/// emitted.
+#[tokio::test]
+async fn malformed_frame_ends_converse_stream_with_error() {
+    // Arrange
+    let delta = |text: &str| {
+        encode_frame(
+            "contentBlockDelta",
+            &format!(r#"{{"contentBlockIndex":0,"delta":{{"text":"{text}"}}}}"#),
+        )
+        .to_vec()
+    };
+    let mut bad = delta("lost");
+    let n = bad.len();
+    bad[n - 4] ^= 0xFF;
+    bad[n - 3] ^= 0xFF;
+    let byte_stream = fstream::iter(vec![
+        Ok(encode_frame("messageStart", r#"{"role":"assistant"}"#)),
+        Ok(Bytes::from(delta("before"))),
+        Ok(Bytes::from(bad)),
+        Ok(Bytes::from(delta("after"))),
+    ]);
+
+    // Act
+    let items: Vec<_> = stream("test".to_string(), byte_stream).collect().await;
+
+    // Assert
+    let texts: Vec<String> = items
+        .iter()
+        .filter_map(|i| i.as_ref().ok())
+        .filter_map(|c| c.choices.first()?.delta.content.clone())
+        .collect();
+    assert_eq!(texts, vec!["before".to_string()], "items: {items:?}");
+    match items.last() {
+        Some(Err(Error::Streaming(msg))) => {
+            assert!(
+                msg.contains("converse-stream frame decode failed"),
+                "got: {msg}"
+            );
+        }
+        other => panic!("stream must end with a decode error; got {other:?}"),
+    }
+}
+
 #[test]
 fn tool_call_index_is_stable_across_two_tool_blocks() {
     // Arrange
