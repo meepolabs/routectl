@@ -679,13 +679,23 @@ fn a_rewrite_that_does_not_read_back_draws_no_budget_and_reports_no_repair() {
     let mut meta = crate::router::DispatchMeta::for_alias(ALIAS);
     let before = serde_json::to_string(&req).expect("serializable");
 
-    let applied = plan.apply(
+    let rejection = non_taking_rejection();
+    let named = super::rejected_field(
+        router.field_repair_table(),
+        &FailureClass::BadRequest,
+        &rejection,
+        ANTHROPIC_API_KIND,
+        super::direct_egress(ANTHROPIC_API_KIND),
+        crate::router::learn_engine::SentEffort::Unknown,
+    )
+    .expect("premise: the rejection names the non-taking row");
+    let applied = plan.apply_named(
+        named,
+        crate::router::learn_engine::ThinkingShape::Unknown,
         &mut req,
         &mut meta,
         &mut budget,
-        &FailureClass::BadRequest,
-        &non_taking_rejection(),
-        ANTHROPIC_API_KIND,
+        &rejection,
     );
 
     assert!(

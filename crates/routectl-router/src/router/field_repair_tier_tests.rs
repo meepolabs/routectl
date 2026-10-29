@@ -152,7 +152,7 @@ fn shared_lane_chain() -> (Router, Arc<Observed>, Arc<Observed>) {
     (router, seen0, seen1)
 }
 
-/// Mutation check: commit each repaired attempt's guard as soon as `apply`
+/// Mutation check: commit each repaired attempt's guard as soon as `apply_named`
 /// repairs it, instead of once at the request's successful settlement -> two
 /// rows, and the second corroborates the first.
 #[tokio::test]

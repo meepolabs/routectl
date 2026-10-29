@@ -1797,7 +1797,7 @@ fn an_apply_that_removes_nothing_charges_no_budget_and_reports_no_repair() {
     //
     // Driven through the real plan: a request that does NOT carry the field is
     // exactly the state where the drop is a no-op. The injection is in scope so
-    // the rejection genuinely NAMES the admitted row -- without it `apply` would
+    // the rejection genuinely NAMES the admitted row -- without it `apply_named` would
     // refuse on candidate selection instead, and this test would pass for the
     // wrong reason.
     let _injection = provisional::inject(REJECTED_PATH);
@@ -1838,13 +1838,23 @@ fn an_apply_that_removes_nothing_charges_no_budget_and_reports_no_repair() {
     let before = serde_json::to_string(&bare).expect("serializable");
 
     // Act -- apply against the request that carries nothing.
-    let applied = plan.apply(
+    let rejection = Error::upstream("p", 400, field_reject_body());
+    let named = super::rejected_field(
+        router.field_repair_table(),
+        &FailureClass::BadRequest,
+        &rejection,
+        ANTHROPIC_API_KIND,
+        super::direct_egress(ANTHROPIC_API_KIND),
+        crate::router::learn_engine::SentEffort::Unknown,
+    )
+    .expect("premise: the rejection names the admitted row");
+    let applied = plan.apply_named(
+        named,
+        crate::router::learn_engine::ThinkingShape::Unknown,
         &mut bare,
         &mut meta,
         &mut budget,
-        &FailureClass::BadRequest,
-        &Error::upstream("p", 400, field_reject_body()),
-        ANTHROPIC_API_KIND,
+        &rejection,
     );
 
     // Assert -- no repair, no mutation, no charge.
@@ -1873,7 +1883,7 @@ fn an_apply_that_removes_nothing_charges_no_budget_and_reports_no_repair() {
     );
 }
 
-/// The fail-closed branch of `apply`, exercised in RELEASE only.
+/// The fail-closed branch of `apply_candidate`, exercised in RELEASE only.
 ///
 /// In debug the same input trips the `debug_assert!`, which is the correct
 /// development behavior and is why this is release-gated rather than

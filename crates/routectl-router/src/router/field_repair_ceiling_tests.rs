@@ -274,14 +274,24 @@ fn apply_on_first_target(
     let mut attempt = req.clone();
     let class = routectl_core::failure_class::classify(err, Some(provider_kind)).class;
 
-    let applied = plan.apply(
-        &mut attempt,
-        &mut meta,
-        &mut budget,
+    let applied = super::rejected_field(
+        router.field_repair_table(),
         &class,
         err,
         provider_kind,
-    );
+        crate::router::field_repair::direct_egress(provider_kind),
+        crate::router::learn_engine::SentEffort::Unknown,
+    )
+    .and_then(|named| {
+        plan.apply_named(
+            named,
+            crate::router::learn_engine::ThinkingShape::Unknown,
+            &mut attempt,
+            &mut meta,
+            &mut budget,
+            err,
+        )
+    });
 
     let left = (0..=usize::from(REPAIRS_PER_REQUEST))
         .filter(|_| budget.draw())
@@ -865,13 +875,22 @@ mod converse_ceiling {
         let rejection = ceiling_rejection_naming(LOWER_LIMIT);
         let class = routectl_core::failure_class::classify(&rejection, Some("bedrock")).class;
         let mut attempt = req.clone();
-        let applied = plan.apply(
-            &mut attempt,
-            &mut crate::router::DispatchMeta::for_alias(ALIAS),
-            &mut crate::router::repair_budget::RepairBudget::per_request(),
+        let named = super::super::rejected_field(
+            router.field_repair_table(),
             &class,
             &rejection,
             "bedrock",
+            crate::router::field_repair::direct_egress("bedrock"),
+            crate::router::learn_engine::SentEffort::Unknown,
+        )
+        .expect("premise: the lower limit names the ceiling row");
+        let applied = plan.apply_named(
+            named,
+            crate::router::learn_engine::ThinkingShape::Unknown,
+            &mut attempt,
+            &mut crate::router::DispatchMeta::for_alias(ALIAS),
+            &mut crate::router::repair_budget::RepairBudget::per_request(),
+            &rejection,
         );
         assert!(applied.is_some(), "premise: the lower limit repairs");
         assert_eq!(attempt.max_tokens, Some(LOWER_LIMIT), "premise");

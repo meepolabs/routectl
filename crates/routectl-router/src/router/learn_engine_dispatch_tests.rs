@@ -13,12 +13,17 @@ use routectl_core::{ChatRequest, Error, Provider, Result, ToolDef};
 use serde_json::{Value, json};
 
 use super::super::super::field_repair::TEST_UNSUPPORTED_PATH;
+#[cfg(feature = "openai-responses")]
+use super::OPENAI_RESPONSES;
 use super::{
-    ANTHROPIC, Answer, CONVERSE, DISPLAY_FIXTURE, OPENAI_COMPAT, OPENAI_RESPONSES,
-    ScriptedProvider, Shape, anthropic_rejection, bag_prefixed, bedrock_rejection, carries_display,
-    carries_test_row, carry_display, carry_test_row, carry_web_search, converse_empty_bag,
-    converse_test_row_in_bag, fixture_rejection, openai_rejection, request, router,
-    test_row_at_root, thinking_with_display, thinking_without_display, unchanged, web_search_tool,
+    ANTHROPIC, Answer, DISPLAY_FIXTURE, OPENAI_COMPAT, ScriptedProvider, Shape,
+    anthropic_rejection, carries_display, carries_test_row, carry_display, carry_test_row,
+    carry_web_search, fixture_rejection, openai_rejection, request, router, test_row_at_root,
+    thinking_with_display, thinking_without_display, unchanged, web_search_tool,
+};
+#[cfg(feature = "bedrock")]
+use super::{
+    CONVERSE, bag_prefixed, bedrock_rejection, converse_empty_bag, converse_test_row_in_bag,
 };
 use crate::router::{Router, RouterOptions};
 use crate::wire_check_state::{FieldRepairOutcome, WireCheckSnapshot};
@@ -260,11 +265,9 @@ async fn an_openai_param_rejection_is_located_on_the_body() {
     .await;
 }
 
+#[cfg(feature = "bedrock")]
 #[tokio::test]
 async fn a_converse_rejection_is_located_in_the_field_bag() {
-    if !cfg!(feature = "bedrock") {
-        return;
-    }
     run_dispatch_rows(&[
         DispatchRow {
             name: "model field carried in the bag: repaired",
@@ -294,11 +297,9 @@ async fn a_converse_rejection_is_located_in_the_field_bag() {
     .await;
 }
 
+#[cfg(feature = "openai-responses")]
 #[tokio::test]
 async fn an_openai_responses_rejection_proceeds_as_with_no_wire_record() {
-    if !cfg!(feature = "openai-responses") {
-        return;
-    }
     run_dispatch_rows(&[DispatchRow {
         name: "a param the parser does not read",
         provider_block: OPENAI_RESPONSES,

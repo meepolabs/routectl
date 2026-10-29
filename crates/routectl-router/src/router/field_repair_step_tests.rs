@@ -11,12 +11,14 @@ use routectl_core::failure_class::FailureClass;
 use routectl_core::{ChatRequest, Error, Message, MessageContent, Role};
 
 use super::super::super::class_observe::DispatchSurface;
-use super::super::super::learn_engine::{EffortRank, ThinkingShape};
+use super::super::super::learn_engine::{EffortRank, SentEffort, ThinkingShape};
 use super::super::super::probe_test_support::{OkProvider, remote_router_without_negative};
 use super::super::super::rejection_parser::{NamedRejection, RejectionKind, RejectionValue};
 use super::super::super::repair_budget::RepairBudget;
 use super::super::super::{DispatchMeta, DispatchTarget, Router};
-use super::super::{FieldRepairTable, FieldSettlementMode, closed_table, provisional};
+use super::super::{
+    FieldRepairTable, FieldSettlementMode, closed_table, direct_egress, provisional, rejected_field,
+};
 use super::{FieldEdit, FieldRepairPlan, RepairStep, rerepairs_same_field};
 
 const TEMPERATURE: &str = "temperature";
@@ -86,20 +88,30 @@ fn rejection(status: u16) -> Error {
     Error::upstream("p1", status, "{}")
 }
 
-/// One `apply` for whatever the thread's injection names.
+/// Resolve a rejection to whatever the thread's injection names, then repair
+/// it; `None` when the injection names no row.
 fn apply(
     plan: &mut FieldRepairPlan<'_>,
     req: &mut ChatRequest,
     budget: &mut RepairBudget,
     status: u16,
 ) -> Option<u16> {
-    plan.apply(
+    let rejection = rejection(status);
+    let named = rejected_field(
+        FieldRepairTable::default(),
+        &FailureClass::BadRequest,
+        &rejection,
+        ANTHROPIC,
+        direct_egress(ANTHROPIC),
+        SentEffort::Unknown,
+    )?;
+    plan.apply_named(
+        named,
+        ThinkingShape::Unknown,
         req,
         &mut DispatchMeta::for_alias("default"),
         budget,
-        &FailureClass::BadRequest,
-        &rejection(status),
-        ANTHROPIC,
+        &rejection,
     )
 }
 

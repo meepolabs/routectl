@@ -21,7 +21,7 @@ use super::{FieldEdit, FieldRepairPlan, Repair, RepairStep};
 
 #[cfg(all(test, not(debug_assertions)))]
 use {
-    super::super::{FieldRepairRow, FieldRepairTable, FieldTransform},
+    super::super::{FieldRepairRow, FieldTransform},
     super::{FieldRepairCandidate, RejectionKind},
     routectl_core::capability::SignalTier,
 };
@@ -190,12 +190,11 @@ impl<'a> FieldRepairPlan<'a> {
     }
 
     /// A guardless plan over the divergent test surface: the shape that reaches
-    /// `apply`'s fail-closed branch. Test-only, and deliberately not
+    /// `apply_candidate`'s fail-closed branch. Test-only, and deliberately not
     /// constructible any other way.
     #[cfg(all(test, not(debug_assertions)))]
     pub(in crate::router) fn divergent_for_tests() -> Self {
         Self::admitted(
-            FieldRepairTable::default(),
             vec![FieldRepairCandidate::unsettled(FieldRepairRow {
                 // Outside the closed table deliberately: the surface is not a
                 // row (see `FieldRepairTable`), and this path exists only so the

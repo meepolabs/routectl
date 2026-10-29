@@ -3407,6 +3407,34 @@ fn carry_for<'r>(
         .expect("a request carrying closed-table rows admits a plan")
 }
 
+/// Resolve a 400 to the row the thread's injection names, then repair it.
+fn repair_named(
+    router: &Router,
+    plan: &mut super::super::field_repair::FieldRepairPlan<'_>,
+    attempt: &mut ChatRequest,
+    meta: &mut super::super::DispatchMeta,
+    budget: &mut RepairBudget,
+) -> Option<u16> {
+    let rejection = Error::upstream("p", 400, "{}");
+    let named = super::super::field_repair::rejected_field(
+        router.field_repair_table(),
+        &routectl_core::failure_class::FailureClass::BadRequest,
+        &rejection,
+        ANTHROPIC,
+        super::super::field_repair::direct_egress(ANTHROPIC),
+        super::super::learn_engine::SentEffort::Unknown,
+    )
+    .expect("premise: the injected rejection names a row");
+    plan.apply_named(
+        named,
+        super::super::learn_engine::ThinkingShape::Unknown,
+        attempt,
+        meta,
+        budget,
+        &rejection,
+    )
+}
+
 #[test]
 fn a_rejection_naming_the_later_present_row_repairs_that_row() {
     // THE starvation pin. The request carries both rows and the upstream names
@@ -3421,14 +3449,7 @@ fn a_rejection_naming_the_later_present_row_repairs_that_row() {
     let mut meta = super::super::DispatchMeta::for_alias(ALIAS);
     let _injection = super::super::field_repair::provisional::inject(PREFIX_PATH);
 
-    let applied = plan.apply(
-        &mut attempt,
-        &mut meta,
-        &mut budget,
-        &routectl_core::failure_class::FailureClass::BadRequest,
-        &Error::upstream("p", 400, "{}"),
-        ANTHROPIC,
-    );
+    let applied = repair_named(&router, &mut plan, &mut attempt, &mut meta, &mut budget);
 
     assert!(
         applied.is_some(),
@@ -3462,14 +3483,7 @@ fn a_rejection_naming_the_first_present_row_repairs_that_row() {
     let mut meta = super::super::DispatchMeta::for_alias(ALIAS);
     let _injection = super::super::field_repair::provisional::inject(GROUNDED_PATH);
 
-    let applied = plan.apply(
-        &mut attempt,
-        &mut meta,
-        &mut budget,
-        &routectl_core::failure_class::FailureClass::BadRequest,
-        &Error::upstream("p", 400, "{}"),
-        ANTHROPIC,
-    );
+    let applied = repair_named(&router, &mut plan, &mut attempt, &mut meta, &mut budget);
 
     assert!(applied.is_some(), "the named row repairs");
     assert_eq!(plan.repaired_path(), Some(GROUNDED_PATH));
@@ -3496,15 +3510,7 @@ fn a_repeat_of_the_repaired_field_repairs_nothing_and_the_rest_release_their_slo
     let _injection = super::super::field_repair::provisional::inject(PREFIX_PATH);
 
     assert!(
-        plan.apply(
-            &mut attempt,
-            &mut meta,
-            &mut budget,
-            &routectl_core::failure_class::FailureClass::BadRequest,
-            &Error::upstream("p", 400, "{}"),
-            ANTHROPIC,
-        )
-        .is_some(),
+        repair_named(&router, &mut plan, &mut attempt, &mut meta, &mut budget).is_some(),
         "premise: the named row repaired",
     );
 
@@ -3513,15 +3519,7 @@ fn a_repeat_of_the_repaired_field_repairs_nothing_and_the_rest_release_their_slo
     // re-dispatched.
     let after_first = serde_json::to_value(&attempt).unwrap();
     assert!(
-        plan.apply(
-            &mut attempt,
-            &mut meta,
-            &mut budget,
-            &routectl_core::failure_class::FailureClass::BadRequest,
-            &Error::upstream("p", 400, "{}"),
-            ANTHROPIC,
-        )
-        .is_none(),
+        repair_named(&router, &mut plan, &mut attempt, &mut meta, &mut budget).is_none(),
         "a plan must refuse a second repair of a field it already repaired",
     );
     assert_eq!(
@@ -4123,14 +4121,7 @@ fn a_second_rejection_naming_a_different_present_row_repairs_it() {
     // First apply: the ENVELOPE row, named.
     let first = {
         let _injection = super::super::field_repair::provisional::inject(GROUNDED_PATH);
-        plan.apply(
-            &mut attempt,
-            &mut meta,
-            &mut budget,
-            &routectl_core::failure_class::FailureClass::BadRequest,
-            &Error::upstream("p", 400, "{}"),
-            ANTHROPIC,
-        )
+        repair_named(&router, &mut plan, &mut attempt, &mut meta, &mut budget)
     };
     assert!(first.is_some(), "premise: the first rejection repaired");
     assert!(
@@ -4142,14 +4133,7 @@ fn a_second_rejection_naming_a_different_present_row_repairs_it() {
     // Second apply: the PREFIX row, named, present.
     let second = {
         let _injection = super::super::field_repair::provisional::inject(PREFIX_PATH);
-        plan.apply(
-            &mut attempt,
-            &mut meta,
-            &mut budget,
-            &routectl_core::failure_class::FailureClass::BadRequest,
-            &Error::upstream("p", 400, "{}"),
-            ANTHROPIC,
-        )
+        repair_named(&router, &mut plan, &mut attempt, &mut meta, &mut budget)
     };
 
     assert!(second.is_some(), "a different field is repaired");

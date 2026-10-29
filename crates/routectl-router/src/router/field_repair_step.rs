@@ -47,9 +47,7 @@ use super::super::rejection_parser::{
 };
 use super::super::repair_budget::RepairBudget;
 use super::super::{CapabilityClearedEvent, CapabilityLearnEvent, DispatchMeta};
-#[cfg(test)]
-use super::rejected_field;
-use super::{FieldRepairHandle, FieldRepairRow, FieldRepairTable, RepairRecord};
+use super::{FieldRepairHandle, FieldRepairRow, RepairRecord};
 
 /// Whether `row` may be repaired again while an earlier step on the same
 /// field is still pending: a ranked effort row, whose refusal names the level
@@ -87,8 +85,6 @@ pub(in crate::router) const fn rerepairs_same_field(row: &FieldRepairRow) -> boo
 pub(in crate::router) struct FieldRepairPlan<'a> {
     /// The table the candidates were admitted from, and so the only rows a
     /// rejection may name for this plan.
-    #[cfg(test)]
-    table: FieldRepairTable,
     candidates: Vec<FieldRepairCandidate<'a>>,
     /// The repairs applied and not yet settled, in the order they were made.
     pending: Vec<RepairStep<'a>>,
@@ -221,14 +217,11 @@ struct Repair {
 impl<'a> FieldRepairPlan<'a> {
     /// A plan over `candidates`, none of them repaired yet.
     pub(super) const fn admitted(
-        #[cfg_attr(not(test), allow(unused_variables))] table: FieldRepairTable,
         candidates: Vec<FieldRepairCandidate<'a>>,
         wire: Option<IngressDialect>,
         reclaim: Option<GuardAdmission<'a>>,
     ) -> Self {
         Self {
-            #[cfg(test)]
-            table,
             candidates,
             pending: Vec::new(),
             committed: Vec::new(),
@@ -348,57 +341,6 @@ impl<'a> FieldRepairPlan<'a> {
         self.pending.iter().map(|step| step.mintable).collect()
     }
 
-    /// Perform the repair for whichever admitted row `err` names: apply that
-    /// row's transform to the attempt request, re-stamp the calibration estimate,
-    /// CHARGE the shared per-request budget, and RELEASE every other
-    /// candidate's guard -- all or nothing.
-    ///
-    /// The rejection is matched against every admitted row rather than against
-    /// one chosen at admission time: the upstream names the field, so the row
-    /// it names is the row to repair. Matching is on the SURFACE (see
-    /// [`Router::rejection_names_field_surface`](super::super::Router::rejection_names_field_surface)).
-    ///
-    /// The budget draw lives here, inside the successful branch, rather than in
-    /// the caller's condition chain. The drop can legitimately remove nothing
-    /// (the request changed under the arm), and a draw in the condition would
-    /// then have charged a request that did not repair -- a charge nothing
-    /// observable can see, since the arm falls through to the ordinary error
-    /// path either way. Ordering the two the other way means the budget and
-    /// the mutation succeed or fail together.
-    ///
-    /// `Some(status)` -- repaired: the named row's field is changed, the
-    /// estimate describes the new payload, one repair was charged, a step was
-    /// added, and the caller must re-dispatch and later settle this plan.
-    /// `None` -- nothing happened: no mutation, no charge, no guard released,
-    /// and the caller must NOT mark the attempt repaired.
-    #[cfg(test)]
-    pub(in crate::router) fn apply(
-        &mut self,
-        attempt_req: &mut ChatRequest,
-        meta: &mut DispatchMeta,
-        budget: &mut RepairBudget,
-        native_class: &FailureClass,
-        rejection: &Error,
-        provider_kind: &str,
-    ) -> Option<u16> {
-        let named = rejected_field(
-            self.table,
-            native_class,
-            rejection,
-            provider_kind,
-            super::direct_egress(provider_kind),
-            super::super::learn_engine::SentEffort::Unknown,
-        )?;
-        self.apply_named(
-            named,
-            ThinkingShape::Unknown,
-            attempt_req,
-            meta,
-            budget,
-            rejection,
-        )
-    }
-
     /// Repair for a rejection already resolved to its closed-table row: the
     /// admitted candidate whose SURFACE that row names. `thinking` is the
     /// thinking shape the refused attempt's egress body sent, which decides
@@ -409,6 +351,12 @@ impl<'a> FieldRepairPlan<'a> {
     /// in which case the new step is added beside the pending one on that
     /// field, as a DIFFERENT field's is. A ranked row the admission did not
     /// carry (its level was written after admission) is admitted here.
+    ///
+    /// `Some(status)` -- repaired: the named row's field is changed, the
+    /// estimate describes the new payload, one repair was charged, a step was
+    /// added, and the caller must re-dispatch and later settle this plan.
+    /// `None` -- nothing happened: no mutation, no charge, no guard released,
+    /// and the caller must NOT mark the attempt repaired.
     pub(in crate::router) fn apply_named(
         &mut self,
         named: NamedRejection,

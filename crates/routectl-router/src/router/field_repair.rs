@@ -171,7 +171,7 @@ pub(super) enum FieldSurface {
     /// Test-only: reports itself PRESENT and removes NOTHING.
     ///
     /// The real surface's presence check and drop read the same two carriers, so
-    /// they cannot disagree -- which leaves `apply`'s fail-closed branch
+    /// they cannot disagree -- which leaves `apply_candidate`'s fail-closed branch
     /// unreachable, and an unreachable safety branch is exactly the kind that
     /// rots into a silent charge for a repair the wire never saw. This variant
     /// manufactures the divergence so that branch can be exercised, in RELEASE
@@ -1226,7 +1226,7 @@ impl FieldRepairTable {
     ///
     /// The divergent surface is deliberately NOT a row here: its presence
     /// predicate answers `true` unconditionally, so a row for it would make
-    /// every request carry it. It reaches `apply`'s fail-closed branch through
+    /// every request carry it. It reaches `apply_candidate`'s fail-closed branch through
     /// [`FieldRepairPlan::apply_candidate`] instead.
     #[cfg(any(test, feature = "test-utils"))]
     pub(crate) fn with_synthetic_rows() -> Self {
@@ -1835,7 +1835,6 @@ impl Router {
             _ => None,
         };
         Some(FieldRepairPlan::admitted(
-            table,
             candidates,
             fidelity_dialect(target, attempt_req),
             reclaim,
@@ -2193,7 +2192,7 @@ mod table_tests {
     use super::*;
     use routectl_core::capability::SignalTier;
 
-    /// The repair plan's source, for the control-flow guard over `apply`.
+    /// The repair plan's source, for the control-flow guard over `apply_candidate`.
     const SOURCE: &str = include_str!("field_repair_step.rs");
 
     /// The body of `FieldRepairPlan::apply_candidate` -- the EFFECT half of the
@@ -2201,7 +2200,7 @@ mod table_tests {
     /// own indentation.
     ///
     /// Anchored on the function NAME rather than on the return type alone: the
-    /// selection half (`apply`) shares that return type, and a bare type anchor
+    /// selection half (`apply_named`) shares that return type, and a bare type anchor
     /// would read the wrong body -- one that contains no mutation, so the guard
     /// below would fail on its own premise rather than pass vacuously.
     ///
@@ -2805,7 +2804,7 @@ mod table_tests {
 
     #[test]
     fn no_path_below_the_body_mutation_can_return_none() {
-        // The ordering invariant `apply` rests on, asserted over its own source
+        // The ordering invariant `apply_candidate` rests on, asserted over its own source
         // because it is a property of CONTROL FLOW rather than of any single
         // outcome: once the field has been dropped, every remaining path must
         // report the repair. A `None` after the mutation would hand the caller
@@ -2825,7 +2824,7 @@ mod table_tests {
         let body = apply_body(SOURCE);
         let mutation = "if !edit.apply_to(surface, attempt_req) {";
         let at = body.find(mutation).unwrap_or_else(|| {
-            panic!("`apply` must mutate through `{mutation}`; its body was: {body}")
+            panic!("`apply_candidate` must mutate through `{mutation}`; its body was: {body}")
         });
         let refusal_end = body[at..]
             .find("\n        }")
@@ -2849,7 +2848,7 @@ mod table_tests {
         assert!(
             body[..at + refusal_end].matches("return None").count() >= 3,
             "control: the pre-mutation refusals must still be there, or this guard is passing \
-             because `apply` stopped refusing anything",
+             because `apply_candidate` stopped refusing anything",
         );
     }
 

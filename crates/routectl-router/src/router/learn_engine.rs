@@ -545,7 +545,7 @@ impl<'a> AttemptLearning<'a> {
     /// Envelope-field L0 repair: on a rejection naming a carried field, drop
     /// (or rewrite) that field from `attempt_req`.
     ///
-    /// `apply` owns the budget draw together with the mutation, so a drop
+    /// `apply_named` owns the budget draw together with the mutation, so a drop
     /// that removes nothing charges nothing and every repaired-state flag is
     /// set only on its `Some`. It also selects WHICH admitted row to repair --
     /// the one the rejection names -- and releases every other candidate's
