@@ -1,6 +1,7 @@
 //! The bytes each Bedrock send site deposits on the attempt's wire tap are
 //! exactly the bytes the upstream received, on both API shapes and on both
-//! the complete and the stream path.
+//! the complete and the stream path. A token count deposits the request body
+//! its CountTokens envelope carries, decoded from that one wrapping.
 
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -20,6 +21,7 @@ use super::{BedrockApiShape, BedrockConfig, BedrockCreds, BedrockProvider, auth}
 enum Call {
     Complete,
     Stream,
+    Count,
 }
 
 struct Capture {
@@ -50,6 +52,7 @@ impl Respond for Capture {
                     "stopReason": "end_turn",
                     "usage": {"inputTokens": 3, "outputTokens": 1, "totalTokens": 4}
                 })),
+            (Call::Count, _) => ResponseTemplate::new(200).set_body_json(json!({"inputTokens": 7})),
             (Call::Stream, shape) => ResponseTemplate::new(200)
                 .set_body_raw(stream_bytes(shape), "application/vnd.amazon.eventstream"),
         }
@@ -152,6 +155,7 @@ async fn send(provider: &BedrockProvider, call: Call, req: ChatRequest) {
                 chunk.expect("no stream error");
             }
         }
+        Call::Count => drop(provider.count_tokens(req).await.expect("counts")),
     }
 }
 
@@ -182,12 +186,50 @@ async fn each_send_site_deposits_the_bytes_the_upstream_received() {
     }
 }
 
+/// The request body a CountTokens envelope carries, as bytes: Invoke's
+/// base64-decoded `invokeModel.body`, Converse's `converse` object.
+fn carried_body(shape: BedrockApiShape, envelope: &[u8]) -> Vec<u8> {
+    let envelope: serde_json::Value = serde_json::from_slice(envelope).expect("JSON envelope");
+    match shape {
+        BedrockApiShape::Invoke => {
+            let encoded = envelope["input"]["invokeModel"]["body"]
+                .as_str()
+                .expect("base64 invoke body");
+            B64.decode(encoded).expect("valid base64")
+        }
+        BedrockApiShape::Converse => {
+            serde_json::to_vec(&envelope["input"]["converse"]).expect("serialize converse")
+        }
+    }
+}
+
 #[tokio::test]
-async fn count_tokens_deposits_nothing() {
-    let (provider, _bodies, _server) = lane(BedrockApiShape::Invoke, Call::Complete).await;
-    let (req, tap) = tapped_request();
+async fn count_tokens_deposits_the_body_its_envelope_carries() {
+    for shape in [BedrockApiShape::Invoke, BedrockApiShape::Converse] {
+        let (provider, bodies, _server) = lane(shape, Call::Count).await;
+        let (req, tap) = tapped_request();
 
-    let _ = provider.count_tokens(req).await;
+        send(&provider, Call::Count, req).await;
 
-    assert!(tap.take_request().request().is_none());
+        let wire = bodies
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        assert_eq!(wire.len(), 1, "{shape:?}: one upstream call");
+        let carried = carried_body(shape, &wire[0]);
+        let contents = tap.take_request();
+        let deposited = contents
+            .request()
+            .unwrap_or_else(|| panic!("{shape:?}: the count deposited the body it sent"));
+        assert_eq!(
+            deposited.as_ref(),
+            carried.as_slice(),
+            "{shape:?}: deposit differs from the body the envelope carries"
+        );
+        let carried: serde_json::Value = serde_json::from_slice(&carried).expect("JSON body");
+        assert!(
+            carried.get("messages").is_some(),
+            "{shape:?}: the carried body is the request, not the envelope"
+        );
+    }
 }

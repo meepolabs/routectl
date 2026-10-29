@@ -153,6 +153,11 @@ impl WireTap {
 
     /// Record the request body as sent. A later deposit on the same attempt
     /// replaces an earlier one, so the slot holds the last body sent.
+    ///
+    /// A provider whose transport wraps the body once (base64 inside an
+    /// envelope, or a JSON member of one) deposits the decoded body it
+    /// wrapped, so paths a rejection names resolve against the request body
+    /// rather than the envelope.
     pub fn deposit(&self, egress: Bytes) {
         #[cfg(any(test, feature = "test-utils"))]
         let egress = match self.drop_on_deposit {

@@ -679,6 +679,8 @@ list with more narrative.
 
 ### Fixed
 
+- **A Bedrock token count rejected for a field routectl added is now laid to that edit.** `/v1/messages/count_tokens` on a Bedrock seat (Invoke or Converse) now records the request body its CountTokens envelope carries, decoded from the base64 wrapping on Invoke, so a 400 naming a path routectl declared adding logs the `routectl_edit_rejected` WARN naming the edit site, as on an anthropic-api count; before, a Bedrock count recorded nothing and such a rejection was never attributed.
+
 - **A request routectl cannot build or serialize fails closed instead of counting as a network failure.** When an egress cannot assemble the outgoing request (a header value the HTTP stack cannot carry, such as a client beta flag containing a control character, or a body that fails to serialize), the attempt now fails with `500 internal_error` and the request stops there. Before, it was classed as a network error: it was retried on the same target, fell back to the next one and was debited against the target's circuit breaker, though nothing had reached the upstream. Applies to every provider; transport failures after the request is sent are unchanged. The logged detail names the provider and the failing step, never the offending value.
 
 - **Bedrock streams end with an error on a corrupt eventstream frame.** A frame that fails to decode (bad prelude or CRC) on an InvokeModel or ConverseStream response now ends the stream with a stream error instead of skipping ahead, so later bytes are never parsed out of a misaligned buffer. The WARN carries the prelude only; the frame hex (up to 256 bytes) stays at TRACE. See [docs/LOGGING.md](docs/LOGGING.md).

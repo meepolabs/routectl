@@ -466,12 +466,8 @@ impl BedrockProvider {
     /// One CountTokens round trip for `normalized`, the normalized form of
     /// `req`.
     async fn count_tokens_once(&self, req: &ChatRequest, normalized: Value) -> Result<TokenCount> {
-        let body = match self.cfg.api_shape {
-            BedrockApiShape::Invoke => count_tokens::invoke_tokens_body(&self.cfg.id, &normalized)?,
-            BedrockApiShape::Converse => {
-                count_tokens::converse_tokens_body(&self.cfg.id, &normalized)?
-            }
-        };
+        let tap = crate::anthropic_api::wire_edits::tap_of(req);
+        let (body, sent_copy) = self.count_tokens_body(normalized, tap.is_some())?;
 
         routectl_core::trace_outgoing_body(
             self.cfg.api_shape.provider_kind_str(),
@@ -484,15 +480,16 @@ impl BedrockProvider {
             self.runtime_origin,
             endpoint::count_tokens_path(&self.cfg.model_id)
         );
-        let body_str = bytes::Bytes::from(serde_json::to_vec(&body).map_err(|e| {
-            Error::Internal(format!(
-                "provider `{}`: serialize request body: {e}",
-                self.cfg.id
-            ))
-        })?);
+        let body_str = bytes::Bytes::from(
+            serde_json::to_vec(&body)
+                .map_err(|e| crate::http_client::local_build_error(&self.cfg.id, e))?,
+        );
         let request = self
             .build_signed_request(body_str, req, &url, "application/json")
             .await?;
+        if let (Some(tap), Some(sent)) = (tap, sent_copy) {
+            tap.deposit(sent);
+        }
 
         let resp = self
             .client
@@ -536,6 +533,38 @@ impl BedrockProvider {
             &raw_body,
         );
         count_tokens::parse_token_count(&self.cfg.id, &raw_body)
+    }
+
+    /// The CountTokens envelope for `normalized`, plus, when `deposit` is
+    /// set, the request body it carries as it crosses the wire: Invoke's
+    /// body is serialized once and those bytes are both returned and
+    /// base64-wrapped into the envelope; Converse's is the allowlisted
+    /// `converse` object, which the envelope carries as plain JSON.
+    fn count_tokens_body(
+        &self,
+        normalized: Value,
+        deposit: bool,
+    ) -> Result<(Value, Option<bytes::Bytes>)> {
+        let id = &self.cfg.id;
+        match self.cfg.api_shape {
+            BedrockApiShape::Invoke => {
+                let inner = serde_json::to_vec(&normalized)
+                    .map_err(|e| crate::http_client::local_build_error(id, e))?;
+                let body = count_tokens::invoke_tokens_body(&inner);
+                Ok((body, deposit.then(|| bytes::Bytes::from(inner))))
+            }
+            BedrockApiShape::Converse => {
+                let body = count_tokens::converse_tokens_body(id, &normalized)?;
+                let sent = match body.pointer("/input/converse").filter(|_| deposit) {
+                    Some(converse) => Some(bytes::Bytes::from(
+                        serde_json::to_vec(converse)
+                            .map_err(|e| crate::http_client::local_build_error(id, e))?,
+                    )),
+                    None => None,
+                };
+                Ok((body, sent))
+            }
+        }
     }
 
     /// Read a `>= 400` response through the shared upstream-error read and

@@ -44,17 +44,12 @@ const CONVERSE_TOKENS_KEYS: [&str; 4] = [
     "additionalModelRequestFields",
 ];
 
-/// Wrap an assembled InvokeModel body as a CountTokens `invokeModel`
-/// input. The body is carried verbatim, base64-encoded -- no field
+/// Wrap a serialized InvokeModel body as a CountTokens `invokeModel`
+/// input. The bytes are carried verbatim, base64-encoded -- no field
 /// filtering: the token-count lane must see the same bytes InvokeModel
 /// would, including the fields InvokeModel requires.
-pub(super) fn invoke_tokens_body(provider_id: &str, invoke_body: &Value) -> Result<Value> {
-    let bytes = serde_json::to_vec(invoke_body).map_err(|e| {
-        Error::Internal(format!(
-            "provider `{provider_id}`: serialize invoke body: {e}"
-        ))
-    })?;
-    Ok(json!({ "input": { "invokeModel": { "body": B64_STANDARD.encode(bytes) } } }))
+pub(super) fn invoke_tokens_body(invoke_body: &[u8]) -> Value {
+    json!({ "input": { "invokeModel": { "body": B64_STANDARD.encode(invoke_body) } } })
 }
 
 /// Wrap an assembled Converse body as a CountTokens `converse` input,
@@ -180,7 +175,7 @@ mod tests {
     fn invoke_tokens_body_carries_the_verbatim_body_base64_encoded() {
         let body = invoke_body();
 
-        let wrapped = invoke_tokens_body("prov", &body).expect("build");
+        let wrapped = invoke_tokens_body(&serde_json::to_vec(&body).expect("serialize"));
 
         let encoded = wrapped["input"]["invokeModel"]["body"]
             .as_str()

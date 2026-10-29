@@ -3458,3 +3458,7 @@ mod probe_pass_tests;
 #[cfg(test)]
 #[path = "probe_seat_equivalence_tests.rs"]
 mod probe_seat_equivalence_tests;
+
+#[cfg(all(test, feature = "bedrock"))]
+#[path = "bedrock_count_tokens_wire_tests.rs"]
+mod bedrock_count_tokens_wire_tests;
