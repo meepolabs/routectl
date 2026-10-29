@@ -49,7 +49,7 @@ use crate::anthropic_api::request::clamp_sampling_for_thinking;
 use super::super::BedrockConfig;
 use super::extras::build_additional_fields;
 use super::messages::build_messages;
-use super::system::build_system;
+use super::system::{build_system, count_dropped_system_parts};
 use super::tools::build_tool_config;
 use super::types::{ConverseRequest, InferenceConfig};
 
@@ -67,10 +67,11 @@ const RESPONSE_FIELD_PATHS: &[&str] = &["/stop_sequence"];
 // rather than picks, so a caller supplying both system sources trips two sites
 // on one request.
 //
-// Reachability: the Role::System lift site is unreachable through the OpenAI
-// and Responses ingresses, which promote those messages into `system` at parse
-// time. It is live through the Anthropic ingress, which forwards them unlifted,
-// and for a direct library caller.
+// Reachability: through the OpenAI and Responses ingresses the Role::System
+// lift site sees only a system turn kept in place for its non-text parts; they
+// promote every other one into `system` at parse time. It is fully live through
+// the Anthropic ingress, which forwards them unlifted, and for a direct library
+// caller.
 pub(super) use crate::translation_drop_metrics::ClientFingerprintStripTally;
 
 /// Count this request's fingerprint withhold on the converse lane. Production
@@ -111,6 +112,7 @@ fn translate_tallied(
     // gated out of the additionalModelRequestFields merge as canonical keys;
     // log once at DEBUG (an expected transform).
     crate::sampling_drop_guard::log_dropped_sampling_fields(&cfg.id, req, &[]);
+    count_dropped_system_parts(req);
     let system = build_system(req, fingerprint);
     let messages = build_messages(&cfg.id, &req.messages)?;
     let tool_config = build_tool_config(&cfg.id, req, &messages)?;

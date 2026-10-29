@@ -196,9 +196,27 @@ impl StreamErrorClass {
     }
 }
 
-/// If any `Role::System` messages are in `req.messages`, lift their text
-/// content into `req.system` and remove them from the messages array.
-/// No-op when there are no System messages.
+/// The system-role messages one [`lift_system_messages`] call moved into
+/// `req.system`, named by their index in `messages` before the lift, so an
+/// ingress declares exactly the edits the lift made.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct LiftedSystem {
+    /// Pre-lift indices of the lifted messages, ascending.
+    pub(crate) indices: Vec<usize>,
+    /// Whether the first lifted message carried flat `Text` content.
+    pub(crate) first_was_text: bool,
+}
+
+/// Lift the text of every `Role::System` message in `req.messages` into
+/// `req.system` and remove those messages from the array. Returns which
+/// messages were lifted. No-op when there are no System messages.
+///
+/// A System message carrying any non-text part (an image, a document, a
+/// forward-compat part) is NOT lifted: `req.system` holds text only, so the
+/// whole message stays in `req.messages` at its position, untouched, and
+/// each egress forwards it or counts what its wire cannot carry. A message
+/// mixing text and non-text parts stays whole too; splitting it would
+/// reorder its text ahead of the parts it was written beside.
 ///
 /// Lifting strategy:
 /// - `MessageContent::Text` messages contribute a `SystemBlock` with no
@@ -216,13 +234,19 @@ impl StreamErrorClass {
 /// - When the existing system text or any lifted block is a billing/
 ///   attribution block, the result is also `SystemContent::Blocks`, so each
 ///   egress withholds that block alone instead of testing a joined string.
-pub(crate) fn lift_system_messages(req: &mut ChatRequest) {
+pub(crate) fn lift_system_messages(req: &mut ChatRequest) -> LiftedSystem {
+    let mut lifted = LiftedSystem::default();
     let mut lifted_blocks: Vec<SystemBlock> = Vec::new();
-    let mut kept = req.messages.to_vec();
-    kept.retain(|m| {
-        if !matches!(m.role, Role::System) {
-            return true;
+    let mut kept = Vec::with_capacity(req.messages.len());
+    for (index, m) in req.messages.iter().enumerate() {
+        if !matches!(m.role, Role::System) || m.content.has_non_text_part() {
+            kept.push(m.clone());
+            continue;
         }
+        if lifted.indices.is_empty() {
+            lifted.first_was_text = matches!(m.content, MessageContent::Text(_));
+        }
+        lifted.indices.push(index);
         match &m.content {
             MessageContent::Text(t) => {
                 lifted_blocks.push(SystemBlock {
@@ -233,9 +257,6 @@ pub(crate) fn lift_system_messages(req: &mut ChatRequest) {
                 });
             }
             MessageContent::Parts(parts) => {
-                // Non-text parts (images, documents) in a System message are
-                // not meaningful in canonical and would be dropped by egresses
-                // that do not support them; skip them here as before.
                 for p in parts {
                     if let ContentPart::Known(KnownContentPart::Text {
                         text,
@@ -254,12 +275,14 @@ pub(crate) fn lift_system_messages(req: &mut ChatRequest) {
             }
             MessageContent::Null => {}
         }
-        false
-    });
+    }
+    if lifted.indices.is_empty() {
+        return lifted;
+    }
     req.messages = kept.into();
 
     if lifted_blocks.is_empty() {
-        return;
+        return lifted;
     }
 
     let needs_blocks = lifted_blocks
@@ -302,6 +325,7 @@ pub(crate) fn lift_system_messages(req: &mut ChatRequest) {
             req.system = Some(SystemContent::Blocks(lifted_blocks));
         }
     }
+    lifted
 }
 
 /// True when the existing system text or any lifted block is a Claude Code

@@ -350,6 +350,111 @@ fn developer_role_message_item_maps_to_role_system() {
     );
 }
 
+/// A system or developer item carrying a non-text block is not lifted:
+/// `instructions` holds text only, so the whole item stays a message in
+/// place with every block, for each egress to forward or count.
+#[test]
+fn a_system_item_with_a_non_text_block_stays_in_place_with_every_part() {
+    let image = json!({"type": "input_image", "image_url": "https://example.com/a.png"});
+    let unknown = json!({"type": "future_block", "payload": {"k": 1}});
+    let rows = [
+        ("system, image block", "system", image.clone()),
+        ("system, unknown block", "system", unknown.clone()),
+        ("developer, image block", "developer", image),
+        ("developer, unknown block", "developer", unknown),
+    ];
+    for (name, role, block) in rows {
+        let body = json!({"model": "m", "input": [
+            {"type": "message", "role": "user", "content": "hi"},
+            {"type": "message", "role": role,
+             "content": [{"type": "input_text", "text": "look"}, block]}]});
+
+        let req = parse(body);
+
+        assert!(req.system.is_none(), "{name}: nothing lifted");
+        assert_eq!(req.messages.len(), 2, "{name}");
+        let kept = &req.messages[1];
+        assert!(matches!(kept.role, Role::System), "{name}");
+        let MessageContent::Parts(parts) = &kept.content else {
+            panic!("{name}: expected parts, got {:?}", kept.content);
+        };
+        assert_eq!(parts.len(), 2, "{name}: every block kept");
+        assert!(
+            matches!(&parts[0], ContentPart::Known(KnownContentPart::Text { text, .. }) if text == "look"),
+            "{name}"
+        );
+        assert!(
+            !matches!(&parts[1], ContentPart::Known(KnownContentPart::Text { .. })),
+            "{name}: the non-text block survives"
+        );
+    }
+}
+
+/// One row: its name, the client body, and the lift edits expected.
+type LiftEditRow = (
+    &'static str,
+    Value,
+    Vec<(&'static str, routectl_core::wire_check::EditKind)>,
+);
+
+/// The lift declares the edits it makes to a Responses body, at `input[]`
+/// indices: each lifted item is removed and its text lands in
+/// `instructions`, added when the client sent none and rewritten when it
+/// did. A kept developer item declares the role rewrite instead.
+#[test]
+fn the_responses_lift_declares_its_edits_at_input_indices() {
+    use EditKind::{Add, Remove, Rewrite};
+    use routectl_core::wire_check::{EditKind, EditSite};
+
+    let msg = |role: &str, text: &str| json!({"type": "message", "role": role, "content": text});
+    let image_dev = json!({"type": "message", "role": "developer",
+                           "content": [{"type": "input_image", "image_url": "https://e/a.png"}]});
+    let call = json!({"type": "function_call", "call_id": "c1", "name": "f", "arguments": "{}"});
+    let rows: Vec<LiftEditRow> = vec![
+        (
+            "leading system, no instructions",
+            json!({"model": "m", "input": [msg("system", "a"), msg("user", "hi")]}),
+            vec![("/instructions", Add), ("/input/0", Remove)],
+        ),
+        (
+            "developer after instructions",
+            json!({"model": "m", "instructions": "be brief",
+                   "input": [msg("user", "hi"), msg("developer", "d")]}),
+            vec![("/instructions", Rewrite), ("/input/1", Remove)],
+        ),
+        (
+            "system after an attached function_call item",
+            json!({"model": "m", "input": [
+                msg("assistant", "x"), call, msg("system", "s"), msg("user", "hi")]}),
+            vec![("/instructions", Add), ("/input/2", Remove)],
+        ),
+        (
+            "kept developer item",
+            json!({"model": "m", "input": [msg("user", "hi"), image_dev]}),
+            vec![("/input/1/role", Rewrite)],
+        ),
+        (
+            "no system",
+            json!({"model": "m", "input": [msg("user", "hi")]}),
+            vec![],
+        ),
+    ];
+    for (name, body, want) in rows {
+        let req = parse(body);
+
+        let got: Vec<(String, EditKind)> = req
+            .routectl_internal
+            .declared_edits
+            .iter()
+            .filter(|e| e.site() == EditSite::SystemMessageLift)
+            .map(|e| (e.path().to_string(), e.kind()))
+            .collect();
+        let want: Vec<(String, EditKind)> =
+            want.into_iter().map(|(p, k)| (p.to_string(), k)).collect();
+        assert_eq!(got, want, "{name}");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // function_call -> tool_calls
 // ---------------------------------------------------------------------------

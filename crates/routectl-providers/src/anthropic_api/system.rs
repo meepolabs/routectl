@@ -5,9 +5,10 @@
 //! cache_control and citations; `lift_legacy_system` is the
 //! backwards-compat fallback that lifts `Role::System` messages into a
 //! flat `AnthropicSystem::Text` for direct callers that bypass an
-//! ingress. Both lifts cover the `req.system`-ABSENT path only: with a
-//! canonical system present the anthropic-api egress forwards the
-//! `Role::System` turns in place (see `messages::SystemTurnPolicy`).
+//! ingress. With a canonical system present the anthropic-api egress forwards
+//! the `Role::System` turns in place (see `messages::SystemTurnPolicy`); a
+//! lane that cannot forward them lifts the turns an ingress kept in place
+//! (`kept_system_turns`) and appends them after it (`append_system`).
 //! `lift_legacy_system_stripped` is the billing-aware variant
 //! used by the anthropic-api egress: it drops the Claude Code
 //! billing/attribution block per text part before joining so the
@@ -140,9 +141,8 @@ pub fn lift_legacy_system(messages: &[Message]) -> Option<AnthropicSystem> {
 /// can emit a single contents-free WARN. Returns None when nothing survives
 /// the strip (the system collapses to absent).
 ///
-/// Like the unfiltered lift, this covers the `req.system`-ABSENT path only;
-/// the both-present case forwards the turns in place, and the forwarding
-/// walk runs the same billing predicate per block.
+/// On anthropic-api the both-present case forwards the turns in place, and
+/// the forwarding walk runs the same billing predicate per block.
 pub fn lift_legacy_system_stripped(
     messages: &[Message],
     dropped: &mut bool,
@@ -159,6 +159,45 @@ pub fn lift_legacy_system_stripped(
         None
     } else {
         Some(SystemContent::Text(kept.join("\n")))
+    }
+}
+
+/// The `Role::System` turns carrying a non-text part. An ingress keeps such a
+/// turn in place instead of hoisting its text into the canonical system, so
+/// a lane that cannot ship the turn lifts its text from here.
+pub fn kept_system_turns(messages: &[Message]) -> Vec<Message> {
+    messages
+        .iter()
+        .filter(|m| matches!(m.role, Role::System) && m.content.has_non_text_part())
+        .cloned()
+        .collect()
+}
+
+/// The wire system: the canonical system, then the lifted text after it. With
+/// both present the result is block-shaped, the canonical blocks first.
+pub fn append_system(
+    primary: Option<AnthropicSystem>,
+    lifted: Option<AnthropicSystem>,
+) -> Option<AnthropicSystem> {
+    match (primary, lifted) {
+        (Some(primary), Some(lifted)) => {
+            let mut blocks = system_blocks(primary);
+            blocks.extend(system_blocks(lifted));
+            Some(AnthropicSystem::Blocks(blocks))
+        }
+        (primary, lifted) => primary.or(lifted),
+    }
+}
+
+fn system_blocks(system: AnthropicSystem) -> Vec<AnthropicSystemBlock> {
+    match system {
+        AnthropicSystem::Text(text) => vec![AnthropicSystemBlock {
+            kind: "text".into(),
+            text,
+            cache_control: None,
+            citations: None,
+        }],
+        AnthropicSystem::Blocks(blocks) => blocks,
     }
 }
 

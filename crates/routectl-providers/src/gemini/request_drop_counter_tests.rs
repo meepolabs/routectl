@@ -1784,3 +1784,53 @@ fn an_unmodeled_thinking_type_counts_one_gemini_drop() {
         assert_eq!(after - before, expected, "{row}");
     }
 }
+
+/// A system-role turn's text reaches `systemInstruction`, which carries text
+/// only, so its image is counted lost once per request.
+#[test]
+fn a_non_text_system_part_is_counted_on_the_gemini_lane() {
+    let class = "system_part_unrepresentable";
+    let req = ChatRequest {
+        model: "gemini-2.5-pro".into(),
+        messages: vec![
+            Message {
+                refusal: None,
+                role: Role::System,
+                content: MessageContent::Parts(vec![
+                    ContentPart::Known(KnownContentPart::Text {
+                        text: "match this".into(),
+                        citations: None,
+                        cache_control: None,
+                    }),
+                    ContentPart::Known(KnownContentPart::ImageUrl {
+                        image_url: json!({"url": "data:image/png;base64,AAAA"}),
+                        cache_control: None,
+                    }),
+                ]),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            user_with_parts(vec![ContentPart::Known(KnownContentPart::Text {
+                text: "hi".into(),
+                citations: None,
+                cache_control: None,
+            })]),
+        ]
+        .into(),
+        ..Default::default()
+    };
+
+    let before = gemini_drop_count(class);
+    let body = wire_body(&req);
+    let after = gemini_drop_count(class);
+
+    assert_eq!(after - before, 1);
+    assert_eq!(
+        body["systemInstruction"]["parts"][0]["text"],
+        json!("match this")
+    );
+    assert!(!body.to_string().contains("AAAA"), "{body}");
+}

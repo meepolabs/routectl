@@ -3,9 +3,11 @@
 //! The Responses API has no first-class system role: system content is
 //! collapsed into a top-level `instructions` string. Two canonical surfaces
 //! feed it: the top-level `req.system` first, then the text of every
-//! `Role::System` message in message order (a direct library caller may
-//! put its system prompt in the messages array; the ingresses hoist those
-//! messages into `req.system` before they reach here). Each block, message
+//! text-only `Role::System` message in message order (a direct library caller
+//! may put its system prompt in the messages array; the ingresses hoist the
+//! text-only ones into `req.system` before they reach here). A system message
+//! carrying a non-text part is not an entry: it rides `input[]` in place. Each
+//! block, message
 //! and part is one entry, and entries join with `"\n\n"` (one blank line) so
 //! boundaries stay visible to the model while the field stays a flat string.
 //! A multi-part system message joins its own parts with `"\n"`.
@@ -117,10 +119,15 @@ fn flatten_filtered_system(req: &ChatRequest, withheld: &mut bool) -> Option<Str
     }
 }
 
-/// One entry per `Role::System` message that keeps legitimate text after the
-/// billing/attribution strip, in message order. The strip runs per part
-/// before the parts of one message are joined, so a fingerprint part cannot
-/// hide behind legitimate text at the leading position the predicate tests.
+/// One entry per text-only `Role::System` message that keeps legitimate text
+/// after the billing/attribution strip, in message order. The strip runs per
+/// part before the parts of one message are joined, so a fingerprint part
+/// cannot hide behind legitimate text at the leading position the predicate
+/// tests.
+///
+/// A message carrying a non-text part rides in place as an input item (see
+/// `messages::build_input`), so it contributes no entry; it is still screened
+/// here, so a fingerprint withheld from that item is recorded once.
 fn system_role_entries(messages: &[Message], withheld: &mut bool) -> Vec<String> {
     messages
         .iter()
@@ -130,7 +137,7 @@ fn system_role_entries(messages: &[Message], withheld: &mut bool) -> Vec<String>
                 std::slice::from_ref(message),
                 withheld,
             );
-            (!parts.is_empty()).then(|| parts.join("\n"))
+            (!parts.is_empty() && !message.content.has_non_text_part()).then(|| parts.join("\n"))
         })
         .collect()
 }

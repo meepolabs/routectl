@@ -20,7 +20,7 @@ use axum::http::HeaderMap;
 use routectl_core::wire_check::{EditKind, EditSite, IngressDialect};
 use routectl_core::{
     ChatChunk, ChatRequest, ChatResponse, ContentPart, Error, KnownContentPart, MessageContent,
-    RefusalReason, Result, Role, is_canonical_request_key,
+    RefusalReason, Result, is_canonical_request_key,
 };
 use serde_json::{Map, Value};
 
@@ -122,7 +122,7 @@ impl IngressAdapter for OpenAiIngress {
         // not include that variant so serde would 400. Rewrite it to
         // `role: "system"` here, before deserialization, so it then
         // flows through `lift_system_messages` normally.
-        normalize_developer_role(&mut body);
+        let developer_turns = normalize_developer_role(&mut body);
         // Vanilla OpenAI clients set thinking via a top-level
         // `reasoning_effort` string, not the canonical nested
         // `reasoning.effort`. `ChatRequest` has no such field and no
@@ -189,9 +189,12 @@ impl IngressAdapter for OpenAiIngress {
         // `req.system` here at ingress so every egress reads the same
         // shape. Concat with newlines when multiple system messages
         // are present (matching the legacy lift-from-egress behavior).
-        let lift_edits = system_lift_edits(&req);
-        super::lift_system_messages(&mut req);
+        let had_system = req.system.is_some();
+        let lifted = super::lift_system_messages(&mut req);
+        let lift_edits = system_lift_edits(had_system, &lifted);
         req.routectl_internal.declared_edits.extend(lift_edits);
+        let role_edits = developer_role_edits(&developer_turns, &lifted);
+        req.routectl_internal.declared_edits.extend(role_edits);
         // tool_choice and OpenAI function tools are NOT translated at
         // the ingress: different egresses want different shapes
         // (openai-compat passes through verbatim, Anthropic egress
@@ -590,27 +593,27 @@ fn merge_into_provider_extras(req: &mut ChatRequest, swept: Map<String, Value>) 
 ///
 /// The edits lifting the system-role messages makes to a Chat body, once
 /// the egress sends the lifted prompt back as the leading system message:
-/// the first moves to the front, later ones fold into it. A body that also
-/// sent a top-level `system` is not a Chat Completions shape and declares
-/// nothing, so any difference it makes stays visible.
-pub(super) fn system_lift_edits(req: &ChatRequest) -> Vec<routectl_core::wire_check::DeclaredEdit> {
+/// the first moves to the front, later ones fold into it. `lifted` names the
+/// messages the lift took, by their pre-lift index; a system message it kept
+/// in place is not an edit. A body that also sent a top-level `system`
+/// (`had_system`) is not a Chat Completions shape and declares nothing, so
+/// any difference it makes stays visible.
+pub(super) fn system_lift_edits(
+    had_system: bool,
+    lifted: &super::LiftedSystem,
+) -> Vec<routectl_core::wire_check::DeclaredEdit> {
     use std::borrow::Cow;
 
     use routectl_core::wire_check::DeclaredEdit;
 
-    if req.system.is_some() {
+    if had_system {
         return Vec::new();
     }
-    let mut systems = req
-        .messages
-        .iter()
-        .enumerate()
-        .filter(|(_, m)| matches!(m.role, Role::System));
-    let Some((first, first_message)) = systems.next() else {
+    let Some((&first, rest)) = lifted.indices.split_first() else {
         return Vec::new();
     };
-    let has_rest = systems.clone().next().is_some();
-    let reshaped = !has_rest && !matches!(first_message.content, MessageContent::Text(_));
+    let has_rest = !rest.is_empty();
+    let reshaped = !has_rest && !lifted.first_was_text;
     let mut edits = Vec::new();
     let mut declare = |path: Cow<'static, str>, kind: EditKind| {
         if let Ok(edit) = DeclaredEdit::new(EditSite::SystemMessageLift, path, kind) {
@@ -621,13 +624,12 @@ pub(super) fn system_lift_edits(req: &ChatRequest) -> Vec<routectl_core::wire_ch
         (0, false) if reshaped => declare("/messages/0/content".into(), EditKind::Rewrite),
         (0, false) => {}
         (0, true) => declare("/messages/0/content".into(), EditKind::Rewrite),
-        (_, false) => declare(format!("/messages/{first}").into(), EditKind::Relocate),
-        (_, true) => {
+        _ => {
             declare("/messages/0".into(), EditKind::Add);
             declare(format!("/messages/{first}").into(), EditKind::Remove);
         }
     }
-    for (j, _) in systems {
+    for j in rest {
         declare(format!("/messages/{j}").into(), EditKind::Remove);
     }
     edits
@@ -664,19 +666,44 @@ fn coalesce_message_reasoning_keys(body: &mut Value) {
 /// before serde deserialization. The o-series / gpt-5+ system-voice
 /// successor role is not a canonical `Role` variant; renaming it here
 /// means the message then flows through `lift_system_messages` normally.
-/// No other role values are touched.
-fn normalize_developer_role(body: &mut Value) {
+/// No other role values are touched. Returns the indices it rewrote.
+fn normalize_developer_role(body: &mut Value) -> Vec<usize> {
     let Some(messages) = body.get_mut("messages").and_then(|v| v.as_array_mut()) else {
-        return;
+        return Vec::new();
     };
-    for msg in messages.iter_mut() {
+    let mut rewritten = Vec::new();
+    for (index, msg) in messages.iter_mut().enumerate() {
         let Some(obj) = msg.as_object_mut() else {
             continue;
         };
         if obj.get("role").and_then(|v| v.as_str()) == Some("developer") {
             obj.insert("role".into(), Value::String("system".into()));
+            rewritten.push(index);
         }
     }
+    rewritten
+}
+
+/// The role rewrite of each developer-role message the lift kept in place:
+/// it reaches the egress as a `system` message.
+fn developer_role_edits(
+    developer_turns: &[usize],
+    lifted: &super::LiftedSystem,
+) -> Vec<routectl_core::wire_check::DeclaredEdit> {
+    use routectl_core::wire_check::DeclaredEdit;
+
+    developer_turns
+        .iter()
+        .filter(|index| lifted.indices.binary_search(index).is_err())
+        .filter_map(|index| {
+            DeclaredEdit::new(
+                EditSite::SystemMessageLift,
+                format!("/messages/{index}/role"),
+                EditKind::Rewrite,
+            )
+            .ok()
+        })
+        .collect()
 }
 
 /// Promote the top-level OpenAI `reasoning_effort` string into the

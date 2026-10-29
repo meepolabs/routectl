@@ -8,10 +8,10 @@
 //!
 //! - anthropic-api forwards the turn in place, block and text verbatim, and
 //!   leaves the upstream to accept or refuse the block.
-//! - Bedrock Invoke never ships an in-band system turn, and with a top-level
-//!   system present the legacy lift does not run either, so the whole turn,
-//!   text included, is LOST from the Invoke body. This is a measured loss,
-//!   not an intended edit: nothing declares it and nothing refuses locally.
+//! - Bedrock Invoke never ships an in-band system turn. The turn's text is
+//!   appended to the top-level system, which carries text only, so the
+//!   `tool_addition` block is LOST from the Invoke body and counted as a
+//!   translation drop on that lane. Nothing refuses locally.
 
 #![cfg(feature = "bedrock")]
 
@@ -155,30 +155,47 @@ fn anthropic_api_carries_the_tool_change_turn_in_place() {
     );
 }
 
-/// LOSS on Bedrock Invoke: the tool-change system turn is dropped whole.
-/// Neither the `tool_addition` block nor the turn's text reaches the body,
-/// the top-level system is unchanged (nothing is lifted into it), and the
-/// rest of the history keeps its order. The model is never told the tool
-/// set changed.
+/// The `(bedrock-invoke, system_part_unrepresentable)` drop counter. No other
+/// test in this binary reaches the key.
+fn invoke_system_part_drops() -> u64 {
+    routectl_providers::translation_drop_metrics::translation_drop_snapshot()
+        .into_iter()
+        .find(|e| e.lane == "bedrock-invoke" && e.drop_class == "system_part_unrepresentable")
+        .map_or(0, |e| e.drop_count)
+}
+
+/// Counted LOSS on Bedrock Invoke: the tool-change turn's text is appended to
+/// the top-level system, the `tool_addition` block has no home there and is
+/// dropped, and the drop is counted once. The rest of the history keeps its
+/// order, with no in-band system turn.
 #[test]
 fn the_tool_change_turn_is_a_loss_on_bedrock_invoke() {
     // Arrange
     let req = request_with_tool_change_turn();
 
     // Act
+    let before = invoke_system_part_drops();
     let body = bedrock_invoke_provider()
         .normalize_request(&req)
         .expect("bedrock invoke normalize");
+    let after = invoke_system_part_drops();
 
     // Assert
-    assert_eq!(body["system"], TOP_LEVEL_SYSTEM);
+    assert_eq!(
+        body["system"],
+        json!([
+            {"type": "text", "text": TOP_LEVEL_SYSTEM},
+            {"type": "text", "text": TOOL_CHANGE_TEXT},
+        ])
+    );
+    assert_eq!(after - before, 1);
     assert_eq!(
         wire_roles(&body),
         ["user", "assistant", "user"],
         "got: {body}"
     );
     let wire = body.to_string();
-    for lost in ["tool_addition", ADDED_TOOL_NAME, TOOL_CHANGE_TEXT] {
+    for lost in ["tool_addition", "\"tools\""] {
         assert!(
             !wire.contains(lost),
             "the Invoke body unexpectedly carries {lost:?}: {body}"

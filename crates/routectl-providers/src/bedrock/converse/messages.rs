@@ -244,7 +244,7 @@ impl ContentDropTally {
 /// a discard -- named and greppable (instead of a bare `=> {}`) so a
 /// future regression in `build_system`'s both-present coverage cannot
 /// hide silently behind it.
-// TRANSLATION-DROP: structural -- system::build_system reaches every Role::System message's content, by translation, by lift, or by merging both sources
+// TRANSLATION-DROP: structural -- system::build_system reaches every Role::System message's text, by translation, by lift, or by merging both sources, and the system translation counts any non-text part
 const fn system_role_content_lives_in_top_level_system() {}
 
 /// Append a translated turn's content to `out`, merging into the

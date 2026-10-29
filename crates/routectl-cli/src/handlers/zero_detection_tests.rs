@@ -594,6 +594,114 @@ fn chat_cases() -> Vec<Case> {
             chat_provider,
         ),
         case(
+            "chat/system-with-image",
+            Ingress::Chat,
+            json!({"model": ALIAS, "messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "system", "content": [
+                    {"type": "text", "text": "match this"},
+                    {"type": "image_url", "image_url": {"url": "https://example.com/a.png"}}]},
+                {"role": "user", "content": "again"}]}),
+            chat_complete(),
+            chat_provider,
+        ),
+        case(
+            "chat/developer-with-unknown-part",
+            Ingress::Chat,
+            json!({"model": ALIAS, "messages": [
+                {"role": "developer", "content": [
+                    {"type": "text", "text": "match this"},
+                    {"type": "future_block", "payload": {"k": 1}}]},
+                {"role": "user", "content": "hi"}]}),
+            chat_complete(),
+            chat_provider,
+        ),
+        case(
+            "chat/kept-developer-before-lifted-system",
+            Ingress::Chat,
+            json!({"model": ALIAS, "messages": [
+                {"role": "developer", "content": [
+                    {"type": "image_url", "image_url": {"url": "https://example.com/a.png"}}]},
+                {"role": "system", "content": "be brief"},
+                {"role": "user", "content": "hi"}]}),
+            chat_complete(),
+            chat_provider,
+        ),
+        case(
+            "chat/lifted-system-before-kept-developer",
+            Ingress::Chat,
+            json!({"model": ALIAS, "messages": [
+                {"role": "system", "content": "be brief"},
+                {"role": "developer", "content": [
+                    {"type": "image_url", "image_url": {"url": "https://example.com/a.png"}}]},
+                {"role": "user", "content": "hi"}]}),
+            chat_complete(),
+            chat_provider,
+        ),
+        case(
+            "chat/kept-developer-before-two-lifted-systems",
+            Ingress::Chat,
+            json!({"model": ALIAS, "messages": [
+                {"role": "developer", "content": [{"type": "image_url", "image_url": {"url": "https://example.com/a.png"}}]},
+                {"role": "system", "content": "a"},
+                {"role": "system", "content": "b"},
+                {"role": "user", "content": "hi"}]}),
+            chat_complete(),
+            chat_provider,
+        ),
+        case(
+            "chat/kept-developer-between-lifted-systems",
+            Ingress::Chat,
+            json!({"model": ALIAS, "messages": [
+                {"role": "system", "content": "a"},
+                {"role": "developer", "content": [{"type": "image_url", "image_url": {"url": "https://example.com/a.png"}}]},
+                {"role": "system", "content": "b"},
+                {"role": "user", "content": "hi"}]}),
+            chat_complete(),
+            chat_provider,
+        ),
+        case(
+            "chat/kept-system-before-lifted-system",
+            Ingress::Chat,
+            json!({"model": ALIAS, "messages": [
+                {"role": "system", "content": [{"type": "image_url", "image_url": {"url": "https://example.com/a.png"}}]},
+                {"role": "system", "content": "a"},
+                {"role": "user", "content": "hi"}]}),
+            chat_complete(),
+            chat_provider,
+        ),
+        case(
+            "responses/kept-system-before-lifted-system",
+            Ingress::Responses,
+            json!({"model": ALIAS, "input": [
+                {"type": "message", "role": "system", "content": [{"type": "input_image", "image_url": "https://example.com/a.png"}]},
+                {"type": "message", "role": "system", "content": "a"},
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}]}),
+            responses_stream(0),
+            responses_provider,
+        ),
+        case(
+            "responses/kept-system-between-lifted-systems",
+            Ingress::Responses,
+            json!({"model": ALIAS, "input": [
+                {"type": "message", "role": "system", "content": "a"},
+                {"type": "message", "role": "system", "content": [{"type": "input_image", "image_url": "https://example.com/a.png"}]},
+                {"type": "message", "role": "system", "content": "b"},
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}]}),
+            responses_stream(0),
+            responses_provider,
+        ),
+        case(
+            "chat/one-turn-before-lifted-system",
+            Ingress::Chat,
+            json!({"model": ALIAS, "messages": [
+                {"role": "user", "content": "x"},
+                {"role": "system", "content": "a"},
+                {"role": "user", "content": "hi"}]}),
+            chat_complete(),
+            chat_provider,
+        ),
+        case(
             "chat/stream-usage-cached",
             Ingress::Chat,
             json!({"model": ALIAS, "stream": true, "messages": hi}),
@@ -705,6 +813,74 @@ fn responses_cases() -> Vec<Case> {
                               "parameters": {"type": "object",
                                              "properties": {"q": {"type": "string"}}}}],
                    "tool_choice": {"type": "function", "name": "search"}}),
+            responses_stream(0),
+            responses_provider,
+        ),
+        case(
+            "responses/system-first",
+            Ingress::Responses,
+            json!({"model": ALIAS, "input": [
+                {"type": "message", "role": "system", "content": "be brief"},
+                {"type": "message", "role": "user",
+                 "content": [{"type": "input_text", "text": "hi"}]}]}),
+            responses_stream(0),
+            responses_provider,
+        ),
+        case(
+            "responses/developer-mid-conversation",
+            Ingress::Responses,
+            json!({"model": ALIAS, "input": [
+                {"type": "message", "role": "user",
+                 "content": [{"type": "input_text", "text": "hi"}]},
+                {"type": "message", "role": "developer", "content": "now be brief"},
+                {"type": "message", "role": "user",
+                 "content": [{"type": "input_text", "text": "again"}]}]}),
+            responses_stream(0),
+            responses_provider,
+        ),
+        case(
+            "responses/instructions-and-system",
+            Ingress::Responses,
+            json!({"model": ALIAS, "instructions": "be brief", "input": [
+                {"type": "message", "role": "user",
+                 "content": [{"type": "input_text", "text": "hi"}]},
+                {"type": "message", "role": "system", "content": "be kind"}]}),
+            responses_stream(0),
+            responses_provider,
+        ),
+        case(
+            "responses/system-with-image",
+            Ingress::Responses,
+            json!({"model": ALIAS, "input": [
+                {"type": "message", "role": "system", "content": [
+                    {"type": "input_text", "text": "match this"},
+                    {"type": "input_image", "image_url": "https://example.com/a.png"}]},
+                {"type": "message", "role": "user",
+                 "content": [{"type": "input_text", "text": "hi"}]}]}),
+            responses_stream(0),
+            responses_provider,
+        ),
+        case(
+            "responses/lifted-system-before-kept-developer",
+            Ingress::Responses,
+            json!({"model": ALIAS, "input": [
+                {"type": "message", "role": "system", "content": "be brief"},
+                {"type": "message", "role": "developer", "content": [
+                    {"type": "input_image", "image_url": "https://example.com/a.png"}]},
+                {"type": "message", "role": "user",
+                 "content": [{"type": "input_text", "text": "hi"}]}]}),
+            responses_stream(0),
+            responses_provider,
+        ),
+        case(
+            "responses/kept-developer-before-lifted-system",
+            Ingress::Responses,
+            json!({"model": ALIAS, "input": [
+                {"type": "message", "role": "developer", "content": [
+                    {"type": "input_image", "image_url": "https://example.com/a.png"}]},
+                {"type": "message", "role": "system", "content": "be brief"},
+                {"type": "message", "role": "user",
+                 "content": [{"type": "input_text", "text": "hi"}]}]}),
             responses_stream(0),
             responses_provider,
         ),

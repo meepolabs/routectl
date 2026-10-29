@@ -56,6 +56,7 @@ pub fn normalize_request(cfg: &BedrockConfig, req: &ChatRequest) -> Result<Value
     crate::translation_drop_metrics::record_translation_lane_seen(LANE);
     let mut response_format = crate::anthropic_api::request::ResponseFormatTally::default();
     let mut foreign = crate::anthropic_api::request::ForeignDialectExtraTally::default();
+    let mut system_parts = crate::anthropic_api::request::SystemPartDropTally::default();
     let assembled = crate::anthropic_api::request::normalize_deferring_format_key_warn(
         &cfg.id,
         req,
@@ -87,12 +88,14 @@ pub fn normalize_request(cfg: &BedrockConfig, req: &ChatRequest) -> Result<Value
         &mut crate::anthropic_api::request::HostedMcpToolWithholdTally::default(),
         &mut response_format,
         &mut foreign,
+        &mut system_parts,
     );
     // Flushed on BOTH arms of the assembly, so a request that dropped its
     // directive and then failed is still in the numerator its denominator
     // already counted.
     flush_response_format_tally(&response_format);
     flush_foreign_dialect_tally(&cfg.id, &foreign);
+    flush_system_part_tally(&cfg.id, &system_parts);
     let (mut body, deferred) = assembled?;
     let obj = body.as_object_mut().ok_or_else(|| {
         Error::Internal(format!(
@@ -308,6 +311,26 @@ fn flush_foreign_dialect_tally(
             provider = %provider_id,
             keys = %tally.keys_for_log(),
             "bedrock-invoke egress: client extras from another ingress dialect dropped",
+        );
+    }
+}
+
+/// Count this request's dropped non-text system-turn parts on the Invoke
+/// lane. The shared Anthropic assembly lifted the turn's text into the
+/// `system` field, which carries text only.
+fn flush_system_part_tally(
+    provider_id: &str,
+    tally: &crate::anthropic_api::request::SystemPartDropTally,
+) {
+    if tally.dropped() {
+        crate::translation_drop_metrics::record_translation_drop(
+            LANE,
+            "system_part_unrepresentable",
+        );
+        tracing::debug!(
+            provider = %provider_id,
+            "bedrock-invoke egress: non-text parts of a system-role turn dropped; the system \
+             field carries text only",
         );
     }
 }
@@ -828,11 +851,11 @@ mod tests {
     /// false`, so a canonical system present ALONGSIDE `Role::System`
     /// messages still leaves the messages array free of the wire role --
     /// a default flip on the anthropic-api side cannot leak the shape
-    /// here. With the canonical system present the legacy lift does not
-    /// run either, so the turn's content, text and any non-text block
-    /// alike, is LOST from the body: a measured loss, not an intended edit
-    /// (`tests/mid_conversation_tool_changes.rs` measures it against the
-    /// anthropic-api lane).
+    /// here. With the canonical system present the legacy lift takes only a
+    /// turn carrying a non-text part (an ingress kept it in place), so this
+    /// text-only turn is LOST from the body: a measured loss, not an intended
+    /// edit. `tests/mid_conversation_tool_changes.rs` measures the non-text
+    /// case against the anthropic-api lane.
     #[test]
     fn system_role_turns_stay_absent_from_the_invoke_body() {
         // Arrange

@@ -208,15 +208,18 @@ fn build_input_tallied(
     let mut out: Vec<ResponseInputItem> = Vec::with_capacity(messages.len());
     for msg in messages {
         match &msg.role {
-            // A system turn's content is not lost here: `system.rs` lifts the
-            // text of every `Role::System` message into `instructions` after
-            // the top-level `req.system`, with the billing/attribution block
-            // withheld. The ingresses also hoist these messages into
-            // `req.system` before the request leaves them, so this arm only
-            // sees a system turn from a direct library caller. Emitting it
-            // again as an input item would duplicate it.
-            // TRANSLATION-DROP: structural -- system-role text is lifted into `instructions` by the system translation, so an input item would duplicate it
-            Role::System => {}
+            // A text-only system turn is not lost here: `system.rs` lifts its
+            // text into `instructions` after the top-level `req.system`, with
+            // the billing/attribution block withheld, so emitting it again as
+            // an input item would duplicate it. A turn carrying a non-text
+            // part has no place in `instructions` and rides in place as a
+            // `system` message item instead; `system.rs` skips it.
+            // TRANSLATION-DROP: structural -- a text-only system turn is lifted into `instructions` by the system translation, and any other system turn is emitted in place below
+            Role::System => {
+                if msg.content.has_non_text_part() {
+                    translate_system_message(id, auth_kind, msg, &mut out, tally)?;
+                }
+            }
             Role::User => translate_user_message(id, auth_kind, msg, &mut out, tally)?,
             Role::Assistant => translate_assistant_message(id, auth_kind, msg, &mut out, tally)?,
             Role::Tool => translate_tool_message(id, auth_kind, msg, &mut out, tally)?,
@@ -309,6 +312,38 @@ fn translate_other_message(
         role: tag.to_string(),
         content,
     });
+    Ok(())
+}
+
+/// A system turn carrying a non-text part, emitted in place as a `system`
+/// message item through the same content build a user turn takes. The
+/// billing/attribution text part is withheld first; `system.rs` sees the
+/// same part and records the withhold, so it is counted once per request.
+fn translate_system_message(
+    id: &str,
+    auth_kind: AuthKind,
+    msg: &Message,
+    out: &mut Vec<ResponseInputItem>,
+    tally: &mut ResponsesDropTally,
+) -> Result<()> {
+    let MessageContent::Parts(parts) = &msg.content else {
+        return Ok(());
+    };
+    let kept: Vec<ContentPart> = parts
+        .iter()
+        .filter(|p| {
+            !matches!(p, ContentPart::Known(KnownContentPart::Text { text, .. })
+                if crate::system_filter::is_billing_attribution_block(text))
+        })
+        .cloned()
+        .collect();
+    let content = build_user_content(id, auth_kind, &MessageContent::Parts(kept), tally)?;
+    if !content.is_empty() {
+        out.push(ResponseInputItem::Message {
+            role: "system".into(),
+            content,
+        });
+    }
     Ok(())
 }
 

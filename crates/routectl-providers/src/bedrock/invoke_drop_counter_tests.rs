@@ -343,3 +343,51 @@ fn an_unmanaged_operator_extra_lands_on_the_invoke_body_uncounted() {
     assert!(warned.is_empty(), "{warned:?}");
     assert_eq!(delta, 0);
 }
+
+fn system_turn_with_image(text: &str) -> Message {
+    Message {
+        refusal: None,
+        role: Role::System,
+        content: MessageContent::Parts(vec![
+            routectl_core::ContentPart::Known(routectl_core::KnownContentPart::Text {
+                text: text.into(),
+                citations: None,
+                cache_control: None,
+            }),
+            routectl_core::ContentPart::Known(routectl_core::KnownContentPart::ImageUrl {
+                image_url: json!({"url": "https://example.com/a.png"}),
+                cache_control: None,
+            }),
+        ]),
+        reasoning: None,
+        reasoning_details: vec![],
+        name: None,
+        tool_call_id: None,
+        tool_calls: None,
+    }
+}
+
+/// Invoke ships no mid-conversation system turn, so a kept system turn's
+/// text is appended to the canonical system and its image is counted lost
+/// under this lane, never the anthropic lane whose assembly builds the body.
+#[test]
+fn a_non_text_system_part_is_counted_on_the_invoke_lane() {
+    let mut req = user_req();
+    req.system = Some(routectl_core::SystemContent::Text("be brief".into()));
+    let mut messages = req.messages.to_vec();
+    messages.push(system_turn_with_image("match this"));
+    req.messages = messages.into();
+    let class = "system_part_unrepresentable";
+
+    let before = (class_count(LANE, class), class_count("anthropic", class));
+    let body = normalize_request(&cfg(), &req).expect("assembles");
+    let after = (class_count(LANE, class), class_count("anthropic", class));
+
+    assert_eq!(after.0 - before.0, 1);
+    assert_eq!(after.1 - before.1, 0);
+    assert_eq!(
+        body["system"],
+        json!([{"type": "text", "text": "be brief"}, {"type": "text", "text": "match this"}])
+    );
+    assert!(!body.to_string().contains("example.com"), "{body}");
+}

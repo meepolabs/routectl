@@ -813,6 +813,20 @@ pub enum MessageContent {
     Null,
 }
 
+impl MessageContent {
+    /// Whether this content carries a part that is not text: an image, a
+    /// document, a tool block, or a forward-compat part.
+    #[must_use]
+    pub fn has_non_text_part(&self) -> bool {
+        match self {
+            Self::Parts(parts) => parts
+                .iter()
+                .any(|p| !matches!(p, ContentPart::Known(crate::KnownContentPart::Text { .. }))),
+            Self::Text(_) | Self::Null => false,
+        }
+    }
+}
+
 /// Unified reasoning request config. See OpenRouter docs for provider mapping.
 ///
 /// - OpenAI o-series: `effort` -> `reasoning_effort`

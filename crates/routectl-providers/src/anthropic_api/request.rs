@@ -91,6 +91,7 @@ pub(crate) use super::system::translate_system;
 // that it merges both sources, an unfiltered lift would forward a
 // client-fingerprinting block to a third-party upstream whenever both are
 // present.
+use super::system::kept_system_turns;
 pub(crate) use super::system::lift_legacy_system_stripped;
 // Only the Bedrock Converse egress consumes this re-export.
 #[cfg(feature = "bedrock")]
@@ -149,6 +150,45 @@ fn flush_fingerprint_tally(fingerprint: &ClientFingerprintStripTally, req: &Chat
         crate::translation_drop_metrics::record_translation_policy_action(
             super::LANE,
             "client_fingerprint_stripped",
+        );
+    }
+}
+
+/// Per-request record that this assembly dropped the non-text parts of a
+/// `Role::System` turn. An ingress keeps such a turn in place rather than lift
+/// it; when the turn does not ride the wire as a system turn, its text is
+/// lifted into the `system` field, which carries text blocks only, so its
+/// images, documents and forward-compat parts are lost. Caller-owned for the
+/// same reason as [`ResponseFormatTally`].
+#[must_use = "a system-part drop counts nothing until its lane flushes it"]
+#[derive(Debug, Default)]
+pub(crate) struct SystemPartDropTally {
+    dropped: bool,
+}
+
+impl SystemPartDropTally {
+    const fn record(&mut self) {
+        self.dropped = true;
+    }
+
+    /// Whether this request lost a non-text system-turn part.
+    pub(crate) const fn dropped(&self) -> bool {
+        self.dropped
+    }
+}
+
+/// Count this request's dropped non-text system-turn parts on the anthropic
+/// lane. Takes the request so a background probe records nothing.
+fn flush_system_part_tally(tally: &SystemPartDropTally, id: &str, req: &ChatRequest) {
+    if tally.dropped() && super::is_client_traffic(req) {
+        crate::translation_drop_metrics::record_translation_drop(
+            super::LANE,
+            "system_part_unrepresentable",
+        );
+        tracing::debug!(
+            provider = id,
+            "anthropic-api egress: non-text parts of a system-role turn dropped; the system \
+             field carries text only",
         );
     }
 }
@@ -711,9 +751,10 @@ const fn anthropic_tool_cache_control(t: &AnthropicTool) -> Option<&routectl_cor
 /// Messages API, which accepts a mid-conversation `role: "system"` turn in
 /// `messages[]`. When true and a canonical `req.system` is shipping, the
 /// legacy lift does not run and each `Role::System` turn rides the wire in
-/// place. When false the turns are treated as lift-consumed, so a lane whose
-/// target API has no such role never ships one. Stated at each call site, not
-/// defaulted.
+/// place. When false the turns are lift-consumed, so a lane whose target API
+/// has no such role never ships one: with a canonical system present, only the
+/// turns an ingress kept in place for their non-text parts are lifted after it.
+/// Stated at each call site, not defaulted.
 ///
 /// `fingerprint` is the caller-owned per-request tally for the client
 /// fingerprint this function withholds. It is recorded into, never flushed
@@ -742,6 +783,7 @@ pub(crate) fn normalize_deferring_format_key_warn(
     hosted_mcp: &mut HostedMcpToolWithholdTally,
     response_format: &mut ResponseFormatTally,
     foreign: &mut ForeignDialectExtraTally,
+    system_parts: &mut SystemPartDropTally,
 ) -> Result<(Value, DeferredOutputConfigDiagnostics)> {
     // The canonical sampling knobs have no Anthropic Messages home and are
     // gated out of the provider_extras merge as canonical keys; log once at
@@ -794,9 +836,9 @@ pub(crate) fn normalize_deferring_format_key_warn(
     // The wire system field and the messages array are two halves of one
     // decision, so the discriminator is resolved ONCE here from the same
     // filtered canonical system the system-field branch below consumes.
-    // With a canonical system present the lift never ran, so nothing else
-    // owns the Role::System turns and they ride the wire in place; with it
-    // absent the lift consumed them. Resolved BEFORE the replay-invariant
+    // With a canonical system present on a lane that accepts system turns,
+    // they ride the wire in place; otherwise the legacy lift consumes them.
+    // Resolved BEFORE the replay-invariant
     // walk because that walk's whole-turn drop is positional: it must only
     // refuse a drop after a system turn that actually reaches the wire.
     let system_turns = if forward_system_turns && filtered_system.is_some() {
@@ -839,17 +881,35 @@ pub(crate) fn normalize_deferring_format_key_warn(
             routectl_core::wire_check::EditKind::Add,
         );
     }
-    let system = filtered_system.as_ref().map(translate_system).or_else(|| {
+    // A lifted system turn's non-text parts have no home in the `system`
+    // field, which carries text blocks only.
+    // TRANSLATION-DROP: lane=anthropic class=system_part_unrepresentable test=a_non_text_system_part_the_lift_cannot_carry_is_counted_on_the_anthropic_lane
+    // TRANSLATION-DROP: lane=bedrock-invoke class=system_part_unrepresentable test=a_non_text_system_part_is_counted_on_the_invoke_lane
+    if system_turns == SystemTurnPolicy::Lift
+        && crate::system_filter::carries_non_text_system_part(&req.messages)
+    {
+        system_parts.record();
+    }
+    let primary = filtered_system.as_ref().map(translate_system);
+    let legacy = (system_turns == SystemTurnPolicy::Lift).then(|| {
         // Legacy lift: strip the billing block from the lifted text too.
         // lift_legacy_system joins Role::System messages into a single
         // AnthropicSystem::Text. Filter each text part through the
         // same billing predicate so the fingerprint never reaches a
         // third-party host via this path either. A separate flag keeps
         // the log line one-per-strip: the req.system branch above already
-        // warned if it dropped, and that branch is mutually exclusive
-        // with this fallback running at all.
+        // warned if it dropped.
+        //
+        // With a canonical system present the lift takes only the turns an
+        // ingress kept in place for their non-text parts: their text was
+        // never hoisted into the canonical system, so it would otherwise be
+        // lost with them.
         let mut legacy_dropped = false;
-        let lifted_content = lift_legacy_system_stripped(&req.messages, &mut legacy_dropped);
+        let lifted_content = if primary.is_some() {
+            lift_legacy_system_stripped(&kept_system_turns(&req.messages), &mut legacy_dropped)
+        } else {
+            lift_legacy_system_stripped(&req.messages, &mut legacy_dropped)
+        };
         if legacy_dropped {
             tracing::debug!(
                 provider = id,
@@ -864,6 +924,7 @@ pub(crate) fn normalize_deferring_format_key_warn(
         }
         lifted_content.as_ref().map(translate_system)
     });
+    let system = super::system::append_system(primary, legacy.flatten());
 
     let mut envelopes = crate::anthropic_api::envelope_policy::EnvelopeUnwrapTally::new(
         id,
@@ -1147,6 +1208,7 @@ pub(crate) fn normalize(
     let mut hosted_mcp = HostedMcpToolWithholdTally::default();
     let mut response_format = ResponseFormatTally::default();
     let mut foreign = ForeignDialectExtraTally::default();
+    let mut system_parts = SystemPartDropTally::default();
     let assembled = normalize_deferring_format_key_warn(
         id,
         req,
@@ -1158,6 +1220,7 @@ pub(crate) fn normalize(
         &mut hosted_mcp,
         &mut response_format,
         &mut foreign,
+        &mut system_parts,
     );
     // Flushed on BOTH arms and outside every fallible step of the assembly: a
     // request whose entire system IS the fingerprint block assembles to no
@@ -1169,6 +1232,7 @@ pub(crate) fn normalize(
     flush_hosted_mcp_tally(&hosted_mcp, req);
     flush_response_format_tally(&response_format, req);
     flush_foreign_dialect_tally(&foreign, id, req);
+    flush_system_part_tally(&system_parts, id, req);
     let (body, deferred) = assembled?;
     deferred.warn(id);
     Ok(body)

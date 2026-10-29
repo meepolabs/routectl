@@ -365,6 +365,7 @@ const EXPECTED_UNMARKED_LOSS_LOGS: &[(&str, &str, &str, &str)] = &[
 /// `(file, symbol)`, so a count that moves either way is a review moment.
 const EXPECTED_RESOLVED_LOG_COUNTS: &[(&str, &str, usize)] = &[
     ("anthropic_api/request.rs", "flush_foreign_dialect_tally", 1),
+    ("anthropic_api/request.rs", "flush_system_part_tally", 1),
     (
         "anthropic_api/request.rs",
         "normalize_deferring_format_key_warn",
@@ -395,6 +396,11 @@ const EXPECTED_RESOLVED_LOG_COUNTS: &[(&str, &str, usize)] = &[
     ("bedrock/converse/messages.rs", "translate_messages", 2),
     ("bedrock/converse/system.rs", "build_system", 2),
     (
+        "bedrock/converse/system.rs",
+        "count_dropped_system_parts",
+        1,
+    ),
+    (
         "bedrock/converse/tools.rs",
         "append_tool_with_cache_point",
         1,
@@ -420,6 +426,7 @@ const EXPECTED_RESOLVED_LOG_COUNTS: &[(&str, &str, usize)] = &[
         3,
     ),
     ("bedrock/invoke.rs", "flush_foreign_dialect_tally", 1),
+    ("bedrock/invoke.rs", "flush_system_part_tally", 1),
     ("bedrock/invoke.rs", "merge_operator_extras", 1),
     ("gemini/request.rs", "build_response_format", 1),
     ("gemini/request.rs", "build_system_instruction", 2),
@@ -429,6 +436,7 @@ const EXPECTED_RESOLVED_LOG_COUNTS: &[(&str, &str, usize)] = &[
     ("gemini/request.rs", "flush", 2),
     ("gemini/request.rs", "log_dropped_cache_control", 1),
     ("gemini/request.rs", "merge_payload_extras", 1),
+    ("gemini/request.rs", "note_dropped_system_parts", 1),
     ("gemini/request.rs", "reasoning_details_to_thought_parts", 1),
     ("gemini/request.rs", "report_withheld_ingress_extras", 1),
     ("gemini/request.rs", "strip_client_metadata", 1),

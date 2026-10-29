@@ -4409,7 +4409,7 @@ fn every_recorder_call_on_this_lane_is_probe_gated() {
     // of THAT gate visible to this guard too; the sibling behavioral tests pin
     // its effect.
     for (name, src, expected_calls, expected_gates) in [
-        ("request.rs", REQUEST, 6usize, 6usize),
+        ("request.rs", REQUEST, 7usize, 7usize),
         ("client.rs", CLIENT, 2, 2),
         ("cloak.rs", CLOAK, 3, 1),
     ] {

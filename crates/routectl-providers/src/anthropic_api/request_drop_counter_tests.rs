@@ -554,3 +554,78 @@ fn response_format_key_loss_counts_nothing_when_no_conversion_loses_a_key() {
         assert_eq!(after, before, "row {row}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Non-text parts of a system-role turn.
+// ---------------------------------------------------------------------------
+
+/// The `(anthropic, system_part_unrepresentable)` drop counter.
+fn system_part_drop_count() -> u64 {
+    crate::translation_drop_metrics::translation_drop_snapshot()
+        .into_iter()
+        .find(|e| e.lane == super::LANE && e.drop_class == "system_part_unrepresentable")
+        .map_or(0, |e| e.drop_count)
+}
+
+fn system_turn_with_image(text: &str) -> Message {
+    Message {
+        content: MessageContent::Parts(vec![
+            routectl_core::ContentPart::Known(routectl_core::KnownContentPart::Text {
+                text: text.into(),
+                citations: None,
+                cache_control: None,
+            }),
+            routectl_core::ContentPart::Known(routectl_core::KnownContentPart::ImageUrl {
+                image_url: serde_json::json!({"url": "https://example.com/a.png"}),
+                cache_control: None,
+            }),
+        ]),
+        ..system_turn(text)
+    }
+}
+
+/// With no canonical system the turn is lifted into the `system` field,
+/// which carries text only: its text arrives, its image is counted lost.
+#[test]
+fn a_non_text_system_part_the_lift_cannot_carry_is_counted_on_the_anthropic_lane() {
+    let req = ChatRequest {
+        messages: vec![system_turn_with_image("match this"), user_turn("hi")].into(),
+        ..base_req()
+    };
+
+    let before = system_part_drop_count();
+    let body = assemble(&req);
+    let after = system_part_drop_count();
+
+    assert_eq!(after - before, 1);
+    assert_eq!(body["system"], serde_json::json!("match this"));
+    assert!(!body.to_string().contains("example.com"), "{body}");
+}
+
+/// With a canonical system the turn rides the wire in place, image and all,
+/// so nothing is counted.
+#[test]
+fn a_forwarded_system_turn_keeps_its_image_and_counts_no_drop() {
+    let req = ChatRequest {
+        system: Some(SystemContent::Text("be brief".into())),
+        messages: vec![
+            user_turn("hi"),
+            system_turn_with_image("match this"),
+            user_turn("again"),
+        ]
+        .into(),
+        ..base_req()
+    };
+
+    let before = system_part_drop_count();
+    let body = assemble(&req);
+    let after = system_part_drop_count();
+
+    assert_eq!(after - before, 0);
+    assert_eq!(body["messages"][1]["role"], serde_json::json!("system"));
+    assert_eq!(
+        body["messages"][1]["content"][1]["source"]["url"],
+        serde_json::json!("https://example.com/a.png"),
+        "{body}"
+    );
+}

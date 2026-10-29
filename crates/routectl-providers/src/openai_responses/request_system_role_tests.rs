@@ -257,3 +257,63 @@ fn a_request_that_fails_after_the_message_strip_still_counts() {
         "the withhold happened before the failure"
     );
 }
+
+fn system_with_image(text: &str) -> Message {
+    Message {
+        content: MessageContent::Parts(vec![
+            text_part(text),
+            ContentPart::Known(KnownContentPart::ImageUrl {
+                image_url: json!({"url": "https://example.com/a.png"}),
+                cache_control: None,
+            }),
+        ]),
+        ..system_text(text)
+    }
+}
+
+/// A system turn carrying a non-text part has no place in `instructions`, so
+/// it rides in place as a `system` message item with its image, and its text
+/// is not copied into `instructions` as well.
+#[test]
+fn a_system_turn_with_an_image_rides_in_place_as_a_system_item() {
+    let mut req = req_with(vec![
+        user_text("hi"),
+        system_with_image("match this"),
+        user_text("again"),
+    ]);
+    req.system = Some(SystemContent::Text("be brief".into()));
+
+    let wire = translate_to_json(&cfg(), &req);
+
+    assert_eq!(wire["instructions"], json!("be brief"));
+    let input = wire["input"].as_array().expect("input array");
+    assert_eq!(input.len(), 3, "{wire}");
+    assert_eq!(input[1]["role"], json!("system"));
+    assert_eq!(
+        input[1]["content"],
+        json!([
+            {"type": "input_text", "text": "match this"},
+            {"type": "input_image", "image_url": "https://example.com/a.png"}
+        ])
+    );
+}
+
+/// The fingerprint part of a system turn kept in place is withheld from the
+/// item it rides in and counted once.
+#[test]
+fn a_fingerprint_part_in_a_kept_system_turn_is_withheld_and_counted_once() {
+    let mut turn = system_with_image("match this");
+    if let MessageContent::Parts(parts) = &mut turn.content {
+        parts.insert(0, text_part(RESPONSES_FINGERPRINT));
+    }
+    let req = req_with(vec![user_text("hi"), turn]);
+
+    let (wire, delta) = wire_with_strip_delta(&req);
+
+    assert!(
+        !wire.to_string().contains(RESPONSES_FINGERPRINT_TELL),
+        "{wire}"
+    );
+    assert_eq!(wire["input"][1]["content"][0]["text"], json!("match this"));
+    assert_eq!(delta, 1);
+}

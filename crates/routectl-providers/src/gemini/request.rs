@@ -72,6 +72,7 @@ struct GeminiDropTally {
     response_format_unrepresentable: bool,
     schema_keyword_unsupported: bool,
     reasoning_effort_unrecognized: bool,
+    system_part_unrepresentable: bool,
 }
 
 impl GeminiDropTally {
@@ -136,6 +137,10 @@ impl GeminiDropTally {
             (
                 self.reasoning_effort_unrecognized,
                 "reasoning_effort_unrecognized",
+            ),
+            (
+                self.system_part_unrepresentable,
+                "system_part_unrepresentable",
             ),
         ] {
             if fired {
@@ -324,6 +329,7 @@ fn build_body(
         req,
         HONORED_SAMPLING_FIELDS,
     );
+    note_dropped_system_parts(provider_id, req, tally);
     let system_instruction = build_system_instruction(req, fingerprint);
     let contents = build_contents(provider_id, req, tally)?;
     let mut schema_budget = super::schema::SchemaBudget::default();
@@ -395,6 +401,21 @@ fn log_dropped_cache_control(provider_id: &str, req: &ChatRequest, tally: &mut G
 // ---------------------------------------------------------------------------
 // System instruction
 // ---------------------------------------------------------------------------
+
+/// A system-role turn's text reaches `systemInstruction`, whose parts carry
+/// text only; its images, documents and forward-compat parts are lost.
+/// TRANSLATION-DROP: lane=gemini class=system_part_unrepresentable test=a_non_text_system_part_is_counted_on_the_gemini_lane
+fn note_dropped_system_parts(provider_id: &str, req: &ChatRequest, tally: &mut GeminiDropTally) {
+    if !crate::system_filter::carries_non_text_system_part(&req.messages) {
+        return;
+    }
+    tally.system_part_unrepresentable = true;
+    tracing::debug!(
+        provider = %provider_id,
+        "gemini egress: non-text parts of a system-role turn dropped; systemInstruction \
+         carries text only"
+    );
+}
 
 fn build_system_instruction(
     req: &ChatRequest,
@@ -482,7 +503,7 @@ fn build_contents(
 
     for msg in &*req.messages {
         match &msg.role {
-            // TRANSLATION-DROP: structural -- system content already reached the wire via `build_system_instruction`; a second copy in `contents` would duplicate it
+            // TRANSLATION-DROP: structural -- system text already reached the wire via `build_system_instruction`, and any non-text part is counted there; a second copy in `contents` would duplicate it
             Role::System => {
                 // Lifted into systemInstruction above; skip here.
             }

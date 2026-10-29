@@ -46,6 +46,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use axum::http::HeaderMap;
 use serde_json::{Map, Value};
 
+use routectl_core::wire_check::{DeclaredEdit, EditKind, EditSite};
 use routectl_core::{
     ChatRequest, ContentPart, CustomTool, Error, KnownContentPart, Message, MessageContent,
     ReasoningConfig, ReasoningDetail, ReasoningDetailKind, RefusalReason, ResponsesPassthroughItem,
@@ -114,6 +115,7 @@ pub(super) fn translate_request(headers: &HeaderMap, body: Value) -> Result<Chat
     };
 
     // instructions -> system.
+    let sent_instructions = obj.contains_key("instructions");
     if let Some(system) = take_instructions(&mut obj) {
         req.system = Some(system);
     }
@@ -122,15 +124,18 @@ pub(super) fn translate_request(headers: &HeaderMap, body: Value) -> Result<Chat
     // into routectl_internal for a same-dialect Responses egress replay
     // (see build_messages) rather than dropped. Tool declarations from
     // `additional_tools` items are held until the top-level tools parse.
+    let mut origins = InputOrigins::default();
     let additional_tools: Vec<Value> = match obj.remove("input") {
         Some(input) => {
             let ParsedInput {
                 messages,
                 passthrough,
                 additional_tools,
+                origins: input_origins,
             } = build_messages(input);
             req.messages = messages.into();
             req.routectl_internal.responses_input_passthrough = passthrough;
+            origins = input_origins;
             additional_tools
         }
         None => Vec::new(),
@@ -138,7 +143,9 @@ pub(super) fn translate_request(headers: &HeaderMap, body: Value) -> Result<Chat
 
     // Lift in-array system/developer messages into req.system so loose
     // Role::System entries do not reach mutual-exclusion egresses.
-    crate::ingress::lift_system_messages(&mut req);
+    let lifted = crate::ingress::lift_system_messages(&mut req);
+    let lift_edits = system_lift_edits(sent_instructions, &lifted, &origins);
+    req.routectl_internal.declared_edits.extend(lift_edits);
 
     // tools -> ToolDef[].
     if let Some(tools) = obj.remove("tools") {
@@ -326,6 +333,59 @@ struct ParsedInput {
     /// Tool declarations carried by `additional_tools` input items, in
     /// input order.
     additional_tools: Vec<Value>,
+    origins: InputOrigins,
+}
+
+/// Where each canonical message came from in the client's `input[]`. Items
+/// and messages do not correspond one to one: a `function_call` or
+/// `reasoning` item attaches to the message before it, and an unmodeled
+/// item is no message at all.
+#[derive(Default)]
+struct InputOrigins {
+    /// The `input[]` index of each message, by message index.
+    items: Vec<usize>,
+    /// The `input[]` indices of the `developer`-role message items.
+    developer: Vec<usize>,
+}
+
+/// The edits the system-message lift makes to a Responses body: every
+/// lifted item leaves `input[]` and its text lands in `instructions`, which
+/// is rewritten when the client sent the field and added when it did not. A
+/// `developer` item the lift kept in place reaches the egress as a `system`
+/// item, so its role is rewritten.
+fn system_lift_edits(
+    sent_instructions: bool,
+    lifted: &crate::ingress::LiftedSystem,
+    origins: &InputOrigins,
+) -> Vec<DeclaredEdit> {
+    let mut edits = Vec::new();
+    let mut declare = |path: String, kind: EditKind| {
+        if let Ok(edit) = DeclaredEdit::new(EditSite::SystemMessageLift, path, kind) {
+            edits.push(edit);
+        }
+    };
+    let lifted_items: Vec<usize> = lifted
+        .indices
+        .iter()
+        .filter_map(|&message| origins.items.get(message).copied())
+        .collect();
+    if !lifted_items.is_empty() {
+        let kind = if sent_instructions {
+            EditKind::Rewrite
+        } else {
+            EditKind::Add
+        };
+        declare("/instructions".to_string(), kind);
+    }
+    for item in &lifted_items {
+        declare(format!("/input/{item}"), EditKind::Remove);
+    }
+    for item in &origins.developer {
+        if !lifted_items.contains(item) {
+            declare(format!("/input/{item}/role"), EditKind::Rewrite);
+        }
+    }
+    edits
 }
 
 /// Turn the Responses `input` field into canonical `messages[]`. `input`
@@ -340,6 +400,7 @@ fn build_messages(input: Value) -> ParsedInput {
             messages: vec![user_text_message(text)],
             passthrough: Vec::new(),
             additional_tools: Vec::new(),
+            origins: InputOrigins::default(),
         },
         Value::Array(items) => build_messages_from_items(items),
         // Any other shape is unusable as conversation input; degrade to
@@ -355,6 +416,7 @@ fn build_messages(input: Value) -> ParsedInput {
                 messages: Vec::new(),
                 passthrough: Vec::new(),
                 additional_tools: Vec::new(),
+                origins: InputOrigins::default(),
             }
         }
     }
@@ -369,8 +431,13 @@ fn build_messages_from_items(items: Vec<Value>) -> ParsedInput {
     // egress can splice the item back at its original conversation position
     // instead of appending it after every modeled item.
     let mut modeled_prefix: usize = 0;
-    for item in items {
+    let mut origins = InputOrigins::default();
+    for (index, item) in items.into_iter().enumerate() {
         let kind = item.get("type").and_then(Value::as_str).unwrap_or("");
+        let is_message = kind == "message" || (kind.is_empty() && item.get("role").is_some());
+        if is_message && item.get("role").and_then(Value::as_str) == Some("developer") {
+            origins.developer.push(index);
+        }
         match kind {
             // A `message` item that omits `type` is tolerated: the
             // Responses API treats a `{role, content}` object as an
@@ -424,11 +491,13 @@ fn build_messages_from_items(items: Vec<Value>) -> ParsedInput {
                 });
             }
         }
+        origins.items.resize(messages.len(), index);
     }
     ParsedInput {
         messages,
         passthrough,
         additional_tools,
+        origins,
     }
 }
 

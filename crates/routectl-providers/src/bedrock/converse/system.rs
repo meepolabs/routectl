@@ -13,6 +13,26 @@ use crate::anthropic_api::types::{AnthropicSystem, AnthropicSystemBlock};
 use super::request::ClientFingerprintStripTally;
 use super::types::{CachePoint, ConverseSystemBlock};
 
+/// Count a request whose system-role turn carries a non-text part: its text
+/// is lifted into the `system` array by [`build_system`], which carries text
+/// blocks only, so its images, documents and forward-compat parts are lost.
+/// Called once per request.
+/// TRANSLATION-DROP: lane=bedrock-converse class=system_part_unrepresentable test=a_non_text_system_part_is_counted_on_the_converse_lane
+pub(super) fn count_dropped_system_parts(req: &ChatRequest) {
+    if !crate::system_filter::carries_non_text_system_part(&req.messages) {
+        return;
+    }
+    crate::translation_drop_metrics::record_translation_drop(
+        super::LANE,
+        "system_part_unrepresentable",
+    );
+    tracing::debug!(
+        model = %routectl_core::sanitize_for_log(&req.model),
+        "bedrock-converse egress: non-text parts of a system-role turn dropped; the system \
+         array carries text only",
+    );
+}
+
 /// Translate the canonical `system` field into AWS's
 /// `Vec<ConverseSystemBlock>`. Reuses
 /// `crate::anthropic_api::request::translate_system` to keep typed
@@ -824,5 +844,48 @@ mod tests {
 
         // Assert
         assert_eq!(after, before, "nothing was stripped, so nothing is counted");
+    }
+
+    /// A kept system turn's text merges into the `system` array, which
+    /// carries text only, so its image is counted lost once per request.
+    #[test]
+    fn a_non_text_system_part_is_counted_on_the_converse_lane() {
+        let class = "system_part_unrepresentable";
+        let count = || {
+            crate::translation_drop_metrics::translation_drop_snapshot()
+                .into_iter()
+                .find(|e| e.lane == "bedrock-converse" && e.drop_class == class)
+                .map_or(0, |e| e.drop_count)
+        };
+        let turn = Message {
+            content: MessageContent::Parts(vec![
+                ContentPart::Known(KnownContentPart::Text {
+                    text: "match this".into(),
+                    citations: None,
+                    cache_control: None,
+                }),
+                ContentPart::Known(KnownContentPart::ImageUrl {
+                    image_url: serde_json::json!({"url": "https://example.com/a.png"}),
+                    cache_control: None,
+                }),
+            ]),
+            ..sys_msg("unused")
+        };
+        let req = ChatRequest {
+            model: "anthropic.claude-sonnet-4-5".into(),
+            system: Some(SystemContent::Text("be brief".into())),
+            messages: vec![turn].into(),
+            ..Default::default()
+        };
+
+        let before = count();
+        let out = super::super::request::translate(&converse_cfg(), &req)
+            .expect("the request translates");
+        let after = count();
+
+        assert_eq!(after - before, 1);
+        let rendered = format!("{:?}", out.system);
+        assert!(rendered.contains("match this"), "{rendered}");
+        assert!(!rendered.contains("example.com"), "{rendered}");
     }
 }

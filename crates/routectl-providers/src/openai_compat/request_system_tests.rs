@@ -434,3 +434,39 @@ fn req_dropped_document_with_system_fingerprint() -> ChatRequest {
     );
     req
 }
+
+/// A system turn carrying an image rides the openai-compat wire in place
+/// with every part, after the lowered top-level system.
+#[test]
+fn a_system_turn_with_an_image_rides_in_place_with_every_part() {
+    let image = json!({"type": "image_url", "image_url": {"url": "https://example.com/a.png"}});
+    let turn = Message {
+        content: MessageContent::Parts(vec![
+            ContentPart::Known(KnownContentPart::Text {
+                text: "match this".into(),
+                citations: None,
+                cache_control: None,
+            }),
+            serde_json::from_value(image.clone()).expect("image part"),
+        ]),
+        ..system_text_message("unused")
+    };
+    let req = req_with(
+        Some(routectl_core::SystemContent::Text("be brief".into())),
+        vec![user_text_message("hi"), turn],
+    );
+
+    let (body, _, _) = wire_and_strip_delta(&req);
+
+    assert_eq!(
+        roles_and_contents(&body),
+        vec![
+            ("system".to_string(), json!("be brief")),
+            ("user".to_string(), json!("hi")),
+            (
+                "system".to_string(),
+                json!([{"type": "text", "text": "match this"}, image])
+            ),
+        ]
+    );
+}

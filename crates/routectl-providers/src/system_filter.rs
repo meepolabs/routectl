@@ -114,6 +114,19 @@ pub fn system_role_texts_stripped(
     texts
 }
 
+/// Whether any `Role::System` message carries a part that is not text. The
+/// ingresses keep such a message in place rather than lift it, so an egress
+/// with no slot for a system-voice image or document loses those parts and
+/// counts the loss.
+#[cfg(any(feature = "bedrock", feature = "anthropic-api", feature = "gemini"))]
+pub fn carries_non_text_system_part(messages: &[routectl_core::Message]) -> bool {
+    use routectl_core::Role;
+
+    messages
+        .iter()
+        .any(|m| matches!(m.role, Role::System) && m.content.has_non_text_part())
+}
+
 /// `messages` with the billing/attribution block withheld from every
 /// `Role::System` message, or `None` when no message carries it, so the caller
 /// keeps its own copy untouched.
