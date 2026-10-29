@@ -2,8 +2,8 @@ use super::*;
 
 mod config_version_tests {
     use super::{
-        CURRENT_CONFIG_VERSION, Config, ConfigVersionError, preflight_config_version,
-        preflight_retired_capability_keys, preflight_retired_model_knobs,
+        CONFIG_VERSION_REMEDIATION, CURRENT_CONFIG_VERSION, Config, ConfigVersionError,
+        preflight_config_version, preflight_retired_capability_keys, preflight_retired_model_knobs,
         validate_cache_pricing_retired,
     };
 
@@ -88,86 +88,114 @@ mod config_version_tests {
         assert_eq!(config.version, CURRENT_CONFIG_VERSION);
     }
 
-    #[test]
-    fn preflight_rejects_absent_version_as_too_old() {
-        // An absent `version` key defaults to `1`, which predates the
-        // current schema, so the loader must reject it rather than migrate.
-        let err = preflight_config_version("[server]\nhost = \"x\"\n")
-            .expect_err("absent version defaults below current and must be rejected");
+    /// What [`preflight_config_version`] must return for one raw config.
+    #[derive(Debug)]
+    enum Verdict {
+        Accept(u32),
+        TooOld(u32),
+        Missing,
+        TooNew(u32),
+    }
 
-        match err {
-            ConfigVersionError::TooOld { found, supported } => {
-                assert_eq!(found, 1);
-                assert_eq!(supported, CURRENT_CONFIG_VERSION);
+    /// One row per input class the preflight distinguishes. Unparseable TOML
+    /// and a non-integer `version` fall through as `Ok` so the typed
+    /// deserialize reports the precise syntax / type error.
+    #[test]
+    fn preflight_classifies_each_version_shape() {
+        let body = "[server]\nhost = \"x\"\n";
+        let current = CURRENT_CONFIG_VERSION;
+        let mut rows: Vec<(String, String, Verdict)> = (1..current)
+            .map(|n| {
+                (
+                    format!("explicit v{n}"),
+                    format!("version = {n}\n{body}"),
+                    Verdict::TooOld(n),
+                )
+            })
+            .collect();
+        rows.extend([
+            ("absent key".to_string(), body.to_string(), Verdict::Missing),
+            (
+                "unparseable toml".to_string(),
+                "this is = = not valid toml".to_string(),
+                Verdict::Accept(1),
+            ),
+            (
+                "string version".to_string(),
+                format!("version = \"two\"\n{body}"),
+                Verdict::Accept(1),
+            ),
+            (
+                "current".to_string(),
+                format!("version = {current}\n{body}"),
+                Verdict::Accept(current),
+            ),
+            (
+                "one above current".to_string(),
+                format!("version = {}\n{body}", current + 1),
+                Verdict::TooNew(current + 1),
+            ),
+        ]);
+
+        for (row, raw, expected) in rows {
+            // Act
+            let got = preflight_config_version(&raw);
+
+            // Assert
+            match (expected, got) {
+                (Verdict::Accept(want), Ok(found)) => assert_eq!(found, want, "row {row}"),
+                (
+                    Verdict::TooOld(want),
+                    Err(err @ ConfigVersionError::TooOld { found, supported }),
+                ) => {
+                    assert_eq!((found, supported), (want, current), "row {row}");
+                    assert_eq!(
+                        err.to_string(),
+                        format!(
+                            "config version {want} is no longer supported; v{current} \
+                             required. {CONFIG_VERSION_REMEDIATION}"
+                        ),
+                        "row {row}"
+                    );
+                }
+                (Verdict::Missing, Err(err @ ConfigVersionError::Missing { supported })) => {
+                    assert_eq!(supported, current, "row {row}");
+                    assert_eq!(
+                        err.to_string(),
+                        format!(
+                            "config version missing; v{current} required. \
+                             {CONFIG_VERSION_REMEDIATION}"
+                        ),
+                        "row {row}"
+                    );
+                }
+                (Verdict::TooNew(want), Err(ConfigVersionError::TooNew(inner))) => {
+                    assert_eq!((inner.found, inner.supported), (want, current), "row {row}");
+                }
+                (expected, got) => panic!("row {row}: expected {expected:?}, got {got:?}"),
             }
-            other => panic!("expected TooOld, got {other:?}"),
         }
-        assert!(err.to_string().contains("config migrate"), "err: {err}");
     }
 
+    /// The shared remediation names the replacement path a refused operator
+    /// can actually take, and promises no write happened.
     #[test]
-    fn preflight_does_not_mask_malformed_toml_as_too_old() {
-        // Unparseable TOML must fall through so the typed deserialize can
-        // report the real syntax error -- never a spurious `config migrate`
-        // hint.
-        assert_eq!(
-            preflight_config_version("this is = = not valid toml"),
-            Ok(1)
-        );
-    }
-
-    #[test]
-    fn preflight_does_not_mask_non_integer_version_as_too_old() {
-        // A `version` that is present but the wrong type falls through to the
-        // typed deserialize, which reports the precise type error.
-        assert_eq!(
-            preflight_config_version("version = \"two\"\n[server]\nhost = \"x\"\n"),
-            Ok(1)
-        );
-    }
-
-    #[test]
-    fn preflight_rejects_version_older_than_current() {
-        // A stale explicit `version` is rejected with the migrate pointer,
-        // never silently upgraded on load.
-        let err = preflight_config_version("version = 1\n[server]\nhost = \"x\"\n")
-            .expect_err("version 1 predates current and must be rejected");
-
-        match err {
-            ConfigVersionError::TooOld { found, supported } => {
-                assert_eq!(found, 1);
-                assert_eq!(supported, CURRENT_CONFIG_VERSION);
-            }
-            other => panic!("expected TooOld, got {other:?}"),
+    fn version_remediation_names_init_the_docs_and_no_write() {
+        for needle in [
+            "aside",
+            "`routectl init`",
+            "docs/CONFIGURATION.md",
+            "Nothing was written.",
+        ] {
+            assert!(
+                CONFIG_VERSION_REMEDIATION.contains(needle),
+                "remediation must mention {needle}: {CONFIG_VERSION_REMEDIATION}"
+            );
         }
-        assert!(err.to_string().contains("config migrate"), "err: {err}");
-    }
-
-    #[test]
-    fn preflight_accepts_current_version() {
-        assert_eq!(
-            preflight_config_version(&format!(
-                "version = {CURRENT_CONFIG_VERSION}\n[server]\nhost = \"x\"\n"
-            )),
-            Ok(CURRENT_CONFIG_VERSION)
+        assert!(
+            !CONFIG_VERSION_REMEDIATION.contains("migrate"),
+            "remediation must not point at a removed command"
         );
-    }
-
-    #[test]
-    fn preflight_rejects_version_newer_than_current() {
-        // Act
-        let found = CURRENT_CONFIG_VERSION + 1;
-        let err = preflight_config_version(&format!("version = {found}\n[server]\nhost = \"x\"\n"))
-            .expect_err("a version above the current one must be rejected");
-
-        // Assert
-        match err {
-            ConfigVersionError::TooNew(inner) => {
-                assert_eq!(inner.found, found);
-                assert_eq!(inner.supported, CURRENT_CONFIG_VERSION);
-            }
-            other => panic!("expected TooNew, got {other:?}"),
-        }
     }
 
     /// Preflight must catch a too-new version BEFORE the full deserialize
@@ -230,7 +258,14 @@ mod config_version_tests {
         );
 
         let err = validate_cache_pricing_retired(&config).expect_err("must reject");
-        assert!(err.contains("config_migrate"), "err: {err}");
+        assert!(
+            err.contains("remove the [cache_pricing] table by hand"),
+            "err: {err}"
+        );
+        assert!(
+            !err.contains("migrate"),
+            "err names a removed command: {err}"
+        );
         assert!(err.contains('1'), "err should name the entry count: {err}");
     }
 }
@@ -370,10 +405,7 @@ mod retired_capability_keys_preflight_tests {
             assert_eq!(err.paths, vec![path.to_string()], "row `{path}`");
             assert_eq!(
                 msg,
-                format!(
-                    "`{path}` was retired in config version 5; remove it (a version 4 \
-                     file is converted by `routectl config migrate`)"
-                ),
+                format!("`{path}` was retired in config version 5; remove it by hand"),
                 "row `{path}`"
             );
             assert!(!msg.contains(CANARY), "row `{path}` leaked a value: {msg}");

@@ -7,9 +7,9 @@
 # resolves until you set the named env var or run the matching `routectl
 # login`. Unresolved refs are warnings, not errors.
 
-# Schema version this file targets. routectl refuses a config older than
-# the schema the running binary writes; run `routectl config migrate` to
-# bring an older file forward. See docs/CONFIGURATION.md.
+# Schema version this file targets. routectl refuses a config with an
+# older version, or with no version line at all; move such a file aside
+# and run `routectl init` to write a new one. See docs/CONFIGURATION.md.
 version = 5
 
 # routectl config has four first-class tables:

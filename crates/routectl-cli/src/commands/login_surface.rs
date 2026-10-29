@@ -576,10 +576,10 @@ pub enum SkipReason {
     /// the loader's path-bearing read failure to.
     Unreadable,
     /// The file exists but this build must not edit it: its version is out
-    /// of bounds, or it carries a removed key the migrator relocates. The
-    /// preflight's own wording -- which already names `config migrate` for
-    /// a too-old file -- is carried VERBATIM rather than re-stated, so the
-    /// pointer cannot drift from the loader's.
+    /// of bounds or missing, or it carries a removed key. The preflight's own
+    /// wording -- which already names the remediation for a refused version
+    /// -- is carried VERBATIM rather than re-stated, so the pointer cannot
+    /// drift from the loader's.
     Unwritable {
         /// The preflight's message, printed as-is.
         detail: String,
@@ -609,8 +609,7 @@ impl std::fmt::Display for SkipReason {
             Self::Unparseable { detail } => write!(
                 f,
                 "the current config does not parse, so no config change was proposed \
-                 ({detail}); fix it (or run `routectl config migrate` if it predates this \
-                 build), then add the entry below. Nothing was written"
+                 ({detail}); fix it, then add the entry below. Nothing was written"
             ),
         }
     }

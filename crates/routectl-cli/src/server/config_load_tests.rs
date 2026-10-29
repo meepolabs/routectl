@@ -4,46 +4,59 @@ use routectl_testkit::ScopedEnv;
 use super::*;
 use crate::server::reload_failure::ReloadFailure;
 
-/// A config older than this build writes is REJECTED at load, never
-/// migrated in place. Both the serve/reload loader
+/// A config older than this build reads, or with no `version` at all, is
+/// REJECTED at load, never migrated in place. Both the serve/reload loader
 /// (`load_effective_config`) and the `config check` unvalidated path
-/// (`load_effective_config_unvalidated`) must reject it identically,
-/// point at `config migrate`, and leave the file byte-identical -- the
-/// mutate-on-load incident class this replaces.
+/// (`load_effective_config_unvalidated`) must reject it with the preflight's
+/// own message and leave the file byte-identical.
 #[test]
 #[serial_test::serial]
-fn load_rejects_a_too_old_config_and_leaves_it_byte_identical() {
-    // Arrange: a v1 config (no explicit `version`) under an isolated
-    // temp dir -- never the live config, per the loader learnings.
-    let dir = tempfile::tempdir().expect("tempdir");
-    let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
-    let cfg_path = dir.path().join("config.toml");
-    let body = "[server]\nhost = \"127.0.0.1\"\nport = 4000\n";
-    std::fs::write(&cfg_path, body).expect("write config.toml");
+fn load_rejects_a_refused_version_and_leaves_it_byte_identical() {
+    let server = "[server]\nhost = \"127.0.0.1\"\nport = 4000\n";
+    for (name, body, opening) in [
+        (
+            "previous version",
+            format!("version = {}\n{server}", CURRENT_CONFIG_VERSION - 1),
+            format!(
+                "config version {} is no longer supported",
+                CURRENT_CONFIG_VERSION - 1
+            ),
+        ),
+        (
+            "versionless",
+            server.to_string(),
+            "config version missing".to_string(),
+        ),
+    ] {
+        // Arrange: an isolated temp dir -- never the live config.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
+        let cfg_path = dir.path().join("config.toml");
+        std::fs::write(&cfg_path, &body).expect("write config.toml");
 
-    // Act: the serve/reload path.
-    let serve_err = match load_effective_config(&cfg_path) {
-        Ok(_) => panic!("a too-old config must be rejected on the serve path"),
-        Err(e) => e,
-    };
-    // Act: the `config check` unvalidated path.
-    let check_err = match load_effective_config_unvalidated(&cfg_path) {
-        Ok(_) => panic!("a too-old config must be rejected on the check path"),
-        Err(e) => e,
-    };
+        // Act: the serve/reload path.
+        let serve_err = match load_effective_config(&cfg_path) {
+            Ok(_) => panic!("a {name} config must be rejected on the serve path"),
+            Err(e) => e,
+        };
+        // Act: the `config check` unvalidated path.
+        let check_err = match load_effective_config_unvalidated(&cfg_path) {
+            Ok(_) => panic!("a {name} config must be rejected on the check path"),
+            Err(e) => e,
+        };
 
-    // Assert: both reject with the single-sourced migrate pointer.
-    for err in [&serve_err, &check_err] {
-        assert!(err.contains("config migrate"), "err: {err}");
-        assert!(
-            err.contains(&routectl_router::CURRENT_CONFIG_VERSION.to_string()),
-            "err: {err}"
+        // Assert: both reject with the single-sourced refusal.
+        for err in [&serve_err, &check_err] {
+            assert!(names_version_refusal(err, &opening), "{name}: {err}");
+        }
+
+        // Assert: the file was not touched -- no stamp, no rewrite.
+        let after = std::fs::read_to_string(&cfg_path).expect("read config after reject");
+        assert_eq!(
+            after, body,
+            "a rejected {name} config must stay byte-identical"
         );
     }
-
-    // Assert: the file was not touched -- no stamp, no rewrite.
-    let after = std::fs::read_to_string(&cfg_path).expect("read config after reject");
-    assert_eq!(after, body, "a rejected config must stay byte-identical");
 }
 
 /// A current-version config loads unchanged: it passes the preflight,
@@ -490,12 +503,12 @@ fn config_check_reports_every_bad_pool() {
 }
 
 // -----------------------------------------------------------------------
-// A PREVIOUS-version config on this binary: every load surface refuses at
-// the version preflight and points at `config migrate`. Critically it must
-// NEVER surface as an unknown-field parse error -- the retired
-// provider-level `seat_selection` is exactly such a field now, and burying
-// the version break behind "unknown field" leaves the operator with no
-// actionable next step.
+// A PREVIOUS-version or versionless config on this binary: every load
+// surface refuses at the version preflight with the shared remediation.
+// Critically it must NEVER surface as an unknown-field parse error -- the
+// retired provider-level `seat_selection` is exactly such a field now, and
+// burying the version break behind "unknown field" leaves the operator with
+// no actionable next step.
 // -----------------------------------------------------------------------
 
 /// The previous schema version, carrying the provider-level `seat_selection`
@@ -521,22 +534,54 @@ fn previous_version_config_plain() -> String {
     )
 }
 
-/// Whether a load error is the version-preflight refusal that names the fix,
-/// and not a parse diagnostic about an unknown field.
-fn is_migrate_pointer(err: &str) -> bool {
-    err.contains("config migrate") && !err.contains("unknown field")
+/// A config with no `version` key, carrying the same retired key: the missing
+/// stamp, not the key, must be what the operator is told about.
+fn versionless_config_with_retired_key() -> String {
+    previous_version_config_with_retired_key()
+        .split_once('\n')
+        .expect("fixture starts with a version line")
+        .1
+        .to_string()
+}
+
+/// Whether a load error is the version-preflight refusal opening with
+/// `opening` and ending in the shared remediation, and not a parse
+/// diagnostic about an unknown field.
+fn names_version_refusal(err: &str, opening: &str) -> bool {
+    err.contains(opening)
+        && err.contains(routectl_router::CONFIG_VERSION_REMEDIATION)
+        && !err.contains("unknown field")
+}
+
+/// Every refused-version fixture with the message opening it must yield.
+fn refused_version_rows() -> Vec<(&'static str, String, String)> {
+    let too_old = format!(
+        "config version {} is no longer supported",
+        CURRENT_CONFIG_VERSION - 1
+    );
+    vec![
+        (
+            "previous version with the retired key",
+            previous_version_config_with_retired_key(),
+            too_old.clone(),
+        ),
+        (
+            "previous version plain",
+            previous_version_config_plain(),
+            too_old,
+        ),
+        (
+            "versionless with the retired key",
+            versionless_config_with_retired_key(),
+            "config version missing".to_string(),
+        ),
+    ]
 }
 
 #[test]
 #[serial_test::serial]
-fn cold_start_on_a_previous_version_config_points_at_config_migrate() {
-    for (name, body) in [
-        (
-            "with the retired key",
-            previous_version_config_with_retired_key(),
-        ),
-        ("plain", previous_version_config_plain()),
-    ] {
+fn cold_start_on_a_refused_version_config_names_the_remediation() {
+    for (name, body, opening) in refused_version_rows() {
         // Arrange
         let dir = tempfile::tempdir().expect("tempdir");
         let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
@@ -545,29 +590,28 @@ fn cold_start_on_a_previous_version_config_points_at_config_migrate() {
 
         // Act: the loader `serve` runs at cold start.
         let err = match load_effective_config(&cfg_path) {
-            Ok(_) => panic!("a previous-version config must not load ({name})"),
+            Ok(_) => panic!("a refused-version config must not load ({name})"),
             Err(e) => e,
         };
 
         // Assert
         assert!(
-            is_migrate_pointer(&err),
-            "a previous-version config ({name}) must yield the migrate pointer, \
+            names_version_refusal(&err, &opening),
+            "a refused-version config ({name}) must yield the version refusal, \
              not a parse error: {err}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&cfg_path).expect("read config after refusal"),
+            body,
+            "{name}: bytes unchanged"
         );
     }
 }
 
 #[test]
 #[serial_test::serial]
-fn config_check_on_a_previous_version_config_points_at_config_migrate() {
-    for (name, body) in [
-        (
-            "with the retired key",
-            previous_version_config_with_retired_key(),
-        ),
-        ("plain", previous_version_config_plain()),
-    ] {
+fn config_check_on_a_refused_version_config_names_the_remediation() {
+    for (name, body, opening) in refused_version_rows() {
         // Arrange
         let dir = tempfile::tempdir().expect("tempdir");
         let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
@@ -581,23 +625,22 @@ fn config_check_on_a_previous_version_config_points_at_config_migrate() {
 
         // Assert
         assert!(
-            is_migrate_pointer(&err),
-            "config check on a previous-version config ({name}) must yield the \
-             migrate pointer, not a parse error: {err}"
+            names_version_refusal(&err, &opening),
+            "config check on a refused-version config ({name}) must yield the \
+             version refusal, not a parse error: {err}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&cfg_path).expect("read config after refusal"),
+            body,
+            "{name}: bytes unchanged"
         );
     }
 }
 
 #[test]
 #[serial_test::serial]
-fn a_hot_reload_of_a_previous_version_config_is_declined() {
-    for (name, body) in [
-        (
-            "with the retired key",
-            previous_version_config_with_retired_key(),
-        ),
-        ("plain", previous_version_config_plain()),
-    ] {
+fn a_hot_reload_of_a_refused_version_config_is_declined() {
+    for (name, body, opening) in refused_version_rows() {
         // Arrange
         let dir = tempfile::tempdir().expect("tempdir");
         let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
@@ -617,12 +660,20 @@ fn a_hot_reload_of_a_previous_version_config_is_declined() {
                 loaded.expect("the loader ran"),
                 Err(ReloadFailure::ConfigLoadFailed)
             ),
-            "a reload of a previous-version config ({name}) must be declined so \
+            "a reload of a refused-version config ({name}) must be declined so \
              the running router stays live"
         );
         assert!(
-            events.iter().any(|e| e.level == tracing::Level::WARN),
-            "a declined reload must say so ({name})"
+            events.iter().any(|e| e.level == tracing::Level::WARN
+                && e.fields
+                    .iter()
+                    .any(|(k, v)| k == "error" && names_version_refusal(v, &opening))),
+            "a declined reload must say why ({name}): {events:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&cfg_path).expect("read config after refusal"),
+            body,
+            "{name}: bytes unchanged"
         );
     }
 }
@@ -717,8 +768,14 @@ fn assert_names_retired_path(path: &str, err: &str) {
         "the error must name `{path}`: {err}"
     );
     assert!(
-        err.contains("routectl config migrate"),
-        "the error must say how a version 4 file is converted: {err}"
+        err.contains(&format!(
+            "`{path}` was retired in config version 5; remove it by hand"
+        )),
+        "the error must say to remove the key by hand: {err}"
+    );
+    assert!(
+        !err.contains("migrate"),
+        "the error must not name a removed command: {err}"
     );
     assert!(
         !err.contains(RETIRED_VALUE_CANARY),
@@ -815,12 +872,12 @@ fn a_hot_reload_carrying_a_retired_key_is_declined() {
     }
 }
 
-/// A previous-version file carrying a retired key is told to migrate: the
-/// version preflight runs first, so neither the retired-key message nor an
+/// A previous-version file carrying a retired key is told its version is
+/// refused: the version preflight runs first, so neither the retired-key message nor an
 /// "unknown field" diagnostic reaches the operator.
 #[test]
 #[serial_test::serial]
-fn a_previous_version_file_with_a_retired_key_points_at_config_migrate() {
+fn a_previous_version_file_with_a_retired_key_names_the_version_refusal() {
     let body = config_with(
         CURRENT_CONFIG_VERSION - 1,
         Splice::Provider,
@@ -836,8 +893,11 @@ fn a_previous_version_file_with_a_retired_key_points_at_config_migrate() {
         Err(e) => e,
     };
 
-    assert!(is_migrate_pointer(&err), "err: {err}");
-    assert!(err.contains("predates"), "err: {err}");
+    let opening = format!(
+        "config version {} is no longer supported",
+        CURRENT_CONFIG_VERSION - 1
+    );
+    assert!(names_version_refusal(&err, &opening), "err: {err}");
     assert!(!err.contains("was retired"), "err: {err}");
 }
 

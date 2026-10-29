@@ -48,7 +48,7 @@ pub trait InitIo: AddIo {
     /// Which selected provider is the default route (aliases.default)?
     fn choose_default_route(&self, candidates: &[String]) -> Option<String>;
     /// The ONE wizard-level high-consequence ack before any write
-    /// (live-daemon / config-migrate pattern; declining writes nothing).
+    /// (live-daemon pattern; declining writes nothing).
     fn confirm_wizard_ack(&self) -> bool;
     /// Credential-less interactive run: how to capture a credential now
     /// (oauth login / hidden api-key prompt), or skip to the actionable

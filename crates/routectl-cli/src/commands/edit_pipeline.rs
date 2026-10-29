@@ -37,9 +37,8 @@ pub(crate) fn render_write_error(err: ConfigWriteError<RelockValidationError>) -
 }
 
 /// The raw-config preflight the loader runs, before any edit touches the
-/// file: [`preflight_raw_config`] refuses an out-of-range `version` (a too-old
-/// file is pointed at `config migrate`) and each removed or retired key with
-/// its actionable message. The router owns the checks and their wording, so
+/// file: [`preflight_raw_config`] refuses an out-of-range or missing `version`
+/// and each removed or retired key with its actionable message. The router owns the checks and their wording, so
 /// the CLI and the loader never diverge.
 pub(crate) fn preflight(raw_text: &str) -> Result<()> {
     preflight_raw_config(raw_text).map_err(|e| Error::Config(e.to_string()))

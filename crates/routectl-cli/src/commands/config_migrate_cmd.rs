@@ -3112,10 +3112,7 @@ default = \"gpt\"
             // Assert
             assert_eq!(
                 err.to_string(),
-                format!(
-                    "config: `{path}` was retired in config version 5; remove it (a version 4 \
-                     file is converted by `routectl config migrate`)"
-                ),
+                format!("config: `{path}` was retired in config version 5; remove it by hand"),
                 "{row}"
             );
             let driver = preflight_raw_config(&body).expect_err(row);

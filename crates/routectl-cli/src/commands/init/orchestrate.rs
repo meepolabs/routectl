@@ -1056,6 +1056,45 @@ mod tests {
         );
     }
 
+    /// Init refuses to edit an existing config whose version it no longer
+    /// reads, with the preflight's own message, and leaves the bytes alone.
+    #[test]
+    fn load_existing_refuses_a_refused_version_and_leaves_it_unchanged() {
+        let server = "[server]\nhost = \"127.0.0.1\"\n";
+        for (name, body, opening) in [
+            (
+                "previous version",
+                format!("version = {}\n{server}", CURRENT_CONFIG_VERSION - 1),
+                format!(
+                    "config version {} is no longer supported",
+                    CURRENT_CONFIG_VERSION - 1
+                ),
+            ),
+            (
+                "versionless",
+                server.to_string(),
+                "config version missing".to_string(),
+            ),
+        ] {
+            // Arrange
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("config.toml");
+            std::fs::write(&path, &body).unwrap();
+
+            // Act
+            let err = load_existing(&path).expect_err("a refused version must not load");
+
+            // Assert
+            let msg = err.to_string();
+            assert!(msg.contains(&opening), "{name}: {msg}");
+            assert!(
+                msg.contains(routectl_router::CONFIG_VERSION_REMEDIATION),
+                "{name}: {msg}"
+            );
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), body, "{name}");
+        }
+    }
+
     /// Init's first read of an existing config runs the shared preflight, so
     /// a retired key is named by path rather than reported as a parse error.
     /// The control file without the key loads.

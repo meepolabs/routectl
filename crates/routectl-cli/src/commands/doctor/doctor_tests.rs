@@ -5,8 +5,8 @@ use chrono::Local;
 use routectl_auth::{OAuthError, OAuthStore};
 use routectl_providers::anthropic_api::AuthKind;
 use routectl_router::{
-    AliasValue, CURRENT_CONFIG_VERSION, CatalogImportState, CatalogOverlay, ModelEntry, PoolEntry,
-    ProviderEntry,
+    AliasValue, CONFIG_VERSION_REMEDIATION, CURRENT_CONFIG_VERSION, CatalogImportState,
+    CatalogOverlay, ModelEntry, PoolEntry, ProviderEntry,
 };
 use routectl_testkit::ScopedEnv;
 
@@ -242,25 +242,39 @@ fn unreferenced_unresolved_provider_is_pass_without_remediation() {
 }
 
 #[test]
-fn version_too_old_fails_with_migrate_remediation() {
-    let context = ctx(
-        Config::default(),
-        Some("version = 1\n"),
-        Vec::new(),
-        Vec::new(),
-    );
-    let findings = section_version(&context);
-    assert_eq!(findings.len(), 1);
-    assert_eq!(findings[0].status, Status::Fail);
-    assert!(
-        findings[0]
-            .remediation
-            .as_deref()
-            .unwrap()
-            .contains("config migrate"),
-        "expected migrate remediation, got {:?}",
-        findings[0].remediation
-    );
+fn refused_version_fails_with_the_shared_remediation() {
+    let previous = format!("version = {}\n", CURRENT_CONFIG_VERSION - 1);
+    for (name, raw, detail) in [
+        (
+            "previous version",
+            previous.as_str(),
+            format!(
+                "config schema v{}, this binary expects v{CURRENT_CONFIG_VERSION}",
+                CURRENT_CONFIG_VERSION - 1
+            ),
+        ),
+        (
+            "versionless",
+            "[server]\n",
+            format!("config schema version missing, this binary expects v{CURRENT_CONFIG_VERSION}"),
+        ),
+    ] {
+        // Arrange
+        let context = ctx(Config::default(), Some(raw), Vec::new(), Vec::new());
+
+        // Act
+        let findings = section_version(&context);
+
+        // Assert
+        assert_eq!(findings.len(), 1, "{name}");
+        assert_eq!(findings[0].status, Status::Fail, "{name}");
+        assert_eq!(findings[0].detail, detail, "{name}");
+        assert_eq!(
+            findings[0].remediation.as_deref(),
+            Some(CONFIG_VERSION_REMEDIATION),
+            "{name}"
+        );
+    }
 }
 
 /// The `version` stamp the running build writes, as raw config text: every
@@ -1026,28 +1040,52 @@ async fn full_run_leaves_config_dir_byte_identical() {
 
 #[tokio::test]
 #[serial_test::serial]
-async fn too_old_config_is_not_stamped_and_reports_fail() {
-    let tmp = tempfile::tempdir().unwrap();
-    let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", tmp.path());
-    let cfg_dir = tmp.path().join("routectl");
-    std::fs::create_dir_all(&cfg_dir).unwrap();
-    let config_path = cfg_dir.join("config.toml");
-    let original = b"version = 1\n";
-    std::fs::write(&config_path, original).unwrap();
+async fn refused_version_config_is_not_stamped_and_reports_fail() {
+    let previous = format!("version = {}\n", CURRENT_CONFIG_VERSION - 1);
+    for (name, original, detail) in [
+        (
+            "previous version",
+            previous.as_bytes(),
+            format!(
+                "config schema v{}, this binary expects v{CURRENT_CONFIG_VERSION}",
+                CURRENT_CONFIG_VERSION - 1
+            ),
+        ),
+        (
+            "versionless",
+            b"[server]\n".as_slice(),
+            format!("config schema version missing, this binary expects v{CURRENT_CONFIG_VERSION}"),
+        ),
+    ] {
+        // Arrange
+        let tmp = tempfile::tempdir().unwrap();
+        let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", tmp.path());
+        let cfg_dir = tmp.path().join("routectl");
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        let config_path = cfg_dir.join("config.toml");
+        std::fs::write(&config_path, original).unwrap();
 
-    let context = gather_context(&config_path, &[]).await;
-    let report = build_report(&context);
+        // Act
+        let context = gather_context(&config_path, &[]).await;
+        let report = build_report(&context);
 
-    let after = std::fs::read(&config_path).unwrap();
-    assert_eq!(
-        after.as_slice(),
-        original,
-        "version preflight must not stamp the file"
-    );
-    let f = find(&report.findings, "version", "config schema");
-    assert_eq!(f.status, Status::Fail);
-    assert!(f.remediation.as_deref().unwrap().contains("config migrate"));
-    assert_ne!(overall_exit(&report.findings), 0);
+        // Assert
+        let after = std::fs::read(&config_path).unwrap();
+        assert_eq!(
+            after.as_slice(),
+            original,
+            "{name}: version preflight must not stamp the file"
+        );
+        let f = find(&report.findings, "version", "config schema");
+        assert_eq!(f.status, Status::Fail, "{name}");
+        assert_eq!(f.detail, detail, "{name}");
+        assert_eq!(
+            f.remediation.as_deref(),
+            Some(CONFIG_VERSION_REMEDIATION),
+            "{name}"
+        );
+        assert_ne!(overall_exit(&report.findings), 0, "{name}");
+    }
 }
 
 #[tokio::test]

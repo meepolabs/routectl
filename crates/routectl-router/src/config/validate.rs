@@ -11,8 +11,8 @@ use crate::config::Config;
 /// block that groups the accounts, making explicit pools the only
 /// multi-seat shape; `4` -> `5` folds the provider / model
 /// `unsupported_features` lists into `[capability.overrides]` and retires
-/// the egress allowlists. Every transform runs via `crate::config_migrate`
-/// under `config migrate`.
+/// the egress allowlists. A file at any earlier version, or with no
+/// `version` at all, is refused by [`preflight_config_version`].
 pub const CURRENT_CONFIG_VERSION: u32 = 5;
 
 pub(super) const fn default_config_version() -> u32 {
@@ -21,7 +21,7 @@ pub(super) const fn default_config_version() -> u32 {
 
 /// The config file names a schema version newer than this build
 /// understands. Kept a distinct type so the too-new posture (upgrade the
-/// binary) stays separate from the too-old posture (migrate the config).
+/// binary) stays separate from the too-old posture (replace the config).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error(
     "config version {found} is newer than the {supported} this build supports; upgrade \
@@ -34,28 +34,45 @@ pub struct VersionTooNewError {
     pub supported: u32,
 }
 
+/// The remediation every too-old or versionless refusal ends with: the
+/// [`ConfigVersionError::TooOld`] and [`ConfigVersionError::Missing`]
+/// messages and doctor's matching remediation all read this one string, so
+/// the advice cannot drift between them. The old file has to be moved aside
+/// because `routectl init` refuses to edit a file it cannot load.
+pub const CONFIG_VERSION_REMEDIATION: &str = "Move the old file aside, run `routectl init` to \
+     write a new one, and see docs/CONFIGURATION.md for the current schema. Nothing was written.";
+
 /// Outcome of [`preflight_config_version`] when the file's schema version is
-/// out of bounds either way. Both bounds fail closed here, before any typed
-/// parse or in-place migration, so a too-old config is never mutated on
-/// load. The single wording every caller shares -- the loader and the
-/// `config` CLI both surface these Display strings verbatim.
+/// out of bounds either way, or absent. Every case fails closed here, before
+/// any typed parse, so a refused config is never mutated on load. The single
+/// wording every caller shares -- the loader and the `config` CLI both
+/// surface these Display strings verbatim.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ConfigVersionError {
     /// The config version is newer than this build supports.
     #[error(transparent)]
     TooNew(#[from] VersionTooNewError),
 
-    /// The config predates what this build writes. Names `config migrate`
-    /// as the fix rather than mutating the file on load.
+    /// The config names a schema version this build no longer reads.
     #[error(
-        "config version {found} predates the {supported} this build writes; run \
-         `config migrate` to bring it forward, or edit it with a routectl binary that \
-         matches its version. Nothing was written."
+        "config version {found} is no longer supported; v{supported} required. {}",
+        CONFIG_VERSION_REMEDIATION
     )]
     TooOld {
         /// Schema version found in the config file.
         found: u32,
-        /// Schema version this build writes.
+        /// Schema version this build reads.
+        supported: u32,
+    },
+
+    /// The config carries no `version` key at all, so it predates the
+    /// versioned schema.
+    #[error(
+        "config version missing; v{supported} required. {}",
+        CONFIG_VERSION_REMEDIATION
+    )]
+    Missing {
+        /// Schema version this build reads.
         supported: u32,
     },
 }
@@ -66,21 +83,18 @@ pub enum ConfigVersionError {
 /// deserializing it directly would fail with a confusing "unknown field"
 /// error that buries the real cause. This preflight catches that case
 /// explicitly and, in the same pass, rejects a config OLDER than this build
-/// writes: a `version` outside `[CURRENT_CONFIG_VERSION, CURRENT_CONFIG_VERSION]`
-/// fails closed here with a clear message. The too-old branch points at
-/// `config migrate` and, crucially, never mutates the file -- the loader no
-/// longer migrates on load.
+/// reads: a `version` outside `[CURRENT_CONFIG_VERSION, CURRENT_CONFIG_VERSION]`
+/// fails closed here with a clear message, and a file with no `version` key
+/// at all fails closed as [`ConfigVersionError::Missing`]. Both refusals end
+/// in [`CONFIG_VERSION_REMEDIATION`] and never mutate the file.
 ///
-/// An out-of-range integer `version` deliberately takes precedence over
-/// every other refusal or typed error in the same file: a too-old file is
-/// pointed at `config migrate` first. TOML that fails to parse at all, or a
-/// `version` that is present but is not a plain non-negative integer, fall
-/// through as `Ok` -- the normal typed deserialize reports those with a
-/// precise syntax / type error. A MISSING `version` key is the
-/// one value this reads as legacy `1`: a config with no `version` predates
-/// the schema and so surfaces the too-old message. Config loading reaches
-/// this through [`preflight_raw_config`], which owns the order of the
-/// raw-text checks and runs this one first.
+/// An out-of-range or missing `version` deliberately takes precedence over
+/// every other refusal or typed error in the same file. TOML that fails to
+/// parse at all, or a `version` that is present but is not a plain
+/// non-negative integer, fall through as `Ok` -- the normal typed
+/// deserialize reports those with a precise syntax / type error. Config
+/// loading reaches this through [`preflight_raw_config`], which owns the
+/// order of the raw-text checks and runs this one first.
 pub fn preflight_config_version(raw_toml: &str) -> Result<u32, ConfigVersionError> {
     // A TOML parse failure is not ours to report -- let the typed deserialize
     // surface the real syntax error.
@@ -89,8 +103,11 @@ pub fn preflight_config_version(raw_toml: &str) -> Result<u32, ConfigVersionErro
     };
 
     let found = match value.get("version") {
-        // Absent key -> legacy v1 config.
-        None => default_config_version(),
+        None => {
+            return Err(ConfigVersionError::Missing {
+                supported: CURRENT_CONFIG_VERSION,
+            });
+        }
         // Present but not a non-negative integer that fits: leave the type
         // error for the typed deserialize rather than mislabel it too-old.
         Some(v) => match v.as_integer().and_then(|i| u32::try_from(i).ok()) {
@@ -116,19 +133,16 @@ pub fn preflight_config_version(raw_toml: &str) -> Result<u32, ConfigVersionErro
 
 /// At `version >= CURRENT_CONFIG_VERSION`, a non-empty legacy
 /// `[cache_pricing]` table is a startup-time misconfiguration, not
-/// silently-ignored data: the config migrate ladder
-/// (`crate::config_migrate::plan_migration`) already folds
-/// `[cache_pricing]` into the catalog overlay and clears it from
-/// `config.toml`, so a non-empty table at v2+ means the file was
-/// hand-edited back into an inconsistent state (or authored fresh from a
-/// stale example). Names the migrator so the operator knows the fix.
+/// silently-ignored data: cache pricing lives in the catalog overlay, so a
+/// non-empty table at the current version means the file was hand-edited
+/// back into an inconsistent state (or authored fresh from a stale
+/// example). The message tells the operator to delete the table.
 pub fn validate_cache_pricing_retired(config: &Config) -> Result<(), String> {
     if config.version >= CURRENT_CONFIG_VERSION && !config.cache_pricing.is_empty() {
         return Err(format!(
             "config version {} carries a non-empty [cache_pricing] table ({} entries), but \
-             [cache_pricing] is retired as of version {CURRENT_CONFIG_VERSION} -- it should \
-             have been migrated into the catalog overlay by the `config_migrate` ladder; run \
-             `config migrate` to fold it forward, or remove [cache_pricing] by hand",
+             [cache_pricing] is retired as of version {CURRENT_CONFIG_VERSION} -- cache pricing \
+             lives in the catalog overlay; remove the [cache_pricing] table by hand",
             config.version,
             config.cache_pricing.len(),
         ));
@@ -193,9 +207,9 @@ pub struct RemovedPaidProbeCapsError;
 /// Read the `[fidelity]` table off the RAW TOML text and refuse the removed
 /// `paid_probe_daily_caps` key by name, ahead of the typed deserialize whose
 /// generic "unknown field" error would not say the key has no replacement.
-/// Not part of [`preflight_retired_capability_keys`]: that list tells the
-/// operator `config migrate` converts an older file, and no rung removes this
-/// key. TOML that does not parse falls through as `Ok` so the typed
+/// Not part of [`preflight_retired_capability_keys`]: that list names the
+/// schema version that retired each key, and this key was removed without a
+/// version bump. TOML that does not parse falls through as `Ok` so the typed
 /// deserialize reports the real syntax error.
 pub fn preflight_removed_paid_probe_caps(raw_toml: &str) -> Result<(), RemovedPaidProbeCapsError> {
     let carries_removed_key = toml::from_str::<toml::Value>(raw_toml)
@@ -249,14 +263,13 @@ pub fn message_safe_key(key: &str) -> String {
 const CAPABILITY_KEYS_RETIRED_IN: u32 = 5;
 
 fn render_retired_paths(paths: &[String]) -> String {
-    let predecessor = CAPABILITY_KEYS_RETIRED_IN - 1;
     paths
         .iter()
         .map(|path| {
             let path = message_safe_key(path);
             format!(
                 "`{path}` was retired in config version {CAPABILITY_KEYS_RETIRED_IN}; remove it \
-                 (a version {predecessor} file is converted by `routectl config migrate`)"
+                 by hand"
             )
         })
         .collect::<Vec<_>>()
@@ -267,16 +280,15 @@ fn render_retired_paths(paths: &[String]) -> String {
 /// collect every key retired in [`CAPABILITY_KEYS_RETIRED_IN`]: the
 /// top-level `bedrock` table, `providers.<name>.allowed_betas`,
 /// `providers.<name>.unsupported_features`, and
-/// `models.<nick>.unsupported_features`. A file at the preceding version
-/// carrying them is converted by `config migrate`; a file at the retirement
-/// version or later carrying them was hand-edited back, and running migrate
-/// on it is a no-op, so the message names the key to remove instead.
+/// `models.<nick>.unsupported_features`. A file at the retirement version or
+/// later carrying them was hand-edited back, so the message names the key to
+/// remove.
 ///
 /// Same pattern as [`preflight_legacy_mitm_credential_source`]: TOML that
 /// does not parse falls through as `Ok` so the typed deserialize reports
 /// the real syntax error. [`preflight_raw_config`] runs it only after
 /// [`preflight_config_version`] has passed, so a file at the preceding
-/// version is told to migrate rather than to delete keys by hand.
+/// version is told its version is refused rather than to delete keys by hand.
 pub fn preflight_retired_capability_keys(raw_toml: &str) -> Result<(), RetiredCapabilityKeysError> {
     let Ok(value) = toml::from_str::<toml::Value>(raw_toml) else {
         return Ok(());
@@ -379,8 +391,8 @@ fn render_retired_model_knobs(paths: &[String]) -> String {
 /// Read the RAW TOML text and collect every removed per-model key (see
 /// [`RETIRED_MODEL_KNOBS`]) into ONE refusal, so an operator sees every line
 /// to delete at once rather than serde's generic "unknown field" for the
-/// first. No rung removes these keys, so the message names neither a version
-/// nor `config migrate`. TOML that does not parse falls through as `Ok` so
+/// first. These keys were removed without a schema version bump, so the
+/// message names no version. TOML that does not parse falls through as `Ok` so
 /// the typed deserialize reports the real syntax error.
 pub fn preflight_retired_model_knobs(raw_toml: &str) -> Result<(), RetiredModelKnobsError> {
     let Ok(value) = toml::from_str::<toml::Value>(raw_toml) else {
@@ -405,7 +417,7 @@ pub fn preflight_retired_model_knobs(raw_toml: &str) -> Result<(), RetiredModelK
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum RawConfigPreflightError {
-    /// The schema version is too old or too new for this build.
+    /// The schema version is too old, too new, or missing for this build.
     #[error(transparent)]
     Version(ConfigVersionError),
 
@@ -431,8 +443,8 @@ pub enum RawConfigPreflightError {
 /// `[mitm] credential_source` key, then the retired capability keys, then
 /// the removed `[fidelity] paid_probe_daily_caps` key, then the removed
 /// per-model keys. The first refusal is returned and the later checks do not
-/// run. Version comes first so an older file is told to migrate rather than
-/// to delete keys by hand.
+/// run. Version comes first so an older or versionless file is told its
+/// version is refused rather than to delete keys by hand.
 ///
 /// TOML that does not parse passes every check, so the typed deserialize
 /// reports the real syntax error.

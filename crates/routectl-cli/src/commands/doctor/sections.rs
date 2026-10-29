@@ -3,9 +3,9 @@
 use routectl_auth::oauth::types::TokenRecord;
 use routectl_core::{sanitize_for_log, sanitize_for_log_with_cap};
 use routectl_router::{
-    ActivationEntry, ActivationStatus, CURRENT_CONFIG_VERSION, ConfigVersionError, Finding,
-    OverlaySoftDefect, PricingSource, Status, UnresolvedReason, compute_activation, epoch_day_age,
-    is_stale_days, preflight_config_version,
+    ActivationEntry, ActivationStatus, CONFIG_VERSION_REMEDIATION, CURRENT_CONFIG_VERSION,
+    ConfigVersionError, Finding, OverlaySoftDefect, PricingSource, Status, UnresolvedReason,
+    compute_activation, epoch_day_age, is_stale_days, preflight_config_version,
 };
 
 use crate::commands::config::MAX_REPORTED_LINE_CHARS;
@@ -143,9 +143,14 @@ pub(super) fn section_version(ctx: &DoctorContext) -> Vec<Finding> {
             name: "config schema".to_string(),
             status: Status::Fail,
             detail: format!("config schema v{found}, this binary expects v{supported}"),
-            remediation: Some(
-                "run `routectl config migrate` to bring the config forward".to_string(),
-            ),
+            remediation: Some(CONFIG_VERSION_REMEDIATION.to_string()),
+        },
+        Err(ConfigVersionError::Missing { supported }) => Finding {
+            section: "version",
+            name: "config schema".to_string(),
+            status: Status::Fail,
+            detail: format!("config schema version missing, this binary expects v{supported}"),
+            remediation: Some(CONFIG_VERSION_REMEDIATION.to_string()),
         },
         Err(ConfigVersionError::TooNew(err)) => Finding {
             section: "version",

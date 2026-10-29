@@ -248,8 +248,8 @@ fn a_previous_version_config_is_skipped_with_the_migrate_pointer() {
         panic!("expected an unwritable skip, got {outcome:?}");
     };
     assert!(
-        detail.contains("config migrate"),
-        "the skip must point at the migrator: {detail}"
+        detail.contains(routectl_router::CONFIG_VERSION_REMEDIATION),
+        "the skip must carry the preflight's remediation: {detail}"
     );
     assert_eq!(read(&path), before);
 }
@@ -293,6 +293,14 @@ fn an_unparseable_config_is_skipped_and_the_parse_error_carries_no_config_value(
     assert!(
         !detail.contains(sentinel),
         "the parse error must not echo a config value: {detail}"
+    );
+    let shown = SkipReason::Unparseable {
+        detail: detail.clone(),
+    }
+    .to_string();
+    assert!(
+        shown.contains("fix it, then add the entry below") && !shown.contains("migrate"),
+        "the skip must say to fix the file, naming no removed command: {shown}"
     );
     assert_eq!(read(&path), before);
 }

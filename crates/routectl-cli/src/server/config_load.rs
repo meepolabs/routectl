@@ -36,9 +36,10 @@ pub(super) fn compute_max_body_bytes(config: &Config) -> usize {
 /// config-file touch and a dedicated overlay-file write
 /// (`WatchTarget::CatalogOverlay` in `file_watch.rs`) trigger this same
 /// re-read via `ReloadRequest::Config` / `ReloadRequest::CatalogOverlay`.
-/// The load NEVER migrates the file in place: a `version` outside the
-/// range this build writes fails closed in the preflight (a too-old file
-/// points at `config migrate`; a too-new file at upgrading routectl).
+/// The load NEVER rewrites the file in place: a `version` outside the
+/// range this build reads, or a missing one, fails closed in the preflight
+/// (a too-old or versionless file is told to move it aside and run
+/// `routectl init`; a too-new file to upgrade routectl).
 ///
 /// The loaded overlay rides back on [`LoadedConfig::catalog_overlay`] --
 /// callers that build a Router thread it into
@@ -106,9 +107,9 @@ fn load_layers(path: &Path) -> Result<LoadedConfig, ClassifiedLoadError> {
 /// Parse-level failures (unreadable file, version out of range, unknown
 /// fields, the legacy `[mitm] credential_source` key) still return `Err`
 /// here -- a config that does not parse has nothing for `check` to render
-/// against, and this keeps the did-you-mean / migration guidance those
-/// preflights emit. In particular a too-old `version` is REJECTED with the
-/// `config migrate` pointer on this path identically to the serve/reload
+/// against, and this keeps the did-you-mean / remediation guidance those
+/// preflights emit. In particular a too-old or missing `version` is
+/// REJECTED with the same message on this path as on the serve/reload
 /// path; neither path mutates the file on load.
 ///
 /// Serve cold start, test and prompt-size go through
@@ -131,8 +132,8 @@ pub fn parse_config_only(path: &Path) -> Result<Config, String> {
         .map_err(|e| format!("cannot read config `{}`: {e}", path.display()))?;
 
     // The raw-text checks run before the `deny_unknown_fields` typed
-    // deserialize, whose generic "unknown field" error would neither point a
-    // too-old file at `config migrate` nor name a removed key. A hot reload
+    // deserialize, whose generic "unknown field" error would neither name a
+    // refused `version` nor a removed key. A hot reload
     // refused here keeps the prior router live (`read_parse_validate_config`
     // treats any `Err` from this function that way).
     routectl_router::preflight_raw_config(&text).map_err(|e| e.to_string())?;

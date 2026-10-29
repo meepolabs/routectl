@@ -33,10 +33,10 @@ pub use schema::{BedrockApiShapeConfig, BedrockCredsConfig, BedrockMantleConfig}
 use validate::default_config_version;
 pub(crate) use validate::message_safe_key;
 pub use validate::{
-    CURRENT_CONFIG_VERSION, ConfigVersionError, LegacyMitmCredentialSourceError,
-    RawConfigPreflightError, RemovedPaidProbeCapsError, RetiredCapabilityKeysError,
-    RetiredModelKnobsError, VersionTooNewError, preflight_config_version, preflight_raw_config,
-    validate_cache_pricing_retired,
+    CONFIG_VERSION_REMEDIATION, CURRENT_CONFIG_VERSION, ConfigVersionError,
+    LegacyMitmCredentialSourceError, RawConfigPreflightError, RemovedPaidProbeCapsError,
+    RetiredCapabilityKeysError, RetiredModelKnobsError, VersionTooNewError,
+    preflight_config_version, preflight_raw_config, validate_cache_pricing_retired,
 };
 
 /// The parsed `config.toml`: server bind, providers, aliases, models, and
@@ -44,13 +44,14 @@ pub use validate::{
 #[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
-    /// Schema-version stamp for this `config.toml`. Absent in the file
-    /// (every pre-v0.9 config) deserializes to `1`. [`CURRENT_CONFIG_VERSION`]
-    /// is `5`. A `version` that does not equal [`CURRENT_CONFIG_VERSION`]
-    /// is rejected before this struct is deserialized -- a too-old file is
-    /// pointed at `config migrate` (which chains the v1->v2, v2->v3, v3->v4
-    /// and v4->v5 transforms), a too-new file at a binary upgrade. See
-    /// [`preflight_config_version`]. The loader never migrates on load.
+    /// Schema-version stamp for this `config.toml`. [`CURRENT_CONFIG_VERSION`]
+    /// is `5`. A file whose `version` is absent or does not equal
+    /// [`CURRENT_CONFIG_VERSION`] is rejected before this struct is
+    /// deserialized -- a too-old or versionless file is told to move the old
+    /// file aside and run `routectl init`, a too-new file to upgrade the
+    /// binary. See [`preflight_config_version`]. The loader never rewrites
+    /// the file on load. An absent key still deserializes to `1` when this
+    /// struct is parsed directly, without the preflight.
     ///
     /// NOTE: `Config::default()` (plain Rust construction, e.g. in tests)
     /// yields `0`, not `1` -- the `1` default applies only on the serde
