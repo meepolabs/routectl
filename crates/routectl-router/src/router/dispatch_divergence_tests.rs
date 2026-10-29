@@ -557,3 +557,87 @@ async fn a_dispatch_dropped_before_content_frees_the_probe_slot_without_a_debit(
         .collect();
     assert_eq!(observed, expected);
 }
+
+const TWICE: &str = "twice";
+
+/// The committed first-party 400 refusing a `computer_20250124` tool: a
+/// self-identifying capability rejection the learner records.
+fn refuses_the_computer_tool(_: &ChatRequest) -> Result<()> {
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../tests/fixtures/rejections/anthropic-api/tool-type-computer-unsupported-messages.json"
+    ))
+    .expect("valid tool-type fixture");
+    Err(Error::upstream_full(
+        "scripted",
+        400,
+        fixture["body"].as_str().expect("fixture body"),
+        None,
+        fixture["lifted_type"].as_str().map(str::to_string),
+        None,
+    ))
+}
+
+fn computer_tool_request() -> ChatRequest {
+    ChatRequest {
+        model: TWICE.into(),
+        tools: Some(vec![ToolDef::Other(
+            json!({"type": "computer_20250124", "name": "computer"}),
+        )]),
+        ..Default::default()
+    }
+}
+
+/// `(surface, upstream calls, attempts, fallback hops, learn events, observations)`.
+type RepeatRow = (&'static str, usize, u32, u32, usize, Option<u32>);
+
+#[tokio::test]
+async fn a_chain_naming_one_seat_twice_visits_it_twice_and_learns_its_rejection_once() {
+    let mut observed: Vec<RepeatRow> = Vec::new();
+    for surface in [Surface::Complete, Surface::Stream] {
+        let only = answering_with(refuses_the_computer_tool);
+        let router = router_over(
+            vec![seat(FIRST, anthropic_entry(None), only.clone())],
+            |config| {
+                config.aliases.insert(
+                    TWICE.into(),
+                    AliasValue::Chain(vec![FIRST.into(), FIRST.into()]),
+                );
+            },
+        );
+
+        let meta = match surface {
+            Surface::Complete => {
+                Box::pin(router.complete_with_options(computer_tool_request(), Default::default()))
+                    .await
+                    .meta
+            }
+            Surface::Stream => {
+                Box::pin(router.stream_with_options(computer_tool_request(), Default::default()))
+                    .await
+                    .meta
+            }
+            Surface::CountTokens => unreachable!("the count column is not pinned here"),
+        };
+
+        let observations = router
+            .learned_capabilities
+            .export_entries()
+            .into_iter()
+            .find(|e| e.state_key == lane_key(FIRST))
+            .map(|e| e.observations);
+        observed.push((
+            surface.label(),
+            only.calls(),
+            meta.attempt_count,
+            meta.fallback_count,
+            meta.learned_capabilities.len(),
+            observations,
+        ));
+    }
+
+    let expected: Vec<RepeatRow> = vec![
+        ("complete", 2, 2, 1, 1, Some(1)),
+        ("stream", 2, 2, 1, 1, Some(1)),
+    ];
+    assert_eq!(observed, expected);
+}

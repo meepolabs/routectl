@@ -312,7 +312,7 @@ impl Router {
     ///
     /// Split out of [`Router::count_tokens`] so the aggregated degradation
     /// WARN fires on every exit of the walk rather than only the exhausted
-    /// one -- the same reason `complete_with_options` wraps `complete_inner`.
+    /// one -- the same reason `complete_with_options` wraps `run_walk`.
     async fn count_tokens_walk(
         &self,
         req: &ChatRequest,
@@ -395,7 +395,7 @@ impl Router {
         let provider_name = target.provider_name.as_str();
         let model_label = target.nickname.as_deref().unwrap_or("");
 
-        // Missing-bearer terminal guard (see `complete_inner`): a
+        // Missing-bearer terminal guard (see `run_walk`): a
         // forwarded seat with NO captured client bearer must fail
         // cleanly before any upstream touch, never an ambiguous
         // upstream 401.
@@ -408,13 +408,13 @@ impl Router {
         // `anthropic-beta` surface count_tokens must observe or the
         // upstream may reject a request /v1/messages would accept.
         let mut attempt_req = req.clone();
-        // See `complete_inner`: a forwarded target keeps the client's
+        // See `run_walk`: a forwarded target keeps the client's
         // requested model verbatim instead of rewriting to `upstream`.
         if !target.use_forwarded_credential {
             attempt_req.model = target.upstream.clone();
         }
         apply_layered_overlays(&self.config, &target, &mut attempt_req);
-        // INTERCEPTOR HOOK (see `complete_inner`): strip runs after layered
+        // INTERCEPTOR HOOK (see `run_walk`): strip runs after layered
         // config compose so the estimated prefix matches the shipped
         // prefix. Strict refusal is a terminal 400; a rolled-back hazard
         // advances to the next capable seat (the count_tokens route-away).
@@ -427,7 +427,7 @@ impl Router {
             }
         }
 
-        // Envelope-field pre-flight (see `complete_inner`): same seam,
+        // Envelope-field pre-flight (see `run_walk`): same seam,
         // `CountTokens` surface. `attempt_req` at this point carries only
         // this seat's overlay + strip, never a prior seat's clone or a
         // reactive repair, so it is the same "original for this target"
@@ -435,7 +435,7 @@ impl Router {
         // `attempt_req`, so from here on this seat has exactly one body:
         // the remote count dispatches it, and every local read of it
         // measures that same body rather than an unplanned one.
-        // Captured before pre-flight -- see `complete_inner`.
+        // Captured before pre-flight -- see `run_walk`.
         let probe_fields = super::probe_payload_capture::ProbeFieldCapture::of(
             self.field_repair_table(),
             &attempt_req,
@@ -548,7 +548,7 @@ impl Router {
                     // outcome (count_tokens never WALKS on health errors, so
                     // "no fallback" here means also no breaker debit/park).
                     // Keyed off the TARGET's `use_forwarded_credential`, not
-                    // request-global bearer presence (see `complete_inner`
+                    // request-global bearer presence (see `run_walk`
                     // for the full rationale). Release the half-open slot
                     // without a breaker debit.
                     if target.use_forwarded_credential

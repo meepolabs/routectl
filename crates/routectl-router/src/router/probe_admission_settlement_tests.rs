@@ -2,7 +2,7 @@
 //! reaches must still release its `in_flight` slot, so the next request
 //! re-probes rather than routing away until reload. The
 //! `ProbeAdmissionSet` settles every unreached admission as `OtherError` on
-//! drop. These tests drive `complete_inner` through the early-exit shapes
+//! drop. These tests drive `run_walk` through the early-exit shapes
 //! -- success on an earlier target, a terminal non-fallbackable error,
 //! `break 'chain` under disable_fallbacks, and a dropped (cancelled)
 //! dispatch future -- and assert the unreached target's slot reset. A

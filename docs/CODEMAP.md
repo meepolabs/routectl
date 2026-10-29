@@ -2652,11 +2652,27 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `capability_cleared`, `cache_plan`, `prefix_rewrite`, `runtime_gate`,
   `sticky`, `count_tokens`, `status`, `replay_repair`, `field_repair`,
   `field_preflight`, `repair_budget`, `window_gate`, `outcome_rule`
+- `src/router/dispatch_loop.rs` -- the one dispatch walk: `Router::run_walk`
+  over a `SurfaceAdapter` (`pub(super)`, statically dispatched: `Output`,
+  `SURFACE`, `admits`, `deadline`, `invoke`, `on_commit`, `exhausted`) owns
+  chain resolution and probe admissions, per-target guards and request
+  shaping, the gate, the attempt loop, auth refresh, the learner repair
+  branch, classify and remap, breaker outcome, credential park, the one
+  `same_provider_retry` call, fallback, the last error and `DispatchMeta`
+  advancement. The per-attempt deadline is `tokio::time::timeout` around
+  `invoke`; expiry is the typed `DeadlineFired`, rendered by the adapter's
+  `Deadline` as a status-0 upstream error. `CommitCtx` carries what a
+  committed attempt hands the adapter. Boolean surface differences are
+  `const fn` rows on `class_observe::DispatchSurface`
+  (`strict_reject_walks`, `unknown_provider_walks`, `health_error_walks`,
+  `sleeps_between_attempts`, `records_success_on_commit`)
 - `src/router/dispatch.rs` -- the dispatch retry state machine (the module
   exempt from the line-size target: `complete`/`stream` are one retry loop and
   the lossy-trim live-cut lands here). Public API:
-  `complete`/`complete_with_options` + `stream`/`stream_with_options` and
-  their `complete_inner`/`stream_inner` loop bodies, which first record the
+  `complete`/`complete_with_options` + `stream`/`stream_with_options`;
+  complete runs `dispatch_loop::run_walk` through `CompleteAdapter`
+  (`request_timeout_ms` per attempt, then the provider-stamp / relabel /
+  evidence / quota commit), stream its `stream_inner` loop body, which first record the
   request's tool pairing defect (`transcript_defect::record_transcript_defect`)
   and then walk the resolved
   chain (from `chain::dispatch_chain_for_request`) attempting each
@@ -2665,7 +2681,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   their park/debit decision from `outcome_rule` (`breaker_outcome`, applied
   through `apply_breaker_outcome`), and the complete arm also takes its
   same-provider retry from it (a small honored reset becomes the next sleep's floor; a
-  larger one parks the provider via the breaker instead). `run_with_timeout`,
+  larger one parks the provider via the breaker instead).
   `wrap_with_breaker_accounting` (settles a post-content error frame once: a
   non-probe stream debits whatever the class, a probe stream applies
   `breaker_outcome`; also the STREAMING quota seam: offers each Ok
@@ -2760,7 +2776,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   and retries once; `replay_rejection_body_free` rebuilds the rejection with
   no upstream body before generic logging, and `emit_replay_degradation`
   (`pub(super)`, also called by the token-count walk) fires one degradation
-  WARN per recorded repair, each carrying the request's `repair_count`. Within `complete_inner` and `stream_inner`
+  WARN per recorded repair, each carrying the request's `repair_count`. Within `run_walk` and `stream_inner`
   the per-target learner state and the replay / field / canary / generic
   arbitration live in `learn_engine::AttemptLearning` (one instance per target,
   handling each rejection and the eventual success), the same engine each `count_tokens_try_seat` seat
@@ -3012,7 +3028,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   mutating the caller's
   request is impossible by signature and every fallback target plans from the
   same original rather than from a sibling target's clone. Called from
-  `complete_inner`, `stream_inner`, and `count_tokens_try_seat` at one
+  `run_walk`, `stream_inner`, and `count_tokens_try_seat` at one
   position: after the layered overlays and the strip interceptor, before
   provider translation, the context reduction, and the calibration stamp --
   so the planned body is the one both a remote count and every local read of
@@ -3277,7 +3293,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `first_target_oauth_id`, backing the discovery-time credential check in
   `handlers/models.rs`
 - `src/router/learn_engine.rs` -- per-target learner state for one chain
-  iteration of `complete_inner` / `stream_inner`, or one
+  iteration of `run_walk` / `stream_inner`, or one
   `count_tokens_try_seat` seat: `AttemptLearning` owns the
   replay and envelope-field carry plans, the held `FieldPreflightPlan` (canary
   repair + settlement only on the `Complete` surface), the learned re-probe

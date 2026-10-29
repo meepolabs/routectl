@@ -619,7 +619,7 @@ impl Drop for LearnedProbeGuard {
 
 /// Request-scoped owner of the re-probe admissions a chain filter staged,
 /// grouped by the target that must settle them. Declared before the chain
-/// loop in `complete_inner` and `stream_inner`; holds every admission the
+/// loop in `run_walk` and `stream_inner`; holds every admission the
 /// filter recorded until the loop either reaches a target (transfer) or the
 /// request leaves dispatch (settle-on-drop).
 ///

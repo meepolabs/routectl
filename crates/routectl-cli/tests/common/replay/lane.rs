@@ -1262,9 +1262,9 @@ static ANTHROPIC_FIDELITY_EXCEPTIONS: [Exception; 8] = [
                  ingress body carried the client's alias, which may end in a bracketed \
                  context-window suffix (e.g. `claude-opus-4-8[1m]` -> `claude-opus-4-8`). \
                  Confirmed at the `attempt_req.model = target.upstream` assignment inside \
-                 `complete_inner` (crates/routectl-router/src/router/dispatch.rs), which runs \
+                 `run_walk` (crates/routectl-router/src/router/dispatch_loop.rs), which runs \
                  for every non-forwarded target; `stream_inner` does the same on the streaming \
-                 path. NOTE the citation is weaker than the other three: `complete_inner` is a \
+                 path. NOTE the citation is weaker than the other three: `run_walk` is a \
                  long dispatch method rather than a single-purpose transform, so its symbol \
                  surviving proves only that dispatch still exists, not that this assignment \
                  does. There is no narrower symbol to name -- no function strips the bracketed \
@@ -1276,8 +1276,8 @@ static ANTHROPIC_FIDELITY_EXCEPTIONS: [Exception; 8] = [
                  exists on this field today, and narrowing to a literal `[1m]` would make the \
                  entry stale the day a second window ships. A forwarded target keeps the \
                  client's model verbatim and produces no divergence here at all.",
-        site_symbol: "complete_inner",
-        site_path: "crates/routectl-router/src/router/dispatch.rs",
+        site_symbol: "run_walk",
+        site_path: "crates/routectl-router/src/router/dispatch_loop.rs",
         path_predicate: |path| path == "model",
         applies_to: None,
         max_per_fixture: None,

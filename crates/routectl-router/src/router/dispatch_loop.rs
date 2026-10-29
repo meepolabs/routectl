@@ -1,0 +1,921 @@
+//! The one dispatch walk every surface runs. [`Router::run_walk`] owns the
+//! lifecycle: chain resolution and probe admissions, the per-target guards
+//! and request shaping, the gate, the attempt loop with its per-attempt
+//! deadline, auth refresh, the learner's repair branch, classification and
+//! remap, breaker outcome, credential park, the same-provider retry decision,
+//! fallback, the last error, and `DispatchMeta` advancement. A
+//! [`SurfaceAdapter`] supplies only what differs in type between surfaces:
+//! the provider call, what a committed attempt becomes, and the exhaustion
+//! error. Differences that are booleans are rows on [`DispatchSurface`].
+
+use std::collections::HashSet;
+use std::future::Future;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use routectl_core::wire_check::WireTap;
+use routectl_core::{ChatRequest, Error, Provider, Result, TranslationReport, sanitize_for_log};
+
+use crate::config::RetryPolicy;
+
+use super::beta_report_learn::install_beta_assembly;
+use super::cache_plan::AutoCacheRequestPlan;
+use super::capability_learn::LearnDedupeKey;
+use super::capability_observe::{UntranslatedCapabilities, install_translation_report};
+use super::class_observe::{DispatchSurface, upstream_facts};
+use super::credential_park::{log_gate_refusal, merge_gate_refusal};
+use super::dispatch::{
+    add_jitter, apply_auto_cache_placement, apply_context_reduction, apply_remap,
+    cache_target_gates, forwarded_terminal_status, log_forwarded_auth_terminal,
+    missing_forwarded_bearer_error, mul_duration, next_is_sibling_seat, replay_rejection_body_free,
+    should_fallback, upstream_status_for_remap,
+};
+use super::edit_declare::{declare_cache_placement, declare_model_rename, fidelity_dialect};
+use super::feature_filter::StripDecision;
+use super::learn_engine::{AttemptLearning, FailureDecision, Rejection};
+use super::local_refusal::ingress_dialect_of;
+use super::outcome_rule::{
+    SameProvider, breaker_outcome, class_debits, probe_fast_fail, rate_limit_reset_hint,
+    same_provider_retry,
+};
+use super::overlays::apply_layered_overlays;
+use super::probe_payload_capture::ProbeFieldCapture;
+use super::repair_budget::RepairBudget;
+use super::runtime_gate::{
+    LearnedProbeGuard, ProbeAdmissionSet, is_probe_request, log_probe_fast_fail,
+};
+use super::transcript_defect::{
+    egress_pairing_refusal, is_transcript_rejection, record_transcript_defect,
+};
+use super::{DispatchMeta, DispatchTarget, Router, RouterOptions};
+
+/// A per-attempt deadline a surface asks the walk to enforce around its
+/// provider call, and the message its expiry carries.
+#[derive(Clone, Copy)]
+pub(super) struct Deadline {
+    ms: u64,
+    describe: fn(u64) -> String,
+}
+
+impl Deadline {
+    pub(super) const fn new(ms: u64, describe: fn(u64) -> String) -> Self {
+        Self { ms, describe }
+    }
+
+    pub(super) const fn after(self) -> Duration {
+        Duration::from_millis(self.ms)
+    }
+}
+
+/// An attempt's deadline expired before its provider call resolved.
+pub(super) struct DeadlineFired(pub(super) Deadline);
+
+impl DeadlineFired {
+    /// The status-0 upstream error the walk records for the expired attempt,
+    /// attributed to the config-key provider name the chain walks so it lines
+    /// up with gate errors and `routectl_provider`, never `provider.id()`.
+    pub(super) fn error(self, provider_name: &str) -> Error {
+        Error::upstream(provider_name, 0, (self.0.describe)(self.0.ms))
+    }
+}
+
+/// What a committed attempt hands its surface: the target that served, the
+/// requests as the client sent them and as they went upstream, the attempt's
+/// wire tap and translation report, and the per-request learner state.
+pub(super) struct CommitCtx<'w, 'm> {
+    pub(super) router: &'w Router,
+    pub(super) target: &'w DispatchTarget,
+    pub(super) client_req: &'w ChatRequest,
+    pub(super) attempt_req: &'w ChatRequest,
+    pub(super) wire_tap: Option<&'w WireTap>,
+    pub(super) translation_report: &'w TranslationReport,
+    pub(super) learning: &'w mut AttemptLearning<'m>,
+    pub(super) learn_dedupe: &'w mut HashSet<LearnDedupeKey>,
+    pub(super) meta: &'w mut DispatchMeta,
+}
+
+/// One dispatch surface's part of the walk. Implementations are few,
+/// closed and statically dispatched; anything a surface decides with a
+/// boolean belongs on [`DispatchSurface`] instead.
+pub(super) trait SurfaceAdapter: Send + Sync {
+    /// What a committed attempt produces for the caller.
+    type Output: Send;
+    /// The surface token every shared rule and observability field reads.
+    const SURFACE: DispatchSurface;
+
+    /// Whether `target` can serve this surface at all. A target that cannot
+    /// is skipped without being marked, gated, or counted.
+    fn admits(&self, target: &DispatchTarget) -> bool;
+
+    /// The per-attempt deadline under the composed attempt policy, if any.
+    fn deadline(&self, attempt_policy: &RetryPolicy) -> Option<Deadline>;
+
+    /// The provider call for one attempt. `Ok` means committed: nothing
+    /// after it may walk to another target.
+    fn invoke(
+        &self,
+        target: &DispatchTarget,
+        provider: Arc<dyn Provider>,
+        req: ChatRequest,
+    ) -> impl Future<Output = Result<Self::Output>> + Send;
+
+    /// Finish a committed attempt after the walk has settled the seat's
+    /// success, the sample charge and the request wire check.
+    fn on_commit(&self, ctx: CommitCtx<'_, '_>, out: Self::Output) -> Self::Output;
+
+    /// The error a walk that committed nothing returns, given the last error
+    /// it recorded and the client's requested alias.
+    fn exhausted(&self, last: Option<Error>, alias: &str) -> Error;
+}
+
+impl Router {
+    /// Walk the resolved chain for `req` on `adapter`'s surface. Mutates
+    /// `meta` as the chain is walked -- `attempt_count` on every upstream
+    /// attempt, `fallback_count` on every hop to a later entry, and the
+    /// served_* fields on each dispatched target -- so the caller's `meta`
+    /// is correct at every early return, including the all-failed Err path.
+    pub(super) async fn run_walk<A: SurfaceAdapter>(
+        &self,
+        adapter: A,
+        mut req: ChatRequest,
+        opts: RouterOptions,
+        meta: &mut DispatchMeta,
+        repair_budget: &mut RepairBudget,
+    ) -> Result<A::Output> {
+        let pairing = record_transcript_defect(&mut req);
+        let (chain, probe_admissions) = self.dispatch_chain_for_request(&req, A::SURFACE)?;
+        // Re-probes the chain filter admitted, owned by a request-scoped set
+        // that settles them on transfer or on drop. `take(state_key)` moves a
+        // target's admissions into its `LearnedProbeGuard` when the loop
+        // reaches the target; any admission still held when the set drops (an
+        // earlier target succeeded, a terminal error, a `break 'chain`, a
+        // client disconnect) was never reached and settles as `OtherError`, so
+        // its `in_flight` slot never latches.
+        let mut probe_set = ProbeAdmissionSet::new(
+            self.learned_capabilities.clone(),
+            probe_admissions,
+            A::SURFACE.as_str(),
+        );
+        // Whether the CLIENT'S request carried a captured forwarded
+        // bearer, computed ONCE before the chain loop (mirroring
+        // `is_probe` below). This is a request-global observability
+        // dimension ONLY (fed to `emit_class_observability`) -- the
+        // per-target `use_forwarded_credential` flag, not this, drives
+        // the model-rewrite bypass and the 401/403/429 terminal re-key,
+        // so a coexisting own-credential Anthropic target in the same
+        // chain keeps its normal auth recovery even on a request that
+        // also carries a forwarded bearer.
+        let is_forwarded = req.routectl_internal.forwarded_bearer.is_some();
+        let ingress = ingress_dialect_of(&req);
+        let chain_len = chain.len();
+        let policy = self.policy_for(&req.model);
+        // Availability-probe detection, computed ONCE: `max_tokens` is
+        // stable across the chain (overlays never touch it). Claude
+        // Code sends max_tokens=1 probes whose output is unread; on a
+        // 429/529 these fast-fail instead of spraying retry+fallback
+        // across the all-Anthropic chain. See `should_fallback`.
+        let is_probe = is_probe_request(&req, &policy);
+        // Auto-cache decision inputs: computed ONCE off the ORIGINAL req
+        // (above the chain loop) so they are identical across every retry
+        // and fallback target. The per-target capability + provider switch
+        // are looked up inside the loop; the request-level facts here do
+        // not vary by target.
+        let auto_cache_plan =
+            AutoCacheRequestPlan::build(&req, self.config.cache.auto_emit_top_level_breakpoint);
+        if auto_cache_plan.has_caller_breakpoints {
+            self.warn_volatile_in_caller_prefix(&req);
+        }
+        // Prefix-rewrite detector: ONCE per client request, off the ORIGINAL
+        // req and above the chain loop for the same reason the auto-cache plan
+        // is -- it observes the CLIENT's bytes, which do not vary by target,
+        // and its output must never reach the per-target emission path.
+        self.observe_prefix_epoch(&req, meta);
+        let mut last_err: Option<Error> = None;
+        // One learned-capability observation per request per
+        // (state_key, feature): the error arm fires per attempt, so this
+        // set stops a same-request retry from manufacturing a second
+        // observation. See `observe_for_learning`.
+        let mut learn_dedupe: HashSet<LearnDedupeKey> = HashSet::new();
+        // One reasoning-drop fidelity WARN per client request: the emit sits
+        // at the dispatch point (per-target, post-overlay) so it is
+        // target-accurate, and this flag stops a same-provider retry or a
+        // later fallback hop from repeating it.
+        let mut reasoning_drop_warned = false;
+        // `repair_budget` is the reactive-repair ceiling for THIS client
+        // request, declared by the caller above the chain loop: each repair
+        // kind gates itself to at most once per target, and this bounds their
+        // SUM across every target the fallback walk reaches. Never declared
+        // inside the loop -- a per-target budget lets an N-target chain pay N
+        // repairs for one logical request. `stream_inner` and `count_tokens`
+        // draw from the same ceiling (see `repair_budget`).
+
+        'chain: for (chain_idx, target) in chain.iter().enumerate() {
+            let provider_name = target.provider_name.as_str();
+            let state_key = target.state_key.as_str();
+            let model = target.upstream.as_str();
+            if !adapter.admits(target) {
+                continue;
+            }
+            // Learned re-probe settle guard for THIS target, scoped to the
+            // whole chain-iteration (persists across same-provider retries,
+            // drops -> OtherError on any exit). Inert unless the filter
+            // admitted at least one probe for this state_key; the move takes
+            // ownership out of the set so the set's drop cannot settle it again.
+            let learned_probe_guard = match probe_set.take(state_key) {
+                Some(admissions) => LearnedProbeGuard::armed(
+                    self.learned_capabilities.clone(),
+                    admissions,
+                    probe_set.surface,
+                ),
+                None => LearnedProbeGuard::inert(),
+            };
+            let mut learning = AttemptLearning::new(self, A::SURFACE, learned_probe_guard);
+            let Some(provider) = target.provider.clone() else {
+                let err = Error::UnknownProvider(provider_name.to_string());
+                if !A::SURFACE.unknown_provider_walks() {
+                    return Err(err);
+                }
+                last_err = Some(err);
+                if opts.disable_fallbacks {
+                    break 'chain;
+                }
+                continue;
+            };
+            // This entry is being dispatched: record it as the terminal
+            // target (overwritten by a later entry on fallback) and count
+            // the hop. `chain_idx` is the index into the resolved chain;
+            // a non-zero index means at least one earlier entry was tried
+            // or skipped, i.e. we fell back to reach here.
+            meta.mark_target(target, &req.model);
+            meta.fallback_count = chain_idx as u32;
+
+            // Missing-bearer terminal guard: a forwarded target with NO
+            // captured client bearer must fail cleanly BEFORE egress --
+            // never an ambiguous upstream 401. Per-target (checked here,
+            // inside the loop), so a mixed chain that never reaches this
+            // target is unaffected.
+            // Terminal on purpose, unlike the walking refusals below: a
+            // client that sent no credential for a forwarded target must not
+            // be served on a later target's own key instead.
+            if let Some(err) = missing_forwarded_bearer_error(target, &req) {
+                self.count_refusal_error(ingress, target, &err);
+                return Err(err);
+            }
+            // A Gemini egress cannot translate a defective tool pairing; the
+            // next target may forward it.
+            if let Some(err) = egress_pairing_refusal(target, pairing.as_ref()) {
+                self.count_refusal_error(ingress, target, &err);
+                last_err = Some(err);
+                if opts.disable_fallbacks {
+                    break 'chain;
+                }
+                continue;
+            }
+
+            let mut attempt_req = req.clone();
+            // A forwarded target keeps the client's requested model
+            // verbatim (model transparency); an own target rewrites to
+            // this target's `upstream` as before.
+            if !target.use_forwarded_credential {
+                attempt_req.model = model.to_string();
+                declare_model_rename(&mut attempt_req, target, &req.model);
+            }
+            // v0.6: layered config compose. The provider's
+            // header_extras + payload_extras are looked up by
+            // provider_name; the model's contribution lives on the
+            // dispatch target.
+            apply_layered_overlays(&self.config, target, &mut attempt_req);
+            // INTERCEPTOR HOOK: strip runs after layered config compose,
+            // before auto-cache / context reduction. Any future interceptor
+            // over the per-attempt canonical clone goes here, ordered by
+            // data-dependency. A strict-mode refusal leaves this target
+            // unsent and walks on, since the next target may carry the
+            // capability; a rolled-back post-strip hazard routes away the
+            // same way.
+            match self.apply_strip_interceptor(target, &mut attempt_req) {
+                StripDecision::Proceed => {}
+                StripDecision::StrictReject(err) => {
+                    self.count_refusal_error(ingress, target, &err);
+                    if !A::SURFACE.strict_reject_walks() {
+                        return Err(err);
+                    }
+                    last_err = Some(err);
+                    if opts.disable_fallbacks {
+                        break 'chain;
+                    }
+                    continue;
+                }
+                StripDecision::RouteAway(err) => {
+                    self.count_refusal_error(ingress, target, &err);
+                    last_err = Some(err);
+                    if opts.disable_fallbacks {
+                        break 'chain;
+                    }
+                    continue;
+                }
+            }
+            // Envelope-field pre-flight: after overlays and the strip
+            // interceptor, before provider translation. Plans from THIS
+            // target's already-overlaid, already-stripped clone -- no
+            // reactive repair has touched it yet at this point in the
+            // loop, so it is exactly the base every fallback target
+            // plans from independently.
+            // Captured BEFORE pre-flight: an acting negative is what makes
+            // pre-flight drop the field, and it is that field a re-check asks
+            // about.
+            let probe_fields = ProbeFieldCapture::of(self.field_repair_table(), &attempt_req);
+            let (preflighted_req, preflight_records, field_canary) =
+                self.plan_field_preflight(&attempt_req, target, A::SURFACE);
+            attempt_req = preflighted_req;
+            meta.field_preflight.extend(preflight_records);
+            // The canary plan and the modified-request accounting guard live
+            // for the whole chain ITERATION, not the attempt: a same-provider
+            // retry is still the same request riding the same decision, and a
+            // fallback hop replaces both by re-planning for the next target.
+            // Held by the target's learner state so every exit path -- an
+            // early return, a `break 'chain`, a dropped future -- releases the
+            // claim and the in-flight count through RAII rather than through a
+            // settlement site somebody has to remember.
+            learning.hold_preflight(field_canary);
+            let provider_cfg = self.config.providers.get(provider_name);
+            apply_context_reduction(
+                &self.config,
+                provider_cfg,
+                provider_name,
+                model,
+                fidelity_dialect(target, &attempt_req),
+                &mut attempt_req,
+                meta,
+            );
+            // Auto-cache: maybe inject the front + terminal cache markers
+            // on THIS per-attempt clone, after overlays (the last
+            // dispatch-time touch of any cache marker) and before the retry
+            // loop, so every retry on this target reuses identical bytes.
+            // Transactional: both markers validate as one candidate and
+            // commit or discard together. Never mutates the original `req`;
+            // any doubt sends un-injected.
+            //
+            // The K-gated verdict is consulted HERE, once per chain entry, so
+            // it is constant across this target's retries and re-derived for
+            // the next fallback target against its own row and triple.
+            let k_suppressed = self.k_emission_suppressed(
+                &auto_cache_plan,
+                target,
+                req.routectl_internal.inbound_session_key.as_deref(),
+            );
+            let cache_decision = apply_auto_cache_placement(
+                &mut attempt_req,
+                &auto_cache_plan,
+                cache_target_gates(provider_cfg),
+                k_suppressed,
+            );
+            declare_cache_placement(
+                &mut attempt_req,
+                target,
+                cache_decision,
+                auto_cache_plan.front_slot,
+            );
+            // Cache observability: stamp the per-marker decision tokens so
+            // the outcome log and the usage ledger can see what was decided,
+            // and emit the per-request decision at debug. No bodies /
+            // secrets: only provider name, model id, and stable tokens.
+            let front_token = cache_decision.front.strategy_str();
+            let terminal_token = cache_decision.terminal.strategy_str();
+            meta.cache_strategy = Some(terminal_token);
+            meta.cache_front_decision = Some(front_token);
+            meta.cache_terminal_decision = Some(terminal_token);
+            tracing::debug!(
+                provider = %routectl_core::sanitize_for_log(provider_name),
+                model = %routectl_core::sanitize_for_log(model),
+                strategy = terminal_token,
+                front_decision = front_token,
+                terminal_decision = terminal_token,
+                "cache_auto_decision",
+            );
+
+            // Steady-state would-trim advisory: NON-MUTATING. Reads the
+            // dispatched clone, prices the would-cut candidate, and records it
+            // onto `meta`. Never touches `attempt_req` (no `apply_trim_plan`),
+            // so what is sent upstream is byte-identical with or without this.
+            self.record_would_trim(
+                &attempt_req,
+                target.provider_kind,
+                target.nickname.as_deref().unwrap_or(model),
+                &target.model.effective_row,
+                meta,
+            );
+
+            // Reasoning-replay carry admission: claim the single-flight slot
+            // for every non-portable artifact scheme this request carries
+            // toward the target lane. `Some` holds the guards and leaves the
+            // carried variant intact; `None` either found nothing to repair or
+            // already stripped `attempt_req` proactively (an acting negative or
+            // a peer probe). Runs after every request-shaping step so the
+            // gray-artifact count reflects the exact carried bytes. A proactive
+            // strip re-stamps the calibration estimate, so the evidence
+            // numerator describes the stripped payload the upstream will price.
+            //
+            // Envelope-field carry admission, at the SAME position and for the
+            // same reason: the closed table plus this attempt's own fields
+            // decide the identity, so the guard is claimed before dispatch and
+            // BOTH settlements stay reachable (commit on a repaired success,
+            // clear when the field is accepted). Nothing is mutated by it -- an
+            // acting verdict simply refuses the slot and the attempt
+            // dispatches unchanged.
+            learning.admit_carries(
+                target,
+                &mut attempt_req,
+                meta,
+                super::field_repair::FieldSettlementMode::Settling,
+                Instant::now(),
+            );
+
+            let mut backoff = Duration::from_millis(policy.initial_backoff_ms);
+            let mut attempts_made: u32 = 0;
+            // Per-chain-entry one-shot auth-recovery flag. Set after a
+            // 401 triggers `provider.on_auth_failure()`; ensures we
+            // retry the SAME chain entry with the freshly-rotated
+            // token at most once. Reset implicitly when the outer
+            // 'chain loop moves to the next target. Note: if the
+            // operator has the same provider in the chain twice
+            // (different model overrides), each entry gets its own
+            // flag -- the per-provider single-flight in OAuthStore
+            // (double-check on access_token equality) is the safety
+            // net that prevents redundant rotations across entries.
+            let mut auth_retry_attempted = false;
+
+            loop {
+                // Per-attempt gate: rate limit + circuit breaker.
+                // Charges one RPM token and (when half-open) claims the
+                // probe slot. If the gate refuses, treat as a fallback
+                // event for THIS provider and move to the next chain
+                // entry -- retrying the same provider would just hit
+                // the gate again.
+                //
+                // The returned guard OWNS the half-open claim this admission
+                // took (inert for a closed breaker or a refusal), so the
+                // cancellation backstop below is armed from the critical
+                // section that acquired the slot and never from a re-read of
+                // the shared half-open bit.
+                let mut probe_guard = {
+                    let (refusal, guard) = self.admit_dispatch(state_key, provider_name);
+                    if let Some((gate_kind, gate_err)) = refusal {
+                        log_gate_refusal(
+                            provider_name,
+                            target.nickname.as_deref().unwrap_or(""),
+                            gate_kind,
+                            &gate_err,
+                            "gate blocked",
+                        );
+                        // Keep the FIRST real error: a synthetic gate error
+                        // (status 0 "circuit breaker open" / RPM) on a later
+                        // chain entry must not overwrite an earlier entry's
+                        // genuine upstream failure, or the client sees the
+                        // synthetic error instead of the real 503/timeout.
+                        // Between two parked seats the earlier deadline wins, and
+                        // any other gate refusal replaces a parked one.
+                        merge_gate_refusal(&mut last_err, gate_err);
+                        if opts.disable_fallbacks {
+                            break 'chain;
+                        }
+                        continue 'chain;
+                    }
+                    guard
+                };
+                // Read before any settle site disarms the guard: only a probe's
+                // commit closes the breaker on a surface that does not record
+                // success at commit.
+                let was_half_open_probe = probe_guard.owns_slot();
+
+                // `probe_guard` is the cancellation backstop (see
+                // ProbeSlotGuard): if the gate admitted THIS dispatch as the
+                // half-open probe, it frees the slot should the future be
+                // dropped before an outcome arm settles it. Disarmed at each
+                // settle below; inert + a no-op otherwise.
+
+                // A repair is a fixed correctness branch, not a retry policy,
+                // so its re-dispatch takes no backoff sleep.
+                let skip_backoff = learning.take_skip_backoff();
+                if attempts_made > 0 && !skip_backoff && A::SURFACE.sleeps_between_attempts() {
+                    let jittered = add_jitter(backoff, policy.jitter_ms);
+                    tokio::time::sleep(jittered).await;
+                    backoff = mul_duration(backoff, policy.backoff_multiplier);
+                }
+
+                let attempt_policy = self.compose_attempt_policy(
+                    &policy,
+                    provider_name,
+                    target.stream_first_byte_timeout_ms,
+                );
+                // Fidelity WARN at the dispatch point: reads the per-target
+                // clone about to go upstream, at most once per request.
+                Self::warn_dropped_reasoning_dialect(
+                    provider_name,
+                    target.provider_kind,
+                    &attempt_req,
+                    &mut reasoning_drop_warned,
+                );
+                // Lazy probe activation at the ADMITTED boundary: the gate
+                // has cleared and this attempt is about to go upstream, so the
+                // lane is provably in use -- while a gate-refused or
+                // breaker-parked request, which never reaches here, is not.
+                // Deliberately NOT the success arm: a lane whose upstream is
+                // erroring is exactly the one a probe should investigate, so
+                // requiring a 2xx would keep the scheduler dark on the traffic
+                // that most needs it. The fields come from the pre-flight
+                // capture, so a field pre-flight dropped on an acting negative
+                // is still the one re-checked; the beta context comes from
+                // `attempt_req`, the per-target body actually being sent. Pure
+                // bookkeeping: it enqueues at most one bounded job per lane and
+                // capability and returns without dialing or awaiting, so this
+                // request is not delayed and its outcome does not depend on it.
+                self.on_admitted_request(target, &probe_fields, &attempt_req);
+                let translation_report = install_translation_report(&mut attempt_req);
+                let beta_assembly = install_beta_assembly(&mut attempt_req);
+                let (wire_tap, sample_charge) = self.install_wire_tap(target, &mut attempt_req);
+                let invoked = adapter.invoke(target, provider.clone(), attempt_req.clone());
+                let result = match adapter.deadline(&attempt_policy) {
+                    Some(deadline) => tokio::time::timeout(deadline.after(), invoked)
+                        .await
+                        .unwrap_or_else(|_| Err(DeadlineFired(deadline).error(provider_name))),
+                    None => invoked.await,
+                };
+                attempts_made += 1;
+                meta.attempt_count += 1;
+
+                match result {
+                    Ok(out) => {
+                        self.settle_seat_success(
+                            state_key,
+                            A::SURFACE.records_success_on_commit() || was_half_open_probe,
+                            &probe_guard,
+                        );
+                        probe_guard.disarm();
+                        sample_charge.keep();
+                        self.check_request_wire(target, &attempt_req, wire_tap.as_ref());
+                        let ctx = CommitCtx {
+                            router: self,
+                            target,
+                            client_req: &req,
+                            attempt_req: &attempt_req,
+                            wire_tap: wire_tap.as_ref(),
+                            translation_report: &translation_report,
+                            learning: &mut learning,
+                            learn_dedupe: &mut learn_dedupe,
+                            meta,
+                        };
+                        return Ok(adapter.on_commit(ctx, out));
+                    }
+                    Err(mut e) => {
+                        let rejection_site = self.settle_failed_attempt(
+                            target,
+                            &attempt_req,
+                            wire_tap.as_ref(),
+                            sample_charge,
+                            &e,
+                            meta,
+                        );
+                        // Read off the status before any lift or remap: see
+                        // `is_transcript_rejection`.
+                        let transcript_rejection =
+                            is_transcript_rejection(&e, req.routectl_internal.transcript_defect);
+                        let native_cf = learning.classify(&e, target.provider_kind);
+                        let original_class = native_cf.class.clone();
+                        let remap_candidate_status = upstream_status_for_remap(&e);
+                        let (cf, remapped) =
+                            apply_remap(native_cf, remap_candidate_status, &target.class_overrides);
+                        let remap_status = if remapped {
+                            remap_candidate_status
+                        } else {
+                            None
+                        };
+                        // A forwarded-credential TARGET that drew
+                        // an upstream 401/403/429 is TERMINAL -- bypass BOTH
+                        // the on_auth_failure refresh-and-retry (below) AND
+                        // the fallback-chain hop, and surface the status
+                        // verbatim. A request-scoped forwarded token has no
+                        // refresh path and no credential to fall back to, so
+                        // both recoveries are useless and wrong; the client
+                        // owns its own retry/backoff. Keyed off the CURRENT
+                        // target's `use_forwarded_credential`, not
+                        // request-global bearer presence, so a coexisting
+                        // own-creds Anthropic target in the same chain keeps
+                        // normal auth recovery. Checked FIRST so it
+                        // precedes auth-retry, same-provider retry, and
+                        // fallback. Releases the half-open probe slot WITHOUT
+                        // a breaker debit (mirrors the terminal path below):
+                        // a forwarded-token failure is not this seat's health
+                        // signal, so it must not trip routectl's breaker.
+                        // Transport retries (5xx/network) are NOT in this set
+                        // and fall through unchanged.
+                        if target.use_forwarded_credential
+                            && let Some(status) = forwarded_terminal_status(&e)
+                        {
+                            log_forwarded_auth_terminal(
+                                status,
+                                req.routectl_internal.inbound_session_key.is_some(),
+                            );
+                            probe_guard.release();
+                            return Err(e);
+                        }
+                        // Auth-401 single-flight refresh: when the
+                        // upstream rejects the token (typically a 401
+                        // on a stale oauth:// credential that slipped
+                        // past the near-expiry check), ask the provider
+                        // to rotate via on_auth_failure, then retry
+                        // exactly once. The OAuth store's per-provider
+                        // mutex collapses concurrent 401-storms to a
+                        // single token-endpoint POST. A non-Ok return
+                        // means the OAuth identity is dead (revoked,
+                        // network-failure to token endpoint); surface
+                        // that immediately rather than walk the
+                        // fallback chain over a known-broken
+                        // credential.
+                        if !auth_retry_attempted
+                            && matches!(&e, Error::Upstream { status: 401, .. })
+                        {
+                            auth_retry_attempted = true;
+                            tracing::debug!(
+                                provider = provider_name,
+                                model = %routectl_core::sanitize_for_log(target.nickname.as_deref().unwrap_or("")),
+                                attempt = attempts_made,
+                                "upstream 401; refreshing auth and retrying once",
+                            );
+                            // A refresh failure means the OAuth identity is
+                            // dead; surface it without walking the chain. But
+                            // first release any half-open probe slot this
+                            // attempt claimed via the gate, or the breaker
+                            // stays locked open until restart.
+                            if let Err(refresh_err) = provider.on_auth_failure().await {
+                                self.park_credential_on_rejection(
+                                    state_key,
+                                    &refresh_err,
+                                    is_probe,
+                                    probe_guard.credential_generation(),
+                                );
+                                probe_guard.release();
+                                return Err(refresh_err);
+                            }
+                            // Refresh succeeded. Release the half-open probe
+                            // slot this attempt claimed at the gate BEFORE the
+                            // `continue` re-enters the loop and re-runs
+                            // the gate. While this caller still holds the
+                            // slot, the in-loop re-gate's `try_dispatch` sees
+                            // `half_open_in_flight` and returns CircuitOpen,
+                            // which would leave the breaker locked open until
+                            // restart. Releasing here lets the re-gate claim a
+                            // fresh slot (the per-attempt accounting the
+                            // in-loop gate promises).
+                            probe_guard.release();
+                            // Preserve the genuine upstream 401 as last_err
+                            // before re-gating. If the re-gate then refuses
+                            // (CircuitOpen / RPM), the `last_err.is_none()`
+                            // guard above keeps this real error rather than
+                            // overwriting it with the synthetic status-0 gate
+                            // error, so the client sees the true 401.
+                            last_err = Some(e);
+                            continue;
+                        }
+                        // The learner repair branches: replay strip, then
+                        // envelope field, then the canary's same-field retry,
+                        // then the named beta withhold.
+                        // A FIXED correctness branch, not a retry policy: each
+                        // fires at most once per target, re-dispatches this
+                        // same target with no backoff, and draws the shared
+                        // per-request repair ceiling. They sit after auth
+                        // recovery and BEFORE the terminal and fallback
+                        // handling below, which a canary's provoked 400 would
+                        // otherwise reach.
+                        let untranslated = UntranslatedCapabilities::take_from(&translation_report);
+                        let assembly = beta_assembly.take();
+                        let rejection = Rejection {
+                            err: &e,
+                            class: &cf,
+                            native_class: &original_class,
+                            target,
+                            client_req: &req,
+                            site: rejection_site,
+                            transcript_rejection,
+                            beta_assembly: assembly.as_ref(),
+                        };
+                        if let FailureDecision::Retry { last_err_body_free } =
+                            learning.on_rejection(rejection, &mut attempt_req, meta, repair_budget)
+                        {
+                            probe_guard.release();
+                            // Preserve the genuine rejection as last_err before
+                            // re-gating the repaired attempt: if the re-gate
+                            // refuses (CircuitOpen / RPM), the
+                            // `last_err.is_none()` guard keeps the real upstream
+                            // rejection rather than surfacing the synthetic
+                            // status-0 gate error.
+                            last_err = Some(last_err_body_free.unwrap_or(e));
+                            continue;
+                        }
+
+                        if let Some(body_free) =
+                            replay_rejection_body_free(&e, &cf.class, provider_name)
+                        {
+                            e = body_free;
+                        }
+                        let do_fallback =
+                            should_fallback(&e, &cf.class, &policy, is_probe, transcript_rejection);
+                        // The honored upstream reset for THIS error (clamped
+                        // to the ceiling), computed once for both the park
+                        // decision below and the in-loop sleep bump in the
+                        // retry branch. `None` for every non-rate-limit error.
+                        let reset_hint = rate_limit_reset_hint(&e, &policy);
+                        let outcome = breaker_outcome(&e, &cf.class, reset_hint, is_probe);
+                        // Probe fast-fail: a probe (max_tokens <=
+                        // probe_max_tokens) that hit a rate-limit/overload
+                        // (429/529) returns the status immediately via an
+                        // explicit early return -- no retry, no fallback.
+                        // The shared rule gives it no breaker debit, so it
+                        // only frees the half-open slot it may have claimed
+                        // at the gate.
+                        if let Some(status) = probe_fast_fail(&e, is_probe) {
+                            log_probe_fast_fail(
+                                provider_name,
+                                target.nickname.as_deref().unwrap_or(""),
+                                status,
+                                req.max_tokens,
+                            );
+                            self.apply_breaker_outcome(state_key, outcome, &cf.class);
+                            probe_guard.settle(outcome);
+                            // A probe fast-fails ACROSS distinct chain targets
+                            // (walking an all-Anthropic chain is futile -- every
+                            // hop shares the limit), but a rate-limited SEAT does
+                            // not mean the pooled model is out of quota: hop to
+                            // the next sibling seat of the SAME pool when one
+                            // exists (and fallbacks are enabled). Carry the
+                            // genuine 429/529 as last_err so a later synthetic
+                            // gate error cannot mask it; fast-fail once the
+                            // pool's seats are exhausted.
+                            if !opts.disable_fallbacks
+                                && next_is_sibling_seat(&chain, chain_idx, target)
+                            {
+                                last_err = Some(e);
+                                continue 'chain;
+                            }
+                            return Err(e);
+                        }
+                        // The breaker DEBIT keys off the failure CLASS, not
+                        // the chain-hop decision: a seat looks unhealthy when
+                        // it emits a transient-health failure (429 / 5xx /
+                        // status-0 / overload), independent of whether the
+                        // operator routes past that status. A non-debiting
+                        // class (4xx caller error, capability, auth) that
+                        // still falls back releases its slot without a debit
+                        // in the fallback branch below.
+                        let debits = class_debits(&cf.class);
+                        let (_opened, breaker_effect) =
+                            self.apply_breaker_outcome(state_key, outcome, &cf.class);
+                        if debits {
+                            probe_guard.disarm();
+                        }
+                        // Outside the debit gate: a credential rejection
+                        // classifies Auth, which never debits.
+                        self.park_credential_on_rejection(
+                            state_key,
+                            &e,
+                            is_probe,
+                            probe_guard.credential_generation(),
+                        );
+                        self.emit_class_observability(
+                            &e,
+                            &cf,
+                            &original_class,
+                            remapped,
+                            remap_status,
+                            A::SURFACE,
+                            provider_name,
+                            target,
+                            do_fallback,
+                            &policy,
+                            debits,
+                            is_probe,
+                            is_forwarded,
+                            ingress,
+                        );
+                        learning.observe_generic(
+                            &e,
+                            &cf,
+                            remapped,
+                            target,
+                            &req,
+                            &untranslated,
+                            &mut learn_dedupe,
+                            meta,
+                        );
+                        if opts.disable_fallbacks {
+                            // Terminal error exit: free any half-open probe
+                            // slot this attempt claimed. A no-op when a
+                            // debiting class already routed through
+                            // record_failure (which clears the slot).
+                            probe_guard.release();
+                            return Err(e);
+                        }
+                        let retry = same_provider_retry(
+                            A::SURFACE,
+                            &e,
+                            &cf.class,
+                            &policy,
+                            attempts_made,
+                            is_probe,
+                            transcript_rejection,
+                            outcome,
+                            reset_hint,
+                        );
+                        let can_retry_here = matches!(retry, SameProvider::Retry { .. });
+                        let facts = upstream_facts(&e);
+                        tracing::debug!(
+                            provider = provider_name,
+                            state_key = %sanitize_for_log(state_key),
+                            surface = A::SURFACE.as_str(),
+                            attempt = attempts_made,
+                            status = ?facts.status,
+                            upstream_type = ?facts.upstream_type,
+                            retry_after_ms = ?reset_hint.map(|d| d.as_millis()),
+                            breaker_effect,
+                            same_provider_retry = can_retry_here,
+                            preserved_upstream_error = facts.status.is_some(),
+                            "retry decision",
+                        );
+                        if can_retry_here {
+                            tracing::debug!(
+                                provider = provider_name,
+                                model = %routectl_core::sanitize_for_log(target.nickname.as_deref().unwrap_or("")),
+                                attempt = attempts_made,
+                                error = ?e,
+                                "retrying same provider",
+                            );
+                            // Keep the genuine upstream error as the running
+                            // last_err before re-probing. If the re-gate then
+                            // refuses (CircuitOpen / RPM), the `last_err.is_none()`
+                            // guard above leaves this real error in place rather
+                            // than overwriting it with the synthetic status-0
+                            // gate error, so the client sees the true failure.
+                            last_err = Some(e);
+                            // Honor a SMALL non-probe upstream reset as the
+                            // next in-loop sleep: bump `backoff` so the
+                            // loop-top sleep waits at least the reset before
+                            // re-probing the SAME provider.
+                            if let SameProvider::Retry {
+                                sleep_floor: Some(h),
+                            } = retry
+                            {
+                                backoff = backoff.max(h);
+                            }
+                            // Free the half-open probe slot this attempt
+                            // claimed before re-probing: the in-loop re-gate
+                            // re-runs `try_dispatch`, which would otherwise see
+                            // this caller's still-held slot as
+                            // `half_open_in_flight` and return CircuitOpen,
+                            // locking the breaker open forever (mirrors the
+                            // auth-retry Ok path).
+                            probe_guard.release();
+                            continue;
+                        }
+                        // Done with this provider. Decide fallback vs propagate.
+                        if do_fallback && A::SURFACE.health_error_walks() {
+                            let has_next = chain_idx + 1 < chain_len;
+                            if has_next {
+                                tracing::warn!(
+                                    provider = provider_name,
+                                    model = %routectl_core::sanitize_for_log(target.nickname.as_deref().unwrap_or("")),
+                                    state_key = %sanitize_for_log(state_key),
+                                    error = ?e,
+                                    "fallback to next",
+                                );
+                            } else {
+                                tracing::warn!(
+                                    provider = provider_name,
+                                    model = %routectl_core::sanitize_for_log(target.nickname.as_deref().unwrap_or("")),
+                                    state_key = %sanitize_for_log(state_key),
+                                    error = ?e,
+                                    "chain exhausted; no fallback target available; request will fail",
+                                );
+                            }
+                            // A fallbackable error whose class did NOT debit
+                            // the breaker leaves the half-open probe slot
+                            // armed; release it without a debit before the hop
+                            // so every settle path frees the slot exactly once.
+                            // A debiting class already settled + disarmed above.
+                            if !debits {
+                                probe_guard.release();
+                            }
+                            last_err = Some(e);
+                            continue 'chain;
+                        }
+                        // Terminal non-fallbackable error. Free any half-open
+                        // probe slot this attempt claimed so the breaker is
+                        // not left locked open.
+                        probe_guard.release();
+                        return Err(e);
+                    }
+                }
+            }
+        }
+
+        Err(adapter.exhausted(last_err, &req.model))
+    }
+}

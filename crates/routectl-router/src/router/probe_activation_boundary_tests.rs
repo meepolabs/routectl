@@ -245,10 +245,11 @@ async fn all_three_walks_share_one_lane_slot() {
 fn activation_call_site_arguments() -> Vec<String> {
     const DISPATCH: &str = include_str!("dispatch.rs");
     const COUNT_TOKENS: &str = include_str!("count_tokens.rs");
+    const DISPATCH_LOOP: &str = include_str!("dispatch_loop.rs");
     const CALL: &str = "self.on_admitted_request(";
     let mut args = Vec::new();
-    for source in [DISPATCH, COUNT_TOKENS] {
-        // Scanned WHOLE deliberately: both files declare their tests as
+    for source in [DISPATCH, DISPATCH_LOOP, COUNT_TOKENS] {
+        // Scanned WHOLE deliberately: these files declare their tests as
         // `#[path]` sidecars, so no test text lives in them and there is
         // nothing to cut -- a `#[cfg(test)]` split would truncate at the
         // sidecar declaration and hide the very call sites this reads.
@@ -265,6 +266,8 @@ fn activation_call_site_arguments() -> Vec<String> {
 fn every_activation_call_site_passes_the_per_target_request() {
     let args = activation_call_site_arguments();
 
+    // Counts sites across every listed file, so a walk moving between them
+    // leaves the total unchanged.
     assert_eq!(
         args.len(),
         3,

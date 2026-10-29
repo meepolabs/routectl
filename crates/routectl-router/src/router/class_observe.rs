@@ -29,6 +29,56 @@ impl DispatchSurface {
             Self::CountTokens => "count_tokens",
         }
     }
+
+    /// Whether a strict-translation refusal leaves the target unsent and
+    /// walks on, or ends the request. A message surface walks because the
+    /// next target may carry the capability; a count ends, since it projects
+    /// the same request onto every seat.
+    pub(super) const fn strict_reject_walks(self) -> bool {
+        match self {
+            Self::Complete | Self::Stream => true,
+            Self::CountTokens => false,
+        }
+    }
+
+    /// Whether a chain entry naming an unregistered provider is skipped or
+    /// ends the request.
+    pub(super) const fn unknown_provider_walks(self) -> bool {
+        match self {
+            Self::Complete | Self::Stream => true,
+            Self::CountTokens => false,
+        }
+    }
+
+    /// Whether a fallbackable upstream health error (429, 5xx, status 0)
+    /// walks to the next target or ends the request. Health fallback is
+    /// reserved for the message surfaces.
+    pub(super) const fn health_error_walks(self) -> bool {
+        match self {
+            Self::Complete | Self::Stream => true,
+            Self::CountTokens => false,
+        }
+    }
+
+    /// Whether a same-target re-dispatch waits out the policy backoff first.
+    /// Only a completion retries on ordinary errors, so only it sleeps.
+    pub(super) const fn sleeps_between_attempts(self) -> bool {
+        match self {
+            Self::Complete => true,
+            Self::Stream | Self::CountTokens => false,
+        }
+    }
+
+    /// Whether a committed attempt records a breaker success. A stream
+    /// commits at first content, which proves only a half-open probe; a
+    /// healthy breaker's failure count must keep accumulating mid-stream
+    /// errors, so the stream tail settles it instead.
+    pub(super) const fn records_success_on_commit(self) -> bool {
+        match self {
+            Self::Complete | Self::CountTokens => true,
+            Self::Stream => false,
+        }
+    }
 }
 
 /// Safe, structured facts pulled from an [`Error`] for the router's

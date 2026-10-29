@@ -40,6 +40,7 @@ mod class_observe;
 mod count_tokens;
 mod credential_park;
 mod dispatch;
+mod dispatch_loop;
 mod edit_declare;
 mod feature_filter;
 pub(crate) mod fidelity_status;
@@ -1981,7 +1982,7 @@ struct DispatchTarget {
     /// `AnthropicApi` provider with `credential_source: Forwarded`;
     /// populated ONCE at chain expansion in `expand_chain_to_targets`,
     /// the same pattern as `provider_kind`, for both seat and non-seat
-    /// targets. Read at the three dispatch paths (`complete_inner`,
+    /// targets. Read at the three dispatch paths (`run_walk`,
     /// `count_tokens_try_seat`, `stream_inner`) to bypass the
     /// `attempt_req.model` rewrite: a forwarded target forwards the
     /// client's requested model verbatim; an own target still rewrites
@@ -3319,6 +3320,14 @@ mod dispatch_divergence_tests;
 #[cfg(test)]
 #[path = "local_build_error_dispatch_tests.rs"]
 mod local_build_error_dispatch_tests;
+
+#[cfg(test)]
+#[path = "dispatch_surface_row_tests.rs"]
+mod dispatch_surface_row_tests;
+
+#[cfg(test)]
+#[path = "dispatch_deadline_tests.rs"]
+mod dispatch_deadline_tests;
 
 #[cfg(test)]
 #[path = "probe_activation_boundary_tests.rs"]
