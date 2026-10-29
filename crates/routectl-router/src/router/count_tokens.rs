@@ -55,7 +55,7 @@ use crate::config::RetryPolicy;
 
 use super::capability_observe::UntranslatedCapabilities;
 use super::class_observe::{DispatchSurface, class_label, matched_by_label, upstream_facts};
-use super::dispatch::{emit_replay_degradation, is_capability_error};
+use super::dispatch::{complete_timed_out, emit_replay_degradation, is_capability_error};
 use super::dispatch_loop::{
     CommitCtx, Deadline, ErrorDisposition, Exhaustion, FailureObservation, SurfaceAdapter,
 };
@@ -121,8 +121,12 @@ impl SurfaceAdapter for CountAdapter {
         capable
     }
 
-    fn deadline(&self, _attempt_policy: &RetryPolicy) -> Option<Deadline> {
-        None
+    /// The composed `request_timeout_ms`, expiring with a completion's text.
+    /// An expired count walks to the next capable seat.
+    fn deadline(&self, attempt_policy: &RetryPolicy) -> Option<Deadline> {
+        attempt_policy
+            .request_timeout_ms
+            .map(|ms| Deadline::new(ms, complete_timed_out))
     }
 
     async fn invoke(
@@ -162,8 +166,9 @@ impl SurfaceAdapter for CountAdapter {
     }
 
     fn exhausted(&self, exhaustion: Exhaustion<'_>) -> Error {
-        // Only a parked seat's gate refusal is held as the last error here,
-        // and it outranks both 501 shapes below.
+        // The walk holds only a timed-out attempt's error or a parked seat's
+        // gate refusal (a timeout is kept over a parked seat either way
+        // round), and either outranks both 501 shapes below.
         if let Some(parked) = exhaustion.last {
             return parked;
         }
@@ -337,6 +342,10 @@ impl Router {
     ///   health on the per-seat breaker that completions gate on.
     /// - A 401 -> single-flight `on_auth_failure` refresh + one retry of
     ///   the SAME seat.
+    /// - An attempt that outlives the composed `request_timeout_ms` -> the
+    ///   status-0 timeout error a completion gives, debited like a 5xx, then
+    ///   advance to the NEXT capable seat. The walk keys on its own deadline
+    ///   expiring, never on the status-0 class a refused connection shares.
     /// - Any OTHER fallbackable HEALTH error (429 / 5xx / status-0) ->
     ///   debit-or-park and propagate (NO walk -- health fallback stays
     ///   reserved for the messages path).
@@ -349,8 +358,9 @@ impl Router {
     /// shared with the two messages walks, so total upstream calls never exceed
     /// `2 * chain.len() + REPAIRS_PER_REQUEST` -- the repair term is added
     /// once for the whole walk, not once per seat. When no capable seat
-    /// serves a count (none capable, or every capable seat
-    /// returned a capability error), this returns
+    /// serves a count, the last timed-out attempt's error is returned, else a
+    /// parked seat's refusal; failing both (none capable, or every capable
+    /// seat returned a capability error), this returns
     /// `Error::NotImplemented` naming the alias -- the handler maps that to
     /// a stable 501, and the last upstream's raw 501 body is never leaked
     /// to the client.

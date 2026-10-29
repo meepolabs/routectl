@@ -139,8 +139,9 @@ pub(super) fn restamp_calibration_estimate(attempt_req: &ChatRequest, meta: &mut
 /// the composed `request_timeout_ms`, committed when the response arrives.
 struct CompleteAdapter;
 
-/// The expiry text of a `complete()` attempt deadline.
-fn complete_timed_out(ms: u64) -> String {
+/// The expiry text of a `complete()` attempt deadline, shared by the token
+/// count so the two surfaces time out with the same error.
+pub(super) fn complete_timed_out(ms: u64) -> String {
     format!("request timed out after {ms}ms")
 }
 

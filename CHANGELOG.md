@@ -423,6 +423,8 @@ list with more narrative.
 
 ### Changed
 
+- **A token count honours `request_timeout_ms` and moves to the next target on expiry.** A `/v1/messages/count_tokens` attempt that does not answer within the composed `request_timeout_ms` ends with the same `request timed out after <ms>ms` error a completion gives, debits the seat's breaker like a 5xx, and the count moves to the next count-capable target. Every other upstream health error on a count still ends the request. When no target counts, the last timeout is returned ahead of a parked credential and the 501.
+
 - **A client that cancels a stream after content no longer counts as a success on the provider's breaker.** Dropping a stream before it ends used to record a success, resetting the provider's failure count; it now records nothing. A stream that runs to its end still records a success, and an error mid-stream still settles as before.
 
 - **A system or developer message holding a non-text part stays in place.** On the Chat Completions and Responses ingresses, a system or developer message with an image, a document or an unknown part is no longer lifted into the request's system prompt as text only; the whole message stays in its position. openai-compat and openai-responses forward it; anthropic-api (lift policy), Bedrock Invoke, Bedrock Converse and Gemini carry its text and count the parts they cannot represent once per request as the `system_part_unrepresentable` translation drop. See [docs/LOGGING.md](docs/LOGGING.md).

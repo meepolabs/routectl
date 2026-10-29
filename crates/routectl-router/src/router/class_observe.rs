@@ -54,7 +54,8 @@ impl DispatchSurface {
 
     /// Whether a fallbackable upstream health error (429, 5xx, status 0)
     /// walks to the next target or ends the request. Health fallback is
-    /// reserved for the message surfaces.
+    /// reserved for the message surfaces; an attempt whose deadline expired
+    /// walks on every surface regardless of this row.
     pub(super) const fn health_error_walks(self) -> bool {
         match self {
             Self::Complete | Self::Stream => true,

@@ -3334,6 +3334,10 @@ mod count_tokens_meta_tests;
 mod dispatch_deadline_tests;
 
 #[cfg(test)]
+#[path = "count_tokens_deadline_tests.rs"]
+mod count_tokens_deadline_tests;
+
+#[cfg(test)]
 #[path = "probe_activation_boundary_tests.rs"]
 mod probe_activation_boundary_tests;
 

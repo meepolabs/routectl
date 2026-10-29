@@ -612,11 +612,12 @@ impl Router {
                 let (wire_tap, sample_charge) =
                     adapter.install_wire(self, target, &mut attempt_req);
                 let invoked = adapter.invoke(target, provider.clone(), attempt_req.clone());
-                let result = match adapter.deadline(&attempt_policy) {
-                    Some(deadline) => tokio::time::timeout(deadline.after(), invoked)
-                        .await
-                        .unwrap_or_else(|_| Err(DeadlineFired(deadline).error(provider_name))),
-                    None => invoked.await,
+                let (result, deadline_fired) = match adapter.deadline(&attempt_policy) {
+                    Some(deadline) => match tokio::time::timeout(deadline.after(), invoked).await {
+                        Ok(resolved) => (resolved, false),
+                        Err(_) => (Err(DeadlineFired(deadline).error(provider_name)), true),
+                    },
+                    None => (invoked.await, false),
                 };
                 attempts_made += 1;
                 meta.attempt_count += 1;
@@ -968,7 +969,10 @@ impl Router {
                             continue;
                         }
                         // Done with this provider. Decide fallback vs propagate.
-                        if do_fallback && A::SURFACE.health_error_walks() {
+                        // An expired deadline walks on every surface: keyed on
+                        // the walk's own deadline, never on the status-0 class
+                        // it shares with a refused connection.
+                        if do_fallback && (deadline_fired || A::SURFACE.health_error_walks()) {
                             let has_next = chain_idx + 1 < chain_len;
                             if has_next {
                                 tracing::warn!(
