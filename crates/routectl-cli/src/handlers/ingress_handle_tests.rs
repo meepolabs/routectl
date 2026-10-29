@@ -11,7 +11,7 @@
 //! - `map_error` envelope shape per dialect (Anthropic, OpenAI).
 //! - `sanitize_stream_error_for_client`: provider names + upstream
 //!   bodies must not leak through to the SSE wire bytes.
-//! - `render_stream_task`: mid-stream upstream error path drives the
+//! - `render_checked_stream_task`: mid-stream upstream error path drives the
 //!   adapter's `render_error_eos` to emit a dialect-specific terminal
 //!   error event AFTER the chunks already rendered.
 //!
@@ -1393,7 +1393,7 @@ fn sanitize_stream_error_does_not_forward_oversized_raw_body() {
     );
 }
 
-// -------- render_stream_task: mid-stream upstream error path --------
+// -------- render_checked_stream_task: mid-stream upstream error path --------
 
 /// Build a one-text-token canonical chunk for use in stream tests.
 fn streaming_text_chunk(text: &str) -> routectl_core::ChatChunk {
@@ -1434,7 +1434,7 @@ async fn drain(mut rx: tokio::sync::mpsc::Receiver<SseEvent>) -> Vec<SseEvent> {
 /// Without this, the stream truncated mid-chunk and Claude Code
 /// SDK would retry up to 5 times on suspected truncation.
 #[tokio::test]
-async fn render_stream_task_anthropic_emits_chunk_then_terminal_error_event() {
+async fn render_checked_stream_task_anthropic_emits_chunk_then_terminal_error_event() {
     use crate::ingress::anthropic::AnthropicIngress;
 
     // Arrange: a synthesized upstream stream that yields one
@@ -1453,13 +1453,15 @@ async fn render_stream_task_anthropic_emits_chunk_then_terminal_error_event() {
     // Act
     let rig = CaptureRig::new();
     let capture = rig.capture("anthropic", &sample_request("m", true), "req-stream-err");
-    let ((), logs) = routectl_testkit::with_capture(Box::pin(render_stream_task(
+    let response_check = unsampled_response_check().await;
+    let ((), logs) = routectl_testkit::with_capture(Box::pin(render_checked_stream_task(
         upstream,
         AnthropicIngress,
         capture,
         tx,
         k_test_router(),
         StreamTurn::unmetered(None, StreamRequestContext::default()),
+        response_check,
     )))
     .await;
     let events = drain(rx).await;
@@ -1576,14 +1578,16 @@ async fn drive_stream_cancels_immediately_on_client_disconnect() {
 
     // Act: spawn the render task, drain the first event so the loop is
     // parked on the (now-stalled) upstream, then drop the receiver.
+    let response_check = unsampled_response_check().await;
     let (rows, events) = routectl_testkit::with_capture(async move {
-        let handle = tokio::spawn(render_stream_task(
+        let handle = tokio::spawn(render_checked_stream_task(
             upstream,
             AnthropicIngress,
             capture,
             tx,
             k_test_router(),
             StreamTurn::unmetered(None, StreamRequestContext::default()),
+            response_check,
         ));
         rx.recv().await.expect("first event before disconnect");
         drop(rx);
@@ -1657,13 +1661,15 @@ async fn drive_stream_preserves_partial_usage_on_client_disconnect() {
     );
 
     // Act
-    let handle = tokio::spawn(render_stream_task(
+    let response_check = unsampled_response_check().await;
+    let handle = tokio::spawn(render_checked_stream_task(
         upstream,
         AnthropicIngress,
         capture,
         tx,
         k_test_router(),
         StreamTurn::unmetered(None, StreamRequestContext::default()),
+        response_check,
     ));
     rx.recv().await.expect("first event before disconnect");
     drop(rx);
@@ -1687,7 +1693,7 @@ async fn drive_stream_preserves_partial_usage_on_client_disconnect() {
 /// OpenAI universal stream terminator; without it the SDK
 /// treats the close as a truncation and retries.
 #[tokio::test]
-async fn render_stream_task_openai_emits_chunk_then_error_chunk_then_done() {
+async fn render_checked_stream_task_openai_emits_chunk_then_error_chunk_then_done() {
     use crate::ingress::openai::OpenAiIngress;
 
     // Arrange: one Ok chunk then one Err.
@@ -1705,13 +1711,15 @@ async fn render_stream_task_openai_emits_chunk_then_error_chunk_then_done() {
     // Act
     let rig = CaptureRig::new();
     let capture = rig.capture("openai", &sample_request("m", true), "req-openai-err");
-    render_stream_task(
+    let response_check = unsampled_response_check().await;
+    render_checked_stream_task(
         upstream,
         OpenAiIngress,
         capture,
         tx,
         k_test_router(),
         StreamTurn::unmetered(None, StreamRequestContext::default()),
+        response_check,
     )
     .await;
     let events = drain(rx).await;
@@ -1743,12 +1751,64 @@ async fn render_stream_task_openai_emits_chunk_then_error_chunk_then_done() {
     assert_eq!(events[2].data, "[DONE]");
 }
 
+/// A stream the wire-check sampler admitted renders with the response
+/// check its dispatch carried, and the render compares what the client
+/// received with what the upstream sent: the lane records a second clean
+/// reading (the request leg's is the first). Rendered without the check,
+/// only the request leg would be recorded.
+#[tokio::test]
+async fn render_checked_stream_task_compares_a_sampled_stream_with_its_upstream() {
+    use crate::ingress::openai::OpenAiIngress;
+    use routectl_router::wire_check_state::CheckOutcome;
+
+    // Arrange: a sampled dispatch against a live upstream.
+    let upstream = chat_stream_upstream().await;
+    let (router, mut dispatched) = dispatched_chat_stream(&upstream, CHECK_EVERY).await;
+    let response_check = dispatched.meta.response_check.take();
+    assert!(
+        response_check.is_some(),
+        "a sampled attempt carries a response check"
+    );
+    let stream = dispatched.result.expect("the dispatch succeeded");
+    let (tx, rx) = tokio::sync::mpsc::channel::<SseEvent>(64);
+    let rig = CaptureRig::new();
+    let capture = rig.capture("openai", &sample_request("a", true), "req-checked");
+
+    // Act
+    render_checked_stream_task(
+        stream,
+        OpenAiIngress,
+        capture,
+        tx,
+        Arc::clone(&router),
+        StreamTurn::unmetered(None, StreamRequestContext::default()),
+        response_check,
+    )
+    .await;
+    let events = drain(rx).await;
+
+    // Assert
+    assert_eq!(events.last().map(|e| e.data.as_str()), Some("[DONE]"));
+    let snapshot = router.wire_check_snapshot();
+    let outcomes: Vec<_> = snapshot
+        .checks
+        .iter()
+        .map(|c| (c.lane.label(), c.outcome, c.reading.count))
+        .collect();
+    assert_eq!(
+        outcomes,
+        [("chat->openai-compat", CheckOutcome::Clean, 2)],
+        "findings: {:?}",
+        snapshot.findings
+    );
+}
+
 /// Counterpart: the natural EOS path is unchanged. This pins
 /// that the helper still emits `render_eos` events (and not
 /// the error variant) when the upstream stream finishes
 /// without an error.
 #[tokio::test]
-async fn render_stream_task_natural_eos_emits_render_eos_not_error() {
+async fn render_checked_stream_task_natural_eos_emits_render_eos_not_error() {
     use crate::ingress::openai::OpenAiIngress;
 
     // Arrange: one Ok chunk, then upstream ends naturally.
@@ -1759,13 +1819,15 @@ async fn render_stream_task_natural_eos_emits_render_eos_not_error() {
     // Act
     let rig = CaptureRig::new();
     let capture = rig.capture("openai", &sample_request("m", true), "req-openai-eos");
-    render_stream_task(
+    let response_check = unsampled_response_check().await;
+    render_checked_stream_task(
         upstream,
         OpenAiIngress,
         capture,
         tx,
         k_test_router(),
         StreamTurn::unmetered(None, StreamRequestContext::default()),
+        response_check,
     )
     .await;
     let events = drain(rx).await;
@@ -1780,7 +1842,7 @@ async fn render_stream_task_natural_eos_emits_render_eos_not_error() {
 }
 
 /// Adapter wrapper that fails on the Nth call to `render_chunk`.
-/// Used to drive path 3 of `render_stream_task` (chunk-render
+/// Used to drive path 3 of `render_checked_stream_task` (chunk-render
 /// failure) without simulating an upstream-stream Err. Delegates
 /// every other trait method to the inner adapter so the wire
 /// shapes (envelope, EOS, error EOS) match the wrapped dialect.
@@ -1852,16 +1914,16 @@ impl<A: IngressAdapter> IngressAdapter for RenderChunkFailsOnceAdapter<A> {
     }
 }
 
-/// Path 3 of `render_stream_task`: the adapter's `render_chunk`
+/// Path 3 of `render_checked_stream_task`: the adapter's `render_chunk`
 /// returns `Err` mid-stream. The driver must still emit the
 /// dialect-specific terminal error event so SDK consumers see a
 /// clean failure rather than a truncated stream. Mirrors
-/// `render_stream_task_anthropic_emits_chunk_then_terminal_error_event`
+/// `render_checked_stream_task_anthropic_emits_chunk_then_terminal_error_event`
 /// but with the failure source on the ingress side rather than the
 /// upstream stream. Pre-fix, this path returned without emitting
 /// any terminator and the SDK's truncation-retry loop fired.
 #[tokio::test]
-async fn render_stream_task_anthropic_render_chunk_failure_emits_terminal_error() {
+async fn render_checked_stream_task_anthropic_render_chunk_failure_emits_terminal_error() {
     use crate::ingress::anthropic::AnthropicIngress;
 
     // Arrange: two Ok chunks. The wrapper fails on the second
@@ -1879,13 +1941,15 @@ async fn render_stream_task_anthropic_render_chunk_failure_emits_terminal_error(
     // Act
     let rig = CaptureRig::new();
     let capture = rig.capture("anthropic", &sample_request("m", true), "req-render-fail");
-    render_stream_task(
+    let response_check = unsampled_response_check().await;
+    render_checked_stream_task(
         upstream,
         adapter,
         capture,
         tx,
         k_test_router(),
         StreamTurn::unmetered(None, StreamRequestContext::default()),
+        response_check,
     )
     .await;
     let events = drain(rx).await;
@@ -2374,7 +2438,7 @@ async fn capture_drop_without_finalize_emits_client_disconnect() {
     );
 }
 
-/// Streaming natural EOS through `render_stream_task` -> exactly one `ok`
+/// Streaming natural EOS through `render_checked_stream_task` -> exactly one `ok`
 /// row, ttfb populated (first chunk), tokens lifted from the chunk usage.
 #[tokio::test]
 async fn capture_stream_natural_eos_emits_single_ok_row() {
@@ -2398,13 +2462,15 @@ async fn capture_stream_natural_eos_emits_single_ok_row() {
     let capture = rig.capture("openai", &sample_request("a", true), "req-stream-ok");
 
     // Act
-    render_stream_task(
+    let response_check = unsampled_response_check().await;
+    render_checked_stream_task(
         upstream,
         OpenAiIngress,
         capture,
         tx,
         k_test_router(),
         StreamTurn::unmetered(None, StreamRequestContext::default()),
+        response_check,
     )
     .await;
     let _ = drain(rx).await;
@@ -2427,7 +2493,7 @@ async fn capture_stream_natural_eos_emits_single_ok_row() {
     );
 }
 
-/// Streaming mid-stream upstream error through `render_stream_task` ->
+/// Streaming mid-stream upstream error through `render_checked_stream_task` ->
 /// exactly one `upstream_error` row (one Ok chunk then an Err).
 #[tokio::test]
 async fn capture_stream_mid_stream_error_emits_upstream_error_row() {
@@ -2444,13 +2510,15 @@ async fn capture_stream_mid_stream_error_emits_upstream_error_row() {
     let capture = rig.capture("openai", &sample_request("a", true), "req-stream-mid-err");
 
     // Act
-    render_stream_task(
+    let response_check = unsampled_response_check().await;
+    render_checked_stream_task(
         upstream,
         OpenAiIngress,
         capture,
         tx,
         k_test_router(),
         StreamTurn::unmetered(None, StreamRequestContext::default()),
+        response_check,
     )
     .await;
     let _ = drain(rx).await;
@@ -2869,7 +2937,7 @@ async fn build_test_router(
         .expect("build router")
 }
 
-/// A bare `Arc<Router>` for the `render_stream_task` tests that only need a
+/// A bare `Arc<Router>` for the `render_checked_stream_task` tests that only need a
 /// recording target for the POST-EOS K-sample call. The default config has
 /// no routes, but recording never dispatches -- it only takes a lock on the
 /// session store -- so an empty router is sufficient.
@@ -2878,6 +2946,108 @@ fn k_test_router() -> std::sync::Arc<routectl_router::Router> {
     Arc::new(routectl_router::Router::new(Arc::new(
         routectl_router::Config::default(),
     )))
+}
+
+/// Wire-check sampling that admits every attempt.
+const CHECK_EVERY: (u32, u32) = (8, 1);
+/// Wire-check sampling that admits no attempt.
+const CHECK_NONE: (u32, u32) = (0, 1000);
+
+/// A mock openai-compat upstream answering one streamed completion.
+async fn chat_stream_upstream() -> wiremock::MockServer {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let frames = [
+        json!({"id": "c1", "object": "chat.completion.chunk",
+               "created": 1_700_000_000_i64, "model": "upstream",
+               "choices": [{"index": 0, "delta": {"role": "assistant", "content": "ok"}}]}),
+        json!({"id": "c1", "object": "chat.completion.chunk",
+               "created": 1_700_000_000_i64, "model": "upstream",
+               "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}),
+    ];
+    let mut body: String = frames.iter().map(|f| format!("data: {f}\n\n")).collect();
+    body.push_str("data: [DONE]\n\n");
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(body),
+        )
+        .mount(&upstream)
+        .await;
+    upstream
+}
+
+/// A streamed chat request dispatched the way the handler dispatches one:
+/// parsed by the OpenAI adapter, its ingress wire captured, then routed to
+/// `upstream` through a router sampling the wire check at `sampling`
+/// (`first_n`, `sample_one_in`).
+async fn dispatched_chat_stream(
+    upstream: &wiremock::MockServer,
+    (first_n, sample_one_in): (u32, u32),
+) -> (
+    std::sync::Arc<routectl_router::Router>,
+    routectl_router::DispatchedStream,
+) {
+    use crate::ingress::openai::OpenAiIngress;
+    use routectl_router::{AliasValue, Config, ModelEntry, ProviderEntry, RetryPolicy};
+    use std::collections::BTreeMap;
+
+    let mut retry = RetryPolicy::default();
+    retry.max_attempts = 1;
+    let mut config = Config {
+        providers: BTreeMap::from([(
+            "p".to_string(),
+            ProviderEntry::openai_compat(upstream.uri(), crate::test_secret::file_ref("k")),
+        )]),
+        models: BTreeMap::from([("m".to_string(), ModelEntry::new("p", "upstream"))]),
+        aliases: BTreeMap::from([("a".to_string(), AliasValue::Single("m".to_string()))]),
+        retry,
+        ..Default::default()
+    };
+    config.wire_check.first_n = first_n;
+    config.wire_check.sample_one_in =
+        std::num::NonZeroU32::new(sample_one_in).expect("nonzero sample");
+    let router = Arc::new(build_test_router(Arc::new(config)).await);
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    let raw_body = Bytes::from(
+        serde_json::to_vec(&json!({
+            "model": "a", "stream": true,
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .expect("json"),
+    );
+    let mut req = OpenAiIngress
+        .parse_request(&headers, &raw_body)
+        .expect("parse request");
+    capture_ingress_wire(&headers, &raw_body, &mut req);
+    let dispatched = router
+        .stream_with_options(req, RouterOptions::default())
+        .await;
+    (router, dispatched)
+}
+
+/// The response check of a successful stream dispatch the wire-check
+/// sampler did not admit: the check every unsampled production stream
+/// renders with.
+async fn unsampled_response_check() -> Option<ResponseCheck> {
+    let upstream = chat_stream_upstream().await;
+    let (_router, mut dispatched) = dispatched_chat_stream(&upstream, CHECK_NONE).await;
+    assert!(
+        dispatched.result.is_ok(),
+        "positive control: the dispatch succeeded"
+    );
+    let check = dispatched.meta.response_check.take();
+    assert!(check.is_none(), "an unsampled attempt carries no check");
+    check
 }
 
 /// Build an `Arc<Router>` over a one-entry chain (unreachable upstream) and a
@@ -2923,18 +3093,18 @@ async fn k_recording_router_and_meta() -> (
     (router, dispatched.meta)
 }
 
-/// End-to-end K-sample recording through `render_stream_task`: a natural-EOS
+/// End-to-end K-sample recording through `render_checked_stream_task`: a natural-EOS
 /// stream carrying a session key lands EXACTLY ONE sample in the router's
 /// per-session store, and a mid-stream-error stream lands ZERO (the error
 /// path returns before the post-EOS recording). Drives the real streaming
 /// helper with a seeded capture so the served triple is present.
 #[tokio::test]
-async fn render_stream_task_records_one_k_sample_on_eos_and_none_on_error() {
+async fn render_checked_stream_task_records_one_k_sample_on_eos_and_none_on_error() {
     use crate::ingress::openai::OpenAiIngress;
     use routectl_router::KSessionKey;
 
     // Arrange (EOS): a router + a meta with the served triple stamped.
-    let (router, meta) = k_recording_router_and_meta().await;
+    let (router, mut meta) = k_recording_router_and_meta().await;
     let provider_kind = meta
         .served_provider_kind
         .clone()
@@ -2953,13 +3123,15 @@ async fn render_stream_task_records_one_k_sample_on_eos_and_none_on_error() {
     let (tx, rx) = tokio::sync::mpsc::channel::<SseEvent>(64);
 
     // Act (EOS): drive the stream to natural completion with a session key.
-    render_stream_task(
+    let response_check = meta.response_check.take();
+    render_checked_stream_task(
         upstream,
         OpenAiIngress,
         capture,
         tx,
         Arc::clone(&router),
         StreamTurn::unmetered(Some("sess".to_string()), StreamRequestContext::default()),
+        response_check,
     )
     .await;
     let _ = drain(rx).await;
@@ -2980,7 +3152,7 @@ async fn render_stream_task_records_one_k_sample_on_eos_and_none_on_error() {
     );
 
     // Arrange (mid-stream error): a fresh router so the store starts empty.
-    let (router_err, meta_err) = k_recording_router_and_meta().await;
+    let (router_err, mut meta_err) = k_recording_router_and_meta().await;
     let rig_err = CaptureRig::new();
     let mut capture_err = rig_err.capture("openai", &sample_request("a", true), "req-k-err");
     capture_err.observe_meta(&meta_err, 0, 0);
@@ -2993,13 +3165,15 @@ async fn render_stream_task_records_one_k_sample_on_eos_and_none_on_error() {
     let (tx_err, rx_err) = tokio::sync::mpsc::channel::<SseEvent>(64);
 
     // Act (error): drive the stream to a mid-stream upstream error.
-    render_stream_task(
+    let response_check = meta_err.response_check.take();
+    render_checked_stream_task(
         upstream_err,
         OpenAiIngress,
         capture_err,
         tx_err,
         Arc::clone(&router_err),
         StreamTurn::unmetered(Some("sess".to_string()), StreamRequestContext::default()),
+        response_check,
     )
     .await;
     let _ = drain(rx_err).await;

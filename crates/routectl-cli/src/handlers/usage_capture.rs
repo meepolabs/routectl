@@ -10,7 +10,7 @@
 //!
 //! Extracted from `ingress_handle.rs` to keep both files under the
 //! project's 800-line ceiling. The two handler functions
-//! (`complete_response`, `stream_response`) and `render_stream_task`
+//! (`complete_response`, `stream_response`) and `render_checked_stream_task`
 //! stay in `ingress_handle.rs` and call into this module.
 
 use std::time::{Instant, SystemTime, UNIX_EPOCH};

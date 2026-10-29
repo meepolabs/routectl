@@ -942,20 +942,8 @@ async fn warm_render_task<A: IngressAdapter>(
 /// the synthetic `message_start` emits on the first content chunk as
 /// before). The warm-hold path (`warm_render_task`) shares `drive_stream`
 /// but pre-flushes the early frame and owns the still-pending future.
-#[cfg(test)]
-async fn render_stream_task<A: IngressAdapter>(
-    upstream: futures::stream::BoxStream<'static, routectl_core::Result<routectl_core::ChatChunk>>,
-    adapter: A,
-    capture: UsageCapture,
-    tx: tokio::sync::mpsc::Sender<SseEvent>,
-    router: Arc<routectl_router::Router>,
-    turn: StreamTurn,
-) {
-    render_checked_stream_task(upstream, adapter, capture, tx, router, turn, None).await;
-}
-
-/// [`render_stream_task`] carrying the answering attempt's response check,
-/// when it has one.
+/// `response_check` is the answering attempt's response check, when it has
+/// one.
 async fn render_checked_stream_task<A: IngressAdapter>(
     upstream: futures::stream::BoxStream<'static, routectl_core::Result<routectl_core::ChatChunk>>,
     adapter: A,
