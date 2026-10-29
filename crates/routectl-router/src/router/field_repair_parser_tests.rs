@@ -369,10 +369,11 @@ fn bedrock_canary_router() -> (Router, Arc<BedrockCanarySeat>) {
 /// closed table has no row for: on every walk that can reach it, it counts once
 /// as parser-unlocalized, dispatches once, mutates nothing, and learns nothing.
 ///
-/// The token-count row is the one that matters most: that walk never reaches
-/// the learn path, so the count there comes from its own call site.
+/// The token-count row is the one that matters most: that surface never
+/// reaches the learn path, so the count there comes from its own branch.
 ///
-/// Mutation check: delete the observer call in `count_tokens_try_seat` -> the
+/// Mutation check: delete the `observe_unlocalized_field_rejection` call in
+/// the count branch of `AttemptLearning::observe_generic` -> the
 /// `count_tokens` row reds on the count (0, not 1).
 #[cfg(feature = "bedrock")]
 #[tokio::test]

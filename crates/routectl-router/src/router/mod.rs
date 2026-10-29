@@ -87,7 +87,7 @@ pub use capability_purge::{PurgeOutcome, ReservedPurge, ReservedSeedLift};
 use dispatch::k_query_key;
 #[cfg(test)]
 use feature_filter::FilterSource;
-use feature_filter::{StripDecision, catalog_capabilities};
+use feature_filter::catalog_capabilities;
 pub use fidelity_status::{
     CanaryPosture, FidelitySnapshot, FieldVerdictStatus, PreflightBlockedReason,
 };
@@ -112,7 +112,6 @@ pub use field_verdict_observability::{
 pub use learned_lanes::{LearnedLaneProjection, ResolvedLearnedLane};
 pub use opening_lookup::OpeningLane;
 pub use outcome_rule::class_debits;
-use overlays::apply_layered_overlays;
 pub use overlays::{merge_header_extras, merge_payload_extras};
 pub use probe_clear_ack::ProbeClearAcknowledgement;
 pub use probe_pass::ProbePassSummary;
@@ -1982,8 +1981,7 @@ struct DispatchTarget {
     /// `AnthropicApi` provider with `credential_source: Forwarded`;
     /// populated ONCE at chain expansion in `expand_chain_to_targets`,
     /// the same pattern as `provider_kind`, for both seat and non-seat
-    /// targets. Read at the two dispatch paths (`run_walk`, which serves
-    /// complete and stream, and `count_tokens_try_seat`) to bypass the
+    /// targets. Read in `run_walk`, which serves every surface, to bypass the
     /// `attempt_req.model` rewrite: a forwarded target forwards the
     /// client's requested model verbatim; an own target still rewrites
     /// to `upstream`. `false` in both constructors until the post-loop
@@ -3326,6 +3324,10 @@ mod local_build_error_dispatch_tests;
 #[cfg(test)]
 #[path = "dispatch_surface_row_tests.rs"]
 mod dispatch_surface_row_tests;
+
+#[cfg(test)]
+#[path = "count_tokens_meta_tests.rs"]
+mod count_tokens_meta_tests;
 
 #[cfg(test)]
 #[path = "dispatch_deadline_tests.rs"]

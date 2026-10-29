@@ -229,7 +229,7 @@ async fn all_three_walks_share_one_lane_slot() {
     assert_eq!(snap.deduped_total, 2);
 }
 
-/// Every activation call site in the dispatch and count_tokens walks,
+/// Every activation call site in the dispatch walk and its surfaces,
 /// read out of the production source.
 ///
 /// A SOURCE-TEXT guard, and the reason is that the overlay set gives
@@ -270,8 +270,8 @@ fn every_activation_call_site_passes_the_per_target_request() {
     // leaves the total unchanged.
     assert_eq!(
         args.len(),
-        2,
-        "expected the shared dispatch walk and count_tokens call sites, found {args:?}"
+        1,
+        "expected the one shared dispatch walk call site, found {args:?}"
     );
     // NAME-based, and that is the limit of what this guard proves. Where the
     // FIELDS are captured -- before pre-flight -- is pinned behaviorally by

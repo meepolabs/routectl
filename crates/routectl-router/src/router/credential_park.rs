@@ -5,10 +5,10 @@
 
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use routectl_core::{ChatRequest, Error, UpstreamReason, sanitize_for_log};
+use routectl_core::{Error, UpstreamReason, sanitize_for_log};
 
-use super::runtime_gate::{ProbeSlotGuard, is_probe_request};
-use super::{DispatchTarget, Router};
+use super::Router;
+use super::runtime_gate::ProbeSlotGuard;
 
 /// The `gate_kind` a credential-parked refusal is logged under.
 pub(super) const CREDENTIAL_PARKED_GATE_KIND: &str = "credential_parked";
@@ -83,18 +83,6 @@ pub(super) fn merge_gate_refusal(last_err: &mut Option<Error>, refusal: Error) {
     };
     if replace {
         *last_err = Some(refusal);
-    }
-}
-
-impl super::count_tokens::CountSeatOutcome {
-    /// A token-count seat's gate refusal: a parked seat is skipped like on the
-    /// message surfaces; a breaker or RPM refusal stays terminal.
-    pub(super) fn of_gate_refusal(gate_kind: &'static str, gate_err: Error) -> Self {
-        if gate_kind == CREDENTIAL_PARKED_GATE_KIND {
-            Self::Parked(gate_err)
-        } else {
-            Self::Terminal(gate_err)
-        }
     }
 }
 
@@ -231,23 +219,6 @@ impl Router {
             );
         }
         parked
-    }
-
-    /// [`Self::park_credential_on_rejection`] for a token-count attempt on
-    /// `req` to `target`, admitted through `guard`. A count request is a probe
-    /// by the same rule a message request is. Runs outside the breaker's debit
-    /// gate like the message surfaces: a credential rejection classifies
-    /// `Auth`, which never debits.
-    pub(super) fn park_counted_seat(
-        &self,
-        target: &DispatchTarget,
-        req: &ChatRequest,
-        err: &Error,
-        guard: &ProbeSlotGuard,
-    ) -> bool {
-        let is_probe = is_probe_request(req, &self.policy_for(&req.model));
-        let generation = guard.credential_generation();
-        self.park_credential_on_rejection(&target.state_key, err, is_probe, generation)
     }
 
     /// Settle a success through the seat keyed by `state_key` for the attempt

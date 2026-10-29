@@ -168,6 +168,11 @@ struct Charged {
 }
 
 impl SampleCharge {
+    /// No charge: an attempt the sampler is never consulted for.
+    pub(super) const fn none() -> Self {
+        Self(None)
+    }
+
     /// Keep the charge: the attempt succeeded, and a success spends its
     /// sampler slot whether or not it was admitted.
     pub(super) fn keep(mut self) {

@@ -81,6 +81,54 @@ impl DispatchSurface {
             Self::Stream => false,
         }
     }
+
+    /// Whether each attempt is shaped as a message dispatch: the pairing
+    /// refusal, the model-rename declaration, the prefix-epoch observation,
+    /// context reduction, auto-cache placement, the would-trim advisory, the
+    /// translation report and the reasoning-drop warning. A count projects
+    /// the request onto a count body and takes none of them.
+    pub(super) const fn shapes_message(self) -> bool {
+        match self {
+            Self::Complete | Self::Stream => true,
+            Self::CountTokens => false,
+        }
+    }
+
+    /// Whether a learned-capability observation is deduped once per request
+    /// across every target, or once per target.
+    pub(super) const fn dedupes_learning_per_request(self) -> bool {
+        match self {
+            Self::Complete | Self::Stream => true,
+            Self::CountTokens => false,
+        }
+    }
+
+    /// Whether an error the walk recovered from or routed past (an auth
+    /// refresh, a learner repair, a strip route-away) is held as the walk's
+    /// last error. A count's exhaustion names why no seat counted instead.
+    pub(super) const fn holds_recovered_errors(self) -> bool {
+        match self {
+            Self::Complete | Self::Stream => true,
+            Self::CountTokens => false,
+        }
+    }
+
+    /// Whether a breaker or rate-limit gate refusal walks to the next target
+    /// or ends the request. A parked credential walks on every surface.
+    pub(super) const fn gate_refusal_walks(self) -> bool {
+        match self {
+            Self::Complete | Self::Stream => true,
+            Self::CountTokens => false,
+        }
+    }
+
+    /// The message a gate refusal logs.
+    pub(super) const fn gate_blocked_message(self) -> &'static str {
+        match self {
+            Self::Complete | Self::Stream => "gate blocked",
+            Self::CountTokens => "count_tokens gate blocked",
+        }
+    }
 }
 
 /// Safe, structured facts pulled from an [`Error`] for the router's

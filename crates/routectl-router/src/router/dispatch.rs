@@ -31,7 +31,7 @@ use super::capability_observe::{EvidencePolicy, UntranslatedCapabilities};
 use super::class_observe::{
     DispatchSurface, UpstreamFacts, class_label, matched_by_label, upstream_facts,
 };
-use super::dispatch_loop::{CommitCtx, Deadline, SurfaceAdapter};
+use super::dispatch_loop::{CommitCtx, Deadline, Exhaustion, SurfaceAdapter};
 use super::feature_filter::emit_feature_unsupported;
 use super::field_preflight::emit_field_preflight;
 use super::field_repair::emit_field_repair;
@@ -247,8 +247,10 @@ impl SurfaceAdapter for CompleteAdapter {
         resp
     }
 
-    fn exhausted(&self, last: Option<Error>, alias: &str) -> Error {
-        last.unwrap_or_else(|| Error::UnknownAlias(alias.to_string()))
+    fn exhausted(&self, exhaustion: Exhaustion<'_>) -> Error {
+        exhaustion
+            .last
+            .unwrap_or_else(|| Error::UnknownAlias(exhaustion.alias.to_string()))
     }
 }
 
@@ -369,8 +371,10 @@ impl SurfaceAdapter for StreamAdapter {
         )
     }
 
-    fn exhausted(&self, last: Option<Error>, alias: &str) -> Error {
-        last.unwrap_or_else(|| Error::UnknownAlias(alias.to_string()))
+    fn exhausted(&self, exhaustion: Exhaustion<'_>) -> Error {
+        exhaustion
+            .last
+            .unwrap_or_else(|| Error::UnknownAlias(exhaustion.alias.to_string()))
     }
 }
 

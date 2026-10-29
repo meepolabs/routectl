@@ -4,9 +4,11 @@
 //! deadline, auth refresh, the learner's repair branch, classification and
 //! remap, breaker outcome, credential park, the same-provider retry decision,
 //! fallback, the last error, and `DispatchMeta` advancement. A
-//! [`SurfaceAdapter`] supplies only what differs in type between surfaces:
-//! the provider call, what a committed attempt becomes, and the exhaustion
-//! error. Differences that are booleans are rows on [`DispatchSurface`].
+//! [`SurfaceAdapter`] supplies what differs in type between surfaces: the
+//! provider call, what a committed attempt becomes, the exhaustion error, and
+//! the typed hooks at the walk's seams (re-probe settlement, field settlement
+//! mode, per-attempt wire handling, error disposition, failure observation).
+//! Differences that are booleans are rows on [`DispatchSurface`].
 
 use std::collections::HashSet;
 use std::future::Future;
@@ -14,6 +16,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use routectl_core::context_reduction::{ReductionDelta, ReductionOutcome, apply_json_minify};
+use routectl_core::failure_class::{ClassifiedFailure, FailureClass};
 use routectl_core::wire_check::{IngressDialect, WireTap};
 use routectl_core::{
     ChatRequest, Error, Provider, RefusalReason, Result, TranslationReport, sanitize_for_log,
@@ -28,12 +31,13 @@ use super::capability_observe::{UntranslatedCapabilities, install_translation_re
 use super::class_observe::{
     DispatchSurface, apply_remap, upstream_facts, upstream_status_for_remap,
 };
-use super::credential_park::{log_gate_refusal, merge_gate_refusal};
+use super::credential_park::{CREDENTIAL_PARKED_GATE_KIND, log_gate_refusal, merge_gate_refusal};
 use super::edit_declare::{
     declare_cache_placement, declare_model_rename, declare_reduction, fidelity_dialect,
 };
 use super::feature_filter::StripDecision;
-use super::learn_engine::{AttemptLearning, FailureDecision, Rejection};
+use super::field_repair::FieldSettlementMode;
+use super::learn_engine::{AttemptLearning, FailureDecision, Rejection, RejectionSite};
 use super::local_refusal::ingress_dialect_of;
 use super::outcome_rule::{
     SameProvider, breaker_outcome, class_debits, probe_fast_fail, rate_limit_reset_hint,
@@ -44,11 +48,12 @@ use super::probe_payload_capture::ProbeFieldCapture;
 use super::repair_budget::RepairBudget;
 use super::replay_repair::replay_rejection_body_free;
 use super::runtime_gate::{
-    LearnedProbeGuard, ProbeAdmissionSet, is_probe_request, log_probe_fast_fail,
+    LearnedProbeGuard, ProbeAdmission, ProbeAdmissionSet, is_probe_request, log_probe_fast_fail,
 };
 use super::transcript_defect::{
     egress_pairing_refusal, is_transcript_rejection, record_transcript_defect,
 };
+use super::wire_check::SampleCharge;
 use super::{DispatchMeta, DispatchTarget, Router, RouterOptions};
 
 /// A per-attempt deadline a surface asks the walk to enforce around its
@@ -96,9 +101,46 @@ pub(super) struct CommitCtx<'w, 'm> {
     pub(super) meta: &'w mut DispatchMeta,
 }
 
+/// How the walk treats a failed attempt before its common error handling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ErrorDisposition {
+    /// Learner repair, breaker outcome, retry, fallback: the common path.
+    Common,
+    /// The target cannot serve this surface after all: free its probe slot
+    /// without a breaker debit, record no last error, and walk on.
+    WalkWithoutDebit,
+}
+
+/// What the walk knows when no attempt committed.
+pub(super) struct Exhaustion<'a> {
+    /// The last error the walk recorded, if any.
+    pub(super) last: Option<Error>,
+    /// The client's requested alias.
+    pub(super) alias: &'a str,
+    /// Whether any chain target passed [`SurfaceAdapter::admits`].
+    pub(super) any_admitted: bool,
+}
+
+/// The settled facts of one failed attempt, for its observability.
+pub(super) struct FailureObservation<'a> {
+    pub(super) err: &'a Error,
+    pub(super) cf: &'a ClassifiedFailure,
+    pub(super) original_class: &'a FailureClass,
+    pub(super) remapped: bool,
+    pub(super) remap_status: Option<u16>,
+    pub(super) target: &'a DispatchTarget,
+    pub(super) fallback: bool,
+    pub(super) policy: &'a RetryPolicy,
+    pub(super) debit: bool,
+    pub(super) is_probe: bool,
+    pub(super) is_forwarded: bool,
+    pub(super) ingress: Option<IngressDialect>,
+}
+
 /// One dispatch surface's part of the walk. Implementations are few,
 /// closed and statically dispatched; anything a surface decides with a
-/// boolean belongs on [`DispatchSurface`] instead.
+/// boolean belongs on [`DispatchSurface`] instead. The adapter value is
+/// built per walk and owned by it, so it is the walk's adapter state.
 pub(super) trait SurfaceAdapter: Send + Sync {
     /// What a committed attempt produces for the caller.
     type Output: Send;
@@ -125,9 +167,75 @@ pub(super) trait SurfaceAdapter: Send + Sync {
     /// success, the sample charge and the request wire check.
     fn on_commit(&self, ctx: CommitCtx<'_, '_>, out: Self::Output) -> Self::Output;
 
-    /// The error a walk that committed nothing returns, given the last error
-    /// it recorded and the client's requested alias.
-    fn exhausted(&self, last: Option<Error>, alias: &str) -> Error;
+    /// The error a walk that committed nothing returns.
+    fn exhausted(&self, exhaustion: Exhaustion<'_>) -> Error;
+
+    /// Settle, before the walk, the re-probe admissions the chain filter
+    /// granted, returning those the walk settles on reaching their target.
+    fn settle_probe_admissions(
+        &self,
+        _router: &Router,
+        admissions: Vec<ProbeAdmission>,
+    ) -> Vec<ProbeAdmission> {
+        admissions
+    }
+
+    /// Whether the envelope-field carry may settle a verdict.
+    fn field_settlement_mode(&self) -> FieldSettlementMode {
+        FieldSettlementMode::Settling
+    }
+
+    /// Give one provider call its wire tap and sampler charge.
+    fn install_wire(
+        &self,
+        router: &Router,
+        target: &DispatchTarget,
+        attempt_req: &mut ChatRequest,
+    ) -> (Option<WireTap>, SampleCharge) {
+        router.install_wire_tap(target, attempt_req)
+    }
+
+    /// Settle the wire of a failed attempt and return where on the wire its
+    /// rejection points.
+    #[allow(clippy::too_many_arguments)]
+    fn read_failed_wire(
+        &self,
+        router: &Router,
+        target: &DispatchTarget,
+        attempt_req: &ChatRequest,
+        tap: Option<&WireTap>,
+        charge: SampleCharge,
+        err: &Error,
+        meta: &mut DispatchMeta,
+    ) -> Option<RejectionSite> {
+        router.settle_failed_attempt(target, attempt_req, tap, charge, err, meta)
+    }
+
+    /// How a failed attempt on `target` is handled, decided after auth
+    /// recovery and before any learner or breaker reads it.
+    fn disposition(&self, _target: &DispatchTarget, _err: &Error) -> ErrorDisposition {
+        ErrorDisposition::Common
+    }
+
+    /// Observe a failed attempt the walk has settled.
+    fn observe_failure(&self, router: &Router, failure: &FailureObservation<'_>) {
+        router.emit_class_observability(
+            failure.err,
+            failure.cf,
+            failure.original_class,
+            failure.remapped,
+            failure.remap_status,
+            Self::SURFACE,
+            failure.target.provider_name.as_str(),
+            failure.target,
+            failure.fallback,
+            failure.policy,
+            failure.debit,
+            failure.is_probe,
+            failure.is_forwarded,
+            failure.ingress,
+        );
+    }
 }
 
 impl Router {
@@ -146,6 +254,7 @@ impl Router {
     ) -> Result<A::Output> {
         let pairing = record_transcript_defect(&mut req);
         let (chain, probe_admissions) = self.dispatch_chain_for_request(&req, A::SURFACE)?;
+        let probe_admissions = adapter.settle_probe_admissions(self, probe_admissions);
         // Re-probes the chain filter admitted, owned by a request-scoped set
         // that settles them on transfer or on drop. `take(state_key)` moves a
         // target's admissions into its `LearnedProbeGuard` when the loop
@@ -182,17 +291,23 @@ impl Router {
         // and fallback target. The per-target capability + provider switch
         // are looked up inside the loop; the request-level facts here do
         // not vary by target.
-        let auto_cache_plan =
-            AutoCacheRequestPlan::build(&req, self.config.cache.auto_emit_top_level_breakpoint);
-        if auto_cache_plan.has_caller_breakpoints {
-            self.warn_volatile_in_caller_prefix(&req);
-        }
+        let auto_cache_plan = A::SURFACE.shapes_message().then(|| {
+            let plan =
+                AutoCacheRequestPlan::build(&req, self.config.cache.auto_emit_top_level_breakpoint);
+            if plan.has_caller_breakpoints {
+                self.warn_volatile_in_caller_prefix(&req);
+            }
+            plan
+        });
         // Prefix-rewrite detector: ONCE per client request, off the ORIGINAL
         // req and above the chain loop for the same reason the auto-cache plan
         // is -- it observes the CLIENT's bytes, which do not vary by target,
         // and its output must never reach the per-target emission path.
-        self.observe_prefix_epoch(&req, meta);
+        if A::SURFACE.shapes_message() {
+            self.observe_prefix_epoch(&req, meta);
+        }
         let mut last_err: Option<Error> = None;
+        let mut any_admitted = false;
         // One learned-capability observation per request per
         // (state_key, feature): the error arm fires per attempt, so this
         // set stops a same-request retry from manufacturing a second
@@ -218,6 +333,7 @@ impl Router {
             if !adapter.admits(target) {
                 continue;
             }
+            any_admitted = true;
             // Learned re-probe settle guard for THIS target, scoped to the
             // whole chain-iteration (persists across same-provider retries,
             // drops -> OtherError on any exit). Inert unless the filter
@@ -243,6 +359,9 @@ impl Router {
                 }
                 continue;
             };
+            if !A::SURFACE.dedupes_learning_per_request() {
+                learn_dedupe.clear();
+            }
             // This entry is being dispatched: record it as the terminal
             // target (overwritten by a later entry on fallback) and count
             // the hop. `chain_idx` is the index into the resolved chain;
@@ -265,7 +384,9 @@ impl Router {
             }
             // A Gemini egress cannot translate a defective tool pairing; the
             // next target may forward it.
-            if let Some(err) = egress_pairing_refusal(target, pairing.as_ref()) {
+            if A::SURFACE.shapes_message()
+                && let Some(err) = egress_pairing_refusal(target, pairing.as_ref())
+            {
                 self.count_refusal_error(ingress, target, &err);
                 last_err = Some(err);
                 if opts.disable_fallbacks {
@@ -280,7 +401,9 @@ impl Router {
             // this target's `upstream` as before.
             if !target.use_forwarded_credential {
                 attempt_req.model = model.to_string();
-                declare_model_rename(&mut attempt_req, target, &req.model);
+                if A::SURFACE.shapes_message() {
+                    declare_model_rename(&mut attempt_req, target, &req.model);
+                }
             }
             // v0.6: layered config compose. The provider's
             // header_extras + payload_extras are looked up by
@@ -309,7 +432,9 @@ impl Router {
                 }
                 StripDecision::RouteAway(err) => {
                     self.count_refusal_error(ingress, target, &err);
-                    last_err = Some(err);
+                    if A::SURFACE.holds_recovered_errors() {
+                        last_err = Some(err);
+                    }
                     if opts.disable_fallbacks {
                         break 'chain;
                     }
@@ -339,73 +464,9 @@ impl Router {
             // claim and the in-flight count through RAII rather than through a
             // settlement site somebody has to remember.
             learning.hold_preflight(field_canary);
-            let provider_cfg = self.config.providers.get(provider_name);
-            apply_context_reduction(
-                &self.config,
-                provider_cfg,
-                provider_name,
-                model,
-                fidelity_dialect(target, &attempt_req),
-                &mut attempt_req,
-                meta,
-            );
-            // Auto-cache: maybe inject the front + terminal cache markers
-            // on THIS per-attempt clone, after overlays (the last
-            // dispatch-time touch of any cache marker) and before the retry
-            // loop, so every retry on this target reuses identical bytes.
-            // Transactional: both markers validate as one candidate and
-            // commit or discard together. Never mutates the original `req`;
-            // any doubt sends un-injected.
-            //
-            // The K-gated verdict is consulted HERE, once per chain entry, so
-            // it is constant across this target's retries and re-derived for
-            // the next fallback target against its own row and triple.
-            let k_suppressed = self.k_emission_suppressed(
-                &auto_cache_plan,
-                target,
-                req.routectl_internal.inbound_session_key.as_deref(),
-            );
-            let cache_decision = apply_auto_cache_placement(
-                &mut attempt_req,
-                &auto_cache_plan,
-                cache_target_gates(provider_cfg),
-                k_suppressed,
-            );
-            declare_cache_placement(
-                &mut attempt_req,
-                target,
-                cache_decision,
-                auto_cache_plan.front_slot,
-            );
-            // Cache observability: stamp the per-marker decision tokens so
-            // the outcome log and the usage ledger can see what was decided,
-            // and emit the per-request decision at debug. No bodies /
-            // secrets: only provider name, model id, and stable tokens.
-            let front_token = cache_decision.front.strategy_str();
-            let terminal_token = cache_decision.terminal.strategy_str();
-            meta.cache_strategy = Some(terminal_token);
-            meta.cache_front_decision = Some(front_token);
-            meta.cache_terminal_decision = Some(terminal_token);
-            tracing::debug!(
-                provider = %routectl_core::sanitize_for_log(provider_name),
-                model = %routectl_core::sanitize_for_log(model),
-                strategy = terminal_token,
-                front_decision = front_token,
-                terminal_decision = terminal_token,
-                "cache_auto_decision",
-            );
-
-            // Steady-state would-trim advisory: NON-MUTATING. Reads the
-            // dispatched clone, prices the would-cut candidate, and records it
-            // onto `meta`. Never touches `attempt_req` (no `apply_trim_plan`),
-            // so what is sent upstream is byte-identical with or without this.
-            self.record_would_trim(
-                &attempt_req,
-                target.provider_kind,
-                target.nickname.as_deref().unwrap_or(model),
-                &target.model.effective_row,
-                meta,
-            );
+            if let Some(plan) = &auto_cache_plan {
+                self.shape_message_attempt(target, &req, plan, &mut attempt_req, meta);
+            }
 
             // Reasoning-replay carry admission: claim the single-flight slot
             // for every non-portable artifact scheme this request carries
@@ -428,7 +489,7 @@ impl Router {
                 target,
                 &mut attempt_req,
                 meta,
-                super::field_repair::FieldSettlementMode::Settling,
+                adapter.field_settlement_mode(),
                 Instant::now(),
             );
 
@@ -467,8 +528,13 @@ impl Router {
                             target.nickname.as_deref().unwrap_or(""),
                             gate_kind,
                             &gate_err,
-                            "gate blocked",
+                            A::SURFACE.gate_blocked_message(),
                         );
+                        if gate_kind != CREDENTIAL_PARKED_GATE_KIND
+                            && !A::SURFACE.gate_refusal_walks()
+                        {
+                            return Err(gate_err);
+                        }
                         // Keep the FIRST real error: a synthetic gate error
                         // (status 0 "circuit breaker open" / RPM) on a later
                         // chain entry must not overwrite an earlier entry's
@@ -511,12 +577,14 @@ impl Router {
                 );
                 // Fidelity WARN at the dispatch point: reads the per-target
                 // clone about to go upstream, at most once per request.
-                Self::warn_dropped_reasoning_dialect(
-                    provider_name,
-                    target.provider_kind,
-                    &attempt_req,
-                    &mut reasoning_drop_warned,
-                );
+                if A::SURFACE.shapes_message() {
+                    Self::warn_dropped_reasoning_dialect(
+                        provider_name,
+                        target.provider_kind,
+                        &attempt_req,
+                        &mut reasoning_drop_warned,
+                    );
+                }
                 // Lazy probe activation at the ADMITTED boundary: the gate
                 // has cleared and this attempt is about to go upstream, so the
                 // lane is provably in use -- while a gate-refused or
@@ -532,9 +600,17 @@ impl Router {
                 // capability and returns without dialing or awaiting, so this
                 // request is not delayed and its outcome does not depend on it.
                 self.on_admitted_request(target, &probe_fields, &attempt_req);
-                let translation_report = install_translation_report(&mut attempt_req);
+                // A surface that does not shape a message keeps the report
+                // off the request, so its egress records nothing and the
+                // attempt reads as having withheld nothing.
+                let translation_report = if A::SURFACE.shapes_message() {
+                    install_translation_report(&mut attempt_req)
+                } else {
+                    TranslationReport::default()
+                };
                 let beta_assembly = install_beta_assembly(&mut attempt_req);
-                let (wire_tap, sample_charge) = self.install_wire_tap(target, &mut attempt_req);
+                let (wire_tap, sample_charge) =
+                    adapter.install_wire(self, target, &mut attempt_req);
                 let invoked = adapter.invoke(target, provider.clone(), attempt_req.clone());
                 let result = match adapter.deadline(&attempt_policy) {
                     Some(deadline) => tokio::time::timeout(deadline.after(), invoked)
@@ -569,7 +645,8 @@ impl Router {
                         return Ok(adapter.on_commit(ctx, out));
                     }
                     Err(mut e) => {
-                        let rejection_site = self.settle_failed_attempt(
+                        let rejection_site = adapter.read_failed_wire(
+                            self,
                             target,
                             &attempt_req,
                             wire_tap.as_ref(),
@@ -675,8 +752,17 @@ impl Router {
                             // guard above keeps this real error rather than
                             // overwriting it with the synthetic status-0 gate
                             // error, so the client sees the true 401.
-                            last_err = Some(e);
+                            if A::SURFACE.holds_recovered_errors() {
+                                last_err = Some(e);
+                            }
                             continue;
+                        }
+                        if adapter.disposition(target, &e) == ErrorDisposition::WalkWithoutDebit {
+                            probe_guard.release();
+                            if opts.disable_fallbacks {
+                                break 'chain;
+                            }
+                            continue 'chain;
                         }
                         // The learner repair branches: replay strip, then
                         // envelope field, then the canary's same-field retry,
@@ -710,7 +796,9 @@ impl Router {
                             // `last_err.is_none()` guard keeps the real upstream
                             // rejection rather than surfacing the synthetic
                             // status-0 gate error.
-                            last_err = Some(last_err_body_free.unwrap_or(e));
+                            if A::SURFACE.holds_recovered_errors() {
+                                last_err = Some(last_err_body_free.unwrap_or(e));
+                            }
                             continue;
                         }
 
@@ -753,6 +841,7 @@ impl Router {
                             // gate error cannot mask it; fast-fail once the
                             // pool's seats are exhausted.
                             if !opts.disable_fallbacks
+                                && A::SURFACE.health_error_walks()
                                 && next_is_sibling_seat(&chain, chain_idx, target)
                             {
                                 last_err = Some(e);
@@ -782,21 +871,22 @@ impl Router {
                             is_probe,
                             probe_guard.credential_generation(),
                         );
-                        self.emit_class_observability(
-                            &e,
-                            &cf,
-                            &original_class,
-                            remapped,
-                            remap_status,
-                            A::SURFACE,
-                            provider_name,
-                            target,
-                            do_fallback,
-                            &policy,
-                            debits,
-                            is_probe,
-                            is_forwarded,
-                            ingress,
+                        adapter.observe_failure(
+                            self,
+                            &FailureObservation {
+                                err: &e,
+                                cf: &cf,
+                                original_class: &original_class,
+                                remapped,
+                                remap_status,
+                                target,
+                                fallback: do_fallback,
+                                policy: &policy,
+                                debit: debits,
+                                is_probe,
+                                is_forwarded,
+                                ingress,
+                            },
                         );
                         learning.observe_generic(
                             &e,
@@ -918,7 +1008,94 @@ impl Router {
             }
         }
 
-        Err(adapter.exhausted(last_err, &req.model))
+        Err(adapter.exhausted(Exhaustion {
+            last: last_err,
+            alias: &req.model,
+            any_admitted,
+        }))
+    }
+
+    /// Shape one target's attempt as a message dispatch: context reduction,
+    /// auto-cache placement and its observability, and the would-trim
+    /// advisory. Runs once per chain entry, outside the attempt loop, so
+    /// every retry on the target reuses identical bytes.
+    fn shape_message_attempt(
+        &self,
+        target: &DispatchTarget,
+        req: &ChatRequest,
+        auto_cache_plan: &AutoCacheRequestPlan,
+        attempt_req: &mut ChatRequest,
+        meta: &mut DispatchMeta,
+    ) {
+        let provider_name = target.provider_name.as_str();
+        let model = target.upstream.as_str();
+        let provider_cfg = self.config.providers.get(provider_name);
+        apply_context_reduction(
+            &self.config,
+            provider_cfg,
+            provider_name,
+            model,
+            fidelity_dialect(target, attempt_req),
+            attempt_req,
+            meta,
+        );
+        // Auto-cache: maybe inject the front + terminal cache markers
+        // on THIS per-attempt clone, after overlays (the last
+        // dispatch-time touch of any cache marker) and before the retry
+        // loop, so every retry on this target reuses identical bytes.
+        // Transactional: both markers validate as one candidate and
+        // commit or discard together. Never mutates the original `req`;
+        // any doubt sends un-injected.
+        //
+        // The K-gated verdict is consulted HERE, once per chain entry, so
+        // it is constant across this target's retries and re-derived for
+        // the next fallback target against its own row and triple.
+        let k_suppressed = self.k_emission_suppressed(
+            auto_cache_plan,
+            target,
+            req.routectl_internal.inbound_session_key.as_deref(),
+        );
+        let cache_decision = apply_auto_cache_placement(
+            attempt_req,
+            auto_cache_plan,
+            cache_target_gates(provider_cfg),
+            k_suppressed,
+        );
+        declare_cache_placement(
+            attempt_req,
+            target,
+            cache_decision,
+            auto_cache_plan.front_slot,
+        );
+        // Cache observability: stamp the per-marker decision tokens so
+        // the outcome log and the usage ledger can see what was decided,
+        // and emit the per-request decision at debug. No bodies /
+        // secrets: only provider name, model id, and stable tokens.
+        let front_token = cache_decision.front.strategy_str();
+        let terminal_token = cache_decision.terminal.strategy_str();
+        meta.cache_strategy = Some(terminal_token);
+        meta.cache_front_decision = Some(front_token);
+        meta.cache_terminal_decision = Some(terminal_token);
+        tracing::debug!(
+            provider = %routectl_core::sanitize_for_log(provider_name),
+            model = %routectl_core::sanitize_for_log(model),
+            strategy = terminal_token,
+            front_decision = front_token,
+            terminal_decision = terminal_token,
+            "cache_auto_decision",
+        );
+
+        // Steady-state would-trim advisory: NON-MUTATING. Reads the
+        // dispatched clone, prices the would-cut candidate, and records it
+        // onto `meta`. Never touches `attempt_req` (no `apply_trim_plan`),
+        // so what is sent upstream is byte-identical with or without this.
+        self.record_would_trim(
+            attempt_req,
+            target.provider_kind,
+            target.nickname.as_deref().unwrap_or(model),
+            &target.model.effective_row,
+            meta,
+        );
     }
 }
 
