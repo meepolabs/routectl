@@ -1,5 +1,5 @@
 {
-  "as_of": "2026-10-27T16:10:47Z",
+  "as_of": "2026-10-29T06:54:29Z",
   "data": {
     "learned_negatives": [],
     "targets": [
@@ -7,7 +7,7 @@
         "circuit": "closed",
         "half_open_probe_in_flight": false,
         "last_outcome": "ok",
-        "last_outcome_at_ms": 1793117447805,
+        "last_outcome_at_ms": 1793256869428,
         "learned_lane": "mock#planted-upstream",
         "nickname": "planted",
         "open_since_ms": null,
@@ -25,13 +25,13 @@
         {
           "count": 1,
           "lane": "responses->openai-responses",
-          "last_seen_unix_secs": 1793117447,
+          "last_seen_unix_secs": 1793256869,
           "outcome": "clean"
         },
         {
           "count": 1,
           "lane": "responses->openai-responses",
-          "last_seen_unix_secs": 1793117447,
+          "last_seen_unix_secs": 1793256869,
           "outcome": "loss"
         }
       ],
@@ -40,7 +40,7 @@
         {
           "count": 1,
           "lane": "responses->openai-responses",
-          "last_seen_unix_secs": 1793117447,
+          "last_seen_unix_secs": 1793256869,
           "path_class": "missing"
         }
       ],
@@ -50,7 +50,7 @@
           "leg": "request",
           "path": "/temperature",
           "path_class": "missing",
-          "ts_unix_secs": 1793117447
+          "ts_unix_secs": 1793256869
         }
       ],
       "unrepaired_rejections": [],

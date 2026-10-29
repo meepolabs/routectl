@@ -671,6 +671,8 @@ list with more narrative.
 
 ### Fixed
 
+- **Chat Completions streams return the upstream's cached-token count and `system_fingerprint`.** A streamed response's usage chunk now carries `usage.prompt_tokens_details.cached_tokens`, as the non-streamed response already did, so an OpenAI-shape cost tracker sees the cache hit either way. Every stream chunk now carries the `system_fingerprint` the upstream sent, where it was always `null` before; it stays `null` when the upstream sent none.
+
 - **Bedrock Mantle's `openai.`-prefixed reasoning models get the OpenAI reasoning-model shaping.** The model profile table matched bare ids only, so on the Mantle Chat Completions lane `openai.gpt-5.6-terra` kept its sampling parameters and was sent `max_tokens`, which it refuses before any other field; a client sending an output limit got a 400 on every request. A leading `openai.` is now ignored when looking up a profile, so these ids drop sampling parameters and send `max_completion_tokens` exactly as their bare ids do. See [docs/PROVIDER-QUIRKS.md](docs/PROVIDER-QUIRKS.md#openai--o-series--gpt-5).
 
 - **GPT-6 models get the OpenAI reasoning-model shaping.** The model profile table had no `gpt-6` row, so `gpt-6-sol`, `gpt-6.1-sol`, `gpt-6-astra` and `gpt-6-luna` (bare or `openai.`-prefixed) were sent `max_tokens`, which each refuses, and sampling parameters they refuse (`top_p` on all four; `temperature` and both penalties on `gpt-6-sol` too). They now drop sampling parameters and send `max_completion_tokens`, as the GPT-5 reasoning models do.

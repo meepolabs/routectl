@@ -182,7 +182,7 @@ class RecordedPlantTests(RunCase):
         rows = self.findings(self.build([plant("response-leg-plant")]))
 
         self.assertEqual([(r["lane"], r["leg"], r["example_paths"]) for r in rows],
-                         [("chat->openai-compat", "response", ["/system_fingerprint"])])
+                         [("responses->openai-responses", "response", ["/output/0/id"])])
 
     def test_clean_control_passes_with_no_rows(self) -> None:
         built = self.build([plant("clean-control")])

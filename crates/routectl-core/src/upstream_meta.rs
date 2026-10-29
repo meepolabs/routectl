@@ -2,8 +2,9 @@
 //! rides alongside a `ChatResponse` / `ChatChunk` without ever touching
 //! the client-facing wire. It carries the provider quota families parsed
 //! off egress response headers (Anthropic's `anthropic-ratelimit-unified-*`,
-//! Codex's `x-codex-*`) and, on an Anthropic-shape stream, the input side
-//! of usage the upstream reported in its first event (`OpeningUsage`).
+//! Codex's `x-codex-*`), on an Anthropic-shape stream the input side of
+//! usage the upstream reported in its first event (`OpeningUsage`), and on
+//! an OpenAI-shape stream the upstream `system_fingerprint`.
 //! Skip-serialized (see the `#[serde(skip)]` fields on `ChatResponse` /
 //! `ChatChunk`); never on the wire.
 //!
@@ -70,6 +71,10 @@ pub struct UpstreamMeta {
     /// say, which a consumer must treat as not established. Not a quota
     /// family.
     pub usage_from_vendor_endpoint: Option<bool>,
+    /// The OpenAI-shape `system_fingerprint` an upstream stamped on a
+    /// stream chunk, for an OpenAI-shape ingress to echo. The canonical
+    /// `ChatChunk` has no envelope slot for it. Not a quota family.
+    pub system_fingerprint: Option<String>,
 }
 
 impl UpstreamMeta {
@@ -83,6 +88,7 @@ impl UpstreamMeta {
             opening_usage: None,
             usage_input_source: None,
             usage_from_vendor_endpoint: None,
+            system_fingerprint: None,
         }
     }
 
@@ -94,6 +100,7 @@ impl UpstreamMeta {
             opening_usage: None,
             usage_input_source: None,
             usage_from_vendor_endpoint: None,
+            system_fingerprint: None,
         }
     }
 
@@ -105,6 +112,7 @@ impl UpstreamMeta {
             opening_usage: Some(opening),
             usage_input_source: None,
             usage_from_vendor_endpoint: None,
+            system_fingerprint: None,
         }
     }
 
@@ -116,6 +124,20 @@ impl UpstreamMeta {
             opening_usage: None,
             usage_input_source: Some(source),
             usage_from_vendor_endpoint: None,
+            system_fingerprint: None,
+        }
+    }
+
+    /// Construct an `UpstreamMeta` carrying only the upstream
+    /// `system_fingerprint`.
+    pub const fn from_system_fingerprint(fingerprint: String) -> Self {
+        Self {
+            anthropic_unified: None,
+            codex: None,
+            opening_usage: None,
+            usage_input_source: None,
+            usage_from_vendor_endpoint: None,
+            system_fingerprint: Some(fingerprint),
         }
     }
 
@@ -147,6 +169,7 @@ impl UpstreamMeta {
             usage_from_vendor_endpoint: self
                 .usage_from_vendor_endpoint
                 .or(other.usage_from_vendor_endpoint),
+            system_fingerprint: self.system_fingerprint.or(other.system_fingerprint),
         }
     }
 }
@@ -458,6 +481,26 @@ mod tests {
         assert_eq!(merged, reversed);
         assert_eq!(merged.anthropic_unified, Some(quota));
         assert_eq!(merged.opening_usage.map(|o| o.input_tokens), Some(42));
+    }
+
+    #[test]
+    fn a_system_fingerprint_survives_a_merge_from_either_side() {
+        // Arrange
+        let fp = UpstreamMeta::from_system_fingerprint("fp_x".into());
+        let source = UpstreamMeta::from_usage_input_source(UsageInputSource::ExplicitFinal);
+
+        // Act
+        let merged = source.clone().merge(fp.clone());
+        let reversed = fp.merge(source);
+
+        // Assert
+        assert_eq!(merged, reversed);
+        assert_eq!(merged.system_fingerprint.as_deref(), Some("fp_x"));
+        assert_eq!(
+            merged.usage_input_source,
+            Some(UsageInputSource::ExplicitFinal)
+        );
+        assert!(!merged.has_quota_family());
     }
 
     #[test]

@@ -324,10 +324,65 @@ pub fn parse_event(
 
     apply_chunk_dialect(id, &mut val, dialect, reasoning_index)?;
 
+    let fingerprint = system_fingerprint_of(&val);
     let chunk: ChatChunk = serde_json::from_value(val)
         .map_err(|e| Error::normalize_response(id, format!("chunk deserialize: {e}")))?;
 
-    Ok(Some(mark_reported_usage(chunk)))
+    Ok(Some(carry_system_fingerprint(
+        mark_reported_usage(chunk),
+        fingerprint,
+    )))
+}
+
+/// The non-empty `system_fingerprint` string a chunk carries, if any.
+fn system_fingerprint_of(val: &Value) -> Option<String> {
+    val.get("system_fingerprint")
+        .and_then(Value::as_str)
+        .filter(|fp| !fp.is_empty())
+        .map(str::to_string)
+}
+
+/// Ride the upstream `system_fingerprint` on the chunk's transport-internal
+/// meta: `ChatChunk` has no envelope slot for it, and an OpenAI-shape
+/// ingress echoes it back.
+fn carry_system_fingerprint(mut chunk: ChatChunk, fingerprint: Option<String>) -> ChatChunk {
+    if let Some(fp) = fingerprint {
+        let carrier = UpstreamMeta::from_system_fingerprint(fp);
+        chunk.upstream_meta = Some(match chunk.upstream_meta.take() {
+            Some(meta) => meta.merge(carrier),
+            None => carrier,
+        });
+    }
+    chunk
+}
+
+/// Per-stream de-duplication of the carried `system_fingerprint`. OpenAI
+/// repeats the same value on every chunk; only its first sighting (or a
+/// change) rides the meta, so chunks that carry nothing else keep a `None`
+/// meta, which the router's pre-content buffer relies on to collapse empty
+/// reasoning chunks.
+#[derive(Debug, Default)]
+pub(crate) struct StreamedFingerprint {
+    last: Option<String>,
+}
+
+impl StreamedFingerprint {
+    pub(crate) fn dedup(&mut self, chunk: &mut ChatChunk) {
+        let Some(meta) = chunk.upstream_meta.as_mut() else {
+            return;
+        };
+        let Some(fp) = meta.system_fingerprint.as_ref() else {
+            return;
+        };
+        if self.last.as_ref() == Some(fp) {
+            meta.system_fingerprint = None;
+            if *meta == UpstreamMeta::default() {
+                chunk.upstream_meta = None;
+            }
+        } else {
+            self.last = Some(fp.clone());
+        }
+    }
 }
 
 /// An OpenAI-compatible usage object is the event's own report of the
@@ -665,15 +720,19 @@ impl ThinkTagAccumulator {
         // the choices loop: `choices_raw` was cloned out of `val`, so
         // no immutable borrow is live and the `&mut val` lift is safe.
         let usage = extract_chunk_usage(provider_id, &mut val);
-
-        Ok(Some(mark_reported_usage(ChatChunk {
+        let chunk = mark_reported_usage(ChatChunk {
             id: chunk_id,
             model,
             choices: new_choices,
             usage,
             opaque_events: Vec::new(),
             upstream_meta: None,
-        })))
+        });
+
+        Ok(Some(carry_system_fingerprint(
+            chunk,
+            system_fingerprint_of(&val),
+        )))
     }
 
     /// Split `text` into (outside_think_content, inside_think_content) while
@@ -1889,6 +1948,122 @@ mod tests {
         assert_eq!(source(&plain), Some(UsageInputSource::ExplicitFinal));
         assert_eq!(source(&think), Some(UsageInputSource::ExplicitFinal));
         assert_eq!(source(&bare), None);
+    }
+
+    /// An upstream `system_fingerprint` rides the chunk meta on both parse
+    /// paths, and survives beside the usage provenance on a usage chunk.
+    #[test]
+    fn system_fingerprint_rides_chunk_meta_on_both_paths() {
+        let usage = json!({"id": "c", "model": "m", "choices": [],
+            "system_fingerprint": "fp_x",
+            "usage": {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12}})
+        .to_string();
+        let content = json!({"id": "c", "model": "m", "system_fingerprint": "fp_x",
+            "choices": [{"index": 0, "delta": {"content": "hi"}, "finish_reason": null}]})
+        .to_string();
+        let meta = |chunk: ChatChunk| chunk.upstream_meta.unwrap_or_default();
+
+        let plain_usage = meta(
+            parse_event("p", &usage, ReasoningDialect::OpenAi, &mut 0)
+                .unwrap()
+                .unwrap(),
+        );
+        let think_usage = meta(
+            ThinkTagAccumulator::new()
+                .process("p", &usage)
+                .unwrap()
+                .unwrap(),
+        );
+        let plain_content = meta(
+            parse_event("p", &content, ReasoningDialect::OpenAi, &mut 0)
+                .unwrap()
+                .unwrap(),
+        );
+        let think_content = meta(
+            ThinkTagAccumulator::new()
+                .process("p", &content)
+                .unwrap()
+                .unwrap(),
+        );
+
+        for (name, m) in [
+            ("parse_event usage", &plain_usage),
+            ("process usage", &think_usage),
+            ("parse_event content", &plain_content),
+            ("process content", &think_content),
+        ] {
+            assert_eq!(m.system_fingerprint.as_deref(), Some("fp_x"), "{name}");
+        }
+        assert_eq!(
+            plain_usage.usage_input_source,
+            Some(UsageInputSource::ExplicitFinal)
+        );
+        assert_eq!(
+            think_usage.usage_input_source,
+            Some(UsageInputSource::ExplicitFinal)
+        );
+    }
+
+    /// A null or absent `system_fingerprint` carries nothing.
+    #[test]
+    fn null_system_fingerprint_leaves_chunk_meta_empty() {
+        let content = json!({"id": "c", "model": "m", "system_fingerprint": null,
+            "choices": [{"index": 0, "delta": {"content": "hi"}, "finish_reason": null}]})
+        .to_string();
+
+        let chunk = parse_event("p", &content, ReasoningDialect::OpenAi, &mut 0)
+            .unwrap()
+            .unwrap();
+
+        assert!(chunk.upstream_meta.is_none());
+    }
+
+    /// The stream carries a repeated fingerprint once: later chunks with
+    /// the same value and nothing else get no meta, a changed value is
+    /// carried again, and a repeat beside other meta keeps that meta.
+    #[test]
+    fn streamed_fingerprint_is_carried_on_first_sighting_and_change_only() {
+        let fp_chunk = |fp: &str| {
+            let raw = json!({"id": "c", "model": "m", "system_fingerprint": fp,
+                "choices": [{"index": 0, "delta": {"content": "x"}, "finish_reason": null}]})
+            .to_string();
+            parse_event("p", &raw, ReasoningDialect::OpenAi, &mut 0)
+                .unwrap()
+                .unwrap()
+        };
+        let usage_raw = json!({"id": "c", "model": "m", "choices": [],
+            "system_fingerprint": "fp_y",
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}})
+        .to_string();
+        let mut usage_chunk = parse_event("p", &usage_raw, ReasoningDialect::OpenAi, &mut 0)
+            .unwrap()
+            .unwrap();
+        let mut seen = StreamedFingerprint::default();
+        let mut chunks = vec![fp_chunk("fp_x"), fp_chunk("fp_x"), fp_chunk("fp_x")];
+        let mut changed = fp_chunk("fp_y");
+
+        for chunk in &mut chunks {
+            seen.dedup(chunk);
+        }
+        seen.dedup(&mut changed);
+        seen.dedup(&mut usage_chunk);
+
+        let carried: Vec<Option<&str>> = chunks
+            .iter()
+            .map(|c| c.upstream_meta.as_ref()?.system_fingerprint.as_deref())
+            .collect();
+        assert_eq!(carried, vec![Some("fp_x"), None, None]);
+        assert!(chunks[1].upstream_meta.is_none());
+        assert_eq!(
+            changed.upstream_meta.unwrap().system_fingerprint.as_deref(),
+            Some("fp_y")
+        );
+        let usage_meta = usage_chunk.upstream_meta.unwrap();
+        assert_eq!(usage_meta.system_fingerprint, None);
+        assert_eq!(
+            usage_meta.usage_input_source,
+            Some(UsageInputSource::ExplicitFinal)
+        );
     }
 
     /// A terminal chunk driven through `ThinkTagAccumulator::process`

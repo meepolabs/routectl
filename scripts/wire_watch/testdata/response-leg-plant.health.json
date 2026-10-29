@@ -1,5 +1,5 @@
 {
-  "as_of": "2026-10-27T16:10:48Z",
+  "as_of": "2026-10-29T06:54:30Z",
   "data": {
     "learned_negatives": [],
     "targets": [
@@ -7,7 +7,7 @@
         "circuit": "closed",
         "half_open_probe_in_flight": false,
         "last_outcome": "ok",
-        "last_outcome_at_ms": 1793117448962,
+        "last_outcome_at_ms": 1793256870365,
         "learned_lane": "mock#planted-upstream",
         "nickname": "planted",
         "open_since_ms": null,
@@ -24,14 +24,14 @@
       "checks": [
         {
           "count": 1,
-          "lane": "chat->openai-compat",
-          "last_seen_unix_secs": 1793117448,
+          "lane": "responses->openai-responses",
+          "last_seen_unix_secs": 1793256870,
           "outcome": "clean"
         },
         {
           "count": 1,
-          "lane": "chat->openai-compat",
-          "last_seen_unix_secs": 1793117448,
+          "lane": "responses->openai-responses",
+          "last_seen_unix_secs": 1793256870,
           "outcome": "loss"
         }
       ],
@@ -39,18 +39,18 @@
       "loss": [
         {
           "count": 1,
-          "lane": "chat->openai-compat",
-          "last_seen_unix_secs": 1793117448,
+          "lane": "responses->openai-responses",
+          "last_seen_unix_secs": 1793256870,
           "path_class": "missing"
         }
       ],
       "loss_findings": [
         {
-          "lane": "chat->openai-compat",
+          "lane": "responses->openai-responses",
           "leg": "response",
-          "path": "/system_fingerprint",
+          "path": "/output/0/id",
           "path_class": "missing",
-          "ts_unix_secs": 1793117448
+          "ts_unix_secs": 1793256870
         }
       ],
       "unrepaired_rejections": [],

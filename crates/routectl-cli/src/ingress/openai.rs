@@ -50,6 +50,10 @@ pub struct OpenAiStreamState {
     /// `ChatChunk` carries no `created`, and a strict SDK requires one
     /// consistent value on `ChatCompletionChunk`.
     created: Option<i64>,
+    /// The upstream `system_fingerprint`, held from the chunk that carried
+    /// it so every later chunk echoes it (the egress carries it only on
+    /// first sighting or change).
+    system_fingerprint: Option<String>,
 }
 
 impl IngressStreamState for OpenAiStreamState {
@@ -275,16 +279,25 @@ impl IngressAdapter for OpenAiIngress {
         // finish_reason (see `map_openai_finish_reason`). OpenAI-out
         // only -- the Anthropic ingress keeps the raw stop_reason.
         let chunk = normalize_finish_reason_in_chunk(chunk, edits);
+        let state = openai_state_mut(state);
+        if let Some(fp) = chunk
+            .upstream_meta
+            .as_ref()
+            .and_then(|meta| meta.system_fingerprint.clone())
+        {
+            state.system_fingerprint = Some(fp);
+        }
         let mut value = serde_json::to_value(&chunk)
             .map_err(|e| Error::Internal(format!("openai ingress: serialize chunk: {e}")))?;
+        surface_cached_tokens_in_usage(&mut value, edits);
         // Stamp the OpenAI streaming envelope a strict SDK requires on
         // `ChatCompletionChunk`: `object:"chat.completion.chunk"`, a
         // stream-stable `id`, a `created` stamp (the canonical chunk
-        // carries none), and a nullable `system_fingerprint`. The id and
-        // created are held on the stream state so every chunk shares one
-        // value. OpenAI-dialect only -- the Anthropic ingress renders
-        // chunks through its own module.
-        apply_openai_chunk_envelope(&mut value, openai_state_mut(state), edits);
+        // carries none), and the upstream `system_fingerprint` (null when
+        // none was sent). The id and created are held on the stream state so
+        // every chunk shares one value. OpenAI-dialect only -- the Anthropic
+        // ingress renders chunks through its own module.
+        apply_openai_chunk_envelope(&mut value, state, edits);
         let data = serde_json::to_string(&value)
             .map_err(|e| Error::Internal(format!("openai ingress: serialize chunk: {e}")))?;
         Ok(vec![SseEvent::unnamed(data)])
@@ -458,13 +471,15 @@ const RESPONSE_ENVELOPE_MEMBERS: [(&str, &str); 4] = [
     ("/system_fingerprint", "system_fingerprint"),
 ];
 
-/// The members the streaming envelope stamp writes on every chunk, whatever
-/// the upstream sent there.
+/// The members the streaming envelope stamp writes on every chunk. `object`,
+/// `id` and `created` replace whatever the upstream sent there;
+/// `system_fingerprint` echoes the upstream value when one was carried.
 const STREAM_ENVELOPE_PATHS: [&str; 4] = ["/object", "/id", "/created", "/system_fingerprint"];
 
 /// Stamp the OpenAI streaming envelope onto a serialized `ChatChunk` body:
 /// `object:"chat.completion.chunk"`, a stream-stable `id`, a stream-stable
-/// `created`, and a nullable `system_fingerprint`. The id and created are
+/// `created`, and the held upstream `system_fingerprint` (else `null`). The
+/// id and created are
 /// coordinated through `state` so every chunk of one stream shares a single
 /// value (an SDK keying on either sees one completion, never a per-chunk
 /// mint). The first non-empty upstream chunk id SEEDS the held id; once
@@ -516,7 +531,11 @@ fn apply_openai_chunk_envelope(
     };
     obj.insert("created".into(), Value::from(created));
 
-    obj.entry("system_fingerprint").or_insert(Value::Null);
+    let fingerprint = state
+        .system_fingerprint
+        .clone()
+        .map_or(Value::Null, Value::from);
+    obj.insert("system_fingerprint".into(), fingerprint);
 }
 
 /// Pull every top-level body key NOT recognized as a canonical
@@ -990,7 +1009,7 @@ mod tests {
     use crate::ingress::STREAM_ERROR_TYPE;
     use routectl_core::{
         Choice, ChunkChoice, ChunkDelta, Message, MessageContent, ReasoningConfig,
-        ReasoningDetailKind, Role, SystemContent, Usage,
+        ReasoningDetailKind, Role, SystemContent, UpstreamMeta, Usage, UsageDelta,
     };
     use serde_json::json;
 
@@ -2114,6 +2133,81 @@ mod tests {
             first_id, third_id,
             "established id must stay stable even when a later chunk carries a wire id"
         );
+    }
+
+    fn stream_chunk(usage: Option<UsageDelta>, meta: Option<UpstreamMeta>) -> ChatChunk {
+        ChatChunk {
+            id: "chatcmpl-1".into(),
+            model: "gpt-4o".into(),
+            choices: vec![],
+            usage,
+            opaque_events: Vec::new(),
+            upstream_meta: meta,
+        }
+    }
+
+    fn render_payload(chunk: ChatChunk, state: &mut dyn IngressStreamState) -> Value {
+        let events = OpenAiIngress.render_chunk(chunk, state).unwrap();
+        serde_json::from_str(&events[0].data).unwrap()
+    }
+
+    /// The stream usage chunk mirrors the canonical cache-read count into
+    /// `usage.prompt_tokens_details.cached_tokens`, as the complete render
+    /// does, so stream and complete agree for an OpenAI cost tracker.
+    #[test]
+    fn render_chunk_surfaces_cached_tokens_in_stream_usage() {
+        // Arrange
+        let usage = UsageDelta {
+            prompt_tokens: Some(8),
+            completion_tokens: Some(1),
+            total_tokens: Some(9),
+            cache_read_input_tokens: Some(4),
+            ..Default::default()
+        };
+        let mut state = OpenAiIngress.new_stream_state(&StreamRequestContext::default());
+
+        // Act
+        let v = render_payload(stream_chunk(Some(usage), None), state.as_mut());
+
+        // Assert
+        assert_eq!(v["usage"]["prompt_tokens_details"]["cached_tokens"], 4);
+        assert_eq!(v["usage"]["cache_read_input_tokens"], 4);
+    }
+
+    /// The upstream `system_fingerprint` carried on the first chunk is
+    /// echoed on that chunk and every later one, including chunks whose
+    /// meta no longer carries it.
+    #[test]
+    fn render_chunk_echoes_upstream_system_fingerprint_on_every_chunk() {
+        // Arrange
+        let carrier = UpstreamMeta::from_system_fingerprint("fp_x".into());
+        let mut state = OpenAiIngress.new_stream_state(&StreamRequestContext::default());
+
+        // Act
+        let first = render_payload(stream_chunk(None, Some(carrier)), state.as_mut());
+        let second = render_payload(stream_chunk(None, None), state.as_mut());
+
+        // Assert
+        assert_eq!(first["system_fingerprint"], "fp_x");
+        assert_eq!(second["system_fingerprint"], "fp_x");
+    }
+
+    /// With no upstream fingerprint the stream chunk keeps an explicit
+    /// `null`, matching the complete render's absent case.
+    #[test]
+    fn render_chunk_stamps_null_system_fingerprint_when_upstream_sent_none() {
+        // Arrange
+        let mut state = OpenAiIngress.new_stream_state(&StreamRequestContext::default());
+
+        // Act
+        let v = render_payload(stream_chunk(None, None), state.as_mut());
+
+        // Assert
+        assert!(
+            v.as_object().unwrap().contains_key("system_fingerprint"),
+            "system_fingerprint key must be present: {v}"
+        );
+        assert!(v["system_fingerprint"].is_null());
     }
 
     /// The OpenAI envelope injection must NOT leak onto the Anthropic

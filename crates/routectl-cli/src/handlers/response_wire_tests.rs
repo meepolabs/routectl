@@ -944,11 +944,10 @@ async fn each_declared_chat_exception_explains_only_its_own_change() {
     }
 }
 
-/// The canonical chunk has no slot for an upstream `system_fingerprint`, so
-/// the stream render stamps `null` where the upstream named one. Pinned as
-/// a detection: the stamp is declared only where the upstream sent nothing.
+/// An upstream `system_fingerprint` reaches the Chat stream client, so the
+/// response leg records no finding for it.
 #[tokio::test]
-async fn the_chat_stream_render_loses_an_upstream_system_fingerprint() {
+async fn the_chat_stream_render_echoes_an_upstream_system_fingerprint() {
     let snapshot = chat_run(
         sse(chat_stream_with(
             Some(("system_fingerprint", json!("fp_1"))),
@@ -959,9 +958,10 @@ async fn the_chat_stream_render_loses_an_upstream_system_fingerprint() {
     .await;
 
     assert_eq!(
-        response_findings(&snapshot),
-        [("/system_fingerprint".to_string(), "missing")]
+        outcomes(&snapshot),
+        [(Dialect::Chat.lane(), CheckOutcome::Clean, 2)]
     );
+    assert_eq!(response_findings(&snapshot), Vec::<(String, &str)>::new());
 }
 
 /// Past the early-flush grace the client gets a synthetic `message_start`

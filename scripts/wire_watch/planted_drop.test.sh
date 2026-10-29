@@ -8,9 +8,10 @@
 #
 #   request-leg-plant   a Responses request carrying `temperature`, which
 #                       the responses->openai-responses egress drops
-#   response-leg-plant  a chat stream whose frames carry
-#                       `system_fingerprint`, which the
-#                       chat->openai-compat stream render loses
+#   response-leg-plant  a Responses stream whose message item carries an
+#                       `id`, which the responses->openai-responses egress
+#                       drops; the mock plants the id only for this cell,
+#                       recognised by a marker in its input text
 #   clean-control       a plain chat completion: no finding, nonzero checks
 #
 # Both plants are entries of KNOWN_UNDECLARED in

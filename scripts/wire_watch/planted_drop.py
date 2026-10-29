@@ -35,7 +35,6 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import strict_json  # noqa: E402
 
 UPSTREAM_MODEL = "planted-upstream"
-CHAT_LANE = "chat->openai-compat"
 RESPONSES_LANE = "responses->openai-responses"
 
 
@@ -48,13 +47,13 @@ class Plant:
 
 
 REQUEST_PLANT = Plant(RESPONSES_LANE, "request", "/temperature")
-RESPONSE_PLANT = Plant(CHAT_LANE, "response", "/system_fingerprint")
+RESPONSE_PLANT = Plant(RESPONSES_LANE, "response", "/output/0/id")
 PLANTS = (REQUEST_PLANT, RESPONSE_PLANT)
 
 # name -> (lane config template, expected ingress, route, plant or None)
 CELLS = {
     "request-leg-plant": ("responses", "openai-responses", "/v1/responses", REQUEST_PLANT),
-    "response-leg-plant": ("chat", "openai", "/v1/chat/completions", RESPONSE_PLANT),
+    "response-leg-plant": ("responses", "openai-responses", "/v1/responses", RESPONSE_PLANT),
     "clean-control": ("chat", "openai", "/v1/chat/completions", None),
 }
 
@@ -73,21 +72,29 @@ def usage(message: str) -> int:
 # Requests the stub driver sends
 # ---------------------------------------------------------------------------
 
+# The response-leg cell's input text, forwarded verbatim to the mock: it is
+# how the mock tells that cell from the request-leg cell on the same route,
+# so only the response-leg answer carries a message item id. The cell does
+# not ask to stream: a streamed Responses render re-stamps `created_at`, a
+# second known loss that would ride along with the plant.
+ITEM_ID_MARKER = "plant the message item id"
+
+
+def responses_input(text: str) -> list:
+    return [{"type": "message", "role": "user",
+             "content": [{"type": "input_text", "text": text}]}]
+
+
 def request_body(cell: str, plants_on: bool) -> tuple[str, dict]:
     _, _, route, _ = CELLS[cell]
     if cell == "request-leg-plant":
-        body: dict = {
-            "model": "planted",
-            "input": [{"type": "message", "role": "user",
-                       "content": [{"type": "input_text", "text": "hi"}]}],
-        }
+        body: dict = {"model": "planted", "input": responses_input("hi")}
         if plants_on:
             body["temperature"] = 0.3
         return route, body
-    body = {"model": "planted", "messages": [{"role": "user", "content": "hi"}]}
     if cell == "response-leg-plant":
-        body["stream"] = True
-    return route, body
+        return route, {"model": "planted", "input": responses_input(ITEM_ID_MARKER)}
+    return route, {"model": "planted", "messages": [{"role": "user", "content": "hi"}]}
 
 
 # ---------------------------------------------------------------------------
@@ -115,39 +122,36 @@ def chat_complete() -> dict:
     }
 
 
-def chat_stream(plants_on: bool) -> bytes:
-    def chunk(delta: dict, finish: str | None) -> dict:
-        frame = {"id": "c1", "object": "chat.completion.chunk",
-                 "created": 1_700_000_000, "model": UPSTREAM_MODEL,
-                 "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}
-        if plants_on:
-            frame["system_fingerprint"] = "fp_planted"
-        return frame
-
-    return sse([(None, chunk({"role": "assistant", "content": "ok"}, None)),
-                (None, chunk({}, "stop"))], done=True)
-
-
 # Nonzero on purpose: a zero `created_at` is re-stamped by the egress, which
 # adds a second, unplanted response-leg finding to the request-leg cell.
 RESPONSES_CREATED_AT = 1_700_000_000
 
 
-def responses_stream() -> bytes:
+def carries_item_id_marker(body: dict) -> bool:
+    return ITEM_ID_MARKER in json.dumps(body.get("input"))
+
+
+def responses_stream(item_id: bool) -> bytes:
+    """The upstream answer; `item_id` plants a message item id the egress
+    drops, so the client's document lacks `/output/0/id`."""
+    message = {"type": "message", "role": "assistant", "status": "completed",
+               "content": [{"type": "output_text", "text": "ok", "annotations": []}]}
+    if item_id:
+        message["id"] = "msg_planted"
     done = {
         "id": "resp_1", "object": "response", "created_at": RESPONSES_CREATED_AT,
         "status": "completed", "model": UPSTREAM_MODEL,
-        "output": [{"type": "message", "role": "assistant", "status": "completed",
-                    "content": [{"type": "output_text", "text": "ok", "annotations": []}]}],
+        "output": [message],
         "usage": {"input_tokens": 3, "output_tokens": 1, "total_tokens": 4},
     }
+    added = {"type": "message", "role": "assistant", "status": "in_progress", "content": []}
+    if item_id:
+        added["id"] = message["id"]
     created = dict(done, status="in_progress", output=[])
     return sse([
         ("response.created", {"type": "response.created", "response": created}),
         ("response.output_item.added",
-         {"type": "response.output_item.added", "output_index": 0,
-          "item": {"type": "message", "role": "assistant",
-                   "status": "in_progress", "content": []}}),
+         {"type": "response.output_item.added", "output_index": 0, "item": added}),
         ("response.content_part.added",
          {"type": "response.content_part.added", "output_index": 0, "content_index": 0,
           "part": {"type": "output_text", "text": "", "annotations": []}}),
@@ -184,12 +188,10 @@ def make_handler(plants_on: bool) -> type:
                 self.reply(400, "text/plain", b"bad json")
                 return
             if self.path.endswith("/responses"):
-                self.reply(200, "text/event-stream", responses_stream())
+                item_id = plants_on and carries_item_id_marker(body)
+                self.reply(200, "text/event-stream", responses_stream(item_id))
             elif self.path.endswith("/chat/completions"):
-                if body.get("stream") is True:
-                    self.reply(200, "text/event-stream", chat_stream(plants_on))
-                else:
-                    self.reply(200, "application/json", json.dumps(chat_complete()).encode())
+                self.reply(200, "application/json", json.dumps(chat_complete()).encode())
             else:
                 self.reply(404, "text/plain", b"no such route")
 

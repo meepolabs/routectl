@@ -213,11 +213,11 @@ def build_run(
 
 def plant(name: str, **kw: Any) -> CellPlan:
     """A cell carrying one of the recorded planted-drop snapshots."""
-    request = name == "request-leg-plant"
+    responses = name in ("request-leg-plant", "response-leg-plant")
     base = CellPlan(
-        driver="codex.sh" if request else "hermes-chat.sh",
-        ingress="openai-responses" if request else "openai",
-        lane="openai-responses" if request else "openai-compat.ollama",
+        driver="codex.sh" if responses else "hermes-chat.sh",
+        ingress="openai-responses" if responses else "openai",
+        lane="openai-responses" if responses else "openai-compat.ollama",
         model=name,
         health=recorded(name),
     )

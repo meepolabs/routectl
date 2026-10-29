@@ -60,18 +60,6 @@ const KNOWN_UNDECLARED: &[KnownUndeclared] = &[
         reason: "real loss: the closing message_delta render drops output_tokens_details",
     },
     KnownUndeclared {
-        lane: CHAT,
-        leg: Leg::Response,
-        path: "/system_fingerprint",
-        reason: "real loss: the stream render stamps a null system_fingerprint",
-    },
-    KnownUndeclared {
-        lane: CHAT,
-        leg: Leg::Response,
-        path: "/usage/prompt_tokens_details",
-        reason: "real loss: the stream render never mirrors cached_tokens back",
-    },
-    KnownUndeclared {
         lane: RESPONSES,
         leg: Leg::Request,
         path: "/temperature",

@@ -535,6 +535,7 @@ impl Provider for OpenAiCompatProvider {
             // id-less indexed tool_call gets a stable id before it reaches
             // the openai->anthropic pairing that keys on the id.
             let mut tool_call_ids = sse::StreamedToolCallIds::default();
+            let mut fingerprint = sse::StreamedFingerprint::default();
             // Per-choice running concatenation of `delta.content` text,
             // indexed by `choice.index` and grown on demand. The terminal
             // chunk (the one carrying `finish_reason`) gets the
@@ -605,6 +606,7 @@ impl Provider for OpenAiCompatProvider {
                             yield Err(e);
                             return;
                         }
+                        fingerprint.dedup(&mut chunk);
                         // Mark terminal + tool-call state PER choice.index so
                         // an `n > 1` stream where one choice finishes and a
                         // sibling truncates mid tool-call is classified by
