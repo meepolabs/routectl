@@ -3309,6 +3309,10 @@ mod probe_test_support;
 mod scripted_provider_support;
 
 #[cfg(test)]
+#[path = "stream_commit_tests.rs"]
+mod stream_commit_tests;
+
+#[cfg(test)]
 #[path = "probe_activation_boundary_tests.rs"]
 mod probe_activation_boundary_tests;
 

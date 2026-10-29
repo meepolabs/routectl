@@ -423,6 +423,8 @@ list with more narrative.
 
 ### Changed
 
+- **A client that cancels a stream after content no longer counts as a success on the provider's breaker.** Dropping a stream before it ends used to record a success, resetting the provider's failure count; it now records nothing. A stream that runs to its end still records a success, and an error mid-stream still settles as before.
+
 - **A system or developer message holding a non-text part stays in place.** On the Chat Completions and Responses ingresses, a system or developer message with an image, a document or an unknown part is no longer lifted into the request's system prompt as text only; the whole message stays in its position. openai-compat and openai-responses forward it; anthropic-api (lift policy), Bedrock Invoke, Bedrock Converse and Gemini carry its text and count the parts they cannot represent once per request as the `system_part_unrepresentable` translation drop. See [docs/LOGGING.md](docs/LOGGING.md).
 
 - **The default log filter is `info,aws_config=warn`.** With `ROUTECTL_LOG` unset, the AWS credential-provider crate now logs at WARN and above only. A `ROUTECTL_LOG` you set replaces the default whole; see [docs/LOGGING.md](docs/LOGGING.md) for the targets to cap in a custom filter.

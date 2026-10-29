@@ -418,9 +418,8 @@ async fn mid_stream_error_after_first_chunk_close_retrips_breaker() {
 }
 
 /// Consumer cancellation (dropping the stream) AFTER a
-/// first-chunk probe success must NOT re-trip the breaker. Proves the
-/// `cancel_is_failure` removal is safe: the breaker was already
-/// closed at the call site, so a cancel is irrelevant to the probe.
+/// first-chunk probe success must NOT re-trip the breaker: the breaker
+/// was already closed at the call site, and a cancel records nothing.
 #[tokio::test]
 async fn cancel_after_first_chunk_success_does_not_retrip_breaker() {
     let (router, _calls) = build_first_chunk_router(false);
@@ -435,7 +434,7 @@ async fn cancel_after_first_chunk_success_does_not_retrip_breaker() {
     drop(stream);
 
     // The breaker stays CLOSED: the first-chunk success already
-    // closed it, and the drop's benign record_success cannot reopen.
+    // closed it, and the drop records no failure that could reopen it.
     assert!(
         !slot_in_flight(&router),
         "cancel after first-chunk success must leave the slot released",

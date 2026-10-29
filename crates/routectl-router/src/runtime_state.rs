@@ -460,6 +460,11 @@ impl ProviderState {
         self.half_open_in_flight
     }
 
+    #[cfg(test)]
+    pub(crate) const fn consecutive_failures_for_tests(&self) -> u32 {
+        self.consecutive_failures
+    }
+
     fn refill_tokens(&mut self, now: Instant, capacity: f64) {
         if now.duration_since(self.rpm_last_refill).as_millis() == 0 {
             // No measurable time elapsed; leave the anchor untouched

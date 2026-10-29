@@ -17,29 +17,33 @@ use super::dispatch::{apply_remap, upstream_status_for_remap};
 use super::outcome_rule::{BreakerOutcome, breaker_outcome, reset_hint_clamped_to};
 use super::precontent::{is_empty_reasoning_only, precontent_summary};
 
-/// Wrap an upstream stream so the breaker records success on clean
-/// completion (None / EOS) and settles the FIRST error that bubbles out of
-/// the stream once; subsequent errors do not double-count. A non-probe
-/// stream records that error as a failure whatever its class. A probe
-/// stream (`is_probe`) settles it by the shared rule (`breaker_outcome`)
-/// on the class after the target's `class_overrides` remap, as before
-/// content: a probe's 429/529 leaves the breaker untouched; otherwise a
-/// debiting class takes the threshold-gated debit, a non-debiting class
-/// takes none, and a probe never parks.
+/// Wrap an upstream stream so the breaker settles exactly once, on whichever
+/// of three exits the stream takes first:
 ///
-/// For a half-open PROBE the call site already closed the breaker on
-/// first content, so a mid-stream failure here re-trips it and a
-/// clean completion / consumer cancellation is a benign re-zeroing of the
-/// just-closed breaker. For a HEALTHY (closed) breaker the call site did
-/// NOT touch the breaker, so this wrap is where mid-stream failures
-/// accumulate toward the threshold (and a clean completion resets the
-/// counter). Consumer cancellation before any error is treated as success
-/// in both cases.
+/// - natural end of stream (the inner stream yields `None`) records success;
+/// - the FIRST error frame settles that error; later frames, and the end of
+///   stream that may follow, record nothing more;
+/// - a drop before either (the client cancelled after content) records
+///   nothing: neither a success that would reset the failure count nor a
+///   failure.
+///
+/// A non-probe stream records an error frame as a failure whatever its class.
+/// A probe stream (`is_probe`) settles it by the shared rule
+/// (`breaker_outcome`) on the class after the target's `class_overrides`
+/// remap, as before content: a probe's 429/529 leaves the breaker untouched;
+/// otherwise a debiting class takes the threshold-gated debit, a non-debiting
+/// class takes none, and a probe never parks.
+///
+/// For a half-open PROBE the call site already closed the breaker and
+/// released the probe slot on first content, so a mid-stream failure here
+/// debits the just-closed breaker. For a HEALTHY (closed) breaker the call
+/// site did NOT touch the breaker, so this wrap is where mid-stream failures
+/// accumulate toward the threshold and a natural end resets the counter.
 ///
 /// Also the streaming quota seam: `quota_feed` is offered every Ok chunk on
 /// its way through and takes the reading off the FIRST one carrying it, which
 /// is the only chunk that carries it. This wrap is where that happens because
-/// it is the last router-owned point before the caller consumes the stream --
+/// it is the last router-owned point before the caller consumes the stream:
 /// the reading is gone by end-of-stream.
 pub(super) fn wrap_with_breaker_accounting(
     inner: BoxStream<'static, Result<ChatChunk>>,
@@ -51,101 +55,100 @@ pub(super) fn wrap_with_breaker_accounting(
     max_honored_retry_after: Duration,
 ) -> BoxStream<'static, Result<ChatChunk>> {
     use futures::stream::StreamExt as _;
-    struct BreakerAccounting {
-        state: Option<Arc<Mutex<crate::runtime_state::ProviderState>>>,
-        settled: bool,
-    }
 
-    impl BreakerAccounting {
-        const fn new(state: Option<Arc<Mutex<crate::runtime_state::ProviderState>>>) -> Self {
-            Self {
-                state,
-                settled: false,
-            }
-        }
-
-        fn with_state(&self, f: impl FnOnce(&mut crate::runtime_state::ProviderState)) {
-            let Some(st) = &self.state else {
-                return;
-            };
-            f(&mut st.lock());
-        }
-
-        fn record_success(&mut self) {
-            if self.settled {
-                return;
-            }
-            self.settled = true;
-            self.with_state(|state| state.record_success(Instant::now()));
-        }
-
-        fn settle_error(&mut self, e: &Error, ctx: &FrameErrorContext) {
-            if self.settled {
-                return;
-            }
-            self.settled = true;
-            let native = classify(e, ctx.provider_kind);
-            let (class, outcome) = if ctx.is_probe {
-                let (cf, _) =
-                    apply_remap(native, upstream_status_for_remap(e), &ctx.class_overrides);
-                let hint = reset_hint_clamped_to(e, ctx.max_honored_retry_after);
-                let outcome = breaker_outcome(e, &cf.class, hint, true);
-                (cf.class, outcome)
-            } else {
-                (native.class, BreakerOutcome::Debit)
-            };
-            match outcome {
-                BreakerOutcome::None => {}
-                BreakerOutcome::Debit => self.with_state(|state| {
-                    state.record_failure(Instant::now(), LastOutcome::from_failure_class(&class));
-                }),
-                BreakerOutcome::Park(cooldown) => {
-                    self.with_state(|state| state.force_open(Instant::now(), cooldown));
-                }
-            }
-        }
-    }
-
-    struct FrameErrorContext {
-        provider_kind: Option<&'static str>,
-        is_probe: bool,
-        class_overrides: BTreeMap<u16, FailureClass>,
-        max_honored_retry_after: Duration,
-    }
-
-    impl Drop for BreakerAccounting {
-        fn drop(&mut self) {
-            // Clean completion OR consumer cancellation before any error:
-            // both record success. For a probe stream the breaker is
-            // already closed (call-site first-content close), so this is a
-            // no-op re-zeroing; for a healthy-breaker stream this resets
-            // any accumulated failure count on a fully-consumed success.
-            if !self.settled {
-                self.record_success();
-            }
-        }
-    }
-
-    let mut accounting = BreakerAccounting::new(state);
-    let mut quota_feed = quota_feed;
-    let ctx = FrameErrorContext {
-        provider_kind,
-        is_probe,
-        class_overrides,
-        max_honored_retry_after,
+    let mut accounting = BreakerAccounting {
+        state,
+        ctx: FrameErrorContext {
+            provider_kind,
+            is_probe,
+            class_overrides,
+            max_honored_retry_after,
+        },
+        settled: false,
     };
+    let mut quota_feed = quota_feed;
     let s = async_stream::stream! {
         let mut inner = inner;
         while let Some(item) = inner.next().await {
             match &item {
                 Ok(chunk) => quota_feed.offer(chunk),
-                Err(e) => accounting.settle_error(e, &ctx),
+                Err(e) => accounting.settle(TailExit::FrameError(e)),
             }
             yield item;
         }
-        accounting.record_success();
+        accounting.settle(TailExit::EndOfStream);
     };
     Box::pin(s)
+}
+
+/// How a committed stream's tail ended, as far as the breaker is concerned.
+enum TailExit<'a> {
+    EndOfStream,
+    FrameError(&'a Error),
+    Cancelled,
+}
+
+struct FrameErrorContext {
+    provider_kind: Option<&'static str>,
+    is_probe: bool,
+    class_overrides: BTreeMap<u16, FailureClass>,
+    max_honored_retry_after: Duration,
+}
+
+struct BreakerAccounting {
+    state: Option<Arc<Mutex<crate::runtime_state::ProviderState>>>,
+    ctx: FrameErrorContext,
+    settled: bool,
+}
+
+impl BreakerAccounting {
+    fn with_state(&self, f: impl FnOnce(&mut crate::runtime_state::ProviderState)) {
+        let Some(st) = &self.state else {
+            return;
+        };
+        f(&mut st.lock());
+    }
+
+    fn settle(&mut self, exit: TailExit<'_>) {
+        if std::mem::replace(&mut self.settled, true) {
+            return;
+        }
+        match exit {
+            TailExit::EndOfStream => self.with_state(|state| state.record_success(Instant::now())),
+            TailExit::FrameError(e) => self.settle_frame_error(e),
+            TailExit::Cancelled => {}
+        }
+    }
+
+    fn settle_frame_error(&self, e: &Error) {
+        let ctx = &self.ctx;
+        let native = classify(e, ctx.provider_kind);
+        let (class, outcome) = if ctx.is_probe {
+            let (cf, _) = apply_remap(native, upstream_status_for_remap(e), &ctx.class_overrides);
+            let hint = reset_hint_clamped_to(e, ctx.max_honored_retry_after);
+            let outcome = breaker_outcome(e, &cf.class, hint, true);
+            (cf.class, outcome)
+        } else {
+            (native.class, BreakerOutcome::Debit)
+        };
+        match outcome {
+            BreakerOutcome::None => {}
+            BreakerOutcome::Debit => self.with_state(|state| {
+                state.record_failure(Instant::now(), LastOutcome::from_failure_class(&class));
+            }),
+            BreakerOutcome::Park(cooldown) => {
+                self.with_state(|state| state.force_open(Instant::now(), cooldown));
+            }
+        }
+    }
+}
+
+impl Drop for BreakerAccounting {
+    fn drop(&mut self) {
+        // A no-op after either other exit; otherwise the consumer dropped the
+        // stream mid-tail, which says nothing about the provider's health.
+        self.settle(TailExit::Cancelled);
+    }
 }
 
 /// Upper bound on the content-free leading chunks that are NOT
