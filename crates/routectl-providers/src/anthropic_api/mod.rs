@@ -123,6 +123,9 @@ pub use extras::DEFAULT_MAX_OUTPUT_TOKENS;
 /// The `thinking.type` this egress composes for a request, for a caller
 /// that must reason about the shape before the body is built.
 pub use extras::emitted_thinking_type;
+/// The `budget_tokens` the legacy enabled thinking shape composes for a
+/// request, for a caller that rewrites a thinking type to `enabled`.
+pub use extras::legacy_thinking_budget;
 
 #[async_trait]
 impl Provider for AnthropicApiProvider {

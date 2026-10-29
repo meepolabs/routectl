@@ -26,6 +26,7 @@ const NON_RANKED_ROWS: &[&str] = &[
     "thinking.enabled.display",
     "thinking.type.enabled",
     "thinking.type.disabled",
+    "thinking.type.adaptive",
     "temperature",
     "top_p",
     "presence_penalty",

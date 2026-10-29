@@ -314,8 +314,9 @@ fn success_response() -> ChatResponse {
 
 /// A request carrying the rejected field through BOTH canonical carriers,
 /// plus an active thinking request so the drop can be shown to remove the
-/// field WITHOUT disabling the feature. The native carrier names adaptive
-/// thinking, so the display row is the only grounded row it carries.
+/// field WITHOUT disabling the feature. The native carrier names between_tools
+/// thinking, which no row rewrites, so the display row is the only grounded row
+/// it carries.
 fn req_on(alias: &str) -> ChatRequest {
     let mut req = ChatRequest {
         model: alias.into(),
@@ -340,7 +341,7 @@ fn req_on(alias: &str) -> ChatRequest {
     };
     req.routectl_internal.anthropic_thinking_display = Some("updates".into());
     req.routectl_internal.anthropic_thinking = routectl_core::AnthropicThinking::Sent(
-        routectl_core::ThinkingObject::from_client(json!({"type": "adaptive"}))
+        routectl_core::ThinkingObject::from_client(json!({"type": "between_tools"}))
             .expect("an object builds a carrier"),
     );
     req

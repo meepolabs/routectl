@@ -142,8 +142,11 @@ pub(super) enum FieldSurface {
     ///
     /// The rewrite replaces the native carrier with `{type: <target>}`
     /// (materializing one when the request carried none): an adaptive target
-    /// keeps only `display`, which has no budget field to carry over, and any
-    /// other target is written bare. An adaptive target with no positive effort
+    /// keeps only `display`, which has no budget field to carry over; an
+    /// enabled target keeps `display` and takes the `budget_tokens` the legacy
+    /// shape composes from the canonical reasoning, and is not written when
+    /// that reasoning composes none; any other target is written bare. An
+    /// adaptive target with no positive effort
     /// on the request also gets the code-owned companion effort
     /// [`COMPANION_EFFORT`], written to the canonical effort and to a client
     /// `output_config.effort` the egress would otherwise re-merge over it.
@@ -685,6 +688,9 @@ const THINKING_TYPE_VALUE_PREFIX: &str = "thinking.type.";
 /// The thinking type that takes no budget and pairs with an effort.
 const ADAPTIVE_THINKING_TYPE: &str = "adaptive";
 
+/// The legacy thinking type, which carries a `budget_tokens`.
+const ENABLED_THINKING_TYPE: &str = "enabled";
+
 /// The effort a `thinking.type` rewrite to adaptive supplies when the request
 /// carries no positive effort. The lowest grounded level that keeps adaptive
 /// thinking accepted; never persisted and never learned, so it is not part of
@@ -727,18 +733,25 @@ fn write_thinking_type(req: &mut ChatRequest, value: &str) {
     let Some(target) = thinking_target(value) else {
         return;
     };
-    let Some(object) = routectl_core::ThinkingObject::from_client(serde_json::json!({
-        "type": target,
-    })) else {
+    let mut thinking = serde_json::json!({"type": target});
+    if target == ENABLED_THINKING_TYPE {
+        let Some(budget) = routectl_providers::anthropic_api::legacy_thinking_budget(req) else {
+            return;
+        };
+        thinking["budget_tokens"] = budget.into();
+    }
+    let Some(object) = routectl_core::ThinkingObject::from_client(thinking) else {
         return;
     };
-    if target == ADAPTIVE_THINKING_TYPE {
-        keep_display_on_the_carrier(req);
-        if !carries_positive_effort(req) {
-            write_companion_effort(req);
+    match target {
+        ADAPTIVE_THINKING_TYPE => {
+            keep_display_on_the_carrier(req);
+            if !carries_positive_effort(req) {
+                write_companion_effort(req);
+            }
         }
-    } else {
-        req.routectl_internal.anthropic_thinking_display = None;
+        ENABLED_THINKING_TYPE => keep_display_on_the_carrier(req),
+        _ => req.routectl_internal.anthropic_thinking_display = None,
     }
     req.routectl_internal.anthropic_thinking = routectl_core::AnthropicThinking::Sent(object);
 }
@@ -950,6 +963,15 @@ const FIELD_REPAIRS: &[FieldRepairRow] = &[
         surface: FieldSurface::AnthropicThinkingType("disabled"),
         transform: FieldTransform::Rewrite {
             accepted: &["thinking.type.adaptive", "thinking.type.between_tools"],
+        },
+        class: TransformClass::Envelope,
+        count_tokens_validates: false,
+    },
+    FieldRepairRow {
+        path: "thinking.type.adaptive",
+        surface: FieldSurface::AnthropicThinkingType("adaptive"),
+        transform: FieldTransform::Rewrite {
+            accepted: &["thinking.type.enabled"],
         },
         class: TransformClass::Envelope,
         count_tokens_validates: false,
@@ -2235,8 +2257,8 @@ mod table_tests {
         // something a passing suite absorbs silently.
         assert_eq!(
             FIELD_REPAIRS.len(),
-            14,
-            "the closed repair table ships exactly fourteen grounded rows (eight, then one \
+            15,
+            "the closed repair table ships exactly fifteen grounded rows (nine, then one \
              per effort level); a new row is a new permanent commitment and updates this \
              guard deliberately",
         );
@@ -2297,7 +2319,23 @@ mod table_tests {
         );
         assert_eq!(thinking_off.class, TransformClass::Envelope);
         assert!(!thinking_off.count_tokens_validates);
-        let temperature = FIELD_REPAIRS[3];
+        let thinking_adaptive = FIELD_REPAIRS[3];
+        assert_eq!(thinking_adaptive.path, "thinking.type.adaptive");
+        assert_eq!(
+            thinking_adaptive.surface,
+            FieldSurface::AnthropicThinkingType("adaptive")
+        );
+        assert_eq!(
+            thinking_adaptive.transform,
+            FieldTransform::Rewrite {
+                accepted: &["thinking.type.enabled"],
+            },
+            "the committed Converse capture lists disabled and enabled; only enabled keeps \
+             the client's request to think",
+        );
+        assert_eq!(thinking_adaptive.class, TransformClass::Envelope);
+        assert!(!thinking_adaptive.count_tokens_validates);
+        let temperature = FIELD_REPAIRS[4];
         assert_eq!(temperature.path, "temperature");
         assert_eq!(
             temperature.surface,
@@ -2327,7 +2365,7 @@ mod table_tests {
             assert_eq!(row.class, TransformClass::Envelope, "{path}");
             assert!(!row.count_tokens_validates, "{path}");
         }
-        let max_tokens = FIELD_REPAIRS[7];
+        let max_tokens = FIELD_REPAIRS[8];
         assert_eq!(max_tokens.path, "max_tokens");
         assert_eq!(max_tokens.surface, FieldSurface::MaxTokens);
         assert_eq!(

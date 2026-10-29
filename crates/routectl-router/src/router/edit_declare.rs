@@ -271,10 +271,11 @@ pub(super) fn declare_field_edit(
 
 /// Declare what a `thinking.type` rewrite changed beyond the type, against
 /// the client's own body: each member of the client's `thinking` the
-/// rewritten object no longer carries, and a client `output_config.effort`
-/// the companion effort replaced. An effort the client did not send is
-/// declared by the egress, which compares the merged `output_config` with
-/// the client's.
+/// rewritten object no longer carries, each member besides the rewritten
+/// `type` it carries that the client's did not, and a client
+/// `output_config.effort` the companion effort replaced. An effort the client
+/// did not send is declared by the egress, which compares the merged
+/// `output_config` with the client's.
 fn declare_thinking_type_rewrite(req: &mut ChatRequest, site: EditSite) {
     let Some(client) = req
         .routectl_internal
@@ -286,16 +287,24 @@ fn declare_thinking_type_rewrite(req: &mut ChatRequest, site: EditSite) {
     };
     let kept = rewritten_thinking_keys(req);
     let thinking = WirePath::root().child("thinking");
-    let removed: Vec<String> = client
-        .get("thinking")
-        .and_then(Value::as_object)
+    let client_thinking = client.get("thinking").and_then(Value::as_object);
+    let removed: Vec<String> = client_thinking
         .into_iter()
         .flat_map(Map::keys)
         .filter(|key| !kept.contains(&key.as_str()))
         .map(|key| thinking.child(key).as_str().to_owned())
         .collect();
+    let added: Vec<String> = kept
+        .iter()
+        .filter(|key| **key != "type")
+        .filter(|key| client_thinking.is_none_or(|object| !object.contains_key(**key)))
+        .map(|key| thinking.child(key).as_str().to_owned())
+        .collect();
     for pointer in removed {
         declare(req, site, pointer, EditKind::Remove);
+    }
+    for pointer in added {
+        declare(req, site, pointer, EditKind::Add);
     }
     let client_effort = client.get("output_config").and_then(|c| c.get("effort"));
     let sent_effort = req

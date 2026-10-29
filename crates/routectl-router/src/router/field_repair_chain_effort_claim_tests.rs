@@ -720,11 +720,12 @@ fn next_incarnation(router: &Router, lane: &str, capability: &str) -> u64 {
 /// verdict removes that key once: the guard's clear removes the lapsed
 /// `high -> medium` verdict, and the accepted-level clear of the same `high`
 /// does not take the registry lock to remove it again. The request makes
-/// three registry mutations: the lapsed verdict's re-probe settles, and each
-/// admitted row (`max_tokens`, `high`) runs its guard's clear.
+/// four registry mutations: the lapsed verdict's re-probe settles, and each
+/// admitted row (`thinking.type.adaptive`, `max_tokens`, `high`) runs its
+/// guard's clear.
 ///
 /// Mutation check: hand `clear_accepted_effort` no removed keys in
-/// `settle_field_success` -> red (two mutations).
+/// `settle_field_success` -> red (three mutations).
 #[tokio::test]
 async fn an_unrepaired_success_removes_its_admitted_effort_verdict_once() {
     let seat = ChainSeat::new(Egress::Anthropic, refuse_high_once_and_every_xhigh);
@@ -763,7 +764,7 @@ async fn an_unrepaired_success_removes_its_admitted_effort_verdict_once() {
     assert!(served.meta.field_repairs.is_empty(), "premise: unrepaired");
     assert_eq!(cleared_keys(&served.meta), [key(HIGH_PATH)]);
     assert!(resident_effort_keys(&router).is_empty());
-    assert_eq!(after - before - 1, 3, "registry mutations");
+    assert_eq!(after - before - 1, 4, "registry mutations");
 }
 
 /// Refuse `high` listing `low, medium` at position 0 only, every `xhigh`

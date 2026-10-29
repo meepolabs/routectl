@@ -253,6 +253,17 @@ fn clamp_budget_to_legacy_window(budget: u32, max: u32, source: BudgetSource) ->
     clamped
 }
 
+/// The `budget_tokens` the legacy `enabled` shape composes from `req`'s
+/// canonical reasoning, or `None` when that reasoning composes no enabled
+/// thinking (thinking off or absent, or a `max_tokens` with no budget window).
+#[must_use]
+pub fn legacy_thinking_budget(req: &ChatRequest) -> Option<u32> {
+    match build_thinking(req)? {
+        ThinkingConfig::Enabled { budget_tokens, .. } => Some(budget_tokens),
+        ThinkingConfig::Adaptive { .. } | ThinkingConfig::Disabled => None,
+    }
+}
+
 /// Decide the `thinking` an Anthropic-shape body carries, from the
 /// ingress carrier `req.routectl_internal.anthropic_thinking`:
 ///

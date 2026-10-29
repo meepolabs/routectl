@@ -930,3 +930,152 @@ async fn a_replaced_client_effort_is_declared_by_the_repair_and_checks_clean() {
     let snapshot = router.wire_check_snapshot();
     assert!(snapshot.loss.is_empty(), "{:?}", snapshot.findings);
 }
+
+/// An adaptive request as the Anthropic ingress builds it, at `max_tokens`
+/// and with the client's `high` effort.
+fn anthropic_adaptive_req(max_tokens: u32) -> ChatRequest {
+    let mut req = req_on(ALIAS);
+    req.max_tokens = Some(max_tokens);
+    req.reasoning = Some(ReasoningConfig {
+        effort: Some("high".to_string()),
+        max_tokens: None,
+        exclude: Some(true),
+        enabled: Some(true),
+    });
+    req.provider_extras = Some(json!({"output_config": {"effort": "high"}}));
+    req.routectl_internal.anthropic_thinking_display = Some("omitted".to_string());
+    req.routectl_internal.anthropic_thinking = native_thinking(json!({"type": "adaptive"}));
+    req
+}
+
+/// A rewrite to `enabled` writes the legacy shape the canonical reasoning
+/// composes: its budget, beside the client's display; where that reasoning
+/// has no budget window it writes nothing, so no unbudgeted `enabled` ships.
+///
+/// Mutation check: drop the `budget_tokens` insert in `write_thinking_type`
+/// -> red on the budgeted row.
+#[test]
+fn an_enabled_rewrite_carries_the_composed_budget_or_does_not_take() {
+    let surface = super::FieldSurface::AnthropicThinkingType("adaptive");
+    let rows = [
+        (
+            "a budget window",
+            32_000,
+            Some(json!({"type": "enabled", "budget_tokens": 24_576, "display": "omitted"})),
+        ),
+        ("no budget window", 64, None),
+    ];
+    for (name, max_tokens, expected) in rows {
+        let mut req = anthropic_adaptive_req(max_tokens);
+        let before = req.clone();
+
+        let took = surface.rewrite_in(&mut req, "thinking.type.enabled");
+
+        assert_eq!(took, expected.is_some(), "{name}");
+        let body = routectl_providers::anthropic_api::AnthropicApiProvider::new(
+            routectl_providers::anthropic_api::AnthropicApiConfig::new("thinking-seat", "k"),
+        )
+        .normalize_request(&req)
+        .expect("the body assembles");
+        match expected {
+            Some(thinking) => assert_eq!(body["thinking"], thinking, "{name}"),
+            None => assert_eq!(
+                req.routectl_internal.anthropic_thinking,
+                before.routectl_internal.anthropic_thinking,
+                "{name}: the request is left as it was",
+            ),
+        }
+    }
+}
+
+/// The committed Converse refusal of adaptive thinking, as bedrock-runtime
+/// returned it.
+#[cfg(feature = "bedrock")]
+fn bedrock_adaptive_rejection() -> Error {
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../tests/fixtures/rejections/bedrock/thinking-type-adaptive-unknown-variant-converse.json"
+    ))
+    .expect("the fixture is JSON");
+    Error::upstream_with_body(
+        "thinking-seat",
+        400,
+        routectl_core::UpstreamBody::new(
+            fixture["body"]
+                .as_str()
+                .expect("the fixture carries its body")
+                .to_string(),
+        ),
+        None,
+        Some("ValidationException".to_string()),
+        None,
+    )
+}
+
+/// [`anthropic_adaptive_req`] with its client body captured for the wire
+/// check.
+#[cfg(feature = "bedrock")]
+fn wire_checked_adaptive_req() -> ChatRequest {
+    let mut req = anthropic_adaptive_req(32_000);
+    req.routectl_internal.ingress_wire = Some(routectl_core::wire_check::IngressWire {
+        dialect: routectl_core::wire_check::IngressDialect::Anthropic,
+        client_version: None,
+        bytes: serde_json::to_vec(&json!({
+            "model": ALIAS,
+            "max_tokens": 32_000,
+            "messages": [{"role": "user", "content": "hello"}],
+            "thinking": {"type": "adaptive", "display": "omitted"},
+            "output_config": {"effort": "high"},
+        }))
+        .expect("serialize")
+        .into(),
+    });
+    req
+}
+
+/// The enabled retry adds a `budget_tokens` the client never sent; the
+/// repair declares it beside the type rewrite, so the wire check finds no
+/// loss on the repaired attempt.
+///
+/// Mutation check: stop declaring the added thinking members -> red
+/// (`/thinking/budget_tokens` is an undeclared addition).
+#[cfg(feature = "bedrock")]
+#[tokio::test]
+async fn an_enabled_retry_declares_its_added_budget_and_checks_clean() {
+    use routectl_core::wire_check::{EditKind, EditSite};
+
+    let seat = Arc::new(ThinkingTypeSeat::refusing_types(
+        &["adaptive"],
+        bedrock_adaptive_rejection,
+        AfterRefusal::Serve,
+    ));
+    let router = thinking_chain(&[(BEDROCK_TOML, Arc::clone(&seat))], WIRE_CHECK_EVERY);
+
+    let dispatched = router
+        .complete_with_options(wire_checked_adaptive_req(), RouterOptions::new())
+        .await;
+
+    assert!(dispatched.result.is_ok(), "{:?}", dispatched.result.err());
+    let bodies = seat.bodies();
+    assert_eq!(bodies.len(), 2);
+    assert_eq!(
+        bodies[1]["thinking"],
+        json!({"type": "enabled", "budget_tokens": 24_576, "display": "omitted"}),
+    );
+    let mut repairs: Vec<(String, EditKind)> = seat.requests()[1]
+        .routectl_internal
+        .declared_edits
+        .iter()
+        .filter(|edit| edit.site() == EditSite::FieldRepair)
+        .map(|edit| (edit.path().to_owned(), edit.kind()))
+        .collect();
+    repairs.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(
+        repairs,
+        vec![
+            ("/thinking/budget_tokens".to_owned(), EditKind::Add),
+            ("/thinking/type".to_owned(), EditKind::Rewrite),
+        ],
+    );
+    let snapshot = router.wire_check_snapshot();
+    assert!(snapshot.loss.is_empty(), "{:?}", snapshot.findings);
+}

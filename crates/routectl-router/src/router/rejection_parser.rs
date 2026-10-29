@@ -51,8 +51,9 @@ pub(super) use beta::rejected_beta_flags;
 #[path = "rejection_parser_effort.rs"]
 mod effort;
 use effort::{
-    effort_field_levels, is_effort_field, localize_responses, quoted_list, ranked_rejection,
-    responses_effort_field, unknown_effort_variant, unsupported_effort_level,
+    ListMembers, effort_field_levels, is_effort_field, list_members, localize_responses,
+    quoted_list, ranked_rejection, responses_effort_field, unknown_effort_variant,
+    unsupported_effort_level,
 };
 
 /// Statuses a caller-shaped field rejection arrives on. Everything else says
@@ -82,6 +83,13 @@ const THINKING_SWITCH_LEAD_IN: &str =
     "To turn thinking off on this model, send \"thinking\": {\"type\": \"";
 const THINKING_SWITCH_MIDDLE: &str = "} instead of {\"type\": \"";
 const THINKING_SWITCH_CLOSE: &str = "}.";
+
+/// The serde refusal of a thinking type, exactly as captured on Converse:
+/// `<lead-in><refused>`<middle><types>`, each type backtick-quoted. The text
+/// after the type list (a parser position) is never read.
+const THINKING_VARIANT_LEAD_IN: &str = "Failed to deserialize the JSON body into the target type: \
+     Invalid 'thinking': Invalid 'type': unknown variant `";
+const THINKING_VARIANT_MIDDLE: &str = ", expected ";
 
 /// A `thinking.type` token the off-switch template may name, and the field
 /// path it localizes to.
@@ -487,6 +495,7 @@ fn bedrock_message(parsed: &ParsedErrorBody) -> Option<&str> {
 fn localize_bedrock(message: &str) -> Option<Attribution<'_>> {
     unsupported_temperature(message)
         .or_else(|| output_ceiling(message))
+        .or_else(|| unknown_thinking_variant(message))
         .or_else(|| unknown_effort_variant(message))
         .or_else(|| localize_message(message))
 }
@@ -591,6 +600,35 @@ fn thinking_off_switch(message: &str) -> Option<Attribution<'static>> {
         kind: RejectionKind::UnsupportedField,
         presupposes_presence: true,
         replacements: vec![thinking_type(accepted)?.path],
+        ceiling: None,
+        echoed: None,
+    })
+}
+
+/// ``...Invalid 'type': unknown variant `<B>`, expected `<A>` or `<C>` ...``
+/// refuses type B and names the listed types. The refused type and every
+/// listed one must be in [`THINKING_TYPES`], and the list must not hold the
+/// refused type; otherwise it names nothing.
+fn unknown_thinking_variant(message: &str) -> Option<Attribution<'static>> {
+    let rest = message.strip_prefix(THINKING_VARIANT_LEAD_IN)?;
+    let (refused, rest) = rest.split_once('`')?;
+    let listed = list_members(
+        rest.strip_prefix(THINKING_VARIANT_MIDDLE)?,
+        ListMembers::Quoted,
+    );
+    if listed.is_empty() || listed.contains(&refused) {
+        return None;
+    }
+    let replacements = listed
+        .iter()
+        .map(|token| thinking_type(token).map(|known| known.path))
+        .collect::<Option<Vec<_>>>()?;
+    Some(Attribution {
+        path: thinking_type(refused)?.path,
+        tier: SignalTier::SelfIdentifying,
+        kind: RejectionKind::UnsupportedField,
+        presupposes_presence: true,
+        replacements,
         ceiling: None,
         echoed: None,
     })

@@ -85,6 +85,11 @@ mod closed_table_presence {
         )
     }
 
+    #[cfg(feature = "bedrock")]
+    fn adaptive_thinking() -> ChatRequest {
+        thinking(json!({"type": "adaptive"}), true, None)
+    }
+
     fn enabled_thinking_with_display() -> ChatRequest {
         let mut req = enabled_thinking();
         req.routectl_internal.anthropic_thinking_display = Some("bogus".into());
@@ -196,6 +201,10 @@ mod closed_table_presence {
     #[cfg(feature = "bedrock")]
     fn converse_enabled(_: &ChatRequest, _: Value) -> Value {
         converse_body(&enabled_thinking())
+    }
+    #[cfg(feature = "bedrock")]
+    fn converse_adaptive(_: &ChatRequest, _: Value) -> Value {
+        converse_body(&adaptive_thinking())
     }
     #[cfg(feature = "bedrock")]
     fn converse_temperature(_: &ChatRequest, _: Value) -> Value {
@@ -443,6 +452,10 @@ mod closed_table_presence {
         "../../tests/fixtures/rejections/bedrock/thinking-type-disabled-unsupported.json"
     );
     #[cfg(feature = "bedrock")]
+    const CONVERSE_ADAPTIVE_FIXTURE: &str = include_str!(
+        "../../tests/fixtures/rejections/bedrock/thinking-type-adaptive-unknown-variant-converse.json"
+    );
+    #[cfg(feature = "bedrock")]
     const INVOKE_CEILING_FIXTURE: &str = include_str!(
         "../../tests/fixtures/rejections/bedrock/max-tokens-above-model-limit-invoke.json"
     );
@@ -451,7 +464,7 @@ mod closed_table_presence {
         include_str!("../../tests/fixtures/rejections/bedrock/max-tokens-above-model-limit.json");
 
     #[cfg(feature = "bedrock")]
-    fn bedrock_presence_rows() -> [SiteRow; 6] {
+    fn bedrock_presence_rows() -> [SiteRow; 7] {
         [
             carried(
                 "thinking.type.disabled, invoke",
@@ -473,6 +486,12 @@ mod closed_table_presence {
                 CONVERSE,
                 converse_enabled,
                 || fixture_rejection(CONVERSE_FIXTURE),
+            ),
+            carried(
+                "thinking.type.adaptive, converse",
+                CONVERSE,
+                converse_adaptive,
+                || fixture_rejection(CONVERSE_ADAPTIVE_FIXTURE),
             ),
             carried(
                 "temperature, converse",

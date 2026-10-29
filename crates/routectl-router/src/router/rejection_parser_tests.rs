@@ -35,6 +35,7 @@ const DISPLAY_PATH: &str = "thinking.enabled.display";
 const DISPLAY_MESSAGE: &str = "thinking.enabled.display: Input should be 'summarized', 'omitted'";
 const CONVERSE_WRAPPER: &str = "The model returned the following errors: ";
 const THINKING_DISABLED_PATH: &str = "thinking.type.disabled";
+const THINKING_ADAPTIVE_PATH: &str = "thinking.type.adaptive";
 const TEMPERATURE_PATH: &str = "temperature";
 const MAX_TOKENS_PATH: &str = "max_tokens";
 const EFFORT_PATH: &str = "output_config.effort";
@@ -344,6 +345,12 @@ fn every_committed_rejection_fixture_resolves_to_a_row_or_is_reported_unresolved
         (
             "bedrock/thinking-type-enabled-unsupported",
             Outcome::Row("thinking.type.enabled", SelfIdentifying, UnsupportedField),
+        ),
+        // The serde refusal of a thinking type outside the model's variant
+        // list, which names `thinking` and `type` in its own prose.
+        (
+            "bedrock/thinking-type-adaptive-unknown-variant-converse",
+            Outcome::Row(THINKING_ADAPTIVE_PATH, SelfIdentifying, UnsupportedField),
         ),
         // A model the route does not serve, `param` null: the compat Mantle
         // pass-through control.
@@ -2138,3 +2145,79 @@ fn messages_ceiling_near_misses_name_no_ceiling() {
 
 include!("rejection_parser_effort_tests.rs");
 include!("rejection_parser_ranked_tests.rs");
+
+/// The committed Converse refusal of `adaptive` lists both thinking types the
+/// model takes; the adaptive row's closed accepted set holds only `enabled`,
+/// so that is the one value the rewrite may write.
+///
+/// Mutation check: remove `thinking.type.enabled` from the adaptive row's
+/// accepted set -> red (no member fills); drop the thinking-type serde arm
+/// from `localize_bedrock` -> red (the envelope localizes nothing).
+#[test]
+fn the_converse_adaptive_refusal_names_enabled_on_the_adaptive_row() {
+    let (status, body) = fixture(BEDROCK, "thinking-type-adaptive-unknown-variant-converse");
+
+    assert_eq!(
+        replacements(BEDROCK, status, &body),
+        Some(vec![
+            "thinking.type.disabled".to_string(),
+            "thinking.type.enabled".to_string(),
+        ]),
+        "both members the envelope lists, in its order",
+    );
+    let parsed = UpstreamBody::new(body);
+    let named = parse_rejection(
+        crate::router::FieldRepairTable::grounded_only(),
+        BEDROCK,
+        Some(EgressKind::BedrockConverse),
+        status,
+        parsed.parsed(),
+        SentEffort::Unknown,
+    )
+    .expect("the captured envelope names the adaptive row");
+    assert_eq!(named.row.path, THINKING_ADAPTIVE_PATH);
+    assert_eq!(named.tier, SelfIdentifying);
+    assert_eq!(named.kind, UnsupportedField);
+    assert_eq!(
+        named.value,
+        Some(RejectionValue::Shape("thinking.type.enabled")),
+    );
+}
+
+/// The thinking-type serde arm reads only its own template and only the
+/// closed thinking-type vocabulary: a list with a member outside it, a refused
+/// token outside it, or another field's serde refusal localizes nothing on
+/// the thinking type.
+#[test]
+fn the_thinking_type_serde_arm_reads_only_known_thinking_types() {
+    let lead = "Failed to deserialize the JSON body into the target type: Invalid 'thinking': \
+                Invalid 'type': unknown variant ";
+    let rows = [
+        (
+            "control: the captured shape",
+            format!("{lead}`adaptive`, expected `disabled` or `enabled` at line 1 column 9"),
+            Outcome::Row(THINKING_ADAPTIVE_PATH, SelfIdentifying, UnsupportedField),
+        ),
+        (
+            "a listed member outside the vocabulary",
+            format!("{lead}`adaptive`, expected `disabled` or `turbo` at line 1 column 9"),
+            Outcome::NotLocalized,
+        ),
+        (
+            "a refused token outside the vocabulary",
+            format!("{lead}`turbo`, expected `disabled` or `enabled` at line 1 column 9"),
+            Outcome::NotLocalized,
+        ),
+        (
+            "another field's serde refusal",
+            "Failed to deserialize the JSON body into the target type: Invalid 'tool_choice': \
+             Invalid 'type': unknown variant `adaptive`, expected `disabled` or `enabled`"
+                .to_string(),
+            Outcome::NotLocalized,
+        ),
+    ];
+    for (name, message, expected) in rows {
+        let body = bedrock_body(&format!("{CONVERSE_WRAPPER}{message}"));
+        assert_eq!(outcome(BEDROCK, 400, &body), expected, "{name}");
+    }
+}

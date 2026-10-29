@@ -1,0 +1,6 @@
+{
+  "note": "Tier 1, captured on bedrock (2026-10-21, Converse, us.zai.glm-5.3): thinking.type adaptive sent in additionalModelRequestFields to a non-Anthropic model whose thinking type only takes disabled or enabled. The same message (only the parser column differing) was returned by magistral-small-2509, qwen3-235b, qwen3-32b and qwen3-next-80b on the same run. The message is verbatim, including the Converse model-errors wrapper; the body is the flat {\"message\":...} shape bedrock-runtime returns. lifted_type is the ValidationException discriminator bedrock-runtime sends in x-amzn-ErrorType on a validation 400, namespace stripped, as on the header-captured thinking-type bedrock fixtures; the capture recorded no response headers.",
+  "status": 400,
+  "lifted_type": "ValidationException",
+  "body": "{\"message\":\"The model returned the following errors: Failed to deserialize the JSON body into the target type: Invalid 'thinking': Invalid 'type': unknown variant `adaptive`, expected `disabled` or `enabled` at line 1 column 7788\"}"
+}
