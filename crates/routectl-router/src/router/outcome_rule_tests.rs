@@ -626,7 +626,7 @@ async fn settle_on(
 }
 
 #[tokio::test]
-async fn same_reset_hint_same_breaker_outcome_on_every_surface() {
+async fn same_reset_hint_same_pre_content_breaker_outcome_on_every_surface() {
     let plain = ChatRequest {
         model: "solo".into(),
         ..Default::default()

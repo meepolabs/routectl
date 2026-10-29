@@ -3199,10 +3199,9 @@ impl Default for RetryPolicy {
 
 impl RetryPolicy {
     /// Maximum attempts a single provider can ever consume regardless
-    /// of error class. The router uses this as a hard ceiling so a
-    /// misconfigured policy can't loop forever. Folds the per-class
-    /// `[retry.classes]` overlay so the ceiling can never sit below a
-    /// class cap the resolver would otherwise honor.
+    /// of error class: the max over every cap the per-class resolver can
+    /// return, folding the `[retry.classes]` overlay, so it never sits
+    /// below a class cap the resolver would otherwise honor.
     pub fn hard_retry_cap(&self) -> u32 {
         self.max_attempts
             .max(self.retry_on_429.unwrap_or(0))

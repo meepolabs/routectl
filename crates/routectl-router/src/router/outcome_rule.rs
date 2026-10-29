@@ -82,9 +82,8 @@ pub(super) enum SameProvider {
 /// The same-provider retry decision for one failed attempt on `surface`.
 ///
 /// Streams and token counts never retry the same provider. A completion
-/// retries while under the policy's hard attempt ceiling, the per-class
-/// predicate ([`should_retry_same_provider`]) allows it, and the attempt
-/// did not park the breaker (the re-gate would be a guaranteed
+/// retries while the per-class predicate ([`should_retry_same_provider`])
+/// allows it and the attempt did not park the breaker (the re-gate would be a guaranteed
 /// CircuitOpen). A debit that opened the breaker does not suppress the
 /// retry. A non-probe reset within [`INLOOP_RETRY_AFTER_CAP`] becomes the
 /// retry's sleep floor.
@@ -103,16 +102,14 @@ pub(super) fn same_provider_retry(
     match surface {
         DispatchSurface::Stream | DispatchSurface::CountTokens => SameProvider::No,
         DispatchSurface::Complete => {
-            let retries = attempts_made < policy.hard_retry_cap()
-                && should_retry_same_provider(
-                    err,
-                    class,
-                    policy,
-                    attempts_made,
-                    is_probe,
-                    transcript_rejection,
-                )
-                && !matches!(outcome, BreakerOutcome::Park(_));
+            let retries = should_retry_same_provider(
+                err,
+                class,
+                policy,
+                attempts_made,
+                is_probe,
+                transcript_rejection,
+            ) && !matches!(outcome, BreakerOutcome::Park(_));
             if !retries {
                 return SameProvider::No;
             }
