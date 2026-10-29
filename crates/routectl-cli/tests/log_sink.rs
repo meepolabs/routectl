@@ -470,3 +470,59 @@ fn a_failing_field_writes_escaped_partial_output_and_the_marker_on_one_line() {
     );
     assert!(!out.contains("Unable to format"), "{out:?}");
 }
+
+/// Run `emit` under the production subscriber with `filter` and return what
+/// it wrote.
+fn filtered(filter: EnvFilter, emit: impl FnOnce()) -> String {
+    let buffer = Buffer::default();
+    let sink = buffer.clone();
+    let subscriber = log_sink::subscriber(filter, move || sink.clone(), false, Clock::Off);
+    tracing::subscriber::with_default(subscriber, emit);
+    buffer.text()
+}
+
+const AWS_CREDS_INFO: &str = "synthetic aws credentials loaded";
+const AWS_CREDS_WARN: &str = "synthetic aws credentials failed";
+const ROUTECTL_INFO: &str = "synthetic routectl startup";
+
+/// One aws_config INFO and WARN record shaped like the profile provider's,
+/// plus one routectl INFO record. Shared so the control and the default
+/// run hit the same callsites.
+fn emit_credential_and_routectl_records() {
+    log_info!(
+        target: "aws_config::profile::credentials",
+        creds = "synthetic-identity",
+        "{AWS_CREDS_INFO}"
+    );
+    warn!(target: "aws_config::profile::credentials", "{AWS_CREDS_WARN}");
+    log_info!(target: "routectl_cli::server", "{ROUTECTL_INFO}");
+}
+
+#[test]
+fn default_directive_drops_aws_config_info_but_keeps_its_warn_and_routectl_info() {
+    // Arrange
+    let default =
+        EnvFilter::try_new(log_sink::DEFAULT_DIRECTIVE).expect("DEFAULT_DIRECTIVE must parse");
+    let control = filtered(EnvFilter::new("info"), emit_credential_and_routectl_records);
+    assert!(
+        control.contains(AWS_CREDS_INFO),
+        "control: a plain info filter must surface the aws_config INFO record:\n{control}"
+    );
+
+    // Act
+    let out = filtered(default, emit_credential_and_routectl_records);
+
+    // Assert
+    assert!(
+        !out.contains(AWS_CREDS_INFO),
+        "aws_config INFO must be filtered by default:\n{out}"
+    );
+    assert!(
+        out.contains(AWS_CREDS_WARN),
+        "aws_config WARN must pass:\n{out}"
+    );
+    assert!(
+        out.contains(ROUTECTL_INFO),
+        "routectl INFO must pass:\n{out}"
+    );
+}

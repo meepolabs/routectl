@@ -44,7 +44,16 @@ written as visible ASCII escapes (`\n`, `\r`, `\t`, `\x1b`,
 terminal, or hide text. A field whose own rendering fails keeps its
 escaped partial text followed by `[field formatting failed]`.
 
-Default level is `info`. Every log line carries the module path
+The default directive is `info,aws_config=warn`: INFO for everything
+except the AWS SDK's `aws_config` crate, which is capped at WARN. On a
+Bedrock lane with `creds = { kind = "profile", ... }` that crate logs the
+resolved credentials at INFO, access key id included (the secret key is
+redacted, the key id is not). A `ROUTECTL_LOG` you set replaces the
+default whole and is honored as written, so a plain `ROUTECTL_LOG=info`
+(or `debug` / `trace`) brings that line back into the log and the
+journal. Append `,aws_config=warn` to any directive you run in production.
+
+Every log line carries the module path
 (`routectl_router::router`, `routectl_providers::bedrock`, etc.) and,
 inside an HTTP request, the `request_id` field for correlation across
 fallback hops (read-only polling requests excepted -- see
@@ -117,7 +126,7 @@ log lines emitted while processing the request inherit `request_id` as
 a span field, so:
 
 ```bash
-ROUTECTL_LOG=info ./routectl serve 2>&1 | grep request_id=probe-1
+ROUTECTL_LOG=info,aws_config=warn ./routectl serve 2>&1 | grep request_id=probe-1
 ```
 
 shows every event for one specific request: ingress parse, alias
@@ -139,7 +148,7 @@ response header is still echoed. To correlate a status request's lines by
 id, enable the span:
 
 ```bash
-ROUTECTL_LOG=info,routectl_cli::server::request_id=debug ./routectl serve
+ROUTECTL_LOG=info,aws_config=warn,routectl_cli::server::request_id=debug ./routectl serve
 ```
 
 ## Triage recipes (full bodies on demand)
@@ -206,7 +215,7 @@ The 16 KB trace body cap is the DEFAULT. Override it with
 resolved value is announced at boot. The 4 KB debug excerpt cap is fixed.
 
 Sensitivity caveat: bodies contain user prompts AND assistant outputs
-at TRACE. Leave `ROUTECTL_LOG` at the default `info` level in
+at TRACE. Leave `ROUTECTL_LOG` unset (the default `info,aws_config=warn`) in
 production. Only flip to debug/trace during active triage and prefer
 redirecting the output to a file (`./routectl serve 2>/tmp/triage.log`)
 rather than tailing live.
@@ -1291,10 +1300,10 @@ surfaces as `transition=activated` events with `trigger=startup`.
 
 ```bash
 # Watch activation transitions (login / logout / expiry) live.
-ROUTECTL_LOG=info ./routectl serve 2>&1 | grep "activation inventory"
+ROUTECTL_LOG=info,aws_config=warn ./routectl serve 2>&1 | grep "activation inventory"
 
 # Only the deactivation reason codes.
-ROUTECTL_LOG=info ./routectl serve 2>&1 \
+ROUTECTL_LOG=info,aws_config=warn ./routectl serve 2>&1 \
   | grep "activation inventory" | grep transition=deactivated
 ```
 
@@ -2289,7 +2298,7 @@ condition at the default level, or the filter that brings the line back. The
 translation counters ride the DEBUG metrics snapshot on target
 `routectl_router::router::metrics` (`rc_translation_drop_counts` /
 `rc_translation_policy_action_counts`), so reading them also needs
-`ROUTECTL_LOG=info,routectl_router::router::metrics=debug`.
+`ROUTECTL_LOG=info,aws_config=warn,routectl_router::router::metrics=debug`.
 
 | What moved | Still visible via |
 |---|---|

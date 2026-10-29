@@ -30,7 +30,10 @@ use tracing_subscriber::util::SubscriberInitExt as _;
 pub const FILTER_ENV: &str = "ROUTECTL_LOG";
 
 /// Directive used when [`FILTER_ENV`] is unset or unparseable.
-pub const DEFAULT_DIRECTIVE: &str = "info";
+///
+/// `aws_config` logs resolved credentials (including the access key id) at
+/// INFO when a profile provider loads them, so its cap sits at WARN.
+pub const DEFAULT_DIRECTIVE: &str = "info,aws_config=warn";
 
 /// Appended in place of whatever a failing `Display` / `Debug` impl did not
 /// write, so a truncated record is visibly truncated.
