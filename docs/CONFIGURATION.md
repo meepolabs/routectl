@@ -92,8 +92,9 @@ model on that provider, and an **alias** maps the model string your
 client sends to that model (or to a fallback chain of them):
 
 ```toml
-version = 5           # config schema version; routectl refuses older
-                      # files until `routectl config migrate` runs
+version = 5           # config schema version; routectl refuses an older
+                      # or versionless file (write a new one with
+                      # `routectl init`)
 
 [providers.anthropic-api-key]
 kind        = "anthropic-api"
@@ -210,9 +211,9 @@ version = 5           # config schema version; see "Config schema version"
 
 # Prompt-cache economics (wm/rm/ttl/...) live outside config.toml as of
 # schema v2: a baked table plus catalog_overlay.json, managed via
-# `routectl catalog`. A v1 config's [cache_pricing] table is a hard
-# startup error, never migrated on load; `routectl config migrate` is
-# what folds it into the overlay. See "Retired: [cache_pricing]" below.
+# `routectl catalog`. A [cache_pricing] table is a hard startup error;
+# set the values with `routectl catalog set` instead. See
+# "Retired: [cache_pricing]" below.
 
 [mitm]                # MITM front-proxy: local TLS-terminating
                       # listener fronting a first-party upstream.
@@ -234,44 +235,77 @@ never an error). Copy and edit; do not re-derive. Carrying a v1
 version = 5
 ```
 
-- **`version`** (u32, required in practice) -- the config schema version
-  this file is written against. The current version is `5`
-  (`CURRENT_CONFIG_VERSION` in
-  `crates/routectl-router/src/config/validate.rs`); a file omitting the
-  key reads as the legacy `1`.
+- **`version`** (u32, required): the config schema version this file is
+  written against. The current version is `5` (`CURRENT_CONFIG_VERSION` in
+  `crates/routectl-router/src/config/validate.rs`), and it is the only
+  version this build reads.
 
 The version is checked in a preflight that reads the key straight off the
-raw TOML text, BEFORE the typed deserialize runs. That ordering is what
-makes the two out-of-range verdicts actionable instead of surfacing as a
-confusing `unknown field` error:
+raw TOML text, BEFORE the typed deserialize runs, so a file written for
+another schema is refused by its version instead of surfacing as a
+confusing `unknown field` error. Three verdicts fail closed:
 
-- **Too old** (`version` below the current one, or absent) -- load fails
-  naming `config migrate`. The loader NEVER migrates on load and never
-  writes to the file: `routectl config migrate` is the only thing that
-  rewrites it, and it does so format-preservingly (operator comments
-  survive) in a two-phase commit that stamps the new `version` last.
-- **Too new** (`version` above what this build supports) -- load fails
+- **Too old** (`version` below 5):
+
+  ```text
+  config version 4 is no longer supported; v5 required. Move the old file aside, run `routectl init` to write a new one, and see docs/CONFIGURATION.md for the current schema. Nothing was written.
+  ```
+
+- **Missing** (no `version` key at all, which is every config written for
+  routectl v0.9.0 or earlier):
+
+  ```text
+  config version missing; v5 required. Move the old file aside, run `routectl init` to write a new one, and see docs/CONFIGURATION.md for the current schema. Nothing was written.
+  ```
+
+- **Too new** (`version` above what this build supports): load fails
   naming a binary upgrade, so a config written by a newer routectl is
   never partially interpreted by an older one.
+
+The same preflight runs at every entry point that reads the file:
+`serve`, `config check`, `doctor` (its `version` section FAILs with the
+same remediation), `init`, and every config edit (`config set` /
+`config unset`, `provider add`, the `routectl login` config offer). It
+never writes to the file, and there is no command that rewrites an older
+file to the current schema. `version` is hot-reloadable: a live swap to a
+file the preflight refuses is REJECTED with a WARN
+(`config reload failed; keeping previous config`) and the running router
+keeps serving the config it already loaded.
 
 The preflight only ever speaks about the `version` key. TOML that does not
 parse at all, or a `version` that is present but is not a plain
 non-negative integer, falls through to the normal typed deserialize so the
 precise syntax or type error is the one reported.
 
-Three knobs are retired by the ladder rather than removed silently: v1's
-`[cache_pricing]` table folds into the catalog overlay (see
-[Retired: `[cache_pricing]`](#retired-cache_pricing)), v2's raw-status
-retry allow/deny escape hatch becomes per-class policy (see
-[Per-class retry and fallback policy](#per-class-retry-and-fallback-policy-retryclasses)),
-and v3's provider-level `seat_selection` moves onto the `[pools.<name>]`
-block that groups the accounts (see
-[Migrating a v3 config to explicit pools](#migrating-a-v3-config-to-explicit-pools)),
-and v4's capability lists are replaced by `[capability.overrides]` and
-pass-through (see
-[Version 5 retires the capability lists](#version-5-retires-the-capability-lists)).
-`version` is hot-reloadable: a live swap to a config carrying an
-out-of-range version is REJECTED and the prior router keeps serving.
+**Replacing an older config.** Move the refused file aside (keep it as a
+reference), run `routectl init` to write a version 5 file, then carry your
+settings over by hand using this reference. `init` refuses to edit a file
+it cannot load, which is why the old file has to move first. What each
+schema version retired, and where its replacement lives:
+
+- **v1 -> v2:** the `[cache_pricing]` table; cache economics live in the
+  catalog overlay (see
+  [Retired: `[cache_pricing]`](#retired-cache_pricing)).
+- **v2 -> v3:** the raw-status retry allow/deny escape hatch; use
+  per-class policy (see
+  [Per-class retry and fallback policy](#per-class-retry-and-fallback-policy-retryclasses)).
+- **v3 -> v4:** a bare `oauth://<provider>` ref means the default seat
+  alone, and the provider-level `seat_selection` moves onto a
+  `[pools.<name>]` block (see
+  [Version 4 makes pools explicit](#version-4-makes-pools-explicit)).
+- **v4 -> v5:** the capability lists; use `[capability.overrides]` and
+  pass-through (see
+  [Version 5 retires the capability lists](#version-5-retires-the-capability-lists)).
+
+**Upgrading and rolling back a running daemon.** The binary and the file
+move together: this build refuses the old file, and an older build may
+not read the new one. Move the old file aside, install the new binary,
+write the new file with `routectl init`, then restart the daemon onto the
+new binary. Until that restart, a daemon still running the old binary
+never sees a valid swap from this procedure: a hot reload that fails
+keeps the config it already loaded. Rolling back means restoring the old
+file together with the previous binary; swapping the binary back alone
+leaves it facing a file it may refuse.
 
 ### Version 5 retires the capability lists
 
@@ -288,48 +322,28 @@ pass-through, or by the router's own learned and seeded verdicts:
 | `[bedrock] allowed_body_fields` | nothing: every body field passes through except `mcp_servers` and an orphan `tool_choice` |
 | `[bedrock]` table | nothing: it held only the two lists above |
 
-`routectl config migrate` carries a version 1-4 file to version 5 in one
-change:
+When carrying an older file's lists over by hand:
 
-- **Folds** each `unsupported_features` list into
+- An `unsupported_features` list becomes
   `[capability.overrides.<spec>].unsupported`, where `<spec>` is the
   provider name for a provider list and `"<provider>:<nickname>"` for a
-  model list, appending to any entry the cell already has.
-- **Drops** every EMPTY `allowed_betas` / `allowed_body_fields` list, and
-  removes the `[bedrock]` table when nothing is left in it.
-- **Refuses, writing nothing,** when any allowlist is NON-empty. An
-  allowlist names what may be sent; it does not convert losslessly into
-  the list of what must not be, so the decision is yours. The refusal
-  names each list's path and entry count (never its values). Delete each
-  list and rerun. Deleting a beta list accepts pass-through: client betas
-  are forwarded except the ones the router withholds from the lane. For a
-  beta that must never be sent, add the replacement before rerunning:
+  model list.
+- An allowlist names what may be sent; it does not convert into the list
+  of what must not be, so decide per flag. Dropping a beta list accepts
+  pass-through: client betas are forwarded except the ones the router
+  withholds from the lane. For a beta that must never be sent, write:
 
   ```toml
   [capability.overrides.bedrock-west]
   unsupported = ["beta:context-1m-2025-08-07"]
   ```
 
-  A body-field list has no successor; delete it.
-- **Refuses, writing nothing,** when a folded capability is already in
-  `force_supported` on the same cell: which of the two is meant cannot be
-  derived. Remove the capability from one of the two lists and rerun.
+  A body-field list has no successor; leave it out.
 
-Run `routectl config migrate --dry-run` first to review the rewritten
-file. A version 5 file that still carries a retired key (`[bedrock]`,
+A version 5 file that still carries a retired key (`[bedrock]`,
 `allowed_betas`, `allowed_body_fields`, or `unsupported_features`) is
-refused at load with a message naming the key's path; migrate is a no-op
-on a version 5 file, so remove the key by hand.
-
-**Upgrading a running daemon.** The version check runs in both
-directions, so the binary and the file move together. A version 5
-binary refuses a version 4 file at startup, and an older binary rejects
-a version 5 file as too new. Migrating while the old daemon still serves
-is safe: its hot reload rejects the version 5 file and the running router
-keeps serving the old config. The daemon must then be RESTARTED onto the
-version 5 binary before the migrated file takes effect. Rolling back
-means restoring the version 4 file together with the old binary;
-swapping the binary back alone leaves it facing a file it refuses.
+refused at load with a message naming the key's path; remove the key by
+hand.
 
 ## Editor autocomplete (JSON Schema)
 
@@ -351,10 +365,10 @@ The schema is generated from routectl's own config types (`cargo run
 --bin gen_schema`) and a golden test fails the build if the committed
 file drifts from those types, so it always matches the binary you built.
 Its root carries an `x-routectl-config-version` marker naming the config
-schema version it was generated against. The schema deliberately does NOT
-pin the `version` field to a single value -- editors must keep accepting
-older, still-migratable configs the binary still loads (see "Catalog:
-prompt-cache economics" below for the v1 -> v2 auto-migration).
+schema version it was generated against. The schema does NOT pin the
+`version` field to a single value, so an editor will not flag an older
+`version`; the load-time preflight is what refuses it (see
+[Config schema version](#config-schema-version-version)).
 
 ## Listener auth + routing
 
@@ -1624,8 +1638,8 @@ keys as `computer_use`, while `computer_toolset_*` keeps its own
 `computer_toolset` key; user-defined custom tools contribute no key. If every chain entry is skipped this way, the router returns
 `501 not_implemented` with the message `no provider in chain supports
 features: <keys>`. Config version 5 retired the per-provider and
-per-model `unsupported_features` lists this used to be written as;
-`routectl config migrate` folds them into `[capability.overrides]` (see
+per-model `unsupported_features` lists this used to be written as; write
+them as `[capability.overrides]` entries instead (see
 [Version 5 retires the capability lists](#version-5-retires-the-capability-lists)).
 
 ## Per-provider runtime gates
@@ -2220,10 +2234,10 @@ how that decision is named.
 
 `supports_adaptive_thinking`, `effort_levels`, `max_thinking_budget` and
 `max_output_tokens` are no longer `[models.X]` keys. A config that still
-carries any of them is refused at load, reload, `config migrate` and every
-config edit, with one message listing every `models.<nick>.<key>` path
-(values are never echoed), what now decides that behavior, and "delete the
-key". No `config migrate` rung removes them; delete the lines by hand.
+carries any of them is refused at load, reload and every config edit,
+with one message listing every `models.<nick>.<key>` path (values are
+never echoed), what now decides that behavior, and "delete the key".
+Delete the lines by hand.
 
 | Removed key                  | What decides it now                                                           |
 |------------------------------|-------------------------------------------------------------------------------|
@@ -3077,25 +3091,12 @@ overlay file and picks up a write automatically -- no restart needed.
 ### Retired: `[cache_pricing]`
 
 Config schema v1's `[cache_pricing]` TOML table (and its
-`pricing_verifications.json` sidecar) is retired: at the current schema
-version a non-empty `[cache_pricing]` table is a hard startup error, not
-silently-ignored data.
-
-`routectl config migrate` is what folds it forward -- the loader NEVER
-migrates on load. The migrator plans the whole transform in memory first,
-then commits in two phases: every `[cache_pricing]` entry (already merged
-with any sidecar verification) is written into `catalog_overlay.json` as a
-`source: import` cell, and only then is `config.toml` rewritten
-format-preservingly with the new `version` stamped and `[cache_pricing]`
-dropped. Config last, deliberately: a crash between the phases leaves the
-file still reporting the old version, so a rerun re-plans from scratch.
-
-The migration is idempotent (a cell whose value already matches what a
-prior run wrote is a silent no-op) and fails closed on any conflict
-between a migrated entry and a DIFFERENT pre-existing overlay value --
-nothing is written for ANY key until the conflict is resolved by hand.
-`pricing_verifications.json` is read only as part of this migration;
-nothing writes to it anymore.
+`pricing_verifications.json` sidecar) is retired. A version 5 file with a
+non-empty `[cache_pricing]` table is a hard startup error naming the
+table, not silently-ignored data; remove the table by hand. To keep a
+value it carried, write it into the overlay with
+[`routectl catalog set`](#routectl-catalog-set--routectl-catalog-disable).
+Nothing reads `pricing_verifications.json` any more.
 
 ### `routectl catalog list`
 
@@ -3263,8 +3264,8 @@ Two sections are printed:
   `source=` tag reads the same as `catalog list`:
   - `baked` -- the value came from the compiled-in baked table (no
     overlay cell for this selector);
-  - `import` -- an overlay cell written by `catalog import` (or migrated
-    from a legacy `[cache_pricing]` entry);
+  - `import` -- an overlay cell written by `catalog import` (or, by an
+    earlier build, from a legacy `[cache_pricing]` entry);
   - `user` -- an overlay cell an operator wrote (`catalog set` /
     `catalog verify`);
   - `disabled` -- the overlay explicitly disabled this selector
@@ -3300,9 +3301,10 @@ Every edit runs the same pipeline before a single byte reaches disk, so
 a rejected edit leaves the file byte-identical:
 
 - **Version preflight.** A config older than the schema version this
-  binary writes is refused outright (run `config migrate`, or use a
-  matching-version binary) -- `config set` never migrates a
-  file as a side effect of editing it.
+  binary writes, or one with no `version` key, is refused outright with
+  the same message the loader prints (see
+  [Config schema version](#config-schema-version-version)); an edit never
+  rewrites the file's schema as a side effect.
 - **Path validation.** The dotted path is checked against the config
   schema before any mutation. An unknown key is rejected with the valid
   sibling keys named at that level; a path into an array is rejected
@@ -4656,7 +4658,7 @@ bytes for a schema-version preflight that never stamps the file.
 
 `doctor` NEVER auto-fixes anything. Every WARN or FAIL finding carries a
 remediation that NAMES the fix (`run \`routectl login anthropic\``, `run
-\`routectl config migrate\``, ...) for the operator to run -- the command
+\`routectl init\``, ...) for the operator to run -- the command
 diagnoses, it does not mutate.
 
 The battery sections, in render order:
@@ -4664,7 +4666,7 @@ The battery sections, in render order:
 | Section | Checks |
 |---|---|
 | Provider activation (`inventory`) | Whether each known provider's credential is present and usable; a configured route that depends on an unusable provider is a WARN. |
-| Config schema version (`version`) | The config's schema version against the binary; a too-old config FAILs with a `config migrate` remediation, a too-new one FAILs with an upgrade remediation, a present-but-broken config FAILs rather than reporting all-PASS. |
+| Config schema version (`version`) | The config's schema version against the binary; a too-old or versionless config FAILs with a move-aside-and-`routectl init` remediation, a too-new one FAILs with an upgrade remediation, a present-but-broken config FAILs rather than reporting all-PASS. |
 | Config validation (`config`) | The static validator suite (the same one `config check` runs) plus a read-only secret-presence scan. Every message names the ref SCHEME, never the secret value, path, or env var name. Each catalog overlay cell whose `wm` sits below the conservative sentinel is one WARN naming the selector and field: the overlay accepts it as an intentional override, so the finding is a reminder, not an error. The CLI reads the overlay file; the daemon's `/status/doctor` reads the overlay it is serving, so a hand edit that kept the overlay revision still shows there. |
 | OAuth credentials (`auth`) | Stored OAuth seats and their expiry; no seats logged in is a WARN, an expired seat is a WARN, a credential store that will not open is a FAIL. On the daemon's `/status/doctor` only, each dispatch seat whose credential the upstream rejected (and the router parked) is one WARN `parked seat <state_key>` naming the reason (`credential-expired` / `credential-invalid`) and when the park lapses; the CLI cannot see daemon state and reports no parks. |
 | OAuth seat pools (`pools`) | One row per `[pools.<name>]` block naming its members and the seat each one's ref names, its `seat_selection`, whether it accepts new logins, and any member the credential store holds no seat for; then one purely informational PASS row per `oauth://` reference on a provider entry NO pool claims (a bare ref pins the default seat, a `#label` ref that one seat; neither carries a strategy). A pool missing a member's stored credential is a WARN naming the member, and a pool no member of which has one is a FAIL -- every model naming it is unroutable. When the credential store will not open, presence reads as unknown and the section claims neither (the `auth` section owns that FAIL). LIMIT: this section builds no router, so it reports CONFIG-and-STORE presence -- a member whose credential is stored but which the provider factory could not construct is visible only to a surface that has a built router. |
@@ -5109,7 +5111,7 @@ Under config schema version 3 a bare ref quietly stood for every stored
 seat of its provider. Version 4 retired that reading: reaching several
 accounts is what `[pools.<name>]` is for, and each account gets its own
 `[providers.X]` entry naming its own seat. See
-[Migrating a v3 config to explicit pools](#migrating-a-v3-config-to-explicit-pools).
+[Version 4 makes pools explicit](#version-4-makes-pools-explicit).
 
 **The pool block.** A pool lists the provider entries (accounts) it
 groups, all of the same provider kind:
@@ -5147,8 +5149,8 @@ reject that, along with a mixed-kind pool, an unknown member, a member
 claimed by two pools, and an empty member list. A rejected hot reload
 leaves the running router serving the previous config.
 
-**Naming convention.** The migrator and `routectl login` derive names the
-same way, so a name generated by one is recognized by the other: the POOL
+**Naming convention.** `routectl login` derives names the same way every
+time, so a name it generated is recognized on the next login: the POOL
 takes the plain family name (`anthropic`), and each account entry takes a
 suffixed one -- `<family>-default` for the default seat,
 `<family>-<label>` for a labelled seat. A generated name that collides
@@ -5255,68 +5257,25 @@ fallback chain remain authoritative. An empty or whitespace-only
 `--label` is rejected with a clear error, matching the
 `oauth://<provider>#<label>` ref parser's rule.
 
-### Migrating a v3 config to explicit pools
+### Version 4 makes pools explicit
 
 Config schema version 4 makes `[pools.<name>]` blocks the ONLY multi-seat
 shape. Under version 3 a bare `oauth://<provider>` ref quietly stood for
-EVERY stored seat of that provider; under version 4 it means the DEFAULT
-SEAT alone, and `#<label>` remains the single-seat pin. That is a
-behavior change on an existing file, so the binary refuses a version-3
-config outright rather than reinterpreting it: `serve` and `config check`
-exit nonzero at the version preflight naming `config migrate`, and a hot
-reload of a version-3 file is rejected while the running router keeps
-serving.
+EVERY stored seat of that provider; under version 4 and later it means
+the DEFAULT SEAT alone, and `#<label>` remains the single-seat pin. A
+version 3 file is refused like any older file (see
+[Config schema version](#config-schema-version-version)).
 
-`routectl config migrate` carries the file forward in one change, with
-one confirmation, applied as a unit:
-
-- Any provider-level `seat_selection` moves onto a `[pools.<name>]` block
-  named after the provider family the entry's `oauth://` ref points at.
-- Reading the credential store read-only, any provider entry whose bare
-  ref covered more than one stored seat gains one account entry per
-  labelled seat (`<family>-<label>`, carrying that seat's
-  `oauth://<family>#<label>` ref) and a pool listing them alongside the
-  original entry, so every seat that used to be reachable still is.
-- A single stored seat needs no rewrite: the default seat IS that seat.
-- An entry NAMED after its own provider family (`[providers.anthropic]`
-  carrying `oauth://anthropic` -- what earlier quickstarts taught) holds
-  the exact name the pool must take, and providers, pools and model
-  nicknames share one namespace. Such an entry is RENAMED to
-  `<family>-default` -- the name its own default-seat ref would generate
-  anyway -- and every `[models.X]` naming it follows the rename. This is
-  part of the same all-or-nothing change: the rename appears in the
-  combined diff and in the confirmation, so no entry moves without your
-  say-so. It refuses instead if `<family>-default` is already held by an
-  entry authenticating with a different credential.
-
-Comments and key order survive. Re-running is a no-op. Nothing is written
-unless the whole change is valid and confirmed -- `--dry-run` prints the
-exact candidate and writes nothing, and declining, or any failure at any
-point, leaves `config.toml` byte-identical. The migration refuses rather
-than guess when a generated entry name is already held by an unrelated
-entry, when two seat labels would generate one name, when a seat label
-cannot appear verbatim in a config key, when the pool name is already a
-provider entry or a model nickname, when a `[pools.<name>]` block of that
-name already exists (its membership is your statement about which
-accounts share an egress, so the migration never grows it), when two or
-more provider entries carry a bare `oauth://` ref for the SAME provider
-family (grouping them would merge entries that may point at different
-egresses into one pool and dispatch every account's credential to all of
-them -- pin all but one with `oauth://<family>#<label>`, or write the
-pool blocks by hand), or when the credential store cannot be read at all
-(without it there is no way to tell a single-seat family from a
-multi-seat one, and stamping the version alone would silently narrow the
-ref). Each refusal names what to fix by hand; rerun after.
-
-When the migration materializes a pool, it also repoints every
-`[models.X] provider` that named the migrated entry at the POOL, so a
-model that dispatched across every stored seat before the migration
-keeps doing so after it -- the combined diff shows the repoints and the
-confirmation covers them. A single-seat relocation (no accounts
-materialized) leaves model references alone: one member, identical
-breadth. On `routectl doctor` and `routectl config check` the migrated
-file reads as one pool row listing every account (the pool named after
-the family, its members suffixed) with the models routed through it.
+When writing the new file, give each stored seat you dispatched through
+its own `[providers.X]` entry (`<family>-<label>`, carrying
+`oauth://<family>#<label>`), list those entries in a `[pools.<name>]`
+block that carries the `seat_selection` the provider entry used to, and
+point each `[models.X] provider` that should spread across the seats at
+the POOL (see the pool block above). `routectl login <provider> --label
+<name>` offers the entry and, on a first login for the family, the pool,
+so logging in again per seat after `routectl init` writes the same
+shape. A model left on a single entry's bare ref reaches the default seat
+alone.
 
 ### Header pack ("look like claude-code")
 

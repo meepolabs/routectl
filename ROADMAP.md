@@ -22,8 +22,8 @@ release cut. Highlights, roughly in dependency order:
 - **Model catalog** -- baked cache-economics catalog + user overlay
   with provenance and verification stamps; `routectl catalog
   list/verify/import/set/disable`.
-- **Config schema v3 + `config migrate`** -- versioned config with a
-  deterministic migration ladder; `config set/show/check` with
+- **Config schema v5** -- versioned config refused at load when its
+  version is not the current one; `config set/show/check` with
   dotted-key paths; a committed JSON Schema (`routectl.schema.json`).
 - **Onboarding** -- `routectl init` wizard, `provider add` with
   secret capture (`env://`/managed `file://`; inline `literal:` refs
