@@ -1880,7 +1880,7 @@ fn screen_forwarded_system_content(content: &MessageContent) -> ScreenedSystemCo
 fn screen_forwarded_system_parts(parts: &[ContentPart]) -> ScreenedSystemContent {
     let kept: Vec<ContentPart> = parts
         .iter()
-        .filter(|p| !is_billing_attribution_part(p))
+        .filter(|p| !crate::system_filter::is_billing_attribution_part(p))
         .cloned()
         .collect();
     let blocks_stripped = parts.len().saturating_sub(kept.len());
@@ -1939,43 +1939,6 @@ fn is_blank_text_part(p: &ContentPart) -> bool {
         p,
         ContentPart::Known(KnownContentPart::Text { text, .. }) if text.trim().is_empty()
     )
-}
-
-/// True iff `p` carries a Claude Code billing/attribution block, in any
-/// shape that can hold the fingerprint text: a typed text block, an
-/// unrecognized block with a `text` field (a capitalized or otherwise
-/// unmodeled `type` tag still reaches the wire verbatim), or a document
-/// whose source carries the text inline. Blocks with no text at all (image
-/// bytes, tool blocks, base64 document payloads) can never match.
-fn is_billing_attribution_part(p: &ContentPart) -> bool {
-    match p {
-        ContentPart::Known(KnownContentPart::Text { text, .. }) => {
-            crate::system_filter::is_billing_attribution_block(text)
-        }
-        ContentPart::Known(KnownContentPart::Document { source, .. }) => {
-            value_carries_billing_text(source)
-        }
-        ContentPart::Other { extras, .. } => extras
-            .get("text")
-            .and_then(Value::as_str)
-            .is_some_and(crate::system_filter::is_billing_attribution_block),
-        _ => false,
-    }
-}
-
-/// True iff `source` carries the billing/attribution text: either as the
-/// bare string form or in any string field of the source object (`data` for
-/// a `text` source, and every sibling, so an unmodeled source field cannot
-/// smuggle the fingerprint past the screen).
-fn value_carries_billing_text(source: &Value) -> bool {
-    match source {
-        Value::String(s) => crate::system_filter::is_billing_attribution_block(s),
-        Value::Object(fields) => fields
-            .values()
-            .filter_map(Value::as_str)
-            .any(crate::system_filter::is_billing_attribution_block),
-        _ => false,
-    }
 }
 
 /// Gather the run of tool turns starting at `start`, returning the turns

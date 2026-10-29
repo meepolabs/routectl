@@ -202,7 +202,7 @@ fn normalize_drops_pure_billing_text_system() {
 fn normalize_strips_billing_from_legacy_system_message() {
     use routectl_core::Role;
     let mut req = simple_req();
-    // req.system stays None: force the lift_legacy_system fallback.
+    // req.system stays None: force the lift_legacy_system_stripped fallback.
     req.system = None;
     req.messages = vec![
         Message {

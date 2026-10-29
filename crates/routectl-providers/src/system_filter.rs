@@ -167,7 +167,8 @@ fn is_system_authority(role: &routectl_core::Role) -> bool {
 }
 
 /// Whether `message` is a system-authority turn (see [`is_system_authority`])
-/// carrying the billing/attribution block in any text part.
+/// carrying the billing/attribution block in any part
+/// [`is_billing_attribution_part`] matches.
 #[cfg(any(feature = "openai-compat", feature = "openai-responses"))]
 pub fn system_message_carries_billing_block(message: &routectl_core::Message) -> bool {
     use routectl_core::MessageContent;
@@ -175,20 +176,61 @@ pub fn system_message_carries_billing_block(message: &routectl_core::Message) ->
     is_system_authority(&message.role)
         && match &message.content {
             MessageContent::Text(text) => is_billing_attribution_block(text),
-            MessageContent::Parts(parts) => parts.iter().any(is_billing_text_part),
+            MessageContent::Parts(parts) => parts.iter().any(is_billing_attribution_part),
             MessageContent::Null => false,
         }
 }
 
-#[cfg(any(feature = "openai-compat", feature = "openai-responses"))]
-fn is_billing_text_part(part: &routectl_core::ContentPart) -> bool {
+/// True iff `part` carries a Claude Code billing/attribution block, in any
+/// shape that can hold the fingerprint text: a typed text block, an
+/// unrecognized block with a `text` field (a capitalized or otherwise
+/// unmodeled `type` tag still reaches the wire verbatim), or a document
+/// whose source carries the text inline. Blocks with no text at all (image
+/// bytes, tool blocks, base64 document payloads) can never match.
+#[cfg(any(
+    feature = "openai-compat",
+    feature = "openai-responses",
+    feature = "anthropic-api"
+))]
+pub fn is_billing_attribution_part(part: &routectl_core::ContentPart) -> bool {
     use routectl_core::{ContentPart, KnownContentPart};
+    use serde_json::Value;
 
-    matches!(
-        part,
-        ContentPart::Known(KnownContentPart::Text { text, .. })
-            if is_billing_attribution_block(text)
-    )
+    match part {
+        ContentPart::Known(KnownContentPart::Text { text, .. }) => {
+            is_billing_attribution_block(text)
+        }
+        ContentPart::Known(KnownContentPart::Document { source, .. }) => {
+            value_carries_billing_text(source)
+        }
+        ContentPart::Other { extras, .. } => extras
+            .get("text")
+            .and_then(Value::as_str)
+            .is_some_and(is_billing_attribution_block),
+        _ => false,
+    }
+}
+
+/// True iff `source` carries the billing/attribution text: either as the
+/// bare string form or in any string field of the source object (`data` for
+/// a `text` source, and every sibling, so an unmodeled source field cannot
+/// smuggle the fingerprint past the screen).
+#[cfg(any(
+    feature = "openai-compat",
+    feature = "openai-responses",
+    feature = "anthropic-api"
+))]
+fn value_carries_billing_text(source: &serde_json::Value) -> bool {
+    use serde_json::Value;
+
+    match source {
+        Value::String(s) => is_billing_attribution_block(s),
+        Value::Object(fields) => fields
+            .values()
+            .filter_map(Value::as_str)
+            .any(is_billing_attribution_block),
+        _ => false,
+    }
 }
 
 /// `message` with the block withheld, or `None` when nothing is left of it.
@@ -207,7 +249,7 @@ pub fn without_billing_attribution(
         MessageContent::Parts(parts) => {
             let kept: Vec<_> = parts
                 .iter()
-                .filter(|part| !is_billing_text_part(part))
+                .filter(|part| !is_billing_attribution_part(part))
                 .cloned()
                 .collect();
             (!kept.is_empty()).then(|| Message {

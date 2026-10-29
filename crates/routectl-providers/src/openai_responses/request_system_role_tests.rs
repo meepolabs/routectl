@@ -423,3 +423,80 @@ fn other_role_turns_are_screened_only_when_they_carry_system_authority() {
         assert_eq!(delta, expected_delta, "{name}");
     }
 }
+
+/// An unmodeled part whose `type` tag routectl does not recognize but which
+/// still carries a `text` field.
+fn unmodeled_text_part(text: &str) -> ContentPart {
+    let mut extras = serde_json::Map::new();
+    extras.insert("text".into(), Value::String(text.into()));
+    ContentPart::Other {
+        type_tag: "Text".into(),
+        cache_control: None,
+        extras,
+    }
+}
+
+/// The block screen is per carrier, not per modeled type: the block riding an
+/// unmodeled text-bearing part of a system or developer turn kept in place is
+/// counted once as withheld, and the same part without the block counts
+/// nothing. The unmodeled part itself never reaches this wire (the content
+/// build drops it), so the count is what tells the two apart.
+#[test]
+fn an_unmodeled_part_carrying_the_fingerprint_is_withheld_from_responses_and_counted() {
+    let rows: [(&str, Role, &str, u64); 4] = [
+        ("system turn", Role::System, RESPONSES_FINGERPRINT, 1),
+        (
+            "developer turn",
+            Role::Other("developer".into()),
+            RESPONSES_FINGERPRINT,
+            1,
+        ),
+        (
+            "system turn without the fingerprint",
+            Role::System,
+            "plain",
+            0,
+        ),
+        (
+            "developer turn without the fingerprint",
+            Role::Other("developer".into()),
+            "plain",
+            0,
+        ),
+    ];
+    for (name, role, unmodeled_text, expected_delta) in rows {
+        // Arrange
+        let wire_role = match &role {
+            Role::Other(tag) => tag.clone(),
+            _ => "system".to_string(),
+        };
+        let turn = Message {
+            role,
+            content: MessageContent::Parts(vec![
+                unmodeled_text_part(unmodeled_text),
+                text_part("legit-sentinel"),
+            ]),
+            ..system_text("")
+        };
+        let req = req_with(vec![user_text("hi"), turn, user_text("again")]);
+
+        // Act
+        let (wire, delta) = wire_with_strip_delta(&req);
+
+        // Assert
+        assert!(
+            !wire.to_string().contains(RESPONSES_FINGERPRINT_TELL),
+            "{name}: {wire}"
+        );
+        assert_eq!(wire["instructions"], json!(""), "{name}");
+        let input = wire["input"].as_array().expect("input array");
+        assert_eq!(input.len(), 3, "{name}: {wire}");
+        assert_eq!(input[1]["role"], json!(wire_role), "{name}");
+        assert_eq!(
+            input[1]["content"],
+            json!([{"type": "input_text", "text": "legit-sentinel"}]),
+            "{name}"
+        );
+        assert_eq!(delta, expected_delta, "{name}");
+    }
+}

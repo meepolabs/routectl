@@ -52,6 +52,8 @@ redacted, the key id is not). A `ROUTECTL_LOG` you set replaces the
 default whole and is honored as written, so a plain `ROUTECTL_LOG=info`
 (or `debug` / `trace`) brings that line back into the log and the
 journal. Append `,aws_config=warn` to any directive you run in production.
+A global `trace` filter also needs `,aws_smithy_runtime=debug,aws_sigv4=debug`:
+at TRACE those two crates log the resolved credential identity as well.
 
 Every log line carries the module path
 (`routectl_router::router`, `routectl_providers::bedrock`, etc.) and,

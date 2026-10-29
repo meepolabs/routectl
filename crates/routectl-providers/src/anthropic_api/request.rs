@@ -893,8 +893,8 @@ pub(crate) fn normalize_deferring_format_key_warn(
     let primary = filtered_system.as_ref().map(translate_system);
     let legacy = (system_turns == SystemTurnPolicy::Lift).then(|| {
         // Legacy lift: strip the billing block from the lifted text too.
-        // lift_legacy_system joins Role::System messages into a single
-        // AnthropicSystem::Text. Filter each text part through the
+        // lift_legacy_system_stripped joins Role::System messages into one
+        // flat system text. Filter each text part through the
         // same billing predicate so the fingerprint never reaches a
         // third-party host via this path either. A separate flag keeps
         // the log line one-per-strip: the req.system branch above already

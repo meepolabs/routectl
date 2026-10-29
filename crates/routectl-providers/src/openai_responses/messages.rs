@@ -324,7 +324,7 @@ fn translate_other_message(
 
 /// A system turn carrying a non-text part, emitted in place as a `system`
 /// message item through the same content build a user turn takes. The
-/// billing/attribution text part is withheld first; `system.rs` sees the
+/// billing/attribution part is withheld first; `system.rs` sees the
 /// same part and records the withhold, so it is counted once per request.
 fn translate_system_message(
     id: &str,
@@ -333,18 +333,10 @@ fn translate_system_message(
     out: &mut Vec<ResponseInputItem>,
     tally: &mut ResponsesDropTally,
 ) -> Result<()> {
-    let MessageContent::Parts(parts) = &msg.content else {
+    let Some(msg) = crate::system_filter::without_billing_attribution(msg) else {
         return Ok(());
     };
-    let kept: Vec<ContentPart> = parts
-        .iter()
-        .filter(|p| {
-            !matches!(p, ContentPart::Known(KnownContentPart::Text { text, .. })
-                if crate::system_filter::is_billing_attribution_block(text))
-        })
-        .cloned()
-        .collect();
-    let content = build_user_content(id, auth_kind, &MessageContent::Parts(kept), tally)?;
+    let content = build_user_content(id, auth_kind, &msg.content, tally)?;
     if !content.is_empty() {
         out.push(ResponseInputItem::Message {
             role: "system".into(),

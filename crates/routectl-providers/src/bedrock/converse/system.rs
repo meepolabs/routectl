@@ -41,7 +41,7 @@ pub(super) fn count_dropped_system_parts(req: &ChatRequest) {
 /// here (Bedrock cache_point semantics).
 ///
 /// When `req.system` is None, falls back to lifting Role::System
-/// messages out of `req.messages` via `lift_legacy_system` -- mirrors
+/// messages out of `req.messages` via `lift_legacy_system_stripped` -- mirrors
 /// the Anthropic egress so direct callers (no ingress, just
 /// `messages: [{role:"system",...}]`) don't silently lose their system
 /// prompt. When BOTH a top-level `system` and Role::System messages are

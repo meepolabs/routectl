@@ -151,17 +151,25 @@ fn flatten_filtered_system(req: &ChatRequest, withheld: &mut bool) -> Option<Str
 ///
 /// A message carrying a non-text part rides in place as an input item (see
 /// `messages::build_input`), so it contributes no entry; it is still screened
-/// here, so a fingerprint withheld from that item is recorded once.
+/// here, with the same part rule the in-place withhold applies (which also
+/// matches an unmodeled part carrying the block), so that withhold is
+/// recorded once.
 fn system_role_entries(messages: &[Message], withheld: &mut bool) -> Vec<String> {
     messages
         .iter()
         .filter(|m| matches!(m.role, Role::System) && !matches!(m.content, MessageContent::Null))
         .filter_map(|message| {
+            if message.content.has_non_text_part() {
+                if crate::system_filter::system_message_carries_billing_block(message) {
+                    *withheld = true;
+                }
+                return None;
+            }
             let parts = crate::system_filter::system_role_texts_stripped(
                 std::slice::from_ref(message),
                 withheld,
             );
-            (!parts.is_empty() && !message.content.has_non_text_part()).then(|| parts.join("\n"))
+            (!parts.is_empty()).then(|| parts.join("\n"))
         })
         .collect()
 }

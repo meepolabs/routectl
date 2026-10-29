@@ -22,8 +22,8 @@ use std::collections::HashSet;
 
 use routectl_core::wire_check::IngressDialect;
 use routectl_core::{
-    ChatChunk, ChatRequest, ChatResponse, ContentPart, Error, KnownContentPart, MessageContent,
-    RefusalReason, Result, Role, SystemBlock, SystemContent,
+    ChatChunk, ChatRequest, ChatResponse, ContentPart, Error, KnownContentPart, Message,
+    MessageContent, RefusalReason, Result, Role, SystemBlock, SystemContent,
 };
 use routectl_providers::is_billing_attribution_block;
 use serde_json::Value;
@@ -236,10 +236,13 @@ pub(crate) struct LiftedSystem {
 ///   egress withholds that block alone instead of testing a joined string.
 pub(crate) fn lift_system_messages(req: &mut ChatRequest) -> LiftedSystem {
     let mut lifted = LiftedSystem::default();
+    if !req.messages.iter().any(is_liftable) {
+        return lifted;
+    }
     let mut lifted_blocks: Vec<SystemBlock> = Vec::new();
     let mut kept = Vec::with_capacity(req.messages.len());
     for (index, m) in req.messages.iter().enumerate() {
-        if !matches!(m.role, Role::System) || m.content.has_non_text_part() {
+        if !is_liftable(m) {
             kept.push(m.clone());
             continue;
         }
@@ -275,9 +278,6 @@ pub(crate) fn lift_system_messages(req: &mut ChatRequest) -> LiftedSystem {
             }
             MessageContent::Null => {}
         }
-    }
-    if lifted.indices.is_empty() {
-        return lifted;
     }
     req.messages = kept.into();
 
@@ -326,6 +326,12 @@ pub(crate) fn lift_system_messages(req: &mut ChatRequest) -> LiftedSystem {
         }
     }
     lifted
+}
+
+/// Whether [`lift_system_messages`] moves `m` into `req.system`: a system
+/// turn whose content is text only.
+fn is_liftable(m: &Message) -> bool {
+    matches!(m.role, Role::System) && !m.content.has_non_text_part()
 }
 
 /// True when the existing system text or any lifted block is a Claude Code

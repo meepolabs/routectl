@@ -3,7 +3,7 @@
 //! Mirrors `crate::anthropic_api::request::normalize` in shape but emits
 //! AWS camelCase + the `additionalModelRequestFields` envelope. Reuses
 //! the Anthropic-shape primitives (`translate_system`, `translate_tool`,
-//! `lift_legacy_system`, `strip_text_after_tool_use`, `compose_thinking`)
+//! `lift_legacy_system_stripped`, `strip_text_after_tool_use`, `compose_thinking`)
 //! where the canonical-side mapping is identical, then adapts to AWS
 //! naming.
 //!

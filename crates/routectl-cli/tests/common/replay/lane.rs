@@ -1203,8 +1203,7 @@ static ANTHROPIC_FIDELITY_EXCEPTIONS: [Exception; 8] = [
                  (crates/routectl-providers/src/anthropic_api/system.rs), which joins the \
                  Role::System texts (dropping billing/attribution blocks per text part) and is \
                  reached only from the `req.system`-ABSENT fallback in the anthropic-api \
-                 request assembly; `lift_legacy_system` is the unfiltered sibling the \
-                 Bedrock Converse egress reuses. Length-changing, hence a NORMALIZER: \
+                 request assembly. Length-changing, hence a NORMALIZER: \
                  whitelisting it per index would have to cover essentially the whole message \
                  array. Reachability caveat, re-derive before trusting it: the lift runs \
                  under the Lift system-turn policy only -- under Forward the turns ride the \

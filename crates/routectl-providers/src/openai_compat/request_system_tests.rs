@@ -590,3 +590,121 @@ fn other_role_turns_are_screened_only_when_they_carry_system_authority() {
         assert_eq!(delta, expected_delta, "{name}");
     }
 }
+
+/// An unmodeled part whose `type` tag routectl does not recognize but which
+/// still carries a `text` field; this wire forwards such a part verbatim.
+fn unmodeled_text_part(text: &str) -> ContentPart {
+    let mut extras = serde_json::Map::new();
+    extras.insert("text".into(), serde_json::Value::String(text.into()));
+    ContentPart::Other {
+        type_tag: "Text".into(),
+        cache_control: None,
+        extras,
+    }
+}
+
+fn known_text_part(text: &str) -> ContentPart {
+    ContentPart::Known(KnownContentPart::Text {
+        text: text.into(),
+        citations: None,
+        cache_control: None,
+    })
+}
+
+fn authority_turn(role: Role, parts: Vec<ContentPart>) -> Message {
+    Message {
+        role,
+        content: MessageContent::Parts(parts),
+        ..system_parts_message(&[])
+    }
+}
+
+/// The block screen is per carrier, not per modeled type: the block riding an
+/// unmodeled text-bearing part of a system or developer turn is withheld and
+/// counted once, and the same part without the block rides unchanged.
+#[test]
+fn an_unmodeled_part_carrying_the_fingerprint_is_withheld_from_openai_compat() {
+    let developer = || Role::Other("developer".into());
+    let rows: Vec<(&str, Message, Message, u64)> = vec![
+        (
+            "system turn",
+            authority_turn(
+                Role::System,
+                vec![
+                    unmodeled_text_part(COMPAT_FINGERPRINT),
+                    known_text_part("legit-sentinel"),
+                ],
+            ),
+            authority_turn(Role::System, vec![known_text_part("legit-sentinel")]),
+            1,
+        ),
+        (
+            "developer turn",
+            authority_turn(
+                developer(),
+                vec![
+                    unmodeled_text_part(COMPAT_FINGERPRINT),
+                    known_text_part("legit-sentinel"),
+                ],
+            ),
+            authority_turn(developer(), vec![known_text_part("legit-sentinel")]),
+            1,
+        ),
+        (
+            "system turn without the fingerprint is unchanged",
+            authority_turn(
+                Role::System,
+                vec![
+                    unmodeled_text_part("plain"),
+                    known_text_part("legit-sentinel"),
+                ],
+            ),
+            authority_turn(
+                Role::System,
+                vec![
+                    unmodeled_text_part("plain"),
+                    known_text_part("legit-sentinel"),
+                ],
+            ),
+            0,
+        ),
+        (
+            "developer turn without the fingerprint is unchanged",
+            authority_turn(
+                developer(),
+                vec![
+                    unmodeled_text_part("plain"),
+                    known_text_part("legit-sentinel"),
+                ],
+            ),
+            authority_turn(
+                developer(),
+                vec![
+                    unmodeled_text_part("plain"),
+                    known_text_part("legit-sentinel"),
+                ],
+            ),
+            0,
+        ),
+    ];
+    for (name, turn, expected_turn, expected_delta) in rows {
+        // Arrange
+        let expected = serde_json::to_value(&expected_turn).expect("turn serializes");
+        let req = req_with(
+            None,
+            vec![user_text_message("hi"), turn, user_text_message("again")],
+        );
+
+        // Act
+        let (body, rendered, delta) = wire_and_strip_delta(&req);
+
+        // Assert
+        assert!(
+            !rendered.contains(COMPAT_FINGERPRINT_TELL),
+            "{name}: {rendered}"
+        );
+        assert_eq!(body["messages"].as_array().map(Vec::len), Some(3), "{name}");
+        assert_eq!(body["messages"][1], expected, "{name}");
+        assert_eq!(delta, expected_delta, "{name}");
+    }
+}
