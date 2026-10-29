@@ -176,7 +176,7 @@ async fn guard_commit(chunks: Vec<ChatChunk>) -> Vec<ChatChunk> {
         "wire-1",
         FixedStream::provider(chunks),
         ChatRequest::default(),
-        &RetryPolicy::default(),
+        RetryPolicy::default().stream_first_byte_timeout_ms,
     )
     .await
     .expect("the guard commits");
@@ -192,7 +192,7 @@ async fn guard_error(chunks: Vec<ChatChunk>) -> String {
         "wire-1",
         FixedStream::provider(chunks),
         ChatRequest::default(),
-        &RetryPolicy::default(),
+        RetryPolicy::default().stream_first_byte_timeout_ms,
     )
     .await
     {
@@ -302,7 +302,7 @@ async fn content_chunk_commits_instead_of_being_summarized() {
         "wire-1",
         FixedStream::provider(vec![role(), empty_reasoning(), text("hi"), finish()]),
         ChatRequest::default(),
-        &RetryPolicy::default(),
+        RetryPolicy::default().stream_first_byte_timeout_ms,
     )
     .await
     .expect("text commits the stream");
@@ -472,7 +472,7 @@ fn endless_ready_empty_reasoning_stream_still_hits_the_first_content_timeout() {
             "wire-1",
             provider,
             ChatRequest::default(),
-            &policy,
+            policy.stream_first_byte_timeout_ms,
         ));
         let _ = tx.send(outcome.map(|_| ()));
     });

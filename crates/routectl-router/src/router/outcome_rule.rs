@@ -137,11 +137,16 @@ pub(super) fn same_provider_retry(
 /// of a degenerate zero-length park (a `force_open(.., ZERO)` would leave
 /// the breaker stuck half-open without ever tripping).
 pub(super) fn rate_limit_reset_hint(err: &Error, policy: &RetryPolicy) -> Option<Duration> {
+    reset_hint_clamped_to(err, policy.max_honored_retry_after())
+}
+
+/// [`rate_limit_reset_hint`] against an already-resolved `ceiling`.
+pub(super) fn reset_hint_clamped_to(err: &Error, ceiling: Duration) -> Option<Duration> {
     match err {
         Error::Upstream {
             retry_after: Some(d),
             ..
-        } => Some((*d).min(policy.max_honored_retry_after())).filter(|d| !d.is_zero()),
+        } => Some((*d).min(ceiling)).filter(|d| !d.is_zero()),
         _ => None,
     }
 }

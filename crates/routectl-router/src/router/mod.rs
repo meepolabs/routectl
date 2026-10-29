@@ -2078,7 +2078,8 @@ struct DispatchTarget {
     /// `[providers.X.class_overrides]` config table (`ConfigFailureClass`
     /// -> canonical `FailureClass` via `ConfigFailureClass::to_failure_class`).
     /// Consulted immediately after `classify` at each of the three dispatch
-    /// error arms (`apply_remap`): a status-key match replaces the
+    /// error arms and on a probe stream's frame error after content
+    /// (`apply_remap`): a status-key match replaces the
     /// classifier's native class with the operator's override, keeping the
     /// native `matched_by`. Empty (the default, and the value every
     /// constructor starts with) leaves native classification untouched.

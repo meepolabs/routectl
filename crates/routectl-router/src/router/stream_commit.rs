@@ -2,6 +2,7 @@
 //! guard that buffers content-free leading chunks until the first
 //! content-bearing one commits the provider.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -9,22 +10,22 @@ use futures::stream::{BoxStream, StreamExt};
 use parking_lot::Mutex;
 use routectl_core::{
     ChatChunk, ChatRequest, Error, Provider, Result,
-    failure_class::{LastOutcome, classify},
+    failure_class::{FailureClass, LastOutcome, classify},
 };
 
-use crate::config::RetryPolicy;
-
-use super::outcome_rule::{BreakerOutcome, breaker_outcome, rate_limit_reset_hint};
+use super::dispatch::{apply_remap, upstream_status_for_remap};
+use super::outcome_rule::{BreakerOutcome, breaker_outcome, reset_hint_clamped_to};
 use super::precontent::{is_empty_reasoning_only, precontent_summary};
 
 /// Wrap an upstream stream so the breaker records success on clean
 /// completion (None / EOS) and settles the FIRST error that bubbles out of
 /// the stream once; subsequent errors do not double-count. A non-probe
 /// stream records that error as a failure whatever its class. A probe
-/// stream (`is_probe`) settles it by the shared rule (`breaker_outcome`):
-/// a probe's 429/529 leaves the breaker untouched, as it does before
-/// content; otherwise a debiting class takes the threshold-gated debit, a
-/// non-debiting class takes none, and a probe never parks.
+/// stream (`is_probe`) settles it by the shared rule (`breaker_outcome`)
+/// on the class after the target's `class_overrides` remap, as before
+/// content: a probe's 429/529 leaves the breaker untouched; otherwise a
+/// debiting class takes the threshold-gated debit, a non-debiting class
+/// takes none, and a probe never parks.
 ///
 /// For a half-open PROBE the call site already closed the breaker on
 /// first content, so a mid-stream failure here re-trips it and a
@@ -46,7 +47,8 @@ pub(super) fn wrap_with_breaker_accounting(
     provider_kind: Option<&'static str>,
     quota_feed: crate::quota::feed::FirstChunkFeed,
     is_probe: bool,
-    policy: RetryPolicy,
+    class_overrides: BTreeMap<u16, FailureClass>,
+    max_honored_retry_after: Duration,
 ) -> BoxStream<'static, Result<ChatChunk>> {
     use futures::stream::StreamExt as _;
     struct BreakerAccounting {
@@ -82,11 +84,15 @@ pub(super) fn wrap_with_breaker_accounting(
                 return;
             }
             self.settled = true;
-            let class = classify(e, ctx.provider_kind).class;
-            let outcome = if ctx.is_probe {
-                breaker_outcome(e, &class, rate_limit_reset_hint(e, &ctx.policy), true)
+            let native = classify(e, ctx.provider_kind);
+            let (class, outcome) = if ctx.is_probe {
+                let (cf, _) =
+                    apply_remap(native, upstream_status_for_remap(e), &ctx.class_overrides);
+                let hint = reset_hint_clamped_to(e, ctx.max_honored_retry_after);
+                let outcome = breaker_outcome(e, &cf.class, hint, true);
+                (cf.class, outcome)
             } else {
-                BreakerOutcome::Debit
+                (native.class, BreakerOutcome::Debit)
             };
             match outcome {
                 BreakerOutcome::None => {}
@@ -103,7 +109,8 @@ pub(super) fn wrap_with_breaker_accounting(
     struct FrameErrorContext {
         provider_kind: Option<&'static str>,
         is_probe: bool,
-        policy: RetryPolicy,
+        class_overrides: BTreeMap<u16, FailureClass>,
+        max_honored_retry_after: Duration,
     }
 
     impl Drop for BreakerAccounting {
@@ -124,7 +131,8 @@ pub(super) fn wrap_with_breaker_accounting(
     let ctx = FrameErrorContext {
         provider_kind,
         is_probe,
-        policy,
+        class_overrides,
+        max_honored_retry_after,
     };
     let s = async_stream::stream! {
         let mut inner = inner;
@@ -191,7 +199,8 @@ pub(super) fn is_content_bearing(chunk: &ChatChunk) -> bool {
 /// The buffer is never exposed to the client before content commits: the API
 /// cannot both surface those chunks and re-enter the outer fallback loop.
 ///
-/// `policy.stream_first_byte_timeout_ms` (when set) caps the wait for
+/// `first_content_timeout_ms` (the policy's `stream_first_byte_timeout_ms`,
+/// when set) caps the wait for
 /// stream-open PLUS the entire pre-content pull loop, so leading content-free
 /// chunks neither reset nor satisfy it -- a role-then-hang still trips the
 /// first-content timeout and falls over. Expiry surfaces as a status-0
@@ -205,7 +214,7 @@ pub(super) async fn try_stream_with_first_content(
     upstream_model: &str,
     provider: Arc<dyn Provider>,
     req: ChatRequest,
-    policy: &RetryPolicy,
+    first_content_timeout_ms: Option<u64>,
 ) -> Result<BoxStream<'static, Result<ChatChunk>>> {
     // Per-attempt clock for the first-activity mark below -- NOT the
     // request-level clock `UsageCapture::start` uses for `ttfb_ms`
@@ -305,7 +314,7 @@ pub(super) async fn try_stream_with_first_content(
         }
     };
 
-    match policy.stream_first_byte_timeout_ms {
+    match first_content_timeout_ms {
         Some(ms) => match tokio::time::timeout(Duration::from_millis(ms), open_and_first).await {
             Ok(r) => r,
             Err(_) => Err(Error::upstream(

@@ -1453,7 +1453,7 @@ impl Router {
                     model,
                     provider.clone(),
                     attempt_req.clone(),
-                    &attempt_policy,
+                    attempt_policy.stream_first_byte_timeout_ms,
                 )
                 .await;
                 attempts_made += 1;
@@ -1564,7 +1564,8 @@ impl Router {
                                     .map(crate::quota::key::seat_key_for_served_identity),
                             ),
                             is_probe,
-                            policy.clone(),
+                            target.class_overrides.clone(),
+                            policy.max_honored_retry_after(),
                         ));
                     }
                     Err(mut e) => {
