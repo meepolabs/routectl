@@ -17,7 +17,7 @@ use routectl_core::{
 use serde_json::{Value, json};
 
 use super::Router;
-use super::scripted_provider_support::{Answer, ScriptedProvider};
+use super::scripted_provider_test_support::{Answer, ScriptedProvider};
 use crate::config::{AliasValue, Config, ProviderEntry, ProviderRuntimePolicy};
 use crate::learned_capability::{EntryVerdict, ExportedEntry};
 use crate::resolved::ResolvedModel;

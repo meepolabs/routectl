@@ -23,7 +23,7 @@ use super::super::field_repair::{
     TEST_UNSUPPORTED_SENTINEL,
 };
 use super::super::rejection_parser::rejected_wire_path;
-use super::super::scripted_provider_support::{Answer, ScriptedProvider, Shape};
+use super::super::scripted_provider_test_support::{Answer, ScriptedProvider, Shape};
 use super::PendingWireRejection;
 use crate::config::Config;
 use crate::resolved::ResolvedModel;

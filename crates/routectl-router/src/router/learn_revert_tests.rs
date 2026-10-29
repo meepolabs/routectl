@@ -17,7 +17,7 @@ use routectl_testkit::CapturedEvent;
 use serde_json::{Value, json};
 
 use super::super::field_repair::{TEST_UNSUPPORTED_PATH, TEST_UNSUPPORTED_SENTINEL};
-use super::super::scripted_provider_support::{Answer, ScriptedProvider, Shape};
+use super::super::scripted_provider_test_support::{Answer, ScriptedProvider, Shape};
 use crate::config::Config;
 use crate::resolved::ResolvedModel;
 use crate::router::{Router, RouterOptions};

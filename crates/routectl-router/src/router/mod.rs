@@ -3305,8 +3305,8 @@ mod probe_scheduling_tests;
 mod probe_test_support;
 
 #[cfg(test)]
-#[path = "scripted_provider_support.rs"]
-mod scripted_provider_support;
+#[path = "scripted_provider_test_support.rs"]
+mod scripted_provider_test_support;
 
 #[cfg(test)]
 #[path = "stream_commit_tests.rs"]
