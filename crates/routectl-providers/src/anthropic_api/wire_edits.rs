@@ -112,28 +112,41 @@ pub fn declare_sampling_clamp(
     }
 }
 
-/// Declare each assistant `tool_use` block whose `id` the wire charset
-/// forces a rewrite of, at its canonical message and block index -- the
-/// client's own indices on the Anthropic ingress, the one lane whose diff
-/// reads them. Chat-shaped `tool_calls` and tool turns reach this egress
-/// only from a translating ingress, where no path is compared. The ids are
-/// re-sanitized to learn whether any changes; the walk runs only with a tap.
+/// Declare each `tool_use` id and `tool_result` `tool_use_id` the wire
+/// charset forces a rewrite of, at its canonical message and block index --
+/// the client's own indices on the Anthropic ingress, the one lane whose diff
+/// reads them. A `tool_use` id is rewritten on assistant turns only; a
+/// `tool_result` id on any turn translated part by part. Chat-shaped
+/// `tool_calls` and tool turns reach this egress only from a translating
+/// ingress, where no path is compared. The ids are re-sanitized to learn
+/// whether any changes; the walk runs only with a tap.
 pub fn declare_tool_id_sanitize(tap: Option<&WireTap>, messages: &[Message]) {
     if tap.is_none() {
         return;
     }
     for (index, msg) in messages.iter().enumerate() {
-        let (Role::Assistant, MessageContent::Parts(parts)) = (&msg.role, &msg.content) else {
+        let MessageContent::Parts(parts) = &msg.content else {
             continue;
         };
+        if matches!(msg.role, Role::Tool | Role::System) {
+            continue;
+        }
+        let is_assistant = matches!(msg.role, Role::Assistant);
         for (block, part) in parts.iter().enumerate() {
-            if let ContentPart::Known(KnownContentPart::ToolUse { id, .. }) = part
-                && matches!(crate::tool_id::sanitize_tool_id(id), Cow::Owned(_))
-            {
+            let (id, field) = match part {
+                ContentPart::Known(KnownContentPart::ToolUse { id, .. }) if is_assistant => {
+                    (id, "id")
+                }
+                ContentPart::Known(KnownContentPart::ToolResult { tool_use_id, .. }) => {
+                    (tool_use_id, "tool_use_id")
+                }
+                _ => continue,
+            };
+            if matches!(crate::tool_id::sanitize_tool_id(id), Cow::Owned(_)) {
                 declare(
                     tap,
                     EditSite::ToolIdSanitize,
-                    format!("/messages/{index}/content/{block}/id"),
+                    format!("/messages/{index}/content/{block}/{field}"),
                     EditKind::Rewrite,
                 );
             }

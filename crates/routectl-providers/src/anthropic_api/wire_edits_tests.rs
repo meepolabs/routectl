@@ -158,11 +158,14 @@ const ASSEMBLY_ROWS: &[AssemblyRow] = &[
         expected: &[(EditKind::Add, "/output_config")],
     },
     AssemblyRow {
-        name: "tool-use id rewritten to the wire charset",
+        name: "tool-use and tool-result ids rewritten to the wire charset",
         site: EditSite::ToolIdSanitize,
         firing: || tool_use_exchange(&["call_a1", "call.a:1"]),
         idle: || tool_use_exchange(&["call_a1", "call_b2"]),
-        expected: &[(EditKind::Rewrite, "/messages/1/content/2/id")],
+        expected: &[
+            (EditKind::Rewrite, "/messages/1/content/2/id"),
+            (EditKind::Rewrite, "/messages/2/content/1/tool_use_id"),
+        ],
     },
     AssemblyRow {
         name: "unsigned thinking block stripped",

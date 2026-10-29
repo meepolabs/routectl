@@ -7,7 +7,9 @@
 //! whose entries each have their own counting wiremock upstream, both able
 //! to serve, so a refused dispatch or a fallback hop shows up in the
 //! per-entry received-request counts. A paired control request through the
-//! same servers proves the counters see traffic.
+//! same servers proves the counters see traffic. A well-formed pair whose
+//! id is outside the upstream's id charset still reaches the upstream as a
+//! matched pair.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -438,6 +440,40 @@ async fn paired_transcripts_reach_the_upstream() {
         h.chain_calls(ANTHROPIC_ALIAS).await,
         (1, 0),
         "count_tokens (primary, fallback)"
+    );
+}
+
+#[tokio::test]
+async fn messages_keep_a_rewritten_tool_id_paired_across_content_blocks() {
+    // Arrange: an OpenAI-origin id the anthropic wire charset cannot carry.
+    let h = Harness::start().await;
+    let body = json!({
+        "model": ANTHROPIC_ALIAS,
+        "max_tokens": 64,
+        "messages": [
+            {"role": "user", "content": "q"},
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "call.a:1", "name": "lookup", "input": {}}
+            ]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "call.a:1", "content": "r"}
+            ]}
+        ]
+    });
+
+    // Act
+    let (status, response) = h.post("/v1/messages", &body).await;
+
+    // Assert
+    assert_eq!(status, 200, "{response}");
+    let (primary, fallback) = h.chain_of(ANTHROPIC_ALIAS);
+    let sent = bodies(primary).await;
+    assert_eq!((sent.len(), bodies(fallback).await.len()), (1, 0));
+    let messages = &sent[0]["messages"];
+    assert_eq!(messages[1]["content"][0]["id"], "esc_call_2ea_3a1");
+    assert_eq!(
+        messages[2]["content"][0]["tool_use_id"], "esc_call_2ea_3a1",
+        "the tool_result names the same wire id as its tool_use: {messages}"
     );
 }
 

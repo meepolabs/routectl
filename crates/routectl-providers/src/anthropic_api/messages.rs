@@ -93,8 +93,9 @@ fn render_skipped_format(format: Option<&str>, redact: bool) -> String {
 ///   block itself from `tool_call_id` (sanitized to match its
 ///   tool_use), so it has no id to build or correlate. A client-authored
 ///   `tool_result` content part (typed or passthrough) is NOT checked:
-///   the egress relays it verbatim and never reads its `tool_use_id`,
-///   so an empty or absent id is forwarded for the upstream to judge.
+///   a typed part's `tool_use_id` is only sanitized like its tool_use
+///   (empty stays empty) and a passthrough part is relayed verbatim, so
+///   an empty or absent id is forwarded for the upstream to judge.
 /// - STRIP any `Thinking` content block whose `signature` is missing,
 ///   empty, or not Claude-shaped (a foreign signature minted by another
 ///   provider on a cross-provider turn) from each message's `Parts`
@@ -571,7 +572,9 @@ fn translate_known_part(k: &KnownContentPart, envelopes: &mut EnvelopeUnwrapTall
             is_error,
             cache_control,
         } => ContentBlock::ToolResult {
-            tool_use_id: tool_use_id.clone(),
+            // Same normalization as the tool_use id it answers, so the
+            // pair still correlates on the wire. An empty id stays empty.
+            tool_use_id: crate::tool_id::sanitize_tool_id(tool_use_id).into_owned(),
             content: content.clone(),
             cache_control: cache_control.clone(),
             is_error: *is_error,
@@ -2337,7 +2340,7 @@ mod thinking_signature_tests {
 mod tool_id_correlation_tests {
     use super::{ContentBlock, SystemTurnPolicy, passthrough_tally, translate_messages_untallied};
     use crate::anthropic_api::types::{AnthropicContent, AnthropicMessage};
-    use routectl_core::{Message, MessageContent, Role};
+    use routectl_core::{ContentPart, KnownContentPart, Message, MessageContent, Role};
     use serde_json::json;
 
     fn user_msg() -> Message {
@@ -2564,6 +2567,86 @@ mod tool_id_correlation_tests {
         assert_eq!(tool_use_id(&out), expected);
         assert_eq!(tool_result_id(&out), expected);
         assert_eq!(expected.len(), 64);
+    }
+
+    fn parts_turn(role: Role, part: KnownContentPart) -> Message {
+        Message {
+            content: MessageContent::Parts(vec![ContentPart::Known(part)]),
+            role,
+            ..user_msg()
+        }
+    }
+
+    /// A tool_use / tool_result exchange carried entirely on typed content
+    /// parts, the shape the Messages ingress produces.
+    fn content_part_exchange(use_id: &str, result_id: &str) -> Vec<Message> {
+        vec![
+            user_msg(),
+            parts_turn(
+                Role::Assistant,
+                KnownContentPart::ToolUse {
+                    id: use_id.into(),
+                    name: "f".into(),
+                    input: json!({}),
+                    cache_control: None,
+                },
+            ),
+            parts_turn(
+                Role::User,
+                KnownContentPart::ToolResult {
+                    tool_use_id: result_id.into(),
+                    content: json!("ok"),
+                    is_error: None,
+                    cache_control: None,
+                },
+            ),
+        ]
+    }
+
+    #[test]
+    fn content_part_tool_result_id_matches_its_sanitized_tool_use() {
+        let rows = [
+            ("escaped id", "call.a:1", "esc_call_2ea_3a1"),
+            ("wire-safe id", "call_a1", "call_a1"),
+        ];
+        for (name, raw, wire) in rows {
+            // Arrange
+            let messages = content_part_exchange(raw, raw);
+
+            // Act
+            let out = translate_messages_untallied(
+                "anthropic",
+                &messages,
+                SystemTurnPolicy::Lift,
+                &mut passthrough_tally(),
+            )
+            .expect("translation must not error");
+
+            // Assert
+            assert_eq!(tool_use_id(&out), wire, "{name}: tool_use");
+            assert_eq!(tool_result_id(&out), wire, "{name}: tool_result");
+        }
+    }
+
+    /// An empty id names no call: it is forwarded empty, never minted into
+    /// an id that could pair with something.
+    #[test]
+    fn content_part_tool_result_empty_id_is_forwarded_empty() {
+        // Arrange
+        let messages = content_part_exchange("call.a:1", "");
+
+        // Act
+        let out = translate_messages_untallied(
+            "anthropic",
+            &messages,
+            SystemTurnPolicy::Lift,
+            &mut passthrough_tally(),
+        )
+        .expect("translation must not error");
+
+        // Assert
+        assert_eq!(tool_use_id(&out), "esc_call_2ea_3a1");
+        assert_eq!(tool_result_id(&out), "");
     }
 
     fn tool_use_ids(out: &[AnthropicMessage]) -> Vec<String> {
