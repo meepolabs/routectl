@@ -561,7 +561,11 @@ license.
   success path; `in_band_error_status` / `IN_BAND_ERROR_DEFAULT_STATUS`
   derive the status of an error object inside an HTTP-200 body (only
   `400..=599` trusted, else 502), shared by the gemini and openai-compat
-  stream parsers
+  stream parsers; `local_build_error` (over the `LocalBuildFailure` trait,
+  implemented for `reqwest::Error` and `serde_json::Error`) maps a local
+  request-build or body-serialize failure on every egress to
+  `Error::Internal` (classifies `Unknown`: no retry, no fallback, no breaker
+  debit; the URL is dropped from the detail)
 - `src/effort.rs` -- shared effort helpers: `VALID_EFFORT_TOKENS`,
   `wire_effort` (the one `none` = omit decision for the translating
   egresses) and the one effort/budget table (`budget_from_level`,
@@ -1221,6 +1225,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/bedrock/mod.rs` -- `BedrockProvider`; topology comment for Invoke vs
   Converse dispatch; `map_bedrock_upstream_error` / `map_error_message` (the
   lane's error mapper over an `upstream_error::UpstreamErrorRead`);
+  `count_tokens_once` deposits on the attempt's wire tap the model body the
+  CountTokens wrapper carries (the serialized InvokeModel body, or the
+  `converse` member), via `count_tokens_body`, as `complete` and `stream`
+  deposit theirs;
   `with_runtime_origin_for_tests` (behind `test-utils`) points a real
   provider at a mock origin
 - `src/bedrock/auth.rs` -- AWS credential resolution (`Bearer` short-circuit,
@@ -2654,7 +2662,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `field_preflight`, `repair_budget`, `window_gate`, `outcome_rule`
 - `src/router/dispatch_loop.rs` -- the one dispatch walk: `Router::run_walk`
   over a `SurfaceAdapter` (`pub(super)`, statically dispatched: `Output`,
-  `SURFACE`, `admits`, `deadline`, `invoke`, `on_commit`, `exhausted`) owns
+  `SURFACE`, `admits`, `deadline`, `invoke`, `on_commit`, `exhausted`, plus
+  the defaulted seam hooks `settle_probe_admissions`, `field_settlement_mode`,
+  `install_wire`, `read_failed_wire`, `disposition` -> `ErrorDisposition`,
+  `observe_failure`; implemented by `dispatch::CompleteAdapter`,
+  `dispatch::StreamAdapter` and `count_tokens::CountAdapter`) owns
   chain resolution and probe admissions, per-target guards and request
   shaping, the gate, the attempt loop, auth refresh, the learner repair
   branch, classify and remap, breaker outcome, credential park, the one
@@ -2662,60 +2674,59 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   advancement. The per-attempt deadline is `tokio::time::timeout` around
   `invoke`; expiry is the typed `DeadlineFired`, rendered by the adapter's
   `Deadline` as a status-0 upstream error. `CommitCtx` carries what a
-  committed attempt hands the adapter. Boolean surface differences are
+  committed attempt hands the adapter, `Exhaustion` what a walk that
+  committed nothing hands it, `FailureObservation` what a settled failure
+  hands `observe_failure`. Boolean surface differences are
   `const fn` rows on `class_observe::DispatchSurface`
   (`strict_reject_walks`, `unknown_provider_walks`, `health_error_walks`,
-  `sleeps_between_attempts`, `records_success_on_commit`). Also owns the
+  `sleeps_between_attempts`, `records_success_on_commit`, `shapes_message`,
+  `dedupes_learning_per_request`, `holds_recovered_errors`,
+  `gate_refusal_walks`, plus the `gate_blocked_message` text).
+  `Router::finish_dispatch` (`pub(crate)`) is the single finish point every
+  public entry point calls once after `run_walk` returns on any exit: it
+  records repairs-per-request and emits the replay degradations, field
+  repairs, wire rejections and field pre-flight decisions held on the meta (a
+  stream's request itself ends later, in the cli's stream drive). Also owns the
   walk's shared shaping and retry helpers: `apply_context_reduction` (+
   `reduction_strategy_token`), the forwarded-credential guards
   (`missing_forwarded_bearer_error`, `forwarded_terminal_status`,
   `log_forwarded_auth_terminal`), `add_jitter`/`mul_duration` and
   `next_is_sibling_seat`; `dispatch` and `count_tokens` import them from
   here, and the loop imports nothing from `dispatch`
-- `src/router/dispatch.rs` -- the dispatch retry state machine (the module
-  exempt from the line-size target: `complete`/`stream` are one retry loop and
-  the lossy-trim live-cut lands here). Public API:
-  `complete`/`complete_with_options` + `stream`/`stream_with_options`;
-  complete runs `dispatch_loop::run_walk` through `CompleteAdapter`
-  (`request_timeout_ms` per attempt, then the provider-stamp / relabel /
-  evidence / quota commit), stream its `stream_inner` loop body, which first record the
-  request's tool pairing defect (`transcript_defect::record_transcript_defect`)
-  and then walk the resolved
-  chain (from `chain::dispatch_chain_for_request`) attempting each
-  `DispatchTarget`, retrying within a provider per `RetryPolicy` with
-  exponential backoff (`dispatch_loop::add_jitter`/`mul_duration`); both error arms take
-  their park/debit decision from `outcome_rule` (`breaker_outcome`, applied
-  through `apply_breaker_outcome`), and the complete arm also takes its
-  same-provider retry from it (a small honored reset becomes the next sleep's floor; a
-  larger one parks the provider via the breaker instead).
-  `wrap_with_breaker_accounting` (settles a post-content error frame once: a
-  non-probe stream debits whatever the class, a probe stream applies
-  `breaker_outcome`; also the STREAMING quota seam: offers each Ok
-  chunk to the armed `quota::feed::FirstChunkFeed`), and
-  `try_stream_with_first_content` (buffers
-  content-free leading chunks -- a `delta.role` opener, id/model metadata --
-  until the first content-bearing chunk per `is_content_bearing`, so the
-  fallback boundary is first CONTENT, not stream-open; chunks matching
-  `precontent::is_empty_reasoning_only` do not count toward the cap (the
-  loop yields to the runtime after each, so the first-content timeout
-  still fires on an always-ready stream) and
-  each consecutive run is buffered as one; its overflow and
-  closed-before-content errors append `precontent::precontent_summary` of
-  the buffered kinds) wrap each
-  attempt; `policy_for` + `compose_attempt_policy` resolve the per-attempt
-  policy. Failure-class routing threads
+- `src/router/dispatch.rs` -- the two message surfaces of the dispatch walk
+  and the per-attempt helpers the walk calls back into. Public API:
+  `complete`/`complete_with_options` + `stream`/`stream_with_options`; each
+  builds a `RepairBudget::per_request`, runs `dispatch_loop::run_walk`
+  through its adapter, then calls `dispatch_loop::finish_dispatch`.
+  `CompleteAdapter`: `request_timeout_ms` per attempt, then the
+  provider-stamp / relabel (`resolve_reported_model`) / evidence / quota
+  commit. `StreamAdapter`: the first-content timeout
+  (`stream_first_content_timed_out`) per attempt, `invoke` through
+  `stream_commit::try_stream_with_first_content` (first CONTENT, not
+  stream-open, is the fallback boundary), and a commit that relabels and wraps
+  the stream in `stream_commit::wrap_with_breaker_accounting`. The walk
+  itself (chain resolution via `chain::dispatch_chain_for_request`, the
+  `transcript_defect::record_transcript_defect` pairing record, per-target
+  retries per `RetryPolicy` with `dispatch_loop::add_jitter`/`mul_duration`
+  backoff, the park/debit decision from `outcome_rule::breaker_outcome`
+  applied through `apply_breaker_outcome`, the completion-only same-provider
+  retry where a small honored reset becomes the next sleep's floor and a
+  larger one parks the provider via the breaker instead) lives in
+  `dispatch_loop`. `policy_for` + `compose_attempt_policy` resolve the
+  per-attempt policy. Failure-class routing in the walk threads
   `routectl_core::failure_class::classify` through every error arm:
   `class_observe::apply_remap(native, status, overrides)` (status via
   `upstream_status_for_remap`) applies the target's `class_overrides` keeping
   the native `matched_by`, then `outcome_rule::should_fallback` (with
-  `probe_fast_fail_status`, shared with `outcome_rule`) decides the chain hop
+  `outcome_rule::probe_fast_fail_status`) decides the chain hop
   and `outcome_rule` the breaker and same-provider retry outcome. Class-decision
   observability: `emit_class_observability` emits one `emit_class_decision`
   event per arm (with `ClassDecisionObs` / `DispatchSurface` / `UpstreamFacts`
   / `upstream_facts`, safe structured dimensions only) plus a
   `routectl::feature_unsupported` INFO via `emit_feature_unsupported` on a
-  lift, and bumps the `RouterMetrics` counters. Would-trim recording lives
-  here with the loop: `record_would_trim` + `would_trim_k_floor_for_meta` +
+  lift, and bumps the `RouterMetrics` counters; the walk calls it through
+  each adapter's default `observe_failure`. Would-trim recording lives
+  here: `record_would_trim` + `would_trim_k_floor_for_meta` +
   `record_near_lossless_marks` (`NEAR_LOSSLESS_RECORDER_VERSION`). The K
   triple itself is derived in ONE place: `k_query_key(session_key,
   provider_kind, served_model) -> KQueryKey`, projected to the read side via
@@ -2729,7 +2740,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   (a `Low` estimate has its `k_floor` clamped to 0.0, so no caller may compare
   the number without it). `Router::k_emission_suppressed(plan, target,
   session_key)` is the K-gated emission consult built on the same two helpers:
-  called once per chain entry above the retry loop, it short-circuits
+  called once per chain entry above the attempt loop, it short-circuits
   (`[cache] k_gated_emission` off -> caller breakpoints -> global auto-emit off
   -> keyless -> no nickname) before allocating anything, then compares the
   Calibrated `k_floor` against `cost_gate::emission_break_even_k` for the
@@ -2744,14 +2755,14 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   rather than only on trim-triggering ones (last-writer-wins across a chain
   walk leaves the served attempt's estimate). The
   dispatch-path context reducer (`dispatch_loop::apply_context_reduction`, the single helper
-  both the completion and streaming loops call: `apply_json_minify` +
+  the walk calls on both message surfaces: `apply_json_minify` +
   `reduction_strategy_token` -> `DispatchMeta.reduction_strategy`, plus
   `accumulate_reduction_counters` folding the pass's `ReductionDelta` into the
   four `DispatchMeta.reduction_strings_compressed`/`_skipped`/`_rejected` +
   `reduction_bytes_saved` counters -- additive across fallback-entry
   preparations, never re-counted by a same-target retry) runs after
   overlays and before the TRANSACTIONAL auto-cache placement helper
-  `cache_plan::apply_auto_cache_placement` -- shared by both dispatch surfaces, gated by
+  `cache_plan::apply_auto_cache_placement` -- shared by both message surfaces, gated by
   `cache_plan::AutoCacheRequestPlan` plus the per-target `cache_target_gates`
   (`CacheTargetGates`: terminal capability + switch, front wire-support +
   switch), applying the FRONT per-block marker
@@ -2760,34 +2771,37 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   discarding whole (`shared_skip_reason` / `cap_skip` / `rollback_skip` fold the
   per-marker reasons) and mapping `cache_plan::CacheDecision` ->
   `DispatchMeta.cache_strategy` / `cache_front_decision` /
-  `cache_terminal_decision`; both run on `complete`/`stream` only, never
-  `count_tokens`. The same above-the-loop position also hosts the
+  `cache_terminal_decision`; both run in the walk's per-attempt message
+  shaping (`DispatchSurface::shapes_message`, so on `complete`/`stream` only,
+  never `count_tokens`), which calls back into `k_emission_suppressed` and
+  `record_would_trim` here. The walk's above-the-loop position also hosts the
   once-per-client-request `prefix_rewrite::Router::observe_prefix_epoch` call on
-  both paths. Forwarded-credential handling:
+  both message surfaces. Forwarded-credential handling (all in the walk):
   `dispatch_loop::missing_forwarded_bearer_error` refuses a `use_forwarded_credential` target
   with no client bearer BEFORE egress and ends the request (the one terminal
   pre-dispatch refusal: a strict strip refusal, a rolled-back strip hazard and
   the Gemini pairing refusal leave the target unsent and walk on),
-  `resolve_reported_model` keeps the
+  `resolve_reported_model` (here, used by both adapters' commits) keeps the
   client's requested model verbatim, and `dispatch_loop::forwarded_terminal_status` +
   `log_forwarded_auth_terminal` surface a 401/403/429 on a forwarded
-  credential verbatim (no refresh, no fallback). The class/remap helpers are
-  `pub(super)`, shared with `count_tokens` and `feature_filter`; the pure
+  credential verbatim (no refresh, no fallback). The pure
   classification/observability labels (`DispatchSurface`,
-  `UpstreamFacts`/`upstream_facts`, `class_label`, `matched_by_label`) now
-  live in `class_observe` and are imported from there. The reasoning-replay
-  strip-repair branch lives here too: a fixed one-shot correctness arm
-  (bounded additive, never nested across fallback) that on a classified
-  replay rejection admits via `replay_repair`, swaps to the stripped variant,
-  and retries once; `replay_repair::replay_rejection_body_free` rebuilds the rejection with
-  no upstream body before generic logging, and `emit_replay_degradation`
-  (`pub(super)`, also called by the token-count walk) fires one degradation
-  WARN per recorded repair, each carrying the request's `repair_count`. Within `run_walk` and `stream_inner`
-  the per-target learner state and the replay / field / canary / generic
-  arbitration live in `learn_engine::AttemptLearning` (one instance per target,
-  handling each rejection and the eventual success), the same engine each `count_tokens_try_seat` seat
-  holds on the `CountTokens` surface. Both chain loops declare the shared
-  `repair_budget::RepairBudget` above themselves; every arm's own conditions
+  `UpstreamFacts`/`upstream_facts`, `class_label`, `matched_by_label`) and
+  the class remap live in `class_observe` and are imported from there. The
+  reasoning-replay strip-repair branch lives in the walk: a fixed one-shot
+  correctness arm (bounded additive, never nested across fallback) that on a
+  classified replay rejection admits via `replay_repair`, swaps to the
+  stripped variant, and retries once;
+  `replay_repair::replay_rejection_body_free` rebuilds the rejection with no
+  upstream body before generic logging, and
+  `replay_repair::emit_replay_degradation` (called once per request from
+  `finish_dispatch`) fires one degradation WARN per recorded repair, each
+  carrying the request's `repair_count`. Within `run_walk` the per-target
+  learner state and the replay / field / canary / generic arbitration live in
+  `learn_engine::AttemptLearning` (one instance per target on every surface,
+  handling each rejection and the eventual success). Each public entry point
+  declares the shared `repair_budget::RepairBudget` and lends it to the
+  walk; every arm's own conditions
   gate first and the CHARGE happens inside the transform
   (`FieldRepairPlan::apply_named` for the field kind), so the repair count is bounded
   per REQUEST rather than per target and a transform that changed nothing costs
@@ -2796,11 +2810,12 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   clone/retry/fallback can no longer repeat it):
   `warn_dropped_reasoning_dialect` +
   `carries_responses_reasoning_dialect` / `target_drops_responses_reasoning`
-  (`RESPONSES_PROVIDER_KIND`) emit ONE WARN (no field values) at the dispatch
-  point inside each chain loop when the per-target post-overlay request
-  carries `provider_extras["reasoning"]` `context` / `mode` that a
-  non-Responses egress drops -- target-accurate, deduped by a stack-local
-  `reasoning_drop_warned` flag above the loop
+  (`RESPONSES_PROVIDER_KIND`) emit ONE WARN (no field values), called by the
+  walk at the dispatch point of each message-surface attempt when the
+  per-target post-overlay request carries `provider_extras["reasoning"]`
+  `context` / `mode` that a non-Responses egress drops -- target-accurate,
+  deduped by a stack-local `reasoning_drop_warned` flag above the walk's
+  chain loop
 - `src/router/replay_repair.rs` -- the router-side reasoning-replay carry
   admission + strip-repair settlement the dispatch arm drives:
   `ReplayCarryPlan` / `plan_replay_carry` decide carry-once vs proactive
@@ -2810,7 +2825,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `DispatchMeta.cleared_capabilities`, unsettled `Drop` on an unrelated error)
   and records each repair in `DispatchMeta.replay_degradations` through
   `record_replay_repair` -> `ReplayRepairHandle`, settled by
-  `settle_replay_repair`; owns `replay_rejection_body_free` (the body-free
+  `settle_replay_repair`, and reported by `emit_replay_degradation` (one WARN
+  per recorded repair, called from `dispatch_loop::finish_dispatch`); owns
+  `replay_rejection_body_free` (the body-free
   rebuild of a classified replay rejection, shared by the walks and the
   learner) and
   `strip_replay_artifacts_recalibrating`, THE dispatch-path strip entry point,
@@ -2826,7 +2843,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   strip without the re-stamp; its direct behavior coverage lives in
   `src/router/replay_strip_tests.rs`
 - `src/router/field_repair.rs` -- the reactive L0 envelope-field repair the
-  three dispatch arms drive, and the counterpart of `replay_repair` for the
+  dispatch walk drives on all three surfaces, and the counterpart of `replay_repair` for the
   field kind. Owns `FIELD_REPAIRS`, the CLOSED path-to-surface table (fifteen
   grounded rows today, all `Envelope`: one `output_config.effort.<level>`
   `RankedRewrite` over `FieldSurface::Effort` per effort level, its carriers
@@ -3028,7 +3045,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `src/router/field_repair_chain_responses_tests.rs`, an `include!`d fragment
   of `field_repair_chain_tests.rs`
 - `src/router/field_preflight.rs` -- the canonical PRE-DISPATCH envelope-field
-  planner all three dispatch walks share, and the proactive counterpart of
+  planner the dispatch walk runs on all three surfaces, and the proactive counterpart of
   `field_repair`'s reactive arm. `Router::plan_field_preflight(original_req,
   target, surface)` takes the request by shared reference and returns
   an owned `(ChatRequest, Vec<FieldPreflight>, FieldPreflightPlan)` triple --
@@ -3036,7 +3053,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   mutating the caller's
   request is impossible by signature and every fallback target plans from the
   same original rather than from a sibling target's clone. Called from
-  `run_walk`, `stream_inner`, and `count_tokens_try_seat` at one
+  `dispatch_loop::run_walk` on every surface at one
   position: after the layered overlays and the strip interceptor, before
   provider translation, the context reduction, and the calibration stamp --
   so the planned body is the one both a remote count and every local read of
@@ -3279,13 +3296,17 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   on a terminal non-retryable fixture (a retryable class re-dispatches the same
   body, which is correct but makes attempts and requests differ)
 - `src/router/class_observe.rs` -- pure classification/observability leaf
-  shared across the dispatch surfaces: `DispatchSurface` (+ `as_str`),
+  shared across the dispatch surfaces: `DispatchSurface` (+ `as_str` and the
+  `const fn` per-surface rows the walk branches on, e.g. `health_error_walks`,
+  `gate_refusal_walks`, `shapes_message`),
   `UpstreamFacts` (+ `upstream_facts`, the safe-facts extractor that carries
   only numeric status and structured classifier tokens, never
   body/prompt/header/Display text), `class_label` (fail-closed low-cardinality
   `FailureClass` token), `matched_by_label`, and the per-provider class
-  remap (`upstream_status_for_remap`, `apply_remap`). All `pub(super)`, imported by
-  `dispatch`, `count_tokens`, and `feature_filter`; the shared leaf keeps
+  remap (`upstream_status_for_remap`, `apply_remap`), plus
+  `is_capability_error` (the count_tokens capability signal). All
+  `pub(super)`, imported by `dispatch_loop`, `dispatch`, `stream_commit`,
+  `count_tokens`, and `feature_filter`; the shared leaf keeps
   `feature_filter` from importing out of `dispatch`, so the import edge
   between them is one-way
 - `src/router/chain.rs` -- alias/chain resolution and expansion into dispatch
@@ -3302,8 +3323,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `first_target_oauth_id`, backing the discovery-time credential check in
   `handlers/models.rs`
 - `src/router/learn_engine.rs` -- per-target learner state for one chain
-  iteration of `run_walk` / `stream_inner`, or one
-  `count_tokens_try_seat` seat: `AttemptLearning` owns the
+  iteration of `dispatch_loop::run_walk` on any surface (a token-count seat
+  included): `AttemptLearning` owns the
   replay and envelope-field carry plans, the held `FieldPreflightPlan` (canary
   repair + settlement only on the `Complete` surface), the learned re-probe
   settle guard and each repair branch's repaired-state flags; the learn dedupe
@@ -3438,15 +3459,22 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `Router::count_tokens` (result-only, NON-SETTLING) and
   `count_tokens_with_meta` -> `CountedTokens` (SETTLING), both through
   `count_tokens_settling`, which threads a `field_repair::FieldSettlementMode`
-  down to the seat's carry admission; `count_tokens_walk` skips seats
-  `seat_can_count_tokens` refuses (egress kind + upstream model id; a
-  `bedrock` seat needs an Anthropic-family id) and `count_tokens_try_seat`
-  returns a `CountSeatOutcome`. Runs no reducer/cache. Each seat holds one
-  `learn_engine::AttemptLearning` on the `CountTokens` surface (repairs,
-  revert and settlement are the engine's), installs a bare per-call tap
-  (`install_count_wire_tap`) that `read_count_rejection_site` reads on a
-  rejection, and settles the breaker through `outcome_rule::breaker_outcome`
-  and `apply_breaker_outcome`. The surface-specific learning rules are in the
+  down to the seat's carry admission, builds a `CountAdapter` and runs
+  `dispatch_loop::run_walk` then `finish_dispatch`. `CountAdapter` (the
+  `CountTokens` surface): `admits` skips seats `seat_can_count_tokens`
+  refuses (egress kind + upstream model id; a `bedrock` seat needs an
+  Anthropic-family id), `deadline` is `request_timeout_ms`,
+  `settle_probe_admissions` settles the filter's re-probes before the walk,
+  `disposition` walks a capability error to the next seat with no breaker
+  debit (a wire 501 logged at DEBUG), `exhausted` returns a parked or
+  timed-out seat's error, else one of the two 501 `NotImplemented` shapes,
+  and `install_wire` / `read_failed_wire` install a bare per-call tap
+  (`wire_check::install_count_wire_tap`) that
+  `wire_rejection::read_count_rejection_site` reads on a rejection. Runs no
+  reducer/cache. Each seat holds one `learn_engine::AttemptLearning` on the
+  `CountTokens` surface (repairs, revert and settlement are the engine's), and
+  the walk settles the breaker through `outcome_rule::breaker_outcome` and
+  `apply_breaker_outcome`. The surface-specific learning rules are in the
   module `//!` doc; the walk's wire behavior is covered in
   `src/router/count_tokens_wire_tests.rs`
 - `src/router/rejection_parser.rs` -- `parse_rejection` -> `NamedRejection`,
@@ -4097,12 +4125,19 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `observe_response_evidence` on the caller's Router and returns whether the
   detectors read it (false when spoiled, unended, already taken, or refused
   by that Router's config)
-- `src/router/stream_commit.rs` -- the streaming dispatch helpers:
+- `src/router/stream_commit.rs` -- the streaming dispatch helpers
+  `StreamAdapter` calls:
   `try_stream_with_first_content` (pre-content guard: buffers content-free
-  leading chunks, bounded by `MAX_PRECONTENT_CHUNKS` and the first-content
-  timeout, until `is_content_bearing` commits the provider) and
-  `wrap_with_breaker_accounting` (settles the breaker once per committed
-  stream and offers each Ok chunk to the quota feed)
+  leading chunks -- a `delta.role` opener, id/model metadata -- bounded by
+  `MAX_PRECONTENT_CHUNKS` and the first-content timeout, until
+  `is_content_bearing` commits the provider; chunks matching
+  `precontent::is_empty_reasoning_only` do not count toward the cap and each
+  consecutive run is buffered as one; its overflow and closed-before-content
+  errors append `precontent::precontent_summary` of the buffered kinds) and
+  `wrap_with_breaker_accounting` (settles a post-content error frame once: a
+  non-probe stream debits whatever the class, a probe stream applies
+  `breaker_outcome`; also the STREAMING quota seam, offering each Ok chunk to
+  the armed `quota::feed::FirstChunkFeed`)
 - `src/router/capability_owner_sweep.rs` -- `owns_learned_entry` (does this
   Router's config own a `RecordedLearnedEntry`) and
   `sweep_unowned_learned_entries`, which removes (through the generation
@@ -4199,7 +4234,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   widened. Structurally disjoint from `usage_capture::is_cache_thrash` -- this
   module fingerprints bytes (cause) and never reads cache usage (symptom).
   Also owns the dispatch-path wiring: `Router::observe_prefix_epoch` (called
-  ONCE per client request above each chain loop, so no per-target state reaches
+  ONCE per client request above the walk's chain loop, so no per-target state reaches
   the emission path and the detector can never influence marker bytes) stamps
   `DispatchMeta.prefix_epoch_event` and, on a rewrite only, emits the
   `cache_prefix_rewritten_in_epoch` WARN via `warn_prefix_rewritten`
@@ -4225,8 +4260,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   seat's refusal (`Error::Credential` with the epoch-ms deadline) and
   `merge_gate_refusal` folds a gate refusal into the chain's running error,
   keeping the first real error and, between parked seats, the earliest deadline;
-  `CountSeatOutcome::of_gate_refusal` skips a parked token-count seat and keeps
-  a breaker or RPM refusal terminal
+  the walk walks past a parked seat (`CREDENTIAL_PARKED_GATE_KIND`) on every
+  surface and ends a token count on a breaker or RPM refusal
+  (`DispatchSurface::gate_refusal_walks`)
 - `src/router/outcome_rule.rs` -- the failure-outcome rule:
   `INLOOP_RETRY_AFTER_CAP`, `rate_limit_reset_hint` (clamps an
   `Error::Upstream.retry_after` to the configured ceiling; a zero hint is
