@@ -36,9 +36,10 @@ license.
   `RefusalReason`; declares the `provider_kind`, `upstream_reason` and
   `refusal_reason` modules
 - `src/schema.rs` -- canonical wire types: `ChatRequest`, `ChatResponse`,
-  `ChatChunk`, `Message`, `ReasoningDetail`, `ReasoningConfig` (`is_off`,
-  `is_off_effort`), `Usage`, `RequestProvenance`, the Anthropic-ingress native
-  `thinking` carrier (`AnthropicThinking`, `ThinkingObject`), and the
+  `ChatChunk`, `Message`, `MessageContent` (`has_non_text_part`),
+  `ReasoningDetail`, `ReasoningConfig` (`is_off`, `is_off_effort`), `Usage`,
+  `RequestProvenance`, the Anthropic-ingress native `thinking` carrier
+  (`AnthropicThinking`, `ThinkingObject`), and the
   `RoutectlInternal` carrier (resolved per-model knobs plus the
   transport-internal capture fields, never serialized to the wire -- see the
   struct's own docs for the field-by-field contract)
@@ -127,7 +128,9 @@ license.
   metadata; today the provider-namespaced `AnthropicUnifiedQuota` (the
   `anthropic-ratelimit-unified-*` quota/overage family, raw strings + `extras`
   forward-compat + `is_overage()`) and `CodexQuota` (the `x-codex-*` family:
-  `active_limit`, `primary_used_percent`, `primary_reset_at` + `extras`), plus
+  `active_limit`, `primary_used_percent`, `primary_reset_at` + `extras`),
+  `OpenAiChatEnvelope` on `openai_chat` (the upstream OpenAI Chat
+  `system_fingerprint` a stream chunk carried), plus
   `OpeningUsage` (an Anthropic-shape stream's first-event input + disjoint
   cache fields, exact, with `OpeningUsageOrigin` wire label, `observed_at` and
   `from_vendor_endpoint` (first-party host or InvokeModel vs any compatible
@@ -512,7 +515,8 @@ license.
   crate-internal feature-gated helper modules `system_filter`,
   `claude_signing`, `tool_id`, `upstream_log`, `anthropic_error`,
   `retry_after`, `sampling_drop_guard`, `bounded_diagnostics`,
-  `stream_completion`, `upstream_error`, `aws_error`
+  `stream_completion`, `upstream_error`, `aws_error`; re-exports
+  `system_filter::is_billing_attribution_block` for the ingress system lift
 - `src/alloc_probe.rs` -- test-only thread-local allocation counter for
   OpenAI Responses request tests; absent from other feature combinations
 - `src/bounded_diagnostics.rs` -- `MAX_LOGGED_DIAGNOSTIC_ITEMS` (8) and
@@ -590,6 +594,9 @@ license.
   keeps its own inline parse to stay byte-identical on the empty-id path)
 - `src/system_filter.rs` -- predicate + strip helpers for the Claude Code
   billing/attribution system block, shared by every egress
+  (`is_billing_attribution_block`, `is_billing_attribution_part`,
+  `system_message_carries_billing_block`, `without_billing_attribution`,
+  `carries_non_text_system_part`)
 - `src/sampling_drop_guard.rs` -- shared leak-guard
   (`log_dropped_sampling_fields`): one DEBUG event per
   request naming which of the canonical sampling knobs (`n`, `seed`,
@@ -616,7 +623,8 @@ license.
 - `src/stream_completion.rs` -- `StreamCompletion`: shared end-of-stream
   verdict for lanes whose wire closes each turn with a terminal event; each
   lane injects its own predicate, and a stream that ends before it yields a
-  status-0 `Upstream` error instead of a clean close
+  status-0 `Upstream` error instead of a clean close; `missing_terminal`
+  builds that error, also used directly by the openai-compat stream
 - `src/upstream_error.rs` -- `UpstreamErrorRead` (+ `CarriedBody`): the one
   read of a non-success upstream response every lane's error mapper takes
   (all five lanes); capped body + parse, gated `Retry-After`, request id,
@@ -781,11 +789,12 @@ license.
   one, and one single-source test per fingerprint-strip site (plus the
   collapsed-system, strip-then-fail, and no-strip controls)
 - `src/anthropic_api/system.rs` -- system-prompt translation:
-  `translate_system` (typed `SystemContent` -> wire) + `lift_legacy_system`
-  (Role::System fallback for direct callers, the `req.system`-absent path
-  only) + `lift_legacy_system_stripped`
-  (billing-aware variant that drops the Claude Code fingerprint block
-  per-message before joining); all `pub(crate)` for Bedrock Converse reuse
+  `translate_system` (typed `SystemContent` -> wire) +
+  `lift_legacy_system_stripped` (Role::System fallback for direct callers
+  that drops the Claude Code fingerprint block per part before joining) +
+  `kept_system_turns` / `append_system` (lift the system turns an ingress
+  kept in place and append them after the canonical system); all
+  `pub(crate)` for Bedrock Converse reuse
 - `src/anthropic_api/tools.rs` -- tool + tool_choice translation:
   `translate_tool` (`ToolDef` -> `AnthropicTool`, incl. legacy OpenAI-shape
   rewrite) + `translate_tools` (the request's list, withholding OpenAI
@@ -806,7 +815,9 @@ license.
 - `src/anthropic_api/extras.rs` -- `compose_thinking`, `build_output_config`,
   `merge_provider_extras`, `normalize_claude_sampling`: Anthropic-shape
   thinking, effort and post-merge body passes; a legacy `enabled` budget is
-  fitted by `clamp_budget_to_legacy_window`
+  fitted by `clamp_budget_to_legacy_window`; public `legacy_thinking_budget`
+  (the `budget_tokens` the legacy shape composes, read by the router's
+  `thinking.type` repair)
 - `src/anthropic_api/output_schema.rs` -- surgical repair of the ONE field
   Anthropic requires on every object in `output_config.format.schema`:
   `inject_additional_properties_false` walks the ASSEMBLED body (after the
@@ -924,7 +935,9 @@ license.
   `reasoning_content` into `reasoning_details`, strips OpenAI envelope keys
 - `src/openai_compat/sse.rs` -- stateless per-chunk parsing +
   `ThinkTagAccumulator` for the `<think>` cross-chunk path +
-  `StreamedToolCallIds` (per-stream synthesis of missing tool-call ids);
+  `StreamedToolCallIds` (per-stream synthesis of missing tool-call ids) +
+  `StreamedFingerprint` (per-stream dedup of the upstream
+  `system_fingerprint` carried on chunk `upstream_meta`);
   `mark_reported_usage` stamps `usage_input_source = ExplicitFinal` on any
   chunk whose usage carries a prompt count; `detect_error_envelope` maps an
   in-band `error` object to `Error::Upstream` with its status clamped via
@@ -2789,11 +2802,12 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `src/router/replay_strip_tests.rs`
 - `src/router/field_repair.rs` -- the reactive L0 envelope-field repair the
   three dispatch arms drive, and the counterpart of `replay_repair` for the
-  field kind. Owns `FIELD_REPAIRS`, the CLOSED path-to-surface table (fourteen
+  field kind. Owns `FIELD_REPAIRS`, the CLOSED path-to-surface table (fifteen
   grounded rows today, all `Envelope`: one `output_config.effort.<level>`
   `RankedRewrite` over `FieldSurface::Effort` per effort level, its carriers
   and ranked repair in `field_repair_effort.rs`; the `thinking.enabled.display` Drop; the
-  `thinking.type.enabled` / `thinking.type.disabled` Rewrites over
+  `thinking.type.enabled` / `thinking.type.disabled` Rewrites and the
+  `thinking.type.adaptive` Rewrite (accepted: `enabled`) over
   `FieldSurface::AnthropicThinkingType`; the `temperature`, `top_p`,
   `presence_penalty` and `frequency_penalty` Drops over
   `FieldSurface::SamplingParam` (one canonical request field each); and the
@@ -3412,8 +3426,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/router/rejection_parser.rs` -- `parse_rejection` -> `NamedRejection`,
   `RejectionKind`: per-dialect parse of an upstream rejection envelope,
   resolved against the lane view `FieldRepairTable::for_lane` keyed on the
-  lane's provider kind and egress (a row outside that view names nothing); also
-  `localized_field` -> `LocalizedField` and `FieldIdentity` (tests:
+  lane's provider kind and egress (a row outside that view names nothing); the
+  Bedrock arm also reads the serde unknown-thinking-variant refusal
+  (`unknown_thinking_variant`); also `localized_field` -> `LocalizedField`
+  and `FieldIdentity` (tests:
   `src/router/rejection_parser_identity_tests.rs`)
 - `src/router/rejection_parser_beta.rs` -- child module of
   `rejection_parser`: `rejected_beta_flags`, the flags one exact
@@ -7392,7 +7408,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   gates all opening/anchor work), `SseEvent`,
   `StreamRequestContext` (request-derived seed for `new_stream_state`:
   opening input-token count + resolved model), `read_alias_header`
-  (`x-routectl-alias` override); `normalize_client_betas` /
+  (`x-routectl-alias` override); `lift_system_messages` -> `LiftedSystem`
+  (text-only system turns into `req.system`, the lifted indices returned for
+  edit declaration); `normalize_max_completion_tokens`;
+  `normalize_client_betas` /
   `MAX_CLIENT_BETA_FLAGS` -- the shared client beta normalizer every body- or
   header-sourced beta goes through on the Anthropic and OpenAI ingresses:
   comma-split, trim, visible-ASCII only, dedup in source order, a 64-flag cap
@@ -7427,9 +7446,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `provider_extras`; a non-string alias is a local `Error::Validation`
   rather than a silent drop), lifts function tools, strips
   internal `matched_stop_sequence` on render, and stamps the OpenAI
-  envelope on render (`object`, nullable `system_fingerprint`, `created`
-  on chunks; synthesizes `chatcmpl-<uuid>` id + unix `created` when the
-  upstream omitted them, stream-stable across chunks). Captures the inbound
+  envelope on render (`object`, `system_fingerprint` mirrored from the
+  upstream value carried on `UpstreamMeta` and held across the stream, else
+  `null`, `created` on chunks; synthesizes `chatcmpl-<uuid>` id + unix
+  `created` when the upstream omitted them, stream-stable across chunks).
+  Captures the inbound
   per-conversation key into `routectl_internal.inbound_session_key` via
   `ingress::session_key` (first allowlist header, else the body's top-level
   `prompt_cache_key`, read from the swept extras); the lift is a copy, so
@@ -8772,7 +8793,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   and `preflight_daemon_effort_tests.rs` (an adaptive turn's `xhigh` refused
   with the committed `Supported levels` capture over a real anthropic-api
   egress is retried at `high` and learned with its value on the ledger; the
-  next turn leaves pre-flighted at `high` and draws no refusal), and
+  next turn leaves pre-flighted at `high` and draws no refusal),
+  `preflight_daemon_thinking_adaptive_tests.rs` (a `thinking.type.adaptive`
+  turn refused on a non-Claude Bedrock Converse model is retried as `enabled`
+  and learned; a Claude model's accepted turn is forwarded as sent), and
   `preflight_daemon_mantle_tests.rs` (on each Bedrock Mantle sub-lane, a real
   Mantle egress against a mock origin answering the committed Mantle capture:
   an admitted row draws one repaired retry, is learned and pre-flighted on the
@@ -8975,7 +8999,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   asserts that a foreign upstream (openai-compat DeepSeek dialect) through
   canonical normalize and Anthropic ingress render does not leak vendor
   envelope keys or a `signature:null` thinking block into the Anthropic-shape
-  response
+  response; also that a zero-argument function call from an OpenAI Responses
+  upstream renders its arguments as an empty object on every ingress
 - `tests/cross_ingress_reasoning_roundtrip.rs` -- pins that routectl accepts
   its OWN output across dialects: captures an assistant turn from
   `AnthropicIngress::render_response` and replays it into
