@@ -157,21 +157,22 @@ jobs:
 
       # Reject malformed `version` inputs from workflow_dispatch
       # before the value flows into filenames, env vars, and `awk`
-      # patterns. `gh api workflows/.../dispatches` accepts
-      # multi-line input strings; without this guard a value like
-      # "0.0.0\nINJECTED=evil" would inject an extra entry into
-      # $GITHUB_ENV via `echo "ARTIFACT=..."`. Trigger requires
-      # repo-write so the practical risk is low, but a one-line
-      # regex closes the surface entirely. Tag pushes skip this --
+      # patterns downstream. The input reaches this script only as the
+      # VERSION environment variable, never as `${{ }}` text in the
+      # script body, so bash never parses it as code and the regex is
+      # the sole gate. The error line is a fixed string: the runner
+      # parses `::` workflow commands out of stdout/stderr, so an
+      # unvalidated value is never echoed. Tag pushes skip this:
       # GitHub already constrains tag refs to `v*` per `on.push.tags`.
       - name: validate workflow_dispatch input
         if: github.event_name == 'workflow_dispatch'
         shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          v='${{ inputs.version }}'
-          if [[ ! "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$ ]]; then
-            echo "::error::workflow_dispatch input 'version' must be bare semver (e.g. 0.0.0-dev), got: $v" >&2
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$ ]]; then
+            echo "::error::workflow_dispatch input 'version' must be bare semver (e.g. 0.0.0-dev)" >&2
             exit 1
           fi
 
@@ -288,9 +289,10 @@ jobs:
           toolchain: 1.95.0
           targets: ${{ matrix.target }}
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          key: ${{ matrix.target }}
+      # No dependency cache in this job: it holds id-token and
+      # attestations write, and a restored cache is written by other,
+      # lower-privilege workflow runs. The binaries it attests build from
+      # the checkout alone.
 
       - name: install aarch64 cross toolchain
         if: ${{ matrix.cross }}
