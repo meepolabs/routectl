@@ -1935,6 +1935,48 @@ async fn cross_anthropic_system_role_message_reaches_openai_compat_without_the_f
     assert_eq!(messages[1]["role"], "user");
 }
 
+/// A `developer` turn crosses this ingress as an unrecognized role and reaches
+/// an openai-compat upstream under its own tag, where it carries system
+/// authority: the billing/attribution block is withheld from it, and the
+/// turn's other content and its position are unchanged.
+#[tokio::test]
+async fn cross_anthropic_developer_role_message_reaches_openai_compat_without_the_fingerprint() {
+    // Arrange + Act
+    let up = capture_openai_egress_body(json!({
+        "model": "heavy",
+        "max_tokens": 16,
+        "messages": [
+            {"role": "user", "content": "hi"},
+            {"role": "developer", "content": [
+                {"type": "text", "text": "dev-legit-before"},
+                {"type": "text", "text": "x-anthropic-billing-header: cc_version=9.9.9; cch=d3vfp"},
+                {"type": "text", "text": "dev-legit-after"}
+            ]},
+            {"role": "user", "content": "again"}
+        ],
+    }))
+    .await;
+
+    // Assert
+    assert!(
+        !up.to_string().contains("d3vfp"),
+        "the client fingerprint reached the openai-compat upstream: {up}"
+    );
+    let messages = up["messages"].as_array().expect("messages array");
+    assert_eq!(messages.len(), 3, "{up}");
+    assert_eq!(messages[0]["role"], "user");
+    assert_eq!(messages[1]["role"], "developer");
+    assert_eq!(
+        messages[1]["content"],
+        json!([
+            {"type": "text", "text": "dev-legit-before"},
+            {"type": "text", "text": "dev-legit-after"}
+        ])
+    );
+    assert_eq!(messages[2]["role"], "user");
+    assert_eq!(messages[2]["content"], "again");
+}
+
 #[tokio::test]
 async fn cross_anthropic_stop_sequences_renamed_to_stop() {
     let up = capture_openai_egress_body(json!({

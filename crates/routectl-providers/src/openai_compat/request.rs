@@ -242,7 +242,7 @@ struct SystemProjection {
     /// `role: "system"` message. `None` when absent, blank, or wholly
     /// withheld.
     lowered: Option<String>,
-    /// `messages` with the block withheld from every `Role::System` turn.
+    /// `messages` with the block withheld from every `system` or `developer` turn.
     /// `None` when no turn carried it, so the serialized array stands.
     messages: Option<Vec<Message>>,
     /// True when the block was withheld from the top-level `system`.

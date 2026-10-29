@@ -21,7 +21,7 @@ use routectl_core::{
 use serde_json::Value;
 
 use super::messages::build_input;
-use super::system::{flush_fingerprint_tally, translate_system};
+use super::system::{flush_fingerprint_tally, record_developer_turn_withhold, translate_system};
 use super::tools::{translate_tool_choice, translate_tools};
 use super::types::{ResponseInput, ResponsesRequest};
 use super::{AuthKind, OpenAiResponsesConfig, extras};
@@ -53,6 +53,7 @@ pub fn translate(cfg: &OpenAiResponsesConfig, req: &ChatRequest) -> Result<Respo
     let mut fingerprint = ClientFingerprintStripTally::default();
     let instructions = translate_system(req, &mut fingerprint);
     declare_instructions(tap, instructions.is_some(), &fingerprint);
+    record_developer_turn_withhold(&req.messages, &mut fingerprint);
     let instructions = instructions.unwrap_or_default();
     let input = build_input_with_passthrough(&cfg.id, cfg.auth_kind, req, tap);
     // Flushed before the input build's `?`, so a request that withheld the

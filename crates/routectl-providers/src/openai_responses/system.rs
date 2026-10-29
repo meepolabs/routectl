@@ -82,6 +82,30 @@ pub(super) fn translate_system(
     }
 }
 
+/// Record the withhold `messages::build_input` makes from a `developer` turn
+/// it forwards in place. Kept apart from [`translate_system`] because that
+/// tally decides the `/instructions` declaration, and this withhold edits
+/// `input[]`, never `instructions`. `Role::System` turns are recorded by
+/// [`translate_system`] already.
+pub(super) fn record_developer_turn_withhold(
+    messages: &[Message],
+    fingerprint: &mut ClientFingerprintStripTally,
+) {
+    let withheld = messages.iter().any(|m| {
+        !matches!(m.role, Role::System)
+            && crate::system_filter::system_message_carries_billing_block(m)
+    });
+    // A third site of the same policy action, sharing its tally.
+    // TRANSLATION-DROP: policy-action class=client_fingerprint_stripped test=a_fingerprint_only_in_a_developer_turn_is_withheld_from_responses_and_counted
+    if withheld {
+        fingerprint.record();
+        tracing::debug!(
+            "openai-responses egress: Claude Code billing/attribution block dropped from a \
+             developer-role message",
+        );
+    }
+}
+
 /// Count the request's fingerprint withhold, if any. Called once per request
 /// by the orchestrator, outside every fallible step of its assembly, so a
 /// request whose whole system was the fingerprint -- or that withheld it and

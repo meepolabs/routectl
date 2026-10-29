@@ -317,3 +317,109 @@ fn a_fingerprint_part_in_a_kept_system_turn_is_withheld_and_counted_once() {
     assert_eq!(wire["input"][1]["content"][0]["text"], json!("match this"));
     assert_eq!(delta, 1);
 }
+
+fn other_role_parts(tag: &str, texts: &[&str]) -> Message {
+    Message {
+        role: Role::Other(tag.into()),
+        ..system_parts(texts)
+    }
+}
+
+fn other_role_text(tag: &str, text: &str) -> Message {
+    Message {
+        role: Role::Other(tag.into()),
+        ..system_text(text)
+    }
+}
+
+/// Single-source pin for the developer-turn strip site: the fingerprint rides
+/// ONLY a `developer` turn forwarded in place. The turn keeps its role, its
+/// position and its other text; none of it moves into `instructions`.
+#[test]
+fn a_fingerprint_only_in_a_developer_turn_is_withheld_from_responses_and_counted() {
+    // Arrange
+    let req = req_with(vec![
+        user_text("hi"),
+        other_role_parts("developer", &[RESPONSES_FINGERPRINT, "dev-legit-sentinel"]),
+        user_text("again"),
+    ]);
+
+    // Act
+    let (wire, delta) = wire_with_strip_delta(&req);
+
+    // Assert
+    assert!(
+        !wire.to_string().contains(RESPONSES_FINGERPRINT_TELL),
+        "the fingerprint in a developer turn reached the wire: {wire}"
+    );
+    assert_eq!(wire["instructions"], json!(""));
+    let input = wire["input"].as_array().expect("input array");
+    assert_eq!(input.len(), 3, "{wire}");
+    assert_eq!(input[1]["role"], json!("developer"));
+    assert_eq!(
+        input[1]["content"],
+        json!([{"type": "input_text", "text": "dev-legit-sentinel"}])
+    );
+    assert_eq!(input[2]["content"][0]["text"], json!("again"));
+    assert_eq!(delta, 1, "the developer-turn withhold is one policy action");
+}
+
+/// Per-row expectation for an `Other`-role turn between two user turns: the
+/// wire `input[1]` the row must produce (or `None` when the turn leaves the
+/// wire) and the policy-action delta.
+#[test]
+fn other_role_turns_are_screened_only_when_they_carry_system_authority() {
+    let rows: Vec<(&str, Message, Option<Value>, u64)> = vec![
+        (
+            "developer text that is wholly the fingerprint leaves the wire",
+            other_role_text("developer", RESPONSES_FINGERPRINT),
+            None,
+            1,
+        ),
+        (
+            "developer without the fingerprint passes through unchanged",
+            other_role_parts("developer", &["dev one", "dev two"]),
+            Some(json!({"type": "message", "role": "developer", "content": [
+                {"type": "input_text", "text": "dev one"},
+                {"type": "input_text", "text": "dev two"}]})),
+            0,
+        ),
+        (
+            "a mid-string billing prefix in a developer turn is kept",
+            other_role_text("developer", "note x-anthropic-billing-header: not leading"),
+            Some(json!({"type": "message", "role": "developer", "content": [
+                {"type": "input_text", "text": "note x-anthropic-billing-header: not leading"}]})),
+            0,
+        ),
+        (
+            "a non-authority tag is not screened",
+            other_role_parts("moderator", &[RESPONSES_FINGERPRINT, "mod text"]),
+            Some(json!({"type": "message", "role": "moderator", "content": [
+                {"type": "input_text", "text": RESPONSES_FINGERPRINT},
+                {"type": "input_text", "text": "mod text"}]})),
+            0,
+        ),
+    ];
+    for (name, turn, expected, expected_delta) in rows {
+        // Arrange
+        let req = req_with(vec![user_text("hi"), turn, user_text("again")]);
+
+        // Act
+        let (wire, delta) = wire_with_strip_delta(&req);
+
+        // Assert
+        let input = wire["input"].as_array().expect("input array");
+        match &expected {
+            Some(item) => {
+                assert_eq!(input.len(), 3, "{name}: {wire}");
+                assert_eq!(&input[1], item, "{name}");
+            }
+            None => {
+                assert_eq!(input.len(), 2, "{name}: {wire}");
+                assert_eq!(input[1]["content"][0]["text"], json!("again"), "{name}");
+            }
+        }
+        assert_eq!(wire["instructions"], json!(""), "{name}");
+        assert_eq!(delta, expected_delta, "{name}");
+    }
+}

@@ -490,6 +490,11 @@ const EXPECTED_RESOLVED_LOG_COUNTS: &[(&str, &str, usize)] = &[
         "log_dropped_cache_control",
         1,
     ),
+    (
+        "openai_responses/system.rs",
+        "record_developer_turn_withhold",
+        1,
+    ),
     ("openai_responses/system.rs", "translate_system", 2),
     (
         "openai_responses/system.rs",

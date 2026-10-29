@@ -128,8 +128,8 @@ pub fn carries_non_text_system_part(messages: &[routectl_core::Message]) -> bool
 }
 
 /// `messages` with the billing/attribution block withheld from every
-/// `Role::System` message, or `None` when no message carries it, so the caller
-/// keeps its own copy untouched.
+/// system-authority message (a `system` or `developer` turn), or `None` when
+/// no message carries it, so the caller keeps its own copy untouched.
 ///
 /// For an egress that keeps system-role messages in place rather than lifting
 /// their text out. The predicate runs per text PART, for the same reason as
@@ -151,11 +151,28 @@ pub fn strip_system_role_messages(
     )
 }
 
-#[cfg(feature = "openai-compat")]
-fn system_message_carries_billing_block(message: &routectl_core::Message) -> bool {
-    use routectl_core::{MessageContent, Role};
+/// Whether `role` speaks with system authority on an OpenAI-shape wire:
+/// `system`, or `developer`, its successor there. Only the Anthropic ingress
+/// leaves a `developer` turn as `Role::Other`; the OpenAI ingresses already
+/// map it onto `Role::System`.
+#[cfg(any(feature = "openai-compat", feature = "openai-responses"))]
+fn is_system_authority(role: &routectl_core::Role) -> bool {
+    use routectl_core::Role;
 
-    matches!(message.role, Role::System)
+    match role {
+        Role::System => true,
+        Role::Other(tag) => tag == "developer",
+        Role::User | Role::Assistant | Role::Tool => false,
+    }
+}
+
+/// Whether `message` is a system-authority turn (see [`is_system_authority`])
+/// carrying the billing/attribution block in any text part.
+#[cfg(any(feature = "openai-compat", feature = "openai-responses"))]
+pub fn system_message_carries_billing_block(message: &routectl_core::Message) -> bool {
+    use routectl_core::MessageContent;
+
+    is_system_authority(&message.role)
         && match &message.content {
             MessageContent::Text(text) => is_billing_attribution_block(text),
             MessageContent::Parts(parts) => parts.iter().any(is_billing_text_part),
@@ -163,7 +180,7 @@ fn system_message_carries_billing_block(message: &routectl_core::Message) -> boo
         }
 }
 
-#[cfg(feature = "openai-compat")]
+#[cfg(any(feature = "openai-compat", feature = "openai-responses"))]
 fn is_billing_text_part(part: &routectl_core::ContentPart) -> bool {
     use routectl_core::{ContentPart, KnownContentPart};
 
@@ -175,8 +192,12 @@ fn is_billing_text_part(part: &routectl_core::ContentPart) -> bool {
 }
 
 /// `message` with the block withheld, or `None` when nothing is left of it.
-#[cfg(feature = "openai-compat")]
-fn without_billing_attribution(message: &routectl_core::Message) -> Option<routectl_core::Message> {
+/// A message [`system_message_carries_billing_block`] rejects is returned
+/// unchanged.
+#[cfg(any(feature = "openai-compat", feature = "openai-responses"))]
+pub fn without_billing_attribution(
+    message: &routectl_core::Message,
+) -> Option<routectl_core::Message> {
     use routectl_core::{Message, MessageContent};
 
     if !system_message_carries_billing_block(message) {
@@ -308,5 +329,28 @@ mod tests {
         // Assert
         assert!(!dropped);
         assert!(matches!(out, Some(SystemContent::Text(s)) if s == "you are helpful"));
+    }
+
+    #[cfg(any(feature = "openai-compat", feature = "openai-responses"))]
+    #[test]
+    fn system_authority_covers_system_and_developer_only() {
+        use routectl_core::Role;
+
+        let rows = [
+            ("system", Role::System, true),
+            ("developer", Role::Other("developer".into()), true),
+            ("unknown tag", Role::Other("moderator".into()), false),
+            (
+                "tag differing only in case",
+                Role::Other("Developer".into()),
+                false,
+            ),
+            ("user", Role::User, false),
+            ("assistant", Role::Assistant, false),
+            ("tool", Role::Tool, false),
+        ];
+        for (name, role, expected) in rows {
+            assert_eq!(is_system_authority(&role), expected, "{name}");
+        }
     }
 }

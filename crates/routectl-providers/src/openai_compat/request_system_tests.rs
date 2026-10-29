@@ -470,3 +470,123 @@ fn a_system_turn_with_an_image_rides_in_place_with_every_part() {
         ]
     );
 }
+
+// ---------------------------------------------------------------------------
+// `developer` turns: the Anthropic ingress leaves them as `Role::Other`, and
+// this wire forwards the tag, where it carries system authority.
+// ---------------------------------------------------------------------------
+
+fn other_role_message(tag: &str, texts: &[&str]) -> Message {
+    Message {
+        role: Role::Other(tag.into()),
+        ..system_parts_message(texts)
+    }
+}
+
+#[test]
+fn a_fingerprint_only_in_a_developer_turn_is_withheld_from_openai_compat_and_counted() {
+    // Arrange
+    let req = req_with(
+        None,
+        vec![
+            user_text_message("hi"),
+            other_role_message("developer", &[COMPAT_FINGERPRINT, "dev-legit-sentinel"]),
+            user_text_message("again"),
+        ],
+    );
+
+    // Act
+    let (body, rendered, delta) = wire_and_strip_delta(&req);
+
+    // Assert
+    assert!(
+        !rendered.contains(COMPAT_FINGERPRINT_TELL),
+        "the fingerprint in a developer turn reached the wire: {rendered}"
+    );
+    assert_eq!(
+        roles_and_contents(&body),
+        vec![
+            ("user".to_string(), json!("hi")),
+            (
+                "developer".to_string(),
+                json!([{"type": "text", "text": "dev-legit-sentinel"}])
+            ),
+            ("user".to_string(), json!("again")),
+        ]
+    );
+    assert_eq!(delta, 1, "the withhold is one policy action");
+}
+
+/// A row of the `Other`-role table: name, the turn, the wire messages a
+/// withholding row expects (`None`: the turn rides unchanged), and the
+/// policy-action delta.
+type OtherRoleRow = (
+    &'static str,
+    Message,
+    Option<Vec<(String, serde_json::Value)>>,
+    u64,
+);
+
+/// Each row puts one `Other`-role turn between two user turns. A row with no
+/// withhold expects the turn on the wire exactly as the canonical message
+/// serializes; a withholding row expects the listed wire messages.
+#[test]
+fn other_role_turns_are_screened_only_when_they_carry_system_authority() {
+    let fingerprint_only = Message {
+        content: MessageContent::Text(COMPAT_FINGERPRINT.into()),
+        ..other_role_message("developer", &[])
+    };
+    let rows: Vec<OtherRoleRow> = vec![
+        (
+            "developer text that is wholly the fingerprint leaves the wire",
+            fingerprint_only,
+            Some(vec![
+                ("user".to_string(), json!("hi")),
+                ("user".to_string(), json!("again")),
+            ]),
+            1,
+        ),
+        (
+            "developer without the fingerprint passes through unchanged",
+            other_role_message("developer", &["dev one", "dev two"]),
+            None,
+            0,
+        ),
+        (
+            "a mid-string billing prefix in a developer turn is kept",
+            other_role_message(
+                "developer",
+                &["note x-anthropic-billing-header: not leading"],
+            ),
+            None,
+            0,
+        ),
+        (
+            "a non-authority tag is not screened",
+            other_role_message("moderator", &[COMPAT_FINGERPRINT, "mod text"]),
+            None,
+            0,
+        ),
+    ];
+    for (name, turn, expected, expected_delta) in rows {
+        // Arrange
+        let canonical = serde_json::to_value(&turn).expect("turn serializes");
+        let req = req_with(
+            None,
+            vec![user_text_message("hi"), turn, user_text_message("again")],
+        );
+
+        // Act
+        let (body, _, delta) = wire_and_strip_delta(&req);
+
+        // Assert
+        match expected {
+            Some(messages) => assert_eq!(roles_and_contents(&body), messages, "{name}"),
+            None => {
+                assert_eq!(body["messages"].as_array().map(Vec::len), Some(3), "{name}");
+                assert_eq!(body["messages"][1], canonical, "{name}");
+            }
+        }
+        assert_eq!(delta, expected_delta, "{name}");
+    }
+}

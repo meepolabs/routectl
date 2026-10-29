@@ -297,6 +297,13 @@ fn translate_other_message(
         role = %sanitize_for_log(tag),
         "responses egress: unrecognized message role forwarded verbatim"
     );
+    // A `developer` turn keeps system authority on this wire, so the
+    // billing/attribution block is withheld from it in place; `system.rs`
+    // records the withhold.
+    let Some(msg) = crate::system_filter::without_billing_attribution(msg) else {
+        return Ok(());
+    };
+    let msg = &msg;
     extract_tool_results(id, &msg.content, out);
 
     let content = build_user_content(id, auth_kind, &msg.content, tally)?;
