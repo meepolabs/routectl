@@ -129,8 +129,7 @@ license.
   `anthropic-ratelimit-unified-*` quota/overage family, raw strings + `extras`
   forward-compat + `is_overage()`) and `CodexQuota` (the `x-codex-*` family:
   `active_limit`, `primary_used_percent`, `primary_reset_at` + `extras`),
-  `OpenAiChatEnvelope` on `openai_chat` (the upstream OpenAI Chat
-  `system_fingerprint` a stream chunk carried), plus
+  `OpenAiChatEnvelope` (`openai_chat`), plus
   `OpeningUsage` (an Anthropic-shape stream's first-event input + disjoint
   cache fields, exact, with `OpeningUsageOrigin` wire label, `observed_at` and
   `from_vendor_endpoint` (first-party host or InvokeModel vs any compatible
@@ -792,9 +791,9 @@ license.
   `translate_system` (typed `SystemContent` -> wire) +
   `lift_legacy_system_stripped` (Role::System fallback for direct callers
   that drops the Claude Code fingerprint block per part before joining) +
-  `kept_system_turns` / `append_system` (lift the system turns an ingress
-  kept in place and append them after the canonical system); all
-  `pub(crate)` for Bedrock Converse reuse
+  `kept_system_turns` / `append_system` (used by the Anthropic request
+  assembly); `translate_system` and `lift_legacy_system_stripped` are
+  re-exported `pub(crate)` via `request.rs` for Bedrock reuse
 - `src/anthropic_api/tools.rs` -- tool + tool_choice translation:
   `translate_tool` (`ToolDef` -> `AnthropicTool`, incl. legacy OpenAI-shape
   rewrite) + `translate_tools` (the request's list, withholding OpenAI
@@ -7409,8 +7408,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `StreamRequestContext` (request-derived seed for `new_stream_state`:
   opening input-token count + resolved model), `read_alias_header`
   (`x-routectl-alias` override); `lift_system_messages` -> `LiftedSystem`
-  (text-only system turns into `req.system`, the lifted indices returned for
-  edit declaration); `normalize_max_completion_tokens`;
+  (system turns with no non-text part leave `messages`; the lifted indices
+  are returned for edit declaration); `normalize_max_completion_tokens`;
   `normalize_client_betas` /
   `MAX_CLIENT_BETA_FLAGS` -- the shared client beta normalizer every body- or
   header-sourced beta goes through on the Anthropic and OpenAI ingresses:
