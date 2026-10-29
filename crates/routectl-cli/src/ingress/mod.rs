@@ -25,6 +25,7 @@ use routectl_core::{
     ChatChunk, ChatRequest, ChatResponse, ContentPart, Error, KnownContentPart, MessageContent,
     RefusalReason, Result, Role, SystemBlock, SystemContent,
 };
+use routectl_providers::is_billing_attribution_block;
 use serde_json::Value;
 
 pub mod anthropic;
@@ -206,11 +207,15 @@ impl StreamErrorClass {
 ///   part, preserving `cache_control` and `citations` from each part.
 ///
 /// Output shape:
-/// - When no lifted block carries `cache_control` or `citations`, the result
-///   is concatenated into `SystemContent::Text` (backward-compatible).
+/// - When no lifted block carries `cache_control` or `citations` and no
+///   entry is a billing/attribution block, the result is concatenated into
+///   `SystemContent::Text` (backward-compatible).
 /// - When any block carries `cache_control` or `citations`, the result is
 ///   `SystemContent::Blocks` so the per-block cache breakpoints survive the
 ///   ingress boundary and reach the Anthropic / Bedrock egress intact.
+/// - When the existing system text or any lifted block is a billing/
+///   attribution block, the result is also `SystemContent::Blocks`, so each
+///   egress withholds that block alone instead of testing a joined string.
 pub(crate) fn lift_system_messages(req: &mut ChatRequest) {
     let mut lifted_blocks: Vec<SystemBlock> = Vec::new();
     let mut kept = req.messages.to_vec();
@@ -259,7 +264,8 @@ pub(crate) fn lift_system_messages(req: &mut ChatRequest) {
 
     let needs_blocks = lifted_blocks
         .iter()
-        .any(|b| b.cache_control.is_some() || b.citations.is_some());
+        .any(|b| b.cache_control.is_some() || b.citations.is_some())
+        || carries_billing_attribution(req.system.as_ref(), &lifted_blocks);
 
     match req.system.take() {
         Some(SystemContent::Text(existing)) if !needs_blocks => {
@@ -296,6 +302,21 @@ pub(crate) fn lift_system_messages(req: &mut ChatRequest) {
             req.system = Some(SystemContent::Blocks(lifted_blocks));
         }
     }
+}
+
+/// True when the existing system text or any lifted block is a Claude Code
+/// billing/attribution block. Egresses withhold that block by testing the
+/// leading text of each entry, so it must stay its own block rather than be
+/// joined behind (or ahead of) legitimate system text.
+fn carries_billing_attribution(existing: Option<&SystemContent>, lifted: &[SystemBlock]) -> bool {
+    let existing_text = match existing {
+        Some(SystemContent::Text(text)) => Some(text.as_str()),
+        _ => None,
+    };
+    existing_text
+        .into_iter()
+        .chain(lifted.iter().map(|b| b.text.as_str()))
+        .any(is_billing_attribution_block)
 }
 
 /// Read the `x-routectl-alias` header. Returns the trimmed header
@@ -857,6 +878,10 @@ mod tool_use_two_hop_tests;
 #[cfg(test)]
 #[path = "openai_system_lift_tests.rs"]
 mod openai_system_lift_tests;
+
+#[cfg(test)]
+#[path = "system_lift_fingerprint_tests.rs"]
+mod system_lift_fingerprint_tests;
 
 #[cfg(test)]
 #[path = "thinking_carrier_ingress_tests.rs"]

@@ -245,6 +245,14 @@ pub(crate) mod tool_calls;
     feature = "gemini"
 ))]
 pub(crate) mod system_filter;
+#[cfg(any(
+    feature = "openai-compat",
+    feature = "bedrock",
+    feature = "openai-responses",
+    feature = "anthropic-api",
+    feature = "gemini"
+))]
+pub use system_filter::is_billing_attribution_block;
 
 // Body re-signer for the billing-header checksum. When routectl mutates
 // the canonical body on the egress path (effort injection, tool-id

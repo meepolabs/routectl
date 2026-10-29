@@ -10,16 +10,18 @@
 //! `Role::System` turns in place (see `messages::SystemTurnPolicy`).
 //! `lift_legacy_system_stripped` is the billing-aware variant
 //! used by the anthropic-api egress: it drops the Claude Code
-//! billing/attribution block per-message before joining so the
+//! billing/attribution block per text part before joining so the
 //! fingerprint never reaches a third-party host via the lift fallback.
 //! All are `pub(crate)` so the Bedrock Converse egress can reuse the
 //! canonical-side mapping (single source of truth).
 
-use routectl_core::{Message, MessageContent, Role, SystemContent};
+#[cfg(test)]
+use routectl_core::MessageContent;
+use routectl_core::{Message, Role, SystemContent};
 
 use super::types::{AnthropicSystem, AnthropicSystemBlock};
 
-use crate::system_filter::is_billing_attribution_block;
+use crate::system_filter::system_role_texts_stripped;
 
 /// Convert canonical `SystemContent` to wire `AnthropicSystem`. Preserves
 /// per-block cache_control and citations.
@@ -48,7 +50,8 @@ pub fn translate_system(s: &SystemContent) -> AnthropicSystem {
 /// Collect the per-message system texts from the canonical `Role::System`
 /// messages, preserving order. Drops empty/blank texts (and non-text Parts)
 /// so a meaningless `system: ""` never lands upstream. One entry per
-/// surviving System message -- the caller joins or filters them.
+/// surviving System message -- the caller joins them.
+#[cfg(test)]
 fn collect_system_texts(messages: &[Message]) -> Vec<String> {
     messages
         .iter()
@@ -127,12 +130,15 @@ pub fn lift_legacy_system(messages: &[Message]) -> Option<AnthropicSystem> {
 }
 
 /// Billing-aware variant of `lift_legacy_system`: lifts Role::System
-/// messages but drops any whose text is a Claude Code billing/attribution
-/// block BEFORE joining. The strip must run per-message -- once joined, a
-/// billing block fused with a real prompt no longer matches the
-/// leading-prefix predicate. Sets `dropped = true` when at least one block
-/// was removed so the caller can emit a single contents-free WARN. Returns
-/// None when nothing survives the strip (the system collapses to absent).
+/// messages but drops every text part that is a Claude Code
+/// billing/attribution block BEFORE joining. The strip must run per PART --
+/// once joined, a billing block that follows legitimate text (in another
+/// part or another message) is no longer at the leading position the
+/// predicate tests. Blank parts are dropped and the survivors join with
+/// "\n", so a fingerprint-free lift is identical to `lift_legacy_system`.
+/// Sets `dropped = true` when at least one block was removed so the caller
+/// can emit a single contents-free WARN. Returns None when nothing survives
+/// the strip (the system collapses to absent).
 ///
 /// Like the unfiltered lift, this covers the `req.system`-ABSENT path only;
 /// the both-present case forwards the turns in place, and the forwarding
@@ -141,14 +147,14 @@ pub fn lift_legacy_system_stripped(
     messages: &[Message],
     dropped: &mut bool,
 ) -> Option<SystemContent> {
-    let mut kept: Vec<String> = Vec::new();
-    for text in collect_system_texts(messages) {
-        if is_billing_attribution_block(&text) {
-            *dropped = true;
-        } else {
-            kept.push(text);
-        }
-    }
+    let kept: Vec<String> = messages
+        .iter()
+        .filter(|m| matches!(m.role, Role::System))
+        .filter_map(|m| {
+            let parts = system_role_texts_stripped(std::slice::from_ref(m), dropped);
+            (!parts.is_empty()).then(|| parts.join("\n"))
+        })
+        .collect();
     if kept.is_empty() {
         None
     } else {
@@ -159,6 +165,8 @@ pub fn lift_legacy_system_stripped(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const BILLING: &str = "x-anthropic-billing-header: v=1; fp=abc";
 
     fn sys_msg(text: &str) -> Message {
         Message {
@@ -188,6 +196,91 @@ mod tests {
         };
         assert!(!text.contains("x-anthropic-billing-header:"));
         assert!(text.contains("you are helpful"));
+    }
+
+    fn sys_parts_msg(texts: &[&str]) -> Message {
+        Message {
+            content: MessageContent::Parts(
+                texts
+                    .iter()
+                    .map(|t| {
+                        routectl_core::ContentPart::Known(routectl_core::KnownContentPart::Text {
+                            text: (*t).into(),
+                            citations: None,
+                            cache_control: None,
+                        })
+                    })
+                    .collect(),
+            ),
+            ..sys_msg("")
+        }
+    }
+
+    #[test]
+    fn stripped_withholds_a_billing_part_in_either_position_of_one_message() {
+        let rows: [(&str, Vec<&str>); 2] = [
+            ("billing part last", vec!["you are helpful", BILLING]),
+            ("billing part first", vec![BILLING, "you are helpful"]),
+        ];
+        for (name, parts) in rows {
+            let mut dropped = false;
+
+            let out = lift_legacy_system_stripped(&[sys_parts_msg(&parts)], &mut dropped);
+
+            assert!(dropped, "{name}");
+            assert!(
+                matches!(&out, Some(SystemContent::Text(t)) if t == "you are helpful"),
+                "{name}: {out:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn stripped_fingerprint_free_parts_join_as_before() {
+        let msgs = vec![
+            sys_parts_msg(&["one", "  ", "two"]),
+            sys_msg("three"),
+            sys_parts_msg(&[" "]),
+        ];
+        let mut dropped = false;
+
+        let out = lift_legacy_system_stripped(&msgs, &mut dropped);
+
+        assert!(!dropped);
+        assert!(
+            matches!(&out, Some(SystemContent::Text(t)) if t == "one\ntwo\nthree"),
+            "{out:?}"
+        );
+        let unfiltered = lift_legacy_system(&msgs).expect("messages produce a system");
+        assert!(
+            matches!(&unfiltered, AnthropicSystem::Text(t) if t == "one\ntwo\nthree"),
+            "{unfiltered:?}"
+        );
+    }
+
+    #[test]
+    fn a_billing_part_in_a_lifted_system_message_never_reaches_the_anthropic_wire() {
+        let req = routectl_core::ChatRequest {
+            model: "claude-sonnet-4-5".into(),
+            messages: vec![
+                sys_parts_msg(&["you are helpful", BILLING]),
+                Message {
+                    role: Role::User,
+                    ..sys_msg("hello")
+                },
+            ]
+            .into(),
+            ..Default::default()
+        };
+
+        let wire = crate::anthropic_api::request::normalize("test", &req, false, None, false, true)
+            .expect("normalize must succeed");
+
+        assert_eq!(wire["system"], "you are helpful", "{wire}");
+        assert!(
+            !wire.to_string().contains("x-anthropic-billing-header:"),
+            "{wire}"
+        );
     }
 
     #[test]

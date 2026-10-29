@@ -79,7 +79,11 @@ pub fn strip_billing_attribution(
 /// `withheld` set. The predicate runs per PART, before any caller joins them:
 /// a fingerprint part that follows legitimate text in the same message is not
 /// at the leading position the predicate tests once the two are joined.
-#[cfg(any(feature = "openai-responses", feature = "gemini"))]
+#[cfg(any(
+    feature = "openai-responses",
+    feature = "gemini",
+    feature = "anthropic-api"
+))]
 pub fn system_role_texts_stripped(
     messages: &[routectl_core::Message],
     withheld: &mut bool,

@@ -624,7 +624,7 @@ const TIER_TWO: &[TierTwoRow] = &[
         gate: Gate::AlwaysOn,
         reason: "the SECOND carrier of the same billing content: with no canonical system the \
                  `role: \"system\"` turns are lifted and joined into the wire system field, so the \
-                 lift filters each message's text through the same predicate. Without it the \
+                 lift filters each text part through the same predicate. Without it the \
                  canonical-path strip has a bypass any client can take by sending its system \
                  prompt as a message instead of as `system`",
         test: "the_legacy_lift_billing_strip_counts_one_policy_action",

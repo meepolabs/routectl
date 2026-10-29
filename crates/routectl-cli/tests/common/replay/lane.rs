@@ -1201,7 +1201,7 @@ static ANTHROPIC_FIDELITY_EXCEPTIONS: [Exception; 8] = [
                  wire `system` field, so `.messages` shrinks and every later element shifts \
                  index. Confirmed at `lift_legacy_system_stripped` \
                  (crates/routectl-providers/src/anthropic_api/system.rs), which joins the \
-                 Role::System texts (dropping billing/attribution blocks per message) and is \
+                 Role::System texts (dropping billing/attribution blocks per text part) and is \
                  reached only from the `req.system`-ABSENT fallback in the anthropic-api \
                  request assembly; `lift_legacy_system` is the unfiltered sibling the \
                  Bedrock Converse egress reuses. Length-changing, hence a NORMALIZER: \
