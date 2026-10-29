@@ -6,9 +6,8 @@
 //! K-floor, context-reduction + auto-cache injection, and forwarded-
 //! credential handling for both `complete` and `stream`.
 
-use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 
 use futures::stream::{BoxStream, StreamExt};
 use routectl_core::wire_check::IngressDialect;
@@ -27,43 +26,20 @@ use crate::context_trim::{
 };
 use crate::cost_gate::{break_even_k, emission_break_even_k};
 
-use super::beta_report_learn::install_beta_assembly;
-use super::cache_plan::{AutoCacheRequestPlan, apply_auto_cache_placement, cache_target_gates};
-use super::capability_learn::LearnDedupeKey;
-use super::capability_observe::{
-    EvidencePolicy, UntranslatedCapabilities, install_translation_report,
-};
+use super::cache_plan::AutoCacheRequestPlan;
+use super::capability_observe::{EvidencePolicy, UntranslatedCapabilities};
 use super::class_observe::{
-    DispatchSurface, UpstreamFacts, apply_remap, class_label, matched_by_label, upstream_facts,
-    upstream_status_for_remap,
+    DispatchSurface, UpstreamFacts, class_label, matched_by_label, upstream_facts,
 };
-use super::credential_park::{log_gate_refusal, merge_gate_refusal};
-use super::dispatch_loop::{
-    CommitCtx, Deadline, SurfaceAdapter, apply_context_reduction, forwarded_terminal_status,
-    log_forwarded_auth_terminal, missing_forwarded_bearer_error, next_is_sibling_seat,
-};
-use super::edit_declare::{declare_cache_placement, declare_model_rename, fidelity_dialect};
-use super::feature_filter::{StripDecision, emit_feature_unsupported};
+use super::dispatch_loop::{CommitCtx, Deadline, SurfaceAdapter};
+use super::feature_filter::emit_feature_unsupported;
 use super::field_preflight::emit_field_preflight;
 use super::field_repair::emit_field_repair;
-use super::learn_engine::{AttemptLearning, FailureDecision, Rejection};
-use super::local_refusal::ingress_dialect_of;
-use super::outcome_rule::{
-    breaker_outcome, class_debits, probe_fast_fail, rate_limit_reset_hint, retry_cap_for,
-    should_fallback,
-};
-use super::overlays::apply_layered_overlays;
-use super::probe_payload_capture::ProbeFieldCapture;
+use super::outcome_rule::retry_cap_for;
 use super::repair_budget::RepairBudget;
-use super::replay_repair::replay_rejection_body_free;
-use super::runtime_gate::{
-    LearnedProbeGuard, ProbeAdmissionSet, is_probe_request, log_probe_fast_fail,
-};
+use super::runtime_gate::is_probe_request;
 use super::stream_commit::{try_stream_with_first_content, wrap_with_breaker_accounting};
 use super::stream_evidence::StreamEvidence;
-use super::transcript_defect::{
-    egress_pairing_refusal, is_transcript_rejection, record_transcript_defect,
-};
 use super::wire_response::{declare_model_relabel, declare_provider_attribution};
 use super::{DispatchMeta, DispatchTarget, Dispatched, DispatchedStream, Router, RouterOptions};
 
@@ -276,6 +252,128 @@ impl SurfaceAdapter for CompleteAdapter {
     }
 }
 
+/// The streaming surface: one upstream stream per attempt, committed at its
+/// first CONTENT chunk and bounded until then by the composed
+/// `stream_first_byte_timeout_ms`. Leading content-free chunks are buffered
+/// inside the attempt, so a failure before content still walks on.
+struct StreamAdapter;
+
+/// The expiry text of a stream's first-content deadline.
+fn stream_first_content_timed_out(ms: u64) -> String {
+    format!(
+        "stream first-content timeout after {ms}ms; content-free leading \
+         chunks (role opener, id/model metadata) do not satisfy the deadline"
+    )
+}
+
+impl SurfaceAdapter for StreamAdapter {
+    type Output = BoxStream<'static, Result<ChatChunk>>;
+    const SURFACE: DispatchSurface = DispatchSurface::Stream;
+
+    fn admits(&self, _target: &DispatchTarget) -> bool {
+        true
+    }
+
+    fn deadline(&self, attempt_policy: &RetryPolicy) -> Option<Deadline> {
+        attempt_policy
+            .stream_first_byte_timeout_ms
+            .map(|ms| Deadline::new(ms, stream_first_content_timed_out))
+    }
+
+    async fn invoke(
+        &self,
+        target: &DispatchTarget,
+        provider: Arc<dyn Provider>,
+        req: ChatRequest,
+    ) -> Result<Self::Output> {
+        try_stream_with_first_content(&target.provider_name, &target.upstream, provider, req).await
+    }
+
+    fn on_commit(&self, ctx: CommitCtx<'_, '_>, stream: Self::Output) -> Self::Output {
+        let CommitCtx {
+            router,
+            target,
+            client_req,
+            attempt_req,
+            wire_tap,
+            translation_report,
+            learning,
+            learn_dedupe,
+            meta,
+        } = ctx;
+        // The walk has already closed a half-open probe's breaker at first
+        // content and left a healthy breaker's failure count alone: the
+        // wrapped stream's breaker accounting below owns the tail, so
+        // mid-stream errors still accumulate toward `circuit_failures`.
+        let policy = router.policy_for(&client_req.model);
+        let is_probe = is_probe_request(client_req, &policy);
+        let state = router.state.get(target.state_key.as_str()).cloned();
+        // First content proves the capability is not rejected: clear any
+        // learned negative this dispatch re-probed, and ride each clear out on
+        // the meta so the ledger records it and a warm rebuild does not
+        // resurrect it. Beta flags the engine's repair withheld settle first,
+        // as rejections. A capability the egress withheld was never tested,
+        // so it is not cleared.
+        let untranslated = UntranslatedCapabilities::take_from(translation_report);
+        // Then settle the replay carry and the envelope-field carry against
+        // this first content; a stream holds no canary. First content is not
+        // the end of the response, so the evidence scope rides out on the
+        // meta and the caller settles it once the stream has ended naturally.
+        meta.stream_evidence = learning
+            .on_success(
+                &untranslated,
+                target,
+                client_req,
+                attempt_req,
+                learn_dedupe,
+                meta,
+            )
+            .map(StreamEvidence::new);
+        // Stamp the client-visible label on every Ok chunk (including the
+        // terminal / usage-only chunk) before the breaker wrap. `Err` passes
+        // through byte-for-byte unchanged.
+        let label = resolve_reported_model(target, &client_req.model);
+        declare_model_relabel(wire_tap);
+        router.carry_response_check(target, attempt_req, wire_tap, meta);
+        let relabeled = stream
+            .map(move |item| match item {
+                Ok(mut chunk) => {
+                    chunk.model = label.clone();
+                    Ok(chunk)
+                }
+                Err(e) => Err(e),
+            })
+            .boxed();
+        let folded = match &meta.stream_evidence {
+            Some(evidence) => evidence.wrap(relabeled),
+            None => relabeled,
+        };
+        wrap_with_breaker_accounting(
+            folded,
+            state,
+            target.provider_kind,
+            // Subscription-quota feed, the STREAMING half. Streaming quota
+            // rides the FIRST canonical chunk only, so it is lifted as the
+            // chunk passes through the wrap -- before the caller renders it --
+            // rather than at end-of-stream, where it is already gone. Keyed on
+            // the seat that ACTUALLY served, exactly as the non-streaming arm is.
+            crate::quota::feed::FirstChunkFeed::armed(
+                router.quota_store.clone(),
+                meta.served_seat
+                    .as_deref()
+                    .map(crate::quota::key::seat_key_for_served_identity),
+            ),
+            is_probe,
+            target.class_overrides.clone(),
+            policy.max_honored_retry_after(),
+        )
+    }
+
+    fn exhausted(&self, last: Option<Error>, alias: &str) -> Error {
+        last.unwrap_or_else(|| Error::UnknownAlias(alias.to_string()))
+    }
+}
+
 impl Router {
     /// Advisory-only WARN when the region the CALLER marked cacheable carries
     /// per-request-volatile content (fresh ids/timestamps): such a prefix
@@ -383,9 +481,8 @@ impl Router {
         // See `complete_with_options`: the ceiling outlives the walk so its
         // spend is read once on every exit.
         let mut repair_budget = RepairBudget::per_request();
-        let result = self
-            .stream_inner(req, opts, &mut meta, &mut repair_budget)
-            .await;
+        let result =
+            Box::pin(self.run_walk(StreamAdapter, req, opts, &mut meta, &mut repair_budget)).await;
         self.metrics
             .record_repairs_per_request(repair_budget.spent());
         emit_replay_degradation(&meta);
@@ -393,695 +490,6 @@ impl Router {
         self.emit_wire_rejections(&meta);
         emit_field_preflight(&meta);
         DispatchedStream { meta, result }
-    }
-
-    /// Dispatch-loop body for `stream_with_options`. Mutates `meta` as
-    /// the chain is walked. The served_* fields are captured at the
-    /// `Ok(stream)` arm (the winning target is known synchronously,
-    /// before any stream body is consumed).
-    async fn stream_inner(
-        &self,
-        mut req: ChatRequest,
-        opts: RouterOptions,
-        meta: &mut DispatchMeta,
-        repair_budget: &mut RepairBudget,
-    ) -> Result<BoxStream<'static, Result<ChatChunk>>> {
-        let pairing = record_transcript_defect(&mut req);
-        let (chain, probe_admissions) =
-            self.dispatch_chain_for_request(&req, DispatchSurface::Stream)?;
-        // See `run_walk`: re-probes the filter admitted, owned by a
-        // request-scoped set that settles each on transfer (`take`) or on drop
-        // (`OtherError` for any admission the loop never reached).
-        let mut probe_set = ProbeAdmissionSet::new(
-            self.learned_capabilities.clone(),
-            probe_admissions,
-            DispatchSurface::Stream.as_str(),
-        );
-        // See `run_walk`: request-global observability dimension
-        // ONLY, fed to `emit_class_observability`. The per-target
-        // `use_forwarded_credential` flag drives the model-rewrite
-        // bypass and the 401/403/429 terminal re-key.
-        let is_forwarded = req.routectl_internal.forwarded_bearer.is_some();
-        let ingress = ingress_dialect_of(&req);
-        let chain_len = chain.len();
-        let policy = self.policy_for(&req.model);
-        // Availability-probe detection (see `complete_with_options`). A
-        // streaming probe that 429/529s fast-fails the chain too.
-        let is_probe = is_probe_request(&req, &policy);
-        // Auto-cache decision inputs: computed ONCE off the ORIGINAL req
-        // (see `run_walk`). Reused across retries and fallback
-        // targets so the decision never drifts.
-        let auto_cache_plan =
-            AutoCacheRequestPlan::build(&req, self.config.cache.auto_emit_top_level_breakpoint);
-        if auto_cache_plan.has_caller_breakpoints {
-            self.warn_volatile_in_caller_prefix(&req);
-        }
-        // Prefix-rewrite detector -- see `run_walk`. Same once-per-client-
-        // request placement above the chain loop, so the streaming path is not a
-        // second site that mints an extra observation for the same turn.
-        self.observe_prefix_epoch(&req, meta);
-        let mut last_err: Option<Error> = None;
-        // One learned-capability observation per request per
-        // (state_key, feature): the error arm fires per attempt, so this
-        // set stops a same-request retry from manufacturing a second
-        // observation. See `observe_for_learning`.
-        let mut learn_dedupe: HashSet<LearnDedupeKey> = HashSet::new();
-        // One reasoning-drop fidelity WARN per client request -- see
-        // `run_walk`. Same stack-local once-flag over the dispatch-point
-        // emit, so the streaming path is not a second site that repeats it.
-        let mut reasoning_drop_warned = false;
-        // `repair_budget`: the reactive-repair ceiling for THIS client request
-        // -- see `run_walk`. Same above-the-loop position and the same
-        // shared ceiling, so the streaming path is not a second walk with its
-        // own allowance.
-
-        'chain: for (chain_idx, target) in chain.iter().enumerate() {
-            let provider_name = target.provider_name.as_str();
-            let state_key = target.state_key.as_str();
-            let model = target.upstream.as_str();
-            // See `run_walk`: learned re-probe settle guard, scoped to
-            // the whole chain-iteration; holds every admission the target owns
-            // and drops -> OtherError on any exit. The move takes ownership out
-            // of the set so the set's drop cannot settle it again.
-            let learned_probe_guard = match probe_set.take(state_key) {
-                Some(admissions) => LearnedProbeGuard::armed(
-                    self.learned_capabilities.clone(),
-                    admissions,
-                    probe_set.surface,
-                ),
-                None => LearnedProbeGuard::inert(),
-            };
-            let mut learning =
-                AttemptLearning::new(self, DispatchSurface::Stream, learned_probe_guard);
-            let Some(provider) = target.provider.clone() else {
-                last_err = Some(Error::UnknownProvider(provider_name.to_string()));
-                if opts.disable_fallbacks {
-                    break 'chain;
-                }
-                continue;
-            };
-            // This entry is being dispatched: record it as the terminal
-            // target (overwritten by a later entry on fallback) and count
-            // the hop -- see `run_walk` for the `chain_idx` rationale.
-            meta.mark_target(target, &req.model);
-            meta.fallback_count = chain_idx as u32;
-
-            // Missing-bearer terminal guard, terminal on purpose: see
-            // `run_walk`.
-            if let Some(err) = missing_forwarded_bearer_error(target, &req) {
-                self.count_refusal_error(ingress, target, &err);
-                return Err(err);
-            }
-            // Gemini pairing refusal: see `run_walk`.
-            if let Some(err) = egress_pairing_refusal(target, pairing.as_ref()) {
-                self.count_refusal_error(ingress, target, &err);
-                last_err = Some(err);
-                if opts.disable_fallbacks {
-                    break 'chain;
-                }
-                continue;
-            }
-
-            let mut attempt_req = req.clone();
-            // See `run_walk`: a forwarded target keeps the client's
-            // requested model verbatim instead of rewriting to `upstream`.
-            if !target.use_forwarded_credential {
-                attempt_req.model = model.to_string();
-                declare_model_rename(&mut attempt_req, target, &req.model);
-            }
-            apply_layered_overlays(&self.config, target, &mut attempt_req);
-            // INTERCEPTOR HOOK (see `run_walk`): strip runs after
-            // layered config compose, before auto-cache / context
-            // reduction. A strict refusal and a rolled-back hazard both
-            // walk on to the next target.
-            match self.apply_strip_interceptor(target, &mut attempt_req) {
-                StripDecision::Proceed => {}
-                StripDecision::StrictReject(err) => {
-                    self.count_refusal_error(ingress, target, &err);
-                    last_err = Some(err);
-                    if opts.disable_fallbacks {
-                        break 'chain;
-                    }
-                    continue;
-                }
-                StripDecision::RouteAway(err) => {
-                    self.count_refusal_error(ingress, target, &err);
-                    last_err = Some(err);
-                    if opts.disable_fallbacks {
-                        break 'chain;
-                    }
-                    continue;
-                }
-            }
-            // Envelope-field pre-flight (see `run_walk`): same seam,
-            // `Stream` surface. The returned plan is held rather than
-            // discarded so the modified-request accounting guard lives for the
-            // whole chain iteration; a stream never claims a canary (the
-            // surface is excluded upstream of the cadence tick), so there is
-            // no settlement to owe here.
-            // Captured before pre-flight -- see `run_walk`.
-            let probe_fields = ProbeFieldCapture::of(self.field_repair_table(), &attempt_req);
-            let (preflighted_req, preflight_records, field_preflight_plan) =
-                self.plan_field_preflight(&attempt_req, target, DispatchSurface::Stream);
-            attempt_req = preflighted_req;
-            meta.field_preflight.extend(preflight_records);
-            learning.hold_preflight(field_preflight_plan);
-            let provider_cfg = self.config.providers.get(provider_name);
-            apply_context_reduction(
-                &self.config,
-                provider_cfg,
-                provider_name,
-                model,
-                fidelity_dialect(target, &attempt_req),
-                &mut attempt_req,
-                meta,
-            );
-            // Auto-cache: see `run_walk`. Same once-vs-per-attempt
-            // split and the same transactional commit-or-discard; injected
-            // on this clone after overlays, before the inner loop. Original
-            // `req` is never mutated. The K-gated verdict is consulted at the
-            // same seam for the same per-target reason.
-            let k_suppressed = self.k_emission_suppressed(
-                &auto_cache_plan,
-                target,
-                req.routectl_internal.inbound_session_key.as_deref(),
-            );
-            let cache_decision = apply_auto_cache_placement(
-                &mut attempt_req,
-                &auto_cache_plan,
-                cache_target_gates(provider_cfg),
-                k_suppressed,
-            );
-            declare_cache_placement(
-                &mut attempt_req,
-                target,
-                cache_decision,
-                auto_cache_plan.front_slot,
-            );
-            // Cache observability: see `run_walk`. Stamp the per-marker
-            // decision tokens and emit the per-request decision at debug. No
-            // bodies / secrets: only provider name, model id, stable tokens.
-            let front_token = cache_decision.front.strategy_str();
-            let terminal_token = cache_decision.terminal.strategy_str();
-            meta.cache_strategy = Some(terminal_token);
-            meta.cache_front_decision = Some(front_token);
-            meta.cache_terminal_decision = Some(terminal_token);
-            tracing::debug!(
-                provider = %routectl_core::sanitize_for_log(provider_name),
-                model = %routectl_core::sanitize_for_log(model),
-                strategy = terminal_token,
-                front_decision = front_token,
-                terminal_decision = terminal_token,
-                "cache_auto_decision",
-            );
-
-            // Steady-state would-trim advisory: see `run_walk`. The same
-            // NON-MUTATING shared helper runs on the streaming path so the two
-            // dispatch sites never diverge. Never touches `attempt_req`.
-            self.record_would_trim(
-                &attempt_req,
-                target.provider_kind,
-                target.nickname.as_deref().unwrap_or(model),
-                &target.model.effective_row,
-                meta,
-            );
-
-            // Reasoning-replay carry admission (see `run_walk`): claim
-            // the single-flight slot for each non-portable carried scheme, or
-            // strip proactively when an acting negative / peer probe refuses.
-            // Envelope-field carry admission -- see `run_walk`. Same
-            // pre-dispatch position, same closed-table identity, so the
-            // streaming walk is not a second site with its own rules.
-            learning.admit_carries(
-                target,
-                &mut attempt_req,
-                meta,
-                super::field_repair::FieldSettlementMode::Settling,
-                Instant::now(),
-            );
-            let attempt_policy = self.compose_attempt_policy(
-                &policy,
-                provider_name,
-                target.stream_first_byte_timeout_ms,
-            );
-            // Per-target one-shot auth-recovery: a 401 from the
-            // pre-content attempt triggers on_auth_failure (forced
-            // refresh through the OAuth store's per-provider mutex)
-            // and exactly one retry. Streams don't have their own
-            // retry policy (mid-stream errors propagate), and this
-            // recovery only covers the PRE-CONTENT window --
-            // once `wrap_with_breaker_accounting` is wrapping a live
-            // stream, a 401 surfacing as a mid-stream chunk error
-            // propagates to the caller without auth-recovery (rare
-            // for current upstreams that don't revalidate per-chunk;
-            // documented gap if a future provider does). A refresh
-            // failure propagates immediately rather than walking the
-            // fallback chain over a dead OAuth identity.
-            let mut auth_retry_attempted = false;
-            let mut attempts_made: u32 = 0;
-            loop {
-                // Per-attempt gate: rate limit + circuit breaker. Lives
-                // INSIDE the loop (mirroring `complete_with_options`) so
-                // the auth-401 retry is gated + RPM-debited exactly like
-                // the first attempt -- per-attempt accounting is uniform
-                // across all three dispatch sites. Streams don't retry on
-                // ordinary errors: a later iteration is the auth-recovery
-                // retry or a pre-content repaired retry (field repairs may
-                // chain, each a further iteration, within the request's
-                // shared repair budget). The gate runs once per attempt, so
-                // each attempt is debited exactly once.
-                //
-                // The returned guard OWNS the half-open claim this admission
-                // took (see `run_walk`).
-                let (refusal, mut probe_guard) = self.admit_dispatch(state_key, provider_name);
-                if let Some((gate_kind, gate_err)) = refusal {
-                    log_gate_refusal(
-                        provider_name,
-                        target.nickname.as_deref().unwrap_or(""),
-                        gate_kind,
-                        &gate_err,
-                        "stream gate blocked",
-                    );
-                    // Keep the FIRST real error: a synthetic gate error
-                    // (status 0 "circuit breaker open" / RPM) on a later
-                    // chain entry must not overwrite an earlier entry's
-                    // genuine upstream failure, or the client sees the
-                    // synthetic error instead of the real 503/timeout.
-                    // Between two parked seats the earlier deadline wins, and
-                    // any other gate refusal replaces a parked one.
-                    merge_gate_refusal(&mut last_err, gate_err);
-                    if opts.disable_fallbacks {
-                        break 'chain;
-                    }
-                    continue 'chain;
-                }
-
-                // Gate granted Allow. Capture NOW whether this dispatch
-                // claimed the half-open probe slot: only a probe's first
-                // CONTENT chunk should close + release the breaker at the Ok
-                // arm below. `probe_guard` (the cancellation backstop, see
-                // ProbeSlotGuard) frees the slot if this future is dropped
-                // before an outcome arm settles it (e.g. consumer disconnect
-                // during the pre-content wait against a hung upstream). It has
-                // to be read before any settle site disarms it.
-                let was_half_open_probe = probe_guard.owns_slot();
-
-                // Fidelity WARN at the dispatch point -- see `run_walk`.
-                Self::warn_dropped_reasoning_dialect(
-                    provider_name,
-                    target.provider_kind,
-                    &attempt_req,
-                    &mut reasoning_drop_warned,
-                );
-                // Lazy probe activation at the same ADMITTED boundary as the
-                // complete walk (see there for why it is not the success arm),
-                // reading the same pre-flight capture and per-target
-                // `attempt_req`. Deduped against the other walks by the shared
-                // lane/capability identity, so a session mixing surfaces still
-                // queues one job.
-                self.on_admitted_request(target, &probe_fields, &attempt_req);
-                let translation_report = install_translation_report(&mut attempt_req);
-                let beta_assembly = install_beta_assembly(&mut attempt_req);
-                let (wire_tap, sample_charge) = self.install_wire_tap(target, &mut attempt_req);
-                let r = try_stream_with_first_content(
-                    provider_name,
-                    model,
-                    provider.clone(),
-                    attempt_req.clone(),
-                    attempt_policy.stream_first_byte_timeout_ms,
-                )
-                .await;
-                attempts_made += 1;
-                meta.attempt_count += 1;
-                match r {
-                    Ok(stream) => {
-                        // A half-open PROBE that produced first CONTENT has
-                        // proven the upstream live -- close the breaker NOW
-                        // (release the single probe slot) rather than
-                        // holding it for the whole stream duration, which
-                        // would lock out all concurrent requests to this
-                        // model until the stream ends. A leading content-free
-                        // role chunk does NOT reach here: the Ok arm fires
-                        // only once `try_stream_with_first_content` has seen
-                        // content. Gate this on `was_half_open_probe`: for a
-                        // HEALTHY (closed) breaker first content must NOT reset
-                        // the failure counter, or mid-stream errors could never
-                        // accumulate toward the threshold (each stream's
-                        // first-content reset would zero the count).
-                        //
-                        // Closing here clears the half-open flag, so a
-                        // mid-stream failure the wrap below debits is
-                        // counted as a normal failure accumulating toward
-                        // `circuit_failures` -- a probe that delivered
-                        // content then errors does NOT get a special immediate
-                        // re-trip (and a probe's 429/529 is not debited at
-                        // all). With circuit_failures = 1 a single
-                        // post-close mid-stream error re-quarantines at once
-                        // (fast-flap); with >= 2 a still-degraded upstream
-                        // may serve up to that many content-then-error
-                        // streams before re-opening -- the throughput-vs-
-                        // quarantine tradeoff of closing on first content
-                        // (see runtime_state.rs).
-                        let state = self.state.get(state_key).cloned();
-                        // First content proves the credential works, whatever
-                        // the breaker phase was.
-                        self.settle_seat_success(state_key, was_half_open_probe, &probe_guard);
-                        // The probe (if any) is settled; the wrapped stream's
-                        // BreakerAccounting owns the tail. Disarm so a drop here
-                        // does not free a slot a later probe may hold.
-                        probe_guard.disarm();
-                        sample_charge.keep();
-                        self.check_request_wire(target, &attempt_req, wire_tap.as_ref());
-                        // First content proves the capability is not rejected:
-                        // clear any learned negative this dispatch re-probed,
-                        // and ride each clear out on the meta so the ledger
-                        // records it and a warm rebuild does not resurrect it.
-                        // Beta flags the engine's repair withheld settle
-                        // first, as rejections. A capability the egress
-                        // withheld was never tested, so it is not cleared.
-                        let untranslated = UntranslatedCapabilities::take_from(&translation_report);
-                        // Then settle the replay carry and the envelope-field
-                        // carry against this first content (see
-                        // `run_walk`); a stream holds no canary.
-                        // First content is not the end of the response, so the
-                        // evidence scope rides out on the meta and the caller
-                        // settles it once the stream has ended naturally.
-                        meta.stream_evidence = learning
-                            .on_success(
-                                &untranslated,
-                                target,
-                                &req,
-                                &attempt_req,
-                                &mut learn_dedupe,
-                                meta,
-                            )
-                            .map(StreamEvidence::new);
-                        // Stamp the client-visible label on every Ok chunk
-                        // (including the terminal / usage-only chunk) before
-                        // the breaker wrap. The closure owns the label String
-                        // (moved in via `move`) to satisfy the 'static
-                        // BoxStream bound; `chunk.model` needs an owned String,
-                        // so the label is cloned per Ok chunk. `Err` passes
-                        // through byte-for-byte unchanged.
-                        let label = resolve_reported_model(target, &req.model);
-                        declare_model_relabel(wire_tap.as_ref());
-                        self.carry_response_check(target, &attempt_req, wire_tap.as_ref(), meta);
-                        let relabeled = stream
-                            .map(move |item| match item {
-                                Ok(mut chunk) => {
-                                    chunk.model = label.clone();
-                                    Ok(chunk)
-                                }
-                                Err(e) => Err(e),
-                            })
-                            .boxed();
-                        let folded = match &meta.stream_evidence {
-                            Some(evidence) => evidence.wrap(relabeled),
-                            None => relabeled,
-                        };
-                        return Ok(wrap_with_breaker_accounting(
-                            folded,
-                            state,
-                            target.provider_kind,
-                            // Subscription-quota feed, the STREAMING half.
-                            // Streaming quota rides the FIRST canonical chunk
-                            // only, so it is lifted as the chunk passes through
-                            // the wrap -- before the caller renders it -- rather
-                            // than at end-of-stream, where it is already gone.
-                            // The feed disarms itself on the first chunk
-                            // carrying metadata, so it reads once per stream and
-                            // never per chunk. Keyed on the seat that ACTUALLY
-                            // served, exactly as the non-streaming arm is.
-                            crate::quota::feed::FirstChunkFeed::armed(
-                                self.quota_store.clone(),
-                                meta.served_seat
-                                    .as_deref()
-                                    .map(crate::quota::key::seat_key_for_served_identity),
-                            ),
-                            is_probe,
-                            target.class_overrides.clone(),
-                            policy.max_honored_retry_after(),
-                        ));
-                    }
-                    Err(mut e) => {
-                        let rejection_site = self.settle_failed_attempt(
-                            target,
-                            &attempt_req,
-                            wire_tap.as_ref(),
-                            sample_charge,
-                            &e,
-                            meta,
-                        );
-                        // Read off the status before any lift or remap: see
-                        // `is_transcript_rejection`.
-                        let transcript_rejection =
-                            is_transcript_rejection(&e, req.routectl_internal.transcript_defect);
-                        let native_cf = learning.classify(&e, target.provider_kind);
-                        let original_class = native_cf.class.clone();
-                        let remap_candidate_status = upstream_status_for_remap(&e);
-                        let (cf, remapped) =
-                            apply_remap(native_cf, remap_candidate_status, &target.class_overrides);
-                        let remap_status = if remapped {
-                            remap_candidate_status
-                        } else {
-                            None
-                        };
-                        // A forwarded-credential TARGET that drew a
-                        // 401/403/429 is TERMINAL -- bypass the
-                        // on_auth_failure refresh (below) AND the fallback
-                        // hop, surface verbatim. Keyed off the CURRENT
-                        // target's `use_forwarded_credential`, not
-                        // request-global bearer presence (see
-                        // `run_walk` for the full rationale). This
-                        // is the pre-content window; a mid-stream error
-                        // never reaches here (it rides the wrapped stream).
-                        // Release the half-open slot without a breaker debit.
-                        if target.use_forwarded_credential
-                            && let Some(status) = forwarded_terminal_status(&e)
-                        {
-                            log_forwarded_auth_terminal(
-                                status,
-                                req.routectl_internal.inbound_session_key.is_some(),
-                            );
-                            probe_guard.release();
-                            return Err(e);
-                        }
-                        // Auth-401 single-flight refresh + retry once
-                        // (pre-content only). A refresh failure means
-                        // the OAuth identity is dead; surface it without
-                        // walking the chain, but first release any half-open
-                        // probe slot this attempt claimed at the gate or the
-                        // breaker stays locked open until restart.
-                        if !auth_retry_attempted
-                            && matches!(&e, Error::Upstream { status: 401, .. })
-                        {
-                            auth_retry_attempted = true;
-                            tracing::debug!(
-                                provider = provider_name,
-                                model = %routectl_core::sanitize_for_log(target.nickname.as_deref().unwrap_or("")),
-                                attempt = attempts_made,
-                                "stream 401 pre-content; refreshing auth and retrying once",
-                            );
-                            if let Err(refresh_err) = provider.on_auth_failure().await {
-                                self.park_credential_on_rejection(
-                                    state_key,
-                                    &refresh_err,
-                                    is_probe,
-                                    probe_guard.credential_generation(),
-                                );
-                                probe_guard.release();
-                                return Err(refresh_err);
-                            }
-                            // Refresh succeeded. Release the half-open probe
-                            // slot this attempt claimed at the gate BEFORE the
-                            // `continue` re-enters the loop and re-runs
-                            // the gate. While this caller still holds the
-                            // slot, the in-loop re-gate's `try_dispatch` sees
-                            // `half_open_in_flight` and returns CircuitOpen,
-                            // which would leave the breaker locked open until
-                            // restart. Releasing here lets the re-gate claim a
-                            // fresh slot.
-                            probe_guard.release();
-                            // Preserve the genuine upstream 401 as last_err
-                            // before re-gating (see `run_walk`): if the
-                            // re-gate refuses, the `last_err.is_none()` guard
-                            // keeps the real 401 over the synthetic gate error.
-                            last_err = Some(e);
-                            continue;
-                        }
-                        // The learner repair branches (see `run_walk`):
-                        // replay strip, envelope field, named beta, each a FIXED
-                        // correctness branch that re-dispatches this target
-                        // exactly ONCE. Streams take no in-loop backoff, so the
-                        // retry is immediate; a stream holds no canary.
-                        let untranslated = UntranslatedCapabilities::take_from(&translation_report);
-                        let assembly = beta_assembly.take();
-                        let rejection = Rejection {
-                            err: &e,
-                            class: &cf,
-                            native_class: &original_class,
-                            target,
-                            client_req: &req,
-                            site: rejection_site,
-                            transcript_rejection,
-                            beta_assembly: assembly.as_ref(),
-                        };
-                        if let FailureDecision::Retry { last_err_body_free } =
-                            learning.on_rejection(rejection, &mut attempt_req, meta, repair_budget)
-                        {
-                            probe_guard.release();
-                            // Preserve the genuine rejection as last_err before
-                            // re-gating the repaired attempt (see
-                            // `run_walk`): if the re-gate refuses, the
-                            // `last_err.is_none()` guard keeps the real
-                            // rejection over the synthetic gate error.
-                            last_err = Some(last_err_body_free.unwrap_or(e));
-                            continue;
-                        }
-                        if let Some(body_free) =
-                            replay_rejection_body_free(&e, &cf.class, provider_name)
-                        {
-                            e = body_free;
-                        }
-                        let do_fallback =
-                            should_fallback(&e, &cf.class, &policy, is_probe, transcript_rejection);
-                        // Stream dispatch never retries the same provider (no
-                        // in-loop sleep), so a reset hint only decides park
-                        // versus debit, by the rule every surface shares
-                        // (`breaker_outcome`).
-                        let reset_hint = rate_limit_reset_hint(&e, &policy);
-                        let outcome = breaker_outcome(&e, &cf.class, reset_hint, is_probe);
-                        // Probe fast-fail: a probe that hit a rate-limit/
-                        // overload (429/529) returns the status immediately
-                        // -- no fallback. The shared rule gives it no breaker
-                        // debit, so it only frees the half-open slot it may
-                        // have claimed at the gate. Streams never retry the
-                        // same provider, so there is no can_retry_here to
-                        // guard.
-                        if let Some(status) = probe_fast_fail(&e, is_probe) {
-                            log_probe_fast_fail(
-                                provider_name,
-                                target.nickname.as_deref().unwrap_or(""),
-                                status,
-                                req.max_tokens,
-                            );
-                            self.apply_breaker_outcome(state_key, outcome, &cf.class);
-                            probe_guard.settle(outcome);
-                            // Fail over to a sibling seat of the SAME pool
-                            // before fast-failing (see `run_walk`): a
-                            // rate-limited seat does not mean the pool is out of
-                            // quota. Fast-fail across DISTINCT chain targets and
-                            // once the pool's seats are exhausted.
-                            if !opts.disable_fallbacks
-                                && next_is_sibling_seat(&chain, chain_idx, target)
-                            {
-                                last_err = Some(e);
-                                continue 'chain;
-                            }
-                            return Err(e);
-                        }
-                        // The DEBIT keys off the failure CLASS, not the
-                        // chain-hop decision (see `run_walk`): a seat is
-                        // unhealthy when it emits a transient-health failure,
-                        // independent of routing. A non-debiting class that
-                        // still falls back releases its slot without a debit
-                        // in the fallback branch below.
-                        let debits = class_debits(&cf.class);
-                        self.apply_breaker_outcome(state_key, outcome, &cf.class);
-                        if debits {
-                            probe_guard.disarm();
-                        }
-                        // Outside the debit gate: a credential rejection
-                        // classifies Auth, which never debits.
-                        self.park_credential_on_rejection(
-                            state_key,
-                            &e,
-                            is_probe,
-                            probe_guard.credential_generation(),
-                        );
-                        self.emit_class_observability(
-                            &e,
-                            &cf,
-                            &original_class,
-                            remapped,
-                            remap_status,
-                            DispatchSurface::Stream,
-                            provider_name,
-                            target,
-                            do_fallback,
-                            &policy,
-                            debits,
-                            is_probe,
-                            is_forwarded,
-                            ingress,
-                        );
-                        learning.observe_generic(
-                            &e,
-                            &cf,
-                            remapped,
-                            target,
-                            &req,
-                            &untranslated,
-                            &mut learn_dedupe,
-                            meta,
-                        );
-                        if opts.disable_fallbacks {
-                            // Terminal error exit: free any half-open probe
-                            // slot this attempt claimed. A no-op when a
-                            // debiting class already routed through
-                            // record_failure (which clears the slot).
-                            probe_guard.release();
-                            return Err(e);
-                        }
-                        if do_fallback {
-                            let has_next = chain_idx + 1 < chain_len;
-                            if has_next {
-                                tracing::warn!(
-                                    provider = provider_name,
-                                    model = %routectl_core::sanitize_for_log(target.nickname.as_deref().unwrap_or("")),
-                                    error = ?e,
-                                    "stream fallback to next",
-                                );
-                            } else {
-                                // The previous shape WARNed "fallback to next"
-                                // with `provider=<self> model=<self>` because
-                                // we always log the SOURCE of the hop, not the
-                                // target. On a single-entry chain (or the
-                                // final entry of a longer chain) there is no
-                                // next target -- the loop exits and the
-                                // request fails. Log accordingly so an
-                                // operator triaging a misleading "fallback
-                                // happened" line sees what actually
-                                // happened.
-                                tracing::warn!(
-                                    provider = provider_name,
-                                    model = %routectl_core::sanitize_for_log(target.nickname.as_deref().unwrap_or("")),
-                                    error = ?e,
-                                    "stream chain exhausted; no fallback target available; request will fail",
-                                );
-                            }
-                            // A fallbackable error whose class did NOT debit
-                            // the breaker leaves the half-open probe slot
-                            // armed; release it without a debit before the hop
-                            // so every settle path frees the slot exactly once.
-                            // A debiting class already settled + disarmed above.
-                            if !debits {
-                                probe_guard.release();
-                            }
-                            last_err = Some(e);
-                            continue 'chain;
-                        }
-                        // Terminal non-fallbackable error. Free any half-open
-                        // probe slot this attempt claimed so the breaker is
-                        // not left locked open.
-                        probe_guard.release();
-                        return Err(e);
-                    }
-                }
-            }
-        }
-
-        Err(last_err.unwrap_or_else(|| Error::UnknownAlias(req.model.clone())))
     }
 
     /// Observability seam at the router's class-decision point. Bumps the
@@ -1246,9 +654,8 @@ impl Router {
     /// CRITICAL: this NEVER mutates `attempt_req`. Both measurements only
     /// read the request and never call `apply_trim_plan`, so the bytes sent
     /// upstream are identical with or without this call. It is extracted
-    /// into ONE helper -- invoked from both `run_walk` and
-    /// `stream_inner` -- so the two byte-identical dispatch blocks cannot
-    /// drift.
+    /// into ONE helper -- invoked from `run_walk`, which every message
+    /// surface shares -- so the dispatch paths cannot drift.
     ///
     /// An unknown / unresolved-catalog target (e.g. `provider_kind` is
     /// `None` for a legacy / direct-construction target, or the two-layer
@@ -1783,7 +1190,14 @@ use routectl_core::{
 };
 
 #[cfg(test)]
-use super::cache_plan::{CacheInjection, CacheTargetGates, place_front_marker};
+use std::time::Instant;
+
+#[cfg(test)]
+use super::cache_plan::{
+    CacheInjection, CacheTargetGates, apply_auto_cache_placement, place_front_marker,
+};
+#[cfg(test)]
+use super::class_observe::{apply_remap, upstream_status_for_remap};
 #[cfg(test)]
 use super::dispatch_loop::reduction_strategy_token;
 #[cfg(test)]

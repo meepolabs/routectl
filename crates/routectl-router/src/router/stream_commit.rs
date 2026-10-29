@@ -202,12 +202,11 @@ pub(super) fn is_content_bearing(chunk: &ChatChunk) -> bool {
 /// The buffer is never exposed to the client before content commits: the API
 /// cannot both surface those chunks and re-enter the outer fallback loop.
 ///
-/// `first_content_timeout_ms` (the policy's `stream_first_byte_timeout_ms`,
-/// when set) caps the wait for
-/// stream-open PLUS the entire pre-content pull loop, so leading content-free
-/// chunks neither reset nor satisfy it -- a role-then-hang still trips the
-/// first-content timeout and falls over. Expiry surfaces as a status-0
-/// upstream error which is fallbackable per `should_fallback`.
+/// The returned future is the whole pre-content window: stream-open PLUS the
+/// pre-content pull loop. The dispatch walk's attempt deadline
+/// (`stream_first_byte_timeout_ms`) wraps it whole, so leading content-free
+/// chunks neither reset nor satisfy that deadline -- a role-then-hang still
+/// trips it and falls over.
 ///
 /// Also emits a debug-level first-activity log the moment the upstream
 /// response headers arrive, ahead of the pre-content pull below (see the
@@ -217,7 +216,6 @@ pub(super) async fn try_stream_with_first_content(
     upstream_model: &str,
     provider: Arc<dyn Provider>,
     req: ChatRequest,
-    first_content_timeout_ms: Option<u64>,
 ) -> Result<BoxStream<'static, Result<ChatChunk>>> {
     // Per-attempt clock for the first-activity mark below -- NOT the
     // request-level clock `UsageCapture::start` uses for `ttfb_ms`
@@ -231,104 +229,87 @@ pub(super) async fn try_stream_with_first_content(
     // is chain-walk overhead, a separate concern from the prefill gap
     // this instrumentation targets.
     let attempt_start = Instant::now();
-    let open_and_first = async {
-        let mut upstream = provider.stream(req).await?;
-        // First sign of upstream life: response headers arrived (every
-        // egress's `stream()` awaits `client.execute()` -- which
-        // resolves once the status line + headers are in -- BEFORE
-        // constructing the lazy body-byte stream below). Distinct from
-        // the first-CONTENT mark (`mark_first_byte` in
-        // `ingress_handle.rs`), which additionally waits out any
-        // upstream `message_start`/`ping` events the SSE parser
-        // swallows. One site here covers every provider (Anthropic,
-        // Bedrock, gemini, openai-compat, openai-responses) since they
-        // all share this `stream()` -> execute -> byte-stream shape.
-        // Debug-only; no bodies/prompts/PII, structured fields only.
-        // Manual capture recipe: docs/LOGGING.md, "Stream first-activity
-        // mark" -- run with ROUTECTL_LOG=routectl_router=debug and issue
-        // a streaming request; this line's `elapsed_ms` is the gap
-        // between upstream headers and the existing first-content
-        // ttfb_ms mark.
-        tracing::debug!(
-            provider = provider_name,
-            upstream = upstream_model,
-            elapsed_ms = attempt_start.elapsed().as_millis() as u64,
-            "stream first-activity: upstream response headers received",
-        );
-        // Buffer content-free leading chunks (role opener, id/model
-        // metadata) until the first content-bearing one. Bounded: a
-        // stream that never produces content must not buffer forever.
-        let mut buffered: Vec<ChatChunk> = Vec::new();
-        let mut counted = 0usize;
-        loop {
-            match upstream.next().await {
-                Some(Ok(chunk)) if is_content_bearing(&chunk) => {
-                    // Commit: buffered metadata (order + upstream_meta
-                    // preserved) -> first content -> upstream tail.
-                    let head = std::mem::take(&mut buffered);
-                    let merged = futures::stream::iter(head.into_iter().map(Ok))
-                        .chain(futures::stream::once(async move { Ok(chunk) }))
-                        .chain(upstream);
-                    return Ok(merged.boxed());
-                }
-                Some(Ok(chunk)) if is_empty_reasoning_only(&chunk) => {
-                    if !buffered.last().is_some_and(is_empty_reasoning_only) {
-                        buffered.push(chunk);
-                    }
-                    // Uncounted chunks leave the loop unbounded: an upstream
-                    // that is always ready would never return Pending, and the
-                    // first-content timeout around this future could not fire.
-                    tokio::task::consume_budget().await;
-                }
-                Some(Ok(chunk)) => {
-                    if counted >= MAX_PRECONTENT_CHUNKS {
-                        // Buffer overflow before any content: a
-                        // pre-content failure. Discard the buffer (nothing
-                        // reached the client) and fall over. Fallbackable
-                        // per `should_fallback`; the breaker records it.
-                        let summary = precontent_summary(buffered.iter().chain([&chunk]));
-                        return Err(Error::Streaming(format!(
-                            "{provider_name} emitted more than {MAX_PRECONTENT_CHUNKS} \
-                             content-free chunks before any content (buffered: {summary})",
-                        )));
-                    }
-                    counted += 1;
+    let mut upstream = provider.stream(req).await?;
+    // First sign of upstream life: response headers arrived (every
+    // egress's `stream()` awaits `client.execute()` -- which
+    // resolves once the status line + headers are in -- BEFORE
+    // constructing the lazy body-byte stream below). Distinct from
+    // the first-CONTENT mark (`mark_first_byte` in
+    // `ingress_handle.rs`), which additionally waits out any
+    // upstream `message_start`/`ping` events the SSE parser
+    // swallows. One site here covers every provider (Anthropic,
+    // Bedrock, gemini, openai-compat, openai-responses) since they
+    // all share this `stream()` -> execute -> byte-stream shape.
+    // Debug-only; no bodies/prompts/PII, structured fields only.
+    // Manual capture recipe: docs/LOGGING.md, "Stream first-activity
+    // mark" -- run with ROUTECTL_LOG=routectl_router=debug and issue
+    // a streaming request; this line's `elapsed_ms` is the gap
+    // between upstream headers and the existing first-content
+    // ttfb_ms mark.
+    tracing::debug!(
+        provider = provider_name,
+        upstream = upstream_model,
+        elapsed_ms = attempt_start.elapsed().as_millis() as u64,
+        "stream first-activity: upstream response headers received",
+    );
+    // Buffer content-free leading chunks (role opener, id/model
+    // metadata) until the first content-bearing one. Bounded: a
+    // stream that never produces content must not buffer forever.
+    let mut buffered: Vec<ChatChunk> = Vec::new();
+    let mut counted = 0usize;
+    loop {
+        match upstream.next().await {
+            Some(Ok(chunk)) if is_content_bearing(&chunk) => {
+                // Commit: buffered metadata (order + upstream_meta
+                // preserved) -> first content -> upstream tail.
+                let head = std::mem::take(&mut buffered);
+                let merged = futures::stream::iter(head.into_iter().map(Ok))
+                    .chain(futures::stream::once(async move { Ok(chunk) }))
+                    .chain(upstream);
+                return Ok(merged.boxed());
+            }
+            Some(Ok(chunk)) if is_empty_reasoning_only(&chunk) => {
+                if !buffered.last().is_some_and(is_empty_reasoning_only) {
                     buffered.push(chunk);
                 }
-                Some(Err(e)) => return Err(e),
-                // Upstream ended before any content (empty stream, or only
-                // content-free chunks). This is NOT a successful empty
-                // completion -- a healthy provider always emits content
-                // (even a role opener is followed by content or an error).
-                // Discard the buffer and treat as a fallbackable streaming
-                // error so the chain walks to the next provider AND the
-                // breaker records a failed probe. Without this, an upstream
-                // that closes before producing content would be reported as
-                // a successful completion to both the client and the
-                // router's health accounting.
-                None => {
-                    let summary = precontent_summary(&buffered);
+                // Uncounted chunks leave the loop unbounded: an upstream
+                // that is always ready would never return Pending, and the
+                // first-content timeout around this future could not fire.
+                tokio::task::consume_budget().await;
+            }
+            Some(Ok(chunk)) => {
+                if counted >= MAX_PRECONTENT_CHUNKS {
+                    // Buffer overflow before any content: a
+                    // pre-content failure. Discard the buffer (nothing
+                    // reached the client) and fall over. Fallbackable
+                    // per `should_fallback`; the breaker records it.
+                    let summary = precontent_summary(buffered.iter().chain([&chunk]));
                     return Err(Error::Streaming(format!(
-                        "{provider_name} stream closed before any content arrived \
-                         (buffered: {summary})",
+                        "{provider_name} emitted more than {MAX_PRECONTENT_CHUNKS} \
+                         content-free chunks before any content (buffered: {summary})",
                     )));
                 }
+                counted += 1;
+                buffered.push(chunk);
+            }
+            Some(Err(e)) => return Err(e),
+            // Upstream ended before any content (empty stream, or only
+            // content-free chunks). This is NOT a successful empty
+            // completion -- a healthy provider always emits content
+            // (even a role opener is followed by content or an error).
+            // Discard the buffer and treat as a fallbackable streaming
+            // error so the chain walks to the next provider AND the
+            // breaker records a failed probe. Without this, an upstream
+            // that closes before producing content would be reported as
+            // a successful completion to both the client and the
+            // router's health accounting.
+            None => {
+                let summary = precontent_summary(&buffered);
+                return Err(Error::Streaming(format!(
+                    "{provider_name} stream closed before any content arrived \
+                     (buffered: {summary})",
+                )));
             }
         }
-    };
-
-    match first_content_timeout_ms {
-        Some(ms) => match tokio::time::timeout(Duration::from_millis(ms), open_and_first).await {
-            Ok(r) => r,
-            Err(_) => Err(Error::upstream(
-                provider_name,
-                0,
-                format!(
-                    "stream first-content timeout after {ms}ms; content-free leading \
-                     chunks (role opener, id/model metadata) do not satisfy the deadline"
-                ),
-            )),
-        },
-        None => open_and_first.await,
     }
 }

@@ -270,8 +270,8 @@ fn every_activation_call_site_passes_the_per_target_request() {
     // leaves the total unchanged.
     assert_eq!(
         args.len(),
-        3,
-        "expected the complete, stream, and count_tokens call sites, found {args:?}"
+        2,
+        "expected the shared dispatch walk and count_tokens call sites, found {args:?}"
     );
     // NAME-based, and that is the limit of what this guard proves. Where the
     // FIELDS are captured -- before pre-flight -- is pinned behaviorally by

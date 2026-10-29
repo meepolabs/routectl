@@ -1982,8 +1982,8 @@ struct DispatchTarget {
     /// `AnthropicApi` provider with `credential_source: Forwarded`;
     /// populated ONCE at chain expansion in `expand_chain_to_targets`,
     /// the same pattern as `provider_kind`, for both seat and non-seat
-    /// targets. Read at the three dispatch paths (`run_walk`,
-    /// `count_tokens_try_seat`, `stream_inner`) to bypass the
+    /// targets. Read at the two dispatch paths (`run_walk`, which serves
+    /// complete and stream, and `count_tokens_try_seat`) to bypass the
     /// `attempt_req.model` rewrite: a forwarded target forwards the
     /// client's requested model verbatim; an own target still rewrites
     /// to `upstream`. `false` in both constructors until the post-loop

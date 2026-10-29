@@ -176,7 +176,6 @@ async fn guard_commit(chunks: Vec<ChatChunk>) -> Vec<ChatChunk> {
         "wire-1",
         FixedStream::provider(chunks),
         ChatRequest::default(),
-        RetryPolicy::default().stream_first_byte_timeout_ms,
     )
     .await
     .expect("the guard commits");
@@ -192,7 +191,6 @@ async fn guard_error(chunks: Vec<ChatChunk>) -> String {
         "wire-1",
         FixedStream::provider(chunks),
         ChatRequest::default(),
-        RetryPolicy::default().stream_first_byte_timeout_ms,
     )
     .await
     {
@@ -302,7 +300,6 @@ async fn content_chunk_commits_instead_of_being_summarized() {
         "wire-1",
         FixedStream::provider(vec![role(), empty_reasoning(), text("hi"), finish()]),
         ChatRequest::default(),
-        RetryPolicy::default().stream_first_byte_timeout_ms,
     )
     .await
     .expect("text commits the stream");
@@ -438,14 +435,28 @@ async fn empty_reasoning_with_any_other_field_counts_toward_the_cap() {
     }
 }
 
+/// A one-leg router whose only target, `m1` on `p1`, waits at most
+/// `first_content_ms` for its first content chunk.
+fn one_leg_router(provider: Arc<dyn Provider>, first_content_ms: u64) -> Router {
+    let mut config = Config::default();
+    config.providers.insert(
+        "p1".into(),
+        crate::config::ProviderEntry::anthropic_api("literal:k"),
+    );
+    config
+        .aliases
+        .insert("alias".into(), AliasValue::Chain(vec!["m1".into()]));
+    let mut router = Router::new(Arc::new(config));
+    let model = ResolvedModel::new("m1", "p1", provider, "wire-1")
+        .with_stream_first_byte_timeout_ms(first_content_ms);
+    router.install_resolved_models(BTreeMap::from([("m1".to_string(), Arc::new(model))]));
+    router
+}
+
 #[test]
 fn endless_ready_empty_reasoning_stream_still_hits_the_first_content_timeout() {
     const TIMEOUT_MS: u64 = 50;
     let wall_limit = Duration::from_secs(10);
-    let policy = RetryPolicy {
-        stream_first_byte_timeout_ms: Some(TIMEOUT_MS),
-        ..RetryPolicy::default()
-    };
     // Endless for as long as the test waits; once it gives up, the stream ends
     // so a regressed guard loop terminates instead of spinning a stranded
     // thread for the rest of the test binary's life.
@@ -467,13 +478,12 @@ fn endless_ready_empty_reasoning_stream_still_hits_the_first_content_timeout() {
             .enable_time()
             .build()
             .expect("runtime builds");
-        let outcome = rt.block_on(try_stream_with_first_content(
-            "p1",
-            "wire-1",
-            provider,
-            ChatRequest::default(),
-            policy.stream_first_byte_timeout_ms,
-        ));
+        let router = one_leg_router(provider, TIMEOUT_MS);
+        let req = ChatRequest {
+            model: "alias".into(),
+            ..ChatRequest::default()
+        };
+        let outcome = rt.block_on(router.stream(req));
         let _ = tx.send(outcome.map(|_| ()));
     });
     let outcome = rx.recv_timeout(wall_limit);

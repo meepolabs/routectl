@@ -419,7 +419,7 @@ async fn stream_reduce_runs_before_auto_cache_breakpoint_covers_reduced_bytes() 
     // breakpoint is present -- proving reduction ran BEFORE auto-cache on
     // the dominant streaming path. `stream_path_also_reduces` runs with
     // auto_cache OFF, so the interaction is never exercised there: a
-    // reorder of the two blocks in `stream_inner` would disable reduction
+    // reorder of the two blocks in `run_walk` would disable reduction
     // on every auto-breakpoint stream and pass every other test.
     let (router, captured) = rig(anthropic_entry(), true, true);
     let _ = router

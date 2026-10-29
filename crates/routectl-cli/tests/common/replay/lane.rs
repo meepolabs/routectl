@@ -1263,8 +1263,8 @@ static ANTHROPIC_FIDELITY_EXCEPTIONS: [Exception; 8] = [
                  context-window suffix (e.g. `claude-opus-4-8[1m]` -> `claude-opus-4-8`). \
                  Confirmed at the `attempt_req.model = target.upstream` assignment inside \
                  `run_walk` (crates/routectl-router/src/router/dispatch_loop.rs), which runs \
-                 for every non-forwarded target; `stream_inner` does the same on the streaming \
-                 path. NOTE the citation is weaker than the other three: `run_walk` is a \
+                 for every non-forwarded target on both the completion and streaming \
+                 surfaces. NOTE the citation is weaker than the other three: `run_walk` is a \
                  long dispatch method rather than a single-purpose transform, so its symbol \
                  surviving proves only that dispatch still exists, not that this assignment \
                  does. There is no narrower symbol to name -- no function strips the bracketed \

@@ -16,7 +16,7 @@ use super::*;
 // error envelope verbatim, so the `provider.stream()` open call fails with the
 // SAME real classification the complete path learns from. This keeps the
 // learned-capability loop identical across surfaces while exercising the
-// streaming dispatch body (`stream_inner`) and its `ProbeAdmissionSet`.
+// streaming surface of the dispatch walk (`run_walk`) and its `ProbeAdmissionSet`.
 // ---------------------------------------------------------------------------
 
 const PROVIDER_KIND: &str = "openai-compat";

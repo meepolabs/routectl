@@ -619,9 +619,9 @@ impl Drop for LearnedProbeGuard {
 
 /// Request-scoped owner of the re-probe admissions a chain filter staged,
 /// grouped by the target that must settle them. Declared before the chain
-/// loop in `run_walk` and `stream_inner`; holds every admission the
-/// filter recorded until the loop either reaches a target (transfer) or the
-/// request leaves dispatch (settle-on-drop).
+/// loop in `run_walk`; holds every admission the filter recorded until the
+/// loop either reaches a target (transfer) or the request leaves dispatch
+/// (settle-on-drop).
 ///
 /// Transfer semantics: [`take`](Self::take) MOVES a target's admissions out
 /// of the set into that target's [`LearnedProbeGuard`] when the loop reaches
