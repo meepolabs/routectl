@@ -914,7 +914,8 @@ license.
 ### openai_compat
 
 - `src/openai_compat/mod.rs` -- `OpenAiCompatProvider` impl; owns
-  `ThinkTagAccumulator` for cross-chunk `<think>` state;
+  `ThinkTagAccumulator` for cross-chunk `<think>` state (`take_think_flush`);
+  stream tail via `classify_stream_tail` and `missing_terminal`;
   `map_openai_compat_upstream_error` builds the client error from an
   `upstream_error::UpstreamErrorRead` (tokens, gated `Retry-After`, request
   id) and routes a non-envelope (flat AWS mantle) 403 through the
@@ -1233,18 +1234,18 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   ARN/bracket-suffix path encoding
 - `src/bedrock/frame.rs` -- shared AWS-eventstream framing driver for both
   Bedrock egresses; owns the byte loop, the 12-byte prelude/length/CRC
-  invariants, the `MAX_FRAME_BYTES` 8 MB DoS cap, decode-error recovery, and
+  invariants, the `MAX_FRAME_BYTES` 8 MB DoS cap, fail-closed decode errors,
   the WARN/TRACE log-hygiene split (prelude-only at WARN, full payload hex at
-  TRACE); both the InvokeModel-stream and ConverseStream decoders delegate to
-  `decode_frames`. Also owns `frame_type` (protocol frame classification from
+  TRACE) and the fallible `FrameHandler::on_eof`; both the InvokeModel-stream
+  and ConverseStream decoders delegate to `decode_frames`. Also owns `frame_type` (protocol frame classification from
   `:message-type` / `:event-type` / `:exception-type`) and `exception_error`
   (builds the in-stream error, status from
   `aws_error::aws_stream_exception_status`), shared by both lanes
 - `src/bedrock/eventstream.rs` -- InvokeModel-stream frame handler / payload
   interpreter (base64-unwrap of Anthropic SSE per frame, parsed by the shared
   `anthropic_api::sse::SseState` labelled `OpeningUsageOrigin::BedrockInvoke`,
-  so the opener carries the same opening usage); delegates the framing byte
-  loop and DoS cap to `frame.rs`
+  so the opener carries the same opening usage); `StreamCompletion` terminal
+  `message_stop`; delegates the framing byte loop and DoS cap to `frame.rs`
 - `src/bedrock/invoke.rs` -- `normalize_request` / `normalize_response`,
   `merge_floor_and_client_betas`: InvokeModel body assembly and response
   mapping
@@ -1306,8 +1307,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/bedrock/converse/response.rs` -- Converse response body -> canonical
   (content walk, stopReason map, cacheDetails -> cache_creation)
 - `src/bedrock/converse/eventstream.rs` -- ConverseStream binary-frame
-  decoder; per-block-index state map; the `metadata` usage chunk stamps
-  `usage_input_source = ExplicitFinal` and `usage_from_vendor_endpoint`
+  decoder; per-block-index state map; terminal frame `messageStop`; the
+  `metadata` usage chunk stamps `usage_input_source = ExplicitFinal` and
+  `usage_from_vendor_endpoint`
 
 ### Tests
 
