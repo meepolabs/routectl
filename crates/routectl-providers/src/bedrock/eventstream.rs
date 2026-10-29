@@ -36,13 +36,19 @@ use routectl_core::{ChatChunk, Error, OpeningUsageOrigin, Result};
 
 use super::BedrockApiShape;
 use super::frame::{self, FrameHandler, FrameLabel};
-use crate::anthropic_api::sse::SseState;
+use super::invoke::PROVIDER_KIND;
+use crate::anthropic_api::sse::{self, SseState};
+use crate::anthropic_api::types::SseEvent;
+use crate::stream_completion::StreamCompletion;
 
 /// Per-frame handler for the Anthropic-shape Invoke stream. Holds the
-/// `SseState` that accumulates across `chunk` frames; the framing layer
-/// owns everything up to the decoded `Message`.
+/// `SseState` that accumulates across `chunk` frames and the record of
+/// whether the inner `message_stop` arrived; the framing layer owns
+/// everything up to the decoded `Message`.
 struct InvokeFrameHandler {
     sse_state: SseState,
+    completion: StreamCompletion<SseEvent>,
+    had_output: bool,
     response_tap: Option<WireTap>,
 }
 
@@ -51,8 +57,27 @@ impl FrameHandler for InvokeFrameHandler {
         if let Some(tap) = self.response_tap.as_ref() {
             fold_invoke_frame(tap, &message);
         }
-        handle_invoke_frame(provider_id, message, &mut self.sse_state)
-            .map(|maybe| maybe.into_iter().collect())
+        let chunk = handle_invoke_frame(
+            provider_id,
+            message,
+            &mut self.sse_state,
+            &mut self.completion,
+        )?;
+        self.had_output |= chunk.is_some();
+        Ok(chunk.into_iter().collect())
+    }
+
+    fn on_eof(&mut self, provider_id: &str) -> Result<Vec<ChatChunk>> {
+        if let Err(e) = self.completion.end_of_stream(provider_id) {
+            tracing::warn!(
+                provider = %provider_id,
+                lane = PROVIDER_KIND,
+                had_output = self.had_output,
+                "bedrock invoke stream: upstream closed before message_stop"
+            );
+            return Err(e);
+        }
+        Ok(Vec::new())
     }
 }
 
@@ -114,6 +139,8 @@ where
     };
     let handler = InvokeFrameHandler {
         sse_state,
+        completion: StreamCompletion::new(PROVIDER_KIND, sse::is_terminal_event),
+        had_output: false,
         response_tap,
     };
     frame::decode_frames(provider_id, byte_stream, handler, FrameLabel::Invoke)
@@ -161,11 +188,13 @@ where
 
 /// Map a single decoded eventstream frame into an optional ChatChunk.
 /// Returns `Ok(None)` for non-content frames (no-op) and `Err` for
-/// upstream exception frames.
+/// upstream exception frames. Every decoded inner Anthropic event is
+/// shown to `completion` before it is applied.
 fn handle_invoke_frame(
     provider_id: &str,
     message: Message,
     sse_state: &mut SseState,
+    completion: &mut StreamCompletion<SseEvent>,
 ) -> Result<Option<ChatChunk>> {
     let payload_bytes = message.payload();
     let event_type = match frame::frame_type(&message) {
@@ -264,7 +293,10 @@ fn handle_invoke_frame(
                     format!("{err_type}: {err_msg}"),
                 ));
             }
-            sse_state.parse_event(provider_id, inner)
+            sse::decode_event(inner).and_then(|ev| {
+                completion.observe(&ev);
+                sse_state.apply_event(provider_id, ev)
+            })
         }
         // An upstream that violates the protocol by naming an exception in
         // `:event-type` (with `:message-type: event`, or absent) still
@@ -322,12 +354,32 @@ mod tests {
             ))
     }
 
+    /// Wire bytes of one `chunk` frame wrapping the Anthropic `inner` event.
+    fn chunk_bytes(inner: &str) -> Vec<u8> {
+        let b64 = B64_STANDARD.encode(inner.as_bytes());
+        let payload = format!(r#"{{"bytes":"{b64}"}}"#);
+        let mut buf = Vec::new();
+        aws_smithy_eventstream::frame::write_message_to(&make_frame("chunk", &payload), &mut buf)
+            .expect("encode eventstream frame");
+        buf
+    }
+
+    /// The closing `message_stop` chunk frame of a complete Invoke stream.
+    fn message_stop_bytes() -> Vec<u8> {
+        chunk_bytes(r#"{"type":"message_stop"}"#)
+    }
+
+    fn invoke_completion() -> StreamCompletion<SseEvent> {
+        StreamCompletion::new(PROVIDER_KIND, sse::is_terminal_event)
+    }
+
     fn handle(event_type: &str, payload: &str) -> Result<Option<ChatChunk>> {
         let mut sse_state = SseState::default();
         handle_invoke_frame(
             "test-bedrock",
             make_frame(event_type, payload),
             &mut sse_state,
+            &mut invoke_completion(),
         )
     }
 
@@ -432,6 +484,7 @@ mod tests {
             "test-bedrock",
             make_exception_frame("throttlingException", r#"{"message":"slow down"}"#),
             &mut sse_state,
+            &mut invoke_completion(),
         )
         .unwrap_err();
         match err {
@@ -453,6 +506,7 @@ mod tests {
             "test-bedrock",
             make_exception_frame("someFutureAwsException", r#"{"message":"nope"}"#),
             &mut sse_state,
+            &mut invoke_completion(),
         )
         .unwrap_err();
         match err {
@@ -467,7 +521,12 @@ mod tests {
     fn frame_with_no_type_headers_is_skipped() {
         let mut sse_state = SseState::default();
         let bare = Message::new(Bytes::from_static(b"{}"));
-        let res = handle_invoke_frame("test-bedrock", bare, &mut sse_state);
+        let res = handle_invoke_frame(
+            "test-bedrock",
+            bare,
+            &mut sse_state,
+            &mut invoke_completion(),
+        );
         assert!(matches!(res, Ok(None)), "got {res:?}");
     }
 
@@ -571,7 +630,9 @@ mod tests {
         // prelude bytes again as headers.
         let (head, tail) = buf.split_at(12);
         let head = Bytes::copy_from_slice(head);
-        let tail = Bytes::copy_from_slice(tail);
+        let mut tail = tail.to_vec();
+        tail.extend_from_slice(&message_stop_bytes());
+        let tail = Bytes::from(tail);
 
         let byte_stream = futures::stream::iter(vec![Ok(head), Ok(tail)]);
         let mut chunks = invoke_stream("test-bedrock".to_string(), byte_stream);
@@ -655,6 +716,7 @@ mod tests {
         let (head1, tail1) = frame1.split_at(12);
         let mut combined_tail: Vec<u8> = tail1.to_vec();
         combined_tail.extend_from_slice(&frame2);
+        combined_tail.extend_from_slice(&message_stop_bytes());
 
         let byte_stream = futures::stream::iter(vec![
             Ok(Bytes::copy_from_slice(head1)),
@@ -691,6 +753,7 @@ mod tests {
         let frame = make_frame("chunk", &payload);
         let mut buf = Vec::new();
         aws_smithy_eventstream::frame::write_message_to(&frame, &mut buf).unwrap();
+        buf.extend_from_slice(&message_stop_bytes());
 
         let byte_stream = futures::stream::iter(vec![Ok(Bytes::from(buf))]);
         let mut chunks = invoke_stream("test-bedrock".to_string(), byte_stream);
@@ -719,6 +782,7 @@ mod tests {
             "test-bedrock",
             make_frame("chunk", "not even close to json"),
             &mut sse_state,
+            &mut invoke_completion(),
         );
         match res {
             Ok(None) => {} // expected
@@ -773,6 +837,93 @@ mod tests {
             }
             other => panic!("stream must end with a decode error; got {other:?}"),
         }
+    }
+
+    const TEXT_START: &str =
+        r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#;
+    const TEXT_BEFORE: &str =
+        r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"before"}}"#;
+    const MESSAGE_DELTA: &str = r#"{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":1}}"#;
+
+    async fn decode_invoke(inner_events: &[&str]) -> Vec<Result<ChatChunk>> {
+        let wire: Vec<u8> = inner_events.iter().flat_map(|e| chunk_bytes(e)).collect();
+        let byte_stream = futures::stream::iter(vec![Ok(Bytes::from(wire))]);
+        invoke_stream("test-bedrock".to_string(), byte_stream)
+            .collect()
+            .await
+    }
+
+    fn texts(items: &[Result<ChatChunk>]) -> Vec<String> {
+        items
+            .iter()
+            .filter_map(|i| i.as_ref().ok())
+            .filter_map(|c| c.choices.first()?.delta.content.clone())
+            .collect()
+    }
+
+    fn assert_ends_with_one_missing_terminal(items: &[Result<ChatChunk>]) {
+        let errs: Vec<_> = items.iter().filter(|i| i.is_err()).collect();
+        assert_eq!(errs.len(), 1, "exactly one error; items: {items:?}");
+        match items.last() {
+            Some(Err(Error::Upstream {
+                provider,
+                status,
+                body,
+                ..
+            })) => {
+                assert_eq!(provider, "test-bedrock");
+                assert_eq!(*status, 0);
+                assert_eq!(
+                    body,
+                    "bedrock-invoke: stream ended without a terminal event"
+                );
+            }
+            other => panic!("stream must end with the missing-terminal error; got {other:?}"),
+        }
+    }
+
+    /// A clean close after content but before the inner `message_stop`
+    /// emits the content, then ends with exactly one missing-terminal
+    /// error. `message_delta` carries the stop reason yet is not terminal.
+    #[tokio::test]
+    async fn invoke_stream_cut_after_content_emits_content_then_one_error() {
+        let items = decode_invoke(&[TEXT_START, TEXT_BEFORE, MESSAGE_DELTA]).await;
+
+        assert_eq!(
+            texts(&items),
+            vec!["before".to_string()],
+            "items: {items:?}"
+        );
+        assert_ends_with_one_missing_terminal(&items);
+    }
+
+    /// A clean close before any content is the same missing-terminal error.
+    #[tokio::test]
+    async fn invoke_stream_cut_before_content_is_one_error() {
+        let items = decode_invoke(&[r#"{"type":"ping"}"#]).await;
+
+        assert_eq!(items.len(), 1, "items: {items:?}");
+        assert_ends_with_one_missing_terminal(&items);
+    }
+
+    /// Positive control for the rows above: the same stream closed by
+    /// `message_stop` ends without an error.
+    #[tokio::test]
+    async fn invoke_stream_closed_by_message_stop_ends_cleanly() {
+        let items = decode_invoke(&[
+            TEXT_START,
+            TEXT_BEFORE,
+            MESSAGE_DELTA,
+            r#"{"type":"message_stop"}"#,
+        ])
+        .await;
+
+        assert_eq!(
+            texts(&items),
+            vec!["before".to_string()],
+            "items: {items:?}"
+        );
+        assert!(items.iter().all(Result::is_ok), "items: {items:?}");
     }
 
     /// End-to-end through the real wire encoding: a content frame followed

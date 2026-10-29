@@ -860,10 +860,10 @@ async fn one_reply_yields_the_same_observations_complete_and_streamed() {
 // --- openai-compat truncation ----------------------------------------------
 
 /// A text stream that closes with neither `[DONE]` nor a finish_reason: the
-/// provider WARNs and ends without an error, so the stream does end
-/// naturally, and the missing clean stop is what keeps it from verifying.
+/// provider ends it with an upstream stream error, so it never reaches a
+/// natural end and its evidence is never settled.
 #[tokio::test]
-async fn a_truncated_openai_compat_stream_warns_and_admits_nothing() {
+async fn a_truncated_openai_compat_stream_errors_and_admits_nothing() {
     // Arrange
     let frame = json!({
         "id": "chatcmpl-1", "object": "chat.completion.chunk", "model": "gpt-4o",
@@ -887,10 +887,9 @@ async fn a_truncated_openai_compat_stream_warns_and_admits_nothing() {
         "the provider warned about the truncation"
     );
     assert!(
-        !logs
-            .iter()
+        logs.iter()
             .any(|e| e.message.contains("upstream stream error")),
-        "the stream ended without an error"
+        "the stream ended with an upstream stream error"
     );
     assert!(router.learned_registry().snapshot().is_empty());
     // Positive control: the same lane and request with a terminated reply

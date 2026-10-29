@@ -41,18 +41,24 @@ impl<E: ?Sized> StreamCompletion<E> {
 
     /// Verdict at transport end of stream: `Ok` once the terminal event
     /// arrived, otherwise the error that tells the client the turn was cut.
-    /// Status 0 classifies it with the other transport failures.
     pub fn end_of_stream(&self, provider_id: &str) -> Result<()> {
         if self.terminated {
             Ok(())
         } else {
-            Err(Error::upstream(
-                provider_id,
-                0,
-                format!("{}: stream ended without a terminal event", self.lane),
-            ))
+            Err(missing_terminal(self.lane, provider_id))
         }
     }
+}
+
+/// The error a `lane` stream ends with when the transport closed before
+/// the lane's terminal event. Status 0 classifies it with the other
+/// transport failures.
+pub fn missing_terminal(lane: &str, provider_id: &str) -> Error {
+    Error::upstream(
+        provider_id,
+        0,
+        format!("{lane}: stream ended without a terminal event"),
+    )
 }
 
 #[cfg(test)]

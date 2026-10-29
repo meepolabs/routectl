@@ -18,7 +18,7 @@
 //!     `AWS4-HMAC-SHA256` prefix + credential scope.
 //!   - `src/bedrock/eventstream.rs` tests `invoke_stream` with prelude-
 //!     split frames, truncation, ping frames, text-delta decode, and
-//!     malformed-frame recovery.
+//!     malformed-frame stream errors.
 //!
 //! What this file adds as external integration coverage:
 //!   - `auth::resolve` maps credential variants to `ResolvedCreds`

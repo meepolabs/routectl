@@ -976,6 +976,109 @@ async fn stream_eof_after_message_stop_without_metadata_emits_closing_chunk() {
     assert!(!any_err, "EOF after messageStop should not error");
 }
 
+async fn decode_converse(frames: &[(&str, &str)]) -> Vec<Result<ChatChunk>> {
+    let wire: Vec<std::result::Result<Bytes, reqwest::Error>> = frames
+        .iter()
+        .map(|(event_type, payload)| Ok(encode_frame(event_type, payload)))
+        .collect();
+    stream("test".to_string(), fstream::iter(wire))
+        .collect()
+        .await
+}
+
+fn assert_ends_with_one_missing_terminal(items: &[Result<ChatChunk>]) {
+    let errs: Vec<_> = items.iter().filter(|i| i.is_err()).collect();
+    assert_eq!(errs.len(), 1, "exactly one error; items: {items:?}");
+    match items.last() {
+        Some(Err(Error::Upstream {
+            provider,
+            status,
+            body,
+            ..
+        })) => {
+            assert_eq!(provider, "test");
+            assert_eq!(*status, 0);
+            assert_eq!(
+                body,
+                "bedrock-converse: stream ended without a terminal event"
+            );
+        }
+        other => panic!("stream must end with the missing-terminal error; got {other:?}"),
+    }
+}
+
+/// A clean close after content but before `messageStop` emits the
+/// content, then ends with exactly one missing-terminal error.
+#[tokio::test]
+async fn stream_eof_before_message_stop_emits_content_then_one_error() {
+    // Arrange + Act
+    let items = decode_converse(&[
+        ("messageStart", r#"{"role":"assistant"}"#),
+        (
+            "contentBlockDelta",
+            r#"{"contentBlockIndex":0,"delta":{"text":"hello"}}"#,
+        ),
+        ("contentBlockStop", r#"{"contentBlockIndex":0}"#),
+    ])
+    .await;
+
+    // Assert
+    let texts: Vec<_> = items
+        .iter()
+        .filter_map(|i| i.as_ref().ok())
+        .filter_map(|c| c.choices.first()?.delta.content.clone())
+        .collect();
+    assert_eq!(texts, vec!["hello".to_string()], "items: {items:?}");
+    assert_ends_with_one_missing_terminal(&items);
+}
+
+/// A clean close with no frames at all is the same missing-terminal error.
+#[tokio::test]
+async fn stream_eof_with_no_frames_is_one_error() {
+    let items = decode_converse(&[]).await;
+
+    assert_eq!(items.len(), 1, "items: {items:?}");
+    assert_ends_with_one_missing_terminal(&items);
+}
+
+/// A `metadata` frame does not close the turn: only `messageStop` does.
+#[tokio::test]
+async fn stream_eof_after_metadata_without_message_stop_is_an_error() {
+    let items = decode_converse(&[
+        ("messageStart", r#"{"role":"assistant"}"#),
+        (
+            "metadata",
+            r#"{"usage":{"inputTokens":1,"outputTokens":1,"totalTokens":2}}"#,
+        ),
+    ])
+    .await;
+
+    assert_ends_with_one_missing_terminal(&items);
+}
+
+/// Positive control: `messageStop` followed by `metadata` ends cleanly.
+#[tokio::test]
+async fn stream_closed_by_message_stop_and_metadata_ends_cleanly() {
+    let items = decode_converse(&[
+        ("messageStart", r#"{"role":"assistant"}"#),
+        (
+            "contentBlockDelta",
+            r#"{"contentBlockIndex":0,"delta":{"text":"hello"}}"#,
+        ),
+        ("contentBlockStop", r#"{"contentBlockIndex":0}"#),
+        ("messageStop", r#"{"stopReason":"end_turn"}"#),
+        (
+            "metadata",
+            r#"{"usage":{"inputTokens":1,"outputTokens":1,"totalTokens":2}}"#,
+        ),
+    ])
+    .await;
+
+    assert!(items.iter().all(Result::is_ok), "items: {items:?}");
+    let last = items.last().unwrap().as_ref().unwrap();
+    assert_eq!(last.choices[0].finish_reason.as_deref(), Some("stop"));
+}
+
 #[test]
 fn matched_stop_sequence_lifts_onto_closing_chunk_when_stop_reason_is_stop_sequence() {
     // Arrange: AWS streams messageStop with the lifted

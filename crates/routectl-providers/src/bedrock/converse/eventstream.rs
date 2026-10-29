@@ -39,6 +39,7 @@ use routectl_core::{
 };
 
 use super::super::frame::{self, FrameHandler, FrameLabel};
+use super::PROVIDER_KIND;
 use super::response::{lift_stop_sequence, translate_cache_details};
 use super::response_types::{
     ConverseUsage, StreamContentBlockDelta, StreamContentBlockStart,
@@ -47,6 +48,7 @@ use super::response_types::{
 };
 use super::tools::HISTORY_COMPAT_TOOL_NAME;
 use crate::anthropic_api::response::map_stop_reason;
+use crate::stream_completion::StreamCompletion;
 
 /// Format tag matching the Anthropic-API egress so chained downstreams
 /// see consistent reasoning_details across the Bedrock-Invoke and
@@ -117,19 +119,41 @@ pub struct ConverseStreamState {
     history_compat_selection_warned: bool,
 }
 
+/// Converse closes every turn with `messageStop`; `metadata` follows it
+/// but is optional on the wire.
+fn is_terminal_frame(event_type: &str) -> bool {
+    event_type == "messageStop"
+}
+
 /// Per-frame handler for the ConverseStream. Holds the cross-frame
-/// block-state map; the shared framing layer owns everything up to the
-/// decoded `Message`.
+/// block-state map and the record of whether `messageStop` arrived; the
+/// shared framing layer owns everything up to the decoded `Message`.
 struct ConverseFrameHandler {
     state: ConverseStreamState,
+    completion: StreamCompletion<str>,
+    had_output: bool,
 }
 
 impl FrameHandler for ConverseFrameHandler {
     fn on_frame(&mut self, provider_id: &str, message: Message) -> Result<Vec<ChatChunk>> {
-        handle_converse_frame(provider_id, message, &mut self.state)
+        if let frame::FrameType::Event(name) = frame::frame_type(&message) {
+            self.completion.observe(name);
+        }
+        let chunks = handle_converse_frame(provider_id, message, &mut self.state)?;
+        self.had_output |= !chunks.is_empty();
+        Ok(chunks)
     }
 
-    fn on_eof(&mut self, provider_id: &str) -> Vec<ChatChunk> {
+    fn on_eof(&mut self, provider_id: &str) -> Result<Vec<ChatChunk>> {
+        if let Err(e) = self.completion.end_of_stream(provider_id) {
+            tracing::warn!(
+                provider = %provider_id,
+                lane = PROVIDER_KIND,
+                had_output = self.had_output,
+                "bedrock converse stream: upstream closed before messageStop"
+            );
+            return Err(e);
+        }
         // messageStop arrived but metadata never did. AWS docs put
         // metadata last, but a network truncation or middleware quirk can
         // drop it silently. Without this flush, finish_reason (and any
@@ -142,9 +166,9 @@ impl FrameHandler for ConverseFrameHandler {
                 "stream ended after messageStop without metadata; \
                  emitting closing chunk with no usage info"
             );
-            vec![build_closing_chunk(&mut self.state, None)]
+            Ok(vec![build_closing_chunk(&mut self.state, None)])
         } else {
-            Vec::new()
+            Ok(Vec::new())
         }
     }
 }
@@ -175,6 +199,8 @@ where
             endpoint_is_foreign: !from_vendor_endpoint,
             ..ConverseStreamState::default()
         },
+        completion: StreamCompletion::new(PROVIDER_KIND, is_terminal_frame),
+        had_output: false,
     };
     frame::decode_frames(provider_id, byte_stream, handler, FrameLabel::Converse)
 }

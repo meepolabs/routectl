@@ -26,8 +26,14 @@ fn chunk_frame_bytes(inner_event: &str) -> Vec<u8> {
     buf
 }
 
+/// Decode `events` as one complete Invoke stream: the closing
+/// `message_stop` (which emits no chunk) is appended.
 async fn decode(events: &[&str]) -> Vec<ChatChunk> {
-    let wire: Vec<u8> = events.iter().flat_map(|e| chunk_frame_bytes(e)).collect();
+    let wire: Vec<u8> = events
+        .iter()
+        .chain(std::iter::once(&MESSAGE_STOP))
+        .flat_map(|e| chunk_frame_bytes(e))
+        .collect();
     let byte_stream = futures::stream::iter(vec![Ok(Bytes::from(wire))]);
     invoke_stream("test-bedrock".to_string(), byte_stream)
         .map(|item| item.expect("no stream error"))
@@ -37,6 +43,7 @@ async fn decode(events: &[&str]) -> Vec<ChatChunk> {
 
 const MESSAGE_START: &str = r#"{"type":"message_start","message":{"id":"msg_bdr","type":"message","role":"assistant","content":[],"model":"claude-opus-4-7","usage":{"input_tokens":321,"output_tokens":1,"cache_creation_input_tokens":654,"cache_read_input_tokens":987,"cache_creation":{"ephemeral_5m_input_tokens":600,"ephemeral_1h_input_tokens":54}}}}"#;
 const MESSAGE_START_NO_USAGE: &str = r#"{"type":"message_start","message":{"id":"msg_bdr","type":"message","role":"assistant","content":[],"model":"claude-opus-4-7"}}"#;
+const MESSAGE_STOP: &str = r#"{"type":"message_stop"}"#;
 const TEXT_START: &str =
     r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#;
 const TEXT_DELTA: &str =

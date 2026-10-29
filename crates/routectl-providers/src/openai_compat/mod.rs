@@ -45,6 +45,7 @@ use routectl_core::{
 
 use sse::ThinkTagAccumulator;
 
+use crate::stream_completion::missing_terminal;
 use crate::upstream_error::{CarriedBody, UpstreamErrorRead};
 
 #[cfg(feature = "bedrock")]
@@ -550,6 +551,7 @@ impl Provider for OpenAiCompatProvider {
             // FIN, committing a truncated tool call as complete. Per-choice
             // state flags that truncation instead.
             let mut choice_tails: Vec<ChoiceTail> = Vec::new();
+            let mut had_output = false;
             while let Some(event_result) = event_stream.next().await {
                 let event = match event_result {
                     Ok(e) => e,
@@ -655,6 +657,7 @@ impl Provider for OpenAiCompatProvider {
                                     response::detect_matched_stop_sequence(text, stops);
                             }
                         }
+                        had_output = true;
                         yield Ok(chunk);
                     }
                     Err(e) => yield Err(e),
@@ -666,6 +669,7 @@ impl Provider for OpenAiCompatProvider {
             // content the client must receive regardless of truncation.
             if dialect == ReasoningDialect::RawThinkTag
                 && let Some(pending) = think_acc.take_pending() {
+                    had_output = true;
                     yield Ok(flush_pending_chunk(&pending));
                 }
             // Then classify the tail: a clean FIN with neither `[DONE]`
@@ -675,9 +679,12 @@ impl Provider for OpenAiCompatProvider {
                 StreamTail::TruncatedText => {
                     tracing::warn!(
                         provider = %provider_id,
+                        lane = PROVIDER_KIND,
+                        had_output,
                         "openai-compat stream closed without a terminal signal \
-                         ([DONE] or finish_reason); response may be truncated"
+                         ([DONE] or finish_reason); ending the stream with an error"
                     );
+                    yield Err(missing_terminal(PROVIDER_KIND, &provider_id));
                 }
                 StreamTail::TruncatedToolCall => {
                     tracing::warn!(
@@ -805,8 +812,8 @@ enum StreamTail {
     /// A `finish_reason` terminal signal was seen; nothing extra to emit.
     Terminated,
     /// No terminal signal, and no tool-call arguments were in flight. A
-    /// truncated text response: surface a loud warn (parity with the
-    /// gemini egress) but do not error the stream.
+    /// truncated text response: the stream ends with the shared
+    /// missing-terminal error.
     TruncatedText,
     /// No terminal signal while tool-call arguments were still
     /// accumulating. The dangerous case: half-streamed arguments must not
@@ -1026,8 +1033,7 @@ mod helper_tests {
     }
 
     /// A choice that ends with no terminal signal and no tool-call activity
-    /// (and the empty-stream case) is a truncated text response: a loud
-    /// warn, not an error.
+    /// (and the empty-stream case) is a truncated text response.
     #[test]
     fn no_terminal_signal_plain_text_classifies_as_truncated_text() {
         let tails = [ChoiceTail {

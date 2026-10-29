@@ -31,7 +31,11 @@ const INVOKE_OPENING: &str = r#"{"type":"message_start","message":{"id":"m","typ
 
 async fn decode(shape: BedrockApiShape, region: &str, endpoint: &str) -> Vec<ChatChunk> {
     let wire = match shape {
-        BedrockApiShape::Invoke => invoke_chunk(INVOKE_OPENING),
+        BedrockApiShape::Invoke => [
+            invoke_chunk(INVOKE_OPENING),
+            invoke_chunk(r#"{"type":"message_stop"}"#),
+        ]
+        .concat(),
         BedrockApiShape::Converse => [
             event_frame("messageStop", r#"{"stopReason":"end_turn"}"#),
             event_frame(

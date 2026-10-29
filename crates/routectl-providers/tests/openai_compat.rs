@@ -469,6 +469,114 @@ async fn stream_raw_think_tag_flushes_pending_on_done() {
     assert_eq!(outside, "hello<thi");
 }
 
+async fn stream_items(
+    sse_body: &'static str,
+    dialect: ReasoningDialect,
+) -> Vec<routectl_core::Result<routectl_core::ChatChunk>> {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse_body),
+        )
+        .mount(&server)
+        .await;
+    let provider = make_provider(&server.uri(), dialect);
+    provider
+        .stream(user_request("m"))
+        .await
+        .unwrap()
+        .collect()
+        .await
+}
+
+fn streamed_content(items: &[routectl_core::Result<routectl_core::ChatChunk>]) -> String {
+    items
+        .iter()
+        .filter_map(|i| i.as_ref().ok())
+        .flat_map(|c| &c.choices)
+        .filter_map(|choice| choice.delta.content.as_deref())
+        .collect()
+}
+
+fn assert_ends_with_one_missing_terminal(
+    items: &[routectl_core::Result<routectl_core::ChatChunk>],
+) {
+    let errs = items.iter().filter(|i| i.is_err()).count();
+    assert_eq!(errs, 1, "exactly one error; items: {items:?}");
+    match items.last() {
+        Some(Err(routectl_core::Error::Upstream {
+            provider,
+            status,
+            body,
+            ..
+        })) => {
+            assert_eq!(provider, "test-provider");
+            assert_eq!(*status, 0);
+            assert_eq!(body, "openai-compat: stream ended without a terminal event");
+        }
+        other => panic!("stream must end with the missing-terminal error; got {other:?}"),
+    }
+}
+
+/// A text stream that closes with neither `[DONE]` nor a finish_reason
+/// emits its content, then ends with exactly one missing-terminal error.
+#[tokio::test]
+async fn stream_closed_without_terminal_signal_emits_content_then_one_error() {
+    let items = stream_items(
+        concat!(
+            "data: {\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"He\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"llo\"},\"finish_reason\":null}]}\n\n",
+        ),
+        ReasoningDialect::OpenAi,
+    )
+    .await;
+
+    assert_eq!(streamed_content(&items), "Hello");
+    assert_ends_with_one_missing_terminal(&items);
+}
+
+/// An empty body (no event at all) is the same missing-terminal error.
+#[tokio::test]
+async fn stream_closed_before_any_event_is_one_error() {
+    let items = stream_items("", ReasoningDialect::OpenAi).await;
+
+    assert_eq!(items.len(), 1, "items: {items:?}");
+    assert_ends_with_one_missing_terminal(&items);
+}
+
+/// A finish_reason without `[DONE]` still terminates the stream cleanly.
+#[tokio::test]
+async fn stream_closed_after_finish_reason_without_done_ends_cleanly() {
+    let items = stream_items(
+        concat!(
+            "data: {\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hello\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        ),
+        ReasoningDialect::OpenAi,
+    )
+    .await;
+
+    assert_eq!(streamed_content(&items), "Hello");
+    assert!(items.iter().all(Result::is_ok), "items: {items:?}");
+}
+
+/// RawThinkTag bytes held back as a possible `<think>` prefix are real
+/// content: a cut stream flushes them before its missing-terminal error.
+#[tokio::test]
+async fn raw_think_tag_stream_cut_flushes_pending_before_the_error() {
+    let items = stream_items(
+        "data: {\"id\":\"t1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello<thi\"},\"finish_reason\":null}]}\n\n",
+        ReasoningDialect::RawThinkTag,
+    )
+    .await;
+
+    assert_eq!(streamed_content(&items), "hello<thi");
+    assert_ends_with_one_missing_terminal(&items);
+}
+
 /// Pin: for `n > 1` the streaming stop-sequence heuristic must track
 /// per-choice content, not one shared buffer. Choice 0 streams `fooEND`
 /// (ends with the configured stop -> matches); choice 1 streams `bar`
