@@ -4,7 +4,8 @@
 //! off egress response headers (Anthropic's `anthropic-ratelimit-unified-*`,
 //! Codex's `x-codex-*`), on an Anthropic-shape stream the input side of
 //! usage the upstream reported in its first event (`OpeningUsage`), and on
-//! an OpenAI-shape stream the upstream `system_fingerprint`.
+//! an OpenAI Chat Completions stream the envelope metadata the canonical
+//! chunk has no slot for (`OpenAiChatEnvelope`).
 //! Skip-serialized (see the `#[serde(skip)]` fields on `ChatResponse` /
 //! `ChatChunk`); never on the wire.
 //!
@@ -71,10 +72,10 @@ pub struct UpstreamMeta {
     /// say, which a consumer must treat as not established. Not a quota
     /// family.
     pub usage_from_vendor_endpoint: Option<bool>,
-    /// The OpenAI-shape `system_fingerprint` an upstream stamped on a
-    /// stream chunk, for an OpenAI-shape ingress to echo. The canonical
-    /// `ChatChunk` has no envelope slot for it. Not a quota family.
-    pub system_fingerprint: Option<String>,
+    /// OpenAI Chat Completions envelope metadata an upstream stamped on a
+    /// stream chunk, for an OpenAI-shape ingress to echo. `None` when the
+    /// chunk carried none. Not a quota family.
+    pub openai_chat: Option<OpenAiChatEnvelope>,
 }
 
 impl UpstreamMeta {
@@ -88,7 +89,7 @@ impl UpstreamMeta {
             opening_usage: None,
             usage_input_source: None,
             usage_from_vendor_endpoint: None,
-            system_fingerprint: None,
+            openai_chat: None,
         }
     }
 
@@ -100,7 +101,7 @@ impl UpstreamMeta {
             opening_usage: None,
             usage_input_source: None,
             usage_from_vendor_endpoint: None,
-            system_fingerprint: None,
+            openai_chat: None,
         }
     }
 
@@ -112,7 +113,7 @@ impl UpstreamMeta {
             opening_usage: Some(opening),
             usage_input_source: None,
             usage_from_vendor_endpoint: None,
-            system_fingerprint: None,
+            openai_chat: None,
         }
     }
 
@@ -124,12 +125,12 @@ impl UpstreamMeta {
             opening_usage: None,
             usage_input_source: Some(source),
             usage_from_vendor_endpoint: None,
-            system_fingerprint: None,
+            openai_chat: None,
         }
     }
 
-    /// Construct an `UpstreamMeta` carrying only the upstream
-    /// `system_fingerprint`.
+    /// Construct an `UpstreamMeta` carrying only the upstream OpenAI Chat
+    /// Completions `system_fingerprint`.
     pub const fn from_system_fingerprint(fingerprint: String) -> Self {
         Self {
             anthropic_unified: None,
@@ -137,7 +138,9 @@ impl UpstreamMeta {
             opening_usage: None,
             usage_input_source: None,
             usage_from_vendor_endpoint: None,
-            system_fingerprint: Some(fingerprint),
+            openai_chat: Some(OpenAiChatEnvelope {
+                system_fingerprint: Some(fingerprint),
+            }),
         }
     }
 
@@ -146,6 +149,13 @@ impl UpstreamMeta {
     pub const fn with_usage_from_vendor_endpoint(mut self, from_vendor: bool) -> Self {
         self.usage_from_vendor_endpoint = Some(from_vendor);
         self
+    }
+
+    /// The upstream OpenAI Chat Completions `system_fingerprint`, if carried.
+    pub fn system_fingerprint(&self) -> Option<&str> {
+        self.openai_chat
+            .as_ref()
+            .and_then(|envelope| envelope.system_fingerprint.as_deref())
     }
 
     /// True when this carrier holds a provider quota family. Opening usage
@@ -169,7 +179,7 @@ impl UpstreamMeta {
             usage_from_vendor_endpoint: self
                 .usage_from_vendor_endpoint
                 .or(other.usage_from_vendor_endpoint),
-            system_fingerprint: self.system_fingerprint.or(other.system_fingerprint),
+            openai_chat: self.openai_chat.or(other.openai_chat),
         }
     }
 }
@@ -355,6 +365,17 @@ pub struct CodexQuota {
     pub extras: Vec<(String, String)>,
 }
 
+/// OpenAI Chat Completions envelope fields an upstream stamps on a stream
+/// chunk that the canonical `ChatChunk` has no slot for. OpenAI-native field
+/// names only. `#[non_exhaustive]` so further envelope fields ship without
+/// breaking downstream library consumers.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub struct OpenAiChatEnvelope {
+    /// The raw `system_fingerprint` value.
+    pub system_fingerprint: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -495,7 +516,7 @@ mod tests {
 
         // Assert
         assert_eq!(merged, reversed);
-        assert_eq!(merged.system_fingerprint.as_deref(), Some("fp_x"));
+        assert_eq!(merged.system_fingerprint(), Some("fp_x"));
         assert_eq!(
             merged.usage_input_source,
             Some(UsageInputSource::ExplicitFinal)

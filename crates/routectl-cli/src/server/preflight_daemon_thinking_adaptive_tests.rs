@@ -28,6 +28,10 @@ mod thinking_adaptive {
     /// The budget the legacy enabled shape composes for the client's `high`
     /// effort.
     const HIGH_EFFORT_BUDGET: u32 = 24_576;
+    /// How long to wait for a committed verdict to reach the ledger.
+    const ACK_DEADLINE: Duration = Duration::from_secs(10);
+    /// How often to re-read the ledger while waiting.
+    const ACK_POLL: Duration = Duration::from_millis(10);
 
     /// Assembled at runtime so no key-shaped literal sits in the source.
     fn bearer_key() -> String {
@@ -209,7 +213,7 @@ mod thinking_adaptive {
     /// confirmation advancement has finished, so the next request reads the
     /// acknowledged state rather than racing it.
     async fn await_acknowledged_verdict(daemon: &Daemon, db_path: &std::path::Path) {
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let deadline = std::time::Instant::now() + ACK_DEADLINE;
         while adaptive_ledger_rows(db_path, NON_CLAUDE_MODEL) == 0
             || daemon.confirmations().in_flight() > 0
         {
@@ -217,7 +221,7 @@ mod thinking_adaptive {
                 std::time::Instant::now() < deadline,
                 "the committed verdict's row never reached the ledger",
             );
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            tokio::time::sleep(ACK_POLL).await;
         }
     }
 

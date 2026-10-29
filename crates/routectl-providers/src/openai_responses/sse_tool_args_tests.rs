@@ -365,6 +365,65 @@ fn empty_args_done_defers_to_item_done_arguments() {
     );
 }
 
+/// An empty `function_call_arguments.done` defers to `output_item.done`;
+/// when the stream completes without that event the call still reaches the
+/// client, as `{}`, once, before the terminal chunk.
+#[test]
+fn a_deferred_zero_argument_call_is_settled_once_by_completion() {
+    type Row = (&'static str, Vec<Value>, Vec<(u64, String, String, String)>);
+    let zero_arg = |index: u64, call_id: &str| (index, call_id.into(), "now".into(), "{}".into());
+    let rows: [Row; 3] = [
+        (
+            "completed without item.done",
+            vec![
+                function_call_added(0, "call_a", "now"),
+                args_done(0, ""),
+                completed(),
+            ],
+            vec![zero_arg(0, "call_a")],
+        ),
+        (
+            "item.done arrives before completed",
+            vec![
+                function_call_added(0, "call_a", "now"),
+                args_done(0, ""),
+                function_call_item_done(0, "call_a", "now", ""),
+                completed(),
+            ],
+            vec![zero_arg(0, "call_a")],
+        ),
+        (
+            "two deferred calls settle in output order",
+            vec![
+                function_call_added(3, "call_b", "now"),
+                function_call_added(1, "call_a", "now"),
+                args_done(3, ""),
+                args_done(1, ""),
+                completed(),
+            ],
+            vec![zero_arg(1, "call_a"), zero_arg(0, "call_b")],
+        ),
+    ];
+
+    for (name, events, expected) in rows {
+        // Act
+        let chunks = drive_all(events);
+
+        // Assert
+        assert_eq!(tool_deltas(&chunks), expected, "{name}");
+        let terminal = chunks.last().expect("terminal chunk");
+        assert!(
+            terminal.choices[0].delta.tool_calls.is_none(),
+            "{name}: the tool call precedes the terminal chunk",
+        );
+        assert_eq!(
+            terminal.choices[0].finish_reason.as_deref(),
+            Some("tool_calls"),
+            "{name}",
+        );
+    }
+}
+
 #[traced_test]
 #[test]
 fn item_done_without_arguments_field_logs_before_emitting_empty_object() {

@@ -11,15 +11,17 @@
 //! Only lanes with an unambiguous terminal event belong here. A wire whose
 //! end-of-stream IS the terminator would be flagged on every healthy stream.
 
-use routectl_core::{Error, Result};
+use routectl_core::Error;
 
 /// Per-stream record of whether the lane's terminal event has arrived.
+#[cfg(any(feature = "anthropic-api", feature = "openai-responses"))]
 pub struct StreamCompletion<E: ?Sized> {
     lane: &'static str,
     is_terminal: fn(&E) -> bool,
     terminated: bool,
 }
 
+#[cfg(any(feature = "anthropic-api", feature = "openai-responses"))]
 impl<E: ?Sized> StreamCompletion<E> {
     /// Track one stream for `lane`, treating an event as terminal when
     /// `is_terminal` accepts it.
@@ -41,7 +43,7 @@ impl<E: ?Sized> StreamCompletion<E> {
 
     /// Verdict at transport end of stream: `Ok` once the terminal event
     /// arrived, otherwise the error that tells the client the turn was cut.
-    pub fn end_of_stream(&self, provider_id: &str) -> Result<()> {
+    pub fn end_of_stream(&self, provider_id: &str) -> routectl_core::Result<()> {
         if self.terminated {
             Ok(())
         } else {
@@ -61,7 +63,7 @@ pub fn missing_terminal(lane: &str, provider_id: &str) -> Error {
     )
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(feature = "anthropic-api", feature = "openai-responses")))]
 mod tests {
     use super::*;
 

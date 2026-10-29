@@ -77,6 +77,9 @@ struct ThinkingTypeSeat {
     refused: &'static [&'static str],
     rejection: fn() -> Error,
     after: AfterRefusal,
+    /// When set, decides each refusal from the body and its position in the
+    /// seat's history, in place of `refused` and `rejection`.
+    respond: Option<fn(&serde_json::Value, usize) -> Option<Error>>,
     seen: Mutex<Vec<(ChatRequest, serde_json::Value)>>,
 }
 
@@ -96,7 +99,17 @@ impl ThinkingTypeSeat {
             refused,
             rejection,
             after,
+            respond: None,
             seen: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// A seat refusing what `respond` refuses and serving everything else.
+    #[cfg(feature = "bedrock")]
+    fn responding(respond: fn(&serde_json::Value, usize) -> Option<Error>) -> Self {
+        Self {
+            respond: Some(respond),
+            ..Self::refusing_types(&[], anthropic_enabled_rejection, AfterRefusal::Serve)
         }
     }
 
@@ -130,7 +143,12 @@ impl ThinkingTypeSeat {
         let refused = body["thinking"]["type"]
             .as_str()
             .is_some_and(|thinking_type| self.refused.contains(&thinking_type));
+        let position = self.seen.lock().len();
+        let answered = self.respond.and_then(|respond| respond(&body, position));
         self.seen.lock().push((req.clone(), body));
+        if let Some(err) = answered {
+            return Err(err);
+        }
         if refused {
             return Err((self.rejection)());
         }
@@ -1078,4 +1096,162 @@ async fn an_enabled_retry_declares_its_added_budget_and_checks_clean() {
     );
     let snapshot = router.wire_check_snapshot();
     assert!(snapshot.loss.is_empty(), "{:?}", snapshot.findings);
+}
+
+/// Refuse `enabled` at position 0 only and `adaptive` from position 2 on,
+/// which is the second request, each with its committed Bedrock capture;
+/// else serve.
+#[cfg(feature = "bedrock")]
+fn enabled_once_then_adaptive_later(body: &serde_json::Value, position: usize) -> Option<Error> {
+    match body["thinking"]["type"].as_str() {
+        Some("enabled") if position == 0 => Some(bedrock_enabled_rejection()),
+        Some("adaptive") if position >= 2 => Some(bedrock_adaptive_rejection()),
+        _ => None,
+    }
+}
+
+/// The two type rows rewrite into each other, so the lane keeps only the
+/// later lesson: an enabled request is refused and learns `enabled ->
+/// adaptive`; the lane then starts refusing adaptive, and an adaptive
+/// request is refused, retried as enabled and
+/// served, which learns `adaptive -> enabled` and, since enabled was just
+/// accepted, clears the stale enabled verdict. A third enabled request then
+/// goes out once, as enabled, with no rejection.
+///
+/// Mutation check: drop the thinking-type clear in `settle_field_success` ->
+/// red (the third request is pre-flighted to adaptive, refused, and repaired
+/// back to enabled).
+#[cfg(feature = "bedrock")]
+#[tokio::test]
+async fn an_accepted_thinking_type_clears_the_verdict_that_rewrote_it() {
+    let seat = Arc::new(ThinkingTypeSeat::responding(
+        enabled_once_then_adaptive_later,
+    ));
+    let router = thinking_chain(&[(BEDROCK_TOML, Arc::clone(&seat))], "");
+    let enabled_key = thinking_type_key();
+    let resident_type_keys = |router: &Router| {
+        let mut keys: Vec<String> = router
+            .learned_capability_snapshot()
+            .into_iter()
+            .map(|entry| entry.feature_key)
+            .filter(|feature| feature.contains("thinking.type."))
+            .collect();
+        keys.sort();
+        keys
+    };
+    let taught = router
+        .complete_with_options(anthropic_enabled_req(), RouterOptions::new())
+        .await;
+    assert!(taught.result.is_ok(), "{:?}", taught.result.err());
+    for event in &taught.meta.learned_capabilities {
+        assert!(router.acknowledge_durable_field_confirmation(
+            &event.state_key,
+            &event.capability_key,
+            &event.provider_kind,
+            event.persistence_generation,
+            event.incarnation,
+            event.observations,
+        ));
+    }
+    assert_eq!(
+        resident_type_keys(&router),
+        std::slice::from_ref(&enabled_key),
+        "premise: enabled learns adaptive",
+    );
+
+    let reversed = router
+        .complete_with_options(anthropic_adaptive_req(32_000), RouterOptions::new())
+        .await;
+
+    assert!(reversed.result.is_ok(), "{:?}", reversed.result.err());
+    let types = |from: usize| -> Vec<String> {
+        seat.bodies()[from..]
+            .iter()
+            .map(|body| body["thinking"]["type"].as_str().unwrap_or("").to_string())
+            .collect()
+    };
+    assert_eq!(
+        types(2),
+        ["adaptive", "enabled"],
+        "premise: adaptive refused"
+    );
+    assert_eq!(
+        reversed
+            .meta
+            .cleared_capabilities
+            .iter()
+            .map(|event| event.capability_key.clone())
+            .collect::<Vec<_>>(),
+        std::slice::from_ref(&enabled_key),
+    );
+    let adaptive_key = crate::field_capability::field_capability_key("thinking.type.adaptive")
+        .expect("a qualified path");
+    assert_eq!(resident_type_keys(&router), [adaptive_key]);
+
+    let next = router
+        .complete_with_options(anthropic_enabled_req(), RouterOptions::new())
+        .await;
+
+    assert!(next.result.is_ok(), "{:?}", next.result.err());
+    assert_eq!(types(4), ["enabled"], "one attempt, as sent");
+    assert!(next.meta.field_repairs.is_empty());
+}
+
+/// Refuse `enabled` at position 0 only; else serve.
+#[cfg(feature = "bedrock")]
+fn enabled_once(body: &serde_json::Value, position: usize) -> Option<Error> {
+    (position == 0 && body["thinking"]["type"] == "enabled").then(bedrock_enabled_rejection)
+}
+
+/// An UNREPAIRED success at a thinking type clears that type's verdict: an
+/// `enabled -> adaptive` verdict learned and not yet acknowledged cannot
+/// drive pre-flight, so the next enabled request reaches the upstream as
+/// sent; it is served, and the enabled verdict clears.
+///
+/// Mutation check: drop the thinking-type clears on the unrepaired branches
+/// of `settle_field_success` -> red (the verdict stays).
+#[cfg(feature = "bedrock")]
+#[tokio::test]
+async fn an_unrepaired_success_at_a_thinking_type_clears_its_verdict() {
+    let seat = Arc::new(ThinkingTypeSeat::responding(enabled_once));
+    let router = thinking_chain(&[(BEDROCK_TOML, Arc::clone(&seat))], "");
+    let taught = router
+        .complete_with_options(anthropic_enabled_req(), RouterOptions::new())
+        .await;
+    assert!(taught.result.is_ok(), "{:?}", taught.result.err());
+    assert_eq!(
+        taught
+            .meta
+            .learned_capabilities
+            .iter()
+            .map(|event| event.capability_key.clone())
+            .collect::<Vec<_>>(),
+        [thinking_type_key()],
+        "premise: enabled learns adaptive, not acknowledged",
+    );
+
+    let served = router
+        .complete_with_options(anthropic_enabled_req(), RouterOptions::new())
+        .await;
+
+    assert!(served.result.is_ok(), "{:?}", served.result.err());
+    assert_eq!(seat.bodies().len(), 3, "premise: one attempt, unrepaired");
+    assert_eq!(seat.bodies()[2]["thinking"]["type"], "enabled");
+    assert!(served.meta.field_repairs.is_empty(), "premise: unrepaired");
+    assert_eq!(
+        served
+            .meta
+            .cleared_capabilities
+            .iter()
+            .map(|event| event.capability_key.clone())
+            .collect::<Vec<_>>(),
+        [thinking_type_key()],
+    );
+    assert!(
+        router
+            .learned_capability_snapshot()
+            .into_iter()
+            .all(|entry| !entry.feature_key.contains("thinking.type.")),
+        "the enabled verdict is gone",
+    );
 }

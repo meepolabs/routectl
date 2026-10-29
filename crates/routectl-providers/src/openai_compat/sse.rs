@@ -371,16 +371,16 @@ impl StreamedFingerprint {
         let Some(meta) = chunk.upstream_meta.as_mut() else {
             return;
         };
-        let Some(fp) = meta.system_fingerprint.as_ref() else {
+        let Some(fp) = meta.system_fingerprint() else {
             return;
         };
-        if self.last.as_ref() == Some(fp) {
-            meta.system_fingerprint = None;
+        if self.last.as_deref() == Some(fp) {
+            meta.openai_chat = None;
             if *meta == UpstreamMeta::default() {
                 chunk.upstream_meta = None;
             }
         } else {
-            self.last = Some(fp.clone());
+            self.last = Some(fp.to_string());
         }
     }
 }
@@ -1992,7 +1992,7 @@ mod tests {
             ("parse_event content", &plain_content),
             ("process content", &think_content),
         ] {
-            assert_eq!(m.system_fingerprint.as_deref(), Some("fp_x"), "{name}");
+            assert_eq!(m.system_fingerprint(), Some("fp_x"), "{name}");
         }
         assert_eq!(
             plain_usage.usage_input_source,
@@ -2050,16 +2050,16 @@ mod tests {
 
         let carried: Vec<Option<&str>> = chunks
             .iter()
-            .map(|c| c.upstream_meta.as_ref()?.system_fingerprint.as_deref())
+            .map(|c| c.upstream_meta.as_ref()?.system_fingerprint())
             .collect();
         assert_eq!(carried, vec![Some("fp_x"), None, None]);
         assert!(chunks[1].upstream_meta.is_none());
         assert_eq!(
-            changed.upstream_meta.unwrap().system_fingerprint.as_deref(),
+            changed.upstream_meta.unwrap().system_fingerprint(),
             Some("fp_y")
         );
         let usage_meta = usage_chunk.upstream_meta.unwrap();
-        assert_eq!(usage_meta.system_fingerprint, None);
+        assert_eq!(usage_meta.system_fingerprint(), None);
         assert_eq!(
             usage_meta.usage_input_source,
             Some(UsageInputSource::ExplicitFinal)

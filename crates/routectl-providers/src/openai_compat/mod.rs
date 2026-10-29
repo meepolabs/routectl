@@ -662,7 +662,10 @@ impl Provider for OpenAiCompatProvider {
                         had_output = true;
                         yield Ok(chunk);
                     }
-                    Err(e) => yield Err(e),
+                    Err(e) => {
+                        yield Err(e);
+                        return;
+                    }
                 }
             }
             // Stream exhausted without a `data: [DONE]` terminator (the

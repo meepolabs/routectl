@@ -257,6 +257,15 @@ impl<'a> FieldRepairPlan<'a> {
                 .any(|step| super::effort::is_ranked(&step.row))
     }
 
+    /// Whether a settling plan holds a pending step on the thinking type.
+    pub(in crate::router) fn has_pending_thinking_type(&self) -> bool {
+        self.reclaim.is_some()
+            && self
+                .pending
+                .iter()
+                .any(|step| super::effort::is_thinking_type(&step.row))
+    }
+
     /// Whether this plan applied any repair, settled or not.
     pub(in crate::router) const fn has_applied(&self) -> bool {
         self.applied

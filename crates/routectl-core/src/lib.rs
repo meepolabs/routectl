@@ -105,8 +105,8 @@ pub use tool_def::{CustomTool, ToolDef};
 pub use tool_pairing::{ToolPairingDefect, ToolPairingError, validate_tool_pairing};
 pub use translation_report::{TranslationKey, TranslationReason, TranslationReport};
 pub use upstream_meta::{
-    AnthropicUnifiedQuota, CodexQuota, OpeningUsage, OpeningUsageOrigin, UpstreamMeta,
-    UsageInputSource,
+    AnthropicUnifiedQuota, CodexQuota, OpenAiChatEnvelope, OpeningUsage, OpeningUsageOrigin,
+    UpstreamMeta, UsageInputSource,
 };
 pub use upstream_reason::UpstreamReason;
 pub use volatile::{

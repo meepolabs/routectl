@@ -286,7 +286,7 @@ impl IngressAdapter for OpenAiIngress {
         if let Some(fp) = chunk
             .upstream_meta
             .as_ref()
-            .and_then(|meta| meta.system_fingerprint.clone())
+            .and_then(|meta| meta.system_fingerprint().map(str::to_string))
         {
             state.system_fingerprint = Some(fp);
         }

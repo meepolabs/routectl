@@ -83,7 +83,10 @@ enum BlockState {
     /// `output_item.done`) are emitted in one chunk. `finalized` is
     /// set once a done event has settled the arguments; any delta
     /// arriving after that would append to an already-complete JSON
-    /// value, so it is dropped.
+    /// value, so it is dropped. `zero_arg_deferred` records an empty
+    /// `function_call_arguments.done` left for `output_item.done` to
+    /// settle; a stream that completes without that event settles it as
+    /// `{}` at completion.
     ToolUse {
         #[allow(dead_code)]
         item_id: String,
@@ -92,6 +95,7 @@ enum BlockState {
         call_index: u32,
         arguments: String,
         finalized: bool,
+        zero_arg_deferred: bool,
     },
 }
 
@@ -333,6 +337,7 @@ impl ResponsesStreamState {
                         call_index,
                         arguments: String::new(),
                         finalized: false,
+                        zero_arg_deferred: false,
                     },
                 );
                 // The sticky `saw_function_call` flag was already set
@@ -483,11 +488,14 @@ impl ResponsesStreamState {
         // output_item.done may still carry the real arguments, and it
         // commits `{}` itself when it does not.
         if final_args.is_empty()
-            && matches!(
-                self.blocks.get(&idx),
-                Some(BlockState::ToolUse { arguments, .. }) if arguments.is_empty()
-            )
+            && let Some(BlockState::ToolUse {
+                arguments,
+                zero_arg_deferred,
+                ..
+            }) = self.blocks.get_mut(&idx)
+            && arguments.is_empty()
         {
+            *zero_arg_deferred = true;
             return Vec::new();
         }
         self.finalize_tool_arguments(provider_id, idx, final_args)
@@ -681,7 +689,8 @@ impl ResponsesStreamState {
             self.model = resp.model;
         }
 
-        Ok(vec![ChatChunk {
+        let mut chunks = self.flush_deferred_zero_arg_calls(provider_id);
+        chunks.push(ChatChunk {
             id: self.response_id.clone(),
             model: self.model.clone(),
             choices: vec![ChunkChoice {
@@ -695,7 +704,30 @@ impl ResponsesStreamState {
                 .map(|_| UpstreamMeta::from_usage_input_source(UsageInputSource::ExplicitFinal)),
             usage: usage_delta,
             opaque_events: Vec::new(),
-        }])
+        });
+        Ok(chunks)
+    }
+
+    /// Settle, as `{}`, every call whose empty `function_call_arguments.done`
+    /// deferred to an `output_item.done` that never arrived, in output order.
+    fn flush_deferred_zero_arg_calls(&mut self, provider_id: &str) -> Vec<ChatChunk> {
+        let mut deferred: Vec<u32> = self
+            .blocks
+            .iter()
+            .filter_map(|(idx, block)| match block {
+                BlockState::ToolUse {
+                    zero_arg_deferred: true,
+                    finalized: false,
+                    ..
+                } => Some(*idx),
+                _ => None,
+            })
+            .collect();
+        deferred.sort_unstable();
+        deferred
+            .into_iter()
+            .filter_map(|idx| self.finalize_tool_arguments(provider_id, idx, ""))
+            .collect()
     }
 
     fn handle_incomplete(

@@ -58,9 +58,9 @@ impl AttemptLearning<'_> {
     /// even when an earlier moved-on commit left nothing pending: the request
     /// that succeeded was not the unrepaired one.
     ///
-    /// Either way the effort level `sent` (the body that succeeded) carried
-    /// was accepted, so its own verdict clears after the commit; see
-    /// [`Self::clear_sent_effort`].
+    /// Either way the effort level and thinking type `sent` (the body that
+    /// succeeded) carried were accepted, so their own verdicts clear after
+    /// the commit; see [`Self::clear_sent_effort`].
     pub(super) fn settle_field_success(
         &mut self,
         req: &ChatRequest,
@@ -70,15 +70,18 @@ impl AttemptLearning<'_> {
     ) {
         let Some(mut plan) = self.field_plan.take() else {
             self.clear_sent_effort(sent, target, &[], meta);
+            self.clear_sent_thinking_type(sent, target, &[], meta);
             return;
         };
         if plan.has_applied() {
             self.commit_field_steps(&mut plan, req, meta);
             self.clear_sent_effort(sent, target, &[], meta);
+            self.clear_sent_thinking_type(sent, target, &[], meta);
         } else {
             let clears = plan.settle_success();
             meta.cleared_capabilities.extend(clears.events);
             self.clear_sent_effort(sent, target, &clears.keys, meta);
+            self.clear_sent_thinking_type(sent, target, &clears.keys, meta);
         }
     }
 
@@ -106,6 +109,26 @@ impl AttemptLearning<'_> {
             .extend(self.router.clear_accepted_effort(target, sent, removed));
     }
 
+    /// Clear the verdict of the thinking type the accepted body `sent`
+    /// carried, on the terms of [`Self::clear_sent_effort`]: the type rows
+    /// rewrite into each other, so two requests committing `enabled ->
+    /// adaptive` and `adaptive -> enabled` cannot both keep their verdict.
+    fn clear_sent_thinking_type(
+        &self,
+        sent: &ChatRequest,
+        target: &DispatchTarget,
+        removed: &[FieldVerdictKey],
+        meta: &mut DispatchMeta,
+    ) {
+        if self.count_surface {
+            return;
+        }
+        meta.cleared_capabilities.extend(
+            self.router
+                .clear_accepted_thinking_type(target, sent, removed),
+        );
+    }
+
     /// Commit every pending step when a repaired retry was refused for a
     /// different field the body that went out is confirmed to carry: the
     /// upstream read past each pending field, so each is proven even if the
@@ -113,9 +136,9 @@ impl AttemptLearning<'_> {
     /// commits nothing. Features come from the client's request, as on
     /// success.
     ///
-    /// A pending effort step proven this way proves the level `sent` carried
-    /// was read past and accepted, so that level's own verdict clears after
-    /// the commit, as on success.
+    /// A pending effort or thinking-type step proven this way proves the
+    /// level or type `sent` carried was read past and accepted, so its own
+    /// verdict clears after the commit, as on success.
     pub(super) fn settle_field_moved_on(
         &mut self,
         rejection: &Rejection<'_>,
@@ -131,9 +154,13 @@ impl AttemptLearning<'_> {
         let provider_kind = rejection.target.provider_kind.unwrap_or("");
         if plan.moved_on_by(rejection.native_class, rejection.err, provider_kind) {
             let effort_proven = plan.has_pending_effort();
+            let thinking_type_proven = plan.has_pending_thinking_type();
             self.commit_field_steps(&mut plan, rejection.client_req, meta);
             if effort_proven {
                 self.clear_sent_effort(sent, rejection.target, &[], meta);
+            }
+            if thinking_type_proven {
+                self.clear_sent_thinking_type(sent, rejection.target, &[], meta);
             }
         }
         self.field_plan = Some(plan);

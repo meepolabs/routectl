@@ -563,6 +563,59 @@ async fn stream_closed_after_finish_reason_without_done_ends_cleanly() {
     assert!(items.iter().all(Result::is_ok), "items: {items:?}");
 }
 
+/// An event the stream cannot use (malformed JSON, or an in-band upstream
+/// error envelope) ends the stream with that one error: nothing after it is
+/// emitted, neither a later valid event nor the missing-terminal error.
+#[tokio::test]
+async fn stream_error_event_is_the_last_item() {
+    macro_rules! malformed {
+        () => {
+            "data: {\"id\":\"c1\",\"choices\":[\n\n"
+        };
+    }
+    macro_rules! in_band_error {
+        () => {
+            "data: {\"error\":{\"message\":\"overloaded\",\"type\":\"server_error\"}}\n\n"
+        };
+    }
+    macro_rules! content_then_done {
+        () => {
+            concat!(
+                "data: {\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"late\"},\"finish_reason\":null}]}\n\n",
+                "data: [DONE]\n\n",
+            )
+        };
+    }
+    let rows: [(&str, &'static str); 4] = [
+        ("malformed then EOF", malformed!()),
+        (
+            "malformed, valid content, [DONE]",
+            concat!(malformed!(), content_then_done!()),
+        ),
+        ("in-band error then EOF", in_band_error!()),
+        (
+            "in-band error, valid content, [DONE]",
+            concat!(in_band_error!(), content_then_done!()),
+        ),
+    ];
+
+    for (name, body) in rows {
+        let items = stream_items(body, ReasoningDialect::OpenAi).await;
+
+        assert_eq!(items.len(), 1, "{name}: exactly one item; items: {items:?}");
+        assert_eq!(streamed_content(&items), "", "{name}");
+        match &items[0] {
+            Err(routectl_core::Error::Upstream { body, .. })
+                if body == "openai-compat: stream ended without a terminal event" =>
+            {
+                panic!("{name}: the event's own error, not the missing-terminal one");
+            }
+            Err(_) => {}
+            Ok(chunk) => panic!("{name}: expected an error, got {chunk:?}"),
+        }
+    }
+}
+
 /// RawThinkTag bytes held back as a possible `<think>` prefix are real
 /// content: a cut stream flushes them before its missing-terminal error.
 #[tokio::test]

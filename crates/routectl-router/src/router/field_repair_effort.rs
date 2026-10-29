@@ -190,6 +190,33 @@ impl Router {
         sent: &ChatRequest,
         removed: &[FieldVerdictKey],
     ) -> Option<CapabilityClearedEvent> {
+        self.clear_accepted_row(target, sent, removed, is_ranked)
+    }
+
+    /// Clear the resident verdict of the thinking type the body `sent`
+    /// emits, on `target`'s lane, on the same terms as
+    /// [`Self::clear_accepted_effort`]. The type rows rewrite into each
+    /// other (`enabled` -> `adaptive` and back), so a verdict on the type an
+    /// accepted body carried would otherwise rewrite every later request of
+    /// that type into the one the lane refuses.
+    pub(in crate::router) fn clear_accepted_thinking_type(
+        &self,
+        target: &DispatchTarget,
+        sent: &ChatRequest,
+        removed: &[FieldVerdictKey],
+    ) -> Option<CapabilityClearedEvent> {
+        self.clear_accepted_row(target, sent, removed, is_thinking_type)
+    }
+
+    /// Clear the verdict of the first row `sent` carries that `is_row`
+    /// selects, on `target`'s lane.
+    fn clear_accepted_row(
+        &self,
+        target: &DispatchTarget,
+        sent: &ChatRequest,
+        removed: &[FieldVerdictKey],
+        is_row: fn(&FieldRepairRow) -> bool,
+    ) -> Option<CapabilityClearedEvent> {
         if !self.config.capability.enabled {
             return None;
         }
@@ -205,7 +232,7 @@ impl Router {
         let table = self
             .field_repair_table()
             .for_lane(provider_kind, Some(lane.egress));
-        let row = super::present_rows(table, sent).find(is_ranked)?;
+        let row = super::present_rows(table, sent).find(is_row)?;
         let key = FieldVerdictKey::new(target.learned_lane.as_ref()?, row.path, provider_kind)?;
         if removed.contains(&key) {
             return None;
@@ -213,6 +240,11 @@ impl Router {
         self.field_verdicts()
             .clear_accepted(&key, self.registry_generation())
     }
+}
+
+/// Whether `row` rewrites the Anthropic thinking type.
+pub(in crate::router) const fn is_thinking_type(row: &FieldRepairRow) -> bool {
+    matches!(row.surface, FieldSurface::AnthropicThinkingType(_))
 }
 
 /// Whether `row` rewrites through the effort rank.
