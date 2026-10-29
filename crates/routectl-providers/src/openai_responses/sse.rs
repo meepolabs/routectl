@@ -479,6 +479,17 @@ impl ResponsesStreamState {
         let (Some(idx), Some(final_args)) = (event.output_index, event.arguments.as_deref()) else {
             return Vec::new();
         };
+        // An empty payload with nothing streamed yet settles nothing:
+        // output_item.done may still carry the real arguments, and it
+        // commits `{}` itself when it does not.
+        if final_args.is_empty()
+            && matches!(
+                self.blocks.get(&idx),
+                Some(BlockState::ToolUse { arguments, .. }) if arguments.is_empty()
+            )
+        {
+            return Vec::new();
+        }
         self.finalize_tool_arguments(provider_id, idx, final_args)
             .into_iter()
             .collect()
@@ -508,13 +519,7 @@ impl ResponsesStreamState {
             return None;
         };
         *finalized = true;
-        // An empty final payload is a zero-argument call; `{}` keeps the
-        // emitted arguments parseable JSON for every downstream client.
-        let final_args = if final_args.is_empty() {
-            "{}"
-        } else {
-            final_args
-        };
+        let final_args = super::response::zero_arg_as_empty_object(final_args);
         if !arguments.is_empty() {
             if arguments.as_str() != final_args {
                 tracing::debug!(
@@ -543,7 +548,16 @@ impl ResponsesStreamState {
         let mut chunks = Vec::new();
         if matches!(self.blocks.get(&idx), Some(BlockState::ToolUse { .. })) {
             let final_args = match event.item.as_ref().and_then(|v| v.get("arguments")) {
-                Some(v) => v.as_str().unwrap_or(""),
+                Some(Value::String(s)) => s.as_str(),
+                Some(other) => {
+                    tracing::debug!(
+                        provider = provider_id,
+                        output_index = idx,
+                        arguments_type = json_type_name(other),
+                        "openai-responses: function_call item.done arguments are not a string"
+                    );
+                    ""
+                }
                 None => {
                     tracing::debug!(
                         provider = provider_id,
@@ -878,6 +892,18 @@ impl ResponsesStreamState {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// JSON type name of `v` for log context; never the value itself.
+const fn json_type_name(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::Bool(_) => "bool",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
 
 /// Return the upstream-stable id when non-empty, otherwise mint a fresh
 /// v4 UUID. Some upstreams omit the item id on early `item.added`

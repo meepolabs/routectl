@@ -5,6 +5,7 @@
 
 use super::*;
 use serde_json::json;
+use tracing_test::traced_test;
 
 const ARGS_DONE_ONLY_FIXTURE: &str =
     include_str!("../../tests/fixtures/openai_responses/args_done_only_parallel_calls.jsonl");
@@ -301,4 +302,123 @@ fn done_events_route_only_to_the_tool_block_at_their_output_index() {
         tool_deltas(&chunks),
         vec![(0, "call_b".into(), "calc".into(), "{\"x\":1}".into())]
     );
+}
+
+fn function_call_item_done_raw(output_index: u32, call_id: &str, item: Value) -> Value {
+    let mut item = item;
+    let obj = item.as_object_mut().expect("item is an object");
+    obj.insert("type".into(), json!("function_call"));
+    obj.insert("id".into(), json!("fc_1"));
+    obj.insert("call_id".into(), json!(call_id));
+    obj.insert("status".into(), json!("completed"));
+    json!({
+        "type": "response.output_item.done",
+        "output_index": output_index,
+        "item": item
+    })
+}
+
+#[test]
+fn late_delta_after_args_done_keeps_the_streamed_arguments() {
+    // Arrange: bytes already streamed, so args.done takes the keep-streamed
+    // branch; a delta arriving after it must not extend the emitted JSON.
+    let events = [
+        function_call_added(0, "call_a", "calc"),
+        args_delta(0, "{\"x\":1}"),
+        args_done(0, "{\"x\":1}"),
+        args_delta(0, ",\"y\":2}"),
+    ];
+
+    // Act
+    let chunks = drive_all(events);
+
+    // Assert
+    let args: Vec<String> = tool_deltas(&chunks)
+        .into_iter()
+        .map(|(_, _, _, a)| a)
+        .collect();
+    assert_eq!(args, vec!["{\"x\":1}".to_string()]);
+}
+
+#[test]
+fn empty_args_done_defers_to_item_done_arguments() {
+    // Arrange
+    let events = [
+        function_call_added(0, "call_a", "clock"),
+        args_done(0, ""),
+        function_call_item_done(0, "call_a", "clock", "{\"tz\":\"utc\"}"),
+        completed(),
+    ];
+
+    // Act
+    let chunks = drive_all(events);
+
+    // Assert
+    assert_eq!(
+        tool_deltas(&chunks),
+        vec![(
+            0,
+            "call_a".into(),
+            "clock".into(),
+            "{\"tz\":\"utc\"}".into()
+        )]
+    );
+}
+
+#[traced_test]
+#[test]
+fn item_done_without_arguments_field_logs_before_emitting_empty_object() {
+    // Arrange
+    let events = [
+        function_call_added(0, "call_a", "now"),
+        function_call_item_done_raw(0, "call_a", json!({"name": "now"})),
+    ];
+
+    // Act
+    let chunks = drive_all(events);
+
+    // Assert
+    assert!(logs_contain("function_call item.done without arguments"));
+    assert_eq!(
+        tool_deltas(&chunks),
+        vec![(0, "call_a".into(), "now".into(), "{}".into())]
+    );
+}
+
+#[traced_test]
+#[test]
+fn item_done_with_non_string_arguments_logs_before_emitting_empty_object() {
+    let rows = [
+        ("null", json!(null)),
+        ("number", json!(7)),
+        ("object", json!({"tz": "utc"})),
+    ];
+    for (kind, arguments) in rows {
+        // Arrange
+        let events = [
+            function_call_added(0, "call_a", "now"),
+            function_call_item_done_raw(
+                0,
+                "call_a",
+                json!({"name": "now", "arguments": arguments}),
+            ),
+        ];
+
+        // Act
+        let chunks = drive_all(events);
+
+        // Assert
+        assert!(
+            logs_contain(&format!("arguments_type=\"{kind}\"")),
+            "row {kind}: the non-string fallback must log its argument type"
+        );
+        assert_eq!(
+            tool_deltas(&chunks),
+            vec![(0, "call_a".into(), "now".into(), "{}".into())],
+            "row {kind}"
+        );
+    }
+    assert!(logs_contain(
+        "function_call item.done arguments are not a string"
+    ));
 }

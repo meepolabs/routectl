@@ -304,6 +304,40 @@ fn response_function_call_arguments_invalid_json_preserved_as_string() {
 }
 
 #[test]
+fn response_function_call_empty_arguments_translate_to_an_empty_object() {
+    // Arrange
+    let body = json!({
+        "status": "completed",
+        "output": [{
+            "type": "function_call",
+            "id": "fc",
+            "call_id": "call_now",
+            "name": "now",
+            "arguments": ""
+        }]
+    });
+
+    // Act
+    let resp = parse(body);
+
+    // Assert: both canonical carriers hold the empty object.
+    let msg = &resp.choices[0].message;
+    let tcs = msg.tool_calls.as_ref().expect("tool_calls");
+    assert_eq!(tcs[0]["function"]["arguments"], "{}");
+    let MessageContent::Parts(parts) = &msg.content else {
+        panic!("expected Parts, got {:?}", msg.content);
+    };
+    let input = parts
+        .iter()
+        .find_map(|p| match p {
+            ContentPart::Known(KnownContentPart::ToolUse { input, .. }) => Some(input),
+            _ => None,
+        })
+        .expect("ToolUse part present");
+    assert_eq!(input, &json!({}));
+}
+
+#[test]
 fn response_reasoning_with_text_variant_is_recognized() {
     // Arrange: a Reasoning content array using the plain "text"
     // discriminant (codex's ReasoningItemContent::Text variant)

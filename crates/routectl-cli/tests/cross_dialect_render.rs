@@ -9,6 +9,12 @@
 //! test pins -- Anthropic 400s on a `signature: null` thinking block
 //! mid-conversation when a provider switch lands on a non-signing
 //! upstream.
+//!
+//! A second section pins that a zero-argument tool call from a Responses
+//! upstream renders as an empty object on every ingress.
+
+use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use serde_json::{Value, json};
 
@@ -18,6 +24,12 @@ use routectl_providers::openai_compat::dialect::ReasoningDialect;
 use routectl_providers::openai_compat::response::{
     OPENAI_COMPAT_ENVELOPE_KEYS, OPENAI_COMPAT_USAGE_SUBKEYS, normalize,
 };
+use routectl_providers::openai_responses::AuthKind as ResponsesAuthKind;
+use routectl_router::{AliasValue, Config, ModelEntry, ProviderEntry, RetryPolicy, ServerConfig};
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
+
+mod common;
 
 /// Build a raw openai-compat response (DeepSeek shape) carrying every
 /// field on the openai-compat strip allow-lists
@@ -248,4 +260,207 @@ fn openai_render_dedupes_tool_use_when_present_in_both_tool_calls_and_parts() {
             "collapsed text content must be preserved; got: {s}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// A zero-argument `function_call` from a Responses upstream, taken on the
+// non-streaming path, reaches every ingress as an EMPTY OBJECT. The Responses
+// wire ships `arguments: ""` for a call with no parameters. Each test drives
+// the real axum server against a wiremock Responses upstream (whose
+// `complete` drains SSE until `response.completed`).
+// ---------------------------------------------------------------------------
+
+const CALL_ID: &str = "call_zero_arg";
+const TOOL_NAME: &str = "current_time";
+
+async fn spawn(config: Arc<Config>) -> String {
+    let config = common::isolate_usage_db(config);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        routectl_cli::server::serve_on_listener(config, listener, None)
+            .await
+            .expect("server failed");
+    });
+    common::readiness::await_health(&base_url).await;
+    base_url
+}
+
+/// A terminal `response.completed` whose only output item is a
+/// `function_call` with empty `arguments`.
+fn zero_arg_sse_body() -> String {
+    let completed = json!({
+        "id": "resp_zero_arg",
+        "object": "response",
+        "status": "completed",
+        "model": "mock-model",
+        "output": [{
+            "type": "function_call",
+            "id": "fc_1",
+            "call_id": CALL_ID,
+            "name": TOOL_NAME,
+            "arguments": "",
+            "status": "completed"
+        }],
+        "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+    });
+    format!(
+        "data: {{\"type\":\"response.completed\",\"response\":{}}}\n\n",
+        serde_json::to_string(&completed).expect("completed body serializes")
+    )
+}
+
+async fn zero_arg_responses_lane() -> (MockServer, Arc<Config>) {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/responses"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(zero_arg_sse_body()),
+        )
+        .mount(&upstream)
+        .await;
+
+    let mut providers = BTreeMap::new();
+    providers.insert(
+        "responses-mock".to_string(),
+        ProviderEntry::openai_responses(common::file_ref("test-key"))
+            .with_openai_responses_base_url(upstream.uri())
+            .with_openai_responses_auth_kind(ResponsesAuthKind::ApiKey),
+    );
+    let mut models = BTreeMap::new();
+    models.insert(
+        "target".to_string(),
+        ModelEntry::new("responses-mock", "mock-model"),
+    );
+    let mut aliases = BTreeMap::new();
+    aliases.insert(
+        "mock-model".to_string(),
+        AliasValue::Single("target".into()),
+    );
+    let config = Arc::new(Config {
+        server: ServerConfig {
+            host: "127.0.0.1".into(),
+            port: 0,
+            auth: None,
+            strict_translation: false,
+            allow_disable_fallbacks: true,
+            ..Default::default()
+        },
+        providers,
+        aliases,
+        retry: RetryPolicy::default(),
+        models,
+        ..Default::default()
+    });
+    (upstream, config)
+}
+
+/// POST `body` to `route` on a server fronting the zero-arg upstream and
+/// return the JSON the client is served.
+async fn served_body(route: &str, body: Value) -> Value {
+    let (upstream, config) = zero_arg_responses_lane().await;
+    let base = spawn(config).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{base}{route}"))
+        .json(&body)
+        .send()
+        .await
+        .expect("ingress request sends");
+    let status = resp.status();
+    let served: Value = resp.json().await.expect("served body is JSON");
+    assert_eq!(status, 200, "ingress returned {status}: {served}");
+
+    let received = upstream
+        .received_requests()
+        .await
+        .expect("requests recorded");
+    assert_eq!(received.len(), 1, "expected exactly one upstream call");
+    served
+}
+
+fn assert_empty_object_arguments(arguments: &Value, served: &Value) {
+    let text = arguments
+        .as_str()
+        .unwrap_or_else(|| panic!("arguments must be a JSON string; served {served}"));
+    let parsed: Value = serde_json::from_str(text)
+        .unwrap_or_else(|e| panic!("arguments {text:?} must parse as JSON ({e}); served {served}"));
+    assert_eq!(parsed, json!({}), "served {served}");
+}
+
+#[tokio::test]
+async fn zero_arg_function_call_reaches_chat_completions_as_an_empty_object() {
+    // Arrange
+    let request = json!({
+        "model": "mock-model",
+        "messages": [{"role": "user", "content": "what time is it"}]
+    });
+
+    // Act
+    let served = served_body("/v1/chat/completions", request).await;
+
+    // Assert
+    let tool_calls = served["choices"][0]["message"]["tool_calls"]
+        .as_array()
+        .unwrap_or_else(|| panic!("tool_calls must be an array; served {served}"));
+    assert_eq!(tool_calls.len(), 1, "served {served}");
+    assert_eq!(tool_calls[0]["id"], CALL_ID);
+    assert_empty_object_arguments(&tool_calls[0]["function"]["arguments"], &served);
+}
+
+#[tokio::test]
+async fn zero_arg_function_call_reaches_anthropic_messages_as_an_empty_object() {
+    // Arrange
+    let request = json!({
+        "model": "mock-model",
+        "max_tokens": 64,
+        "messages": [{"role": "user", "content": "what time is it"}]
+    });
+
+    // Act
+    let served = served_body("/v1/messages", request).await;
+
+    // Assert
+    let tool_uses: Vec<&Value> = served["content"]
+        .as_array()
+        .unwrap_or_else(|| panic!("content must be an array; served {served}"))
+        .iter()
+        .filter(|b| b["type"] == "tool_use")
+        .collect();
+    assert_eq!(tool_uses.len(), 1, "served {served}");
+    assert_eq!(tool_uses[0]["id"], CALL_ID);
+    let input = &tool_uses[0]["input"];
+    assert!(
+        input.as_object().is_some_and(serde_json::Map::is_empty),
+        "tool_use.input must be an empty object; served {served}"
+    );
+}
+
+#[tokio::test]
+async fn zero_arg_function_call_reaches_responses_as_an_empty_object() {
+    // Arrange
+    let request = json!({
+        "model": "mock-model",
+        "input": [{
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "what time is it"}]
+        }]
+    });
+
+    // Act
+    let served = served_body("/v1/responses", request).await;
+
+    // Assert
+    let calls: Vec<&Value> = served["output"]
+        .as_array()
+        .unwrap_or_else(|| panic!("output must be an array; served {served}"))
+        .iter()
+        .filter(|item| item["type"] == "function_call")
+        .collect();
+    assert_eq!(calls.len(), 1, "served {served}");
+    assert_eq!(calls[0]["call_id"], CALL_ID);
+    assert_empty_object_arguments(&calls[0]["arguments"], &served);
 }

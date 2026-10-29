@@ -259,6 +259,7 @@ fn walk_output(
                 ..
             } => {
                 has_function_call = true;
+                let arguments = zero_arg_as_empty_object(arguments);
                 tool_calls.push(json!({
                     "id": call_id,
                     "type": "function",
@@ -271,7 +272,7 @@ fn walk_output(
                 // egress should re-emit the original text so the
                 // model sees the same input it produced.
                 let input_value: Value = serde_json::from_str(arguments)
-                    .unwrap_or_else(|_| Value::String(arguments.clone()));
+                    .unwrap_or_else(|_| Value::String(arguments.to_string()));
                 parts.push(ContentPart::Known(KnownContentPart::ToolUse {
                     id: call_id.clone(),
                     name: name.clone(),
@@ -462,6 +463,17 @@ pub fn upstream_error_from_failed(provider_id: &str, body: &ResponsesResponse) -
         .as_ref()
         .and_then(codex_reset_hint);
     Error::upstream_with_retry_after(provider_id, 0, msg, retry_after)
+}
+
+/// The Responses wire ships `arguments: ""` for a zero-argument call;
+/// `{}` keeps the arguments parseable JSON (and an object, which the
+/// Anthropic `tool_use.input` requires) for every downstream client.
+pub(super) const fn zero_arg_as_empty_object(arguments: &str) -> &str {
+    if arguments.is_empty() {
+        "{}"
+    } else {
+        arguments
+    }
 }
 
 #[cfg(test)]
