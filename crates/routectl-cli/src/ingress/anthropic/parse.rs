@@ -13,10 +13,12 @@ use routectl_core::{
 use routectl_core::{ContentPart, MessageContent};
 
 use crate::ingress::normalize_client_betas;
+use crate::ingress::normalize_max_completion_tokens;
 use crate::ingress::read_alias_header;
 use crate::ingress::session_key::resolve_session_key;
 
 pub(super) fn translate_request(headers: &HeaderMap, mut body: Value) -> Result<ChatRequest> {
+    normalize_max_completion_tokens(&mut body);
     let obj = body.as_object_mut().ok_or_else(|| {
         Error::Validation(
             "anthropic ingress: request body is not an object".into(),
@@ -256,8 +258,9 @@ fn metadata_session_id(metadata: &Option<Value>) -> Option<&str> {
 /// and return them as a JSON object; the caller threads it into
 /// `provider_extras`. The OpenAI Chat ingress sweeps with the same
 /// predicate, so the two dialects agree on what an extra is. A canonical
-/// alias with no `ChatRequest` field (`max_completion_tokens`, a top-level
-/// `reasoning_details`) stays in the body and serde drops it.
+/// alias with no `ChatRequest` field (a top-level `reasoning_details`) stays
+/// in the body and serde drops it; `max_completion_tokens` is renamed to
+/// `max_tokens` before the sweep runs.
 fn sweep_anthropic_extras(obj: &mut Map<String, Value>) -> Value {
     let extra_keys: Vec<String> = obj
         .keys()

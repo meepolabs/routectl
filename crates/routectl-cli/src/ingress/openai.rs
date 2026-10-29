@@ -25,6 +25,7 @@ use routectl_core::{
 use serde_json::{Map, Value};
 
 use super::normalize_client_betas;
+use super::normalize_max_completion_tokens;
 use super::{
     ErrorEnvelopeShape, IngressAdapter, IngressStreamState, ResponseEdits, SseEvent,
     StreamErrorClass, StreamRequestContext, read_alias_header,
@@ -638,33 +639,6 @@ fn coalesce_message_reasoning_keys(body: &mut Value) {
             }
         }
     }
-}
-
-/// Normalize the o-series / gpt-5+ `max_completion_tokens` field to
-/// the canonical `max_tokens` before serde deserialization.
-///
-/// Rules:
-/// - Only `max_completion_tokens` present: rename it to `max_tokens`.
-/// - Both present: keep `max_tokens` (wins), remove
-///   `max_completion_tokens` so it neither overwrites nor lingers as
-///   an unknown canonical key that the forward-compat sweep skips.
-/// - Only `max_tokens`: no-op.
-fn normalize_max_completion_tokens(body: &mut Value) {
-    let Some(obj) = body.as_object_mut() else {
-        return;
-    };
-    let has_mct = obj.contains_key("max_completion_tokens");
-    if !has_mct {
-        return;
-    }
-    let mct_val = obj.remove("max_completion_tokens");
-    if !obj.contains_key("max_tokens")
-        && let Some(v) = mct_val
-    {
-        obj.insert("max_tokens".into(), v);
-    }
-    // If `max_tokens` was already present we just removed
-    // `max_completion_tokens` above; `max_tokens` stays unchanged.
 }
 
 /// Rewrite `role: "developer"` to `role: "system"` on each message

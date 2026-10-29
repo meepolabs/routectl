@@ -1,9 +1,10 @@
 //! What the forward-compat sweep keeps out of `provider_extras`, and what
 //! that does to the egress bodies. An Anthropic body carrying the OpenAI
-//! token-cap alias `max_completion_tokens` and a top-level
-//! `reasoning_details` must reach every egress exactly as the same body
-//! without them does, while an unknown knob beside them still forwards to
-//! every Anthropic-shape egress.
+//! token-cap alias `max_completion_tokens` beside `max_tokens`, and a
+//! top-level `reasoning_details`, must reach every egress exactly as the
+//! same body without them does, while an unknown knob beside them still
+//! forwards to every Anthropic-shape egress. Sent without `max_tokens`, the
+//! alias becomes the token cap every Anthropic-family egress ships.
 
 use routectl_core::Provider;
 use routectl_core::wire_check::{EditKind, EditSite, Leg, WireTap};
@@ -204,4 +205,65 @@ fn openai_compat_refuses_no_managed_key_for_the_canonical_aliases() {
         assert!(!swept_strips.contains(&path), "{key}: {swept_strips:?}");
     }
     assert_eq!(swept_delta, 0, "{swept_strips:?}");
+}
+
+/// The token cap each Anthropic-family egress body carries: `max_tokens` on
+/// anthropic-api and Invoke, `inferenceConfig.maxTokens` on Converse.
+fn shipped_cap(lane: &str, body: &Value) -> Option<u64> {
+    let cap = match lane {
+        "bedrock-converse" => body.pointer("/inferenceConfig/maxTokens"),
+        _ => body.get("max_tokens"),
+    };
+    cap.and_then(Value::as_u64)
+}
+
+#[test]
+fn max_completion_tokens_maps_to_the_token_cap_on_every_anthropic_family_lane() {
+    let default = u64::from(routectl_providers::anthropic_api::DEFAULT_MAX_OUTPUT_TOKENS);
+    let body = |max_tokens: Option<u64>, mct: Option<u64>| {
+        let mut body = json!({
+            "model": "claude-opus-4-7",
+            "messages": [{"role": "user", "content": "hi"}],
+        });
+        if let Some(v) = max_tokens {
+            body["max_tokens"] = json!(v);
+        }
+        if let Some(v) = mct {
+            body["max_completion_tokens"] = json!(v);
+        }
+        body
+    };
+    // (name, body, [anthropic-api, bedrock-invoke, bedrock-converse])
+    let rows: [(&str, Value, [Option<u64>; 3]); 3] = [
+        (
+            "only max_completion_tokens",
+            body(None, Some(777)),
+            [Some(777), Some(777), Some(777)],
+        ),
+        (
+            "both: max_tokens wins",
+            body(Some(4096), Some(777)),
+            [Some(4096), Some(4096), Some(4096)],
+        ),
+        (
+            "neither: the egress default",
+            body(None, None),
+            [Some(default), Some(default), None],
+        ),
+    ];
+
+    for (name, body, want) in rows {
+        let req = parse(body);
+        let bodies = egress_bodies(&req);
+        let lanes = ["anthropic-api", "bedrock-invoke", "bedrock-converse"];
+        for (lane, want) in lanes.into_iter().zip(want) {
+            let (_, sent) = bodies.iter().find(|(l, _)| *l == lane).expect("lane body");
+            assert!(
+                !sent.contains("max_completion_tokens"),
+                "{name}: {lane}: {sent}"
+            );
+            let sent: Value = serde_json::from_str(sent).expect("egress json");
+            assert_eq!(shipped_cap(lane, &sent), want, "{name}: {lane}: {sent}");
+        }
+    }
 }

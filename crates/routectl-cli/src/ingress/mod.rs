@@ -351,6 +351,34 @@ pub fn read_alias_header(headers: &HeaderMap) -> Option<String> {
 /// work every dispatch target repeats, far above any real client.
 pub const MAX_CLIENT_BETA_FLAGS: usize = 64;
 
+/// Normalize the OpenAI token-cap alias `max_completion_tokens` to the
+/// canonical `max_tokens` before serde deserialization. `ChatRequest` has no
+/// field for the alias, so serde would otherwise drop the cap.
+///
+/// Rules:
+/// - Only `max_completion_tokens` present: rename it to `max_tokens`.
+/// - Both present: keep `max_tokens` (wins), remove
+///   `max_completion_tokens` so it neither overwrites nor lingers as
+///   an unknown canonical key that the forward-compat sweep skips.
+/// - Only `max_tokens`: no-op.
+pub(crate) fn normalize_max_completion_tokens(body: &mut Value) {
+    let Some(obj) = body.as_object_mut() else {
+        return;
+    };
+    let has_mct = obj.contains_key("max_completion_tokens");
+    if !has_mct {
+        return;
+    }
+    let mct_val = obj.remove("max_completion_tokens");
+    if !obj.contains_key("max_tokens")
+        && let Some(v) = mct_val
+    {
+        obj.insert("max_tokens".into(), v);
+    }
+    // If `max_tokens` was already present we just removed
+    // `max_completion_tokens` above; `max_tokens` stays unchanged.
+}
+
 /// Split every entry on `,`, trim each piece, and keep the first occurrence of
 /// each non-empty flag whose bytes are all visible ASCII (`0x21..=0x7E`), in
 /// source order. A flag holding any other byte (a control byte, DEL, a space,
