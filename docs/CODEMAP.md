@@ -563,8 +563,9 @@ license.
   `400..=599` trusted, else 502), shared by the gemini and openai-compat
   stream parsers; `local_build_error` (over the `LocalBuildFailure` trait,
   implemented for `reqwest::Error` and `serde_json::Error`) maps a local
-  request-build or body-serialize failure on every egress to
-  `Error::Internal` (classifies `Unknown`: no retry, no fallback, no breaker
+  request-build or body-serialize failure at its call sites (every egress
+  except Bedrock complete/stream, which map body serialization to
+  `Error::Internal` directly) to `Error::Internal` (classifies `Unknown`: no retry, no fallback, no breaker
   debit; the URL is dropped from the detail)
 - `src/effort.rs` -- shared effort helpers: `VALID_EFFORT_TOKENS`,
   `wire_effort` (the one `none` = omit decision for the translating
@@ -2695,9 +2696,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   here, and the loop imports nothing from `dispatch`
 - `src/router/dispatch.rs` -- the two message surfaces of the dispatch walk
   and the per-attempt helpers the walk calls back into. Public API:
-  `complete`/`complete_with_options` + `stream`/`stream_with_options`; each
-  builds a `RepairBudget::per_request`, runs `dispatch_loop::run_walk`
-  through its adapter, then calls `dispatch_loop::finish_dispatch`.
+  `complete`/`complete_with_options` + `stream`/`stream_with_options`;
+  `complete` and `stream` delegate with default options, and each
+  `_with_options` builds a `RepairBudget::per_request`, runs
+  `dispatch_loop::run_walk` through its adapter, then calls
+  `dispatch_loop::finish_dispatch`.
   `CompleteAdapter`: `request_timeout_ms` per attempt, then the
   provider-stamp / relabel (`resolve_reported_model`) / evidence / quota
   commit. `StreamAdapter`: the first-content timeout
@@ -6590,7 +6593,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   flush-timing backstop. On a dialect with `reports_opening_usage` the
   admission builds an `OpeningMeter` first (see `opening_meter.rs`), carried
   in a `StreamTurn`. FAST branch (resolves within grace): `Ok` seeds the
-  served-lane opening and spawns `render_stream_task` on the resolved stream
+  served-lane opening and spawns `render_checked_stream_task` on the resolved stream
   (the winner's own opener, if its opening chunk carries one, renders
   instead); `Err` returns a REAL HTTP
   status via `map_error` (preserving the SDK pre-stream 529 retry).
