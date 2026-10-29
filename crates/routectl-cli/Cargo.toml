@@ -48,10 +48,9 @@ subtle = "2"
 # without echoing). The one new dependency the secret-source breadth needs;
 # stdin/env/file capture use std + routectl-auth's ManagedSecretStore.
 rpassword = "7"
-# `config migrate --dry-run` on a legacy (v1) file renders the candidate by
-# running the IO-performing v1->v2 rung against a throwaway copy, so a dry-run
-# provably cannot touch the real config or overlay. Already a runtime dep of
-# routectl-router (config_write), promoted here for the same discipline.
+# `init --scaffold` writes the new config through a same-directory temp file
+# and an atomic rename. Already a runtime dep of routectl-router
+# (config_write).
 tempfile = "3"
 # Per-process MITM seam nonce generation (proxy::split stamper +
 # ingress::MitmSeamNonce): OS CSPRNG bytes, base64url-encoded.
@@ -153,11 +152,6 @@ insta.workspace = true
 serial_test = "3"
 routectl-testkit.workspace = true
 criterion = { workspace = true }
-# The config-migrate tests race config.toml through the SAME advisory
-# write lock the config writer holds (config_write::edit_config_toml), so
-# a test can gate run_at's config-phase re-read on an out-of-band write.
-# Test-only; the release binary reaches the lock via routectl-router.
-fd-lock = "4"
 # Bedrock event-stream frame encoding, so a handler test can serve a real
 # Bedrock provider a streamed answer from a mock origin. Both already build
 # through routectl-providers' `bedrock` feature, pinned to the same minors.

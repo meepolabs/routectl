@@ -639,11 +639,10 @@ fn the_planned_delta_parses_and_validates_as_config() {
     assert!(config.providers.contains_key("anthropic-default"));
 }
 
-/// The convergence property in its pure form: the shape a migration
-/// produces (suffixed account entries, the plain-named pool listing them)
-/// needs no login write for any of its seats, whether the pool is pinned or
-/// growth-marked. The pin over the REAL migration pipeline lives beside that
-/// pipeline's own fixtures, in `config_migrate_cmd`'s tests.
+/// The convergence property in its pure form: the multi-seat shape
+/// (suffixed account entries, the plain-named pool listing them) needs no
+/// login write for any of its seats, whether the pool is pinned or
+/// growth-marked.
 #[test]
 fn the_migrated_config_shape_plans_nothing_for_either_of_its_seats() {
     // Arrange
@@ -658,7 +657,7 @@ fn the_migrated_config_shape_plans_nothing_for_either_of_its_seats() {
          api_key_ref = \"oauth://anthropic#work\"\n"
         .parse()
         .expect("fixture parses");
-    routectl_router::upsert_pool_members(
+    crate::commands::edit_pipeline::upsert_pool_members(
         &mut doc,
         "anthropic",
         &["anthropic-managed", "anthropic-work"],
@@ -691,13 +690,13 @@ fn a_login_id_with_no_provider_shape_is_an_error_not_a_plan() {
     assert!(plan(&Config::default(), "not-a-provider", None).is_err());
 }
 
-/// The other half of the convergence property: a NEW label over migrate's
-/// own output. The migrator writes no growth marker, so the pool is pinned
-/// and only the account entry is planned -- the pool half is skipped with
-/// the note, never joined and never marked.
+/// The other half of the convergence property: a NEW label over the
+/// multi-seat shape with no growth marker. The pool is pinned, so only the
+/// account entry is planned -- the pool half is skipped with the note, never
+/// joined and never marked.
 #[test]
 fn a_new_label_over_the_migrated_shape_plans_the_entry_only_and_notes_the_pinned_pool() {
-    // Arrange: migrate's output for one seat, pool included, marker absent.
+    // Arrange: one seat, pool included, marker absent.
     let mut doc: toml_edit::DocumentMut = "version = 4\n\
          [providers.anthropic-managed]\n\
          kind = \"anthropic-api\"\n\
@@ -705,7 +704,11 @@ fn a_new_label_over_the_migrated_shape_plans_the_entry_only_and_notes_the_pinned
          api_key_ref = \"oauth://anthropic\"\n"
         .parse()
         .expect("fixture parses");
-    routectl_router::upsert_pool_members(&mut doc, "anthropic", &["anthropic-managed"]);
+    crate::commands::edit_pipeline::upsert_pool_members(
+        &mut doc,
+        "anthropic",
+        &["anthropic-managed"],
+    );
     let config: Config = toml::from_str(&doc.to_string()).expect("migrated config parses");
 
     // Act: a label the migrated config carries no entry for.

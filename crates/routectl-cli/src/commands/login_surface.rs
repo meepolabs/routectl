@@ -49,13 +49,13 @@ use routectl_router::seat_naming::{
     seat_secret_ref,
 };
 use routectl_router::{
-    Config, ConfigWriteError, EditOutcome, parse_config, upsert_pool_members as upsert_pool,
+    CONFIG_VERSION_REMEDIATION, Config, ConfigWriteError, EditOutcome, parse_config,
 };
 use toml_edit::{DocumentMut, Item};
 
 use super::edit_pipeline::{
     RelockValidationError, confirm_high_consequence, gate, insert_provider_block, parse_document,
-    preflight, render_gate_errors,
+    preflight, render_gate_errors, upsert_pool_members as upsert_pool,
 };
 use super::login_provider_block::{
     ProviderBlock, entry_field_str, provider_block, required_auth_fields, toml_key, toml_string,
@@ -601,6 +601,11 @@ impl std::fmt::Display for SkipReason {
                 "no config file yet, so nothing was written -- run `routectl config init` \
                  to create one, then add the entry below"
             ),
+            // A refused version already ends with the shared remediation,
+            // whose last sentence is this tail; the caller adds the period.
+            Self::Unwritable { detail } if detail.ends_with(CONFIG_VERSION_REMEDIATION) => {
+                f.write_str(detail.trim_end_matches('.'))
+            }
             Self::Unwritable { detail } => write!(f, "{detail} Nothing was written"),
             Self::Unreadable => write!(
                 f,
@@ -806,11 +811,16 @@ fn surface_against(
 /// The block comes from the same renderer every other surface prints, so a
 /// skipped login and an accepted one can never describe different entries.
 fn skip(reason: SkipReason, family: &str, label: Option<&str>) -> SurfaceOutcome {
-    println!("\n{reason}.");
+    println!("\n{}", skip_line(&reason));
     if let Some(block) = provider_block(family, label) {
         println!("\n{}", block.render());
     }
     SurfaceOutcome::Skipped(reason)
+}
+
+/// The sentence [`skip`] prints for `reason`.
+fn skip_line(reason: &SkipReason) -> String {
+    format!("{reason}.")
 }
 
 /// The seat's config bytes, or the reason there are none.

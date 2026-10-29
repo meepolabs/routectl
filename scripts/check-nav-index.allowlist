@@ -8,7 +8,6 @@ crates/routectl-auth/src/oauth/store/test_support.rs
 crates/routectl-cli/benches/hotpath.rs
 crates/routectl-cli/src/commands/catalog/mod.rs
 crates/routectl-cli/src/commands/catalog/render.rs
-crates/routectl-cli/src/commands/catalog/verifications.rs
 crates/routectl-cli/src/commands/catalog/write.rs
 crates/routectl-cli/src/commands/init/orchestrate.rs
 crates/routectl-cli/src/commands/parse_error_redaction.rs
@@ -20,7 +19,6 @@ crates/routectl-cli/src/server/tests.rs
 crates/routectl-cli/src/test_secret.rs
 crates/routectl-cli/tests/capability_purge_e2e.rs
 crates/routectl-cli/tests/capability_purge_no_proxy.rs
-crates/routectl-cli/tests/config_migrate.rs
 crates/routectl-cli/tests/forwarded_mode_e2e.rs
 crates/routectl-cli/tests/probe_doctor_e2e.rs
 crates/routectl-cli/tests/proxy_forward.rs

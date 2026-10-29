@@ -31,7 +31,6 @@ pub use schema::{
 #[cfg(feature = "bedrock")]
 pub use schema::{BedrockApiShapeConfig, BedrockCredsConfig, BedrockMantleConfig};
 use validate::default_config_version;
-pub(crate) use validate::message_safe_key;
 pub use validate::{
     CONFIG_VERSION_REMEDIATION, CURRENT_CONFIG_VERSION, ConfigVersionError,
     LegacyMitmCredentialSourceError, RawConfigPreflightError, RemovedPaidProbeCapsError,

@@ -3,8 +3,8 @@
 //! closed reasoning-replay matcher.
 
 use super::{
-    ClassifiedFailure, FailureClass, LastOutcome, MatchedBy, ReplayAttempt,
-    class_guidance_for_status, classify, classify_with_attempt, replay, tables,
+    ClassifiedFailure, FailureClass, LastOutcome, MatchedBy, ReplayAttempt, classify,
+    classify_with_attempt, replay, tables,
 };
 use crate::error::Error;
 
@@ -623,80 +623,6 @@ fn classify_is_total_and_never_returns_timeout() {
     }
 }
 
-// --- Status-to-class refusal guidance ---
-
-#[test]
-fn guidance_for_plain_5xx_is_server_error_with_no_alternatives() {
-    // Arrange + Act
-    let got = class_guidance_for_status(500);
-
-    // Assert
-    assert_eq!(got.primary, FailureClass::ServerError);
-    assert!(got.alternatives.is_empty(), "{:?}", got.alternatives);
-}
-
-#[test]
-fn guidance_for_429_is_rate_limited_with_no_alternatives() {
-    // Arrange + Act
-    let got = class_guidance_for_status(429);
-
-    // Assert
-    assert_eq!(got.primary, FailureClass::RateLimited);
-    assert!(got.alternatives.is_empty(), "{:?}", got.alternatives);
-}
-
-#[test]
-fn guidance_for_503_surfaces_server_error_overloaded_ambiguity() {
-    // Arrange + Act
-    let got = class_guidance_for_status(503);
-
-    // Assert: bare 503 is ServerError, but an overloaded body token
-    // lifts it to Overloaded -- the ambiguity the migrator must name.
-    assert_eq!(got.primary, FailureClass::ServerError);
-    assert_eq!(got.alternatives, vec![FailureClass::Overloaded]);
-}
-
-#[test]
-fn guidance_for_generic_4xx_is_bad_request_with_body_lift_alternatives() {
-    // Arrange + Act
-    let got = class_guidance_for_status(400);
-
-    // Assert: bare 400 is BadRequest; body tokens can lift it to the
-    // sibling client-error classes, in taxonomy order.
-    assert_eq!(got.primary, FailureClass::BadRequest);
-    assert_eq!(
-        got.alternatives,
-        vec![
-            FailureClass::ContentPolicy,
-            FailureClass::ContextWindow,
-            FailureClass::FeatureUnsupported {
-                capability: String::new(),
-            },
-        ]
-    );
-}
-
-#[test]
-fn guidance_for_non_4xx_5xx_status_is_unknown_with_no_alternatives() {
-    // Arrange + Act: a status outside the classified range.
-    let got = class_guidance_for_status(200);
-
-    // Assert
-    assert_eq!(got.primary, FailureClass::Unknown);
-    assert!(got.alternatives.is_empty(), "{:?}", got.alternatives);
-}
-
-#[test]
-fn guidance_is_panic_free_for_every_u16() {
-    for status in 0..=u16::MAX {
-        // Act: must not panic for any status.
-        let got = class_guidance_for_status(status);
-
-        // Assert: the status round-trips onto the guidance.
-        assert_eq!(got.status, status);
-    }
-}
-
 // --- class_token + LastOutcome vocabulary ---
 
 /// Every current canonical variant. Constructed explicitly so a new
@@ -1214,25 +1140,6 @@ fn the_replay_class_reuses_the_existing_feature_unsupported_token() {
     assert_eq!(
         LastOutcome::from_failure_class(&replay_class()),
         LastOutcome::Http4xx
-    );
-}
-
-#[test]
-fn status_guidance_is_unaffected_by_the_replay_matcher() {
-    // Guidance is derived with no attempt signal, so the bare-400 row
-    // keeps exactly its previous alternatives.
-    let got = class_guidance_for_status(400);
-
-    assert_eq!(got.primary, FailureClass::BadRequest);
-    assert_eq!(
-        got.alternatives,
-        vec![
-            FailureClass::ContentPolicy,
-            FailureClass::ContextWindow,
-            FailureClass::FeatureUnsupported {
-                capability: String::new(),
-            },
-        ]
     );
 }
 

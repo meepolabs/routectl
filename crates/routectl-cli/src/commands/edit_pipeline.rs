@@ -16,7 +16,7 @@ use std::io::{IsTerminal as _, Write as _};
 
 use routectl_core::{Error, Result};
 use routectl_router::{Config, ConfigWriteError, parse_config, preflight_raw_config};
-use toml_edit::{DocumentMut, Item, Table};
+use toml_edit::{Array, DocumentMut, Item, Table};
 
 use super::config::validation_report;
 use super::parse_error_redaction::redact_parse_error;
@@ -133,6 +133,53 @@ pub(crate) fn insert_provider_block(doc: &mut DocumentMut, name: &str, block: Ta
     Ok(())
 }
 
+/// Write `[pools.<pool>]`: union `members` into whatever member list the
+/// block already carries, creating the `pools` table and the block itself
+/// when absent.
+///
+/// Format-preserving and IDEMPOTENT: a member already listed is not
+/// duplicated, so re-running over this function's own output changes no
+/// bytes. A repeated login of the same seat therefore leaves the file
+/// untouched, and an operator-written member list is grown, never rewritten.
+///
+/// Nothing else on the block is touched: an existing `seat_selection` or
+/// `accepts_new_logins` marker is an operator statement and survives
+/// verbatim.
+pub(crate) fn upsert_pool_members(doc: &mut DocumentMut, pool: &str, members: &[&str]) {
+    let root = doc.as_table_mut();
+    if !root.contains_key("pools") {
+        let mut table = Table::new();
+        table.set_implicit(true);
+        root.insert("pools", Item::Table(table));
+    }
+    let Some(pools) = root.get_mut("pools").and_then(Item::as_table_like_mut) else {
+        return;
+    };
+    if !pools.contains_key(pool) {
+        pools.insert(pool, Item::Table(Table::new()));
+    }
+    let Some(block) = pools.get_mut(pool).and_then(Item::as_table_like_mut) else {
+        return;
+    };
+    if !block.contains_key("members") {
+        block.insert("members", toml_edit::value(Array::new()));
+    }
+    if let Some(arr) = block.get_mut("members").and_then(Item::as_array_mut) {
+        let mut seen: std::collections::BTreeSet<String> = arr
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect();
+        for member in members {
+            // Insert BEFORE the push, so a duplicate within `members`
+            // itself is dropped too -- a caller assembling a list from two
+            // sources must not be able to write `["a", "a"]`.
+            if seen.insert((*member).to_string()) {
+                arr.push(*member);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -216,5 +263,93 @@ mod tests {
                 .contains("paid probes were removed; delete this key"),
             "err: {err}"
         );
+    }
+
+    fn doc_of(text: &str) -> DocumentMut {
+        text.parse::<DocumentMut>().unwrap()
+    }
+
+    /// The union is what lets repeated writers grow one pool without either
+    /// knowing what the other wrote: a rerun must add no member and change
+    /// no byte.
+    #[test]
+    fn upsert_pool_members_unions_without_duplicating_and_is_byte_idempotent() {
+        // Arrange
+        let mut doc = doc_of("version = 4\n");
+
+        // Act
+        upsert_pool_members(&mut doc, "anthropic", &["a", "b"]);
+        let after_first = doc.to_string();
+        upsert_pool_members(&mut doc, "anthropic", &["b", "c"]);
+        let after_second = doc.to_string();
+        upsert_pool_members(&mut doc, "anthropic", &["a", "b", "c"]);
+
+        // Assert
+        assert!(
+            after_first.contains(r#"members = ["a", "b"]"#),
+            "{after_first}"
+        );
+        assert!(
+            after_second.contains(r#"members = ["a", "b", "c"]"#),
+            "{after_second}"
+        );
+        assert_eq!(doc.to_string(), after_second, "a rerun must change no byte");
+    }
+
+    /// The union covers duplicates WITHIN one call's member list too, not
+    /// just against what the block already carries: a caller assembling
+    /// the list from two sources (an entry name plus a pool's members)
+    /// must not be able to write a duplicate.
+    #[test]
+    fn upsert_pool_members_drops_duplicates_within_one_calls_member_list() {
+        // Arrange
+        let mut doc = doc_of("version = 4\n");
+
+        // Act
+        upsert_pool_members(&mut doc, "anthropic", &["a", "a", "b", "a"]);
+
+        // Assert
+        assert!(doc.to_string().contains(r#"members = ["a", "b"]"#), "{doc}");
+    }
+
+    /// Everything else on the block is the operator's statement and
+    /// survives a member union verbatim -- including the growth marker,
+    /// which login never flips.
+    #[test]
+    fn upsert_pool_members_leaves_seat_selection_and_the_growth_marker_untouched() {
+        // Arrange
+        let mut doc = doc_of(
+            "version = 4\n\
+             [pools.anthropic]\n\
+             members = [\"a\"]\n\
+             seat_selection = \"round-robin\" # spread the load\n\
+             accepts_new_logins = false\n",
+        );
+
+        // Act
+        upsert_pool_members(&mut doc, "anthropic", &["b"]);
+
+        // Assert
+        let out = doc.to_string();
+        assert!(out.contains(r#"members = ["a", "b"]"#), "{out}");
+        assert!(
+            out.contains("seat_selection = \"round-robin\" # spread the load"),
+            "{out}"
+        );
+        assert!(out.contains("accepts_new_logins = false"), "{out}");
+    }
+
+    /// An inline `pools = { ... }` shape must be walked as well as the
+    /// standard-table one, or a member union silently no-ops.
+    #[test]
+    fn upsert_pool_members_descends_into_an_inline_pools_table() {
+        // Arrange
+        let mut doc = doc_of("version = 4\npools = { anthropic = { members = [\"a\"] } }\n");
+
+        // Act
+        upsert_pool_members(&mut doc, "anthropic", &["b"]);
+
+        // Assert
+        assert!(doc.to_string().contains(r#""a", "b""#), "{doc}");
     }
 }

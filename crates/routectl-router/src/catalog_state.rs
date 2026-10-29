@@ -26,7 +26,7 @@
 //! `0o600` set before the write, `fsync` the temp file, atomic `rename`,
 //! `0o600` re-set after, then `fsync` the PARENT DIRECTORY so the
 //! rename itself survives a crash (mirrors
-//! `crate::config_migrate::write_config_atomic`). Unlike the overlay's
+//! `crate::config_write::write_config_atomic`). Unlike the overlay's
 //! `save`, there is deliberately NO revision check here: this file is
 //! rebuildable observability data, so a last-write-wins race between
 //! two boots is harmless (the loser's boot simply gets re-diffed on the

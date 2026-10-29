@@ -32,7 +32,7 @@
 //! DIRECTORY -- `rename` is atomic for concurrent readers, but is not
 //! durable across a crash/power loss until the directory entry pointing
 //! at the new inode is flushed too (mirrors
-//! `crate::config_migrate::write_config_atomic`). [`save`] additionally
+//! `crate::config_write::write_config_atomic`). [`save`] additionally
 //! compares the on-disk `revision` against an
 //! `expected_revision` before writing: a caller working from a stale
 //! snapshot gets an explicit conflict instead of a silent lost update (the
@@ -93,12 +93,12 @@ impl Default for CatalogOverlay {
     }
 }
 
-/// Provenance of an overlay cell: an imported legacy stamp/override
-/// (migration) versus an operator-authored one (import/user verbs).
+/// Provenance of an overlay cell: written by `catalog import` versus authored
+/// by an operator (the `catalog` set/verify/disable verbs).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OverlaySource {
-    /// Migrated from a legacy stamp or override.
+    /// Written by `catalog import` from a generated catalog.
     Import,
     /// Authored directly by an operator.
     User,
@@ -347,8 +347,6 @@ pub fn log_overlay_soft_defects(defects: &[OverlaySoftDefect]) {
 /// I/O error) propagates from [`load`] unchanged -- a caller cannot write
 /// blind over a file it could not validate.
 ///
-/// Today only the migrator calls this; the import/user verbs share the
-/// same function.
 pub fn save(
     path: &Path,
     expected_revision: u64,

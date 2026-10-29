@@ -15,7 +15,7 @@
 
 use routectl_router::{CURRENT_CONFIG_VERSION, parse_config};
 
-use super::{SkipReason, SurfaceOutcome, render_delta, surface, surface_against};
+use super::{SkipReason, SurfaceOutcome, render_delta, skip_line, surface, surface_against};
 
 /// A minimal config at the version this build writes, rendered from the
 /// const so the next schema bump needs no fixture edit.
@@ -226,11 +226,11 @@ fn an_absent_config_file_is_skipped_and_never_created() {
     assert!(!path.exists(), "login must not create a config file");
 }
 
-/// A pre-v4 config is the migrate case: skipped, pointed at `config
-/// migrate`, exit 0. Nonzero here would break every credential-only login
-/// against a stale config.
+/// A previous-version config is refused, not edited: skipped with the
+/// preflight's remediation, exit 0. Nonzero here would break every
+/// credential-only login against a stale config.
 #[test]
-fn a_previous_version_config_is_skipped_with_the_migrate_pointer() {
+fn a_previous_version_config_is_skipped_with_the_version_remediation() {
     // Arrange
     let dir = tempfile::tempdir().expect("tempdir");
     let stale = base().replace(
@@ -252,6 +252,61 @@ fn a_previous_version_config_is_skipped_with_the_migrate_pointer() {
         "the skip must carry the preflight's remediation: {detail}"
     );
     assert_eq!(read(&path), before);
+}
+
+/// Each unwritable class prints its "Nothing was written" exactly once. A
+/// refused version's preflight text already ends with that sentence (the
+/// shared remediation), so the skip must not append it a second time; a
+/// removed-key refusal does not, so the skip still adds it.
+#[test]
+fn an_unwritable_skip_says_nothing_was_written_exactly_once() {
+    let at =
+        |version: &str| base().replace(&format!("version = {CURRENT_CONFIG_VERSION}"), version);
+    let rows = [
+        (
+            "previous version",
+            at(&format!("version = {}", CURRENT_CONFIG_VERSION - 1)),
+            true,
+        ),
+        ("missing version", at(""), true),
+        (
+            "retired capability key",
+            format!("{}[bedrock]\n", base()),
+            false,
+        ),
+    ];
+
+    for (row, body, is_version_refusal) in rows {
+        // Arrange
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write_config(dir.path(), &body);
+        let before = read(&path);
+
+        // Act
+        let outcome = surface(&path, "anthropic", None, true).expect("a skip is not an error");
+
+        // Assert
+        let SurfaceOutcome::Skipped(reason @ SkipReason::Unwritable { detail }) = &outcome else {
+            panic!("row `{row}`: expected an unwritable skip, got {outcome:?}");
+        };
+        assert_eq!(
+            detail.contains(routectl_router::CONFIG_VERSION_REMEDIATION),
+            is_version_refusal,
+            "row `{row}`: the fixture must exercise the intended class: {detail}"
+        );
+        let shown = skip_line(reason);
+        assert_eq!(
+            shown.matches("Nothing was written").count(),
+            1,
+            "row `{row}`: {shown}"
+        );
+        assert!(
+            shown.ends_with("Nothing was written."),
+            "row `{row}`: {shown}"
+        );
+        assert!(!shown.ends_with(".."), "row `{row}`: {shown}");
+        assert_eq!(read(&path), before, "row `{row}`: the file must not change");
+    }
 }
 
 #[test]
@@ -723,14 +778,13 @@ fn the_pinned_pool_block_survives_a_fresh_login_byte_for_byte() {
     );
 }
 
-/// The most reachable path, end to end and with no hand-editing: `config
-/// migrate` writes pool blocks WITHOUT the growth marker, so a login
-/// straight after a migration is exactly the pinned-pool case. A NEW label
-/// plans the entry only; an EXISTING seat still plans nothing.
+/// A pool block WITHOUT the growth marker is the pinned-pool case, end to
+/// end: a NEW label plans the entry only; an EXISTING seat still plans
+/// nothing.
 #[test]
 fn a_login_over_migrate_output_writes_the_entry_and_leaves_the_unmarked_pool_alone() {
-    // Arrange: the shape the migration ladder produces -- suffixed account
-    // entries plus the plain-named pool listing them, no marker.
+    // Arrange: suffixed account entries plus the plain-named pool listing
+    // them, no marker.
     let mut doc: toml_edit::DocumentMut = format!(
         "version = {CURRENT_CONFIG_VERSION}\n\
          [providers.anthropic-managed]\n\
@@ -740,11 +794,15 @@ fn a_login_over_migrate_output_writes_the_entry_and_leaves_the_unmarked_pool_alo
     )
     .parse()
     .expect("fixture parses");
-    routectl_router::upsert_pool_members(&mut doc, "anthropic", &["anthropic-managed"]);
+    crate::commands::edit_pipeline::upsert_pool_members(
+        &mut doc,
+        "anthropic",
+        &["anthropic-managed"],
+    );
     let migrated = doc.to_string();
     assert!(
         !migrated.contains("accepts_new_logins"),
-        "the migrator writes no growth marker -- that is what makes this the pinned case"
+        "no growth marker -- that is what makes this the pinned case"
     );
 
     let dir = tempfile::tempdir().expect("tempdir");
@@ -858,7 +916,11 @@ fn a_control_character_in_a_member_name_keeps_the_shown_delta_parseable() {
     )
     .parse()
     .expect("fixture parses");
-    routectl_router::upsert_pool_members(&mut doc, "anthropic", &["anthropic-default", hostile]);
+    crate::commands::edit_pipeline::upsert_pool_members(
+        &mut doc,
+        "anthropic",
+        &["anthropic-default", hostile],
+    );
     let body = doc.to_string();
     let config = parse_config(&body).expect("the fixture config parses");
 

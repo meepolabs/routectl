@@ -185,7 +185,7 @@ async fn add_and_parse(path: &Path, args: ProviderAddArgs, io: &dyn AddIo) -> (C
 /// Bind an ephemeral port, boot the server on `config` (usage DB isolated),
 /// and return the base URL once `/health` responds. Polls generously rather
 /// than sleeping a fixed readiness tick, so a slow boot does not race the
-/// smoke (the pattern the config-migrate boot smokes use).
+/// smoke.
 async fn boot_and_await_health(config: Arc<Config>) -> String {
     let config = common::isolate_usage_db(config);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

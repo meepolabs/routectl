@@ -525,7 +525,7 @@ pub const PREFIX_QUORUM: u32 = 2;
 /// it here is fine.)
 ///
 /// An anonymous `const _: ()`, the repo-standard shape for a compile-time
-/// assertion (see `config_migrate`'s migration-ladder guard). Rustc evaluates
+/// assertion. Rustc evaluates
 /// the initializer of every `const` item in a crate it compiles, so this runs
 /// with no consumer, no reference, and no name to keep alive -- and an anonymous
 /// item cannot trip `dead_code`, so it needs no lint expectation either.

@@ -1,7 +1,7 @@
 //! Fail-safe redaction of `parse_config` (toml/serde) diagnostics down to
 //! provably-secret-free content, shared by every command that surfaces a
-//! config parse error to the terminal (`config migrate` on a gate failure,
-//! `doctor` on the read-only load error).
+//! config parse error to the terminal (`doctor` on the read-only load error,
+//! the login config surface on an unparseable file).
 //!
 //! The redaction is allowlist / fail-safe by construction: a line is retained
 //! ONLY when its shape is recognized as value-free, and every backtick-quoted

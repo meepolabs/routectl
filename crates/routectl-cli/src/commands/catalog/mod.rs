@@ -34,25 +34,11 @@
 //!   disable -- write a JSON-null overlay cell for a KNOWN selector,
 //!              disabling it regardless of what it previously carried. See
 //!              `write::disable_at`.
-//!
-//! LEGACY SIDECAR (`pricing_verifications.json`): this command still carries
-//! the READ side of the old sidecar format ([`verifications::PricingVerifications`],
-//! [`verifications::load_verifications`]) -- but ONLY as a read path consumed
-//! by the v1 -> v2 config migration: `config migrate` reads the sidecar beside
-//! the config file and folds any historical stamps into the v1 rung's
-//! `cache_pricing` input before the migrator moves them into the catalog
-//! overlay. The config LOADER no longer runs that migration -- it
-//! preflight-rejects a too-old config and points the operator at
-//! `config migrate`. Nothing in the CLI writes the sidecar anymore -- `verify`
-//! now stamps the overlay directly. The read side stays until v1 config
-//! support itself is dropped.
 
 pub mod render;
-pub mod verifications;
 pub mod write;
 
 pub use render::{build_list_data, list};
-pub use verifications::{PricingVerifications, load_verifications};
 pub use write::{CatalogWriteError, disable, export, set, verify};
 
 pub(crate) use render::render_table;

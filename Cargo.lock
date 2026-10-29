@@ -2743,7 +2743,6 @@ dependencies = [
  "clap",
  "criterion",
  "dhat",
- "fd-lock",
  "futures",
  "http",
  "http-body",

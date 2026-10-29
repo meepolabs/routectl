@@ -1,8 +1,8 @@
 //! The single `config.toml` write path: an advisory-lock + base-bytes
 //! revision-checked, format-preserving atomic edit primitive.
 //!
-//! Every cooperative routectl writer of `config.toml` (`config set` today,
-//! the config migrator and the setup wizard later) goes through
+//! Every cooperative routectl writer of `config.toml` (`config set`,
+//! `init`, the login config surface) goes through
 //! [`edit_config_toml`]. It owns three concerns and nothing else -- it is a
 //! write primitive, NOT a mutation-DTO layer and NOT a validator:
 //!

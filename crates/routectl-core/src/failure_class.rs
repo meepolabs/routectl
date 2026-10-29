@@ -554,22 +554,6 @@ pub fn classify_with_attempt(
     }
 }
 
-fn classify_upstream(
-    status: u16,
-    upstream_type: Option<&str>,
-    upstream_code: Option<&str>,
-    provider_kind: Option<&str>,
-) -> ClassifiedFailure {
-    classify_upstream_attempt(
-        status,
-        upstream_type,
-        upstream_code,
-        None,
-        provider_kind,
-        ReplayAttempt::none(),
-    )
-}
-
 fn classify_upstream_attempt(
     status: u16,
     upstream_type: Option<&str>,
@@ -699,71 +683,6 @@ fn matched_token(ty: Option<&str>, code: Option<&str>, set: &[&str]) -> Option<S
 
 fn token_in(ty: Option<&str>, code: Option<&str>, set: &[&str]) -> bool {
     matched_token(ty, code, set).is_some()
-}
-
-/// Taxonomy-derived class guidance for a bare HTTP status, for the config
-/// migrator's fail-closed refusal text.
-///
-/// A bare status has no provider- and body-independent failure class: the
-/// migrator sees only the numeric code, never the provider or response-body
-/// tokens that can lift it. `primary` is the class a bare status resolves to
-/// with no provider and no tokens (the union table, [`classify`] with
-/// `provider_kind = None`). `alternatives` are the OTHER classes the same
-/// status can resolve to once body tokens are present: 503 lifts to
-/// [`FailureClass::Overloaded`]; a 4xx lifts to [`FailureClass::ContentPolicy`]
-/// / [`FailureClass::ContextWindow`] / [`FailureClass::FeatureUnsupported`].
-/// A [`FailureClass::FeatureUnsupported`] alternative carries an empty
-/// `capability` -- the concrete capability is a per-token body detail the
-/// migrator never sees.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StatusClassGuidance {
-    /// The status the guidance describes.
-    pub status: u16,
-    /// The class a bare status resolves to with no provider / body tokens.
-    pub primary: FailureClass,
-    /// Other classes the same status can resolve to on body tokens, in
-    /// taxonomy order. Empty when the status is unambiguous.
-    pub alternatives: Vec<FailureClass>,
-}
-
-/// Derive [`StatusClassGuidance`] for any `status`, reusing the real
-/// `classify_upstream` path -- never a hand-duplicated status->class table,
-/// so a taxonomy change cannot drift the guidance.
-///
-/// Panic-free for any `u16`: a status outside `{0} U 400..=599` yields the
-/// classifier's fallback class with no alternatives.
-pub fn class_guidance_for_status(status: u16) -> StatusClassGuidance {
-    let primary = classify_upstream(status, None, None, None).class;
-    let mut alternatives = Vec::new();
-    for token in union_lift_tokens() {
-        let lifted = match classify_upstream(status, Some(token), Some(token), None).class {
-            FailureClass::FeatureUnsupported { .. } => FailureClass::FeatureUnsupported {
-                capability: String::new(),
-            },
-            other => other,
-        };
-        if lifted != primary && !alternatives.contains(&lifted) {
-            alternatives.push(lifted);
-        }
-    }
-    StatusClassGuidance {
-        status,
-        primary,
-        alternatives,
-    }
-}
-
-/// Every token that can trigger a same-row lift in the provider-agnostic
-/// union table, so the reachable alternatives are read from the real
-/// taxonomy rather than restated.
-fn union_lift_tokens() -> impl Iterator<Item = &'static str> {
-    let t = &tables::UNION;
-    t.content_policy
-        .iter()
-        .chain(t.context_window)
-        .chain(t.overloaded)
-        .chain(t.feature_unsupported)
-        .copied()
 }
 
 #[cfg(test)]

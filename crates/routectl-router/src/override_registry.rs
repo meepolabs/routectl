@@ -33,7 +33,7 @@
 //! forced a capability off and forced it on for the same target). That is
 //! a config error surfaced by [`validate_capability_overrides`], wired
 //! into the shared validator so `serve` load, `config check`, and the
-//! `config migrate` gate all reject it. Semantically identical duplicates
+//! `config set` gate all reject it. Semantically identical duplicates
 //! (two `RouteAway` contributions, e.g. two `unsupported` entries that
 //! normalize to the same capability) are not a conflict.
 

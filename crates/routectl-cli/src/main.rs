@@ -393,38 +393,6 @@ enum ConfigCmd {
     },
     /// Print the example config to stdout.
     Example,
-    /// Migrate a legacy `config.toml` forward to the current schema version,
-    /// re-validating the result through the same shared gate as `config set`
-    /// before an atomic write. Every rung from the file's version runs in
-    /// order: v1->v2 folds the retired `[cache_pricing]` table into the
-    /// catalog overlay; v2->v3 retires the per-status `retry_allowlist` /
-    /// `retry_denylist` keys; v3->v4 moves a provider's `seat_selection` onto
-    /// a `[pools.<name>]` block; v4->v5 folds `unsupported_features` into
-    /// `[capability.overrides]` and drops empty `allowed_betas` /
-    /// `allowed_body_fields` lists and an emptied `[bedrock]` table. A file
-    /// already at version 5 that still carries `allowed_betas`,
-    /// `unsupported_features` or a top-level `[bedrock]` table is refused,
-    /// naming each key to remove. A config carrying behavior a rung cannot
-    /// fold losslessly is refused with hand-edit guidance and nothing is
-    /// written. The write requires acknowledgement: an interactive `y`, or
-    /// `--yes` when non-interactive.
-    Migrate {
-        /// Render the exact rewritten candidate plus a change summary without
-        /// writing anything (needs no acknowledgement). The candidate is
-        /// byte-exact and unredacted, so it may carry credentials anywhere the
-        /// file does -- e.g. userinfo, query, or fragment in a `base_url`,
-        /// `literal:` key refs, or a secret placed in `header_extras`. Never
-        /// paste it into a bug report, and rotate anything already exposed.
-        #[arg(long)]
-        dry_run: bool,
-        /// Acknowledge the schema break without an interactive prompt
-        /// (required to migrate in a non-interactive run).
-        #[arg(long)]
-        yes: bool,
-        /// Deprecated alias for `--yes`, kept for one release; prefer `--yes`.
-        #[arg(long, hide = true)]
-        force: bool,
-    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -791,24 +759,6 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             ConfigCmd::Example => {
                 if let Err(e) = commands::config::example() {
-                    eprintln!("error: {e}");
-                    std::process::exit(1);
-                }
-            }
-            ConfigCmd::Migrate {
-                dry_run,
-                yes,
-                force,
-            } => {
-                let config_path = resolve_config_path(cli.config.as_deref());
-                if force {
-                    eprintln!(
-                        "warning: `--force` is deprecated for `config migrate`; use `--yes`."
-                    );
-                }
-                if let Err(e) =
-                    commands::config_migrate_cmd::run(&config_path, dry_run, yes || force).await
-                {
                     eprintln!("error: {e}");
                     std::process::exit(1);
                 }
@@ -1434,34 +1384,21 @@ mod tests {
         );
     }
 
-    /// `config migrate` speaks the unified skip-confirm dialect: `--yes` is the
-    /// canonical acknowledgement, and the deprecated `--force` still parses to
-    /// the same variant (kept one release; hidden from help).
+    /// The removed schema-upgrade subcommand has no stub: naming it is a clap
+    /// usage error (exit 2), while a sibling `config` subcommand still parses.
     #[test]
-    fn migrate_accepts_yes_and_the_deprecated_force_alias() {
-        let cli = Cli::parse_from(["routectl", "config", "migrate", "--yes"]);
-        assert!(matches!(
-            cli.cmd,
-            Cmd::Config {
-                action: ConfigCmd::Migrate {
-                    dry_run: false,
-                    yes: true,
-                    force: false,
-                }
-            }
-        ));
+    fn the_removed_schema_upgrade_subcommand_is_a_usage_error() {
+        let control = Cli::try_parse_from(["routectl", "config", "example"]);
+        assert!(
+            control.is_ok(),
+            "control: a live `config` subcommand parses"
+        );
 
-        let cli = Cli::parse_from(["routectl", "config", "migrate", "--force"]);
-        assert!(matches!(
-            cli.cmd,
-            Cmd::Config {
-                action: ConfigCmd::Migrate {
-                    dry_run: false,
-                    yes: false,
-                    force: true,
-                }
-            }
-        ));
+        let err = Cli::try_parse_from(["routectl", "config", "migrate"])
+            .expect_err("the removed subcommand must not parse");
+
+        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidSubcommand);
+        assert_eq!(err.exit_code(), 2);
     }
 
     /// `provider add` overwrite is spelled `--overwrite`; the old `--force`

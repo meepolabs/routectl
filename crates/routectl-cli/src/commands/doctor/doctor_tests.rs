@@ -1969,8 +1969,8 @@ fn config_with_pool_and_pinned_refs() -> Config {
     cfg
 }
 
-/// A two-account pool over the same two entries -- the shape `config migrate`
-/// produces.
+/// A two-account pool over the same two entries -- the explicit multi-seat
+/// shape.
 fn config_with_a_named_pool() -> Config {
     toml::from_str(
         "version = 3\n\
