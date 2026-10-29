@@ -423,7 +423,7 @@ list with more narrative.
 
 ### Changed
 
-- **A system or developer message holding a non-text part stays in place.** On the Chat Completions and Responses ingresses, a system or developer message with an image, a document or an unknown part is no longer lifted into the request's system prompt as text only; the whole message stays in its position. openai-compat and openai-responses forward it; anthropic-api (lift policy), Bedrock Invoke, Bedrock Converse and Gemini carry its text and count each part they cannot represent as the `system_part_unrepresentable` translation drop. See [docs/LOGGING.md](docs/LOGGING.md).
+- **A system or developer message holding a non-text part stays in place.** On the Chat Completions and Responses ingresses, a system or developer message with an image, a document or an unknown part is no longer lifted into the request's system prompt as text only; the whole message stays in its position. openai-compat and openai-responses forward it; anthropic-api (lift policy), Bedrock Invoke, Bedrock Converse and Gemini carry its text and count the parts they cannot represent once per request as the `system_part_unrepresentable` translation drop. See [docs/LOGGING.md](docs/LOGGING.md).
 
 - **The default log filter is `info,aws_config=warn`.** With `ROUTECTL_LOG` unset, the AWS credential-provider crate now logs at WARN and above only. A `ROUTECTL_LOG` you set replaces the default whole; see [docs/LOGGING.md](docs/LOGGING.md) for the targets to cap in a custom filter.
 
@@ -677,7 +677,7 @@ list with more narrative.
 
 ### Fixed
 
-- **Bedrock streams end with an error on a corrupt eventstream frame.** A frame that fails to decode (bad prelude or CRC) on an InvokeModel or ConverseStream response now ends the stream with a stream error instead of skipping ahead, so later bytes are never parsed out of a misaligned buffer. The WARN carries the prelude only; the full frame hex stays at TRACE. See [docs/LOGGING.md](docs/LOGGING.md).
+- **Bedrock streams end with an error on a corrupt eventstream frame.** A frame that fails to decode (bad prelude or CRC) on an InvokeModel or ConverseStream response now ends the stream with a stream error instead of skipping ahead, so later bytes are never parsed out of a misaligned buffer. The WARN carries the prelude only; the frame hex (up to 256 bytes) stays at TRACE. See [docs/LOGGING.md](docs/LOGGING.md).
 
 - **Invoke, Converse and openai-compat streams error when they end before their terminal event.** A Bedrock InvokeModel stream that closes without `message_stop`, a ConverseStream without `messageStop`, or an openai-compat stream with neither `data: [DONE]` nor a `finish_reason` on every choice now ends with one stream error after the content already sent, instead of finishing as if complete; usage evidence for such a stream is not settled. An openai-compat host that never sends either terminal signal now errors on every stream. An openai-compat stream also ends at its first error event, emitting any held-back `<think>`-tag bytes first.
 
