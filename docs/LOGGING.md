@@ -26,6 +26,7 @@ The first half is for operators (filtering, triage, redaction); the
   [context reduction](#context-reduction-log-shapes),
   [config-reload transitions](#config-reload-transition-fields),
   [stream first-activity](#stream-first-activity-mark),
+  [dispatch walk DEBUG lines](#dispatch-walk-debug-lines),
   [capability intelligence](#capability-intelligence-events)
 - [WARN and ERROR catalog](#warn-and-error-catalog)
 - [Visibility moved to DEBUG](#visibility-moved-to-debug)
@@ -1425,6 +1426,20 @@ gap between this mark and the request's existing first-content mark
 `routectl usage`) is the first-activity-to-first-content delta --
 effectively the upstream prefill time.
 
+## Dispatch walk DEBUG lines
+
+Completions, streams, and `/v1/messages/count_tokens` run one shared chain
+walk, so its per-attempt lines carry the same text on every surface; the
+`surface` field, where present, says which one. Enable them with
+`ROUTECTL_LOG=info,aws_config=warn,routectl_router::router::dispatch_loop=debug`.
+
+| Level | Target | Message | Fields | Emitted by |
+|---|---|---|---|---|
+| DEBUG | `routectl_router::router::dispatch_loop` | `upstream 401; refreshing auth and retrying once` | `provider`, `model`, `attempt` | Every surface, once per target, on the first upstream 401 of a non-forwarded target (a stream only before content). |
+| DEBUG | `routectl_router::router::dispatch_loop` | `retry decision` | `provider`, `state_key`, `surface`, `attempt`, `status`, `upstream_type`, `retry_after_ms`, `breaker_effect`, `same_provider_retry`, `preserved_upstream_error` | Every surface, once per failed attempt that reaches the fallback decision. |
+| DEBUG | `routectl_router::router::dispatch_loop` | `retrying same provider` | `provider`, `model`, `attempt`, `error` | Completions only: streams and token counts never retry the same provider. |
+| DEBUG | `routectl_router::router::credential_park` | `gate blocked`, `count_tokens gate blocked` | `provider`, `model`, `gate_kind`, `error` | Every surface, when the refusing gate is a credential park (`gate_kind = credential_parked`); other gate refusals are WARN. |
+
 ## Capability intelligence events
 
 routectl's learned-capability subsystem (see CONFIGURATION.md,
@@ -2219,14 +2234,14 @@ Repeat behavior is noted where the line is latched, sampled, or aggregated
 
 | Level | Target | Message prefix | Why actionable / operator action |
 |---|---|---|---|
-| WARN | `routectl_router::router::dispatch` | `reasoning_replay_degraded` (once per repair) | Carried reasoning was stripped for `target_lane`. If frequent, pin the session to one lane or scheme. |
+| WARN | `routectl_router::router::replay_repair` | `reasoning_replay_degraded` (once per repair) | Carried reasoning was stripped for `target_lane`. If frequent, pin the session to one lane or scheme. |
 | WARN | `routectl_router::router::dispatch` | `cache_volatile_in_caller_prefix` (once per process per kind) | The client marks volatile content cacheable, so each request writes a cache entry nothing reads: fix the client's breakpoint placement. |
 | WARN | `routectl_router::router::dispatch` | `reasoning context/mode dropped ...` (once per request) | The client's `reasoning.context` / `mode` cannot be represented on `provider`: route Responses-dialect clients to an OpenAI Responses target. |
-| WARN | `routectl_router::router::dispatch_loop` | `gate blocked`, `count_tokens gate blocked` | `provider` is rate-limited or its breaker is open: check upstream health or raise `rpm_limit`. A refusal by a credential park (`gate_kind = credential_parked`) logs at DEBUG instead: the park already warned once when it parked. |
+| WARN | `routectl_router::router::credential_park` | `gate blocked` (completions and streams), `count_tokens gate blocked` (token counts); fields `provider`, `model`, `gate_kind`, `error` | `provider` is rate-limited or its breaker is open: check upstream health or raise `rpm_limit`. A refusal by a credential park (`gate_kind = credential_parked`) logs at DEBUG instead: the park already warned once when it parked. |
 | WARN | `routectl_router::router::credential_park` | `seat credential rejected; parking the seat` (once per park) | The upstream rejected `state_key`'s credential for `reason`; the seat is skipped for `parked_for_secs`. Re-login or fix the credential: a credentials or config reload lifts every park. |
-| WARN | `routectl_router::router::dispatch` | `fallback to next` | An upstream failed and the request moved on: investigate `provider` if it persists. |
-| WARN | `routectl_router::router::dispatch` | `chain exhausted ...` | The request failed with no fallback left: check `provider` health, or add a fallback target. |
-| WARN | `routectl_router::router::dispatch` | `forwarded-token upstream auth failure surfaced verbatim`, `forwarded target has no captured client bearer; refusing` | The client's forwarded credential was rejected or absent: the client must re-authenticate, or fix the forwarded-credential config. |
+| WARN | `routectl_router::router::dispatch_loop` | `fallback to next` (completions and streams on a fallbackable error; token counts only when the attempt's `request_timeout_ms` expired); fields `provider`, `model`, `state_key`, `error` | An upstream failed and the request moved on: investigate `provider` if it persists. |
+| WARN | `routectl_router::router::dispatch_loop` | `chain exhausted; no fallback target available; request will fail` (the same surfaces and fields as `fallback to next`, on the last target) | The request failed with no fallback left: check `provider` health, or add a fallback target. |
+| WARN | `routectl_router::router::dispatch_loop` | `forwarded-token upstream auth failure surfaced verbatim`, `forwarded target has no captured client bearer; refusing` (every surface) | The client's forwarded credential was rejected or absent: the client must re-authenticate, or fix the forwarded-credential config. |
 | WARN | `routectl_router::router::dispatch` | `unknown failure classification on upstream outcome (fail-closed)` | An upstream `status` / `upstream_type` is unclassified: add a `class_overrides` entry or file a bug. |
 | WARN | `routectl_router::router` | `rejecting invalid alias glob pattern; entry ignored`, `refusing resolved model: its runtime state key is ambiguous` (boot / reload) | Fix the `[aliases]` glob, or rename the model or pool member so its state key is unique. |
 | WARN | `routectl_router::router` | `invalidation` event (reload) | Catalog-scoped learned capabilities are evicted: expect re-learning. No action unless the catalog or overlay change was unintended. |

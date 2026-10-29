@@ -35,7 +35,6 @@ use routectl_providers::effort::VALID_EFFORT_TOKENS;
 use super::capability_learn::LearnDedupeKey;
 use super::capability_observe::{EvidenceScope, UntranslatedCapabilities};
 use super::class_observe::{DispatchSurface, upstream_facts};
-use super::dispatch::{REPLAY_ACTION_STRIP_REPAIR, REPLAY_REASON_UPSTREAM_REJECTION};
 use super::field_preflight::FieldPreflightPlan;
 use super::field_repair::{
     FIELD_ACTION_LOSSY_DROP_REPAIR, FieldRepairHandle, FieldRepairPlan, FieldRepairRow,
@@ -45,6 +44,7 @@ use super::learn_proposers::{BetaProposer, CapabilityProposer, FieldRowProposer,
 use super::learn_revert::{MatchedEdit, SentSlot, TargetRevert};
 use super::rejection_parser::{NamedRejection, RawPath, RejectionKind, RejectionValue};
 use super::repair_budget::RepairBudget;
+use super::replay_repair::{REPLAY_ACTION_STRIP_REPAIR, REPLAY_REASON_UPSTREAM_REJECTION};
 use super::replay_repair::{
     ReplayCarryPlan, ReplayRepairHandle, record_replay_repair, strip_replay_artifacts_recalibrating,
 };

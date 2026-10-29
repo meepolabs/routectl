@@ -54,10 +54,12 @@ use routectl_providers::anthropic_family::{AnthropicFamily, anthropic_family};
 use crate::config::RetryPolicy;
 
 use super::capability_observe::UntranslatedCapabilities;
-use super::class_observe::{DispatchSurface, class_label, matched_by_label, upstream_facts};
-use super::dispatch::{complete_timed_out, is_capability_error};
+use super::class_observe::{
+    DispatchSurface, class_label, is_capability_error, matched_by_label, upstream_facts,
+};
 use super::dispatch_loop::{
     CommitCtx, Deadline, ErrorDisposition, Exhaustion, FailureObservation, SurfaceAdapter,
+    complete_timed_out,
 };
 use super::field_repair::FieldSettlementMode;
 use super::learn_engine::RejectionSite;

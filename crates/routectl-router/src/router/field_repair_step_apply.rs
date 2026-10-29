@@ -129,7 +129,7 @@ impl<'a> FieldRepairPlan<'a> {
             self.declare_repair(attempt_req, row.surface, repair.edit);
         }
         let guard = self.take_step_guard(idx, claim);
-        super::super::super::dispatch::restamp_calibration_estimate(attempt_req, meta);
+        super::super::super::replay_repair::restamp_calibration_estimate(attempt_req, meta);
         let reject_status = super::super::super::class_observe::upstream_facts(rejection)
             .status
             .unwrap_or(0);

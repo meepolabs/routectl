@@ -37,9 +37,11 @@ use std::time::Instant;
 use routectl_core::capability::REASONING_REPLAY;
 use routectl_core::failure_class::{FailureClass, ReplayAttempt};
 use routectl_core::{
-    ChatRequest, Error, ReasoningDetail, ReplayScheme, Replayability, is_replayable, scheme_of,
+    ChatRequest, Error, ReasoningDetail, ReplayScheme, Replayability, is_replayable,
+    sanitize_for_log, scheme_of,
 };
 
+use crate::context_trim::estimate_total_tokens;
 use crate::learned_replay::{ReplayLearnKey, ReplayProbeGuard};
 
 use super::class_observe::upstream_facts;
@@ -48,6 +50,16 @@ use super::{
     CapabilityClearedEvent, CapabilityLearnEvent, DispatchMeta, DispatchTarget, ReplayDegradation,
     Router,
 };
+
+/// Message/event name of the reasoning-replay degradation WARN. Stable,
+/// greppable, closed-set.
+pub(super) const REPLAY_DEGRADE_EVENT: &str = "reasoning_replay_degraded";
+/// Action token: the fixed strip-repair correctness branch stripped the
+/// carried reasoning artifacts and re-dispatched the same target once.
+pub(super) const REPLAY_ACTION_STRIP_REPAIR: &str = "strip_repair";
+/// Reason token: the carried variant drew the proven upstream replay
+/// rejection.
+pub(super) const REPLAY_REASON_UPSTREAM_REJECTION: &str = "upstream_replay_rejection";
 
 /// The carried-artifact admission for one dispatch target: the single-flight
 /// guards held while the optimistically-carried variant is in flight, the
@@ -118,6 +130,61 @@ impl ReplayCarryPlan<'_> {
     }
 }
 
+/// Emit the reasoning-replay degradation WARN for a resolved request: one
+/// line per strip-repair that fired anywhere in the chain walk, in the order
+/// they fired, and none otherwise. The request's repair ceiling bounds the
+/// line count. Every line carries `repair_count`, the request's total, so a
+/// reader of any one line knows whether siblings exist. Carries closed-set
+/// tokens and counts only -- never the artifact bytes, a reasoning item id,
+/// a hash, the session key, or the upstream body. The request span already
+/// supplies `request_id` correlation across the retry and fallback hops.
+pub(super) fn emit_replay_degradation(meta: &DispatchMeta) {
+    let repair_count = meta.replay_degradations.len();
+    for deg in &meta.replay_degradations {
+        tracing::warn!(
+            action = deg.action,
+            target_lane = deg.target_lane.as_str(),
+            state_key = %sanitize_for_log(&deg.state_key),
+            source_schemes = %join_schemes(deg.source_schemes.as_slice()),
+            reason = deg.reason,
+            artifact_count = deg.artifact_count,
+            repair_attempted = deg.repair_attempted,
+            repair_succeeded = deg.repair_succeeded,
+            learned = deg.learned,
+            repair_count,
+            "{REPLAY_DEGRADE_EVENT}",
+        );
+    }
+}
+
+/// Join replay scheme tokens into a stable, comma-separated closed-set
+/// string for the degradation WARN's `source_schemes` field.
+fn join_schemes(schemes: &[ReplayScheme]) -> String {
+    schemes
+        .iter()
+        .map(|s| s.as_str())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// Bring `meta.calib_estimated_tokens` back in line with `attempt_req` after
+/// a dispatch-path mutation shrank the payload.
+///
+/// `record_would_trim` stamps the estimate ONCE, before the retry loop, from
+/// the request as it stood then. A reactive repair -- dropping a rejected
+/// envelope field, stripping a rejected artifact -- makes the dispatched
+/// payload smaller than that stamp describes, while the provider's reported
+/// prompt total reflects the smaller payload. Left uncorrected the evidence
+/// ratio comes out too low, and a low correction factor shrinks a corrected
+/// estimate until the window gate admits requests the static estimate had
+/// correctly judged too large.
+///
+/// THE single re-stamp entry point for every such mutation, so a new repair
+/// class cannot land on this path without going through it.
+pub(super) fn restamp_calibration_estimate(attempt_req: &ChatRequest, meta: &mut DispatchMeta) {
+    meta.calib_estimated_tokens = Some(estimate_total_tokens(attempt_req));
+}
+
 /// Strip the lane-rejected reasoning artifacts off a per-attempt request AND
 /// bring the calibration estimate back in line with the payload that will
 /// actually go upstream. THE dispatch-path entry point for the strip: every
@@ -145,7 +212,7 @@ pub(super) fn strip_replay_artifacts_recalibrating(
         return false;
     }
     declare_replay_strip(attempt_req, &removed_ids);
-    super::dispatch::restamp_calibration_estimate(attempt_req, meta);
+    restamp_calibration_estimate(attempt_req, meta);
     true
 }
 

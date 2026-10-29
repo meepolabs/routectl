@@ -132,6 +132,32 @@ impl DispatchSurface {
     }
 }
 
+/// A count_tokens CAPABILITY signal -- the selected target is
+/// count_tokens-capable by kind (`anthropic-api`), but its concrete
+/// upstream cannot actually count. Two shapes carry this:
+///
+/// - `Error::NotImplemented` -- the local trait-default (a provider that
+///   never overrode `count_tokens`), and
+/// - `Error::Upstream { status: 501, .. }` -- a WIRE 501 from an
+///   upstream that declares it does not implement the endpoint (e.g. a
+///   remote anthropic-api base_url that proxies to an egress which
+///   cannot count).
+///
+/// Both mean "this seat cannot count", NOT "this seat is unhealthy". The
+/// count_tokens walk treats them as capability signals: release the
+/// probe slot without debiting the breaker and advance to the next
+/// capable seat. It must NEVER reach `should_fallback` / `record_failure`
+/// -- a capability signal recorded as health would trip the per-seat
+/// breaker that completions gate on. Scoped to the count_tokens path
+/// ONLY: on the completion path a wire 501 is a genuine upstream fault
+/// and must still trip the breaker.
+pub(super) const fn is_capability_error(err: &Error) -> bool {
+    matches!(
+        err,
+        Error::NotImplemented(..) | Error::Upstream { status: 501, .. }
+    )
+}
+
 /// Safe, structured facts pulled from an [`Error`] for the router's
 /// class-decision observability. Deliberately EXCLUDES the body and the
 /// Display/Debug string: only the numeric status and the

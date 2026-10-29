@@ -1081,7 +1081,7 @@ impl Router {
             charged,
             "check_or_mark_refusal held before the mutation, so the draw after it cannot fail",
         );
-        super::dispatch::restamp_calibration_estimate(attempt_req, meta);
+        super::replay_repair::restamp_calibration_estimate(attempt_req, meta);
         Some(CanaryRepair {
             status: super::class_observe::upstream_facts(err)
                 .status

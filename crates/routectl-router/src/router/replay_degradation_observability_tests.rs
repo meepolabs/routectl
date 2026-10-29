@@ -254,7 +254,7 @@ fn degrade_warns(
 ) -> Vec<&routectl_testkit::CapturedEvent> {
     events
         .iter()
-        .filter(|e| e.message == super::REPLAY_DEGRADE_EVENT)
+        .filter(|e| e.message == crate::router::replay_repair::REPLAY_DEGRADE_EVENT)
         .collect()
 }
 
@@ -438,7 +438,7 @@ async fn two_repair_fallback_path_leaks_no_blob_id_or_body_at_trace() {
     assert!(result.is_ok());
     let degrade_lines = lines
         .iter()
-        .filter(|line| line.contains(super::REPLAY_DEGRADE_EVENT))
+        .filter(|line| line.contains(crate::router::replay_repair::REPLAY_DEGRADE_EVENT))
         .count();
     assert_eq!(
         degrade_lines, 2,

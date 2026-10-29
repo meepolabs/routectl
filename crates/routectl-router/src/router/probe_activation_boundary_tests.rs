@@ -187,7 +187,7 @@ async fn the_streaming_walk_activates_at_the_same_boundary() {
 }
 
 #[tokio::test]
-async fn the_count_tokens_walk_activates_the_lane() {
+async fn the_count_tokens_dispatch_activates_the_lane() {
     // count_tokens is a real admitted request on this lane and its own
     // free validator class, so it must activate like the other two walks.
     let provider = Arc::new(OkProvider {

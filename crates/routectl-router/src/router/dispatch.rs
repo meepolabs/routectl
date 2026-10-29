@@ -12,7 +12,7 @@ use std::time::{Duration, SystemTime};
 use futures::stream::{BoxStream, StreamExt};
 use routectl_core::wire_check::IngressDialect;
 use routectl_core::{
-    ChatChunk, ChatRequest, ChatResponse, Error, Provider, ReplayScheme, Result,
+    ChatChunk, ChatRequest, ChatResponse, Error, Provider, Result,
     failure_class::{ClassifiedFailure, FailureClass, MatchedBy},
     sanitize_for_log, scan_caller_prefix_advisory,
 };
@@ -31,7 +31,7 @@ use super::capability_observe::{EvidencePolicy, UntranslatedCapabilities};
 use super::class_observe::{
     DispatchSurface, UpstreamFacts, class_label, matched_by_label, upstream_facts,
 };
-use super::dispatch_loop::{CommitCtx, Deadline, Exhaustion, SurfaceAdapter};
+use super::dispatch_loop::{CommitCtx, Deadline, Exhaustion, SurfaceAdapter, complete_timed_out};
 use super::feature_filter::emit_feature_unsupported;
 use super::outcome_rule::retry_cap_for;
 use super::repair_budget::RepairBudget;
@@ -40,16 +40,6 @@ use super::stream_commit::{try_stream_with_first_content, wrap_with_breaker_acco
 use super::stream_evidence::StreamEvidence;
 use super::wire_response::{declare_model_relabel, declare_provider_attribution};
 use super::{DispatchMeta, DispatchTarget, Dispatched, DispatchedStream, Router, RouterOptions};
-
-/// Message/event name of the reasoning-replay degradation WARN. Stable,
-/// greppable, closed-set.
-const REPLAY_DEGRADE_EVENT: &str = "reasoning_replay_degraded";
-/// Action token: the fixed strip-repair correctness branch stripped the
-/// carried reasoning artifacts and re-dispatched the same target once.
-pub(super) const REPLAY_ACTION_STRIP_REPAIR: &str = "strip_repair";
-/// Reason token: the carried variant drew the proven upstream replay
-/// rejection.
-pub(super) const REPLAY_REASON_UPSTREAM_REJECTION: &str = "upstream_replay_rejection";
 
 /// The one provider kind whose egress can represent the
 /// OpenAI-Responses-dialect `reasoning.context` / `reasoning.mode`
@@ -78,70 +68,9 @@ fn target_drops_responses_reasoning(provider_kind: Option<&str>) -> bool {
     provider_kind != Some(RESPONSES_PROVIDER_KIND)
 }
 
-/// Emit the reasoning-replay degradation WARN for a resolved request: one
-/// line per strip-repair that fired anywhere in the chain walk, in the order
-/// they fired, and none otherwise. The request's repair ceiling bounds the
-/// line count. Every line carries `repair_count`, the request's total, so a
-/// reader of any one line knows whether siblings exist. Carries closed-set
-/// tokens and counts only -- never the artifact bytes, a reasoning item id,
-/// a hash, the session key, or the upstream body. The request span already
-/// supplies `request_id` correlation across the retry and fallback hops.
-pub(super) fn emit_replay_degradation(meta: &DispatchMeta) {
-    let repair_count = meta.replay_degradations.len();
-    for deg in &meta.replay_degradations {
-        tracing::warn!(
-            action = deg.action,
-            target_lane = deg.target_lane.as_str(),
-            state_key = %sanitize_for_log(&deg.state_key),
-            source_schemes = %join_schemes(deg.source_schemes.as_slice()),
-            reason = deg.reason,
-            artifact_count = deg.artifact_count,
-            repair_attempted = deg.repair_attempted,
-            repair_succeeded = deg.repair_succeeded,
-            learned = deg.learned,
-            repair_count,
-            "{REPLAY_DEGRADE_EVENT}",
-        );
-    }
-}
-
-/// Join replay scheme tokens into a stable, comma-separated closed-set
-/// string for the degradation WARN's `source_schemes` field.
-fn join_schemes(schemes: &[ReplayScheme]) -> String {
-    schemes
-        .iter()
-        .map(|s| s.as_str())
-        .collect::<Vec<_>>()
-        .join(",")
-}
-
-/// Bring `meta.calib_estimated_tokens` back in line with `attempt_req` after
-/// a dispatch-path mutation shrank the payload.
-///
-/// `record_would_trim` stamps the estimate ONCE, before the retry loop, from
-/// the request as it stood then. A reactive repair -- dropping a rejected
-/// envelope field, stripping a rejected artifact -- makes the dispatched
-/// payload smaller than that stamp describes, while the provider's reported
-/// prompt total reflects the smaller payload. Left uncorrected the evidence
-/// ratio comes out too low, and a low correction factor shrinks a corrected
-/// estimate until the window gate admits requests the static estimate had
-/// correctly judged too large.
-///
-/// THE single re-stamp entry point for every such mutation, so a new repair
-/// class cannot land on this path without going through it.
-pub(super) fn restamp_calibration_estimate(attempt_req: &ChatRequest, meta: &mut DispatchMeta) {
-    meta.calib_estimated_tokens = Some(estimate_total_tokens(attempt_req));
-}
-
 /// The non-streaming surface: one `complete()` call per attempt, bounded by
 /// the composed `request_timeout_ms`, committed when the response arrives.
 struct CompleteAdapter;
-
-/// The expiry text of a `complete()` attempt deadline, shared by the token
-/// count so the two surfaces time out with the same error.
-pub(super) fn complete_timed_out(ms: u64) -> String {
-    format!("request timed out after {ms}ms")
-}
 
 impl SurfaceAdapter for CompleteAdapter {
     type Output = ChatResponse;
@@ -1041,51 +970,6 @@ pub(super) fn resolve_reported_model(target: &DispatchTarget, req_model: &str) -
         Some(label) if !label.is_empty() => label.to_string(),
         _ => req_model.to_string(),
     }
-}
-
-/// The upstream status of a probe-fast-fail-eligible error, or `None`
-/// when `err` is not one. 429 is a rate-limit; 529 is Anthropic's
-/// overload status. Both surface as `Error::Upstream { status, .. }`
-/// (the anthropic-api egress forwards the raw upstream status). A probe
-/// that hits one of these skips retry+fallback: on the all-Anthropic
-/// chain every hop shares the same limit, so walking it is futile and
-/// the probe's output is unread. A generic 5xx or a capability 4xx
-/// (e.g. Bedrock's `max_tokens=1` 400) returns `None` here so it keeps
-/// walking the chain -- a healthy sibling provider can still answer.
-pub(super) const fn probe_fast_fail_status(err: &Error) -> Option<u16> {
-    match err {
-        Error::Upstream {
-            status: s @ (429 | 529),
-            ..
-        } => Some(*s),
-        _ => None,
-    }
-}
-
-/// A count_tokens CAPABILITY signal -- the selected target is
-/// count_tokens-capable by kind (`anthropic-api`), but its concrete
-/// upstream cannot actually count. Two shapes carry this:
-///
-/// - `Error::NotImplemented` -- the local trait-default (a provider that
-///   never overrode `count_tokens`), and
-/// - `Error::Upstream { status: 501, .. }` -- a WIRE 501 from an
-///   upstream that declares it does not implement the endpoint (e.g. a
-///   remote anthropic-api base_url that proxies to an egress which
-///   cannot count).
-///
-/// Both mean "this seat cannot count", NOT "this seat is unhealthy". The
-/// count_tokens walk treats them as capability signals: release the
-/// probe slot without debiting the breaker and advance to the next
-/// capable seat. It must NEVER reach `should_fallback` / `record_failure`
-/// -- a capability signal recorded as health would trip the per-seat
-/// breaker that completions gate on. Scoped to the count_tokens path
-/// ONLY: on the completion path a wire 501 is a genuine upstream fault
-/// and must still trip the breaker.
-pub(super) const fn is_capability_error(err: &Error) -> bool {
-    matches!(
-        err,
-        Error::NotImplemented(..) | Error::Upstream { status: 501, .. }
-    )
 }
 
 /// Safe, structured inputs for the per-arm class-decision observability

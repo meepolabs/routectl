@@ -12,7 +12,6 @@ use routectl_core::failure_class::FailureClass;
 use crate::config::RetryPolicy;
 
 use super::class_observe::DispatchSurface;
-use super::dispatch::probe_fast_fail_status;
 
 /// The largest upstream reset hint we honor as an in-loop, same-provider
 /// retry sleep (blocking the request thread). A reset at or below this
@@ -52,6 +51,25 @@ pub(super) fn breaker_outcome(
     match reset_hint {
         Some(h) if !is_probe && h > INLOOP_RETRY_AFTER_CAP => BreakerOutcome::Park(h),
         _ => BreakerOutcome::Debit,
+    }
+}
+
+/// The upstream status of a probe-fast-fail-eligible error, or `None`
+/// when `err` is not one. 429 is a rate-limit; 529 is Anthropic's
+/// overload status. Both surface as `Error::Upstream { status, .. }`
+/// (the anthropic-api egress forwards the raw upstream status). A probe
+/// that hits one of these skips retry+fallback: on the all-Anthropic
+/// chain every hop shares the same limit, so walking it is futile and
+/// the probe's output is unread. A generic 5xx or a capability 4xx
+/// (e.g. Bedrock's `max_tokens=1` 400) returns `None` here so it keeps
+/// walking the chain -- a healthy sibling provider can still answer.
+pub(super) const fn probe_fast_fail_status(err: &Error) -> Option<u16> {
+    match err {
+        Error::Upstream {
+            status: s @ (429 | 529),
+            ..
+        } => Some(*s),
+        _ => None,
     }
 }
 

@@ -32,7 +32,6 @@ use super::class_observe::{
     DispatchSurface, apply_remap, upstream_facts, upstream_status_for_remap,
 };
 use super::credential_park::{CREDENTIAL_PARKED_GATE_KIND, log_gate_refusal, merge_gate_refusal};
-use super::dispatch::emit_replay_degradation;
 use super::edit_declare::{
     declare_cache_placement, declare_model_rename, declare_reduction, fidelity_dialect,
 };
@@ -48,7 +47,7 @@ use super::outcome_rule::{
 use super::overlays::apply_layered_overlays;
 use super::probe_payload_capture::ProbeFieldCapture;
 use super::repair_budget::RepairBudget;
-use super::replay_repair::replay_rejection_body_free;
+use super::replay_repair::{emit_replay_degradation, replay_rejection_body_free};
 use super::runtime_gate::{
     LearnedProbeGuard, ProbeAdmission, ProbeAdmissionSet, is_probe_request, log_probe_fast_fail,
 };
@@ -86,6 +85,12 @@ impl DeadlineFired {
     fn error(self, provider_name: &str) -> Error {
         Error::upstream(provider_name, 0, (self.0.describe)(self.0.ms))
     }
+}
+
+/// The expiry text of a `complete()` attempt deadline, shared by the token
+/// count so the two surfaces time out with the same error.
+pub(super) fn complete_timed_out(ms: u64) -> String {
+    format!("request timed out after {ms}ms")
 }
 
 /// What a committed attempt hands its surface: the target that served, the
@@ -349,8 +354,8 @@ impl Router {
         // kind gates itself to at most once per target, and this bounds their
         // SUM across every target the fallback walk reaches. Never declared
         // inside the loop -- a per-target budget lets an N-target chain pay N
-        // repairs for one logical request. `stream_inner` and `count_tokens`
-        // draw from the same ceiling (see `repair_budget`).
+        // repairs for one logical request. Every surface adapter draws from
+        // this one request-scoped `repair_budget`.
 
         'chain: for (chain_idx, target) in chain.iter().enumerate() {
             let provider_name = target.provider_name.as_str();
