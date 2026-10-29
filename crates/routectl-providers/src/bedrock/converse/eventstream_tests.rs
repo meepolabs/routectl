@@ -930,6 +930,113 @@ fn tool_call_index_is_stable_across_two_tool_blocks() {
     );
 }
 
+/// A zero-argument tool_use may close with no toolUse delta at all; the
+/// call must still reach the client, once, with an empty-object argument.
+#[test]
+fn tool_use_without_deltas_emits_one_call_at_block_stop() {
+    // Arrange
+    let mut state = ConverseStreamState::default();
+    let started = run(
+        "contentBlockStart",
+        r#"{"contentBlockIndex":0,
+            "start":{"toolUse":{"toolUseId":"tu_0","name":"now"}}}"#,
+        &mut state,
+    );
+
+    // Act
+    let stopped = run("contentBlockStop", r#"{"contentBlockIndex":0}"#, &mut state);
+
+    // Assert
+    assert!(started.is_empty(), "start alone emits nothing");
+    assert_eq!(stopped.len(), 1, "stopped: {stopped:?}");
+    let tcs = stopped[0].choices[0].delta.tool_calls.as_ref().unwrap();
+    assert_eq!(tcs.len(), 1);
+    assert_eq!(tcs[0]["index"], 0);
+    assert_eq!(tcs[0]["id"], "tu_0");
+    assert_eq!(tcs[0]["type"], "function");
+    assert_eq!(tcs[0]["function"]["name"], "now");
+    assert_eq!(tcs[0]["function"]["arguments"], "{}");
+}
+
+/// A tool_use that already streamed its arguments must not be emitted a
+/// second time when its block stops.
+#[test]
+fn tool_use_with_deltas_emits_nothing_at_block_stop() {
+    // Arrange
+    let mut state = ConverseStreamState::default();
+    let _ = run(
+        "contentBlockStart",
+        r#"{"contentBlockIndex":0,
+            "start":{"toolUse":{"toolUseId":"tu_1","name":"calc"}}}"#,
+        &mut state,
+    );
+    let delta = run(
+        "contentBlockDelta",
+        r#"{"contentBlockIndex":0,"delta":{"toolUse":{"input":"{\"a\":1}"}}}"#,
+        &mut state,
+    );
+
+    // Act
+    let stopped = run("contentBlockStop", r#"{"contentBlockIndex":0}"#, &mut state);
+
+    // Assert
+    assert_eq!(delta.len(), 1);
+    assert!(stopped.is_empty(), "stopped: {stopped:?}");
+}
+
+/// Across a full stream, a delta-less tool block followed by a streamed
+/// one surfaces each call exactly once, in block order.
+#[tokio::test]
+async fn delta_less_and_streamed_tool_blocks_each_surface_once_in_order() {
+    // Arrange + Act
+    let items = decode_converse(&[
+        ("messageStart", r#"{"role":"assistant"}"#),
+        (
+            "contentBlockStart",
+            r#"{"contentBlockIndex":0,"start":{"toolUse":{"toolUseId":"a","name":"f1"}}}"#,
+        ),
+        ("contentBlockStop", r#"{"contentBlockIndex":0}"#),
+        (
+            "contentBlockStart",
+            r#"{"contentBlockIndex":1,"start":{"toolUse":{"toolUseId":"b","name":"f2"}}}"#,
+        ),
+        (
+            "contentBlockDelta",
+            r#"{"contentBlockIndex":1,"delta":{"toolUse":{"input":"{\"x\":2}"}}}"#,
+        ),
+        ("contentBlockStop", r#"{"contentBlockIndex":1}"#),
+        ("messageStop", r#"{"stopReason":"tool_use"}"#),
+        (
+            "metadata",
+            r#"{"usage":{"inputTokens":1,"outputTokens":1,"totalTokens":2}}"#,
+        ),
+    ])
+    .await;
+
+    // Assert
+    assert!(items.iter().all(Result::is_ok), "items: {items:?}");
+    let calls: Vec<(u64, String, String)> = items
+        .iter()
+        .filter_map(|i| i.as_ref().ok())
+        .filter_map(|c| c.choices.first()?.delta.tool_calls.clone())
+        .flatten()
+        .map(|tc| {
+            (
+                tc["index"].as_u64().unwrap(),
+                tc["id"].as_str().unwrap().to_string(),
+                tc["function"]["arguments"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        calls,
+        vec![
+            (0, "a".to_string(), "{}".to_string()),
+            (1, "b".to_string(), "{\"x\":2}".to_string()),
+        ]
+    );
+}
+
 #[tokio::test]
 async fn stream_eof_after_message_stop_without_metadata_emits_closing_chunk() {
     // Arrange: synthesize the full happy-path frame sequence MINUS

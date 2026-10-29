@@ -67,6 +67,10 @@ enum BlockState {
         id: String,
         name: String,
         call_index: u32,
+        /// Set once a toolUse delta has emitted this call. A zero-argument
+        /// call may close with no delta, so `contentBlockStop` emits it
+        /// only when this is still false.
+        emitted: bool,
     },
     /// Reasoning block. Index in the reasoning_details array assigned
     /// at start time so all deltas for this block carry the same
@@ -266,27 +270,33 @@ pub fn handle_converse_frame(
             // Strategy A: on a Reasoning block, emit the aggregated
             // structured detail carrying both text + signature.
             let removed = state.blocks.remove(&ev.content_block_index);
-            let chunks = if let Some(BlockState::Reasoning {
-                detail_index,
-                accumulated,
-                signature,
-                detail_id,
-            }) = removed
-            {
-                if accumulated.is_empty() && signature.is_none() {
-                    // Empty thinking block -- skip emission so replay
-                    // doesn't push a doomed empty Thinking block.
-                    vec![]
-                } else {
-                    vec![reasoning_terminal_chunk(
-                        detail_index,
-                        detail_id,
-                        accumulated,
-                        signature,
-                    )]
+            let chunks = match removed {
+                Some(BlockState::Reasoning {
+                    detail_index,
+                    accumulated,
+                    signature,
+                    detail_id,
+                }) => {
+                    if accumulated.is_empty() && signature.is_none() {
+                        // Empty thinking block -- skip emission so replay
+                        // doesn't push a doomed empty Thinking block.
+                        vec![]
+                    } else {
+                        vec![reasoning_terminal_chunk(
+                            detail_index,
+                            detail_id,
+                            accumulated,
+                            signature,
+                        )]
+                    }
                 }
-            } else {
-                vec![]
+                Some(BlockState::ToolUse {
+                    id,
+                    name,
+                    call_index,
+                    emitted: false,
+                }) => vec![tool_delta_chunk(id, name, call_index, "{}".to_string())],
+                _ => vec![],
             };
             Ok(chunks)
         }
@@ -353,6 +363,7 @@ fn handle_block_start(
                 id: tool_use.tool_use_id,
                 name: tool_use.name,
                 call_index,
+                emitted: false,
             }
         }
         Some(StreamContentBlockStartPayload::Other(ref raw)) => {
@@ -444,13 +455,17 @@ fn handle_block_delta(
             vec![text_chunk(text)]
         }
         StreamDelta::ToolUse { tool_use } => {
-            let block = state.blocks.get(&ev.content_block_index);
+            let block = state.blocks.get_mut(&ev.content_block_index);
             let (id, name, call_index) = match block {
                 Some(BlockState::ToolUse {
                     id,
                     name,
                     call_index,
-                }) => (id.clone(), name.clone(), *call_index),
+                    emitted,
+                }) => {
+                    *emitted = true;
+                    (id.clone(), name.clone(), *call_index)
+                }
                 _ => {
                     // Defensive: AWS emits `contentBlockStart` before
                     // any toolUse delta. If we got here without a
