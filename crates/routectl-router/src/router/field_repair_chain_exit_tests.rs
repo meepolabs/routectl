@@ -279,8 +279,8 @@ async fn drive(router: &Router, walk: Walk, req: ChatRequest) {
     }
 }
 
-/// Mutation check (one per walk): delete the `record_repairs_per_request`
-/// call beside that walk's `emit_field_repair` -> red on that walk's row.
+/// Mutation check (one per walk): delete that walk's `finish_dispatch` call
+/// -> red on that walk's row.
 #[tokio::test]
 async fn a_request_with_no_repair_lands_in_bucket_zero_on_every_walk() {
     for walk in WALKS {

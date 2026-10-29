@@ -49,7 +49,7 @@ pub(super) const REPAIRS_PER_REQUEST: u8 = 5;
 /// when a rejection enters the learner, and takes it once when the learner
 /// has decided. Nothing else reads or clears it.
 #[derive(Debug)]
-pub(super) struct RepairBudget {
+pub struct RepairBudget {
     remaining: u8,
     refused: bool,
 }

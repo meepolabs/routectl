@@ -264,6 +264,43 @@ async fn count_traffic_leaves_wire_check_counters_unchanged() {
     );
 }
 
+/// A rejected count leaves nothing for the finish to report as a wire
+/// rejection, while the same rejection on a message dispatch queues one.
+///
+/// Mutation check: push a pending rejection from the count's rejection-site
+/// reader -> red on the count's empty assertion.
+#[tokio::test]
+async fn a_rejected_count_queues_no_wire_rejection_on_its_meta() {
+    let server = refusing_upstream().await;
+    let router = wire_router(&server.uri()).await;
+
+    let counted = router.count_tokens_with_meta(client_request()).await;
+    let completed =
+        Box::pin(router.complete_with_options(client_request(), RouterOptions::new())).await;
+
+    assert_eq!(
+        bodies(&server, COUNT_PATH).await.len(),
+        2,
+        "premise: the count was refused once and re-sent"
+    );
+    assert!(
+        counted.result.is_ok(),
+        "premise: the re-sent count is served"
+    );
+    assert!(
+        counted.meta.wire_rejections.is_empty(),
+        "a count rejection is read for its site only, never queued"
+    );
+    assert!(
+        completed.result.is_ok(),
+        "premise: the reverted message is served"
+    );
+    assert!(
+        !completed.meta.wire_rejections.is_empty(),
+        "positive control: a message rejection is queued on its meta"
+    );
+}
+
 /// A count-capable provider recording whether each call carried a tap.
 struct TapProbe {
     taps: Mutex<Vec<bool>>,

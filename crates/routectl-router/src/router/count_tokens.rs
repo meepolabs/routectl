@@ -55,12 +55,11 @@ use crate::config::RetryPolicy;
 
 use super::capability_observe::UntranslatedCapabilities;
 use super::class_observe::{DispatchSurface, class_label, matched_by_label, upstream_facts};
-use super::dispatch::{complete_timed_out, emit_replay_degradation, is_capability_error};
+use super::dispatch::{complete_timed_out, is_capability_error};
 use super::dispatch_loop::{
     CommitCtx, Deadline, ErrorDisposition, Exhaustion, FailureObservation, SurfaceAdapter,
 };
-use super::field_preflight::emit_field_preflight;
-use super::field_repair::{FieldSettlementMode, emit_field_repair};
+use super::field_repair::FieldSettlementMode;
 use super::learn_engine::RejectionSite;
 use super::repair_budget::RepairBudget;
 use super::runtime_gate::ProbeAdmission;
@@ -431,11 +430,7 @@ impl Router {
             &mut repair_budget,
         ))
         .await;
-        self.metrics
-            .record_repairs_per_request(repair_budget.spent());
-        emit_replay_degradation(&meta);
-        emit_field_repair(&meta);
-        emit_field_preflight(&meta);
+        self.finish_dispatch(&meta, &repair_budget);
         CountedTokens { meta, result }
     }
 }

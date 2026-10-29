@@ -32,11 +32,13 @@ use super::class_observe::{
     DispatchSurface, apply_remap, upstream_facts, upstream_status_for_remap,
 };
 use super::credential_park::{CREDENTIAL_PARKED_GATE_KIND, log_gate_refusal, merge_gate_refusal};
+use super::dispatch::emit_replay_degradation;
 use super::edit_declare::{
     declare_cache_placement, declare_model_rename, declare_reduction, fidelity_dialect,
 };
 use super::feature_filter::StripDecision;
-use super::field_repair::FieldSettlementMode;
+use super::field_preflight::emit_field_preflight;
+use super::field_repair::{FieldSettlementMode, emit_field_repair};
 use super::learn_engine::{AttemptLearning, FailureDecision, Rejection, RejectionSite};
 use super::local_refusal::ingress_dialect_of;
 use super::outcome_rule::{
@@ -239,6 +241,30 @@ pub(super) trait SurfaceAdapter: Send + Sync {
 }
 
 impl Router {
+    /// Close a resolved walk: count the reactive repairs it drew and report
+    /// its replay degradations, field repairs, wire rejections and field
+    /// pre-flight decisions. Called exactly once per public entry point,
+    /// after [`Router::run_walk`] returns on any exit, when every repair
+    /// record on `meta` is final.
+    ///
+    /// This is where a complete or a token count finishes as a request. A
+    /// stream's walk also ends here, at its commit or exhaustion, but the
+    /// request it serves ends later: at the end of the cli's `drive_stream`
+    /// loop (`routectl-cli` `handlers/ingress_handle.rs`), which finalizes
+    /// the stream's usage capture on every exit.
+    ///
+    /// A token count queues no wire rejection on `meta` (see
+    /// [`Router::read_count_rejection_site`]), so reporting them is a no-op
+    /// there.
+    pub(crate) fn finish_dispatch(&self, meta: &DispatchMeta, repair_budget: &RepairBudget) {
+        self.metrics
+            .record_repairs_per_request(repair_budget.spent());
+        emit_replay_degradation(meta);
+        emit_field_repair(meta);
+        self.emit_wire_rejections(meta);
+        emit_field_preflight(meta);
+    }
+
     /// Walk the resolved chain for `req` on `adapter`'s surface. Mutates
     /// `meta` as the chain is walked -- `attempt_count` on every upstream
     /// attempt, `fallback_count` on every hop to a later entry, and the

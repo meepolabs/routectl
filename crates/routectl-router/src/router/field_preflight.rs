@@ -1330,8 +1330,8 @@ const FIELD_PREFLIGHT_EVENT: &str = "envelope_field_preflight";
 /// take, which is exactly the false-claim shape a diagnostic must not have.
 /// The non-acting tier carries the reason token instead.
 ///
-/// Called from the three public wrappers rather than inside the chain loops,
-/// so a walk leaving by any exit still reports -- the same reason
+/// Called from [`super::Router::finish_dispatch`] rather than inside the
+/// walk, so a walk leaving by any exit still reports -- the same reason
 /// `emit_field_repair` and `emit_replay_degradation` sit there.
 ///
 /// Every field is a closed-set token, a code-authored path literal, a

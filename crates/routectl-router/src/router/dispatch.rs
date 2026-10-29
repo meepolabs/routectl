@@ -33,8 +33,6 @@ use super::class_observe::{
 };
 use super::dispatch_loop::{CommitCtx, Deadline, Exhaustion, SurfaceAdapter};
 use super::feature_filter::emit_feature_unsupported;
-use super::field_preflight::emit_field_preflight;
-use super::field_repair::emit_field_repair;
 use super::outcome_rule::retry_cap_for;
 use super::repair_budget::RepairBudget;
 use super::runtime_gate::is_probe_request;
@@ -452,12 +450,7 @@ impl Router {
         let result =
             Box::pin(self.run_walk(CompleteAdapter, req, opts, &mut meta, &mut repair_budget))
                 .await;
-        self.metrics
-            .record_repairs_per_request(repair_budget.spent());
-        emit_replay_degradation(&meta);
-        emit_field_repair(&meta);
-        self.emit_wire_rejections(&meta);
-        emit_field_preflight(&meta);
+        self.finish_dispatch(&meta, &repair_budget);
         Dispatched { meta, result }
     }
 
@@ -488,12 +481,7 @@ impl Router {
         let mut repair_budget = RepairBudget::per_request();
         let result =
             Box::pin(self.run_walk(StreamAdapter, req, opts, &mut meta, &mut repair_budget)).await;
-        self.metrics
-            .record_repairs_per_request(repair_budget.spent());
-        emit_replay_degradation(&meta);
-        emit_field_repair(&meta);
-        self.emit_wire_rejections(&meta);
-        emit_field_preflight(&meta);
+        self.finish_dispatch(&meta, &repair_budget);
         DispatchedStream { meta, result }
     }
 
