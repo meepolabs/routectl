@@ -123,11 +123,15 @@ fn render_skipped_format(format: Option<&str>, redact: bool) -> String {
 ///   from `reasoning_details` / `tool_calls` when those are present,
 ///   so we keep the message in that case. Preserve never strips, so
 ///   this drop path does not run under Preserve. One exception, and only
-///   under [`SystemTurnPolicy::Forward`]: a message immediately following
-///   a `Role::System` turn is KEPT, since a wire `system` turn must
-///   precede an `assistant` turn or end the array and the drop would
-///   strand it. Under `Lift` no system turn reaches the wire, so the
-///   positional rationale does not apply and the drop stands.
+///   under [`SystemTurnPolicy::Forward`]: a message whose nearest preceding
+///   turn that reaches the wire is a `Role::System` turn is KEPT, since a
+///   wire `system` turn must precede an `assistant` turn or end the array
+///   and the drop would strand it. The kept turn ships through
+///   `build_assistant_content`'s empty-blocks backstop. A system turn the
+///   forwarded screen drops (empty, blank, or only the billing fingerprint)
+///   never reaches the wire, so it is looked past rather than counted.
+///   Under `Lift` no system turn reaches the wire, so the positional
+///   rationale does not apply and the drop stands.
 ///
 /// One structured DEBUG line fires per request when stripping occurs,
 /// carrying the provider id, the exact count of dropped blocks, the
@@ -238,21 +242,10 @@ pub(super) fn normalize_replay_invariants<'a>(
         }
         let has_tool_calls = msg.tool_calls.as_ref().is_some_and(|tc| !tc.is_empty());
         let has_emittable_reasoning = message_has_emittable_reasoning(msg);
-        // Positional legality: on the Anthropic wire a `system` turn must
-        // precede an `assistant` turn or end the array. Dropping the
-        // assistant turn that immediately follows one would leave the
-        // system turn followed by a user turn -- a shape the upstream
-        // rejects, minted by routectl rather than by the caller. Keeping
-        // the turn is safe: `build_assistant_content`'s empty-blocks
-        // backstop emits one empty text block (and warns), so nothing
-        // ships as `content: []`. Only the Forward policy puts a system
-        // turn on the wire, so only Forward earns the refusal.
-        let precedes_kept_system_turn = system_turns == SystemTurnPolicy::Forward
-            && out.last().is_some_and(|m| matches!(m.role, Role::System));
         if kept.is_empty()
             && !has_tool_calls
             && !has_emittable_reasoning
-            && !precedes_kept_system_turn
+            && !follows_wire_system_turn(&out, system_turns)
         {
             // Stripping emptied this message and there is no other content
             // the wire can serialize: no tool_calls, and every
@@ -396,6 +389,23 @@ fn message_has_unsigned_thinking(msg: &Message) -> bool {
     } else {
         false
     }
+}
+
+/// Whether the turn about to be appended to `out` would follow a system turn
+/// that reaches the wire. On the Anthropic wire a `system` turn must precede
+/// an `assistant` turn or end the array, so dropping the assistant turn after
+/// one would leave it followed by a user turn, a shape the upstream rejects.
+/// Only [`SystemTurnPolicy::Forward`] puts a system turn on the wire, and
+/// only one the forwarded screen keeps: a screened-out turn leaves no wire
+/// message to strand, so the walk looks past it to the turn before.
+fn follows_wire_system_turn(out: &[Message], system_turns: SystemTurnPolicy) -> bool {
+    if system_turns != SystemTurnPolicy::Forward {
+        return false;
+    }
+    out.iter()
+        .rev()
+        .find(|m| !matches!(m.role, Role::System) || forwarded_system_turn_reaches_wire(&m.content))
+        .is_some_and(|m| matches!(m.role, Role::System))
 }
 
 /// True iff `detail` will produce an Anthropic content block in
@@ -1812,6 +1822,16 @@ fn last_breakpoint(content: &MessageContent) -> Option<CacheControl> {
         MessageContent::Parts(parts) => parts.iter().rev().find_map(|p| p.cache_control().cloned()),
         MessageContent::Text(_) | MessageContent::Null => None,
     }
+}
+
+/// Whether a forwarded `Role::System` turn with `content` survives the
+/// screen and ships in place, rather than being dropped as empty or as the
+/// billing fingerprint alone.
+fn forwarded_system_turn_reaches_wire(content: &MessageContent) -> bool {
+    matches!(
+        screen_forwarded_system_content(content).verdict,
+        SystemTurnVerdict::Forward(_)
+    )
 }
 
 /// Screen one forwarded `Role::System` turn's content before it reaches

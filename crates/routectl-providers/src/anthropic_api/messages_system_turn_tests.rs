@@ -502,6 +502,183 @@ fn whole_turn_drop_still_fires_after_a_system_turn_on_the_lift_lane() {
     );
 }
 
+fn st_unsigned_only_assistant() -> Message {
+    Message {
+        refusal: None,
+        role: Role::Assistant,
+        content: MessageContent::Parts(vec![ContentPart::Known(KnownContentPart::Thinking {
+            thinking: "reasoning".into(),
+            signature: None,
+        })]),
+        reasoning: None,
+        reasoning_details: Vec::new(),
+        name: None,
+        tool_call_id: None,
+        tool_calls: None,
+    }
+}
+
+/// Run the replay strip under Forward, returning the stripped canonical roles
+/// and the wire it translates to.
+fn st_strip_then_forward(messages: Vec<Message>) -> (Vec<&'static str>, Vec<AnthropicMessage>) {
+    let req = ChatRequest {
+        model: "claude-opus-4-8".into(),
+        messages: messages.into(),
+        max_tokens: Some(1024),
+        ..Default::default()
+    };
+    let normalized = normalize_replay_invariants(
+        "anthropic",
+        &req,
+        CoreHistoryReasoning::Auto,
+        SystemTurnPolicy::Forward,
+    )
+    .expect("strip");
+    let roles = normalized
+        .iter()
+        .map(|m| match m.role {
+            Role::System => "system",
+            Role::User => "user",
+            Role::Assistant => "assistant",
+            Role::Tool => "tool",
+            Role::Other(_) => "other",
+        })
+        .collect();
+    (roles, st_forward(&normalized))
+}
+
+fn st_has_empty_text_block(out: &[AnthropicMessage]) -> bool {
+    out.iter().any(|m| {
+        matches!(
+            &m.content,
+            AnthropicContent::Blocks(blocks) if blocks.iter().any(|b| matches!(
+                b,
+                ContentBlock::Text { text, .. } if text.is_empty()
+            ))
+        )
+    })
+}
+
+/// A system turn the forwarded screen drops never reaches the wire, so it
+/// cannot be stranded: the emptied assistant turn after it is dropped exactly
+/// as if no system turn preceded it, rather than kept and shipped through the
+/// empty-text backstop. One row per shape the screen drops.
+#[test]
+fn whole_turn_drop_fires_after_a_system_turn_the_screen_drops() {
+    // Arrange
+    let billing = "x-anthropic-billing-header: v=1; fp=abc";
+    let rows: [(&str, MessageContent); 8] = [
+        ("null", MessageContent::Null),
+        ("empty string", MessageContent::Text(String::new())),
+        ("whitespace string", MessageContent::Text(" \n\t ".into())),
+        ("empty parts", MessageContent::Parts(vec![])),
+        (
+            "blank text block",
+            MessageContent::Parts(vec![st_text_part("  ")]),
+        ),
+        ("billing-only string", MessageContent::Text(billing.into())),
+        (
+            "billing-only parts",
+            MessageContent::Parts(vec![st_text_part(billing)]),
+        ),
+        (
+            "blank after billing strip",
+            MessageContent::Parts(vec![st_text_part(billing), st_text_part(" ")]),
+        ),
+    ];
+    let (baseline_roles, _) = st_strip_then_forward(vec![
+        st_user("hi"),
+        st_unsigned_only_assistant(),
+        st_user("continue"),
+    ]);
+    let mut failures: Vec<String> = Vec::new();
+
+    for (name, content) in rows {
+        // Act
+        let (roles, out) = st_strip_then_forward(vec![
+            st_user("hi"),
+            st_system(content),
+            st_unsigned_only_assistant(),
+            st_user("continue"),
+        ]);
+
+        // Assert
+        let non_system: Vec<&str> = roles.into_iter().filter(|r| *r != "system").collect();
+        if non_system != baseline_roles {
+            failures.push(format!("{name}: stripped roles {non_system:?}"));
+        }
+        if st_roles(&out).contains(&"assistant") || st_has_empty_text_block(&out) {
+            failures.push(format!("{name}: wire roles {:?}", st_roles(&out)));
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+/// Positive control for the rows above: a system turn the screen forwards
+/// still keeps the emptied assistant turn after it, including a turn carrying
+/// only a non-text block, which the screen never treats as blank and the
+/// egress ships in place. A run of system turns counts the nearest one that
+/// reaches the wire, so a dropped turn between it and the assistant does not
+/// strand it.
+#[test]
+fn whole_turn_drop_is_refused_after_a_system_turn_the_screen_forwards() {
+    // Arrange
+    let image = ContentPart::Known(KnownContentPart::Image {
+        source: json!({"type": "base64", "media_type": "image/png", "data": "AAAA"}),
+        cache_control: None,
+    });
+    let rows: [(&str, Vec<Message>, Vec<&str>); 3] = [
+        (
+            "non-empty text",
+            vec![st_system(MessageContent::Text("note".into()))],
+            vec!["user", "system", "assistant", "user"],
+        ),
+        (
+            "image only",
+            vec![st_system(MessageContent::Parts(vec![image]))],
+            vec!["user", "system", "assistant", "user"],
+        ),
+        (
+            "forwarded then empty",
+            vec![
+                st_system(MessageContent::Text("note".into())),
+                st_system(MessageContent::Text(String::new())),
+            ],
+            vec!["user", "system", "assistant", "user"],
+        ),
+    ];
+
+    for (name, system_turns, expected) in rows {
+        let mut messages = vec![st_user("hi")];
+        messages.extend(system_turns);
+        messages.extend([st_unsigned_only_assistant(), st_user("continue")]);
+
+        // Act
+        let (_, out) = st_strip_then_forward(messages);
+
+        // Assert
+        assert_eq!(st_roles(&out), expected, "{name}");
+    }
+}
+
+/// A run of system turns the screen all drops keeps nothing on the wire to
+/// strand, so the emptied assistant turn after it is dropped.
+#[test]
+fn whole_turn_drop_fires_after_a_run_of_dropped_system_turns() {
+    // Act
+    let (roles, out) = st_strip_then_forward(vec![
+        st_user("hi"),
+        st_system(MessageContent::Text(String::new())),
+        st_system(MessageContent::Null),
+        st_unsigned_only_assistant(),
+        st_user("continue"),
+    ]);
+
+    // Assert
+    assert!(!roles.contains(&"assistant"), "{roles:?}");
+    assert_eq!(st_roles(&out), vec!["user"]);
+}
+
 /// The accounted-identity ledger holds across a request mixing every
 /// shape the walk handles: forwarded system turns, a billing-screened
 /// system turn, a folded tool run, and plain user / assistant turns.

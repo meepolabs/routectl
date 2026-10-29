@@ -290,6 +290,67 @@ fn drops_assistant_message_when_only_block_was_unsigned_thinking() {
     );
 }
 
+/// With a canonical system shipping, system turns ride the wire in place; an
+/// empty one is screened out, so it strands nothing and the emptied assistant
+/// turn after it is dropped rather than shipped as an empty text block.
+#[test]
+fn drops_unsigned_thinking_only_turn_after_an_empty_forwarded_system_turn() {
+    use routectl_core::{ContentPart, KnownContentPart, SystemContent};
+    let req = ChatRequest {
+        model: "claude-sonnet-4".into(),
+        system: Some(SystemContent::Text("be brief".into())),
+        messages: vec![
+            user_msg("hello"),
+            Message {
+                refusal: None,
+                role: Role::System,
+                content: MessageContent::Text(String::new()),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            Message {
+                refusal: None,
+                role: Role::Assistant,
+                content: MessageContent::Parts(vec![ContentPart::Known(
+                    KnownContentPart::Thinking {
+                        thinking: "let me think".into(),
+                        signature: None,
+                    },
+                )]),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            user_msg("any update?"),
+        ]
+        .into(),
+        ..Default::default()
+    };
+
+    let body = normalize("test-anthropic", &req, false, None, false, true).unwrap();
+
+    let messages = body["messages"].as_array().unwrap();
+    assert!(
+        messages.iter().all(|m| m["role"] != json!("assistant")),
+        "the emptied assistant turn must be dropped, got: {messages:?}"
+    );
+    let empty_text_block = messages
+        .iter()
+        .filter_map(|m| m["content"].as_array())
+        .flatten()
+        .any(|b| b["type"] == json!("text") && b["text"] == json!(""));
+    assert!(
+        !empty_text_block,
+        "no empty-text backstop may ship, got: {body}"
+    );
+    assert_eq!(body["system"], json!("be brief"), "{body}");
+}
+
 #[test]
 fn keeps_message_with_only_unsigned_thinking_when_tool_calls_present() {
     // Pin the corner: stripping leaves Parts empty BUT the message
