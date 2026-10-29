@@ -240,7 +240,7 @@ impl Provider for AnthropicApiProvider {
         // client computed. Re-sign only on the Claude-Code OauthBearer
         // api.anthropic.com surface; every other path is a no-op.
         let mut body_bytes = serde_json::to_vec(&body)
-            .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
+            .map_err(|e| crate::http_client::local_build_error(&self.cfg.id, e))?;
         if !forwarded_leg
             && self.cfg.auth_kind == AuthKind::OauthBearer
             && is_anthropic_api_host(&self.cfg.base_url)
@@ -261,7 +261,7 @@ impl Provider for AnthropicApiProvider {
             .header("content-type", "application/json")
             .body(body_bytes)
             .build()
-            .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
+            .map_err(|e| crate::http_client::local_build_error(&self.cfg.id, e))?;
         // Mantle lane: SigV4/bearer-sign the built request before any
         // header trace or execute so the trace shows the real auth header
         // and the signed input matches the transmitted bytes. No-op on the
@@ -469,7 +469,7 @@ impl Provider for AnthropicApiProvider {
         // over the exact transmitted bytes on the Claude-Code OauthBearer
         // api.anthropic.com surface; a no-op everywhere else.
         let mut body_bytes = serde_json::to_vec(&body)
-            .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
+            .map_err(|e| crate::http_client::local_build_error(&self.cfg.id, e))?;
         if !forwarded_leg
             && self.cfg.auth_kind == AuthKind::OauthBearer
             && is_anthropic_api_host(&self.cfg.base_url)
@@ -490,7 +490,7 @@ impl Provider for AnthropicApiProvider {
             .header("content-type", "application/json")
             .body(body_bytes)
             .build()
-            .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
+            .map_err(|e| crate::http_client::local_build_error(&self.cfg.id, e))?;
         // Mantle lane: sign the built stream request before trace/execute
         // (see complete()). No-op on the first-party lane.
         #[cfg(feature = "bedrock")]
@@ -755,7 +755,7 @@ impl Provider for AnthropicApiProvider {
         // cch re-sign, matches upstream).
         let body_bytes = bytes::Bytes::from(
             serde_json::to_vec(&body)
-                .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?,
+                .map_err(|e| crate::http_client::local_build_error(&self.cfg.id, e))?,
         );
         let tap = wire_edits::tap_of(&req);
         let sent_copy = tap.map(|_| body_bytes.clone());
@@ -773,7 +773,7 @@ impl Provider for AnthropicApiProvider {
             .header("content-type", "application/json")
             .body(body_bytes)
             .build()
-            .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
+            .map_err(|e| crate::http_client::local_build_error(&self.cfg.id, e))?;
         #[cfg(feature = "bedrock")]
         self.sign_mantle(&mut request).await?;
         // Dir 2: outgoing request headers (incl. auth) for the
@@ -1150,3 +1150,8 @@ mod cloak_refusal_tests;
 #[cfg(test)]
 #[path = "mod_wire_tap_tests.rs"]
 mod wire_tap_tests;
+
+// A request the HTTP stack cannot build fails as Internal on every send path.
+#[cfg(test)]
+#[path = "mod_build_error_tests.rs"]
+mod build_error_tests;

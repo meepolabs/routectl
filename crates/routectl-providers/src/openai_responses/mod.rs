@@ -209,14 +209,14 @@ impl Provider for OpenAiResponsesProvider {
         // content-type is stamped explicitly (rather than via `.json()`) so
         // both lanes emit one deterministic header.
         let body_bytes = crate::wire_declare::serialize_and_deposit(&req, &body)
-            .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
+            .map_err(|e| crate::http_client::local_build_error(&self.cfg.id, e))?;
         #[cfg_attr(not(feature = "bedrock"), allow(unused_mut))]
         let mut request = rb
             .header("content-type", "application/json")
             .header("accept", "text/event-stream")
             .body(body_bytes)
             .build()
-            .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
+            .map_err(|e| crate::http_client::local_build_error(&self.cfg.id, e))?;
         // Mantle lane: SigV4/bearer-sign the built request before any header
         // trace or execute so the trace shows the real auth header and the
         // signed input matches the transmitted bytes. No-op on the
@@ -419,14 +419,14 @@ impl Provider for OpenAiResponsesProvider {
         // See complete(): serialize once, deposit, sign and send the same
         // bytes with an explicit content-type.
         let body_bytes = crate::wire_declare::serialize_and_deposit(&req, &body)
-            .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
+            .map_err(|e| crate::http_client::local_build_error(&self.cfg.id, e))?;
         #[cfg_attr(not(feature = "bedrock"), allow(unused_mut))]
         let mut request = rb
             .header("content-type", "application/json")
             .header("accept", "text/event-stream")
             .body(body_bytes)
             .build()
-            .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
+            .map_err(|e| crate::http_client::local_build_error(&self.cfg.id, e))?;
         // Mantle lane: sign the built stream request before trace/execute
         // (see complete()). No-op on the first-party lane.
         #[cfg(feature = "bedrock")]

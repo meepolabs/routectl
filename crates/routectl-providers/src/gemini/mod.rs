@@ -434,12 +434,12 @@ impl GeminiProvider {
         let url = self.generate_url(&req.model);
         let rb = self.build_headers(self.client.post(&url), &req, &key)?;
         let body_bytes = crate::wire_declare::serialize_and_deposit(&req, &body)
-            .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
+            .map_err(|e| crate::http_client::local_build_error(&self.cfg.id, e))?;
         let request = rb
             .header("content-type", "application/json")
             .body(body_bytes)
             .build()
-            .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
+            .map_err(|e| crate::http_client::local_build_error(&self.cfg.id, e))?;
 
         crate::header_trace::outgoing(PROVIDER_KIND, &self.cfg.id, request.headers());
         let resp = self
@@ -486,12 +486,12 @@ impl GeminiProvider {
         // applied to the shared client at build time.
         let rb = auth::apply_bearer(self.client.post(&url), &token)?;
         let body_bytes = crate::wire_declare::serialize_and_deposit(&req, &body)
-            .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
+            .map_err(|e| crate::http_client::local_build_error(&self.cfg.id, e))?;
         let request = rb
             .header("content-type", "application/json")
             .body(body_bytes)
             .build()
-            .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
+            .map_err(|e| crate::http_client::local_build_error(&self.cfg.id, e))?;
 
         crate::header_trace::outgoing(PROVIDER_KIND, &self.cfg.id, request.headers());
         let resp = self
@@ -540,13 +540,13 @@ impl GeminiProvider {
         let url = self.stream_url(&req.model);
         let rb = self.build_headers(self.client.post(&url), &req, &key)?;
         let body_bytes = crate::wire_declare::serialize_and_deposit(&req, &body)
-            .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
+            .map_err(|e| crate::http_client::local_build_error(&self.cfg.id, e))?;
         let request = rb
             .header("content-type", "application/json")
             .header("accept", "text/event-stream")
             .body(body_bytes)
             .build()
-            .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
+            .map_err(|e| crate::http_client::local_build_error(&self.cfg.id, e))?;
 
         crate::header_trace::outgoing(PROVIDER_KIND, &self.cfg.id, request.headers());
         let resp = self
@@ -583,13 +583,13 @@ impl GeminiProvider {
         let url = self.cloudcode_stream_url();
         let rb = auth::apply_bearer(self.client.post(&url), &token)?;
         let body_bytes = crate::wire_declare::serialize_and_deposit(&req, &body)
-            .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
+            .map_err(|e| crate::http_client::local_build_error(&self.cfg.id, e))?;
         let request = rb
             .header("content-type", "application/json")
             .header("accept", "text/event-stream")
             .body(body_bytes)
             .build()
-            .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
+            .map_err(|e| crate::http_client::local_build_error(&self.cfg.id, e))?;
 
         crate::header_trace::outgoing(PROVIDER_KIND, &self.cfg.id, request.headers());
         let resp = self

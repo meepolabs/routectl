@@ -588,7 +588,7 @@ impl BedrockProvider {
             .header(reqwest::header::ACCEPT, accept)
             .body(body_str)
             .build()
-            .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
+            .map_err(|e| crate::http_client::local_build_error(&self.cfg.id, e))?;
 
         // Explicitly insert user-agent so it appears in the dir-2
         // header trace and is included in the SigV4 signing scope.

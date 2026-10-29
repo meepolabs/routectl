@@ -210,6 +210,53 @@ pub fn redirect_not_followed_error(provider_id: &str) -> routectl_core::Error {
     routectl_core::Error::upstream(provider_id, 502, REDIRECT_NOT_FOLLOWED_MESSAGE)
 }
 
+/// A failure to assemble the outgoing request before anything is sent:
+/// the step it failed at, and a detail that echoes no request content.
+pub trait LocalBuildFailure {
+    /// The request-assembly step that failed, as named in the message.
+    fn step(&self) -> &'static str;
+    /// The failure's own description, carrying no header value, body
+    /// content or URL from the request.
+    fn detail(self) -> String;
+}
+
+impl LocalBuildFailure for reqwest::Error {
+    fn step(&self) -> &'static str {
+        "build request"
+    }
+
+    // The URL is dropped: on some lanes it carries the client's model id.
+    // reqwest's own text and its source's (an `http` or `url` parse error)
+    // name the defect, never the offending value.
+    fn detail(self) -> String {
+        let err = self.without_url();
+        match std::error::Error::source(&err) {
+            Some(source) => format!("{err}: {source}"),
+            None => err.to_string(),
+        }
+    }
+}
+
+impl LocalBuildFailure for serde_json::Error {
+    fn step(&self) -> &'static str {
+        "serialize request body"
+    }
+
+    fn detail(self) -> String {
+        self.to_string()
+    }
+}
+
+/// Map a failure to build or serialize the outgoing request to
+/// [`routectl_core::Error::Internal`]. Nothing reached the upstream, so it
+/// is not a network failure: it classifies `Unknown`, which fails the
+/// request closed (no retry, no fallback, no breaker debit) as a 500
+/// `internal_error`.
+pub fn local_build_error<E: LocalBuildFailure>(provider_id: &str, e: E) -> routectl_core::Error {
+    let step = e.step();
+    routectl_core::Error::Internal(format!("provider `{provider_id}`: {step}: {}", e.detail()))
+}
+
 /// Status assumed for an error reported inside an HTTP-200 body when the
 /// body carries no usable HTTP error status of its own.
 #[cfg(any(feature = "openai-compat", feature = "gemini"))]

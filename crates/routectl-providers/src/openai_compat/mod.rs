@@ -293,13 +293,13 @@ impl OpenAiCompatProvider {
         body: &Value,
     ) -> Result<reqwest::Request> {
         let body_bytes = crate::wire_declare::serialize_and_deposit(req, body)
-            .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))?;
+            .map_err(|e| crate::http_client::local_build_error(&self.cfg.id, e))?;
         self.client
             .post(url)
             .headers(headers)
             .body(body_bytes)
             .build()
-            .map_err(|e| Error::upstream(&self.cfg.id, 0, e.to_string()))
+            .map_err(|e| crate::http_client::local_build_error(&self.cfg.id, e))
     }
 }
 

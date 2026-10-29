@@ -511,3 +511,77 @@ async fn single_wire_chunk_is_yielded_as_bounded_frames() {
         "per-frame allocation must be far below the response cap",
     );
 }
+
+/// A header value carrying a control byte: reqwest accepts it on the
+/// builder and defers the failure to `.build()`.
+const UNSENDABLE_HEADER_VALUE: &str = "client-secret-flag\nx";
+
+/// A request reqwest refuses at `.build()`, and the client-derived text the
+/// resulting message must not echo.
+struct BuildFailure {
+    name: &'static str,
+    url: &'static str,
+    header_value: &'static str,
+    withheld: &'static str,
+}
+
+#[test]
+fn local_build_error_maps_a_deferred_reqwest_build_failure_to_internal() {
+    let rows = [
+        BuildFailure {
+            name: "unsendable header value",
+            url: "https://api.example.test/v1/messages",
+            header_value: UNSENDABLE_HEADER_VALUE,
+            withheld: "client-secret-flag",
+        },
+        // reqwest attaches this URL to its error (`for url (...)`).
+        BuildFailure {
+            name: "url with no host",
+            url: "mailto:client-model",
+            header_value: "ok",
+            withheld: "client-model",
+        },
+    ];
+    for row in rows {
+        // Arrange: a real build failure, deferred by reqwest to `.build()`.
+        let build_err = reqwest::Client::new()
+            .post(row.url)
+            .header("anthropic-beta", row.header_value)
+            .build()
+            .expect_err(row.name);
+
+        // Act
+        let err = super::local_build_error("seat-a", build_err);
+
+        // Assert: fail-closed class, provider and step named, nothing echoed.
+        let name = row.name;
+        let routectl_core::Error::Internal(message) = &err else {
+            panic!("{name}: expected Error::Internal, got {err:?}");
+        };
+        assert!(
+            message.starts_with("provider `seat-a`: build request: "),
+            "{name}: {message}"
+        );
+        assert!(!message.contains(row.withheld), "{name}: {message}");
+        assert_eq!(
+            routectl_core::failure_class::classify(&err, None).class,
+            routectl_core::failure_class::FailureClass::Unknown,
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn local_build_error_names_the_serialize_step_for_a_serde_failure() {
+    let serde_err = serde_json::from_str::<serde_json::Value>("{").expect_err("truncated json");
+
+    let err = super::local_build_error("seat-a", serde_err);
+
+    let routectl_core::Error::Internal(message) = &err else {
+        panic!("expected Error::Internal, got {err:?}");
+    };
+    assert!(
+        message.starts_with("provider `seat-a`: serialize request body: "),
+        "{message}"
+    );
+}

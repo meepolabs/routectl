@@ -3317,6 +3317,10 @@ mod stream_commit_tests;
 mod dispatch_divergence_tests;
 
 #[cfg(test)]
+#[path = "local_build_error_dispatch_tests.rs"]
+mod local_build_error_dispatch_tests;
+
+#[cfg(test)]
 #[path = "probe_activation_boundary_tests.rs"]
 mod probe_activation_boundary_tests;
 
