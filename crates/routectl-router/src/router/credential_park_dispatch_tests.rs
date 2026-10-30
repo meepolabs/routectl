@@ -49,6 +49,7 @@ pub(super) struct ScriptedProvider {
     script: Mutex<VecDeque<Step>>,
     refresh_err: Option<RefreshErr>,
     pub(super) calls: AtomicUsize,
+    pub(super) refreshes: AtomicUsize,
     hold: Option<Arc<Hold>>,
 }
 
@@ -81,6 +82,7 @@ impl ScriptedProvider {
             script: Mutex::new(script.iter().copied().collect()),
             refresh_err,
             calls: AtomicUsize::new(0),
+            refreshes: AtomicUsize::new(0),
             hold: None,
         })
     }
@@ -169,6 +171,7 @@ impl Provider for ScriptedProvider {
         })
     }
     async fn on_auth_failure(&self) -> Result<()> {
+        self.refreshes.fetch_add(1, Ordering::SeqCst);
         match self.refresh_err {
             Some(Some(reason)) => Err(Error::Credential {
                 detail: format!("oauth refresh failed for {}", self.id),

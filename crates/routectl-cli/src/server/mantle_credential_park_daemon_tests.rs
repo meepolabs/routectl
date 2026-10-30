@@ -1,8 +1,9 @@
-//! An expired Bedrock Mantle credential, end to end: a real daemon, real HTTP
+//! A rejected Bedrock Mantle credential, end to end: a real daemon, real HTTP
 //! into its ingress, a real openai-compat Mantle egress against a mock origin
-//! answering with the recorded expired-key 401. The terminal row carries the
-//! reason, the health panel shows the park, the served doctor warns about it,
-//! and the next request never reaches the origin.
+//! answering with a recorded expired-key or invalid-key 401. The terminal row
+//! carries the reason, the health panel shows the park, the served doctor
+//! warns about it, and the next request never reaches the origin. An expired
+//! key spends the one auth redial; an invalid key is dialed once.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -30,11 +31,13 @@ const BACKUP: &str = "backup";
 const UPSTREAM: &str = "openai.gpt-oss-120b-1:0";
 const REGION: &str = "us-east-1";
 const EXPIRED: &str = "credential-expired";
+const INVALID: &str = "credential-invalid";
 
-/// The recorded Mantle chat-vocabulary 401 for an expired API key.
-fn expired_401() -> ResponseTemplate {
-    let capture: Value = serde_json::from_str(MANTLE_CAPTURE).expect("capture is JSON");
-    let row = &capture["responses"]["mantle-chat-expired"];
+/// The recorded Mantle chat-vocabulary response named `capture`.
+fn recorded(capture: &str) -> ResponseTemplate {
+    let recording: Value = serde_json::from_str(MANTLE_CAPTURE).expect("capture is JSON");
+    let row = &recording["responses"][capture];
+    assert!(row.is_object(), "no recorded response {capture}");
     let status = u16::try_from(row["status"].as_u64().expect("status")).expect("u16 status");
     ResponseTemplate::new(status)
         .insert_header("content-type", "application/json")
@@ -257,10 +260,20 @@ async fn spawn(dir: &tempfile::TempDir, text: &str, router: Router) -> Daemon {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial_test::serial]
-async fn an_expired_mantle_key_is_stamped_parked_reported_and_then_skipped() {
+async fn a_rejected_mantle_key_is_stamped_parked_reported_and_then_skipped() {
+    let cases = [
+        ("expired key", "mantle-chat-expired", EXPIRED, 2),
+        ("invalid key", "mantle-chat-invalid", INVALID, 1),
+    ];
+    for (name, capture, reason, dials) in cases {
+        a_rejected_key_parks(name, capture, reason, dials).await;
+    }
+}
+
+async fn a_rejected_key_parks(name: &str, capture: &str, reason: &str, dials: usize) {
     let dir = tempfile::tempdir().expect("config tempdir");
     let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
-    let origin = mock(expired_401()).await;
+    let origin = mock(recorded(capture)).await;
     let text = config_text(None);
     let config = Arc::new(parse_config(&text).expect("valid mantle test config"));
     let daemon = spawn(&dir, &text, router(config, &origin.uri(), None)).await;
@@ -277,33 +290,44 @@ async fn an_expired_mantle_key_is_stamped_parked_reported_and_then_skipped() {
 
     assert!(
         health_row(&healthy, SEAT)["park_reason"].is_null(),
-        "positive control: the seat starts unparked: {healthy}"
+        "{name}: positive control: the seat starts unparked: {healthy}"
     );
-    assert_eq!(first_status, 401, "{first_body}");
-    assert!(dialed >= 1, "the first request reached the origin");
+    assert_eq!(first_status, 401, "{name}: {first_body}");
+    assert_eq!(dialed, dials, "{name}: dials before the park");
     assert_eq!(
         rows[0],
-        ("upstream_error".to_string(), Some(EXPIRED.into()))
+        ("upstream_error".to_string(), Some(reason.into())),
+        "{name}"
     );
 
     let parked = health_row(&health, SEAT);
-    assert_eq!(parked["park_reason"], EXPIRED, "{parked}");
+    assert_eq!(parked["park_reason"], reason, "{name}: {parked}");
     let until = parked["parked_until_ms"].as_i64().expect("park deadline");
-    assert!(until > chrono::Utc::now().timestamp_millis(), "{parked}");
+    assert!(
+        until > chrono::Utc::now().timestamp_millis(),
+        "{name}: {parked}"
+    );
 
     let warns = park_warns(&doctor);
-    assert_eq!(warns.len(), 1, "{doctor}");
-    assert_eq!(warns[0]["status"], "Warn");
-    assert_eq!(warns[0]["name"], format!("parked seat {SEAT}"));
+    assert_eq!(warns.len(), 1, "{name}: {doctor}");
+    assert_eq!(warns[0]["status"], "Warn", "{name}");
+    assert_eq!(warns[0]["name"], format!("parked seat {SEAT}"), "{name}");
     assert!(
-        warns[0]["detail"].as_str().unwrap().contains(EXPIRED),
-        "{}",
+        warns[0]["detail"].as_str().unwrap().contains(reason),
+        "{name}: {}",
         warns[0]
     );
 
-    assert_eq!(redialed, dialed, "the parked seat is never dialed again");
-    assert_eq!(second_status, 503, "{second_body}");
-    assert_eq!(rows[1], ("gate_blocked".to_string(), Some(EXPIRED.into())));
+    assert_eq!(
+        redialed, dialed,
+        "{name}: the parked seat is never dialed again"
+    );
+    assert_eq!(second_status, 503, "{name}: {second_body}");
+    assert_eq!(
+        rows[1],
+        ("gate_blocked".to_string(), Some(reason.into())),
+        "{name}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -311,7 +335,7 @@ async fn an_expired_mantle_key_is_stamped_parked_reported_and_then_skipped() {
 async fn a_first_401_a_fallback_recovers_from_writes_no_reason() {
     let dir = tempfile::tempdir().expect("config tempdir");
     let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
-    let mantle_origin = mock(expired_401()).await;
+    let mantle_origin = mock(recorded("mantle-chat-expired")).await;
     let backup_origin = mock(ok_200()).await;
     let text = config_text(Some(&backup_origin.uri()));
     let config = Arc::new(parse_config(&text).expect("valid mantle test config"));

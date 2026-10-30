@@ -19,7 +19,8 @@ use routectl_core::context_reduction::{ReductionDelta, ReductionOutcome, apply_j
 use routectl_core::failure_class::{ClassifiedFailure, FailureClass};
 use routectl_core::wire_check::{IngressDialect, WireTap};
 use routectl_core::{
-    ChatRequest, Error, Provider, RefusalReason, Result, TranslationReport, sanitize_for_log,
+    ChatRequest, Error, Provider, RefusalReason, Result, TranslationReport, UpstreamReason,
+    sanitize_for_log,
 };
 
 use crate::config::RetryPolicy;
@@ -743,9 +744,13 @@ impl Router {
                         // network-failure to token endpoint); surface
                         // that immediately rather than walk the
                         // fallback chain over a known-broken
-                        // credential.
+                        // credential. A 401 the upstream typed as an
+                        // invalid credential skips the redial: no
+                        // refresh revives a key that was never valid,
+                        // so it falls through to the terminal park.
                         if !auth_retry_attempted
                             && matches!(&e, Error::Upstream { status: 401, .. })
+                            && e.upstream_reason() != Some(UpstreamReason::CredentialInvalid)
                         {
                             auth_retry_attempted = true;
                             tracing::debug!(

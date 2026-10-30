@@ -3338,6 +3338,10 @@ use std::time::Instant;
 mod credential_park_dispatch_tests;
 
 #[cfg(test)]
+#[path = "credential_invalid_auth_retry_tests.rs"]
+mod credential_invalid_auth_retry_tests;
+
+#[cfg(test)]
 #[path = "probe_guard_generation_tests.rs"]
 mod probe_guard_generation_tests;
 
