@@ -91,6 +91,7 @@ pub(super) fn flush_fingerprint_tally(fingerprint: &ClientFingerprintStripTally)
 // ---------------------------------------------------------------------------
 
 pub fn translate(cfg: &BedrockConfig, req: &ChatRequest) -> Result<ConverseRequest> {
+    let _observation = crate::translation_drop_metrics::ObservationScope::enter(req);
     let mut fingerprint = ClientFingerprintStripTally::default();
     let translated = translate_tallied(cfg, req, &mut fingerprint);
     // Flushed on BOTH arms and outside every fallible step of the translation:

@@ -78,6 +78,7 @@ pub fn normalize(
     payload_extras: Option<&Value>,
     strict_translation: bool,
 ) -> Result<Value> {
+    let _observation = crate::translation_drop_metrics::ObservationScope::enter(req);
     // The one point every openai-compat egress request passes exactly
     // once, on both the Ok and the Err arm: it precedes the first
     // fallible step. This is the DENOMINATOR for this lane's

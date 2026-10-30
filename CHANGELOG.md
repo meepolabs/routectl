@@ -694,6 +694,8 @@ list with more narrative.
 
 ### Fixed
 
+- **Translation-drop counters count a client request once, not once per attempt.** A request that is retried on the same target, re-sent after a learned beta repair, or falls back to another lane is normalized again on each attempt, and each pass used to bump the lane's request count (`lane_seen`) and every `(lane, drop_class)` drop count again, so retries and repairs inflated both. The lane count and each drop class now advance only the first time a client request reaches that lane or loses that class, and the request's `translation_drops` usage column counts the distinct `(lane, drop_class)` pairs, equal to what the request added to the global drop counts. Policy-action counts are unchanged and still count every attempt, so a policy-action rate can now exceed 1.0 on a lane where requests are retried. A library caller that sets no per-request observation slot keeps the previous per-call counting.
+
 - **An invalid Bedrock Mantle key is no longer sent a second request before parking.** A 401 the upstream names as an invalid credential (`Invalid bearer token`) now parks the seat after its first request instead of spending the auth refresh-and-retry on a key no refresh can revive. An expired key keeps its one retry, and an unclassified 401 on an OAuth provider still refreshes and retries once.
 
 - **A routine OAuth token refresh no longer lifts every credential park.** routectl persists a refreshed token to the credentials file, and the reload that write triggered used to lift every park, so a rejected credential was re-dialed after each refresh. That reload now finds no seat changed and lifts nothing.

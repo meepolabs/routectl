@@ -168,6 +168,7 @@ pub fn translate(provider_id: &str, req: &ChatRequest) -> Result<GenerateContent
 /// withholding it and then failing -- counts exactly once. The ingress-extras
 /// withhold is reported there too, for the same reason.
 pub(super) fn provider_body(provider_id: &str, req: &ChatRequest) -> Result<Value> {
+    let _observation = crate::translation_drop_metrics::ObservationScope::enter(req);
     let client_extras = client_extras_for(
         req,
         Dialect::Gemini,

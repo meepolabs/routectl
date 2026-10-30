@@ -34,6 +34,7 @@ use crate::translation_drop_metrics::{
 /// false / `stream()` toggles it true; this orchestrator builds with
 /// `stream = false` and the caller flips as needed.
 pub fn translate(cfg: &OpenAiResponsesConfig, req: &ChatRequest) -> Result<ResponsesRequest> {
+    let _observation = crate::translation_drop_metrics::ObservationScope::enter(req);
     // The ONE per-lane denominator site for `openai-responses`. Placed at the
     // top of the orchestrator rather than inside a sub-module: this is the
     // only function every request on this lane passes through exactly once,

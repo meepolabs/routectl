@@ -50,6 +50,7 @@ pub(crate) const LANE: &str = PROVIDER_KIND;
 /// vendors, prefer Converse (vendor-neutral) -- the InvokeModel adapter
 /// here does not currently shape Mistral/Llama/Cohere bodies.
 pub fn normalize_request(cfg: &BedrockConfig, req: &ChatRequest) -> Result<Value> {
+    let _observation = crate::translation_drop_metrics::ObservationScope::enter(req);
     // The one point every Invoke request passes exactly once, on both the Ok
     // and the Err arm, ahead of the first fallible step: this lane's
     // request-volume DENOMINATOR. Exactly one call site per lane.

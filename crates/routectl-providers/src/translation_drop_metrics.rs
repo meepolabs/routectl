@@ -83,6 +83,24 @@
 //! not, so [`TranslationDropSnapshotEntry::drop_rate`] reports the drop RATE
 //! per lane instead of an uncontextualized count.
 //!
+//! # Per client request, not per normalize call
+//!
+//! One client request can be normalized several times: a same-target retry,
+//! a learned repair re-dispatched on the same target, a fallback hop. Each
+//! lane's synchronous request entry opens an observation scope (`ObservationScope`) over the
+//! request's `RequestObservation` slot for exactly the duration of that call,
+//! and [`record_translation_drop`] / [`record_translation_lane_seen`] consult
+//! it first: with a slot, the global `(lane, drop_class)` and `lane_seen`
+//! counters advance only on the request's FIRST sighting of that key, and the
+//! slot counts the distinct pairs it has seen. Without a slot (a library
+//! caller, or a drop site reached outside any lane entry), every call counts,
+//! as before. Policy actions never consult the slot and stay per call.
+//!
+//! The scope is a thread-local, set and restored by a guard inside the
+//! synchronous entry, so it never spans an `.await` and two requests on one
+//! runtime thread cannot see each other's slot. The guard restores on drop,
+//! including during a panic unwind.
+//!
 //! # Testing against this registry
 //!
 //! The registry is PROCESS-GLOBAL in every build except this crate's own
@@ -104,9 +122,12 @@
 //! Counters accumulate across the whole test binary, so an absolute
 //! expectation is wrong the moment a second test touches the key.
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 #[cfg(not(test))]
 use std::sync::{Mutex, OnceLock};
+
+use routectl_core::{ChatRequest, RequestObservation};
 
 /// `(lane, drop_class)` label pair identifying one counted drop kind. Both
 /// sides are `&'static str` literals named at the call site (e.g.
@@ -146,11 +167,52 @@ fn with_registry_mut<T>(f: impl FnOnce(&mut Registry) -> T) -> T {
     }
 }
 
+thread_local! {
+    static ACTIVE_OBSERVATION: RefCell<Option<RequestObservation>> =
+        const { RefCell::new(None) };
+}
+
+/// The observation slot the current thread's lane entry is translating for,
+/// installed for the guard's lifetime. Open it as the first statement of a
+/// lane's synchronous request entry and let it drop at the end of that call;
+/// it must never be held across an `.await`.
+#[must_use = "the scope ends as soon as the guard is dropped"]
+pub(crate) struct ObservationScope {
+    previous: Option<RequestObservation>,
+}
+
+impl ObservationScope {
+    /// Install `req`'s observation slot (or none) until the guard drops.
+    pub(crate) fn enter(req: &ChatRequest) -> Self {
+        let slot = req.routectl_internal.observation.clone();
+        let previous = ACTIVE_OBSERVATION.with_borrow_mut(|active| std::mem::replace(active, slot));
+        Self { previous }
+    }
+}
+
+impl Drop for ObservationScope {
+    fn drop(&mut self) {
+        let previous = self.previous.take();
+        ACTIVE_OBSERVATION.with_borrow_mut(|active| *active = previous);
+    }
+}
+
+/// Whether a counter keyed by `note`'s argument should advance: always
+/// without an active slot, otherwise only on the slot's first sighting.
+fn first_sighting(note: impl FnOnce(&RequestObservation) -> bool) -> bool {
+    ACTIVE_OBSERVATION.with_borrow(|active| active.as_ref().is_none_or(note))
+}
+
 /// Bump the drop counter for `(lane, drop_class)` by one. Call once per
 /// REQUEST from the existing tally-and-flush call site, never once per
 /// dropped block -- a request with three dropped blocks of the same class
-/// is one drop event, not three.
+/// is one drop event, not three. Inside a lane's observation scope the counter
+/// advances only the first time the client request sees this pair, however
+/// many times it is normalized.
 pub fn record_translation_drop(lane: &'static str, drop_class: &'static str) {
+    if !first_sighting(|slot| slot.note_translation_drop(lane, drop_class)) {
+        return;
+    }
     with_registry_mut(|reg| {
         let count = reg.drops.entry((lane, drop_class)).or_default();
         *count = count.saturating_add(1);
@@ -178,8 +240,12 @@ pub fn record_translation_policy_action(lane: &'static str, policy_class: &'stat
 /// caller already calls `flush()` unconditionally on both the drop and
 /// no-drop arm. One call site per lane: it is the shared denominator for
 /// both the drop and the policy-action numerator, so a second site would
-/// understate both rates for the whole lane.
+/// understate both rates for the whole lane. Inside a lane's observation scope
+/// it advances only the first time the client request reaches the lane.
 pub fn record_translation_lane_seen(lane: &'static str) {
+    if !first_sighting(|slot| slot.note_lane_seen(lane)) {
+        return;
+    }
     with_registry_mut(|reg| {
         let count = reg.lane_seen.entry(lane).or_default();
         *count = count.saturating_add(1);
@@ -195,12 +261,15 @@ pub struct TranslationDropSnapshotEntry {
     pub lane: &'static str,
     /// The deliberate-drop classification named at the call site.
     pub drop_class: &'static str,
-    /// Cumulative count of requests on which this `(lane, drop_class)` drop
-    /// fired at least once.
+    /// Cumulative count of client requests on which this `(lane,
+    /// drop_class)` drop fired at least once, however many times each was
+    /// normalized. A request carrying no observation slot counts once per
+    /// normalize call instead.
     pub drop_count: u64,
-    /// Cumulative count of requests [`record_translation_lane_seen`] has
-    /// observed for `lane`, regardless of drop_class. The denominator for
-    /// [`drop_rate`](Self::drop_rate).
+    /// Cumulative count of client requests that reached `lane`, regardless
+    /// of drop_class, counted once per request across retries, repairs and
+    /// fallback hops (once per normalize call for a request with no
+    /// observation slot). The denominator for [`drop_rate`](Self::drop_rate).
     pub lane_seen_count: u64,
 }
 
@@ -253,12 +322,15 @@ pub struct TranslationPolicyActionSnapshotEntry {
     pub lane: &'static str,
     /// The policy-action classification named at the call site.
     pub policy_class: &'static str,
-    /// Cumulative count of requests on which this `(lane, policy_class)`
-    /// action fired at least once.
+    /// Cumulative count of normalize calls on which this `(lane,
+    /// policy_class)` action fired at least once. Unlike the drop count it is
+    /// not deduplicated per client request: a retried or re-dispatched
+    /// request counts once per attempt that took the action.
     pub action_count: u64,
-    /// Cumulative count of requests [`record_translation_lane_seen`] has
-    /// observed for `lane`, regardless of class. The denominator for
-    /// [`action_rate`](Self::action_rate), shared with the drop counter.
+    /// Cumulative count of client requests that reached `lane`, regardless
+    /// of class, counted as [`TranslationDropSnapshotEntry::lane_seen_count`]
+    /// is. The denominator for [`action_rate`](Self::action_rate), shared with
+    /// the drop counter.
     pub lane_seen_count: u64,
 }
 
@@ -298,9 +370,9 @@ pub fn translation_policy_action_snapshot() -> Vec<TranslationPolicyActionSnapsh
     })
 }
 
-/// One lane's request-volume denominator: how many requests
-/// [`record_translation_lane_seen`] has observed for `lane`. `0` when the lane
-/// has never been marked seen.
+/// One lane's request-volume denominator: how many client requests reached
+/// `lane`, once per request (once per normalize call for a request with no
+/// observation slot). `0` when the lane has never been marked seen.
 ///
 /// Exists because [`translation_drop_snapshot`] exposes the denominator only
 /// hanging off a `(lane, drop_class)` row, so reading it before any drop class

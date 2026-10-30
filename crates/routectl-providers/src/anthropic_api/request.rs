@@ -1183,6 +1183,7 @@ pub(crate) fn normalize(
     terminal_anthropic_host: bool,
     forward_system_turns: bool,
 ) -> Result<Value> {
+    let _observation = crate::translation_drop_metrics::ObservationScope::enter(req);
     // The one point every anthropic-api egress request passes exactly once,
     // on both the Ok and the Err arm: `complete`, `stream` and `count_tokens`
     // all reach the wire body through here and nowhere else, and it precedes

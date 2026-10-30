@@ -369,6 +369,18 @@ mod streaming_role_parity_tests;
 ))]
 mod hosted_mcp_tool_egress_tests;
 
+// Every lane's request entry counts a client request once per observation
+// slot, and once per call without one.
+#[cfg(all(
+    test,
+    feature = "openai-compat",
+    feature = "anthropic-api",
+    feature = "openai-responses",
+    feature = "gemini",
+    feature = "bedrock"
+))]
+mod translation_drop_observation_tests;
+
 // Each provider's own `provider_kind=` token agrees with the shared table.
 #[cfg(test)]
 mod provider_kind_tests;
