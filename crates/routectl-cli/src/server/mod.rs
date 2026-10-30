@@ -227,3 +227,11 @@ mod mantle_credential_park_daemon_tests;
 #[cfg(test)]
 #[path = "essential_routeaway_daemon_tests.rs"]
 mod essential_routeaway_daemon_tests;
+
+#[cfg(test)]
+#[path = "observation_reconcile_daemon_tests.rs"]
+mod observation_reconcile_daemon_tests;
+
+#[cfg(test)]
+#[path = "observation_lifecycle_daemon_tests.rs"]
+mod observation_lifecycle_daemon_tests;
