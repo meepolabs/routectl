@@ -7,8 +7,12 @@
 //! rewrite:
 //!
 //! - 18 -> 17: v18 appended eight nullable `requests` columns and created
-//!   `ledger_gaps`. A v17 binary names every `requests` column it writes and
-//!   never touches `ledger_gaps`, so both stay in place.
+//!   `ledger_gaps` with its covering `idx_ledger_gaps_ts_ms` index. A v17
+//!   binary names every `requests` column it writes and never touches
+//!   `ledger_gaps`, so the columns, the table and its index all stay in
+//!   place. The shape check covers columns only: like every other index,
+//!   the gap index is tolerated, not verified, because no older binary
+//!   reads or depends on it.
 //! - 17 -> 16: v17 appended two nullable `capability_events` columns, which a
 //!   v16 binary never names.
 //!

@@ -28,7 +28,8 @@ pub struct ObservationTotals {
     pub field_repairs: i64,
     /// Summed `missing_terminals`.
     pub missing_terminals: i64,
-    /// `ledger_gaps` rows recorded inside the window.
+    /// `ledger_gaps` rows recorded inside the window: one per writer check
+    /// that found new drops, not one per drop episode.
     pub gap_rows: i64,
     /// Summed `ledger_gaps.dropped` over those rows: request rows lost.
     pub gap_dropped: i64,
@@ -43,22 +44,34 @@ impl ObservationTotals {
 }
 
 /// One statement so the request sums and the gap check read one snapshot.
-/// The `ledger_gaps` subquery scans the table: it holds one row per drop
-/// episode, so it stays far too small for an index on `ts_ms` to pay for its
-/// write and migration cost.
+/// Each side is a single-row aggregate, so the cross join yields exactly one
+/// row. `ledger_gaps` gains a row on every writer check that found new drops,
+/// which under sustained saturation is close to one row per message, so the
+/// gap side reads `idx_ledger_gaps_ts_ms` (covering `ts_ms` and `dropped`)
+/// rather than scanning the table.
 pub(super) const OBSERVATION_TOTALS_SQL: &str = "\
 SELECT
-    COALESCE(SUM(wire_losses), 0)       AS wire_losses,
-    COALESCE(SUM(translation_drops), 0) AS translation_drops,
-    COALESCE(SUM(local_refusals), 0)    AS local_refusals,
-    COALESCE(SUM(field_repairs), 0)     AS field_repairs,
-    COALESCE(SUM(missing_terminals), 0) AS missing_terminals,
-    (SELECT COUNT(*) FROM ledger_gaps
-      WHERE ts_ms >= ?1 AND ts_ms < ?2)                AS gap_rows,
-    (SELECT COALESCE(SUM(dropped), 0) FROM ledger_gaps
-      WHERE ts_ms >= ?1 AND ts_ms < ?2)                AS gap_dropped
-FROM requests
-WHERE ts_start >= ?1 AND ts_start < ?2";
+    r.wire_losses,
+    r.translation_drops,
+    r.local_refusals,
+    r.field_repairs,
+    r.missing_terminals,
+    g.gap_rows,
+    g.gap_dropped
+FROM
+    (SELECT
+        COALESCE(SUM(wire_losses), 0)       AS wire_losses,
+        COALESCE(SUM(translation_drops), 0) AS translation_drops,
+        COALESCE(SUM(local_refusals), 0)    AS local_refusals,
+        COALESCE(SUM(field_repairs), 0)     AS field_repairs,
+        COALESCE(SUM(missing_terminals), 0) AS missing_terminals
+     FROM requests
+     WHERE ts_start >= ?1 AND ts_start < ?2) AS r,
+    (SELECT
+        COUNT(*)                    AS gap_rows,
+        COALESCE(SUM(dropped), 0)   AS gap_dropped
+     FROM ledger_gaps
+     WHERE ts_ms >= ?1 AND ts_ms < ?2) AS g";
 
 /// Observation totals for requests whose `ts_start` is in `[from_ms, to_ms)`,
 /// and gap rows whose `ts_ms` is in the same half-open window.

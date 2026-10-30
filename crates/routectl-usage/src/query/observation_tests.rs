@@ -239,3 +239,64 @@ fn observation_totals_uses_ts_start_index() {
         "observation totals must use idx_requests_ts_start; plan was {plan:?}"
     );
 }
+
+#[test]
+fn dense_gap_rows_sum_inside_the_half_open_window_only() {
+    // Arrange: one gap row per millisecond strictly inside the window (one
+    // per message under saturation), plus identifying rows on each bound,
+    // alongside request rows so both halves of the statement are exercised.
+    let (_dir, _path, db) = open_db();
+    let inference = Some(Operation::Inference);
+    insert_row(&db, "in-window", FROM + 5, inference, same(4));
+    insert_row(&db, "outside", TO, inference, same(9));
+    for ts in (FROM + 1)..(TO - 1) {
+        insert_gap(&db, ts, 1);
+    }
+    insert_gap(&db, FROM - 1, 1_000);
+    insert_gap(&db, FROM, 10_000);
+    insert_gap(&db, TO - 1, 100_000);
+    insert_gap(&db, TO, 1_000_000);
+    let dense = TO - 1 - (FROM + 1);
+
+    // Act
+    let totals = observation_totals(&db, FROM, TO).expect("observation_totals");
+
+    // Assert: the dense run plus the `from` and `to - 1` rows; never the
+    // `from - 1` or `to` rows.
+    assert_eq!(counts_of(&totals), [4; 5]);
+    assert_eq!(totals.gap_rows, dense + 2);
+    assert_eq!(totals.gap_dropped, dense + 10_000 + 100_000);
+}
+
+#[test]
+fn gap_read_searches_the_covering_index_instead_of_scanning() {
+    // Arrange
+    let (_dir, _path, db) = open_db();
+    for ts in FROM..TO {
+        insert_gap(&db, ts, 1);
+    }
+
+    // Act
+    let plan: Vec<String> = db
+        .conn()
+        .prepare(&format!("EXPLAIN QUERY PLAN {OBSERVATION_TOTALS_SQL}"))
+        .expect("prepare explain")
+        .query_map([FROM, TO], |row| row.get::<_, String>(3))
+        .expect("query explain")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("collect explain");
+
+    // Assert
+    assert!(
+        plan.iter().any(|d| d.starts_with("SEARCH")
+            && d.contains("ledger_gaps")
+            && d.contains("USING COVERING INDEX idx_ledger_gaps_ts_ms")),
+        "the gap read must search the covering index; plan was {plan:?}"
+    );
+    assert!(
+        !plan
+            .iter()
+            .any(|d| d.starts_with("SCAN") && d.contains("ledger_gaps")),
+        "the gap read must not scan ledger_gaps; plan was {plan:?}"
+    );
+}

@@ -257,9 +257,12 @@ pub fn open(path: impl AsRef<Path>) -> Result<UsageDb, OpenError> {
 }
 
 /// Open the usage DB at `path` for reading only. Unlike `open`, this does
-/// NOT create the file, chmod it, switch journal modes, or migrate -- the
-/// daemon is the sole writer and may be live; a viewer must not mutate the
-/// file out from under it. WAL readers do not block the writer, but a busy
+/// NOT create the database file, chmod it, switch journal modes, or migrate:
+/// the daemon is the sole writer and may be live, and a viewer must not mutate
+/// the file out from under it. One side effect remains: opening a WAL
+/// database while its `-wal` / `-shm` sidecars are missing (daemon stopped)
+/// creates an empty `-wal` and a 32 KB `-shm`. They are never deleted and no
+/// data is written to them. WAL readers do not block the writer, but a busy
 /// timeout is still set for safety. A missing file or a missing `requests`
 /// table surfaces as `NoData` so the CLI can print a friendly message; a
 /// DB whose schema version does not exactly match this binary surfaces as
@@ -271,8 +274,10 @@ pub fn open_readonly(path: impl AsRef<Path>) -> Result<UsageDb, OpenError> {
 
 /// Open the usage DB at `path` for reading only with a small busy timeout,
 /// for the status surface that polls under load. Like `open_readonly` it
-/// does NOT create, chmod, migrate, or switch journal modes -- the daemon
-/// is the sole writer and may be live -- and it classifies a missing file /
+/// does NOT create the database file, chmod, migrate, or switch journal
+/// modes (the daemon is the sole writer and may be live), though it too
+/// creates an empty `-wal` and a 32 KB `-shm` when a WAL database's sidecars
+/// are missing (never deleting them or writing data to them). It classifies a missing file /
 /// missing `requests` table / schema mismatch identically (`NoData`,
 /// `VersionTooNew`, `VersionTooOld`). It differs in two ways: the busy
 /// timeout is `FASTFAIL_BUSY_TIMEOUT_MS` (well under the CLI viewer's 5s) so
@@ -333,13 +338,17 @@ pub fn open_rw(path: impl AsRef<Path>) -> Result<UsageDb, OpenError> {
 
 /// Shared read-only open sequence behind [`open_readonly`] and
 /// [`open_readonly_fastfail`]: reject a missing file as `NoData`, open the
-/// file `SQLITE_OPEN_READ_ONLY` (never `CREATE`, so a missing file is still
-/// rejected and nothing is created or migrated). It then applies
+/// file `SQLITE_OPEN_READ_ONLY` (never `CREATE`, so a missing database file is
+/// still rejected and never created or migrated). It then applies
 /// `busy_timeout_ms`, verifies the schema version matches this binary, and
 /// treats a missing `requests` table as `NoData`. When `check_wal` is set it
 /// additionally confirms WAL by READING the journal-mode pragma (never writing
-/// it), failing closed with `NotWal`. Neither path creates, chmods, migrates,
-/// or switches journal modes -- the daemon is the sole writer and may be live.
+/// it), failing closed with `NotWal`. Neither path creates the database file,
+/// chmods, migrates, or switches journal modes, because the daemon is the sole
+/// writer and may be live. The one file-system side effect is SQLite's own:
+/// reading a WAL database whose `-wal` / `-shm` sidecars are missing (daemon
+/// stopped) creates an empty `-wal` and a 32 KB `-shm`, which this open never
+/// deletes or writes data to.
 fn open_readonly_with_timeout(
     path: impl AsRef<Path>,
     busy_timeout_ms: u64,

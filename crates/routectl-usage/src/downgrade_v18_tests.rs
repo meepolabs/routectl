@@ -248,6 +248,13 @@ fn downgrades_a_fresh_v18_db_to_17_keeping_every_column_row_and_table() {
     let (_dir, path) = temp_db_path();
     fresh_v18_with_rows(&path);
     let before = file_state(&path);
+    assert!(
+        before
+            .schema
+            .iter()
+            .any(|(kind, name, _)| kind == "index" && name == "idx_ledger_gaps_ts_ms"),
+        "sanity: the fresh file carries the gap index the downgrade must keep"
+    );
 
     // Act
     downgrade_to(&path, 17).expect("downgrade");

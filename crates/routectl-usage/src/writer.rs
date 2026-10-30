@@ -362,6 +362,34 @@ fn now_epoch_ms() -> i64 {
         .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
 }
 
+/// Log one retention prune's outcome; a failure bumps the prune-error
+/// counter and the writer carries on. `table` prefixes the message, so the
+/// rendered text stays the documented "<table> retention prune ..." line.
+fn report_prune(
+    table: &'static str,
+    outcome: Result<PruneOutcome, rusqlite::Error>,
+    retention_days: u32,
+    counters: &UsageCounters,
+) {
+    match outcome {
+        Ok(PruneOutcome::Pruned { deleted }) => tracing::info!(
+            target: "routectl_usage::writer",
+            deleted,
+            retention_days,
+            "{table} retention prune complete"
+        ),
+        Ok(PruneOutcome::Skipped) => {}
+        Err(err) => {
+            counters.incr_prune_errors();
+            tracing::warn!(
+                target: "routectl_usage::writer",
+                error = %err,
+                "{table} retention prune failed -- continuing"
+            );
+        }
+    }
+}
+
 /// Consumer-thread entry point: open the DB (or degrade), prune once,
 /// then drain the channel until all senders are gone.
 fn run_writer(
@@ -610,47 +638,31 @@ impl WriterState {
 
     /// Run the one-shot startup retention prune. Best-effort: failures log
     /// a WARN and bump a counter but never abort the writer. Prunes the
-    /// `requests` table and the `capability_events` ledger (the latter
-    /// exempts the tombstone boundary and everything after it).
+    /// `requests` table, the `capability_events` ledger (the latter exempts
+    /// the tombstone boundary and everything after it), and `ledger_gaps`.
     fn prune_once(&self, retention_days: u32, counters: &Arc<UsageCounters>) {
         let Some(conn) = self.conn.as_ref() else {
             return;
         };
         let now = now_epoch_ms();
-        match retention::prune(conn, retention_days, now) {
-            Ok(PruneOutcome::Pruned { deleted }) => tracing::info!(
-                target: "routectl_usage::writer",
-                deleted,
-                retention_days,
-                "usage retention prune complete"
-            ),
-            Ok(PruneOutcome::Skipped) => {}
-            Err(err) => {
-                counters.incr_prune_errors();
-                tracing::warn!(
-                    target: "routectl_usage::writer",
-                    error = %err,
-                    "usage retention prune failed -- continuing"
-                );
-            }
-        }
-        match retention::prune_capability_events(conn, retention_days, now) {
-            Ok(PruneOutcome::Pruned { deleted }) => tracing::info!(
-                target: "routectl_usage::writer",
-                deleted,
-                retention_days,
-                "capability ledger retention prune complete"
-            ),
-            Ok(PruneOutcome::Skipped) => {}
-            Err(err) => {
-                counters.incr_prune_errors();
-                tracing::warn!(
-                    target: "routectl_usage::writer",
-                    error = %err,
-                    "capability ledger retention prune failed -- continuing"
-                );
-            }
-        }
+        report_prune(
+            "usage",
+            retention::prune(conn, retention_days, now),
+            retention_days,
+            counters,
+        );
+        report_prune(
+            "capability ledger",
+            retention::prune_capability_events(conn, retention_days, now),
+            retention_days,
+            counters,
+        );
+        report_prune(
+            "ledger gap",
+            retention::prune_ledger_gaps(conn, retention_days, now),
+            retention_days,
+            counters,
+        );
     }
 
     /// Persist one record, tracking degraded-state transitions. A real
@@ -1845,6 +1857,41 @@ mod tests {
             .expect("survivor");
         assert_eq!(survivor, "new");
         assert_eq!(row_count(&path), 1);
+    }
+
+    #[tokio::test]
+    async fn startup_prune_drops_old_gap_rows_and_keeps_in_window_ones() {
+        // Arrange: one gap row past a 30-day retention and one inside it.
+        let (_dir, path) = temp_path();
+        {
+            let db = crate::db::open(&path).expect("seed open");
+            let now = now_epoch_ms();
+            let day = 86_400_000i64;
+            for (ts, dropped) in [(now - 40 * day, 7), (now - day, 3)] {
+                db.conn()
+                    .execute(
+                        "INSERT INTO ledger_gaps (ts_ms, cause, dropped) \
+                         VALUES (?1, 'queue_full', ?2)",
+                        rusqlite::params![ts, dropped],
+                    )
+                    .expect("seed gap");
+            }
+        }
+
+        // Act
+        let (_handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 30, true);
+        writer.shutdown();
+
+        // Assert: only the in-window row survives.
+        let conn = Connection::open(&path).expect("read");
+        let survivors: Vec<i64> = conn
+            .prepare("SELECT dropped FROM ledger_gaps")
+            .expect("prepare")
+            .query_map([], |r| r.get(0))
+            .expect("query")
+            .collect::<Result<_, _>>()
+            .expect("collect");
+        assert_eq!(survivors, vec![3]);
     }
 
     #[tokio::test]

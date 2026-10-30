@@ -416,17 +416,26 @@ pub const CREATE_CAPABILITY_EVENTS_TS_INDEX: &str =
 
 /// DDL for the `ledger_gaps` table (v18).
 ///
-/// One row per batch of request rows the ledger lost because its queue was
-/// full: `ts_ms` is when the writer recorded the gap (epoch-millis), `cause`
+/// One row per writer check that found new request rows lost to a full
+/// queue: `ts_ms` is when the writer recorded the gap (epoch-millis), `cause`
 /// names why the rows were dropped, and `dropped` is how many were lost since
-/// the previous gap row. A time window containing a gap row is incomplete.
-/// Carries counts only, never request content.
+/// the previous gap row. The writer checks after every message, so sustained
+/// saturation writes close to one row per processed message. A time window
+/// containing a gap row is incomplete. Carries counts only, never request
+/// content.
 pub const CREATE_LEDGER_GAPS_TABLE: &str = "\
 CREATE TABLE IF NOT EXISTS ledger_gaps (
     ts_ms   INTEGER NOT NULL,
     cause   TEXT    NOT NULL,
     dropped INTEGER NOT NULL
 )";
+
+/// Covering index over `ledger_gaps (ts_ms, dropped)` (v18): the windowed gap
+/// count and sum, and the retention prune, read the index alone. The table
+/// can grow by one row per message under sustained saturation, so an
+/// unindexed window read would scan it.
+pub const CREATE_LEDGER_GAPS_TS_INDEX: &str =
+    "CREATE INDEX IF NOT EXISTS idx_ledger_gaps_ts_ms ON ledger_gaps (ts_ms, dropped)";
 
 /// DDL for the `meta` key/value table. Holds the DB creation timestamp
 /// and a human-readable copy of the schema version. Survives migrations.

@@ -69,6 +69,25 @@ pub fn prune_capability_events(
     Ok(PruneOutcome::Pruned { deleted })
 }
 
+/// Delete `ledger_gaps` rows recorded before the retention cutoff.
+///
+/// Uses the same window as [`prune`]: a gap row only qualifies the request
+/// rows of its window, so once those rows are gone the gap row has nothing
+/// left to mark incomplete. `retention_days == 0` is an explicit "keep
+/// everything" and returns `Skipped`.
+pub fn prune_ledger_gaps(
+    conn: &Connection,
+    retention_days: u32,
+    now_ms: i64,
+) -> Result<PruneOutcome, rusqlite::Error> {
+    if retention_days == 0 {
+        return Ok(PruneOutcome::Skipped);
+    }
+    let cutoff = now_ms.saturating_sub(i64::from(retention_days).saturating_mul(MS_PER_DAY));
+    let deleted = conn.execute("DELETE FROM ledger_gaps WHERE ts_ms < ?1", [cutoff])?;
+    Ok(PruneOutcome::Pruned { deleted })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -245,5 +264,58 @@ mod tests {
         // Assert
         assert_eq!(outcome, PruneOutcome::Skipped);
         assert_eq!(event_count(db.conn()), 2);
+    }
+
+    fn insert_gap(conn: &Connection, ts_ms: i64, dropped: i64) {
+        conn.execute(
+            "INSERT INTO ledger_gaps (ts_ms, cause, dropped) VALUES (?1, 'queue_full', ?2)",
+            rusqlite::params![ts_ms, dropped],
+        )
+        .expect("insert gap");
+    }
+
+    fn gap_dropped_values(conn: &Connection) -> Vec<i64> {
+        let mut stmt = conn
+            .prepare("SELECT dropped FROM ledger_gaps ORDER BY ts_ms")
+            .expect("prepare");
+        stmt.query_map([], |r| r.get(0))
+            .expect("query")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect")
+    }
+
+    #[test]
+    fn gap_prune_deletes_rows_before_the_cutoff_and_keeps_the_rest() {
+        // Arrange: 7-day retention puts the cutoff at day 3. Rows just
+        // before, at, and after it, plus an old and a fresh one.
+        let (_dir, db) = open_db();
+        let now = 10 * MS_PER_DAY;
+        let cutoff = now - 7 * MS_PER_DAY;
+        insert_gap(db.conn(), 0, 1);
+        insert_gap(db.conn(), cutoff - 1, 10);
+        insert_gap(db.conn(), cutoff, 100);
+        insert_gap(db.conn(), now - 1, 1000);
+
+        // Act
+        let outcome = prune_ledger_gaps(db.conn(), 7, now).expect("prune");
+
+        // Assert: strictly older than the cutoff goes; the cutoff row stays.
+        assert_eq!(outcome, PruneOutcome::Pruned { deleted: 2 });
+        assert_eq!(gap_dropped_values(db.conn()), vec![100, 1000]);
+    }
+
+    #[test]
+    fn gap_prune_zero_retention_keeps_everything() {
+        // Arrange
+        let (_dir, db) = open_db();
+        insert_gap(db.conn(), 0, 1);
+        insert_gap(db.conn(), 10 * MS_PER_DAY, 2);
+
+        // Act
+        let outcome = prune_ledger_gaps(db.conn(), 0, 100 * MS_PER_DAY).expect("prune");
+
+        // Assert
+        assert_eq!(outcome, PruneOutcome::Skipped);
+        assert_eq!(gap_dropped_values(db.conn()), vec![1, 2]);
     }
 }

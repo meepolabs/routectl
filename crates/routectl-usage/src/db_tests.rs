@@ -42,6 +42,24 @@ fn index_exists(conn: &Connection, name: &str) -> bool {
     .is_ok()
 }
 
+fn index_sql(conn: &Connection, name: &str) -> String {
+    conn.query_row(
+        "SELECT sql FROM sqlite_master WHERE type='index' AND name=?1",
+        [name],
+        |r| r.get(0),
+    )
+    .expect("index sql")
+}
+
+fn index_columns(conn: &Connection, name: &str) -> Vec<String> {
+    conn.prepare("SELECT name FROM pragma_index_info(?1) ORDER BY seqno")
+        .expect("prepare index_info")
+        .query_map([name], |r| r.get(0))
+        .expect("query index_info")
+        .collect::<Result<_, _>>()
+        .expect("index columns")
+}
+
 #[test]
 fn fresh_open_sets_version_tables_index_and_wal() {
     // Arrange
@@ -58,6 +76,7 @@ fn fresh_open_sets_version_tables_index_and_wal() {
     assert!(table_exists(db.conn(), "capability_events"));
     assert!(index_exists(db.conn(), "idx_requests_ts_start"));
     assert!(index_exists(db.conn(), "idx_capability_events_ts"));
+    assert!(index_exists(db.conn(), "idx_ledger_gaps_ts_ms"));
     assert_eq!(journal_mode(db.conn()).to_lowercase(), "wal");
 }
 
@@ -2131,6 +2150,16 @@ fn v17_to_v18_yields_the_same_schema_as_a_fresh_db_preserving_rows() {
             "{table}: a migrated v17 DB must be indistinguishable from a fresh v18 DB"
         );
     }
+    assert!(index_exists(&migrated, "idx_ledger_gaps_ts_ms"));
+    assert!(index_exists(fresh.conn(), "idx_ledger_gaps_ts_ms"));
+    assert_eq!(
+        index_sql(&migrated, "idx_ledger_gaps_ts_ms"),
+        index_sql(fresh.conn(), "idx_ledger_gaps_ts_ms")
+    );
+    assert_eq!(
+        index_columns(fresh.conn(), "idx_ledger_gaps_ts_ms"),
+        vec!["ts_ms".to_string(), "dropped".to_string()]
+    );
     assert_eq!(
         table_shape(fresh.conn(), "ledger_gaps"),
         vec![
@@ -2199,6 +2228,7 @@ fn v17_to_v18_failure_after_the_first_alter_leaves_the_file_at_v17() {
     assert_eq!(meta_schema_version(&conn), "17");
     assert_eq!(requests_column_names(&conn), columns_before);
     assert!(!table_exists(&conn, "ledger_gaps"));
+    assert!(!index_exists(&conn, "idx_ledger_gaps_ts_ms"));
 
     // Assert: once the fault is gone the same file migrates normally.
     conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
@@ -2288,6 +2318,7 @@ fn a_v1_db_climbs_the_whole_ladder_to_the_fresh_v18_shape() {
             "{table}: a v1 DB must climb to the fresh v18 shape"
         );
     }
+    assert!(index_exists(&conn, "idx_ledger_gaps_ts_ms"));
     let (extra, operation): (Option<String>, Option<String>) = conn
         .query_row(
             "SELECT extra, operation FROM requests WHERE request_id = 'v1-row'",

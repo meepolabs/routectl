@@ -11,9 +11,9 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
 use crate::capability_event::TOMBSTONE_VERDICT;
 use crate::schema::{
     CREATE_CAPABILITY_EVENTS_TABLE, CREATE_CAPABILITY_EVENTS_TS_INDEX,
-    CREATE_CAPABILITY_LEARN_EVENTS_TABLE, CREATE_LEDGER_GAPS_TABLE, CREATE_META_TABLE,
-    CREATE_REQUESTS_TABLE, CREATE_TS_START_INDEX, META_CREATED_AT_MS, META_LEGACY_CAPABILITY_PURGE,
-    META_SCHEMA_VERSION, SCHEMA_VERSION,
+    CREATE_CAPABILITY_LEARN_EVENTS_TABLE, CREATE_LEDGER_GAPS_TABLE, CREATE_LEDGER_GAPS_TS_INDEX,
+    CREATE_META_TABLE, CREATE_REQUESTS_TABLE, CREATE_TS_START_INDEX, META_CREATED_AT_MS,
+    META_LEGACY_CAPABILITY_PURGE, META_SCHEMA_VERSION, SCHEMA_VERSION,
 };
 
 /// Errors raised while migrating the usage DB. The caller can degrade
@@ -562,18 +562,20 @@ pub const V18_REQUESTS_COLUMNS: &[(&str, &str)] = &[
 
 /// Apply the v17 -> v18 step atomically: append the eight nullable
 /// request-observation columns to `requests` (no default, no CHECK), create
-/// the `ledger_gaps` table, bump `PRAGMA user_version` to 18, and update the
+/// the `ledger_gaps` table and its covering `ts_ms` index, bump `PRAGMA user_version` to 18, and update the
 /// human-readable `meta.schema_version` row. All in one transaction so a crash
 /// mid-step rolls back rather than landing a column-without-version state.
 /// Existing rows survive with every new column NULL -- no backfill, no rewrite.
 ///
 /// The step is strictly additive, so a v17 binary can be handed the file back
 /// after the version stamps are lowered: a v17 writer names its `requests`
-/// columns explicitly and never reads `ledger_gaps`.
+/// columns explicitly and never reads or writes `ledger_gaps`, so neither the
+/// table nor its index is visible to it.
 ///
 /// A FRESH DB reaches this arm too, its `requests` already created from the
 /// current DDL; so does a downgraded-then-reopened file. Each `ADD COLUMN` is
-/// therefore guarded by `column_exists`, and the table uses `IF NOT EXISTS`.
+/// therefore guarded by `column_exists`, and the table and index use
+/// `IF NOT EXISTS`.
 fn migrate_v17_to_v18(conn: &Connection) -> Result<(), rusqlite::Error> {
     let tx = conn.unchecked_transaction()?;
     for (column, declared_type) in V18_REQUESTS_COLUMNS {
@@ -584,6 +586,7 @@ fn migrate_v17_to_v18(conn: &Connection) -> Result<(), rusqlite::Error> {
         }
     }
     tx.execute_batch(CREATE_LEDGER_GAPS_TABLE)?;
+    tx.execute_batch(CREATE_LEDGER_GAPS_TS_INDEX)?;
     tx.execute_batch("PRAGMA user_version = 18")?;
     tx.execute(
         "INSERT INTO meta (key, value) VALUES (?1, ?2) \
