@@ -546,6 +546,28 @@ fn thrash_fires_only_for_auto_emitted_create_without_read() {
 }
 
 #[test]
+fn thrash_never_fires_for_any_decision_but_auto_emitted() {
+    // Arrange: every decision token the router can record other than an
+    // emitted breakpoint, each in the thrash-shaped create-without-read case.
+    let others: Vec<&str> = routectl_core::cache_decision::CACHE_DECISION_TOKENS
+        .iter()
+        .copied()
+        .filter(|token| *token != "auto_emitted")
+        .collect();
+
+    // Act
+    let flagged: Vec<&str> = others
+        .iter()
+        .copied()
+        .filter(|token| is_cache_thrash(Some(token), 300, 0))
+        .collect();
+
+    // Assert
+    assert_eq!(others.len(), 9, "nine non-emitting decisions");
+    assert!(flagged.is_empty(), "thrash flagged {flagged:?}");
+}
+
+#[test]
 fn cache_hit_pct_zero_read_is_zero() {
     // Arrange / Act / Assert: no read against a real prompt is 0%.
     assert_eq!(cache_hit_pct(0, 1000), 0);

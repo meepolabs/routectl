@@ -15,6 +15,7 @@
 
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use routectl_core::cache_decision::AUTO_EMITTED;
 use routectl_core::capability::{EvidenceSource, FailurePhase, Verdict};
 use routectl_core::failure_class::classify;
 use routectl_core::{Error, ObservationSnapshot, RequestObservation, ServedIdentity};
@@ -179,7 +180,7 @@ pub(crate) const fn outcome_for_dispatch_err(meta: &DispatchMeta) -> Outcome {
 
 /// True when an auto-emitted breakpoint created a cache entry that got no
 /// read this request -- the thrash signature. The router auto-emitted
-/// (`strategy == "auto_emitted"`), the upstream reported cache CREATION
+/// (`strategy` is [`AUTO_EMITTED`]), the upstream reported cache CREATION
 /// (`cache_creation > 0`), and NO cache READ (`cache_read == 0`). A
 /// caller-supplied or skipped strategy is never thrash here (routectl did
 /// not make the decision); a created-and-read entry is the healthy case.
@@ -190,7 +191,7 @@ pub(crate) fn is_cache_thrash(
     cache_creation: u64,
     cache_read: u64,
 ) -> bool {
-    strategy == Some("auto_emitted") && cache_creation > 0 && cache_read == 0
+    strategy == Some(AUTO_EMITTED) && cache_creation > 0 && cache_read == 0
 }
 
 /// Cache-EXCLUSIVE new input for the DB `input_tokens` column. This is
@@ -1323,7 +1324,7 @@ impl UsageCapture {
     /// the record); `cache_read` is the read count.
     fn emit_cache_outcome(&self) {
         let strategy = self.cache_strategy;
-        if strategy != Some("auto_emitted") {
+        if strategy != Some(AUTO_EMITTED) {
             return;
         }
         let cache_creation =
@@ -1340,7 +1341,7 @@ impl UsageCapture {
             tracing::warn!(
                 provider = %routectl_core::sanitize_for_log(provider),
                 model = %routectl_core::sanitize_for_log(model),
-                strategy = "auto_emitted",
+                strategy = AUTO_EMITTED,
                 cache_creation = cache_creation,
                 cache_read = cache_read,
                 "cache_auto_outcome",
@@ -1349,7 +1350,7 @@ impl UsageCapture {
             tracing::debug!(
                 provider = %routectl_core::sanitize_for_log(provider),
                 model = %routectl_core::sanitize_for_log(model),
-                strategy = "auto_emitted",
+                strategy = AUTO_EMITTED,
                 cache_creation = cache_creation,
                 cache_read = cache_read,
                 "cache_auto_outcome",
@@ -1384,7 +1385,7 @@ impl UsageCapture {
         let provider = self.record.provider.as_deref().unwrap_or("");
         let model = self.record.model.as_deref().unwrap_or("");
         let request_id = self.record.request_id.as_str();
-        let cache_active = cache_read > 0 || cache_creation > 0 || strategy == "auto_emitted";
+        let cache_active = cache_read > 0 || cache_creation > 0 || strategy == AUTO_EMITTED;
         if cache_active {
             tracing::info!(
                 request_id = %request_id,

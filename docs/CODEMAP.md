@@ -287,9 +287,11 @@ license.
   the ten tokens the `cache_auto_decision` log emits and the usage ledger's
   `cache_front_decision` / `cache_terminal_decision` columns persist
   (`AUTO_EMITTED`, `CALLER_SUPPLIED`, `VOLATILE_VETOED` and the seven
-  `AUTO_SKIPPED_*` decline reasons), collected in `CACHE_DECISION_TOKENS` with
-  the `is_known_cache_decision` membership predicate readers use to skip an
-  unrecognized token rather than panic. Single source for the spelling: the
+  `AUTO_SKIPPED_*` decline reasons). Production code names the individual
+  consts (the router's emitter, the cli capture's thrash signal); the
+  exhaustive `CACHE_DECISION_TOKENS` list compiles only under `test` or the
+  `test-utils` feature, for tests that check another surface covers every
+  token. Single source for the spelling: the
   router's `CacheInjection::strategy_str` maps its variants onto these consts
   instead of holding literals, so the emitted token and a reader's expectation
   cannot drift. CLOSED vocabulary (the emitting enum is exhaustive) and a

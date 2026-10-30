@@ -66,17 +66,3 @@ fn only_the_skip_reasons_carry_the_auto_skipped_prefix() {
         .count();
     assert_eq!(skips, 7, "seven decline reasons carry the prefix");
 }
-
-#[test]
-fn recognizes_known_tokens_and_rejects_unknown_ones() {
-    // Arrange + Act + Assert: readers depend on this to skip rather than
-    // panic on a token written by a newer build.
-    for token in CACHE_DECISION_TOKENS {
-        assert!(is_known_cache_decision(token), "{token} must be known");
-    }
-    assert!(!is_known_cache_decision(""));
-    assert!(!is_known_cache_decision("auto_skipped:"));
-    assert!(!is_known_cache_decision("auto_emitted "));
-    assert!(!is_known_cache_decision("AUTO_EMITTED"));
-    assert!(!is_known_cache_decision("auto_skipped:not_a_real_reason"));
-}

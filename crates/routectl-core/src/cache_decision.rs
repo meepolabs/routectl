@@ -15,6 +15,11 @@
 //! The vocabulary is CLOSED in the emitting direction (the router's enum
 //! is exhaustive) but readers stay open-set-tolerant: a row carrying an
 //! unrecognized token is skipped, never panicked on.
+//!
+//! Production code names the individual consts. The exhaustive list exists
+//! only for tests that check another surface (the usage schema comment, the
+//! cli thrash signal) against every token, so it compiles only under `test`
+//! or the `test-utils` feature.
 
 /// A breakpoint was injected in this marker's slot and validated. The one
 /// token in the vocabulary that means caching actually happened.
@@ -60,7 +65,8 @@ pub const AUTO_SKIPPED_VALIDATION_ROLLED_BACK: &str = "auto_skipped:validation_r
 
 /// Every cache-decision token. Exhaustive: the emitting enum is closed, so
 /// unlike the open-ended capability-key vocabulary this list IS the whole
-/// contract, which is what lets a test assert the emitter covers it.
+/// contract, which is what lets a test assert another surface covers it.
+#[cfg(any(test, feature = "test-utils"))]
 pub const CACHE_DECISION_TOKENS: &[&str] = &[
     AUTO_EMITTED,
     CALLER_SUPPLIED,
@@ -73,13 +79,6 @@ pub const CACHE_DECISION_TOKENS: &[&str] = &[
     AUTO_SKIPPED_K_BELOW_BREAK_EVEN,
     AUTO_SKIPPED_VALIDATION_ROLLED_BACK,
 ];
-
-/// Whether `token` is a recognized cache-decision token. Open-set-tolerant:
-/// a reader uses this to skip a row whose token is absent or unrecognized
-/// rather than panicking.
-pub fn is_known_cache_decision(token: &str) -> bool {
-    CACHE_DECISION_TOKENS.contains(&token)
-}
 
 #[cfg(test)]
 #[path = "cache_decision_tests.rs"]
