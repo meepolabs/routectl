@@ -48,11 +48,7 @@ fn direct(nickname: &str, provider_name: &str) -> Arc<ResolvedModel> {
 fn pooled(nickname: &str, members: &[&str]) -> Arc<ResolvedModel> {
     let seats: Vec<SeatTarget> = members
         .iter()
-        .map(|member| SeatTarget {
-            provider_name: (*member).to_string(),
-            provider: Arc::new(NullProvider),
-            auth_secret_ref: None,
-        })
+        .map(|member| SeatTarget::new((*member).to_string(), Arc::new(NullProvider), None, false))
         .collect();
     Arc::new(
         ResolvedModel::new(nickname, "pool", Arc::new(NullProvider), "u")

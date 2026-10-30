@@ -277,9 +277,7 @@ impl Router {
         seats
             .iter()
             .map(|s| {
-                let seat = crate::seat_pool::seat_identity(s.auth_secret_ref.as_ref());
-                let account = self.credential_account_for(&s.provider_name, seat.as_deref());
-                self.capacity_snapshot_for(&s.state_key_for(nickname), account.as_deref(), now)
+                self.capacity_snapshot_for(&s.state_key_for(nickname), s.account(), now)
                     .unwrap_or(
                         // Defensive: a seat with no state slot should never
                         // happen (install creates one per seat). If it does,

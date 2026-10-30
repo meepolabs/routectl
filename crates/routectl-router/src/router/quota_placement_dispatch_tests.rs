@@ -115,11 +115,12 @@ fn pooled_router_with_selection(selection: SeatSelection, quota_enabled: bool) -
             id: member.to_string(),
         });
         let member_ref = secret_ref(member);
-        seats.push(SeatTarget {
-            provider_name: member.to_string(),
+        seats.push(SeatTarget::new(
+            member.to_string(),
             provider,
-            auth_secret_ref: Some(member_ref.clone()),
-        });
+            Some(member_ref.clone()),
+            false,
+        ));
         providers.insert(
             member.to_string(),
             ProviderEntry::anthropic_api(member_ref.to_string()),

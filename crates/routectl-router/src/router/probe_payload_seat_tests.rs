@@ -457,13 +457,16 @@ fn pooled_router_named(
     let mut router = Router::new(Arc::new(config));
     let seats: Vec<crate::seat_pool::SeatTarget> = labels
         .into_iter()
-        .map(|name| crate::seat_pool::SeatTarget {
-            provider_name: name.to_string(),
-            provider: Arc::new(NamedSeatProvider {
-                id: name,
-                calls: Arc::clone(&calls),
-            }) as Arc<dyn Provider>,
-            auth_secret_ref: None,
+        .map(|name| {
+            crate::seat_pool::SeatTarget::new(
+                name.to_string(),
+                Arc::new(NamedSeatProvider {
+                    id: name,
+                    calls: Arc::clone(&calls),
+                }) as Arc<dyn Provider>,
+                None,
+                false,
+            )
         })
         .collect();
     let model = ResolvedModel::new(

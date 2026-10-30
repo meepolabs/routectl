@@ -926,11 +926,12 @@ async fn compile_pool(
             continue;
         }
         match build_provider_with_options(member, entry, secrets.clone(), opts.clone()).await {
-            Ok(provider) => seats.push(SeatTarget {
-                provider_name: member.clone(),
+            Ok(provider) => seats.push(SeatTarget::new(
+                member.clone(),
                 provider,
-                auth_secret_ref: Some(secret_ref),
-            }),
+                Some(secret_ref),
+                entry.forwarded_base_url().is_some(),
+            )),
             Err(e) => {
                 // The error text is deliberately NOT carried into the
                 // omission OR the log line: it can inline a credential path,

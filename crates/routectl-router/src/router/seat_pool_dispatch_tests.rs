@@ -86,14 +86,15 @@ fn pooled_router_with_members(
             id: (*member).to_string(),
             calls: counter,
         });
-        seats.push(SeatTarget {
-            provider_name: (*member).to_string(),
+        seats.push(SeatTarget::new(
+            (*member).to_string(),
             provider,
-            auth_secret_ref: Some(routectl_auth::SecretRef::OAuth {
+            Some(routectl_auth::SecretRef::OAuth {
                 provider: (*member).to_string(),
                 label: None,
             }),
-        });
+            false,
+        ));
         providers.insert(
             (*member).to_string(),
             ProviderEntry::anthropic_api(format!("oauth://{member}")),
@@ -529,14 +530,15 @@ fn sticky_birth_log_renders_the_seat_key_through_the_log_sanitizer() {
     let (router, _counters) = pooled_router(SeatSelection::StickyLeastLoaded);
     let nickname = format!("opus-{}", "\u{e9}t\u{e9}".repeat(50));
     let member = format!("anthropic-\u{1b}[31m-{}", "a".repeat(150));
-    let seats = [SeatTarget {
-        provider_name: member.clone(),
-        provider: Arc::new(SeatProvider {
+    let seats = [SeatTarget::new(
+        member.clone(),
+        Arc::new(SeatProvider {
             id: member.clone(),
             calls: Arc::new(AtomicUsize::new(0)),
         }),
-        auth_secret_ref: None,
-    }];
+        None,
+        false,
+    )];
     let raw_key = seats[0].state_key_for(&nickname);
     assert!(raw_key.chars().count() > 300);
 
@@ -724,11 +726,7 @@ fn two_pool_sticky_chain_router() -> Router {
                     id: (*member).to_string(),
                     calls: Arc::new(AtomicUsize::new(0)),
                 });
-                SeatTarget {
-                    provider_name: (*member).to_string(),
-                    provider,
-                    auth_secret_ref: None,
-                }
+                SeatTarget::new((*member).to_string(), provider, None, false)
             })
             .collect()
     }
@@ -898,11 +896,7 @@ fn one_pool_two_models_router() -> Router {
                     id: (*member).to_string(),
                     calls: Arc::new(AtomicUsize::new(0)),
                 });
-                SeatTarget {
-                    provider_name: (*member).to_string(),
-                    provider,
-                    auth_secret_ref: None,
-                }
+                SeatTarget::new((*member).to_string(), provider, None, false)
             })
             .collect::<Vec<_>>(),
     );
@@ -1114,11 +1108,7 @@ fn one_pool_two_round_robin_models_router() -> Router {
                     id: (*member).to_string(),
                     calls: Arc::new(AtomicUsize::new(0)),
                 });
-                SeatTarget {
-                    provider_name: (*member).to_string(),
-                    provider,
-                    auth_secret_ref: None,
-                }
+                SeatTarget::new((*member).to_string(), provider, None, false)
             })
             .collect::<Vec<_>>(),
     );
@@ -1262,14 +1252,15 @@ fn sticky_pool_router(members: &[&str]) -> Router {
             id: (*member).to_string(),
             calls: Arc::new(AtomicUsize::new(0)),
         });
-        seats.push(SeatTarget {
-            provider_name: (*member).to_string(),
+        seats.push(SeatTarget::new(
+            (*member).to_string(),
             provider,
-            auth_secret_ref: Some(routectl_auth::SecretRef::OAuth {
+            Some(routectl_auth::SecretRef::OAuth {
                 provider: (*member).to_string(),
                 label: None,
             }),
-        });
+            false,
+        ));
     }
     let mut pools = BTreeMap::new();
     pools.insert(

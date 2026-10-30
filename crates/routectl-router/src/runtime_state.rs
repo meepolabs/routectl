@@ -9,7 +9,7 @@
 //!
 //! A credential park is not per model: it belongs to the credential's account
 //! (`seat_pool::credential_account`), held in one router-level map of
-//! [`AccountCredential`] records, so a rejection observed through one model
+//! `AccountCredential` records, so a rejection observed through one model
 //! refuses every model on the same account. The model gate takes the
 //! account's park as an input, which is how a lapsed park re-tests through
 //! each model slot's own half-open claim.
@@ -65,30 +65,30 @@ impl CredentialPark {
 /// still matches, so an attempt admitted before a reload can neither re-park
 /// the account nor lift a park set after it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct AccountCredential {
+pub(crate) struct AccountCredential {
     park: Option<CredentialPark>,
     generation: u64,
 }
 
 impl AccountCredential {
     /// The account's park, if any.
-    pub const fn park(&self) -> Option<CredentialPark> {
+    pub(crate) const fn park(&self) -> Option<CredentialPark> {
         self.park
     }
 
     /// The generation an admission captures.
-    pub const fn generation(&self) -> u64 {
+    pub(crate) const fn generation(&self) -> u64 {
         self.generation
     }
 
     /// Park the account until `until`, replacing any earlier park.
-    pub const fn park_until(&mut self, reason: UpstreamReason, until: Instant) {
+    pub(crate) const fn park_until(&mut self, reason: UpstreamReason, until: Instant) {
         self.park = Some(CredentialPark { reason, until });
     }
 
     /// Park the account for [`CREDENTIAL_PARK_BACKSTOP`] from `now` only when
     /// `generation` is still current, returning whether it parked.
-    pub fn park_in_generation(
+    pub(crate) fn park_in_generation(
         &mut self,
         now: Instant,
         reason: UpstreamReason,
@@ -105,7 +105,7 @@ impl AccountCredential {
     /// whether it was eligible. A success admitted before a reload proves the
     /// old credential, not the one a rejection under the new generation
     /// parked.
-    pub const fn clear_in_generation(&mut self, generation: u64) -> bool {
+    pub(crate) const fn clear_in_generation(&mut self, generation: u64) -> bool {
         if generation != self.generation {
             return false;
         }
@@ -116,7 +116,7 @@ impl AccountCredential {
     /// Lift the park and start a new generation. Advances even when nothing is
     /// parked: the attempt that would park may still be in flight. Returns
     /// whether a park was lifted.
-    pub const fn reset(&mut self) -> bool {
+    pub(crate) const fn reset(&mut self) -> bool {
         let was_parked = self.park.is_some();
         self.park = None;
         self.generation = self.generation.wrapping_add(1);
@@ -491,7 +491,7 @@ impl ProviderState {
     }
 
     /// [`Self::capacity_snapshot`] for a model whose account carries `park`.
-    pub fn capacity_snapshot_under(
+    pub(crate) fn capacity_snapshot_under(
         &self,
         now: Instant,
         park: Option<CredentialPark>,
@@ -533,7 +533,7 @@ impl ProviderState {
     }
 
     /// [`Self::gate_status`] for a model whose account carries `park`.
-    pub fn gate_status_under(
+    pub(crate) fn gate_status_under(
         &self,
         now: Instant,
         park: Option<CredentialPark>,

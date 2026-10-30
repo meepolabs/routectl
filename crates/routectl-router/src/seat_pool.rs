@@ -53,9 +53,37 @@ pub struct SeatTarget {
     /// read this field -- it works through the seat's own `ManagedToken`,
     /// which already refreshes the correct credential.
     pub auth_secret_ref: Option<SecretRef>,
+    /// The seat's credential account ([`credential_account`]), derived once
+    /// when the seat set is built so placement and admission read it without
+    /// re-deriving it per request. `None` for a forwarded seat.
+    account: Option<Arc<str>>,
 }
 
 impl SeatTarget {
+    /// Build a seat for pool member `provider_name`, deriving its credential
+    /// account from `auth_secret_ref` and whether the member's entry
+    /// forwards the client's credential.
+    pub fn new(
+        provider_name: String,
+        provider: Arc<dyn Provider>,
+        auth_secret_ref: Option<SecretRef>,
+        forwarded: bool,
+    ) -> Self {
+        let seat = seat_identity(auth_secret_ref.as_ref());
+        let account = credential_account(seat.as_deref(), &provider_name, forwarded).map(Arc::from);
+        Self {
+            provider_name,
+            provider,
+            auth_secret_ref,
+            account,
+        }
+    }
+
+    /// The seat's credential account, or `None` for a forwarded seat.
+    pub fn account(&self) -> Option<&str> {
+        self.account.as_deref()
+    }
+
     /// This seat's key into `Router.state` under `nickname`: its own circuit
     /// breaker and RPM bucket entry.
     ///
@@ -747,13 +775,14 @@ mod tests {
             }
         }
 
-        SeatTarget {
-            provider_name: "anthropic-work".to_string(),
-            provider: Arc::new(NullProvider),
-            auth_secret_ref: Some(SecretRef::File(std::path::PathBuf::from(
+        SeatTarget::new(
+            "anthropic-work".to_string(),
+            Arc::new(NullProvider),
+            Some(SecretRef::File(std::path::PathBuf::from(
                 "/var/secrets/anthropic-work.key",
             ))),
-        }
+            false,
+        )
     }
 
     #[test]

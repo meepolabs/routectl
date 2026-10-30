@@ -222,12 +222,16 @@ fn a_pooled_seat_lane_is_the_member_entry_not_the_pool_or_the_account() {
     let p: Arc<dyn Provider> = Arc::new(StubProvider);
     let seats: Vec<SeatTarget> = ["alpha", "beta"]
         .iter()
-        .map(|member| SeatTarget {
-            provider_name: (*member).to_string(),
-            provider: Arc::clone(&p),
-            auth_secret_ref: Some(
-                routectl_auth::SecretRef::parse("oauth://acct#shared").expect("parse oauth ref"),
-            ),
+        .map(|member| {
+            SeatTarget::new(
+                (*member).to_string(),
+                Arc::clone(&p),
+                Some(
+                    routectl_auth::SecretRef::parse("oauth://acct#shared")
+                        .expect("parse oauth ref"),
+                ),
+                false,
+            )
         })
         .collect();
     let model = ResolvedModel::new("sonnet", "the-pool", Arc::clone(&p), "claude-sonnet")

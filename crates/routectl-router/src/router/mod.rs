@@ -2022,7 +2022,7 @@ struct DispatchTarget {
     /// (see [`crate::seat_pool::credential_account`]), derived at chain
     /// expansion once the forwarded fact is known. `None` for a forwarded
     /// credential, which is never parked.
-    account: Option<String>,
+    account: Option<Arc<str>>,
     /// Wire model id sent to the provider.
     upstream: String,
     /// Concrete provider instance.

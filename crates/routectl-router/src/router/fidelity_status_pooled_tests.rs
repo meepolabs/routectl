@@ -141,10 +141,13 @@ fn pooled_router(config: Config) -> Router {
     let provider: std::sync::Arc<dyn routectl_core::Provider> = std::sync::Arc::new(InertProvider);
     let seats: Vec<crate::seat_pool::SeatTarget> = [MEMBER, OTHER_MEMBER]
         .iter()
-        .map(|member| crate::seat_pool::SeatTarget {
-            provider_name: (*member).to_string(),
-            provider: std::sync::Arc::clone(&provider),
-            auth_secret_ref: None,
+        .map(|member| {
+            crate::seat_pool::SeatTarget::new(
+                (*member).to_string(),
+                std::sync::Arc::clone(&provider),
+                None,
+                false,
+            )
         })
         .collect();
     let resolved = ResolvedModel::new(

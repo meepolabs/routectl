@@ -482,61 +482,70 @@ async fn clear_all_credential_parks_lifts_every_seat() {
     assert_eq!(park_reason(&router, "m-b"), None);
 }
 
+/// How long the success settlement holds its account lock open for a
+/// concurrent rejection that must not get through it.
+const CONTENDED_FOR: Duration = Duration::from_millis(200);
+
 #[tokio::test]
 async fn a_success_settles_the_breaker_and_the_park_in_one_critical_section() {
     for surface in SURFACES {
-        // Arrange: a lapsed park whose re-test succeeds, and a rejection that
-        // tries to park the account from inside the success settlement.
+        // Arrange: a lapsed park whose re-test succeeds, and a rejection on
+        // the same account, admitted under the current generation, that a
+        // second thread settles through the real rejection path while the
+        // success settlement is inside its critical section.
         let primary = ScriptedProvider::new("p-a", &[Step::Ok]);
         let sibling = ScriptedProvider::new("p-b", &[Step::Ok]);
-        let router = chain_router(primary, sibling, false);
+        let router = Arc::new(chain_router(primary, sibling, false));
         assert!(router.park_credential_for_tests(
             "m-a",
             UpstreamReason::CredentialExpired,
             Instant::now()
         ));
-        let accounts = router.credential_accounts.clone();
-        let fired = Arc::new(AtomicBool::new(false));
-        let waited_for_the_settle = Arc::new(AtomicBool::new(false));
+        let generation = router.credential_generation_for_tests("m-a");
+        let blocked_inside_the_settle = Arc::new(AtomicBool::new(false));
+        let rejecter: Arc<Mutex<Option<std::thread::JoinHandle<bool>>>> = Arc::default();
         {
-            let (accounts, fired, waited) = (
-                accounts.clone(),
-                fired.clone(),
-                waited_for_the_settle.clone(),
+            let (router, blocked, rejecter) = (
+                router.clone(),
+                blocked_inside_the_settle.clone(),
+                rejecter.clone(),
             );
             super::credential_park::set_within_success_settle_hook(move || {
-                fired.store(true, Ordering::SeqCst);
-                match accounts.try_lock() {
-                    Some(mut accounts) => accounts.entry("#p-a".into()).or_default().park_until(
-                        UpstreamReason::CredentialInvalid,
-                        Instant::now() + CREDENTIAL_PARK_BACKSTOP,
-                    ),
-                    None => waited.store(true, Ordering::SeqCst),
-                }
+                let (started_tx, started_rx) = std::sync::mpsc::channel();
+                let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+                let handle = std::thread::spawn(move || {
+                    started_tx.send(()).expect("the hook is listening");
+                    let parked = router.settle_credential_rejection_for_tests(
+                        "m-a",
+                        &rejection("p-a", 403, INVALID),
+                        generation,
+                    );
+                    let _ = finished_tx.send(());
+                    parked
+                });
+                started_rx.recv().expect("the rejecter starts");
+                blocked.store(
+                    finished_rx.recv_timeout(CONTENDED_FOR).is_err(),
+                    Ordering::SeqCst,
+                );
+                *rejecter.lock() = Some(handle);
             });
         }
 
         // Act
         let served = dispatch(&router, surface, request(None, false)).await;
-        if waited_for_the_settle.load(Ordering::SeqCst) {
-            accounts
-                .lock()
-                .entry("#p-a".into())
-                .or_default()
-                .park_until(
-                    UpstreamReason::CredentialInvalid,
-                    Instant::now() + CREDENTIAL_PARK_BACKSTOP,
-                );
-        }
+        let handle = rejecter.lock().take();
+        let parked = handle.map(|h| h.join().expect("the rejecter finishes"));
 
         // Assert
         assert!(served, "{surface:?}");
-        assert!(
-            fired.load(Ordering::SeqCst),
-            "{surface:?}: the success must settle through the seat"
+        assert_eq!(
+            parked,
+            Some(true),
+            "{surface:?}: the rejection must run and park once the settlement releases"
         );
         assert!(
-            waited_for_the_settle.load(Ordering::SeqCst),
+            blocked_inside_the_settle.load(Ordering::SeqCst),
             "{surface:?}: the rejection must wait out the settlement's account lock"
         );
         assert_eq!(
@@ -926,13 +935,16 @@ fn pool_then_sibling_router(
     let seat_targets: Vec<SeatTarget> = members
         .iter()
         .zip(seats)
-        .map(|(member, provider)| SeatTarget {
-            provider_name: (*member).to_string(),
-            provider: provider as Arc<dyn Provider>,
-            auth_secret_ref: Some(routectl_auth::SecretRef::OAuth {
-                provider: (*member).to_string(),
-                label: None,
-            }),
+        .map(|(member, provider)| {
+            SeatTarget::new(
+                (*member).to_string(),
+                provider as Arc<dyn Provider>,
+                Some(routectl_auth::SecretRef::OAuth {
+                    provider: (*member).to_string(),
+                    label: None,
+                }),
+                false,
+            )
         })
         .collect();
     let default_provider = seat_targets[0].provider.clone();

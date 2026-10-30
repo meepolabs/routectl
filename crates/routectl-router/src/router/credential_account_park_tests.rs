@@ -417,13 +417,16 @@ async fn the_sticky_snapshot_reads_every_seat_of_a_parked_account_as_blocked() {
     );
     let seats: Arc<[crate::seat_pool::SeatTarget]> = members
         .iter()
-        .map(|member| crate::seat_pool::SeatTarget {
-            provider_name: (*member).to_string(),
-            provider: ScriptedProvider::new(member, &[Step::Ok]) as Arc<dyn Provider>,
-            auth_secret_ref: Some(routectl_auth::SecretRef::OAuth {
-                provider: (*member).to_string(),
-                label: None,
-            }),
+        .map(|member| {
+            crate::seat_pool::SeatTarget::new(
+                (*member).to_string(),
+                ScriptedProvider::new(member, &[Step::Ok]) as Arc<dyn Provider>,
+                Some(routectl_auth::SecretRef::OAuth {
+                    provider: (*member).to_string(),
+                    label: None,
+                }),
+                false,
+            )
         })
         .collect();
     let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
@@ -457,23 +460,40 @@ async fn the_sticky_snapshot_reads_every_seat_of_a_parked_account_as_blocked() {
 }
 
 #[tokio::test]
-async fn the_park_warn_names_the_account() {
-    // Arrange
-    let fx = accounts(&[Step::Reject(403, INVALID)], &[Step::Ok], &[Step::Ok]);
+async fn the_park_warn_names_the_account_through_the_log_sanitizer() {
+    let rows = [
+        ("plain entry name", "p-a", "#p-a"),
+        (
+            "entry name carrying an ANSI escape",
+            "p-\u{1b}[31ma",
+            "#p-?[31ma",
+        ),
+    ];
+    for (name, entry, expected) in rows {
+        // Arrange: the entry name passes config validation, which refuses
+        // only the seat-key separator and an oversized name.
+        assert_eq!(
+            crate::seat_pool::check_state_key_name("provider name", entry),
+            Ok(()),
+            "{name}: premise"
+        );
+        let rejecting = ScriptedProvider::new("p-a", &[Step::Reject(403, INVALID)]);
+        let router = router_over(&[("m-a", entry, rejecting)]);
 
-    // Act
-    let (_, events) = routectl_testkit::with_capture(Box::pin(async {
-        dispatch_err(&fx.router, Surface::Complete, to("m-a")).await
-    }))
-    .await;
+        // Act
+        let (_, events) = routectl_testkit::with_capture(Box::pin(async {
+            dispatch_err(&router, Surface::Complete, to("m-a")).await
+        }))
+        .await;
 
-    // Assert
-    let warn = events
-        .iter()
-        .find(|e| e.message == "seat credential rejected; parking the seat")
-        .expect("the park warns");
-    assert_eq!(warn.level, tracing::Level::WARN);
-    assert_eq!(warn.field("account"), Some("#p-a"));
+        // Assert
+        let warn = events
+            .iter()
+            .find(|e| e.message == "seat credential rejected; parking the seat")
+            .unwrap_or_else(|| panic!("{name}: the park warns"));
+        assert_eq!(warn.level, tracing::Level::WARN, "{name}");
+        assert_eq!(warn.field("account"), Some(expected), "{name}");
+    }
 }
 
 #[test]

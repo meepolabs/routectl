@@ -13,6 +13,7 @@
 //! holding a slot.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use routectl_core::{Error, UpstreamReason, sanitize_for_log};
@@ -152,6 +153,13 @@ impl Router {
         crate::seat_pool::credential_account(seat, provider_name, forwarded)
     }
 
+    /// The credential account of a non-pooled target, which carries no
+    /// precomputed seat account.
+    pub(super) fn direct_target_account(&self, target: &super::DispatchTarget) -> Option<Arc<str>> {
+        self.credential_account_for(&target.provider_name, target.seat.as_deref())
+            .map(Arc::from)
+    }
+
     /// The park on `account`, read under the account lock and released
     /// before the caller locks any model slot. `None` for no account.
     pub(super) fn account_park(&self, account: Option<&str>) -> Option<CredentialPark> {
@@ -171,7 +179,7 @@ impl Router {
             .values()
             .flat_map(|model| self.projection_targets(model))
             .find(|target| target.state_key == state_key)
-            .and_then(|target| target.account)
+            .and_then(|target| target.account.as_deref().map(str::to_string))
     }
 
     /// [`Self::account_for_state_key`] for the router's other test seams.

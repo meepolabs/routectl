@@ -92,11 +92,7 @@ fn pooled_siblings(calls: &Arc<AtomicUsize>) -> Router {
     let models = ["opus", "sonnet"]
         .into_iter()
         .map(|nickname| {
-            let seat = SeatTarget {
-                provider_name: "m1".into(),
-                provider: provider.clone(),
-                auth_secret_ref: None,
-            };
+            let seat = SeatTarget::new("m1".into(), provider.clone(), None, false);
             let model = ResolvedModel::new(nickname, "pool", provider.clone(), "u")
                 .with_seats(Arc::from(vec![seat]));
             (nickname.to_string(), Arc::new(model))

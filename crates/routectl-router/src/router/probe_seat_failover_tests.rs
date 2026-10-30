@@ -119,16 +119,13 @@ fn pooled_two_seat_router(
     seat_b_provider: Arc<dyn Provider>,
 ) -> Router {
     let seats = vec![
-        SeatTarget {
-            provider_name: "anthropic-a".to_string(),
-            provider: default_provider.clone(),
-            auth_secret_ref: None,
-        },
-        SeatTarget {
-            provider_name: "anthropic-b".to_string(),
-            provider: seat_b_provider,
-            auth_secret_ref: None,
-        },
+        SeatTarget::new(
+            "anthropic-a".to_string(),
+            default_provider.clone(),
+            None,
+            false,
+        ),
+        SeatTarget::new("anthropic-b".to_string(), seat_b_provider, None, false),
     ];
 
     let mut providers = BTreeMap::new();

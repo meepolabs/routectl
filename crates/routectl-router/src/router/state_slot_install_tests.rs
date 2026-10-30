@@ -44,11 +44,7 @@ fn direct(nickname: &str, provider_name: &str) -> Arc<ResolvedModel> {
 fn pooled(nickname: &str, members: &[&str]) -> Arc<ResolvedModel> {
     let seats: Vec<SeatTarget> = members
         .iter()
-        .map(|member| SeatTarget {
-            provider_name: (*member).to_string(),
-            provider: provider(),
-            auth_secret_ref: None,
-        })
+        .map(|member| SeatTarget::new((*member).to_string(), provider(), None, false))
         .collect();
     Arc::new(ResolvedModel::new(nickname, "pool", provider(), "u").with_seats(Arc::from(seats)))
 }
@@ -314,11 +310,7 @@ fn an_exact_identity_readded_after_an_empty_table_reuses_its_retained_slots() {
 fn pooled_via(nickname: &str, pool: &str, members: &[&str]) -> Arc<ResolvedModel> {
     let seats: Vec<SeatTarget> = members
         .iter()
-        .map(|member| SeatTarget {
-            provider_name: (*member).to_string(),
-            provider: provider(),
-            auth_secret_ref: None,
-        })
+        .map(|member| SeatTarget::new((*member).to_string(), provider(), None, false))
         .collect();
     Arc::new(ResolvedModel::new(nickname, pool, provider(), "u").with_seats(Arc::from(seats)))
 }

@@ -103,11 +103,7 @@ fn reported_model_survives_config_resolved_dispatch_relay() {
     let direct = into_one_dispatch_target(m.clone());
     assert_eq!(direct.reported_model.as_deref(), Some("public-label"));
 
-    let seat = crate::seat_pool::SeatTarget {
-        provider_name: "seat-a".to_string(),
-        provider: p.clone(),
-        auth_secret_ref: None,
-    };
+    let seat = crate::seat_pool::SeatTarget::new("seat-a".to_string(), p.clone(), None, false);
     let via_seat = dispatch_target_for_seat(&m, &seat, None);
     assert_eq!(via_seat.reported_model.as_deref(), Some("public-label"));
 }
@@ -136,11 +132,7 @@ fn visible_routectl_provider_survives_config_resolved_dispatch_relay() {
     let direct = into_one_dispatch_target(m.clone());
     assert!(!direct.visible_routectl_provider);
 
-    let seat = crate::seat_pool::SeatTarget {
-        provider_name: "seat-a".to_string(),
-        provider: p.clone(),
-        auth_secret_ref: None,
-    };
+    let seat = crate::seat_pool::SeatTarget::new("seat-a".to_string(), p.clone(), None, false);
     let via_seat = dispatch_target_for_seat(&m, &seat, None);
     assert!(!via_seat.visible_routectl_provider);
 }
@@ -163,11 +155,12 @@ fn seat_dispatch_target_carries_provider_kind() {
         id: "test-prov".into(),
         calls: AtomicUsize::new(0),
     });
-    let seats = vec![crate::seat_pool::SeatTarget {
-        provider_name: "test-prov".to_string(),
-        provider: provider.clone(),
-        auth_secret_ref: None,
-    }];
+    let seats = vec![crate::seat_pool::SeatTarget::new(
+        "test-prov".to_string(),
+        provider.clone(),
+        None,
+        false,
+    )];
     let model = Arc::new(
         ResolvedModel::new("nick", "test-prov", provider, "claude-x").with_seats(seats.into()),
     );
@@ -538,10 +531,8 @@ fn router_with_pooled_model(
 
     let seats: Vec<crate::seat_pool::SeatTarget> = members
         .iter()
-        .map(|member| crate::seat_pool::SeatTarget {
-            provider_name: (*member).to_string(),
-            provider: provider.clone(),
-            auth_secret_ref: None,
+        .map(|member| {
+            crate::seat_pool::SeatTarget::new((*member).to_string(), provider.clone(), None, false)
         })
         .collect();
 

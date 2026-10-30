@@ -109,11 +109,7 @@ fn pooled_router(selection: SeatSelection) -> Router {
     );
     let seats: Arc<[SeatTarget]> = MEMBERS
         .iter()
-        .map(|member| SeatTarget {
-            provider_name: (*member).to_string(),
-            provider: stub(),
-            auth_secret_ref: None,
-        })
+        .map(|member| SeatTarget::new((*member).to_string(), stub(), None, false))
         .collect::<Vec<_>>()
         .into();
     let mut router = Router::new(Arc::new(config));

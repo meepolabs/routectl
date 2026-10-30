@@ -201,10 +201,13 @@ fn expand_chain_to_targets_sets_flag_for_every_seat_of_a_forwarded_pool() {
     let router = Router::new(Arc::new(config));
     let seats: Vec<crate::seat_pool::SeatTarget> = ["fwd-a", "fwd-b"]
         .iter()
-        .map(|member| crate::seat_pool::SeatTarget {
-            provider_name: (*member).to_string(),
-            provider: spy.clone() as Arc<dyn Provider>,
-            auth_secret_ref: None,
+        .map(|member| {
+            crate::seat_pool::SeatTarget::new(
+                (*member).to_string(),
+                spy.clone() as Arc<dyn Provider>,
+                None,
+                true,
+            )
         })
         .collect();
     let model = Arc::new(

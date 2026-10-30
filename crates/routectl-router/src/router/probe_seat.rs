@@ -161,11 +161,7 @@ impl Router {
                     .map(|seat| ProbeSeat {
                         provider_name: seat.provider_name.clone(),
                         state_key: seat.state_key_for(nickname),
-                        account: self.credential_account_for(
-                            &seat.provider_name,
-                            crate::seat_pool::seat_identity(seat.auth_secret_ref.as_ref())
-                                .as_deref(),
-                        ),
+                        account: seat.account().map(str::to_string),
                         upstream: model.upstream.clone(),
                         provider: std::sync::Arc::clone(&seat.provider),
                     }),

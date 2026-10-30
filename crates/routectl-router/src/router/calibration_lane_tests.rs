@@ -80,11 +80,7 @@ fn model(nickname: &str, provider: &str, upstream: &str, window: Option<u32>) ->
 fn pooled(nickname: &str, pool: &str, members: &[&str], upstream: &str) -> ResolvedModel {
     let seats: Arc<[SeatTarget]> = members
         .iter()
-        .map(|member| SeatTarget {
-            provider_name: (*member).to_string(),
-            provider: stub(),
-            auth_secret_ref: None,
-        })
+        .map(|member| SeatTarget::new((*member).to_string(), stub(), None, false))
         .collect::<Vec<_>>()
         .into();
     model(nickname, pool, upstream, None).with_seats(seats)
