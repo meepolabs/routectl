@@ -32,8 +32,8 @@ license.
 ## routectl-core
 
 - `src/lib.rs` -- crate root; re-exports schema types, error type, Provider
-  trait, log helpers, the canonical-key allowlist, `UpstreamReason`, and
-  `RefusalReason`; declares the `provider_kind`, `upstream_reason` and
+  trait, log helpers, the canonical-key allowlist, `UpstreamReason`,
+  `RefusalReason`, and the request-observation types; declares the `provider_kind`, `upstream_reason` and
   `refusal_reason` modules
 - `src/schema.rs` -- canonical wire types: `ChatRequest`, `ChatResponse`,
   `ChatChunk`, `Message`, `MessageContent` (`has_non_text_part`),
@@ -57,13 +57,9 @@ license.
   closed `TranslationReason` (`HostedToolWithheld`, `TranslationRejected`)
   carrying only the date-stripped `TranslationKey`, never a label, URL or
   header; deduped, first-seen order; skipped for background probes
-- `src/request_observation.rs` -- `RequestObservation`: clone-shared
-  per-request slot (carried across fallback hops, unlike the per-attempt
-  slots) where router and providers bump wire losses, local refusals,
-  missing terminals, field repairs and first-sighting translation drops per
-  `(lane, class)`, plus the last `ServedIdentity` and the probe flag;
-  `snapshot` returns an `ObservationSnapshot`. Content-free: static tokens
-  and configured names only
+- `src/request_observation.rs` -- `RequestObservation`: the content-free
+  per-request observation slot shared across fallback hops (+ `ServedIdentity`);
+  `snapshot` returns an `ObservationSnapshot`
 - `src/config_dir.rs` -- the shared routectl config-folder rule: pure
   `config_dir_from` (absolute `XDG_CONFIG_HOME`, else absolute home +
   `.config`, joined with `routectl`; empty or relative counts as unset; on
@@ -704,12 +700,17 @@ license.
   Also `AccessDeniedDetail` (the 403 scrub input) and
   `aws_stream_exception_status` (in-stream exception member -> HTTP status)
 - `src/translation_drop_metrics.rs` -- process-wide `(lane, class)` translation
-  drop and policy-action counters with their snapshot readers, plus the
+  drop and policy-action counters with their snapshot readers; inside a lane's
+  `ObservationScope` the drop and lane-seen counters advance once per client
+  request (first sighting on the request's observation slot), plus the
   crate-internal `ClientFingerprintStripTally` and
   `carries_unmodeled_thinking_type` (the cross-dialect
   `thinking_type_unrepresentable` predicate); under `cfg(test)` the registry
   is per-thread, so this crate's unit tests assert counters without serial
   guards (integration tests share the process-global one)
+- `src/translation_drop_observation_tests.rs` -- cross-lane guard: every
+  lane's request entry counts a client request once however often it is
+  normalized when it carries an observation slot, once per call otherwise
 - `src/hosted_mcp_tool_egress_tests.rs` -- cross-lane guard: a Responses
   hosted-MCP tool's credentials reach no anthropic-api, Bedrock Invoke, or
   Converse body, still ship unchanged to a Responses upstream, and count one
@@ -2563,7 +2564,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   of starting every field verdict at a fresh cadence),
   `rebuild_calibration_from_ledger` (the same shape for the PRIVATE
   calibration store, supplying the lane predicate that drops a remapped or
-  removed upstream), `register`, `record_k_sample`,
+  removed upstream), `register`, `record_k_sample`, `live_samples` (a
+  `LiveSampleSink`: the two live sample stores, shared with hot-reload
+  successors, without the Router),
   `record_calibration_sample` (the live per-lane token-estimate evidence write;
   requires BOTH a served provider kind and the served wire upstream
   (`DispatchMeta::served_upstream`) or it forms no lane, and hashes the
@@ -4256,8 +4259,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   is the whole of what OFF does on the placement side -- no store read, no cap,
   no diagnostic), `record_quota_placement` (per-arm counters plus one
   throttled line, silent on the dormant arm so OFF leaves no trace), and
-  `apply_sticky_outcome` (stamps the selection_decision token, whose fixed
-  vocabulary quota never extends)
+  `apply_sticky_outcome` (applies the pin write the outcome implies; quota
+  changes which seat a birth picks, never the pin write)
 - `src/router/transcript_defect.rs` -- a tool pairing defect as a per-request
   provenance fact on the complete, stream and count_tokens walks:
   `record_transcript_defect` (validates once, stores
@@ -5448,12 +5451,14 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 
 Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   single background writer thread that persists one row per routed request to
-  a local SQLite DB. The hot path never blocks/awaits/panics; overflow and
-  disabled-gate drops are counted, not surfaced.
+  a local SQLite DB. The hot path never blocks/awaits/panics; overflow,
+  closed-channel and disabled-gate drops are counted, not surfaced.
 
 - `src/lib.rs` -- crate root; re-exports `UsageHandle` (+ the `#[doc(hidden)]`
   test-introspection `UsageCounters`),
-  `UsageRecord`/`Outcome`/`ParseOutcomeError`,
+  `UsageRecord`/`Outcome`/`Operation`/`Harness` (+ their parse errors),
+  `downgrade_to`/`SUPPORTED_TARGETS`/`DowngradeError`/`NotAdditiveReason`,
+  `observation_totals`/`ObservationTotals`,
   `UsageWriter`/`CHANNEL_CAPACITY`,
   `UsageDb`/`open`/`open_readonly`/`open_readonly_fastfail`/`open_rw`/`OpenError`,
   the read-side query surface
@@ -5469,12 +5474,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `MigrateError`, and the `SCHEMA_VERSION` constant; carries
   `#![warn(missing_docs)]`. `prune`/`prune_capability_events`/`PruneOutcome`
   and the `META_*` schema keys are crate-internal (not re-exported)
-- `src/record.rs` -- `UsageRecord` (one field per WRITTEN capture column --
-  the three write-stopped legacy decision columns carry no field; epoch-ms
-  `i64` timestamps, nullable `Option<T>` columns) and the closed `Outcome`
-  enum (`ok`, `upstream_error`, `client_disconnect`, `timeout`, `cancelled`,
-  `gate_blocked`) with `as_str`/`FromStr` wire tokens that mirror the DB CHECK
-  constraint
+- `src/record.rs` -- `UsageRecord` (one field per WRITTEN capture column, the
+  v18 request-observation fields included) and the closed `Outcome`,
+  `Operation` and `Harness` enums with their `as_str`/`FromStr` wire tokens
 - `src/capability_event.rs` -- the unified `capability_events` ledger write
   shape: `CapabilityEvent` (plain-type fields keeping the crate a leaf --
   `ts`, NORMALIZED `lane_key` / `capability`, open-set `verdict` / `phase` /
@@ -5580,15 +5582,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   blocks/awaits/panics -- safe from `Drop`), `try_send_capability_event` (the
   same best-effort discipline for a unified-ledger
   `CapabilityEvent`), runtime-flippable `enabled` gate, shared lock-free
-  `UsageCounters` (enqueued / dropped_full / dropped_disabled / persisted /
+  `UsageCounters` (enqueued / dropped_full / dropped_closed / dropped_disabled / persisted /
   write_errors / prune_errors plus the capability-event trio capability_events_enqueued /
   capability_events_dropped_full / capability_events_persisted)
-- `src/ledger_gap.rs` -- `GapTracker`, the writer thread's in-memory total of
-  queue-full request drops already recorded in `ledger_gaps`; after each
-  message and once after the receive loop the writer appends one
-  `(ts_ms, QUEUE_FULL_CAUSE, delta)` row when `dropped_full` has moved past
-  it (the total advances only on a committed insert). `QUEUE_FULL_CAUSE`
-  (`queue_full`) is the crate-internal cause token
+- `src/ledger_gap.rs` -- `GapTracker`: the writer thread's record of
+  queue-full request drops, appended to `ledger_gaps` as they occur
+  (`QUEUE_FULL_CAUSE` is the crate-internal cause token)
 - `src/query/mod.rs` -- read-query facade: owns the shared row/error types
   `QueryError` (`Sqlite` + `Interrupted`, the latter distinguishing a fired
   query deadline from a real DB fault, + `InvalidBucket` for a time-bucket grid
@@ -5600,7 +5599,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   prices by what it was, and a surface reporting at the kind-agnostic grain
   coalesces the partitions back together after pricing), `AggRow` and re-exports
   the whole read-side surface from its submodules so every symbol stays at
-  `routectl_usage::` unchanged
+  `routectl_usage::` unchanged. Also the `inference_rows!` predicate every
+  inference-population reader splices in to exclude token-count rows
 - `src/query/deadline.rs` -- `DeadlineGuard::install(db, deadline)`: the
   reusable connection-level read deadline (SQLite progress handler re-checked
   every 10_000 VM ops, detached on every exit path including unwind). Per
@@ -5668,14 +5668,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `ShadowMisfireSummary`, `NearLosslessAttributionSummary`, `KCalibration`,
   `ReuseSampleRow`); carries the COALESCE zero-row guards so a SUM/CASE over
   an empty ledger reads as 0 rather than erroring
-- `src/query/observation.rs` -- `observation_totals(db, from, to)` +
-  `ObservationTotals`: the five per-request observation counts
-  (`wire_losses`, `translation_drops`, `local_refusals`, `field_repairs`,
-  `missing_terminals`) summed over EVERY `requests` row with `ts_start` in
-  the half-open window (token-count rows included, NULL as 0), plus the
-  `ledger_gaps` rows / dropped total with `ts_ms` in the same window and
-  `has_gap()`. One statement over `idx_requests_ts_start`; `ledger_gaps` is
-  scanned (one row per drop episode). Tests: `observation_tests.rs`
+- `src/query/observation.rs` -- `observation_totals(db, from, to)` ->
+  `ObservationTotals`: a window's summed per-request observation counts plus
+  its `ledger_gaps` totals (`has_gap()`). Tests: `observation_tests.rs`
 - `src/query/reduction.rs` -- lossless-minifier (context-reduction) outcome
   read query; exports `reduction_summary` + `ReductionSummary` (per-decision
   request histogram over the OPEN `reduction_decision` token vocabulary plus
@@ -5779,8 +5774,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   serves every row kind with the command selecting the destination
   table. The one-shot startup
   prune
-  runs over both `requests` (`retention::prune`) and `capability_events`
-  (`retention::prune_capability_events`, tombstone-exempt)
+  runs over `requests` (`retention::prune`), `capability_events`
+  (`retention::prune_capability_events`, tombstone-exempt) and `ledger_gaps`
+  (`retention::prune_ledger_gaps`)
 - `src/db.rs` -- `UsageDb` wrapper + `open`: connection setup (WAL, foreign
   keys), the `INSERT OR IGNORE` write keyed on the UNIQUE `request_id`
   (idempotency), schema-presence assertions.
@@ -5829,7 +5825,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   count-pair `would_trim_path_units` / `would_trim_path_extractable` (kept
   unaveraged so the extractability rate reconstructs offline via SUM/SUM),
   `would_trim_recorder_version` (NULL on pre-recorder rows, stamped by the
-  near-lossless recorder), the capped JSON `would_trim_raw_marks`, and
+  near-lossless recorder), the capped JSON `would_trim_raw_marks` (now
+  WRITE-STOPPED: retained in the DDL, no longer bound), and
   `would_trim_context_fraction` (NULL when the pricing row's context window is
   unknown) -- columns only, the recorder pass computes their values (same
   `ALTER TABLE ... ADD COLUMN` discipline). v9 adds the separate append-only
@@ -5928,7 +5925,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `vocab_version INTEGER` (NULL vocabulary = legacy v1) via
   `migrate_v16_to_v17` (guarded `ALTER TABLE capability_events ADD COLUMN`
   x2, one transaction with the version bump, no backfill); strictly additive,
-  so `downgrade.rs` can hand the file back to a v16 binary
+  so `downgrade.rs` can hand the file back to a v16 binary. v18
+  (`SCHEMA_VERSION = 18`) appends the eight nullable request-observation
+  columns to `requests` and creates `ledger_gaps` +
+  `CREATE_LEDGER_GAPS_TS_INDEX` via `migrate_v17_to_v18`; also additive
 - `src/migrate.rs` -- forward-only schema migration / version stamping against
   the `meta` table; also `purge_legacy_capability_observations(conn)`, a
   one-shot data step (no version bump) that deletes NULL-vocabulary
@@ -5936,27 +5936,17 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   guarded by the `META_LEGACY_CAPABILITY_PURGE` marker (value = deleted count,
   marker and delete in one transaction); called from the writer's open, not
   from `db::open`
-- `src/downgrade.rs` -- the ONE backward step: `downgrade_to_v16(path)`
-  re-stamps an exactly-additive v17 file (`PRAGMA user_version` and
-  `meta.schema_version` to 16, one transaction, no column or row touched) so a
-  v16 binary opens it. Refuses with a `DowngradeError` and leaves the file
-  untouched on a missing file (never created), a version other than 17, a meta
-  mirror that disagrees, a `capability_events` column list (read through
-  `PRAGMA table_xinfo`: name, declared type, `NOT NULL`, default, primary-key
-  position, hidden flag) other than the frozen v16 set followed by plain
-  nullable `provider_kind TEXT`, `vocab_version INTEGER` (`NotAdditive`
-  carrying a `NotAdditiveReason`: `ColumnCount` or `ColumnShape`, never the
-  file-supplied column text), or
-  `InUse` when any other connection has the file open: it sets
-  `locking_mode = EXCLUSIVE` before its first read, and in WAL mode the first
-  transaction then fails busy while any other connection (the daemon's writer,
-  a viewer) is attached
+- `src/downgrade.rs` -- offline re-stamp rollback: `downgrade_to(path,
+  target)` runs the additive `STEPS` (18 -> 17, 17 -> 16) down to a target in
+  `SUPPORTED_TARGETS`; any refusal is a `DowngradeError` that leaves the file
+  untouched (the daemon must be stopped)
 - `src/retention.rs` -- `prune` (startup-only, best-effort) dropping
   `requests` rows older than the configured retention window, and
   `prune_capability_events` (same shape for the `capability_events` ledger)
   which age-prunes only rows before the latest tombstone's rowid so the
   tombstone boundary and every row after it survive regardless of age (no
-  tombstone -> ordinary age prune); `PruneOutcome` counters
+  tombstone -> ordinary age prune), and `prune_ledger_gaps` (the `requests`
+  window applied to `ledger_gaps`); `PruneOutcome` counters
 - `src/production_inventory_tests.rs` -- the DECLARED inventory of this crate's
   production modules, reconciled against a filesystem walk of `src/` so a new
   undeclared module (or a stale declared one) goes RED; a planted-file fixture
@@ -6104,6 +6094,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   lane refused (a graceful restart on the same ledger restores the
   negatives) sends the request to that lane, and count_tokens is never
   refused; declared from `server/mod.rs`
+- `src/server/observation_reconcile_daemon_tests.rs` -- assembled-daemon
+  reconciliation of the five per-request observation counts: live counter,
+  row column and ledger totals agree; declared from `server/mod.rs`
+- `src/server/observation_lifecycle_daemon_tests.rs` -- assembled-daemon
+  abnormal-exit rows (`client_disconnect` vs `cancelled`) and a ledger gap
+  read back across a restart; declared from `server/mod.rs`
 - `src/server/capability_boundary.rs` -- the replay boundary a
   revision-changing reload must commit BEFORE it publishes the replacement
   router, in two phases. `admit_capability_boundary(usage, router) ->
@@ -6556,7 +6552,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `src/handlers/messages_count_tokens.rs` -- `POST /v1/messages/count_tokens`
   proxy that walks the chain to the first seat able to count in the
   caller's Anthropic tokenizer (`seat_can_count_tokens`); captures the
-  posted body via `capture_ingress_wire` right after parse
+  posted body via `capture_ingress_wire` right after parse; writes one
+  `Operation::CountTokens` usage row through `UsageCapture`
 - `src/handlers/responses.rs` -- `POST /v1/responses` thin wrapper around
   `ingress_handle` with `ResponsesIngress`
 - `src/handlers/ingress_handle.rs` -- generic ingress driver: parse + route +
@@ -6585,7 +6582,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   channel close rather than waiting for a send to fail) or on `Err` emits ONE
   terminal in-stream `render_error_eos` + finalizes `UpstreamError` with the
   `pre_content_dispatch` stage marker (`observe_meta` relocated into the task;
-  Drop `client_disconnect` reserved for genuine cancellation). Also owns the
+  Drop `cancelled` reserved for an unobserved exit). Also owns the
   forwarded-mode (pure-proxy) ingress path: `enforce_pure_proxy_admission`
   (the shared admission gate all three dialect handlers funnel through, backed
   by the pure `classify_pure_proxy_rejection` decision core over
@@ -6617,13 +6614,15 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `src/handlers/ingress_wire.rs` -- `capture_ingress_wire`: right after parse,
   attaches the posted body (refcount), its dialect (from `provenance`) and the
   client version (stable Claude CLI version, else the first safe
-  user-agent `product/version` token) as `routectl_internal.ingress_wire`
+  user-agent `product/version` token) as `routectl_internal.ingress_wire`;
+  `classify_harness` maps the user-agent to the closed usage `Harness` token
 - `src/handlers/response_wire.rs` -- client side of the response-leg wire
   check: `ClientSink` / `ClientStreamCheck` (built with the rendering ingress
   adapter's id) fold the frames `drive_stream` sends when the dispatch carried
   a `ResponseCheck` and hand them to `compare_traced_stream` at drop;
   `CheckedBody`, `response_edits_for` and `abandon_unrendered` serve the
-  complete path
+  complete path; `PendingRow` holds the rendered response's usage row (and
+  live samples) inside `CheckedBody` until the body is sent or dropped
 - `src/handlers/credential_message.rs` -- the fixed client message for a
   local `Error::Credential`: the reason token and, when every reachable seat is parked,
   the remaining wait in seconds; never the provider id or OAuth detail
@@ -6726,8 +6725,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   request shape + `RequestId` (`build_usage_draft`), the
   dispatch/token/quota/outcome columns are stamped from `DispatchMeta` +
   `ChatResponse`/`ChatChunk` + `UpstreamMeta`, `finalize(outcome)` emits the
-  row once (idempotent), and the Drop fallback stamps `client_disconnect` for
-  a cancelled/disconnected request. Also subsumes the egress stream
+  row once (idempotent), and the Drop fallback stamps `cancelled` for a
+  request whose exit was never observed (an observed hangup finalizes
+  `client_disconnect` first). Also subsumes the egress stream
   trace-summary line. Owns the outcome-mapping helpers
   (`outcome_for_dispatch_err`, `error_class_of`) and the auto-cache outcome
   signal (`is_cache_thrash` + `emit_cache_outcome`: `cache_auto_outcome` at
@@ -6886,7 +6886,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   provenance tokens `override`/`learned`, signal-tier
   tokens) plus the `unavailable` reason codes
   (`no_data`/`schema_mismatch`/`db_busy`/`db_unavailable`/`config_unavailable`/`doctor_unavailable`/`no_config_path`/`query_timeout`)
-- `src/handlers/status/query.rs` -- `QUERY /status/query` (schema_version 1),
+- `src/handlers/status/query.rs` -- `QUERY /status/query` (schema_version 2),
   the grouped windowed aggregate. Three EXCLUSIVE regimes: 405 (method is not
   `QUERY`, guarded by the handler's first extractor), 400 (body outside the
   closed vocabulary -- `deny_unknown_fields` + closed `window`
@@ -6895,7 +6895,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   alias/provider filters -- or over `MAX_BODY_BYTES` (8 KiB), or still arriving
   at the `BODY_READ_TIMEOUT` (1s) read deadline that stops a stalled send from
   parking a concurrency permit; all refused with the FIXED envelope
-  `{"schema_version":1,"error":{"code":"invalid_query",...}}` that never echoes
+  `{"schema_version":2,"error":{"code":"invalid_query",...}}` that never echoes
   serde text or body bytes and never opens the ledger), and 200 for everything
   else including every data-source failure. Runs `routectl_usage::query` under
   the same isolation as the panels (`guard_panel` blocking worker +
@@ -6969,12 +6969,14 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `/status/usage?window=today|week|month|all` (default today). Opens the
   ledger read-only PER REQUEST via `open_readonly_fastfail` inside
   `guard_panel`'s blocking worker, runs
-  `aggregate`/`errors_by_class`/`latest_quota_by_seat`/`would_trim_summary` over the
+  `aggregate`/`errors_by_class`/`latest_quota_by_seat`/`would_trim_summary`/`window_observation` over the
   `window_bounds` window, and maps to the aggregates-only `UsagePanel` DTO
-  (schema_version 3: per-`(alias,provider,model,upstream)` rollups + windowed
+  (schema_version 4: per-`(alias,provider,model,upstream)` rollups + windowed
   totals + one per-seat quota snapshot each (`seat` + `provider_kind`, per-row
-  `ts_start_ms` freshness) + would-trim summary; per-group and totals
+  `ts_start_ms` freshness) + would-trim summary + the window's `observation`
+  block; per-group and totals
   `errors_by_class` failure-class breakdown, `client_disconnect_total` +
+  `cancelled_total` +
   reporting-only `cache_read_present` denominator; NEVER request
   rows/ids/bodies/prompts). The ledger reads group at a FINER grain than the
   panel reports (they carry each row's persisted `provider_kind` so cost is
@@ -6989,7 +6991,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `query_error_code` also owns the `query_timeout` arm
   (`QueryError::Interrupted`). `build_panel` anchors ONE `USAGE_BUDGET_MS`
   deadline inside the blocking closure and `collect` installs a single
-  `DeadlineGuard` on the per-request connection, so all four reads share one
+  `DeadlineGuard` on the per-request connection, so all five reads share one
   budget and an overrun sheds `query_timeout` instead of starving a worker
 - `src/handlers/status/health.rs` -- `/status/health` (schema_version 8).
   Snapshots the router through the read-only facade ONCE (`router.view()`) and
@@ -7102,13 +7104,16 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   local-refusal rows per (lane, reason). Closed labels, sanitized paths and
   counts only
 - `src/handlers/status/usage_health.rs` -- `UsageHealthView`, a counters-only
-  facade over the usage writer's shared `Arc<UsageCounters>`, with two reads:
+  facade over the usage writer's shared `Arc<UsageCounters>`, with three reads:
   `writer_degraded()` (latching, derived from the monotonic write-error count --
   it over-reports a recovered writer rather than under-reporting a live fault)
   feeding the fidelity line's `rc_usage_writer_degraded`, and
   `capability_writes()` -> `CapabilityWriteCounters` (the three
   capability-persistence failure counters, reported apart rather than summed)
-  for the doctor panel. A facade rather than the writer's producer handle:
+  for the doctor panel, and `ledger_health()` -> `LedgerHealth` (the
+  request-row loss counters). Also `window_observation` -> `WindowObservation`,
+  a window's ledger observation totals judged complete or not against those
+  counters (read by the usage and doctor panels). A facade rather than the writer's producer handle:
   `StatusState`'s contract is that it carries no handle that could enqueue rows,
   and a lexical guard in `mod.rs` refuses that type's name in every status source
 - `src/handlers/status/config.rs` -- `/status/config`. Renders the
@@ -7169,7 +7174,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `capability_writer_unavailable`) read once through
   `UsageHealthView::capability_writes`, `lossy_repairs_by_lane` (the
   facade's per-lane lossy field-repair rows), and the budget-exhaustion and
-  repairs-per-request rows. Config-load errors are already redacted inside the gather (no
+  repairs-per-request rows, plus `ledger_health` and today's `observation`
+  block (the block alone is omitted when the ledger cannot be read). Config-load errors are already redacted inside the gather (no
   second copy). `config_path: None` -> `no_config_path` unavailable; a gather
   failure -> `doctor_unavailable`
 - `src/handlers/status/doctor_tests.rs` -- `#[path]` sidecar coverage of the
@@ -8194,10 +8200,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   (clamped never below the window's own lower bound), then widens the requested
   `hour`/`day` width by a whole multiple (i128 intermediates) until the count fits
   the cap, so the grid always covers the window and never exceeds it
-- `src/commands/usage_downgrade.rs` -- `routectl usage downgrade --to 16 [--db
-  P]`: the offline rollback step over `routectl_usage::downgrade_to_v16`
-  (refuses while the daemon or any reader has the DB open, or on a file that
-  is not exactly additive v17); prints the re-stamped path, exits 1 on refusal
+- `src/commands/usage_downgrade.rs` -- `routectl usage downgrade --to 17|16
+  [--db P]`: the offline rollback over `routectl_usage::downgrade_to` (a v18
+  file taken to 16 runs both steps); prints the re-stamped path, exits 1 on
+  refusal
 - `src/commands/opening_accuracy/mod.rs` -- `routectl usage
   --opening-accuracy`, the read-only context meter release-gate report over an
   explicit window: builds `OpeningAccuracyReport` from
@@ -8584,7 +8590,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `src/commands/doctor_panels.rs` -- doctor's read-only would-trim opportunity
   panel, kept apart from the aggregator so the compute/map/render seam is
   unit-testable against a temp DB. `compute_would_trim_panel(config, now) ->
-  Option<WouldTrimPanel>` opens the usage DB via `open_readonly` and
+  Option<WouldTrimPanel>` opens the usage DB via `open_readonly_fastfail` and
   summarizes the all-time window (best-effort: a missing/unmigrated DB or any
   read failure -> `None`, never fails the surrounding diagnostic; a present DB
   with zero candidates -> a `Some` all-zero panel); `now` is injected for
