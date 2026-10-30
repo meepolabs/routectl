@@ -485,7 +485,9 @@ pub(super) async fn handle_credentials_reload(
     // A seat this process refreshed itself reads as unchanged, so a routine
     // token refresh lifts nothing.
     log_lifted_parks(
-        router_swap.load().lift_credential_parks(&changed_seats),
+        router_swap
+            .load()
+            .lift_oauth_credential_parks(&changed_seats),
         "credentials",
     );
 

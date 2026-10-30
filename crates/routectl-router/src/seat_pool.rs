@@ -91,7 +91,9 @@ impl SeatTarget {
     /// contract, so a flaky model-on-account combination must not open the
     /// breaker for healthy sibling models on the same account. Stable across
     /// a Router rebuild, so `carry_over_runtime_state_from` matches a
-    /// surviving seat and preserves its counters / park.
+    /// surviving seat and preserves its breaker and RPM counters. A credential
+    /// park is not keyed here: it lives on the account, in the router-level
+    /// account map a rebuild shares whole.
     #[must_use]
     pub fn state_key_for(&self, nickname: &str) -> String {
         seat_state_key(nickname, Some(&self.provider_name))

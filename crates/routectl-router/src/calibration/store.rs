@@ -21,12 +21,14 @@
 //! # Forwarded-credential lanes
 //!
 //! A forwarded-credential target sends the client's requested model verbatim,
-//! so its lane is `(provider_kind, requested model)` and the write records it
-//! like any other. The admission predicate never admits one, so such a lane
-//! is neither warmed from the ledger at boot nor kept by a reload's prune.
-//! Between two reloads, though, a forwarded client can create one lane per
-//! distinct model string it sends: that part of the map is traffic-bounded
-//! for the life of one Router, and swept by the next reload.
+//! so the lane it READS is `(provider_kind, requested model)`: the same lane
+//! an own-credential target serving that upstream writes, since both measure
+//! the same model's tokenizer. A dispatch served on a forwarded credential
+//! WRITES nothing, live or to the ledger (the usage capture refuses its
+//! evidence pair): only own-credential traffic writes lane evidence.
+//! The admission predicate never admits a forwarded lane either, so an older
+//! ledger row from such a dispatch is not warmed unless an own-credential
+//! target serves that same upstream.
 //!
 //! One bounded leak survives the prune, by construction rather than
 //! oversight: `record` has no admission gate of its own, so a write racing
@@ -62,7 +64,7 @@ pub const SAMPLES_PER_LANE: usize = 64;
 /// so every nickname, pool seat and provider entry of one kind sending one
 /// upstream shares a lane, and renaming a nickname keeps its evidence. A
 /// forwarded-credential target sends the client's requested model, so that
-/// is its upstream here.
+/// is the upstream it reads under; it never records one.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct LaneKey {
     /// Stable provider-kind token of the served target (`anthropic-api` |

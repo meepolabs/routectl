@@ -272,6 +272,23 @@ impl Router {
             .count()
     }
 
+    /// [`Self::lift_credential_parks`] over the OAuth seats among `seats`,
+    /// skipping any name shaped like a `[providers]` entry account. A
+    /// credentials-file key is not validated against the seat grammar, so a
+    /// key starting with the separator would otherwise name an entry account,
+    /// whose credential the credentials file does not hold.
+    pub fn lift_oauth_credential_parks<I>(&self, seats: I) -> usize
+    where
+        I: IntoIterator,
+        I::Item: AsRef<str>,
+    {
+        self.lift_credential_parks(
+            seats
+                .into_iter()
+                .filter(|seat| !crate::seat_pool::is_entry_account(seat.as_ref())),
+        )
+    }
+
     /// [`Self::lift_credential_parks`] over every account keyed by a
     /// `[providers]` entry rather than an OAuth seat. A config reload
     /// re-resolves those credentials on rebuild; an OAuth seat's credential
@@ -403,3 +420,7 @@ mod credential_account_park_tests;
 #[cfg(test)]
 #[path = "credential_park_lift_tests.rs"]
 mod credential_park_lift_tests;
+
+#[cfg(test)]
+#[path = "credential_park_slotless_tests.rs"]
+mod credential_park_slotless_tests;

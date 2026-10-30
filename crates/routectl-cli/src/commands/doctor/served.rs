@@ -126,8 +126,9 @@ pub(super) fn parked_seat_finding(seat: &ParkedSeat) -> Finding {
             seat.reason.as_str(),
         ),
         remediation: Some(
-            "renew or replace the credential; a credentials or config reload lifts every park, \
-             otherwise the seat is re-tested once the park lapses"
+            "renew or replace the credential; changing an OAuth seat's credentials entry lifts \
+             its park and an accepted config reload lifts any other account's, otherwise the \
+             account is re-tested once the park lapses"
                 .to_string(),
         ),
     }

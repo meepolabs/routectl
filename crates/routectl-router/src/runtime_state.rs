@@ -26,8 +26,11 @@ const RPM_WINDOW_MS: u64 = 60_000;
 
 /// How long a credential park holds before the half-open path re-tests the
 /// account, once per model slot on it. Fixed rather than configurable: a false
-/// park costs at most this long plus one request per model on the account, and
-/// a credentials or config reload clears every park.
+/// park costs at most this long plus one request per model on the account. A
+/// reload lifts a park early only where it may have changed the credential: a
+/// credentials reload lifts the OAuth seats whose stored record changed, and
+/// an accepted config reload lifts every non-OAuth (`[providers]` entry)
+/// account.
 pub const CREDENTIAL_PARK_BACKSTOP: Duration = Duration::from_hours(1);
 
 /// An account parked because its upstream rejected the credential itself, with

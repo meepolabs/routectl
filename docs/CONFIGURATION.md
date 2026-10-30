@@ -2031,9 +2031,10 @@ provider kind share one lane (a direct entry and a passthrough entry for
 one model learn together), every seat of a pool shares its model's lane,
 and renaming a nickname keeps the lane's evidence. The same upstream on
 two provider kinds is two lanes. A forwarded-credential target sends the
-client's requested model, so that is its lane; such lanes are learned
-while the daemon runs but are not restored at startup and are dropped on
-every config reload. A failed or partial request contributes nothing:
+client's requested model, so that is the lane it reads: it uses the
+correction an own-credential target serving that same upstream learned.
+A request served on a forwarded credential contributes nothing; only
+own-credential traffic writes lane evidence. A failed or partial request contributes nothing either:
 there is no trustworthy pairing between what was estimated and what the
 upstream actually charged for.
 

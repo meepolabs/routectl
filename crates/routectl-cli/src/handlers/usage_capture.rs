@@ -365,6 +365,10 @@ pub(crate) struct UsageCapture {
     /// straight onto the record because it is admitted as calibration
     /// evidence only on the success finalize -- see `finalize`.
     observed_prompt_total: u32,
+    /// Whether the served dispatch authenticated with the client's forwarded
+    /// credential (`DispatchMeta::served_forwarded_credential`). Such a row
+    /// is never calibration evidence; see `admissible_prompt_total`.
+    served_forwarded_credential: bool,
     /// The dispatch's auto-cache decision token, read PRE-persistence by
     /// the cache-outcome / cache-summary log emitters. Log-only: the ledger
     /// no longer persists it.
@@ -387,6 +391,7 @@ impl UsageCapture {
             last_completion: 0,
             last_total: 0,
             observed_prompt_total: 0,
+            served_forwarded_credential: false,
             cache_strategy: None,
         }
     }
@@ -434,6 +439,7 @@ impl UsageCapture {
         self.record.seat = meta.served_seat.clone();
         self.record.model = meta.served_model.clone();
         self.record.upstream = meta.served_upstream.clone();
+        self.served_forwarded_credential = meta.served_forwarded_credential;
         if meta.served_forwarded_credential {
             self.stamp_extra("credential_source", "forwarded");
             tracing::debug!(
@@ -1140,13 +1146,12 @@ impl UsageCapture {
     /// fail the request.
     ///
     /// The lane is `(provider_kind, upstream)`: `self.record.upstream` is
-    /// `DispatchMeta::served_upstream`, the wire id the request was sent with
-    /// (the client's requested model on a forwarded-credential target), and
-    /// the same column the warm rebuild reads back. A dispatch missing either
-    /// half forms no lane and is skipped inside the router.
+    /// `DispatchMeta::served_upstream`, the wire id the request was sent with,
+    /// and the same column the warm rebuild reads back. A dispatch missing
+    /// either half forms no lane and is skipped inside the router.
     ///
-    /// Admission mirrors the persisted pair exactly: only a success, and only
-    /// a nonzero prompt total. The canonical upstream field is not optional,
+    /// Admission mirrors the persisted pair exactly: only a success, only an
+    /// own-credential dispatch, and only a nonzero prompt total. The canonical upstream field is not optional,
     /// so an upstream reporting nothing arrives as a real zero, and admitting
     /// it would drag the lane's correction toward zero -- the direction that
     /// makes the context-window gate admit oversized requests.
@@ -1216,7 +1221,7 @@ impl UsageCapture {
     /// The observed cache-INCLUSIVE prompt total, if it is admissible as
     /// calibration evidence for a row finishing with `outcome`.
     ///
-    /// Two refusals, both fail-closed:
+    /// Three refusals, all fail-closed:
     ///
     /// - a non-success row is refused outright -- a partial or failed request
     ///   has no trustworthy pairing between what was estimated and what the
@@ -1224,9 +1229,14 @@ impl UsageCapture {
     /// - a success reporting a ZERO total is refused. The canonical prompt
     ///   field is not optional, so an upstream that reports nothing arrives
     ///   here as a real 0 rather than an absence, and a stored 0 would drag a
-    ///   later correction factor toward zero on what is purely a data bug.
+    ///   later correction factor toward zero on what is purely a data bug;
+    /// - a dispatch served on a forwarded client credential is refused: only
+    ///   own-credential traffic is admissible calibration evidence.
     const fn admissible_prompt_total(&self, outcome: Outcome) -> Option<u64> {
-        if !matches!(outcome, Outcome::Ok) || self.observed_prompt_total == 0 {
+        if !matches!(outcome, Outcome::Ok)
+            || self.served_forwarded_credential
+            || self.observed_prompt_total == 0
+        {
             return None;
         }
         Some(self.observed_prompt_total as u64)
@@ -1380,3 +1390,7 @@ mod tests;
 #[cfg(test)]
 #[path = "usage_capture_reason_tests.rs"]
 mod reason_tests;
+
+#[cfg(test)]
+#[path = "usage_capture_forwarded_calibration_tests.rs"]
+mod forwarded_calibration_tests;

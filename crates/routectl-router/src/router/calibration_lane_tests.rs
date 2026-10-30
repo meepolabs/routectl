@@ -268,7 +268,7 @@ fn a_sample_through_any_pool_seat_lands_in_the_lane_the_opening_lookup_reads() {
 }
 
 #[test]
-fn a_forwarded_target_reads_and_writes_the_requested_model_at_every_site() {
+fn a_forwarded_target_resolves_the_requested_model_at_every_site() {
     // Arrange: an unlisted client model routed through `default` to a
     // forwarded target whose configured upstream differs from it.
     let requested = "client-model-x";
@@ -288,15 +288,16 @@ fn a_forwarded_target_reads_and_writes_the_requested_model_at_every_site() {
     );
     let fwd = head(&router, requested);
 
-    // Act
+    // Act: evidence for the requested model's lane, as an own-credential
+    // target serving that upstream would record it.
     let mut meta = DispatchMeta::for_alias(requested);
     meta.mark_target(&fwd, requested);
     feed(&router, ANTHROPIC, requested);
     let kept = router.filter_chain_by_window(vec![fwd, head(&router, "roomy")], &req);
     let lane = router.opening_lane(requested).expect("lane resolves");
 
-    // Assert: the write, the gate and the opening lookup all name the
-    // requested model, never the configured upstream or the nickname.
+    // Assert: the dispatch metadata, the gate and the opening lookup all name
+    // the requested model, never the configured upstream or the nickname.
     assert_eq!(meta.served_upstream.as_deref(), Some(requested));
     assert_eq!(kept_nicknames(&kept), vec!["roomy"]);
     assert_eq!(lane.upstream_model, requested);
@@ -390,7 +391,9 @@ fn a_remapped_nickname_reads_the_cold_lane_and_an_unserved_upstream_is_pruned() 
 #[test]
 fn a_forwarded_lane_does_not_survive_a_reload_and_an_own_lane_does() {
     // The client requests a model equal to the target's configured upstream,
-    // so only the credential source tells the two rows apart.
+    // so only the credential source tells the two rows apart. The lane is fed
+    // straight through the router, below the usage capture that refuses a
+    // forwarded dispatch's evidence, so the prune is pinned on its own.
     let cases = [
         ("own credential", own_anthropic(), true),
         ("forwarded credential", forwarded_anthropic(), false),
@@ -403,7 +406,7 @@ fn a_forwarded_lane_does_not_survive_a_reload_and_an_own_lane_does() {
         record_served(&before, &head(&before, OPUS), OPUS, 1_000);
         assert!(
             has_lane(&before, ANTHROPIC, OPUS),
-            "{case}: premise, recorded live"
+            "{case}: premise, the lane holds evidence"
         );
         let mut after = router(config, models());
 

@@ -179,10 +179,13 @@ impl Router {
         provider_name_for_err: &str,
         kind: AdmissionKind,
     ) -> (Option<(&'static str, Error)>, ProbeSlotGuard) {
-        let Some(state) = self.state.get(state_key).cloned() else {
-            return (None, ProbeSlotGuard::new(None, 0));
-        };
         let now = Instant::now();
+        let Some(state) = self.state.get(state_key).cloned() else {
+            return (
+                self.slotless_park_refusal(account, now),
+                ProbeSlotGuard::new(None, 0),
+            );
+        };
         let (admission, credential_generation) = self.admit_locked(&state, account, now, kind);
         #[cfg(test)]
         run_after_admission_hook();
@@ -204,6 +207,24 @@ impl Router {
             )),
         };
         (refusal, guard)
+    }
+
+    /// The refusal for a target with no model slot: a park belongs to the
+    /// account, not the slot, so a live account park refuses here exactly as
+    /// it does on the slotted path. Only an unparked or absent account keeps
+    /// the slotless allow.
+    fn slotless_park_refusal(
+        &self,
+        account: Option<&str>,
+        now: Instant,
+    ) -> Option<(&'static str, Error)> {
+        let park = self.account_park(account)?;
+        park.is_live_at(now).then(|| {
+            (
+                super::credential_park::CREDENTIAL_PARKED_GATE_KIND,
+                super::credential_park::parked_seat_error(park.reason, park.until, now),
+            )
+        })
     }
 
     /// The account gate, then the model gate, in the lock order the

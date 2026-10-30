@@ -68,9 +68,10 @@ ORDER BY ts_start ASC, rid ASC";
 ///   `(provider_kind, wire upstream)`; a NULL in either half has no usable
 ///   lane identity and forms no lane on the live path either.
 ///
-/// `upstream` is the wire id the request was sent with (the client's
-/// requested model on a forwarded-credential row), the same value the live
-/// write keys on. The served nickname (`model`) is neither read nor
+/// `upstream` is the wire id the request was sent with, the same value the
+/// live write keys on. A row served on a forwarded client credential carries
+/// no evidence pair, since the live path records none for it either, so the
+/// NOT NULL filters already exclude it. The served nickname (`model`) is neither read nor
 /// filtered: a renamed nickname's history still belongs to its lane.
 ///
 /// `session_id` is deliberately NOT filtered: the live path records a keyless

@@ -1,7 +1,7 @@
 //! A reload lifts only the credential parks whose credential it may have
-//! changed: a named set of accounts (the OAuth seats a credentials reload
-//! changed), or every `[providers]` entry account and no OAuth seat (a config
-//! reload). A lift starts a new generation on each account it names, so an
+//! changed: the named OAuth seats a credentials reload changed (an
+//! entry-shaped name among them lifts nothing), or every `[providers]` entry
+//! account and no OAuth seat (a config reload). A lift starts a new generation on each account it names, so an
 //! attempt admitted before it cannot re-park that account, while an account
 //! it leaves alone keeps its generation and its park.
 
@@ -64,19 +64,21 @@ fn park_every_account(router: &Router) {
 #[derive(Clone, Copy, Debug)]
 enum Lift {
     Accounts(&'static [&'static str]),
+    OauthSeats(&'static [&'static str]),
     Entries,
 }
 
 fn apply(router: &Router, lift: Lift) -> usize {
     match lift {
         Lift::Accounts(accounts) => router.lift_credential_parks(accounts),
+        Lift::OauthSeats(seats) => router.lift_oauth_credential_parks(seats),
         Lift::Entries => router.lift_entry_credential_parks(),
     }
 }
 
 #[tokio::test]
 async fn a_lift_clears_exactly_the_accounts_it_targets() {
-    let rows: [(&str, Lift, [bool; 3]); 5] = [
+    let rows: [(&str, Lift, [bool; 3]); 10] = [
         (
             "one oauth seat",
             Lift::Accounts(&["anthropic#b"]),
@@ -94,6 +96,31 @@ async fn a_lift_clears_exactly_the_accounts_it_targets() {
             [false, false, false],
         ),
         ("every entry account", Lift::Entries, [false, false, true]),
+        (
+            "oauth: one seat",
+            Lift::OauthSeats(&["anthropic#b"]),
+            [false, true, false],
+        ),
+        (
+            "oauth: an entry-shaped name",
+            Lift::OauthSeats(&["#p-c"]),
+            [false, false, false],
+        ),
+        (
+            "oauth: a seat beside an entry-shaped name",
+            Lift::OauthSeats(&["anthropic#a", "#p-c"]),
+            [true, false, false],
+        ),
+        (
+            "oauth: a name of both shapes",
+            Lift::OauthSeats(&["#anthropic#b"]),
+            [false, false, false],
+        ),
+        (
+            "oauth: no seat",
+            Lift::OauthSeats(&[]),
+            [false, false, false],
+        ),
     ];
     for (name, lift, lifted) in rows {
         // Arrange

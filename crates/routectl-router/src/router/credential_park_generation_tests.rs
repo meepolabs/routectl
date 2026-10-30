@@ -1,6 +1,7 @@
 //! A success lifts the credential park only in the generation its attempt
-//! was admitted under, and a reload's lift costs at most one request
-//! per seat before a still-bad credential re-parks it.
+//! was admitted under, and a reload's lift costs at most one request per
+//! model slot on the credential account before a still-bad credential
+//! re-parks the account.
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;

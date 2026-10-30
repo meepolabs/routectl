@@ -226,6 +226,53 @@ async fn a_credentials_reload_lifts_only_the_seats_whose_record_changed() {
     }
 }
 
+/// A credentials-file key shaped like an entry account (`#compat`) names no
+/// OAuth seat, so its appearance lifts nothing, even beside a seat whose
+/// record did change. The key changes the seat set, so the router rebuilds.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_credentials_reload_never_lifts_an_entry_account_named_by_a_file_key() {
+    let rows: [SeatEditRow; 2] = [
+        (
+            "entry-shaped key added",
+            &[
+                ("anthropic#a", "tok-a"),
+                ("anthropic#b", "tok-b"),
+                ("#compat", "tok-c"),
+            ],
+            [PARKED, PARKED, PARKED],
+        ),
+        (
+            "entry-shaped key beside a changed seat",
+            &[
+                ("anthropic#a", "tok-a"),
+                ("anthropic#b", "tok-b2"),
+                ("#compat", "tok-c"),
+            ],
+            [PARKED, None, PARKED],
+        ),
+    ];
+    for (name, seats, expected) in rows {
+        // Arrange
+        let dir = tempfile::tempdir().unwrap();
+        let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
+        let _key = ScopedEnv::set(KEY_ENV, "test-key");
+        let rig = Rig::new(dir.path()).await;
+        rig.park_every_account();
+        rig.write_seats(seats);
+
+        // Act
+        rig.reload_credentials().await;
+
+        // Assert
+        assert!(
+            rig.oauth.credential_keys().await.contains("#compat"),
+            "{name}: premise, the reload accepted the entry-shaped key",
+        );
+        assert_eq!(rig.parks(&MODELS), expected, "{name}");
+    }
+}
+
 #[tokio::test]
 #[serial_test::serial]
 async fn a_failed_credentials_reload_keeps_every_park() {

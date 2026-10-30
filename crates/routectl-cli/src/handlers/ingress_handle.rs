@@ -1336,8 +1336,8 @@ pub(crate) fn map_error(shape: ErrorEnvelopeShape, e: Error) -> Response {
         }
         // A local decision, not the client's own key: the fixed message carries
         // only the reason token and the remaining park. Logged at WARN, not
-        // ERROR: while every seat is parked, each request lands here, and the
-        // park itself already logged its one WARN per seat.
+        // ERROR: while every account is parked, each request lands here, and
+        // the park itself already logged its one WARN per credential account.
         Error::Credential {
             reason,
             parked_until_ms,
