@@ -141,7 +141,11 @@ pub(super) fn apply_layered_overlays(
     // The wire tap is per provider call and is deliberately NOT carried.
     let captured_ingress_wire = req.routectl_internal.ingress_wire.take();
     let captured_declared_edits = std::mem::take(&mut req.routectl_internal.declared_edits);
+    // The observation slot is per client request, not per attempt: every hop
+    // must bump the one slot the ingress kept, so it is carried.
+    let captured_observation = req.routectl_internal.observation.take();
     let mut internal = RoutectlInternal::default();
+    internal.observation = captured_observation;
     internal.ingress_wire = captured_ingress_wire;
     internal.declared_edits = captured_declared_edits;
     internal.originating_claude_code_session = captured_originating_claude_code_session;
@@ -461,3 +465,7 @@ mod reasoning_passthrough_tests;
 #[cfg(test)]
 #[path = "anthropic_thinking_fallback_tests.rs"]
 mod anthropic_thinking_fallback_tests;
+
+#[cfg(test)]
+#[path = "observation_fallback_tests.rs"]
+mod observation_fallback_tests;

@@ -275,7 +275,8 @@ pub struct ResponsesPassthroughItem {
 /// The same holds for the per-request `withheld_betas` the router sets, the
 /// per-attempt
 /// `translation_report`, `beta_assembly` and `wire_tap` slots, which only
-/// providers write into, and the wire-check carriage (`ingress_wire`, `declared_edits`).
+/// providers write into, the wire-check carriage (`ingress_wire`, `declared_edits`),
+/// and the per-request `observation` slot.
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct RoutectlInternal {
@@ -560,6 +561,12 @@ pub struct RoutectlInternal {
     /// edits it made on this attempt; the router reads it after the call.
     /// `None` means nobody is listening and the egress records nothing.
     pub wire_tap: Option<crate::wire_check::WireTap>,
+
+    /// Request-owned observation slot the ingress creates and keeps a clone
+    /// of; the router and providers bump it as they serve the request. Unlike
+    /// the per-attempt slots it is carried across every fallback hop. `None`
+    /// means nobody is listening (a library caller) and nothing is recorded.
+    pub observation: Option<crate::request_observation::RequestObservation>,
 
     /// The first tool call / tool result pairing rule the request's
     /// transcript breaks, recorded once by the router before the chain walk.
@@ -1656,6 +1663,12 @@ mod tests {
     #[test]
     fn forwarded_bearer_defaults_to_none() {
         assert!(RoutectlInternal::default().forwarded_bearer.is_none());
+    }
+
+    /// A carrier nobody installed a slot on records no observation.
+    #[test]
+    fn observation_defaults_to_none() {
+        assert!(RoutectlInternal::default().observation.is_none());
     }
 
     /// A freshly-defaulted carrier has no forwarded Stainless headers, so

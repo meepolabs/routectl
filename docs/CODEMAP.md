@@ -57,6 +57,13 @@ license.
   closed `TranslationReason` (`HostedToolWithheld`, `TranslationRejected`)
   carrying only the date-stripped `TranslationKey`, never a label, URL or
   header; deduped, first-seen order; skipped for background probes
+- `src/request_observation.rs` -- `RequestObservation`: clone-shared
+  per-request slot (carried across fallback hops, unlike the per-attempt
+  slots) where router and providers bump wire losses, local refusals,
+  missing terminals, field repairs and first-sighting translation drops per
+  `(lane, class)`, plus the last `ServedIdentity` and the probe flag;
+  `snapshot` returns an `ObservationSnapshot`. Content-free: static tokens
+  and configured names only
 - `src/config_dir.rs` -- the shared routectl config-folder rule: pure
   `config_dir_from` (absolute `XDG_CONFIG_HOME`, else absolute home +
   `.config`, joined with `routectl`; empty or relative counts as unset; on
