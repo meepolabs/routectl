@@ -19,7 +19,7 @@ fn series(result: &QueryResult) -> &QuerySeries {
 
 /// Every additive metric, in one tuple, so a test can compare a bucket sum to
 /// the totals across all of them at once.
-fn additive(m: &QueryMetrics) -> [i64; 13] {
+fn additive(m: &QueryMetrics) -> [i64; 14] {
     [
         m.requests,
         m.ok,
@@ -33,6 +33,7 @@ fn additive(m: &QueryMetrics) -> [i64; 13] {
         m.server_tool_calls,
         m.stream_count,
         m.client_disconnect_total,
+        m.cancelled_total,
         m.fallback_served,
     ]
 }
@@ -222,6 +223,7 @@ fn every_additive_bucket_metric_sums_to_the_window_totals() {
         39,   // server_tool_calls, summed over the server_tool_use values
         5,    // stream_count
         1,    // client_disconnect_total
+        0,    // cancelled_total
         4,    // fallback_served
     ];
     assert_eq!(additive(&result.totals), expected);
@@ -229,7 +231,7 @@ fn every_additive_bucket_metric_sums_to_the_window_totals() {
     // Both folds saw the same rows, so every additive field reconciles
     // bucket-wise with the totals it was folded beside.
     let s = series(&result);
-    let summed = s.buckets.iter().fold([0_i64; 13], |mut acc, b| {
+    let summed = s.buckets.iter().fold([0_i64; 14], |mut acc, b| {
         for (slot, value) in acc.iter_mut().zip(additive(&b.metrics)) {
             *slot += value;
         }

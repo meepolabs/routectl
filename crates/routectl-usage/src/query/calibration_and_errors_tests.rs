@@ -350,3 +350,50 @@ fn errors_by_class_uses_ts_start_index() {
         "breakdown query must use idx_requests_ts_start; plan was {plan:?}"
     );
 }
+
+#[test]
+fn cancelled_rows_stay_out_of_errors_and_the_class_breakdown() {
+    // Arrange: one group holding every outcome class; the cancelled row
+    // carries a resolved class so a breakdown that admitted it would show it.
+    let (_dir, path) = temp_db_path();
+    let db = open(&path).expect("open");
+    insert_class_row(&db, "ok", 100, "p", "u", "a", "ok", None);
+    insert_class_row(
+        &db,
+        "err",
+        110,
+        "p",
+        "u",
+        "a",
+        "upstream_error",
+        Some("http-5xx"),
+    );
+    insert_class_row(&db, "cd", 120, "p", "u", "a", "client_disconnect", None);
+    insert_class_row(&db, "cx", 130, "p", "u", "a", "cancelled", Some("timeout"));
+
+    // Act
+    let agg = aggregate(&db, 0, 1000).expect("aggregate");
+    let breakdown = errors_by_class(&db, 0, 1000).expect("errors_by_class");
+
+    // Assert: 4 = 1 ok + 1 error + 1 client_disconnect + 1 cancelled, and the
+    // breakdown is exactly the one upstream_error.
+    assert_eq!(agg.len(), 1);
+    let row = &agg[0];
+    assert_eq!(
+        (
+            row.requests,
+            row.ok,
+            row.errors,
+            row.client_disconnect_total,
+            row.cancelled_total,
+        ),
+        (4, 1, 1, 1, 1)
+    );
+    let classes: Vec<(&str, i64)> = breakdown
+        .iter()
+        .map(|(_, class, count)| (class.as_str(), *count))
+        .collect();
+    assert_eq!(classes, vec![("http-5xx", 1)]);
+    let class_sum: i64 = breakdown.iter().map(|(_, _, n)| *n).sum();
+    assert_eq!(class_sum, row.errors);
+}

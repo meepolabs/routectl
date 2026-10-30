@@ -685,6 +685,57 @@ fn render_footer_shows_client_disconnect_line() {
     );
 }
 
+fn outcome_row(db: &UsageDb, request_id: &str, outcome: &str) {
+    db.conn()
+        .execute(
+            "INSERT INTO requests (ts_start, ts_end, request_id, ingress_dialect, \
+             requested_model, alias, model, provider, upstream, stream, outcome, \
+             latency_ms, tool_count, msg_count, attempt_count, fallback_count) \
+             VALUES (1000, 1000, ?1, 'openai', 'req-model', 'al', 'm', 'm', 'm', 0, \
+             ?2, 5, 0, 0, 0, 0)",
+            rusqlite::params![request_id, outcome],
+        )
+        .expect("insert outcome row");
+}
+
+#[test]
+fn report_counts_cancelled_apart_from_errors_and_disconnects() {
+    // Arrange: one row per outcome class, plus a second cancelled row so the
+    // cancelled count is distinguishable from every other count.
+    let (_dir, _path, db) = temp_db();
+    for (request_id, outcome) in [
+        ("ok1", "ok"),
+        ("err1", "upstream_error"),
+        ("cd1", "client_disconnect"),
+        ("cx1", "cancelled"),
+        ("cx2", "cancelled"),
+    ] {
+        outcome_row(&db, request_id, outcome);
+    }
+    let report = report_all(&db, &cost_config(), Some(GroupDim::Model), false);
+
+    // Act
+    let out = render_report(&report);
+
+    // Assert: the footer reports the cancelled count on its own line, and the
+    // model row's err cell counts only the upstream_error (header order is
+    // key|reqs|err|...).
+    assert_eq!(report.total_errors, 1);
+    assert_eq!(report.client_disconnects, 1);
+    assert_eq!(report.cancellations, 2);
+    assert!(
+        out.contains("client disconnects: 1 (0 pre-dispatch)\ncancelled: 2\n"),
+        "footer must report the cancelled count: {out:?}"
+    );
+    let row_line = out
+        .lines()
+        .find(|l| l.trim_start().starts_with("m "))
+        .expect("model row present");
+    let cells: Vec<&str> = row_line.split_whitespace().collect();
+    assert_eq!(cells.get(1).copied(), Some("5"), "reqs cell: {row_line:?}");
+    assert_eq!(cells.get(2).copied(), Some("1"), "err cell: {row_line:?}");
+}
+
 #[test]
 fn render_footer_client_disconnect_excluded_from_error_column() {
     // Arrange: a client_disconnect row alongside an ok row in the same group.

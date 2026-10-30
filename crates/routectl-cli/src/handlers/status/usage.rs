@@ -981,6 +981,7 @@ mod tests {
                 stream_count: 0,
                 client_disconnect_total: 0,
                 client_disconnect_pre_dispatch: 0,
+                cancelled_total: 0,
             }],
             vec![(
                 GroupKey {

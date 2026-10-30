@@ -203,3 +203,71 @@ fn fallback_served_counts_rows_that_needed_a_fallback_and_sums_to_totals() {
             .sum::<i64>()
     );
 }
+
+/// Seed one model over two providers with every terminal outcome class the
+/// readers distinguish: pa carries ok, ok, upstream_error, cancelled; pb carries
+/// ok, client_disconnect, cancelled. Each provider is its own fine row, so the
+/// coarse model group is folded from two of them.
+fn seed_outcome_mix(db: &UsageDb) {
+    let rows = [
+        ("o1", "pa", "ok"),
+        ("o2", "pa", "ok"),
+        ("o3", "pa", "upstream_error"),
+        ("o4", "pa", "cancelled"),
+        ("o5", "pb", "ok"),
+        ("o6", "pb", "client_disconnect"),
+        ("o7", "pb", "cancelled"),
+    ];
+    for (request_id, provider, outcome) in rows {
+        insert(
+            db,
+            &Fixture {
+                request_id,
+                provider: Some(provider),
+                outcome,
+                ..Fixture::default()
+            },
+        );
+    }
+}
+
+/// `(requests, ok, errors, client_disconnect_total, cancelled_total)`.
+fn outcome_counts(m: &QueryMetrics) -> (i64, i64, i64, i64, i64) {
+    (
+        m.requests,
+        m.ok,
+        m.errors,
+        m.client_disconnect_total,
+        m.cancelled_total,
+    )
+}
+
+#[test]
+fn cancelled_rows_are_excluded_from_errors_and_reconcile_per_group_and_totals() {
+    // Arrange
+    let (_dir, db) = open_db();
+    seed_outcome_mix(&db);
+
+    // Act
+    let by_model = query(&db, &spec(GroupDim::Model), unpriced, no_deadline()).expect("query");
+    let by_provider =
+        query(&db, &spec(GroupDim::Provider), unpriced, no_deadline()).expect("query");
+
+    // Assert: 7 = 3 ok + 1 upstream_error + 1 client_disconnect + 2 cancelled,
+    // and only the upstream_error counts as an error.
+    let m = &group(&by_model, "m1").metrics;
+    assert_eq!(outcome_counts(m), (7, 3, 1, 1, 2), "group m1");
+    assert_eq!(outcome_counts(&by_model.totals), (7, 3, 1, 1, 2), "totals");
+    // pa = 2 ok + 1 upstream_error + 1 cancelled; pb = 1 ok + 1
+    // client_disconnect + 1 cancelled.
+    let pa = &group(&by_provider, "pa").metrics;
+    let pb = &group(&by_provider, "pb").metrics;
+    assert_eq!(outcome_counts(pa), (4, 2, 1, 0, 1), "group pa");
+    assert_eq!(outcome_counts(pb), (3, 1, 0, 1, 1), "group pb");
+    for metrics in [m, &by_model.totals, pa, pb] {
+        assert_eq!(
+            metrics.requests,
+            metrics.ok + metrics.errors + metrics.client_disconnect_total + metrics.cancelled_total
+        );
+    }
+}

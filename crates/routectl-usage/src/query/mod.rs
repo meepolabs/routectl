@@ -168,11 +168,13 @@ pub struct GroupKey {
 /// (`stream=1 AND outcome='ok' AND ttfb_ms IS NOT NULL AND latency_ms >
 /// ttfb_ms`); they feed a robust generation-throughput estimate.
 ///
-/// `errors` counts `outcome NOT IN ('ok', 'client_disconnect')` -- a client
-/// hangup before the first content chunk is not a routing failure, so it is
-/// excluded and reported separately via `client_disconnect_total` /
-/// `client_disconnect_pre_dispatch` instead. `gate_blocked` and
-/// `upstream_error` remain inside `errors`.
+/// `errors` counts `outcome NOT IN ('ok', 'client_disconnect', 'cancelled')`
+/// -- a client hangup, or a request abandoned before it finalized, is not a
+/// routing failure, so both are excluded and reported separately via
+/// `client_disconnect_total` / `client_disconnect_pre_dispatch` and
+/// `cancelled_total` instead. `gate_blocked` and `upstream_error` remain inside
+/// `errors`, so `requests == ok + errors + client_disconnect_total +
+/// cancelled_total` per group.
 #[derive(Debug, Clone)]
 pub struct AggRow {
     /// The group's `(model, provider, upstream, alias, provider_kind)` key.
@@ -182,7 +184,7 @@ pub struct AggRow {
     /// Requests whose outcome was `ok`.
     pub ok: i64,
     /// Requests whose outcome was an error, excluding `client_disconnect`
-    /// (see the struct note).
+    /// and `cancelled` (see the struct note).
     pub errors: i64,
     /// Summed input tokens over the group (NULL counters count as 0).
     pub input_tokens: i64,
@@ -247,6 +249,11 @@ pub struct AggRow {
     /// column, not the `COALESCE(model, requested_model)` group key, so it
     /// reflects whether a provider was ever resolved for that row.
     pub client_disconnect_pre_dispatch: i64,
+    /// Rows in the group whose terminal outcome is `cancelled`: the request
+    /// was dropped before it finalized without the capture attributing the
+    /// drop to a client hangup. Excluded from `errors` -- see that field's
+    /// note.
+    pub cancelled_total: i64,
 }
 
 #[cfg(test)]

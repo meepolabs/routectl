@@ -485,6 +485,9 @@ pub struct WindowReport {
     /// Subset of `client_disconnects` that never reached dispatch (raw
     /// `model IS NULL`, i.e. disconnected before the first content chunk).
     pub client_disconnects_pre_dispatch: i64,
+    /// Window-wide `cancelled` outcome count (excluded from `total_errors`;
+    /// see `AggRow::cancelled_total`).
+    pub cancellations: i64,
     /// Steady-state would-trim opportunity over the window (advisory; only
     /// populated and surfaced under `--detail`).
     pub would_trim: WouldTrimSummary,
@@ -932,8 +935,13 @@ pub fn build_window_report(
         .collect();
     display_rows.push(finalize_row("total".to_string(), total, &ttft));
 
-    let (cache_hit_rate, total_errors, client_disconnects, client_disconnects_pre_dispatch) =
-        footer(&rows);
+    let FooterTotals {
+        cache_hit_rate,
+        total_errors,
+        client_disconnects,
+        client_disconnects_pre_dispatch,
+        cancellations,
+    } = footer(&rows);
     // The total row mirrors the authoritative footer (token-weighted over
     // cache-reporting rows) so the two never disagree in mixed-provider windows.
     if let Some(t) = display_rows.last_mut() {
@@ -950,6 +958,7 @@ pub fn build_window_report(
         total_errors,
         client_disconnects,
         client_disconnects_pre_dispatch,
+        cancellations,
         would_trim,
         shadow_misfire,
         near_lossless_attribution,
@@ -1046,30 +1055,34 @@ fn cache_hit_ratio(num: i64, den: i64) -> Option<f64> {
 /// excluded from both numerator and denominator. `None` when no qualifying row
 /// has a positive denominator. Errors ARE a flow, so the error count stays a
 /// cross-row sum. `client_disconnect_total` / `client_disconnect_pre_dispatch`
-/// are likewise cross-row sums straight off `AggRow` -- see that struct's docs
-/// for why they are excluded from `errors`.
-fn footer(rows: &[AggRow]) -> (Option<f64>, i64, i64, i64) {
+/// and `cancelled_total` are likewise cross-row sums straight off `AggRow` --
+/// see that struct's docs for why they are excluded from `errors`.
+fn footer(rows: &[AggRow]) -> FooterTotals {
     let mut num = 0i64;
     let mut den = 0i64;
-    let mut errors = 0i64;
-    let mut client_disconnects = 0i64;
-    let mut client_disconnects_pre_dispatch = 0i64;
+    let mut totals = FooterTotals::default();
     for r in rows {
-        errors += r.errors;
-        client_disconnects += r.client_disconnect_total;
-        client_disconnects_pre_dispatch += r.client_disconnect_pre_dispatch;
+        totals.total_errors += r.errors;
+        totals.client_disconnects += r.client_disconnect_total;
+        totals.client_disconnects_pre_dispatch += r.client_disconnect_pre_dispatch;
+        totals.cancellations += r.cancelled_total;
         if r.cache_read_present > 0 {
             num += r.cache_read_billed;
             den += cache_prompt_den(r);
         }
     }
-    let rate = cache_hit_ratio(num, den);
-    (
-        rate,
-        errors,
-        client_disconnects,
-        client_disconnects_pre_dispatch,
-    )
+    totals.cache_hit_rate = cache_hit_ratio(num, den);
+    totals
+}
+
+/// The window-wide footer figures [`footer`] folds out of the aggregate rows.
+#[derive(Debug, Default)]
+struct FooterTotals {
+    cache_hit_rate: Option<f64>,
+    total_errors: i64,
+    client_disconnects: i64,
+    client_disconnects_pre_dispatch: i64,
+    cancellations: i64,
 }
 
 /// Nearest-rank percentile of a sorted, non-empty slice. `q` is in `[0,1]`;
@@ -1597,8 +1610,8 @@ fn render_footer(report: &WindowReport) -> String {
         |r| format!("cache hit {:.1}%", r * 100.0),
     );
     format!(
-        "{hit}\nclient disconnects: {} ({} pre-dispatch)\n",
-        report.client_disconnects, report.client_disconnects_pre_dispatch
+        "{hit}\nclient disconnects: {} ({} pre-dispatch)\ncancelled: {}\n",
+        report.client_disconnects, report.client_disconnects_pre_dispatch, report.cancellations
     )
 }
 

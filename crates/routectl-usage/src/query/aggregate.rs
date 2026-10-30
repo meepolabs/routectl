@@ -61,7 +61,7 @@ macro_rules! agg_base_columns {
     provider_kind,
     COUNT(*)                                            AS requests,
     SUM(CASE WHEN outcome = 'ok' THEN 1 ELSE 0 END)     AS ok,
-    SUM(CASE WHEN outcome NOT IN ('ok', 'client_disconnect')
+    SUM(CASE WHEN outcome NOT IN ('ok', 'client_disconnect', 'cancelled')
         THEN 1 ELSE 0 END)                              AS errors,
     COALESCE(SUM(input_tokens), 0)                      AS input_tokens,
     COALESCE(SUM(output_tokens), 0)                     AS output_tokens,
@@ -95,7 +95,8 @@ macro_rules! agg_base_columns {
     SUM(CASE WHEN outcome = 'client_disconnect' THEN 1 ELSE 0 END)
                                                          AS client_disconnect_total,
     SUM(CASE WHEN outcome = 'client_disconnect' AND r.model IS NULL
-        THEN 1 ELSE 0 END)                              AS client_disconnect_pre_dispatch"
+        THEN 1 ELSE 0 END)                              AS client_disconnect_pre_dispatch,
+    SUM(CASE WHEN outcome = 'cancelled' THEN 1 ELSE 0 END) AS cancelled_total"
     };
 }
 
@@ -318,18 +319,18 @@ pub fn aggregate(db: &UsageDb, from_ms: i64, to_ms: i64) -> Result<Vec<AggRow>, 
 pub(super) fn map_fine_row(row: &Row) -> rusqlite::Result<FineRow> {
     Ok(FineRow {
         agg: map_agg_row(row)?,
-        ttfb_max: row.get(29)?,
-        ttft_sum: row.get(30)?,
-        ttft_count: row.get(31)?,
-        latency_sum: row.get(32)?,
-        latency_max: row.get(33)?,
-        input_tokens_max: row.get(34)?,
-        input_tokens_present: row.get(35)?,
-        tok_s_sum: row.get(36)?,
-        tok_s_count: row.get(37)?,
-        cache_hit_sum: row.get(38)?,
-        cache_hit_count: row.get(39)?,
-        fallback_served: row.get(40)?,
+        ttfb_max: row.get(30)?,
+        ttft_sum: row.get(31)?,
+        ttft_count: row.get(32)?,
+        latency_sum: row.get(33)?,
+        latency_max: row.get(34)?,
+        input_tokens_max: row.get(35)?,
+        input_tokens_present: row.get(36)?,
+        tok_s_sum: row.get(37)?,
+        tok_s_count: row.get(38)?,
+        cache_hit_sum: row.get(39)?,
+        cache_hit_count: row.get(40)?,
+        fallback_served: row.get(41)?,
     })
 }
 
@@ -339,7 +340,7 @@ pub(super) fn map_fine_row(row: &Row) -> rusqlite::Result<FineRow> {
 /// index is read here.
 pub(super) fn map_fine_row_bucketed(row: &Row) -> rusqlite::Result<(FineRow, i64)> {
     let fine = map_fine_row(row)?;
-    let bucket = row.get(41)?;
+    let bucket = row.get(42)?;
     Ok((fine, bucket))
 }
 
@@ -399,6 +400,7 @@ fn map_agg_row(row: &Row) -> rusqlite::Result<AggRow> {
         stream_count: row.get(26)?,
         client_disconnect_total: row.get(27)?,
         client_disconnect_pre_dispatch: row.get(28)?,
+        cancelled_total: row.get(29)?,
     })
 }
 
@@ -406,7 +408,7 @@ fn map_agg_row(row: &Row) -> rusqlite::Result<AggRow> {
 /// the aggregate stays one row per group, while this breakdown fans a group
 /// into one row per failure class. It shares `AGG_SQL`'s window predicate and
 /// group-key expressions and adds the SAME `errors` filter (`outcome NOT IN
-/// ('ok', 'client_disconnect')`), so the per-group class counts sum EXACTLY to
+/// ('ok', 'client_disconnect', 'cancelled')`), so the per-group class counts sum EXACTLY to
 /// that group's `AggRow::errors`. NULL `resolved_class` (pre-dispatch or
 /// never-classified rows) buckets under `unclassified` via the COALESCE; a
 /// forward-compat token written by a newer binary passes through verbatim as
@@ -420,7 +422,7 @@ SELECT
     COUNT(*)                                            AS count
 FROM requests
 WHERE ts_start >= ?1 AND ts_start < ?2
-  AND outcome NOT IN ('ok', 'client_disconnect')
+  AND outcome NOT IN ('ok', 'client_disconnect', 'cancelled')
   AND ",
     inference_rows!(),
     "

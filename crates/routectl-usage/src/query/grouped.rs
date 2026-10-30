@@ -174,7 +174,8 @@ pub struct QueryMetrics {
     pub requests: i64,
     /// Requests whose outcome was `ok`.
     pub ok: i64,
-    /// Requests whose outcome was an error, excluding `client_disconnect`.
+    /// Requests whose outcome was an error, excluding `client_disconnect`
+    /// and `cancelled`.
     pub errors: i64,
     /// Summed input tokens.
     pub input_tokens: i64,
@@ -194,6 +195,8 @@ pub struct QueryMetrics {
     pub stream_count: i64,
     /// Count of rows whose terminal outcome was `client_disconnect`.
     pub client_disconnect_total: i64,
+    /// Count of rows whose terminal outcome was `cancelled`.
+    pub cancelled_total: i64,
     /// Count of requests served only after a fallback (`fallback_count > 0`).
     pub fallback_served: i64,
     /// Approximate p50 time-to-first-token (request-weighted mean) over
@@ -485,6 +488,7 @@ struct GroupAcc {
     server_tool_calls: i64,
     stream_count: i64,
     client_disconnect_total: i64,
+    cancelled_total: i64,
     fallback_served: i64,
     ttft_sum: i64,
     ttft_count: i64,
@@ -524,6 +528,7 @@ impl GroupAcc {
         self.server_tool_calls += agg.server_tool_calls;
         self.stream_count += agg.stream_count;
         self.client_disconnect_total += agg.client_disconnect_total;
+        self.cancelled_total += agg.cancelled_total;
         self.fallback_served += fine.fallback_served;
         self.ttft_sum += fine.ttft_sum;
         self.ttft_count += fine.ttft_count;
@@ -576,6 +581,7 @@ impl GroupAcc {
         self.server_tool_calls += other.server_tool_calls;
         self.stream_count += other.stream_count;
         self.client_disconnect_total += other.client_disconnect_total;
+        self.cancelled_total += other.cancelled_total;
         self.fallback_served += other.fallback_served;
         self.ttft_sum += other.ttft_sum;
         self.ttft_count += other.ttft_count;
@@ -614,6 +620,7 @@ impl GroupAcc {
             server_tool_calls: self.server_tool_calls,
             stream_count: self.stream_count,
             client_disconnect_total: self.client_disconnect_total,
+            cancelled_total: self.cancelled_total,
             fallback_served: self.fallback_served,
             ttft_p50_ms: mean_i64(self.ttft_sum, self.ttft_count),
             ttft_p95_ms: self.ttfb_max,
