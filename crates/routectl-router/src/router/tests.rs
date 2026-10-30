@@ -605,6 +605,59 @@ fn carry_over_k_store_from_shares_the_store_arc() {
     );
 }
 
+/// A sample sink taken from a Router that a hot reload then replaces keeps
+/// writing into the live stores, and does not keep the replaced Router
+/// alive: a response body still being sent across a reload records its
+/// samples where the new Router reads them.
+#[test]
+fn a_live_sample_sink_outlives_its_router_across_a_reload() {
+    use std::time::SystemTime;
+
+    // Arrange: the reload's own carry-over of both stores.
+    let kind = "openai-compat";
+    let nickname = "opus";
+    let config = config_serving_lanes();
+    let before = Arc::new(Router::new(config.clone()));
+    let sink = before.live_samples();
+    let mut after = router_serving_nicknames(&config, &[nickname]);
+    after.carry_over_k_store_from(&before);
+    after.carry_over_calibration_from(&before);
+    let replaced = Arc::downgrade(&before);
+    drop(before);
+
+    // Act
+    let now = SystemTime::now();
+    sink.record_k_sample(Some("sess-reload"), kind, nickname, 7, now);
+    sink.record_calibration_sample(
+        Some(kind),
+        Some(nickname),
+        Some("sess-reload"),
+        10_000,
+        13_000,
+        now,
+    );
+
+    // Assert
+    assert!(
+        replaced.upgrade().is_none(),
+        "the sink must not keep the replaced Router alive",
+    );
+    let window = after
+        .k_session_store
+        .get(&crate::k_estimator::KSessionKey {
+            session_key: "sess-reload".to_string(),
+            provider_kind: kind.to_string(),
+            model: nickname.to_string(),
+        })
+        .expect("the K sample reaches the new Router's store");
+    assert_eq!(window.len(), 1);
+    assert_eq!(
+        after.calibration_lanes(),
+        vec![(kind.to_string(), nickname.to_string())],
+        "the calibration sample reaches the new Router's store",
+    );
+}
+
 #[test]
 fn carry_over_calibration_from_preserves_a_learned_factor() {
     // Regression guard for the silent-collapse trap, calibration edition: a
