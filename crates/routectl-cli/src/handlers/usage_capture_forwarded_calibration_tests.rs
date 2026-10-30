@@ -150,7 +150,7 @@ async fn serve(
     );
     cap.observe_meta(&dispatched.meta, 0, 0);
     cap.observe_response(&resp);
-    cap.record_calibration_sample(router, Some(session_key));
+    cap.record_calibration_sample(&router.live_samples(), Some(session_key));
     cap.admit_evidence_pair(Outcome::Ok);
     let pair = (
         cap.record.calib_estimated_tokens,

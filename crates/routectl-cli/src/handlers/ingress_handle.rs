@@ -575,7 +575,7 @@ async fn complete_response<A: IngressAdapter>(
                         body,
                         response_check,
                         response_edits,
-                        PendingRow::new(capture, Arc::clone(&router), session_key),
+                        PendingRow::new(capture, router.live_samples(), session_key),
                     )));
                     // Dir 4: egress response headers, captured from the
                     // built response so the trace reflects what the client
@@ -1158,8 +1158,9 @@ async fn drive_stream<A: IngressAdapter>(
     // row as a clean completion; the egress trace-summary fires from inside
     // `finalize`.
     client_check.finish(StreamExit::Ended);
-    capture.record_k_sample(&router, session_key.as_deref());
-    capture.record_calibration_sample(&router, session_key.as_deref());
+    let samples = router.live_samples();
+    capture.record_k_sample(&samples, session_key.as_deref());
+    capture.record_calibration_sample(&samples, session_key.as_deref());
     // Only this natural, fully delivered end may anchor the next turn;
     // every earlier return drops the pending turn unpublished.
     stamp_opening(&mut capture, meter.as_ref());

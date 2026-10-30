@@ -2833,7 +2833,7 @@ async fn record_k_sample_lands_keyed_sample_and_skips_keyless() {
         .served_model
         .clone()
         .expect("served model is stamped on the failing meta");
-    capture.record_k_sample(&router, Some("sess-live"));
+    capture.record_k_sample(&router.live_samples(), Some("sess-live"));
 
     // Assert: exactly one sample under the served triple.
     let window = router
@@ -2854,7 +2854,7 @@ async fn record_k_sample_lands_keyed_sample_and_skips_keyless() {
         .complete_with_options(req2, Default::default())
         .await;
     capture2.observe_meta(&dispatched2.meta, 0, 0);
-    capture2.record_k_sample(&router2, None);
+    capture2.record_k_sample(&router2.live_samples(), None);
 
     // Assert: a keyless request leaves the store empty.
     assert!(
@@ -5876,4 +5876,116 @@ async fn stream_terminal_capability_refusal_matches_the_envelope() {
     assert_eq!(class.openai_code, "invalid_request_error");
     assert_eq!(body["error"]["message"].as_str(), Some(message.as_str()));
     assert!(!message.contains("leak-lane"), "{message}");
+}
+
+/// An OpenAI adapter rendering two placeholder events per chunk and two at
+/// the end, so a one-slot channel blocks the second send of each.
+struct TwoEventsPerFrame;
+
+impl IngressAdapter for TwoEventsPerFrame {
+    fn id(&self) -> &str {
+        crate::ingress::openai::OpenAiIngress.id()
+    }
+    fn dialect(&self) -> routectl_core::wire_check::IngressDialect {
+        crate::ingress::openai::OpenAiIngress.dialect()
+    }
+    fn error_envelope_shape(&self) -> ErrorEnvelopeShape {
+        crate::ingress::openai::OpenAiIngress.error_envelope_shape()
+    }
+    fn parse_request(
+        &self,
+        headers: &HeaderMap,
+        body: &[u8],
+    ) -> routectl_core::Result<routectl_core::ChatRequest> {
+        crate::ingress::openai::OpenAiIngress.parse_request(headers, body)
+    }
+    fn render_response(
+        &self,
+        resp: routectl_core::ChatResponse,
+    ) -> routectl_core::Result<bytes::Bytes> {
+        crate::ingress::openai::OpenAiIngress.render_response(resp)
+    }
+    fn new_stream_state(&self, ctx: &StreamRequestContext) -> Box<dyn IngressStreamState> {
+        crate::ingress::openai::OpenAiIngress.new_stream_state(ctx)
+    }
+    fn render_chunk(
+        &self,
+        _chunk: routectl_core::ChatChunk,
+        _state: &mut dyn IngressStreamState,
+    ) -> routectl_core::Result<Vec<SseEvent>> {
+        Ok(vec![SseEvent::unnamed("{}"), SseEvent::unnamed("{}")])
+    }
+    fn render_eos(&self, _state: &mut dyn IngressStreamState) -> Vec<SseEvent> {
+        vec![SseEvent::unnamed("{}"), SseEvent::unnamed("{}")]
+    }
+    fn render_error_eos(
+        &self,
+        state: &mut dyn IngressStreamState,
+        error: &dyn std::fmt::Display,
+        class: &crate::ingress::StreamErrorClass,
+    ) -> Vec<SseEvent> {
+        crate::ingress::openai::OpenAiIngress.render_error_eos(state, error, class)
+    }
+}
+
+/// Where the client leaves: while a chunk's events are being sent, or
+/// while the end-of-stream events are.
+#[derive(Clone, Copy, Debug)]
+enum SendFailsAt {
+    Chunk,
+    EndOfStream,
+}
+
+/// A client that leaves while a send is blocked compares the stream as
+/// disconnected before the capture writes its `client_disconnect` row, at
+/// both send sites. The receiver never reads, so the one-slot channel
+/// holds the first event and the second send waits until it is dropped.
+#[tokio::test]
+async fn a_client_leaving_during_a_send_compares_before_its_row() {
+    use crate::handlers::response_wire::order_probe::{self, Step};
+    use routectl_core::wire_check::StreamExit;
+
+    for site in [SendFailsAt::Chunk, SendFailsAt::EndOfStream] {
+        let upstream_server = chat_stream_upstream().await;
+        let (_router, mut dispatched) = dispatched_chat_stream(&upstream_server, CHECK_EVERY).await;
+        let check = dispatched.meta.response_check.take();
+        assert!(check.is_some(), "positive control: the check is armed");
+        let upstream = match site {
+            SendFailsAt::Chunk => dispatched.result.expect("the stream dispatched"),
+            SendFailsAt::EndOfStream => Box::pin(futures::stream::empty()),
+        };
+        let (tx, rx) = tokio::sync::mpsc::channel::<SseEvent>(1);
+        let rig = CaptureRig::new();
+        let capture = rig.capture("openai", &sample_request("a", true), "req-send-fails");
+
+        order_probe::start();
+        let handle = tokio::spawn(render_checked_stream_task(
+            upstream,
+            TwoEventsPerFrame,
+            capture,
+            tx,
+            k_test_router(),
+            StreamTurn::unmetered(None, StreamRequestContext::default()),
+            check,
+        ));
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        drop(rx);
+        tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+            .await
+            .expect("the task returns once the client leaves")
+            .expect("render task panicked");
+        let steps = order_probe::take();
+        let rows = rig.flush_and_read().await;
+
+        assert_eq!(
+            steps,
+            [
+                Step::Compared(StreamExit::Disconnect),
+                Step::Row(Outcome::ClientDisconnect)
+            ],
+            "{site:?}"
+        );
+        assert_eq!(rows.len(), 1, "{site:?}");
+        assert_eq!(rows[0].outcome, "client_disconnect", "{site:?}");
+    }
 }

@@ -1154,7 +1154,7 @@ impl UsageCapture {
     /// key on, so they must come from the dispatch meta, not the request.
     pub(crate) fn record_k_sample(
         &self,
-        router: &routectl_router::Router,
+        samples: &routectl_router::LiveSampleSink,
         session_key: Option<&str>,
     ) {
         let (Some(provider_kind), Some(model)) = (
@@ -1165,7 +1165,7 @@ impl UsageCapture {
         };
         let cache_read = self.record.cache_read.unwrap_or(0);
         let ts = ms_to_system_time(self.record.ts_start);
-        router.record_k_sample(session_key, provider_kind, model, cache_read, ts);
+        samples.record_k_sample(session_key, provider_kind, model, cache_read, ts);
     }
 
     /// Record one live token-estimate observation into the router's per-lane
@@ -1191,7 +1191,7 @@ impl UsageCapture {
     /// makes the context-window gate admit oversized requests.
     pub(crate) fn record_calibration_sample(
         &self,
-        router: &routectl_router::Router,
+        samples: &routectl_router::LiveSampleSink,
         session_key: Option<&str>,
     ) {
         let Some(estimated_tokens) = self.record.calib_estimated_tokens else {
@@ -1200,7 +1200,7 @@ impl UsageCapture {
         let Some(prompt_tokens) = self.admissible_prompt_total(Outcome::Ok) else {
             return;
         };
-        router.record_calibration_sample(
+        samples.record_calibration_sample(
             self.record.provider_kind.as_deref(),
             self.record.upstream.as_deref(),
             session_key,
@@ -1217,6 +1217,10 @@ impl UsageCapture {
             return;
         }
         self.finalized = true;
+        #[cfg(test)]
+        super::response_wire::order_probe::note(super::response_wire::order_probe::Step::Row(
+            outcome,
+        ));
         self.record.outcome = outcome;
         self.stamp_observation(self.observation.snapshot());
         self.admit_evidence_pair(outcome);

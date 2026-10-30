@@ -7,7 +7,6 @@
 //! is sent and never alters it.
 
 use std::pin::Pin;
-use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use axum::body::Bytes;
@@ -15,7 +14,7 @@ use http_body::{Body, Frame, SizeHint};
 use routectl_core::wire_check::{
     Assembled, IncompleteReason, SseFrame, StreamAssembler, StreamExit,
 };
-use routectl_router::{ResponseCheck, Router};
+use routectl_router::{LiveSampleSink, ResponseCheck};
 use routectl_usage::Outcome;
 
 use crate::handlers::usage_capture::UsageCapture;
@@ -46,21 +45,23 @@ pub(super) fn abandon_unrendered(check: Option<ResponseCheck>) {
 /// its [`CheckedBody`] until the body is either sent or dropped.
 pub(super) struct PendingRow {
     capture: UsageCapture,
-    router: Arc<Router>,
+    samples: LiveSampleSink,
     session_key: Option<String>,
 }
 
 impl PendingRow {
-    /// `capture`'s row, whose live K and calibration samples go to `router`
-    /// under `session_key` once the body is delivered.
+    /// `capture`'s row, whose live K and calibration samples go to
+    /// `samples` under `session_key` once the body is handed off. Holding
+    /// the stores rather than the Router lets a slow client's body outlive
+    /// a hot reload without keeping the replaced Router alive.
     pub(super) const fn new(
         capture: UsageCapture,
-        router: Arc<Router>,
+        samples: LiveSampleSink,
         session_key: Option<String>,
     ) -> Self {
         Self {
             capture,
-            router,
+            samples,
             session_key,
         }
     }
@@ -72,9 +73,9 @@ impl PendingRow {
     /// the in-memory stores route one way now and another after a restart.
     fn deliver(mut self) {
         let session_key = self.session_key.as_deref();
-        self.capture.record_k_sample(&self.router, session_key);
+        self.capture.record_k_sample(&self.samples, session_key);
         self.capture
-            .record_calibration_sample(&self.router, session_key);
+            .record_calibration_sample(&self.samples, session_key);
         self.capture.finalize(Outcome::Ok);
     }
 }
@@ -108,10 +109,12 @@ impl CheckedBody {
         }
     }
 
-    /// Whether the client has everything: the frame was taken, or there was
-    /// nothing to send (`is_end_stream` already told hyper so, and it does
-    /// not poll such a body).
-    fn is_delivered(&self) -> bool {
+    /// Whether the body was handed off to hyper: its frame was taken, or
+    /// there was nothing to send (`is_end_stream` already told hyper so, and
+    /// it does not poll such a body). Handed off is not received: a
+    /// connection reset after hyper took the frame still compares the body
+    /// and writes an `ok` row.
+    fn is_handed_off(&self) -> bool {
         self.body.as_ref().is_none_or(Bytes::is_empty)
     }
 }
@@ -134,7 +137,7 @@ impl Body for CheckedBody {
     }
 
     fn is_end_stream(&self) -> bool {
-        self.is_delivered()
+        self.is_handed_off()
     }
 
     fn size_hint(&self) -> SizeHint {
@@ -145,9 +148,9 @@ impl Body for CheckedBody {
 
 impl Drop for CheckedBody {
     fn drop(&mut self) {
-        let delivered = self.is_delivered();
+        let handed_off = self.is_handed_off();
         if let Some((check, body, edits)) = self.check.take() {
-            if delivered {
+            if handed_off {
                 check.compare_body(&body, edits.as_slice());
             } else {
                 check.compare_stream(
@@ -156,9 +159,15 @@ impl Drop for CheckedBody {
                     &[],
                 );
             }
+            #[cfg(test)]
+            order_probe::note(order_probe::Step::Compared(if handed_off {
+                StreamExit::Ended
+            } else {
+                StreamExit::Cancelled
+            }));
         }
         if let Some(row) = self.row.take()
-            && delivered
+            && handed_off
         {
             row.deliver();
         }
@@ -241,6 +250,8 @@ impl ClientStreamCheck {
                 self.edits.as_slice(),
                 &armed.ingress,
             );
+            #[cfg(test)]
+            order_probe::note(order_probe::Step::Compared(exit));
         }
     }
 }
@@ -248,6 +259,45 @@ impl ClientStreamCheck {
 impl Drop for ClientStreamCheck {
     fn drop(&mut self) {
         self.finish(StreamExit::Cancelled);
+    }
+}
+
+/// The order in which a response's compare and its usage row happen on the
+/// current thread, recorded only between [`order_probe::start`] and
+/// [`order_probe::take`].
+#[cfg(test)]
+pub(super) mod order_probe {
+    use std::cell::RefCell;
+
+    use routectl_core::wire_check::StreamExit;
+    use routectl_usage::Outcome;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Step {
+        /// A response-leg compare ran, the response having ended as this.
+        Compared(StreamExit),
+        /// The usage row was written with this outcome.
+        Row(Outcome),
+    }
+
+    thread_local! {
+        static STEPS: RefCell<Option<Vec<Step>>> = const { RefCell::new(None) };
+    }
+
+    pub fn start() {
+        STEPS.with_borrow_mut(|steps| *steps = Some(Vec::new()));
+    }
+
+    pub fn take() -> Vec<Step> {
+        STEPS.with_borrow_mut(Option::take).unwrap_or_default()
+    }
+
+    pub fn note(step: Step) {
+        STEPS.with_borrow_mut(|steps| {
+            if let Some(steps) = steps {
+                steps.push(step);
+            }
+        });
     }
 }
 

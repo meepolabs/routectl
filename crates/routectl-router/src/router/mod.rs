@@ -3101,16 +3101,8 @@ impl Router {
         cache_read: u64,
         ts: std::time::SystemTime,
     ) {
-        let Some(key) = k_query_key(session_key, Some(provider_kind), model).store_key() else {
-            return;
-        };
-        self.k_session_store.record_sample(
-            key,
-            crate::k_estimator::Sample {
-                ts,
-                observed_reuse: cache_read > 0,
-            },
-        );
+        self.live_samples()
+            .record_k_sample(session_key, provider_kind, model, cache_read, ts);
     }
 
     /// Record one live token-estimate observation into the per-lane
@@ -3143,16 +3135,26 @@ impl Router {
         prompt_tokens: u64,
         ts: std::time::SystemTime,
     ) {
-        let (Some(provider_kind), Some(upstream)) = (provider_kind, upstream) else {
-            return;
-        };
-        let key = crate::calibration::LaneKey {
-            provider_kind: provider_kind.to_string(),
-            upstream: upstream.to_string(),
-        };
-        let cohort = crate::calibration::cohort_of(session_key);
-        self.calibration_store
-            .record(key, estimated_tokens, prompt_tokens, cohort, ts);
+        self.live_samples().record_calibration_sample(
+            provider_kind,
+            upstream,
+            session_key,
+            estimated_tokens,
+            prompt_tokens,
+            ts,
+        );
+    }
+
+    /// The live K and calibration stores, for a caller that records its
+    /// samples after this Router may have been replaced by a hot reload.
+    /// The reload shares both stores with the new Router, so samples
+    /// recorded through the sink reach the live stores without the sink
+    /// keeping this Router alive.
+    pub fn live_samples(&self) -> LiveSampleSink {
+        LiveSampleSink {
+            k: Arc::clone(&self.k_session_store),
+            calibration: Arc::clone(&self.calibration_store),
+        }
     }
 
     /// Every calibration lane currently holding evidence, as
@@ -3292,6 +3294,67 @@ impl Router {
     /// re-picked pin by [`Router::carry_over_pool_state_from`].
     pub fn note_pool_removed_pin_repick(&self) {
         self.metrics.incr_pool_removed_pin_repick();
+    }
+}
+
+/// Where a request's live K and calibration samples go: the two stores a
+/// Router shares with its hot-reload successors, without the Router.
+/// Records exactly as [`Router::record_k_sample`] and
+/// [`Router::record_calibration_sample`] do.
+#[derive(Clone)]
+pub struct LiveSampleSink {
+    k: Arc<crate::k_estimator::KSessionStore>,
+    calibration: Arc<crate::calibration::CalibrationStore>,
+}
+
+impl std::fmt::Debug for LiveSampleSink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LiveSampleSink").finish_non_exhaustive()
+    }
+}
+
+impl LiveSampleSink {
+    /// See [`Router::record_k_sample`].
+    pub fn record_k_sample(
+        &self,
+        session_key: Option<&str>,
+        provider_kind: &str,
+        model: &str,
+        cache_read: u64,
+        ts: std::time::SystemTime,
+    ) {
+        let Some(key) = k_query_key(session_key, Some(provider_kind), model).store_key() else {
+            return;
+        };
+        self.k.record_sample(
+            key,
+            crate::k_estimator::Sample {
+                ts,
+                observed_reuse: cache_read > 0,
+            },
+        );
+    }
+
+    /// See [`Router::record_calibration_sample`].
+    pub fn record_calibration_sample(
+        &self,
+        provider_kind: Option<&str>,
+        upstream: Option<&str>,
+        session_key: Option<&str>,
+        estimated_tokens: u64,
+        prompt_tokens: u64,
+        ts: std::time::SystemTime,
+    ) {
+        let (Some(provider_kind), Some(upstream)) = (provider_kind, upstream) else {
+            return;
+        };
+        let key = crate::calibration::LaneKey {
+            provider_kind: provider_kind.to_string(),
+            upstream: upstream.to_string(),
+        };
+        let cohort = crate::calibration::cohort_of(session_key);
+        self.calibration
+            .record(key, estimated_tokens, prompt_tokens, cohort, ts);
     }
 }
 
