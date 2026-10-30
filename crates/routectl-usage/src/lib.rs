@@ -63,8 +63,8 @@ pub use query::{
     shadow_misfire_summary, suppressed_sessions, ttfbs, would_trim_summary,
 };
 pub use record::{
-    Outcome, PREFIX_EPOCH_RESEEDED, PREFIX_EPOCH_REWRITTEN, PREFIX_EPOCH_STABLE, ParseOutcomeError,
-    UsageRecord,
+    Harness, Operation, Outcome, PREFIX_EPOCH_RESEEDED, PREFIX_EPOCH_REWRITTEN,
+    PREFIX_EPOCH_STABLE, ParseHarnessError, ParseOperationError, ParseOutcomeError, UsageRecord,
 };
 pub use schema::SCHEMA_VERSION;
 pub use writer::CapabilityEventWrite;

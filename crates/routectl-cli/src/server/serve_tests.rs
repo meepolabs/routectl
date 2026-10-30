@@ -1265,6 +1265,14 @@ fn sample_usage_record(request_id: &str) -> routectl_usage::UsageRecord {
         cache_front_decision: None,
         cache_terminal_decision: None,
         prefix_epoch_event: None,
+        operation: routectl_usage::Operation::Inference,
+        probe: false,
+        harness: routectl_usage::Harness::Other,
+        wire_losses: 0,
+        translation_drops: 0,
+        local_refusals: 0,
+        field_repairs: 0,
+        missing_terminals: 0,
     }
 }
 

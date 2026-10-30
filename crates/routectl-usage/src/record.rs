@@ -2,7 +2,9 @@
 //!
 //! `UsageRecord` mirrors the capture-column set persisted by the usage
 //! writer. It is shaped for the DB writer, not the public wire -- one
-//! field per column, nullable columns as `Option<T>`, timestamps as
+//! field per column, nullable columns as `Option<T>` (except the v18
+//! request-observation fields, which the writer always fills; their columns
+//! are nullable only for rows written before v18), timestamps as
 //! epoch-millis UTC `i64`, JSON-text columns as `serde_json::Value`.
 
 use serde::{Deserialize, Serialize};
@@ -81,6 +83,113 @@ impl std::str::FromStr for Outcome {
 
 impl TryFrom<&str> for Outcome {
     type Error = ParseOutcomeError;
+
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        s.parse()
+    }
+}
+
+/// What kind of client request a usage row records.
+///
+/// CLOSED set, persisted as the `requests.operation` token. A row written
+/// before the column existed stores NULL and reads as `Inference`, which is
+/// also the `Default`. Adding a variant is additive; removing or renaming one
+/// strands rows already written with its token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Operation {
+    /// A model inference request (complete or streamed).
+    #[default]
+    Inference,
+    /// A token-count request: no inference, so no cost.
+    CountTokens,
+}
+
+impl Operation {
+    /// The exact lowercase token persisted in `requests.operation`.
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Inference => "inference",
+            Self::CountTokens => "count_tokens",
+        }
+    }
+}
+
+/// Error returned when a token does not map to a known `Operation`.
+#[derive(Debug, thiserror::Error)]
+#[error("unknown operation token: {0}")]
+pub struct ParseOperationError(pub String);
+
+impl std::str::FromStr for Operation {
+    type Err = ParseOperationError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "inference" => Ok(Self::Inference),
+            "count_tokens" => Ok(Self::CountTokens),
+            other => Err(ParseOperationError(other.to_string())),
+        }
+    }
+}
+
+impl TryFrom<&str> for Operation {
+    type Error = ParseOperationError;
+
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        s.parse()
+    }
+}
+
+/// Which client harness sent the request, classified from its user-agent.
+///
+/// CLOSED set, persisted as the `requests.harness` token; the user-agent
+/// itself is never stored. Anything unrecognized, missing or malformed is
+/// `Other`, which is also the `Default` and how a pre-column NULL reads.
+/// Adding a variant is additive; removing or renaming one strands rows already
+/// written with its token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Harness {
+    /// Claude Code.
+    ClaudeCode,
+    /// The Codex CLI.
+    CodexCli,
+    /// Any other, unknown or absent client.
+    #[default]
+    Other,
+}
+
+impl Harness {
+    /// The exact lowercase token persisted in `requests.harness`.
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::ClaudeCode => "claude_code",
+            Self::CodexCli => "codex_cli",
+            Self::Other => "other",
+        }
+    }
+}
+
+/// Error returned when a token does not map to a known `Harness`.
+#[derive(Debug, thiserror::Error)]
+#[error("unknown harness token: {0}")]
+pub struct ParseHarnessError(pub String);
+
+impl std::str::FromStr for Harness {
+    type Err = ParseHarnessError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "claude_code" => Ok(Self::ClaudeCode),
+            "codex_cli" => Ok(Self::CodexCli),
+            "other" => Ok(Self::Other),
+            other => Err(ParseHarnessError(other.to_string())),
+        }
+    }
+}
+
+impl TryFrom<&str> for Harness {
+    type Error = ParseHarnessError;
 
     fn try_from(s: &str) -> Result<Self, Self::Error> {
         s.parse()
@@ -325,6 +434,26 @@ pub struct UsageRecord {
     /// deliberately not a token -- same shape as `would_trim_shadow_misfire`.
     pub prefix_epoch_event: Option<i64>,
 
+    // REQUEST OBSERVATION
+    // Non-`Option` although the columns are nullable: the writer always binds
+    // a value, and NULL marks only rows written before the columns existed.
+    /// What kind of request this row records.
+    pub operation: Operation,
+    /// Whether the request was a capability probe.
+    pub probe: bool,
+    /// Client harness classified from the user-agent (never stored itself).
+    pub harness: Harness,
+    /// Wire-check losses found for this request, request and response legs.
+    pub wire_losses: u64,
+    /// Distinct translation drops for this client request (not per attempt).
+    pub translation_drops: u64,
+    /// Requests or responses routectl refused locally while serving this one.
+    pub local_refusals: u64,
+    /// Field repairs spent on this request.
+    pub field_repairs: u64,
+    /// Streams for this request that ended without a terminal event.
+    pub missing_terminals: u64,
+
     // TIMING
     /// End-to-end request latency, milliseconds.
     pub latency_ms: i64,
@@ -447,6 +576,69 @@ mod tests {
     }
 
     #[test]
+    fn operation_tokens_round_trip_through_str_and_serde() {
+        // Arrange
+        let cases = [
+            (Operation::Inference, "inference"),
+            (Operation::CountTokens, "count_tokens"),
+        ];
+
+        // Act + Assert
+        for (variant, token) in cases {
+            assert_eq!(variant.as_str(), token, "{token}");
+            assert_eq!(token.parse::<Operation>().expect(token), variant, "{token}");
+            assert_eq!(Operation::try_from(token).expect(token), variant, "{token}");
+            assert_eq!(
+                serde_json::to_value(variant).expect(token),
+                serde_json::Value::String(token.to_string()),
+                "{token}"
+            );
+        }
+    }
+
+    #[test]
+    fn operation_from_str_rejects_unknown_tokens() {
+        for token in ["", "Inference", "count-tokens", "countTokens", "other"] {
+            assert!(token.parse::<Operation>().is_err(), "{token:?}");
+        }
+    }
+
+    #[test]
+    fn harness_tokens_round_trip_through_str_and_serde() {
+        // Arrange
+        let cases = [
+            (Harness::ClaudeCode, "claude_code"),
+            (Harness::CodexCli, "codex_cli"),
+            (Harness::Other, "other"),
+        ];
+
+        // Act + Assert
+        for (variant, token) in cases {
+            assert_eq!(variant.as_str(), token, "{token}");
+            assert_eq!(token.parse::<Harness>().expect(token), variant, "{token}");
+            assert_eq!(Harness::try_from(token).expect(token), variant, "{token}");
+            assert_eq!(
+                serde_json::to_value(variant).expect(token),
+                serde_json::Value::String(token.to_string()),
+                "{token}"
+            );
+        }
+    }
+
+    #[test]
+    fn harness_from_str_rejects_unknown_tokens() {
+        for token in ["", "Other", "claude-code", "codex", "opencode", "curl/8"] {
+            assert!(token.parse::<Harness>().is_err(), "{token:?}");
+        }
+    }
+
+    #[test]
+    fn new_vocabularies_default_to_the_legacy_null_reading() {
+        assert_eq!(Operation::default(), Operation::Inference);
+        assert_eq!(Harness::default(), Harness::Other);
+    }
+
+    #[test]
     fn fully_populated_record_constructs() {
         // Arrange + Act
         let record = UsageRecord {
@@ -497,6 +689,14 @@ mod tests {
             cache_front_decision: Some("auto_emitted".to_string()),
             cache_terminal_decision: Some("auto_skipped:breakpoint_cap".to_string()),
             prefix_epoch_event: Some(1),
+            operation: Operation::CountTokens,
+            probe: true,
+            harness: Harness::ClaudeCode,
+            wire_losses: 1,
+            translation_drops: 2,
+            local_refusals: 3,
+            field_repairs: 4,
+            missing_terminals: 5,
             latency_ms: 1000,
             ttfb_ms: Some(120),
             input_tokens: Some(100),
@@ -572,6 +772,14 @@ mod tests {
             cache_front_decision: None,
             cache_terminal_decision: None,
             prefix_epoch_event: None,
+            operation: Operation::Inference,
+            probe: false,
+            harness: Harness::Other,
+            wire_losses: 0,
+            translation_drops: 0,
+            local_refusals: 0,
+            field_repairs: 0,
+            missing_terminals: 0,
             latency_ms: 0,
             ttfb_ms: None,
             input_tokens: None,

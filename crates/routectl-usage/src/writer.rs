@@ -1001,12 +1001,20 @@ fn insert_record(conn: &Connection, r: &UsageRecord) -> Result<usize, rusqlite::
             r.cache_front_decision,
             r.cache_terminal_decision,
             r.prefix_epoch_event,
+            r.operation.as_str(),
+            r.probe as i64,
+            r.harness.as_str(),
+            r.wire_losses,
+            r.translation_drops,
+            r.local_refusals,
+            r.field_repairs,
+            r.missing_terminals,
         ],
     )
 }
 
 /// The bound `INSERT OR IGNORE`. Column order mirrors `record.rs` /
-/// `schema.rs` exactly; `?1..?64` positions match the params list above.
+/// `schema.rs` exactly; `?1..?72` positions match the params list above.
 /// The DDL's three write-stopped legacy decision columns are absent from
 /// this list on purpose -- an omitted nullable column stores NULL. That
 /// includes `reduction_strategy`: the current context-reduction outcome
@@ -1047,7 +1055,9 @@ INSERT OR IGNORE INTO requests (
     reduction_bytes_saved,
     cache_front_decision,
     cache_terminal_decision,
-    prefix_epoch_event
+    prefix_epoch_event,
+    operation, probe, harness,
+    wire_losses, translation_drops, local_refusals, field_repairs, missing_terminals
 ) VALUES (
     ?1, ?2, ?3, ?4, ?5, ?6,
     ?7, ?8, ?9, ?10, ?11, ?12,
@@ -1081,7 +1091,9 @@ INSERT OR IGNORE INTO requests (
     ?61,
     ?62,
     ?63,
-    ?64
+    ?64,
+    ?65, ?66, ?67,
+    ?68, ?69, ?70, ?71, ?72
 )";
 
 #[cfg(test)]
@@ -1161,6 +1173,14 @@ mod tests {
             cache_front_decision: None,
             cache_terminal_decision: None,
             prefix_epoch_event: None,
+            operation: crate::record::Operation::Inference,
+            probe: false,
+            harness: crate::record::Harness::Other,
+            wire_losses: 0,
+            translation_drops: 0,
+            local_refusals: 0,
+            field_repairs: 0,
+            missing_terminals: 0,
         }
     }
 
@@ -1548,6 +1568,114 @@ mod tests {
         );
         assert_eq!(epoch, 2);
         assert_eq!(legacy, None, "legacy strategy must stay write-stopped");
+    }
+
+    /// The v18 request-observation columns, read back in column order.
+    type ObservationRow = (String, i64, String, i64, i64, i64, i64, i64);
+
+    fn observation_row(conn: &Connection, request_id: &str) -> ObservationRow {
+        conn.query_row(
+            "SELECT operation, probe, harness, wire_losses, translation_drops, \
+             local_refusals, field_repairs, missing_terminals \
+             FROM requests WHERE request_id = ?1",
+            [request_id],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                    r.get(7)?,
+                ))
+            },
+        )
+        .expect("row")
+    }
+
+    /// One row per v18 field, each carrying a non-default value in exactly
+    /// that field, so a bind landing in the wrong column (or not at all)
+    /// fails the row that names it. The all-default row pins what a record
+    /// with nothing observed persists: values, never NULL.
+    #[tokio::test]
+    async fn try_send_round_trips_each_request_observation_field() {
+        // Arrange
+        let defaults: ObservationRow = ("inference".into(), 0, "other".into(), 0, 0, 0, 0, 0);
+        type Setter = fn(&mut UsageRecord);
+        let cases: [(&str, Setter, ObservationRow); 9] = [
+            ("obs-default", |_| {}, defaults.clone()),
+            (
+                "obs-operation",
+                |r| r.operation = crate::record::Operation::CountTokens,
+                ("count_tokens".into(), 0, "other".into(), 0, 0, 0, 0, 0),
+            ),
+            (
+                "obs-probe",
+                |r| r.probe = true,
+                ("inference".into(), 1, "other".into(), 0, 0, 0, 0, 0),
+            ),
+            (
+                "obs-harness",
+                |r| r.harness = crate::record::Harness::CodexCli,
+                ("inference".into(), 0, "codex_cli".into(), 0, 0, 0, 0, 0),
+            ),
+            (
+                "obs-wire-losses",
+                |r| r.wire_losses = 11,
+                ("inference".into(), 0, "other".into(), 11, 0, 0, 0, 0),
+            ),
+            (
+                "obs-translation-drops",
+                |r| r.translation_drops = 12,
+                ("inference".into(), 0, "other".into(), 0, 12, 0, 0, 0),
+            ),
+            (
+                "obs-local-refusals",
+                |r| r.local_refusals = 13,
+                ("inference".into(), 0, "other".into(), 0, 0, 13, 0, 0),
+            ),
+            (
+                "obs-field-repairs",
+                |r| r.field_repairs = 14,
+                ("inference".into(), 0, "other".into(), 0, 0, 0, 14, 0),
+            ),
+            (
+                "obs-missing-terminals",
+                |r| r.missing_terminals = 15,
+                ("inference".into(), 0, "other".into(), 0, 0, 0, 0, 15),
+            ),
+        ];
+        let (_dir, path) = temp_path();
+        let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+
+        // Act
+        for (request_id, set, _) in &cases {
+            let mut rec = record(request_id);
+            rec.prefix_epoch_event = Some(2);
+            set(&mut rec);
+            handle.try_send(rec);
+        }
+        assert!(
+            wait_persisted(handle.counters(), cases.len() as u64),
+            "rows not persisted"
+        );
+        writer.shutdown();
+
+        // Assert
+        let conn = Connection::open(&path).expect("read");
+        for (request_id, _, want) in &cases {
+            assert_eq!(&observation_row(&conn, request_id), want, "{request_id}");
+            let epoch: i64 = conn
+                .query_row(
+                    "SELECT prefix_epoch_event FROM requests WHERE request_id = ?1",
+                    [request_id],
+                    |r| r.get(0),
+                )
+                .expect("epoch");
+            assert_eq!(epoch, 2, "{request_id}: an earlier column shifted");
+        }
     }
 
     #[test]

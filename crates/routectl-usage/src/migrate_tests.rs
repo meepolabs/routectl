@@ -227,11 +227,17 @@ fn purge_keeps_the_schema_version_and_the_file_still_downgrades() {
 
     // Act
     let version = user_version(&path);
+    Connection::open(&path)
+        .expect("reopen")
+        .execute_batch(
+            "UPDATE meta SET value = '17' WHERE key = 'schema_version';
+             PRAGMA user_version = 17;",
+        )
+        .expect("restamp v17 as the v18 -> v17 downgrade leaves it");
     let downgraded = downgrade_to_v16(&path);
 
     // Assert
     assert_eq!(version, SCHEMA_VERSION);
-    assert_eq!(version, 17);
     assert!(downgraded.is_ok(), "downgrade refused: {downgraded:?}");
 }
 

@@ -2,12 +2,25 @@ use tempfile::TempDir;
 
 use super::*;
 
+/// Lower a current file's version stamps to v17, the state the v18 -> v17
+/// downgrade leaves: every v18 column and table stays in place.
+fn restamp_v17(path: &std::path::Path) {
+    rusqlite::Connection::open(path)
+        .expect("reopen")
+        .execute_batch(
+            "UPDATE meta SET value = '17' WHERE key = 'schema_version';
+             PRAGMA user_version = 17;",
+        )
+        .expect("restamp v17");
+}
+
 #[test]
 fn downgrades_a_fresh_db_and_names_the_path() {
     // Arrange
     let dir = TempDir::new().expect("tempdir");
     let path = dir.path().join("usage.db");
-    drop(routectl_usage::open(&path).expect("fresh v17 db"));
+    drop(routectl_usage::open(&path).expect("fresh db"));
+    restamp_v17(&path);
 
     // Act
     let message = run(&path).expect("downgrade");
@@ -50,6 +63,7 @@ fn refuses_while_the_daemon_writer_holds_the_db() {
     assert!(matches!(result, Err(DowngradeError::InUse)), "{result:?}");
     drop(handle);
     writer.shutdown();
+    restamp_v17(&path);
     let message = run(&path).expect("downgrade succeeds once the writer stopped");
     assert!(message.contains("v16"));
 }

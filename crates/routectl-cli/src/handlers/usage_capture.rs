@@ -20,7 +20,7 @@ use routectl_core::capability::{EvidenceSource, FailurePhase, Verdict};
 use routectl_core::failure_class::classify;
 use routectl_router::router::{CapabilityClearedEvent, CapabilityObserveEvent};
 use routectl_router::{CURRENT_VOCAB_VERSION, DispatchMeta, ObservationDirection};
-use routectl_usage::{CapabilityEvent, Outcome, UsageHandle, UsageRecord};
+use routectl_usage::{CapabilityEvent, Harness, Operation, Outcome, UsageHandle, UsageRecord};
 use serde_json::Value;
 
 use crate::handlers::opening_diagnostics::OpeningDiagnostics;
@@ -97,6 +97,14 @@ pub(crate) fn build_usage_draft(
         cache_front_decision: None,
         cache_terminal_decision: None,
         prefix_epoch_event: None,
+        operation: Operation::Inference,
+        probe: false,
+        harness: Harness::Other,
+        wire_losses: 0,
+        translation_drops: 0,
+        local_refusals: 0,
+        field_repairs: 0,
+        missing_terminals: 0,
         latency_ms: 0,
         ttfb_ms: None,
         input_tokens: None,

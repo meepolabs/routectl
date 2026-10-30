@@ -2,7 +2,9 @@
 //!
 //! One column per `UsageRecord` field (see `record.rs`) for every WRITTEN
 //! column, with matching null-ability: `Option<T>` fields are NULLable;
-//! non-`Option` fields are NOT NULL. The DDL additionally retains three
+//! non-`Option` fields are NOT NULL, except the v18 request-observation
+//! columns, which are non-`Option` in the record but NULLable on disk so rows
+//! written before v18 need no rewrite. The DDL additionally retains three
 //! intentionally write-stopped legacy columns (`strategy`,
 //! `reduction_strategy`, `selection_decision`) that have no `UsageRecord`
 //! field, so old databases keep opening and historical values stay
@@ -13,7 +15,7 @@
 /// Current on-disk schema version. The migrate-on-open ladder advances a
 /// freshly-created or older DB to this version. Bump alongside a new
 /// migration step in `migrate.rs`.
-pub const SCHEMA_VERSION: i64 = 17;
+pub const SCHEMA_VERSION: i64 = 18;
 
 /// `meta` key holding the DB creation timestamp (epoch ms).
 pub const META_CREATED_AT_MS: &str = "created_at_ms";
@@ -261,7 +263,8 @@ CREATE TABLE IF NOT EXISTS requests (
     -- (`auto_emitted`, `caller_supplied`, `volatile_vetoed`,
     -- `auto_skipped:global_disabled`, `auto_skipped:provider_disabled`,
     -- `auto_skipped:no_capability`, `auto_skipped:breakpoint_cap`,
-    -- `auto_skipped:validation_rolled_back`, `auto_skipped:no_placement_region`)
+    -- `auto_skipped:validation_rolled_back`, `auto_skipped:no_placement_region`,
+    -- `auto_skipped:k_below_break_even`)
     -- -- one contract-frozen vocabulary across log and ledger, never the
     -- write-stopped v1 `strategy` column above.
     --
@@ -285,7 +288,33 @@ CREATE TABLE IF NOT EXISTS requests (
     -- older rows stay NULL.
     cache_front_decision TEXT,
     cache_terminal_decision TEXT,
-    prefix_epoch_event INTEGER
+    prefix_epoch_event INTEGER,
+
+    -- REQUEST OBSERVATION (v18): what kind of request this row records and
+    -- what went missing or was repaired while serving it. `operation` is the
+    -- closed `Operation` token (`inference`, `count_tokens`); `probe` is 1 for
+    -- a capability probe request, else 0; `harness` is the closed `Harness`
+    -- token (`claude_code`, `codex_cli`, `other`) classified from the client's
+    -- user-agent, which itself is never stored. The five counts are per client
+    -- request: wire-check losses, distinct translation drops, local refusals,
+    -- field repairs, and streams that ended without a terminal event.
+    --
+    -- Nullable with no default and no CHECK so the step stays a schema-text
+    -- edit (no row rewrite) and a v17 binary handed the file back is
+    -- unaffected. The writer always binds a value, so NULL marks a row written
+    -- before this version; readers take it as `inference`, not a probe,
+    -- `other`, and 0 respectively. Appended last so these columns land in the
+    -- same ordinal position whether the DB was created fresh at v18 or
+    -- migrated from v17 via `ALTER TABLE ... ADD COLUMN` (which always
+    -- appends). No backfill.
+    operation       TEXT,
+    probe           INTEGER,
+    harness         TEXT,
+    wire_losses     INTEGER,
+    translation_drops INTEGER,
+    local_refusals  INTEGER,
+    field_repairs   INTEGER,
+    missing_terminals INTEGER
 )";
 
 /// Index over `ts_start` for time-range scans (the dominant query
@@ -383,6 +412,20 @@ CREATE TABLE IF NOT EXISTS capability_events (
 /// query shape for the hygiene prune and the ts-ordered rebuild replay).
 pub const CREATE_CAPABILITY_EVENTS_TS_INDEX: &str =
     "CREATE INDEX IF NOT EXISTS idx_capability_events_ts ON capability_events (ts)";
+
+/// DDL for the `ledger_gaps` table (v18).
+///
+/// One row per batch of request rows the ledger lost because its queue was
+/// full: `ts_ms` is when the writer recorded the gap (epoch-millis), `cause`
+/// names why the rows were dropped, and `dropped` is how many were lost since
+/// the previous gap row. A time window containing a gap row is incomplete.
+/// Carries counts only, never request content.
+pub const CREATE_LEDGER_GAPS_TABLE: &str = "\
+CREATE TABLE IF NOT EXISTS ledger_gaps (
+    ts_ms   INTEGER NOT NULL,
+    cause   TEXT    NOT NULL,
+    dropped INTEGER NOT NULL
+)";
 
 /// DDL for the `meta` key/value table. Holds the DB creation timestamp
 /// and a human-readable copy of the schema version. Survives migrations.

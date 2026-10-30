@@ -258,6 +258,14 @@ mod tests {
             cache_front_decision: None,
             cache_terminal_decision: None,
             prefix_epoch_event: None,
+            operation: crate::record::Operation::Inference,
+            probe: false,
+            harness: crate::record::Harness::Other,
+            wire_losses: 0,
+            translation_drops: 0,
+            local_refusals: 0,
+            field_repairs: 0,
+            missing_terminals: 0,
         }
     }
 

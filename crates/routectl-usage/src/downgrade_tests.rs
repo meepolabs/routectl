@@ -27,6 +27,18 @@ fn meta_version(conn: &Connection) -> String {
     .expect("meta schema_version")
 }
 
+/// Lower a current file's version stamps to v17, the state the v18 -> v17
+/// downgrade leaves: every v18 column and table stays in place.
+fn restamp_v17(path: &std::path::Path) {
+    Connection::open(path)
+        .expect("reopen")
+        .execute_batch(
+            "UPDATE meta SET value = '17' WHERE key = 'schema_version';
+             PRAGMA user_version = 17;",
+        )
+        .expect("restamp v17");
+}
+
 /// The `capability_events` DDL as v16 created it: the current DDL with the two
 /// trailing v17 columns cut off. Derived from the live constant so it cannot
 /// drift from the real prior shape.
@@ -130,6 +142,7 @@ fn downgrades_a_fresh_v17_db_and_a_v16_reader_and_writer_use_it() {
     let db = open(&path).expect("open fresh");
     insert_capability_event(db.conn(), &negative()).expect("insert");
     drop(db);
+    restamp_v17(&path);
 
     // Act
     downgrade_to_v16(&path).expect("downgrade");
@@ -166,20 +179,21 @@ fn downgrades_a_fresh_v17_db_and_a_v16_reader_and_writer_use_it() {
 }
 
 #[test]
-fn a_downgraded_file_migrates_back_to_v17_with_v16_rows_reading_legacy() {
+fn a_downgraded_file_migrates_back_to_current_with_v16_rows_reading_legacy() {
     // Arrange: a downgraded file a v16 binary then wrote to.
     let (_dir, path) = temp_db_path();
     drop(open(&path).expect("open fresh"));
+    restamp_v17(&path);
     downgrade_to_v16(&path).expect("downgrade");
     Connection::open(&path)
         .expect("reopen")
         .execute(V16_INSERT, [])
         .expect("v16 insert");
 
-    // Act: a v17 open migrates it forward again.
+    // Act: a current open migrates it forward again.
     let db = open(&path).expect("re-upgrade");
 
-    // Assert: v17 again, same column shape, and the v16-written row carries a
+    // Assert: current again, same column shape, and the v16-written row carries a
     // NULL vocabulary (legacy).
     assert_eq!(user_version(db.conn()), crate::schema::SCHEMA_VERSION);
     let rows = crate::query::read_capability_events_after(db.conn(), 0, 10).expect("read");
@@ -187,6 +201,7 @@ fn a_downgraded_file_migrates_back_to_v17_with_v16_rows_reading_legacy() {
     assert_eq!(rows[0].vocab_version, None);
     assert_eq!(rows[0].provider_kind, None);
     drop(db);
+    restamp_v17(&path);
     downgrade_to_v16(&path).expect("the re-upgraded file is still exactly additive");
 }
 
@@ -200,8 +215,9 @@ fn downgrades_a_v16_db_that_migrated_to_v17() {
          PRAGMA user_version = 16;",
     )
     .expect("restamp v16");
-    migrate_to_current(&conn, 0).expect("migrate v16 -> v17");
+    migrate_to_current(&conn, 0).expect("migrate v16 -> current");
     drop(conn);
+    restamp_v17(&path);
 
     // Act + Assert
     downgrade_to_v16(&path).expect("a migrated v17 file is additive");
@@ -226,6 +242,7 @@ fn refuses_while_another_connection_has_the_file_open() {
         let (_dir, path) = temp_db_path();
         drop(open(&path).expect("open fresh"));
         let holder = hold(&path);
+        restamp_v17(&path);
 
         // Act
         let result = downgrade_to_v16(&path);

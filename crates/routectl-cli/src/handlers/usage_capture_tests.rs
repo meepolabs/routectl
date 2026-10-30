@@ -1935,6 +1935,70 @@ fn draft_leaves_every_cache_decision_column_null() {
     assert_eq!(cap.record.prefix_epoch_event, None);
 }
 
+/// The usage schema documents the cache-decision column vocabulary in a DDL
+/// comment, which SQLite keeps in the stored table SQL. Every token the core
+/// vocabulary defines must be named there, so a token added in core without
+/// a schema note fails here.
+#[test]
+fn usage_schema_comment_names_every_cache_decision_token() {
+    // Arrange: the `requests` DDL exactly as a fresh usage DB stores it.
+    let dir = tempfile::tempdir().expect("usage tempdir");
+    let db = routectl_usage::open(dir.path().join("usage.db")).expect("open usage db");
+    let ddl: String = db
+        .conn()
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'requests'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("requests ddl");
+    let (_, after_heading) = ddl
+        .split_once("CACHE-BREAKPOINT DECISIONS")
+        .expect("the cache-decision comment block is present");
+    let (vocabulary_note, _) = after_heading
+        .split_once("one contract-frozen vocabulary")
+        .expect("the vocabulary note ends where it always has");
+
+    // Act
+    let missing: Vec<&str> = routectl_core::cache_decision::CACHE_DECISION_TOKENS
+        .iter()
+        .copied()
+        .filter(|token| !vocabulary_note.contains(&format!("`{token}`")))
+        .collect();
+
+    // Assert
+    assert!(
+        !routectl_core::cache_decision::CACHE_DECISION_TOKENS.is_empty(),
+        "the core vocabulary is non-empty"
+    );
+    assert!(
+        vocabulary_note.contains("`auto_emitted`"),
+        "positive control: the note lists tokens in backticks"
+    );
+    assert!(missing.is_empty(), "schema comment misses {missing:?}");
+}
+
+#[test]
+fn draft_records_an_inference_from_an_unclassified_harness_with_zero_counts() {
+    // Arrange / Act
+    let (cap, _w, _dir) = capture();
+
+    // Assert: what the row reads as until the request lifecycle fills it.
+    assert_eq!(cap.record.operation, routectl_usage::Operation::Inference);
+    assert!(!cap.record.probe);
+    assert_eq!(cap.record.harness, routectl_usage::Harness::Other);
+    assert_eq!(
+        [
+            cap.record.wire_losses,
+            cap.record.translation_drops,
+            cap.record.local_refusals,
+            cap.record.field_repairs,
+            cap.record.missing_terminals,
+        ],
+        [0; 5]
+    );
+}
+
 #[tokio::test]
 async fn observe_meta_copies_both_decision_tokens_and_the_epoch_code() {
     // Arrange: a front marker that found no region, a terminal marker that
