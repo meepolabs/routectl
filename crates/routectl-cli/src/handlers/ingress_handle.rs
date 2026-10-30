@@ -32,7 +32,7 @@ use crate::handlers::ingress_wire::capture_ingress_wire;
 use crate::handlers::opening_meter::{OpeningMeter, StreamTurn};
 use crate::handlers::pure_proxy_admission::enforce_pure_proxy_admission;
 use crate::handlers::response_wire::{
-    CheckedBody, ClientSink, abandon_unrendered, response_edits_for,
+    CheckedBody, ClientSink, PendingRow, abandon_unrendered, response_edits_for,
 };
 use crate::handlers::stream_evidence_settle::{StreamEvidenceSettler, StreamEvidenceSlot};
 use crate::handlers::usage_capture::{
@@ -560,23 +560,13 @@ async fn complete_response<A: IngressAdapter>(
             match adapter.render_response_declared(resp, &mut response_edits) {
                 Ok(body) => {
                     // Upstream delivered AND we serialized it: this is the
-                    // only path where the client receives 200 + body, so
-                    // finalize `ok` here rather than before the render.
+                    // only path where the client receives 200 + body. The
+                    // row (and the live K / calibration samples sharing its
+                    // `ok` boundary) is written by the body once it is sent,
+                    // after the response-leg compare, so the row counts what
+                    // that compare found; a body dropped unsent leaves the
+                    // capture to its `client_disconnect` drop.
                     //
-                    // Both live evidence writes respect the SAME boundary.
-                    // A render failure finalizes `UpstreamError`, and the
-                    // startup replay admits `outcome = 'ok'` rows only, so
-                    // recording before the render would leave the in-memory
-                    // stores holding evidence the ledger refused -- the lane
-                    // and the K window would route one way now and another
-                    // way after a restart rebuilt from the ledger.
-                    //
-                    // Best-effort: neither call may affect the response, and
-                    // a keyless / no-served-target request is skipped inside
-                    // the respective helper.
-                    capture.record_k_sample(&router, session_key.as_deref());
-                    capture.record_calibration_sample(&router, session_key.as_deref());
-                    capture.finalize(Outcome::Ok);
                     // The trace-level egress body (dir 4) fires inside the
                     // adapter render now, before the single `to_vec`: the
                     // handler holds only the finished wire bytes and no
@@ -585,6 +575,7 @@ async fn complete_response<A: IngressAdapter>(
                         body,
                         response_check,
                         response_edits,
+                        PendingRow::new(capture, Arc::clone(&router), session_key),
                     )));
                     // Dir 4: egress response headers, captured from the
                     // built response so the trace reflects what the client
@@ -1027,7 +1018,7 @@ async fn drive_stream<A: IngressAdapter>(
                     reason = "client_disconnected",
                     "client disconnected mid-stream; cancelling upstream"
                 );
-                client_check.end(StreamExit::Disconnect);
+                client_check.finish(StreamExit::Disconnect);
                 evidence.end(StreamExit::Disconnect);
                 return;
             }
@@ -1061,7 +1052,7 @@ async fn drive_stream<A: IngressAdapter>(
                                 // guard stays un-finalized, so Drop
                                 // stamps `client_disconnect` -- no
                                 // explicit call needed.
-                                client_check.end(StreamExit::Disconnect);
+                                client_check.finish(StreamExit::Disconnect);
                                 evidence.end(StreamExit::Disconnect);
                                 return;
                             }
@@ -1097,9 +1088,9 @@ async fn drive_stream<A: IngressAdapter>(
                         let render_err = routectl_core::Error::Streaming(e.to_string());
                         let safe_msg = sanitize_stream_error_for_client(&render_err);
                         let class = crate::ingress::StreamErrorClass::from_error(&render_err);
+                        client_check.finish(StreamExit::RenderFailure);
                         capture.observe_error(&render_err);
                         capture.finalize(Outcome::UpstreamError);
-                        client_check.end(StreamExit::RenderFailure);
                         evidence.end(StreamExit::RenderFailure);
                         for ev in adapter.render_error_eos(state.as_mut(), &safe_msg, &class) {
                             let _ = tx.send(ev).await;
@@ -1129,10 +1120,10 @@ async fn drive_stream<A: IngressAdapter>(
                     class = ?class,
                     "upstream stream error -- emitting terminal error event"
                 );
+                client_check.finish(StreamExit::UpstreamError);
                 capture.observe_error(&e);
                 capture.mark_stream_stage(StreamStage::MidStream);
                 capture.finalize(Outcome::UpstreamError);
-                client_check.end(StreamExit::UpstreamError);
                 evidence.end(StreamExit::UpstreamError);
                 for ev in adapter.render_error_eos(state.as_mut(), &safe_msg, &class) {
                     if tx.send(ev).await.is_err() {
@@ -1151,7 +1142,7 @@ async fn drive_stream<A: IngressAdapter>(
         if tx.send(ev).await.is_err() {
             // Client disconnected during EOS render. The guard stays
             // un-finalized, so Drop stamps `client_disconnect`.
-            client_check.end(StreamExit::Disconnect);
+            client_check.finish(StreamExit::Disconnect);
             evidence.end(StreamExit::Disconnect);
             return;
         }
@@ -1160,10 +1151,13 @@ async fn drive_stream<A: IngressAdapter>(
         // commits here. Idempotent for the common has-content case.
         capture.mark_stream_http_committed();
     }
-    // Natural EOS reached. Record the observed cache-reuse into the per-
-    // session K-estimator store BEFORE finalizing -- best-effort, never
-    // affects the bytes already sent. Then finalize the row as a clean
-    // completion; the egress trace-summary fires from inside `finalize`.
+    // Natural EOS reached. Compare the delivered stream first, so the row
+    // counts what that compare found. Then record the observed cache-reuse
+    // into the per-session K-estimator store BEFORE finalizing --
+    // best-effort, never affects the bytes already sent. Then finalize the
+    // row as a clean completion; the egress trace-summary fires from inside
+    // `finalize`.
+    client_check.finish(StreamExit::Ended);
     capture.record_k_sample(&router, session_key.as_deref());
     capture.record_calibration_sample(&router, session_key.as_deref());
     // Only this natural, fully delivered end may anchor the next turn;
@@ -1174,7 +1168,6 @@ async fn drive_stream<A: IngressAdapter>(
     }
     capture.finalize(Outcome::Ok);
     evidence.settle(&capture);
-    client_check.end(StreamExit::Ended);
 }
 
 /// Merge a metered stream's opening diagnostics into its usage row; a no-op

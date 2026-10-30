@@ -7,6 +7,7 @@
 //! is sent and never alters it.
 
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use axum::body::Bytes;
@@ -14,8 +15,10 @@ use http_body::{Body, Frame, SizeHint};
 use routectl_core::wire_check::{
     Assembled, IncompleteReason, SseFrame, StreamAssembler, StreamExit,
 };
-use routectl_router::ResponseCheck;
+use routectl_router::{ResponseCheck, Router};
+use routectl_usage::Outcome;
 
+use crate::handlers::usage_capture::UsageCapture;
 use crate::ingress::{ResponseEdits, SseEvent};
 
 /// The response edits a renderer should declare into: recording only when
@@ -39,23 +42,77 @@ pub(super) fn abandon_unrendered(check: Option<ResponseCheck>) {
     }
 }
 
+/// The usage row of a complete response the handler has rendered, held by
+/// its [`CheckedBody`] until the body is either sent or dropped.
+pub(super) struct PendingRow {
+    capture: UsageCapture,
+    router: Arc<Router>,
+    session_key: Option<String>,
+}
+
+impl PendingRow {
+    /// `capture`'s row, whose live K and calibration samples go to `router`
+    /// under `session_key` once the body is delivered.
+    pub(super) const fn new(
+        capture: UsageCapture,
+        router: Arc<Router>,
+        session_key: Option<String>,
+    ) -> Self {
+        Self {
+            capture,
+            router,
+            session_key,
+        }
+    }
+
+    /// Record the live samples, then write the row as `ok`.
+    ///
+    /// The samples share the row's `ok` boundary: the startup replay admits
+    /// `ok` rows only, so a sample recorded for any other outcome would make
+    /// the in-memory stores route one way now and another after a restart.
+    fn deliver(mut self) {
+        let session_key = self.session_key.as_deref();
+        self.capture.record_k_sample(&self.router, session_key);
+        self.capture
+            .record_calibration_sample(&self.router, session_key);
+        self.capture.finalize(Outcome::Ok);
+    }
+}
+
 /// A complete response body that compares itself with the upstream's
-/// answer once its one frame has been taken. Dropped unread, it records
-/// `incomplete` instead: the client never received what would be compared.
+/// answer once its one frame has been taken, and only then writes the
+/// request's usage row, so the row counts what the compare found. Dropped
+/// unread, it records `incomplete` instead and leaves the row to the
+/// capture's own drop: the client never received what would be compared.
 /// The compare never runs ahead of the bytes.
 pub(super) struct CheckedBody {
     body: Option<Bytes>,
     check: Option<(ResponseCheck, Bytes, ResponseEdits)>,
+    row: Option<PendingRow>,
 }
 
 impl CheckedBody {
     /// `body`, compared through `check` (when present) with the edits the
-    /// renderer declared while building it.
-    pub(super) fn new(body: Bytes, check: Option<ResponseCheck>, edits: ResponseEdits) -> Self {
+    /// renderer declared while building it; `row` is written when the body
+    /// is over.
+    pub(super) fn new(
+        body: Bytes,
+        check: Option<ResponseCheck>,
+        edits: ResponseEdits,
+        row: PendingRow,
+    ) -> Self {
         Self {
             check: check.map(|check| (check, body.clone(), edits)),
             body: Some(body),
+            row: Some(row),
         }
+    }
+
+    /// Whether the client has everything: the frame was taken, or there was
+    /// nothing to send (`is_end_stream` already told hyper so, and it does
+    /// not poll such a body).
+    fn is_delivered(&self) -> bool {
+        self.body.as_ref().is_none_or(Bytes::is_empty)
     }
 }
 
@@ -77,7 +134,7 @@ impl Body for CheckedBody {
     }
 
     fn is_end_stream(&self) -> bool {
-        self.body.as_ref().is_none_or(Bytes::is_empty)
+        self.is_delivered()
     }
 
     fn size_hint(&self) -> SizeHint {
@@ -88,17 +145,22 @@ impl Body for CheckedBody {
 
 impl Drop for CheckedBody {
     fn drop(&mut self) {
-        let Some((check, body, edits)) = self.check.take() else {
-            return;
-        };
-        if self.body.is_some() {
-            check.compare_stream(
-                Assembled::Incomplete(IncompleteReason::Cancelled),
-                StreamExit::Cancelled,
-                &[],
-            );
-        } else {
-            check.compare_body(&body, edits.as_slice());
+        let delivered = self.is_delivered();
+        if let Some((check, body, edits)) = self.check.take() {
+            if delivered {
+                check.compare_body(&body, edits.as_slice());
+            } else {
+                check.compare_stream(
+                    Assembled::Incomplete(IncompleteReason::Cancelled),
+                    StreamExit::Cancelled,
+                    &[],
+                );
+            }
+        }
+        if let Some(row) = self.row.take()
+            && delivered
+        {
+            row.deliver();
         }
     }
 }
@@ -125,15 +187,15 @@ impl ClientSink {
     }
 }
 
-/// Folds the frames a streamed response sends the client and, when it is
-/// dropped, compares them with the upstream's stream through the check,
-/// tracing both documents when both are whole. The exit defaults to a
-/// cancelled task; each `drive_stream` exit names its own with
-/// [`Self::end`].
+/// Folds the frames a streamed response sends the client and compares them
+/// with the upstream's stream through the check, tracing both documents
+/// when both are whole. Each `drive_stream` exit compares with
+/// [`Self::finish`] before it writes the usage row, so the row counts what
+/// the compare found; a check dropped unfinished (a cancelled task)
+/// compares as cancelled.
 pub(super) struct ClientStreamCheck {
     armed: Option<ArmedCheck>,
     edits: ResponseEdits,
-    exit: StreamExit,
 }
 
 struct ArmedCheck {
@@ -152,11 +214,7 @@ impl ClientStreamCheck {
             check,
             ingress: ingress.into(),
         });
-        Self {
-            armed,
-            edits,
-            exit: StreamExit::Cancelled,
-        }
+        Self { armed, edits }
     }
 
     /// The collector the renderer declares its response edits into.
@@ -173,22 +231,23 @@ impl ClientStreamCheck {
         }
     }
 
-    /// Name how the stream ended.
-    pub(super) const fn end(&mut self, exit: StreamExit) {
-        self.exit = exit;
+    /// Compare what the client received, the stream having ended as
+    /// `exit`. Only the first call compares.
+    pub(super) fn finish(&mut self, exit: StreamExit) {
+        if let Some(armed) = self.armed.take() {
+            armed.check.compare_traced_stream(
+                armed.assembler.finish(exit),
+                exit,
+                self.edits.as_slice(),
+                &armed.ingress,
+            );
+        }
     }
 }
 
 impl Drop for ClientStreamCheck {
     fn drop(&mut self) {
-        if let Some(armed) = self.armed.take() {
-            armed.check.compare_traced_stream(
-                armed.assembler.finish(self.exit),
-                self.exit,
-                self.edits.as_slice(),
-                &armed.ingress,
-            );
-        }
+        self.finish(StreamExit::Cancelled);
     }
 }
 
@@ -203,3 +262,7 @@ mod trace_tests;
 #[cfg(test)]
 #[path = "response_wire_translation_trace_tests.rs"]
 mod translation_trace_tests;
+
+#[cfg(test)]
+#[path = "response_wire_row_tests.rs"]
+mod row_tests;

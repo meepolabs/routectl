@@ -2269,6 +2269,9 @@ async fn a_clean_completion_records_a_live_k_sample() {
     .await;
 
     assert_eq!(resp.status(), StatusCode::OK);
+    to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("the client takes the body");
     assert!(
         !router.k_session_store.is_empty(),
         "a served response must record its K sample",
@@ -2301,6 +2304,9 @@ async fn a_clean_completion_records_live_calibration_evidence() {
     .await;
 
     assert_eq!(resp.status(), StatusCode::OK);
+    to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("the client takes the body");
     assert_eq!(
         router.calibration_lanes(),
         vec![("openai-compat".to_string(), "gpt-4o".to_string())],
@@ -2902,6 +2908,9 @@ async fn sub_trigger_keyed_dispatch_still_lands_a_k_sample() {
 
     // Assert: a delivered 200 recorded one sample under the served triple.
     assert_eq!(resp.status(), StatusCode::OK);
+    to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("the client takes the body");
     let window = router
         .k_session_store
         .get(&KSessionKey {

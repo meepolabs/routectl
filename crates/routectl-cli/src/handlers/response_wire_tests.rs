@@ -285,7 +285,7 @@ pub(super) async fn router(
 
 /// What the client-facing renderer does to the response in a test run.
 #[derive(Clone, Copy)]
-enum Render {
+pub(super) enum Render {
     /// The production renderer, unchanged.
     AsShipped,
     /// The production renderer, then one upstream member removed.
@@ -394,14 +394,14 @@ impl Dialect {
 
 /// A production adapter whose rendered output loses one member when the
 /// render is `Dropping`, as a renderer with a fidelity bug would.
-struct DroppingAdapter<A> {
+pub(super) struct DroppingAdapter<A> {
     inner: A,
     dialect: Dialect,
     render: Render,
 }
 
 impl<A> DroppingAdapter<A> {
-    const fn new(inner: A, dialect: Dialect, render: Render) -> Self {
+    pub(super) const fn new(inner: A, dialect: Dialect, render: Render) -> Self {
         Self {
             inner,
             dialect,
