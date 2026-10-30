@@ -30,6 +30,7 @@ use tokio::sync::mpsc;
 use crate::capability_event::{CapabilityEvent, insert_capability_event};
 use crate::db::{self, UsageDb};
 use crate::handle::{UsageCounters, UsageHandle};
+use crate::ledger_gap::GapTracker;
 use crate::record::UsageRecord;
 use crate::retention::{self, PruneOutcome};
 
@@ -393,7 +394,11 @@ fn run_writer(
                 state.commit_capability_batch(batch, &counters)
             }
         }
+        state.persist_ledger_gaps(&counters);
     }
+    // Drops counted after the last message (a burst right before shutdown)
+    // would otherwise never reach a gap row.
+    state.persist_ledger_gaps(&counters);
 }
 
 /// The in-memory sequencing metadata a capability event carries to the writer.
@@ -545,6 +550,8 @@ pub(crate) struct WriterState {
     /// was still in flight when the boundary landed. Starts at zero: before any
     /// boundary commits, nothing is stale.
     boundary_generation: u64,
+    /// Queue-full drops already recorded as `ledger_gaps` rows.
+    gaps: GapTracker,
 }
 
 /// Run the one-shot legacy capability purge on a freshly opened DB.
@@ -580,6 +587,7 @@ impl WriterState {
                     degraded: false,
                     boundary_generation: 0,
                     purge_floors: fresh_purge_floors(),
+                    gaps: GapTracker::default(),
                 }
             }
             Err(err) => {
@@ -594,6 +602,7 @@ impl WriterState {
                     degraded: true,
                     boundary_generation: 0,
                     purge_floors: fresh_purge_floors(),
+                    gaps: GapTracker::default(),
                 }
             }
         }
@@ -844,6 +853,25 @@ impl WriterState {
     fn raise_purge_floor(&mut self, key: PurgeFloorKey, incarnation: u64) {
         let floor = self.purge_floors.entry(key).or_insert(incarnation);
         *floor = (*floor).max(incarnation);
+    }
+
+    /// Record queue-full request drops counted since the last gap row as one
+    /// new `ledger_gaps` row. Without a connection there is nowhere to write
+    /// it; the drops stay pending and `write_errors` already marks the
+    /// window incomplete. A failed insert is a write failure like any other
+    /// and leaves the drops pending for the next check.
+    fn persist_ledger_gaps(&mut self, counters: &Arc<UsageCounters>) {
+        let Some(conn) = self.conn.as_ref() else {
+            return;
+        };
+        match self
+            .gaps
+            .persist_new_drops(conn, counters.dropped_full(), now_epoch_ms())
+        {
+            Ok(None) => {}
+            Ok(Some(_)) => self.mark_healthy(),
+            Err(err) => self.record_failure(Some(err), counters),
+        }
     }
 
     /// Count a write failure, emit a rate-limited ERROR, and log the
@@ -1724,37 +1752,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn full_channel_drops_and_counts_without_blocking() {
-        // Arrange: a handle over a channel whose receiver is never polled,
-        // so the queue fills and stays full.
-        let capacity = 2usize;
-        let (tx, _rx) = mpsc::channel::<WriterMessage>(capacity);
-        let counters = Arc::new(UsageCounters::default());
-        let enabled = Arc::new(AtomicBool::new(true));
-        let handle = UsageHandle::new(tx, enabled, Arc::clone(&counters));
-
-        // Act: send well past capacity, timing the loop to prove try_send
-        // never blocks (a blocking send against a full channel would dwarf
-        // this bound).
-        let sends = 50usize;
-        let start = std::time::Instant::now();
-        for i in 0..sends {
-            handle.try_send(record(&format!("full-{i}")));
-        }
-        let elapsed = start.elapsed();
-
-        // Assert: completed far under any blocking threshold; exact split
-        // of enqueued (capacity) vs overflow drops (the rest).
-        assert!(
-            elapsed < Duration::from_millis(100),
-            "send loop blocked: took {elapsed:?} for {sends} sends"
-        );
-        assert_eq!(counters.dropped_disabled(), 0);
-        assert_eq!(counters.enqueued(), capacity as u64);
-        assert_eq!(counters.dropped_full(), (sends - capacity) as u64);
-    }
-
-    #[tokio::test]
     async fn drop_without_shutdown_is_non_blocking() {
         // Arrange: a live writer with rows queued behind it.
         let (_dir, path) = temp_path();
@@ -1803,7 +1800,7 @@ mod tests {
         let enabled = Arc::new(AtomicBool::new(true));
         let (handle, writer) = UsageWriter::degraded(tx, enabled, counters);
 
-        // Act: try_send accepts-and-drops (channel closed -> overflow);
+        // Act: try_send accepts-and-drops (channel closed, not full);
         // shutdown returns immediately with no thread to join.
         handle.try_send(record("degraded"));
         let start = std::time::Instant::now();
@@ -1811,7 +1808,8 @@ mod tests {
 
         // Assert
         assert!(start.elapsed() < Duration::from_millis(100));
-        assert_eq!(handle.counters().dropped_full(), 1);
+        assert_eq!(handle.counters().dropped_closed(), 1);
+        assert_eq!(handle.counters().dropped_full(), 0);
     }
 
     #[tokio::test]

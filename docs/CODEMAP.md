@@ -5568,6 +5568,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `UsageCounters` (enqueued / dropped_full / dropped_disabled / persisted /
   write_errors / prune_errors plus the capability-event trio capability_events_enqueued /
   capability_events_dropped_full / capability_events_persisted)
+- `src/ledger_gap.rs` -- `GapTracker`, the writer thread's in-memory total of
+  queue-full request drops already recorded in `ledger_gaps`; after each
+  message and once after the receive loop the writer appends one
+  `(ts_ms, QUEUE_FULL_CAUSE, delta)` row when `dropped_full` has moved past
+  it (the total advances only on a committed insert). `QUEUE_FULL_CAUSE`
+  (`queue_full`) is the crate-internal cause token
 - `src/query/mod.rs` -- read-query facade: owns the shared row/error types
   `QueryError` (`Sqlite` + `Interrupted`, the latter distinguishing a fired
   query deadline from a real DB fault, + `InvalidBucket` for a time-bucket grid

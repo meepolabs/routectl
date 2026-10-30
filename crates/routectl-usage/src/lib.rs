@@ -16,6 +16,7 @@ mod cost;
 mod db;
 mod downgrade;
 mod handle;
+mod ledger_gap;
 #[cfg(test)]
 mod legacy_meta_tests;
 mod migrate;

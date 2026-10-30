@@ -17,6 +17,7 @@ const USAGE_PRODUCTION_FILES: &[&str] = &[
     "db.rs",
     "downgrade.rs",
     "handle.rs",
+    "ledger_gap.rs",
     "lib.rs",
     "migrate.rs",
     "query/aggregate.rs",

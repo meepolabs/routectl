@@ -4,9 +4,9 @@
 //! `Clone` (cheap -- a few `Arc`s and a bounded `Sender`), and its sole
 //! hot-path method, [`UsageHandle::try_send`], never blocks, never
 //! awaits, and never panics. When usage is disabled the record is dropped
-//! at the gate; when the bounded channel is full the record is dropped
-//! and an atomic counter is bumped. Either way the caller returns
-//! immediately.
+//! at the gate; when the bounded channel is full or closed the record is
+//! dropped and the counter for that cause is bumped. Either way the caller
+//! returns immediately.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -18,7 +18,7 @@ use crate::record::UsageRecord;
 use crate::writer::WriterMessage;
 
 /// Shared, lock-free health counters. The producer side bumps
-/// `enqueued` / `dropped_full`; the consumer thread bumps the persist /
+/// `enqueued` / `dropped_full` / `dropped_closed`; the consumer thread bumps the persist /
 /// error / prune counters. All reads are relaxed snapshots for
 /// observability -- never used for control flow.
 #[doc(hidden)]
@@ -26,6 +26,12 @@ use crate::writer::WriterMessage;
 pub struct UsageCounters {
     enqueued: AtomicU64,
     dropped_full: AtomicU64,
+    /// Records the channel refused because it was CLOSED: the writer is gone
+    /// (shutting down, or never started). Kept apart from `dropped_full`
+    /// because full is load and closed is teardown, and only full drops are
+    /// later persisted as gap rows: a closed channel has no writer left to
+    /// persist anything.
+    dropped_closed: AtomicU64,
     dropped_disabled: AtomicU64,
     persisted: AtomicU64,
     write_errors: AtomicU64,
@@ -73,6 +79,11 @@ impl UsageCounters {
     /// Records dropped because the bounded channel was full.
     pub fn dropped_full(&self) -> u64 {
         self.dropped_full.load(Ordering::Relaxed)
+    }
+
+    /// Records dropped because the channel was closed (writer gone).
+    pub fn dropped_closed(&self) -> u64 {
+        self.dropped_closed.load(Ordering::Relaxed)
     }
 
     /// Records dropped at the enabled gate (intentional, not overflow).
@@ -131,6 +142,10 @@ impl UsageCounters {
 
     pub(crate) fn incr_dropped_full(&self) -> u64 {
         self.dropped_full.fetch_add(1, Ordering::Relaxed)
+    }
+
+    pub(crate) fn incr_dropped_closed(&self) -> u64 {
+        self.dropped_closed.fetch_add(1, Ordering::Relaxed)
     }
 
     pub(crate) fn incr_dropped_disabled(&self) {
@@ -210,10 +225,11 @@ impl UsageHandle {
     ///
     /// Returns immediately in every case. When usage is disabled the
     /// record is dropped at the gate (counted as a disabled-drop, not an
-    /// overflow). When the bounded channel is full or already closed the
-    /// record is dropped and the overflow counter is bumped (with a
-    /// rate-limited WARN). Safe to call from any context, including a
-    /// `Drop` impl.
+    /// overflow). When the bounded channel is full the record is dropped
+    /// and the full counter is bumped; when it is already closed the record
+    /// is dropped and the closed counter is bumped. Each cause has its own
+    /// rate-limited WARN. Safe to call from any context, including a `Drop`
+    /// impl.
     pub fn try_send(&self, record: UsageRecord) {
         if !self.is_enabled() {
             self.counters.incr_dropped_disabled();
@@ -224,7 +240,10 @@ impl UsageHandle {
             .try_send(WriterMessage::request(Box::new(record)))
         {
             Ok(()) => self.counters.incr_enqueued(),
-            Err(_) => self.note_overflow_drop(),
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => self.note_overflow_drop(),
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                self.note_writer_closed_drop();
+            }
         }
     }
 
@@ -315,6 +334,18 @@ impl UsageHandle {
                 target: "routectl_usage::handle",
                 dropped_total = prior + 1,
                 "usage channel full -- dropping record (capture lags writer)"
+            );
+        }
+    }
+
+    /// Count and (bounded) warn about a record refused by a CLOSED channel.
+    fn note_writer_closed_drop(&self) {
+        let prior = self.counters.incr_dropped_closed();
+        if prior == 0 || (prior + 1).is_multiple_of(DROP_WARN_INTERVAL) {
+            tracing::warn!(
+                target: "routectl_usage::handle",
+                dropped_total = prior + 1,
+                "usage writer channel closed -- dropping record (writer stopped)"
             );
         }
     }

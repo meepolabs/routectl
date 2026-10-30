@@ -1034,7 +1034,22 @@ and inherit no `request_id` span (the writer runs on a dedicated OS thread).
 | INFO  | `routectl_usage::writer` | (none) | `"usage writer recovered -- persisting rows again"` (degraded->healthy recovery edge) |
 | ERROR | `routectl_usage::writer` | `error=...` | `"usage db open failed -- running degraded (records will be dropped)"` |
 | WARN  | `routectl_usage::handle` | `dropped_total=<N>` | `"usage channel full -- dropping record (capture lags writer)"` (rate-limited: first drop + every 1024 thereafter) |
+| WARN  | `routectl_usage::handle` | `dropped_total=<N>` | `"usage writer channel closed -- dropping record (writer stopped)"` (rate-limited: first drop + every 1024 thereafter) |
 | WARN  | `routectl_usage::writer` | `error=...` | `"usage retention prune failed -- continuing"` |
+
+A request row the writer channel refuses is counted by cause and never
+silently lost. A FULL channel (the writer is alive but behind) counts
+`dropped_full`; a CLOSED channel (the writer is stopping or never started)
+counts `dropped_closed`. After each message it handles, and once more as it
+stops, the writer compares `dropped_full` with the total it has already
+recorded and appends one `ledger_gaps` row (`cause = queue_full`,
+`dropped` = the difference) when they differ, so a time window that lost
+rows to a full queue stays marked incomplete across a restart. Closed-channel
+drops are not written to `ledger_gaps`: there is no writer left to write
+them, so they are visible only on the live `dropped_closed` counter of the
+process that dropped them, and are lost if that process then exits. A gap
+insert that fails counts as a write error and is retried with the full
+difference on the next message.
 
 The usage ledger's `http_status` column records the transport status the
 client received: 200 for a delivered non-streaming body and once the SSE
@@ -2297,7 +2312,8 @@ Repeat behavior is noted where the line is latched, sampled, or aggregated
 | ERROR | `routectl_usage::writer` | `capability boundary batch failed; no row committed` | A capability boundary was not persisted: inspect `error` (disk full, lock, corruption). |
 | ERROR | `routectl_usage::writer` | `usage writer degraded -- dropping rows it cannot persist` (on the healthy-to-degraded edge) | Usage rows are being dropped: fix the DB fault in `error`. |
 | ERROR | `routectl_usage::writer` | `usage writer still degraded` (every 1024 errors) | The same DB fault is still active: fix it. |
-| WARN | `routectl_usage::handle` | `usage channel full -- dropping record` (first, then every 1024) | The writer is behind capture: check disk latency. |
+| WARN | `routectl_usage::handle` | `usage channel full -- dropping record` (first, then every 1024) | The writer is behind capture: check disk latency. The lost rows are recorded as a `queue_full` row in `ledger_gaps`. |
+| WARN | `routectl_usage::handle` | `usage writer channel closed -- dropping record` (first, then every 1024) | The writer is gone and these rows are not recorded anywhere durable: outside shutdown, look for an earlier writer ERROR. |
 | WARN | `routectl_usage::handle` | `usage writer channel closed -- dropping capability write` (first, then every 1024) | The writer is gone: outside shutdown, look for an earlier writer ERROR. |
 | WARN | `routectl_usage::handle` | `usage channel full -- dropping capability event` (first, then every 1024) | The writer is behind: check disk latency. |
 | WARN | `routectl_auth::memory_store` | `secret resolution failed` (`reason` names the case) | Set the named env var, make the `file://` path absolute and readable, point it at a regular UTF-8 file, or `chmod 600` it. |
