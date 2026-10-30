@@ -13,7 +13,7 @@ use routectl_router::{
     ACTION_MIXED, ACTION_NONE, CapabilityMatrixPanel, Config, MatrixAvailability, MatrixCell,
     MatrixReplaySummary, MatrixSource, MatrixWarm, VERDICT_MIXED, WouldTrimPanel,
 };
-use routectl_usage::{OpenError, WouldTrimSummary, open_readonly, would_trim_summary};
+use routectl_usage::{OpenError, WouldTrimSummary, open_readonly_fastfail, would_trim_summary};
 
 use super::catalog::render_table;
 use super::usage::{WindowFlag, human_count, window_bounds};
@@ -26,11 +26,14 @@ const DEFAULT_WINDOW: WindowFlag = WindowFlag::All;
 
 /// Compute the would-trim panel from the usage DB, read-only.
 ///
-/// Opens the usage DB via `open_readonly` and summarizes the would-trim
-/// opportunity over the default window (`window_bounds(DEFAULT_WINDOW, now)`).
-/// Returns `None` when there is no panel to show -- a missing / unmigrated DB,
-/// or any other read failure -- so the panel is best-effort and never fails the
-/// surrounding diagnostic. A present DB with zero candidates returns a `Some`
+/// Opens the usage DB via `open_readonly_fastfail` and summarizes the
+/// would-trim opportunity over the default window
+/// (`window_bounds(DEFAULT_WINDOW, now)`). The served status doctor polls this,
+/// so a locked DB sheds after the short fast-fail busy timeout rather than
+/// holding the poll on the writer's lock. Returns `None` when there is no
+/// panel to show -- a missing / unmigrated / non-WAL DB, a lock that outlasts
+/// the busy timeout, or any other read failure -- so the panel is best-effort
+/// and never fails the surrounding diagnostic. A present DB with zero candidates returns a `Some`
 /// all-zero panel, which is distinct from "no data".
 ///
 /// `now` is passed in (never read from the clock here) so the window is
@@ -39,7 +42,7 @@ pub(crate) fn compute_would_trim_panel(
     config: &Config,
     now: DateTime<Local>,
 ) -> Option<WouldTrimPanel> {
-    let db = match open_readonly(&config.usage.db_path) {
+    let db = match open_readonly_fastfail(&config.usage.db_path) {
         Ok(db) => db,
         Err(OpenError::NoData { .. } | OpenError::VersionTooOld { .. }) => return None,
         Err(e) => {
@@ -298,7 +301,10 @@ mod tests {
     use super::*;
     use chrono::{NaiveDate, TimeZone};
     use routectl_usage::{UsageDb, open};
+    use rusqlite::OpenFlags;
     use std::path::{Path, PathBuf};
+    use std::sync::mpsc;
+    use std::time::Duration;
     use tempfile::TempDir;
 
     fn fixed_now() -> DateTime<Local> {
@@ -417,7 +423,7 @@ mod tests {
     #[test]
     fn compute_returns_none_for_unmigrated_db() {
         // Arrange: a DB whose schema predates this binary. Roll a freshly
-        // seeded DB's user_version below the supported schema so open_readonly
+        // seeded DB's user_version below the supported schema so the open
         // reports VersionTooOld.
         let (_dir, path, db) = temp_db();
         db.conn()
@@ -492,7 +498,7 @@ mod tests {
     fn compute_log_on_open_failure_carries_no_path() {
         use routectl_testkit::capture_events;
 
-        // Arrange: point the usage path at a DIRECTORY so `open_readonly`
+        // Arrange: point the usage path at a DIRECTORY so the open
         // fails with `OpenError::Open` -- whose Display embeds the path -- via
         // the catch-all `Err(e)` branch (not NoData / VersionTooOld).
         let dir = TempDir::new().expect("tempdir");
@@ -513,19 +519,136 @@ mod tests {
             .find(|e| e.message.contains("would-trim panel: usage db unavailable"))
             .expect("omission log emitted");
         assert_eq!(event.field("reason"), Some("open"));
-        for e in &events {
+        assert_no_event_carries(&events, &secret_fragment);
+    }
+
+    /// Assert no captured event's message or any field carries `fragment`.
+    fn assert_no_event_carries(events: &[routectl_testkit::CapturedEvent], fragment: &str) {
+        for e in events {
             assert!(
-                !e.message.contains(&*secret_fragment),
+                !e.message.contains(fragment),
                 "log message leaked the db path: {}",
                 e.message
             );
             for (name, value) in &e.fields {
                 assert!(
-                    !value.contains(&*secret_fragment),
+                    !value.contains(fragment),
                     "log field `{name}` leaked the db path: {value}"
                 );
             }
         }
+    }
+
+    /// The `PRAGMA busy_timeout` a freshly opened read-only connection runs
+    /// with, read from a healthy WAL DB so the bounds below track the usage
+    /// crate's constants instead of copying them.
+    fn busy_timeout_ms(db: &UsageDb) -> u64 {
+        let ms: i64 = db
+            .conn()
+            .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
+            .expect("read busy_timeout");
+        u64::try_from(ms).expect("non-negative busy_timeout")
+    }
+
+    /// A connection that excludes every other connection from the DB until it
+    /// drops. In WAL mode an ordinary write transaction never blocks a reader;
+    /// `locking_mode = EXCLUSIVE` engaged on the first access keeps the
+    /// wal-index private and holds the file lock, so a reader fails busy.
+    fn exclusive_lock_holder(path: &Path) -> rusqlite::Connection {
+        let holder = rusqlite::Connection::open(path).expect("open lock holder");
+        holder
+            .pragma_update(None, "locking_mode", "EXCLUSIVE")
+            .expect("exclusive locking mode");
+        holder
+            .execute_batch("BEGIN EXCLUSIVE; SELECT COUNT(*) FROM requests;")
+            .expect("take the exclusive lock");
+        holder
+    }
+
+    #[test]
+    fn compute_sheds_before_the_viewer_busy_timeout_while_the_db_is_locked() {
+        // Arrange: a seeded WAL DB, every other connection dropped so the
+        // holder can engage exclusive mode.
+        let (_dir, path, db) = temp_db();
+        let now = fixed_now();
+        insert_would_trim_row(&db, "w1", now.timestamp_millis() - 1_000, Some(30_000));
+        drop(db);
+        let fastfail_ms = busy_timeout_ms(&open_readonly_fastfail(&path).expect("fastfail open"));
+        let viewer_ms = busy_timeout_ms(&routectl_usage::open_readonly(&path).expect("open"));
+        let bound = Duration::from_millis(viewer_ms / 2);
+        assert!(
+            Duration::from_millis(fastfail_ms) < bound && bound < Duration::from_millis(viewer_ms),
+            "bound {bound:?} must sit between the fast-fail ({fastfail_ms}ms) and viewer \
+             ({viewer_ms}ms) busy timeouts"
+        );
+        let holder = exclusive_lock_holder(&path);
+
+        // Positive control: the holder really blocks a read-only reader.
+        let probe = rusqlite::Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("probe open");
+        probe
+            .busy_timeout(Duration::ZERO)
+            .expect("probe busy timeout");
+        assert!(
+            probe
+                .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+                .is_err(),
+            "fixture must block a reader while the holder is live"
+        );
+        drop(probe);
+
+        // Act: compute on a worker so a wait on the lock surfaces as a timeout.
+        let config = config_for(&path);
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(compute_would_trim_panel(&config, now));
+        });
+        let result = rx.recv_timeout(bound);
+
+        // Assert: the panel is omitted inside the bound, then reads again
+        // once the lock is released.
+        let panel = result.unwrap_or_else(|_| panic!("panel did not shed within {bound:?}"));
+        assert!(panel.is_none(), "a locked DB must omit the panel");
+        drop(holder);
+        let after = compute_would_trim_panel(&config_for(&path), now).expect("panel after unlock");
+        assert_eq!(after.candidate_requests, 1);
+    }
+
+    #[test]
+    fn compute_omits_a_non_wal_db_and_logs_only_the_error_class() {
+        use routectl_testkit::capture_events;
+
+        // Arrange: a seeded, current-schema DB switched back to the rollback
+        // journal, so only the WAL check can refuse it.
+        let (_dir, path, db) = temp_db();
+        let now = fixed_now();
+        insert_would_trim_row(&db, "w1", now.timestamp_millis() - 1_000, Some(30_000));
+        drop(db);
+        let raw = rusqlite::Connection::open(&path).expect("raw open");
+        let mode: String = raw
+            .pragma_update_and_check(None, "journal_mode", "DELETE", |r| r.get(0))
+            .expect("leave wal");
+        assert!(
+            !mode.eq_ignore_ascii_case("wal"),
+            "fixture must genuinely not be in WAL mode"
+        );
+        drop(raw);
+        let secret_fragment = path.to_string_lossy().into_owned();
+        let config = config_for(&path);
+
+        // Act
+        let events = capture_events(|| {
+            assert!(compute_would_trim_panel(&config, now).is_none());
+        });
+
+        // Assert: exactly the path-free class is logged, and nothing carries
+        // the DB path.
+        let event = events
+            .iter()
+            .find(|e| e.message.contains("would-trim panel: usage db unavailable"))
+            .expect("omission log emitted");
+        assert_eq!(event.field("reason"), Some("not_wal"));
+        assert_no_event_carries(&events, &secret_fragment);
     }
 
     fn matrix_panel(
