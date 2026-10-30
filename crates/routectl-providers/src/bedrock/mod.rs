@@ -284,7 +284,7 @@ impl BedrockProvider {
     /// # Panics
     ///
     /// When the HTTP client cannot be built, as [`Self::new`] does.
-    #[cfg(all(feature = "bedrock", feature = "test-utils"))]
+    #[cfg(all(feature = "bedrock", any(test, feature = "test-utils")))]
     pub fn with_runtime_origin_for_tests(mut self, origin: &str) -> Self {
         self.client = crate::http_client::build_no_redirect(self.cfg.user_agent.as_deref(), origin)
             .expect("reqwest no-redirect client build failed for the test origin");
@@ -454,6 +454,7 @@ impl BedrockProvider {
             &endpoint,
             resp.bytes_stream(),
             crate::wire_declare::response_tap(req),
+            req.routectl_internal.observation.clone(),
         );
         Ok(routectl_core::wrap_stream_with_summary(
             stream,

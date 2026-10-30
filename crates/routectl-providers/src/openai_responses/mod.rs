@@ -282,7 +282,8 @@ impl Provider for OpenAiResponsesProvider {
         let response_tap = crate::wire_declare::response_tap(&req);
         let mut completed_body: Option<Value> = None;
         let mut terminal_kind: Option<String> = None;
-        let mut completion = StreamCompletion::new(PROVIDER_KIND, sse::is_terminal_event);
+        let mut completion = StreamCompletion::new(PROVIDER_KIND, sse::is_terminal_event)
+            .with_observation(req.routectl_internal.observation.clone());
         let mut accumulated_items: Vec<Value> = Vec::new();
         while let Some(result) = event_stream.next().await {
             let event = result.map_err(|e| Error::Streaming(e.to_string()))?;
@@ -475,11 +476,13 @@ impl Provider for OpenAiResponsesProvider {
         let byte_stream = resp.bytes_stream();
         let event_stream = byte_stream.eventsource();
         let response_tap = crate::wire_declare::response_tap(&req);
+        let observation = req.routectl_internal.observation.clone();
 
         let stream = async_stream::stream! {
             let mut pending_upstream_meta = upstream_meta;
             let mut state = sse::ResponsesStreamState::new(auth_kind);
-            let mut completion = StreamCompletion::new(PROVIDER_KIND, sse::is_terminal_event);
+            let mut completion = StreamCompletion::new(PROVIDER_KIND, sse::is_terminal_event)
+                .with_observation(observation);
             futures::pin_mut!(event_stream);
             while let Some(result) = event_stream.next().await {
                 match result {

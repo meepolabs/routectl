@@ -12,6 +12,8 @@
 //! end-of-stream IS the terminator would be flagged on every healthy stream.
 
 use routectl_core::Error;
+#[cfg(any(feature = "anthropic-api", feature = "openai-responses"))]
+use routectl_core::RequestObservation;
 
 /// Per-stream record of whether the lane's terminal event has arrived.
 #[cfg(any(feature = "anthropic-api", feature = "openai-responses"))]
@@ -19,6 +21,7 @@ pub struct StreamCompletion<E: ?Sized> {
     lane: &'static str,
     is_terminal: fn(&E) -> bool,
     terminated: bool,
+    observation: Option<RequestObservation>,
 }
 
 #[cfg(any(feature = "anthropic-api", feature = "openai-responses"))]
@@ -30,7 +33,15 @@ impl<E: ?Sized> StreamCompletion<E> {
             lane,
             is_terminal,
             terminated: false,
+            observation: None,
         }
+    }
+
+    /// Also count a missing terminal on the request's observation `slot`.
+    #[must_use]
+    pub fn with_observation(mut self, slot: Option<RequestObservation>) -> Self {
+        self.observation = slot;
+        self
     }
 
     /// Record one decoded wire event. Sticky: once a terminal event is seen
@@ -42,11 +53,13 @@ impl<E: ?Sized> StreamCompletion<E> {
     }
 
     /// Verdict at transport end of stream: `Ok` once the terminal event
-    /// arrived, otherwise the error that tells the client the turn was cut.
+    /// arrived, otherwise the error that tells the client the turn was cut,
+    /// counted once on the process total and on the request's slot.
     pub fn end_of_stream(&self, provider_id: &str) -> routectl_core::Result<()> {
         if self.terminated {
             Ok(())
         } else {
+            crate::stream_terminal_metrics::record_missing_terminal(self.observation.as_ref());
             Err(missing_terminal(self.lane, provider_id))
         }
     }

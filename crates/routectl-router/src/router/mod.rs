@@ -1267,6 +1267,7 @@ impl RouterMetrics {
             rc_wire_loss_total = ?wire_check.loss,
             rc_wire_check_total = ?wire_check.checks,
             rc_request_refused_local_total = ?wire_check.local_refusals,
+            rc_missing_terminal_total = routectl_providers::stream_terminal_metrics::missing_terminal_total(),
             "router metrics snapshot"
         );
         #[cfg(not(feature = "bedrock"))]
@@ -1314,6 +1315,7 @@ impl RouterMetrics {
             rc_wire_loss_total = ?wire_check.loss,
             rc_wire_check_total = ?wire_check.checks,
             rc_request_refused_local_total = ?wire_check.local_refusals,
+            rc_missing_terminal_total = routectl_providers::stream_terminal_metrics::missing_terminal_total(),
             "router metrics snapshot"
         );
     }

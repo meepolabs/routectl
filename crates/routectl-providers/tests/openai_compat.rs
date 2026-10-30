@@ -525,6 +525,8 @@ fn assert_ends_with_one_missing_terminal(
 /// emits its content, then ends with exactly one missing-terminal error.
 #[tokio::test]
 async fn stream_closed_without_terminal_signal_emits_content_then_one_error() {
+    let total_before = routectl_providers::stream_terminal_metrics::missing_terminal_total();
+
     let items = stream_items(
         concat!(
             "data: {\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"He\"},\"finish_reason\":null}]}\n\n",
@@ -536,6 +538,12 @@ async fn stream_closed_without_terminal_signal_emits_content_then_one_error() {
 
     assert_eq!(streamed_content(&items), "Hello");
     assert_ends_with_one_missing_terminal(&items);
+    // The process total is shared with this binary's other tests, so only a
+    // lower bound on the delta is stable.
+    assert!(
+        routectl_providers::stream_terminal_metrics::missing_terminal_total() > total_before,
+        "the cut stream advances the process-wide missing-terminal total"
+    );
 }
 
 /// An empty body (no event at all) is the same missing-terminal error.

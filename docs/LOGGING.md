@@ -569,6 +569,23 @@ silence a loss WARN. Loss findings and unrepaired rejections inside the
 status window, with timestamps, are listed under `wire_check` in
 `/status/health` (`loss_findings`, `unrepaired_rejections`).
 
+### Missing stream terminals
+
+A stream that answered HTTP 200 but closed before its lane's terminal event
+(anthropic-api and Bedrock Invoke `message_stop`, Converse `messageStop`,
+an openai-responses terminal `response.*` event, openai-compat `data: [DONE]`
+or a `finish_reason`) ends with the lane's `stream ended without a terminal
+event` error and its WARN. Each such stream is counted once, at the point the
+lane decides the stream was cut, in two places: the request's
+`missing_terminals` usage column, and `rc_missing_terminal_total` on the
+router metrics snapshot (DEBUG, target `routectl_router::router::metrics`), a
+process-wide total since start with no labels; the WARN names the lane.
+openai-responses counts on the stream path and on `complete()`, which reads
+the same stream. Not counted: an openai-compat stream that closes mid
+tool-call (it ends with its own truncated tool-call error), a stream the
+client or a caller stops reading before the end, a stream that ends with its
+own upstream or decode error, and gemini, which has no terminal check.
+
 ### Rejected routectl edit WARN (`routectl_router::router::learn_revert`)
 
 When an upstream rejection names a path routectl itself put on the wire --

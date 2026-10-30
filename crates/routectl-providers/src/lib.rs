@@ -113,6 +113,11 @@ pub mod effort;
 // counters regardless of which provider features this crate was built with.
 pub mod translation_drop_metrics;
 
+// Process-wide missing-stream-terminal counter. Unconditional for the same
+// reason as `translation_drop_metrics`: the router's metrics snapshot reads it
+// whatever provider features this crate was built with.
+pub mod stream_terminal_metrics;
+
 // Shared helpers for the Bedrock mantle lanes. The URL builders and the
 // service-scope constant are pure and dependency-free, so they stay
 // unconditional (`routectl-router` derives lane base URLs from a region
@@ -380,6 +385,17 @@ mod hosted_mcp_tool_egress_tests;
     feature = "bedrock"
 ))]
 mod translation_drop_observation_tests;
+
+// Every terminal-checked lane counts a cut stream once on the request's slot
+// and on the process total, and counts nothing else.
+#[cfg(all(
+    test,
+    feature = "openai-compat",
+    feature = "anthropic-api",
+    feature = "openai-responses",
+    feature = "bedrock"
+))]
+mod stream_terminal_observation_tests;
 
 // Each provider's own `provider_kind=` token agrees with the shared table.
 #[cfg(test)]

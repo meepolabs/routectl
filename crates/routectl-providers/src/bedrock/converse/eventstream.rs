@@ -33,8 +33,8 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use routectl_core::{
-    ChatChunk, Error, ReasoningDetail, ReasoningDetailKind, Result, Role, UpstreamMeta,
-    UsageInputSource,
+    ChatChunk, Error, ReasoningDetail, ReasoningDetailKind, RequestObservation, Result, Role,
+    UpstreamMeta, UsageInputSource,
     schema::{ChunkChoice, ChunkDelta, UsageDelta},
 };
 
@@ -185,15 +185,17 @@ pub fn stream<S>(provider_id: String, byte_stream: S) -> BoxStream<'static, Resu
 where
     S: Stream<Item = std::result::Result<Bytes, reqwest::Error>> + Send + 'static,
 {
-    stream_from(provider_id, byte_stream, true)
+    stream_from(provider_id, byte_stream, true, None)
 }
 
 /// [`stream`], attributing the final usage report to the vendor endpoint
-/// only when `from_vendor_endpoint` holds.
+/// only when `from_vendor_endpoint` holds, and counting a stream that ends
+/// before `messageStop` on `observation`.
 pub fn stream_from<S>(
     provider_id: String,
     byte_stream: S,
     from_vendor_endpoint: bool,
+    observation: Option<RequestObservation>,
 ) -> BoxStream<'static, Result<ChatChunk>>
 where
     S: Stream<Item = std::result::Result<Bytes, reqwest::Error>> + Send + 'static,
@@ -203,7 +205,8 @@ where
             endpoint_is_foreign: !from_vendor_endpoint,
             ..ConverseStreamState::default()
         },
-        completion: StreamCompletion::new(PROVIDER_KIND, is_terminal_frame),
+        completion: StreamCompletion::new(PROVIDER_KIND, is_terminal_frame)
+            .with_observation(observation),
         had_output: false,
     };
     frame::decode_frames(provider_id, byte_stream, handler, FrameLabel::Converse)

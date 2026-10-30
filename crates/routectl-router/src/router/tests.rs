@@ -2264,6 +2264,30 @@ fn log_snapshot_carries_the_wire_check_counters() {
 }
 
 #[test]
+fn log_snapshot_carries_the_missing_terminal_total() {
+    let router = Router::new(Arc::new(Config::default()));
+    let floor = routectl_providers::stream_terminal_metrics::missing_terminal_total();
+
+    let events = routectl_testkit::capture_events(|| {
+        router.log_metrics_snapshot();
+    });
+
+    let snapshot = events
+        .iter()
+        .find(|e| e.message == "router metrics snapshot")
+        .expect("one snapshot event");
+    let carried: u64 = snapshot
+        .field("rc_missing_terminal_total")
+        .expect("the snapshot carries the missing-terminal total")
+        .parse()
+        .expect("a count");
+    assert!(
+        carried >= floor,
+        "the snapshot reads the live total: {carried} < {floor}"
+    );
+}
+
+#[test]
 fn log_snapshot_emits_one_complete_event_with_current_counter_values() {
     // Arrange: bump a couple of counters so the snapshot's assertions
     // pin real numbers, not just field presence.

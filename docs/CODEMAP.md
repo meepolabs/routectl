@@ -636,6 +636,15 @@ license.
   lane injects its own predicate, and a stream that ends before it yields a
   status-0 `Upstream` error instead of a clean close; `missing_terminal`
   builds that error, also used directly by the openai-compat stream
+- `src/stream_terminal_metrics.rs` -- process-wide missing-stream-terminal
+  total (`missing_terminal_total`, read by the router metrics snapshot as
+  `rc_missing_terminal_total`) and the crate-internal
+  `record_missing_terminal` that bumps it with the request's slot; per-thread
+  under `cfg(test)`
+- `src/stream_terminal_observation_tests.rs` -- cross-lane guard: a cut
+  stream counts once on slot and total per terminal-checked lane; a
+  terminated stream, a consumer drop before the end, and an openai-compat
+  mid-tool-call cut count nothing
 - `src/upstream_error.rs` -- `UpstreamErrorRead` (+ `CarriedBody`): the one
   read of a non-success upstream response every lane's error mapper takes
   (all five lanes); capped body + parse, gated `Retry-After`, request id,

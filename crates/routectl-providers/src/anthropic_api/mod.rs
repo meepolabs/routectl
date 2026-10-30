@@ -581,10 +581,12 @@ impl Provider for AnthropicApiProvider {
 
         let base_state = stream_state_for(&provider_id, &self.cfg.base_url);
         let response_tap = crate::wire_declare::response_tap(&req);
+        let observation = req.routectl_internal.observation.clone();
         let stream = async_stream::stream! {
             let mut state = base_state;
             state.tool_reverse = tool_reverse;
-            let mut completion = StreamCompletion::new(PROVIDER_KIND, sse::is_terminal_event);
+            let mut completion = StreamCompletion::new(PROVIDER_KIND, sse::is_terminal_event)
+                .with_observation(observation);
 
             futures::pin_mut!(event_stream);
             while let Some(result) = event_stream.next().await {

@@ -520,6 +520,7 @@ impl Provider for OpenAiCompatProvider {
         // across yield points, which filter_map/FnMut cannot do.
         let mut event_stream = resp.bytes_stream().eventsource();
         let response_tap = crate::wire_declare::response_tap(&req);
+        let observation = req.routectl_internal.observation.clone();
 
         let out = async_stream::stream! {
             let mut think_acc = ThinkTagAccumulator::new();
@@ -690,6 +691,7 @@ impl Provider for OpenAiCompatProvider {
                         "openai-compat stream closed without a terminal signal \
                          ([DONE] or finish_reason); ending the stream with an error"
                     );
+                    crate::stream_terminal_metrics::record_missing_terminal(observation.as_ref());
                     yield Err(missing_terminal(PROVIDER_KIND, &provider_id));
                 }
                 StreamTail::TruncatedToolCall => {
