@@ -591,13 +591,11 @@ impl UsageCapture {
 
 /// The drain itself, as a free function over a `UsageHandle`.
 ///
-/// Separated from [`UsageCapture`] because one dispatch surface carries
-/// capability events WITHOUT carrying a usage row: the token-count walk settles
-/// envelope-field verdicts but records no `UsageRecord`. Its settlement rows
-/// still have to reach the ledger -- a registry mutation whose event row was
-/// dropped is exactly what a warm rebuild resurrects a verdict from -- so that
-/// handler calls this directly rather than constructing a row it does not want,
-/// and no second copy of the mapping exists to drift from this one.
+/// Free of [`UsageCapture`] so a caller holding only a `UsageHandle` and a
+/// `DispatchMeta` drives the one mapping, with no second copy to drift from
+/// it. A settlement row has to reach the ledger: a registry mutation whose
+/// event row was dropped is exactly what a warm rebuild resurrects a verdict
+/// from.
 pub(crate) fn drain_capability_events(
     usage: &UsageHandle,
     meta: &DispatchMeta,
