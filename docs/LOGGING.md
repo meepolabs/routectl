@@ -1060,7 +1060,8 @@ and inherit no `request_id` span (the writer runs on a dedicated OS thread).
 | ERROR | `routectl_usage::writer` | `error=...` | `"usage db open failed -- running degraded (records will be dropped)"` |
 | WARN  | `routectl_usage::handle` | `dropped_total=<N>` | `"usage channel full -- dropping record (capture lags writer)"` (rate-limited: first drop + every 1024 thereafter) |
 | WARN  | `routectl_usage::handle` | `dropped_total=<N>` | `"usage writer channel closed -- dropping record (writer stopped)"` (rate-limited: first drop + every 1024 thereafter) |
-| WARN  | `routectl_usage::writer` | `error=...` | `"usage retention prune failed -- continuing"` |
+| INFO  | `routectl_usage::writer` | `deleted=<N> retention_days=<N>` | `"usage retention prune complete"` / `"capability ledger retention prune complete"` / `"ledger gap retention prune complete"` (startup prune of the `requests`, `capability_events` and `ledger_gaps` tables; none is written when retention is 0) |
+| WARN  | `routectl_usage::writer` | `error=...` | `"usage retention prune failed -- continuing"` / `"capability ledger retention prune failed -- continuing"` / `"ledger gap retention prune failed -- continuing"` (bumps the prune-error counter) |
 
 ### `request finished` (INFO)
 
@@ -1087,8 +1088,12 @@ always present, in this order; a column the row leaves unset renders as `-`.
 | `input_tokens`, `output_tokens`, `cache_read` | Token columns as the row stores them (`input_tokens` is cache-exclusive). |
 | `wire_losses`, `translation_drops`, `local_refusals`, `field_repairs`, `missing_terminals` | The request's five per-request counts. |
 
-Content-free: never a body, prompt, header, error detail, credential, session
-id or user-agent. The routing names can carry the client's requested model id
+Content-free: never a body, prompt, error detail, credential, session id or
+user-agent. The request id is the only header value the line carries: a
+client's `x-request-id` is used only when it is 1-128 ASCII letters, digits or
+`-_.:`, and otherwise replaced by a generated id. `harness` is a closed token
+classified from the user-agent; no raw header or other header value appears.
+The routing names can carry the client's requested model id
 (a pre-dispatch failure names the requested alias; a forwarded-credential or
 default-alias route sends the requested id upstream), and the request id can be
 client-chosen, so all six strings are escaped and capped at 256 characters like
@@ -2409,6 +2414,7 @@ Repeat behavior is noted where the line is latched, sampled, or aggregated
 | ERROR | `routectl_usage::writer` | `usage db open failed -- running degraded` | Fix the usage DB path, permissions, or corruption named in `error`, then restart. |
 | WARN | `routectl_usage::writer` | `usage retention prune failed -- continuing` | The usage DB is growing past retention: inspect `error` (lock, disk, corruption). |
 | WARN | `routectl_usage::writer` | `capability ledger retention prune failed -- continuing` | The capability ledger is growing past retention: inspect `error`. |
+| WARN | `routectl_usage::writer` | `ledger gap retention prune failed -- continuing` | The ledger gap table is growing past retention: inspect `error`. |
 | ERROR | `routectl_usage::writer` | `usage writer insert affected unexpected row count` | Should never fire: file a bug with `rows`. |
 | ERROR | `routectl_usage::writer` | `capability boundary batch failed; no row committed` | A capability boundary was not persisted: inspect `error` (disk full, lock, corruption). |
 | ERROR | `routectl_usage::writer` | `usage writer degraded -- dropping rows it cannot persist` (on the healthy-to-degraded edge) | Usage rows are being dropped: fix the DB fault in `error`. |

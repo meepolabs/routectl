@@ -406,59 +406,75 @@ fn split_fields(line: &str) -> Vec<String> {
     tokens
 }
 
-/// A requested model carrying ` outcome=ok harness=claude_code`, reaching
-/// the line through every client-influenced carrier, never adds a second
-/// `outcome` or `harness` key: the real values stay the only ones.
+/// A requested model spelling extra pairs, breaking out of its quotes, or
+/// ending in a bare backslash, reaching the line through every
+/// client-influenced carrier, never adds or hides a key: every pinned key
+/// appears once, and the closed tokens keep their real values.
 #[test]
 fn a_requested_model_spelling_key_value_pairs_adds_no_key_to_the_line() {
-    // Arrange
-    let forged = "m outcome=ok harness=claude_code";
-    let emit = || {
-        let (handle, _rx, _) = owned_handle(8);
-        let slot = RequestObservation::new();
-        slot.set_last_target(ServedIdentity {
-            alias: Some(forged.to_string()),
-            model: Some(forged.to_string()),
-            upstream: Some(forged.to_string()),
-            provider: Some(forged.to_string()),
-            seat: Some(forged.to_string()),
-            ..Default::default()
-        });
-        let draft = build_usage_draft(
-            "anthropic",
-            &request(forged, "hi"),
-            ROW_ID.to_string(),
-            Harness::Other,
-        );
-        drop(UsageCapture::new(
-            draft,
-            handle,
-            "ingress-1".to_string(),
-            slot,
-        ));
-    };
+    let rows = [
+        ("spaced pairs", "m outcome=ok harness=claude_code"),
+        ("quote breakout", "m\" outcome=ok harness=claude_code x=\""),
+        ("trailing backslash", "m\\"),
+    ];
+    for (row, forged) in rows {
+        // Arrange
+        let emit = || {
+            let (handle, _rx, _) = owned_handle(8);
+            let slot = RequestObservation::new();
+            slot.set_last_target(ServedIdentity {
+                alias: Some(forged.to_string()),
+                model: Some(forged.to_string()),
+                upstream: Some(forged.to_string()),
+                provider: Some(forged.to_string()),
+                seat: Some(forged.to_string()),
+                ..Default::default()
+            });
+            let draft = build_usage_draft(
+                "anthropic",
+                &request(forged, "hi"),
+                ROW_ID.to_string(),
+                Harness::Other,
+            );
+            drop(UsageCapture::new(
+                draft,
+                handle,
+                "ingress-1".to_string(),
+                slot,
+            ));
+        };
 
-    // Act
-    let log = production_log(emit);
+        // Act
+        let log = production_log(emit);
 
-    // Assert
-    let lines: Vec<&str> = log
-        .lines()
-        .filter(|l| l.contains(REQUEST_FINISHED))
-        .collect();
-    assert_eq!(lines.len(), 1, "{log}");
-    let tokens = split_fields(lines[0]);
-    let values_of = |key: &str| -> Vec<String> {
-        let prefix = format!("{key}=");
-        tokens
-            .iter()
-            .filter_map(|t| t.strip_prefix(&prefix).map(str::to_string))
-            .collect()
-    };
-    assert_eq!(values_of("outcome"), ["cancelled"], "{}", lines[0]);
-    assert_eq!(values_of("harness"), ["other"], "{}", lines[0]);
-    for key in ["alias", "model", "upstream", "provider", "seat"] {
-        assert_eq!(values_of(key), [format!("{forged:?}")], "{}", lines[0]);
+        // Assert
+        let lines: Vec<&str> = log
+            .lines()
+            .filter(|l| l.contains(REQUEST_FINISHED))
+            .collect();
+        assert_eq!(lines.len(), 1, "{row}: {log}");
+        let line = lines[0];
+        let tokens = split_fields(line);
+        let values_of = |key: &str| -> Vec<String> {
+            let prefix = format!("{key}=");
+            tokens
+                .iter()
+                .filter_map(|t| t.strip_prefix(&prefix).map(str::to_string))
+                .collect()
+        };
+        for key in FINISHED_KEYS {
+            assert_eq!(values_of(key).len(), 1, "{row}: {key} in {line}");
+        }
+        assert_eq!(values_of("operation"), ["inference"], "{row}: {line}");
+        assert_eq!(values_of("outcome"), ["cancelled"], "{row}: {line}");
+        assert_eq!(values_of("harness"), ["other"], "{row}: {line}");
+        for key in ["alias", "model", "upstream", "provider", "seat"] {
+            assert_eq!(
+                values_of(key),
+                [format!("{forged:?}")],
+                "{row}: {key} in {line}"
+            );
+        }
     }
 }
 

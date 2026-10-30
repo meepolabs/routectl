@@ -2,11 +2,15 @@
 //! from its usage row.
 //!
 //! Content-free: the line carries ids, closed-vocabulary tokens, routing
-//! names and counts only, never a body, prompt, header, error detail,
-//! credential, session id or user-agent. The routing names (alias, model,
-//! upstream, provider, seat) can hold the client's requested model id on a
-//! forwarded-credential or default-alias route, and the request id can be
-//! client-chosen, so every string passes through
+//! names and counts only, never a body, prompt, error detail, credential,
+//! session id or user-agent. The request id is the only header value the
+//! line carries: a client's `x-request-id` is used only after it passes the
+//! request-id allowlist (ASCII letters, digits and `-_.:`, length-bounded),
+//! otherwise a generated id. `harness` is a closed token classified from the
+//! user-agent; no raw header or other header value appears. The routing
+//! names (alias, model, upstream, provider, seat) can hold the client's
+//! requested model id on a forwarded-credential or default-alias route, and
+//! the request id can be client-chosen, so every string passes through
 //! [`routectl_core::sanitize_for_log`], which escapes control characters and
 //! bounds the length, and is then written as a quoted, escaped value, so a
 //! name carrying ` outcome=ok` cannot add a key to the line. Closed tokens,
