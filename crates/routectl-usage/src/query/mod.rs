@@ -6,6 +6,7 @@ mod calibration;
 mod capability;
 mod deadline;
 mod grouped;
+mod observation;
 mod reduction;
 mod session_ref;
 mod stream_extra;
@@ -27,6 +28,7 @@ pub use grouped::{
     BucketSpec, CostStatus, GroupDim, QueryGroup, QueryMetrics, QueryResult, QuerySeries,
     QuerySpec, QueryTotals, RowCost, SeriesBucket, query,
 };
+pub use observation::{ObservationTotals, observation_totals};
 pub use reduction::{ReductionSummary, reduction_summary};
 pub use stream_extra::{StreamExtraRow, for_each_stream_extra};
 pub use would_trim::{

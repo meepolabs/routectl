@@ -5666,6 +5666,14 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `ShadowMisfireSummary`, `NearLosslessAttributionSummary`, `KCalibration`,
   `ReuseSampleRow`); carries the COALESCE zero-row guards so a SUM/CASE over
   an empty ledger reads as 0 rather than erroring
+- `src/query/observation.rs` -- `observation_totals(db, from, to)` +
+  `ObservationTotals`: the five per-request observation counts
+  (`wire_losses`, `translation_drops`, `local_refusals`, `field_repairs`,
+  `missing_terminals`) summed over EVERY `requests` row with `ts_start` in
+  the half-open window (token-count rows included, NULL as 0), plus the
+  `ledger_gaps` rows / dropped total with `ts_ms` in the same window and
+  `has_gap()`. One statement over `idx_requests_ts_start`; `ledger_gaps` is
+  scanned (one row per drop episode). Tests: `observation_tests.rs`
 - `src/query/reduction.rs` -- lossless-minifier (context-reduction) outcome
   read query; exports `reduction_summary` + `ReductionSummary` (per-decision
   request histogram over the OPEN `reduction_decision` token vocabulary plus

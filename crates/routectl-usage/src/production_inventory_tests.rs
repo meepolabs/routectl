@@ -27,6 +27,7 @@ const USAGE_PRODUCTION_FILES: &[&str] = &[
     "query/deadline.rs",
     "query/grouped.rs",
     "query/mod.rs",
+    "query/observation.rs",
     "query/reduction.rs",
     "query/session_ref.rs",
     "query/stream_extra.rs",
