@@ -149,7 +149,7 @@ futures = { workspace = true }
 # needed by the MITM proxy's TLS-handshake tests (`proxy::ca`).
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time", "test-util", "io-util"] }
 insta.workspace = true
-serial_test = "3"
+serial_test = "4"
 routectl-testkit.workspace = true
 criterion = { workspace = true }
 # Bedrock event-stream frame encoding, so a handler test can serve a real

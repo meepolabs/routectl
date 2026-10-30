@@ -98,7 +98,7 @@ routectl-router = { path = ".", default-features = false, features = ["test-util
 # for the same unification reason as the self dev-dependency above.
 routectl-providers = { workspace = true, default-features = false, features = ["test-utils"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "test-util"] }
-serial_test = "3"
+serial_test = "4"
 # Decodes the request body a Bedrock CountTokens envelope carries base64-wrapped.
 base64 = "0.22"
 wiremock.workspace = true
