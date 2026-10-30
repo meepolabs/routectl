@@ -1253,7 +1253,6 @@ fn sample_usage_record(request_id: &str) -> routectl_usage::UsageRecord {
         would_trim_path_units: None,
         would_trim_path_extractable: None,
         would_trim_recorder_version: None,
-        would_trim_raw_marks: None,
         would_trim_context_fraction: None,
         calib_estimated_tokens: None,
         calib_prompt_tokens: None,

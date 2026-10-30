@@ -85,7 +85,6 @@ pub(crate) fn build_usage_draft(
         would_trim_path_units: None,
         would_trim_path_extractable: None,
         would_trim_recorder_version: None,
-        would_trim_raw_marks: None,
         would_trim_context_fraction: None,
         calib_estimated_tokens: None,
         calib_prompt_tokens: None,
@@ -469,7 +468,6 @@ impl UsageCapture {
         self.record.would_trim_path_units = meta.would_trim_path_units;
         self.record.would_trim_path_extractable = meta.would_trim_path_extractable;
         self.record.would_trim_recorder_version = meta.would_trim_recorder_version;
-        self.record.would_trim_raw_marks = meta.would_trim_raw_marks.clone();
         self.record.would_trim_context_fraction = meta.would_trim_context_fraction;
         self.record.calib_estimated_tokens = meta.calib_estimated_tokens;
         // Counts and the decision token only -- the counters carry no

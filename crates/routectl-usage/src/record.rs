@@ -349,12 +349,6 @@ pub struct UsageRecord {
     /// non-NULL rows so aggregates never mix baseline vs near-lossless
     /// semantics. Plumbing only -- always `None` until that pass stamps it.
     pub would_trim_recorder_version: Option<i64>,
-    /// Capped raw-marks JSON blob: per-mark ordering captured for a future
-    /// raw-marks sweep, bounded to a byte cap (see
-    /// `writer::capped_raw_marks_text`) so the stored JSON is always valid.
-    /// Plumbing only -- always `None` until the near-lossless recorder pass
-    /// computes it. Recording only.
-    pub would_trim_raw_marks: Option<Value>,
     /// Non-mutating context-fraction advisory: `estimate_total_tokens /
     /// max_context_tokens` from the resolved pricing row. `None` when the
     /// context window is unknown (fail-closed). Plumbing only -- always
@@ -677,7 +671,6 @@ mod tests {
             would_trim_path_units: Some(10),
             would_trim_path_extractable: Some(7),
             would_trim_recorder_version: Some(1),
-            would_trim_raw_marks: Some(json!([{"kind": "dedup", "index": 0}])),
             would_trim_context_fraction: Some(0.25),
             calib_estimated_tokens: Some(9_500),
             calib_prompt_tokens: Some(10_000),
@@ -760,7 +753,6 @@ mod tests {
             would_trim_path_units: None,
             would_trim_path_extractable: None,
             would_trim_recorder_version: None,
-            would_trim_raw_marks: None,
             would_trim_context_fraction: None,
             calib_estimated_tokens: None,
             calib_prompt_tokens: None,

@@ -15,7 +15,6 @@ use routectl_core::{
     failure_class::{ClassifiedFailure, FailureClass, MatchedBy},
     sanitize_for_log, scan_caller_prefix_advisory,
 };
-use serde_json::Value;
 
 use crate::catalog::{CatalogRow, EffectiveRow};
 use crate::config::RetryPolicy;
@@ -847,7 +846,6 @@ fn record_near_lossless_marks(
     meta.would_trim_context_fraction = row
         .and_then(|r| r.max_context_tokens)
         .map(|window| estimate_total_tokens(attempt_req) as f64 / window as f64);
-    meta.would_trim_raw_marks = Some(serde_json::to_value(&marks.marks).unwrap_or(Value::Null));
 
     if let Some(candidate) = near_lossless_candidate(attempt_req, &marks.marks) {
         let break_even = row.and_then(|r| break_even_k(r, &candidate));

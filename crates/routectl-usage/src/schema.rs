@@ -4,11 +4,11 @@
 //! column, with matching null-ability: `Option<T>` fields are NULLable;
 //! non-`Option` fields are NOT NULL, except the v18 request-observation
 //! columns, which are non-`Option` in the record but NULLable on disk so rows
-//! written before v18 need no rewrite. The DDL additionally retains three
+//! written before v18 need no rewrite. The DDL additionally retains four
 //! intentionally write-stopped legacy columns (`strategy`,
-//! `reduction_strategy`, `selection_decision`) that have no `UsageRecord`
-//! field, so old databases keep opening and historical values stay
-//! readable. Timestamps
+//! `reduction_strategy`, `selection_decision`, `would_trim_raw_marks`) that
+//! have no `UsageRecord` field, so old databases keep opening and historical
+//! values stay readable. Timestamps
 //! are epoch-millis `INTEGER`; JSON columns are `TEXT` (JSON1-queryable);
 //! the two quota-utilization ratios are `REAL`.
 
@@ -168,9 +168,10 @@ CREATE TABLE IF NOT EXISTS requests (
     -- the recorder existed and stamped by the near-lossless recorder, so
     -- reporting can filter to non-NULL rows and never mix unstamped baseline
     -- against recorded semantics in an aggregate.
-    -- `would_trim_raw_marks` is a capped JSON blob (see
-    -- `writer::capped_raw_marks_text`) capturing per-mark ordering for the
-    -- future path-extraction sweep. `would_trim_context_fraction` is NULL
+    -- `would_trim_raw_marks` is write-stopped: it held a capped JSON blob of
+    -- per-mark ordering, is no longer written (new rows store NULL), and is
+    -- kept so older binaries that still name it in their INSERT can write
+    -- to this file. `would_trim_context_fraction` is NULL
     -- when the pricing row's context window is unknown. Appended last so
     -- these columns land in the same ordinal position whether the DB was
     -- created fresh at v8 or migrated from v7 via `ALTER TABLE ... ADD

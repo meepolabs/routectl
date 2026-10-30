@@ -885,47 +885,11 @@ fn json_text(value: &Option<serde_json::Value>) -> Option<String> {
     value.as_ref().and_then(|v| serde_json::to_string(v).ok())
 }
 
-/// Per-row byte cap on the `would_trim_raw_marks` blob (bounded-capture
-/// house style -- see `routectl_providers::anthropic_api::sse_opaque` --
-/// degrade gracefully on overflow rather than mid-value truncate into
-/// invalid JSON). 64 KB is generous for any reasonable per-request mark
-/// count while keeping the column bounded against an adversarial input.
-const MAX_RAW_MARKS_BYTES: usize = 64 * 1024;
-
-/// Serialize the `would_trim_raw_marks` JSON value to owned TEXT, bounded to
-/// `MAX_RAW_MARKS_BYTES`. If the full serialization fits, it is stored
-/// verbatim. If `value` is a JSON array and the full form overflows,
-/// trailing elements are dropped (in order) until the remainder fits --
-/// this always produces valid, parseable JSON, unlike a byte-offset
-/// truncation of the serialized string. A non-array value that overflows
-/// has no element boundary to trim, so it degrades to `None` rather than
-/// storing invalid JSON.
-fn capped_raw_marks_text(value: &Option<serde_json::Value>) -> Option<String> {
-    let value = value.as_ref()?;
-    let full = serde_json::to_string(value).ok()?;
-    if full.len() <= MAX_RAW_MARKS_BYTES {
-        return Some(full);
-    }
-    let array = value.as_array()?;
-    let mut kept = Vec::new();
-    let mut budget = 2; // the enclosing "[" + "]"
-    for item in array {
-        let item_text = serde_json::to_string(item).ok()?;
-        let separator_len = usize::from(!kept.is_empty());
-        let added = item_text.len() + separator_len;
-        if budget + added > MAX_RAW_MARKS_BYTES {
-            break;
-        }
-        budget += added;
-        kept.push(item_text);
-    }
-    Some(format!("[{}]", kept.join(",")))
-}
-
 /// `INSERT OR IGNORE` one record, binding every column `UsageRecord`
-/// carries, in schema order. The three write-stopped legacy decision
-/// columns (`strategy`, `reduction_strategy`, `selection_decision`) are
-/// intentionally omitted, so a newly inserted row stores NULL for them.
+/// carries, in schema order. The four write-stopped legacy columns
+/// (`strategy`, `reduction_strategy`, `selection_decision`,
+/// `would_trim_raw_marks`) are intentionally omitted, so a newly inserted
+/// row stores NULL for them.
 /// Duplicate `request_id`s are silently ignored (the idempotency
 /// contract). All values are bound parameters. Returns the number of rows
 /// actually inserted (1 for a new row, 0 for an ignored duplicate).
@@ -933,7 +897,6 @@ fn insert_record(conn: &Connection, r: &UsageRecord) -> Result<usize, rusqlite::
     let server_tool_use = json_text(&r.server_tool_use);
     let quota_extras = json_text(&r.quota_extras);
     let extra = json_text(&r.extra);
-    let would_trim_raw_marks = capped_raw_marks_text(&r.would_trim_raw_marks);
     conn.execute(
         INSERT_SQL,
         rusqlite::params![
@@ -988,7 +951,6 @@ fn insert_record(conn: &Connection, r: &UsageRecord) -> Result<usize, rusqlite::
             r.would_trim_path_units,
             r.would_trim_path_extractable,
             r.would_trim_recorder_version,
-            would_trim_raw_marks,
             r.would_trim_context_fraction,
             r.resolved_class,
             r.calib_estimated_tokens,
@@ -1014,9 +976,9 @@ fn insert_record(conn: &Connection, r: &UsageRecord) -> Result<usize, rusqlite::
 }
 
 /// The bound `INSERT OR IGNORE`. Column order mirrors `record.rs` /
-/// `schema.rs` exactly; `?1..?72` positions match the params list above.
-/// The DDL's three write-stopped legacy decision columns are absent from
-/// this list on purpose -- an omitted nullable column stores NULL. That
+/// `schema.rs` exactly; `?1..?71` positions match the params list above.
+/// The DDL's four write-stopped legacy columns are absent from this list on
+/// purpose -- an omitted nullable column stores NULL. That
 /// includes `reduction_strategy`: the current context-reduction outcome
 /// lands in `reduction_decision`, so a NULL in the legacy column keeps
 /// meaning write-stopped. Same for `strategy`: the cache-injection decisions
@@ -1043,7 +1005,6 @@ INSERT OR IGNORE INTO requests (
     would_trim_path_units,
     would_trim_path_extractable,
     would_trim_recorder_version,
-    would_trim_raw_marks,
     would_trim_context_fraction,
     resolved_class,
     calib_estimated_tokens,
@@ -1091,9 +1052,8 @@ INSERT OR IGNORE INTO requests (
     ?61,
     ?62,
     ?63,
-    ?64,
-    ?65, ?66, ?67,
-    ?68, ?69, ?70, ?71, ?72
+    ?64, ?65, ?66,
+    ?67, ?68, ?69, ?70, ?71
 )";
 
 #[cfg(test)]
@@ -1161,7 +1121,6 @@ mod tests {
             would_trim_path_units: None,
             would_trim_path_extractable: None,
             would_trim_recorder_version: None,
-            would_trim_raw_marks: None,
             would_trim_context_fraction: None,
             calib_estimated_tokens: None,
             calib_prompt_tokens: None,
@@ -1300,11 +1259,11 @@ mod tests {
         assert_eq!(resolved_class, "upstream-timeout");
     }
 
-    /// The three legacy decision columns survive in the DDL but are no
+    /// The four write-stopped legacy columns survive in the DDL but are no
     /// longer bound by the INSERT, so every newly written row stores NULL.
     /// Fails loudly if a binding is ever re-added.
     #[tokio::test]
-    async fn insert_leaves_write_stopped_decision_columns_null() {
+    async fn insert_leaves_write_stopped_legacy_columns_null() {
         // Arrange
         let (_dir, path) = temp_path();
         let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
@@ -1316,17 +1275,26 @@ mod tests {
 
         // Assert
         let conn = Connection::open(&path).expect("read");
-        let (strategy, reduction, selection): (Option<String>, Option<String>, Option<String>) =
-            conn.query_row(
-                "SELECT strategy, reduction_strategy, selection_decision \
+        let (strategy, reduction, selection, raw_marks): (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT strategy, reduction_strategy, selection_decision, would_trim_raw_marks \
                  FROM requests WHERE request_id='ws-1'",
                 [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .expect("row");
         assert_eq!(strategy, None, "strategy must be write-stopped");
         assert_eq!(reduction, None, "reduction_strategy must be write-stopped");
         assert_eq!(selection, None, "selection_decision must be write-stopped");
+        assert_eq!(
+            raw_marks, None,
+            "would_trim_raw_marks must be write-stopped"
+        );
     }
 
     #[tokio::test]
@@ -1340,7 +1308,6 @@ mod tests {
         rec.would_trim_path_units = Some(10);
         rec.would_trim_path_extractable = Some(7);
         rec.would_trim_recorder_version = Some(1);
-        rec.would_trim_raw_marks = Some(json!([{"kind": "dedup", "index": 0}]));
         rec.would_trim_context_fraction = Some(0.25);
 
         // Act
@@ -1356,14 +1323,12 @@ mod tests {
             path_units,
             path_extractable,
             recorder_version,
-            raw_marks,
             context_fraction,
-        ): (i64, i64, i64, i64, i64, String, f64) = conn
+        ): (i64, i64, i64, i64, i64, f64) = conn
             .query_row(
                 "SELECT would_trim_dedup_tokens, would_trim_supersession_tokens, \
                  would_trim_path_units, would_trim_path_extractable, \
-                 would_trim_recorder_version, would_trim_raw_marks, \
-                 would_trim_context_fraction \
+                 would_trim_recorder_version, would_trim_context_fraction \
                  FROM requests WHERE request_id='rt-v8'",
                 [],
                 |r| {
@@ -1374,7 +1339,6 @@ mod tests {
                         r.get(3)?,
                         r.get(4)?,
                         r.get(5)?,
-                        r.get(6)?,
                     ))
                 },
             )
@@ -1384,7 +1348,6 @@ mod tests {
         assert_eq!(path_units, 10);
         assert_eq!(path_extractable, 7);
         assert_eq!(recorder_version, 1);
-        assert_eq!(raw_marks, "[{\"index\":0,\"kind\":\"dedup\"}]");
         assert_eq!(context_fraction, 0.25);
     }
 
@@ -1676,64 +1639,6 @@ mod tests {
                 .expect("epoch");
             assert_eq!(epoch, 2, "{request_id}: an earlier column shifted");
         }
-    }
-
-    #[test]
-    fn capped_raw_marks_text_stores_small_blob_verbatim() {
-        // Arrange
-        let value = Some(json!([{"kind": "dedup", "index": 0}]));
-
-        // Act
-        let text = capped_raw_marks_text(&value);
-
-        // Assert
-        assert_eq!(text, Some("[{\"index\":0,\"kind\":\"dedup\"}]".to_string()));
-    }
-
-    #[test]
-    fn capped_raw_marks_text_bounds_an_over_cap_array() {
-        // Arrange: an array whose full serialization exceeds the cap.
-        let big_item = "x".repeat(MAX_RAW_MARKS_BYTES / 4);
-        let marks: Vec<serde_json::Value> =
-            (0..8).map(|i| json!({"i": i, "pad": big_item})).collect();
-        let value = Some(serde_json::Value::Array(marks));
-
-        // Act
-        let text = capped_raw_marks_text(&value).expect("bounded blob present");
-
-        // Assert: bounded, and still valid, parseable JSON.
-        assert!(
-            text.len() <= MAX_RAW_MARKS_BYTES,
-            "capped blob must not exceed the byte cap, got {} bytes",
-            text.len()
-        );
-        let parsed: serde_json::Value =
-            serde_json::from_str(&text).expect("capped blob is valid json");
-        let kept = parsed.as_array().expect("capped blob is a json array");
-        assert!(
-            kept.len() < 8,
-            "over-cap array must drop trailing elements, kept {}",
-            kept.len()
-        );
-    }
-
-    #[test]
-    fn capped_raw_marks_text_returns_none_for_missing_value() {
-        // Act + Assert
-        assert_eq!(capped_raw_marks_text(&None), None);
-    }
-
-    #[test]
-    fn capped_raw_marks_text_returns_none_for_over_cap_non_array() {
-        // Arrange: a non-array value (no element boundary to trim) whose
-        // full serialization exceeds the cap.
-        let value = Some(serde_json::Value::String("x".repeat(MAX_RAW_MARKS_BYTES)));
-
-        // Act
-        let text = capped_raw_marks_text(&value);
-
-        // Assert: degrades to None rather than storing invalid JSON.
-        assert_eq!(text, None);
     }
 
     #[tokio::test]

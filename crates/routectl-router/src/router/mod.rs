@@ -19,7 +19,6 @@ use routectl_core::{
     ChatChunk, ChatResponse, PrefixComponent, Provider, ReplayScheme, Result, TokenCount,
     VolatileKind, failure_class::FailureClass,
 };
-use serde_json::Value;
 
 use crate::config::{AliasValue, Config, HistoryReasoning, ReasoningDialect};
 use crate::glob::PrefixIndex;
@@ -1557,13 +1556,6 @@ pub struct DispatchMeta {
     /// filter to non-NULL rows so aggregates never mix unstamped baseline
     /// against recorded semantics.
     pub would_trim_recorder_version: Option<i64>,
-    /// Raw-marks JSON blob (uncapped at this layer): the near-lossless
-    /// pass's marks (dedup + supersession), captured for a future
-    /// path-extraction sweep. The byte cap is applied downstream by
-    /// `routectl_usage::writer::capped_raw_marks_text` so the stored JSON
-    /// is always valid. `None` when the near-lossless pass did not run
-    /// (below trigger). Recording only.
-    pub would_trim_raw_marks: Option<Value>,
     /// Non-mutating context-fraction advisory: `estimate_total_tokens /
     /// max_context_tokens` from the resolved pricing row. `None` when the
     /// near-lossless pass did not run (below trigger) OR the resolved
@@ -1870,7 +1862,6 @@ impl DispatchMeta {
             would_trim_path_units: None,
             would_trim_path_extractable: None,
             would_trim_recorder_version: None,
-            would_trim_raw_marks: None,
             would_trim_context_fraction: None,
             calib_estimated_tokens: None,
             learned_capabilities: Vec::new(),

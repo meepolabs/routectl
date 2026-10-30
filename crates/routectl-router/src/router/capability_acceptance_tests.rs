@@ -27,7 +27,7 @@ use routectl_core::capability::{
     EvidenceSource, FailurePhase, STRUCTURED_OUTPUT, SignalTier, Verdict, WEB_SEARCH,
 };
 use routectl_core::{Choice, Message, MessageContent, Role, ToolDef, Usage};
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::capability_detect::ObservationDirection;
 use crate::catalog::{CatalogRow, EffectiveRow, Source};

@@ -2282,15 +2282,16 @@ fn a_v1_db_climbs_the_whole_ladder_to_the_fresh_v18_shape() {
 
 /// Pins the physical `requests` DDL shape: 75 columns, in this exact
 /// order, with this exact null-ability. The set intentionally EXCEEDS the
-/// `UsageRecord` field set by three write-stopped legacy columns
-/// (`strategy`, `reduction_strategy`, `selection_decision`), which the DDL
+/// `UsageRecord` field set by four write-stopped legacy columns
+/// (`strategy`, `reduction_strategy`, `selection_decision`,
+/// `would_trim_raw_marks`), which the DDL
 /// retains so old databases keep opening and historical values stay
 /// readable. This test fails loudly if the physical schema drifts.
 #[test]
 fn requests_columns_match_physical_schema() {
     // Arrange: (column name, expected NOT NULL). Written columns mirror
     // record.rs -- non-Option fields are NOT NULL, Option<T> fields are
-    // NULLable; the three retained write-stopped columns are NULLable, and
+    // NULLable; the four retained write-stopped columns are NULLable, and
     // so are the v18 request-observation columns (NULL on pre-v18 rows).
     let expected: &[(&str, bool)] = &[
         ("ts_start", true),

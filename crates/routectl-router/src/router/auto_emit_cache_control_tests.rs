@@ -700,10 +700,6 @@ async fn would_trim_near_lossless_attribution_records_dedup_and_supersession() {
         Some(3),
         "all three results resolve to path \"/a\" via their paired tool_use",
     );
-    assert!(
-        dispatched.meta.would_trim_raw_marks.is_some(),
-        "a trigger-clearing request with marks must record the raw-marks blob",
-    );
 }
 
 #[tokio::test]

@@ -9,6 +9,7 @@ use routectl_core::{
     AnthropicUnifiedQuota, ChunkChoice, ChunkDelta, ReasoningDetail, ReasoningDetailKind, Role,
     UpstreamMeta, UsageDelta,
 };
+use serde_json::Value;
 
 /// A provider whose single `stream()` call returns a preset stream.
 struct FixedStream {
