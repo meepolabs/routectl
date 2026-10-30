@@ -38,7 +38,7 @@ pub fn translate(provider_id: &str, resp: GenerateContentResponse) -> Result<Cha
                 .filter(|r| !r.is_empty());
             let finish = match block_reason {
                 Some(reason) => {
-                    tracing::info!(
+                    tracing::debug!(
                         provider = %provider_id,
                         surface = "complete",
                         origin = "prompt_feedback",
@@ -57,7 +57,7 @@ pub fn translate(provider_id: &str, resp: GenerateContentResponse) -> Result<Cha
             let has_tool_calls = walked.tool_calls.is_some();
             let finish = map_finish_reason(c.finish_reason.as_deref(), has_tool_calls);
             if finish.as_deref() == Some("content_filter") {
-                tracing::info!(
+                tracing::debug!(
                     provider = %provider_id,
                     surface = "complete",
                     origin = "candidate_finish",
@@ -714,37 +714,39 @@ mod tests {
     }
 
     #[test]
-    fn prompt_block_emits_one_info_no_payload() {
+    fn prompt_block_emits_one_debug_no_payload() {
         let events = routectl_testkit::capture_events(|| {
             let resp = empty_response(Some(PromptFeedback {
                 block_reason: Some("PROHIBITED_CONTENT".into()),
             }));
             let _ = translate("gemini:test", resp).expect("translate ok");
         });
-        let infos: Vec<_> = events
+        let blocks: Vec<_> = events
             .iter()
-            .filter(|e| e.level == tracing::Level::INFO)
+            .filter(|e| e.message.contains("blocked on 200 surface"))
             .collect();
-        assert_eq!(infos.len(), 1, "exactly one INFO; got {infos:?}");
-        assert_eq!(infos[0].field("provider"), Some("gemini:test"));
-        assert_eq!(infos[0].field("surface"), Some("complete"));
-        assert_eq!(infos[0].field("origin"), Some("prompt_feedback"));
-        assert_eq!(infos[0].field("block_reason"), Some("PROHIBITED_CONTENT"));
+        assert_eq!(blocks.len(), 1, "exactly one block line; got {blocks:?}");
+        assert_eq!(blocks[0].level, tracing::Level::DEBUG);
+        assert_eq!(blocks[0].field("provider"), Some("gemini:test"));
+        assert_eq!(blocks[0].field("surface"), Some("complete"));
+        assert_eq!(blocks[0].field("origin"), Some("prompt_feedback"));
+        assert_eq!(blocks[0].field("block_reason"), Some("PROHIBITED_CONTENT"));
     }
 
     #[test]
-    fn candidate_content_filter_emits_one_info() {
+    fn candidate_content_filter_emits_one_debug() {
         let events = routectl_testkit::capture_events(|| {
             let _ = translate("gemini:test", text_response("", "SAFETY")).expect("translate ok");
         });
-        let infos: Vec<_> = events
+        let blocks: Vec<_> = events
             .iter()
-            .filter(|e| e.level == tracing::Level::INFO)
+            .filter(|e| e.message.contains("blocked on 200 surface"))
             .collect();
-        assert_eq!(infos.len(), 1, "exactly one INFO; got {infos:?}");
-        assert_eq!(infos[0].field("surface"), Some("complete"));
-        assert_eq!(infos[0].field("origin"), Some("candidate_finish"));
-        assert_eq!(infos[0].field("block_reason"), Some("SAFETY"));
+        assert_eq!(blocks.len(), 1, "exactly one block line; got {blocks:?}");
+        assert_eq!(blocks[0].level, tracing::Level::DEBUG);
+        assert_eq!(blocks[0].field("surface"), Some("complete"));
+        assert_eq!(blocks[0].field("origin"), Some("candidate_finish"));
+        assert_eq!(blocks[0].field("block_reason"), Some("SAFETY"));
     }
 
     #[test]

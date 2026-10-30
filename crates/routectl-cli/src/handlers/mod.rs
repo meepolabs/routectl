@@ -13,6 +13,7 @@ pub(crate) mod opening_meter;
 pub mod pure_proxy_admission;
 pub mod pure_proxy_metrics;
 mod reason_detail;
+mod request_finished_log;
 mod response_wire;
 pub mod responses;
 pub mod status;

@@ -60,10 +60,19 @@ where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = T>,
 {
+    traced_at("info,routectl_core::log_safe=trace", body)
+}
+
+/// [`traced`] under the production subscriber at `directive`.
+pub(super) fn traced_at<F, Fut, T>(directive: &str, body: F) -> (T, String)
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = T>,
+{
     let sink = Sink::default();
     let writer = sink.clone();
     let subscriber = log_sink::subscriber(
-        EnvFilter::new("info,routectl_core::log_safe=trace"),
+        EnvFilter::new(directive),
         move || writer.clone(),
         false,
         Clock::Off,

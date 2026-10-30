@@ -328,3 +328,7 @@ mod row_tests;
 #[cfg(test)]
 #[path = "response_wire_cancel_tests.rs"]
 mod cancel_tests;
+
+#[cfg(test)]
+#[path = "response_wire_finished_log_tests.rs"]
+mod finished_log_tests;

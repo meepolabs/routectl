@@ -682,12 +682,16 @@ fn prompt_block_event_emits_single_content_filter_terminal_and_no_eos_warn() {
         events.iter().all(|e| e.level != Level::WARN),
         "a prompt-blocked stream must not warn at EOS; got {events:?}"
     );
-    let infos: Vec<_> = events.iter().filter(|e| e.level == Level::INFO).collect();
-    assert_eq!(infos.len(), 1, "exactly one INFO; got {infos:?}");
-    assert_eq!(infos[0].field("provider"), Some(PID));
-    assert_eq!(infos[0].field("surface"), Some("stream"));
-    assert_eq!(infos[0].field("origin"), Some("prompt_feedback"));
-    assert_eq!(infos[0].field("block_reason"), Some("SAFETY"));
+    let blocks: Vec<_> = events
+        .iter()
+        .filter(|e| e.message.contains("blocked on 200 surface"))
+        .collect();
+    assert_eq!(blocks.len(), 1, "exactly one block line; got {blocks:?}");
+    assert_eq!(blocks[0].level, Level::DEBUG);
+    assert_eq!(blocks[0].field("provider"), Some(PID));
+    assert_eq!(blocks[0].field("surface"), Some("stream"));
+    assert_eq!(blocks[0].field("origin"), Some("prompt_feedback"));
+    assert_eq!(blocks[0].field("block_reason"), Some("SAFETY"));
 }
 
 fn usage_meta(prompt: u32) -> UsageMetadata {

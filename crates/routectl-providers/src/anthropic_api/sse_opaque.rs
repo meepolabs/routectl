@@ -138,8 +138,7 @@ impl OpaqueCapture {
 
     /// Capture one `content_block_delta` payload. `value` is the inner
     /// `delta` object. Enforces both caps; emits a DEBUG line per
-    /// captured delta so operators can reconstruct fidelity post-hoc
-    /// without paying the INFO budget.
+    /// captured delta so operators can reconstruct fidelity post-hoc.
     pub(super) fn record_delta(
         &mut self,
         value: &Value,
@@ -187,7 +186,7 @@ impl OpaqueCapture {
         );
     }
 
-    /// Capture the `content_block_stop` sentinel and emit the INFO
+    /// Capture the `content_block_stop` sentinel and emit the DEBUG
     /// summary. The stop sentinel is appended only when the matching
     /// `ContentBlockStart` was actually pushed (`start_emitted`) -- a
     /// block whose start was dropped (e.g. an oversized start payload
@@ -196,10 +195,10 @@ impl OpaqueCapture {
     /// always emits its stop, even when it later degraded: degrading
     /// stops capturing further DELTAS (see `record_delta`), not the
     /// stop boundary, so the consumer sees (start, ..., truncated
-    /// deltas, stop) rather than an unclosed block. The INFO summary
-    /// fires regardless so operators see a per-block rollup.
+    /// deltas, stop) rather than an unclosed block. The summary fires
+    /// regardless so a debug filter shows a per-block rollup.
     pub(super) fn record_stop(&mut self, provider: &str, out: &mut Vec<OpaqueSseEvent>) {
-        tracing::info!(
+        tracing::debug!(
             provider = %provider,
             upstream_index = self.upstream_index,
             block_type = %sanitize_for_log(&self.type_tag),

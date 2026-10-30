@@ -145,7 +145,7 @@ impl GeminiStreamState {
             let usage = self.cached_usage.take();
             let finish = map_finish_reason(finish_reason_raw.as_deref(), self.saw_function_call);
             if finish.as_deref() == Some("content_filter") {
-                tracing::info!(
+                tracing::debug!(
                     provider = %provider_id,
                     surface = "stream",
                     origin = "candidate_finish",
@@ -162,7 +162,7 @@ impl GeminiStreamState {
             self.saw_finish_reason = true;
             self.terminal_emitted = true;
             let usage = self.cached_usage.take();
-            tracing::info!(
+            tracing::debug!(
                 provider = %provider_id,
                 surface = "stream",
                 origin = "prompt_feedback",

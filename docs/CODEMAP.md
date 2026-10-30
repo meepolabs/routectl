@@ -6715,6 +6715,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   constants and pinned against them by test).
   Tests: `opening_diagnostics_tests.rs`; `opening_accuracy_boundary_tests.rs`
   reads rows two daemon processes wrote to one ledger back through the report
+- `src/handlers/request_finished_log.rs` -- `emit_request_finished`, the one
+  content-free INFO `request finished` line per client request, rendered from
+  the finished `UsageRecord` in `UsageCapture::finalize` before the row is
+  queued; routing names and the request id pass through `sanitize_for_log`.
+  Tests: `usage_capture_finished_log_tests.rs`
 - `src/handlers/usage_capture.rs` -- `UsageCapture`, the unified RAII capture
   guard (replaces the former `EgressStreamSummary`) that records exactly ONE
   `UsageRecord` per request on both ingress paths: a draft is seeded from the

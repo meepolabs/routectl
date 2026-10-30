@@ -525,7 +525,7 @@ fn plain_count_request() -> ChatRequest {
 async fn count_tokens_class_path_emits_one_observability_event() {
     // A 500 is a health class the seat debits: the terminal walk exits
     // here (count_tokens never falls back on health), so the settle point
-    // fires exactly one INFO `count_tokens` event carrying the class
+    // fires exactly one DEBUG `count_tokens` event carrying the class
     // decision -- no longer silent.
     let provider: Arc<dyn Provider> = Arc::new(HealthErrorProvider { status: 500 });
     let router = build_router(provider, false);
@@ -543,7 +543,7 @@ async fn count_tokens_class_path_emits_one_observability_event() {
         "the class/remap/debit path emits exactly one count_tokens event",
     );
     let ev = emitted[0];
-    assert_eq!(ev.level, tracing::Level::INFO);
+    assert_eq!(ev.level, tracing::Level::DEBUG);
     assert_eq!(ev.field("state_key"), Some("haiku"));
     assert_eq!(ev.field("status"), Some("500"));
     assert_eq!(ev.field("effective_class"), Some("server_error"));

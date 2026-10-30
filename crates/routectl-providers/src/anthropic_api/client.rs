@@ -1182,7 +1182,7 @@ impl AnthropicApiProvider {
             .map_err(|refusal| refusal.into_error(&self.cfg.id))?;
         // Decision log: provider + non-CC gate + how many tool names were
         // normalized. NEVER logs tool names or message content.
-        tracing::info!(
+        tracing::debug!(
             provider = %self.cfg.id,
             is_non_cc = is_non_cc,
             rename_count = result.tool_reverse.len(),

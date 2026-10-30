@@ -26,6 +26,7 @@ use routectl_usage::{CapabilityEvent, Harness, Operation, Outcome, UsageHandle, 
 use serde_json::Value;
 
 use crate::handlers::opening_diagnostics::OpeningDiagnostics;
+use crate::handlers::request_finished_log::emit_request_finished;
 
 /// Seed a `UsageRecord` draft from the request shape + identity, before
 /// dispatch. The dispatch / token / outcome / timing columns are stamped
@@ -1236,6 +1237,7 @@ impl UsageCapture {
         self.emit_egress_summary();
         self.emit_cache_outcome();
         self.emit_cache_summary();
+        emit_request_finished(&self.record);
         // Move the owned record into the channel rather than cloning a
         // wide ~40-column struct (some columns carry JSON Value trees).
         // `finalized` is already set above, so the only later access --
@@ -1357,22 +1359,18 @@ impl UsageCapture {
         }
     }
 
-    /// Emit the per-request cache breadcrumb: `cache=READ/PROMPT (PCT%)`.
-    /// READ is the cache-read token count; PROMPT is the cache-INCLUSIVE
-    /// prompt total, reconstructed from the cache-EXCLUSIVE `input_tokens`
-    /// the record stores plus the disjoint cache columns
-    /// (`input_tokens + cache_read + cache_write_5m + cache_write_1h`).
-    ///
-    /// Surfaced at INFO only when there was cache activity (a read, a
-    /// write, or an auto-emitted decision), so cached / auto-emitted
-    /// requests get an INFO breadcrumb while uncached requests stay at
-    /// DEBUG (no `cache=0/0` flood). Counts / ids / strategy only -- never
-    /// message content / secrets / bodies.
+    /// Emit the per-request cache breadcrumb at DEBUG:
+    /// `cache=READ/PROMPT (PCT%)`. READ is the cache-read token count;
+    /// PROMPT is the cache-INCLUSIVE prompt total, reconstructed from the
+    /// cache-EXCLUSIVE `input_tokens` the record stores plus the disjoint
+    /// cache columns (`input_tokens + cache_read + cache_write_5m +
+    /// cache_write_1h`). The INFO `request finished` line already carries
+    /// `cache_read`. Counts / ids / strategy only -- never message content /
+    /// secrets / bodies.
     fn emit_cache_summary(&self) {
         let cache_read = self.record.cache_read.unwrap_or(0);
-        let cache_write_5m = self.record.cache_write_5m.unwrap_or(0);
-        let cache_write_1h = self.record.cache_write_1h.unwrap_or(0);
-        let cache_creation = cache_write_5m + cache_write_1h;
+        let cache_creation =
+            self.record.cache_write_5m.unwrap_or(0) + self.record.cache_write_1h.unwrap_or(0);
         let prompt = self
             .record
             .input_tokens
@@ -1380,34 +1378,16 @@ impl UsageCapture {
             .saturating_add(cache_read)
             .saturating_add(cache_creation);
         let pct = cache_hit_pct(cache_read, prompt);
-        let strategy = self.cache_strategy.unwrap_or("");
-        let provider = self.record.provider.as_deref().unwrap_or("");
-        let model = self.record.model.as_deref().unwrap_or("");
-        let request_id = self.record.request_id.as_str();
-        let cache_active = cache_read > 0 || cache_creation > 0 || strategy == AUTO_EMITTED;
-        if cache_active {
-            tracing::info!(
-                request_id = %request_id,
-                provider = %routectl_core::sanitize_for_log(provider),
-                model = %routectl_core::sanitize_for_log(model),
-                strategy = %strategy,
-                cache_read = cache_read,
-                prompt = prompt,
-                cache_hit_pct = pct,
-                "cache={cache_read}/{prompt} ({pct}%)",
-            );
-        } else {
-            tracing::debug!(
-                request_id = %request_id,
-                provider = %routectl_core::sanitize_for_log(provider),
-                model = %routectl_core::sanitize_for_log(model),
-                strategy = %strategy,
-                cache_read = cache_read,
-                prompt = prompt,
-                cache_hit_pct = pct,
-                "cache={cache_read}/{prompt} ({pct}%)",
-            );
-        }
+        tracing::debug!(
+            request_id = %routectl_core::sanitize_for_log(&self.record.request_id),
+            provider = %routectl_core::sanitize_for_log(self.record.provider.as_deref().unwrap_or("")),
+            model = %routectl_core::sanitize_for_log(self.record.model.as_deref().unwrap_or("")),
+            strategy = %self.cache_strategy.unwrap_or(""),
+            cache_read = cache_read,
+            prompt = prompt,
+            cache_hit_pct = pct,
+            "cache={cache_read}/{prompt} ({pct}%)",
+        );
     }
 
     /// Emit the single `direction=egress` stream trace-summary line that
@@ -1468,3 +1448,7 @@ mod forwarded_calibration_tests;
 #[cfg(test)]
 #[path = "usage_capture_observation_tests.rs"]
 mod observation_tests;
+
+#[cfg(test)]
+#[path = "usage_capture_finished_log_tests.rs"]
+mod finished_log_tests;

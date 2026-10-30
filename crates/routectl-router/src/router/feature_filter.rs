@@ -141,7 +141,7 @@ impl Router {
                 Some((feature, FilterSource::Learned)) => {
                     // The route_away event is deferred until the final chain
                     // shape is known: its level distinguishes "an alternative
-                    // remains" (INFO) from "the request survives only on the
+                    // remains" (DEBUG) from "the request survives only on the
                     // tail" (WARN).
                     route_aways.push((target.state_key.clone(), feature, FilterSource::Learned));
                     learned_tail.push(target);
@@ -186,7 +186,7 @@ impl Router {
             ));
         }
         // Route-away observability: each tail demotion (learned or catalog
-        // prior) emits one route_away event tagged with its source. INFO
+        // prior) emits one route_away event tagged with its source. DEBUG
         // while a supported alternative remains; WARN when the chain
         // survives ONLY via the de-prioritized tail (the route-away floor).
         // Capability TOKEN + state_key only -- never a request body.
@@ -205,7 +205,7 @@ impl Router {
                      survives only via the de-prioritized tail",
                 );
             } else {
-                tracing::info!(
+                tracing::debug!(
                     event = "route_away",
                     state_key = %sanitize_for_log(&state_key),
                     capability_key = %capability_key,
@@ -646,7 +646,7 @@ pub(super) fn emit_feature_unsupported(
     is_forwarded: bool,
     remapped: bool,
 ) {
-    tracing::info!(
+    tracing::debug!(
         target: "routectl::feature_unsupported",
         provider,
         provider_kind = provider_kind.unwrap_or(""),

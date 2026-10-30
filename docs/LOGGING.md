@@ -96,6 +96,12 @@ The default `info` log is meant to be read, so the levels follow one rule set:
    dashboard refreshing every few seconds adds no access lines at INFO.
    Inference request lines -- and `/v1/messages/count_tokens`, which calls the
    upstream -- stay INFO.
+6. **One INFO line per finished request.** Every inference and token-count
+   request writes one [`request finished`](#request-finished-info) line
+   carrying its outcome, served target, attempts, timing, tokens and
+   per-request counts. What happened on the way (a capability demotion, a
+   cloak decision, a content-filter finish, an opaque SSE block) logs at
+   DEBUG; a failure an operator can act on stays WARN or ERROR.
 
 What an operator now needs a debug filter (or a counter) to see is listed in
 [Visibility moved to DEBUG](#visibility-moved-to-debug).
@@ -938,12 +944,12 @@ log site.
 | Index mismatch (`sse_unknown::index_matches`) | WARN | `provider`, `expected_index`, `got_index`, `event_kind`, `open_block_type` |
 | Per-stream cap exceeded (`sse_unknown`) | WARN | `provider`, `opaque_bytes_total`, `opaque_events_total`, `canonical_chunk_emitted` |
 | Per-delta capture (`sse_opaque::record_delta`) | DEBUG | `provider`, `upstream_index`, `delta_bytes` |
-| Block stop summary (`sse_opaque::record_stop`) | INFO | `provider`, `upstream_index`, `block_type`, `captured_bytes`, `delta_count` |
+| Block stop summary (`sse_opaque::record_stop`) | DEBUG | `provider`, `upstream_index`, `block_type`, `captured_bytes`, `delta_count` |
 | Cap exceeded / degrade (`sse_opaque::degrade`) | WARN | `provider`, `upstream_index`, `block_type`, `reason`, `captured_bytes`, `delta_count` |
 
 Opening an unknown block is the forward-compat capture working as designed
-(`server_tool_use` and friends arrive on ordinary traffic), so it is DEBUG; the
-INFO stop summary below already records each captured block.
+(`server_tool_use` and friends arrive on ordinary traffic), so it is DEBUG, and
+so is the per-block stop summary that records each captured block.
 
 Example lines (formatted for readability; real output is one event
 per line and inherits the `request_id` span field):
@@ -963,7 +969,7 @@ DEBUG routectl_providers::anthropic_api::sse_opaque
   provider=anthropic-prod upstream_index=1 delta_bytes=312
   "anthropic SSE: captured opaque delta"
 
-INFO routectl_providers::anthropic_api::sse_opaque
+DEBUG routectl_providers::anthropic_api::sse_opaque
   provider=anthropic-prod upstream_index=1 block_type=web_search_tool_result
   captured_bytes=2048 delta_count=4
   "anthropic SSE: opaque block closed"
@@ -1053,6 +1059,52 @@ and inherit no `request_id` span (the writer runs on a dedicated OS thread).
 | WARN  | `routectl_usage::handle` | `dropped_total=<N>` | `"usage channel full -- dropping record (capture lags writer)"` (rate-limited: first drop + every 1024 thereafter) |
 | WARN  | `routectl_usage::handle` | `dropped_total=<N>` | `"usage writer channel closed -- dropping record (writer stopped)"` (rate-limited: first drop + every 1024 thereafter) |
 | WARN  | `routectl_usage::writer` | `error=...` | `"usage retention prune failed -- continuing"` |
+
+### `request finished` (INFO)
+
+Every client request routectl records a usage row for (inference and
+`/v1/messages/count_tokens`) writes exactly one INFO line, `request
+finished`, target `routectl_cli::handlers::request_finished_log`. It is
+rendered from the finished row just before the row is handed to the usage
+writer, so it is written even when the writer's queue refuses the row, and
+on every exit: success, upstream error, an observed client hangup
+(`client_disconnect`) and a dropped handler (`cancelled`). Every key below is
+always present, in this order; a column the row leaves unset renders as `-`.
+
+| Field | Meaning |
+|---|---|
+| `request_id` | The request correlation id (also the row's id). |
+| `operation` | `inference` or `count_tokens`. |
+| `outcome` | `ok`, `upstream_error`, `client_disconnect`, `timeout`, `cancelled` or `gate_blocked`. |
+| `http_status` | The transport status the client received. |
+| `harness` | `claude_code`, `codex_cli` or `other` (the user-agent itself is never logged). |
+| `probe` | `true` for routectl's own probe traffic. |
+| `alias`, `model`, `upstream`, `provider`, `seat` | The served target's routing names. |
+| `attempt_count`, `fallback_count` | Dispatch attempts, and fallbacks past the first target. |
+| `latency_ms`, `ttfb_ms` | Total time, and time to the first byte. |
+| `input_tokens`, `output_tokens`, `cache_read` | Token columns as the row stores them (`input_tokens` is cache-exclusive). |
+| `wire_losses`, `translation_drops`, `local_refusals`, `field_repairs`, `missing_terminals` | The request's five per-request counts. |
+
+Content-free: never a body, prompt, header, error detail, credential, session
+id or user-agent. The routing names can carry the client's requested model id
+(a pre-dispatch failure names the requested alias; a forwarded-credential or
+default-alias route sends the requested id upstream), and the request id can be
+client-chosen, so all six strings are escaped and capped at 256 characters like
+every other client-influenced field.
+
+```
+INFO routectl_cli::handlers::request_finished_log: request finished request_id=probe-1 operation=inference outcome=ok
+  http_status=200 harness=claude_code probe=false alias=sonnet model=sonnet
+  upstream=claude-sonnet-4-5 provider=anthropic seat=main attempt_count=1
+  fallback_count=0 latency_ms=2140 ttfb_ms=610 input_tokens=12 output_tokens=380
+  cache_read=48210 wire_losses=0 translation_drops=0 local_refusals=0
+  field_repairs=0 missing_terminals=0
+```
+
+The line names `request_id` as its own field because it is not always written
+inside the request span (a complete body's row is finalized after the handler
+has returned the response). The span-close access line is unchanged: it is what carries `request_id`
+onto WARNs emitted inside the request.
 
 A request row the writer channel refuses is counted by cause and never
 silently lost. A FULL channel (the writer is alive but behind) counts
@@ -1240,7 +1292,7 @@ breakpoint cost against what it returned.
   CONFIGURATION.md). A caller-supplied or skipped strategy is never
   flagged as thrash -- routectl only warns on decisions it made itself.
 
-### per-request cache summary (`cache=READ/PROMPT (PCT%)`)
+### per-request cache summary (`cache=READ/PROMPT (PCT%)`, DEBUG)
 
 Emitted once per request from the usage-capture finalize path, alongside
 the thrash signal above. The message reads `cache=READ/PROMPT (PCT%)`:
@@ -1263,14 +1315,9 @@ the thrash signal above. The message reads `cache=READ/PROMPT (PCT%)`:
 | `prompt`       | Cache-inclusive prompt total (reconstructed, see above).  |
 | `cache_hit_pct`| Integer cache-hit percentage.                             |
 
-Level gating, to avoid flooding INFO with `cache=0/0` on every uncached
-request:
-
-- **INFO** when there was cache activity -- a read (`cache_read > 0`), a
-  write (`cache_write_5m + cache_write_1h > 0`), or an auto-emitted
-  decision (`strategy == auto_emitted`). Cached / auto-emitted requests
-  get an INFO breadcrumb.
-- **DEBUG** otherwise (no cache activity).
+Always DEBUG (target `routectl_cli::handlers::usage_capture`). At the
+default level the [`request finished`](#request-finished-info) line carries
+`cache_read` and `input_tokens`; the thrash signal above stays WARN.
 
 Counts, ids, and stable tokens only -- never bodies, prompt content, or
 secrets.
@@ -1547,9 +1594,9 @@ Summary (grep the `event` field to isolate a kind):
 | `purge` | INFO | `routectl_router::router::capability_purge` | `operator purged a learned-capability entry` |
 | `expire_probe` | INFO | `routectl_router::learned_capability` | `lapsed learned negative admitted for its single re-probe` |
 | `evict` | WARN | `routectl_router::learned_capability` | `learned-capability registry at capacity; evicted oldest entry` |
-| `route_away` | INFO / WARN | `routectl_router::router::feature_filter` | `capability negative de-prioritized this target to the tail` (INFO) / `capability negative routed this target away; request survives only via the de-prioritized tail` (WARN) |
+| `route_away` | DEBUG / WARN | `routectl_router::router::feature_filter` | `capability negative de-prioritized this target to the tail` (DEBUG) / `capability negative routed this target away; request survives only via the de-prioritized tail` (WARN) |
 | `hard_exclusion` | WARN | `routectl_router::router::feature_filter` | `capability refused on every lane; request excluded before dispatch` |
-| `count_tokens` | INFO | `routectl_router::router::count_tokens` | `count_tokens seat terminal; resilience class policy applied` |
+| `count_tokens` | DEBUG | `routectl_router::router::count_tokens` | `count_tokens seat terminal; resilience class policy applied` |
 | `invalidation` | WARN | `routectl_router::router` | `catalog/overlay changed across reload; catalog-scoped learned capabilities are evicted at the replay boundary` |
 | `strip` | WARN | `routectl_router::router::feature_filter` | `capability_strip_decision` |
 | `suppression` | WARN | `routectl_router::router::capability_learn` | `force_supported override contradicted: masked capability still rejected upstream` / `f2 feature-naming negative suppressed: same-chain f1 already observed for this capability` |
@@ -1891,12 +1938,12 @@ WARN routectl_router::learned_capability event=evict reason=beta_lane_cap
   "learned-capability lane at its beta-flag cap; evicted the lane's youngest beta entry"
 ```
 
-### `route_away` (INFO / WARN)
+### `route_away` (DEBUG / WARN)
 
 Emitted once per learned-tail demotion when an acting capability negative
 de-prioritizes a target. The LEVEL distinguishes the two outcomes:
 
-- **INFO** when a supported alternative still fronts the chain -- the
+- **DEBUG** when a supported alternative still fronts the chain -- the
   learned negative simply moved this target to the tail.
 - **WARN** when the chain survives ONLY via the de-prioritized learned
   tail (every other target was filtered out), so the request rides the
@@ -1912,7 +1959,7 @@ de-prioritizes a target. The LEVEL distinguishes the two outcomes:
 | `source` | string | Where the negative came from: `learned`, `prior` (catalog), or `override`. |
 
 ```
-INFO routectl_router::router::feature_filter event=route_away state_key=front
+DEBUG routectl_router::router::feature_filter event=route_away state_key=front
   capability_key=web_search source=learned
   "capability negative de-prioritized this target to the tail"
 
@@ -1961,7 +2008,7 @@ or add a `force_supported` override for the lane; otherwise route the
 alias to a lane that supports the capability. Recovery is automatic once a
 negative lapses and its re-probe succeeds.
 
-### `count_tokens` (INFO)
+### `count_tokens` (DEBUG)
 
 Emitted once when a `count_tokens` seat reaches its class/remap/debit
 settle point -- an upstream health error (rate-limit / server / timeout /
@@ -1987,7 +2034,7 @@ advances to the next capable seat) do NOT emit it. Safe dimensions only
 | `debit` | bool | `true` when the class-based rule debited or parked the seat's circuit breaker: a threshold-gated debit for a debiting class, or a park when a non-probe request carried an upstream reset hint longer than 5 seconds. A probe's 429 or 529 is excluded whatever its hint and logs `false`, as does a non-debiting class; the slot is then released without a health debit. |
 
 ```
-INFO routectl_router::router::count_tokens event=count_tokens state_key=haiku
+DEBUG routectl_router::router::count_tokens event=count_tokens state_key=haiku
   provider=prov status=500 upstream_type= upstream_code=
   effective_class=server_error matched_by=status remapped=false debit=true
   "count_tokens seat terminal; resilience class policy applied"
@@ -2369,8 +2416,10 @@ Repeat behavior is noted where the line is latched, sampled, or aggregated
 
 ## Visibility moved to DEBUG
 
-These lines were WARN (or per-poll INFO) and now log at DEBUG because they
-describe routectl working as designed. Each entry names what still shows the
+These lines were WARN, per-poll INFO or per-attempt INFO and now log at DEBUG
+because they describe routectl working as designed, or one step of a request
+whose result the [`request finished`](#request-finished-info) line already
+reports. Each entry names what still shows the
 condition at the default level, or the filter that brings the line back. The
 translation counters ride the DEBUG metrics snapshot on target
 `routectl_router::router::metrics` (`rc_translation_drop_counts` /
@@ -2381,7 +2430,7 @@ translation counters ride the DEBUG metrics snapshot on target
 |---|---|
 | Sampling-parameter strips: `stripped sampling params the OAuth seat rejects ...` and `sampling fields dropped: not translated onto this egress's wire` | `routectl_providers=debug` only. No counter carries them yet. |
 | Unsigned-thinking strip (`stripping unsigned thinking blocks ...`) and the whole-turn drop that follows it (`dropping assistant turn(s) from outgoing request`) | `routectl_providers::anthropic_api=debug` only. No counter carries them yet. |
-| Other Anthropic-egress expected transforms: adaptive-thinking budget discard, legacy thinking drop on probe-sized requests, legacy budget clamp, text-after-`tool_use` strip, `tool_choice="none"` mapping, flat-text block omission, forward-compat opaque block open, reasoning-envelope unwrap, `output_config.format` key omission, Claude Code billing/attribution strip, omission of a forwarded mid-conversation system turn that is empty or blank-text-only, context-management cache-miss thinking strip | `routectl_providers::anthropic_api=debug`. The opaque block open is still summarized by the INFO `opaque block closed` line; the billing strip is counted as the `client_fingerprint_stripped` policy action. Billing strips and empty-turn omissions share one per-request line, `forwarded Role::System turns screened`, with `system_blocks_stripped` / `system_turns_dropped` for the billing screen and `system_turns_dropped_empty` for empty turns; `system_turn_breakpoints_moved` / `system_turn_breakpoints_dropped` count a dropped turn's `cache_control` breakpoint re-anchored on the preceding message's last block, or lost because no preceding block can bear one; `system_turn_merges_skipped` counts same-role neighbors of a dropped turn left as two adjacent messages because merging them would need a block reorder (a `tool_result` after non-`tool_result` content, or thinking after assistant content). No content is logged and these counts have no counter. |
+| Other Anthropic-egress expected transforms: adaptive-thinking budget discard, legacy thinking drop on probe-sized requests, legacy budget clamp, text-after-`tool_use` strip, `tool_choice="none"` mapping, flat-text block omission, forward-compat opaque block open, reasoning-envelope unwrap, `output_config.format` key omission, Claude Code billing/attribution strip, omission of a forwarded mid-conversation system turn that is empty or blank-text-only, context-management cache-miss thinking strip | `routectl_providers::anthropic_api=debug`. The opaque block open is still summarized by the DEBUG `opaque block closed` line; the billing strip is counted as the `client_fingerprint_stripped` policy action. Billing strips and empty-turn omissions share one per-request line, `forwarded Role::System turns screened`, with `system_blocks_stripped` / `system_turns_dropped` for the billing screen and `system_turns_dropped_empty` for empty turns; `system_turn_breakpoints_moved` / `system_turn_breakpoints_dropped` count a dropped turn's `cache_control` breakpoint re-anchored on the preceding message's last block, or lost because no preceding block can bear one; `system_turn_merges_skipped` counts same-role neighbors of a dropped turn left as two adjacent messages because merging them would need a block reorder (a `tool_result` after non-`tool_result` content, or thinking after assistant content). No content is logged and these counts have no counter. |
 | Bedrock expected transforms: billing/attribution withhold, reserved dummy `toolSpec` injection, Converse reasoning skips, foreign-dialect client extras withhold, Converse `output_config` omission for a non-Claude model | `routectl_providers::bedrock=debug`. Counters: `client_fingerprint_stripped` (Converse), the drop classes `reasoning_signature_missing`, `reasoning_summary_unsupported`, `reasoning_foreign_format_unsupported` and `output_config_unrepresentable` (Converse), and `anthropic_beta_rejected_by_bedrock`, `foreign_dialect_extra` and `response_format_keys_unrepresentable` (Converse and Invoke, each on its own lane). A refused operator `additional_model_request_fields` key is the `operator_extra_managed_key_conflict` policy action on both lanes, besides its WARN. The Invoke billing/attribution withhold has no counter yet. The named-beta repair is the router's (`routectl_router::router=debug`). |
 | Anthropic-egress dialect and format losses: foreign-dialect client extras withhold, a converted `response_format`'s `name` / `strict` | `routectl_providers::anthropic_api=debug`, naming keys only. The `foreign_dialect_extra` and `response_format_keys_unrepresentable` drop classes on the `anthropic` lane, each counted once per request. |
 | `cache_control` drops on lanes with no breakpoint surface (openai-responses, gemini, openai-compat) | The `cache_control_unsupported` drop class, counted once per request on each lane. openai-compat also accepts `strict_translation` to reject instead. |
@@ -2396,4 +2445,11 @@ translation counters ride the DEBUG metrics snapshot on target
 | Per-row capability warm-rebuild skips (`rebuild_skip`) | The `skipped_*` tallies on the INFO `warmed learned-capability registry from usage ledger` line; `routectl_router::capability_rebuild=debug` for the per-row reasons. |
 | K-estimator and calibration warm row-cap notes | `loaded_rows` / `rows_loaded` equal to `row_cap` on their INFO warm lines. |
 | Read-only polling access lines (`/health`, `/status`, the declared `/status/*` routes) | `routectl_cli::server::request_id=debug`. Unchanged snapshots from those polls are folded by the field-verdict gate (on change plus an hourly heartbeat). |
+| Per-request cache breadcrumb (`cache=READ/PROMPT (PCT%)`) | `cache_read` and `input_tokens` on the INFO `request finished` line; `routectl_cli::handlers::usage_capture=debug` for the line. The auto-cache thrash WARN is unchanged. |
+| Capability tail demotion with a supported alternative left (`route_away`, `capability negative de-prioritized this target to the tail`) | `routectl_router::router::feature_filter=debug`. The tail-only arm (the request survives only on the demoted target) stays WARN. |
+| Upstream-reported unsupported capability (`upstream reported an unsupported capability`, target `routectl::feature_unsupported`) | `rc_feature_unsupported_total` on the metrics snapshot; `routectl::feature_unsupported=debug` for the line. A capability that is learned from it logs the `learn` WARN; the request's result is on `request finished`. |
+| Token-count seat terminal (`count_tokens seat terminal; resilience class policy applied`) | `outcome` / `http_status` on the `count_tokens` operation's `request finished` line; `routectl_router::router::count_tokens=debug` for the class, remap and debit. |
+| anthropic-api cloak decision (`anthropic-api cloak applied to outgoing body`) | `routectl_providers::anthropic_api=debug`. Client content the cloak refuses or loses still logs its WARN. |
+| Gemini content-filter finish on a 200 response (`gemini: prompt blocked on 200 surface`, `gemini: candidate blocked on 200 surface`) | The client receives `finish_reason` `content_filter`; `routectl_providers::gemini=debug` for the block reason. |
+| Opaque SSE block stop summary (`anthropic SSE: opaque block closed`) | `routectl_providers::anthropic_api::sse_opaque=debug`. Cap and index-mismatch WARNs are unchanged. |
 | Boot and shutdown housekeeping: `watch target canonicalize failed (file may not exist yet) ...`, `config reload abandoned at shutdown ...`, the DST spring-forward note in `routectl usage` | `routectl_cli=debug`. The shutdown race is still reported once by `shutdown during a capability boundary write` when a boundary was in flight. |

@@ -144,7 +144,7 @@ async fn feature_unsupported_event_fires_on_complete_with_safe_fields() {
         .iter()
         .find(|e| e.target == "routectl::feature_unsupported")
         .expect("feature_unsupported event must fire");
-    assert_eq!(ev.level, tracing::Level::INFO);
+    assert_eq!(ev.level, tracing::Level::DEBUG);
     assert_eq!(ev.field("provider"), Some("p1"));
     assert_eq!(ev.field("provider_kind"), Some("openai-compat"));
     assert_eq!(ev.field("model"), Some("m1"));

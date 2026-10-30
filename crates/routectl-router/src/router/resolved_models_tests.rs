@@ -1307,12 +1307,12 @@ fn learned_negative_deprioritizes_target_to_tail() {
         "a supported survivor is not a tail-only entry",
     );
     // A healthy alternative remains, so the demotion emits route_away at
-    // INFO (not WARN) carrying the unified state_key / capability_key.
+    // DEBUG (not WARN) carrying the unified state_key / capability_key.
     let info = events
         .iter()
         .find(|e| e.field("event") == Some("route_away"))
         .expect("a tail demotion must emit a route_away event");
-    assert_eq!(info.level, tracing::Level::INFO);
+    assert_eq!(info.level, tracing::Level::DEBUG);
     assert_eq!(info.field("state_key"), Some("front"));
     assert_eq!(info.field("capability_key"), Some("web_search"));
     assert!(

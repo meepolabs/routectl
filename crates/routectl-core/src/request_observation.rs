@@ -8,19 +8,24 @@
 //! build its record. A request without a slot (a library caller) records
 //! nothing.
 //!
-//! Content-free by contract: no method accepts a request body, header or any
-//! other caller-supplied string. Counts are integers, translation lanes and
+//! Content-free by contract: no method accepts a request body, header,
+//! credential or session value. Counts are integers, translation lanes and
 //! drop classes are `&'static str` tokens named at the call site, and the
-//! served identity holds only routectl's own configuration names (alias,
-//! model nickname, upstream id, provider name, provider kind, seat).
+//! served identity holds routing names (alias, model nickname, upstream id,
+//! provider name, provider kind, seat). On a forwarded-credential or
+//! default-alias route the alias and upstream id are the client's requested
+//! model id, so a consumer rendering them into a log line sanitizes and
+//! bounds them like any other client-influenced string.
 //!
 //! [`snapshot`]: RequestObservation::snapshot
 
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, PoisonError};
 
-/// The target a request was last dispatched to, by the names routectl's own
-/// configuration gives it. Never holds request content.
+/// The target a request was last dispatched to, by its routing names. The
+/// alias and upstream id can be the client's requested model id on a
+/// forwarded-credential or default-alias route; never body, header,
+/// credential or session content.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ServedIdentity {
     /// Routing alias the request resolved to.
