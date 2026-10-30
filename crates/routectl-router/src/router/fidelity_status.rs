@@ -89,9 +89,12 @@ pub enum PreflightBlockedReason {
     /// one field repair admits (`anthropic-api`, `bedrock`, `openai-compat`,
     /// `openai-responses`), or it has no attributable base URL (a forwarded
     /// credential, a local hop, or no classifiable egress base URL, as on a Mantle
-    /// sub-lane whose region names no endpoint). A verdict on such a lane is REAL
-    /// (the registry holds it from a reactive repair or a ledger replay), but
-    /// pre-flight will never fire on it.
+    /// sub-lane whose region names no endpoint), or the verdict's row is one
+    /// this build's table carries but the lane's row view omits (a Mantle
+    /// sub-lane outside its allowlist, an effort level on a direct
+    /// `openai-compat` lane, a non-effort row on a direct `openai-responses`
+    /// lane). A verdict on such a lane is REAL (the registry holds it from a
+    /// reactive repair or a ledger replay), but pre-flight will never fire on it.
     UnsupportedLane,
     /// An operator `[capability.overrides]` cell forces this capability SUPPORTED
     /// for the target, so no learned verdict may act on it.
@@ -454,12 +457,12 @@ impl Router {
         acting: &std::collections::HashMap<(String, String), u64>,
     ) -> Option<PreflightBlockedReason> {
         // CONFIG-LEVEL gates, in the planner's own order. These outrank every
-        // per-key check because they refuse the LANE, not the verdict -- a
-        // verdict on a refused lane is real but can never fire.
+        // per-key check because they refuse the LANE, or the row on that lane,
+        // not the verdict's evidence. A verdict here is real but can never fire.
         if !self.config.capability.enabled {
             return Some(PreflightBlockedReason::CapabilityDisabled);
         }
-        if !self.lane_supports_preflight(key) {
+        if !self.lane_supports_preflight(key, class) {
             return Some(PreflightBlockedReason::UnsupportedLane);
         }
         // The operator MASK, after the lane gates: the mask is about a specific
@@ -526,7 +529,7 @@ impl Router {
     }
 
     /// Whether the lane this verdict's target sits on is one the pre-flight planner
-    /// acts on at all.
+    /// acts on at all, for this verdict's row.
     ///
     /// Reads only the shared attributability decision
     /// (`field_repair::attributable_field_lane`) that `plan_field_preflight`
@@ -539,7 +542,16 @@ impl Router {
     /// through the same accessor the chain derives
     /// `DispatchTarget::use_forwarded_credential` from, which keeps the two from
     /// disagreeing about the same provider.
-    fn lane_supports_preflight(&self, key: &FieldVerdictKey) -> bool {
+    ///
+    /// An attributable lane then also has to carry the row in its view
+    /// ([`Self::lane_view_carries`]). A key this build's table has no row for
+    /// (`class` is `None`) skips that check: there is no row to place in or out
+    /// of a view, and the class gate reports it as not eligible.
+    fn lane_supports_preflight(
+        &self,
+        key: &FieldVerdictKey,
+        class: Option<TransformClass>,
+    ) -> bool {
         let provider_name = key.lane().provider_entry();
         let use_forwarded_credential = self
             .config
@@ -551,7 +563,27 @@ impl Router {
             provider_name,
             use_forwarded_credential,
         )
-        .is_some()
+        .is_some_and(|lane| class.is_none() || self.lane_view_carries(key, &lane))
+    }
+
+    /// Whether the row view pre-flight reads for `lane` carries `key`'s row.
+    ///
+    /// The view comes from the same `for_lane` accessor, with the same entry
+    /// kind and egress, that the planner reads for an attributable target, so
+    /// a row the planner never considers on this lane is never reported as
+    /// waiting on evidence there.
+    fn lane_view_carries(
+        &self,
+        key: &FieldVerdictKey,
+        lane: &crate::router::field_repair::AttributableLane<'_>,
+    ) -> bool {
+        self.field_repair_table()
+            .for_lane(lane.provider_kind, Some(lane.egress))
+            .lane_rows()
+            .any(|row| {
+                crate::field_capability::field_capability_key(row.path).as_deref()
+                    == Some(key.capability_key())
+            })
     }
 
     /// Whether an operator `[capability.overrides]` cell forces this capability

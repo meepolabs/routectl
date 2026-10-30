@@ -431,6 +431,8 @@ list with more narrative.
 
 ### Changed
 
+- **The fidelity status row reports `unsupported_lane` for a verdict whose field the lane never rewrites before sending.** A learned field verdict on a lane whose row view omits that field (an effort level on a direct openai-compat lane, any field but an effort level on a direct openai-responses lane, any field outside a Bedrock Mantle sub-lane's own list) used to report an evidence token such as `not_eligible` or `below_quorum`, suggesting more confirmations would let pre-flight act on it. Pre-flight never acts on such a row, and `blocked_reason` now says so. Verdicts on anthropic-api and direct Bedrock lanes, and verdicts inside a lane's view, report as before. See [docs/LOGGING.md](docs/LOGGING.md).
+
 - **The usage ledger's `harness` column now names the client.** Each request is classified once from its `User-Agent` when it arrives: a Claude Code CLI value (`claude-cli/<version>`) records `claude_code`, a Codex CLI value (`codex_cli_rs/<version>`) records `codex_cli`, and a missing, non-UTF-8 or any other value records `other`. The user-agent itself is still never stored or logged.
 
 - **The usage database no longer writes the `would_trim_raw_marks` column.** New `requests` rows store NULL there; the column stays in the schema so older binaries keep writing to the file, and values already recorded remain readable. Reclaiming the space older rows use is a separate, optional step. Library callers lose `UsageRecord::would_trim_raw_marks` and `DispatchMeta::would_trim_raw_marks`.

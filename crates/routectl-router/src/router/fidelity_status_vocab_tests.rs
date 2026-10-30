@@ -292,6 +292,160 @@ fn a_loopback_anthropic_lane_reports_unsupported_lane() {
     );
 }
 
+/// The status token each planted row reports on a lane fixture whose
+/// `[providers.p0]` body is `provider_toml`, keyed by row path.
+///
+/// Every row is planted unacknowledged, so a row the lane's view carries reads
+/// the evidence token `not_eligible` and one it omits reads `unsupported_lane`:
+/// the two differ by view membership alone.
+fn lane_tokens_for(provider_toml: &str, paths: &[&str]) -> Vec<(String, &'static str)> {
+    let router = convergence_router_on(provider_toml);
+    for path in paths {
+        let key = crate::field_capability::field_capability_key(path).expect("well-formed path");
+        plant_verdict_on(&router, CONVERGENCE_LANE, key);
+    }
+    let rows = router.field_verdict_status();
+    assert_eq!(
+        rows.len(),
+        paths.len(),
+        "one row per planted path: {rows:?}"
+    );
+    paths
+        .iter()
+        .map(|path| {
+            let key = crate::field_capability::field_capability_key(path).expect("well-formed");
+            let row = rows
+                .iter()
+                .find(|row| row.capability_key == key)
+                .unwrap_or_else(|| panic!("a row for {path}: {rows:?}"));
+            ((*path).to_string(), row.blocked_reason_token())
+        })
+        .collect()
+}
+
+/// One lane fixture: its name, `[providers.p0]` body, and the literal token each
+/// planted row must report.
+type LaneViewCase = (
+    &'static str,
+    &'static str,
+    &'static [(&'static str, &'static str)],
+);
+
+/// Every lane kind field repair admits, each with a literal expectation.
+fn lane_view_cases() -> Vec<LaneViewCase> {
+    const IN: &str = "not_eligible";
+    const OUT: &str = "unsupported_lane";
+    #[cfg_attr(
+        not(any(feature = "bedrock", feature = "openai-responses")),
+        allow(unused_mut)
+    )]
+    let mut cases: Vec<LaneViewCase> = vec![
+        (
+            "anthropic-api (every row in view)",
+            "kind = \"anthropic-api\"\napi_key_ref = \"literal:k\"\n",
+            &[("temperature", IN), ("output_config.effort.xhigh", IN)],
+        ),
+        (
+            "openai-compat direct (no effort rows)",
+            "kind = \"openai-compat\"\nbase_url = \"https://example.test/v1\"\n\
+             api_key_ref = \"literal:k\"\n",
+            &[("temperature", IN), ("output_config.effort.xhigh", OUT)],
+        ),
+    ];
+    #[cfg(feature = "bedrock")]
+    cases.extend::<[LaneViewCase; 3]>([
+        (
+            "bedrock (every row in view)",
+            "kind = \"bedrock\"\nregion = \"us-west-2\"\ncreds = { kind = \"default-chain\" }\n",
+            &[("temperature", IN), ("output_config.effort.xhigh", IN)],
+        ),
+        (
+            "anthropic-api Mantle sub-lane",
+            "kind = \"anthropic-api\"\napi_key_ref = \"\"\n\
+             bedrock_mantle = { region = \"us-west-2\", creds = { kind = \"default-chain\" } }\n",
+            &[("max_tokens", IN), ("temperature", OUT)],
+        ),
+        (
+            "openai-compat Mantle sub-lane",
+            "kind = \"openai-compat\"\napi_key_ref = \"\"\n\
+             bedrock_mantle = { region = \"us-west-2\", creds = { kind = \"default-chain\" } }\n",
+            &[("top_p", IN), ("temperature", OUT)],
+        ),
+    ]);
+    #[cfg(feature = "openai-responses")]
+    cases.push((
+        "openai-responses direct (effort rows only)",
+        "kind = \"openai-responses\"\napi_key_ref = \"literal:k\"\nauth_kind = \"api-key\"\n",
+        &[("output_config.effort.xhigh", IN), ("temperature", OUT)],
+    ));
+    #[cfg(all(feature = "openai-responses", feature = "bedrock"))]
+    cases.push((
+        "openai-responses Mantle sub-lane",
+        "kind = \"openai-responses\"\napi_key_ref = \"\"\n\
+         bedrock_mantle = { region = \"us-east-1\", creds = { kind = \"default-chain\" } }\n",
+        &[("output_config.effort.max", IN), ("temperature", OUT)],
+    ));
+    cases
+}
+
+/// Per lane kind, a row the lane's view carries reports its evidence token and a
+/// row the view omits reports `unsupported_lane`, spelled as literals so a change
+/// to the view derivation cannot be echoed back by the expectation.
+///
+/// anthropic-api and direct bedrock read every row, so both of their rows are
+/// in view; the out-of-view half is reachable only on the narrower lanes.
+///
+/// Mutation check: drop the view clause from `lane_supports_preflight` (answer
+/// `attributable_field_lane(..).is_some()`) -> every OUT row reads `not_eligible`.
+#[test]
+fn each_lane_kind_reports_unsupported_lane_only_for_rows_outside_its_view() {
+    for (name, provider_toml, expected) in lane_view_cases() {
+        let paths: Vec<&str> = expected.iter().map(|(path, _)| *path).collect();
+        let tokens = lane_tokens_for(provider_toml, &paths);
+        let expected: Vec<(String, &str)> = expected
+            .iter()
+            .map(|(path, token)| ((*path).to_string(), *token))
+            .collect();
+        assert_eq!(tokens, expected, "{name}");
+    }
+}
+
+/// For every lane fixture and every row this build's table carries, the status
+/// surface reports `unsupported_lane` exactly when the row is absent from the
+/// view `FieldRepairTable::for_lane(..).lane_rows()` gives the lane's entry kind
+/// and egress -- the accessor pre-flight reads -- so the two cannot drift.
+#[test]
+fn the_status_lane_gate_reads_the_view_pre_flight_reads() {
+    for (name, provider_toml, _) in lane_view_cases() {
+        let router = convergence_router_on(provider_toml);
+        let entry = router.config.providers.get("p0").expect("fixture entry");
+        let view: Vec<&str> = router
+            .field_repair_table()
+            .for_lane(entry.kind_str(), Some(entry.egress_kind()))
+            .lane_rows()
+            .map(|row| row.path)
+            .collect();
+        let all: Vec<&str> = router
+            .field_repair_table()
+            .rows()
+            .iter()
+            .map(|row| row.path)
+            .collect();
+        assert!(
+            all.len() > view.len() || name.contains("every row"),
+            "{name}: premise: a narrow lane omits some row",
+        );
+        for (path, token) in lane_tokens_for(provider_toml, &all) {
+            let expected = if view.contains(&path.as_str()) {
+                "not_eligible"
+            } else {
+                "unsupported_lane"
+            };
+            assert_eq!(token, expected, "{name}: {path}");
+        }
+    }
+}
+
 /// A pooled seat (`nick#member`) resolves the MEMBER provider entry for kind, base
 /// URL, and override mask, and the BASE (model nick) for nickname and opt-in.
 ///

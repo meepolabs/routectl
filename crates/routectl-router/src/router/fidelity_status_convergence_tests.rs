@@ -489,6 +489,10 @@ fn convergence_matrix() -> Vec<ConvergenceCase> {
     // rows in this build's table, so a foreign-key verdict is covered by its own
     // status case. Its convergence obligation is vacuous by construction -- there is
     // no planner decision to compare -- and stating that here is why no row exists.
+    // A row OUTSIDE the lane's view is unreachable for the same reason: the planner
+    // reads only the view's rows, so it records nothing for one, and the status side
+    // is pinned per lane kind by
+    // `each_lane_kind_reports_unsupported_lane_only_for_rows_outside_its_view`.
 
     // BELOW QUORUM: the prefix-impacting class at one confirmation, where it needs
     // two. The class whose quorum is higher than the envelope's is the only one on
