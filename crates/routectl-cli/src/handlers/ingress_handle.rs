@@ -512,7 +512,7 @@ fn ok_json_response(body: impl Into<Body>) -> Response {
 )]
 async fn complete_response<A: IngressAdapter>(
     router: Arc<routectl_router::Router>,
-    req: routectl_core::ChatRequest,
+    mut req: routectl_core::ChatRequest,
     opts: RouterOptions,
     adapter: A,
     envelope: ErrorEnvelopeShape,
@@ -520,7 +520,7 @@ async fn complete_response<A: IngressAdapter>(
     confirmations: Arc<ConfirmationTracker>,
     draft: UsageRecord,
 ) -> Response {
-    let mut capture = UsageCapture::new(draft, usage, adapter.id().to_string());
+    let mut capture = UsageCapture::for_request(draft, usage, adapter.id().to_string(), &mut req);
     // Extract the canonical live session key BEFORE dispatch moves `req`
     // into the router. POST-response K-sample recording (below) keys on
     // this same value the usage ledger's `session_id` column was seeded
@@ -620,7 +620,7 @@ async fn complete_response<A: IngressAdapter>(
 )]
 async fn stream_response<A: IngressAdapter + 'static>(
     router: Arc<routectl_router::Router>,
-    req: routectl_core::ChatRequest,
+    mut req: routectl_core::ChatRequest,
     opts: RouterOptions,
     adapter: A,
     usage: UsageHandle,
@@ -629,7 +629,7 @@ async fn stream_response<A: IngressAdapter + 'static>(
     meter: Option<OpeningMeter>,
     evidence: StreamEvidenceSlot,
 ) -> Response {
-    let capture = UsageCapture::new(draft, usage, adapter.id().to_string());
+    let capture = UsageCapture::for_request(draft, usage, adapter.id().to_string(), &mut req);
     // Extract the canonical live session key BEFORE dispatch moves `req`
     // into the router; it rides into the render task for POST-response
     // K-sample recording at natural end-of-stream.
@@ -1878,3 +1878,7 @@ mod upstream_parse_cap_tests;
 #[cfg(test)]
 #[path = "stream_evidence_settle_tests.rs"]
 mod stream_evidence_settle_tests;
+
+#[cfg(test)]
+#[path = "ingress_observation_tests.rs"]
+mod ingress_observation_tests;

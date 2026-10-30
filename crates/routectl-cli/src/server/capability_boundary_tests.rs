@@ -1389,6 +1389,7 @@ async fn a_clear_settled_across_a_boundary_stays_cleared_across_two_restarts() {
         crate::handlers::usage_capture::build_usage_draft("anthropic", &request, "req-b".into()),
         usage.clone(),
         "ingress-boundary".to_string(),
+        routectl_core::RequestObservation::new(),
     );
     capture.drain_capability_events(&meta, u32::try_from(catalog).unwrap_or(0), 2);
 

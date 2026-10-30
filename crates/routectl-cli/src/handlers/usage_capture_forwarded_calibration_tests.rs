@@ -142,7 +142,12 @@ async fn serve(
     let db_path = crate::test_usage_dir::usage_dir().join("usage.db");
     let (handle, writer) = UsageWriter::start(db_path, CHANNEL_CAPACITY, 0, true);
     let draft = build_usage_draft("anthropic", &req, format!("req-{model}-{session_key}"));
-    let mut cap = UsageCapture::new(draft, handle, "ingress-1".to_string());
+    let mut cap = UsageCapture::new(
+        draft,
+        handle,
+        "ingress-1".to_string(),
+        routectl_core::RequestObservation::new(),
+    );
     cap.observe_meta(&dispatched.meta, 0, 0);
     cap.observe_response(&resp);
     cap.record_calibration_sample(router, Some(session_key));

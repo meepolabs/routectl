@@ -384,6 +384,7 @@ async fn walk(row: &Row) -> Outcome {
         build_usage_draft("openai", &row.request, row.name.to_string()),
         usage,
         "openai".to_string(),
+        routectl_core::RequestObservation::new(),
     );
     let turn = StreamTurn {
         session_key: None,
@@ -797,6 +798,7 @@ async fn stream_through_walk(router: Router, req: ChatRequest) -> Arc<Router> {
         build_usage_draft("openai", &req, "parity".to_string()),
         routectl_usage::handle_over_channel(usage_tx),
         "openai".to_string(),
+        routectl_core::RequestObservation::new(),
     );
     let turn = StreamTurn {
         session_key: None,

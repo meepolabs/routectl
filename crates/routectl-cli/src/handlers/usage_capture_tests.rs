@@ -56,7 +56,12 @@ fn capture() -> (UsageCapture, UsageWriter, std::path::PathBuf) {
     let draft = build_usage_draft("anthropic", &req, "req-1".to_string());
     let (handle, writer, dir) = dummy_handle();
     (
-        UsageCapture::new(draft, handle, "ingress-1".to_string()),
+        UsageCapture::new(
+            draft,
+            handle,
+            "ingress-1".to_string(),
+            routectl_core::RequestObservation::new(),
+        ),
         writer,
         dir,
     )
@@ -255,7 +260,12 @@ fn capture_over_a_readable_db() -> (
         ..Default::default()
     };
     let draft = build_usage_draft("anthropic", &req, "calib-row".to_string());
-    let cap = UsageCapture::new(draft, handle.clone(), "ingress-1".to_string());
+    let cap = UsageCapture::new(
+        draft,
+        handle.clone(),
+        "ingress-1".to_string(),
+        routectl_core::RequestObservation::new(),
+    );
     (cap, handle, writer, dir, db_path)
 }
 
@@ -465,7 +475,12 @@ fn capture_with_handle() -> (UsageCapture, UsageHandle, UsageWriter, std::path::
     };
     let draft = build_usage_draft("anthropic", &req, "req-take".to_string());
     let (handle, writer, dir) = dummy_handle();
-    let cap = UsageCapture::new(draft, handle.clone(), "ingress-1".to_string());
+    let cap = UsageCapture::new(
+        draft,
+        handle.clone(),
+        "ingress-1".to_string(),
+        routectl_core::RequestObservation::new(),
+    );
     (cap, handle, writer, dir)
 }
 
@@ -557,7 +572,7 @@ fn cache_hit_pct_zero_prompt_guards_divide() {
 // `observe_meta`'s marker-stamping without needing a full forwarded
 // AnthropicApi chain wired through the factory.
 
-async fn any_dispatch_meta() -> routectl_router::DispatchMeta {
+pub(super) async fn any_dispatch_meta() -> routectl_router::DispatchMeta {
     use routectl_auth::{MemoryStore, SecretStore};
     use routectl_router::{AliasValue, Config, ModelEntry, ProviderEntry, RetryPolicy};
     use std::collections::BTreeMap;
@@ -784,7 +799,12 @@ fn drain_and_open(
         true,
     );
     let draft = build_usage_draft("anthropic", &minimal_request(), "req-cap".to_string());
-    let mut cap = UsageCapture::new(draft, handle.clone(), "ingress-1".to_string());
+    let mut cap = UsageCapture::new(
+        draft,
+        handle.clone(),
+        "ingress-1".to_string(),
+        routectl_core::RequestObservation::new(),
+    );
     cap.observe_meta(meta, catalog, overlay);
     assert!(
         wait_capability_persisted(&handle, want),
@@ -2332,6 +2352,7 @@ async fn a_real_dispatch_persists_the_strategy_tokens_and_epoch_code_it_produced
         build_usage_draft("anthropic", &second, "calib-row".to_string()),
         handle.clone(),
         "ingress-1".to_string(),
+        routectl_core::RequestObservation::new(),
     );
     cap.observe_meta(&dispatched.meta, 0, 0);
     cap.observe_response(&resp);
@@ -2393,7 +2414,12 @@ fn drain_and_count(meta: &routectl_router::DispatchMeta) -> i64 {
         true,
     );
     let draft = build_usage_draft("anthropic", &minimal_request(), "req-gen".to_string());
-    let mut cap = UsageCapture::new(draft, handle.clone(), "ingress-1".to_string());
+    let mut cap = UsageCapture::new(
+        draft,
+        handle.clone(),
+        "ingress-1".to_string(),
+        routectl_core::RequestObservation::new(),
+    );
     cap.observe_meta(meta, 7, 1);
     drop(cap);
     drop(handle);

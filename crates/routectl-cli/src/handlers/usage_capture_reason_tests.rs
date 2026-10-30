@@ -16,7 +16,12 @@ fn capture() -> (UsageCapture, UsageWriter) {
     };
     let draft = build_usage_draft("openai", &req, "req-reason".to_string());
     (
-        UsageCapture::new(draft, handle, "ingress-1".to_string()),
+        UsageCapture::new(
+            draft,
+            handle,
+            "ingress-1".to_string(),
+            routectl_core::RequestObservation::new(),
+        ),
         writer,
     )
 }
@@ -98,7 +103,12 @@ fn a_capability_refusal_persists_gate_blocked_with_its_class_and_lanes() {
         ..Default::default()
     };
     let draft = build_usage_draft("anthropic", &req, "cap-refusal-row".to_string());
-    let mut cap = UsageCapture::new(draft, handle.clone(), "ingress-1".to_string());
+    let mut cap = UsageCapture::new(
+        draft,
+        handle.clone(),
+        "ingress-1".to_string(),
+        routectl_core::RequestObservation::new(),
+    );
     let err = Error::capability_unsupported_everywhere(
         "advisor",
         ["bedrock-a#us-east-1", "bedrock-b#eu\u{1b}[31m"],

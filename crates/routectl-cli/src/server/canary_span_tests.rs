@@ -404,6 +404,7 @@ fn drain_through_production(usage: &UsageHandle, meta: &routectl_router::Dispatc
         build_usage_draft("p0", &request, "canary-span".into()),
         usage.clone(),
         "ingress-span".to_string(),
+        routectl_core::RequestObservation::new(),
     );
     // Revision 0 on both stamps: this Router installs no catalog overlay, so the
     // boundary the writer compares against is the default. A mismatched stamp

@@ -15,9 +15,9 @@
 
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use routectl_core::Error;
 use routectl_core::capability::{EvidenceSource, FailurePhase, Verdict};
 use routectl_core::failure_class::classify;
+use routectl_core::{Error, ObservationSnapshot, RequestObservation, ServedIdentity};
 use routectl_router::router::{CapabilityClearedEvent, CapabilityObserveEvent};
 use routectl_router::{CURRENT_VOCAB_VERSION, DispatchMeta, ObservationDirection};
 use routectl_usage::{CapabilityEvent, Harness, Operation, Outcome, UsageHandle, UsageRecord};
@@ -380,14 +380,27 @@ pub(crate) struct UsageCapture {
     /// the cache-outcome / cache-summary log emitters. Log-only: the ledger
     /// no longer persists it.
     cache_strategy: Option<&'static str>,
+    /// The request's observation slot; the router bumps the clone riding
+    /// the request, and `finalize` reads it once into the row.
+    observation: RequestObservation,
+    /// Whether `observe_meta` stamped the served identity. When it never
+    /// ran, the slot's last target is the only identity there is.
+    meta_observed: bool,
 }
 
 impl UsageCapture {
-    pub(crate) fn new(record: UsageRecord, usage: UsageHandle, ingress_id: String) -> Self {
+    pub(crate) fn new(
+        record: UsageRecord,
+        usage: UsageHandle,
+        ingress_id: String,
+        observation: RequestObservation,
+    ) -> Self {
         Self {
             record,
             usage,
             ingress_id,
+            observation,
+            meta_observed: false,
             start: Instant::now(),
             first_byte: None,
             first_enqueue: None,
@@ -401,6 +414,20 @@ impl UsageCapture {
             served_forwarded_credential: false,
             cache_strategy: None,
         }
+    }
+
+    /// A capture for `req`: installs a fresh observation slot on the request
+    /// before it is dispatched and keeps the other clone, so whatever the
+    /// router counts against this request reaches its row.
+    pub(crate) fn for_request(
+        record: UsageRecord,
+        usage: UsageHandle,
+        ingress_id: String,
+        req: &mut routectl_core::ChatRequest,
+    ) -> Self {
+        let observation = RequestObservation::new();
+        req.routectl_internal.observation = Some(observation.clone());
+        Self::new(record, usage, ingress_id, observation)
     }
 
     /// Record the first-byte marker (first stream chunk, or the
@@ -438,6 +465,7 @@ impl UsageCapture {
         catalog_version: u32,
         overlay_revision: u64,
     ) {
+        self.meta_observed = true;
         self.record.alias = meta.resolved_alias.clone();
         self.record.attempt_count = meta.attempt_count;
         self.record.fallback_count = meta.fallback_count;
@@ -1190,6 +1218,7 @@ impl UsageCapture {
         }
         self.finalized = true;
         self.record.outcome = outcome;
+        self.stamp_observation(self.observation.snapshot());
         self.admit_evidence_pair(outcome);
         self.record.ts_end = epoch_ms_now();
         self.record.latency_ms = i64::try_from(self.start.elapsed().as_millis()).unwrap_or(0);
@@ -1204,6 +1233,35 @@ impl UsageCapture {
         // `finalized` is already set above, so the only later access --
         // Drop -- short-circuits and never touches the taken record.
         self.usage.try_send(std::mem::take(&mut self.record));
+    }
+
+    /// Copy the request's observation into the row: the five counts and the
+    /// probe flag always; the served identity only when `observe_meta` never
+    /// ran (a dispatch dropped mid-flight), so a row still names the last
+    /// target tried.
+    fn stamp_observation(&mut self, snapshot: ObservationSnapshot) {
+        self.record.wire_losses = snapshot.wire_losses;
+        self.record.translation_drops = snapshot.translation_drops;
+        self.record.local_refusals = snapshot.local_refusals;
+        self.record.field_repairs = snapshot.field_repairs;
+        self.record.missing_terminals = snapshot.missing_terminals;
+        self.record.probe = snapshot.probe;
+        if !self.meta_observed
+            && let Some(target) = snapshot.last_target
+        {
+            self.stamp_served_identity(target);
+        }
+    }
+
+    fn stamp_served_identity(&mut self, target: ServedIdentity) {
+        if let Some(alias) = target.alias {
+            self.record.alias = alias;
+        }
+        self.record.model = target.model;
+        self.record.upstream = target.upstream;
+        self.record.provider = target.provider;
+        self.record.provider_kind = target.provider_kind;
+        self.record.seat = target.seat;
     }
 
     /// Admit or refuse the calibration evidence PAIR as a unit.
@@ -1400,3 +1458,7 @@ mod reason_tests;
 #[cfg(test)]
 #[path = "usage_capture_forwarded_calibration_tests.rs"]
 mod forwarded_calibration_tests;
+
+#[cfg(test)]
+#[path = "usage_capture_observation_tests.rs"]
+mod observation_tests;

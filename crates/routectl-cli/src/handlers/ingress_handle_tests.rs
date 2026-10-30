@@ -93,7 +93,12 @@ impl CaptureRig {
     ) -> UsageCapture {
         let draft = build_usage_draft(dialect, req, request_id.to_string());
         let handle = self.handle.clone().expect("rig handle present");
-        UsageCapture::new(draft, handle, dialect.to_string())
+        UsageCapture::new(
+            draft,
+            handle,
+            dialect.to_string(),
+            routectl_core::RequestObservation::new(),
+        )
     }
 
     /// Drop the producer handle, drain the writer, and return every

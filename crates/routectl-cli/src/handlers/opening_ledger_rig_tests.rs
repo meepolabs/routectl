@@ -99,6 +99,7 @@ pub(super) fn metered_turn(
         build_usage_draft("anthropic", &req, id.to_string()),
         ledger.handle(),
         "anthropic".to_string(),
+        routectl_core::RequestObservation::new(),
     );
     (turn, capture)
 }
