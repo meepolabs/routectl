@@ -134,11 +134,11 @@ fn lead_member(router: &Router) -> String {
         .provider_name
 }
 
-fn feed_lane(router: &Router, kind: &str, nickname: &str, ts: SystemTime) {
+fn feed_lane(router: &Router, kind: &str, upstream: &str, ts: SystemTime) {
     for i in 0..9 {
         router.record_calibration_sample(
             Some(kind),
-            Some(nickname),
+            Some(upstream),
             Some(&format!("caller-{}", i % 3)),
             1_000,
             2_000,
@@ -364,9 +364,9 @@ fn the_opening_lane_lookup_mints_no_sticky_pin_and_counts_no_pool_dispatch() {
 #[test]
 fn a_calibrated_lane_corrects_the_raw_estimate() {
     let router = standalone_router();
-    feed_lane(&router, OPENAI_KIND, "glm", SystemTime::now());
+    feed_lane(&router, OPENAI_KIND, "glm-4.6", SystemTime::now());
 
-    let corrected = router.calibrated_estimate(OPENAI_KIND, "glm", 10_000);
+    let corrected = router.calibrated_estimate(OPENAI_KIND, "glm-4.6", 10_000);
 
     assert_eq!(corrected, Some(20_000));
 }
@@ -374,14 +374,14 @@ fn a_calibrated_lane_corrects_the_raw_estimate() {
 #[test]
 fn a_factor_applies_only_to_its_own_lane() {
     let router = standalone_router();
-    feed_lane(&router, OPENAI_KIND, "glm", SystemTime::now());
+    feed_lane(&router, OPENAI_KIND, "glm-4.6", SystemTime::now());
 
     assert_eq!(
-        router.calibrated_estimate(OPENAI_KIND, "opus", 10_000),
+        router.calibrated_estimate(OPENAI_KIND, "claude-opus-4-7", 10_000),
         None
     );
     assert_eq!(
-        router.calibrated_estimate(ANTHROPIC_KIND, "glm", 10_000),
+        router.calibrated_estimate(ANTHROPIC_KIND, "glm-4.6", 10_000),
         None
     );
 }
@@ -390,23 +390,32 @@ fn a_factor_applies_only_to_its_own_lane() {
 fn a_cold_lane_has_no_calibrated_estimate() {
     let router = standalone_router();
 
-    assert_eq!(router.calibrated_estimate(OPENAI_KIND, "glm", 10_000), None);
+    assert_eq!(
+        router.calibrated_estimate(OPENAI_KIND, "glm-4.6", 10_000),
+        None
+    );
 }
 
 #[test]
 fn a_stale_lane_has_no_calibrated_estimate() {
     let router = standalone_router();
-    feed_lane(&router, OPENAI_KIND, "glm", SystemTime::UNIX_EPOCH);
+    feed_lane(&router, OPENAI_KIND, "glm-4.6", SystemTime::UNIX_EPOCH);
 
-    assert_eq!(router.calibrated_estimate(OPENAI_KIND, "glm", 10_000), None);
+    assert_eq!(
+        router.calibrated_estimate(OPENAI_KIND, "glm-4.6", 10_000),
+        None
+    );
 }
 
 #[test]
 fn the_calibration_kill_switch_disables_the_estimate_and_keeps_the_evidence() {
     let router = install_standalone(standalone_config(false));
-    feed_lane(&router, OPENAI_KIND, "glm", SystemTime::now());
+    feed_lane(&router, OPENAI_KIND, "glm-4.6", SystemTime::now());
 
-    assert_eq!(router.calibrated_estimate(OPENAI_KIND, "glm", 10_000), None);
+    assert_eq!(
+        router.calibrated_estimate(OPENAI_KIND, "glm-4.6", 10_000),
+        None
+    );
     assert_eq!(retained_samples(&router), 9);
 }
 
@@ -414,18 +423,18 @@ fn the_calibration_kill_switch_disables_the_estimate_and_keeps_the_evidence() {
 fn a_calibrated_lookup_records_no_evidence() {
     // Arrange: one calibrated lane, and a lookup on an unseen one.
     let router = standalone_router();
-    feed_lane(&router, OPENAI_KIND, "glm", SystemTime::now());
+    feed_lane(&router, OPENAI_KIND, "glm-4.6", SystemTime::now());
     let before = retained_samples(&router);
 
     // Act
-    let _ = router.calibrated_estimate(OPENAI_KIND, "glm", 10_000);
-    let _ = router.calibrated_estimate(ANTHROPIC_KIND, "opus", 10_000);
+    let _ = router.calibrated_estimate(OPENAI_KIND, "glm-4.6", 10_000);
+    let _ = router.calibrated_estimate(ANTHROPIC_KIND, "claude-opus-4-7", 10_000);
 
     // Assert
     assert_eq!(retained_samples(&router), before);
     assert_eq!(
         router.calibration_lanes(),
-        vec![(OPENAI_KIND.to_string(), "glm".to_string())],
+        vec![(OPENAI_KIND.to_string(), "glm-4.6".to_string())],
         "a lookup on an unseen lane must not create it"
     );
 }

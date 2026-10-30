@@ -1139,11 +1139,11 @@ impl UsageCapture {
     /// the response usage are observed. It must never change the response or
     /// fail the request.
     ///
-    /// `self.record.model` is the served NICKNAME (`observe_meta` copies
-    /// `DispatchMeta::served_model`, which is the target's nickname and never
-    /// the upstream wire id) -- the same label the gate's lane lookup keys on.
-    /// A dispatch missing either half of that key forms no lane and is
-    /// skipped inside the router.
+    /// The lane is `(provider_kind, upstream)`: `self.record.upstream` is
+    /// `DispatchMeta::served_upstream`, the wire id the request was sent with
+    /// (the client's requested model on a forwarded-credential target), and
+    /// the same column the warm rebuild reads back. A dispatch missing either
+    /// half forms no lane and is skipped inside the router.
     ///
     /// Admission mirrors the persisted pair exactly: only a success, and only
     /// a nonzero prompt total. The canonical upstream field is not optional,
@@ -1163,7 +1163,7 @@ impl UsageCapture {
         };
         router.record_calibration_sample(
             self.record.provider_kind.as_deref(),
-            self.record.model.as_deref(),
+            self.record.upstream.as_deref(),
             session_key,
             estimated_tokens,
             prompt_tokens,

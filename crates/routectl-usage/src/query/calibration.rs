@@ -12,8 +12,9 @@ pub struct CalibrationSampleRow {
     pub ts_start_ms: i64,
     /// Stable provider-kind token of the served target.
     pub provider_kind: String,
-    /// Served model NICKNAME, never the upstream wire id.
-    pub model: String,
+    /// Upstream model id the request was sent with (the `upstream` column),
+    /// the lane's model dimension. Never the served nickname.
+    pub upstream: String,
     /// Inbound session identifier the request was recorded under, absent when
     /// the request carried no recognized identity. Kept NULLABLE on purpose:
     /// the live path records a keyless request too (under a shared cohort), so
@@ -26,14 +27,14 @@ pub struct CalibrationSampleRow {
 }
 
 const CALIBRATION_SAMPLES_SQL: &str = "\
-SELECT ts_start, provider_kind, model, session_id, calib_estimated_tokens, calib_prompt_tokens
+SELECT ts_start, provider_kind, upstream, session_id, calib_estimated_tokens, calib_prompt_tokens
 FROM (
-  SELECT rowid AS rid, ts_start, provider_kind, model, session_id,
+  SELECT rowid AS rid, ts_start, provider_kind, upstream, session_id,
          calib_estimated_tokens, calib_prompt_tokens
   FROM requests
   WHERE ts_start >= ?1
     AND provider_kind IS NOT NULL
-    AND model IS NOT NULL
+    AND upstream IS NOT NULL
     AND calib_estimated_tokens IS NOT NULL
     AND calib_prompt_tokens IS NOT NULL
     AND outcome = 'ok'
@@ -63,14 +64,14 @@ ORDER BY ts_start ASC, rid ASC";
 /// - both calibration columns NOT NULL. The pair is admitted or refused as a
 ///   unit, so a NULL in either half means the row was refused as evidence when
 ///   it was written.
-/// - `provider_kind` and `model` NOT NULL. A lane is
-///   `(provider_kind, served nickname)`; a NULL in either half has no usable
+/// - `provider_kind` and `upstream` NOT NULL. A lane is
+///   `(provider_kind, wire upstream)`; a NULL in either half has no usable
 ///   lane identity and forms no lane on the live path either.
 ///
-/// `model` is the SERVED NICKNAME, which is what the live write and the gate's
-/// lookup both key on. Keying this query on the upstream wire id instead would
-/// silently never match a lane the gate can look up, holding every lane
-/// uncorrected forever while reading as health.
+/// `upstream` is the wire id the request was sent with (the client's
+/// requested model on a forwarded-credential row), the same value the live
+/// write keys on. The served nickname (`model`) is neither read nor
+/// filtered: a renamed nickname's history still belongs to its lane.
 ///
 /// `session_id` is deliberately NOT filtered: the live path records a keyless
 /// request under a shared cohort rather than dropping it.
@@ -85,7 +86,7 @@ pub fn read_calibration_samples_since(
             Ok(CalibrationSampleRow {
                 ts_start_ms: row.get(0)?,
                 provider_kind: row.get(1)?,
-                model: row.get(2)?,
+                upstream: row.get(2)?,
                 session_id: row.get(3)?,
                 estimated_tokens: row.get(4)?,
                 prompt_tokens: row.get(5)?,

@@ -10,11 +10,10 @@
 //!
 //! Three properties are load-bearing:
 //!
-//! - **A lane is `(provider_kind, served nickname)`.** The nickname is the
-//!   operator-facing label, never the upstream wire id -- pricing keys on the
-//!   wire id, this does not. A target missing either half forms NO lane, so
-//!   no fallback label can make the live write and a later ledger-driven
-//!   rebuild disagree about which lane a sample belongs to.
+//! - **A lane is `(provider_kind, wire upstream)`.** The upstream is the
+//!   model id the target sends, so two nicknames, or two pool seats, sending
+//!   one upstream on one provider kind share their evidence, and renaming a
+//!   nickname keeps it. A write missing either half forms NO lane.
 //! - **The whole state machine is `Option<Factor>`.** Cold, thin, stale,
 //!   out-of-range and switched-off all collapse to `None`, which means the
 //!   gate skips the multiply and behaves exactly as it does without this

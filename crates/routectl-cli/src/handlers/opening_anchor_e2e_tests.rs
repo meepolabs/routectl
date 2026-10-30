@@ -279,7 +279,7 @@ async fn a_calibrated_cold_opening_and_an_uncorrected_anchor() {
     for i in 0..12_u64 {
         router.record_calibration_sample(
             Some("openai-compat"),
-            Some("glm"),
+            Some("glm-4.6"),
             Some(&format!("cohort-{}", i % 3)),
             1_000,
             1_500,
@@ -290,7 +290,7 @@ async fn a_calibrated_cold_opening_and_an_uncorrected_anchor() {
     let calibrated = router
         .calibrated_estimate(
             "openai-compat",
-            "glm",
+            "glm-4.6",
             routectl_router::estimate_total_tokens(&canonical(&first)),
         )
         .expect("positive control: the lane has a factor");

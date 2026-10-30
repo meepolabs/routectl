@@ -2298,8 +2298,8 @@ async fn a_clean_completion_records_live_calibration_evidence() {
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(
         router.calibration_lanes(),
-        vec![("openai-compat".to_string(), "m".to_string())],
-        "a delivered 200 records the lane the served target names",
+        vec![("openai-compat".to_string(), "gpt-4o".to_string())],
+        "a delivered 200 records the lane of the upstream the target sent",
     );
 }
 

@@ -3,7 +3,7 @@
 //! One bounded ring of recent ratio samples per lane, behind a single mutex.
 //! Deliberately NOT the bounded-LRU shape the cache-reuse tracker uses: that
 //! keyspace is inbound-session-keyed and therefore client-driven and
-//! unbounded, whereas a lane is `(provider_kind, operator-declared nickname)`.
+//! unbounded, whereas a lane is `(provider_kind, wire upstream)`.
 //!
 //! # The carry-over contract
 //!
@@ -12,18 +12,29 @@
 //! sample recorded through the outgoing Router in the window between the
 //! carry-over and the swap lands in the same map the incoming Router reads.
 //! The carry-over immediately prunes any lane [`CalibrationStore::retain_lanes`]
-//! refuses -- the Router-side predicate checks the lane's nickname against the
-//! new resolved-model table -- so the map does not grow past the models EVER
-//! declared in this process. That bound is operator-action-bounded, never
-//! traffic-bounded, and resets on restart.
+//! refuses -- the Router-side predicate admits a lane only when some resolved
+//! own-credential target of that provider kind serves that upstream -- so
+//! across reloads the map is bounded by the provider kinds times the
+//! upstream ids ever served in this process. That bound is
+//! operator-action-bounded and resets on restart.
+//!
+//! # Forwarded-credential lanes
+//!
+//! A forwarded-credential target sends the client's requested model verbatim,
+//! so its lane is `(provider_kind, requested model)` and the write records it
+//! like any other. The admission predicate never admits one, so such a lane
+//! is neither warmed from the ledger at boot nor kept by a reload's prune.
+//! Between two reloads, though, a forwarded client can create one lane per
+//! distinct model string it sends: that part of the map is traffic-bounded
+//! for the life of one Router, and swept by the next reload.
 //!
 //! One bounded leak survives the prune, by construction rather than
 //! oversight: `record` has no admission gate of its own, so a write racing
-//! the swap through the OLD `Arc` can re-create a lane for a nickname the
-//! prune just dropped. The leak is bounded on every axis that matters -- at
-//! most one lane per racing request per reload, unreachable by any read
+//! the swap through the OLD `Arc` can re-create a lane the prune just
+//! dropped. The leak is bounded on every axis that matters -- at most one
+//! lane per racing request per reload, unreachable by any own-credential read
 //! (the gate resolves its lane key from the CURRENT resolved-model table, so
-//! a dropped nickname's key can never form), and swept by the very next
+//! a dropped upstream's key cannot form there), and swept by the very next
 //! reload's prune. Mirroring quota's write-time admission set here would
 //! close it exactly, and was rejected: a self-healing one-lane leak does not
 //! warrant that machinery.
@@ -46,17 +57,19 @@ pub const SAMPLES_PER_LANE: usize = 64;
 
 /// Identity of one calibration lane.
 ///
-/// The model dimension is the SERVED NICKNAME -- the operator-facing label --
-/// and never the upstream wire id. Pricing legitimately keys on the wire id;
-/// this does not, and a query keyed on it would silently never match a
-/// written sample, holding every lane cold forever while looking healthy.
+/// The model dimension is the upstream wire id the target sends, never the
+/// operator's nickname: the estimator's error is a property of the model,
+/// so every nickname, pool seat and provider entry of one kind sending one
+/// upstream shares a lane, and renaming a nickname keeps its evidence. A
+/// forwarded-credential target sends the client's requested model, so that
+/// is its upstream here.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct LaneKey {
     /// Stable provider-kind token of the served target (`anthropic-api` |
     /// `openai-compat` | `bedrock` | `openai-responses`).
     pub provider_kind: String,
-    /// Served model NICKNAME, not the upstream wire id.
-    pub nickname: String,
+    /// Upstream model id sent on the wire, not the served nickname.
+    pub upstream: String,
 }
 
 /// One request's worth of evidence about a lane's estimator error.
@@ -210,10 +223,10 @@ impl CalibrationStore {
     }
 
     /// Drop every lane whose key `pred` refuses. The hot-reload carry-over's
-    /// prune step: called with the new Router's `knows_nickname` predicate
+    /// prune step: called with the new Router's `knows_lane` predicate
     /// immediately after the store's `Arc` is shared with the outgoing
     /// Router, so a lane the new resolved-model table no longer serves is
-    /// removed rather than left to answer from a stale nickname forever.
+    /// removed rather than kept forever.
     pub fn retain_lanes(&self, mut pred: impl FnMut(&LaneKey) -> bool) {
         self.lanes.lock().retain(|key, _| pred(key));
     }

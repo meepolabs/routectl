@@ -1,6 +1,6 @@
 //! Tests for the calibration startup warm: the migrating-open ordering, the
-//! served-nickname key (with the wire-id negative control), agreement with
-//! live admission, the row-cap warning, and the failed-read posture.
+//! wire-upstream key (whatever nickname recorded a row), agreement with live
+//! admission, the row-cap warning, and the failed-read posture.
 
 use crate::server::test_support::drain_usage_writer_strict;
 use std::collections::BTreeMap;
@@ -16,8 +16,8 @@ use super::*;
 use crate::server::build_router_from_config;
 
 /// The nickname the tests' resolved-model table declares, and the DIFFERENT
-/// upstream wire id it maps to. Two distinct strings is the whole point: a
-/// query keyed on the wire id must find nothing the gate can look up.
+/// upstream wire id it maps to. Two distinct strings is the whole point: the
+/// lane is the wire id, so a row's nickname must not decide its admission.
 const NICKNAME: &str = "opus-lane";
 const WIRE_ID: &str = "claude-opus-4-5-20251101";
 const PROVIDER_KIND: &str = "openai-compat";
@@ -75,7 +75,8 @@ fn now_ms() -> i64 {
 }
 
 /// Insert one evidence row directly, so the reader's mapping and the query's
-/// admission filters can be exercised against a real read-only open.
+/// admission filters can be exercised against a real read-only open. The row
+/// is recorded under the served nickname `NICKNAME` and sent as `upstream`.
 #[allow(clippy::too_many_arguments)]
 fn insert_evidence_row(
     db: &routectl_usage::UsageDb,
@@ -83,7 +84,7 @@ fn insert_evidence_row(
     ts_start: i64,
     session_id: Option<&str>,
     provider_kind: &str,
-    model: &str,
+    upstream: &str,
     estimated: Option<i64>,
     prompt: Option<i64>,
     outcome: &str,
@@ -91,15 +92,16 @@ fn insert_evidence_row(
     db.conn()
         .execute(
             "INSERT INTO requests (ts_start, ts_end, request_id, ingress_dialect, \
-             requested_model, alias, model, provider_kind, session_id, stream, outcome, \
-             latency_ms, tool_count, msg_count, attempt_count, fallback_count, \
+             requested_model, alias, model, upstream, provider_kind, session_id, stream, \
+             outcome, latency_ms, tool_count, msg_count, attempt_count, fallback_count, \
              calib_estimated_tokens, calib_prompt_tokens) \
-             VALUES (?1, ?1, ?2, 'openai', ?3, 'fast', ?4, ?5, ?6, 0, ?7, 5, 0, 0, 1, 0, ?8, ?9)",
+             VALUES (?1, ?1, ?2, 'openai', 'fast', 'fast', ?3, ?4, ?5, ?6, 0, ?7, 5, 0, 0, 1, 0, \
+             ?8, ?9)",
             rusqlite::params![
                 ts_start,
                 request_id,
-                WIRE_ID,
-                model,
+                NICKNAME,
+                upstream,
                 provider_kind,
                 session_id,
                 outcome,
@@ -110,18 +112,18 @@ fn insert_evidence_row(
         .expect("insert evidence row");
 }
 
-/// Seed enough balanced evidence under `model` for one lane to clear the
-/// reduction's sample and cohort floors, all carrying the same ratio.
-fn seed_balanced_lane(db: &routectl_usage::UsageDb, model: &str, prompt: i64) {
+/// Seed enough balanced evidence sent as `upstream` for one lane to clear
+/// the reduction's sample and cohort floors, all carrying the same ratio.
+fn seed_balanced_lane(db: &routectl_usage::UsageDb, upstream: &str, prompt: i64) {
     let base = now_ms();
     for i in 0..9 {
         insert_evidence_row(
             db,
-            &format!("{model}-r{i}"),
+            &format!("{upstream}-r{i}"),
             base - i64::from(9 - i),
             Some(&format!("caller-{}", i % 3)),
             PROVIDER_KIND,
-            model,
+            upstream,
             Some(10_000),
             Some(prompt),
             "ok",
@@ -140,11 +142,11 @@ fn row_count(path: &Path) -> i64 {
 
 #[tokio::test]
 async fn a_restart_recovers_the_factor_the_previous_process_had_learned() {
-    // Arrange: a ledger holding one lane's worth of evidence, written under
-    // the SERVED NICKNAME as the live path writes it.
+    // Arrange: a ledger holding one lane's worth of evidence, sent as the
+    // wire id the live path records.
     let (_dir, path) = temp_db_path();
     let db = open(&path).expect("open");
-    seed_balanced_lane(&db, NICKNAME, 12_000);
+    seed_balanced_lane(&db, WIRE_ID, 12_000);
     drop(db);
     let tmp = TempDir::new().expect("tempdir");
     let router = router_with_one_lane(&tmp).await;
@@ -160,18 +162,22 @@ async fn a_restart_recovers_the_factor_the_previous_process_had_learned() {
     assert_eq!(summary.lanes_calibrated, 1);
 }
 
-/// The trap this repo has already fallen into once: the rebuild can only key on
-/// what the ledger STORES, and it must produce the same lane key the live
-/// write and the gate lookup use -- the served nickname. Keyed on the upstream
-/// wire id, nothing ever matches, no lane ever calibrates, and there is no
-/// error at all: just permanent silence that reads as health.
+/// The lane is the wire upstream, never the nickname that recorded a row: a
+/// row recorded under a nickname this config no longer declares still warms
+/// the lane its upstream serves, while a row whose upstream nothing serves is
+/// dropped and counted.
 #[tokio::test]
-async fn evidence_stored_under_the_wire_id_calibrates_zero_lanes() {
-    // Arrange: the SAME evidence, differing only in which label the `model`
-    // column carries -- the upstream wire id instead of the served nickname.
+async fn the_warm_admits_rows_by_served_upstream_whatever_nickname_recorded_them() {
+    // Arrange: the ledger's nickname column carries a retired name; the
+    // upstream column carries the served wire id on one lane and an unserved
+    // one on the other.
     let (_dir, path) = temp_db_path();
     let db = open(&path).expect("open");
     seed_balanced_lane(&db, WIRE_ID, 12_000);
+    seed_balanced_lane(&db, "claude-retired", 12_000);
+    db.conn()
+        .execute("UPDATE requests SET model = 'pt-retired'", [])
+        .expect("rename the recording nickname");
     drop(db);
     let tmp = TempDir::new().expect("tempdir");
     let router = router_with_one_lane(&tmp).await;
@@ -179,16 +185,14 @@ async fn evidence_stored_under_the_wire_id_calibrates_zero_lanes() {
     // Act
     let summary = warm_calibration_from_ledger(&path, &router);
 
-    // Assert: nine rows load and ZERO lanes calibrate. The wire id is not in
-    // the resolved-model table, so it is dropped rather than becoming a lane
-    // that can never serve -- and nothing errors, which is exactly why this
-    // trap reads as health.
-    assert_eq!(summary.rows_loaded, 9);
-    assert_eq!(summary.accepted, 0);
-    assert_eq!(summary.rejected_unknown_nickname, 9);
+    // Assert
+    assert_eq!(summary.rows_loaded, 18);
+    assert_eq!(summary.accepted, 9);
+    assert_eq!(summary.rejected_unknown_lane, 9);
+    assert_eq!(summary.lanes_calibrated, 1);
     assert_eq!(
-        summary.lanes_calibrated, 0,
-        "keying on the upstream wire id must calibrate no lane at all"
+        router.calibration_lanes(),
+        vec![(PROVIDER_KIND.to_string(), WIRE_ID.to_string())]
     );
 }
 
@@ -203,7 +207,7 @@ async fn rebuild_rejects_exactly_what_live_admission_rejects() {
     // NULL, and a success whose prompt half is NULL.
     let (_dir, path) = temp_db_path();
     let db = open(&path).expect("open");
-    seed_balanced_lane(&db, NICKNAME, 12_000);
+    seed_balanced_lane(&db, WIRE_ID, 12_000);
     let base = now_ms();
     insert_evidence_row(
         &db,
@@ -211,7 +215,7 @@ async fn rebuild_rejects_exactly_what_live_admission_rejects() {
         base,
         Some("caller-0"),
         PROVIDER_KIND,
-        NICKNAME,
+        WIRE_ID,
         Some(10_000),
         Some(90_000),
         "upstream_error",
@@ -222,7 +226,7 @@ async fn rebuild_rejects_exactly_what_live_admission_rejects() {
         base,
         Some("caller-1"),
         PROVIDER_KIND,
-        NICKNAME,
+        WIRE_ID,
         None,
         Some(90_000),
         "ok",
@@ -233,7 +237,7 @@ async fn rebuild_rejects_exactly_what_live_admission_rejects() {
         base,
         Some("caller-2"),
         PROVIDER_KIND,
-        NICKNAME,
+        WIRE_ID,
         Some(10_000),
         None,
         "ok",
@@ -314,7 +318,7 @@ async fn evidence_older_than_the_age_bound_does_not_come_back_calibrated() {
             stale + i64::from(i),
             Some(&format!("caller-{}", i % 3)),
             PROVIDER_KIND,
-            NICKNAME,
+            WIRE_ID,
             Some(10_000),
             Some(12_000),
             "ok",
@@ -345,7 +349,7 @@ fn rebuild_log_reports_the_tally_and_stays_quiet_under_the_cap() {
         .expect("info rebuild log emitted");
     assert_eq!(info.field("rows_loaded"), Some("4999"));
     assert_eq!(info.field("accepted"), Some("40"));
-    assert_eq!(info.field("rejected_unknown_nickname"), Some("2"));
+    assert_eq!(info.field("rejected_unknown_lane"), Some("2"));
     assert_eq!(info.field("rejected_pair"), Some("1"));
     assert_eq!(info.field("lanes_calibrated"), Some("3"));
     assert!(
@@ -402,7 +406,7 @@ async fn the_warm_migrates_before_reading_and_the_writer_still_attaches() {
     drop(handle);
     drain_usage_writer_strict(writer).await;
     let db = open(&path).expect("reopen after writer");
-    seed_balanced_lane(&db, NICKNAME, 12_000);
+    seed_balanced_lane(&db, WIRE_ID, 12_000);
     drop(db);
     let restarted = router_with_one_lane(&tmp).await;
     let summary = warm_calibration_from_ledger(&path, &restarted);

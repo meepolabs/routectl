@@ -13,14 +13,15 @@ fn open_db() -> (TempDir, crate::db::UsageDb) {
 }
 
 /// Insert one request row with full control over every column the query
-/// filters or returns.
+/// filters or returns. The served nickname is a fixed label: the query
+/// neither filters nor returns it.
 #[allow(clippy::too_many_arguments)]
 fn insert_row(
     db: &crate::db::UsageDb,
     request_id: &str,
     ts_start: i64,
     provider_kind: Option<&str>,
-    model: Option<&str>,
+    upstream: Option<&str>,
     session_id: Option<&str>,
     estimated: Option<i64>,
     prompt: Option<i64>,
@@ -29,15 +30,15 @@ fn insert_row(
     db.conn()
         .execute(
             "INSERT INTO requests (ts_start, ts_end, request_id, ingress_dialect, \
-             requested_model, alias, model, provider_kind, session_id, stream, outcome, \
-             latency_ms, tool_count, msg_count, attempt_count, fallback_count, \
+             requested_model, alias, model, upstream, provider_kind, session_id, stream, \
+             outcome, latency_ms, tool_count, msg_count, attempt_count, fallback_count, \
              calib_estimated_tokens, calib_prompt_tokens) \
-             VALUES (?1, ?1, ?2, 'openai', 'req-model', 'al', ?3, ?4, ?5, 0, ?6, 5, 0, 0, \
-             1, 0, ?7, ?8)",
+             VALUES (?1, ?1, ?2, 'openai', 'req-model', 'al', 'pt-opus-5-5', ?3, ?4, ?5, 0, ?6, \
+             5, 0, 0, 1, 0, ?7, ?8)",
             rusqlite::params![
                 ts_start,
                 request_id,
-                model,
+                upstream,
                 provider_kind,
                 session_id,
                 outcome,
@@ -55,7 +56,7 @@ fn insert_admissible(db: &crate::db::UsageDb, request_id: &str, ts_start: i64, p
         request_id,
         ts_start,
         Some("anthropic-api"),
-        Some("opus"),
+        Some("claude-opus-5-5"),
         Some("sess"),
         Some(10_000),
         Some(prompt),
@@ -78,7 +79,7 @@ fn an_admissible_row_returns_every_column_the_reducer_needs() {
         vec![CalibrationSampleRow {
             ts_start_ms: 500,
             provider_kind: "anthropic-api".to_string(),
-            model: "opus".to_string(),
+            upstream: "claude-opus-5-5".to_string(),
             session_id: Some("sess".to_string()),
             estimated_tokens: 10_000,
             prompt_tokens: 12_500,
@@ -101,7 +102,7 @@ fn rows_the_live_path_never_recorded_are_not_admitted() {
         "mid-stream-failure",
         510,
         Some("anthropic-api"),
-        Some("opus"),
+        Some("claude-opus-5-5"),
         Some("sess"),
         Some(10_000),
         Some(12_500),
@@ -112,7 +113,7 @@ fn rows_the_live_path_never_recorded_are_not_admitted() {
         "null-estimate-half",
         520,
         Some("anthropic-api"),
-        Some("opus"),
+        Some("claude-opus-5-5"),
         Some("sess"),
         None,
         Some(12_500),
@@ -123,7 +124,7 @@ fn rows_the_live_path_never_recorded_are_not_admitted() {
         "null-prompt-half",
         530,
         Some("anthropic-api"),
-        Some("opus"),
+        Some("claude-opus-5-5"),
         Some("sess"),
         Some(10_000),
         None,
@@ -134,18 +135,7 @@ fn rows_the_live_path_never_recorded_are_not_admitted() {
         "no-provider-kind",
         540,
         None,
-        Some("opus"),
-        Some("sess"),
-        Some(10_000),
-        Some(12_500),
-        "ok",
-    );
-    insert_row(
-        &db,
-        "no-served-model",
-        550,
-        Some("anthropic-api"),
-        None,
+        Some("claude-opus-5-5"),
         Some("sess"),
         Some(10_000),
         Some(12_500),
@@ -160,6 +150,30 @@ fn rows_the_live_path_never_recorded_are_not_admitted() {
     assert_eq!(rows[0].ts_start_ms, 500);
 }
 
+/// The upstream is the lane's model dimension, and a row without one forms
+/// no lane on the live path. The control row differs only in that column.
+#[test]
+fn a_row_without_an_upstream_is_not_admitted() {
+    let (_dir, db) = open_db();
+    insert_admissible(&db, "with-upstream", 500, 12_500);
+    insert_row(
+        &db,
+        "no-upstream",
+        510,
+        Some("anthropic-api"),
+        None,
+        Some("sess"),
+        Some(10_000),
+        Some(12_500),
+        "ok",
+    );
+
+    let rows = read_calibration_samples_since(db.conn(), 0, 100).expect("read");
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].upstream, "claude-opus-5-5");
+}
+
 /// A keyless request IS recorded by the live path (under a shared cohort), so
 /// filtering NULL session ids out here would admit FEWER rows than live
 /// traffic did -- divergence in the other direction.
@@ -171,7 +185,7 @@ fn a_keyless_row_is_admitted_because_the_live_path_records_one() {
         "keyless",
         500,
         Some("anthropic-api"),
-        Some("opus"),
+        Some("claude-opus-5-5"),
         None,
         Some(10_000),
         Some(12_500),

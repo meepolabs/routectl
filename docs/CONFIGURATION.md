@@ -2024,11 +2024,18 @@ from traffic it has already served: a request that completes
 successfully and whose upstream reported a nonzero prompt total
 contributes the estimate routectl used paired with that
 cache-inclusive total, and those pairs reduce to one multiplicative
-correction per lane. A lane is `(provider kind, served model nickname)`
--- the nickname you declared under `[models.X]`, never the upstream wire
-id. A failed or partial request contributes nothing: there is no
-trustworthy pairing between what was estimated and what the upstream
-actually charged for.
+correction per lane. A lane is `(provider kind, upstream model id)`:
+the `upstream` the request was sent with, not the nickname you declared
+under `[models.X]`. Two nicknames that send the same upstream on the same
+provider kind share one lane (a direct entry and a passthrough entry for
+one model learn together), every seat of a pool shares its model's lane,
+and renaming a nickname keeps the lane's evidence. The same upstream on
+two provider kinds is two lanes. A forwarded-credential target sends the
+client's requested model, so that is its lane; such lanes are learned
+while the daemon runs but are not restored at startup and are dropped on
+every config reload. A failed or partial request contributes nothing:
+there is no trustworthy pairing between what was estimated and what the
+upstream actually charged for.
 
 The correction has exactly ONE consumer: the proactive context-window
 gate's comparison. It never changes the bytes sent upstream, never
@@ -2103,8 +2110,12 @@ hot-reloadable sections
 chain resolution, so a live config swap -- an editor save the daemon's
 file watcher picks up, or a `routectl config set calibration.enabled
 false` -- applies to the next request with no restart and no
-confirmation prompt. The lane store is preserved across that swap
-(lanes whose nickname the new config no longer declares are dropped).
+confirmation prompt. The lane store is preserved across that swap. A
+lane is dropped when no own-credential model of its provider kind sends
+its upstream under the new config: pointing a nickname at a different
+upstream reads that upstream's own (possibly cold) lane, and the old
+upstream's lane goes once nothing serves it. The startup warm applies the
+same rule to ledger rows, whatever nickname recorded them.
 
 An unknown key inside the block fails config load rather than being
 silently ignored, so a typo is reported by `routectl config check`

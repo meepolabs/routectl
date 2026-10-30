@@ -1,5 +1,5 @@
 //! Tests for the ledger-driven lane rebuild: replay order, the shared
-//! admission rule, the unknown-nickname drop, current-clock freshness, and the
+//! admission rule, the unknown-lane drop, current-clock freshness, and the
 //! failed-read posture.
 
 use super::*;
@@ -51,7 +51,7 @@ impl CalibrationLedgerReader for FailedReader {
 }
 
 fn row(
-    nickname: &str,
+    upstream: &str,
     session: Option<&str>,
     estimated: u64,
     prompt: u64,
@@ -60,7 +60,7 @@ fn row(
     CalibrationLedgerRow::new(
         ts,
         "anthropic-api".to_string(),
-        nickname.to_string(),
+        upstream.to_string(),
         session.map(str::to_string),
         estimated,
         prompt,
@@ -69,11 +69,11 @@ fn row(
 
 /// Enough balanced evidence for one lane to clear the reduction's sample and
 /// cohort floors, all at `ts`, all carrying the same ratio.
-fn balanced_rows(nickname: &str, permille: u64, ts: SystemTime) -> Vec<CalibrationLedgerRow> {
+fn balanced_rows(upstream: &str, permille: u64, ts: SystemTime) -> Vec<CalibrationLedgerRow> {
     (0..9)
         .map(|i| {
             row(
-                nickname,
+                upstream,
                 Some(&format!("caller-{}", i % 3)),
                 10_000,
                 10 * permille,
@@ -83,14 +83,14 @@ fn balanced_rows(nickname: &str, permille: u64, ts: SystemTime) -> Vec<Calibrati
         .collect()
 }
 
-fn accept_all(_: &str) -> bool {
+fn accept_all(_: &str, _: &str) -> bool {
     true
 }
 
-fn lane(nickname: &str) -> LaneKey {
+fn lane(upstream: &str) -> LaneKey {
     LaneKey {
         provider_kind: "anthropic-api".to_string(),
-        nickname: nickname.to_string(),
+        upstream: upstream.to_string(),
     }
 }
 
@@ -156,20 +156,26 @@ fn rows_replay_oldest_first_so_the_ring_retains_what_arrival_order_would_have() 
 }
 
 #[test]
-fn a_row_whose_nickname_left_the_resolved_table_is_dropped() {
-    // A history of renamed models must not grow the lane map with lanes that
-    // can never serve a request.
+fn a_row_whose_lane_nothing_serves_is_dropped_and_counted() {
+    // A history of remapped models must not grow the lane map with lanes no
+    // request reads. The predicate sees both halves of the row's lane.
     let store = CalibrationStore::default();
     let mut rows = balanced_rows("opus", 1_200, now());
-    rows.extend(balanced_rows("retired-nickname", 1_300, now()));
+    rows.extend(balanced_rows("retired-upstream", 1_300, now()));
     let reader = FakeReader::new(rows);
 
-    let summary = rebuild_into(&reader, &store, &|nickname| nickname == "opus", now(), 100);
+    let summary = rebuild_into(
+        &reader,
+        &store,
+        &|kind, upstream| kind == "anthropic-api" && upstream == "opus",
+        now(),
+        100,
+    );
 
     assert_eq!(summary.accepted, 9);
-    assert_eq!(summary.rejected_unknown_nickname, 9);
-    assert_eq!(store.len(), 1, "only the still-resolvable lane exists");
-    assert_eq!(store.factor_for(&lane("retired-nickname"), now()), None);
+    assert_eq!(summary.rejected_unknown_lane, 9);
+    assert_eq!(store.len(), 1, "only the still-served lane exists");
+    assert_eq!(store.factor_for(&lane("retired-upstream"), now()), None);
 }
 
 #[test]

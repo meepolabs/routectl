@@ -404,7 +404,7 @@ impl OpeningMeter {
         });
         let calibration_raw = self.calibration_raw_tokens;
         select_opening(probe, basis, self.raw_tokens, |lane, _| {
-            router.calibrated_estimate(&lane.provider_kind, &lane.nickname, calibration_raw)
+            router.calibrated_estimate(&lane.provider_kind, &lane.upstream_model, calibration_raw)
         })
     }
 }

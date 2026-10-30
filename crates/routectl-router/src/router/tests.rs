@@ -618,7 +618,7 @@ fn carry_over_calibration_from_preserves_a_learned_factor() {
     let now = SystemTime::now();
 
     // Arrange: enough balanced evidence for one lane to produce a factor.
-    let config = Arc::new(Config::default());
+    let config = config_serving_lanes();
     let before = Router::new(config.clone());
     for i in 0..9 {
         before.record_calibration_sample(
@@ -632,7 +632,7 @@ fn carry_over_calibration_from_preserves_a_learned_factor() {
     }
     let key = crate::calibration::LaneKey {
         provider_kind: kind.to_string(),
-        nickname: nickname.to_string(),
+        upstream: nickname.to_string(),
     };
     let learned = before
         .calibration_store
@@ -661,14 +661,14 @@ fn carry_over_calibration_from_drops_lanes_the_new_config_no_longer_serves() {
     // sit in the shared map for one bounded window (see the store's own
     // doc), but it must never again be OBSERVABLE through the current
     // Router -- `factor_for` must read it as unseen, exactly as it would a
-    // lane that never existed. Only the lane whose nickname the new
-    // resolved table still holds may produce a factor.
+    // lane that never existed. Only the lane whose upstream the new
+    // resolved table still serves may produce a factor.
     use std::time::SystemTime;
 
     let kind = "openai-compat";
     let now = SystemTime::now();
 
-    let config = Arc::new(Config::default());
+    let config = config_serving_lanes();
     let before = Router::new(config.clone());
     for nickname in ["kept", "retired"] {
         for i in 0..9 {
@@ -686,11 +686,11 @@ fn carry_over_calibration_from_drops_lanes_the_new_config_no_longer_serves() {
 
     let kept_key = crate::calibration::LaneKey {
         provider_kind: kind.to_string(),
-        nickname: "kept".to_string(),
+        upstream: "kept".to_string(),
     };
     let retired_key = crate::calibration::LaneKey {
         provider_kind: kind.to_string(),
-        nickname: "retired".to_string(),
+        upstream: "retired".to_string(),
     };
 
     // Act: the replacement router serves only `kept`.
@@ -744,7 +744,7 @@ fn carry_over_calibration_from_makes_a_swap_window_sample_visible() {
     let nickname = "opus";
     let now = SystemTime::now();
 
-    let config = Arc::new(Config::default());
+    let config = config_serving_lanes();
     let before = Router::new(config.clone());
     let mut after = router_serving_nicknames(&config, &[nickname]);
 
@@ -768,7 +768,7 @@ fn carry_over_calibration_from_makes_a_swap_window_sample_visible() {
     // Assert: the shared store already reflects the late sample.
     let key = crate::calibration::LaneKey {
         provider_kind: kind.to_string(),
-        nickname: nickname.to_string(),
+        upstream: nickname.to_string(),
     };
     assert!(
         after.calibration_store.factor_for(&key, now).is_some(),
@@ -1062,9 +1062,22 @@ fn carry_over_quota_from_re_admits_exactly_the_new_seat_set() {
     assert_eq!(quota_fast_fraction(&after, &kept), Some(0.55));
 }
 
-/// A Router serving exactly `nicknames` out of its resolved table, so the
-/// calibration carry-over's nickname filter has something to admit against.
-/// The models resolve onto a stub provider; these tests never dispatch.
+/// A config declaring the own-credential openai-compat entry `p` every model
+/// `router_serving_nicknames` installs is bound to, so a calibration lane on
+/// it is one the Router serves.
+fn config_serving_lanes() -> Arc<Config> {
+    let mut config = Config::default();
+    config.providers.insert(
+        "p".to_string(),
+        crate::config::ProviderEntry::openai_compat("https://example.invalid/v1", "env://K"),
+    );
+    Arc::new(config)
+}
+
+/// A Router whose resolved table holds one model per nickname, each on
+/// provider `p` and sending its own nickname as its upstream, so the
+/// calibration carry-over's lane filter has something to admit against. The
+/// models resolve onto a stub provider; these tests never dispatch.
 fn router_serving_nicknames(config: &Arc<Config>, nicknames: &[&str]) -> Router {
     use routectl_core::{ChatChunk, ChatResponse, Provider};
 
@@ -1105,7 +1118,7 @@ fn router_serving_nicknames(config: &Arc<Config>, nicknames: &[&str]) -> Router 
                     *nickname,
                     "p",
                     provider.clone(),
-                    "upstream",
+                    *nickname,
                 )),
             )
         })

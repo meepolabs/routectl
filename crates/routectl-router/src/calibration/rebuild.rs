@@ -25,9 +25,12 @@
 //!   row timestamps alone: a lane whose newest evidence is already past the
 //!   age bound comes back uncorrected.
 //!
-//! A row whose nickname is absent from the current resolved-model table is
-//! dropped: a history of renamed models would otherwise grow the lane map
-//! with lanes that can never serve a request.
+//! A row whose `(provider_kind, upstream)` no resolved own-credential target
+//! serves is dropped: a history of remapped or removed models would otherwise
+//! grow the lane map with lanes no request reads. The nickname that recorded
+//! a row plays no part, so a renamed model keeps its history. A
+//! forwarded-credential lane is never served in that sense, so it does not
+//! warm.
 
 use std::time::SystemTime;
 
@@ -46,9 +49,9 @@ pub struct CalibrationLedgerRow {
     pub ts: SystemTime,
     /// Stable provider-kind token of the served target.
     pub provider_kind: String,
-    /// Served model NICKNAME, never the upstream wire id. Keying this on the
-    /// wire id would silently never match a lane the gate looks up.
-    pub nickname: String,
+    /// Upstream model id the request was sent with, the lane's model
+    /// dimension.
+    pub upstream: String,
     /// Inbound session identifier the request was recorded under, absent for
     /// a request that carried no recognized identity. Reduced to an opaque
     /// cohort tag and never stored.
@@ -67,7 +70,7 @@ impl CalibrationLedgerRow {
     pub const fn new(
         ts: SystemTime,
         provider_kind: String,
-        nickname: String,
+        upstream: String,
         session_key: Option<String>,
         estimated_tokens: u64,
         prompt_tokens: u64,
@@ -75,7 +78,7 @@ impl CalibrationLedgerRow {
         Self {
             ts,
             provider_kind,
-            nickname,
+            upstream,
             session_key,
             estimated_tokens,
             prompt_tokens,
@@ -111,9 +114,10 @@ pub struct CalibrationRebuildSummary {
     pub rows_loaded: usize,
     /// Rows stored as lane evidence.
     pub accepted: usize,
-    /// Rows dropped because the nickname no longer exists in the resolved
-    /// model table (a renamed or removed model).
-    pub rejected_unknown_nickname: usize,
+    /// Rows dropped because no resolved own-credential target of the row's
+    /// provider kind serves its upstream (a remapped or removed model, or a
+    /// forwarded-credential lane).
+    pub rejected_unknown_lane: usize,
     /// Rows dropped by the store's own pair validation -- the same refusal
     /// the live write applies.
     pub rejected_pair: usize,
@@ -130,14 +134,14 @@ impl CalibrationRebuildSummary {
     pub const fn new(
         rows_loaded: usize,
         accepted: usize,
-        rejected_unknown_nickname: usize,
+        rejected_unknown_lane: usize,
         rejected_pair: usize,
         lanes_calibrated: usize,
     ) -> Self {
         Self {
             rows_loaded,
             accepted,
-            rejected_unknown_nickname,
+            rejected_unknown_lane,
             rejected_pair,
             lanes_calibrated,
         }
@@ -148,13 +152,13 @@ impl CalibrationRebuildSummary {
 ///
 /// Reads the `[now - MAX_SAMPLE_AGE, now]` window (nothing older can survive
 /// the reduction's age bound, so nothing older is worth loading), capped at
-/// `limit` rows. `known_nickname` answers whether a nickname is still in the
-/// resolved model table. Best-effort throughout: a reader that yields no
+/// `limit` rows. `known_lane(provider_kind, upstream)` answers whether the
+/// current resolved model table still serves that lane. Best-effort throughout: a reader that yields no
 /// rows leaves every lane uncorrected, which is exactly today's behavior.
 pub fn rebuild_into(
     reader: &dyn CalibrationLedgerReader,
     store: &CalibrationStore,
-    known_nickname: &dyn Fn(&str) -> bool,
+    known_lane: &dyn Fn(&str, &str) -> bool,
     now: SystemTime,
     limit: usize,
 ) -> CalibrationRebuildSummary {
@@ -172,13 +176,13 @@ pub fn rebuild_into(
         ..CalibrationRebuildSummary::default()
     };
     for row in rows {
-        if !known_nickname(&row.nickname) {
-            summary.rejected_unknown_nickname += 1;
+        if !known_lane(&row.provider_kind, &row.upstream) {
+            summary.rejected_unknown_lane += 1;
             continue;
         }
         let key = LaneKey {
             provider_kind: row.provider_kind,
-            nickname: row.nickname,
+            upstream: row.upstream,
         };
         let stored = store.record(
             key,

@@ -111,6 +111,7 @@ pub use field_verdict_observability::{
 };
 pub use learned_lanes::{LearnedLaneProjection, ResolvedLearnedLane};
 pub use opening_lookup::OpeningLane;
+use opening_lookup::wire_upstream;
 pub use outcome_rule::class_debits;
 pub use overlays::{merge_header_extras, merge_payload_extras};
 pub use probe_clear_ack::ProbeClearAcknowledgement;
@@ -273,14 +274,14 @@ pub struct Router {
     /// lost nor double-counted.
     prefix_epoch_store: Arc<prefix_rewrite::PrefixRewriteStore>,
     /// Per-lane token-estimate correction evidence, keyed by
-    /// `(provider_kind, served nickname)`. Read at the context-window gate's
+    /// `(provider_kind, wire upstream)`. Read at the context-window gate's
     /// decision point to correct the estimate it compares, written
     /// post-response from the ingress capture path.
     ///
-    /// Not the LRU shape `k_session_store` uses: a lane is an
-    /// operator-declared nickname on one of the four provider kinds, so the
-    /// keyspace is bounded by the models ever declared in this process
-    /// rather than by client traffic.
+    /// Not the LRU shape `k_session_store` uses: an own-credential lane is a
+    /// configured upstream on one provider kind, so across reloads the
+    /// keyspace is bounded by the upstreams ever served in this process
+    /// rather than by client traffic (forwarded lanes: see the store's doc).
     ///
     /// MUST survive a hot-reload (see `carry_over_calibration_from`): a wipe
     /// sends every lane back to the uncorrected estimate, and because that IS
@@ -1889,11 +1890,14 @@ impl DispatchMeta {
         self.served_provider = Some(target.provider_name.clone());
         self.served_provider_kind = target.provider_kind.map(std::string::ToString::to_string);
         self.served_model = target.nickname.clone();
-        self.served_upstream = Some(if target.use_forwarded_credential {
-            requested_model.to_string()
-        } else {
-            target.upstream.clone()
-        });
+        self.served_upstream = Some(
+            wire_upstream(
+                target.use_forwarded_credential,
+                requested_model,
+                &target.upstream,
+            )
+            .to_string(),
+        );
         self.served_forwarded_credential = target.use_forwarded_credential;
         // A forwarded target authenticates with the client's own bearer, so
         // routectl owns no seat for that row. Gated here rather than relying
@@ -2689,20 +2693,21 @@ impl Router {
     /// and the swap lands in the same map the incoming Router reads, so it
     /// is neither lost nor written to a copy nobody reads. Immediately after
     /// the share, `CalibrationStore::retain_lanes`
-    /// drops every lane `Router::knows_nickname` refuses -- the same
-    /// predicate the boot rebuild filters rows by -- so the map does not
-    /// grow past the models ever declared in this process; leaving a run of
-    /// reloads with renamed models to carry every past name forward would
-    /// break that bound.
+    /// drops every lane `Router::knows_lane` refuses -- the same predicate
+    /// the boot rebuild filters rows by -- so the map does not grow past the
+    /// upstreams ever served in this process; leaving a run of reloads with
+    /// remapped models to carry every past upstream forward would break that
+    /// bound. A renamed nickname whose upstream is unchanged keeps its lane,
+    /// and a forwarded-credential lane is always dropped.
     ///
     /// Sharing accepts one bounded leak the old copy-and-filter did not: an
-    /// in-flight write through the OLD `Arc` can re-create a lane for a
-    /// nickname this prune just dropped. See the store's own doc for why the
+    /// in-flight write through the OLD `Arc` can re-create a lane this prune
+    /// just dropped. See the store's own doc for why the
     /// leak is bounded and self-healing rather than something to close here.
     pub fn carry_over_calibration_from(&mut self, previous: &Self) {
         self.calibration_store = Arc::clone(&previous.calibration_store);
         self.calibration_store
-            .retain_lanes(|key| self.knows_nickname(&key.nickname));
+            .retain_lanes(|key| self.knows_lane(&key.provider_kind, &key.upstream));
     }
 
     /// Carry the previous Router's latest per-seat subscription-quota readings
@@ -2736,13 +2741,31 @@ impl Router {
         self.admit_quota_seats();
     }
 
-    /// Whether `nickname` is still in this Router's resolved model table.
+    /// Whether some resolved own-credential target of `provider_kind` sends
+    /// `upstream`: a standalone model through its provider entry, a pooled
+    /// model through any seat's member entry.
     ///
     /// THE one calibration-lane admission predicate: both the boot rebuild and
     /// the hot-reload carry-over go through it, so a lane the one path refuses
-    /// cannot be the lane the other admits.
-    fn knows_nickname(&self, nickname: &str) -> bool {
-        self.resolved_models.contains_key(nickname)
+    /// cannot be the lane the other admits. A forwarded-credential entry never
+    /// serves a lane here: its wire id is whatever a client requested, so its
+    /// lanes record live but neither warm nor survive a reload. An entry
+    /// missing from `[providers]` forms no lane at dispatch either.
+    fn knows_lane(&self, provider_kind: &str, upstream: &str) -> bool {
+        self.resolved_models
+            .values()
+            .filter(|model| model.upstream == upstream)
+            .any(|model| {
+                let serves = |name: &str| {
+                    self.config.providers.get(name).is_some_and(|entry| {
+                        entry.forwarded_base_url().is_none() && entry.kind_str() == provider_kind
+                    })
+                };
+                match model.seats.as_deref() {
+                    Some(seats) => seats.iter().any(|seat| serves(&seat.provider_name)),
+                    None => serves(&model.provider_name),
+                }
+            })
     }
 
     /// Install the catalog overlay this Router's resolved-model table was
@@ -3093,11 +3116,10 @@ impl Router {
     /// AFTER the served target and the response's own prompt total are known.
     ///
     /// A lane requires BOTH halves of its key: the served provider kind and
-    /// the served model NICKNAME. A target missing either forms no lane and
-    /// the call is a no-op -- deliberately NOT falling back to the upstream
-    /// wire id, because that label is what a later ledger-driven rebuild
-    /// cannot reproduce, and a live path recording under a label the rebuild
-    /// filters out would make the two disagree about the same lane.
+    /// the wire upstream the request was sent with (`DispatchMeta::
+    /// served_upstream`, the value the usage ledger persists, so the warm
+    /// rebuild reproduces the same key). A dispatch missing either forms no
+    /// lane and the call is a no-op.
     ///
     /// `session_key` names the CALLER the observation came from and is used
     /// only to derive an opaque cohort tag, so that no single high-volume
@@ -3113,18 +3135,18 @@ impl Router {
     pub fn record_calibration_sample(
         &self,
         provider_kind: Option<&str>,
-        nickname: Option<&str>,
+        upstream: Option<&str>,
         session_key: Option<&str>,
         estimated_tokens: u64,
         prompt_tokens: u64,
         ts: std::time::SystemTime,
     ) {
-        let (Some(provider_kind), Some(nickname)) = (provider_kind, nickname) else {
+        let (Some(provider_kind), Some(upstream)) = (provider_kind, upstream) else {
             return;
         };
         let key = crate::calibration::LaneKey {
             provider_kind: provider_kind.to_string(),
-            nickname: nickname.to_string(),
+            upstream: upstream.to_string(),
         };
         let cohort = crate::calibration::cohort_of(session_key);
         self.calibration_store
@@ -3132,7 +3154,7 @@ impl Router {
     }
 
     /// Every calibration lane currently holding evidence, as
-    /// `(provider_kind, nickname)` pairs.
+    /// `(provider_kind, upstream)` pairs.
     ///
     /// The store itself stays encapsulated; this hands out lane IDENTITIES
     /// only, never samples. Read surface for boot / reload observability and
@@ -3141,7 +3163,7 @@ impl Router {
         self.calibration_store
             .export_entries()
             .into_iter()
-            .map(|(key, _)| (key.provider_kind, key.nickname))
+            .map(|(key, _)| (key.provider_kind, key.upstream))
             .collect()
     }
 
@@ -3154,9 +3176,10 @@ impl Router {
     /// the SAME store write the live path uses, so no second validation or
     /// reduction path exists to diverge from it.
     ///
-    /// Rows naming a nickname absent from this Router's resolved model table
-    /// are dropped: a history of renamed models would otherwise grow the lane
-    /// map with lanes that can never serve a request.
+    /// Rows whose `(provider_kind, upstream)` no resolved own-credential
+    /// target serves are dropped (`Router::knows_lane`): a history of
+    /// remapped models would otherwise grow the lane map with lanes no
+    /// request reads.
     ///
     /// Bootstrap only. A hot reload carries the live store over instead
     /// (`carry_over_calibration_from`); re-reading history there would clobber
@@ -3170,7 +3193,7 @@ impl Router {
         crate::calibration::rebuild_into(
             reader,
             &self.calibration_store,
-            &|nickname| self.knows_nickname(nickname),
+            &|provider_kind, upstream| self.knows_lane(provider_kind, upstream),
             now,
             limit,
         )

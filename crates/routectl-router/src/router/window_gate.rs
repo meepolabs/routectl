@@ -127,16 +127,26 @@ impl Router {
     /// or `None` to compare the raw estimate exactly as the static gate does.
     ///
     /// Every refusal collapses here: the kill switch, a target that forms no
-    /// lane (either half of the key absent), an unseen lane, one with too
-    /// little or too old evidence, and one whose reduced ratio fell outside
-    /// the sane band. One `None`, so there is one fallback path.
+    /// lane (no provider kind), an unseen lane, one with too little or too
+    /// old evidence, and one whose reduced ratio fell outside the sane band.
+    /// One `None`, so there is one fallback path.
     ///
-    /// The lane's model dimension is the served NICKNAME, the same label the
-    /// recording path writes under. Keying it on the upstream wire id would
-    /// silently never match, holding every lane uncorrected forever while
-    /// reading as health.
-    fn calibration_factor(&self, target: &DispatchTarget, now: SystemTime) -> Option<Factor> {
-        self.lane_calibration_factor(target.provider_kind?, target.nickname.as_deref()?, now)
+    /// The lane's model dimension is the wire upstream through
+    /// [`super::wire_upstream`], the same derivation the recorded dispatch
+    /// metadata uses; `requested_model` is the client's pre-rewrite model,
+    /// which a forwarded-credential target sends verbatim.
+    fn calibration_factor(
+        &self,
+        target: &DispatchTarget,
+        requested_model: &str,
+        now: SystemTime,
+    ) -> Option<Factor> {
+        let upstream = super::wire_upstream(
+            target.use_forwarded_credential,
+            requested_model,
+            &target.upstream,
+        );
+        self.lane_calibration_factor(target.provider_kind?, upstream, now)
     }
 
     /// Skip chain targets whose context window clearly cannot hold the
@@ -199,7 +209,7 @@ impl Router {
             // adopt this number, which is what keeps the persisted
             // estimate columns meaning exactly what they meant before.
             let corrected_tokens = self
-                .calibration_factor(target, now)
+                .calibration_factor(target, &req.model, now)
                 .map_or(estimated_tokens, |factor| factor.apply(estimated_tokens));
             let window = u64::from(window);
             if !exceeds_window_margin(corrected_tokens, window) {

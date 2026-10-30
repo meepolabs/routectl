@@ -9,10 +9,10 @@ fn now() -> SystemTime {
     SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000)
 }
 
-fn key(kind: &str, nickname: &str) -> LaneKey {
+fn key(kind: &str, upstream: &str) -> LaneKey {
     LaneKey {
         provider_kind: kind.into(),
-        nickname: nickname.into(),
+        upstream: upstream.into(),
     }
 }
 
@@ -143,15 +143,15 @@ fn retain_lanes_drops_a_lane_the_predicate_refuses() {
     store.record(key("bedrock", "retired"), 1_000, 900, 7, now());
     assert_eq!(store.len(), 2);
 
-    // Act: the predicate admits only the "kept" nickname, mirroring the
-    // carry-over's `knows_nickname` check.
-    store.retain_lanes(|k| k.nickname == "kept");
+    // Act: the predicate admits only the "kept" upstream, mirroring the
+    // carry-over's `knows_lane` check.
+    store.retain_lanes(|k| k.upstream == "kept");
 
     // Assert
     let surviving: Vec<String> = store
         .export_entries()
         .into_iter()
-        .map(|(k, _)| k.nickname)
+        .map(|(k, _)| k.upstream)
         .collect();
     assert_eq!(surviving, vec!["kept".to_string()]);
 }

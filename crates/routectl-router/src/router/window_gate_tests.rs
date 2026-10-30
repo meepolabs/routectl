@@ -119,11 +119,12 @@ fn comfortably_large(req: &ChatRequest) -> u32 {
 }
 
 /// A dispatch target on provider `p` whose effective row is the given
-/// merge result.
+/// merge result. Each nickname sends its own name as its upstream, so two
+/// fixture targets are two calibration lanes.
 fn target(nickname: &str, effective_row: EffectiveRow) -> DispatchTarget {
     let provider: Arc<dyn Provider> = Arc::new(StubProvider);
     let model =
-        ResolvedModel::new(nickname, "p", provider, "upstream").with_effective_row(effective_row);
+        ResolvedModel::new(nickname, "p", provider, nickname).with_effective_row(effective_row);
     into_one_dispatch_target(Arc::new(model))
 }
 
@@ -394,12 +395,13 @@ fn calibratable_target(nickname: &str, window: u32) -> DispatchTarget {
 /// Feed one lane enough balanced evidence to produce a correction, at the
 /// ratio implied by `estimated` / `actual`. Goes through the SAME public
 /// recording entry point production uses, so the key the gate later queries
-/// on is proven to match the key the live write landed under.
-fn feed_lane(router: &Router, nickname: Option<&str>, estimated: u64, actual: u64) {
+/// on is proven to match the key the live write landed under. `upstream` is
+/// the lane's wire id, which for the fixture targets equals the nickname.
+fn feed_lane(router: &Router, upstream: Option<&str>, estimated: u64, actual: u64) {
     for i in 0..9 {
         router.record_calibration_sample(
             Some(LANE_KIND),
-            nickname,
+            upstream,
             Some(&format!("caller-{}", i % 3)),
             estimated,
             actual,
@@ -570,22 +572,28 @@ fn the_calibration_kill_switch_behaves_exactly_as_the_static_gate() {
 }
 
 #[test]
-fn a_nickname_less_target_forms_no_lane_on_either_side() {
-    // A target lacking a nickname has no lane, so neither the recording path
-    // nor the gate's lookup may invent one from another label. Feeding under
-    // `None` records nothing at all, and the reverse -- evidence recorded
-    // under a real nickname -- must not reach a target that has none.
+fn a_dispatch_without_an_upstream_records_no_lane() {
+    // The write side's missing half: no wire upstream, no lane, and no
+    // other label stands in for it.
     let router = router(true);
     let req = oversized_request();
     let raw = estimated_tokens(&req);
 
     feed_lane(&router, None, raw, raw * UNDER_COUNT_PERMILLE / 1_000);
+
     assert!(
         router.calibration_store.is_empty(),
-        "a nickname-less dispatch must create no lane",
+        "a dispatch with no upstream must create no lane",
     );
+}
 
-    // Evidence under a real nickname, consulted by a target that has none.
+#[test]
+fn a_nickname_less_target_reads_its_upstream_lane() {
+    // The read side never needed the nickname: the lane is the target's
+    // upstream, which a target always carries.
+    let router = router(true);
+    let req = oversized_request();
+    let raw = estimated_tokens(&req);
     feed_lane(
         &router,
         Some("boundary"),
@@ -601,19 +609,15 @@ fn a_nickname_less_target_forms_no_lane_on_either_side() {
 
     let kept = router.filter_chain_by_window(chain, &req);
 
-    assert_eq!(
-        nicknames(&kept),
-        vec!["", "roomy"],
-        "a nickname-less target is compared against the raw estimate",
-    );
-    assert_eq!(router.metrics.window_gate_skips_total(), 0);
+    assert_eq!(nicknames(&kept), vec!["roomy"]);
+    assert_eq!(router.metrics.window_gate_skips_total(), 1);
 }
 
 #[test]
 fn a_target_without_a_provider_kind_forms_no_lane() {
     // The other half of the key. `into_one_dispatch_target` leaves the kind
     // unset on the legacy construction path, and an unset kind must refuse
-    // the lane rather than key on the nickname alone.
+    // the lane rather than key on the upstream alone.
     let router = router(true);
     let req = oversized_request();
     let raw = estimated_tokens(&req);

@@ -116,7 +116,7 @@ fn evidence_row_to_ledger_row(row: routectl_usage::CalibrationSampleRow) -> Cali
     CalibrationLedgerRow::new(
         UNIX_EPOCH + Duration::from_millis(row.ts_start_ms.max(0) as u64),
         row.provider_kind,
-        row.model,
+        row.upstream,
         row.session_id,
         row.estimated_tokens.max(0) as u64,
         row.prompt_tokens.max(0) as u64,
@@ -168,7 +168,7 @@ fn emit_rebuild_log(summary: &CalibrationRebuildSummary) {
     tracing::info!(
         rows_loaded = summary.rows_loaded,
         accepted = summary.accepted,
-        rejected_unknown_nickname = summary.rejected_unknown_nickname,
+        rejected_unknown_lane = summary.rejected_unknown_lane,
         rejected_pair = summary.rejected_pair,
         lanes_calibrated = summary.lanes_calibrated,
         row_cap = REBUILD_ROW_LIMIT,
