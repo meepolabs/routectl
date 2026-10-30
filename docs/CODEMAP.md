@@ -2220,9 +2220,12 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `CalibrationLedgerRow` / `CalibrationRebuildSummary` / `rebuild_into`) -- the
   reduction and the lane ring stay module-private
 - `src/calibration/store.rs` -- `Mutex<HashMap<LaneKey, LaneSamples>>` evidence
-  map (NOT an LRU: a lane is `(provider_kind, served NICKNAME)`, so the
-  keyspace is bounded by the loaded model table, unlike the client-driven
-  session keyspace `k_estimator` guards). `record` converts one
+  map (NOT an LRU: a lane is `(provider_kind, wire upstream)`, so every
+  nickname, pool seat and entry of one kind sending one upstream shares a
+  lane and a renamed nickname keeps its evidence; the keyspace is bounded by
+  the upstreams ever served, unlike the client-driven session keyspace
+  `k_estimator` guards; a forwarded-credential dispatch reads its lane but
+  never writes one). `record` converts one
   estimate/actual pair to an integer permille ratio and pushes it onto the
   lane's bounded ring (`SAMPLES_PER_LANE`), dropping a pair with a zero on
   either side and REPORTING whether it stored (the warm rebuild tallies its
@@ -2254,10 +2257,12 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `CalibrationLedgerRow` and `CalibrationRebuildSummary`. `rebuild_into`
   reads the `[now - MAX_SAMPLE_AGE, now]` window, replays OLDEST-FIRST through
   `CalibrationStore::record` (no second validation / reduction / bounds path),
-  drops a row whose nickname left the resolved-model table, and judges
-  freshness against the passed-in clock. Reached through
-  `Router::rebuild_calibration_from_ledger`, which supplies the
-  resolved-model predicate (`Router::knows_nickname`, shared with the reload
+  drops a row whose `(provider_kind, upstream)` no resolved own-credential
+  target serves (tallied as `rejected_unknown_lane`; the recording nickname
+  plays no part), and judges freshness against the passed-in clock.
+  `CalibrationLedgerRow.upstream` is the wire id the request was sent with.
+  Reached through `Router::rebuild_calibration_from_ledger`, which supplies
+  the lane predicate (`Router::knows_lane`, shared with the reload
   carry-over) and keeps the store encapsulated. `CalibrationRebuildSummary` is
   `#[non_exhaustive]` with a `new` constructor, so a further tally field is not
   a breaking change
@@ -2448,8 +2453,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/router/mod.rs` -- the `Router` type family + construction/lifecycle
   plus submodule wiring; the dispatch retry state machine itself lives in
   `dispatch.rs`. Holds the `Router` struct (providers map, per-`[models.X]`
-  runtime gates, resolved-model map, learned-capability + override + k-sample
-  registries) and the `RouterOptions` / `DispatchMeta` / `Dispatched` /
+  runtime gates, the router-level `credential_accounts` park map (one record
+  per credential account, shared whole by `carry_over_runtime_state_from`, so
+  a park outlives any one model slot), resolved-model map, learned-capability
+  + override + k-sample registries) and the `RouterOptions` / `DispatchMeta` / `Dispatched` /
   `DispatchedStream` / `RouterMetrics` / `DispatchTarget` types with their
   non-dispatch impls (`DispatchTarget.capability_prior`, the metric counters,
   `DispatchMeta::for_alias`/`mark_target`; `DispatchMeta` carries the additive
@@ -2537,14 +2544,18 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   so a cold boot restores confirmation history and due-canary state instead
   of starting every field verdict at a fresh cadence),
   `rebuild_calibration_from_ledger` (the same shape for the PRIVATE
-  calibration store, supplying the resolved-model predicate that drops a
-  renamed nickname), `register`, `record_k_sample`,
+  calibration store, supplying the lane predicate that drops a remapped or
+  removed upstream), `register`, `record_k_sample`,
   `record_calibration_sample` (the live per-lane token-estimate evidence write;
-  requires BOTH a served provider kind and a served NICKNAME or it forms no
-  lane, and hashes the session key into an opaque reduction cohort),
+  requires BOTH a served provider kind and the served wire upstream
+  (`DispatchMeta::served_upstream`) or it forms no lane, and hashes the
+  session key into an opaque reduction cohort),
   `calibration_lanes` (lane IDENTITIES only, never samples -- the observability
-  read surface over the otherwise-private store), `knows_nickname` (the ONE
-  lane-admission predicate, shared by the boot rebuild and the reload carry),
+  read surface over the otherwise-private store), `knows_lane` (the ONE
+  lane-admission predicate, shared by the boot rebuild and the reload carry:
+  some resolved own-credential target of that provider kind sends that
+  upstream; a lane only a forwarded target reads is neither warmed nor
+  kept, and forwarded dispatches write no evidence),
   `admit_quota_seats` (declares the config's OAuth account keys to the quota
   store at install time, which is what bounds that store's keyspace),
   `resolve_nickname`, `has_forwarded_provider`, `override_registry`. Also owns
@@ -2564,7 +2575,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `observe_failure`; implemented by `dispatch::CompleteAdapter`,
   `dispatch::StreamAdapter` and `count_tokens::CountAdapter`) owns
   chain resolution and probe admissions, per-target guards and request
-  shaping, the gate, the attempt loop, auth refresh, the learner repair
+  shaping, the gate, the attempt loop, auth refresh (a 401 the upstream typed
+  `CredentialInvalid` skips the refresh-and-retry and falls through to the
+  terminal park), the learner repair
   branch, classify and remap, breaker outcome, credential park, the one
   `same_provider_retry` call, fallback, the last error and `DispatchMeta`
   advancement. The per-attempt deadline is `tokio::time::timeout` around
@@ -3351,8 +3364,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/router/status.rs` -- route-target status facade for the /status
   surface: `RouteTargetStatus` (re-exported from `router` for the crate-root
   path `routectl_router::router::RouteTargetStatus`), `Router::status_targets`
-  (per-target gate + seat snapshot), `Router::seat_count_for`, and the private
-  `gate_status_for` gate read
+  (per-target gate + seat snapshot; a parked account is reported on every
+  target of the account), `Router::seat_count_for`, and the private
+  `gate_status_for` gate read (state key + account park)
 - `src/router/count_tokens.rs` -- the token-counting dispatch path:
   `Router::count_tokens` (result-only, NON-SETTLING) and
   `count_tokens_with_meta` -> `CountedTokens` (SETTLING), both through
@@ -3423,9 +3437,15 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   rotation cursor, sticky pin, quota read or pool counter moves; a pooled
   head is the model's lane, not a seat's; forwarded heads report the
   requested model as wire id, mixed-credential pools answer `None`), and
-  `Router::calibrated_estimate` (the raw estimate times the lane's factor,
-  never recorded). Owns `lane_calibration_factor`, the one factor lookup +
-  `[calibration]` kill switch the window gate also calls
+  `Router::calibrated_estimate(provider_kind, upstream, raw)` (the raw
+  estimate times the `(provider_kind, upstream)` lane's factor, never
+  recorded). Owns `lane_calibration_factor`, the one factor lookup +
+  `[calibration]` kill switch the window gate also calls, and `wire_upstream`,
+  the ONE wire-id derivation (the client's requested model on a
+  forwarded-credential target, else the configured upstream) shared by
+  `DispatchMeta.served_upstream`, the window gate's lane lookup and
+  `opening_lane`, so the lane a sample is written under is the lane both
+  readers form
 - `src/router/overlays.rs` -- layered header/payload overlay merge:
   `apply_layered_overlays` (which also stamps `routectl_internal.max_output_tokens`
   on every egress and `fills_max_tokens` from `wire_check::fills_max_tokens`,
@@ -3718,8 +3738,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/router/probe_seat.rs` -- `ProbeSeat`, `probe_seat_for`,
   `probe_entry_lane`, `probe_lane_carries`: which seat a probe
   identity's lane names (the first resolved model or pooled member egressing
-  that provider entry with that upstream), whether a rejection from it is
-  attributable, and whether that lane's view carries the probed row
+  that provider entry with that upstream, carrying the seat's credential
+  `account` so a parked account refuses the probe before its model gate),
+  whether a rejection from it is attributable, and whether that lane's view
+  carries the probed row
 - `src/router/probe_failure_class.rs` -- one closed mapping off the SHARED
   `routectl_core` classifier: what a failure means for free validation. Fails
   closed; reasoning in module docs
@@ -4146,14 +4168,24 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   latch -- rather than copying entries, so an observation racing the router swap
   is neither lost nor reclassified against a stale baseline, and
   once-per-process holds literally across a reload
-- `src/router/credential_park.rs` -- seat credential park, router side:
-  parks a seat when a terminal rejection (or a terminal auth refresh) carries
-  a typed `UpstreamReason`, never for a probe, and only in the credential
-  generation the attempt was admitted under; `settle_seat_success` records the
-  breaker success and, in the same generation only, lifts the park in one
-  critical section;
-  `clear_all_credential_parks` (reload coordinator) lifts every park and
-  advances every seat's generation; `log_gate_refusal` logs a park refusal at
+- `src/router/credential_park.rs` -- account credential park, router side:
+  `CredentialAccounts` (the `Router.credential_accounts` map of
+  `AccountCredential` records keyed by `seat_pool::credential_account`, so a
+  park observed through one model refuses every model on the account; lock
+  order is the account map before any `ProviderState` slot, never the
+  reverse); `credential_account_for` / `direct_target_account` (the one
+  account derivation for a target, keyed off the operator entry's forwarded
+  fact) and `account_park` (copies the park out before any slot lock); parks
+  an account when a terminal rejection (or a terminal auth refresh) carries a
+  typed `UpstreamReason`, never for a probe or a forwarded credential (no
+  account), and only in the credential generation the attempt was admitted
+  under; `settle_seat_success` records the breaker success and, in the same
+  generation only, lifts the account's park under both locks;
+  `lift_credential_parks(accounts)` lifts the named accounts' parks and
+  advances their generations, `lift_oauth_credential_parks` restricts that
+  to OAuth seat accounts (credentials reload) and
+  `lift_entry_credential_parks` lifts every `[providers]` entry account
+  (config reload); `log_gate_refusal` logs a park refusal at
   DEBUG and every other gate kind at WARN; `parked_seat_error` builds a parked
   seat's refusal (`Error::Credential` with the epoch-ms deadline) and
   `merge_gate_refusal` folds a gate refusal into the chain's running error,
@@ -4178,9 +4210,14 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   attempt parked); `should_fallback` (the chain-hop predicate: probe fast-fail
   and transcript rejections stay, an unknown provider always walks)
 - `src/router/runtime_gate.rs` -- breaker/RPM gate + probe-slot admission
-  RAII: `admit_dispatch`/`admit_probe_dispatch` (admission returns the
-  half-open ownership guard, which also carries the seat's credential
-  generation read in the same critical section), the
+  RAII: `admit_client`/`admit_probe` (take the target's credential account;
+  `admit_locked` checks the account park first, so a live park refuses before
+  the slot is locked with no RPM token or half-open claim spent, then runs the
+  model gate under the park; `slotless_park_refusal` refuses a target with no
+  model slot on a live account park too; admission returns the half-open
+  ownership guard, which also carries the account's credential generation
+  read in the same critical section; `admit_dispatch`/`admit_probe_dispatch`
+  survive only as test seams resolving the account from a state key), the
   `record_failure_opened`/`park_provider`
   breaker-accounting methods, `apply_breaker_outcome` (applies a
   `BreakerOutcome`, returning whether a debit opened the breaker plus the
@@ -4247,7 +4284,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   (`SKIP_WARN_INTERVAL_SECS`) bounding the skip WARN to one line per interval
   across requests, while `RouterMetrics::window_gate_skips_total` stays the
   exact skip count
-- `src/runtime_state.rs` -- per-model (nickname-keyed) token-bucket RPM
+- `src/runtime_state.rs` -- per-state-key (bare nickname, or
+  `nickname#member` for a pool seat) token-bucket RPM
   limiter + circuit breaker state machine; `force_open` parks the breaker for
   an explicit reset hint, bypassing the consecutive-failure threshold;
   `capacity_snapshot(&self, now)` is a non-mutating read (`CapacitySnapshot` =
@@ -4256,15 +4294,15 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   arithmetic with `refill_tokens` (via `projected_tokens`) so the two cannot
   drift, and never claims the half-open probe slot the way a
   `try_dispatch`-based read would. A credential park (`CredentialPark`:
-  `UpstreamReason` + deadline, `CREDENTIAL_PARK_BACKSTOP` = 1 h) sits beside
-  the breaker: only `park_credential*` / `clear_credential_park*` /
-  `reset_credential_parks` touch it (never `record_success` /
-  `record_failure` / `force_open`), the gate refuses with
-  `GateDecision::CredentialParked { reason, until }`, and a lapsed park
-  shares the single half-open re-test slot with a lapsed cooldown. A
-  credential generation, advanced by `reset_credential_parks`, gates
-  `park_credential_in_generation` and `clear_credential_park_in_generation`
-  so a pre-reload attempt cannot re-park or un-park the seat.
+  `UpstreamReason` + deadline, `CREDENTIAL_PARK_BACKSTOP` = 1 h) is NOT held
+  by `ProviderState`: it lives on the account's `AccountCredential` (park +
+  generation; `park_until` / `park_in_generation` / `clear_in_generation` /
+  `reset`, the generation advanced by every `reset` so a pre-reload attempt
+  cannot re-park or un-park the account), and the model gate takes it as an
+  input (`admit_under_park`, `capacity_snapshot_under`, `gate_status_under`).
+  A live park refuses with `GateDecision::CredentialParked { reason, until }`;
+  a lapsed park shares the slot's single half-open re-test with a lapsed
+  cooldown, so each model slot on a lapsed account re-tests once.
 - `src/seat_naming.rs` -- THE naming convention for OAuth account entries and
   their pool, pure over a `Config` (never the credential store): `pool_name`
   (plain provider-family name), `account_entry_name` (`<family>-default` /
@@ -4288,9 +4326,14 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `unavailable_pool_error` (the boot / reload refusal naming both the dead
   pool and every model routed at it). Nothing here carries a store error
   string, credential path, or account id
-- `src/seat_pool.rs` -- pool dispatch glue: `SeatTarget`, the seat state-key
-  grammar (`seat_state_key` / `split_seat_state_key` / `check_state_key_name`),
-  `seat_identity`, and the round-robin and sticky least-loaded seat selection
+- `src/seat_pool.rs` -- pool dispatch glue: `SeatTarget` (built by
+  `SeatTarget::new`, which precomputes the seat's credential `account()`), the
+  seat state-key grammar (`seat_state_key` / `split_seat_state_key` /
+  `check_state_key_name`), `seat_identity`, `credential_account` (the park's
+  account key: the OAuth seat identity, else the `[providers]` entry name
+  behind the separator, `None` for a forwarded credential) with
+  `is_entry_account`, and the round-robin and sticky least-loaded seat
+  selection
 - `src/state_key.rs` -- `StateKey`, the learned-store lane (provider entry,
   upstream): one constructor and one first-`#` parser over the serialized
   `provider_entry#upstream` ledger `lane_key`; no `Display`, only the
@@ -5332,7 +5375,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/oauth/store/refresh.rs` -- per-seat single-flight refresh:
   `force_refresh(provider, label)` targets one seat (drives `routectl refresh
   --label`), `refresh_under_lock` (near-expiry 300s lead + 401-recovery +
-  reload-generation guard), `reload_from_disk`, transient-failure cooldown
+  reload-generation guard), `reload_from_disk` (returns the seat keys whose
+  stored record the reload added, removed or changed, via `changed_seats`;
+  key strings only), transient-failure cooldown
   bookkeeping, and the transient-vs-terminal error classifier
   (`refresh_failure_error`: `Error::Credential` only for a refused grant)
 - `src/oauth/store/seat.rs` -- `SecretStore` impl for `OAuthStore`: resolves
@@ -5652,10 +5697,13 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   the router's boot warm rebuild; exports `read_calibration_samples_since` +
   `CalibrationSampleRow`. Admission mirrors the live write row for row --
   `outcome = 'ok'`, both `calib_*` columns NOT NULL (the pair is admitted or
-  refused as a unit), `provider_kind`/`model` NOT NULL -- because a rebuild
+  refused as a unit), `provider_kind`/`upstream` NOT NULL -- because a rebuild
   that admitted more would let a restart replay rows live traffic never
-  recorded. `model` is the SERVED NICKNAME, the same label the gate's lane
-  lookup keys on; `session_id` is deliberately NOT filtered (the live path
+  recorded. `upstream` is the wire id the request was sent with, the same
+  value the live lane write keys on; the served nickname (`model`) is neither
+  read nor filtered, so a renamed nickname's history stays on its lane, and a
+  forwarded-credential row carries no evidence pair; `session_id` is
+  deliberately NOT filtered (the live path
   records a keyless request too). Newest-N cap with a `rowid` tie-break,
   returned oldest-first so a replay lands in arrival order
 - `src/query/capability.rs` -- capability-ledger read queries for the  warm-rebuild replayer; exports `read_capability_events_after(conn,
@@ -6156,8 +6204,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   or `handle_credentials_reload` -> `rebuild_router_for_seat_change`
   (seat-set-gated rebuild off the unchanged config + the coordinator's current
   overlay, which the replacement Router both merges and retains);
-  `clear_credential_parks` lifts every seat credential park after a reload
-  that may have fixed the credential. Two bounded
+  a credentials reload lifts only the OAuth seat parks whose stored record
+  `reload_from_disk` reports changed (`lift_oauth_credential_parks`, so a
+  routine self-refresh lifts nothing), and an accepted config reload lifts
+  only `[providers]` entry account parks (`lift_entry_credential_parks`),
+  past the commit point; `log_lifted_parks` logs the count. Two bounded
   interval drivers ride the same pipeline and the same `shutdown_rx`, both
   reading the live router PER TICK so a publication switches them onto the
   replacement cleanly: `run_router_metrics_snapshot_driver` (in
@@ -6684,11 +6735,13 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   stamps per dispatched attempt), `observe_response` / `observe_chunk` hold the
   cache-INCLUSIVE canonical `prompt_tokens` on the guard, and `finalize`
   admits it into `calib_prompt_tokens` via `admissible_prompt_total` -- success
-  outcome AND a nonzero reported total, otherwise NULL (the canonical field is
+  outcome AND an own-credential dispatch (`served_forwarded_credential` unset)
+  AND a nonzero reported total, otherwise NULL (the canonical field is
   not optional, so an unreported total arrives as a real 0).
   `record_calibration_sample` feeds that SAME admitted pair into the router's
   in-memory per-lane store (post-response, best-effort, sibling to
-  `record_k_sample`), keyed on the served nickname the ledger row also carries.
+  `record_k_sample`), keyed on the served wire upstream the ledger row's
+  `upstream` column also carries.
   The non-streaming caller records BOTH live evidence writes INSIDE the
   successful-render arm, on the same boundary as `finalize(Ok)`: a render
   failure finalizes `upstream_error`, which clears the persisted calibration
