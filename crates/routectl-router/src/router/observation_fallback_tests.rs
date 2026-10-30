@@ -7,15 +7,15 @@ use futures::stream::BoxStream;
 use parking_lot::Mutex;
 use routectl_core::{
     ChatChunk, ChatResponse, Choice, Error, Message, MessageContent, Provider, RequestObservation,
-    Result, Role,
+    Result, Role, ServedIdentity,
 };
 use serde_json::json;
 
 use super::*;
 use crate::config::{AliasValue, RetryPolicy};
 use crate::resolved::ResolvedModel;
-use crate::router::Router;
 use crate::router::chain::into_one_dispatch_target;
+use crate::router::{Router, RouterOptions};
 
 type Captured = Arc<Mutex<Vec<ChatRequest>>>;
 
@@ -201,4 +201,120 @@ async fn fallback_attempt_bumps_the_slot_the_caller_kept() {
         1,
         "the fallback attempt's slot is a clone of the kept one",
     );
+}
+
+/// Two-entry chain over distinct anthropic-api providers whose models draw
+/// from labelled OAuth seats, so every served-identity field is populated
+/// and differs between the hops: the first entry 503s, the second serves.
+fn two_seated_entry_chain() -> Router {
+    let mut config = Config {
+        retry: RetryPolicy {
+            max_attempts: 1,
+            initial_backoff_ms: 0,
+            ..Default::default()
+        },
+        ..Config::default()
+    };
+    config.aliases.insert(
+        "flow".into(),
+        AliasValue::Chain(vec!["entry1".into(), "entry2".into()]),
+    );
+    let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
+    for (nick, provider_name, fails) in [("entry1", "prov1", true), ("entry2", "prov2", false)] {
+        config.providers.insert(
+            provider_name.into(),
+            crate::config::ProviderEntry::anthropic_api(format!("oauth://{provider_name}")),
+        );
+        let provider: Arc<dyn Provider> = Arc::new(BumpingProvider {
+            captured: Captured::default(),
+            fails,
+        });
+        let model = ResolvedModel::new(nick, provider_name, provider, format!("{nick}-upstream"))
+            .with_auth_secret_ref(routectl_auth::SecretRef::OAuth {
+                provider: provider_name.into(),
+                label: Some("work".into()),
+            });
+        models.insert(nick.into(), Arc::new(model));
+    }
+    let mut router = Router::new(Arc::new(config));
+    router.install_resolved_models(models);
+    router
+}
+
+fn flow_request(max_tokens: Option<u32>, slot: &RequestObservation) -> ChatRequest {
+    let mut req = ChatRequest {
+        model: "flow".into(),
+        max_tokens,
+        ..Default::default()
+    };
+    req.routectl_internal.observation = Some(slot.clone());
+    req
+}
+
+/// Mutation check: delete the `set_last_target` call after `mark_target` in
+/// the walk -> red (no last target).
+#[tokio::test]
+async fn two_hop_fallback_names_the_second_target_as_last_target() {
+    let router = two_seated_entry_chain();
+    let kept = RequestObservation::new();
+
+    let dispatched = router
+        .complete_with_options(flow_request(None, &kept), RouterOptions::new())
+        .await;
+
+    assert!(
+        dispatched.result.is_ok(),
+        "premise: the second entry serves"
+    );
+    assert_eq!(dispatched.meta.fallback_count, 1, "premise: one hop");
+    let expected = ServedIdentity {
+        alias: Some("flow".into()),
+        model: Some("entry2".into()),
+        upstream: Some("entry2-upstream".into()),
+        provider: Some("prov2".into()),
+        provider_kind: Some("anthropic-api".into()),
+        seat: Some("prov2#work".into()),
+    };
+    assert_eq!(kept.snapshot().last_target, Some(expected));
+}
+
+#[tokio::test]
+async fn a_walk_stopped_before_fallback_still_names_the_target_tried() {
+    let (router, _first, _second) = two_entry_chain();
+    let kept = RequestObservation::new();
+    let mut opts = RouterOptions::new();
+    opts.disable_fallbacks = true;
+
+    let dispatched = router
+        .complete_with_options(flow_request(None, &kept), opts)
+        .await;
+
+    assert!(dispatched.result.is_err(), "premise: the first entry fails");
+    let last = kept.snapshot().last_target.expect("a target was tried");
+    assert_eq!(last.model.as_deref(), Some("entry1"));
+}
+
+/// Mutation check: delete the `set_probe` call beside `is_probe_request` in
+/// the walk -> red on the probe row; write `true` unconditionally -> red on
+/// the non-probe rows.
+#[tokio::test]
+async fn probe_flag_follows_max_tokens_against_the_probe_threshold() {
+    let threshold = RetryPolicy::default().probe_max_tokens;
+    let cases = [
+        ("at the threshold", Some(threshold), true),
+        ("above the threshold", Some(threshold + 1), false),
+        ("no max_tokens", None, false),
+    ];
+    for (name, max_tokens, expected) in cases {
+        let (router, _first, _second) = two_entry_chain();
+        let kept = RequestObservation::new();
+
+        drop(
+            router
+                .complete_with_options(flow_request(max_tokens, &kept), RouterOptions::new())
+                .await,
+        );
+
+        assert_eq!(kept.snapshot().probe, expected, "{name}");
+    }
 }

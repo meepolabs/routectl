@@ -375,10 +375,11 @@ impl Router {
         // Reactive-repair ceiling for THIS client request, declared outside the
         // walk so the draws it spent are read once on every exit of it.
         let mut repair_budget = RepairBudget::per_request();
+        let observation = req.routectl_internal.observation.clone();
         let result =
             Box::pin(self.run_walk(CompleteAdapter, req, opts, &mut meta, &mut repair_budget))
                 .await;
-        self.finish_dispatch(&meta, &repair_budget);
+        self.finish_dispatch(&meta, &repair_budget, observation.as_ref());
         Dispatched { meta, result }
     }
 
@@ -407,9 +408,10 @@ impl Router {
         // See `complete_with_options`: the ceiling outlives the walk so its
         // spend is read once on every exit.
         let mut repair_budget = RepairBudget::per_request();
+        let observation = req.routectl_internal.observation.clone();
         let result =
             Box::pin(self.run_walk(StreamAdapter, req, opts, &mut meta, &mut repair_budget)).await;
-        self.finish_dispatch(&meta, &repair_budget);
+        self.finish_dispatch(&meta, &repair_budget, observation.as_ref());
         DispatchedStream { meta, result }
     }
 

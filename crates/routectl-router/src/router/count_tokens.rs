@@ -424,6 +424,7 @@ impl Router {
         // be the per-seat reset the shared ceiling exists to remove; holding
         // it here reads its spend once on every exit of the walk.
         let mut repair_budget = RepairBudget::per_request();
+        let observation = req.routectl_internal.observation.clone();
         let result = Box::pin(self.run_walk(
             CountAdapter { mode },
             req,
@@ -432,7 +433,7 @@ impl Router {
             &mut repair_budget,
         ))
         .await;
-        self.finish_dispatch(&meta, &repair_budget);
+        self.finish_dispatch(&meta, &repair_budget, observation.as_ref());
         CountedTokens { meta, result }
     }
 }

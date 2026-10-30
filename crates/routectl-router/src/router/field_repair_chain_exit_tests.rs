@@ -333,3 +333,67 @@ async fn a_request_that_spends_the_allowance_lands_in_the_last_bucket_on_every_w
         );
     }
 }
+
+// -----------------------------------------------------------------------
+// The request's observation slot
+// -----------------------------------------------------------------------
+
+/// `req` carrying a fresh observation slot, and the slot.
+fn observed(mut req: ChatRequest) -> (ChatRequest, routectl_core::RequestObservation) {
+    let slot = routectl_core::RequestObservation::new();
+    req.routectl_internal.observation = Some(slot.clone());
+    (req, slot)
+}
+
+/// Repairs the histogram counted: each bucket's requests times its draws.
+fn histogram_repairs(router: &Router) -> u64 {
+    router
+        .repairs_per_request()
+        .iter()
+        .zip(0u64..)
+        .map(|(requests, draws)| requests * draws)
+        .sum()
+}
+
+/// Mutation checks: delete the `set_field_repairs` call in
+/// `finish_dispatch` -> red on every walk (slot reads 0); record
+/// `spent + 1` in the histogram -> red on the reconciliation.
+#[tokio::test]
+async fn the_slot_and_the_histogram_count_the_same_repairs_on_every_walk() {
+    for walk in WALKS {
+        let seat = ChainSeat::new(Egress::Anthropic, two_key);
+        let router = anthropic_router(&seat, &wire_checked(ONE_ATTEMPT));
+        let (req, slot) = observed(two_key_req());
+
+        drive(&router, walk, req).await;
+
+        assert_eq!(seat.calls(), 3, "{walk:?}: premise");
+        let repairs = slot.snapshot().field_repairs;
+        assert_eq!(repairs, 2, "{walk:?}: slot");
+        assert_eq!(histogram_repairs(&router), repairs, "{walk:?}: histogram");
+    }
+}
+
+#[tokio::test]
+async fn a_count_tokens_walk_stamps_identity_and_field_repairs() {
+    let seat = ChainSeat::new(Egress::Anthropic, two_key);
+    let router = anthropic_router(&seat, &wire_checked(ONE_ATTEMPT));
+    let (req, slot) = observed(two_key_req());
+
+    let counted = router.count_tokens_with_meta(req).await;
+
+    assert!(counted.result.is_ok(), "{:?}", counted.result.err());
+    let snap = slot.snapshot();
+    assert_eq!(snap.field_repairs, 2);
+    assert_eq!(
+        snap.last_target,
+        Some(routectl_core::ServedIdentity {
+            alias: Some(ALIAS.into()),
+            model: Some("m0".into()),
+            upstream: Some("upstream".into()),
+            provider: Some("p0".into()),
+            provider_kind: Some("anthropic-api".into()),
+            seat: None,
+        }),
+    );
+}

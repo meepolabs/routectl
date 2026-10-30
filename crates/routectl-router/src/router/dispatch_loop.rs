@@ -19,8 +19,8 @@ use routectl_core::context_reduction::{ReductionDelta, ReductionOutcome, apply_j
 use routectl_core::failure_class::{ClassifiedFailure, FailureClass};
 use routectl_core::wire_check::{IngressDialect, WireTap};
 use routectl_core::{
-    ChatRequest, Error, Provider, RefusalReason, Result, TranslationReport, UpstreamReason,
-    sanitize_for_log,
+    ChatRequest, Error, Provider, RefusalReason, RequestObservation, Result, TranslationReport,
+    UpstreamReason, sanitize_for_log,
 };
 
 use crate::config::RetryPolicy;
@@ -262,9 +262,17 @@ impl Router {
     /// A token count queues no wire rejection on `meta` (see
     /// [`Router::read_count_rejection_site`]), so reporting them is a no-op
     /// there.
-    pub(crate) fn finish_dispatch(&self, meta: &DispatchMeta, repair_budget: &RepairBudget) {
-        self.metrics
-            .record_repairs_per_request(repair_budget.spent());
+    pub(crate) fn finish_dispatch(
+        &self,
+        meta: &DispatchMeta,
+        repair_budget: &RepairBudget,
+        observation: Option<&RequestObservation>,
+    ) {
+        let spent = repair_budget.spent();
+        self.metrics.record_repairs_per_request(spent);
+        if let Some(observation) = observation {
+            observation.set_field_repairs(u64::from(spent));
+        }
         emit_replay_degradation(meta);
         emit_field_repair(meta);
         self.emit_wire_rejections(meta);
@@ -318,6 +326,9 @@ impl Router {
         // 429/529 these fast-fail instead of spraying retry+fallback
         // across the all-Anthropic chain. See `should_fallback`.
         let is_probe = is_probe_request(&req, &policy);
+        if let Some(observation) = req.routectl_internal.observation.as_ref() {
+            observation.set_probe(is_probe);
+        }
         // Auto-cache decision inputs: computed ONCE off the ORIGINAL req
         // (above the chain loop) so they are identical across every retry
         // and fallback target. The per-target capability + provider switch
@@ -399,7 +410,10 @@ impl Router {
             // the hop. `chain_idx` is the index into the resolved chain;
             // a non-zero index means at least one earlier entry was tried
             // or skipped, i.e. we fell back to reach here.
-            meta.mark_target(target, &req.model);
+            let identity = meta.mark_target(target, &req.model);
+            if let Some(observation) = req.routectl_internal.observation.as_ref() {
+                observation.set_last_target(identity);
+            }
             meta.fallback_count = chain_idx as u32;
 
             // Missing-bearer terminal guard: a forwarded target with NO

@@ -16,8 +16,8 @@ use std::time::Duration;
 use futures::stream::BoxStream;
 use parking_lot::Mutex;
 use routectl_core::{
-    ChatChunk, ChatResponse, PrefixComponent, Provider, ReplayScheme, Result, TokenCount,
-    VolatileKind, failure_class::FailureClass,
+    ChatChunk, ChatResponse, PrefixComponent, Provider, ReplayScheme, Result, ServedIdentity,
+    TokenCount, VolatileKind, failure_class::FailureClass,
 };
 
 use crate::config::{AliasValue, Config, HistoryReasoning, ReasoningDialect};
@@ -1876,7 +1876,9 @@ impl DispatchMeta {
     /// sends over the wire, since `use_forwarded_credential` bypasses the
     /// `target.upstream` rewrite. Only consulted on that branch; an own
     /// target's `served_upstream` is `target.upstream`, unchanged.
-    fn mark_target(&mut self, target: &DispatchTarget, requested_model: &str) {
+    ///
+    /// Returns the identity just recorded.
+    fn mark_target(&mut self, target: &DispatchTarget, requested_model: &str) -> ServedIdentity {
         self.served_provider = Some(target.provider_name.clone());
         self.served_provider_kind = target.provider_kind.map(std::string::ToString::to_string);
         self.served_model = target.nickname.clone();
@@ -1898,6 +1900,14 @@ impl DispatchMeta {
         } else {
             target.seat.clone()
         };
+        ServedIdentity {
+            alias: Some(self.resolved_alias.clone()),
+            model: self.served_model.clone(),
+            upstream: self.served_upstream.clone(),
+            provider: self.served_provider.clone(),
+            provider_kind: self.served_provider_kind.clone(),
+            seat: self.served_seat.clone(),
+        }
     }
 }
 

@@ -22,7 +22,6 @@ use std::sync::{Arc, Mutex, PoisonError};
 /// The target a request was last dispatched to, by the names routectl's own
 /// configuration gives it. Never holds request content.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-#[non_exhaustive]
 pub struct ServedIdentity {
     /// Routing alias the request resolved to.
     pub alias: Option<String>,
