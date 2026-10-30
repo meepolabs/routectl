@@ -293,7 +293,7 @@ impl SurfaceAdapter for CountAdapter {
     /// One INFO event at the settle point makes a count breaker debit or
     /// park triageable. Safe dimensions only, never a body or prompt.
     fn observe_failure(&self, router: &Router, failure: &FailureObservation<'_>) {
-        router.count_refusal_error(failure.ingress, failure.target, failure.err);
+        router.count_refusal_error(failure.refusal_origin, failure.target, failure.err);
         let facts = upstream_facts(failure.err);
         tracing::info!(
             event = "count_tokens",

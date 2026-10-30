@@ -13,7 +13,8 @@ use routectl_core::capability::{EvidenceSource, FailurePhase, SignalTier};
 use routectl_core::wire_check::{IngressDialect, IngressWire};
 use routectl_core::{
     ChatChunk, ChatRequest, ChatResponse, ChunkChoice, ChunkDelta, ContentPart, Error, Message,
-    MessageContent, Provider, RefusalReason, RequestProvenance, Result, Role, TokenCount, ToolDef,
+    MessageContent, Provider, RefusalReason, RequestObservation, RequestProvenance, Result, Role,
+    TokenCount, ToolDef,
 };
 use routectl_providers::openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
 use serde_json::{Value, json};
@@ -693,4 +694,142 @@ async fn a_provider_raised_refusal_on_the_first_target_counts_once_when_the_seco
         })
         .collect();
     assert_eq!(observed, expected);
+}
+
+/// `req` with a fresh observation slot attached, and the creator's clone of
+/// that slot.
+fn observed(mut req: ChatRequest) -> (ChatRequest, RequestObservation) {
+    let observation = RequestObservation::new();
+    req.routectl_internal.observation = Some(observation.clone());
+    (req, observation)
+}
+
+/// Every local refusal the router counted, summed over its keys.
+fn refusal_total(router: &Router) -> u64 {
+    refusals(router).iter().map(|(_, _, count)| count).sum()
+}
+
+/// A request's local refusals land on its observation slot exactly when
+/// they land on the global counter, through every exit that counts one: a
+/// provider-raised refusal, a pre-dispatch strip refusal (token counts
+/// included), and one per target when the chain walks. No other slot
+/// counter moves, and a refusal with no lane counts on neither.
+#[tokio::test]
+async fn each_counted_local_refusal_also_counts_on_the_request_slot() {
+    type Case = (
+        &'static str,
+        Surface,
+        fn() -> Router,
+        fn(Surface) -> ChatRequest,
+        u64,
+    );
+    fn provider_raised() -> Router {
+        failing_router(egress_local_refusal)
+    }
+    fn strict_strip() -> Router {
+        let router = router_over(
+            ProviderEntry::anthropic_api("literal:k"),
+            Arc::new(AnsweringProvider::default()),
+            true,
+        );
+        router
+            .learned_capabilities
+            .import_entries(vec![acting_advisor_negative(PROVIDER, UPSTREAM)]);
+        router
+    }
+    fn strip_on_every_target() -> Router {
+        let router = chain_router(
+            ProviderEntry::anthropic_api("literal:k"),
+            Arc::new(AnsweringProvider::default()),
+            Arc::new(AnsweringProvider::default()),
+        );
+        router.learned_capabilities.import_entries(vec![
+            acting_advisor_negative(PROVIDER, UPSTREAM),
+            acting_advisor_negative(SECOND_PROVIDER, SECOND_UPSTREAM),
+        ]);
+        router
+    }
+    fn plain(_: Surface) -> ChatRequest {
+        anthropic_request()
+    }
+    fn advisor(surface: Surface) -> ChatRequest {
+        ChatRequest {
+            tools: Some(vec![ToolDef::Other(
+                json!({"type": "advisor", "name": "advisor"}),
+            )]),
+            ..anthropic_request_on(surface)
+        }
+    }
+    fn no_ingress(_: Surface) -> ChatRequest {
+        ChatRequest {
+            model: ALIAS.into(),
+            ..Default::default()
+        }
+    }
+    let cases: [Case; 9] = [
+        (
+            "provider-raised",
+            Surface::Complete,
+            provider_raised,
+            plain,
+            1,
+        ),
+        (
+            "provider-raised",
+            Surface::Stream,
+            provider_raised,
+            plain,
+            1,
+        ),
+        ("strict strip", Surface::Complete, strict_strip, advisor, 1),
+        ("strict strip", Surface::Stream, strict_strip, advisor, 1),
+        (
+            "strict strip",
+            Surface::CountTokens,
+            strict_strip,
+            advisor,
+            1,
+        ),
+        (
+            "strip on each target",
+            Surface::Complete,
+            strip_on_every_target,
+            forcing_advisor_request_on,
+            2,
+        ),
+        (
+            "strip on each target",
+            Surface::Stream,
+            strip_on_every_target,
+            forcing_advisor_request_on,
+            2,
+        ),
+        (
+            "strip on each target",
+            Surface::CountTokens,
+            strip_on_every_target,
+            forcing_advisor_request_on,
+            2,
+        ),
+        ("no lane", Surface::Complete, provider_raised, no_ingress, 0),
+    ];
+
+    for (name, surface, build, request, expected) in cases {
+        let router = build();
+        let (req, observation) = observed(request(surface));
+
+        dispatch_err(&router, surface, req).await;
+
+        let slot = observation.snapshot();
+        assert_eq!(
+            refusal_total(&router),
+            expected,
+            "{name} on {surface:?}: global"
+        );
+        assert_eq!(slot.local_refusals, expected, "{name} on {surface:?}: slot");
+        assert_eq!(slot.wire_losses, 0, "{name} on {surface:?}");
+        assert_eq!(slot.translation_drops, 0, "{name} on {surface:?}");
+        assert_eq!(slot.field_repairs, 0, "{name} on {surface:?}");
+        assert_eq!(slot.missing_terminals, 0, "{name} on {surface:?}");
+    }
 }

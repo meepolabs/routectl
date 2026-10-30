@@ -10,11 +10,11 @@
 
 use std::sync::Arc;
 
-use routectl_core::ChatRequest;
 use routectl_core::wire_check::{
     AttemptRecord, DeclaredEdit, DiffOutcome, EgressKind, IngressDialect, Lane, LaneClass, Leg,
     WireTap, diff,
 };
+use routectl_core::{ChatRequest, RequestObservation};
 use serde_json::Value;
 
 use crate::wire_check_state::WireCheckState;
@@ -273,6 +273,19 @@ pub(super) fn compare_request(state: &WireCheckState, lane: Lane, record: &Attem
         outcome.findings.iter().map(|f| (&f.path, f.class)),
         outcome.truncated,
     );
+    count_wire_losses(
+        record.canonical().routectl_internal.observation.as_ref(),
+        &outcome,
+    );
+}
+
+/// Add `outcome`'s findings to a request's observation slot, one per
+/// finding, as [`WireCheckState::record_compared`] adds them to the loss
+/// counters.
+pub(super) fn count_wire_losses(observation: Option<&RequestObservation>, outcome: &DiffOutcome) {
+    if let Some(observation) = observation {
+        observation.add_wire_losses(u64::try_from(outcome.findings.len()).unwrap_or(u64::MAX));
+    }
 }
 
 #[cfg(test)]

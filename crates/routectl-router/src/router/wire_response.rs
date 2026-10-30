@@ -20,16 +20,16 @@
 use std::fmt;
 use std::sync::Arc;
 
-use routectl_core::ChatRequest;
 use routectl_core::wire_check::{
     Assembled, DeclaredEdit, EditKind, EditSite, IncompleteReason, Lane, LaneClass, Leg, PathClass,
     StreamExit, TapContents, WirePath, WireTap, diff,
 };
+use routectl_core::{ChatRequest, RequestObservation};
 use serde_json::Value;
 
 use crate::wire_check_state::WireCheckState;
 
-use super::wire_check::attempt_lane;
+use super::wire_check::{attempt_lane, count_wire_losses};
 use super::{DispatchMeta, DispatchTarget, Router};
 
 const LOG_TARGET: &str = "routectl_router::wire_check";
@@ -42,8 +42,9 @@ const LOG_TARGET: &str = "routectl_router::wire_check";
 const MAX_INLINE_COMPARE_BYTES: usize = 2 * 1024 * 1024;
 
 /// The response-direction check of the attempt that answered the client.
-/// Opaque: it holds the attempt's tap, its lane and the router's wire-check
-/// state, and exposes only the comparison.
+/// Opaque: it holds the attempt's tap, its lane, the router's wire-check
+/// state and the request's observation slot, and exposes only the
+/// comparison.
 #[derive(Clone)]
 pub struct ResponseCheck {
     lane: Lane,
@@ -51,6 +52,7 @@ pub struct ResponseCheck {
     state: Arc<WireCheckState>,
     provider_id: Option<Arc<str>>,
     compares: bool,
+    observation: Option<RequestObservation>,
 }
 
 impl fmt::Debug for ResponseCheck {
@@ -235,6 +237,7 @@ impl ResponseCheck {
             outcome.findings.iter().map(|f| (&f.path, f.class)),
             outcome.truncated,
         );
+        count_wire_losses(self.observation.as_ref(), &outcome);
     }
 
     /// Emit a finished stream's documents as the upstream success body and
@@ -299,6 +302,7 @@ impl Router {
                 state: Arc::clone(&self.wire_check),
                 provider_id: target.provider.as_ref().map(|p| Arc::from(p.id())),
                 compares: tap.checks_response(),
+                observation: attempt_req.routectl_internal.observation.clone(),
             });
     }
 }

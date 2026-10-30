@@ -13,7 +13,7 @@ use routectl_core::wire_check::{
 };
 use routectl_core::{
     ChatChunk, ChatRequest, ChatResponse, Choice, ChunkChoice, ChunkDelta, Error, Message,
-    MessageContent, Provider, Result, Role,
+    MessageContent, Provider, RequestObservation, Result, Role,
 };
 use serde_json::{Value, json};
 
@@ -686,3 +686,91 @@ fn each_provider_entry_shape_derives_its_egress_kind_and_fill() {
 
 #[path = "wire_check_charge_tests.rs"]
 mod wire_check_charge_tests;
+
+/// A JSON object nested `levels` deep, deeper than the diff descends.
+fn nested(levels: usize) -> Value {
+    (0..levels).fold(json!(0), |inner, _| json!({ "n": inner }))
+}
+
+/// Every wire loss the router counted, summed over its keys.
+fn loss_total(snapshot: &WireCheckSnapshot) -> u64 {
+    snapshot.loss.iter().map(|c| c.reading.count).sum()
+}
+
+/// A request-leg compare adds to the request's observation slot exactly
+/// what it adds to the global loss counters: one per finding, nothing for a
+/// compare with no complete body, and nothing for one the diff budget cut
+/// short before it found anything. No other slot counter moves.
+#[tokio::test]
+async fn a_request_leg_compare_adds_its_findings_to_the_request_slot() {
+    let too_deep = nested(routectl_core::wire_check::MAX_DIFF_DEPTH + 4);
+    let rows: [(&str, Value, Deposit, CheckOutcome, u64); 5] = [
+        (
+            "two keys lost",
+            client_body(),
+            Deposit::Fixed(json!({
+                "model": ALIAS,
+                "messages": [{"role": "user", "content": "hi"}]
+            })),
+            CheckOutcome::Loss,
+            2,
+        ),
+        (
+            "nothing deposited",
+            client_body(),
+            Deposit::Nothing,
+            CheckOutcome::Incomplete,
+            0,
+        ),
+        (
+            "budget cut before any finding",
+            json!({"model": ALIAS, "z": too_deep}),
+            Deposit::Fixed(json!({"model": ALIAS, "z": too_deep})),
+            CheckOutcome::Budget,
+            0,
+        ),
+        (
+            "budget cut after one finding",
+            json!({"a": 1, "model": ALIAS, "z": too_deep}),
+            Deposit::Fixed(json!({"model": ALIAS, "z": too_deep})),
+            CheckOutcome::Budget,
+            1,
+        ),
+        (
+            "clean",
+            client_body(),
+            Deposit::Fixed(client_body()),
+            CheckOutcome::Clean,
+            0,
+        ),
+    ];
+    for (name, client, deposit, outcome, losses) in rows {
+        for surface in SURFACES {
+            let provider = Arc::new(DepositingProvider::new(deposit.clone()));
+            let router = router(CHECK_EVERY, vec![provider]);
+            let mut req = request_from(IngressDialect::Anthropic, &client);
+            let observation = RequestObservation::new();
+            req.routectl_internal.observation = Some(observation.clone());
+
+            dispatch(&router, surface, req).await;
+
+            let snapshot = router.wire_check_snapshot();
+            let slot = observation.snapshot();
+            assert_eq!(
+                outcomes(&snapshot),
+                [("anthropic->anthropic-api", outcome, 1)],
+                "{name} on {surface:?}"
+            );
+            assert_eq!(
+                loss_total(&snapshot),
+                losses,
+                "{name} on {surface:?}: global"
+            );
+            assert_eq!(slot.wire_losses, losses, "{name} on {surface:?}: slot");
+            assert_eq!(slot.local_refusals, 0, "{name} on {surface:?}");
+            assert_eq!(slot.translation_drops, 0, "{name} on {surface:?}");
+            assert_eq!(slot.field_repairs, 0, "{name} on {surface:?}");
+            assert_eq!(slot.missing_terminals, 0, "{name} on {surface:?}");
+        }
+    }
+}

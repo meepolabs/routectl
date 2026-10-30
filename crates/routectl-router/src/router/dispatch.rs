@@ -10,7 +10,6 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use futures::stream::{BoxStream, StreamExt};
-use routectl_core::wire_check::IngressDialect;
 use routectl_core::{
     ChatChunk, ChatRequest, ChatResponse, Error, Provider, Result,
     failure_class::{ClassifiedFailure, FailureClass, MatchedBy},
@@ -33,6 +32,7 @@ use super::class_observe::{
 };
 use super::dispatch_loop::{CommitCtx, Deadline, Exhaustion, SurfaceAdapter, complete_timed_out};
 use super::feature_filter::emit_feature_unsupported;
+use super::local_refusal::RefusalOrigin;
 use super::outcome_rule::retry_cap_for;
 use super::repair_budget::RepairBudget;
 use super::runtime_gate::is_probe_request;
@@ -439,10 +439,10 @@ impl Router {
         debit: bool,
         is_probe: bool,
         is_forwarded: bool,
-        ingress: Option<IngressDialect>,
+        refusal_origin: &RefusalOrigin,
     ) {
         if let Some(reason) = err.refusal_reason() {
-            self.count_local_refusal(ingress, target, reason);
+            self.count_local_refusal(refusal_origin, target, reason);
         }
         let facts = upstream_facts(err);
         let model = target.nickname.as_deref().unwrap_or("");

@@ -11,10 +11,12 @@ use routectl_core::wire_check::{
     Assembled, IncompleteReason, IngressDialect, IngressWire, Leg, SseFrame, StreamExit,
 };
 use routectl_core::{
-    ChatChunk, ChatRequest, ChatResponse, ChunkChoice, ChunkDelta, Error, Provider, Result,
+    ChatChunk, ChatRequest, ChatResponse, ChunkChoice, ChunkDelta, Error, ObservationSnapshot,
+    Provider, RequestObservation, Result,
 };
 use serde_json::{Value, json};
 
+use super::ResponseCheck;
 use crate::config::Config;
 use crate::resolved::ResolvedModel;
 use crate::router::{Router, RouterOptions};
@@ -607,5 +609,131 @@ async fn a_trace_only_check_traces_whole_documents_and_records_nothing() {
             [(CheckOutcome::Clean, 1)],
             "{name}: only the request leg recorded"
         );
+    }
+}
+
+/// Every wire loss the router counted, summed over its keys.
+fn loss_total(router: &Router) -> u64 {
+    router
+        .wire_check_snapshot()
+        .loss
+        .iter()
+        .map(|c| c.reading.count)
+        .sum()
+}
+
+/// `client_body` without the top-level keys `dropped`, as a renderer that
+/// lost them would build it.
+fn client_body_without(dropped: &[&str]) -> Value {
+    let mut body = client_body();
+    for key in dropped {
+        body.as_object_mut().expect("object").remove(*key);
+    }
+    body
+}
+
+/// What one response compare added: the global loss counters' delta and
+/// the request slot as the compare left it, read after the dispatch's own
+/// request leg (a clean one here) has settled.
+struct ResponseDelta {
+    global: u64,
+    slot: ObservationSnapshot,
+}
+
+/// Dispatch a checked request carrying a fresh slot on the complete or
+/// stream surface, then run `compare` on the check it carried.
+async fn response_delta(stream: bool, compare: impl FnOnce(ResponseCheck)) -> ResponseDelta {
+    let router = router("anthropic-api", CHECK_EVERY);
+    let observation = RequestObservation::new();
+    let mut req = request(IngressDialect::Anthropic, stream);
+    req.routectl_internal.observation = Some(observation.clone());
+    let check = if stream {
+        let dispatched = Box::pin(router.stream_with_options(req, RouterOptions::default())).await;
+        let _chunks: Vec<_> = dispatched.result.expect("stream opens").collect().await;
+        dispatched.meta.response_check
+    } else {
+        Box::pin(router.complete_with_options(req, RouterOptions::default()))
+            .await
+            .meta
+            .response_check
+    }
+    .expect("an admitted fidelity attempt carries one");
+    let before = (loss_total(&router), observation.snapshot().wire_losses);
+    assert_eq!(before, (0, 0), "the request leg is clean");
+
+    compare(check);
+
+    ResponseDelta {
+        global: loss_total(&router),
+        slot: observation.snapshot(),
+    }
+}
+
+/// A response compare adds to the answering request's observation slot
+/// exactly what it adds to the global loss counters, on a complete body and
+/// on a stream alike: one per finding, nothing when a side is unfinished,
+/// nothing for a body over the inline limit. No other slot counter moves.
+#[tokio::test]
+async fn a_response_leg_compare_adds_its_findings_to_the_request_slot() {
+    type Row = (&'static str, bool, fn(ResponseCheck), u64);
+    let rows: [Row; 6] = [
+        (
+            "complete, two keys lost",
+            false,
+            |check| {
+                let body = client_body_without(&["stop_reason", "id"]);
+                check.compare_body(&serde_json::to_vec(&body).expect("json"), &[]);
+            },
+            2,
+        ),
+        (
+            "complete, client body unreadable",
+            false,
+            |check| check.compare_body(b"not json", &[]),
+            0,
+        ),
+        (
+            "complete, client body over the limit",
+            false,
+            |check| check.compare_body(&vec![b'x'; super::MAX_INLINE_COMPARE_BYTES + 1], &[]),
+            0,
+        ),
+        (
+            "stream, two keys lost",
+            true,
+            |check| {
+                let client = Assembled::Complete(client_body_without(&["stop_reason", "id"]));
+                check.compare_stream(client, StreamExit::Ended, &[]);
+            },
+            2,
+        ),
+        (
+            "stream, traced, two keys lost",
+            true,
+            |check| {
+                let client = Assembled::Complete(client_body_without(&["stop_reason", "id"]));
+                check.compare_traced_stream(client, StreamExit::Ended, &[], "anthropic");
+            },
+            2,
+        ),
+        (
+            "stream, client went away",
+            true,
+            |check| {
+                let client = Assembled::Incomplete(IncompleteReason::Disconnect);
+                check.compare_stream(client, StreamExit::Disconnect, &[]);
+            },
+            0,
+        ),
+    ];
+    for (name, stream, compare, losses) in rows {
+        let delta = response_delta(stream, compare).await;
+
+        assert_eq!(delta.global, losses, "{name}: global");
+        assert_eq!(delta.slot.wire_losses, losses, "{name}: slot");
+        assert_eq!(delta.slot.local_refusals, 0, "{name}");
+        assert_eq!(delta.slot.translation_drops, 0, "{name}");
+        assert_eq!(delta.slot.field_repairs, 0, "{name}");
+        assert_eq!(delta.slot.missing_terminals, 0, "{name}");
     }
 }

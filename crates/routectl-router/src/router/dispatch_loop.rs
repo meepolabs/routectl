@@ -40,7 +40,7 @@ use super::feature_filter::StripDecision;
 use super::field_preflight::emit_field_preflight;
 use super::field_repair::{FieldSettlementMode, emit_field_repair};
 use super::learn_engine::{AttemptLearning, FailureDecision, Rejection, RejectionSite};
-use super::local_refusal::ingress_dialect_of;
+use super::local_refusal::RefusalOrigin;
 use super::outcome_rule::{
     SameProvider, breaker_outcome, class_debits, probe_fast_fail, rate_limit_reset_hint,
     same_provider_retry, should_fallback,
@@ -142,7 +142,7 @@ pub(super) struct FailureObservation<'a> {
     pub(super) debit: bool,
     pub(super) is_probe: bool,
     pub(super) is_forwarded: bool,
-    pub(super) ingress: Option<IngressDialect>,
+    pub(super) refusal_origin: &'a RefusalOrigin,
 }
 
 /// One dispatch surface's part of the walk. Implementations are few,
@@ -241,7 +241,7 @@ pub(super) trait SurfaceAdapter: Send + Sync {
             failure.debit,
             failure.is_probe,
             failure.is_forwarded,
-            failure.ingress,
+            failure.refusal_origin,
         );
     }
 }
@@ -309,7 +309,7 @@ impl Router {
         // chain keeps its normal auth recovery even on a request that
         // also carries a forwarded bearer.
         let is_forwarded = req.routectl_internal.forwarded_bearer.is_some();
-        let ingress = ingress_dialect_of(&req);
+        let refusal_origin = RefusalOrigin::of(&req);
         let chain_len = chain.len();
         let policy = self.policy_for(&req.model);
         // Availability-probe detection, computed ONCE: `max_tokens` is
@@ -411,7 +411,7 @@ impl Router {
             // client that sent no credential for a forwarded target must not
             // be served on a later target's own key instead.
             if let Some(err) = missing_forwarded_bearer_error(target, &req) {
-                self.count_refusal_error(ingress, target, &err);
+                self.count_refusal_error(&refusal_origin, target, &err);
                 return Err(err);
             }
             // A Gemini egress cannot translate a defective tool pairing; the
@@ -419,7 +419,7 @@ impl Router {
             if A::SURFACE.shapes_message()
                 && let Some(err) = egress_pairing_refusal(target, pairing.as_ref())
             {
-                self.count_refusal_error(ingress, target, &err);
+                self.count_refusal_error(&refusal_origin, target, &err);
                 last_err = Some(err);
                 if opts.disable_fallbacks {
                     break 'chain;
@@ -452,7 +452,7 @@ impl Router {
             match self.apply_strip_interceptor(target, &mut attempt_req) {
                 StripDecision::Proceed => {}
                 StripDecision::StrictReject(err) => {
-                    self.count_refusal_error(ingress, target, &err);
+                    self.count_refusal_error(&refusal_origin, target, &err);
                     if !A::SURFACE.strict_reject_walks() {
                         return Err(err);
                     }
@@ -463,7 +463,7 @@ impl Router {
                     continue;
                 }
                 StripDecision::RouteAway(err) => {
-                    self.count_refusal_error(ingress, target, &err);
+                    self.count_refusal_error(&refusal_origin, target, &err);
                     if A::SURFACE.holds_recovered_errors() {
                         last_err = Some(err);
                     }
@@ -924,7 +924,7 @@ impl Router {
                                 debit: debits,
                                 is_probe,
                                 is_forwarded,
-                                ingress,
+                                refusal_origin: &refusal_origin,
                             },
                         );
                         learning.observe_generic(
