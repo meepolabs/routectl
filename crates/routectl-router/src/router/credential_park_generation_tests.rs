@@ -1,5 +1,5 @@
 //! A success lifts the credential park only in the generation its attempt
-//! was admitted under, and a reload's clear-all costs at most one request
+//! was admitted under, and a reload's lift costs at most one request
 //! per seat before a still-bad credential re-parks it.
 
 use std::sync::Arc;
@@ -39,7 +39,7 @@ async fn a_success_admitted_before_a_reload_leaves_a_park_set_after_it() {
             let interleave = async {
                 hold.entered.notified().await;
                 if reload {
-                    router.clear_all_credential_parks();
+                    router.lift_entry_credential_parks();
                 }
                 let generation = router
                     .admit_for_credential_tests("m-a")
@@ -80,7 +80,7 @@ async fn the_seam_lifts_a_park_only_in_the_success_generation() {
         let before_reload = router
             .admit_for_credential_tests("m-a")
             .expect("a healthy seat admits");
-        router.clear_all_credential_parks();
+        router.lift_entry_credential_parks();
         let current = router
             .admit_for_credential_tests("m-a")
             .expect("a healthy seat admits");
@@ -116,8 +116,8 @@ async fn a_reload_erases_a_park_and_the_next_rejection_parks_again() {
         dispatch(&router, surface, request(None, false)).await;
         assert_eq!(park_reason(&router, "m-a"), INVALID, "{surface:?} premise");
 
-        // Act: the reload clears every park, then traffic resumes.
-        let cleared = router.clear_all_credential_parks();
+        // Act: the reload lifts the park, then traffic resumes.
+        let cleared = router.lift_entry_credential_parks();
         let after_clear = park_reason(&router, "m-a");
         dispatch(&router, surface, request(None, false)).await;
         let after_next = park_reason(&router, "m-a");

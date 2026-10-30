@@ -1,6 +1,7 @@
 //! Account credential park: the router side of an account whose upstream
 //! rejected the credential itself. Parks on a typed reason, lifts on a success
-//! through any model on the account, and lifts everywhere on a reload. The
+//! through any model on the account, and lifts on a reload that may have
+//! changed the account's credential. The
 //! per-account record is [`crate::runtime_state::AccountCredential`]; the
 //! model gate it feeds is [`crate::runtime_state::ProviderState`].
 //!
@@ -249,16 +250,38 @@ impl Router {
         self.park_credential_on_rejection(account.as_deref(), err, false, generation)
     }
 
-    /// Lift the credential park on every account and start a new credential
-    /// generation on each, returning how many accounts were parked. The
+    /// Lift the credential park on each of `accounts` and start a new
+    /// credential generation on each, returning how many were parked. The
     /// generation advances even on an account with no park, so an attempt
     /// admitted before this call cannot park its account after it. An account
-    /// no attempt has admitted on yet has no record and nothing in flight.
-    pub fn clear_all_credential_parks(&self) -> usize {
+    /// no attempt has admitted on yet has no record and nothing in flight, so
+    /// it is skipped rather than given one.
+    pub fn lift_credential_parks<I>(&self, accounts: I) -> usize
+    where
+        I: IntoIterator,
+        I::Item: AsRef<str>,
+    {
+        let mut records = self.credential_accounts.lock();
+        accounts
+            .into_iter()
+            .filter(|account| {
+                records
+                    .get_mut(account.as_ref())
+                    .is_some_and(AccountCredential::reset)
+            })
+            .count()
+    }
+
+    /// [`Self::lift_credential_parks`] over every account keyed by a
+    /// `[providers]` entry rather than an OAuth seat. A config reload
+    /// re-resolves those credentials on rebuild; an OAuth seat's credential
+    /// lives in the credentials file, whose own reload lifts it.
+    pub fn lift_entry_credential_parks(&self) -> usize {
         self.credential_accounts
             .lock()
-            .values_mut()
-            .filter_map(|record| record.reset().then_some(()))
+            .iter_mut()
+            .filter(|(account, _)| crate::seat_pool::is_entry_account(account))
+            .filter_map(|(_, record)| record.reset().then_some(()))
             .count()
     }
 
@@ -299,7 +322,7 @@ impl Router {
             tracing::debug!(
                 account = %sanitize_for_log(account),
                 reason = reason.as_str(),
-                "seat credential rejected before a reload lifted every park; not parking",
+                "seat credential rejected before a reload lifted its park; not parking",
             );
         }
         parked
@@ -376,3 +399,7 @@ mod credential_park_generation_tests;
 #[cfg(test)]
 #[path = "credential_account_park_tests.rs"]
 mod credential_account_park_tests;
+
+#[cfg(test)]
+#[path = "credential_park_lift_tests.rs"]
+mod credential_park_lift_tests;

@@ -329,6 +329,116 @@ async fn reload_from_disk_picks_up_external_mutation() {
     assert_eq!(listed, vec!["anthropic"]);
 }
 
+/// One external change to the credentials file between two reloads.
+enum DiskEdit {
+    None,
+    Write(&'static str, &'static str),
+    Remove(&'static str),
+}
+
+/// `reload_from_disk` reports exactly the seat keys whose stored record
+/// differs between the cache it replaced and the file it loaded: a seat
+/// added, removed or rewritten with a new value. Untouched seats beside the
+/// edited one are the negative control in every row.
+#[tokio::test]
+async fn reload_from_disk_returns_exactly_the_changed_seat_keys() {
+    let rows: [(&str, DiskEdit, &[&str]); 5] = [
+        ("identical file", DiskEdit::None, &[]),
+        (
+            "seat added",
+            DiskEdit::Write("anthropic#c", "tok-c"),
+            &["anthropic#c"],
+        ),
+        (
+            "seat removed",
+            DiskEdit::Remove("anthropic#b"),
+            &["anthropic#b"],
+        ),
+        (
+            "seat value changed",
+            DiskEdit::Write("anthropic#b", "tok-b2"),
+            &["anthropic#b"],
+        ),
+        (
+            "same value rewritten",
+            DiskEdit::Write("anthropic#b", "tok-b"),
+            &[],
+        ),
+    ];
+    for (name, edit, expected) in rows {
+        // Arrange: two seats loaded into the store's cache.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credentials.json");
+        let store = OAuthStore::open(&path).await.unwrap();
+        let expiry = unix_now() + 3600;
+        store
+            .write_record("anthropic", rec_named("tok-a", expiry))
+            .await
+            .unwrap();
+        store
+            .write_record("anthropic#b", rec_named("tok-b", expiry))
+            .await
+            .unwrap();
+        let external = OAuthStore::open(&path).await.unwrap();
+        match edit {
+            DiskEdit::None => {}
+            DiskEdit::Write(seat, token) => {
+                external
+                    .write_record(seat, rec_named(token, expiry))
+                    .await
+                    .unwrap();
+            }
+            DiskEdit::Remove(seat) => {
+                assert!(external.remove_provider(seat).await.unwrap(), "{name}");
+            }
+        }
+
+        // Act
+        let changed = store.reload_from_disk().await.unwrap();
+
+        // Assert
+        let expected: BTreeSet<String> = expected.iter().map(|k| (*k).to_string()).collect();
+        assert_eq!(changed, expected, "{name}");
+    }
+}
+
+/// A routine in-process refresh persists the rotated token to disk, and the
+/// file watcher then reloads the store. The reload must see no change: the
+/// cache already holds what the refresh wrote.
+#[tokio::test]
+async fn reload_after_an_in_process_refresh_reports_no_changed_seat() {
+    // Arrange: a near-expiry seat refreshed through the store itself.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("credentials.json");
+    let seed = OAuthStore::open(&path).await.unwrap();
+    seed.write_record("anthropic", rec_at(unix_now() + 10))
+        .await
+        .unwrap();
+    drop(seed);
+    let flow = Arc::new(CountingFlow::new(RefreshOutcome::Mint(
+        "tok-refreshed".into(),
+    )));
+    let store = open_with_flow(&path, flow.clone()).await;
+    let token = store
+        .get(&SecretRef::OAuth {
+            provider: "anthropic".into(),
+            label: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        token, "tok-refreshed",
+        "premise: the refresh rewrote the file"
+    );
+    assert_eq!(flow.call_count(), 1, "premise: one refresh ran");
+
+    // Act
+    let changed = store.reload_from_disk().await.unwrap();
+
+    // Assert
+    assert!(changed.is_empty(), "got {changed:?}");
+}
+
 /// `reload_from_disk` against a corrupted file (garbage bytes
 /// written between snapshots) must surface the parse error AND
 /// leave the in-memory cache untouched. Mirrors the disk-first

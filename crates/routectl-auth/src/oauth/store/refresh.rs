@@ -1,5 +1,6 @@
 //! Token refresh with cooldown + transient-error classification.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use tokio::sync::Mutex as AsyncMutex;
@@ -8,7 +9,7 @@ use routectl_core::{Error, Result};
 
 use crate::oauth::file_io;
 use crate::oauth::providers;
-use crate::oauth::types::{TokenRecord, seat_key, unix_now};
+use crate::oauth::types::{CredentialsFile, TokenRecord, seat_key, unix_now};
 use crate::oauth::{OAuthError, OAuthResult};
 
 use super::{OAuthStore, REFRESH_LEAD_SECS};
@@ -69,6 +70,12 @@ impl OAuthStore {
     /// pick up tokens minted by a sibling `routectl login` (or any
     /// editor / external writer) without a daemon restart.
     ///
+    /// Returns the seat keys whose stored record the reload added, removed
+    /// or changed, compared against the cache it replaced. A seat this
+    /// process refreshed itself is already in the cache with the value it
+    /// persisted, so the reload its own write triggers reports no change for
+    /// it. Only key strings are returned; no token material.
+    ///
     /// Disk-first ordering invariant (matches `write_record`): the
     /// in-memory cache is only overwritten after a successful disk
     /// read. A parse error or IO failure leaves the existing cache
@@ -85,9 +92,10 @@ impl OAuthStore {
     /// re-rotate through the same single-flight gate; the only cost is
     /// at most one extra refresh per reload race, which is bounded by
     /// the operator-driven reload cadence (minutes-to-hours).
-    pub async fn reload_from_disk(&self) -> OAuthResult<()> {
+    pub async fn reload_from_disk(&self) -> OAuthResult<BTreeSet<String>> {
         let cf = file_io::load(&self.inner.path).await?;
         let mut guard = self.inner.file.write().await;
+        let changed = changed_seats(&guard, &cf);
         *guard = cf;
         // A successful load clears any degrade marker: the file is
         // readable again, so the next request resolves normally instead of
@@ -119,7 +127,7 @@ impl OAuthStore {
             .lock()
             .expect("refresh_cooldowns mutex poisoned")
             .clear();
-        Ok(())
+        Ok(changed)
     }
 
     /// Cooldown clock. Production reads the wall clock via `unix_now()`;
@@ -558,6 +566,18 @@ fn cooldown_reason(err: &OAuthError) -> String {
         },
         other => refresh_failure_class(other).to_string(),
     }
+}
+
+/// The seat keys whose record differs between `before` and `after`: present
+/// in only one of them, or present in both with different values.
+fn changed_seats(before: &CredentialsFile, after: &CredentialsFile) -> BTreeSet<String> {
+    before
+        .providers
+        .keys()
+        .chain(after.providers.keys())
+        .filter(|seat| before.providers.get(*seat) != after.providers.get(*seat))
+        .cloned()
+        .collect()
 }
 
 #[cfg(test)]

@@ -215,6 +215,13 @@ pub fn credential_account(
     ))
 }
 
+/// Whether `account`, a [`credential_account`] key, names a `[providers]`
+/// entry rather than an OAuth seat. Only the entry form starts with
+/// [`SEAT_KEY_SEPARATOR`].
+pub fn is_entry_account(account: &str) -> bool {
+    account.starts_with(SEAT_KEY_SEPARATOR)
+}
+
 /// Per-pool round-robin cursor set. Holds one `AtomicUsize` per rotation
 /// namespace -- the POOL name for a pool-backed model, so two models on one
 /// pool advance ONE cursor and their traffic interleaves across the pool's

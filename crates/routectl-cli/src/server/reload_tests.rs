@@ -70,6 +70,13 @@ fn write_pool_credentials(path: &std::path::Path, seats: &[(&str, &str)]) {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs();
+    write_pool_credentials_at(path, seats, now);
+}
+
+/// [`write_pool_credentials`] stamped at `now`, so two writes of one seat
+/// with one token store byte-identical records.
+#[cfg(test)]
+fn write_pool_credentials_at(path: &std::path::Path, seats: &[(&str, &str)], now: u64) {
     let mut providers = serde_json::Map::new();
     for (key, token) in seats {
         providers.insert(

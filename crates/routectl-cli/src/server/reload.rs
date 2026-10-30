@@ -462,24 +462,32 @@ pub(super) async fn handle_credentials_reload(
     };
 
     let before = store.credential_keys().await;
-    if let Err(e) = store.reload_from_disk().await {
-        tracing::warn!(
-            path = %store.path().display(),
-            error = %e,
-            "credentials reload failed; keeping previous in-memory cache",
-        );
-        return;
-    }
+    let changed_seats = match store.reload_from_disk().await {
+        Ok(changed) => changed,
+        Err(e) => {
+            tracing::warn!(
+                path = %store.path().display(),
+                error = %e,
+                "credentials reload failed; keeping previous in-memory cache",
+            );
+            return;
+        }
+    };
     tracing::info!(
         path = %store.path().display(),
         "credentials reloaded from disk",
     );
 
     // The live router already dials with the reloaded tokens (the OAuth store
-    // is shared), so a seat parked on the old credential gets a fresh attempt
-    // now, before the seat-set gate below can return early on a token-only
-    // change. A seat-set rebuild carries this cleared state onward.
-    clear_credential_parks(&router_swap.load(), "credentials");
+    // is shared), so a seat whose stored credential changed gets a fresh
+    // attempt now, before the seat-set gate below can return early on a
+    // token-only change. A seat-set rebuild carries the lifted state onward.
+    // A seat this process refreshed itself reads as unchanged, so a routine
+    // token refresh lifts nothing.
+    log_lifted_parks(
+        router_swap.load().lift_credential_parks(&changed_seats),
+        "credentials",
+    );
 
     // Recompute activation on EVERY successful credentials reload, before the
     // seat-gated router-rebuild early return below: activation tracks token
@@ -513,12 +521,10 @@ pub(super) async fn handle_credentials_reload(
     .await;
 }
 
-/// Lift every credential park on `router` after a reload of `source` that may
-/// have fixed the credential a seat was parked on. Also starts a new credential
-/// generation on every seat, so an attempt admitted before the reload cannot
-/// re-park its seat when its rejection lands after it.
-fn clear_credential_parks(router: &Router, source: &'static str) {
-    let cleared = router.clear_all_credential_parks();
+/// Log the parks a reload of `source` lifted, if any. The lift itself also
+/// started a new credential generation on each account it targeted, so an
+/// attempt admitted before the reload cannot re-park that account.
+fn log_lifted_parks(cleared: usize, source: &'static str) {
     if cleared > 0 {
         tracing::info!(
             source,
@@ -713,10 +719,13 @@ pub(super) async fn handle_config_reload(
     } else {
         publish_router(router_swap, Arc::new(new_router));
     }
-    // Only past the commit point: the candidate shares the live router's gate
-    // slots from carry-over on, so clearing any earlier would lift the live
-    // parks on a reload that is then rejected.
-    clear_credential_parks(&router_swap.load(), "config");
+    // Only past the commit point: the candidate shares the live router's park
+    // map from carry-over on, so lifting any earlier would lift the live parks
+    // on a reload that is then rejected. A rebuild re-resolves every
+    // `[providers]` entry's credential, so each entry account may have a new
+    // one; an OAuth seat's credential lives in the credentials file, whose own
+    // reload lifts it.
+    log_lifted_parks(router_swap.load().lift_entry_credential_parks(), "config");
 
     // Soft overlay defects are logged once per accepted overlay revision, not
     // on every reload that happens to re-read an unchanged file.

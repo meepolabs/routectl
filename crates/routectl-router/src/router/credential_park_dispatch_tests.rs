@@ -465,26 +465,6 @@ async fn the_retest_of_a_lapsed_park_settles_it() {
     }
 }
 
-#[tokio::test]
-async fn clear_all_credential_parks_lifts_every_seat() {
-    // Arrange
-    let primary = ScriptedProvider::new("p-a", &[Step::Ok]);
-    let sibling = ScriptedProvider::new("p-b", &[Step::Ok]);
-    let router = chain_router(primary, sibling, false);
-    let until = Instant::now() + CREDENTIAL_PARK_BACKSTOP;
-    for key in ["m-a", "m-b"] {
-        assert!(router.park_credential_for_tests(key, UpstreamReason::CredentialInvalid, until));
-    }
-
-    // Act
-    let cleared = router.clear_all_credential_parks();
-
-    // Assert
-    assert_eq!(cleared, 2);
-    assert_eq!(park_reason(&router, "m-a"), None);
-    assert_eq!(park_reason(&router, "m-b"), None);
-}
-
 /// How long the success settlement holds its account lock open for a
 /// concurrent rejection that must not get through it.
 const CONTENDED_FOR: Duration = Duration::from_millis(200);
@@ -585,7 +565,7 @@ async fn a_rejection_admitted_before_a_reload_parks_only_when_no_reload_landed()
                 let reloader = async {
                     hold.entered.notified().await;
                     if reload {
-                        router.clear_all_credential_parks();
+                        router.lift_entry_credential_parks();
                     }
                     hold.release.notify_one();
                 };
