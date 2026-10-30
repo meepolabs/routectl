@@ -6,7 +6,8 @@
 //! at the handler boundary (`build_usage_draft`), the dispatch / token /
 //! quota / outcome columns are stamped via `observe_*`, and `finalize`
 //! emits the row once (idempotent). The Drop fallback stamps the
-//! `client_disconnect` outcome for a cancelled / disconnected request.
+//! `cancelled` outcome for a request dropped before it finalized; an
+//! observed client hangup finalizes `client_disconnect` explicitly.
 //!
 //! Extracted from `ingress_handle.rs` to keep both files under the
 //! project's 800-line ceiling. The two handler functions
@@ -337,17 +338,17 @@ impl StreamStage {
 ///   - `observe_*` stamps dispatch / token / quota / outcome columns,
 ///   - `finalize(outcome)` stamps timing + outcome and `try_send`s the
 ///     row ONCE (idempotent: a second call is a no-op),
-///   - `Drop`, if not yet finalized, finalizes with the
-///     `client_disconnect` fallback so a cancelled / disconnected request
-///     still emits a row.
+///   - `Drop`, if not yet finalized, finalizes with the `cancelled`
+///     fallback so a request dropped mid-flight still emits a row.
 ///
-/// The `finalized` field is the inverse-flag: a normal exit sets it via
-/// `finalize`; an abnormal exit (client hangup, render-send failure, task
-/// cancellation -- where Drop runs without our code path) leaves it false
-/// and Drop stamps the fallback outcome. `cancelled` is folded into
-/// `client_disconnect`: inc2 cannot reliably distinguish a task
-/// cancellation from a client hangup inside Drop, so it does not separate
-/// them.
+/// The `finalized` field is the inverse-flag: every exit the handler
+/// observes sets it via `finalize`, a client hangup included (the handler
+/// finalizes `client_disconnect` where it sees the hangup). An exit no
+/// handler code observes (the handler future or render task dropped
+/// mid-dispatch) leaves it false, and Drop stamps `cancelled`: the capture
+/// cannot tell what dropped it. Under axum a client hanging up before the
+/// response is built drops the handler future, so some client cancels land
+/// as `cancelled`.
 ///
 /// `try_send` never blocks / awaits / panics, so calling `finalize` from
 /// Drop is safe. The guard also subsumes the old `EgressStreamSummary`
@@ -1443,13 +1444,11 @@ impl UsageCapture {
 
 impl Drop for UsageCapture {
     fn drop(&mut self) {
-        // Inverse-flag fallback: any drop without a prior `finalize` is an
-        // abnormal exit (client hangup, render-send failure, task
-        // cancellation). Stamp `client_disconnect` and emit the one row.
-        // `cancelled` is folded in here -- Drop cannot reliably tell a
-        // cancellation from a hangup.
+        // Observed hangups finalize before the capture drops, so reaching
+        // here unfinalized means the owning future was dropped without its
+        // exit being seen.
         if !self.finalized {
-            self.finalize(Outcome::ClientDisconnect);
+            self.finalize(Outcome::Cancelled);
         }
     }
 }

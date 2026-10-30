@@ -564,7 +564,7 @@ async fn every_stream_exit_persists_the_response_leg_compare_in_its_one_row() {
 
 /// A stream task the runtime drops mid-stream (a shutdown or an abort, with
 /// the client still connected) compares as cancelled before its capture
-/// writes the `client_disconnect` row.
+/// writes the `cancelled` row: nothing observed a client hangup.
 #[test]
 fn an_aborted_stream_task_compares_before_its_row() {
     let ledger = Ledger::start();
@@ -600,13 +600,13 @@ fn an_aborted_stream_task_compares_before_its_row() {
         steps,
         [
             Step::Compared(StreamExit::Cancelled),
-            Step::Row(Outcome::ClientDisconnect)
+            Step::Row(Outcome::Cancelled)
         ]
     );
     assert_eq!(
         rows,
         [Row {
-            outcome: "client_disconnect".to_string(),
+            outcome: "cancelled".to_string(),
             wire_losses: Some(0),
         }]
     );

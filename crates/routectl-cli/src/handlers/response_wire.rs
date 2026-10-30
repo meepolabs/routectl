@@ -78,13 +78,19 @@ impl PendingRow {
             .record_calibration_sample(&self.samples, session_key);
         self.capture.finalize(Outcome::Ok);
     }
+
+    /// Write the row as `client_disconnect`, with no samples: the body was
+    /// dropped before hyper took it, so the client left.
+    fn abandon(mut self) {
+        self.capture.finalize(Outcome::ClientDisconnect);
+    }
 }
 
 /// A complete response body that compares itself with the upstream's
 /// answer once its one frame has been taken, and only then writes the
 /// request's usage row, so the row counts what the compare found. Dropped
-/// unread, it records `incomplete` instead and leaves the row to the
-/// capture's own drop: the client never received what would be compared.
+/// unread, it records `incomplete` instead and writes the row as
+/// `client_disconnect`: the client never received what would be compared.
 /// The compare never runs ahead of the bytes.
 pub(super) struct CheckedBody {
     body: Option<Bytes>,
@@ -166,10 +172,12 @@ impl Drop for CheckedBody {
                 StreamExit::Cancelled
             }));
         }
-        if let Some(row) = self.row.take()
-            && handed_off
-        {
-            row.deliver();
+        if let Some(row) = self.row.take() {
+            if handed_off {
+                row.deliver();
+            } else {
+                row.abandon();
+            }
         }
     }
 }
@@ -316,3 +324,7 @@ mod translation_trace_tests;
 #[cfg(test)]
 #[path = "response_wire_row_tests.rs"]
 mod row_tests;
+
+#[cfg(test)]
+#[path = "response_wire_cancel_tests.rs"]
+mod cancel_tests;

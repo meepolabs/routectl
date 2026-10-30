@@ -4613,7 +4613,7 @@ loaded.
 
 The running server's `/status/query` endpoint answers a grouped, windowed
 aggregate over the local usage ledger. Like `--json` above, its payload
-carries a `schema_version` (currently `1`) and its shape is UNSTABLE before
+carries a `schema_version` (currently `2`) and its shape is UNSTABLE before
 1.0 -- metric names may be added and the envelope may be restructured. The
 `schema_version` bumps on any semantic change or removal; purely additive
 changes (a new metric, a new grouping or window token) do not bump it.

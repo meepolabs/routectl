@@ -1081,6 +1081,22 @@ already marks the window it landed in. The residual: closed-channel drops
 and failed writes of a process that has since exited are not recorded
 anywhere, so a window they touched can read `complete` while missing rows.
 
+A request that ends without an answer the client received writes one of two
+non-upstream outcomes. `client_disconnect` means routectl saw the client
+leave: a stream whose client channel closed or whose send failed (before the
+first content, mid-stream or during the end-of-stream frames), or a complete
+body dropped before it was handed to the client. `cancelled` means the
+request's handler was dropped before any of those exits ran, so nothing
+observed why: a server shutdown or a task abort mid-dispatch, and also, under
+axum, a client that hangs up before the response is built, since that drops
+the handler the same way. Some client cancels therefore land as
+`cancelled`; read the two together for "the client never got an answer".
+A `cancelled` row still names the last target the request reached (alias,
+model, upstream, provider, provider kind, seat) and carries the per-request
+counts gathered before the drop, with `missing_terminals` 0. Neither outcome
+counts in `errors` on `/status/usage`, `/status/query` or `routectl usage`;
+each has its own total (`client_disconnect_total`, `cancelled_total`).
+
 The usage ledger's `http_status` column records the transport status the
 client received: 200 for a delivered non-streaming body and once the SSE
 head commits, while a mid-stream provider failure keeps 200 and is carried

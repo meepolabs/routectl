@@ -564,8 +564,8 @@ async fn complete_response<A: IngressAdapter>(
                     // row (and the live K / calibration samples sharing its
                     // `ok` boundary) is written by the body once it is sent,
                     // after the response-leg compare, so the row counts what
-                    // that compare found; a body dropped unsent leaves the
-                    // capture to its `client_disconnect` drop.
+                    // that compare found; a body dropped unsent writes it as
+                    // `client_disconnect`.
                     //
                     // The trace-level egress body (dir 4) fires inside the
                     // adapter render now, before the single `to_vec`: the
@@ -812,13 +812,12 @@ fn build_sse_response(rx: tokio::sync::mpsc::Receiver<SseEvent>, egress_id: &str
 ///   ledger does not collapse it with a mid-stream cut.
 ///
 /// `observe_meta` + the dispatch-error finalize live HERE (not in the
-/// handler) because the future resolves inside this task. The Drop
-/// `client_disconnect` fallback covers the genuine-hangup exits: a
-/// `tx.send` failure before the dispatch resolved (the client vanished
-/// before we could flush the head), and a client disconnect detected
-/// while awaiting the still-pending dispatch (the pre-content window the
-/// content-commit boundary keeps open). Both drop the guard un-finalized
-/// so Drop stamps `client_disconnect`.
+/// handler) because the future resolves inside this task. Two exits are
+/// observed client hangups and finalize `client_disconnect` where they are
+/// seen: a `tx.send` failure before the dispatch resolved (the client
+/// vanished before we could flush the head), and a client disconnect
+/// detected while awaiting the still-pending dispatch (the pre-content
+/// window the content-commit boundary keeps open).
 async fn warm_render_task<A: IngressAdapter>(
     mut fut: DispatchFut,
     adapter: A,
@@ -836,9 +835,8 @@ async fn warm_render_task<A: IngressAdapter>(
     for ev in adapter.early_frame(state.as_mut()) {
         let sent = ev.clone();
         if tx.send(ev).await.is_err() {
-            // Client vanished before the head flushed -- a genuine
-            // disconnect. Leave the guard un-finalized so Drop stamps
-            // `client_disconnect`.
+            // The client vanished before the head flushed.
+            capture.finalize(Outcome::ClientDisconnect);
             return;
         }
         // The early frame flushed as the first body byte: the SSE head is
@@ -858,10 +856,10 @@ async fn warm_render_task<A: IngressAdapter>(
     // hangs up during that window must be detected HERE -- the `tx.closed()`
     // watch inside `drive_stream` is only reached AFTER the dispatch resolves.
     // On disconnect: drop the pending dispatch (releasing the upstream request
-    // and any half-open probe slot the future holds) and return WITHOUT
-    // finalizing, so the RAII guard's Drop stamps `client_disconnect` -- never
-    // an `upstream_error` from waiting out the full first-content timeout, and
-    // never a breaker/probe debit (the dispatch never resolves to an error).
+    // and any half-open probe slot the future holds) and finalize
+    // `client_disconnect`. It is never an `upstream_error` from waiting out
+    // the full first-content timeout, and never a breaker/probe debit (the
+    // dispatch never resolves to an error).
     // Biased + `tx.closed()` first matches the `drive_stream` select so both
     // paths react to the same disconnect signal identically.
     let mut dispatched = tokio::select! {
@@ -872,6 +870,7 @@ async fn warm_render_task<A: IngressAdapter>(
                 reason = "client_disconnected",
                 "client disconnected before first content; cancelling pending dispatch"
             );
+            capture.finalize(Outcome::ClientDisconnect);
             return;
         }
         dispatched = &mut fut => dispatched,
@@ -912,7 +911,7 @@ async fn warm_render_task<A: IngressAdapter>(
             // HTTP status is gone, so surface exactly ONE terminal in-stream
             // error. Finalize the row as `UpstreamError` with the pre-content
             // stage marker so the ledger keeps it distinct from a mid-stream
-            // cut; reserve the Drop `client_disconnect` for real cancellation.
+            // cut.
             capture.observe_error(&e);
             capture.mark_stream_stage(StreamStage::PreContentDispatch);
             capture.finalize(Outcome::UpstreamError);
@@ -965,8 +964,9 @@ async fn render_checked_stream_task<A: IngressAdapter>(
 ///    to the client.
 /// 3. Render failure (canonical chunk that the adapter cannot turn
 ///    into wire events) -> log + emit the terminal error event + return.
-/// 4. Client disconnects (channel send returns Err) -> return.
-///    Drop emits truncated.
+/// 4. Client disconnects (the channel closes or a send returns Err) ->
+///    finalize the row as `client_disconnect` and return. The summary
+///    reports truncated.
 ///
 /// Extracted so the streaming-error path is unit-testable without spinning
 /// up the axum layer: a test can build a synthesized
@@ -1003,11 +1003,12 @@ async fn drive_stream<A: IngressAdapter>(
     // upstream mid-stream error, client disconnect, runtime task
     // cancellation). Truncation / outcome detection uses an inverse-flag
     // pattern: the natural EOS path calls `finalize(Outcome::Ok)`; a
-    // mid-stream upstream error calls `finalize(Outcome::UpstreamError)`;
-    // any exit we cannot explicitly mark (client disconnect on a `tx`
-    // send failure, render failure, task cancellation) leaves the guard
-    // un-finalized and Drop stamps the `client_disconnect` fallback. So
-    // exactly one row lands per stream, mapped to the right outcome.
+    // mid-stream upstream error or render failure calls
+    // `finalize(Outcome::UpstreamError)`; a client disconnect (the
+    // `tx.closed()` arm or a failed send) calls
+    // `finalize(Outcome::ClientDisconnect)` after the client compare. Only
+    // a task cancellation leaves the guard un-finalized, and Drop stamps
+    // `cancelled`. So exactly one row lands per stream.
     let mut opening_stamped = false;
     loop {
         let item = tokio::select! {
@@ -1020,6 +1021,7 @@ async fn drive_stream<A: IngressAdapter>(
                 );
                 client_check.finish(StreamExit::Disconnect);
                 evidence.end(StreamExit::Disconnect);
+                capture.finalize(Outcome::ClientDisconnect);
                 return;
             }
             item = upstream.next() => item,
@@ -1048,12 +1050,9 @@ async fn drive_stream<A: IngressAdapter>(
                         for ev in events {
                             client_check.observe(&ev);
                             if tx.send(ev).await.is_err() {
-                                // Client disconnected mid-stream. The
-                                // guard stays un-finalized, so Drop
-                                // stamps `client_disconnect` -- no
-                                // explicit call needed.
                                 client_check.finish(StreamExit::Disconnect);
                                 evidence.end(StreamExit::Disconnect);
+                                capture.finalize(Outcome::ClientDisconnect);
                                 return;
                             }
                             // First successful body send: the SSE head is
@@ -1140,10 +1139,9 @@ async fn drive_stream<A: IngressAdapter>(
     for ev in adapter.render_eos(state.as_mut()) {
         client_check.observe(&ev);
         if tx.send(ev).await.is_err() {
-            // Client disconnected during EOS render. The guard stays
-            // un-finalized, so Drop stamps `client_disconnect`.
             client_check.finish(StreamExit::Disconnect);
             evidence.end(StreamExit::Disconnect);
+            capture.finalize(Outcome::ClientDisconnect);
             return;
         }
         // Covers an EOS-only stream (no content chunk ever sent): the

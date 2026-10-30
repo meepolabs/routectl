@@ -2450,11 +2450,11 @@ async fn capture_finalize_then_drop_does_not_double_send() {
     assert_eq!(rows[0].outcome, "ok");
 }
 
-/// A guard dropped without an explicit finalize (client hangup / task
-/// cancellation) -> exactly one `client_disconnect` row via the Drop
+/// A guard dropped without an explicit finalize (a task cancellation no
+/// handler code observed) -> exactly one `cancelled` row via the Drop
 /// fallback.
 #[tokio::test]
-async fn capture_drop_without_finalize_emits_client_disconnect() {
+async fn capture_drop_without_finalize_emits_cancelled() {
     // Arrange
     let rig = CaptureRig::new();
     let req = sample_request("a", true);
@@ -2466,7 +2466,7 @@ async fn capture_drop_without_finalize_emits_client_disconnect() {
 
     // Assert
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].outcome, "client_disconnect");
+    assert_eq!(rows[0].outcome, "cancelled");
     assert_eq!(rows[0].request_id, "req-dropped");
     assert!(
         rows[0].ttfb_ms.is_none(),
@@ -3515,8 +3515,8 @@ async fn warm_render_first_byte_is_message_start_with_estimate_no_duplicate() {
 /// SSE head is already committed, so the failure surfaces as EXACTLY ONE
 /// terminal in-stream error via `render_error_eos`, and finalizes a single
 /// `upstream_error` row bearing the pre-content stage marker (distinct from a
-/// mid-stream cut). `observe_meta` ran inside the render task; the Drop
-/// `client_disconnect` fallback did NOT fire.
+/// mid-stream cut). `observe_meta` ran inside the render task; neither a
+/// disconnect nor the Drop fallback fired.
 #[tokio::test]
 async fn warm_render_dispatch_err_emits_one_terminal_error_and_pre_content_row() {
     use crate::ingress::anthropic::AnthropicIngress;
@@ -3570,7 +3570,7 @@ async fn warm_render_dispatch_err_emits_one_terminal_error_and_pre_content_row()
     let row = &rows[0];
     assert_eq!(
         row.outcome, "upstream_error",
-        "warm dispatch Err finalizes upstream_error, not the client_disconnect Drop fallback"
+        "warm dispatch Err finalizes upstream_error, not a disconnect"
     );
     assert_eq!(row.request_id, "req-warm-err");
     assert_eq!(
@@ -3686,7 +3686,7 @@ async fn warm_render_cancels_pending_dispatch_on_client_disconnect_before_conten
         "the pending dispatch must be cancelled (dropped), not polled to timeout"
     );
     // Exactly one row, finalized as client_disconnect (not upstream_error) with
-    // no stage marker -- the RAII Drop path, so no breaker/probe debit.
+    // no stage marker; the dispatch never resolved, so no breaker/probe debit.
     assert_eq!(rows.len(), 1, "exactly one usage row");
     assert_eq!(
         rows[0].outcome, "client_disconnect",
@@ -3914,10 +3914,10 @@ async fn warm_render_post_content_anthropic_error_is_terminal_with_preserved_typ
 }
 
 /// Client disconnects before the warm-hold render task can flush its early
-/// frame (the receiver is already gone). Pins Q4's Drop reservation: the
-/// finalize path never runs (the early-frame send fails and the task returns
-/// immediately), so the `UsageCapture` guard's `Drop` fallback stamps
-/// `client_disconnect` -- NOT `upstream_error` -- and no stage marker is set.
+/// frame (the receiver is already gone). The failed early-frame send is an
+/// observed hangup, so the task finalizes `client_disconnect` there, not
+/// `upstream_error` and not the Drop fallback's `cancelled`, and no stage
+/// marker is set.
 #[tokio::test]
 async fn warm_render_client_disconnect_before_flush_drops_to_client_disconnect() {
     use crate::ingress::anthropic::AnthropicIngress;
@@ -3943,8 +3943,7 @@ async fn warm_render_client_disconnect_before_flush_drops_to_client_disconnect()
     drop(rx);
 
     // Act: the early-frame send fails immediately (no receiver); the task
-    // returns without ever finalizing, leaving the Drop fallback to stamp
-    // the row.
+    // finalizes the observed hangup as client_disconnect and returns.
     warm_render_task(
         fut,
         AnthropicIngress,
@@ -3959,11 +3958,7 @@ async fn warm_render_client_disconnect_before_flush_drops_to_client_disconnect()
     // Assert: exactly one row, client_disconnect, no stage marker -- a
     // genuine cancellation, not an upstream failure.
     let rows = rig.flush_and_read().await;
-    assert_eq!(
-        rows.len(),
-        1,
-        "the Drop fallback still emits exactly one row"
-    );
+    assert_eq!(rows.len(), 1, "the observed hangup emits exactly one row");
     assert_eq!(
         rows[0].outcome, "client_disconnect",
         "a pre-flush disconnect must not be misreported as an upstream error"
@@ -3971,7 +3966,7 @@ async fn warm_render_client_disconnect_before_flush_drops_to_client_disconnect()
     assert_eq!(rows[0].request_id, "req-warm-disconnect");
     assert_eq!(
         rows[0].stream_stage, None,
-        "the Drop fallback path never calls mark_stream_stage"
+        "the hangup path never calls mark_stream_stage"
     );
     // Truth-table row 5 (regression guard): the early-frame send failed, so
     // NO byte ever flushed and the SSE head never committed. http_status must

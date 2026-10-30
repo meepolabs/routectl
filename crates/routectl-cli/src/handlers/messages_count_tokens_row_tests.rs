@@ -49,9 +49,27 @@ fn priced_groups(db: &routectl_usage::UsageDb) -> usize {
     .len()
 }
 
-/// A count provider that either counts or refuses the request locally.
+/// A count provider that counts, refuses the request locally, or holds it
+/// forever after signalling that it arrived.
 struct CountDouble {
     refuses: bool,
+    holds: Option<Arc<tokio::sync::Notify>>,
+}
+
+impl CountDouble {
+    const fn counting() -> Self {
+        Self {
+            refuses: false,
+            holds: None,
+        }
+    }
+
+    const fn refusing() -> Self {
+        Self {
+            refuses: true,
+            holds: None,
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -72,6 +90,10 @@ impl Provider for CountDouble {
         Err(Error::normalize_response("count-double", "unused"))
     }
     async fn count_tokens(&self, _: ChatRequest) -> Result<TokenCount> {
+        if let Some(arrived) = &self.holds {
+            arrived.notify_one();
+            std::future::pending::<()>().await;
+        }
         if self.refuses {
             return Err(Error::Validation(
                 "refused".into(),
@@ -204,7 +226,7 @@ fn rows(db_path: &Path) -> Vec<RowView> {
 
 #[tokio::test]
 async fn a_successful_count_writes_one_count_tokens_row_with_null_tokens() {
-    let posted = post_count(CountDouble { refuses: false }, COUNT_BODY).await;
+    let posted = post_count(CountDouble::counting(), COUNT_BODY).await;
 
     assert_eq!(posted.status, StatusCode::OK);
     assert_eq!(
@@ -227,7 +249,7 @@ async fn a_successful_count_writes_one_count_tokens_row_with_null_tokens() {
 
 #[tokio::test]
 async fn a_failed_count_writes_one_row_with_the_dispatch_error_outcome_and_target() {
-    let posted = post_count(CountDouble { refuses: true }, COUNT_BODY).await;
+    let posted = post_count(CountDouble::refusing(), COUNT_BODY).await;
 
     assert_ne!(posted.status, StatusCode::OK);
     let rows = rows(&posted.db_path);
@@ -245,7 +267,7 @@ async fn a_failed_count_writes_one_row_with_the_dispatch_error_outcome_and_targe
 async fn a_count_row_is_absent_from_aggregate_and_cost_views_and_present_in_observation_totals() {
     // Arrange: a refused count, so the row carries a nonzero observation
     // count that observation totals can only report if they read the row.
-    let posted = post_count(CountDouble { refuses: true }, COUNT_BODY).await;
+    let posted = post_count(CountDouble::refusing(), COUNT_BODY).await;
     let db = routectl_usage::open(&posted.db_path).expect("open ledger");
 
     // Act
@@ -272,8 +294,97 @@ async fn a_count_row_is_absent_from_aggregate_and_cost_views_and_present_in_obse
 
 #[tokio::test]
 async fn a_count_body_that_never_parses_writes_no_row() {
-    let posted = post_count(CountDouble { refuses: false }, "{ not valid json").await;
+    let posted = post_count(CountDouble::counting(), "{ not valid json").await;
 
     assert_eq!(posted.status, StatusCode::BAD_REQUEST);
     assert_eq!(rows(&posted.db_path), []);
+}
+
+/// Operation, outcome, provider, model, upstream and missing terminals of
+/// one persisted row.
+type CancelView = (
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<i64>,
+);
+
+/// A count whose handler future is dropped while the provider still holds
+/// it writes one `cancelled` row naming the target the walk reached, with
+/// no missing terminal.
+#[tokio::test]
+async fn a_count_aborted_mid_dispatch_writes_one_cancelled_row_at_its_last_target() {
+    // Arrange
+    let wait = std::time::Duration::from_secs(10);
+    let arrived = Arc::new(tokio::sync::Notify::new());
+    let double = CountDouble {
+        refuses: false,
+        holds: Some(Arc::clone(&arrived)),
+    };
+    let dir = tempfile::tempdir().expect("usage tempdir");
+    let db_path = dir.path().join("usage.db");
+    let (usage, writer) = UsageWriter::start(db_path.clone(), CHANNEL_CAPACITY, 0, true);
+    let state = AppState::for_test_with_usage(
+        Arc::new(arc_swap::ArcSwap::from_pointee(router_with(double))),
+        usage,
+    );
+    let app = axum::Router::new()
+        .route("/v1/messages/count_tokens", post(super::count_tokens))
+        .with_state(state);
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/messages/count_tokens")
+        .header("content-type", "application/json")
+        .body(Body::from(COUNT_BODY))
+        .expect("request builds");
+
+    // Act
+    let handler = tokio::spawn(app.oneshot(req));
+    tokio::time::timeout(wait, arrived.notified())
+        .await
+        .expect("the provider receives the count");
+    handler.abort();
+    let joined = tokio::time::timeout(wait, handler)
+        .await
+        .expect("the aborted handler finishes");
+    tokio::task::spawn_blocking(move || writer.shutdown())
+        .await
+        .expect("usage writer shutdown");
+
+    // Assert
+    assert!(joined.is_err_and(|e| e.is_cancelled()));
+    let conn = rusqlite::Connection::open(&db_path).expect("read open");
+    let mut stmt = conn
+        .prepare(
+            "SELECT operation, outcome, provider, model, upstream, missing_terminals \
+             FROM requests",
+        )
+        .expect("prepare");
+    let rows: Vec<CancelView> = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+            ))
+        })
+        .expect("query")
+        .collect::<std::result::Result<_, _>>()
+        .expect("rows");
+    assert_eq!(
+        rows,
+        [(
+            "count_tokens".to_owned(),
+            "cancelled".to_owned(),
+            Some("p".to_owned()),
+            Some("m".to_owned()),
+            Some("upstream".to_owned()),
+            Some(0),
+        )]
+    );
 }

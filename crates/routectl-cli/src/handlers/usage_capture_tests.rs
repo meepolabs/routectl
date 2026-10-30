@@ -1460,23 +1460,23 @@ fn observe_error_stores_none_when_class_has_no_token() {
 }
 
 #[tokio::test]
-async fn disconnect_drop_emits_single_row_with_null_resolved_class() {
+async fn unfinalized_drop_emits_single_cancelled_row_with_null_resolved_class() {
     // Arrange: a live capture that never finalizes explicitly.
     let (cap, handle, writer, dir) = capture_with_handle();
     let path = dir.join("usage.db");
 
-    // Act: drop without finalize -- the Drop guard finalizes the abnormal
-    // exit as ClientDisconnect. observe_error never ran, so resolved_class
-    // was never stamped.
+    // Act: drop without finalize; the Drop guard finalizes the unobserved
+    // exit as Cancelled. observe_error never ran, so resolved_class was
+    // never stamped.
     drop(cap);
 
-    // Assert: exactly one row, outcome client_disconnect, resolved_class NULL.
+    // Assert: exactly one row, outcome cancelled, resolved_class NULL.
     assert!(wait_persisted(&handle, 1), "row not persisted");
     writer.shutdown();
     assert_eq!(
         handle.counters().persisted(),
         1,
-        "disconnect Drop must emit exactly one row"
+        "an unfinalized Drop must emit exactly one row"
     );
     let conn = rusqlite::Connection::open(&path).expect("read open");
     let (outcome, resolved_class): (String, Option<String>) = conn
@@ -1484,10 +1484,10 @@ async fn disconnect_drop_emits_single_row_with_null_resolved_class() {
             Ok((r.get(0)?, r.get(1)?))
         })
         .expect("row");
-    assert_eq!(outcome, "client_disconnect");
+    assert_eq!(outcome, "cancelled");
     assert!(
         resolved_class.is_none(),
-        "disconnect row must carry NULL resolved_class"
+        "a cancelled row must carry NULL resolved_class"
     );
 }
 

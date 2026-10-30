@@ -50,7 +50,7 @@ use super::{Panel, StatusState, guard_panel, now_utc_rfc3339};
 /// Wire-shape version of the query payload. Additive changes (a new metric, a
 /// new `group_by` or `window` token) do NOT bump it; a semantic change to an
 /// existing field, or a removal, does.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// The one method this route answers. Not expressible as an axum
 /// `MethodFilter`, hence the manual guard.
