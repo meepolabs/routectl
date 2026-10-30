@@ -11,7 +11,7 @@ use routectl_core::{
 };
 
 use crate::config::RetryPolicy;
-use crate::runtime_state::{AdmissionKind, GateDecision, ProviderState};
+use crate::runtime_state::{AdmissionKind, GateAdmission, GateDecision, ProviderState};
 
 use super::Router;
 use super::outcome_rule::BreakerOutcome;
@@ -92,9 +92,33 @@ impl Router {
         refusal
     }
 
-    /// Run the RPM bucket + circuit breaker for `state_key` and return both
-    /// the refusal (if any) and a guard that OWNS whatever half-open claim
-    /// this admission took.
+    /// [`Self::admit_client`] with the account resolved from `state_key`.
+    /// Test seam: dispatch carries the account on its target.
+    #[cfg(test)]
+    pub(super) fn admit_dispatch(
+        &self,
+        state_key: &str,
+        provider_name_for_err: &str,
+    ) -> (Option<(&'static str, Error)>, ProbeSlotGuard) {
+        let account = self.account_for_state_key_in_tests(state_key);
+        self.admit_client(state_key, account.as_deref(), provider_name_for_err)
+    }
+
+    /// [`Self::admit_probe`] with the account resolved from `state_key`.
+    /// Test seam.
+    #[cfg(test)]
+    pub(super) fn admit_probe_dispatch(
+        &self,
+        state_key: &str,
+        provider_name_for_err: &str,
+    ) -> (Option<(&'static str, Error)>, ProbeSlotGuard) {
+        let account = self.account_for_state_key_in_tests(state_key);
+        self.admit_probe(state_key, account.as_deref(), provider_name_for_err)
+    }
+
+    /// Run the account gate, then the RPM bucket + circuit breaker for
+    /// `state_key`, and return both the refusal (if any) and a guard that OWNS
+    /// whatever half-open claim this admission took.
     ///
     /// The guard is armed only when THIS admission set the half-open bit, as
     /// reported by the single `ProviderState` critical section that set it.
@@ -106,20 +130,23 @@ impl Router {
     ///
     /// A refusal, and an admission through a CLOSED breaker, both yield an
     /// inert guard whose drop is a no-op.
-    pub(super) fn admit_dispatch(
+    pub(super) fn admit_client(
         &self,
         state_key: &str,
+        account: Option<&str>,
         provider_name_for_err: &str,
     ) -> (Option<(&'static str, Error)>, ProbeSlotGuard) {
         self.admit(
             state_key,
+            account,
             provider_name_for_err,
             AdmissionKind::ClientDispatch,
         )
     }
 
     /// Admit a BACKGROUND PROBE, which defers a half-open-ready lane instead of
-    /// taking its recovery attempt.
+    /// taking its recovery attempt, and is refused outright on a parked
+    /// account.
     ///
     /// The deferral happens inside `ProviderState`'s critical section, before
     /// the half-open claim and before the RPM debit, so a declined probe leaves
@@ -131,13 +158,15 @@ impl Router {
     /// The returned guard is always inert -- a probe never claims -- but it is
     /// returned rather than elided so the worker's release path stays a single
     /// `Drop` on every exit.
-    pub(super) fn admit_probe_dispatch(
+    pub(super) fn admit_probe(
         &self,
         state_key: &str,
+        account: Option<&str>,
         provider_name_for_err: &str,
     ) -> (Option<(&'static str, Error)>, ProbeSlotGuard) {
         self.admit(
             state_key,
+            account,
             provider_name_for_err,
             AdmissionKind::BackgroundProbe,
         )
@@ -146,6 +175,7 @@ impl Router {
     fn admit(
         &self,
         state_key: &str,
+        account: Option<&str>,
         provider_name_for_err: &str,
         kind: AdmissionKind,
     ) -> (Option<(&'static str, Error)>, ProbeSlotGuard) {
@@ -153,17 +183,7 @@ impl Router {
             return (None, ProbeSlotGuard::new(None, 0));
         };
         let now = Instant::now();
-        // The credential generation is read in the admission's own critical
-        // section: a reload landing between two acquisitions would hand this
-        // attempt the post-reload generation and let its rejection re-park.
-        let (admission, credential_generation) = {
-            let mut st = state.lock();
-            let admission = match kind {
-                AdmissionKind::ClientDispatch => st.try_dispatch_admitting(now),
-                AdmissionKind::BackgroundProbe => st.try_dispatch_probe(now),
-            };
-            (admission, st.credential_generation())
-        };
+        let (admission, credential_generation) = self.admit_locked(&state, account, now, kind);
         #[cfg(test)]
         run_after_admission_hook();
         let claimed = admission.claimed_half_open.then_some(state);
@@ -184,6 +204,37 @@ impl Router {
             )),
         };
         (refusal, guard)
+    }
+
+    /// The account gate, then the model gate, in the lock order the
+    /// credential-park module documents: the account map, then the slot.
+    ///
+    /// A live account park refuses before the slot is locked, so no RPM token
+    /// is charged and no half-open slot claimed. The generation is read in the
+    /// same critical section as the admission: a reload landing between two
+    /// acquisitions would hand this attempt the post-reload generation and let
+    /// its rejection re-park. The account's record is created here, so a
+    /// reload's reset always has a generation to advance under an attempt in
+    /// flight.
+    fn admit_locked(
+        &self,
+        state: &Mutex<ProviderState>,
+        account: Option<&str>,
+        now: Instant,
+        kind: AdmissionKind,
+    ) -> (GateAdmission, u64) {
+        let Some(account) = account else {
+            return (state.lock().admit_under_park(now, kind, None), 0);
+        };
+        let mut accounts = self.credential_accounts.lock();
+        let record = *accounts.entry(account.to_string()).or_default();
+        if let Some(park) = record.park()
+            && park.is_live_at(now)
+        {
+            return (GateAdmission::refused(park.refusal()), record.generation());
+        }
+        let admission = state.lock().admit_under_park(now, kind, record.park());
+        (admission, record.generation())
     }
 
     /// Debit one breaker failure for `state_key`, returning whether this

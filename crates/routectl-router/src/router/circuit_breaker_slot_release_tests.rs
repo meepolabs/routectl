@@ -1330,7 +1330,7 @@ impl Provider for Status0Provider {
 /// `breaker_open_at`, which claims a probe slot via `try_dispatch`).
 fn circuit_phase(router: &Router) -> crate::runtime_state::CircuitPhase {
     router
-        .capacity_snapshot_for("m", Instant::now())
+        .capacity_snapshot_for("m", None, Instant::now())
         .expect("per-model state slot exists")
         .circuit
 }

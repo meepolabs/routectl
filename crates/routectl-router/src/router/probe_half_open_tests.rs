@@ -579,7 +579,7 @@ async fn a_lane_that_recovers_after_deferrals_still_dials() {
     assert_eq!(provider.count_calls.load(Ordering::SeqCst), 0, "premise");
 
     // The lane recovers: a real request settles the half-open attempt.
-    let generation = router.state["m1"].lock().credential_generation();
+    let generation = router.credential_generation_for_tests("m1");
     router.settle_seat_success_for_tests("m1", true, generation);
     assert_eq!(
         router.gate_status_for_tests("m1").circuit,

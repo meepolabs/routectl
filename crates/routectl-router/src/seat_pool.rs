@@ -161,6 +161,32 @@ pub fn seat_identity(secret_ref: Option<&SecretRef>) -> Option<String> {
     }
 }
 
+/// The credential account a dispatch target's credential park is scoped to:
+/// every model on one account is refused while that account's credential is
+/// parked.
+///
+/// An OAuth target's account is its [`seat_identity`]; any other own-credential
+/// target's account is its `[providers]` entry name behind
+/// [`SEAT_KEY_SEPARATOR`]. The prefix keeps the two domains disjoint: an OAuth
+/// identity starts with its provider, which `SecretRef::parse` refuses empty,
+/// and an entry name may not contain the separator ([`check_state_key_name`]),
+/// so `oauth://x` and entry `x` never share an account. Two entries reading one
+/// secret are two accounts. A forwarded credential is the client's, not the
+/// operator's, so a forwarded target has no account and is never parked.
+pub fn credential_account(
+    seat_identity: Option<&str>,
+    provider_name: &str,
+    forwarded: bool,
+) -> Option<String> {
+    if forwarded {
+        return None;
+    }
+    Some(seat_identity.map_or_else(
+        || format!("{SEAT_KEY_SEPARATOR}{provider_name}"),
+        str::to_string,
+    ))
+}
+
 /// Per-pool round-robin cursor set. Holds one `AtomicUsize` per rotation
 /// namespace -- the POOL name for a pool-backed model, so two models on one
 /// pool advance ONE cursor and their traffic interleaves across the pool's
@@ -884,6 +910,92 @@ mod tests {
     fn seat_identity_of_absent_ref_is_none() {
         // Arrange / Act / Assert: a target with no credential ref at all.
         assert_eq!(seat_identity(None), None);
+    }
+
+    /// `(name, seat identity, entry, forwarded, expected account)`.
+    type AccountRow<'a> = (&'a str, Option<&'a str>, &'a str, bool, Option<&'a str>);
+
+    /// One target's `(seat identity, entry)`.
+    type TargetCredential<'a> = (Option<String>, &'a str);
+
+    #[test]
+    fn credential_account_keys_oauth_by_seat_and_any_other_entry_by_its_name() {
+        let rows: [AccountRow<'_>; 5] = [
+            (
+                "unlabeled oauth seat",
+                Some("codex"),
+                "entry-a",
+                false,
+                Some("codex"),
+            ),
+            (
+                "labeled oauth seat",
+                Some("anthropic#a"),
+                "entry-a",
+                false,
+                Some("anthropic#a"),
+            ),
+            ("non-oauth entry", None, "glm", false, Some("#glm")),
+            ("forwarded entry", None, "claude-fwd", true, None),
+            (
+                "forwarded entry with an oauth seat",
+                Some("codex"),
+                "entry-a",
+                true,
+                None,
+            ),
+        ];
+        for (name, seat, entry, forwarded, expected) in rows {
+            // Act
+            let account = credential_account(seat, entry, forwarded);
+
+            // Assert
+            assert_eq!(account.as_deref(), expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn credential_accounts_collide_only_on_one_credential() {
+        let oauth =
+            |uri: &str| seat_identity(Some(&SecretRef::parse(uri).expect("parse oauth ref")));
+        let rows: [(&str, TargetCredential<'_>, TargetCredential<'_>, bool); 4] = [
+            (
+                "oauth://x vs entry x",
+                (oauth("oauth://x"), "a"),
+                (None, "x"),
+                false,
+            ),
+            (
+                "one oauth seat under two entries",
+                (oauth("oauth://p#l"), "a"),
+                (oauth("oauth://p#l"), "b"),
+                true,
+            ),
+            (
+                "two labels of one oauth provider",
+                (oauth("oauth://p#l"), "a"),
+                (oauth("oauth://p#m"), "a"),
+                false,
+            ),
+            (
+                "two entries on one env var",
+                (None, "a"),
+                (None, "b"),
+                false,
+            ),
+        ];
+        for (name, (left_seat, left_entry), (right_seat, right_entry), same) in rows {
+            // Act
+            let left = credential_account(left_seat.as_deref(), left_entry, false);
+            let right = credential_account(right_seat.as_deref(), right_entry, false);
+
+            // Assert
+            assert!(
+                left.is_some() && right.is_some(),
+                "{name}: both own an account"
+            );
+            assert_eq!(left == right, same, "{name}: {left:?} vs {right:?}");
+        }
     }
 
     #[test]

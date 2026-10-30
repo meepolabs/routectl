@@ -49,21 +49,19 @@ impl Provider for Unused {
     }
 }
 
-/// Three non-pooled seats; the two in [`PARKED`] are parked for an hour when
-/// `park` is set.
-fn router(park: bool) -> Router {
+/// A router over non-pooled models given as `(nickname, provider entry)`;
+/// models naming one entry share one credential account.
+fn router_over(models: &[(&str, &str)]) -> Router {
     let mut router = Router::new(Arc::new(Config::default()));
     let provider: Arc<dyn Provider> = Arc::new(Unused);
-    let models: BTreeMap<String, Arc<ResolvedModel>> = PARKED
+    let models: BTreeMap<String, Arc<ResolvedModel>> = models
         .iter()
-        .map(|(key, _)| *key)
-        .chain([FREE])
-        .map(|nickname| {
+        .map(|(nickname, entry)| {
             (
-                nickname.to_string(),
+                (*nickname).to_string(),
                 Arc::new(ResolvedModel::new(
-                    nickname,
-                    "p",
+                    *nickname,
+                    *entry,
                     Arc::clone(&provider),
                     "u",
                 )),
@@ -71,6 +69,17 @@ fn router(park: bool) -> Router {
         })
         .collect();
     router.install_resolved_models(models);
+    router
+}
+
+/// Three non-pooled seats, each on its own account; the two in [`PARKED`]
+/// are parked for an hour when `park` is set.
+fn router(park: bool) -> Router {
+    let router = router_over(&[
+        (PARKED[0].0, "p-expired"),
+        (PARKED[1].0, "p-invalid"),
+        (FREE, "p-free"),
+    ]);
     if park {
         let until = Instant::now() + Duration::from_hours(1);
         for (key, reason) in PARKED {
@@ -183,4 +192,40 @@ async fn the_served_doctor_warns_once_per_parked_seat_and_the_offline_doctor_nam
     );
     assert!(parked_findings(&unparked).is_empty(), "{unparked:?}");
     assert!(parked_findings(&offline).is_empty(), "{offline:?}");
+}
+
+/// One parked account under N targets reports N parked rows, one per target,
+/// and none for a target on another account.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn the_served_doctor_names_every_target_of_a_parked_account() {
+    let dir = tempfile::tempdir().unwrap();
+    let _xdg = routectl_testkit::ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
+    let config_path = dir.path().join("config.toml");
+    std::fs::write(&config_path, config_text(&dir.path().join("usage.db"))).unwrap();
+    let siblings = ["sibling-a", "sibling-b", "sibling-c"];
+    let router = router_over(&[
+        (siblings[0], "shared"),
+        (siblings[1], "shared"),
+        (siblings[2], "shared"),
+        (FREE, "p-free"),
+    ]);
+    assert!(router.park_credential_for_tests(
+        siblings[0],
+        UpstreamReason::CredentialInvalid,
+        Instant::now() + Duration::from_hours(1),
+    ));
+
+    let served = served_findings(router, config_path).await;
+
+    let mut named: Vec<String> = parked_findings(&served)
+        .iter()
+        .map(|f| f["name"].as_str().unwrap().to_string())
+        .collect();
+    named.sort();
+    let expected: Vec<String> = siblings
+        .iter()
+        .map(|s| format!("parked seat {s}"))
+        .collect();
+    assert_eq!(named, expected, "{served:?}");
 }

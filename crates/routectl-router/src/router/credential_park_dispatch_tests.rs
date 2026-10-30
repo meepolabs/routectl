@@ -486,7 +486,7 @@ async fn clear_all_credential_parks_lifts_every_seat() {
 async fn a_success_settles_the_breaker_and_the_park_in_one_critical_section() {
     for surface in SURFACES {
         // Arrange: a lapsed park whose re-test succeeds, and a rejection that
-        // tries to park the seat from inside the success settlement.
+        // tries to park the account from inside the success settlement.
         let primary = ScriptedProvider::new("p-a", &[Step::Ok]);
         let sibling = ScriptedProvider::new("p-b", &[Step::Ok]);
         let router = chain_router(primary, sibling, false);
@@ -495,18 +495,22 @@ async fn a_success_settles_the_breaker_and_the_park_in_one_critical_section() {
             UpstreamReason::CredentialExpired,
             Instant::now()
         ));
-        let slot = router.state.get("m-a").cloned().expect("m-a slot");
+        let accounts = router.credential_accounts.clone();
         let fired = Arc::new(AtomicBool::new(false));
         let waited_for_the_settle = Arc::new(AtomicBool::new(false));
         {
-            let (slot, fired, waited) =
-                (slot.clone(), fired.clone(), waited_for_the_settle.clone());
+            let (accounts, fired, waited) = (
+                accounts.clone(),
+                fired.clone(),
+                waited_for_the_settle.clone(),
+            );
             super::credential_park::set_within_success_settle_hook(move || {
                 fired.store(true, Ordering::SeqCst);
-                match slot.try_lock() {
-                    Some(mut state) => {
-                        state.park_credential(Instant::now(), UpstreamReason::CredentialInvalid)
-                    }
+                match accounts.try_lock() {
+                    Some(mut accounts) => accounts.entry("#p-a".into()).or_default().park_until(
+                        UpstreamReason::CredentialInvalid,
+                        Instant::now() + CREDENTIAL_PARK_BACKSTOP,
+                    ),
                     None => waited.store(true, Ordering::SeqCst),
                 }
             });
@@ -515,8 +519,14 @@ async fn a_success_settles_the_breaker_and_the_park_in_one_critical_section() {
         // Act
         let served = dispatch(&router, surface, request(None, false)).await;
         if waited_for_the_settle.load(Ordering::SeqCst) {
-            slot.lock()
-                .park_credential(Instant::now(), UpstreamReason::CredentialInvalid);
+            accounts
+                .lock()
+                .entry("#p-a".into())
+                .or_default()
+                .park_until(
+                    UpstreamReason::CredentialInvalid,
+                    Instant::now() + CREDENTIAL_PARK_BACKSTOP,
+                );
         }
 
         // Assert
@@ -527,7 +537,7 @@ async fn a_success_settles_the_breaker_and_the_park_in_one_critical_section() {
         );
         assert!(
             waited_for_the_settle.load(Ordering::SeqCst),
-            "{surface:?}: the rejection must wait out the settlement's lock"
+            "{surface:?}: the rejection must wait out the settlement's account lock"
         );
         assert_eq!(
             park_reason(&router, "m-a"),

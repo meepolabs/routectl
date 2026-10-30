@@ -1971,7 +1971,7 @@ async fn a_repairable_rejection_does_not_debit_the_breaker_in_any_walk() {
         );
         assert_eq!(
             router
-                .capacity_snapshot_for("m0", std::time::Instant::now())
+                .capacity_snapshot_for("m0", None, std::time::Instant::now())
                 .expect("seat state slot exists")
                 .circuit,
             crate::runtime_state::CircuitPhase::Closed,

@@ -112,8 +112,17 @@ impl Router {
 
     /// One dispatch target per seat of a pooled model, or the single target
     /// of a direct one, in configured order, built by the constructors chain
-    /// expansion uses.
+    /// expansion uses and carrying the credential account it derives.
     pub(super) fn projection_targets(&self, model: &Arc<ResolvedModel>) -> Vec<DispatchTarget> {
+        let mut targets = self.projection_targets_unaccounted(model);
+        for target in &mut targets {
+            target.account =
+                self.credential_account_for(&target.provider_name, target.seat.as_deref());
+        }
+        targets
+    }
+
+    fn projection_targets_unaccounted(&self, model: &Arc<ResolvedModel>) -> Vec<DispatchTarget> {
         model.seats.as_ref().map_or_else(
             || vec![into_one_dispatch_target(Arc::clone(model))],
             |seats| {

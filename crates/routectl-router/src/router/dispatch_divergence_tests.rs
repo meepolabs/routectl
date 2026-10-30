@@ -186,7 +186,7 @@ fn unknown_provider(_: &ChatRequest) -> Result<()> {
 /// Non-mutating breaker phase of the seat `nickname`.
 fn phase(router: &Router, nickname: &str) -> CircuitPhase {
     router
-        .capacity_snapshot_for(nickname, Instant::now())
+        .capacity_snapshot_for(nickname, None, Instant::now())
         .expect("the seat has a state slot")
         .circuit
 }

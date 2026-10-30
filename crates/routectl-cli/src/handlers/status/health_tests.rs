@@ -244,22 +244,22 @@ async fn the_health_panel_reads_the_park_from_the_live_router() {
     assert!(free["parked_until_ms"].is_null(), "{free}");
 }
 
-/// Two non-pooled targets, `parked` and `free`, with `parked`'s credential
-/// parked for ten minutes.
+/// Two non-pooled targets on separate accounts, `parked` and `free`, with
+/// `parked`'s credential parked for ten minutes.
 fn parked_router() -> Router {
     use routectl_router::ResolvedModel;
     use std::collections::BTreeMap;
 
     let mut router = Router::new(Arc::new(Config::default()));
     let provider: Arc<dyn Provider> = Arc::new(Unused);
-    let models: BTreeMap<String, Arc<ResolvedModel>> = ["parked", "free"]
+    let models: BTreeMap<String, Arc<ResolvedModel>> = [("parked", "p-parked"), ("free", "p-free")]
         .into_iter()
-        .map(|nickname| {
+        .map(|(nickname, entry)| {
             (
                 nickname.to_string(),
                 Arc::new(ResolvedModel::new(
                     nickname,
-                    "p",
+                    entry,
                     Arc::clone(&provider),
                     "u",
                 )),

@@ -552,7 +552,8 @@ impl Router {
                 // section that acquired the slot and never from a re-read of
                 // the shared half-open bit.
                 let mut probe_guard = {
-                    let (refusal, guard) = self.admit_dispatch(state_key, provider_name);
+                    let (refusal, guard) =
+                        self.admit_client(state_key, target.account.as_deref(), provider_name);
                     if let Some((gate_kind, gate_err)) = refusal {
                         log_gate_refusal(
                             provider_name,
@@ -657,6 +658,7 @@ impl Router {
                     Ok(out) => {
                         self.settle_seat_success(
                             state_key,
+                            target.account.as_deref(),
                             A::SURFACE.records_success_on_commit() || was_half_open_probe,
                             &probe_guard,
                         );
@@ -759,7 +761,7 @@ impl Router {
                             // stays locked open until restart.
                             if let Err(refresh_err) = provider.on_auth_failure().await {
                                 self.park_credential_on_rejection(
-                                    state_key,
+                                    target.account.as_deref(),
                                     &refresh_err,
                                     is_probe,
                                     probe_guard.credential_generation(),
@@ -898,7 +900,7 @@ impl Router {
                         // Outside the debit gate: a credential rejection
                         // classifies Auth, which never debits.
                         self.park_credential_on_rejection(
-                            state_key,
+                            target.account.as_deref(),
                             &e,
                             is_probe,
                             probe_guard.credential_generation(),

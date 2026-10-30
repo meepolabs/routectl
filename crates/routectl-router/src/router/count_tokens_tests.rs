@@ -586,7 +586,7 @@ fn half_open_in_flight(router: &Router, state_key: &str) -> bool {
 /// Non-mutating breaker phase for the seat keyed by `state_key`.
 fn circuit_phase(router: &Router, state_key: &str) -> crate::runtime_state::CircuitPhase {
     router
-        .capacity_snapshot_for(state_key, Instant::now())
+        .capacity_snapshot_for(state_key, None, Instant::now())
         .expect("seat state slot exists")
         .circuit
 }

@@ -19,6 +19,10 @@ pub(super) struct ProbeSeat {
     pub(super) provider_name: String,
     /// The seat's key into `Router.state`: its own breaker and RPM bucket.
     pub(super) state_key: String,
+    /// The seat's credential account, whose park refuses the probe before
+    /// its model gate is consulted (see
+    /// [`crate::seat_pool::credential_account`]).
+    pub(super) account: Option<String>,
     /// The seat's wire model id.
     pub(super) upstream: String,
     pub(super) provider: std::sync::Arc<dyn routectl_core::Provider>,
@@ -36,6 +40,7 @@ impl std::fmt::Debug for ProbeSeat {
         f.debug_struct("ProbeSeat")
             .field("provider_name", &self.provider_name)
             .field("state_key", &self.state_key)
+            .field("account", &self.account)
             .field("upstream", &self.upstream)
             .field("provider_id", &self.provider.id())
             .finish()
@@ -143,6 +148,10 @@ impl Router {
                 None => (model.provider_name == entry).then(|| ProbeSeat {
                     provider_name: model.provider_name.clone(),
                     state_key: nickname.clone(),
+                    account: self.credential_account_for(
+                        &model.provider_name,
+                        crate::seat_pool::seat_identity(model.auth_secret_ref.as_ref()).as_deref(),
+                    ),
                     upstream: model.upstream.clone(),
                     provider: std::sync::Arc::clone(&model.provider),
                 }),
@@ -152,6 +161,11 @@ impl Router {
                     .map(|seat| ProbeSeat {
                         provider_name: seat.provider_name.clone(),
                         state_key: seat.state_key_for(nickname),
+                        account: self.credential_account_for(
+                            &seat.provider_name,
+                            crate::seat_pool::seat_identity(seat.auth_secret_ref.as_ref())
+                                .as_deref(),
+                        ),
                         upstream: model.upstream.clone(),
                         provider: std::sync::Arc::clone(&seat.provider),
                     }),

@@ -51,11 +51,13 @@ impl Router {
     pub(super) fn capacity_snapshot_for(
         &self,
         state_key: &str,
+        account: Option<&str>,
         now: Instant,
     ) -> Option<crate::runtime_state::CapacitySnapshot> {
+        let park = self.account_park(account);
         self.state
             .get(state_key)
-            .map(|s| s.lock().capacity_snapshot(now))
+            .map(|s| s.lock().capacity_snapshot_under(now, park))
     }
 
     /// The per-seat subscription-quota tiers for a birth pick over this pool,
@@ -275,7 +277,9 @@ impl Router {
         seats
             .iter()
             .map(|s| {
-                self.capacity_snapshot_for(&s.state_key_for(nickname), now)
+                let seat = crate::seat_pool::seat_identity(s.auth_secret_ref.as_ref());
+                let account = self.credential_account_for(&s.provider_name, seat.as_deref());
+                self.capacity_snapshot_for(&s.state_key_for(nickname), account.as_deref(), now)
                     .unwrap_or(
                         // Defensive: a seat with no state slot should never
                         // happen (install creates one per seat). If it does,

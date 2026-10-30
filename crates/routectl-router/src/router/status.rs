@@ -56,7 +56,13 @@ impl Router {
     /// `capacity_snapshot_for`, this must never go through the
     /// `try_dispatch`-based `breaker_open_for` anti-pattern, which would
     /// claim a half-open probe slot just to read.
-    fn gate_status_for(&self, state_key: &str, now: Instant) -> ProviderGateStatus {
+    fn gate_status_for(
+        &self,
+        state_key: &str,
+        account: Option<&str>,
+        now: Instant,
+    ) -> ProviderGateStatus {
+        let park = self.account_park(account);
         self.state.get(state_key).map_or(
             ProviderGateStatus {
                 rpm_available: None,
@@ -67,7 +73,7 @@ impl Router {
                 last_outcome_elapsed: None,
                 credential_park: None,
             },
-            |s| s.lock().gate_status(now),
+            |s| s.lock().gate_status_under(now, park),
         )
     }
 
@@ -76,7 +82,8 @@ impl Router {
     /// never claims a half-open slot.
     #[cfg(test)]
     pub(crate) fn gate_status_for_tests(&self, state_key: &str) -> ProviderGateStatus {
-        self.gate_status_for(state_key, Instant::now())
+        let account = self.account_for_state_key_in_tests(state_key);
+        self.gate_status_for(state_key, account.as_deref(), Instant::now())
     }
 
     /// Read-only health of every dispatch target, for the status surface.
@@ -86,13 +93,14 @@ impl Router {
     /// targets are the ones chain expansion builds, so each entry's
     /// `state_key` and `learned_lane` are dispatch's own. Each entry's gate is read via the `&self`-borrow `gate_status_for`, which
     /// never claims a half-open probe slot; a target with no state slot
-    /// fails safe to circuit-Open rather than panicking.
+    /// fails safe to circuit-Open rather than panicking. A parked account is
+    /// reported on every target of the account, one row each.
     pub fn status_targets(&self, now: Instant) -> Vec<RouteTargetStatus> {
         let mut out = Vec::new();
         for model in self.resolved_models.values() {
             for target in self.projection_targets(model) {
                 out.push(RouteTargetStatus {
-                    gate: self.gate_status_for(&target.state_key, now),
+                    gate: self.gate_status_for(&target.state_key, target.account.as_deref(), now),
                     nickname: model.nickname.clone(),
                     seat_label: model.seats.as_ref().map(|_| target.provider_name.clone()),
                     provider_name: target.provider_name,

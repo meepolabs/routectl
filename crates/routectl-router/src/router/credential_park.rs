@@ -1,14 +1,31 @@
-//! Seat credential park: the router side of a seat whose upstream rejected
-//! the credential itself. Parks on a typed reason, lifts on a success through
-//! the seat, and lifts everywhere on a reload. The park state and its gate
-//! behavior live in [`crate::runtime_state::ProviderState`].
+//! Account credential park: the router side of an account whose upstream
+//! rejected the credential itself. Parks on a typed reason, lifts on a success
+//! through any model on the account, and lifts everywhere on a reload. The
+//! per-account record is [`crate::runtime_state::AccountCredential`]; the
+//! model gate it feeds is [`crate::runtime_state::ProviderState`].
+//!
+//! Lock order: the account map (`Router::credential_accounts`) before any
+//! `ProviderState` slot. Admission and success settlement hold both, in that
+//! order, so a park and a lift are each atomic with the model gate they
+//! decide. Every other path takes one lock alone: readers copy the park out
+//! and release the map before locking a slot, and the breaker, RPM and
+//! half-open release paths never touch the map. Nothing takes the map while
+//! holding a slot.
 
+use std::collections::BTreeMap;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use routectl_core::{Error, UpstreamReason, sanitize_for_log};
 
 use super::Router;
 use super::runtime_gate::ProbeSlotGuard;
+use crate::runtime_state::{AccountCredential, CredentialPark};
+
+/// Every credential account's park and generation, keyed by
+/// [`crate::seat_pool::credential_account`]. Shared whole across a hot-reload,
+/// so an account that leaves the config keeps its (inert) record until the
+/// process restarts; the keyspace is bounded by the accounts ever configured.
+pub(super) type CredentialAccounts = BTreeMap<String, AccountCredential>;
 
 /// The `gate_kind` a credential-parked refusal is logged under.
 pub(super) const CREDENTIAL_PARKED_GATE_KIND: &str = "credential_parked";
@@ -39,7 +56,7 @@ fn run_within_success_settle_hook() {
     }
 }
 
-/// The refusal a credential-parked seat answers with: the park's reason and
+/// The refusal a credential-parked account answers with: the park's reason and
 /// its deadline as epoch ms, read against `now`, the admission's own instant.
 pub(super) fn parked_seat_error(reason: UpstreamReason, until: Instant, now: Instant) -> Error {
     let deadline = SystemTime::now() + until.saturating_duration_since(now);
@@ -116,10 +133,57 @@ pub(super) fn log_gate_refusal(
 }
 
 impl Router {
-    /// Park the credential of the state slot keyed by `state_key` until
-    /// `until`, returning `false` when no such slot exists. Test seam for the
-    /// reload and dispatch tests that need a parked (or already lapsed) seat
-    /// without driving an upstream rejection.
+    /// The credential account of a target egressing through `provider_name`
+    /// with OAuth seat identity `seat`. The forwarded fact is read off the
+    /// operator's entry through the accessor chain expansion derives
+    /// `DispatchTarget::use_forwarded_credential` from, so every reader
+    /// (dispatch, status, sticky placement, background probes) names one
+    /// account for one target.
+    pub(super) fn credential_account_for(
+        &self,
+        provider_name: &str,
+        seat: Option<&str>,
+    ) -> Option<String> {
+        let forwarded = self
+            .config
+            .providers
+            .get(provider_name)
+            .is_some_and(|entry| entry.forwarded_base_url().is_some());
+        crate::seat_pool::credential_account(seat, provider_name, forwarded)
+    }
+
+    /// The park on `account`, read under the account lock and released
+    /// before the caller locks any model slot. `None` for no account.
+    pub(super) fn account_park(&self, account: Option<&str>) -> Option<CredentialPark> {
+        let account = account?;
+        self.credential_accounts
+            .lock()
+            .get(account)
+            .and_then(AccountCredential::park)
+    }
+
+    /// The credential account of the dispatch target keyed by `state_key`,
+    /// resolved through the targets chain expansion builds. Test seams only:
+    /// dispatch carries the account on its target.
+    #[cfg(any(test, feature = "test-utils"))]
+    fn account_for_state_key(&self, state_key: &str) -> Option<String> {
+        self.resolved_models
+            .values()
+            .flat_map(|model| self.projection_targets(model))
+            .find(|target| target.state_key == state_key)
+            .and_then(|target| target.account)
+    }
+
+    /// [`Self::account_for_state_key`] for the router's other test seams.
+    #[cfg(test)]
+    pub(super) fn account_for_state_key_in_tests(&self, state_key: &str) -> Option<String> {
+        self.account_for_state_key(state_key)
+    }
+
+    /// Park the credential account of the target keyed by `state_key` until
+    /// `until`, returning `false` when no such target or account exists. Test
+    /// seam for the reload and dispatch tests that need a parked (or already
+    /// lapsed) account without driving an upstream rejection.
     #[cfg(any(test, feature = "test-utils"))]
     #[doc(hidden)]
     pub fn park_credential_for_tests(
@@ -128,13 +192,24 @@ impl Router {
         reason: routectl_core::UpstreamReason,
         until: Instant,
     ) -> bool {
-        match self.state.get(state_key) {
-            Some(slot) => {
-                slot.lock().park_credential_until(reason, until);
-                true
-            }
-            None => false,
-        }
+        let Some(account) = self.account_for_state_key(state_key) else {
+            return false;
+        };
+        self.credential_accounts
+            .lock()
+            .entry(account)
+            .or_default()
+            .park_until(reason, until);
+        true
+    }
+
+    /// The current credential generation of the account of the target keyed
+    /// by `state_key`, read without admitting anything. Test seam.
+    #[cfg(test)]
+    pub(super) fn credential_generation_for_tests(&self, state_key: &str) -> u64 {
+        self.account_for_state_key(state_key)
+            .and_then(|account| self.credential_accounts.lock().get(&account).copied())
+            .map_or(0, |record| record.generation())
     }
 
     /// Admit one client dispatch on `state_key` through the real gate and
@@ -145,14 +220,15 @@ impl Router {
     #[cfg(any(test, feature = "test-utils"))]
     #[doc(hidden)]
     pub fn admit_for_credential_tests(&self, state_key: &str) -> Option<u64> {
-        let (refusal, mut guard) = self.admit_dispatch(state_key, "test");
+        let account = self.account_for_state_key(state_key);
+        let (refusal, mut guard) = self.admit_client(state_key, account.as_deref(), "test");
         guard.release();
         refusal.is_none().then(|| guard.credential_generation())
     }
 
     /// Settle a terminal rejection `err` of a client attempt admitted under
     /// `generation`, exactly as a dispatch surface does, returning whether it
-    /// parked the seat.
+    /// parked the account.
     #[cfg(any(test, feature = "test-utils"))]
     #[doc(hidden)]
     pub fn settle_credential_rejection_for_tests(
@@ -161,33 +237,33 @@ impl Router {
         err: &Error,
         generation: u64,
     ) -> bool {
-        self.park_credential_on_rejection(state_key, err, false, generation)
+        let account = self.account_for_state_key(state_key);
+        self.park_credential_on_rejection(account.as_deref(), err, false, generation)
     }
 
-    /// Lift the credential park on every seat this Router gates and start a
-    /// new credential generation on each, returning how many were parked. The
-    /// generation advances even on a seat with no park, so an attempt admitted
-    /// before this call cannot park its seat after it. Clear-all rather than
-    /// per-credential: no credential -> state_key map exists for every secret
-    /// kind, and a wrongly cleared park costs one request per seat before it
-    /// re-parks.
+    /// Lift the credential park on every account and start a new credential
+    /// generation on each, returning how many accounts were parked. The
+    /// generation advances even on an account with no park, so an attempt
+    /// admitted before this call cannot park its account after it. An account
+    /// no attempt has admitted on yet has no record and nothing in flight.
     pub fn clear_all_credential_parks(&self) -> usize {
-        self.state
-            .values()
-            .filter(|state| state.lock().reset_credential_parks())
+        self.credential_accounts
+            .lock()
+            .values_mut()
+            .filter_map(|record| record.reset().then_some(()))
             .count()
     }
 
-    /// Park the seat keyed by `state_key` when `err` carries a typed
-    /// credential reason and the attempt's admission `generation` is still
-    /// current, returning whether it parked. A probe never parks: a minimal
-    /// availability request is not evidence about the seat a client will use.
-    /// Called beside the breaker settle, never inside its debit gate, because
-    /// a credential rejection classifies `Auth`, which does not debit. Leaves
-    /// the half-open slot to the caller's probe guard.
+    /// Park `account` when `err` carries a typed credential reason and the
+    /// attempt's admission `generation` is still current, returning whether
+    /// it parked. A probe never parks: a minimal availability request is not
+    /// evidence about the account a client will use. No account (a forwarded
+    /// credential) never parks. Called beside the breaker settle, never inside
+    /// its debit gate, because a credential rejection classifies `Auth`, which
+    /// does not debit. Leaves the half-open slot to the caller's probe guard.
     pub(super) fn park_credential_on_rejection(
         &self,
-        state_key: &str,
+        account: Option<&str>,
         err: &Error,
         is_probe: bool,
         generation: u64,
@@ -195,25 +271,25 @@ impl Router {
         if is_probe {
             return false;
         }
-        let Some(reason) = err.upstream_reason() else {
+        let (Some(reason), Some(account)) = (err.upstream_reason(), account) else {
             return false;
         };
-        let Some(state) = self.state.get(state_key) else {
-            return false;
-        };
-        let parked = state
+        let parked = self
+            .credential_accounts
             .lock()
-            .park_credential_in_generation(Instant::now(), reason, generation);
+            .entry(account.to_string())
+            .or_default()
+            .park_in_generation(Instant::now(), reason, generation);
         if parked {
             tracing::warn!(
-                state_key = %sanitize_for_log(state_key),
+                account = %sanitize_for_log(account),
                 reason = reason.as_str(),
                 parked_for_secs = crate::runtime_state::CREDENTIAL_PARK_BACKSTOP.as_secs(),
                 "seat credential rejected; parking the seat",
             );
         } else {
             tracing::debug!(
-                state_key = %sanitize_for_log(state_key),
+                account = %sanitize_for_log(account),
                 reason = reason.as_str(),
                 "seat credential rejected before a reload lifted every park; not parking",
             );
@@ -221,21 +297,23 @@ impl Router {
         parked
     }
 
-    /// Settle a success through the seat keyed by `state_key` for the attempt
-    /// admitted through `guard`: record the breaker success when
-    /// `record_breaker` is set, and lift the credential park when the
-    /// admission's generation is still current, since a success proves the
-    /// credential it was admitted under. One critical section, so a
-    /// concurrent rejection cannot park between the two and then be lifted by
-    /// a success that preceded it.
+    /// Settle a success through the model slot keyed by `state_key` on
+    /// `account` for the attempt admitted through `guard`: record the breaker
+    /// success when `record_breaker` is set, and lift the account's park when
+    /// the admission's generation is still current, since a success proves the
+    /// credential it was admitted under. One critical section over both locks,
+    /// in the module's lock order, so a concurrent rejection cannot park
+    /// between the two and then be lifted by a success that preceded it.
     pub(super) fn settle_seat_success(
         &self,
         state_key: &str,
+        account: Option<&str>,
         record_breaker: bool,
         guard: &ProbeSlotGuard,
     ) {
         self.settle_seat_success_in_generation(
             state_key,
+            account,
             record_breaker,
             guard.credential_generation(),
         );
@@ -251,28 +329,42 @@ impl Router {
         record_breaker: bool,
         generation: u64,
     ) {
-        self.settle_seat_success_in_generation(state_key, record_breaker, generation);
+        let account = self.account_for_state_key(state_key);
+        self.settle_seat_success_in_generation(
+            state_key,
+            account.as_deref(),
+            record_breaker,
+            generation,
+        );
     }
 
     fn settle_seat_success_in_generation(
         &self,
         state_key: &str,
+        account: Option<&str>,
         record_breaker: bool,
         generation: u64,
     ) {
         let Some(state) = self.state.get(state_key) else {
             return;
         };
+        let mut accounts = self.credential_accounts.lock();
         let mut state = state.lock();
         if record_breaker {
             state.record_success(Instant::now());
         }
         #[cfg(test)]
         run_within_success_settle_hook();
-        state.clear_credential_park_in_generation(generation);
+        if let Some(record) = account.and_then(|account| accounts.get_mut(account)) {
+            record.clear_in_generation(generation);
+        }
     }
 }
 
 #[cfg(test)]
 #[path = "credential_park_generation_tests.rs"]
 mod credential_park_generation_tests;
+
+#[cfg(test)]
+#[path = "credential_account_park_tests.rs"]
+mod credential_account_park_tests;

@@ -357,8 +357,11 @@ impl Router {
         // rate token -- no path refunds it -- so every declined probe would
         // quietly consume a slice of the operator's budget for a request it
         // never sent.
-        let (refusal, probe_guard) =
-            self.admit_probe_dispatch(&seat.state_key, &seat.provider_name);
+        let (refusal, probe_guard) = self.admit_probe(
+            &seat.state_key,
+            seat.account.as_deref(),
+            &seat.provider_name,
+        );
         if refusal.is_some() {
             // The guard is inert on a refusal by construction, but drop it
             // explicitly so the release path is the same on every exit.

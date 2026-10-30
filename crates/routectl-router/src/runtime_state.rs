@@ -1,9 +1,18 @@
-//! Per-model runtime gates: token-bucket rate limiter + passive
-//! circuit breaker. The `Router` holds one `ProviderState` per
-//! model nickname (one `[models.X]` entry); both the rate limiter
-//! and the breaker are read+updated under a single Mutex so the
-//! router's chain walk can ask "should I dispatch to this model
-//! right now?" atomically.
+//! Per-model runtime gates (token-bucket rate limiter + passive circuit
+//! breaker) and the per-account credential park.
+//!
+//! The `Router` holds one `ProviderState` per dispatch target's state key:
+//! the bare model nickname for a direct model, `nickname#member` for one seat
+//! of a pooled model. Both the rate limiter and the breaker are read and
+//! updated under that slot's Mutex, so the chain walk asks "should I dispatch
+//! to this model right now?" atomically.
+//!
+//! A credential park is not per model: it belongs to the credential's account
+//! (`seat_pool::credential_account`), held in one router-level map of
+//! [`AccountCredential`] records, so a rejection observed through one model
+//! refuses every model on the same account. The model gate takes the
+//! account's park as an input, which is how a lapsed park re-tests through
+//! each model slot's own half-open claim.
 
 use std::time::{Duration, Instant};
 
@@ -16,14 +25,15 @@ const DEFAULT_CIRCUIT_COOLDOWN_MS: u64 = 30_000;
 const RPM_WINDOW_MS: u64 = 60_000;
 
 /// How long a credential park holds before the half-open path re-tests the
-/// seat. Fixed rather than configurable: a false park costs at most this long
-/// plus one request, and a credentials or config reload clears every park.
+/// account, once per model slot on it. Fixed rather than configurable: a false
+/// park costs at most this long plus one request per model on the account, and
+/// a credentials or config reload clears every park.
 pub const CREDENTIAL_PARK_BACKSTOP: Duration = Duration::from_hours(1);
 
-/// A seat parked because its upstream rejected the credential itself, with
-/// exact evidence of why. Lives beside the breaker rather than inside it: the
-/// breaker's trip and reset paths never clear it, so a transient success or a
-/// rate-limit park cannot un-park a dead credential.
+/// An account parked because its upstream rejected the credential itself, with
+/// exact evidence of why. Lives outside the breaker: the breaker's trip and
+/// reset paths never clear it, so a transient success or a rate-limit park
+/// cannot un-park a dead credential.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CredentialPark {
     /// Why the upstream rejected the credential.
@@ -34,11 +44,83 @@ pub struct CredentialPark {
 }
 
 impl CredentialPark {
-    const fn refusal(self) -> GateDecision {
+    pub(crate) const fn refusal(self) -> GateDecision {
         GateDecision::CredentialParked {
             reason: self.reason,
             until: self.until,
         }
+    }
+
+    /// Whether the park still refuses outright at `now`, before any model
+    /// gate is consulted.
+    pub(crate) fn is_live_at(self, now: Instant) -> bool {
+        now < self.until
+    }
+}
+
+/// One credential account's park and generation.
+///
+/// The generation advances on every [`Self::reset`]. An attempt captures it at
+/// admission, and its rejection parks (or its success lifts) only while it
+/// still matches, so an attempt admitted before a reload can neither re-park
+/// the account nor lift a park set after it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AccountCredential {
+    park: Option<CredentialPark>,
+    generation: u64,
+}
+
+impl AccountCredential {
+    /// The account's park, if any.
+    pub const fn park(&self) -> Option<CredentialPark> {
+        self.park
+    }
+
+    /// The generation an admission captures.
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Park the account until `until`, replacing any earlier park.
+    pub const fn park_until(&mut self, reason: UpstreamReason, until: Instant) {
+        self.park = Some(CredentialPark { reason, until });
+    }
+
+    /// Park the account for [`CREDENTIAL_PARK_BACKSTOP`] from `now` only when
+    /// `generation` is still current, returning whether it parked.
+    pub fn park_in_generation(
+        &mut self,
+        now: Instant,
+        reason: UpstreamReason,
+        generation: u64,
+    ) -> bool {
+        if generation != self.generation {
+            return false;
+        }
+        self.park_until(reason, now + CREDENTIAL_PARK_BACKSTOP);
+        true
+    }
+
+    /// Lift the park only when `generation` is still current, returning
+    /// whether it was eligible. A success admitted before a reload proves the
+    /// old credential, not the one a rejection under the new generation
+    /// parked.
+    pub const fn clear_in_generation(&mut self, generation: u64) -> bool {
+        if generation != self.generation {
+            return false;
+        }
+        self.park = None;
+        true
+    }
+
+    /// Lift the park and start a new generation. Advances even when nothing is
+    /// parked: the attempt that would park may still be in flight. Returns
+    /// whether a park was lifted.
+    pub const fn reset(&mut self) -> bool {
+        let was_parked = self.park.is_some();
+        self.park = None;
+        self.generation = self.generation.wrapping_add(1);
+        was_parked
     }
 }
 
@@ -89,19 +171,6 @@ pub struct ProviderState {
     /// Monotonic instant `last_outcome` was stamped, for elapsed-age
     /// exposure via `gate_status`.
     last_outcome_at: Option<Instant>,
-
-    /// Credential park, set only by [`Self::park_credential_until`] and
-    /// cleared only by [`Self::clear_credential_park`] (directly, gated on
-    /// the generation, or by a reload's reset). Shares
-    /// `half_open_in_flight` with the breaker, so a lapsed park and a lapsed
-    /// cooldown still admit one re-test between them.
-    credential_park: Option<CredentialPark>,
-
-    /// Advanced by every [`Self::reset_credential_parks`]. An attempt captures
-    /// it at admission, and its rejection parks only while it still matches,
-    /// so an attempt admitted before a reload cannot re-park the seat after
-    /// the reload lifted every park.
-    credential_generation: u64,
 }
 
 /// One gate admission: the decision, plus whether this call claimed the
@@ -124,7 +193,7 @@ pub(crate) struct GateAdmission {
 
 impl GateAdmission {
     /// A refusal, which by construction claims nothing.
-    const fn refused(decision: GateDecision) -> Self {
+    pub(crate) const fn refused(decision: GateDecision) -> Self {
         Self {
             decision,
             claimed_half_open: false,
@@ -167,9 +236,9 @@ pub enum GateDecision {
     /// already in flight). Treat as a fallbackable failure and skip
     /// this provider until the next cooldown cycle.
     CircuitOpen,
-    /// The seat's credential is parked (or its single re-test is already in
-    /// flight). Treat as a fallbackable failure; the reason and deadline are
-    /// what an all-seats-parked error reports.
+    /// The target's account credential is parked (or this slot's re-test is
+    /// already in flight). Treat as a fallbackable failure; the reason and
+    /// deadline are what an all-seats-parked error reports.
     CredentialParked {
         /// Why the upstream rejected the credential.
         reason: UpstreamReason,
@@ -200,8 +269,6 @@ impl ProviderState {
             half_open_in_flight: false,
             last_outcome: None,
             last_outcome_at: None,
-            credential_park: None,
-            credential_generation: 0,
         }
     }
 
@@ -224,25 +291,23 @@ impl ProviderState {
     /// Ownership is therefore reported by the admission itself and carried,
     /// never re-derived from shared state afterwards.
     pub(crate) fn try_dispatch_admitting(&mut self, now: Instant) -> GateAdmission {
-        self.try_dispatch_inner(now, AdmissionKind::ClientDispatch)
+        self.admit_under_park(now, AdmissionKind::ClientDispatch, None)
     }
 
-    /// [`Self::try_dispatch_admitting`] for a BACKGROUND PROBE.
+    /// Admit a `kind` caller while the model's account carries `park`.
     ///
-    /// Differs in exactly one place: a lane whose cooldown has lapsed is
-    /// refused rather than claimed, and refused BEFORE the RPM check, so
-    /// neither the recovery attempt nor a rate token is consumed. See
-    /// [`AdmissionKind::BackgroundProbe`].
-    ///
-    /// Real-dispatch behavior is untouched -- both entry points share one
-    /// critical section, and only this flag differs.
-    pub(crate) fn try_dispatch_probe(&mut self, now: Instant) -> GateAdmission {
-        self.try_dispatch_inner(now, AdmissionKind::BackgroundProbe)
-    }
-
-    fn try_dispatch_inner(&mut self, now: Instant, kind: AdmissionKind) -> GateAdmission {
-        if let Some(park) = self.credential_park
-            && (now < park.until || self.half_open_in_flight)
+    /// A live park refuses outright. A lapsed one makes the slot
+    /// half-open-ready exactly as a lapsed breaker cooldown does, so each model
+    /// slot on a lapsed account admits one re-test of its own, sharing
+    /// `half_open_in_flight` with the breaker.
+    pub(crate) fn admit_under_park(
+        &mut self,
+        now: Instant,
+        kind: AdmissionKind,
+        park: Option<CredentialPark>,
+    ) -> GateAdmission {
+        if let Some(park) = park
+            && (park.is_live_at(now) || self.half_open_in_flight)
         {
             return GateAdmission::refused(park.refusal());
         }
@@ -251,7 +316,7 @@ impl ProviderState {
                 return GateAdmission::refused(GateDecision::CircuitOpen);
             }
             Some(_) => true,
-            None => self.credential_park.is_some(),
+            None => park.is_some(),
         };
         let claimed_half_open = if retest_ready {
             // Cooldown or credential park lapsed. Allow exactly one probe
@@ -260,7 +325,7 @@ impl ProviderState {
             // failure counter here -- only the settle paths mutate that
             // state, so the gate reopens only after a verified outcome.
             if self.half_open_in_flight {
-                return GateAdmission::refused(self.half_open_refusal());
+                return GateAdmission::refused(half_open_refusal(park));
             }
             // A BACKGROUND probe stops here, before claiming and before the
             // RPM check below. Returning now is what leaves the recovery
@@ -268,7 +333,7 @@ impl ProviderState {
             // budget untouched -- the RPM debit below is not refunded on any
             // later path.
             if matches!(kind, AdmissionKind::BackgroundProbe) {
-                return GateAdmission::refused(self.half_open_refusal());
+                return GateAdmission::refused(half_open_refusal(park));
             }
             self.half_open_in_flight = true;
             // Claimed HERE, in the same critical section that will report it.
@@ -297,14 +362,6 @@ impl ProviderState {
             decision: GateDecision::Allow,
             claimed_half_open,
         }
-    }
-
-    /// The refusal a half-open-ready gate gives a caller that cannot take the
-    /// re-test: the credential park when one is set (it names the reason and
-    /// deadline an all-parked error needs), else the breaker.
-    fn half_open_refusal(&self) -> GateDecision {
-        self.credential_park
-            .map_or(GateDecision::CircuitOpen, CredentialPark::refusal)
     }
 
     /// Mark the most recent dispatch as successful. Resets the
@@ -376,72 +433,6 @@ impl ProviderState {
         self.half_open_in_flight = false;
     }
 
-    /// Park the seat's credential for [`CREDENTIAL_PARK_BACKSTOP`] from `now`.
-    pub fn park_credential(&mut self, now: Instant, reason: UpstreamReason) {
-        self.park_credential_until(reason, now + CREDENTIAL_PARK_BACKSTOP);
-    }
-
-    /// Park the seat's credential until `until`, replacing any earlier park.
-    /// Leaves the half-open slot alone: the dispatch that observed the
-    /// rejection settles its own claim through its probe guard.
-    pub const fn park_credential_until(&mut self, reason: UpstreamReason, until: Instant) {
-        self.credential_park = Some(CredentialPark { reason, until });
-    }
-
-    /// Park the seat's credential for [`CREDENTIAL_PARK_BACKSTOP`] from `now`
-    /// only when `generation` is still the current credential generation,
-    /// returning whether it parked.
-    pub fn park_credential_in_generation(
-        &mut self,
-        now: Instant,
-        reason: UpstreamReason,
-        generation: u64,
-    ) -> bool {
-        if generation != self.credential_generation {
-            return false;
-        }
-        self.park_credential(now, reason);
-        true
-    }
-
-    /// Lift the credential park, if any.
-    pub const fn clear_credential_park(&mut self) {
-        self.credential_park = None;
-    }
-
-    /// Lift the credential park only when `generation` is still the current
-    /// credential generation, returning whether it was eligible. A success
-    /// admitted before a reload proves the old credential, not the one a
-    /// rejection under the new generation parked.
-    pub const fn clear_credential_park_in_generation(&mut self, generation: u64) -> bool {
-        if generation != self.credential_generation {
-            return false;
-        }
-        self.clear_credential_park();
-        true
-    }
-
-    /// Lift the credential park and start a new credential generation, so a
-    /// rejection admitted before this call can no longer park the seat.
-    /// Advances even when nothing is parked: the attempt that would park may
-    /// still be in flight. Returns whether a park was lifted.
-    pub const fn reset_credential_parks(&mut self) -> bool {
-        let was_parked = self.credential_park.is_some();
-        self.credential_park = None;
-        self.credential_generation = self.credential_generation.wrapping_add(1);
-        was_parked
-    }
-
-    /// The credential generation an admission captures.
-    pub const fn credential_generation(&self) -> u64 {
-        self.credential_generation
-    }
-
-    /// The seat's credential park, if any.
-    pub const fn credential_park(&self) -> Option<CredentialPark> {
-        self.credential_park
-    }
-
     /// Release a half-open probe slot claimed by `try_dispatch` WITHOUT
     /// recording an outcome. Used when the dispatch path declines to
     /// count an attempt as a provider fault (e.g. a probe fast-fail on a
@@ -496,6 +487,15 @@ impl ProviderState {
     /// Projects the lazily-refilled bucket level at `now` and classifies
     /// the breaker phase, mirroring what `try_dispatch` would observe.
     pub fn capacity_snapshot(&self, now: Instant) -> CapacitySnapshot {
+        self.capacity_snapshot_under(now, None)
+    }
+
+    /// [`Self::capacity_snapshot`] for a model whose account carries `park`.
+    pub fn capacity_snapshot_under(
+        &self,
+        now: Instant,
+        park: Option<CredentialPark>,
+    ) -> CapacitySnapshot {
         let rpm_available = self
             .rpm_capacity
             .map(|capacity| self.projected_tokens(now, capacity));
@@ -511,9 +511,8 @@ impl ProviderState {
                 }
             }
         };
-        let credential_blocked = self
-            .credential_park
-            .is_some_and(|park| now < park.until || self.half_open_in_flight);
+        let credential_blocked =
+            park.is_some_and(|park| park.is_live_at(now) || self.half_open_in_flight);
 
         CapacitySnapshot {
             rpm_available,
@@ -530,7 +529,16 @@ impl ProviderState {
     /// the half-open-probe-in-flight bool explicitly, rather than folding it
     /// into `CircuitPhase::Open` the way the phase classification does.
     pub fn gate_status(&self, now: Instant) -> ProviderGateStatus {
-        let snapshot = self.capacity_snapshot(now);
+        self.gate_status_under(now, None)
+    }
+
+    /// [`Self::gate_status`] for a model whose account carries `park`.
+    pub fn gate_status_under(
+        &self,
+        now: Instant,
+        park: Option<CredentialPark>,
+    ) -> ProviderGateStatus {
+        let snapshot = self.capacity_snapshot_under(now, park);
         ProviderGateStatus {
             rpm_available: snapshot.rpm_available,
             circuit: snapshot.circuit,
@@ -540,12 +548,19 @@ impl ProviderState {
                 .map(|opened_at| now.duration_since(opened_at)),
             last_outcome: self.last_outcome,
             last_outcome_elapsed: self.last_outcome_at.map(|at| now.duration_since(at)),
-            credential_park: self.credential_park.map(|park| CredentialParkStatus {
+            credential_park: park.map(|park| CredentialParkStatus {
                 reason: park.reason,
                 remaining: park.until.saturating_duration_since(now),
             }),
         }
     }
+}
+
+/// The refusal a half-open-ready gate gives a caller that cannot take the
+/// re-test: the account's credential park when one is set (it names the reason
+/// and deadline an all-parked error needs), else the breaker.
+fn half_open_refusal(park: Option<CredentialPark>) -> GateDecision {
+    park.map_or(GateDecision::CircuitOpen, CredentialPark::refusal)
 }
 
 /// Status view of a credential park: the reason and how long until the park
@@ -585,8 +600,8 @@ pub struct ProviderGateStatus {
     /// Elapsed time since `last_outcome` was stamped; `None` when no dispatch
     /// has settled yet.
     pub last_outcome_elapsed: Option<Duration>,
-    /// The seat's credential park, if any: `None` when the credential is not
-    /// parked.
+    /// The target's account credential park, if any: `None` when the account
+    /// is not parked.
     pub credential_park: Option<CredentialParkStatus>,
 }
 

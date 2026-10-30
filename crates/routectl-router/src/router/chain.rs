@@ -319,6 +319,8 @@ impl Router {
             // a seat constructor may have already populated).
             target.use_forwarded_credential =
                 provider_entry.is_some_and(|entry| entry.forwarded_base_url().is_some());
+            target.account =
+                self.credential_account_for(&target.provider_name, target.seat.as_deref());
             target.egress_kind = provider_entry.map(crate::config::ProviderEntry::egress_kind);
             if target.class_overrides.is_empty()
                 && let Some(entry) = provider_entry
@@ -529,6 +531,7 @@ pub(super) fn into_one_dispatch_target(m: Arc<ResolvedModel>) -> DispatchTarget 
         state_key: m.nickname.clone(),
         learned_lane: crate::state_key::StateKey::new(&m.provider_name, &m.upstream),
         seat: crate::seat_pool::seat_identity(m.auth_secret_ref.as_ref()),
+        account: None,
         upstream: m.upstream.clone(),
         provider: Some(m.provider.clone()),
         strip_capabilities: std::sync::Arc::default(),
@@ -593,6 +596,7 @@ pub(super) fn dispatch_target_for_seat(
         // already per seat.
         learned_lane: crate::state_key::StateKey::new(&seat.provider_name, &m.upstream),
         seat: crate::seat_pool::seat_identity(seat.auth_secret_ref.as_ref()),
+        account: None,
         upstream: m.upstream.clone(),
         provider: Some(seat.provider.clone()),
         strip_capabilities: std::sync::Arc::default(),

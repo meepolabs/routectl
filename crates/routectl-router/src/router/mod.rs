@@ -185,6 +185,16 @@ pub struct Router {
     /// emptying the table cannot let a later install take a slot under a
     /// different identity. Written only through `claim_state_slot`.
     slot_owners: BTreeMap<String, state_slots::SlotOwner>,
+    /// Every credential account's park and generation (see
+    /// `credential_park`). One map for the router rather than a field per
+    /// `state` slot, so a park observed through one model refuses every model
+    /// on the account, including one added by a later reload. Lock order: this
+    /// map before any `state` slot; never taken while a slot is held.
+    ///
+    /// Shared whole across a hot-reload (`carry_over_runtime_state_from`), so
+    /// a park and its generation survive the swap and an attempt still in
+    /// flight on the outgoing router settles against the same record.
+    credential_accounts: Arc<Mutex<credential_park::CredentialAccounts>>,
     /// v0.6.0 pre-resolved model table. Populated when an external
     /// caller built it via `factory::build_resolved_models`. When
     /// non-empty, the dispatch path walks `Arc<ResolvedModel>` chains
@@ -2008,6 +2018,11 @@ struct DispatchTarget {
     /// for a target with no ref. Surfaced through `DispatchMeta` so usage
     /// accounting partitions rows by ACCOUNT rather than by model.
     seat: Option<String>,
+    /// The credential account this target's credential park is scoped to
+    /// (see [`crate::seat_pool::credential_account`]), derived at chain
+    /// expansion once the forwarded fact is known. `None` for a forwarded
+    /// credential, which is never parked.
+    account: Option<String>,
     /// Wire model id sent to the provider.
     upstream: String,
     /// Concrete provider instance.
@@ -2224,6 +2239,7 @@ impl Router {
             providers: Default::default(),
             state,
             slot_owners,
+            credential_accounts: Arc::default(),
             resolved_models: BTreeMap::new(),
             alias_glob_index,
             round_robin: Default::default(),
@@ -2442,10 +2458,15 @@ impl Router {
     /// and keys with no recorded owner on either side keep their fresh state
     /// too.
     ///
+    /// The credential-account map is shared whole, not per key: an account's
+    /// park outlives any one model slot, so a model newly added on a parked
+    /// account starts refused.
+    ///
     /// Called by the hot-reload coordinator in routectl-cli immediately
     /// after building a replacement Router and before swapping it in, to
     /// avoid resetting gates that took time to build up across reloads.
     pub fn carry_over_runtime_state_from(&mut self, previous: &Self) {
+        self.credential_accounts = Arc::clone(&previous.credential_accounts);
         for (key, state) in &previous.state {
             let Some(slot) = self.state.get_mut(key.as_str()) else {
                 continue;
