@@ -26,7 +26,8 @@ pub struct CalibrationSampleRow {
     pub prompt_tokens: i64,
 }
 
-const CALIBRATION_SAMPLES_SQL: &str = "\
+const CALIBRATION_SAMPLES_SQL: &str = concat!(
+    "\
 SELECT ts_start, provider_kind, upstream, session_id, calib_estimated_tokens, calib_prompt_tokens
 FROM (
   SELECT rowid AS rid, ts_start, provider_kind, upstream, session_id,
@@ -38,10 +39,14 @@ FROM (
     AND calib_estimated_tokens IS NOT NULL
     AND calib_prompt_tokens IS NOT NULL
     AND outcome = 'ok'
+    AND ",
+    inference_rows!(),
+    "
   ORDER BY ts_start DESC, rowid DESC
   LIMIT ?2
 )
-ORDER BY ts_start ASC, rid ASC";
+ORDER BY ts_start ASC, rid ASC"
+);
 
 /// Raw calibration-evidence pairs whose request start time is at or after
 /// `window_start_ms`. Selects the most recent `limit` qualifying rows in the

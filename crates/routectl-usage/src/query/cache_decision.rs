@@ -61,7 +61,8 @@ const EMITTED_TOKEN: &str = "auto_emitted";
 /// counted as declines. The emitted token and the three epoch values are BOUND
 /// (`?3..?6`) rather than inlined, so a renumbered `PREFIX_EPOCH_*` constant or
 /// a renamed token cannot silently desync from this query.
-const CACHE_DECISION_SQL: &str = "\
+const CACHE_DECISION_SQL: &str = concat!(
+    "\
 SELECT
     COUNT(cache_front_decision)                                          AS front_decided,
     COALESCE(SUM(CASE WHEN cache_front_decision = ?3 THEN 1 ELSE 0 END), 0)
@@ -74,7 +75,10 @@ SELECT
     COALESCE(SUM(CASE WHEN prefix_epoch_event = ?5 THEN 1 ELSE 0 END), 0) AS epoch_rewritten,
     COALESCE(SUM(CASE WHEN prefix_epoch_event = ?6 THEN 1 ELSE 0 END), 0) AS epoch_reseeded
 FROM requests
-WHERE ts_start >= ?1 AND ts_start < ?2";
+WHERE ts_start >= ?1 AND ts_start < ?2
+  AND ",
+    inference_rows!()
+);
 
 /// The window's cache-breakpoint decision summary. All fields are 0 when no
 /// row in the window carried a decision or a classified epoch.
@@ -198,7 +202,8 @@ pub struct SuppressedSessions {
 /// ledger. The tiebreak is on the RAW session column rather than the
 /// reported digest, which is process-salted and therefore unordered across
 /// runs.
-const SUPPRESSED_SESSIONS_SQL: &str = "\
+const SUPPRESSED_SESSIONS_SQL: &str = concat!(
+    "\
 SELECT
     session_id,
     provider_kind,
@@ -212,9 +217,13 @@ WHERE ts_start >= ?1 AND ts_start < ?2
   AND provider_kind IS NOT NULL
   AND model IS NOT NULL
   AND (cache_front_decision = ?3 OR cache_terminal_decision = ?3)
+  AND ",
+    inference_rows!(),
+    "
 GROUP BY session_id, provider_kind, model
 ORDER BY last_suppressed DESC, first_suppressed DESC, session_id, provider_kind, model
-LIMIT ?4";
+LIMIT ?4"
+);
 
 /// Find the window's K-suppressed sessions: the bounded, newest-first list of
 /// `(session, provider_kind, model)` triples whose requests carried the

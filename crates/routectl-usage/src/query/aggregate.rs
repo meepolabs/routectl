@@ -112,7 +112,10 @@ const AGG_SQL: &str = concat!(
     "SELECT\n",
     agg_base_columns!(),
     "\nFROM requests AS r
-WHERE ts_start >= ?1 AND ts_start < ?2\n",
+WHERE ts_start >= ?1 AND ts_start < ?2
+  AND ",
+    inference_rows!(),
+    "\n",
     agg_group_by!()
 );
 
@@ -211,11 +214,16 @@ macro_rules! query_agg_select {
 /// never apply to one and not the other.
 macro_rules! query_agg_from_where {
     () => {
-        "
+        concat!(
+            "
 FROM requests AS r
 WHERE ts_start >= ?1 AND ts_start < ?2
+  AND ",
+            inference_rows!(),
+            "
   AND (?3 IS NULL OR alias = ?3)
   AND (?4 IS NULL OR provider = ?4)\n"
+        )
     };
 }
 
@@ -335,7 +343,10 @@ pub(super) fn map_fine_row_bucketed(row: &Row) -> rusqlite::Result<(FineRow, i64
     Ok((fine, bucket))
 }
 
-const EARLIEST_TS_START_SQL: &str = "SELECT MIN(ts_start) FROM requests WHERE ts_start >= ?1";
+const EARLIEST_TS_START_SQL: &str = concat!(
+    "SELECT MIN(ts_start) FROM requests WHERE ts_start >= ?1 AND ",
+    inference_rows!()
+);
 
 /// The `ts_start` of the oldest row at or after `from_ms`, or `None` when no row
 /// qualifies. A `MIN` over a range of an indexed column, so this is an index seek
@@ -400,7 +411,8 @@ fn map_agg_row(row: &Row) -> rusqlite::Result<AggRow> {
 /// never-classified rows) buckets under `unclassified` via the COALESCE; a
 /// forward-compat token written by a newer binary passes through verbatim as
 /// its own class rather than being folded into `unclassified`.
-pub(super) const ERRORS_BY_CLASS_SQL: &str = "\
+pub(super) const ERRORS_BY_CLASS_SQL: &str = concat!(
+    "\
 SELECT
     COALESCE(model, requested_model) AS model, provider, upstream, alias,
     provider_kind,
@@ -409,9 +421,13 @@ SELECT
 FROM requests
 WHERE ts_start >= ?1 AND ts_start < ?2
   AND outcome NOT IN ('ok', 'client_disconnect')
+  AND ",
+    inference_rows!(),
+    "
 GROUP BY COALESCE(model, requested_model), provider, upstream, alias,
          provider_kind,
-         COALESCE(resolved_class, 'unclassified')";
+         COALESCE(resolved_class, 'unclassified')"
+);
 
 /// Windowed per-group error breakdown by resolved failure class. Returns one
 /// `(group key, class, count)` triple per `(group, class)` pair; the caller
@@ -468,6 +484,9 @@ ORDER BY seat";
 ///
 /// Not windowed: a quota snapshot is the latest known state of a seat,
 /// independent of any report window.
+///
+/// Not restricted to inference rows either: seat quota is state, and a
+/// token-count response reports it like any other request.
 pub fn latest_quota_by_seat(db: &UsageDb) -> Result<Vec<QuotaSnapshot>, QueryError> {
     let mut stmt = db.conn().prepare(LATEST_QUOTA_BY_SEAT_SQL)?;
     let snapshots = stmt
@@ -488,11 +507,15 @@ pub fn latest_quota_by_seat(db: &UsageDb) -> Result<Vec<QuotaSnapshot>, QueryErr
     Ok(snapshots)
 }
 
-const TTFBS_SQL: &str = "\
+const TTFBS_SQL: &str = concat!(
+    "\
 SELECT model, provider, upstream, alias, provider_kind, ttfb_ms
 FROM requests
 WHERE ts_start >= ?1 AND ts_start < ?2
-  AND ttfb_ms IS NOT NULL AND stream = 1 AND outcome = 'ok'";
+  AND ttfb_ms IS NOT NULL AND stream = 1 AND outcome = 'ok'
+  AND ",
+    inference_rows!()
+);
 
 /// Raw in-window `ttfb_ms` values with their group keys, so the CLI can
 /// compute time-to-first-token percentiles per display group. Restricted to

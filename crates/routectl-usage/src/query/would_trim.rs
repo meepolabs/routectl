@@ -36,7 +36,8 @@ pub struct WouldTrimSummary {
 ///   met      : k_floor NOT NULL AND k_floor >= would_trim_break_even_k
 ///   unmet    : k_floor NOT NULL AND k_floor < would_trim_break_even_k
 /// The WHERE gate restricts the verdict counts to candidate rows only.
-const WOULD_TRIM_SQL: &str = "\
+const WOULD_TRIM_SQL: &str = concat!(
+    "\
 SELECT
     COUNT(would_trim_tokens)                                            AS candidate_requests,
     COALESCE(SUM(would_trim_tokens), 0)                                AS would_trim_tokens,
@@ -58,7 +59,10 @@ SELECT
               AND would_trim_break_even_k IS NULL
          THEN 1 ELSE 0 END), 0)                                        AS verdict_unpriced
 FROM requests
-WHERE ts_start >= ?1 AND ts_start < ?2";
+WHERE ts_start >= ?1 AND ts_start < ?2
+  AND ",
+    inference_rows!()
+);
 
 /// The window's steady-state would-trim opportunity. `COUNT(col)` ignores
 /// NULLs, so `candidate_requests` is the number of requests the trimmer
@@ -98,12 +102,16 @@ pub struct ShadowMisfireSummary {
     pub misfire_turns: i64,
 }
 
-const SHADOW_MISFIRE_SQL: &str = "\
+const SHADOW_MISFIRE_SQL: &str = concat!(
+    "\
 SELECT
     COUNT(would_trim_shadow_misfire)                                      AS compared_turns,
     COALESCE(SUM(CASE WHEN would_trim_shadow_misfire = 1 THEN 1 ELSE 0 END), 0) AS misfire_turns
 FROM requests
-WHERE ts_start >= ?1 AND ts_start < ?2";
+WHERE ts_start >= ?1 AND ts_start < ?2
+  AND ",
+    inference_rows!()
+);
 
 /// The window's shadow misfire monitor summary. `COUNT(col)` ignores NULLs,
 /// so `compared_turns` is the number of turns the monitor compared. All fields
@@ -158,7 +166,8 @@ pub struct NearLosslessAttributionSummary {
     pub context_fraction_sum: f64,
 }
 
-const NEAR_LOSSLESS_ATTRIBUTION_SQL: &str = "\
+const NEAR_LOSSLESS_ATTRIBUTION_SQL: &str = concat!(
+    "\
 SELECT
     COUNT(would_trim_recorder_version)                      AS recorder_requests,
     COALESCE(SUM(would_trim_dedup_tokens), 0)                AS dedup_tokens,
@@ -169,7 +178,10 @@ SELECT
     COALESCE(SUM(would_trim_context_fraction), 0.0)           AS context_fraction_sum
 FROM requests
 WHERE ts_start >= ?1 AND ts_start < ?2
-  AND would_trim_recorder_version IS NOT NULL";
+  AND would_trim_recorder_version IS NOT NULL
+  AND ",
+    inference_rows!()
+);
 
 /// The window's near-lossless attribution. Restricted to
 /// `would_trim_recorder_version IS NOT NULL` so baseline (pre-recorder) rows
@@ -252,7 +264,8 @@ struct CalibRow {
 /// SUM) into 0. The subquery runs the window over ALL valid-triple rows so
 /// future reuse is counted even from uncalibrated rows; the outer WHERE then
 /// restricts the population to calibrated rows.
-const K_CALIBRATION_SQL: &str = "\
+const K_CALIBRATION_SQL: &str = concat!(
+    "\
 SELECT floor, realized_remaining FROM (
     SELECT r.would_trim_k_floor AS floor,
            COALESCE(SUM(CASE WHEN cache_read > 0 THEN 1 ELSE 0 END) OVER (
@@ -262,8 +275,12 @@ SELECT floor, realized_remaining FROM (
            ), 0) AS realized_remaining
     FROM requests r
     WHERE session_id IS NOT NULL AND provider_kind IS NOT NULL AND model IS NOT NULL
+      AND ",
+    inference_rows!(),
+    "
 )
-WHERE floor IS NOT NULL AND floor >= 0.0";
+WHERE floor IS NOT NULL AND floor >= 0.0"
+);
 
 /// Minimum rows in a (session, provider_kind, model) group before its
 /// first-half/second-half continuation-rate delta is meaningful enough to
@@ -274,12 +291,17 @@ const HAZARD_DECAY_MIN_GROUP_ROWS: usize = 4;
 /// Ordered per-turn reuse outcomes for the hazard-decay reduction. Delivered
 /// grouped by the triple and oldest-first WITHIN each group, so consecutive
 /// rows sharing a triple form one session's turn sequence.
-const K_HAZARD_DECAY_SQL: &str = "\
+const K_HAZARD_DECAY_SQL: &str = concat!(
+    "\
 SELECT session_id, provider_kind, model,
        CASE WHEN cache_read > 0 THEN 1 ELSE 0 END AS hit
 FROM requests
 WHERE session_id IS NOT NULL AND provider_kind IS NOT NULL AND model IS NOT NULL
-ORDER BY session_id, provider_kind, model, ts_start, rowid";
+  AND ",
+    inference_rows!(),
+    "
+ORDER BY session_id, provider_kind, model, ts_start, rowid"
+);
 
 /// One ordered per-turn reuse outcome for the hazard-decay reduction.
 struct HitRow {
@@ -435,7 +457,8 @@ pub struct ReuseSampleRow {
     pub cache_read: i64,
 }
 
-const REUSE_SAMPLES_SQL: &str = "\
+const REUSE_SAMPLES_SQL: &str = concat!(
+    "\
 SELECT ts_start, session_id, provider_kind, model, cache_read
 FROM (
   SELECT rowid AS rid, ts_start, session_id, provider_kind, model, COALESCE(cache_read, 0) AS cache_read
@@ -445,10 +468,14 @@ FROM (
     AND provider_kind IS NOT NULL
     AND model IS NOT NULL
     AND outcome = 'ok'
+    AND ",
+    inference_rows!(),
+    "
   ORDER BY ts_start DESC, rowid DESC
   LIMIT ?2
 )
-ORDER BY ts_start ASC, rid ASC";
+ORDER BY ts_start ASC, rid ASC"
+);
 
 /// Raw reuse samples whose request start time is at or after `window_start_ms`.
 /// Selects the most recent `limit` qualifying rows in the window (newest-N,

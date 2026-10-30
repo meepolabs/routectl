@@ -34,13 +34,18 @@ pub struct StreamExtraRow {
     pub extra: Option<String>,
 }
 
-const STREAM_EXTRA_SQL: &str = "\
+const STREAM_EXTRA_SQL: &str = concat!(
+    "\
 SELECT ts_start, provider, provider_kind, model, upstream, outcome, extra
 FROM requests
 WHERE ingress_dialect = ?1
   AND stream = 1
   AND ts_start >= ?2 AND ts_start < ?3
-ORDER BY ts_start ASC, rowid ASC";
+  AND ",
+    inference_rows!(),
+    "
+ORDER BY ts_start ASC, rowid ASC"
+);
 
 /// Visit every streaming row of `ingress_dialect` whose start time falls in
 /// the half-open window `[from_ms, to_ms)`, oldest first, without buffering

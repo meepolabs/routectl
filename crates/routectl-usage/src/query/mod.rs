@@ -1,5 +1,47 @@
 //! Usage read-query facade and shared row/error types.
 
+/// The persisted `operation` token of a token-count request. A macro so the
+/// SQL below can splice it with `concat!`; welded to
+/// [`Operation::CountTokens`](crate::Operation::CountTokens) at compile time.
+macro_rules! count_tokens_operation {
+    () => {
+        "count_tokens"
+    };
+}
+
+/// Row-eligibility predicate for every reader whose population is inference
+/// traffic: it drops token-count rows. `IS NOT` rather than `!=` because rows
+/// written before the `operation` column existed hold NULL and are inference;
+/// `NULL != 'count_tokens'` is NULL, which a WHERE treats as false.
+macro_rules! inference_rows {
+    () => {
+        concat!("operation IS NOT '", count_tokens_operation!(), "'")
+    };
+}
+
+const _: () = assert!(
+    const_str_eq(
+        count_tokens_operation!(),
+        crate::Operation::CountTokens.as_str()
+    ),
+    "the inference-row predicate must name the persisted count_tokens token"
+);
+
+const fn const_str_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < a.len() {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
 mod aggregate;
 mod cache_decision;
 mod calibration;
@@ -215,3 +257,7 @@ use aggregate::ERRORS_BY_CLASS_SQL;
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "inference_rows_tests.rs"]
+mod inference_rows_tests;

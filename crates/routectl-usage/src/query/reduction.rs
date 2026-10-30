@@ -67,7 +67,8 @@ impl ReductionSummary {
 /// One `GROUP BY reduction_decision` row: the token, its request count, and
 /// the four raw counters summed within it. The window totals are folded from
 /// these in Rust so the histogram and the totals cannot disagree.
-const REDUCTION_SQL: &str = "\
+const REDUCTION_SQL: &str = concat!(
+    "\
 SELECT
     reduction_decision                                        AS decision,
     COUNT(*)                                                  AS requests,
@@ -78,8 +79,12 @@ SELECT
 FROM requests
 WHERE ts_start >= ?1 AND ts_start < ?2
   AND reduction_decision IS NOT NULL
+  AND ",
+    inference_rows!(),
+    "
 GROUP BY reduction_decision
-ORDER BY reduction_decision";
+ORDER BY reduction_decision"
+);
 
 /// The window's lossless-minifier outcome summary. Rows with a NULL
 /// `reduction_decision` (pre-column history, and requests that dispatched no
