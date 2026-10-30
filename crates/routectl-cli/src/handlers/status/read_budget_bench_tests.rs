@@ -183,7 +183,14 @@ fn time_query(path: &Path, spec: &QuerySpec) -> (Duration, i64) {
 fn time_usage(path: &Path, bounds: WindowBounds) -> (Duration, i64) {
     let db = open_readonly_fastfail(path).expect("open seeded ledger");
     let started = Instant::now();
-    let panel = collect(&db, "all", bounds, no_deadline()).expect("collection completes");
+    let panel = collect(
+        &db,
+        "all",
+        bounds,
+        super::LedgerHealth::default(),
+        no_deadline(),
+    )
+    .expect("collection completes");
     (started.elapsed(), panel.totals.requests)
 }
 

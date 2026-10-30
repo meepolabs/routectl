@@ -1068,6 +1068,19 @@ process that dropped them, and are lost if that process then exits. A gap
 insert that fails counts as a write error and is retried with the full
 difference on the next message.
 
+`/status/usage` and `/status/doctor` read these together. Both carry an
+`observation` block for a window (the requested one on `/status/usage`,
+today on `/status/doctor`) with the window's `ledger_gaps` rows and a
+`complete` flag, and the doctor panel carries the three live counters as
+`ledger_health {dropped_full, dropped_closed, write_errors}`. `complete` is
+false when a gap row falls inside the window, or when the live
+`dropped_closed` or `write_errors` counter is nonzero: neither loss is
+written down with a time, so either one marks every window incomplete until
+the process restarts. `dropped_full` alone does not, because its gap row
+already marks the window it landed in. The residual: closed-channel drops
+and failed writes of a process that has since exited are not recorded
+anywhere, so a window they touched can read `complete` while missing rows.
+
 The usage ledger's `http_status` column records the transport status the
 client received: 200 for a delivered non-streaming body and once the SSE
 head commits, while a mid-stream provider failure keeps 200 and is carried

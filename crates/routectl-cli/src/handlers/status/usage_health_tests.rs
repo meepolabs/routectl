@@ -60,3 +60,69 @@ fn a_healthy_writer_reports_not_degraded() {
     drop(handle);
     writer.shutdown();
 }
+
+/// SQL-shaped needles a status source must not carry: any of them means a
+/// panel is reading the ledger with its own statement instead of the
+/// routectl-usage readers.
+const LEDGER_SQL_NEEDLES: [&str; 7] = [
+    concat!(".con", "n()"),
+    concat!("query_", "row("),
+    concat!(".prep", "are("),
+    concat!(".exec", "ute("),
+    concat!("SEL", "ECT "),
+    concat!("FROM ", "requests"),
+    concat!("FROM ", "ledger_gaps"),
+];
+
+/// The needles present in the production part of `src`.
+fn ledger_sql_in(src: &str) -> Vec<&'static str> {
+    let production = crate::handlers::status::production_source::production_source(src);
+    LEDGER_SQL_NEEDLES
+        .into_iter()
+        .filter(|needle| production.contains(needle))
+        .collect()
+}
+
+/// `/status/usage` and `/status/doctor` read the window's observation totals
+/// through the one shared reader, which calls routectl-usage's
+/// `observation_totals`; none of the three sources issues SQL of its own.
+///
+/// Mutation check: replace the `observation_totals(` call in
+/// `window_observation` with an inline `db.conn().query_row(..)` -> red; drop
+/// the `window_observation(` call from either panel -> red.
+#[test]
+fn status_panels_read_observation_totals_without_their_own_sql() {
+    let sources = [
+        ("usage.rs", include_str!("usage.rs")),
+        ("doctor.rs", include_str!("doctor.rs")),
+        ("usage_health.rs", include_str!("usage_health.rs")),
+    ];
+    for (name, src) in sources {
+        assert_eq!(
+            ledger_sql_in(src),
+            Vec::<&str>::new(),
+            "{name} must not carry its own ledger SQL"
+        );
+    }
+    let production =
+        |src| crate::handlers::status::production_source::production_source(src).to_string();
+    assert!(
+        production(include_str!("usage_health.rs")).contains(concat!("observation_totals", "(db"))
+    );
+    for (name, src) in &sources[..2] {
+        assert!(
+            production(src).contains(concat!("window_observation", "(")),
+            "{name} must read its observation block through window_observation"
+        );
+    }
+
+    // Positive control: the scanner trips on an inline statement.
+    let inline = concat!(
+        "fn f(db: &UsageDb) { db.con",
+        "n().query_",
+        "row(\"SEL",
+        "ECT 1 FROM ",
+        "ledger_gaps\", [], |r| r.get(0)); }"
+    );
+    assert_eq!(ledger_sql_in(inline).len(), 4);
+}

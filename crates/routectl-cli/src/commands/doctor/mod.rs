@@ -193,7 +193,14 @@ pub(crate) use self::served::{GatherSources, ParkedSeat, ResidentLearned, Served
 /// v21 -> v22: additive. Every capability matrix cell gains `value`, the
 /// value the resident learned verdict applies (`shape:<v>` / `ceiling:<n>`),
 /// `null` when no learned entry backs the cell or its verdict writes none.
-const SCHEMA_VERSION: u32 = 22;
+///
+/// v22 -> v23: additive, served panel only. The `/status/doctor` panel gains
+/// `ledger_health` (the live `dropped_full`, `dropped_closed` and
+/// `write_errors` request-row loss counters) and `observation`: today's
+/// summed per-request observation counts, its ledger gap rows, and whether
+/// its rows are complete (`null` when the usage ledger cannot be read). The
+/// report itself is unchanged.
+pub(crate) const SCHEMA_VERSION: u32 = 23;
 
 /// A section-producer: pure mapping of the read-only [`DoctorContext`] to a
 /// section's findings.

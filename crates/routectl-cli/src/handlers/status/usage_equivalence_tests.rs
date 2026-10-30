@@ -36,7 +36,7 @@ const TO_MS: i64 = FROM_MS + 86_400_000;
 //
 // Derived BY HAND from `seed` below, not from a program run. `-` is a NULL
 // column. Rows A and D sit at `from_ms - 1` and `to_ms`, outside the half-open
-// interval, and contribute to nothing; the seven rows below are in-window:
+// interval, and contribute to nothing; the eight rows below are in-window:
 //
 //   row  outcome           stream ttfb  in   out  reas cread cw5m cw1h   stu   fb
 //   B    ok                  1    100   10    20    5     7    3    2   {2}     0
@@ -46,12 +46,15 @@ const TO_MS: i64 = FROM_MS + 86_400_000;
 //   G    ok                  0     -     1     1    -     -    -    -    -      3
 //   H    client_disconnect   1     -     -     -    -     9    -    -   {1,4}   0
 //   I    ok                  1     -   100   200    -    50   10   20    -      0
+//   J    cancelled           0     -     -     -    -     -    -    -    -      0
 //
-// requests                = COUNT(*)                                      = 7
+// requests                = COUNT(*)                                      = 8
 // ok                      = B + C + E + G + I                             = 5
-// errors                  = outcome NOT IN (ok, client_disconnect) = F     = 1
+// errors                  = outcome NOT IN (ok, client_disconnect,
+//                           cancelled) = F                                = 1
 // client_disconnect_total = H                                             = 1
-//   (and 7 == 5 + 1 + 1, the panel's own reconciliation identity)
+// cancelled_total         = J                                             = 1
+//   (and 8 == 5 + 1 + 1 + 1, the panel's own reconciliation identity)
 // input_tokens            = 10 + 4 + 0 + 2 + 1 + 0 + 100                  = 117
 // output_tokens           = 20 + 6 + 11 + 3 + 1 + 0 + 200                 = 241
 // reasoning_tokens        = 5 (only B reports one)                        = 5
@@ -61,10 +64,11 @@ const TO_MS: i64 = FROM_MS + 86_400_000;
 // cache_write_1h          = 2 + 20                                        = 22
 // stream_count            = SUM(stream) = B + E + F + H + I               = 5
 
-const EXPECTED_REQUESTS: i64 = 7;
+const EXPECTED_REQUESTS: i64 = 8;
 const EXPECTED_OK: i64 = 5;
 const EXPECTED_ERRORS: i64 = 1;
 const EXPECTED_CLIENT_DISCONNECT_TOTAL: i64 = 1;
+const EXPECTED_CANCELLED_TOTAL: i64 = 1;
 const EXPECTED_INPUT_TOKENS: i64 = 117;
 const EXPECTED_OUTPUT_TOKENS: i64 = 241;
 const EXPECTED_REASONING_TOKENS: i64 = 5;
@@ -77,7 +81,7 @@ const EXPECTED_STREAM_COUNT: i64 = 5;
 /// The metric vocabulary BOTH surfaces carry -- the projection this guard
 /// asserts equal. Every token is a contracts sec-15 wire name and an `i64` on
 /// both sides.
-const SHARED: [&str; 12] = [
+const SHARED: [&str; 13] = [
     "requests",
     "ok",
     "errors",
@@ -87,6 +91,7 @@ const SHARED: [&str; 12] = [
     "cache_read_billed",
     "server_tool_calls",
     "client_disconnect_total",
+    "cancelled_total",
     "cache_write_5m",
     "cache_write_1h",
     "stream_count",
@@ -95,8 +100,7 @@ const SHARED: [&str; 12] = [
 /// `QueryMetrics` tokens with NO panel counterpart. They cannot diverge
 /// BETWEEN the paths because only one path computes them; their correctness
 /// rests on the query path's own tests.
-const QUERY_ONLY: [&str; 13] = [
-    "cancelled_total",
+const QUERY_ONLY: [&str; 12] = [
     "fallback_served",
     "ttft_p50_ms",
     "ttft_p95_ms",
@@ -210,7 +214,7 @@ fn insert(db: &UsageDb, f: &Fixture) {
         .expect("insert fixture row");
 }
 
-/// Seed the seven divergence-prone shapes the oracle above is computed from.
+/// Seed the eight divergence-prone shapes the oracle above is computed from.
 ///
 /// Every row sets `outcome` EXPLICITLY. `Outcome`'s Rust `#[default]` is
 /// `ClientDisconnect` (it is the abnormal-exit sentinel), which lands OUTSIDE
@@ -371,6 +375,19 @@ fn seed(db: &UsageDb) {
             ..Fixture::default()
         },
     );
+
+    // J: a cancelled request. Outside `errors` and `client_disconnect_total`,
+    // inside `cancelled_total`, so the four outcome buckets still sum to
+    // `requests`.
+    insert(
+        db,
+        &Fixture {
+            request_id: "j-cancelled",
+            ts_start: FROM_MS + 6_000,
+            outcome: "cancelled",
+            ..Fixture::default()
+        },
+    );
 }
 
 /// Seed one ledger and run BOTH folds against it: the panel's `collect` and
@@ -392,6 +409,7 @@ fn both_folds() -> (TempDir, UsagePanel, QueryResult) {
         &db,
         "today",
         bounds,
+        LedgerHealth::default(),
         Instant::now() + Duration::from_mins(10),
     )
     .expect("panel fold");
@@ -414,7 +432,7 @@ fn both_folds() -> (TempDir, UsagePanel, QueryResult) {
 }
 
 /// Sum one per-group panel field across every rollup group. Three of the
-/// twelve shared tokens are panel-side per-group only, so their window-wide
+/// thirteen shared tokens are panel-side per-group only, so their window-wide
 /// value is the sum over the groups the panel reports.
 fn panel_group_sum(panel: &UsagePanel, field: impl Fn(&UsageGroup) -> i64) -> i64 {
     panel.groups.iter().map(field).sum()
@@ -439,7 +457,7 @@ fn shared_projection_agrees_between_query_and_usage_panel() {
     let p = &panel.totals;
     let q = &result.totals;
 
-    // Assert: the nine tokens both surfaces carry at window totals.
+    // Assert: the ten tokens both surfaces carry at window totals.
     assert_eq!(p.requests, q.requests, "requests");
     assert_eq!(p.ok, q.ok, "ok");
     assert_eq!(p.errors, q.errors, "errors");
@@ -458,6 +476,7 @@ fn shared_projection_agrees_between_query_and_usage_panel() {
         p.client_disconnect_total, q.client_disconnect_total,
         "client_disconnect_total"
     );
+    assert_eq!(p.cancelled_total, q.cancelled_total, "cancelled_total");
 
     // And the three the panel reports per group only.
     assert_eq!(
@@ -484,13 +503,26 @@ fn both_paths_match_the_hand_computed_window_oracle() {
     // both against the independent derivation at the top of this file.
     let (_dir, panel, result) = both_folds();
 
-    for (label, requests, ok, errors, disconnects, input, output, reasoning, cread, stu) in [
+    for (
+        label,
+        requests,
+        ok,
+        errors,
+        disconnects,
+        cancelled,
+        input,
+        output,
+        reasoning,
+        cread,
+        stu,
+    ) in [
         (
             "usage panel",
             panel.totals.requests,
             panel.totals.ok,
             panel.totals.errors,
             panel.totals.client_disconnect_total,
+            panel.totals.cancelled_total,
             panel.totals.input_tokens,
             panel.totals.output_tokens,
             panel.totals.reasoning_tokens,
@@ -503,6 +535,7 @@ fn both_paths_match_the_hand_computed_window_oracle() {
             result.totals.ok,
             result.totals.errors,
             result.totals.client_disconnect_total,
+            result.totals.cancelled_total,
             result.totals.input_tokens,
             result.totals.output_tokens,
             result.totals.reasoning_tokens,
@@ -518,9 +551,13 @@ fn both_paths_match_the_hand_computed_window_oracle() {
             "{label}: client_disconnect_total"
         );
         assert_eq!(
+            cancelled, EXPECTED_CANCELLED_TOTAL,
+            "{label}: cancelled_total"
+        );
+        assert_eq!(
             requests,
-            ok + errors + disconnects,
-            "{label}: requests == ok + errors + client_disconnect_total"
+            ok + errors + disconnects + cancelled,
+            "{label}: requests == ok + errors + client_disconnect_total + cancelled_total"
         );
         assert_eq!(input, EXPECTED_INPUT_TOKENS, "{label}: input_tokens");
         assert_eq!(output, EXPECTED_OUTPUT_TOKENS, "{label}: output_tokens");

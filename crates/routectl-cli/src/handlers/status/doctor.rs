@@ -1,6 +1,6 @@
 //! `/status/doctor` panel: the no-network doctor report plus a reachability
-//! summary derived from the live circuit breaker and the live
-//! capability-write failure counters.
+//! summary derived from the live circuit breaker, the live capability-write
+//! and request-row loss counters, and today's ledger observation totals.
 //!
 //! A `/status` request NEVER dials an upstream. The panel runs only the
 //! no-network doctor sections (inventory / version / config / auth / secrets /
@@ -19,38 +19,48 @@
 //! `spawn_blocking` builder [`guard_panel`] wraps it in, driven to completion
 //! with a runtime handle.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
 use axum::Json;
 use axum::extract::State;
+use chrono::Local;
 use serde::Serialize;
 
 use routectl_core::failure_class::LastOutcome;
 use routectl_router::router::RouteTargetStatus;
 use routectl_router::{DoctorReport, LaneBudgetExhaustions, LaneLossyRepairs};
+use routectl_usage::open_readonly_fastfail;
 
 use super::field_verdict_log::{FidelityEmission, FidelityGate, log_field_verdict_snapshot};
 use super::router_view::StatusRouterView;
-use super::usage_health::CapabilityWriteCounters;
+use super::usage::{open_error_code, query_error_code};
+use super::usage_health::{
+    CapabilityWriteCounters, LedgerHealth, WindowObservation, window_observation,
+};
 use super::vocabulary::codes;
 use super::{Panel, StatusState, guard_panel, now_utc_rfc3339};
-use crate::commands::doctor::{GatherSources, build_report_no_network, gather_context_no_network};
+use crate::commands::doctor::{
+    GatherSources, SCHEMA_VERSION, build_report_no_network, gather_context_no_network,
+};
+use crate::commands::usage::{WindowBounds, WindowFlag, window_bounds};
 
-/// Wire-shape version of the doctor panel payload. Reuses the no-network
-/// [`DoctorReport`]'s own `schema_version` (22): the panel embeds that report
+/// Wire-shape version of the doctor panel payload. IS the no-network
+/// [`DoctorReport`]'s own `schema_version`: the panel embeds that report
 /// verbatim, so it must not invent a parallel number. The panel's own
 /// `capability_writes` block joined at 13 alongside the report's matrix
 /// change, its `lossy_repairs_by_lane` list at 18, and its
 /// `budget_exhaustions_by_lane` list and `repairs_per_request` buckets at 19.
 /// At 20 the embedded report's `config` section gained its old-folder finding.
 /// At 21 the embedded report's `knobs` section lost its config state. At 22
-/// every capability matrix cell gained the learned verdict's `value`.
-pub const DOCTOR_SCHEMA_VERSION: u32 = 22;
+/// every capability matrix cell gained the learned verdict's `value`. At 23 the
+/// panel gained `ledger_health` and today's `observation` block.
+pub const DOCTOR_SCHEMA_VERSION: u32 = SCHEMA_VERSION;
 
-/// The no-network doctor report plus the circuit-derived reachability summary
-/// and the live capability-write counters.
+/// The no-network doctor report plus the circuit-derived reachability summary,
+/// the live capability-write and request-row loss counters, and today's
+/// observation block.
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct DoctorPanel {
     /// The full no-network report (findings + panels), embedded verbatim.
@@ -72,6 +82,51 @@ pub(super) struct DoctorPanel {
     /// counts the requests that drew exactly `n`, from zero to the whole
     /// per-request allowance.
     repairs_per_request: Vec<u64>,
+    /// The live request-row loss counters, reported apart by cause.
+    ledger_health: LedgerHealth,
+    /// Today's ledger observation totals and completeness verdict. `null`
+    /// when the usage ledger cannot be read; the rest of the panel stands.
+    observation: Option<WindowObservation>,
+}
+
+/// The panel's ledger-derived inputs: the live loss counters and the
+/// observation block judged against them.
+#[derive(Debug, Clone, Copy)]
+struct LedgerInputs {
+    health: LedgerHealth,
+    observation: Option<WindowObservation>,
+}
+
+/// Today's observation block, or `None` when the ledger cannot be opened or
+/// read. Opens with the fast-fail read-only open so a poll sheds instead of
+/// waiting on the writer's lock. Today's window rides the `ts_start` index, so
+/// the read stays cheap on a large ledger without a deadline of its own.
+fn read_observation(
+    db_path: &Path,
+    bounds: WindowBounds,
+    health: LedgerHealth,
+) -> Option<WindowObservation> {
+    let db = match open_readonly_fastfail(db_path) {
+        Ok(db) => db,
+        Err(err) => {
+            // The open error's Display embeds the DB path; log only its code.
+            tracing::debug!(
+                reason = open_error_code(&err),
+                "doctor panel: usage db unavailable, omitting observation"
+            );
+            return None;
+        }
+    };
+    match window_observation(&db, bounds.from_ms, bounds.to_ms, health) {
+        Ok(observation) => Some(observation),
+        Err(err) => {
+            tracing::debug!(
+                reason = query_error_code(&err),
+                "doctor panel: observation read failed, omitting"
+            );
+            None
+        }
+    }
 }
 
 /// One dispatch target's reachability, derived from its last settled outcome.
@@ -112,6 +167,7 @@ fn build_panel_data(
     view: &StatusRouterView,
     writer_degraded: bool,
     capability_writes: CapabilityWriteCounters,
+    ledger: LedgerInputs,
     emission: FidelityEmission,
     gate: &FidelityGate,
 ) -> DoctorPanel {
@@ -128,6 +184,8 @@ fn build_panel_data(
         lossy_repairs_by_lane: view.lossy_repairs_by_lane(),
         budget_exhaustions_by_lane: view.budget_exhaustions_by_lane(),
         repairs_per_request: view.repairs_per_request(),
+        ledger_health: ledger.health,
+        observation: ledger.observation,
     }
 }
 
@@ -151,6 +209,9 @@ async fn build_from_path(
     // Counter reads, not I/O, so these stay out here beside the router snapshot.
     let writer_degraded = state.usage_health.writer_degraded();
     let capability_writes = state.usage_health.capability_writes();
+    let ledger_health = state.usage_health.ledger_health();
+    let usage_db_path = state.usage_db_path.clone();
+    let today = window_bounds(WindowFlag::Today, Local::now());
     let gate = Arc::clone(&state.fidelity_gate);
     let legacy_dirs = state.legacy_config_dirs().to_vec();
     let handle = tokio::runtime::Handle::current();
@@ -172,11 +233,16 @@ async fn build_from_path(
             ));
             let report = build_report_no_network(&ctx);
             let schema_version = report.schema_version;
+            let ledger = LedgerInputs {
+                health: ledger_health,
+                observation: read_observation(&usage_db_path, today, ledger_health),
+            };
             let data = build_panel_data(
                 report,
                 &view,
                 writer_degraded,
                 capability_writes,
+                ledger,
                 emission,
                 &gate,
             );

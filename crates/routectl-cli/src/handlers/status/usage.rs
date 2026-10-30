@@ -7,7 +7,8 @@
 //! and maps the result to an aggregates-only DTO. It never caches a
 //! connection, never touches the writer handle, and never exposes request
 //! rows, ids, bodies, or prompts -- only rollups, windowed totals, the
-//! per-seat quota snapshots, and the would-trim summary.
+//! per-seat quota snapshots, the would-trim summary, and the window's
+//! observation totals with its completeness verdict.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -29,11 +30,14 @@ use routectl_usage::{
 use crate::commands::usage::{WindowBounds, WindowFlag, window_bounds};
 use crate::server::status_gate::USAGE_BUDGET_MS;
 
+use super::usage_health::{LedgerHealth, WindowObservation, window_observation};
 use super::vocabulary::codes;
 use super::{Panel, StatusState, guard_panel, now_utc_rfc3339};
 
-/// Wire-shape version of the usage panel payload.
-pub const SCHEMA_VERSION: u32 = 3;
+/// Wire-shape version of the usage panel payload. At 4 the totals and every
+/// group gained `cancelled_total` (so `errors` no longer has to absorb it) and
+/// the panel gained the window's `observation` block.
+pub const SCHEMA_VERSION: u32 = 4;
 
 /// The `window` query parameter for `GET /status/usage`.
 #[derive(Debug, Deserialize)]
@@ -43,8 +47,8 @@ pub(super) struct WindowQuery {
 
 /// Aggregates-only usage payload. Carries per-`(alias, provider, model,
 /// upstream)` rollups, windowed totals, one latest quota snapshot per seat,
-/// and the would-trim summary. It never carries request rows, ids, bodies, or
-/// prompts.
+/// the would-trim summary, and the window's observation totals. It never
+/// carries request rows, ids, bodies, or prompts.
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct UsagePanel {
     /// The resolved calendar window token: `today`, `week`, `month`, `all`.
@@ -57,6 +61,9 @@ pub(super) struct UsagePanel {
     groups: Vec<UsageGroup>,
     quota: Vec<UsageQuota>,
     would_trim: UsageWouldTrim,
+    /// The window's summed per-request observation counts, its ledger gaps,
+    /// and whether its rows are complete.
+    observation: WindowObservation,
 }
 
 /// Window-wide totals, summed across every rollup group.
@@ -77,9 +84,13 @@ struct UsageTotals {
     /// appears as its own key rather than folding into `unclassified`.
     errors_by_class: BTreeMap<String, i64>,
     /// Window-wide count of client-disconnect rows. Surfaced so
-    /// `requests == ok + errors + client_disconnect_total` reconciles at
-    /// totals (it already reconciles per group).
+    /// `requests == ok + errors + client_disconnect_total + cancelled_total`
+    /// reconciles at totals (it already reconciles per group).
     client_disconnect_total: i64,
+    /// Window-wide count of rows whose outcome is `cancelled`: the request
+    /// ended without an upstream failure or an observed client hangup. Kept
+    /// out of `errors` like `client_disconnect_total`.
+    cancelled_total: i64,
     /// Window-wide count of rows that REPORTED a `cache_read` value
     /// (`COUNT(cache_read)`, NULLs excluded) -- a reporting-only denominator,
     /// not a request count. Hit-rate figures MUST divide by this, NOT by raw
@@ -109,6 +120,7 @@ struct UsageGroup {
     server_tool_calls: i64,
     stream_count: i64,
     client_disconnect_total: i64,
+    cancelled_total: i64,
     /// Per-group error breakdown by resolved failure class. Sums to `errors`
     /// by construction (same predicate). Empty (`{}`) when the group has zero
     /// errors. NULL-class rows bucket under `unclassified`; forward-compat
@@ -141,6 +153,7 @@ impl UsageGroup {
         self.server_tool_calls += other.server_tool_calls;
         self.stream_count += other.stream_count;
         self.client_disconnect_total += other.client_disconnect_total;
+        self.cancelled_total += other.cancelled_total;
         self.cache_read_present += other.cache_read_present;
         for (class, count) in other.errors_by_class {
             *self.errors_by_class.entry(class).or_default() += count;
@@ -210,6 +223,8 @@ async fn build_window(
 ) -> Panel<UsagePanel> {
     let bounds = window_bounds(flag, Local::now());
     let db_path = state.usage_db_path.clone();
+    // A counter read, not I/O; taken beside `as_of` so both describe one instant.
+    let health = state.usage_health.ledger_health();
     // Stamp `as_of` at request time (before the blocking read), so a lock
     // wait or slow disk cannot skew the freshness marker.
     let as_of = now_utc_rfc3339();
@@ -217,7 +232,7 @@ async fn build_window(
         &state.builder_capacity,
         SCHEMA_VERSION,
         codes::DB_UNAVAILABLE,
-        move || build_panel(&db_path, token, bounds, as_of),
+        move || build_panel(&db_path, token, bounds, health, as_of),
     )
     .await;
     state.observability.usage.record(&panel);
@@ -245,6 +260,7 @@ fn build_panel(
     db_path: &Path,
     token: &'static str,
     bounds: WindowBounds,
+    health: LedgerHealth,
     as_of: String,
 ) -> Panel<UsagePanel> {
     let deadline = Instant::now() + Duration::from_millis(USAGE_BUDGET_MS);
@@ -252,17 +268,17 @@ fn build_panel(
         Ok(db) => db,
         Err(err) => return Panel::unavailable(SCHEMA_VERSION, open_error_code(&err)),
     };
-    match collect(&db, token, bounds, deadline) {
+    match collect(&db, token, bounds, health, deadline) {
         Ok(dto) => Panel::available(SCHEMA_VERSION, as_of, dto),
         Err(code) => Panel::unavailable(SCHEMA_VERSION, code),
     }
 }
 
-/// Run the four read-only aggregate queries and assemble the DTO. On a
-/// query failure, returns the mapped shed code.
+/// Run the five read-only ledger queries and assemble the DTO. On a query
+/// failure, returns the mapped shed code.
 ///
 /// ONE deadline covers the whole collection rather than any single statement:
-/// three of the four reads full-scan the ledger on the all-time window the
+/// three of the reads full-scan the ledger on the all-time window the
 /// dashboard polls, so bounding one of them would not bound the panel. The
 /// guard is per-CONNECTION and this connection is opened per request, so a
 /// single install reaches every statement below with no stale-handler risk
@@ -271,6 +287,7 @@ fn collect(
     db: &UsageDb,
     token: &'static str,
     bounds: WindowBounds,
+    health: LedgerHealth,
     deadline: Instant,
 ) -> Result<UsagePanel, &'static str> {
     let _guard = DeadlineGuard::install(db, deadline).map_err(|e| query_error_code(&e))?;
@@ -280,7 +297,17 @@ fn collect(
     let quota = latest_quota_by_seat(db).map_err(|e| query_error_code(&e))?;
     let would_trim =
         would_trim_summary(db, bounds.from_ms, bounds.to_ms).map_err(|e| query_error_code(&e))?;
-    Ok(assemble(token, bounds, rows, breakdown, quota, would_trim))
+    let observation = window_observation(db, bounds.from_ms, bounds.to_ms, health)
+        .map_err(|e| query_error_code(&e))?;
+    Ok(assemble(
+        token,
+        bounds,
+        rows,
+        breakdown,
+        quota,
+        would_trim,
+        observation,
+    ))
 }
 
 /// Fold the query results into the wire DTO. Totals are summed over the
@@ -301,6 +328,7 @@ fn assemble(
     breakdown: Vec<(GroupKey, String, i64)>,
     quota: Vec<QuotaSnapshot>,
     would_trim: WouldTrimSummary,
+    observation: WindowObservation,
 ) -> UsagePanel {
     let mut per_group: std::collections::HashMap<GroupKey, BTreeMap<String, i64>> =
         std::collections::HashMap::new();
@@ -322,6 +350,7 @@ fn assemble(
         totals.cache_read_billed += row.cache_read_billed;
         totals.server_tool_calls += row.server_tool_calls;
         totals.client_disconnect_total += row.client_disconnect_total;
+        totals.cancelled_total += row.cancelled_total;
         totals.cache_read_present += row.cache_read_present;
         // The breakdown is grouped at the SAME kind-bearing grain as the
         // aggregate, so this stays an exact-match lookup; the class maps are
@@ -342,6 +371,7 @@ fn assemble(
         groups,
         quota: quota.into_iter().map(map_quota).collect(),
         would_trim: map_would_trim(would_trim),
+        observation,
     }
 }
 
@@ -371,6 +401,7 @@ fn map_group(row: AggRow, errors_by_class: BTreeMap<String, i64>) -> UsageGroup 
         server_tool_calls: row.server_tool_calls,
         stream_count: row.stream_count,
         client_disconnect_total: row.client_disconnect_total,
+        cancelled_total: row.cancelled_total,
         errors_by_class,
         cache_read_present: row.cache_read_present,
     }
@@ -996,6 +1027,18 @@ mod tests {
             )],
             Vec::new(),
             WouldTrimSummary::default(),
+            WindowObservation {
+                from_ms: 0,
+                to_ms: 100,
+                wire_losses: 0,
+                translation_drops: 0,
+                local_refusals: 0,
+                field_repairs: 0,
+                missing_terminals: 0,
+                gap_rows: 0,
+                gap_dropped: 0,
+                complete: true,
+            },
         );
         let text = serde_json::to_string(&panel).unwrap();
         for forbidden in ["request_id", "prompt", "message", "\"body\"", "session_id"] {
@@ -1193,10 +1236,28 @@ mod tests {
         assert_eq!(json["data"]["totals"]["errors"], 4);
     }
 
+    /// The four outcome buckets of one metric set: `(ok, errors,
+    /// client_disconnect_total, cancelled_total)`.
+    fn outcome_buckets(set: &Value) -> (i64, i64, i64, i64) {
+        let n = |k: &str| {
+            set[k]
+                .as_i64()
+                .unwrap_or_else(|| panic!("{k} is an integer"))
+        };
+        (
+            n("ok"),
+            n("errors"),
+            n("client_disconnect_total"),
+            n("cancelled_total"),
+        )
+    }
+
+    /// Mutation check: drop `cancelled_total` from the totals accumulation in
+    /// `assemble` -> red on the totals identity.
     #[tokio::test]
-    async fn requests_reconcile_ok_errors_disconnect_at_totals() {
-        // REQ = OK + ERR + DISC at totals, with client_disconnect_total and
-        // cache_read_present surfaced.
+    async fn requests_reconcile_ok_errors_disconnect_cancelled_at_totals() {
+        // REQ = OK + ERR + DISC + CANC at totals, with client_disconnect_total,
+        // cancelled_total and cache_read_present surfaced.
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("usage.db");
         seed_class_ledger(
@@ -1206,6 +1267,7 @@ mod tests {
                 ("ok", None),
                 ("upstream_error", Some("http-5xx")),
                 ("client_disconnect", None),
+                ("cancelled", None),
             ],
         );
 
@@ -1215,17 +1277,49 @@ mod tests {
 
         let totals = &json["data"]["totals"];
         let requests = totals["requests"].as_i64().unwrap();
-        let ok = totals["ok"].as_i64().unwrap();
-        let errors = totals["errors"].as_i64().unwrap();
-        let disc = totals["client_disconnect_total"].as_i64().unwrap();
-        assert_eq!(requests, 4);
+        let (ok, errors, disc, cancelled) = outcome_buckets(totals);
+        assert_eq!(requests, 5);
         assert_eq!(ok, 2);
-        assert_eq!(errors, 1);
+        assert_eq!(errors, 1, "a cancelled row is not an upstream error");
         assert_eq!(disc, 1);
-        assert_eq!(requests, ok + errors + disc);
+        assert_eq!(cancelled, 1);
+        assert_eq!(requests, ok + errors + disc + cancelled);
         // Every seeded row reported a cache_read, so the reporting-only
         // denominator equals the request count here.
-        assert_eq!(totals["cache_read_present"], 4);
+        assert_eq!(totals["cache_read_present"], 5);
+    }
+
+    /// The identity holds per reported group too, including a group whose
+    /// cancelled rows span two kind eras and so reach the panel through
+    /// `UsageGroup::merge`.
+    ///
+    /// Mutation check: drop the `cancelled_total` line from
+    /// `UsageGroup::merge` -> red here.
+    #[tokio::test]
+    async fn requests_reconcile_per_group_across_kind_eras_with_cancelled_rows() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("usage.db");
+        seed_two_kind_eras(
+            &path,
+            &[
+                (Some("gemini"), "ok", None),
+                (Some("gemini"), "cancelled", None),
+                (Some("openai-compat"), "cancelled", None),
+                (Some("openai-compat"), "upstream_error", Some("timeout")),
+                (None, "client_disconnect", None),
+            ],
+        );
+
+        let (status, json) =
+            get_usage(state_with_ledger(path.clone()), "/status/usage?window=all").await;
+        assert_eq!(status, StatusCode::OK);
+
+        let groups = json["data"]["groups"].as_array().unwrap();
+        assert_eq!(groups.len(), 1, "one reported group across the eras");
+        let group = &groups[0];
+        let (ok, errors, disc, cancelled) = outcome_buckets(group);
+        assert_eq!((ok, errors, disc, cancelled), (1, 1, 1, 2));
+        assert_eq!(group["requests"], ok + errors + disc + cancelled);
     }
 
     /// The migration race at the panel boundary: a pre-migration v11 snapshot
@@ -1279,7 +1373,7 @@ mod tests {
             json["unavailable"].is_null(),
             "a migrated v12 DB must read as available: {json}"
         );
-        assert_eq!(json["schema_version"], 3);
+        assert_eq!(json["schema_version"], 4);
         assert_eq!(json["data"]["totals"]["requests"], 2);
     }
 
@@ -1321,13 +1415,120 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn usage_panel_reports_schema_version_three() {
+    async fn usage_panel_reports_schema_version_four() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("usage.db");
         seed_ledger(&path, &[Local::now().timestamp_millis()]);
         let (status, json) = get_usage(state_with_ledger(path), "/status/usage").await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(json["schema_version"], 3);
+        assert_eq!(json["schema_version"], 4);
+    }
+
+    /// Build a `StatusState` over the caller's usage handle, whose counters
+    /// the panel reads, and the ledger at `db_path`.
+    fn state_with_usage(db_path: PathBuf, usage: routectl_usage::UsageHandle) -> Arc<StatusState> {
+        let router = Router::new(Arc::new(Config::default()));
+        let app = AppState::for_test_with_usage(Arc::new(ArcSwap::from_pointee(router)), usage);
+        let mut status = StatusState::from_app(&app, None, DaemonMeta::for_test());
+        status.usage_db_path = db_path;
+        Arc::new(status)
+    }
+
+    /// Record one `ledger_gaps` row at `ts_ms`.
+    fn seed_gap(path: &Path, ts_ms: i64) {
+        let db = open(path).expect("open ledger");
+        db.conn()
+            .execute(
+                "INSERT INTO ledger_gaps (ts_ms, cause, dropped) VALUES (?1, 'queue_full', 3)",
+                [ts_ms],
+            )
+            .expect("seed gap row");
+    }
+
+    #[tokio::test]
+    async fn a_clean_window_reads_complete() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("usage.db");
+        seed_ledger(&path, &[Local::now().timestamp_millis()]);
+
+        let (status, json) = get_usage(state_with_ledger(path), "/status/usage").await;
+
+        assert_eq!(status, StatusCode::OK);
+        let observation = &json["data"]["observation"];
+        assert_eq!(observation["gap_rows"], 0);
+        assert_eq!(observation["complete"], true);
+    }
+
+    /// A gap row marks only the window it falls inside: the same row is
+    /// outside today's window when it was recorded 40 days ago (the control
+    /// that the window bound is applied), and inside the all-time window.
+    ///
+    /// Mutation check: drop `!totals.has_gap()` from `window_observation` ->
+    /// red on the all-time window.
+    #[tokio::test]
+    async fn a_gap_row_in_the_window_reads_incomplete() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("usage.db");
+        let now = Local::now().timestamp_millis();
+        seed_ledger(&path, &[now]);
+        seed_gap(&path, now - 40 * DAY_MS);
+
+        let (_, today) = get_usage(state_with_ledger(path.clone()), "/status/usage").await;
+        let (_, all) = get_usage(state_with_ledger(path), "/status/usage?window=all").await;
+
+        assert_eq!(today["data"]["observation"]["gap_rows"], 0);
+        assert_eq!(today["data"]["observation"]["complete"], true);
+        assert_eq!(all["data"]["observation"]["gap_rows"], 1);
+        assert_eq!(all["data"]["observation"]["gap_dropped"], 3);
+        assert_eq!(all["data"]["observation"]["complete"], false);
+    }
+
+    /// Mutation check: drop the `dropped_closed` arm of
+    /// `LedgerHealth::has_unrecorded_loss` -> red here.
+    #[tokio::test]
+    async fn a_closed_channel_drop_reads_incomplete() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("usage.db");
+        seed_ledger(&path, &[Local::now().timestamp_millis()]);
+        let usage = routectl_usage::handle_with_closed_channel();
+        usage.try_send(routectl_usage::UsageRecord::default());
+        assert_eq!(usage.counters().dropped_closed(), 1, "premise");
+
+        let (_, json) = get_usage(state_with_usage(path, usage), "/status/usage").await;
+
+        assert_eq!(json["data"]["observation"]["gap_rows"], 0);
+        assert_eq!(json["data"]["observation"]["complete"], false);
+    }
+
+    /// A write error is driven the way a real one happens: the writer cannot
+    /// open a database whose parent path is a regular file.
+    ///
+    /// Mutation check: drop the `write_errors` arm of
+    /// `LedgerHealth::has_unrecorded_loss` -> red here.
+    #[tokio::test]
+    async fn a_write_error_reads_incomplete() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("usage.db");
+        seed_ledger(&path, &[Local::now().timestamp_millis()]);
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, b"not a directory").expect("plant the blocker");
+        let (usage, writer) = routectl_usage::UsageWriter::start(
+            blocker.join("usage.db"),
+            routectl_usage::CHANNEL_CAPACITY,
+            0,
+            true,
+        );
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while usage.counters().write_errors() == 0 && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(usage.counters().write_errors() > 0, "premise");
+
+        let (_, json) = get_usage(state_with_usage(path, usage), "/status/usage").await;
+
+        assert_eq!(json["data"]["observation"]["gap_rows"], 0);
+        assert_eq!(json["data"]["observation"]["complete"], false);
+        writer.shutdown();
     }
 
     /// Poll-loop safety: a panel that stays unavailable across repeated polls
@@ -1452,11 +1653,12 @@ mod tests {
             .expect("instant predates the process start");
 
         // Act
-        let shed = collect(&db, "all", ALL_TIME, expired);
+        let shed = collect(&db, "all", ALL_TIME, LedgerHealth::default(), expired);
         let after = collect(
             &db,
             "all",
             ALL_TIME,
+            LedgerHealth::default(),
             Instant::now() + Duration::from_mins(10),
         );
 
@@ -1523,6 +1725,7 @@ mod tests {
             &db,
             "all",
             ALL_TIME,
+            LedgerHealth::default(),
             started + Duration::from_millis(USAGE_BUDGET_MS),
         )
         .expect("the panel must answer inside its budget");

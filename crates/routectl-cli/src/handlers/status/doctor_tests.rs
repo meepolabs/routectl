@@ -168,6 +168,10 @@ async fn build_panel_data_emits_the_field_verdict_snapshot_log() {
             &view,
             false,
             state.usage_health.capability_writes(),
+            LedgerInputs {
+                health: state.usage_health.ledger_health(),
+                observation: None,
+            },
             FidelityEmission::always(),
             &FidelityGate::default(),
         );
@@ -184,7 +188,7 @@ async fn build_panel_data_emits_the_field_verdict_snapshot_log() {
 #[test]
 fn no_config_path_yields_unavailable_panel() {
     let panel = Panel::<DoctorPanel>::unavailable(DOCTOR_SCHEMA_VERSION, codes::NO_CONFIG_PATH);
-    assert_eq!(panel.schema_version, 22);
+    assert_eq!(panel.schema_version, 23);
     assert_eq!(panel.unavailable.as_deref(), Some("no_config_path"));
     assert!(panel.data.is_none());
 }
@@ -206,6 +210,39 @@ async fn panel_constant_tracks_the_no_network_report_schema_version() {
     let ctx = gather_context_no_network(&config_path, GatherSources::Disk, &[]).await;
     let report = build_report_no_network(&ctx);
     assert_eq!(report.schema_version, DOCTOR_SCHEMA_VERSION);
+}
+
+/// Whether `src` defines `DOCTOR_SCHEMA_VERSION` as the doctor report's own
+/// constant rather than as a number of its own.
+fn defines_panel_version_from_the_report_constant(src: &str) -> bool {
+    let production = crate::handlers::status::production_source::production_source(src);
+    let needle = concat!("pub const DOCTOR_SCHEMA_VERSION", ": u32 = ");
+    let Some(at) = production.find(needle) else {
+        return false;
+    };
+    let rhs = production[at + needle.len()..]
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim();
+    rhs == "SCHEMA_VERSION"
+}
+
+/// The panel version has ONE source: the doctor report's `SCHEMA_VERSION`.
+/// A second literal here could drift from the report it embeds, and the
+/// unavailable paths carry this constant while the success path carries the
+/// report's, so drift would make one panel speak two versions.
+///
+/// Mutation check: define the constant as `23` -> red here.
+#[test]
+fn panel_schema_version_is_defined_from_the_report_constant() {
+    assert!(
+        defines_panel_version_from_the_report_constant(include_str!("doctor.rs")),
+        "DOCTOR_SCHEMA_VERSION must be defined as commands::doctor::SCHEMA_VERSION"
+    );
+    // Positive control: the scanner rejects a literal definition.
+    let literal = concat!("pub const DOCTOR_SCHEMA_VERSION", ": u32 = 23;\n");
+    assert!(!defines_panel_version_from_the_report_constant(literal));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -240,12 +277,12 @@ async fn handler_returns_report_with_no_probe_section() {
     let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
     let json: Value = serde_json::from_slice(&bytes).unwrap();
 
-    assert_eq!(json["schema_version"], 22);
+    assert_eq!(json["schema_version"], 23);
     assert!(json["unavailable"].is_null());
     let as_of = json["as_of"].as_str().expect("as_of present");
     assert!(chrono::DateTime::parse_from_rfc3339(as_of).is_ok());
 
-    assert_eq!(json["data"]["report"]["schema_version"], 22);
+    assert_eq!(json["data"]["report"]["schema_version"], 23);
     let findings = json["data"]["report"]["findings"].as_array().unwrap();
     assert!(
         !findings.is_empty(),
@@ -370,6 +407,116 @@ async fn a_forced_capability_drop_increments_the_rendered_counter() {
     assert_eq!(after["capability_events_dropped_full"], 1);
     assert_eq!(after["write_errors"], 0);
     assert_eq!(after["capability_writer_unavailable"], 0);
+}
+
+/// Build a doctor-panel state over `usage` with a minimal on-disk config, and
+/// the usage ledger at `db_path`.
+fn doctor_state_over(
+    usage: routectl_usage::UsageHandle,
+    dir: &std::path::Path,
+    db_path: PathBuf,
+) -> Arc<StatusState> {
+    let config_path = dir.join("config.toml");
+    std::fs::write(
+        &config_path,
+        format!("version = {}\n", routectl_router::CURRENT_CONFIG_VERSION),
+    )
+    .unwrap();
+    let router = Arc::new(ArcSwap::from_pointee(Router::new(Arc::new(
+        Config::default(),
+    ))));
+    let app = AppState::for_test_with_usage(router, usage);
+    let mut status = StatusState::from_app(&app, Some(config_path), DaemonMeta::for_test());
+    status.usage_db_path = db_path;
+    Arc::new(status)
+}
+
+/// The doctor panel reports the two request-row drop causes apart, read from
+/// the live counters on every build: a full channel moves only
+/// `dropped_full`, a closed channel only `dropped_closed`.
+///
+/// Mutation check: read `dropped_full` into `dropped_closed` in
+/// `UsageHealthView::ledger_health` -> red on the closed case.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ledger_health_reports_full_and_closed_drops_apart() {
+    let dir = tempfile::tempdir().unwrap();
+    let absent = dir.path().join("absent-usage.db");
+    let health = |json: &Value| json["data"]["ledger_health"].clone();
+
+    // A one-slot channel nobody drains: the second row is refused as FULL.
+    let (tx, _rx) = tokio::sync::mpsc::channel::<routectl_usage::WriterMessage>(1);
+    let full = routectl_usage::handle_over_channel_with(
+        tx,
+        Arc::new(routectl_usage::UsageCounters::default()),
+    );
+    let state = doctor_state_over(full.clone(), dir.path(), absent.clone());
+    assert_eq!(
+        health(&doctor_json(&state).await),
+        serde_json::json!({ "dropped_full": 0, "dropped_closed": 0, "write_errors": 0 }),
+        "control: nothing refused yet"
+    );
+    full.try_send(routectl_usage::UsageRecord::default());
+    full.try_send(routectl_usage::UsageRecord::default());
+    assert_eq!(
+        health(&doctor_json(&state).await),
+        serde_json::json!({ "dropped_full": 1, "dropped_closed": 0, "write_errors": 0 }),
+    );
+
+    let closed = routectl_usage::handle_with_closed_channel();
+    let state = doctor_state_over(closed.clone(), dir.path(), absent);
+    closed.try_send(routectl_usage::UsageRecord::default());
+    assert_eq!(
+        health(&doctor_json(&state).await),
+        serde_json::json!({ "dropped_full": 0, "dropped_closed": 1, "write_errors": 0 }),
+    );
+}
+
+/// The doctor panel carries today's observation block from the ledger, and a
+/// gap row recorded today marks it incomplete. An unreadable ledger leaves the
+/// block `null` while the rest of the panel stands.
+///
+/// Mutation check: build the panel with `observation: None` -> red on the
+/// seeded ledger.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn doctor_panel_carries_todays_observation_and_marks_a_gap_incomplete() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("usage.db");
+    let now = chrono::Local::now().timestamp_millis();
+    {
+        let db = routectl_usage::open(&db_path).expect("open ledger");
+        db.conn()
+            .execute(
+                "INSERT INTO requests (ts_start, ts_end, request_id, ingress_dialect, \
+                 requested_model, alias, stream, outcome, latency_ms, tool_count, \
+                 msg_count, attempt_count, fallback_count, wire_losses, field_repairs) \
+                 VALUES (?1, ?1, 'r', 'openai', 'm', 'a', 0, 'ok', 5, 0, 0, 1, 0, 2, 3)",
+                [now],
+            )
+            .expect("seed row");
+        db.conn()
+            .execute(
+                "INSERT INTO ledger_gaps (ts_ms, cause, dropped) VALUES (?1, 'queue_full', 4)",
+                [now],
+            )
+            .expect("seed gap row");
+    }
+    let usage = routectl_usage::handle_over_channel_with(
+        tokio::sync::mpsc::channel::<routectl_usage::WriterMessage>(1).0,
+        Arc::new(routectl_usage::UsageCounters::default()),
+    );
+
+    let json = doctor_json(&doctor_state_over(usage.clone(), dir.path(), db_path)).await;
+    let observation = &json["data"]["observation"];
+    assert_eq!(observation["wire_losses"], 2);
+    assert_eq!(observation["field_repairs"], 3);
+    assert_eq!(observation["gap_rows"], 1);
+    assert_eq!(observation["gap_dropped"], 4);
+    assert_eq!(observation["complete"], false);
+
+    let missing = dir.path().join("absent-usage.db");
+    let json = doctor_json(&doctor_state_over(usage, dir.path(), missing)).await;
+    assert!(json["unavailable"].is_null(), "the panel itself stands");
+    assert!(json["data"]["observation"].is_null());
 }
 
 /// The `/status/doctor` payload carries the lossy field-repair count per
