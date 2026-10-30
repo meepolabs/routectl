@@ -66,7 +66,7 @@ fn a_served_request_logs_one_content_free_finished_line_at_info() {
         let line = lines[0];
         assert!(line.contains(" INFO "), "stream={stream}: {line}");
         assert!(
-            line.contains(&format!("request_id={PLANTED_ID}")),
+            line.contains(&format!("request_id=\"{PLANTED_ID}\"")),
             "control: the sink renders planted client text: {line}"
         );
         assert!(line.contains("outcome=ok"), "stream={stream}: {line}");

@@ -88,8 +88,11 @@ pub async fn count_tokens(
     // The slot is installed before dispatch moves `req`, so a count dropped
     // mid-walk still names the last target tried.
     let request_id = request_id.map(|e| e.0.0).unwrap_or_default();
+    // The count row is content-free: unlike an inference row it keeps no
+    // session id. The request itself still carries the key for routing.
     let draft = UsageRecord {
         operation: Operation::CountTokens,
+        session_id: None,
         ..build_usage_draft(adapter.id(), &req, request_id, classify_harness(&headers))
     };
     let mut capture = UsageCapture::for_request(

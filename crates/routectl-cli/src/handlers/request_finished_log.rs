@@ -8,7 +8,9 @@
 //! forwarded-credential or default-alias route, and the request id can be
 //! client-chosen, so every string passes through
 //! [`routectl_core::sanitize_for_log`], which escapes control characters and
-//! bounds the length.
+//! bounds the length, and is then written as a quoted, escaped value, so a
+//! name carrying ` outcome=ok` cannot add a key to the line. Closed tokens,
+//! booleans and counts stay bare.
 
 use std::fmt;
 
@@ -34,8 +36,22 @@ impl<T: fmt::Display> fmt::Display for OrAbsent<T> {
     }
 }
 
-fn safe(value: Option<&str>) -> OrAbsent<String> {
-    OrAbsent(value.map(routectl_core::sanitize_for_log))
+/// A client-influenced string, sanitized and written as a quoted, escaped
+/// value; an unset column is the bare [`ABSENT`], so it never reads as a
+/// value spelled `-`.
+struct Quoted(Option<String>);
+
+impl fmt::Debug for Quoted {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.0 {
+            Some(value) => fmt::Debug::fmt(value.as_str(), f),
+            None => f.write_str(ABSENT),
+        }
+    }
+}
+
+fn quoted(value: Option<&str>) -> Quoted {
+    Quoted(value.map(routectl_core::sanitize_for_log))
 }
 
 /// Emit the request's one INFO summary from its finished row. Called before
@@ -43,17 +59,17 @@ fn safe(value: Option<&str>) -> OrAbsent<String> {
 /// refuses the row.
 pub fn emit_request_finished(record: &UsageRecord) {
     tracing::info!(
-        request_id = %routectl_core::sanitize_for_log(&record.request_id),
+        request_id = ?quoted(Some(&record.request_id)),
         operation = %record.operation.as_str(),
         outcome = %record.outcome.as_str(),
         http_status = %OrAbsent(record.http_status),
         harness = %record.harness.as_str(),
         probe = record.probe,
-        alias = %routectl_core::sanitize_for_log(&record.alias),
-        model = %safe(record.model.as_deref()),
-        upstream = %safe(record.upstream.as_deref()),
-        provider = %safe(record.provider.as_deref()),
-        seat = %safe(record.seat.as_deref()),
+        alias = ?quoted(Some(&record.alias)),
+        model = ?quoted(record.model.as_deref()),
+        upstream = ?quoted(record.upstream.as_deref()),
+        provider = ?quoted(record.provider.as_deref()),
+        seat = ?quoted(record.seat.as_deref()),
         attempt_count = record.attempt_count,
         fallback_count = record.fallback_count,
         latency_ms = record.latency_ms,

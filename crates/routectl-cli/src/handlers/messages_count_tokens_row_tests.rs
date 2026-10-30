@@ -1,7 +1,7 @@
 //! The usage row a `/v1/messages/count_tokens` request leaves in the ledger:
 //! one row marked as a token count, with the served identity, outcome and
 //! request id, kept out of inference readers and counted in observation
-//! totals.
+//! totals. Unlike an inference row it never keeps the client's session id.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -290,6 +290,79 @@ async fn a_count_row_is_absent_from_aggregate_and_cost_views_and_present_in_obse
     let control = routectl_usage::aggregate(&db, WINDOW_FROM, WINDOW_TO).expect("aggregate");
     assert_eq!(control.len(), 1, "{control:?}");
     assert_eq!(priced_groups(&db), 1);
+}
+
+/// A count and an inference request carrying the same session header, posted
+/// through the real handlers into one ledger: the count row keeps no session
+/// id, while the inference row keeps the one it has always recorded.
+#[tokio::test]
+async fn a_count_row_keeps_no_session_id_while_an_inference_row_keeps_it() {
+    // Arrange
+    const SESSION: &str = "count-row-session-5d1e";
+    let dir = tempfile::tempdir().expect("usage tempdir");
+    let db_path = dir.path().join("usage.db");
+    let (usage, writer) = UsageWriter::start(db_path.clone(), CHANNEL_CAPACITY, 0, true);
+    let state = AppState::for_test_with_usage(
+        Arc::new(arc_swap::ArcSwap::from_pointee(router_with(
+            CountDouble::counting(),
+        ))),
+        usage,
+    );
+    let app = axum::Router::new()
+        .route("/v1/messages/count_tokens", post(super::count_tokens))
+        .route("/v1/messages", post(crate::handlers::messages::messages))
+        .layer(axum::middleware::from_fn(
+            crate::server::request_id::middleware,
+        ))
+        .with_state(state);
+    let inference_body =
+        r#"{"model":"a","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}"#;
+    let post_with_session = |uri: &'static str, body: &'static str| {
+        Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("content-type", "application/json")
+            .header("anthropic-version", "2023-06-01")
+            .header("x-claude-code-session-id", SESSION)
+            .body(Body::from(body))
+            .expect("request builds")
+    };
+
+    // Act
+    for req in [
+        post_with_session("/v1/messages/count_tokens", COUNT_BODY),
+        post_with_session("/v1/messages", inference_body),
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(req)
+            .await
+            .expect("router is infallible");
+        to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("response body drains");
+    }
+    tokio::task::spawn_blocking(move || writer.shutdown())
+        .await
+        .expect("usage writer shutdown");
+
+    // Assert
+    let conn = rusqlite::Connection::open(&db_path).expect("read open");
+    let mut stmt = conn
+        .prepare("SELECT operation, session_id FROM requests ORDER BY operation")
+        .expect("prepare");
+    let rows: Vec<(String, Option<String>)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .expect("query")
+        .collect::<std::result::Result<_, _>>()
+        .expect("rows");
+    assert_eq!(
+        rows,
+        [
+            ("count_tokens".to_owned(), None),
+            ("inference".to_owned(), Some(SESSION.to_owned())),
+        ]
+    );
 }
 
 #[tokio::test]

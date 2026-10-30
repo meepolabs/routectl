@@ -1,8 +1,9 @@
 //! Every finished request writes exactly one INFO `request finished` line,
 //! rendered from its row before the row is queued, so a row the writer's
 //! queue refuses still has its line. The line carries a fixed key set, never
-//! request content, and bounds and escapes the routing names a client can
-//! influence. The per-request cache breadcrumb stays at DEBUG.
+//! request content, and bounds, escapes and quotes the routing names a client
+//! can influence, so none of them can add a key. The per-request cache
+//! breadcrumb stays at DEBUG.
 
 use std::sync::Arc;
 
@@ -15,8 +16,12 @@ use routectl_core::{
 use routectl_testkit::{CapturedEvent, capture_events};
 use routectl_usage::{UsageCounters, WriterMessage};
 use tokio::sync::mpsc;
+use tracing_subscriber::EnvFilter;
+
+use crate::log_sink::{self, Clock};
 
 const ROW_ID: &str = "finished-row";
+const ROW_ID_QUOTED: &str = "\"finished-row\"";
 
 /// The pinned key set, in emission order.
 const FINISHED_KEYS: [&str; 23] = [
@@ -262,7 +267,12 @@ fn every_finish_path_writes_exactly_one_info_request_finished_line_with_the_pinn
         assert_eq!(line.level, tracing::Level::INFO, "{}", row.name);
         let keys: Vec<&str> = line.fields.iter().map(|(k, _)| k.as_str()).collect();
         assert_eq!(keys, FINISHED_KEYS, "{}", row.name);
-        assert_eq!(line.field("request_id"), Some(ROW_ID), "{}", row.name);
+        assert_eq!(
+            line.field("request_id"),
+            Some(ROW_ID_QUOTED),
+            "{}",
+            row.name
+        );
         assert_eq!(line.field("outcome"), Some(row.outcome), "{}", row.name);
         assert_eq!(line.field("operation"), Some(row.operation), "{}", row.name);
     }
@@ -327,7 +337,11 @@ fn a_long_control_character_requested_model_is_escaped_and_bounded_on_the_line()
 
     let line = finished(&events)[0];
     for key in ["alias", "model", "upstream"] {
-        let value = line.field(key).expect("key present");
+        let quoted = line.field(key).expect("key present");
+        let value = quoted
+            .strip_prefix('"')
+            .and_then(|v| v.strip_suffix('"'))
+            .unwrap_or_else(|| panic!("{key} is not quoted: {quoted:?}"));
         assert!(value.starts_with("evil?[31m?model"), "{key}: {value:?}");
         assert!(
             value.chars().count() <= 256,
@@ -335,6 +349,116 @@ fn a_long_control_character_requested_model_is_escaped_and_bounded_on_the_line()
             value.chars().count()
         );
         assert!(!value.chars().any(char::is_control), "{key}: {value:?}");
+    }
+}
+
+/// Render what `emit` logs through the production sink at `info`.
+fn production_log(emit: impl FnOnce()) -> String {
+    #[derive(Clone, Default)]
+    struct Buffer(Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for Buffer {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("buffer lock").extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let buffer = Buffer::default();
+    let sink = buffer.clone();
+    let subscriber = log_sink::subscriber(
+        EnvFilter::new("info"),
+        move || sink.clone(),
+        false,
+        Clock::Off,
+    );
+    // A second live dispatch keeps callsite registration off the
+    // single-dispatch shortcut, which can cache a sibling thread's "never".
+    let _keepalive = tracing::Dispatch::new(tracing_subscriber::registry());
+    tracing::subscriber::with_default(subscriber, emit);
+    let bytes = buffer.0.lock().expect("buffer lock").clone();
+    String::from_utf8(bytes).expect("sink wrote UTF-8")
+}
+
+/// Split a rendered line on the spaces outside quoted values, the way a
+/// reader of the key=value format does.
+fn split_fields(line: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    let mut escaped = false;
+    for c in line.chars() {
+        match c {
+            _ if escaped => escaped = false,
+            '\\' if in_quotes => escaped = true,
+            '"' => in_quotes = !in_quotes,
+            ' ' if !in_quotes => {
+                tokens.push(std::mem::take(&mut current));
+                continue;
+            }
+            _ => {}
+        }
+        current.push(c);
+    }
+    tokens.push(current);
+    tokens.retain(|t| !t.is_empty());
+    tokens
+}
+
+/// A requested model carrying ` outcome=ok harness=claude_code`, reaching
+/// the line through every client-influenced carrier, never adds a second
+/// `outcome` or `harness` key: the real values stay the only ones.
+#[test]
+fn a_requested_model_spelling_key_value_pairs_adds_no_key_to_the_line() {
+    // Arrange
+    let forged = "m outcome=ok harness=claude_code";
+    let emit = || {
+        let (handle, _rx, _) = owned_handle(8);
+        let slot = RequestObservation::new();
+        slot.set_last_target(ServedIdentity {
+            alias: Some(forged.to_string()),
+            model: Some(forged.to_string()),
+            upstream: Some(forged.to_string()),
+            provider: Some(forged.to_string()),
+            seat: Some(forged.to_string()),
+            ..Default::default()
+        });
+        let draft = build_usage_draft(
+            "anthropic",
+            &request(forged, "hi"),
+            ROW_ID.to_string(),
+            Harness::Other,
+        );
+        drop(UsageCapture::new(
+            draft,
+            handle,
+            "ingress-1".to_string(),
+            slot,
+        ));
+    };
+
+    // Act
+    let log = production_log(emit);
+
+    // Assert
+    let lines: Vec<&str> = log
+        .lines()
+        .filter(|l| l.contains(REQUEST_FINISHED))
+        .collect();
+    assert_eq!(lines.len(), 1, "{log}");
+    let tokens = split_fields(lines[0]);
+    let values_of = |key: &str| -> Vec<String> {
+        let prefix = format!("{key}=");
+        tokens
+            .iter()
+            .filter_map(|t| t.strip_prefix(&prefix).map(str::to_string))
+            .collect()
+    };
+    assert_eq!(values_of("outcome"), ["cancelled"], "{}", lines[0]);
+    assert_eq!(values_of("harness"), ["other"], "{}", lines[0]);
+    for key in ["alias", "model", "upstream", "provider", "seat"] {
+        assert_eq!(values_of(key), [format!("{forged:?}")], "{}", lines[0]);
     }
 }
 

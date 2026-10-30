@@ -2783,7 +2783,8 @@ failure, the last target tried), and the outcome: `ok`, or the
 dispatch-error outcome (`upstream_error`, `gate_blocked`). The token
 columns (`input_tokens`, `output_tokens`, `reasoning_tokens`,
 `cache_read`, `cache_write_5m`, `cache_write_1h`) stay NULL: a count
-consumes no tokens. These rows are left out of every inference reader
+consumes no tokens. `session_id` stays NULL too: unlike an inference
+row, a count row never records the client's session id. These rows are left out of every inference reader
 (the `routectl usage` aggregates and cost, `/status/usage` totals and
 groups), so counting traffic never inflates request totals or spend;
 the per-window observation totals include them. A body that fails to

@@ -140,7 +140,9 @@ ROUTECTL_LOG=info,aws_config=warn ./routectl serve 2>&1 | grep request_id=probe-
 
 shows every event for one specific request: ingress parse, alias
 resolution, fallback hops, retry attempts, upstream calls, response
-shape, errors.
+shape, errors. The one `request finished` line quotes its value
+(`request_id="probe-1"`), so `grep probe-1` also catches it; see
+[`request finished` (INFO)](#request-finished-info).
 
 **Polling paths are the exception.** The request span of the read-only
 polling endpoints (`/health`, `/status`, and the declared `/status/*`
@@ -1073,13 +1075,13 @@ always present, in this order; a column the row leaves unset renders as `-`.
 
 | Field | Meaning |
 |---|---|
-| `request_id` | The request correlation id (also the row's id). |
+| `request_id` | The request correlation id (also the row's id), quoted. |
 | `operation` | `inference` or `count_tokens`. |
 | `outcome` | `ok`, `upstream_error`, `client_disconnect`, `timeout`, `cancelled` or `gate_blocked`. |
 | `http_status` | The transport status the client received. |
 | `harness` | `claude_code`, `codex_cli` or `other` (the user-agent itself is never logged). |
 | `probe` | `true` for routectl's own probe traffic. |
-| `alias`, `model`, `upstream`, `provider`, `seat` | The served target's routing names. |
+| `alias`, `model`, `upstream`, `provider`, `seat` | The served target's routing names, quoted; an unset one is a bare `-`. |
 | `attempt_count`, `fallback_count` | Dispatch attempts, and fallbacks past the first target. |
 | `latency_ms`, `ttfb_ms` | Total time, and time to the first byte. |
 | `input_tokens`, `output_tokens`, `cache_read` | Token columns as the row stores them (`input_tokens` is cache-exclusive). |
@@ -1090,12 +1092,16 @@ id or user-agent. The routing names can carry the client's requested model id
 (a pre-dispatch failure names the requested alias; a forwarded-credential or
 default-alias route sends the requested id upstream), and the request id can be
 client-chosen, so all six strings are escaped and capped at 256 characters like
-every other client-influenced field.
+every other client-influenced field, and written as double-quoted values with
+`"` and `\` backslash-escaped. A model id spelled `x outcome=ok` therefore
+stays inside its own quotes and cannot add a key: a reader that splits on the
+spaces outside quotes always sees the fixed key set above. The closed tokens
+(`operation`, `outcome`, `harness`), `probe` and every count stay bare.
 
 ```
-INFO routectl_cli::handlers::request_finished_log: request finished request_id=probe-1 operation=inference outcome=ok
-  http_status=200 harness=claude_code probe=false alias=sonnet model=sonnet
-  upstream=claude-sonnet-4-5 provider=anthropic seat=main attempt_count=1
+INFO routectl_cli::handlers::request_finished_log: request finished request_id="probe-1" operation=inference outcome=ok
+  http_status=200 harness=claude_code probe=false alias="sonnet" model="sonnet"
+  upstream="claude-sonnet-4-5" provider="anthropic" seat="main" attempt_count=1
   fallback_count=0 latency_ms=2140 ttfb_ms=610 input_tokens=12 output_tokens=380
   cache_read=48210 wire_losses=0 translation_drops=0 local_refusals=0
   field_repairs=0 missing_terminals=0
@@ -1103,7 +1109,9 @@ INFO routectl_cli::handlers::request_finished_log: request finished request_id=p
 
 The line names `request_id` as its own field because it is not always written
 inside the request span (a complete body's row is finalized after the handler
-has returned the response). The span-close access line is unchanged: it is what carries `request_id`
+has returned the response). Because the value is quoted here, `grep
+request_id=probe-1` matches the span-carried lines but not this one; `grep
+probe-1` matches both. The span-close access line is unchanged: it is what carries `request_id`
 onto WARNs emitted inside the request.
 
 A request row the writer channel refuses is counted by cause and never
