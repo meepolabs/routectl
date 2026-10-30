@@ -4481,34 +4481,43 @@ source, reason and `terminal_source` counts.
 ### Rolling the usage database back (`routectl usage downgrade`)
 
 A binary refuses a usage database stamped with a newer schema version than
-it understands, so rolling a host back to the previous release needs the
-database re-stamped first. Schema v17 only appends two nullable columns to
-the capability ledger, which a v16 binary never reads, so the rollback is a
-re-stamp, not a rewrite:
+it understands, so rolling a host back to an earlier release needs the
+database re-stamped first. Each schema step it undoes only appended
+nullable columns or a table that the earlier binary never names, so the
+rollback is a re-stamp, not a rewrite:
+
+- `--to 17` undoes v18: the eight request-observation columns on
+  `requests` and the `ledger_gaps` table stay in place. A v17 binary names
+  every `requests` column it writes and never reads `ledger_gaps`.
+- `--to 16` undoes v18 (when the file is at v18) and then v17: the two
+  capability-ledger columns stay in place as well.
 
 ```bash
 systemctl --user stop routectl        # or however the daemon runs
-./routectl usage downgrade --to 16    # [--db /path/to/usage.db]
+./routectl usage downgrade --to 17    # [--db /path/to/usage.db]; --to 16 for a v16 binary
 # install and start the previous binary
 ```
 
 The command is **offline only**: it refuses while the daemon or any other
-process (a `routectl usage` viewer, a status poll) has the database open,
-and it refuses a file that is not exactly the additive v17 shape. On a
-refusal nothing changes. It never drops the two v17 columns, so starting
-the newer binary again migrates the file straight back to v17; rows the
-older binary wrote in between replay as the legacy vocabulary. Use this
-command rather than editing the version with a hand-run `sqlite3`, which
-can disturb the database's WAL sidecar files.
+process (a `routectl usage` viewer, a status poll) has the database open.
+Before re-stamping, each step checks that the tables it covers are exactly
+the earlier shape plus the columns that step added, and refuses anything
+else. It reads only the schema, never the rows, so it takes the same time
+on any database size. All steps commit in one transaction, so a refusal
+at any step leaves the file exactly as it was. Nothing is dropped, so
+starting the newer binary again migrates the file straight back to the
+current version without re-adding anything; rows the older binary wrote
+in between carry NULL in the newer columns and read as legacy rows. Use
+this command rather than editing the version with a hand-run `sqlite3`,
+which can disturb the database's WAL sidecar files.
 
 The first start of a release carrying the legacy capability cleanup runs a
 one-time data migration: it deletes the legacy capability observations
 (rows with no vocabulary version) that precede the newest replay boundary,
 which the replayer already ignores, and logs the count once. Boundary
 markers, rows at or after the newest boundary, and rows carrying a
-vocabulary version are kept. It changes no schema: the file stays v17, the
-previous binary opens it unchanged, and `routectl usage downgrade --to 16`
-still works. The deleted rows can be recovered only from a backup taken
+vocabulary version are kept. It changes no schema: the schema version is
+unchanged, and `routectl usage downgrade` still works. The deleted rows can be recovered only from a backup taken
 before the upgrade, so snapshot the database first if they matter.
 
 ## Diagnostics (`routectl doctor` and `routectl provider probe`)

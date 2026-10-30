@@ -306,16 +306,16 @@ enum UsageCmd {
     /// Re-stamp the usage DB at an older schema version so the previous
     /// routectl binary can open it (rollback). OFFLINE: refuses while the
     /// daemon, or anything else, has the DB open -- stop `routectl serve`
-    /// first. Only an exactly-additive v17 file is accepted; no column or row
-    /// is changed, and opening the file with this binary migrates it forward
-    /// again.
+    /// first. Only a file whose tables are exactly the additive shape of each
+    /// version stepped over is accepted; no column, row or table is changed,
+    /// and opening the file with this binary migrates it forward again.
     Downgrade {
-        /// The schema version to stamp. Only 16 is supported.
+        /// The schema version to stamp: 17, or 16 (steps through 17).
         #[arg(
             long,
             value_parser = clap::value_parser!(i64).range(
-                commands::usage_downgrade::SUPPORTED_TARGET
-                    ..=commands::usage_downgrade::SUPPORTED_TARGET
+                *commands::usage_downgrade::SUPPORTED_TARGETS.start()
+                    ..=*commands::usage_downgrade::SUPPORTED_TARGETS.end()
             )
         )]
         to: i64,
@@ -845,7 +845,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Cmd::Usage {
-            action: Some(UsageCmd::Downgrade { to: _, db }),
+            action: Some(UsageCmd::Downgrade { to, db }),
             ..
         } => {
             let db_path = match db {
@@ -856,7 +856,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     .db_path
                     .clone(),
             };
-            match commands::usage_downgrade::run(&db_path) {
+            match commands::usage_downgrade::run(&db_path, to) {
                 Ok(message) => println!("{message}"),
                 Err(e) => {
                     eprintln!("error: {e}");
@@ -1724,22 +1724,28 @@ mod tests {
         }
     }
 
-    /// `usage downgrade` takes exactly `--to 16`, and the report flags do not
-    /// mix with it.
+    /// `usage downgrade` takes `--to 17` or `--to 16` and nothing else, and the
+    /// report flags do not mix with it.
     #[test]
-    fn usage_downgrade_parses_only_the_supported_target() {
-        let parsed =
-            Cli::try_parse_from(["routectl", "usage", "downgrade", "--to", "16"]).expect("parses");
-        assert!(matches!(
-            parsed.cmd,
-            Cmd::Usage {
-                action: Some(UsageCmd::Downgrade { to: 16, db: None }),
-                ..
-            }
-        ));
+    fn usage_downgrade_parses_only_the_supported_targets() {
+        for target in [17_i64, 16] {
+            let value = target.to_string();
+            let parsed = Cli::try_parse_from(["routectl", "usage", "downgrade", "--to", &value])
+                .expect("parses");
+            assert!(
+                matches!(
+                    parsed.cmd,
+                    Cmd::Usage {
+                        action: Some(UsageCmd::Downgrade { to, db: None }),
+                        ..
+                    } if to == target
+                ),
+                "--to {target}"
+            );
+        }
         for argv in [
             ["routectl", "usage", "downgrade", "--to", "15"].as_slice(),
-            ["routectl", "usage", "downgrade", "--to", "17"].as_slice(),
+            ["routectl", "usage", "downgrade", "--to", "18"].as_slice(),
             ["routectl", "usage", "downgrade"].as_slice(),
             ["routectl", "usage", "--today", "downgrade", "--to", "16"].as_slice(),
         ] {

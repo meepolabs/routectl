@@ -2,37 +2,29 @@ use tempfile::TempDir;
 
 use super::*;
 
-/// Lower a current file's version stamps to v17, the state the v18 -> v17
-/// downgrade leaves: every v18 column and table stays in place.
-fn restamp_v17(path: &std::path::Path) {
+fn user_version(path: &Path) -> i64 {
     rusqlite::Connection::open(path)
         .expect("reopen")
-        .execute_batch(
-            "UPDATE meta SET value = '17' WHERE key = 'schema_version';
-             PRAGMA user_version = 17;",
-        )
-        .expect("restamp v17");
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .expect("user_version")
 }
 
 #[test]
-fn downgrades_a_fresh_db_and_names_the_path() {
-    // Arrange
-    let dir = TempDir::new().expect("tempdir");
-    let path = dir.path().join("usage.db");
-    drop(routectl_usage::open(&path).expect("fresh db"));
-    restamp_v17(&path);
+fn downgrades_a_fresh_db_to_each_target_and_names_the_path() {
+    for target in [17_i64, 16] {
+        // Arrange: a fresh file at the current version.
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("usage.db");
+        drop(routectl_usage::open(&path).expect("fresh db"));
 
-    // Act
-    let message = run(&path).expect("downgrade");
+        // Act
+        let message = run(&path, target).expect("downgrade");
 
-    // Assert
-    assert!(message.contains(&path.display().to_string()), "{message}");
-    assert!(message.contains("v16"), "{message}");
-    let conn = rusqlite::Connection::open(&path).expect("reopen");
-    let version: i64 = conn
-        .query_row("PRAGMA user_version", [], |r| r.get(0))
-        .expect("user_version");
-    assert_eq!(version, SUPPORTED_TARGET);
+        // Assert
+        assert!(message.contains(&path.display().to_string()), "{message}");
+        assert!(message.contains(&format!("v{target}")), "{message}");
+        assert_eq!(user_version(&path), target);
+    }
 }
 
 #[test]
@@ -57,13 +49,13 @@ fn refuses_while_the_daemon_writer_holds_the_db() {
     ));
 
     // Act
-    let result = run(&path);
+    let result = run(&path, 17);
 
     // Assert
     assert!(matches!(result, Err(DowngradeError::InUse)), "{result:?}");
     drop(handle);
     writer.shutdown();
-    restamp_v17(&path);
-    let message = run(&path).expect("downgrade succeeds once the writer stopped");
+    assert_eq!(user_version(&path), routectl_usage::SCHEMA_VERSION);
+    let message = run(&path, 16).expect("downgrade succeeds once the writer stopped");
     assert!(message.contains("v16"));
 }

@@ -518,7 +518,7 @@ fn migrate_v15_to_v16(conn: &Connection) -> Result<(), rusqlite::Error> {
 /// Existing rows survive with both new columns NULL -- no backfill, no rewrite.
 ///
 /// The step is strictly additive so a v16 binary can be handed the file back:
-/// `usage downgrade --to 16` re-stamps the version without touching the
+/// the 17 -> 16 downgrade step re-stamps the version without touching the
 /// columns, and a v16 reader names its columns explicitly, so the two trailing
 /// columns are invisible to it.
 ///
@@ -549,7 +549,7 @@ fn migrate_v16_to_v17(conn: &Connection) -> Result<(), rusqlite::Error> {
 
 /// The `requests` columns v18 appends, in physical order, with their declared
 /// types. The DDL in `schema.rs` lists the same set last.
-const V18_REQUESTS_COLUMNS: &[(&str, &str)] = &[
+pub const V18_REQUESTS_COLUMNS: &[(&str, &str)] = &[
     ("operation", "TEXT"),
     ("probe", "INTEGER"),
     ("harness", "TEXT"),

@@ -7,36 +7,24 @@ use crate::db::{open, open_readonly};
 use crate::migrate::migrate_to_current;
 use crate::schema::{CREATE_CAPABILITY_EVENTS_TABLE, CREATE_META_TABLE, CREATE_REQUESTS_TABLE};
 
-fn temp_db_path() -> (TempDir, std::path::PathBuf) {
+pub(super) fn temp_db_path() -> (TempDir, std::path::PathBuf) {
     let dir = TempDir::new().expect("tempdir");
     let path = dir.path().join("usage.db");
     (dir, path)
 }
 
-fn user_version(conn: &Connection) -> i64 {
+pub(super) fn user_version(conn: &Connection) -> i64 {
     conn.query_row("PRAGMA user_version", [], |r| r.get(0))
         .expect("user_version")
 }
 
-fn meta_version(conn: &Connection) -> String {
+pub(super) fn meta_version(conn: &Connection) -> String {
     conn.query_row(
         "SELECT value FROM meta WHERE key = ?1",
         [META_SCHEMA_VERSION],
         |r| r.get(0),
     )
     .expect("meta schema_version")
-}
-
-/// Lower a current file's version stamps to v17, the state the v18 -> v17
-/// downgrade leaves: every v18 column and table stays in place.
-fn restamp_v17(path: &std::path::Path) {
-    Connection::open(path)
-        .expect("reopen")
-        .execute_batch(
-            "UPDATE meta SET value = '17' WHERE key = 'schema_version';
-             PRAGMA user_version = 17;",
-        )
-        .expect("restamp v17");
 }
 
 /// The `capability_events` DDL as v16 created it: the current DDL with the two
@@ -86,7 +74,7 @@ fn v17_file_from_ddl(path: &std::path::Path, ddl: &str, added_columns: &[&str]) 
 /// `ddl` with one column definition rewritten. Panics unless `from` occurs
 /// exactly once, so a DDL edit cannot silently turn a refusal row into a copy
 /// of the real shape.
-fn rewrite_once(ddl: &str, from: &str, to: &str) -> String {
+pub(super) fn rewrite_once(ddl: &str, from: &str, to: &str) -> String {
     assert_eq!(
         ddl.matches(from).count(),
         1,
@@ -95,11 +83,18 @@ fn rewrite_once(ddl: &str, from: &str, to: &str) -> String {
     ddl.replacen(from, to, 1)
 }
 
-/// Assert `path` is refused on shape and is still stamped v17.
+/// Assert `path` is refused on the `capability_events` shape and is still
+/// stamped v17.
 fn assert_refused_on_shape(path: &std::path::Path, name: &str) {
-    let result = downgrade_to_v16(path);
+    let result = downgrade_to(path, 16);
     assert!(
-        matches!(result, Err(DowngradeError::NotAdditive { .. })),
+        matches!(
+            result,
+            Err(DowngradeError::NotAdditive {
+                table: "capability_events",
+                ..
+            })
+        ),
         "{name}: {result:?}"
     );
     let conn = Connection::open(path).expect("reopen");
@@ -136,16 +131,15 @@ const V16_READ: &str = "SELECT rowid, ts, lane_key, capability, verdict, phase, 
      FROM capability_events ORDER BY rowid";
 
 #[test]
-fn downgrades_a_fresh_v17_db_and_a_v16_reader_and_writer_use_it() {
-    // Arrange: a fresh v17 DB with one stamped row.
+fn downgrades_a_fresh_db_to_16_and_a_v16_reader_and_writer_use_it() {
+    // Arrange: a fresh current DB with one stamped row.
     let (_dir, path) = temp_db_path();
     let db = open(&path).expect("open fresh");
     insert_capability_event(db.conn(), &negative()).expect("insert");
     drop(db);
-    restamp_v17(&path);
 
     // Act
-    downgrade_to_v16(&path).expect("downgrade");
+    downgrade_to(&path, 16).expect("downgrade");
 
     // Assert: both stamps read 16, the journal is still WAL, and the v16
     // statements work against the file with its rows intact.
@@ -183,8 +177,7 @@ fn a_downgraded_file_migrates_back_to_current_with_v16_rows_reading_legacy() {
     // Arrange: a downgraded file a v16 binary then wrote to.
     let (_dir, path) = temp_db_path();
     drop(open(&path).expect("open fresh"));
-    restamp_v17(&path);
-    downgrade_to_v16(&path).expect("downgrade");
+    downgrade_to(&path, 16).expect("downgrade");
     Connection::open(&path)
         .expect("reopen")
         .execute(V16_INSERT, [])
@@ -201,12 +194,11 @@ fn a_downgraded_file_migrates_back_to_current_with_v16_rows_reading_legacy() {
     assert_eq!(rows[0].vocab_version, None);
     assert_eq!(rows[0].provider_kind, None);
     drop(db);
-    restamp_v17(&path);
-    downgrade_to_v16(&path).expect("the re-upgraded file is still exactly additive");
+    downgrade_to(&path, 16).expect("the re-upgraded file is still exactly additive");
 }
 
 #[test]
-fn downgrades_a_v16_db_that_migrated_to_v17() {
+fn downgrades_a_v16_db_that_migrated_to_current() {
     // Arrange: a v16-shaped file migrated forward by the ladder.
     let (_dir, path) = temp_db_path();
     let conn = v17_file_with(&path, &[]);
@@ -217,10 +209,9 @@ fn downgrades_a_v16_db_that_migrated_to_v17() {
     .expect("restamp v16");
     migrate_to_current(&conn, 0).expect("migrate v16 -> current");
     drop(conn);
-    restamp_v17(&path);
 
     // Act + Assert
-    downgrade_to_v16(&path).expect("a migrated v17 file is additive");
+    downgrade_to(&path, 16).expect("a migrated file is additive");
     assert_eq!(user_version(&Connection::open(&path).expect("reopen")), 16);
 }
 
@@ -238,24 +229,25 @@ fn refuses_while_another_connection_has_the_file_open() {
         }),
     ];
     for (name, hold) in holders {
-        // Arrange
-        let (_dir, path) = temp_db_path();
-        drop(open(&path).expect("open fresh"));
-        let holder = hold(&path);
-        restamp_v17(&path);
+        for target in [17, 16] {
+            // Arrange
+            let (_dir, path) = temp_db_path();
+            drop(open(&path).expect("open fresh"));
+            let holder = hold(&path);
 
-        // Act
-        let result = downgrade_to_v16(&path);
+            // Act
+            let result = downgrade_to(&path, target);
 
-        // Assert: refused as in-use, and the file is still v17.
-        assert!(
-            matches!(result, Err(DowngradeError::InUse)),
-            "{name}: {result:?}"
-        );
-        drop(holder);
-        let conn = Connection::open(&path).expect("reopen");
-        assert_eq!(user_version(&conn), 17, "{name}");
-        assert_eq!(meta_version(&conn), "17", "{name}");
+            // Assert: refused as in-use, and the file is still current.
+            assert!(
+                matches!(result, Err(DowngradeError::InUse)),
+                "{name} --to {target}: {result:?}"
+            );
+            drop(holder);
+            let conn = Connection::open(&path).expect("reopen");
+            assert_eq!(user_version(&conn), 18, "{name} --to {target}");
+            assert_eq!(meta_version(&conn), "18", "{name} --to {target}");
+        }
     }
 }
 
@@ -340,13 +332,14 @@ fn a_shape_refusal_message_carries_no_schema_content() {
     ));
 
     // Act
-    let err = downgrade_to_v16(&path).expect_err("a defaulted column is refused");
+    let err = downgrade_to(&path, 16).expect_err("a defaulted column is refused");
 
     // Assert
     assert!(
         matches!(
             err,
             DowngradeError::NotAdditive {
+                table: "capability_events",
                 reason: NotAdditiveReason::ColumnShape
             }
         ),
@@ -379,11 +372,11 @@ fn a_shape_refusal_names_whether_the_count_or_a_column_differs() {
         drop(v17_file_with(&path, added));
 
         // Act
-        let result = downgrade_to_v16(&path);
+        let result = downgrade_to(&path, 16);
 
         // Assert
         assert!(
-            matches!(result, Err(DowngradeError::NotAdditive { reason }) if reason == *expected),
+            matches!(result, Err(DowngradeError::NotAdditive { reason, .. }) if reason == *expected),
             "{name}: {result:?}"
         );
     }
@@ -457,7 +450,7 @@ fn the_exact_additive_shape_is_accepted_by_the_shape_fixture() {
         &["provider_kind TEXT", "vocab_version INTEGER"],
     ));
 
-    downgrade_to_v16(&path).expect("exact additive shape downgrades");
+    downgrade_to(&path, 16).expect("exact additive shape downgrades");
 }
 
 #[test]
@@ -471,34 +464,60 @@ fn the_current_ddl_is_accepted_by_the_constraint_fixture() {
         &[],
     ));
 
-    downgrade_to_v16(&path).expect("the real v17 DDL downgrades");
+    downgrade_to(&path, 16).expect("the real v17 DDL downgrades");
 }
 
 #[test]
-fn refuses_a_file_at_any_version_other_than_17() {
-    for version in [0_i64, 15, 16, 18] {
+fn refuses_a_file_whose_version_the_target_does_not_accept() {
+    // A downgrade to `target` accepts a file above `target` and no newer than
+    // the newest step's input. The fixture is a valid v17 file re-stamped, so
+    // only the version check can refuse these rows.
+    let cases: &[(i64, &[i64])] = &[(16, &[0, 15, 16, 19]), (17, &[0, 15, 16, 17, 19])];
+    for &(target, versions) in cases {
+        for &version in versions {
+            // Arrange
+            let (_dir, path) = temp_db_path();
+            let conn = v17_file_with(&path, &["provider_kind TEXT", "vocab_version INTEGER"]);
+            conn.execute_batch(&format!("PRAGMA user_version = {version}"))
+                .expect("restamp");
+            drop(conn);
+
+            // Act
+            let result = downgrade_to(&path, target);
+
+            // Assert
+            assert!(
+                matches!(
+                    result,
+                    Err(DowngradeError::UnexpectedVersion { found, target: t })
+                        if found == version && t == target
+                ),
+                "v{version} --to {target}: {result:?}"
+            );
+            assert_eq!(
+                user_version(&Connection::open(&path).expect("reopen")),
+                version
+            );
+        }
+    }
+}
+
+#[test]
+fn refuses_a_target_outside_the_step_list_before_touching_the_file() {
+    for target in [15, 18] {
         // Arrange
         let (_dir, path) = temp_db_path();
-        let conn = v17_file_with(&path, &["provider_kind TEXT", "vocab_version INTEGER"]);
-        conn.execute_batch(&format!("PRAGMA user_version = {version}"))
-            .expect("restamp");
-        drop(conn);
+        drop(open(&path).expect("open fresh"));
 
         // Act
-        let result = downgrade_to_v16(&path);
+        let result = downgrade_to(&path, target);
 
         // Assert
         assert!(
-            matches!(
-                result,
-                Err(DowngradeError::UnexpectedVersion { found, expected: 17 }) if found == version
-            ),
-            "v{version}: {result:?}"
+            matches!(result, Err(DowngradeError::UnsupportedTarget { target: t }) if t == target),
+            "--to {target}: {result:?}"
         );
-        assert_eq!(
-            user_version(&Connection::open(&path).expect("reopen")),
-            version
-        );
+        assert_eq!(user_version(&Connection::open(&path).expect("reopen")), 18);
     }
 }
 
@@ -521,7 +540,7 @@ fn refuses_when_the_meta_mirror_disagrees() {
         drop(conn);
 
         // Act
-        let result = downgrade_to_v16(&path);
+        let result = downgrade_to(&path, 16);
 
         // Assert
         assert!(
@@ -540,7 +559,7 @@ fn refuses_when_the_meta_mirror_disagrees() {
 fn a_missing_file_is_refused_and_not_created() {
     let (_dir, path) = temp_db_path();
 
-    let result = downgrade_to_v16(&path);
+    let result = downgrade_to(&path, 16);
 
     assert!(matches!(result, Err(DowngradeError::NoData { .. })));
     assert!(!path.exists());

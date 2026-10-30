@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::db::open;
-use crate::downgrade::downgrade_to_v16;
+use crate::downgrade::downgrade_to;
 use std::path::{Path, PathBuf};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -227,14 +227,7 @@ fn purge_keeps_the_schema_version_and_the_file_still_downgrades() {
 
     // Act
     let version = user_version(&path);
-    Connection::open(&path)
-        .expect("reopen")
-        .execute_batch(
-            "UPDATE meta SET value = '17' WHERE key = 'schema_version';
-             PRAGMA user_version = 17;",
-        )
-        .expect("restamp v17 as the v18 -> v17 downgrade leaves it");
-    let downgraded = downgrade_to_v16(&path);
+    let downgraded = downgrade_to(&path, 16);
 
     // Assert
     assert_eq!(version, SCHEMA_VERSION);

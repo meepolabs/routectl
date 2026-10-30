@@ -2150,32 +2150,50 @@ fn v17_to_v18_yields_the_same_schema_as_a_fresh_db_preserving_rows() {
     );
 }
 
-/// The v18 step is one transaction: a failure injected after its first
-/// `ALTER TABLE` (here, the version-mirror write that follows every ALTER)
-/// rolls the whole step back, leaving the file at v17 with its original
-/// column list and no gap table.
+/// The v18 step is one transaction: a failure between its first and second
+/// `ALTER TABLE` rolls the whole step back, leaving the file at v17 with its
+/// original column list and no gap table.
 #[test]
 fn v17_to_v18_failure_after_the_first_alter_leaves_the_file_at_v17() {
-    // Arrange: a v17 file whose `meta` rejects any write, so the step fails
-    // after its ALTERs and table creation have already run.
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    // Arrange: a v17 file whose connection allows the first `ALTER TABLE
+    // requests` and denies every later one.
     let (_dir, path) = temp_db_path();
     let conn = v17_db(&path);
-    conn.execute_batch(
-        "CREATE TRIGGER fail_meta_update BEFORE UPDATE ON meta \
-             BEGIN SELECT RAISE(ABORT, 'injected'); END;
-         CREATE TRIGGER fail_meta_insert BEFORE INSERT ON meta \
-             BEGIN SELECT RAISE(ABORT, 'injected'); END;",
-    )
-    .expect("create triggers");
     let columns_before = requests_column_names(&conn);
+    let alters = Arc::new(AtomicUsize::new(0));
+    let seen = Arc::clone(&alters);
+    conn.authorizer(Some(move |ctx: AuthContext<'_>| match ctx.action {
+        AuthAction::AlterTable {
+            table_name: "requests",
+            ..
+        } => {
+            if seen.fetch_add(1, Ordering::SeqCst) == 0 {
+                Authorization::Allow
+            } else {
+                Authorization::Deny
+            }
+        }
+        _ => Authorization::Allow,
+    }))
+    .expect("install authorizer");
 
     // Act
     let result = migrate_to_current(&conn, 0);
 
-    // Assert: the step failed, and nothing it did survived.
+    // Assert: the step failed at the second ALTER, and nothing it did survived:
+    // not the first added column, not the gap table, not either version stamp.
     assert!(
         result.is_err(),
         "the injected failure must surface: {result:?}"
+    );
+    assert_eq!(
+        alters.load(Ordering::SeqCst),
+        2,
+        "failed at the second ALTER"
     );
     assert_eq!(user_version(&conn), 17);
     assert_eq!(meta_schema_version(&conn), "17");
@@ -2183,9 +2201,10 @@ fn v17_to_v18_failure_after_the_first_alter_leaves_the_file_at_v17() {
     assert!(!table_exists(&conn, "ledger_gaps"));
 
     // Assert: once the fault is gone the same file migrates normally.
-    conn.execute_batch("DROP TRIGGER fail_meta_update; DROP TRIGGER fail_meta_insert;")
-        .expect("drop triggers");
+    conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+        .expect("clear authorizer");
     assert_eq!(migrate_to_current(&conn, 0).expect("retry"), 18);
+    assert_eq!(v18_tail_shape(&conn), expected_v18_tail());
 }
 
 /// The v18 step's `ADD COLUMN`s are guarded: re-entering it on a file that
