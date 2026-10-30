@@ -427,6 +427,8 @@ list with more narrative.
 
 ### Changed
 
+- **The usage ledger's `harness` column now names the client.** Each request is classified once from its `User-Agent` when it arrives: a Claude Code CLI value (`claude-cli/<version>`) records `claude_code`, a Codex CLI value (`codex_cli_rs/<version>`) records `codex_cli`, and a missing, non-UTF-8 or any other value records `other`. The user-agent itself is still never stored or logged.
+
 - **The usage database no longer writes the `would_trim_raw_marks` column.** New `requests` rows store NULL there; the column stays in the schema so older binaries keep writing to the file, and values already recorded remain readable. Reclaiming the space older rows use is a separate, optional step. Library callers lose `UsageRecord::would_trim_raw_marks` and `DispatchMeta::would_trim_raw_marks`.
 
 - **The learned token-estimate correction keys on the upstream model id, not the nickname.** A `[calibration]` lane is now `(provider kind, upstream)`: two nicknames sending one upstream on one provider kind share their evidence, a pool's seats share their model's lane, and renaming a nickname keeps it. A request served on a forwarded credential no longer contributes evidence, live or to the usage ledger; a forwarded target reads the lane of the model the client requested, which an own-credential target serving that upstream feeds. The startup warm's INFO line field `rejected_unknown_nickname` is renamed `rejected_unknown_lane`, and `CalibrationRebuildSummary` / `CalibrationLedgerRow` rename the same fields. Existing evidence is rebuilt from the usage ledger under the new key. See [docs/CONFIGURATION.md](docs/CONFIGURATION.md#learned-token-estimate-correction-calibration).

@@ -141,7 +141,12 @@ async fn serve(
     let resp = dispatched.result.expect("the stub upstream answers");
     let db_path = crate::test_usage_dir::usage_dir().join("usage.db");
     let (handle, writer) = UsageWriter::start(db_path, CHANNEL_CAPACITY, 0, true);
-    let draft = build_usage_draft("anthropic", &req, format!("req-{model}-{session_key}"));
+    let draft = build_usage_draft(
+        "anthropic",
+        &req,
+        format!("req-{model}-{session_key}"),
+        routectl_usage::Harness::Other,
+    );
     let mut cap = UsageCapture::new(
         draft,
         handle,

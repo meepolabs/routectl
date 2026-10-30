@@ -57,6 +57,18 @@ pub const PINNED_CODEX_VERSION: &str = "0.145.0";
 /// Mirrors codex's `DEFAULT_ORIGINATOR` in `default_client.rs:36`.
 pub const CODEX_ORIGINATOR: &str = "codex_cli_rs";
 
+/// Whether an inbound `User-Agent` names the Codex CLI: it STARTS with
+/// `codex_cli_rs/` followed by a non-empty version token, the shape
+/// [`codex_user_agent`] mints. A longer product name sharing the prefix
+/// (`codex_cli_rsX/1`) or an empty version does not match.
+pub fn is_codex_cli_user_agent(user_agent: &str) -> bool {
+    user_agent
+        .strip_prefix(CODEX_ORIGINATOR)
+        .and_then(|rest| rest.strip_prefix('/'))
+        .and_then(|rest| rest.split(char::is_whitespace).next())
+        .is_some_and(|version| !version.is_empty())
+}
+
 /// `originator` HTTP header name. A const so call sites stay
 /// case-stable across the egress and refresh paths.
 pub const ORIGINATOR_HEADER_NAME: &str = "originator";
@@ -296,6 +308,24 @@ pub fn default_identity_headers() -> [(&'static str, &'static str); 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn codex_cli_user_agent_matches_the_minted_shape_only() {
+        let minted = codex_user_agent();
+        let cases: [(&str, bool); 7] = [
+            (minted, true),
+            ("codex_cli_rs/0.40.0", true),
+            ("codex_cli_rsX/1", false),
+            ("codex_cli_rs/", false),
+            ("codex_cli_rs/ (Linux)", false),
+            ("curl/8", false),
+            ("", false),
+        ];
+
+        for (ua, expected) in cases {
+            assert_eq!(is_codex_cli_user_agent(ua), expected, "{ua:?}");
+        }
+    }
 
     #[test]
     fn user_agent_starts_with_codex_cli_rs_and_pinned_version() {

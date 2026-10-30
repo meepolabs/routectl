@@ -401,7 +401,12 @@ fn drain_through_production(usage: &UsageHandle, meta: &routectl_router::Dispatc
         ..Default::default()
     };
     let capture = UsageCapture::new(
-        build_usage_draft("p0", &request, "canary-span".into()),
+        build_usage_draft(
+            "p0",
+            &request,
+            "canary-span".into(),
+            routectl_usage::Harness::Other,
+        ),
         usage.clone(),
         "ingress-span".to_string(),
         routectl_core::RequestObservation::new(),

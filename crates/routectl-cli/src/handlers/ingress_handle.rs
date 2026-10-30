@@ -28,7 +28,7 @@ use serde_json::{Value, json};
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::Instrument;
 
-use crate::handlers::ingress_wire::capture_ingress_wire;
+use crate::handlers::ingress_wire::{capture_ingress_wire, classify_harness};
 use crate::handlers::opening_meter::{OpeningMeter, StreamTurn};
 use crate::handlers::pure_proxy_admission::enforce_pure_proxy_admission;
 use crate::handlers::response_wire::{
@@ -176,7 +176,7 @@ pub async fn ingress_handle<A: IngressAdapter + 'static>(
     // fields exist yet). The dispatch + token + outcome fields are
     // stamped later by the capture guard.
     let request_id = request_id.map(|r| r.0).unwrap_or_default();
-    let draft = build_usage_draft(adapter.id(), &req, request_id);
+    let draft = build_usage_draft(adapter.id(), &req, request_id, classify_harness(&headers));
 
     let streaming = req.stream == Some(true);
     // Admission of a metered stream: the turn's anchor order is reserved

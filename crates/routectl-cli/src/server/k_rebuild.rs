@@ -698,6 +698,7 @@ mod tests {
             "anthropic",
             &req,
             "req-meta-rebuild".to_string(),
+            routectl_usage::Harness::Other,
         );
         assert_eq!(
             draft.session_id.as_deref(),
@@ -772,6 +773,7 @@ mod tests {
             "openai",
             &req,
             "req-openai-chat-rebuild".to_string(),
+            routectl_usage::Harness::Other,
         );
         assert_eq!(
             draft.session_id.as_deref(),
@@ -845,6 +847,7 @@ mod tests {
             "openai",
             &req,
             "req-openai-chat-keyless".to_string(),
+            routectl_usage::Harness::Other,
         );
         assert_eq!(
             draft.session_id, None,

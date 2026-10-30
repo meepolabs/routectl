@@ -14,7 +14,12 @@ fn capture() -> (UsageCapture, UsageWriter) {
         model: "m".to_string(),
         ..Default::default()
     };
-    let draft = build_usage_draft("openai", &req, "req-reason".to_string());
+    let draft = build_usage_draft(
+        "openai",
+        &req,
+        "req-reason".to_string(),
+        routectl_usage::Harness::Other,
+    );
     (
         UsageCapture::new(
             draft,
@@ -102,7 +107,12 @@ fn a_capability_refusal_persists_gate_blocked_with_its_class_and_lanes() {
         model: "m".to_string(),
         ..Default::default()
     };
-    let draft = build_usage_draft("anthropic", &req, "cap-refusal-row".to_string());
+    let draft = build_usage_draft(
+        "anthropic",
+        &req,
+        "cap-refusal-row".to_string(),
+        routectl_usage::Harness::Other,
+    );
     let mut cap = UsageCapture::new(
         draft,
         handle.clone(),

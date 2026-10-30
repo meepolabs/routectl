@@ -43,7 +43,12 @@ fn rig() -> Rig {
     let db_path = dir.path().join("usage.db");
     let (handle, writer) = UsageWriter::start(db_path.clone(), CHANNEL_CAPACITY, 0, true);
     let slot = RequestObservation::new();
-    let draft = build_usage_draft("anthropic", &request(), ROW_ID.to_string());
+    let draft = build_usage_draft(
+        "anthropic",
+        &request(),
+        ROW_ID.to_string(),
+        routectl_usage::Harness::Other,
+    );
     let capture = UsageCapture::new(draft, handle.clone(), "ingress-1".to_string(), slot.clone());
     Rig {
         capture,

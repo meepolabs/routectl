@@ -1,14 +1,17 @@
 //! Capture of the client's request body for the live wire check: the raw
 //! bytes exactly as posted, the ingress dialect that parsed them and the
 //! client's version token, set once on the canonical request right after
-//! parsing.
+//! parsing. Also the one place the user-agent is classified into the closed
+//! harness token the usage ledger records.
 
 use axum::body::Bytes;
 use axum::http::HeaderMap;
 use axum::http::header::USER_AGENT;
-use routectl_core::identity::anthropic::parse_claude_cli_version;
+use routectl_core::identity::anthropic::{claude_cli_ua_token, parse_claude_cli_version};
+use routectl_core::identity::codex::is_codex_cli_user_agent;
 use routectl_core::wire_check::{IngressDialect, IngressWire};
 use routectl_core::{ChatRequest, is_safe_token};
+use routectl_usage::Harness;
 
 /// Attach the posted body to `req` as its ingress wire. The body is shared
 /// by refcount, never copied. A request whose provenance names no ingress
@@ -36,6 +39,22 @@ fn client_version(headers: &HeaderMap) -> Option<String> {
         .split_whitespace()
         .find(|token| token.contains('/') && is_safe_token(token))
         .map(str::to_string)
+}
+
+/// The client harness named by the user-agent. A missing, non-UTF-8 or
+/// unrecognized value is `Other`. Only this closed token leaves ingress;
+/// the user-agent itself is never carried further.
+pub(super) fn classify_harness(headers: &HeaderMap) -> Harness {
+    let Some(user_agent) = headers.get(USER_AGENT).and_then(|v| v.to_str().ok()) else {
+        return Harness::Other;
+    };
+    if claude_cli_ua_token(user_agent).is_some() {
+        Harness::ClaudeCode
+    } else if is_codex_cli_user_agent(user_agent) {
+        Harness::CodexCli
+    } else {
+        Harness::Other
+    }
 }
 
 #[cfg(test)]

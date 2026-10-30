@@ -96,7 +96,12 @@ pub(super) fn metered_turn(
         evidence: crate::handlers::stream_evidence_settle::StreamEvidenceSlot::default(),
     };
     let capture = UsageCapture::new(
-        build_usage_draft("anthropic", &req, id.to_string()),
+        build_usage_draft(
+            "anthropic",
+            &req,
+            id.to_string(),
+            routectl_usage::Harness::Other,
+        ),
         ledger.handle(),
         "anthropic".to_string(),
         routectl_core::RequestObservation::new(),

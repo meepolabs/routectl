@@ -53,7 +53,12 @@ fn capture() -> (UsageCapture, UsageWriter, std::path::PathBuf) {
         .into(),
         ..Default::default()
     };
-    let draft = build_usage_draft("anthropic", &req, "req-1".to_string());
+    let draft = build_usage_draft(
+        "anthropic",
+        &req,
+        "req-1".to_string(),
+        routectl_usage::Harness::Other,
+    );
     let (handle, writer, dir) = dummy_handle();
     (
         UsageCapture::new(
@@ -259,7 +264,12 @@ fn capture_over_a_readable_db() -> (
         .into(),
         ..Default::default()
     };
-    let draft = build_usage_draft("anthropic", &req, "calib-row".to_string());
+    let draft = build_usage_draft(
+        "anthropic",
+        &req,
+        "calib-row".to_string(),
+        routectl_usage::Harness::Other,
+    );
     let cap = UsageCapture::new(
         draft,
         handle.clone(),
@@ -473,7 +483,12 @@ fn capture_with_handle() -> (UsageCapture, UsageHandle, UsageWriter, std::path::
         .into(),
         ..Default::default()
     };
-    let draft = build_usage_draft("anthropic", &req, "req-take".to_string());
+    let draft = build_usage_draft(
+        "anthropic",
+        &req,
+        "req-take".to_string(),
+        routectl_usage::Harness::Other,
+    );
     let (handle, writer, dir) = dummy_handle();
     let cap = UsageCapture::new(
         draft,
@@ -798,7 +813,12 @@ fn drain_and_open(
         0,
         true,
     );
-    let draft = build_usage_draft("anthropic", &minimal_request(), "req-cap".to_string());
+    let draft = build_usage_draft(
+        "anthropic",
+        &minimal_request(),
+        "req-cap".to_string(),
+        routectl_usage::Harness::Other,
+    );
     let mut cap = UsageCapture::new(
         draft,
         handle.clone(),
@@ -1201,7 +1221,12 @@ fn build_usage_draft_metadata_only_session_key_lands_in_session_id() {
     let req = anthropic_request(&axum::http::HeaderMap::new(), body);
 
     // Act
-    let draft = build_usage_draft("anthropic", &req, "req-meta".to_string());
+    let draft = build_usage_draft(
+        "anthropic",
+        &req,
+        "req-meta".to_string(),
+        routectl_usage::Harness::Other,
+    );
 
     // Assert: the ledger row still gets a session identity even though
     // the header was never sent.
@@ -1224,7 +1249,12 @@ fn build_usage_draft_trims_header_derived_session_id() {
     let req = anthropic_request(&headers, body);
 
     // Act
-    let draft = build_usage_draft("anthropic", &req, "req-trim".to_string());
+    let draft = build_usage_draft(
+        "anthropic",
+        &req,
+        "req-trim".to_string(),
+        routectl_usage::Harness::Other,
+    );
 
     // Assert: the untrimmed raw header value never reaches the ledger row.
     assert_eq!(draft.session_id.as_deref(), Some("sid-from-header"));
@@ -1247,7 +1277,12 @@ fn build_usage_draft_header_wins_over_metadata_in_session_id() {
     let req = anthropic_request(&headers, body);
 
     // Act
-    let draft = build_usage_draft("anthropic", &req, "req-both".to_string());
+    let draft = build_usage_draft(
+        "anthropic",
+        &req,
+        "req-both".to_string(),
+        routectl_usage::Harness::Other,
+    );
 
     // Assert
     assert_eq!(draft.session_id.as_deref(), Some("sid-from-header"));
@@ -2349,7 +2384,12 @@ async fn a_real_dispatch_persists_the_strategy_tokens_and_epoch_code_it_produced
         "the rig must produce a real emit at both regions and a classified epoch",
     );
     let mut cap = UsageCapture::new(
-        build_usage_draft("anthropic", &second, "calib-row".to_string()),
+        build_usage_draft(
+            "anthropic",
+            &second,
+            "calib-row".to_string(),
+            routectl_usage::Harness::Other,
+        ),
         handle.clone(),
         "ingress-1".to_string(),
         routectl_core::RequestObservation::new(),
@@ -2413,7 +2453,12 @@ fn drain_and_count(meta: &routectl_router::DispatchMeta) -> i64 {
         0,
         true,
     );
-    let draft = build_usage_draft("anthropic", &minimal_request(), "req-gen".to_string());
+    let draft = build_usage_draft(
+        "anthropic",
+        &minimal_request(),
+        "req-gen".to_string(),
+        routectl_usage::Harness::Other,
+    );
     let mut cap = UsageCapture::new(
         draft,
         handle.clone(),

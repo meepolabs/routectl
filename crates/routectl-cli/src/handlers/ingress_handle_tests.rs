@@ -91,7 +91,12 @@ impl CaptureRig {
         req: &routectl_core::ChatRequest,
         request_id: &str,
     ) -> UsageCapture {
-        let draft = build_usage_draft(dialect, req, request_id.to_string());
+        let draft = build_usage_draft(
+            dialect,
+            req,
+            request_id.to_string(),
+            routectl_usage::Harness::Other,
+        );
         let handle = self.handle.clone().expect("rig handle present");
         UsageCapture::new(
             draft,
@@ -2157,7 +2162,12 @@ async fn a_render_failure_leaves_no_live_calibration_evidence() {
     // to serialize the response the upstream delivered.
     let rig = CaptureRig::new();
     let req = sample_request("a", false);
-    let draft = build_usage_draft("openai", &req, "req-calib-render-fail".to_string());
+    let draft = build_usage_draft(
+        "openai",
+        &req,
+        "req-calib-render-fail".to_string(),
+        routectl_usage::Harness::Other,
+    );
     let resp = complete_response(
         Arc::clone(&router),
         req,
@@ -2213,7 +2223,12 @@ async fn a_render_failure_leaves_no_live_k_sample() {
     // Act: the real non-streaming handler path, with an adapter that fails to
     // serialize the response the upstream delivered.
     let rig = CaptureRig::new();
-    let draft = build_usage_draft("openai", &req, "req-k-render-fail".to_string());
+    let draft = build_usage_draft(
+        "openai",
+        &req,
+        "req-k-render-fail".to_string(),
+        routectl_usage::Harness::Other,
+    );
     let resp = complete_response(
         Arc::clone(&router),
         req,
@@ -2254,7 +2269,12 @@ async fn a_clean_completion_records_a_live_k_sample() {
     let rig = CaptureRig::new();
     let mut req = sample_request("a", false);
     req.routectl_internal.inbound_session_key = Some("sess-k-render-ok".into());
-    let draft = build_usage_draft("openai", &req, "req-k-render-ok".to_string());
+    let draft = build_usage_draft(
+        "openai",
+        &req,
+        "req-k-render-ok".to_string(),
+        routectl_usage::Harness::Other,
+    );
 
     let resp = complete_response(
         Arc::clone(&router),
@@ -2289,7 +2309,12 @@ async fn a_clean_completion_records_live_calibration_evidence() {
     let router = Arc::new(calibration_recording_router(&upstream.uri()).await);
     let rig = CaptureRig::new();
     let req = sample_request("a", false);
-    let draft = build_usage_draft("openai", &req, "req-calib-ok".to_string());
+    let draft = build_usage_draft(
+        "openai",
+        &req,
+        "req-calib-ok".to_string(),
+        routectl_usage::Harness::Other,
+    );
 
     let resp = complete_response(
         Arc::clone(&router),
@@ -2891,7 +2916,12 @@ async fn sub_trigger_keyed_dispatch_still_lands_a_k_sample() {
     let rig = CaptureRig::new();
     let mut req = sample_request("a", false);
     req.routectl_internal.inbound_session_key = Some("sess-sub-trigger".to_string());
-    let draft = build_usage_draft("openai", &req, "req-k-sub-trigger".to_string());
+    let draft = build_usage_draft(
+        "openai",
+        &req,
+        "req-k-sub-trigger".to_string(),
+        routectl_usage::Harness::Other,
+    );
 
     // Act: the production non-streaming path.
     let resp = complete_response(

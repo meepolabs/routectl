@@ -36,10 +36,14 @@ use crate::handlers::opening_diagnostics::OpeningDiagnostics;
 /// rather than a separately-derived header-only value. A single source
 /// means a metadata-derived (header-absent) session id persists on the
 /// ledger row instead of silently recording `NULL`.
+///
+/// `harness` is the closed token ingress classified from the user-agent;
+/// the user-agent itself never reaches the draft.
 pub(crate) fn build_usage_draft(
     ingress_dialect: &str,
     req: &routectl_core::ChatRequest,
     request_id: String,
+    harness: Harness,
 ) -> UsageRecord {
     let session_id = req.routectl_internal.inbound_session_key.clone();
     let (thinking_req, thinking_req_kind) = thinking_of(req);
@@ -98,7 +102,7 @@ pub(crate) fn build_usage_draft(
         prefix_epoch_event: None,
         operation: Operation::Inference,
         probe: false,
-        harness: Harness::Other,
+        harness,
         wire_losses: 0,
         translation_drops: 0,
         local_refusals: 0,
