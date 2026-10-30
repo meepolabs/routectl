@@ -5248,12 +5248,11 @@ to choose between and every strategy behaves identically:
   fresh and below its threshold, or every eligible seat fresh-known and
   over it. Mixed evidence -- some seats observed and over threshold, the
   rest unobserved -- falls back to `fill-first`, as do a pool with no
-  readings at all and the switch off. The per-request decision (birth_pick
-  / sticky_stay / overflow_repin / defer_no_healthy / keyless_quota /
-  keyless_fill_first) is not
+  readings at all and the switch off. The per-request seat decision is not
   persisted, and only partially logged: a DEBUG line marks a birth pick
-  and an overflow repin, while `sticky_stay`, `defer_no_healthy` and the
-  keyless fall-through emit no selection-decision line of their own. Note
+  and an overflow repin, while a sticky stay, a pick deferred for lack of
+  a healthy seat, and the keyless fall-through emit no selection line of
+  their own. Note
   an incomplete-evidence fallback is separately visible in the throttled
   quota-placement diagnostic when `[seat_quota]` is on. The usage ledger's
   `selection_decision` column is write-stopped (retained in the schema,

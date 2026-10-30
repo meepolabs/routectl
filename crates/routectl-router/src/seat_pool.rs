@@ -539,8 +539,7 @@ fn order_home_first(home: usize, seat_count: usize) -> Vec<usize> {
 
 /// Outcome of a single sticky-least-loaded selection. The walk-order hint is
 /// returned alongside; this enum tells the caller whether (and how) to update
-/// the pin. It also maps to the fixed-vocabulary `selection_decision` token
-/// recorded in the usage ledger, so each variant is an observable decision.
+/// the pin.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SelectionOutcome {
     /// Pin miss (birth): caller pins `home` with `repinned: false`.

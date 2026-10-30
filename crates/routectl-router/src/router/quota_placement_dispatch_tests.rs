@@ -612,27 +612,41 @@ fn each_partition_arm_is_counted_on_a_real_birth_pick() {
 }
 
 #[test]
-fn the_selection_decision_vocabulary_is_unchanged_by_quota() {
+fn a_quota_birth_writes_an_unrepinned_pin_that_a_follow_up_keeps() {
     // Quota changes WHICH seat wins inside the existing birth path and never
-    // the persisted, operator-documented decision vocabulary.
+    // whether or how the pin is written: the quota-chosen home is pinned as an
+    // ordinary birth, and the next turn stays on it without a rewrite.
     let router = pooled_router(true);
     seed_readings(&router, &[("anthropic-seat-c", 0.0)]);
+    let pin_key = super::chain::sticky_pin_key("S", SEAT_POOL);
 
-    let decisions: Vec<Option<&'static str>> = router
-        .dispatch_chain("opus", Some("S"))
-        .expect("chain resolves")
-        .into_iter()
-        .map(|t| t.selection_decision)
-        .collect();
-    assert_eq!(decisions, vec![Some("birth_pick"), None, None]);
+    let birth = chain_order(&router, "S");
+    let pin = router
+        .sticky_pins
+        .get(&pin_key)
+        .expect("a keyed quota birth writes a pin");
+    assert_eq!(birth[0], "opus#anthropic-seat-c");
+    assert_eq!(pin.member, "anthropic-seat-c");
+    assert!(
+        !pin.repinned,
+        "a quota birth is an ordinary, un-repinned birth"
+    );
 
-    let stay: Vec<Option<&'static str>> = router
-        .dispatch_chain("opus", Some("S"))
-        .expect("chain resolves")
-        .into_iter()
-        .map(|t| t.selection_decision)
-        .collect();
-    assert_eq!(stay, vec![Some("sticky_stay"), None, None]);
+    let mut stay = Vec::new();
+    let rebirths = routectl_testkit::capture_events(|| stay = chain_order(&router, "S"))
+        .iter()
+        .filter(|e| e.message == "sticky least-loaded birth pick: pinned session to seat")
+        .count();
+    assert_eq!(
+        rebirths, 0,
+        "the follow-up reads the pin rather than re-picking"
+    );
+    assert_eq!(stay, birth, "the follow-up walks the same order");
+    assert_eq!(
+        router.sticky_pins.get(&pin_key),
+        Some(pin),
+        "the follow-up stays without rewriting the pin"
+    );
 }
 
 #[test]

@@ -153,79 +153,72 @@ fn chain_state_keys_for(router: &Router, session_key: Option<&str>) -> Vec<Strin
         .collect()
 }
 
-/// The `selection_decision` token on each target of the resolved chain
-/// for `opus`. Same-module access to the private field; lets the
-/// observability tests assert which token (if any) landed on the home
-/// seat without changing any routing.
-fn chain_decisions_for(router: &Router, session_key: Option<&str>) -> Vec<Option<&'static str>> {
-    router
-        .dispatch_chain("opus", session_key)
-        .expect("chain resolves")
-        .into_iter()
-        .map(|t| t.selection_decision)
-        .collect()
+/// How many sticky birth-pick lines `f` emits. A birth is the only outcome
+/// that logs this line, so a zero count on a follow-up request is what
+/// tells a sticky stay apart from a fresh birth that happened to land on
+/// the same seat.
+fn birth_pick_events<F: FnOnce()>(f: F) -> usize {
+    routectl_testkit::capture_events(f)
+        .iter()
+        .filter(|e| e.message == "sticky least-loaded birth pick: pinned session to seat")
+        .count()
 }
 
 #[tokio::test]
-async fn fill_first_records_no_selection_decision() {
-    // A genuinely non-sticky pool has no sticky decision: every target's
-    // selection_decision is None.
-    let (router, _counters) = pooled_router(SeatSelection::FillFirst);
-    let decisions = chain_decisions_for(&router, None);
-    assert_eq!(decisions, vec![None, None, None]);
-}
-
-#[tokio::test]
-async fn sticky_keyed_records_decision_on_home_only() {
-    // A keyed StickyLeastLoaded pool stamps the sticky token on the home
-    // (first) target ONLY -- birth_pick on the first request, sticky_stay
-    // on a follow-up for the same session. The fallback seats stay None.
+async fn sticky_keyed_births_a_pin_on_the_home_then_stays_without_rewriting_it() {
+    // A keyed StickyLeastLoaded pool pins the session to the seat it leads
+    // with on the first request, then a follow-up for the same session
+    // leads with that seat again WITHOUT a second birth or a pin rewrite.
     let (router, _counters) = pooled_router(SeatSelection::StickyLeastLoaded);
 
-    let birth = chain_decisions_for(&router, Some("S"));
+    let mut birth = Vec::new();
+    let births = birth_pick_events(|| birth = chain_state_keys_for(&router, Some("S")));
+    let pin = router
+        .sticky_pins
+        .get(&super::chain::sticky_pin_key("S", POOL))
+        .expect("the first request births a pin");
+    assert_eq!(births, 1, "the first request for a session is a birth pick");
     assert_eq!(
-        birth,
-        vec![Some("birth_pick"), None, None],
-        "first request for a session is a birth pick on the home seat"
+        opus_state_key(&pin.member),
+        birth[0],
+        "the pin names the home seat"
     );
+    assert!(!pin.repinned, "a birth pin starts un-repinned");
 
-    let stay = chain_decisions_for(&router, Some("S"));
+    let mut stay = Vec::new();
+    let rebirths = birth_pick_events(|| stay = chain_state_keys_for(&router, Some("S")));
     assert_eq!(
-        stay,
-        vec![Some("sticky_stay"), None, None],
-        "a follow-up for the same session stays on the pinned home seat"
+        rebirths, 0,
+        "a follow-up reads the pin rather than re-picking"
+    );
+    assert_eq!(
+        stay, birth,
+        "a follow-up walks the same order from the pinned home"
+    );
+    assert_eq!(
+        router
+            .sticky_pins
+            .get(&super::chain::sticky_pin_key("S", POOL)),
+        Some(pin),
+        "a sticky stay writes nothing"
     );
 }
 
 #[tokio::test]
-async fn keyless_sticky_records_keyless_fill_first() {
-    // StickyLeastLoaded on a multi-seat pool WITHOUT a session key
-    // collapses to fill-first; the token must surface that collapse so an
-    // operator can spot it. Order is unchanged (byte-for-byte fill-first).
+async fn keyless_sticky_walks_fill_first_and_mints_no_pin() {
+    // StickyLeastLoaded on a multi-seat pool WITHOUT a session key (and
+    // without quota evidence) collapses to fill-first and has no key to
+    // pin under.
     let (router, _counters) = pooled_router(SeatSelection::StickyLeastLoaded);
-    let decisions = chain_decisions_for(&router, None);
-    assert_eq!(decisions, vec![Some("keyless_fill_first"), None, None]);
-    // The collapse must not alter the seat order.
     assert_eq!(
         chain_state_keys_for(&router, None),
         vec!["opus#anthropic-a", "opus#anthropic-b", "opus#anthropic-c"]
     );
-}
-
-#[test]
-fn mark_target_copies_selection_decision_into_meta() {
-    // mark_target propagates the home target's selection_decision into
-    // the per-request DispatchMeta exactly like the served_* fields.
-    let (router, _counters) = pooled_router(SeatSelection::StickyLeastLoaded);
-    let chain = router
-        .dispatch_chain("opus", Some("S"))
-        .expect("chain resolves");
-    let home = &chain[0];
-    assert_eq!(home.selection_decision, Some("birth_pick"));
-
-    let mut meta = DispatchMeta::for_alias("opus");
-    meta.mark_target(home, "opus");
-    assert_eq!(meta.selection_decision, Some("birth_pick"));
+    assert_eq!(
+        router.sticky_pins.len(),
+        0,
+        "a keyless request mints no pin"
+    );
 }
 
 #[test]
@@ -279,51 +272,10 @@ fn mark_target_leaves_served_seat_none_for_a_non_oauth_credential() {
 }
 
 #[tokio::test]
-async fn sticky_overflow_repin_stamps_overflow_repin_token() {
-    // The thrash signal: a session pinned (birth_pick) whose home seat
-    // then trips must, on re-request, migrate to a healthy sibling AND
-    // stamp `overflow_repin` on the NEW home target. Reuses the
-    // park-and-re-request seam from
-    // `sticky_overflow_repin_migrates_once_and_does_not_flap`.
-    let (router, _counters) = pooled_router(SeatSelection::StickyLeastLoaded);
-
-    // Birth: first request pins session S and stamps birth_pick.
-    let birth = chain_decisions_for(&router, Some("S"));
-    assert_eq!(birth[0], Some("birth_pick"));
-    let home = chain_state_keys_for(&router, Some("S"))[0].clone();
-
-    // Force the pinned home seat's breaker open.
-    assert!(
-        router.force_open_breaker(&home, Duration::from_hours(1)),
-        "home seat must own a state slot to trip"
-    );
-
-    // Re-request ONCE: the migration stamps overflow_repin on the new
-    // home (first) target only; fallback seats stay None. A single
-    // resolution is read so the one-time-cap (repinned=true) does not
-    // turn a follow-up into a sticky_stay before we observe the token.
-    let migrated = router
-        .dispatch_chain("opus", Some("S"))
-        .expect("chain resolves");
-    let migrated_decisions: Vec<Option<&'static str>> =
-        migrated.iter().map(|t| t.selection_decision).collect();
-    assert_ne!(
-        migrated[0].state_key, home,
-        "overflow-repin must migrate off the parked home seat"
-    );
-    assert_eq!(
-        migrated_decisions,
-        vec![Some("overflow_repin"), None, None],
-        "the thrash signal must land on the migrated home target only"
-    );
-}
-
-#[tokio::test]
-async fn sticky_defer_no_healthy_stamps_defer_token() {
+async fn sticky_defer_no_healthy_walks_fill_first_and_writes_no_pin() {
     // A fresh keyed session (pin miss) over a pool whose every seat's
     // breaker is forced open has no dispatchable home: the outcome is
-    // DeferNoHealthy -> `defer_no_healthy` token, fill-first order, and
-    // NO pin written.
+    // DeferNoHealthy -> fill-first order, no birth, and NO pin written.
     let (router, _counters) = pooled_router(SeatSelection::StickyLeastLoaded);
     for key in ["opus#anthropic-a", "opus#anthropic-b", "opus#anthropic-c"] {
         assert!(
@@ -332,18 +284,16 @@ async fn sticky_defer_no_healthy_stamps_defer_token() {
         );
     }
 
-    let decisions = chain_decisions_for(&router, Some("S"));
-    assert_eq!(
-        decisions,
-        vec![Some("defer_no_healthy"), None, None],
-        "a no-healthy-seat miss must stamp defer_no_healthy on the home target"
-    );
+    let mut order = Vec::new();
+    let births = birth_pick_events(|| order = chain_state_keys_for(&router, Some("S")));
+
     // Order is the fill-first walk (a hint, not a filter), and no pin
     // was written for the deferred session.
     assert_eq!(
-        chain_state_keys_for(&router, Some("S")),
+        order,
         vec!["opus#anthropic-a", "opus#anthropic-b", "opus#anthropic-c"]
     );
+    assert_eq!(births, 0, "a no-healthy-seat miss is not a birth");
     assert!(
         pinned_member(&router, "S").is_none(),
         "DeferNoHealthy must not write a pin"
@@ -777,27 +727,19 @@ async fn two_sticky_pools_in_one_chain_keep_independent_stable_pins() {
     // Chain `hot = [opusPool, sonnetPool]` over TWO pools, both
     // StickyLeastLoaded, same session "S". Each pool must birth-then-stay on
     // its OWN home seat. With a single session-keyed pin the two pools clobber
-    // each other every turn, so the 2nd request would report birth_pick again
-    // for both.
+    // each other every turn, so the 2nd request would birth again for both.
     let router = two_pool_sticky_chain_router();
 
     // Request 1: both pools birth. Chain layout is
-    // [opus home, opus seat, sonnet home, sonnet seat]; the sticky token
-    // lands on each pool's home (first) target only.
-    let first = router
-        .dispatch_chain("hot", Some("S"))
-        .expect("chain resolves");
+    // [opus home, opus seat, sonnet home, sonnet seat].
+    let mut first = Vec::new();
+    let births = birth_pick_events(|| {
+        first = router
+            .dispatch_chain("hot", Some("S"))
+            .expect("chain resolves");
+    });
     assert_eq!(first.len(), 4, "two two-seat pools expand to four targets");
-    assert_eq!(
-        first[0].selection_decision,
-        Some("birth_pick"),
-        "opus pool births on the first request"
-    );
-    assert_eq!(
-        first[2].selection_decision,
-        Some("birth_pick"),
-        "sonnet pool births on the first request"
-    );
+    assert_eq!(births, 2, "each pool births on the first request");
     let opus_home = first[0].state_key.clone();
     let sonnet_home = first[2].state_key.clone();
     assert!(
@@ -810,20 +752,14 @@ async fn two_sticky_pools_in_one_chain_keep_independent_stable_pins() {
     );
 
     // Request 2 for the SAME session: each pool STAYS on its own pinned home
-    // (sticky_stay, not a fresh birth) and the homes are unchanged.
-    let second = router
-        .dispatch_chain("hot", Some("S"))
-        .expect("chain resolves");
-    assert_eq!(
-        second[0].selection_decision,
-        Some("sticky_stay"),
-        "opus pool must retain its pin, not re-birth"
-    );
-    assert_eq!(
-        second[2].selection_decision,
-        Some("sticky_stay"),
-        "sonnet pool must retain its pin, not re-birth"
-    );
+    // (no fresh birth) and the homes are unchanged.
+    let mut second = Vec::new();
+    let rebirths = birth_pick_events(|| {
+        second = router
+            .dispatch_chain("hot", Some("S"))
+            .expect("chain resolves");
+    });
+    assert_eq!(rebirths, 0, "neither pool may re-birth its pin");
     assert_eq!(
         second[0].state_key, opus_home,
         "opus pool keeps the same home seat across turns"
@@ -922,23 +858,27 @@ async fn two_models_on_one_pool_share_one_session_pin() {
 
     // Act: the session births on the first model, then arrives at the SECOND
     // model of the same pool.
-    let first = router
-        .dispatch_chain("opusShared", Some("S"))
-        .expect("chain resolves");
-    let second = router
-        .dispatch_chain("sonnetShared", Some("S"))
-        .expect("chain resolves");
+    let mut first = Vec::new();
+    let births = birth_pick_events(|| {
+        first = router
+            .dispatch_chain("opusShared", Some("S"))
+            .expect("chain resolves");
+    });
+    let mut second = Vec::new();
+    let rebirths = birth_pick_events(|| {
+        second = router
+            .dispatch_chain("sonnetShared", Some("S"))
+            .expect("chain resolves");
+    });
 
     // Assert: the first model births; the second READS that pin rather than
     // minting its own.
     assert_eq!(
-        first[0].selection_decision,
-        Some("birth_pick"),
+        births, 1,
         "the first model of the pool births the session's pin"
     );
     assert_eq!(
-        second[0].selection_decision,
-        Some("sticky_stay"),
+        rebirths, 0,
         "the second model of the SAME pool must read the shared pin, not birth"
     );
 

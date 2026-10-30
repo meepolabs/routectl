@@ -372,40 +372,27 @@ impl Router {
         // existing `seat_order_for_request` path UNCHANGED, so keyless
         // StickyLeastLoaded stays byte-for-byte fill-first -- and therefore
         // mints no pin and consults no quota, since it makes no pick at all.
-        //
-        // `token` is computed ALONGSIDE the order purely for observability:
-        // the order and target set below are byte-for-byte what they were
-        // before the token existed. It is `None` for genuinely non-sticky
-        // modes (FillFirst, RoundRobin) and single-seat pools, which have no
-        // sticky decision to record.
-        let (order, token): (Vec<usize>, Option<&'static str>) = match (selection, session_key) {
+        let order: Vec<usize> = match (selection, session_key) {
             (crate::config::SeatSelection::StickyLeastLoaded, Some(key)) if seats.len() > 1 => {
                 let pin_key = sticky_pin_key(key, m.rotation_key());
-                let (order, tok) = self.sticky_seat_order(seats, &pin_key, &m.nickname);
-                (order, Some(tok))
+                self.sticky_seat_order(seats, &pin_key, &m.nickname)
             }
             // Keyless StickyLeastLoaded has no session identity, so it mints
             // no pin -- but it still places by remaining budget, because the
             // only thing that outranks quota fairness is cache preservation
             // and a keyless request has no warm cache to preserve. When quota
             // contributes nothing it collapses to fill-first as it always
-            // has; that collapse stays visible in the recorded token so an
-            // operator can still spot a silent fill-first regime on a pool
-            // configured sticky.
+            // has.
             (crate::config::SeatSelection::StickyLeastLoaded, _) if seats.len() > 1 => {
                 self.keyless_seat_order(seats, m)
             }
-            _ => (
-                crate::seat_pool::seat_order_for_request(
-                    m.rotation_key(),
-                    seats.len(),
-                    selection,
-                    &self.round_robin,
-                ),
-                None,
+            _ => crate::seat_pool::seat_order_for_request(
+                m.rotation_key(),
+                seats.len(),
+                selection,
+                &self.round_robin,
             ),
         };
-        let first = out.len();
         for idx in order {
             let seat = &seats[idx];
             // Resolved per SEAT, not once per model: pool members are
@@ -418,15 +405,6 @@ impl Router {
                 .get(&seat.provider_name)
                 .map(crate::config::ProviderEntry::kind_str);
             out.push(dispatch_target_for_seat(m, seat, provider_kind));
-        }
-        // Stamp the decision on the home (first) target pushed for THIS
-        // model only -- never the fallback seats. The LIMITATION on
-        // `DispatchMeta::selection_decision` applies: a serve past the home
-        // records `None`.
-        if let Some(tok) = token
-            && let Some(t) = out.get_mut(first)
-        {
-            t.selection_decision = Some(tok);
         }
     }
 
@@ -546,7 +524,6 @@ pub(super) fn into_one_dispatch_target(m: Arc<ResolvedModel>) -> DispatchTarget 
         reported_model: m.reported_model.clone(),
         visible_routectl_provider: m.visible_routectl_provider,
         model: m,
-        selection_decision: None,
         class_overrides: BTreeMap::new(),
         capabilities,
     }
@@ -611,7 +588,6 @@ pub(super) fn dispatch_target_for_seat(
         reported_model: m.reported_model.clone(),
         visible_routectl_provider: m.visible_routectl_provider,
         model: m.clone(),
-        selection_decision: None,
         class_overrides: BTreeMap::new(),
         capabilities,
     }

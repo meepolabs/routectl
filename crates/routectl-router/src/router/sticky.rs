@@ -142,8 +142,7 @@ impl Router {
         }
     }
 
-    /// The walk order for a KEYLESS request on a multi-seat sticky pool, plus
-    /// the decision token to record.
+    /// The walk order for a KEYLESS request on a multi-seat sticky pool.
     ///
     /// No session key means no pin to read and none to write, so this makes a
     /// placement and not a sticky decision. It still consults quota: a keyless
@@ -151,13 +150,12 @@ impl Router {
     /// thing the milestone ranks above quota fairness.
     ///
     /// Falls back to the unchanged fill-first walk whenever the partition
-    /// declines, and reports the fall-back through the same token the collapse
-    /// has always used so an operator's view of that regime does not change.
+    /// declines.
     pub(super) fn keyless_seat_order(
         &self,
         seats: &[crate::seat_pool::SeatTarget],
         model: &crate::resolved::ResolvedModel,
-    ) -> (Vec<usize>, Option<&'static str>) {
+    ) -> Vec<usize> {
         let nickname = model.nickname.as_str();
         let quota = self.quota_tiers_for_birth(seats);
         let mut decision = QuotaDecision::Dormant;
@@ -175,18 +173,14 @@ impl Router {
             )
         };
         self.record_quota_placement(decision, nickname);
-        match ordered {
-            Some(order) => (order, Some("keyless_quota")),
-            None => (
-                crate::seat_pool::seat_order_for_request(
-                    model.rotation_key(),
-                    seats.len(),
-                    crate::config::SeatSelection::StickyLeastLoaded,
-                    &self.round_robin,
-                ),
-                Some("keyless_fill_first"),
-            ),
-        }
+        ordered.unwrap_or_else(|| {
+            crate::seat_pool::seat_order_for_request(
+                model.rotation_key(),
+                seats.len(),
+                crate::config::SeatSelection::StickyLeastLoaded,
+                &self.round_robin,
+            )
+        })
     }
 
     /// Resolve the sticky least-loaded seat walk order for `key` over a
@@ -204,19 +198,15 @@ impl Router {
     /// Subscription-quota tiers are gathered for the BIRTH candidate set only
     /// (the pure selector ignores them on every other path), and only while
     /// the kill switch is on. A healthy pin therefore never reads quota state
-    /// at all, so no soft cap can move a warm session.
-    ///
-    /// Returns the walk order paired with a fixed-vocabulary
-    /// `selection_decision` token mapped from the `SelectionOutcome`
-    /// (observability only -- the pin writes, logs, and returned order are
-    /// byte-for-byte unchanged from before the token was added). The quota
-    /// partition changes WHICH seat a birth picks and never that vocabulary.
+    /// at all, so no soft cap can move a warm session. The quota partition
+    /// changes WHICH seat a birth picks, never whether or how the pin is
+    /// written.
     pub(super) fn sticky_seat_order(
         &self,
         seats: &[crate::seat_pool::SeatTarget],
         key: &str,
         nickname: &str,
-    ) -> (Vec<usize>, &'static str) {
+    ) -> Vec<usize> {
         // A pinned member no longer present in this pool resolves to None
         // -> treated as a miss (re-pick), and `repinned` resets to false on
         // the fresh birth -- correct.
@@ -260,8 +250,8 @@ impl Router {
             &quota,
         );
         self.record_quota_placement(quota_decision, nickname);
-        let token = self.apply_sticky_outcome(key, nickname, seats, outcome);
-        (order, token)
+        self.apply_sticky_outcome(key, nickname, seats, outcome);
+        order
     }
 
     /// Gather the per-seat capacity snapshots for sticky least-loaded
@@ -295,8 +285,7 @@ impl Router {
             .collect()
     }
 
-    /// Apply the pin write implied by `outcome` and return the fixed-vocabulary
-    /// `selection_decision` token. A birth pins the chosen home
+    /// Apply the pin write implied by `outcome`. A birth pins the chosen home
     /// (`repinned: false`); a one-time overflow-repin pins the new home
     /// (`repinned: true`); a stay or no-healthy case writes nothing. Never
     /// logs the raw session key.
@@ -306,7 +295,7 @@ impl Router {
         nickname: &str,
         seats: &[crate::seat_pool::SeatTarget],
         outcome: crate::seat_pool::SelectionOutcome,
-    ) -> &'static str {
+    ) {
         match outcome {
             crate::seat_pool::SelectionOutcome::Birth { home } => {
                 let member = seats[home].provider_name.clone();
@@ -322,7 +311,6 @@ impl Router {
                         repinned: false,
                     },
                 );
-                "birth_pick"
             }
             crate::seat_pool::SelectionOutcome::OverflowRepin { home } => {
                 let member = seats[home].provider_name.clone();
@@ -338,10 +326,9 @@ impl Router {
                         repinned: true,
                     },
                 );
-                "overflow_repin"
             }
-            crate::seat_pool::SelectionOutcome::Stay { .. } => "sticky_stay",
-            crate::seat_pool::SelectionOutcome::DeferNoHealthy => "defer_no_healthy",
+            crate::seat_pool::SelectionOutcome::Stay { .. }
+            | crate::seat_pool::SelectionOutcome::DeferNoHealthy => {}
         }
     }
 }

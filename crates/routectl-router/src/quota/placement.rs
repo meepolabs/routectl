@@ -85,11 +85,10 @@ pub enum SeatQuota {
 
 /// What the partition did on one pick, for the counters and the diagnostic.
 ///
-/// Deliberately NOT a `SelectionOutcome` variant: those map to a fixed
-/// `selection_decision` vocabulary persisted in the usage ledger and
-/// documented as operator-facing. Quota changes WHICH seat wins inside the
-/// existing birth path and never the outcome vocabulary, so its own reporting
-/// lives here.
+/// Deliberately NOT a `SelectionOutcome` variant: those decide whether and
+/// how the session pin is written. Quota changes WHICH seat wins inside the
+/// existing birth path and never the pin write, so its own reporting lives
+/// here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuotaDecision {
     /// Quota was not consulted: no tiers were supplied at all, because the

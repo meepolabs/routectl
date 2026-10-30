@@ -1473,16 +1473,6 @@ pub struct DispatchMeta {
     /// from this raw count). Same aggregation and `Some(0)` / `None`
     /// semantics as `reduction_strings_compressed`.
     pub reduction_bytes_saved: Option<u64>,
-    /// Stable seat-selection decision token for the served target's home
-    /// seat (see `push_seat_targets` for the fixed vocabulary). `None` for
-    /// non-sticky / single-seat pools, non-pooled aliases, and when no
-    /// target was dispatched.
-    ///
-    /// LIMITATION: this token is propagated only when the sticky HOME seat
-    /// serves. A request that falls back PAST its home (home failed) records
-    /// `None`, because the decision is stamped on the home target only and
-    /// `mark_target` copies whichever target actually served.
-    pub selection_decision: Option<&'static str>,
     /// Non-mutating steady-state would-trim advisory: the freed-token count
     /// `d` of the trimmer's would-cut candidate for the dispatched request.
     /// `None` when the steady-state trimmer proposed no cut (or no target was
@@ -1851,7 +1841,6 @@ impl DispatchMeta {
             reduction_strings_skipped: None,
             reduction_strings_rejected: None,
             reduction_bytes_saved: None,
-            selection_decision: None,
             would_trim_tokens: None,
             would_trim_break_even_k: None,
             would_trim_k_floor: None,
@@ -1909,7 +1898,6 @@ impl DispatchMeta {
         } else {
             target.seat.clone()
         };
-        self.selection_decision = target.selection_decision;
     }
 }
 
@@ -2074,14 +2062,6 @@ struct DispatchTarget {
     /// semantics: the served target's value wins. Does not affect
     /// `DispatchMeta` accounting.
     visible_routectl_provider: bool,
-    /// Stable seat-selection decision token for THIS target, set only on
-    /// the home (first) seat target of a sticky / keyless-collapse pool by
-    /// `push_seat_targets`. `None` on every other target. Propagated to
-    /// `DispatchMeta::selection_decision` via `mark_target` for
-    /// observability; usage accounting no longer records it (the ledger's
-    /// `selection_decision` column is write-stopped). Observability only --
-    /// never affects seat order, the target set, or dispatch.
-    selection_decision: Option<&'static str>,
     /// Per-status failure-class remap for this target's provider, adapted
     /// ONCE at chain expansion from the operator's
     /// `[providers.X.class_overrides]` config table (`ConfigFailureClass`
