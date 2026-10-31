@@ -235,7 +235,7 @@ default = "codex-deep"
 # ---- Retry policy (server-wide) ----
 
 [retry]
-max_attempts                  = 2
+max_attempts                  = 3
 initial_backoff_ms            = 250
 backoff_multiplier            = 2.0
 jitter_ms                     = 50

@@ -311,7 +311,7 @@ upstream = "claude-opus-4-7-20260301"
 default         = "opus-or"
 
 [retry]
-max_attempts       = 2
+max_attempts       = 3
 initial_backoff_ms = 250
 
 [capability]

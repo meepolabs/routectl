@@ -199,6 +199,8 @@ fn thinking_chain(seats: &[(&str, Arc<ThinkingTypeSeat>)], extra_toml: &str) -> 
         toml_text.push_str(&format!("\n[providers.p{idx}]\n{provider_toml}"));
     }
     let mut config: Config = toml::from_str(&toml_text).expect("valid test toml");
+    // Pinned so the attempt counts these tests assert do not follow the shipped default.
+    config.retry.max_attempts = 2;
     config.aliases.insert(
         ALIAS.to_string(),
         AliasValue::Chain((0..seats.len()).map(|idx| format!("m{idx}")).collect()),

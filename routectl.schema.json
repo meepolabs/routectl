@@ -1740,7 +1740,7 @@
           "type": "integer"
         },
         "max_attempts": {
-          "default": 2,
+          "default": 3,
           "description": "Retry-attempts cap per provider in the chain for the five health\nclasses (rate-limited, server-error, overloaded, timeout,\nnetwork-error); the other classes never retry on the same\nprovider. `[retry.classes.<class>] retry` overrides it per class.",
           "format": "uint32",
           "minimum": 0,
@@ -2141,7 +2141,7 @@
         "backoff_multiplier": 2.0,
         "initial_backoff_ms": 250,
         "jitter_ms": 50,
-        "max_attempts": 2,
+        "max_attempts": 3,
         "max_honored_retry_after_ms": null,
         "probe_max_tokens": 1
       },

@@ -36,6 +36,24 @@ fn default_retry_policy_has_probe_max_tokens_one() {
     assert_eq!(RetryPolicy::default().probe_max_tokens, 1);
 }
 
+/// `max_attempts` defaults to 3 whether the `[retry]` block is present
+/// without the key or absent altogether.
+#[test]
+fn default_max_attempts_is_three() {
+    use crate::config::Config;
+    let cases = [
+        (
+            "retry block present, key omitted",
+            "[retry]\nprobe_max_tokens = 1\n",
+        ),
+        ("retry block absent", "version = 5\n"),
+    ];
+    for (name, toml_text) in cases {
+        let cfg: Config = toml::from_str(toml_text).expect(name);
+        assert_eq!(cfg.retry.max_attempts, 3, "{name}");
+    }
+}
+
 /// An operator that sets `stream_first_byte_timeout_ms` explicitly
 /// must get exactly that value back.
 #[test]

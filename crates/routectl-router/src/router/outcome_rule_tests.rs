@@ -398,7 +398,10 @@ fn retry_rows() -> Vec<RetryRow> {
 
 #[test]
 fn same_provider_retry_table() {
-    let policy = RetryPolicy::default();
+    let policy = RetryPolicy {
+        max_attempts: 2,
+        ..RetryPolicy::default()
+    };
     assert_eq!(policy.hard_retry_cap(), 2, "the hard-cap row assumes 2");
     for row in retry_rows() {
         let class = classify(&row.err, None).class;

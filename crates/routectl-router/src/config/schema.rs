@@ -3237,7 +3237,7 @@ impl RetryPolicy {
 }
 
 const fn default_max_attempts() -> u32 {
-    2
+    3
 }
 
 /// Default ceiling on an honored upstream reset hint when

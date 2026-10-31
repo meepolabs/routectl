@@ -363,6 +363,8 @@ fn chain_config(alias: &str, seats: usize) -> Config {
         chain.push(format!("m{idx}"));
     }
     let mut config: Config = toml::from_str(&toml_text).expect("valid test toml");
+    // Pinned so the attempt counts these tests assert do not follow the shipped default.
+    config.retry.max_attempts = 2;
     config
         .aliases
         .insert(alias.to_string(), AliasValue::Chain(chain));

@@ -993,8 +993,8 @@ async fn large_retry_after_parks_provider_via_force_open() {
 #[tokio::test]
 async fn small_retry_after_honored_in_loop_not_parked() {
     // Arrange: 1ms reset (tiny, keeps the in-loop sleep negligible),
-    // 429 -> retryable (default max_attempts = 2). Threshold 5 so a
-    // single recorded failure cannot trip the breaker.
+    // 429 -> retryable (default max_attempts = 3). Threshold 5 so the
+    // three recorded failures cannot trip the breaker.
     let calls = Arc::new(AtomicUsize::new(0));
     let provider: Arc<dyn Provider> = Arc::new(RetryAfterProvider {
         id: "p".into(),
@@ -1008,13 +1008,13 @@ async fn small_retry_after_honored_in_loop_not_parked() {
     // Act.
     let _ = router.complete(plain_req()).await.unwrap_err();
 
-    // Assert: the same provider was retried in-loop (2 = max_attempts),
+    // Assert: the same provider was retried in-loop (3 = max_attempts),
     // and the breaker was NOT force-parked (closed under the high
     // threshold). A force-park would have opened it after the first
-    // attempt and skipped the second.
+    // attempt and skipped the rest.
     assert_eq!(
         calls.load(Ordering::SeqCst),
-        2,
+        3,
         "a small reset must be honored as an in-loop retry, not a park",
     );
     assert!(

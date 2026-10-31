@@ -1704,7 +1704,7 @@ retired in config schema v3.
 
 ```toml
 [retry]
-max_attempts                  = 2
+max_attempts                  = 3
 initial_backoff_ms            = 250
 backoff_multiplier            = 2.0
 jitter_ms                     = 50
@@ -1742,8 +1742,8 @@ provider may accept) keep the normal retry+fallback behavior.
 ### Per-class retry and fallback policy (`[retry.classes]`)
 
 Most deployments need nothing here: the baked class matrix below IS
-the policy, and `max_attempts` is the one knob it reads. To tune one
-class, set its `retry` (or `fallback`) leaf under
+the policy, and `max_attempts` (default 3) is the one knob it reads.
+To tune one class, set its `retry` (or `fallback`) leaf under
 `[retry.classes.<class>]`; this is the retry surface. A
 `[providers.X.class_overrides]` remap (next section) is an escape hatch
 for an upstream that reports a failure under the wrong status.
