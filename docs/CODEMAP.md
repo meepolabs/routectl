@@ -1576,8 +1576,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/config/tuning.rs` -- the ONE precedence for the tiered tuning keys
   (`circuit_failures`, `circuit_cooldown_ms`, `rpm_limit`, `request_timeout_ms`,
   `stream_first_byte_timeout_ms`): `resolve_tuning(config, entry, model_ms)`
-  walks model > provider > pool (the named pool, or the pool claiming the
-  provider) > `[retry]` > shipped default per key and returns
+  resolves each key through only the tiers it supports (breaker threshold,
+  cooldown and RPM: provider > pool > default; request timeout: provider >
+  pool > `[retry]` > default; first content: model > provider > pool >
+  `[retry]` > default; the pool is the named pool, or the pool claiming the
+  provider) and returns
   `ResolvedTuning`, each cell a `Resolved { value, source: TuningSource }`
   (render tokens model / provider / pool / global / default); the shipped
   defaults live only here. `gate()` yields the crate-internal `GateTuning`
@@ -4249,7 +4252,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   and transcript rejections stay, an unknown provider always walks)
 - `src/router/breaker_transition.rs` -- the INFO transition lines
   `breaker_opened` / `breaker_parked` / `breaker_closed` (event token and
-  sanitized `state_key` only), emitted by `runtime_gate`, `credential_park`
+  sanitized `state_key`, plus `cooldown_ms` on a park), emitted by `runtime_gate`, `credential_park`
   and `stream_commit` when a settle changes the circuit's state
 - `src/router/runtime_gate.rs` -- breaker/RPM gate + probe-slot admission
   RAII: `admit_client`/`admit_probe` (take the target's credential account;
