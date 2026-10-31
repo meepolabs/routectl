@@ -70,7 +70,7 @@ CREATE TABLE IF NOT EXISTS requests (
 
 /// The column list a v17 writer's `INSERT` names, frozen as text. A v17
 /// binary handed a downgraded file writes through exactly this list.
-const V17_INSERT_COLUMNS: &str = "\
+pub(super) const V17_INSERT_COLUMNS: &str = "\
     ts_start, ts_end, request_id, ingress_dialect, requested_model, alias,
     model, upstream, provider, provider_kind, seat, session_id,
     stream, max_tokens_req, tool_count, thinking_req, thinking_req_kind,
@@ -109,15 +109,15 @@ const V17_INSERT_COLUMNS: &str = "\
 /// the schema text of every object, and the row counts of the tables a step
 /// covers.
 #[derive(Debug, PartialEq, Eq)]
-struct FileState {
-    user_version: i64,
-    meta_version: String,
-    schema: Vec<(String, String, Option<String>)>,
-    requests: i64,
-    ledger_gaps: Option<i64>,
+pub(super) struct FileState {
+    pub(super) user_version: i64,
+    pub(super) meta_version: String,
+    pub(super) schema: Vec<(String, String, Option<String>)>,
+    pub(super) requests: i64,
+    pub(super) ledger_gaps: Option<i64>,
 }
 
-fn file_state(path: &std::path::Path) -> FileState {
+pub(super) fn file_state(path: &std::path::Path) -> FileState {
     let conn = Connection::open(path).expect("reopen");
     let schema = conn
         .prepare("SELECT type, name, sql FROM sqlite_master ORDER BY type, name")
@@ -136,12 +136,12 @@ fn file_state(path: &std::path::Path) -> FileState {
 }
 
 /// Row count of `table`, or `None` when it cannot be read.
-fn count(conn: &Connection, table: &str) -> Option<i64> {
+pub(super) fn count(conn: &Connection, table: &str) -> Option<i64> {
     conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
         .ok()
 }
 
-fn requests_column_names(conn: &Connection) -> Vec<String> {
+pub(super) fn requests_column_names(conn: &Connection) -> Vec<String> {
     conn.prepare("SELECT name FROM pragma_table_info('requests')")
         .expect("prepare")
         .query_map([], |r| r.get(0))
@@ -153,7 +153,14 @@ fn requests_column_names(conn: &Connection) -> Vec<String> {
 /// Insert one request row through the frozen v17 column list, binding a
 /// value to every `NOT NULL` column and NULL to the rest.
 fn insert_as_v17_writer(conn: &Connection, request_id: &str) {
-    let columns: Vec<&str> = V17_INSERT_COLUMNS
+    insert_through(conn, V17_INSERT_COLUMNS, request_id);
+}
+
+/// Insert one request row through the comma-separated `column_list`, as an
+/// older writer naming exactly those columns would, binding a value to every
+/// `NOT NULL` column and NULL to the rest.
+pub(super) fn insert_through(conn: &Connection, column_list: &str, request_id: &str) {
+    let columns: Vec<&str> = column_list
         .split(',')
         .map(str::trim)
         .filter(|c| !c.is_empty())
@@ -179,12 +186,12 @@ fn insert_as_v17_writer(conn: &Connection, request_id: &str) {
     );
     let inserted = conn
         .execute(&sql, rusqlite::params_from_iter(values))
-        .expect("v17 insert");
+        .expect("an older writer's insert");
     assert_eq!(inserted, 1);
 }
 
 /// A fresh current file holding one request row and one gap row.
-fn fresh_v18_with_rows(path: &std::path::Path) {
+pub(super) fn fresh_with_rows(path: &std::path::Path) {
     let db = open(path).expect("open fresh");
     insert_as_v17_writer(db.conn(), "fresh-row");
     db.conn()
@@ -192,6 +199,13 @@ fn fresh_v18_with_rows(path: &std::path::Path) {
             "INSERT INTO ledger_gaps (ts_ms, cause, dropped) VALUES (1, 'queue_full', 3)",
         )
         .expect("gap row");
+}
+
+/// A v18 file as the rollback path leaves it: a fresh current file with rows,
+/// stepped down to 18, so `requests` still carries the trailing v19 columns.
+fn fresh_v18_with_rows(path: &std::path::Path) {
+    fresh_with_rows(path);
+    downgrade_to(path, 18).expect("step the fresh file down to 18");
 }
 
 /// A WAL file stamped v18 whose `requests` is created by `requests_ddl` then
@@ -314,10 +328,11 @@ fn a_v17_writer_inserts_into_a_downgraded_file_and_reopening_re_upgrades_it() {
     // Act: the current binary opens it again.
     let db = open(&path).expect("re-upgrade");
 
-    // Assert: v18 again, the same column list with no duplicate, both request
-    // rows present with the v17-written row's tail NULL, and the one gap row.
-    assert_eq!(user_version(db.conn()), 18);
-    assert_eq!(meta_version(db.conn()), "18");
+    // Assert: current again, the same column list with no duplicate, both
+    // request rows present with the v17-written row's tail NULL, and the one
+    // gap row.
+    assert_eq!(user_version(db.conn()), SCHEMA_VERSION);
+    assert_eq!(meta_version(db.conn()), SCHEMA_VERSION.to_string());
     assert_eq!(requests_column_names(db.conn()), fresh_columns);
     assert_eq!(count(db.conn(), "requests"), Some(2));
     assert_eq!(count(db.conn(), "ledger_gaps"), Some(1));
@@ -496,7 +511,11 @@ fn the_exact_additive_v18_shape_is_accepted_by_the_shape_fixture() {
     let tail: Vec<&str> = tail.iter().map(String::as_str).collect();
     let through_v17 = requests_ddl_through_v17();
     let cases: &[(&str, &str, &[&str])] = &[
-        ("the real v18 DDL", CREATE_REQUESTS_TABLE, &[]),
+        (
+            "the current DDL, trailing v19 columns included",
+            CREATE_REQUESTS_TABLE,
+            &[],
+        ),
         ("v17 DDL plus the appended tail", &through_v17, &tail),
     ];
     for &(name, ddl, added) in cases {

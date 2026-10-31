@@ -1272,6 +1272,12 @@ fn sample_usage_record(request_id: &str) -> routectl_usage::UsageRecord {
         local_refusals: 0,
         field_repairs: 0,
         missing_terminals: 0,
+        skip_credential_unusable: 0,
+        skip_account_parked: 0,
+        skip_breaker_open: 0,
+        skip_rate_limited: 0,
+        skip_capability: 0,
+        skip_context_window: 0,
     }
 }
 

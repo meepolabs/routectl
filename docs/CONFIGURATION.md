@@ -4550,15 +4550,19 @@ database re-stamped first. Each schema step it undoes only appended
 nullable columns or a table that the earlier binary never names, so the
 rollback is a re-stamp, not a rewrite:
 
-- `--to 17` undoes v18: the eight request-observation columns on
-  `requests` and the `ledger_gaps` table stay in place. A v17 binary names
-  every `requests` column it writes and never reads `ledger_gaps`.
-- `--to 16` undoes v18 (when the file is at v18) and then v17: the two
-  capability-ledger columns stay in place as well.
+- `--to 18` undoes v19: the six skip-count columns on `requests` stay in
+  place. A v18 binary names every `requests` column it writes.
+- `--to 17` undoes v19 (when the file is at v19) and then v18: the eight
+  request-observation columns on `requests` and the `ledger_gaps` table
+  stay in place. A v17 binary names every `requests` column it writes and
+  never reads `ledger_gaps`. A file already stamped 18 that still carries
+  the skip-count columns is accepted.
+- `--to 16` undoes every step above the file's version down to v17, then
+  v17: the two capability-ledger columns stay in place as well.
 
 ```bash
 systemctl --user stop routectl        # or however the daemon runs
-./routectl usage downgrade --to 17    # [--db /path/to/usage.db]; --to 16 for a v16 binary
+./routectl usage downgrade --to 18    # [--db /path/to/usage.db]; --to 17 or --to 16 for an older binary
 # install and start the previous binary
 ```
 

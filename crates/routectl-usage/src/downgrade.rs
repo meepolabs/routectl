@@ -1,4 +1,4 @@
-//! Offline schema downgrade: v18 -> v17 -> v16.
+//! Offline schema downgrade: v19 -> v18 -> v17 -> v16.
 //!
 //! A binary refuses a file stamped with a newer schema version than it
 //! understands (`VersionTooNew`), so rolling a host back to an earlier binary
@@ -6,13 +6,18 @@
 //! strictly additive forward step, so every downgrade is a re-stamp, never a
 //! rewrite:
 //!
+//! - 19 -> 18: v19 appended six nullable skip-count columns to `requests`,
+//!   which a v18 binary never names.
 //! - 18 -> 17: v18 appended eight nullable `requests` columns and created
 //!   `ledger_gaps` with its covering `idx_ledger_gaps_ts_ms` index. A v17
 //!   binary names every `requests` column it writes and never touches
 //!   `ledger_gaps`, so the columns, the table and its index all stay in
 //!   place. The shape check covers columns only: like every other index,
 //!   the gap index is tolerated, not verified, because no older binary
-//!   reads or depends on it.
+//!   reads or depends on it. A file stamped 18 may still carry the six v19
+//!   columns (a v19 file stepped down, or one a v18 binary then wrote to),
+//!   so this step accepts `requests` either without them or followed by
+//!   exactly them; a v17 binary never names them either.
 //! - 17 -> 16: v17 appended two nullable `capability_events` columns, which a
 //!   v16 binary never names.
 //!
@@ -47,7 +52,7 @@ use std::time::Duration;
 
 use rusqlite::{Connection, ErrorCode, OpenFlags, TransactionBehavior};
 
-use crate::migrate::V18_REQUESTS_COLUMNS;
+use crate::migrate::{V18_REQUESTS_COLUMNS, V19_REQUESTS_COLUMNS};
 use crate::schema::META_SCHEMA_VERSION;
 
 /// One downgrade step: the version it accepts and the shape check that must
@@ -60,6 +65,10 @@ struct Step {
 /// Every downgrade step, newest first. A downgrade runs a contiguous run of
 /// them, starting at the file's version, until it reaches the target.
 const STEPS: &[Step] = &[
+    Step {
+        from: 19,
+        verify_shape: verify_additive_v19,
+    },
     Step {
         from: 18,
         verify_shape: verify_additive_v18,
@@ -314,8 +323,8 @@ pub enum DowngradeError {
 /// Stamp the usage DB at `path` down to schema version `target`, so a binary
 /// built for that version opens it.
 ///
-/// Runs every step from the file's version down to `target` -- 18 -> 17,
-/// then 17 -> 16 when `target` is 16 -- in one transaction. Each step checks
+/// Runs every step from the file's version down to `target` -- 19 -> 18,
+/// then 18 -> 17, then 17 -> 16, stopping at `target` -- in one transaction. Each step checks
 /// its tables are exactly the earlier shape plus the additive set the forward
 /// step appended, then re-stamps `PRAGMA user_version` and
 /// `meta.schema_version` one version lower; no column, row or table is
@@ -415,21 +424,51 @@ fn verify_stamps(conn: &Connection, expected: i64) -> Result<(), DowngradeError>
     Ok(())
 }
 
-/// The 18 -> 17 shape check: `requests` is the frozen v17 column list
-/// followed by exactly the eight v18 columns (plain nullable, no default),
-/// and `ledger_gaps` is exactly its v18 shape.
-fn verify_additive_v18(conn: &Connection) -> Result<(), DowngradeError> {
-    let requests: Vec<FrozenColumn> = V17_REQUESTS_COLUMNS
+/// The `requests` columns through v18: the frozen v17 list followed by the
+/// eight v18 columns (plain nullable, no default).
+fn requests_through_v18() -> Vec<FrozenColumn> {
+    V17_REQUESTS_COLUMNS
         .iter()
         .copied()
-        .chain(
-            V18_REQUESTS_COLUMNS
-                .iter()
-                .map(|&(name, declared_type)| (name, declared_type, false, 0)),
-        )
-        .collect();
-    verify_table(conn, "requests", &requests)?;
-    verify_table(conn, "ledger_gaps", V18_LEDGER_GAPS_COLUMNS)
+        .chain(appended(V18_REQUESTS_COLUMNS))
+        .collect()
+}
+
+/// The `requests` columns through v19: the v18 shape followed by the six v19
+/// skip-count columns (plain nullable, no default).
+fn requests_through_v19() -> Vec<FrozenColumn> {
+    requests_through_v18()
+        .into_iter()
+        .chain(appended(V19_REQUESTS_COLUMNS))
+        .collect()
+}
+
+/// A forward step's `(name, declared type)` set as frozen records: every
+/// appended column is nullable, has no default and is not part of a key.
+fn appended(
+    columns: &'static [(&'static str, &'static str)],
+) -> impl Iterator<Item = FrozenColumn> {
+    columns
+        .iter()
+        .map(|&(name, declared_type)| (name, declared_type, false, 0))
+}
+
+/// The 19 -> 18 shape check: `requests` is exactly the v18 shape followed by
+/// the six v19 columns.
+fn verify_additive_v19(conn: &Connection) -> Result<(), DowngradeError> {
+    verify_table(conn, "requests", &[&requests_through_v19()])
+}
+
+/// The 18 -> 17 shape check: `requests` is the frozen v17 column list
+/// followed by exactly the eight v18 columns, optionally followed by exactly
+/// the six v19 columns, and `ledger_gaps` is exactly its v18 shape.
+fn verify_additive_v18(conn: &Connection) -> Result<(), DowngradeError> {
+    verify_table(
+        conn,
+        "requests",
+        &[&requests_through_v18(), &requests_through_v19()],
+    )?;
+    verify_table(conn, "ledger_gaps", &[V18_LEDGER_GAPS_COLUMNS])
 }
 
 /// The 17 -> 16 shape check: `capability_events` is the frozen v16 column
@@ -440,16 +479,22 @@ fn verify_additive_v17(conn: &Connection) -> Result<(), DowngradeError> {
         .chain(V17_ADDITIVE_COLUMNS)
         .copied()
         .collect();
-    verify_table(conn, "capability_events", &capability_events)
+    verify_table(conn, "capability_events", &[&capability_events])
 }
 
-/// Check `table` is an ordinary table whose columns are exactly `expected`.
+/// Check `table` is an ordinary table whose columns are exactly one of
+/// `layouts`. The layout compared is the one with the table's column count;
+/// with none, the first, which then fails on the count.
 fn verify_table(
     conn: &Connection,
     table: &'static str,
-    expected: &[FrozenColumn],
+    layouts: &[&[FrozenColumn]],
 ) -> Result<(), DowngradeError> {
     let columns = table_columns(conn, table)?;
+    let expected = layouts
+        .iter()
+        .find(|layout| layout.len() == columns.len())
+        .unwrap_or(&layouts[0]);
     match not_additive_reason(&columns, expected) {
         Some(reason) => Err(DowngradeError::NotAdditive { table, reason }),
         None => Ok(()),
@@ -532,3 +577,7 @@ mod tests;
 #[cfg(test)]
 #[path = "downgrade_v18_tests.rs"]
 mod v18_tests;
+
+#[cfg(test)]
+#[path = "downgrade_v19_tests.rs"]
+mod v19_tests;

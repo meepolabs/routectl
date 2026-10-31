@@ -229,7 +229,7 @@ fn refuses_while_another_connection_has_the_file_open() {
         }),
     ];
     for (name, hold) in holders {
-        for target in [17, 16] {
+        for target in [18, 17, 16] {
             // Arrange
             let (_dir, path) = temp_db_path();
             drop(open(&path).expect("open fresh"));
@@ -245,8 +245,16 @@ fn refuses_while_another_connection_has_the_file_open() {
             );
             drop(holder);
             let conn = Connection::open(&path).expect("reopen");
-            assert_eq!(user_version(&conn), 18, "{name} --to {target}");
-            assert_eq!(meta_version(&conn), "18", "{name} --to {target}");
+            assert_eq!(
+                user_version(&conn),
+                crate::schema::SCHEMA_VERSION,
+                "{name} --to {target}"
+            );
+            assert_eq!(
+                meta_version(&conn),
+                crate::schema::SCHEMA_VERSION.to_string(),
+                "{name} --to {target}"
+            );
         }
     }
 }
@@ -472,7 +480,11 @@ fn refuses_a_file_whose_version_the_target_does_not_accept() {
     // A downgrade to `target` accepts a file above `target` and no newer than
     // the newest step's input. The fixture is a valid v17 file re-stamped, so
     // only the version check can refuse these rows.
-    let cases: &[(i64, &[i64])] = &[(16, &[0, 15, 16, 19]), (17, &[0, 15, 16, 17, 19])];
+    let cases: &[(i64, &[i64])] = &[
+        (16, &[0, 15, 16, 20]),
+        (17, &[0, 15, 16, 17, 20]),
+        (18, &[0, 15, 16, 17, 18, 20]),
+    ];
     for &(target, versions) in cases {
         for &version in versions {
             // Arrange
@@ -504,7 +516,7 @@ fn refuses_a_file_whose_version_the_target_does_not_accept() {
 
 #[test]
 fn refuses_a_target_outside_the_step_list_before_touching_the_file() {
-    for target in [15, 18] {
+    for target in [15, 19] {
         // Arrange
         let (_dir, path) = temp_db_path();
         drop(open(&path).expect("open fresh"));
@@ -517,7 +529,10 @@ fn refuses_a_target_outside_the_step_list_before_touching_the_file() {
             matches!(result, Err(DowngradeError::UnsupportedTarget { target: t }) if t == target),
             "--to {target}: {result:?}"
         );
-        assert_eq!(user_version(&Connection::open(&path).expect("reopen")), 18);
+        assert_eq!(
+            user_version(&Connection::open(&path).expect("reopen")),
+            crate::schema::SCHEMA_VERSION
+        );
     }
 }
 

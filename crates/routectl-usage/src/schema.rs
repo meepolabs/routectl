@@ -3,8 +3,8 @@
 //! One column per `UsageRecord` field (see `record.rs`) for every WRITTEN
 //! column, with matching null-ability: `Option<T>` fields are NULLable;
 //! non-`Option` fields are NOT NULL, except the v18 request-observation
-//! columns, which are non-`Option` in the record but NULLable on disk so rows
-//! written before v18 need no rewrite. The DDL additionally retains four
+//! columns and the v19 skip counts, which are non-`Option` in the record but
+//! NULLable on disk so rows written before them need no rewrite. The DDL additionally retains four
 //! intentionally write-stopped legacy columns (`strategy`,
 //! `reduction_strategy`, `selection_decision`, `would_trim_raw_marks`) that
 //! have no `UsageRecord` field, so old databases keep opening and historical
@@ -15,7 +15,7 @@
 /// Current on-disk schema version. The migrate-on-open ladder advances a
 /// freshly-created or older DB to this version. Bump alongside a new
 /// migration step in `migrate.rs`.
-pub const SCHEMA_VERSION: i64 = 18;
+pub const SCHEMA_VERSION: i64 = 19;
 
 /// `meta` key holding the DB creation timestamp (epoch ms).
 pub const META_CREATED_AT_MS: &str = "created_at_ms";
@@ -315,7 +315,24 @@ CREATE TABLE IF NOT EXISTS requests (
     translation_drops INTEGER,
     local_refusals  INTEGER,
     field_repairs   INTEGER,
-    missing_terminals INTEGER
+    missing_terminals INTEGER,
+
+    -- TARGET SKIPS (v19): per client request, how many targets were passed
+    -- over without an attempt, one count per eligibility reason token
+    -- (`skip_<token>`).
+    --
+    -- Nullable with no default and no CHECK, like the v18 counts: the writer
+    -- always binds a value (0 when nothing was skipped), so NULL marks a row
+    -- written before this version and reads as 0. Appended last so these
+    -- columns land in the same ordinal position whether the DB was created
+    -- fresh at v19 or migrated from v18 via `ALTER TABLE ... ADD COLUMN`
+    -- (which always appends). No backfill.
+    skip_credential_unusable INTEGER,
+    skip_account_parked INTEGER,
+    skip_breaker_open INTEGER,
+    skip_rate_limited INTEGER,
+    skip_capability INTEGER,
+    skip_context_window INTEGER
 )";
 
 /// Index over `ts_start` for time-range scans (the dominant query

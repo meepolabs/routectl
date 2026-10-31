@@ -1011,12 +1011,18 @@ fn insert_record(conn: &Connection, r: &UsageRecord) -> Result<usize, rusqlite::
             r.local_refusals,
             r.field_repairs,
             r.missing_terminals,
+            r.skip_credential_unusable,
+            r.skip_account_parked,
+            r.skip_breaker_open,
+            r.skip_rate_limited,
+            r.skip_capability,
+            r.skip_context_window,
         ],
     )
 }
 
 /// The bound `INSERT OR IGNORE`. Column order mirrors `record.rs` /
-/// `schema.rs` exactly; `?1..?71` positions match the params list above.
+/// `schema.rs` exactly; `?1..?77` positions match the params list above.
 /// The DDL's four write-stopped legacy columns are absent from this list on
 /// purpose -- an omitted nullable column stores NULL. That
 /// includes `reduction_strategy`: the current context-reduction outcome
@@ -1058,7 +1064,9 @@ INSERT OR IGNORE INTO requests (
     cache_terminal_decision,
     prefix_epoch_event,
     operation, probe, harness,
-    wire_losses, translation_drops, local_refusals, field_repairs, missing_terminals
+    wire_losses, translation_drops, local_refusals, field_repairs, missing_terminals,
+    skip_credential_unusable, skip_account_parked, skip_breaker_open,
+    skip_rate_limited, skip_capability, skip_context_window
 ) VALUES (
     ?1, ?2, ?3, ?4, ?5, ?6,
     ?7, ?8, ?9, ?10, ?11, ?12,
@@ -1093,7 +1101,9 @@ INSERT OR IGNORE INTO requests (
     ?62,
     ?63,
     ?64, ?65, ?66,
-    ?67, ?68, ?69, ?70, ?71
+    ?67, ?68, ?69, ?70, ?71,
+    ?72, ?73, ?74,
+    ?75, ?76, ?77
 )";
 
 #[cfg(test)]
@@ -1180,6 +1190,12 @@ mod tests {
             local_refusals: 0,
             field_repairs: 0,
             missing_terminals: 0,
+            skip_credential_unusable: 0,
+            skip_account_parked: 0,
+            skip_breaker_open: 0,
+            skip_rate_limited: 0,
+            skip_capability: 0,
+            skip_context_window: 0,
         }
     }
 
@@ -1678,6 +1694,104 @@ mod tests {
                 )
                 .expect("epoch");
             assert_eq!(epoch, 2, "{request_id}: an earlier column shifted");
+        }
+    }
+
+    /// The v19 skip-count columns, read back in column order.
+    type SkipRow = [i64; 6];
+
+    fn skip_row(conn: &Connection, request_id: &str) -> SkipRow {
+        conn.query_row(
+            "SELECT skip_credential_unusable, skip_account_parked, skip_breaker_open, \
+             skip_rate_limited, skip_capability, skip_context_window \
+             FROM requests WHERE request_id = ?1",
+            [request_id],
+            |r| {
+                Ok([
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ])
+            },
+        )
+        .expect("row")
+    }
+
+    /// One row per skip field, each carrying a non-zero value in exactly that
+    /// field, so a bind landing in the wrong column (or not at all) fails the
+    /// row that names it. The all-default row pins that a record with nothing
+    /// skipped persists 0s, never NULL.
+    #[tokio::test]
+    async fn try_send_round_trips_each_skip_count_field() {
+        // Arrange
+        type Setter = fn(&mut UsageRecord);
+        let cases: [(&str, Setter, SkipRow); 7] = [
+            ("skip-default", |_| {}, [0, 0, 0, 0, 0, 0]),
+            (
+                "skip-credential-unusable",
+                |r| r.skip_credential_unusable = 21,
+                [21, 0, 0, 0, 0, 0],
+            ),
+            (
+                "skip-account-parked",
+                |r| r.skip_account_parked = 22,
+                [0, 22, 0, 0, 0, 0],
+            ),
+            (
+                "skip-breaker-open",
+                |r| r.skip_breaker_open = 23,
+                [0, 0, 23, 0, 0, 0],
+            ),
+            (
+                "skip-rate-limited",
+                |r| r.skip_rate_limited = 24,
+                [0, 0, 0, 24, 0, 0],
+            ),
+            (
+                "skip-capability",
+                |r| r.skip_capability = 25,
+                [0, 0, 0, 0, 25, 0],
+            ),
+            (
+                "skip-context-window",
+                |r| r.skip_context_window = 26,
+                [0, 0, 0, 0, 0, 26],
+            ),
+        ];
+        let (_dir, path) = temp_path();
+        let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+
+        // Act
+        for (request_id, set, _) in &cases {
+            let mut rec = record(request_id);
+            rec.missing_terminals = 9;
+            set(&mut rec);
+            handle.try_send(rec);
+        }
+        assert!(
+            wait_persisted(handle.counters(), cases.len() as u64),
+            "rows not persisted"
+        );
+        writer.shutdown();
+
+        // Assert
+        let conn = Connection::open(&path).expect("read");
+        for (request_id, _, want) in &cases {
+            assert_eq!(&skip_row(&conn, request_id), want, "{request_id}");
+            let missing_terminals: i64 = conn
+                .query_row(
+                    "SELECT missing_terminals FROM requests WHERE request_id = ?1",
+                    [request_id],
+                    |r| r.get(0),
+                )
+                .expect("missing_terminals");
+            assert_eq!(
+                missing_terminals, 9,
+                "{request_id}: an earlier column shifted"
+            );
         }
     }
 

@@ -596,6 +596,49 @@ fn migrate_v17_to_v18(conn: &Connection) -> Result<(), rusqlite::Error> {
     tx.commit()
 }
 
+/// The `requests` columns v19 appends, in physical order, with their declared
+/// types: one skip count per eligibility reason token. The DDL in `schema.rs`
+/// lists the same set last.
+pub const V19_REQUESTS_COLUMNS: &[(&str, &str)] = &[
+    ("skip_credential_unusable", "INTEGER"),
+    ("skip_account_parked", "INTEGER"),
+    ("skip_breaker_open", "INTEGER"),
+    ("skip_rate_limited", "INTEGER"),
+    ("skip_capability", "INTEGER"),
+    ("skip_context_window", "INTEGER"),
+];
+
+/// Apply the v18 -> v19 step atomically: append the six nullable skip-count
+/// columns to `requests` (no default, no CHECK), bump `PRAGMA user_version`
+/// to 19, and update the human-readable `meta.schema_version` row, all in one
+/// transaction. Existing rows survive with every new column NULL -- no
+/// backfill, no rewrite.
+///
+/// The step is strictly additive, so a v18 binary can be handed the file back
+/// after the version stamps are lowered: a v18 writer names its `requests`
+/// columns explicitly, so the six trailing columns are invisible to it.
+///
+/// A FRESH DB reaches this arm too, its `requests` already created from the
+/// current DDL; so does a downgraded-then-reopened file. Each `ADD COLUMN` is
+/// therefore guarded by `column_exists`.
+fn migrate_v18_to_v19(conn: &Connection) -> Result<(), rusqlite::Error> {
+    let tx = conn.unchecked_transaction()?;
+    for (column, declared_type) in V19_REQUESTS_COLUMNS {
+        if !column_exists(&tx, "requests", column)? {
+            tx.execute_batch(&format!(
+                "ALTER TABLE requests ADD COLUMN {column} {declared_type}"
+            ))?;
+        }
+    }
+    tx.execute_batch("PRAGMA user_version = 19")?;
+    tx.execute(
+        "INSERT INTO meta (key, value) VALUES (?1, ?2) \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        rusqlite::params![META_SCHEMA_VERSION, "19"],
+    )?;
+    tx.commit()
+}
+
 /// True if `table` already has a column named `column`. Used so the
 /// v1 -> v2 `ADD COLUMN` is safe on a fresh DB (whose `requests` was
 /// created from the current schema and already carries the column).
@@ -658,6 +701,7 @@ pub fn migrate_to_current(conn: &Connection, now_ms: i64) -> Result<i64, Migrate
             15 => migrate_v15_to_v16(conn)?,
             16 => migrate_v16_to_v17(conn)?,
             17 => migrate_v17_to_v18(conn)?,
+            18 => migrate_v18_to_v19(conn)?,
             other => unreachable!("no migration step from version {other}"),
         }
         version = read_user_version(conn)?;

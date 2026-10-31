@@ -441,6 +441,8 @@ list with more narrative.
 
 ### Changed
 
+- **The usage database moves to schema 19 (six skip-count columns, NULL on older rows).** Every `requests` row gains `skip_credential_unusable`, `skip_account_parked`, `skip_breaker_open`, `skip_rate_limited`, `skip_capability` and `skip_context_window`; new rows write 0 where nothing was skipped. The migration only appends nullable columns in one transaction. To roll back, stop the daemon and run `routectl usage downgrade --to 18` before starting the previous binary.
+
 - **The stream first-content timeout defaults to 5 minutes, down from 10.** A stream that has not delivered its first content within 5 minutes of an attempt now fails that attempt and moves to the next target when no model, provider, pool or `[retry]` sets `stream_first_byte_timeout_ms`. A config that sets the key keeps its value. See [docs/CONFIGURATION.md](docs/CONFIGURATION.md#per-provider-runtime-gates).
 
 - **Completions and token counts time out after 30 minutes per attempt by default.** When no provider, pool or `[retry]` sets `request_timeout_ms`, each complete and count-tokens attempt now ends after 30 minutes with `request timed out after 1800000ms`; before, such an attempt had no deadline. A timed-out completion counts as a network error: it is tried up to `max_attempts` times on the same provider (or the `[retry.classes.network-error] retry` cap when set), then falls back to the next target; a timed-out token count moves to the next target without a same-provider retry. A stream that has committed content is not cut by this timeout. A config that sets the key keeps its value. See [docs/CONFIGURATION.md](docs/CONFIGURATION.md#per-provider-runtime-gates).

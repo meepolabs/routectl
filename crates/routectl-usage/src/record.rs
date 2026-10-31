@@ -448,6 +448,23 @@ pub struct UsageRecord {
     /// Streams for this request that ended without a terminal event.
     pub missing_terminals: u64,
 
+    // TARGET SKIPS
+    // One count per eligibility reason: targets passed over for that reason
+    // without an attempt. Non-`Option` for the same reason as the observation
+    // counts above: NULL marks only rows written before the columns existed.
+    /// Targets skipped because their credential was unusable.
+    pub skip_credential_unusable: u64,
+    /// Targets skipped because their credential account was parked.
+    pub skip_account_parked: u64,
+    /// Targets skipped because their circuit breaker was open.
+    pub skip_breaker_open: u64,
+    /// Targets skipped because their local request-rate limit was exhausted.
+    pub skip_rate_limited: u64,
+    /// Targets skipped because they lacked a capability the request needs.
+    pub skip_capability: u64,
+    /// Targets skipped because the request did not fit their context window.
+    pub skip_context_window: u64,
+
     // TIMING
     /// End-to-end request latency, milliseconds.
     pub latency_ms: i64,
@@ -690,6 +707,12 @@ mod tests {
             local_refusals: 3,
             field_repairs: 4,
             missing_terminals: 5,
+            skip_credential_unusable: 6,
+            skip_account_parked: 7,
+            skip_breaker_open: 8,
+            skip_rate_limited: 9,
+            skip_capability: 10,
+            skip_context_window: 11,
             latency_ms: 1000,
             ttfb_ms: Some(120),
             input_tokens: Some(100),
@@ -772,6 +795,12 @@ mod tests {
             local_refusals: 0,
             field_repairs: 0,
             missing_terminals: 0,
+            skip_credential_unusable: 0,
+            skip_account_parked: 0,
+            skip_breaker_open: 0,
+            skip_rate_limited: 0,
+            skip_capability: 0,
+            skip_context_window: 0,
             latency_ms: 0,
             ttfb_ms: None,
             input_tokens: None,

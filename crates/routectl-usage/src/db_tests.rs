@@ -2059,8 +2059,9 @@ fn meta_schema_version(conn: &Connection) -> String {
     .expect("meta schema_version")
 }
 
-/// The v18 tail as `(name, declared type, notnull, default)`, read from the
-/// file. Used to pin "last, in order, nullable, no default".
+/// The v18 set as `(name, declared type, notnull, default)`, read from the
+/// file: the eight columns starting at `operation`. Used to pin "contiguous,
+/// in order, nullable, no default".
 fn v18_tail_shape(conn: &Connection) -> Vec<(String, String, i64, Option<String>)> {
     let mut stmt = conn
         .prepare("SELECT name, type, \"notnull\", dflt_value FROM pragma_table_info('requests')")
@@ -2070,7 +2071,11 @@ fn v18_tail_shape(conn: &Connection) -> Vec<(String, String, i64, Option<String>
         .expect("query table_info")
         .map(|r| r.expect("row"))
         .collect();
-    all[all.len() - V18_REQUESTS_TAIL.len()..].to_vec()
+    let start = all
+        .iter()
+        .position(|(name, ..)| name == V18_REQUESTS_TAIL[0])
+        .expect("the v18 set is present");
+    all[start..(start + V18_REQUESTS_TAIL.len()).min(all.len())].to_vec()
 }
 
 fn expected_v18_tail() -> Vec<(String, String, i64, Option<String>)> {
@@ -2087,7 +2092,7 @@ fn expected_v18_tail() -> Vec<(String, String, i64, Option<String>)> {
 /// A v17 DB migrates to v18 with `requests` and `ledger_gaps` shapes
 /// PHYSICALLY IDENTICAL to a fresh v18 DB; the eight new columns are last, in
 /// order, nullable and without a default; existing rows survive unchanged with
-/// every new column NULL; both version stamps read 18; a second pass is a
+/// every new column NULL; both version stamps read the current version; a second pass is a
 /// no-op.
 #[test]
 fn v17_to_v18_yields_the_same_schema_as_a_fresh_db_preserving_rows() {
@@ -2113,10 +2118,9 @@ fn v17_to_v18_yields_the_same_schema_as_a_fresh_db_preserving_rows() {
     let version = migrate_to_current(&migrated, 0).expect("migrate v17->v18");
 
     // Assert: stamped, rows unchanged, every new column NULL.
-    assert_eq!(version, 18);
-    assert_eq!(SCHEMA_VERSION, 18);
-    assert_eq!(user_version(&migrated), 18);
-    assert_eq!(meta_schema_version(&migrated), "18");
+    assert_eq!(version, SCHEMA_VERSION);
+    assert_eq!(user_version(&migrated), SCHEMA_VERSION);
+    assert_eq!(meta_schema_version(&migrated), SCHEMA_VERSION.to_string());
     assert_eq!(snapshot(&migrated), rows_before, "no prior value changed");
     let non_null_new: i64 = migrated
         .query_row(
@@ -2171,7 +2175,7 @@ fn v17_to_v18_yields_the_same_schema_as_a_fresh_db_preserving_rows() {
 
     // Idempotent: a second pass leaves shape and rows alone.
     let again = migrate_to_current(&migrated, 0).expect("re-run migrate");
-    assert_eq!(again, 18);
+    assert_eq!(again, SCHEMA_VERSION);
     assert_eq!(snapshot(&migrated), rows_before);
     assert_eq!(
         table_shape(&migrated, "requests"),
@@ -2233,7 +2237,7 @@ fn v17_to_v18_failure_after_the_first_alter_leaves_the_file_at_v17() {
     // Assert: once the fault is gone the same file migrates normally.
     conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
         .expect("clear authorizer");
-    assert_eq!(migrate_to_current(&conn, 0).expect("retry"), 18);
+    assert_eq!(migrate_to_current(&conn, 0).expect("retry"), SCHEMA_VERSION);
     assert_eq!(v18_tail_shape(&conn), expected_v18_tail());
 }
 
@@ -2258,8 +2262,8 @@ fn v17_to_v18_is_a_no_op_on_a_file_that_already_has_the_columns() {
     let version = migrate_to_current(db.conn(), 0).expect("re-migrate");
 
     // Assert
-    assert_eq!(version, 18);
-    assert_eq!(meta_schema_version(db.conn()), "18");
+    assert_eq!(version, SCHEMA_VERSION);
+    assert_eq!(meta_schema_version(db.conn()), SCHEMA_VERSION.to_string());
     assert_eq!(table_shape(db.conn(), "requests"), requests_before);
     let gaps: i64 = db
         .conn()
@@ -2307,8 +2311,8 @@ fn a_v1_db_climbs_the_whole_ladder_to_the_fresh_v18_shape() {
     let version = migrate_to_current(&conn, 0).expect("migrate v1->current");
 
     // Assert
-    assert_eq!(version, 18);
-    assert_eq!(meta_schema_version(&conn), "18");
+    assert_eq!(version, SCHEMA_VERSION);
+    assert_eq!(meta_schema_version(&conn), SCHEMA_VERSION.to_string());
     let (_fresh_dir, fresh_path) = temp_db_path();
     let fresh = open(&fresh_path).expect("open fresh db");
     for table in ["requests", "ledger_gaps"] {
@@ -2330,7 +2334,7 @@ fn a_v1_db_climbs_the_whole_ladder_to_the_fresh_v18_shape() {
     assert_eq!(operation, None);
 }
 
-/// Pins the physical `requests` DDL shape: 75 columns, in this exact
+/// Pins the physical `requests` DDL shape: 81 columns, in this exact
 /// order, with this exact null-ability. The set intentionally EXCEEDS the
 /// `UsageRecord` field set by four write-stopped legacy columns
 /// (`strategy`, `reduction_strategy`, `selection_decision`,
@@ -2342,7 +2346,8 @@ fn requests_columns_match_physical_schema() {
     // Arrange: (column name, expected NOT NULL). Written columns mirror
     // record.rs -- non-Option fields are NOT NULL, Option<T> fields are
     // NULLable; the four retained write-stopped columns are NULLable, and
-    // so are the v18 request-observation columns (NULL on pre-v18 rows).
+    // so are the v18 request-observation columns (NULL on pre-v18 rows) and
+    // the v19 skip counts (NULL on pre-v19 rows).
     let expected: &[(&str, bool)] = &[
         ("ts_start", true),
         ("ts_end", true),
@@ -2419,6 +2424,12 @@ fn requests_columns_match_physical_schema() {
         ("local_refusals", false),
         ("field_repairs", false),
         ("missing_terminals", false),
+        ("skip_credential_unusable", false),
+        ("skip_account_parked", false),
+        ("skip_breaker_open", false),
+        ("skip_rate_limited", false),
+        ("skip_capability", false),
+        ("skip_context_window", false),
     ];
 
     let (_dir, path) = temp_db_path();
