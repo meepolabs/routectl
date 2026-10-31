@@ -51,7 +51,7 @@ use routectl_core::wire_check::WireTap;
 use routectl_core::{ChatRequest, Error, Provider, Result, TokenCount, sanitize_for_log};
 use routectl_providers::anthropic_family::{AnthropicFamily, anthropic_family};
 
-use crate::config::RetryPolicy;
+use crate::config::ResolvedTuning;
 
 use super::capability_observe::UntranslatedCapabilities;
 use super::class_observe::{
@@ -122,11 +122,12 @@ impl SurfaceAdapter for CountAdapter {
         capable
     }
 
-    /// The composed `request_timeout_ms`, expiring with a completion's text.
+    /// The resolved `request_timeout_ms`, expiring with a completion's text.
     /// An expired count walks to the next capable seat.
-    fn deadline(&self, attempt_policy: &RetryPolicy) -> Option<Deadline> {
-        attempt_policy
+    fn deadline(&self, tuning: &ResolvedTuning) -> Option<Deadline> {
+        tuning
             .request_timeout_ms
+            .value
             .map(|ms| Deadline::new(ms, complete_timed_out))
     }
 
@@ -343,7 +344,7 @@ impl Router {
     ///   health on the per-seat breaker that completions gate on.
     /// - A 401 -> single-flight `on_auth_failure` refresh + one retry of
     ///   the SAME seat.
-    /// - An attempt that outlives the composed `request_timeout_ms` -> the
+    /// - An attempt that outlives the resolved `request_timeout_ms` -> the
     ///   status-0 timeout error a completion gives, debited like a 5xx, then
     ///   advance to the NEXT capable seat. The walk keys on its own deadline
     ///   expiring, never on the status-0 class a refused connection shares.

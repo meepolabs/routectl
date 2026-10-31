@@ -140,3 +140,124 @@ async fn an_expired_completion_attempt_is_a_status_zero_error_with_the_exact_tex
     }
     assert_eq!(hangs.calls.load(Ordering::SeqCst), 1);
 }
+
+/// The provider tier's `request_timeout_ms` beats `[retry]`'s at the
+/// dispatched deadline, read from the stamp installed for the target.
+#[tokio::test(start_paused = true)]
+async fn provider_timeout_reaches_deadline_through_stamp() {
+    // Arrange
+    let mut config: Config = toml::from_str(
+        r#"
+[providers.p-hangs]
+kind = "anthropic-api"
+api_key_ref = "literal:k"
+request_timeout_ms = 20
+
+[retry]
+max_attempts = 1
+request_timeout_ms = 5000
+"#,
+    )
+    .expect("valid test toml");
+    config
+        .aliases
+        .insert(ALIAS.into(), AliasValue::Chain(vec![HANGS.into()]));
+    let hangs = Arc::new(HangingProvider::default());
+    let mut router = Router::new(Arc::new(config));
+    let model = ResolvedModel::new(HANGS, provider_of(HANGS), hangs.clone(), "up");
+    router.install_resolved_models(BTreeMap::from([(HANGS.to_string(), Arc::new(model))]));
+    let started = tokio::time::Instant::now();
+
+    // Act
+    let dispatched = tokio::time::timeout(
+        OUTER_BOUND,
+        Box::pin(router.complete_with_options(request(), RouterOptions::default())),
+    )
+    .await
+    .expect("the attempt deadline ends the hanging attempt");
+
+    // Assert
+    match dispatched.result {
+        Err(Error::Upstream { body, .. }) => {
+            assert_eq!(body, "request timed out after 20ms");
+        }
+        other => panic!("expected the deadline's upstream error, got {other:?}"),
+    }
+    assert_eq!(started.elapsed(), Duration::from_millis(20));
+    assert_eq!(hangs.calls.load(Ordering::SeqCst), 1);
+}
+
+/// A pooled model's seats each dispatch under their own member's tier, with
+/// the pool beneath it and `[retry]` beneath that: the per-attempt values are
+/// what resolving the seat's member entry with the model's first-content
+/// override gives, so a seat member's own value and the pool's value each
+/// reach a dispatched attempt.
+#[tokio::test(start_paused = true)]
+async fn each_pooled_seat_dispatches_under_its_member_tier() {
+    // Arrange
+    const MEMBER_A: &str = "member-a";
+    const MEMBER_B: &str = "member-b";
+    let mut config: Config = toml::from_str(&format!(
+        r#"
+[providers.{MEMBER_A}]
+kind = "anthropic-api"
+api_key_ref = "literal:k"
+request_timeout_ms = 20
+
+[providers.{MEMBER_B}]
+kind = "anthropic-api"
+api_key_ref = "literal:k"
+
+[pools.pool]
+members = ["{MEMBER_A}", "{MEMBER_B}"]
+request_timeout_ms = 40
+
+[retry]
+max_attempts = 1
+request_timeout_ms = 80
+"#
+    ))
+    .expect("valid test toml");
+    config
+        .aliases
+        .insert(ALIAS.into(), AliasValue::Chain(vec!["opus".into()]));
+    let seat_a = Arc::new(HangingProvider::default());
+    let seat_b = Arc::new(HangingProvider::default());
+    let seats = vec![
+        crate::seat_pool::SeatTarget::new(MEMBER_A.into(), seat_a.clone(), None, false),
+        crate::seat_pool::SeatTarget::new(MEMBER_B.into(), seat_b.clone(), None, false),
+    ];
+    let model = ResolvedModel::new("opus", "pool", seat_a.clone(), "up")
+        .with_stream_first_byte_timeout_ms(7_000)
+        .with_seats(Arc::from(seats));
+    let mut router = Router::new(Arc::new(config));
+    router.install_resolved_models(BTreeMap::from([("opus".to_string(), Arc::new(model))]));
+    let targets = router.dispatch_chain(ALIAS, None).expect("chain resolves");
+    let started = tokio::time::Instant::now();
+
+    // Act
+    let dispatched = tokio::time::timeout(
+        OUTER_BOUND,
+        Box::pin(router.complete_with_options(request(), RouterOptions::default())),
+    )
+    .await
+    .expect("the attempt deadlines end both hanging seats");
+
+    // Assert
+    let stamps: Vec<_> = targets.iter().map(|t| *router.tuning_for(t)).collect();
+    let per_member: Vec<_> = [MEMBER_A, MEMBER_B]
+        .iter()
+        .map(|member| crate::config::resolve_tuning(&router.config, Some(member), Some(7_000)))
+        .collect();
+    assert_eq!(stamps, per_member);
+    match dispatched.result {
+        Err(Error::Upstream { provider, body, .. }) => {
+            assert_eq!(provider, MEMBER_B);
+            assert_eq!(body, "request timed out after 40ms");
+        }
+        other => panic!("expected the last seat's deadline error, got {other:?}"),
+    }
+    assert_eq!(started.elapsed(), Duration::from_millis(20 + 40));
+    assert_eq!(seat_a.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(seat_b.calls.load(Ordering::SeqCst), 1);
+}

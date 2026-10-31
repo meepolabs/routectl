@@ -184,6 +184,11 @@ pub struct Router {
     /// emptying the table cannot let a later install take a slot under a
     /// different identity. Written only through `claim_state_slot`.
     slot_owners: BTreeMap<String, state_slots::SlotOwner>,
+    /// The tuning (breaker, RPM, both per-attempt timeouts) resolved for
+    /// each `state` key when its slot is claimed, so a dispatch reads the
+    /// stamp rather than re-resolving per attempt. Rebuilt with the Router,
+    /// so a reload stamps fresh values; never carried over.
+    tuning: BTreeMap<String, Arc<crate::config::ResolvedTuning>>,
     /// Every credential account's park and generation (see
     /// `credential_park`). One map for the router rather than a field per
     /// `state` slot, so a park observed through one model refuses every model
@@ -2054,8 +2059,6 @@ struct DispatchTarget {
     reasoning_dialect: Option<ReasoningDialect>,
     /// Per-model openai-compat outgoing-history reasoning policy.
     history_reasoning: Option<HistoryReasoning>,
-    /// Per-model `stream_first_byte_timeout_ms`.
-    stream_first_byte_timeout_ms: Option<u64>,
     /// Per-model `max_tokens` ceiling for the Anthropic-shape egresses:
     /// the catalog prior, threaded from `ResolvedModel.max_output_tokens`.
     /// Zero means no ceiling known -- `apply_layered_overlays` then fills
@@ -2144,13 +2147,15 @@ impl Router {
     pub fn new(config: Arc<Config>) -> Self {
         let mut state = BTreeMap::new();
         let mut slot_owners = BTreeMap::new();
+        let mut tuning = BTreeMap::new();
         for name in config.providers.keys() {
-            let gate = crate::config::resolve_tuning(&config, Some(name), None).gate();
+            let resolved = crate::config::resolve_tuning(&config, Some(name), None);
             state.insert(
                 name.clone(),
-                Arc::new(Mutex::new(ProviderState::from_gate(gate))),
+                Arc::new(Mutex::new(ProviderState::from_gate(resolved.gate()))),
             );
             slot_owners.insert(name.clone(), state_slots::SlotOwner::Provider(name.clone()));
+            tuning.insert(name.clone(), Arc::new(resolved));
         }
 
         // Build the suffix-glob index from the configured `[aliases]`
@@ -2223,6 +2228,7 @@ impl Router {
             providers: Default::default(),
             state,
             slot_owners,
+            tuning,
             credential_accounts: Arc::default(),
             resolved_models: BTreeMap::new(),
             alias_glob_index,
@@ -2348,6 +2354,11 @@ impl Router {
                         state_slots::SlotOwner::Provider(seat.provider_name.clone()),
                         Some(&seat.provider_name),
                     );
+                    self.stamp_tuning(
+                        seat.state_key_for(nickname),
+                        Some(&seat.provider_name),
+                        m.stream_first_byte_timeout_ms,
+                    );
                 }
                 // Round-robin pools rotate the starting seat per request;
                 // register a cursor only for that selection mode, keyed by the
@@ -2363,6 +2374,11 @@ impl Router {
                 nickname.clone(),
                 state_slots::SlotOwner::of_model(m),
                 Some(&m.provider_name),
+            );
+            self.stamp_tuning(
+                nickname.clone(),
+                Some(&m.provider_name),
+                m.stream_first_byte_timeout_ms,
             );
         }
         self.admit_quota_seats();
@@ -3208,6 +3224,9 @@ impl Router {
             state_slots::SlotOwner::Provider(name.clone()),
             None,
         );
+        if !self.tuning.contains_key(&name) {
+            self.stamp_tuning(name.clone(), Some(&name), None);
+        }
         self.providers.insert(name, provider);
     }
 
@@ -3500,6 +3519,10 @@ mod seat_pool_dispatch_tests;
 #[cfg(test)]
 #[path = "state_slot_install_tests.rs"]
 mod state_slot_install_tests;
+
+#[cfg(test)]
+#[path = "tuning_stamp_tests.rs"]
+mod tuning_stamp_tests;
 
 #[cfg(test)]
 #[path = "state_key_rpm_isolation_tests.rs"]

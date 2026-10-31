@@ -17,7 +17,7 @@ use routectl_core::{
 };
 
 use crate::catalog::{CatalogRow, EffectiveRow};
-use crate::config::RetryPolicy;
+use crate::config::{ResolvedTuning, RetryPolicy};
 use crate::context_trim::{
     SteadyStateTrimParams, collect_near_lossless_marks, estimate_total_tokens,
     near_lossless_candidate, propose_steady_state_trim, trimmed_prefix_fingerprint,
@@ -68,7 +68,7 @@ fn target_drops_responses_reasoning(provider_kind: Option<&str>) -> bool {
 }
 
 /// The non-streaming surface: one `complete()` call per attempt, bounded by
-/// the composed `request_timeout_ms`, committed when the response arrives.
+/// the resolved `request_timeout_ms`, committed when the response arrives.
 struct CompleteAdapter;
 
 impl SurfaceAdapter for CompleteAdapter {
@@ -79,9 +79,10 @@ impl SurfaceAdapter for CompleteAdapter {
         true
     }
 
-    fn deadline(&self, attempt_policy: &RetryPolicy) -> Option<Deadline> {
-        attempt_policy
+    fn deadline(&self, tuning: &ResolvedTuning) -> Option<Deadline> {
+        tuning
             .request_timeout_ms
+            .value
             .map(|ms| Deadline::new(ms, complete_timed_out))
     }
 
@@ -182,7 +183,7 @@ impl SurfaceAdapter for CompleteAdapter {
 }
 
 /// The streaming surface: one upstream stream per attempt, committed at its
-/// first CONTENT chunk and bounded until then by the composed
+/// first CONTENT chunk and bounded until then by the resolved
 /// `stream_first_byte_timeout_ms`. Leading content-free chunks are buffered
 /// inside the attempt, so a failure before content still walks on.
 struct StreamAdapter;
@@ -203,9 +204,10 @@ impl SurfaceAdapter for StreamAdapter {
         true
     }
 
-    fn deadline(&self, attempt_policy: &RetryPolicy) -> Option<Deadline> {
-        attempt_policy
+    fn deadline(&self, tuning: &ResolvedTuning) -> Option<Deadline> {
+        tuning
             .stream_first_byte_timeout_ms
+            .value
             .map(|ms| Deadline::new(ms, stream_first_content_timed_out))
     }
 
@@ -508,27 +510,6 @@ impl Router {
     /// would key off this value.
     pub(super) fn policy_for(&self, _model: &str) -> RetryPolicy {
         self.config.retry.clone()
-    }
-
-    /// The per-attempt policy for one target: `base` with both timeouts
-    /// replaced by the tuning resolver's values for `provider_name` and
-    /// the model's first-content override. See
-    /// [`crate::config::tuning`] for the precedence.
-    pub(super) fn compose_attempt_policy(
-        &self,
-        base: &RetryPolicy,
-        provider_name: &str,
-        model_first_byte_timeout_override: Option<u64>,
-    ) -> RetryPolicy {
-        let tuning = crate::config::resolve_tuning(
-            &self.config,
-            Some(provider_name),
-            model_first_byte_timeout_override,
-        );
-        let mut out = base.clone();
-        out.request_timeout_ms = tuning.request_timeout_ms.value;
-        out.stream_first_byte_timeout_ms = tuning.stream_first_byte_timeout_ms.value;
-        out
     }
 
     /// NON-MUTATING would-trim advisory recording, gated by ONE independent

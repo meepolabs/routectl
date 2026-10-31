@@ -34,11 +34,11 @@ fn build_router_with_provider_timeouts(
     Router::new(Arc::new(cfg))
 }
 
-/// `compose_attempt_policy` takes both timeouts from the tuning resolver,
-/// not from `base`: the provider tier beats a global set on `base`'s
-/// source config, and the model override beats both.
+/// A target no install stamped (its model was never installed) takes the
+/// resolver's answer for its provider and its model's first-content
+/// override: the provider tier beats `[retry]`, the model beats both.
 #[test]
-fn compose_takes_both_timeouts_from_the_resolver() {
+fn a_slotless_target_resolves_its_tuning_from_its_provider_and_model() {
     // Arrange
     let cfg: Config = toml::from_str(
         r#"
@@ -55,21 +55,37 @@ stream_first_byte_timeout_ms = 90000
 "#,
     )
     .expect("valid test toml");
-    let base = cfg.retry.clone();
     let router = Router::new(Arc::new(cfg));
+    let provider: Arc<dyn Provider> =
+        super::scripted_provider_test_support::ScriptedProvider::new(None, |_| Ok(()));
+    let target = |override_ms: Option<u64>| {
+        let mut model =
+            crate::resolved::ResolvedModel::new("never-installed", "p1", provider.clone(), "u");
+        if let Some(ms) = override_ms {
+            model = model.with_stream_first_byte_timeout_ms(ms);
+        }
+        into_one_dispatch_target(Arc::new(model))
+    };
 
     // Act
-    let provider_tier = router.compose_attempt_policy(&base, "p1", None);
-    let model_tier = router.compose_attempt_policy(&base, "p1", Some(5_000));
+    let provider_tier = router.tuning_for(&target(None));
+    let model_tier = router.tuning_for(&target(Some(5_000)));
 
     // Assert
-    assert_eq!(provider_tier.request_timeout_ms, Some(120_000));
-    assert_eq!(provider_tier.stream_first_byte_timeout_ms, Some(60_000));
-    assert_eq!(model_tier.stream_first_byte_timeout_ms, Some(5_000));
     assert_eq!(
-        model_tier.max_attempts, base.max_attempts,
-        "non-tiered fields pass through"
+        *provider_tier,
+        crate::config::resolve_tuning(&router.config, Some("p1"), None)
     );
+    assert_eq!(
+        *model_tier,
+        crate::config::resolve_tuning(&router.config, Some("p1"), Some(5_000))
+    );
+    assert_eq!(provider_tier.request_timeout_ms.value, Some(120_000));
+    assert_eq!(
+        provider_tier.stream_first_byte_timeout_ms.value,
+        Some(60_000)
+    );
+    assert_eq!(model_tier.stream_first_byte_timeout_ms.value, Some(5_000));
 }
 
 #[test]

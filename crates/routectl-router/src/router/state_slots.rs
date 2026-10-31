@@ -1,17 +1,18 @@
 //! Ownership of runtime-state slots: which identity seeded each key of the
-//! state map, and whether a model being installed may take the keys it
-//! composes.
+//! state map, whether a model being installed may take the keys it
+//! composes, and the tuning resolved for each key.
 
 use std::fmt;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
 
+use crate::config::ResolvedTuning;
 use crate::resolved::ResolvedModel;
 use crate::runtime_state::ProviderState;
 use crate::seat_pool::check_state_key_name;
 
-use super::Router;
+use super::{DispatchTarget, Router};
 
 /// The identity whose runtime policy seeded a state slot. A provider and a
 /// pool of the same name are different owners: a pool slot is a pooled
@@ -71,6 +72,36 @@ impl Router {
             Arc::new(Mutex::new(ProviderState::from_gate(gate))),
         );
         self.slot_owners.insert(key, owner);
+    }
+
+    /// Record the tuning a dispatch through `key` runs under, replacing any
+    /// earlier stamp. Unlike the state slot, the stamp is not first-claim:
+    /// a model reusing a slot its provider seeded still carries its own
+    /// first-content override.
+    pub(super) fn stamp_tuning(
+        &mut self,
+        key: String,
+        entry: Option<&str>,
+        model_first_byte_ms: Option<u64>,
+    ) {
+        let tuning = crate::config::resolve_tuning(&self.config, entry, model_first_byte_ms);
+        self.tuning.insert(key, Arc::new(tuning));
+    }
+
+    /// The tuning `target` dispatches under: the stamp for its state key, or,
+    /// for a target no install stamped, the resolver's answer for its
+    /// provider and its model's first-content override.
+    pub(super) fn tuning_for(&self, target: &DispatchTarget) -> Arc<ResolvedTuning> {
+        self.tuning
+            .get(target.state_key.as_str())
+            .cloned()
+            .unwrap_or_else(|| {
+                Arc::new(crate::config::resolve_tuning(
+                    &self.config,
+                    Some(&target.provider_name),
+                    target.model.stream_first_byte_timeout_ms,
+                ))
+            })
     }
 
     /// Why `m`, filed under `nickname`, may not take runtime-state slots, or

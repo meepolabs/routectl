@@ -23,7 +23,7 @@ use routectl_core::{
     UpstreamReason, sanitize_for_log,
 };
 
-use crate::config::RetryPolicy;
+use crate::config::{ResolvedTuning, RetryPolicy};
 
 use super::beta_report_learn::install_beta_assembly;
 use super::cache_plan::{AutoCacheRequestPlan, apply_auto_cache_placement, cache_target_gates};
@@ -159,8 +159,8 @@ pub(super) trait SurfaceAdapter: Send + Sync {
     /// is skipped without being marked, gated, or counted.
     fn admits(&self, target: &DispatchTarget) -> bool;
 
-    /// The per-attempt deadline under the composed attempt policy, if any.
-    fn deadline(&self, attempt_policy: &RetryPolicy) -> Option<Deadline>;
+    /// The per-attempt deadline under the target's resolved tuning, if any.
+    fn deadline(&self, tuning: &ResolvedTuning) -> Option<Deadline>;
 
     /// The provider call for one attempt. `Ok` means committed: nothing
     /// after it may walk to another target.
@@ -539,6 +539,7 @@ impl Router {
                 Instant::now(),
             );
 
+            let tuning = self.tuning_for(target);
             let mut backoff = Duration::from_millis(policy.initial_backoff_ms);
             let mut attempts_made: u32 = 0;
             // Per-chain-entry one-shot auth-recovery flag. Set after a
@@ -617,11 +618,6 @@ impl Router {
                     backoff = mul_duration(backoff, policy.backoff_multiplier);
                 }
 
-                let attempt_policy = self.compose_attempt_policy(
-                    &policy,
-                    provider_name,
-                    target.stream_first_byte_timeout_ms,
-                );
                 // Fidelity WARN at the dispatch point: reads the per-target
                 // clone about to go upstream, at most once per request.
                 if A::SURFACE.shapes_message() {
@@ -659,7 +655,7 @@ impl Router {
                 let (wire_tap, sample_charge) =
                     adapter.install_wire(self, target, &mut attempt_req);
                 let invoked = adapter.invoke(target, provider.clone(), attempt_req.clone());
-                let (result, deadline_fired) = match adapter.deadline(&attempt_policy) {
+                let (result, deadline_fired) = match adapter.deadline(&tuning) {
                     Some(deadline) => match tokio::time::timeout(deadline.after(), invoked).await {
                         Ok(resolved) => (resolved, false),
                         Err(_) => (Err(DeadlineFired(deadline).error(provider_name)), true),
