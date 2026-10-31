@@ -864,6 +864,32 @@ base_url = "https://svc:sk-userinfo-FAKE@internal.example:8443/v1?key=sk-query-F
             "the notice must say the dump is not round-trippable; got: {first}"
         );
     }
+
+    /// `config show` prints the config as written: an omitted first-content
+    /// timeout stays omitted (its default is applied at dispatch), while an
+    /// explicit one is still printed.
+    #[test]
+    fn show_prints_retry_first_byte_timeout_only_when_written() {
+        let rows = [
+            ("omitted", "[retry]\nmax_attempts = 2\n", false),
+            (
+                "explicit",
+                "[retry]\nmax_attempts = 2\nstream_first_byte_timeout_ms = 600000\n",
+                true,
+            ),
+        ];
+        for (name, toml_text, expect_key) in rows {
+            let config: Config = toml::from_str(toml_text).expect("config must parse");
+
+            let rendered = render_show(&config).expect("render must succeed");
+
+            assert_eq!(
+                rendered.contains("stream_first_byte_timeout_ms"),
+                expect_key,
+                "row `{name}`; rendered:\n{rendered}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]

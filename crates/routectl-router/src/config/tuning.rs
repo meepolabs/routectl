@@ -80,7 +80,7 @@ impl BreakerThreshold {
     /// The threshold for a configured `circuit_failures` value. `0` opens
     /// on the first failure, the same as `1`.
     #[must_use]
-    pub const fn from_configured(failures: u32) -> Self {
+    const fn from_configured(failures: u32) -> Self {
         match NonZeroU32::new(failures) {
             Some(n) => Self::After(n),
             None => Self::After(NonZeroU32::MIN),

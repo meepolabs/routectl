@@ -11,6 +11,7 @@ const MEMBER: &str = "seat-a";
 const SIBLING: &str = "seat-b";
 const LONE: &str = "lone";
 const POOL: &str = "team-pool";
+const MODEL: &str = "slow";
 
 fn parse(toml_text: &str) -> Config {
     toml::from_str(toml_text).expect("valid test toml")
@@ -20,6 +21,24 @@ fn parse(toml_text: &str) -> Config {
 /// `retry` are extra lines appended to the `seat-a` provider, the pool and
 /// the `[retry]` table.
 fn config(member: &str, pool: &str, retry: &str) -> Config {
+    config_with_model(member, pool, retry, "")
+}
+
+/// [`config`] plus, when `model` is non-empty, a `[models.MODEL]` table on
+/// `seat-a` carrying those extra lines.
+fn config_with_model(member: &str, pool: &str, retry: &str, model: &str) -> Config {
+    let model_table = if model.is_empty() {
+        String::new()
+    } else {
+        format!(
+            r#"
+[models.{MODEL}]
+provider = "{MEMBER}"
+upstream = "u"
+{model}
+"#
+        )
+    };
     parse(&format!(
         r#"
 [providers.{MEMBER}]
@@ -44,7 +63,7 @@ members = ["{MEMBER}", "{SIBLING}"]
 
 [retry]
 {retry}
-"#
+{model_table}"#
     ))
 }
 
@@ -148,7 +167,7 @@ fn each_key_at_each_tier_reports_value_and_source() {
         pool: &'static str,
         retry: &'static str,
         entry: &'static str,
-        model: Option<u64>,
+        model: &'static str,
         check: fn(&ResolvedTuning),
     }
     let rows = [
@@ -158,7 +177,7 @@ fn each_key_at_each_tier_reports_value_and_source() {
             pool: "circuit_failures = 7",
             retry: "",
             entry: MEMBER,
-            model: None,
+            model: "",
             check: |t| {
                 assert_eq!(t.circuit_failures.value, after(4));
                 assert_eq!(t.circuit_failures.source, TuningSource::Provider);
@@ -170,7 +189,7 @@ fn each_key_at_each_tier_reports_value_and_source() {
             pool: "circuit_failures = 7",
             retry: "",
             entry: MEMBER,
-            model: None,
+            model: "",
             check: |t| {
                 assert_eq!(t.circuit_failures.value, after(7));
                 assert_eq!(t.circuit_failures.source, TuningSource::Pool);
@@ -182,7 +201,7 @@ fn each_key_at_each_tier_reports_value_and_source() {
             pool: "circuit_cooldown_ms = 22000",
             retry: "",
             entry: MEMBER,
-            model: None,
+            model: "",
             check: |t| {
                 assert_eq!(t.circuit_cooldown_ms.value, 11_000);
                 assert_eq!(t.circuit_cooldown_ms.source, TuningSource::Provider);
@@ -194,7 +213,7 @@ fn each_key_at_each_tier_reports_value_and_source() {
             pool: "circuit_cooldown_ms = 22000",
             retry: "",
             entry: MEMBER,
-            model: None,
+            model: "",
             check: |t| {
                 assert_eq!(t.circuit_cooldown_ms.value, 22_000);
                 assert_eq!(t.circuit_cooldown_ms.source, TuningSource::Pool);
@@ -206,7 +225,7 @@ fn each_key_at_each_tier_reports_value_and_source() {
             pool: "rpm_limit = 34",
             retry: "",
             entry: MEMBER,
-            model: None,
+            model: "",
             check: |t| {
                 assert_eq!(t.rpm_limit.value, Some(12));
                 assert_eq!(t.rpm_limit.source, TuningSource::Provider);
@@ -218,7 +237,7 @@ fn each_key_at_each_tier_reports_value_and_source() {
             pool: "rpm_limit = 34",
             retry: "",
             entry: MEMBER,
-            model: None,
+            model: "",
             check: |t| {
                 assert_eq!(t.rpm_limit.value, Some(34));
                 assert_eq!(t.rpm_limit.source, TuningSource::Pool);
@@ -230,7 +249,7 @@ fn each_key_at_each_tier_reports_value_and_source() {
             pool: "request_timeout_ms = 240000",
             retry: "request_timeout_ms = 1800000",
             entry: MEMBER,
-            model: None,
+            model: "",
             check: |t| assert_eq!(t.request_timeout_ms, at(120_000, TuningSource::Provider)),
         },
         Row {
@@ -239,7 +258,7 @@ fn each_key_at_each_tier_reports_value_and_source() {
             pool: "request_timeout_ms = 240000",
             retry: "request_timeout_ms = 1800000",
             entry: MEMBER,
-            model: None,
+            model: "",
             check: |t| assert_eq!(t.request_timeout_ms, at(240_000, TuningSource::Pool)),
         },
         Row {
@@ -248,7 +267,7 @@ fn each_key_at_each_tier_reports_value_and_source() {
             pool: "",
             retry: "request_timeout_ms = 1800000",
             entry: MEMBER,
-            model: None,
+            model: "",
             check: |t| assert_eq!(t.request_timeout_ms, at(1_800_000, TuningSource::Global)),
         },
         Row {
@@ -257,7 +276,7 @@ fn each_key_at_each_tier_reports_value_and_source() {
             pool: "stream_first_byte_timeout_ms = 70000",
             retry: "stream_first_byte_timeout_ms = 80000",
             entry: MEMBER,
-            model: Some(5_000),
+            model: "stream_first_byte_timeout_ms = 5000",
             check: |t| {
                 assert_eq!(
                     t.stream_first_byte_timeout_ms,
@@ -271,7 +290,7 @@ fn each_key_at_each_tier_reports_value_and_source() {
             pool: "stream_first_byte_timeout_ms = 70000",
             retry: "stream_first_byte_timeout_ms = 80000",
             entry: MEMBER,
-            model: None,
+            model: "",
             check: |t| {
                 assert_eq!(
                     t.stream_first_byte_timeout_ms,
@@ -285,7 +304,7 @@ fn each_key_at_each_tier_reports_value_and_source() {
             pool: "stream_first_byte_timeout_ms = 70000",
             retry: "stream_first_byte_timeout_ms = 80000",
             entry: MEMBER,
-            model: None,
+            model: "",
             check: |t| {
                 assert_eq!(
                     t.stream_first_byte_timeout_ms,
@@ -299,7 +318,7 @@ fn each_key_at_each_tier_reports_value_and_source() {
             pool: "",
             retry: "stream_first_byte_timeout_ms = 80000",
             entry: MEMBER,
-            model: None,
+            model: "",
             check: |t| {
                 assert_eq!(
                     t.stream_first_byte_timeout_ms,
@@ -309,8 +328,12 @@ fn each_key_at_each_tier_reports_value_and_source() {
         },
     ];
     for row in rows {
-        let cfg = config(row.member, row.pool, row.retry);
-        let t = resolve_tuning(&cfg, Some(row.entry), row.model);
+        let cfg = config_with_model(row.member, row.pool, row.retry, row.model);
+        let model_ms = cfg
+            .models
+            .get(MODEL)
+            .and_then(|m| m.stream_first_byte_timeout_ms);
+        let t = resolve_tuning(&cfg, Some(row.entry), model_ms);
         eprintln!("row: {}", row.name);
         (row.check)(&t);
     }
