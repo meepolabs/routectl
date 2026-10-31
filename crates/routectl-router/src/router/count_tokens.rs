@@ -168,9 +168,9 @@ impl SurfaceAdapter for CountAdapter {
     }
 
     fn exhausted(&self, exhaustion: Exhaustion<'_>) -> Error {
-        // The walk holds only a timed-out attempt's error or a parked seat's
-        // gate refusal (a timeout is kept over a parked seat either way
-        // round), and either outranks both 501 shapes below.
+        // The walk holds only a timed-out attempt's error or a parked or
+        // unusable seat's refusal (a timeout is kept over either refusal,
+        // either way round), and any of them outranks both 501 shapes below.
         if let Some(parked) = exhaustion.last {
             return parked;
         }

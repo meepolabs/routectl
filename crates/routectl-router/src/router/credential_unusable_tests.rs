@@ -477,12 +477,11 @@ async fn refusals_of_an_unusable_seat_log_at_debug_and_never_warn() {
                 "{label}: every request was refused at least once ({refusal_debugs})"
             );
             assert_eq!(fx.a.calls.load(Ordering::SeqCst), 0, "{label}");
-            let fallback_served = !both && !matches!(surface, Surface::CountTokens);
-            let expected_b_calls = if fallback_served { REQUESTS } else { 0 };
+            let expected_b_calls = if both { 0 } else { REQUESTS };
             assert_eq!(
                 fx.b.calls.load(Ordering::SeqCst),
                 expected_b_calls,
-                "{label}: count_tokens does not walk past this refusal"
+                "{label}: every surface walks past this refusal"
             );
         }
     }

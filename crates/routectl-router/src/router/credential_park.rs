@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Instant;
 
-use routectl_core::{EligibilityReason, Error, sanitize_for_log};
+use routectl_core::{EligibilityReason, Error, UpstreamReason, sanitize_for_log};
 
 use super::Router;
 use super::runtime_gate::ProbeSlotGuard;
@@ -456,6 +456,47 @@ impl Router {
         parked
     }
 
+    /// Mark `account` unusable when the upstream refused its refresh token
+    /// (`err` is the typed credential-invalid refresh failure) and the
+    /// attempt's admission `generation` is still current, returning whether
+    /// the account is now unusable. A probe never marks, and no account (a
+    /// forwarded credential) never marks; any other refresh failure is not
+    /// evidence the credential is gone.
+    pub(super) fn mark_unusable_on_refused_refresh(
+        &self,
+        account: Option<&str>,
+        err: &Error,
+        is_probe: bool,
+        generation: u64,
+    ) -> bool {
+        let is_refused = matches!(
+            err,
+            Error::Credential {
+                reason: UpstreamReason::CredentialInvalid,
+                ..
+            }
+        );
+        let Some(account) = account.filter(|_| is_refused && !is_probe) else {
+            return false;
+        };
+        let cause = UnusableCause::Revoked;
+        let outcome = self.mark_credential_unusable(account, cause, Some(generation));
+        match outcome {
+            MarkOutcome::Transitioned => tracing::warn!(
+                account = %sanitize_for_log(account),
+                cause = cause.as_str(),
+                "seat refresh token refused; marking the seat unusable",
+            ),
+            MarkOutcome::Unchanged => {}
+            MarkOutcome::Stale => tracing::debug!(
+                account = %sanitize_for_log(account),
+                cause = cause.as_str(),
+                "seat refresh token refused before a reload reset the seat; not marking",
+            ),
+        }
+        outcome.applied()
+    }
+
     /// Settle a success through the model slot keyed by `state_key` on
     /// `account` for the attempt admitted through `guard`: record the breaker
     /// success when `record_breaker` is set, and lift the account's park when
@@ -568,3 +609,7 @@ mod merge_tests;
 #[cfg(test)]
 #[path = "credential_unusable_tests.rs"]
 mod credential_unusable_tests;
+
+#[cfg(test)]
+#[path = "credential_refused_refresh_tests.rs"]
+mod credential_refused_refresh_tests;

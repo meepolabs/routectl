@@ -32,7 +32,10 @@ use super::capability_observe::{UntranslatedCapabilities, install_translation_re
 use super::class_observe::{
     DispatchSurface, apply_remap, upstream_facts, upstream_status_for_remap,
 };
-use super::credential_park::{CREDENTIAL_PARKED_GATE_KIND, log_gate_refusal, merge_gate_refusal};
+use super::credential_park::{
+    CREDENTIAL_PARKED_GATE_KIND, CREDENTIAL_UNUSABLE_GATE_KIND, log_gate_refusal,
+    merge_gate_refusal, unusable_seat_error,
+};
 use super::edit_declare::{
     declare_cache_placement, declare_model_rename, declare_reduction, fidelity_dialect,
 };
@@ -581,6 +584,7 @@ impl Router {
                             A::SURFACE.gate_blocked_message(),
                         );
                         if gate_kind != CREDENTIAL_PARKED_GATE_KIND
+                            && gate_kind != CREDENTIAL_UNUSABLE_GATE_KIND
                             && !A::SURFACE.gate_refusal_walks()
                         {
                             return Err(gate_err);
@@ -751,12 +755,10 @@ impl Router {
                         // to rotate via on_auth_failure, then retry
                         // exactly once. The OAuth store's per-provider
                         // mutex collapses concurrent 401-storms to a
-                        // single token-endpoint POST. A non-Ok return
-                        // means the OAuth identity is dead (revoked,
-                        // network-failure to token endpoint); surface
-                        // that immediately rather than walk the
-                        // fallback chain over a known-broken
-                        // credential. A 401 the upstream typed as an
+                        // single token-endpoint POST. A refused refresh
+                        // token marks the seat unusable and walks on; any
+                        // other refresh failure is surfaced at once. A
+                        // 401 the upstream typed as an
                         // invalid credential skips the redial: no
                         // refresh revives a key that was never valid,
                         // so it falls through to the terminal park.
@@ -771,20 +773,30 @@ impl Router {
                                 attempt = attempts_made,
                                 "upstream 401; refreshing auth and retrying once",
                             );
-                            // A refresh failure means the OAuth identity is
-                            // dead; surface it without walking the chain. But
-                            // first release any half-open probe slot this
-                            // attempt claimed via the gate, or the breaker
-                            // stays locked open until restart.
+                            // Every refresh-failure exit first releases any
+                            // half-open probe slot this attempt claimed via
+                            // the gate, or the breaker stays locked open
+                            // until restart. A refused refresh token marked
+                            // under this admission's generation walks on as
+                            // the unusable refusal later requests answer;
+                            // any other refresh failure, or a refusal a
+                            // reload has since overtaken, is surfaced.
                             if let Err(refresh_err) = provider.on_auth_failure().await {
-                                self.park_credential_on_rejection(
+                                let marked = self.mark_unusable_on_refused_refresh(
                                     target.account.as_deref(),
                                     &refresh_err,
                                     is_probe,
                                     probe_guard.credential_generation(),
                                 );
                                 probe_guard.release();
-                                return Err(refresh_err);
+                                if !marked {
+                                    return Err(refresh_err);
+                                }
+                                merge_gate_refusal(&mut last_err, unusable_seat_error());
+                                if opts.disable_fallbacks {
+                                    break 'chain;
+                                }
+                                continue 'chain;
                             }
                             // Refresh succeeded. Release the half-open probe
                             // slot this attempt claimed at the gate BEFORE the

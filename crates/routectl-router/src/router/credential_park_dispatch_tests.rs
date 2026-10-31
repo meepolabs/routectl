@@ -2,7 +2,7 @@
 //! is parked; a parked seat is skipped and the chain falls back; the first
 //! success through the seat lifts the park. Driven through every dispatch
 //! surface (complete, stream, count_tokens), because each owns its own error
-//! arm, success arm, and auth-refresh exit.
+//! arm and success arm.
 
 use super::*;
 use crate::config::{ProviderEntry, RetryPolicy};
@@ -77,7 +77,11 @@ impl ScriptedProvider {
         Self::with_refresh(id, script, None)
     }
 
-    fn with_refresh(id: &str, script: &[Step], refresh_err: Option<RefreshErr>) -> Arc<Self> {
+    pub(super) fn with_refresh(
+        id: &str,
+        script: &[Step],
+        refresh_err: Option<RefreshErr>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             id: id.into(),
             script: Mutex::new(script.iter().copied().collect()),
@@ -208,7 +212,7 @@ fn chain_router_with_auth_fallback(
 
 /// [`chain_router_with_auth_fallback`] with `tweak` applied to the config
 /// before the router is built.
-fn chain_router_with(
+pub(super) fn chain_router_with(
     primary: Arc<ScriptedProvider>,
     sibling: Arc<ScriptedProvider>,
     primary_forwarded: bool,
@@ -355,32 +359,6 @@ async fn a_rejection_that_must_not_judge_the_seat_never_parks_it() {
                 "{surface:?} {name}: the seat must have been dialed",
             );
             assert_eq!(park_reason(&router, "m-a"), None, "{surface:?} {name}");
-        }
-    }
-}
-
-#[tokio::test]
-async fn a_terminal_refresh_failure_with_a_reason_parks_the_seat() {
-    let cases = [
-        ("refresh rejected with a reason", INVALID, INVALID),
-        ("refresh failed without a reason", None, None),
-    ];
-    for surface in SURFACES {
-        for (name, refresh_reason, expected) in cases {
-            // Arrange
-            let primary = ScriptedProvider::with_refresh(
-                "p-a",
-                &[Step::Reject(401, None)],
-                Some(refresh_reason),
-            );
-            let sibling = ScriptedProvider::new("p-b", &[Step::Ok]);
-            let router = chain_router(primary, sibling, false);
-
-            // Act
-            dispatch(&router, surface, request(None, false)).await;
-
-            // Assert
-            assert_eq!(park_reason(&router, "m-a"), expected, "{surface:?} {name}");
         }
     }
 }
@@ -542,14 +520,8 @@ async fn a_success_settles_the_breaker_and_the_park_in_one_critical_section() {
 
 #[tokio::test]
 async fn a_rejection_admitted_before_a_reload_parks_only_when_no_reload_landed() {
-    let rejections: [(&str, &[Step], Option<RefreshErr>); 2] = [
-        ("terminal rejection", &[Step::Reject(403, INVALID)], None),
-        (
-            "terminal refresh failure",
-            &[Step::Reject(401, None)],
-            Some(INVALID),
-        ),
-    ];
+    let rejections: [(&str, &[Step], Option<RefreshErr>); 1] =
+        [("terminal rejection", &[Step::Reject(403, INVALID)], None)];
     for surface in SURFACES {
         for (name, script, refresh_err) in rejections {
             for (reload, expected) in [(true, None), (false, INVALID)] {
@@ -673,7 +645,11 @@ async fn requests_against_an_open_breaker_still_warn_per_request() {
 }
 
 /// Dispatch one request on `surface` and return its error, if any.
-async fn dispatch_err(router: &Router, surface: Surface, req: ChatRequest) -> Option<Error> {
+pub(super) async fn dispatch_err(
+    router: &Router,
+    surface: Surface,
+    req: ChatRequest,
+) -> Option<Error> {
     match surface {
         Surface::Complete => router.complete(req).await.err(),
         Surface::Stream => router.stream(req).await.err(),

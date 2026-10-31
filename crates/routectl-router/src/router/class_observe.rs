@@ -115,7 +115,8 @@ impl DispatchSurface {
     }
 
     /// Whether a breaker or rate-limit gate refusal walks to the next target
-    /// or ends the request. A parked credential walks on every surface.
+    /// or ends the request. A parked or unusable credential walks on every
+    /// surface.
     pub(super) const fn gate_refusal_walks(self) -> bool {
         match self {
             Self::Complete | Self::Stream => true,
