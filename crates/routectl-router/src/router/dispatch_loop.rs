@@ -107,6 +107,9 @@ pub(super) struct CommitCtx<'w, 'm> {
     pub(super) learning: &'w mut AttemptLearning<'m>,
     pub(super) learn_dedupe: &'w mut HashSet<LearnDedupeKey>,
     pub(super) meta: &'w mut DispatchMeta,
+    /// The breaker epoch the attempt holds after its commit-time success
+    /// settlement; the settlements still to come carry it.
+    pub(super) breaker_epoch: u64,
 }
 
 /// How the walk treats a failed attempt before its common error handling.
@@ -667,7 +670,7 @@ impl Router {
 
                 match result {
                     Ok(out) => {
-                        self.settle_seat_success(
+                        let breaker_epoch = self.settle_seat_success(
                             state_key,
                             target.account.as_deref(),
                             A::SURFACE.records_success_on_commit() || was_half_open_probe,
@@ -686,6 +689,7 @@ impl Router {
                             learning: &mut learning,
                             learn_dedupe: &mut learn_dedupe,
                             meta,
+                            breaker_epoch,
                         };
                         return Ok(adapter.on_commit(ctx, out));
                     }
@@ -878,7 +882,12 @@ impl Router {
                                 status,
                                 req.max_tokens,
                             );
-                            self.apply_breaker_outcome(state_key, outcome, &cf.class);
+                            self.apply_breaker_outcome(
+                                state_key,
+                                outcome,
+                                &cf.class,
+                                probe_guard.breaker_epoch(),
+                            );
                             probe_guard.settle(outcome);
                             // A probe fast-fails ACROSS distinct chain targets
                             // (walking an all-Anthropic chain is futile -- every
@@ -907,8 +916,12 @@ impl Router {
                         // still falls back releases its slot without a debit
                         // in the fallback branch below.
                         let debits = class_debits(&cf.class);
-                        let (_opened, breaker_effect) =
-                            self.apply_breaker_outcome(state_key, outcome, &cf.class);
+                        let (_opened, breaker_effect) = self.apply_breaker_outcome(
+                            state_key,
+                            outcome,
+                            &cf.class,
+                            probe_guard.breaker_epoch(),
+                        );
                         if debits {
                             probe_guard.disarm();
                         }
@@ -950,8 +963,8 @@ impl Router {
                         if opts.disable_fallbacks {
                             // Terminal error exit: free any half-open probe
                             // slot this attempt claimed. A no-op when a
-                            // debiting class already routed through
-                            // record_failure (which clears the slot).
+                            // debiting class already routed through the
+                            // breaker debit (which clears the slot).
                             probe_guard.release();
                             return Err(e);
                         }

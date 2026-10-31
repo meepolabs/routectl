@@ -312,7 +312,8 @@ async fn each_seat_has_independent_breaker() {
     assert!(router.state.contains_key("opus#anthropic-c"));
 
     // Park the default seat for a long cooldown.
-    router.park_provider("opus#anthropic-a", Duration::from_hours(1));
+    let epoch = router.breaker_epoch_for_tests("opus#anthropic-a");
+    router.park_provider("opus#anthropic-a", Duration::from_hours(1), epoch);
 
     // The default seat's breaker is open; siblings are untouched.
     assert!(
@@ -380,7 +381,8 @@ async fn parked_seat_is_skipped_and_sibling_serves() {
     // Full dispatch: park the first member's seat, then a request must fall
     // to the next member and that member's provider serves.
     let (router, counters) = pooled_router(SeatSelection::FillFirst);
-    router.park_provider("opus#anthropic-a", Duration::from_hours(1));
+    let epoch = router.breaker_epoch_for_tests("opus#anthropic-a");
+    router.park_provider("opus#anthropic-a", Duration::from_hours(1), epoch);
 
     let resp = router.complete(req()).await.expect("sibling serves");
     assert_eq!(resp.routectl_provider.as_deref(), Some("anthropic-b"));

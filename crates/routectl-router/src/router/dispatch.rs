@@ -108,6 +108,7 @@ impl SurfaceAdapter for CompleteAdapter {
             learning,
             learn_dedupe,
             meta,
+            ..
         } = ctx;
         // Stamp the served upstream provider name only when the served
         // target opts in (`visible_routectl_provider`, default true). When
@@ -233,6 +234,7 @@ impl SurfaceAdapter for StreamAdapter {
             learning,
             learn_dedupe,
             meta,
+            breaker_epoch,
         } = ctx;
         // The walk has already closed a half-open probe's breaker at first
         // content and left a healthy breaker's failure count alone: the
@@ -247,6 +249,7 @@ impl SurfaceAdapter for StreamAdapter {
             .map(|state| BreakerSlot {
                 state: state.clone(),
                 state_key: target.state_key.clone(),
+                epoch: breaker_epoch,
             });
         // First content proves the capability is not rejected: clear any
         // learned negative this dispatch re-probed, and ride each clear out on

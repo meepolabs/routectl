@@ -743,6 +743,8 @@ list with more narrative.
 
 ### Fixed
 
+- **A stream that ends after its half-open test was superseded no longer closes or reopens the breaker for the newer test.** Each admission now carries the breaker state it was admitted under, and a success, failure, park or slot release from an older state is dropped. Settlements from requests admitted through a closed breaker that land after an open and close cycle are dropped the same way; concurrent requests admitted through one closed breaker still count toward the same trip.
+
 - **A token refresh racing a re-login of the same seat keeps the new login, and the daemon still notices the change.**
 
 - **A provider's timeouts now win over the `[retry]` table.** `request_timeout_ms` on `[providers.X]` used to apply only when `[retry] request_timeout_ms` was unset, and `stream_first_byte_timeout_ms` on `[providers.X]` never applied at all, because `[retry]` always carried the 10-minute first-content default. Both timeouts now resolve model (first-content only) > provider > pool > `[retry]` > default, each key independently. A config that sets a timeout on both a provider and `[retry]` now gets the provider's value for that provider. `routectl config show` no longer prints `[retry] stream_first_byte_timeout_ms` when the config omits it; it still defaults to 5 minutes at runtime. See [docs/CONFIGURATION.md](docs/CONFIGURATION.md#per-provider-runtime-gates).

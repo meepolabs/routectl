@@ -44,6 +44,10 @@ use super::precontent::{is_empty_reasoning_only, precontent_summary};
 /// site did NOT touch the breaker, so this wrap is where mid-stream failures
 /// accumulate toward the threshold and a natural end resets the counter.
 ///
+/// Every settle carries the slot's breaker epoch, so a tail that ends after
+/// the breaker moved on (re-tripped, lapsed, and a newer half-open claim
+/// taken) settles nothing: it cannot close, reopen or free the newer state.
+///
 /// A settle that moves the circuit (a debit that opens it, a park, a natural
 /// end that closes an open circuit) logs the same transition line the
 /// dispatch walk does, keyed on the slot's `state_key`.
@@ -89,10 +93,12 @@ pub(super) fn wrap_with_breaker_accounting(
     Box::pin(s)
 }
 
-/// The breaker slot a committed stream settles, and the key that names it.
+/// The breaker slot a committed stream settles, the key that names it, and
+/// the breaker epoch the dispatch holds after its commit-time settlement.
 pub(super) struct BreakerSlot {
     pub(super) state: Arc<Mutex<crate::runtime_state::ProviderState>>,
     pub(super) state_key: String,
+    pub(super) epoch: u64,
 }
 
 /// How a committed stream's tail ended, as far as the breaker is concerned.
@@ -116,17 +122,18 @@ struct BreakerAccounting {
 }
 
 impl BreakerAccounting {
-    /// Run `f` on the slot under its lock, then hand `f`'s verdict on
-    /// whether the circuit transitioned to `log` with the lock released.
+    /// Run `f` on the slot under its lock with the slot's epoch, then hand
+    /// `f`'s verdict on whether the circuit transitioned to `log` with the
+    /// lock released.
     fn with_state(
         &self,
-        f: impl FnOnce(&mut crate::runtime_state::ProviderState) -> bool,
+        f: impl FnOnce(&mut crate::runtime_state::ProviderState, u64) -> bool,
         log: impl FnOnce(&str),
     ) {
         let Some(slot) = &self.slot else {
             return;
         };
-        let transitioned = f(&mut slot.state.lock());
+        let transitioned = f(&mut slot.state.lock(), slot.epoch);
         if transitioned {
             log(&slot.state_key);
         }
@@ -138,7 +145,7 @@ impl BreakerAccounting {
         }
         match exit {
             TailExit::EndOfStream => self.with_state(
-                |state| state.record_success_closing(Instant::now()),
+                |state, epoch| state.record_success_closing(Instant::now(), epoch).closed,
                 breaker_transition::log_closed,
             ),
             TailExit::FrameError(e) => self.settle_frame_error(e),
@@ -154,17 +161,16 @@ impl BreakerAccounting {
         match breaker_outcome(e, &cf.class, hint, ctx.is_probe) {
             BreakerOutcome::None => {}
             BreakerOutcome::Debit => self.with_state(
-                |state| {
+                |state, epoch| {
                     let outcome = LastOutcome::from_failure_class(&cf.class);
-                    state.record_failure_debit(Instant::now(), outcome).opened
+                    state
+                        .record_failure_debit(Instant::now(), outcome, epoch)
+                        .opened
                 },
                 breaker_transition::log_opened,
             ),
             BreakerOutcome::Park(cooldown) => self.with_state(
-                |state| {
-                    state.force_open(Instant::now(), cooldown);
-                    true
-                },
+                |state, epoch| state.force_open_in_epoch(Instant::now(), cooldown, epoch),
                 |state_key| breaker_transition::log_parked(state_key, cooldown),
             ),
         }

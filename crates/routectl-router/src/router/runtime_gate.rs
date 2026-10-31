@@ -61,6 +61,15 @@ impl Router {
         }
     }
 
+    /// The current breaker epoch for `state_key`, 0 when no slot exists. Test
+    /// seam for a settlement modelling the owner of the breaker's state.
+    #[cfg(test)]
+    pub(super) fn breaker_epoch_for_tests(&self, state_key: &str) -> u64 {
+        self.state
+            .get(state_key)
+            .map_or(0, |slot| slot.lock().epoch())
+    }
+
     /// Whether the breaker for `state_key` currently reads open (parked).
     /// `None` when no state slot exists for the key. Companion test seam to
     /// `force_open_breaker` for the carry-over tests.
@@ -184,14 +193,14 @@ impl Router {
         let Some(state) = self.state.get(state_key).cloned() else {
             return (
                 self.slotless_park_refusal(account, now),
-                ProbeSlotGuard::new(None, 0),
+                ProbeSlotGuard::new(None, 0, 0),
             );
         };
         let (admission, credential_generation) = self.admit_locked(&state, account, now, kind);
         #[cfg(test)]
         run_after_admission_hook();
         let claimed = admission.claimed_half_open.then_some(state);
-        let guard = ProbeSlotGuard::new(claimed, credential_generation);
+        let guard = ProbeSlotGuard::new(claimed, admission.epoch, credential_generation);
         let refusal = match admission.decision {
             GateDecision::Allow => None,
             GateDecision::RateLimited => Some((
@@ -259,14 +268,23 @@ impl Router {
         (admission, record.generation())
     }
 
-    /// Debit one breaker failure for `state_key`, returning whether this
-    /// debit tripped (or re-tripped) the breaker on this call. Logs the
-    /// transition when the debit opened a closed or half-open circuit.
-    pub(super) fn record_failure_opened(&self, state_key: &str, outcome: LastOutcome) -> bool {
+    /// Debit one breaker failure for `state_key` from an attempt admitted
+    /// under breaker `epoch`, returning whether this debit tripped (or
+    /// re-tripped) the breaker on this call. Logs the transition when the
+    /// debit opened a closed or half-open circuit. A no-op once `epoch` is
+    /// stale.
+    pub(super) fn record_failure_opened(
+        &self,
+        state_key: &str,
+        outcome: LastOutcome,
+        epoch: u64,
+    ) -> bool {
         let Some(state) = self.state.get(state_key) else {
             return false;
         };
-        let debit = state.lock().record_failure_debit(Instant::now(), outcome);
+        let debit = state
+            .lock()
+            .record_failure_debit(Instant::now(), outcome, epoch);
         if debit.opened {
             breaker_transition::log_opened(state_key);
         }
@@ -280,11 +298,17 @@ impl Router {
     /// this seat until it actually resets, rather than re-probing on the
     /// flat schedule. The caller MUST have already clamped `cooldown` to
     /// `RetryPolicy::max_honored_retry_after` (see `rate_limit_reset_hint`).
-    /// `force_open` clears any in-flight half-open slot, so this is a
-    /// leak-safe substitute for the `record_failure` it replaces.
-    pub(super) fn park_provider(&self, state_key: &str, cooldown: Duration) {
-        if let Some(state) = self.state.get(state_key) {
-            state.lock().force_open(Instant::now(), cooldown);
+    /// An applied park clears the half-open slot, so this is a leak-safe
+    /// substitute for the debit it replaces. A no-op, logging nothing, once
+    /// the attempt's breaker `epoch` is stale.
+    pub(super) fn park_provider(&self, state_key: &str, cooldown: Duration, epoch: u64) {
+        let Some(state) = self.state.get(state_key) else {
+            return;
+        };
+        let parked = state
+            .lock()
+            .force_open_in_epoch(Instant::now(), cooldown, epoch);
+        if parked {
             breaker_transition::log_parked(state_key, cooldown);
         }
     }
@@ -292,22 +316,27 @@ impl Router {
     /// Apply a failed attempt's [`BreakerOutcome`] to the seat's breaker.
     /// Returns whether a debit opened the breaker, plus the
     /// `breaker_effect` label (`none` / `opened` / `parked`) the retry
-    /// decision log reports. Probe-slot settlement stays with the caller.
+    /// decision log reports. `epoch` is the attempt's admission epoch.
+    /// Probe-slot settlement stays with the caller.
     pub(super) fn apply_breaker_outcome(
         &self,
         state_key: &str,
         outcome: BreakerOutcome,
         class: &FailureClass,
+        epoch: u64,
     ) -> (bool, &'static str) {
         match outcome {
             BreakerOutcome::None => (false, "none"),
             BreakerOutcome::Debit => {
-                let opened =
-                    self.record_failure_opened(state_key, LastOutcome::from_failure_class(class));
+                let opened = self.record_failure_opened(
+                    state_key,
+                    LastOutcome::from_failure_class(class),
+                    epoch,
+                );
                 (opened, if opened { "opened" } else { "none" })
             }
             BreakerOutcome::Park(cooldown) => {
-                self.park_provider(state_key, cooldown);
+                self.park_provider(state_key, cooldown, epoch);
                 (false, "parked")
             }
         }
@@ -320,8 +349,8 @@ impl Router {
 /// `admit_dispatch` claims the single half-open probe slot
 /// (`half_open_in_flight = true`) BEFORE the dispatch awaits the upstream, and
 /// hands the claim back as this guard.
-/// Every synchronous outcome arm already settles the slot (`record_success` /
-/// `record_failure` / `park_provider` / [`ProbeSlotGuard::release`]). The gap
+/// Every synchronous outcome arm already settles the slot (a breaker success,
+/// debit, `park_provider`, or [`ProbeSlotGuard::release`]). The gap
 /// this guards is async CANCELLATION: if the future is dropped while awaiting a
 /// hung upstream (client disconnect or client-side timeout), none of those
 /// arms run and the slot stays claimed forever -- every later probe then sees
@@ -336,20 +365,21 @@ impl Router {
 ///
 /// A failed attempt settles through `settle()`, which takes the
 /// [`BreakerOutcome`] just applied and picks `disarm()` or `release()` from
-/// it; other sites call those two directly. `record_failure` /
-/// `record_success` / `park_provider` already clear `half_open_in_flight`
-/// internally, so disarm after them only suppresses a redundant (idempotent,
-/// harmless) drop-time release. Sites that settle WITHOUT a breaker outcome
-/// call `release()`, which frees the slot only when this guard's admission
-/// claimed it: the flag is shared, so an unconditional clear from a dispatch
-/// admitted through a closed breaker would erase a claim a different caller
-/// took after the breaker tripped. A NEW settle site MUST call `settle()`,
-/// `disarm()` or `release()`, or the guard's drop would free a slot a
-/// concurrent probe may have re-claimed.
+/// it; other sites call those two directly. A breaker success, debit or
+/// `park_provider` already clears `half_open_in_flight` internally, so
+/// disarm after them only suppresses a redundant drop-time
+/// release. Sites that settle WITHOUT a breaker outcome call `release()`,
+/// which frees the slot only when this guard's admission claimed it, and
+/// every release carries the admission's breaker epoch, so a release after
+/// the slot moved on to a newer claim frees nothing. A NEW settle site calls
+/// `settle()`, `disarm()` or `release()`.
 pub(super) struct ProbeSlotGuard {
     /// `Some` while armed; `None` once an outcome settled the slot or the
     /// dispatch never claimed it.
     state: Option<Arc<Mutex<ProviderState>>>,
+    /// The breaker epoch the admission captured. Outlives `disarm`: every
+    /// breaker settlement of the attempt carries it.
+    breaker_epoch: u64,
     /// The seat's credential generation at admission. Outlives `disarm`:
     /// the terminal park sites run after the breaker settle disarmed.
     credential_generation: u64,
@@ -359,11 +389,22 @@ impl ProbeSlotGuard {
     /// Arm a guard for a dispatch that claimed the half-open probe slot. Pass
     /// `None` for a dispatch that did not (closed breaker): the guard is then
     /// inert and its drop is a no-op.
-    const fn new(state: Option<Arc<Mutex<ProviderState>>>, credential_generation: u64) -> Self {
+    const fn new(
+        state: Option<Arc<Mutex<ProviderState>>>,
+        breaker_epoch: u64,
+        credential_generation: u64,
+    ) -> Self {
         Self {
             state,
+            breaker_epoch,
             credential_generation,
         }
+    }
+
+    /// The breaker epoch this attempt was admitted under; every breaker
+    /// settlement of the attempt applies only while it is still current.
+    pub(super) const fn breaker_epoch(&self) -> u64 {
+        self.breaker_epoch
     }
 
     /// The credential generation this attempt was admitted under; a
@@ -399,7 +440,7 @@ impl ProbeSlotGuard {
     /// shared flag untouched.
     pub(super) fn release(&mut self) {
         if let Some(state) = self.state.take() {
-            state.lock().release_probe_slot();
+            state.lock().release_probe_slot_in_epoch(self.breaker_epoch);
         }
     }
 }
@@ -407,11 +448,7 @@ impl ProbeSlotGuard {
 impl Drop for ProbeSlotGuard {
     fn drop(&mut self) {
         if let Some(state) = &self.state {
-            // release_probe_slot is idempotent (it only sets a bool false). If
-            // a concurrent caller re-claimed the slot between our settle and
-            // this drop, freeing it here opens at most a transient extra probe
-            // window -- never a failure record, never a latch.
-            state.lock().release_probe_slot();
+            state.lock().release_probe_slot_in_epoch(self.breaker_epoch);
         }
     }
 }

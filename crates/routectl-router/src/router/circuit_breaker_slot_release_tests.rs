@@ -2054,3 +2054,46 @@ async fn count_tokens_closed_admission_401_refresh_success_keeps_foreign_claim()
     )
     .await;
 }
+
+/// How a superseded half-open claim's guard lets go of the slot.
+type LetGo = fn(ProbeSlotGuard);
+
+#[test]
+fn a_superseded_claims_guard_leaves_the_newer_claim() {
+    let rows: [(&str, LetGo); 2] = [("release", |mut guard| guard.release()), ("drop", drop)];
+    for (name, let_go) in rows {
+        // Arrange: A claims the half-open slot; the breaker is then parked
+        // again under A's claim and lapses, and B claims the new slot.
+        let (router, _calls) = build_first_chunk_router(false);
+        arm_half_open(&router);
+        let (refusal, guard_a) = router.admit_dispatch("m", "p");
+        assert!(
+            refusal.is_none() && guard_a.owns_slot(),
+            "premise: {name}: A claims"
+        );
+        arm_half_open(&router);
+        let (refusal, guard_b) = router.admit_dispatch("m", "p");
+        assert!(
+            refusal.is_none() && guard_b.owns_slot(),
+            "premise: {name}: B claims"
+        );
+
+        // Act
+        let_go(guard_a);
+
+        // Assert
+        assert!(slot_in_flight(&router), "{name}: A freed B's claim");
+        let (third, _inert) = router.admit_dispatch("m", "p");
+        assert_eq!(
+            third.map(|(kind, _)| kind),
+            Some("circuit_breaker"),
+            "{name}: a second concurrent probe was admitted"
+        );
+        // Positive control: B's own guard frees it.
+        drop(guard_b);
+        assert!(
+            !slot_in_flight(&router),
+            "{name}: B could not free its claim"
+        );
+    }
+}

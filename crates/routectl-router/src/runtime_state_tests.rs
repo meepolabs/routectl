@@ -882,7 +882,7 @@ fn retune_to_disabled_closes_a_lapsed_circuit_on_failed_probe() {
         // Act: the lapsed window admits one request, and it fails.
         let t2 = t0 + Duration::from_secs(2);
         assert_eq!(s.try_dispatch(t2), GateDecision::Allow, "{row}");
-        let debit = s.record_failure_debit(t2, LastOutcome::Http5xx);
+        let debit = s.record_failure_debit(t2, LastOutcome::Http5xx, s.epoch());
 
         // Assert: nothing tripped or opened, and the circuit stops gating:
         // two admissions with no settle between them both pass.

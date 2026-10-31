@@ -140,6 +140,14 @@ impl AccountCredential {
 /// Only ONE concurrent caller can hold the half-open probe slot. While
 /// `half_open_in_flight` is true, other `try_dispatch` callers see
 /// `CircuitOpen` even though the cooldown elapsed.
+///
+/// Every admission captures the breaker `epoch`, and every settlement
+/// (success, failure debit, forced open, probe release) carries the epoch its
+/// admission captured and applies only while it is still current. The epoch
+/// advances on each transition that changes who may settle: closed -> open,
+/// the half-open claim, and the claim's settlement to closed or open. A
+/// settlement that outlives its state (a stream tail that ends after a newer
+/// half-open claim) therefore cannot close, reopen or free the newer one.
 #[derive(Debug)]
 pub struct ProviderState {
     /// Token bucket: leaky cap of `rpm_limit` requests per 60s window.
@@ -165,9 +173,14 @@ pub struct ProviderState {
     /// to wait (return CircuitOpen) so the breaker only sees ONE
     /// probe per cooldown cycle.
     half_open_in_flight: bool,
+    /// Advances on every breaker transition; see the type docs. Concurrent
+    /// closed-state admissions share one epoch, so their debits count toward
+    /// the threshold together.
+    epoch: u64,
 
     /// Kind of the most recent settled dispatch outcome, stamped only by
-    /// `record_success` / `record_failure` under the per-target lock.
+    /// `record_success_closing` / `record_failure_debit` under the
+    /// per-target lock.
     /// Never holds `LastOutcome::CircuitOpen` -- gate refusals are derived
     /// from the circuit phase downstream, not stored here.
     last_outcome: Option<LastOutcome>,
@@ -177,7 +190,8 @@ pub struct ProviderState {
 }
 
 /// What one failure debit did to the breaker; see
-/// [`ProviderState::record_failure_debit`].
+/// [`ProviderState::record_failure_debit`]. Both fields are `false` for a
+/// debit whose epoch is no longer current.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct FailureDebit {
     /// The debit tripped (or re-tripped) the breaker.
@@ -186,12 +200,24 @@ pub(crate) struct FailureDebit {
     pub(crate) opened: bool,
 }
 
-/// One gate admission: the decision, plus whether this call claimed the
-/// single half-open probe slot.
+/// What one success did to the breaker; see
+/// [`ProviderState::record_success_closing`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SuccessSettlement {
+    /// The success closed a circuit that was open or half-open.
+    pub(crate) closed: bool,
+    /// The epoch the caller holds afterwards: the post-close epoch when the
+    /// success applied, else the stale epoch it was given. A later settlement
+    /// of the same dispatch (a committed stream's tail) carries this one.
+    pub(crate) held_epoch: u64,
+}
+
+/// One gate admission: the decision, whether this call claimed the single
+/// half-open probe slot, and the breaker epoch it was admitted under.
 ///
-/// `claimed_half_open` is an OWNERSHIP fact about the call that produced it,
-/// not a read of current state -- see
-/// [`ProviderState::try_dispatch_admitting`] for why the difference matters.
+/// `claimed_half_open` and `epoch` are facts about the call that produced
+/// them, not reads of current state -- see [`ProviderState::admit_under_park`]
+/// for why the difference matters.
 /// `pub(crate)`: the admission token is a router-internal coordination type
 /// with no cross-crate consumer, and `runtime_state` is a public module, so a
 /// bare `pub` would widen the crate's surface for nothing.
@@ -202,14 +228,19 @@ pub(crate) struct GateAdmission {
     /// `true` only when THIS call set the half-open bit and still holds it on
     /// return. A refusal never claims.
     pub(crate) claimed_half_open: bool,
+    /// The breaker epoch every settlement of this admission carries; after
+    /// a claim, the post-claim epoch. Meaningless on a refusal, which
+    /// settles nothing.
+    pub(crate) epoch: u64,
 }
 
 impl GateAdmission {
-    /// A refusal, which by construction claims nothing.
+    /// A refusal, which by construction claims nothing and settles nothing.
     pub(crate) const fn refused(decision: GateDecision) -> Self {
         Self {
             decision,
             claimed_half_open: false,
+            epoch: 0,
         }
     }
 }
@@ -285,6 +316,7 @@ impl ProviderState {
             consecutive_failures: 0,
             circuit_opened_at: None,
             half_open_in_flight: false,
+            epoch: 0,
             last_outcome: None,
             last_outcome_at: None,
         }
@@ -314,24 +346,17 @@ impl ProviderState {
         self.rpm_capacity = new_capacity;
     }
 
-    /// Decide whether to dispatch right now. If `Allow`, the caller
-    /// MUST follow up with `record_success` or `record_failure`
-    /// (the breaker depends on every Allow being closed out).
-    pub fn try_dispatch(&mut self, now: Instant) -> GateDecision {
+    /// Decide whether to dispatch right now, discarding the admission's
+    /// claim and epoch. Test convenience: production admits through
+    /// [`Self::admit_under_park`] and settles under the epoch it returns.
+    #[cfg(test)]
+    pub(crate) fn try_dispatch(&mut self, now: Instant) -> GateDecision {
         self.try_dispatch_admitting(now).decision
     }
 
-    /// [`Self::try_dispatch`], additionally reporting whether THIS call
-    /// claimed the single half-open probe slot.
-    ///
-    /// One critical section returns both facts, which is the whole point: the
-    /// half-open bit is SHARED, so a caller that admits here and then reads
-    /// `half_open_probe_in_flight()` separately can observe a claim that a
-    /// DIFFERENT caller took in between, and conclude it owns a slot it never
-    /// claimed. Releasing on that inference frees the other caller's claim and
-    /// admits a second concurrent probe past the single-probe invariant.
-    /// Ownership is therefore reported by the admission itself and carried,
-    /// never re-derived from shared state afterwards.
+    /// [`Self::admit_under_park`] for a client dispatch on an unparked
+    /// account. Test convenience.
+    #[cfg(test)]
     pub(crate) fn try_dispatch_admitting(&mut self, now: Instant) -> GateAdmission {
         self.admit_under_park(now, AdmissionKind::ClientDispatch, None)
     }
@@ -342,6 +367,14 @@ impl ProviderState {
     /// half-open-ready exactly as a lapsed breaker cooldown does, so each model
     /// slot on a lapsed account admits one re-test of its own, sharing
     /// `half_open_in_flight` with the breaker.
+    ///
+    /// One critical section returns the claim and the epoch, which is the
+    /// whole point: a caller that admits here and then reads
+    /// `half_open_probe_in_flight()` or the epoch separately can observe a
+    /// claim or transition a DIFFERENT caller made in between, and settle
+    /// state it was never admitted under. Ownership and epoch are therefore
+    /// reported by the admission itself and carried, never re-derived from
+    /// shared state afterwards.
     pub(crate) fn admit_under_park(
         &mut self,
         now: Instant,
@@ -360,7 +393,7 @@ impl ProviderState {
             Some(_) => true,
             None => park.is_some(),
         };
-        let claimed_half_open = if retest_ready {
+        if retest_ready {
             // Cooldown or credential park lapsed. Allow exactly one probe
             // through; other callers are refused until the probe records its
             // outcome. We do NOT clear `circuit_opened_at`, the park, or the
@@ -377,73 +410,112 @@ impl ProviderState {
             if matches!(kind, AdmissionKind::BackgroundProbe) {
                 return GateAdmission::refused(half_open_refusal(park));
             }
-            self.half_open_in_flight = true;
-            // Claimed HERE, in the same critical section that will report it.
-            // Fall through to the RPM check below, which can still hand it back.
-            true
-        } else {
-            false
-        };
+        }
 
         if let Some(capacity) = self.rpm_capacity {
             self.refill_tokens(now, capacity);
             if self.rpm_tokens < 1.0 {
-                // The RPM gate refused, so we're NOT actually issuing the
-                // probe; hand back the half-open slot if this call claimed it.
-                // Keyed on the claim, not on the breaker phase: a lapsed
-                // credential park claims with the breaker closed.
-                if claimed_half_open {
-                    self.half_open_in_flight = false;
-                }
+                // Refused before the claim below, so a rate-limited re-test
+                // leaves the half-open slot and the epoch as they were.
                 return GateAdmission::refused(GateDecision::RateLimited);
             }
             self.rpm_tokens -= 1.0;
         }
 
+        if retest_ready {
+            // Claimed HERE, in the same critical section that reports it. A
+            // lapsed credential park claims with the breaker closed; it is a
+            // claim all the same, so it starts a new epoch too.
+            self.half_open_in_flight = true;
+            self.advance_epoch();
+        }
         GateAdmission {
             decision: GateDecision::Allow,
-            claimed_half_open,
+            claimed_half_open: retest_ready,
+            epoch: self.epoch,
         }
     }
 
-    /// Mark the most recent dispatch as successful. Resets the
-    /// circuit-breaker failure counter and closes a tripped circuit
-    /// if this was a half-open probe.
-    pub const fn record_success(&mut self, now: Instant) {
-        self.record_success_closing(now);
+    /// [`Self::record_success_closing`] at the current epoch, as the owner of
+    /// whatever the breaker holds. Test convenience: production settles
+    /// carry their admission's epoch.
+    #[cfg(test)]
+    pub(crate) const fn record_success(&mut self, now: Instant) {
+        self.record_success_closing(now, self.epoch);
     }
 
-    /// [`Self::record_success`], returning whether this call closed a
-    /// circuit that was open or half-open.
-    pub(crate) const fn record_success_closing(&mut self, now: Instant) -> bool {
+    /// Mark a dispatch admitted under `epoch` as successful: reset the
+    /// failure counter and close an open or half-open circuit. A no-op when
+    /// `epoch` is no longer current.
+    pub(crate) const fn record_success_closing(
+        &mut self,
+        now: Instant,
+        epoch: u64,
+    ) -> SuccessSettlement {
+        if epoch != self.epoch {
+            return SuccessSettlement {
+                closed: false,
+                held_epoch: epoch,
+            };
+        }
         let was_open = self.circuit_opened_at.is_some();
+        if was_open || self.half_open_in_flight {
+            self.advance_epoch();
+        }
         self.consecutive_failures = 0;
         self.circuit_opened_at = None;
         self.half_open_in_flight = false;
         self.forced_cooldown = None;
         self.last_outcome = Some(LastOutcome::Ok);
         self.last_outcome_at = Some(now);
-        was_open
+        SuccessSettlement {
+            closed: was_open,
+            held_epoch: self.epoch,
+        }
     }
 
-    /// Mark the most recent dispatch as failed. Trips the breaker
-    /// when consecutive failures hit the configured threshold. If
-    /// this was a half-open probe, re-trip the breaker by setting
-    /// a fresh `circuit_opened_at = now`; with the breaker disabled, a
-    /// failed half-open probe closes the circuit instead, so an open
-    /// circuit left behind by a reload that turned the breaker off (or by
-    /// `force_open`) stops gating once its window has been served. Returns
-    /// whether this call opened (tripped) the breaker. The caller supplies
+    /// [`Self::record_failure_debit`] at the current epoch, returning
+    /// `tripped`. Test convenience: production settles carry their
+    /// admission's epoch.
+    #[cfg(test)]
+    pub(crate) const fn record_failure(&mut self, now: Instant, outcome: LastOutcome) -> bool {
+        self.record_failure_debit(now, outcome, self.epoch).tripped
+    }
+
+    /// Debit one failure of a dispatch admitted under `epoch`; a no-op when
+    /// `epoch` is no longer current. Trips the breaker when consecutive
+    /// failures hit the configured threshold. A failed half-open probe
+    /// re-trips it with a fresh `circuit_opened_at = now`; with the breaker
+    /// disabled, it closes the circuit instead, so an open circuit left
+    /// behind by a reload that turned the breaker off (or by `force_open`)
+    /// stops gating once its window has been served. The caller supplies
     /// the derived `outcome` (via `LastOutcome::from_failure_class`); it is
     /// stamped regardless of whether the breaker trips.
-    pub const fn record_failure(&mut self, now: Instant, outcome: LastOutcome) -> bool {
+    ///
+    /// `tripped` is also `true` for a debit at or past the threshold on a
+    /// circuit that is already open; `opened` is `true` only when the
+    /// circuit was closed before the debit, or the debit is the failure of
+    /// the half-open probe.
+    pub(crate) const fn record_failure_debit(
+        &mut self,
+        now: Instant,
+        outcome: LastOutcome,
+        epoch: u64,
+    ) -> FailureDebit {
+        if epoch != self.epoch {
+            return FailureDebit {
+                tripped: false,
+                opened: false,
+            };
+        }
+        let was_closed = self.circuit_opened_at.is_none();
         let was_half_open_probe = self.half_open_in_flight;
         self.half_open_in_flight = false;
         self.last_outcome = Some(outcome);
         self.last_outcome_at = Some(now);
 
         self.consecutive_failures = self.consecutive_failures.saturating_add(1);
-        match self.circuit_failure_threshold {
+        let tripped = match self.circuit_failure_threshold {
             // Re-trip the breaker if a half-open probe failed (regardless of
             // counter), or if the counter just crossed the threshold for
             // the first time.
@@ -462,68 +534,85 @@ impl ProviderState {
                 false
             }
             _ => false,
+        };
+        let opened = tripped && (was_closed || was_half_open_probe);
+        if opened || was_half_open_probe {
+            self.advance_epoch();
         }
+        FailureDebit { tripped, opened }
     }
 
-    /// [`Self::record_failure`], also reporting whether the debit moved the
-    /// circuit into the open state. `tripped` is `record_failure`'s own
-    /// answer, which is also `true` for a debit at or past the threshold on
-    /// a circuit that is already open; `opened` is `true` only when the
-    /// circuit was closed before the debit, or the debit is the failure of
-    /// the half-open probe.
-    pub(crate) const fn record_failure_debit(
-        &mut self,
-        now: Instant,
-        outcome: LastOutcome,
-    ) -> FailureDebit {
-        let was_closed = self.circuit_opened_at.is_none();
-        let was_half_open_probe = self.half_open_in_flight;
-        let tripped = self.record_failure(now, outcome);
-        FailureDebit {
-            tripped,
-            opened: tripped && (was_closed || was_half_open_probe),
-        }
+    /// [`Self::force_open_in_epoch`] at the current epoch. Test convenience:
+    /// production settles carry their admission's epoch.
+    #[cfg(test)]
+    pub(crate) const fn force_open(&mut self, now: Instant, cooldown: Duration) {
+        self.force_open_in_epoch(now, cooldown, self.epoch);
     }
 
     /// Park the provider immediately for `cooldown`, bypassing the
-    /// consecutive-failure threshold. Used when an upstream sent an
-    /// explicit reset hint (e.g. a rate-limit reset that is hours away):
-    /// a single such signal should open the circuit at once rather than
-    /// waiting for `circuit_failure_threshold` failures to accumulate.
-    /// The custom `cooldown` governs only THIS open window; the next
-    /// normal trip or a successful close restores the baseline. Recovery
-    /// after the cooldown still flows through the single half-open probe.
+    /// consecutive-failure threshold, for a dispatch admitted under `epoch`;
+    /// a no-op returning `false` when `epoch` is no longer current. Used
+    /// when an upstream sent an explicit reset hint (e.g. a rate-limit reset
+    /// that is hours away): a single such signal should open the circuit at
+    /// once rather than waiting for `circuit_failure_threshold` failures to
+    /// accumulate. The custom `cooldown` governs only THIS open window; the
+    /// next normal trip or a successful close restores the baseline.
+    /// Recovery after the cooldown still flows through the single half-open
+    /// probe.
     ///
     /// The caller is responsible for clamping `cooldown` to any
-    /// configured ceiling before calling; `force_open` honors whatever it
-    /// is given. The consecutive-failure counter is left untouched -- the
-    /// open state is driven by `circuit_opened_at` + the forced window,
-    /// independent of the counter.
-    ///
-    /// Call only from a context that does NOT hold the half-open probe
-    /// slot. The router satisfies this: observing the upstream error that
-    /// carries the reset implies the caller reached the provider, which
-    /// implies it owns the slot this call then releases. Calling it while
-    /// another caller holds the slot would reset that caller's state.
-    pub const fn force_open(&mut self, now: Instant, cooldown: Duration) {
+    /// configured ceiling before calling; this honors whatever it is given.
+    /// The consecutive-failure counter is left untouched -- the open state
+    /// is driven by `circuit_opened_at` + the forced window, independent of
+    /// the counter. An applied park frees the half-open slot: at the
+    /// current epoch the caller is the slot's owner, if anyone is.
+    pub(crate) const fn force_open_in_epoch(
+        &mut self,
+        now: Instant,
+        cooldown: Duration,
+        epoch: u64,
+    ) -> bool {
+        if epoch != self.epoch {
+            return false;
+        }
         self.circuit_opened_at = Some(now);
         self.forced_cooldown = Some(cooldown);
-        // Release any in-flight probe slot so the new park window starts
-        // clean, mirroring the failure path.
         self.half_open_in_flight = false;
+        self.advance_epoch();
+        true
     }
 
-    /// Release a half-open probe slot claimed by `try_dispatch` WITHOUT
-    /// recording an outcome. Used when the dispatch path declines to
-    /// count an attempt as a provider fault (e.g. a probe fast-fail on a
-    /// transient 429/529, or a non-fallbackable client error) but must
-    /// still free the slot it claimed so the next probe can proceed
-    /// after cooldown. Deliberately does NOT touch
-    /// `consecutive_failures` or `circuit_opened_at`: releasing a
-    /// claimed slot is not a failure observation, so the breaker's trip
-    /// state and counter stay unchanged.
-    pub const fn release_probe_slot(&mut self) {
-        self.half_open_in_flight = false;
+    /// [`Self::release_probe_slot_in_epoch`] at the current epoch. Test
+    /// convenience: production releases carry their admission's epoch.
+    #[cfg(test)]
+    pub(crate) const fn release_probe_slot(&mut self) {
+        self.release_probe_slot_in_epoch(self.epoch);
+    }
+
+    /// Release a half-open probe slot claimed under `epoch` WITHOUT
+    /// recording an outcome; a no-op when `epoch` is no longer current, so a
+    /// claim taken since cannot be freed by an earlier holder. Used when the
+    /// dispatch path declines to count an attempt as a provider fault (e.g.
+    /// a probe fast-fail on a transient 429/529, or a non-fallbackable
+    /// client error) but must still free the slot it claimed so the next
+    /// probe can proceed after cooldown. Deliberately does NOT touch
+    /// `consecutive_failures`, `circuit_opened_at` or the epoch: releasing a
+    /// claimed slot is not a failure observation, and the next claim starts
+    /// its own epoch.
+    pub(crate) const fn release_probe_slot_in_epoch(&mut self, epoch: u64) {
+        if epoch == self.epoch {
+            self.half_open_in_flight = false;
+        }
+    }
+
+    /// The current breaker epoch.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) const fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    const fn advance_epoch(&mut self) {
+        self.epoch = self.epoch.wrapping_add(1);
     }
 
     /// True while a half-open probe is in flight for this provider.
@@ -752,3 +841,7 @@ mod credential_park_tests;
 #[cfg(test)]
 #[path = "runtime_state_default_breaker_tests.rs"]
 mod default_breaker_tests;
+
+#[cfg(test)]
+#[path = "runtime_state_epoch_tests.rs"]
+mod epoch_tests;

@@ -21,7 +21,7 @@ use routectl_core::{Error, UpstreamReason, sanitize_for_log};
 
 use super::Router;
 use super::runtime_gate::ProbeSlotGuard;
-use crate::runtime_state::{AccountCredential, CredentialPark};
+use crate::runtime_state::{AccountCredential, CredentialPark, SuccessSettlement};
 
 /// Every credential account's park and generation, keyed by
 /// [`crate::seat_pool::credential_account`]. Shared whole across a hot-reload,
@@ -352,23 +352,30 @@ impl Router {
     /// credential it was admitted under. One critical section over both locks,
     /// in the module's lock order, so a concurrent rejection cannot park
     /// between the two and then be lifted by a success that preceded it.
+    ///
+    /// The breaker success applies only under the guard's admission epoch.
+    /// Returns the breaker epoch the attempt holds afterwards, read in the
+    /// same critical section, for the settlements still to come (a committed
+    /// stream's tail).
     pub(super) fn settle_seat_success(
         &self,
         state_key: &str,
         account: Option<&str>,
         record_breaker: bool,
         guard: &ProbeSlotGuard,
-    ) {
+    ) -> u64 {
         self.settle_seat_success_in_generation(
             state_key,
             account,
             record_breaker,
+            guard.breaker_epoch(),
             guard.credential_generation(),
-        );
+        )
     }
 
-    /// [`Self::settle_seat_success`] for an attempt admitted under
-    /// `generation`. Test seam for a success held across a reload.
+    /// [`Self::settle_seat_success`] for an attempt admitted under credential
+    /// `generation`, settling the breaker as the owner of its current epoch.
+    /// Test seam for a success held across a reload.
     #[cfg(any(test, feature = "test-utils"))]
     #[doc(hidden)]
     pub fn settle_seat_success_for_tests(
@@ -378,10 +385,15 @@ impl Router {
         generation: u64,
     ) {
         let account = self.account_for_state_key(state_key);
+        let epoch = self
+            .state
+            .get(state_key)
+            .map_or(0, |state| state.lock().epoch());
         self.settle_seat_success_in_generation(
             state_key,
             account.as_deref(),
             record_breaker,
+            epoch,
             generation,
         );
     }
@@ -391,25 +403,34 @@ impl Router {
         state_key: &str,
         account: Option<&str>,
         record_breaker: bool,
+        breaker_epoch: u64,
         generation: u64,
-    ) {
+    ) -> u64 {
         let Some(state) = self.state.get(state_key) else {
-            return;
+            return breaker_epoch;
         };
-        let closed = {
+        let (closed, held_epoch) = {
             let mut accounts = self.credential_accounts.lock();
             let mut state = state.lock();
-            let closed = record_breaker && state.record_success_closing(Instant::now());
+            let settled = if record_breaker {
+                state.record_success_closing(Instant::now(), breaker_epoch)
+            } else {
+                SuccessSettlement {
+                    closed: false,
+                    held_epoch: breaker_epoch,
+                }
+            };
             #[cfg(test)]
             run_within_success_settle_hook();
             if let Some(record) = account.and_then(|account| accounts.get_mut(account)) {
                 record.clear_in_generation(generation);
             }
-            closed
+            (settled.closed, settled.held_epoch)
         };
         if closed {
             super::breaker_transition::log_closed(state_key);
         }
+        held_epoch
     }
 }
 

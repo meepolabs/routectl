@@ -111,6 +111,7 @@ fn wrap(
         Some(BreakerSlot {
             state: state.clone(),
             state_key: "m-test".into(),
+            epoch: state.lock().epoch(),
         }),
         None,
         FirstChunkFeed::armed(Arc::new(QuotaStore::default()), None),
@@ -420,4 +421,124 @@ async fn a_committed_tail_logs_each_transition_it_settles() {
         mismatches.is_empty(),
         "rows logged wrongly: {mismatches:#?}"
     );
+}
+
+/// A provider whose stream commits on one content chunk and then yields
+/// whatever the test sends, so a committed tail can be held open across
+/// breaker transitions and settled on cue.
+struct HeldTailProvider {
+    tail: Mutex<Option<futures::channel::mpsc::UnboundedReceiver<Result<ChatChunk>>>>,
+}
+
+#[async_trait::async_trait]
+impl routectl_core::Provider for HeldTailProvider {
+    fn id(&self) -> &'static str {
+        "p"
+    }
+    fn normalize_request(&self, _: &routectl_core::ChatRequest) -> Result<serde_json::Value> {
+        Ok(serde_json::json!({}))
+    }
+    fn normalize_response(&self, _: serde_json::Value) -> Result<routectl_core::ChatResponse> {
+        Err(Error::normalize_response("p", "unused"))
+    }
+    async fn complete(&self, _: routectl_core::ChatRequest) -> Result<routectl_core::ChatResponse> {
+        unreachable!("stream only")
+    }
+    async fn stream(
+        &self,
+        _: routectl_core::ChatRequest,
+    ) -> Result<futures::stream::BoxStream<'static, Result<ChatChunk>>> {
+        let tail = self.tail.lock().take().expect("one stream per test");
+        Ok(stream::iter([Ok(content("a"))]).chain(tail).boxed())
+    }
+}
+
+/// A router over `provider` with a threshold-1, zero-cooldown breaker on
+/// model `m`: one debit opens it and the window lapses at once, so each
+/// open is immediately half-open-ready.
+fn held_tail_router(provider: Arc<HeldTailProvider>) -> super::Router {
+    use crate::config::{Config, ModelEntry, ProviderEntry};
+    let mut config = Config::default();
+    let mut entry = ProviderEntry::anthropic_api("literal:k");
+    if let ProviderEntry::AnthropicApi { runtime, .. } = &mut entry {
+        runtime.circuit_failures = Some(1);
+        runtime.circuit_cooldown_ms = Some(0);
+    }
+    config.providers.insert("p".into(), entry);
+    config.models.insert("m".into(), ModelEntry::new("p", "u"));
+    let mut router = super::Router::new(Arc::new(config));
+    let mut models = BTreeMap::new();
+    models.insert(
+        "m".to_string(),
+        Arc::new(crate::resolved::ResolvedModel::new("m", "p", provider, "u")),
+    );
+    router.install_resolved_models(models);
+    router
+}
+
+#[tokio::test]
+async fn a_tail_settling_after_a_newer_half_open_claim_leaves_that_claim() {
+    let rows = [
+        (
+            "503 frame",
+            Some(Error::upstream("p", 503, "mid-stream boom")),
+        ),
+        ("end of stream", None),
+    ];
+    for (name, frame) in rows {
+        // Arrange: stream A commits as the half-open probe, closing the
+        // breaker; the breaker then re-trips, lapses, and B claims the new
+        // half-open slot while A's tail is still open.
+        let (tail_tx, tail_rx) = futures::channel::mpsc::unbounded();
+        let provider = Arc::new(HeldTailProvider {
+            tail: Mutex::new(Some(tail_rx)),
+        });
+        let router = held_tail_router(provider);
+        assert!(router.force_open_breaker("m", Duration::ZERO), "premise");
+        let mut stream_a = router
+            .stream(routectl_core::ChatRequest {
+                model: "m".into(),
+                ..Default::default()
+            })
+            .await
+            .expect("A commits");
+        assert!(stream_a.next().await.is_some_and(|c| c.is_ok()), "premise");
+        let state = router.state.get("m").cloned().expect("slot");
+        assert_eq!(
+            state.lock().gate_status(Instant::now()).circuit,
+            CircuitPhase::Closed,
+            "premise: {name}: A's first content closed the breaker"
+        );
+        state
+            .lock()
+            .record_failure(Instant::now(), LastOutcome::Http5xx);
+        let (refusal, guard_b) = router.admit_dispatch("m", "p");
+        assert!(
+            refusal.is_none() && guard_b.owns_slot(),
+            "premise: {name}: B claims"
+        );
+
+        // Act: A's tail settles.
+        if let Some(frame) = frame {
+            tail_tx.unbounded_send(Err(frame)).expect("tail open");
+        }
+        drop(tail_tx);
+        while stream_a.next().await.is_some() {}
+        drop(stream_a);
+
+        // Assert: B's claim stands.
+        let status = state.lock().gate_status(Instant::now());
+        assert!(
+            status.half_open_probe_in_flight,
+            "{name}: B's claim was freed"
+        );
+        assert_eq!(status.circuit, CircuitPhase::Open, "{name}: circuit moved");
+        let (third, _inert) = router.admit_dispatch("m", "p");
+        assert_eq!(
+            third.map(|(kind, _)| kind),
+            Some("circuit_breaker"),
+            "{name}: a third admission was let through"
+        );
+        drop(guard_b);
+    }
 }

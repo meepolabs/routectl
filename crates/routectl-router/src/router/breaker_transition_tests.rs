@@ -224,7 +224,12 @@ async fn only_a_debit_that_moves_the_circuit_to_open_logs_opened() {
             for step in steps {
                 match step {
                     Step::Debit => {
-                        tripped.push(router.record_failure_opened(MODEL, LastOutcome::Http5xx));
+                        let epoch = router.breaker_epoch_for_tests(MODEL);
+                        tripped.push(router.record_failure_opened(
+                            MODEL,
+                            LastOutcome::Http5xx,
+                            epoch,
+                        ));
                     }
                     Step::ClaimProbe => {
                         let (refusal, mut guard) = router.admit_dispatch(MODEL, "p");
@@ -254,7 +259,8 @@ async fn the_state_key_is_sanitized() {
 
     // Act
     let ((), events) = with_capture(async {
-        router.record_failure_opened(nickname, LastOutcome::Http5xx);
+        let epoch = router.breaker_epoch_for_tests(nickname);
+        router.record_failure_opened(nickname, LastOutcome::Http5xx, epoch);
     })
     .await;
 
