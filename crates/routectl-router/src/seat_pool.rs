@@ -1143,7 +1143,7 @@ mod tests {
         CapacitySnapshot {
             rpm_available: None,
             circuit: CircuitPhase::Closed,
-            credential_blocked: false,
+            credential: crate::runtime_state::CredentialState::Usable,
         }
     }
 
@@ -1151,7 +1151,7 @@ mod tests {
         CapacitySnapshot {
             rpm_available: Some(rpm),
             circuit: CircuitPhase::Closed,
-            credential_blocked: false,
+            credential: crate::runtime_state::CredentialState::Usable,
         }
     }
 
@@ -1160,7 +1160,7 @@ mod tests {
         CapacitySnapshot {
             rpm_available: None,
             circuit: CircuitPhase::Open,
-            credential_blocked: false,
+            credential: crate::runtime_state::CredentialState::Usable,
         }
     }
 
@@ -1259,7 +1259,7 @@ mod tests {
             CapacitySnapshot {
                 rpm_available: Some(100.0),
                 circuit: CircuitPhase::HalfOpenReady,
-                credential_blocked: false,
+                credential: crate::runtime_state::CredentialState::Usable,
             },
             closed_with(3.0),
         ];
@@ -1427,7 +1427,7 @@ mod tests {
             CapacitySnapshot {
                 rpm_available: Some(100.0),
                 circuit: CircuitPhase::HalfOpenReady,
-                credential_blocked: false,
+                credential: crate::runtime_state::CredentialState::Usable,
             },
             closed_with(100.0),
         ];
@@ -1476,7 +1476,7 @@ mod tests {
             CapacitySnapshot {
                 rpm_available: Some(100.0),
                 circuit: CircuitPhase::HalfOpenReady,
-                credential_blocked: false,
+                credential: crate::runtime_state::CredentialState::Usable,
             },
             closed_with(3.0),
         ];

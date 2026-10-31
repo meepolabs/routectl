@@ -37,6 +37,7 @@ fn sample_target(circuit: CircuitPhase) -> RouteTargetStatus {
             last_outcome: None,
             last_outcome_elapsed: None,
             credential_park: None,
+            credential_unusable: None,
         },
     }
 }
@@ -64,6 +65,7 @@ fn target_with_ages(
             last_outcome,
             last_outcome_elapsed,
             credential_park: None,
+            credential_unusable: None,
         },
     }
 }

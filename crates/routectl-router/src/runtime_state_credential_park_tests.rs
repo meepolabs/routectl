@@ -176,7 +176,7 @@ fn gate_status_reports_the_park_reason_and_time_left() {
     ];
     for (name, read_at, remaining) in rows {
         // Act
-        let status = s.gate_status_under(read_at, park);
+        let status = s.gate_status_under(read_at, park, None);
 
         // Assert
         assert_eq!(
@@ -189,7 +189,7 @@ fn gate_status_reports_the_park_reason_and_time_left() {
         );
     }
     assert_eq!(
-        s.gate_status_under(t0, None).credential_park,
+        s.gate_status_under(t0, None, None).credential_park,
         None,
         "unparked"
     );
@@ -214,11 +214,16 @@ fn capacity_snapshot_reads_a_credential_blocked_seat_as_not_dispatchable() {
         }
 
         // Act
-        let snapshot = s.capacity_snapshot_under(read_at, park);
+        let snapshot = s.capacity_snapshot_under(read_at, park, None);
 
         // Assert
         assert_eq!(snapshot.is_dispatchable(), dispatchable, "{name}");
-        assert_eq!(snapshot.credential_blocked, !dispatchable, "{name}");
+        let expected = if dispatchable {
+            CredentialState::Usable
+        } else {
+            CredentialState::Parked
+        };
+        assert_eq!(snapshot.credential, expected, "{name}");
     }
 }
 

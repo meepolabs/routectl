@@ -1,7 +1,8 @@
 //! The account gate refuses a live park even for a state key with no model
 //! slot: the park belongs to the account, so a target admitted outside the
-//! slot table still cannot dial a parked credential. Only an unparked or
-//! absent account keeps the slotless allow.
+//! slot table still cannot dial a parked credential. An unusable mark
+//! refuses the same way. Only a usable, unparked or absent account keeps the
+//! slotless allow.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -11,9 +12,10 @@ use routectl_core::{EligibilityReason, Error, Provider, UpstreamReason};
 
 use super::super::credential_park_dispatch_tests::{ScriptedProvider, Step};
 use super::super::{Config, Router};
-use super::CREDENTIAL_PARKED_GATE_KIND;
+use super::{CREDENTIAL_PARKED_GATE_KIND, CREDENTIAL_UNUSABLE_GATE_KIND};
 use crate::config::ProviderEntry;
 use crate::resolved::ResolvedModel;
+use crate::runtime_state::UnusableCause;
 
 const SLOTLESS: &str = "no-such-slot";
 const ACCOUNT: &str = "#p-a";
@@ -109,4 +111,46 @@ fn a_slotless_park_refusal_matches_the_slotted_one() {
         ))
     );
     assert_eq!(slotless, slotted);
+}
+
+#[test]
+fn a_slotless_admission_refuses_an_unusable_account() {
+    // (case, mark `#p-a` unusable, also park it, account admitted, expected)
+    type Row = (
+        &'static str,
+        bool,
+        bool,
+        Option<&'static str>,
+        Option<(&'static str, EligibilityReason)>,
+    );
+    let unusable = Some((
+        CREDENTIAL_UNUSABLE_GATE_KIND,
+        EligibilityReason::CredentialUnusable,
+    ));
+    let rows: [Row; 4] = [
+        ("unusable", true, false, Some(ACCOUNT), unusable),
+        ("unusable and parked", true, true, Some(ACCOUNT), unusable),
+        ("another account", true, false, Some("#p-other"), None),
+        ("no account", true, false, None, None),
+    ];
+    for (case, mark, parked, account, expected) in rows {
+        // Arrange
+        let router = router();
+        if mark {
+            assert!(router.mark_credential_unusable_for_tests("m-a", UnusableCause::Unreadable));
+        }
+        if parked {
+            assert!(router.park_credential_for_tests(
+                "m-a",
+                UpstreamReason::CredentialInvalid,
+                Instant::now() + Duration::from_hours(1),
+            ));
+        }
+
+        // Act
+        let got = refusal(&router, SLOTLESS, account);
+
+        // Assert
+        assert_eq!(got, expected, "{case}");
+    }
 }

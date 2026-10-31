@@ -62,7 +62,7 @@ impl Router {
         account: Option<&str>,
         now: Instant,
     ) -> ProviderGateStatus {
-        let park = self.account_park(account);
+        let record = self.account_record(account).unwrap_or_default();
         self.state.get(state_key).map_or(
             ProviderGateStatus {
                 rpm_available: None,
@@ -72,8 +72,12 @@ impl Router {
                 last_outcome: None,
                 last_outcome_elapsed: None,
                 credential_park: None,
+                credential_unusable: None,
             },
-            |s| s.lock().gate_status_under(now, park),
+            |s| {
+                s.lock()
+                    .gate_status_under(now, record.park(), record.unusable())
+            },
         )
     }
 

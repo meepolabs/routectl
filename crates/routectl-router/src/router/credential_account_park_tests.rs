@@ -459,7 +459,10 @@ async fn the_sticky_snapshot_reads_every_seat_of_a_parked_account_as_blocked() {
     let snapshots = router.gather_capacity_snapshots(&seats, "pooled2", Instant::now());
 
     // Assert
-    let blocked: Vec<bool> = snapshots.iter().map(|s| s.credential_blocked).collect();
+    let blocked: Vec<bool> = snapshots
+        .iter()
+        .map(|s| s.credential == crate::runtime_state::CredentialState::Parked)
+        .collect();
     assert_eq!(
         blocked,
         [true, false],

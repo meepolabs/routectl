@@ -12,12 +12,14 @@
 //! `AccountCredential` records, so a rejection observed through one model
 //! refuses every model on the same account. The model gate takes the
 //! account's park as an input, which is how a lapsed park re-tests through
-//! each model slot's own half-open claim.
+//! each model slot's own half-open claim. The same record carries an
+//! unusable mark (a credential known not to work), which refuses before the
+//! model gate is consulted and never lapses on its own.
 
 use std::time::{Duration, Instant};
 
-use routectl_core::UpstreamReason;
 use routectl_core::failure_class::LastOutcome;
+use routectl_core::{EligibilityReason, UpstreamReason};
 
 use crate::config::ProviderRuntimePolicy;
 use crate::config::tuning::{BreakerThreshold, GateTuning, ResolvedTuning};
@@ -60,15 +62,56 @@ impl CredentialPark {
     }
 }
 
-/// One credential account's park and generation.
+/// Why an account's credential is known to be unusable. Diagnostic only: it
+/// names the class of evidence, never a token, path or value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum UnusableCause {
+    /// No stored login exists for the seat.
+    NotLoggedIn,
+    /// The credential source exists but cannot be read or parsed.
+    Unreadable,
+    /// The access token is past its expiry and could not be refreshed.
+    Expired,
+    /// The upstream refused the refresh token.
+    Revoked,
+}
+
+impl UnusableCause {
+    /// The stable snake_case token for this cause, for logs and status.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NotLoggedIn => "not_logged_in",
+            Self::Unreadable => "unreadable",
+            Self::Expired => "expired",
+            Self::Revoked => "revoked",
+        }
+    }
+}
+
+/// An account whose credential is known to be unusable, and since when.
+///
+/// Unlike a [`CredentialPark`] it never lapses and never re-tests: only a
+/// reload that may have changed the credential, or a generation-gated clear,
+/// readmits the account.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Unusable {
+    /// Why the credential is unusable.
+    pub cause: UnusableCause,
+    /// When the account was first marked with this cause.
+    pub since: Instant,
+}
+
+/// One credential account's park, unusable mark and generation.
 ///
 /// The generation advances on every [`Self::reset`]. An attempt captures it at
 /// admission, and its rejection parks (or its success lifts) only while it
 /// still matches, so an attempt admitted before a reload can neither re-park
-/// the account nor lift a park set after it.
+/// the account nor lift a park set after it. A generation-gated unusable mark
+/// or clear is fenced the same way.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct AccountCredential {
     park: Option<CredentialPark>,
+    unusable: Option<Unusable>,
     generation: u64,
 }
 
@@ -76,6 +119,48 @@ impl AccountCredential {
     /// The account's park, if any.
     pub(crate) const fn park(&self) -> Option<CredentialPark> {
         self.park
+    }
+
+    /// The account's unusable mark, if any.
+    pub(crate) const fn unusable(&self) -> Option<Unusable> {
+        self.unusable
+    }
+
+    /// Mark the account unusable for `cause` at `now`, returning whether the
+    /// mark applied. With `Some(generation)` it applies only while that
+    /// generation is current; `None` marks unconditionally. A re-mark with the
+    /// same cause keeps the original `since`; a different cause replaces the
+    /// mark whole.
+    pub(crate) fn mark_unusable(
+        &mut self,
+        cause: UnusableCause,
+        now: Instant,
+        generation: Option<u64>,
+    ) -> bool {
+        if generation.is_some_and(|generation| generation != self.generation) {
+            return false;
+        }
+        let since = match self.unusable {
+            Some(mark) if mark.cause == cause => mark.since,
+            _ => now,
+        };
+        self.unusable = Some(Unusable { cause, since });
+        true
+    }
+
+    /// Clear an unusable mark carrying `cause`, only while `generation` is
+    /// current, returning whether it cleared one. A mark with another cause
+    /// was set from other evidence and stays.
+    pub(crate) fn clear_unusable_in_generation(
+        &mut self,
+        cause: UnusableCause,
+        generation: u64,
+    ) -> bool {
+        if generation != self.generation || self.unusable.map(|mark| mark.cause) != Some(cause) {
+            return false;
+        }
+        self.unusable = None;
+        true
     }
 
     /// The generation an admission captures.
@@ -115,12 +200,13 @@ impl AccountCredential {
         true
     }
 
-    /// Lift the park and start a new generation. Advances even when nothing is
-    /// parked: the attempt that would park may still be in flight. Returns
-    /// whether a park was lifted.
+    /// Lift the park, clear any unusable mark and start a new generation.
+    /// Advances even when nothing is parked: the attempt that would park may
+    /// still be in flight. Returns whether a park was lifted.
     pub(crate) const fn reset(&mut self) -> bool {
         let was_parked = self.park.is_some();
         self.park = None;
+        self.unusable = None;
         self.generation = self.generation.wrapping_add(1);
         was_parked
     }
@@ -297,6 +383,13 @@ pub enum GateDecision {
         reason: UpstreamReason,
         /// When the park lapses into a single half-open re-test.
         until: Instant,
+    },
+    /// The target's account credential is known to be unusable. Treat as a
+    /// fallbackable failure; no wait is known, since only a credential change
+    /// readmits the account.
+    CredentialUnusable {
+        /// Why the credential is unusable.
+        cause: UnusableCause,
     },
 }
 
@@ -692,14 +785,16 @@ impl ProviderState {
     /// Projects the lazily-refilled bucket level at `now` and classifies
     /// the breaker phase, mirroring what `try_dispatch` would observe.
     pub fn capacity_snapshot(&self, now: Instant) -> CapacitySnapshot {
-        self.capacity_snapshot_under(now, None)
+        self.capacity_snapshot_under(now, None, None)
     }
 
-    /// [`Self::capacity_snapshot`] for a model whose account carries `park`.
+    /// [`Self::capacity_snapshot`] for a model whose account carries `park`
+    /// and `unusable`.
     pub(crate) fn capacity_snapshot_under(
         &self,
         now: Instant,
         park: Option<CredentialPark>,
+        unusable: Option<Unusable>,
     ) -> CapacitySnapshot {
         let rpm_available = self
             .rpm_capacity
@@ -716,13 +811,19 @@ impl ProviderState {
                 }
             }
         };
-        let credential_blocked =
-            park.is_some_and(|park| park.is_live_at(now) || self.half_open_in_flight);
+        let parked = park.is_some_and(|park| park.is_live_at(now) || self.half_open_in_flight);
+        let credential = if unusable.is_some() {
+            CredentialState::Unusable
+        } else if parked {
+            CredentialState::Parked
+        } else {
+            CredentialState::Usable
+        };
 
         CapacitySnapshot {
             rpm_available,
             circuit,
-            credential_blocked,
+            credential,
         }
     }
 
@@ -734,16 +835,18 @@ impl ProviderState {
     /// the half-open-probe-in-flight bool explicitly, rather than folding it
     /// into `CircuitPhase::Open` the way the phase classification does.
     pub fn gate_status(&self, now: Instant) -> ProviderGateStatus {
-        self.gate_status_under(now, None)
+        self.gate_status_under(now, None, None)
     }
 
-    /// [`Self::gate_status`] for a model whose account carries `park`.
+    /// [`Self::gate_status`] for a model whose account carries `park` and
+    /// `unusable`.
     pub(crate) fn gate_status_under(
         &self,
         now: Instant,
         park: Option<CredentialPark>,
+        unusable: Option<Unusable>,
     ) -> ProviderGateStatus {
-        let snapshot = self.capacity_snapshot_under(now, park);
+        let snapshot = self.capacity_snapshot_under(now, park, unusable);
         ProviderGateStatus {
             rpm_available: snapshot.rpm_available,
             circuit: snapshot.circuit,
@@ -756,6 +859,10 @@ impl ProviderState {
             credential_park: park.map(|park| CredentialParkStatus {
                 reason: park.reason,
                 remaining: park.until.saturating_duration_since(now),
+            }),
+            credential_unusable: unusable.map(|mark| CredentialUnusableStatus {
+                cause: mark.cause,
+                since_elapsed: now.saturating_duration_since(mark.since),
             }),
         }
     }
@@ -780,6 +887,16 @@ pub struct CredentialParkStatus {
     pub reason: UpstreamReason,
     /// Time left before the park lapses; zero once lapsed.
     pub remaining: Duration,
+}
+
+/// Status view of an unusable mark: the cause and how long ago it was first
+/// set. Monotonic; the DTO layer converts it to an epoch-ms instant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CredentialUnusableStatus {
+    /// Why the credential is unusable.
+    pub cause: UnusableCause,
+    /// Time since the account was first marked with this cause.
+    pub since_elapsed: Duration,
 }
 
 /// Non-mutating health view of a `ProviderState` for the status surface.
@@ -811,6 +928,9 @@ pub struct ProviderGateStatus {
     /// The target's account credential park, if any: `None` when the account
     /// is not parked.
     pub credential_park: Option<CredentialParkStatus>,
+    /// The target's account unusable mark, if any: `None` when the
+    /// credential is not known to be unusable.
+    pub credential_unusable: Option<CredentialUnusableStatus>,
 }
 
 /// Read-only classification of the circuit breaker, mirroring the decision
@@ -831,6 +951,19 @@ pub enum CircuitPhase {
     HalfOpenReady,
 }
 
+/// Whether a target's account credential would let a dispatch through, as a
+/// snapshot sees it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CredentialState {
+    /// Neither an unusable mark nor a live park refuses the dispatch.
+    Usable,
+    /// The account carries an unusable mark.
+    Unusable,
+    /// The account's park has not lapsed, or its single re-test is already
+    /// in flight.
+    Parked,
+}
+
 /// Non-mutating view of a `ProviderState`'s capacity at a given instant.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CapacitySnapshot {
@@ -840,23 +973,35 @@ pub struct CapacitySnapshot {
     pub rpm_available: Option<f64>,
     /// Read-only circuit-breaker phase.
     pub circuit: CircuitPhase,
-    /// Whether a credential park would refuse the dispatch: the park has not
-    /// lapsed, or its single re-test is already in flight.
-    pub credential_blocked: bool,
+    /// Whether the account's credential would refuse the dispatch, and why.
+    pub credential: CredentialState,
 }
 
 impl CapacitySnapshot {
-    /// Predict whether `try_dispatch` would return `Allow` from this state,
-    /// without mutating anything: no credential park refuses it, the circuit
-    /// is not `Open` (i.e. `Closed` or `HalfOpenReady`) AND there is RPM
-    /// headroom (unlimited, or at least one whole token available).
+    /// The reason admission would refuse a dispatch from this state, by
+    /// priority: an unusable credential, a parked account, an open breaker
+    /// (an in-flight half-open re-test reads as open), then an empty RPM
+    /// bucket. `None` when nothing refuses. A snapshot yields only these
+    /// target-state reasons, never a request-only one.
+    pub fn reason(&self) -> Option<EligibilityReason> {
+        match self.credential {
+            CredentialState::Unusable => return Some(EligibilityReason::CredentialUnusable),
+            CredentialState::Parked => return Some(EligibilityReason::AccountParked),
+            CredentialState::Usable => {}
+        }
+        if self.circuit == CircuitPhase::Open {
+            return Some(EligibilityReason::BreakerOpen);
+        }
+        match self.rpm_available {
+            Some(tokens) if tokens < 1.0 => Some(EligibilityReason::RateLimited),
+            _ => None,
+        }
+    }
+
+    /// Predict whether admission would return `Allow` from this state,
+    /// without mutating anything: [`Self::reason`] names no refusal.
     pub fn is_dispatchable(&self) -> bool {
-        let circuit_ok = !self.credential_blocked && self.circuit != CircuitPhase::Open;
-        let rpm_ok = match self.rpm_available {
-            None => true,
-            Some(tokens) => tokens >= 1.0,
-        };
-        circuit_ok && rpm_ok
+        self.reason().is_none()
     }
 }
 
@@ -879,3 +1024,7 @@ mod epoch_tests;
 #[cfg(test)]
 #[path = "runtime_state_retry_in_tests.rs"]
 mod retry_in_tests;
+
+#[cfg(test)]
+#[path = "runtime_state_unusable_tests.rs"]
+mod unusable_tests;

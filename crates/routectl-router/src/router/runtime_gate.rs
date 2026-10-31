@@ -44,6 +44,14 @@ fn run_after_admission_hook() {
     }
 }
 
+/// The gate kind and error a credential-unusable refusal answers with.
+const fn unusable_refusal() -> (&'static str, Error) {
+    (
+        super::credential_park::CREDENTIAL_UNUSABLE_GATE_KIND,
+        super::credential_park::unusable_seat_error(),
+    )
+}
+
 impl Router {
     /// Trip the circuit breaker for the state slot keyed by `state_key`
     /// (a model nickname or a per-seat `nickname#label`), returning `false`
@@ -203,20 +211,25 @@ impl Router {
                 super::credential_park::CREDENTIAL_PARKED_GATE_KIND,
                 super::credential_park::parked_seat_error(until, now),
             )),
+            GateDecision::CredentialUnusable { .. } => Some(unusable_refusal()),
         };
         (refusal, guard)
     }
 
-    /// The refusal for a target with no model slot: a park belongs to the
-    /// account, not the slot, so a live account park refuses here exactly as
-    /// it does on the slotted path. Only an unparked or absent account keeps
-    /// the slotless allow.
+    /// The refusal for a target with no model slot: an unusable mark and a
+    /// park belong to the account, not the slot, so either refuses here
+    /// exactly as it does on the slotted path. Only a usable, unparked or
+    /// absent account keeps the slotless allow.
     fn slotless_park_refusal(
         &self,
         account: Option<&str>,
         now: Instant,
     ) -> Option<(&'static str, Error)> {
-        let park = self.account_park(account)?;
+        let record = self.account_record(account)?;
+        if record.unusable().is_some() {
+            return Some(unusable_refusal());
+        }
+        let park = record.park()?;
         park.is_live_at(now).then(|| {
             (
                 super::credential_park::CREDENTIAL_PARKED_GATE_KIND,
@@ -228,8 +241,11 @@ impl Router {
     /// The account gate, then the model gate, in the lock order the
     /// credential-park module documents: the account map, then the slot.
     ///
-    /// A live account park refuses before the slot is locked, so no RPM token
-    /// is charged and no half-open slot claimed. The generation is read in the
+    /// An unusable mark, then a live account park, refuses before the slot
+    /// is locked, so no RPM token is charged and no half-open slot claimed.
+    /// The mark is re-read here, under the account lock, even though a
+    /// snapshot read it moments before: a mark landing between the two is
+    /// still honored. The generation is read in the
     /// same critical section as the admission: a reload landing between two
     /// acquisitions would hand this attempt the post-reload generation and let
     /// its rejection re-park. The account's record is created here, so a
@@ -247,6 +263,12 @@ impl Router {
         };
         let mut accounts = self.credential_accounts.lock();
         let record = *accounts.entry(account.to_string()).or_default();
+        if let Some(mark) = record.unusable() {
+            return (
+                GateAdmission::refused(GateDecision::CredentialUnusable { cause: mark.cause }),
+                record.generation(),
+            );
+        }
         if let Some(park) = record.park()
             && park.is_live_at(now)
         {

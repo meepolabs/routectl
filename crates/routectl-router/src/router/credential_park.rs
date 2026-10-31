@@ -21,7 +21,7 @@ use routectl_core::{EligibilityReason, Error, sanitize_for_log};
 
 use super::Router;
 use super::runtime_gate::ProbeSlotGuard;
-use crate::runtime_state::{AccountCredential, CredentialPark, SuccessSettlement};
+use crate::runtime_state::{AccountCredential, SuccessSettlement, UnusableCause};
 
 /// Every credential account's park and generation, keyed by
 /// [`crate::seat_pool::credential_account`]. Shared whole across a hot-reload,
@@ -31,6 +31,9 @@ pub(super) type CredentialAccounts = BTreeMap<String, AccountCredential>;
 
 /// The `gate_kind` a credential-parked refusal is logged under.
 pub(super) const CREDENTIAL_PARKED_GATE_KIND: &str = "credential_parked";
+
+/// The `gate_kind` a credential-unusable refusal is logged under.
+pub(super) const CREDENTIAL_UNUSABLE_GATE_KIND: &str = "credential_unusable";
 
 #[cfg(test)]
 type SettleHook = Box<dyn FnOnce()>;
@@ -66,6 +69,15 @@ pub(super) fn parked_seat_error(until: Instant, now: Instant) -> Error {
     Error::LocallyUnavailable {
         reason: EligibilityReason::AccountParked,
         retry_after: (until > now).then(|| until.saturating_duration_since(now)),
+    }
+}
+
+/// The refusal an account with an unusable credential answers with. No wait
+/// is known: only a credential change readmits the account.
+pub(super) const fn unusable_seat_error() -> Error {
+    Error::LocallyUnavailable {
+        reason: EligibilityReason::CredentialUnusable,
+        retry_after: None,
     }
 }
 
@@ -106,9 +118,9 @@ pub(super) fn merge_gate_refusal(last_err: &mut Option<Error>, refusal: Error) {
     }
 }
 
-/// Log a gate refusal. A credential park refuses every request for up to an
-/// hour and already logged its own WARN when it parked, so its refusals log
-/// at DEBUG; every other gate kind stays a WARN.
+/// Log a gate refusal. A credential park or an unusable credential refuses
+/// every request until it lifts, and its transition is logged where it is
+/// set, so their refusals log at DEBUG; every other gate kind stays a WARN.
 pub(super) fn log_gate_refusal(
     provider: &str,
     model: &str,
@@ -116,7 +128,7 @@ pub(super) fn log_gate_refusal(
     gate_err: &Error,
     message: &'static str,
 ) {
-    if gate_kind == CREDENTIAL_PARKED_GATE_KIND {
+    if gate_kind == CREDENTIAL_PARKED_GATE_KIND || gate_kind == CREDENTIAL_UNUSABLE_GATE_KIND {
         tracing::debug!(
             provider = %sanitize_for_log(provider),
             model = %sanitize_for_log(model),
@@ -162,14 +174,49 @@ impl Router {
             .map(Arc::from)
     }
 
-    /// The park on `account`, read under the account lock and released
-    /// before the caller locks any model slot. `None` for no account.
-    pub(super) fn account_park(&self, account: Option<&str>) -> Option<CredentialPark> {
+    /// A copy of `account`'s record, read under the account lock and released
+    /// before the caller locks any model slot. `None` for no account or an
+    /// account with no record yet.
+    pub(super) fn account_record(&self, account: Option<&str>) -> Option<AccountCredential> {
         let account = account?;
+        self.credential_accounts.lock().get(account).copied()
+    }
+
+    /// Mark `account`'s credential unusable for `cause`, returning whether
+    /// the mark applied. With `Some(generation)` the mark applies only while
+    /// that credential generation is current, so evidence gathered before a
+    /// reload cannot mark the reloaded credential; `None` marks
+    /// unconditionally. The record is created when absent, so a later reload
+    /// has a mark to clear. A re-mark with the same cause keeps the original
+    /// `since`; a different cause replaces the mark. The account then refuses
+    /// every admission until a reload resets it or
+    /// [`Self::clear_unusable_in_generation`] clears it.
+    pub fn mark_credential_unusable(
+        &self,
+        account: &str,
+        cause: UnusableCause,
+        generation: Option<u64>,
+    ) -> bool {
         self.credential_accounts
             .lock()
-            .get(account)
-            .and_then(AccountCredential::park)
+            .entry(account.to_string())
+            .or_default()
+            .mark_unusable(cause, Instant::now(), generation)
+    }
+
+    /// Clear `account`'s unusable mark when it carries `cause` and
+    /// `generation` is still current, returning whether it cleared one. An
+    /// account with no record has nothing to clear.
+    pub fn clear_unusable_in_generation(
+        &self,
+        account: &str,
+        cause: UnusableCause,
+        generation: u64,
+    ) -> bool {
+        self.credential_accounts
+            .lock()
+            .get_mut(account)
+            .is_some_and(|record| record.clear_unusable_in_generation(cause, generation))
     }
 
     /// The credential account of the dispatch target keyed by `state_key`,
@@ -211,6 +258,37 @@ impl Router {
             .or_default()
             .park_until(reason, until);
         true
+    }
+
+    /// [`Self::mark_credential_unusable`] on the account of the target keyed
+    /// by `state_key`, unconditionally, returning `false` when no such target
+    /// or account exists. Test seam for dispatch and status tests that need
+    /// an unusable seat without producing the evidence that marks one.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[doc(hidden)]
+    pub fn mark_credential_unusable_for_tests(
+        &self,
+        state_key: &str,
+        cause: UnusableCause,
+    ) -> bool {
+        self.account_for_state_key(state_key)
+            .is_some_and(|account| self.mark_credential_unusable(&account, cause, None))
+    }
+
+    /// [`Self::lift_credential_parks`] on the account of the target keyed by
+    /// `state_key`, returning `false` when no such target or account exists.
+    /// Test seam standing in for the reload that changed the credential.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[doc(hidden)]
+    pub fn reset_credential_for_tests(&self, state_key: &str) -> bool {
+        self.account_for_state_key(state_key)
+            .is_some_and(|account| {
+                self.credential_accounts
+                    .lock()
+                    .get_mut(&account)
+                    .map(AccountCredential::reset)
+                    .is_some()
+            })
     }
 
     /// The current credential generation of the account of the target keyed
@@ -454,3 +532,7 @@ mod credential_park_slotless_tests;
 #[cfg(test)]
 #[path = "credential_park_merge_tests.rs"]
 mod merge_tests;
+
+#[cfg(test)]
+#[path = "credential_unusable_tests.rs"]
+mod credential_unusable_tests;

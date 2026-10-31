@@ -54,10 +54,11 @@ impl Router {
         account: Option<&str>,
         now: Instant,
     ) -> Option<crate::runtime_state::CapacitySnapshot> {
-        let park = self.account_park(account);
-        self.state
-            .get(state_key)
-            .map(|s| s.lock().capacity_snapshot_under(now, park))
+        let record = self.account_record(account).unwrap_or_default();
+        self.state.get(state_key).map(|s| {
+            s.lock()
+                .capacity_snapshot_under(now, record.park(), record.unusable())
+        })
     }
 
     /// The per-seat subscription-quota tiers for a birth pick over this pool,
@@ -278,7 +279,7 @@ impl Router {
                         crate::runtime_state::CapacitySnapshot {
                             rpm_available: Some(0.0),
                             circuit: crate::runtime_state::CircuitPhase::Open,
-                            credential_blocked: false,
+                            credential: crate::runtime_state::CredentialState::Usable,
                         },
                     )
             })
