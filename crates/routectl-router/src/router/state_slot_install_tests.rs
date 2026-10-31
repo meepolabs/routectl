@@ -351,3 +351,49 @@ fn a_pooled_model_named_after_a_provider_is_refused_even_when_its_pool_shares_th
     assert!(Arc::ptr_eq(&router.state["anthropic-work"], &provider_slot));
     assert!(!router.state.contains_key("anthropic-work#anthropic-b"));
 }
+
+/// Two failures on `key`'s slot; returns whether the second opened it.
+fn second_failure_opens(router: &Router, key: &str) -> (bool, bool) {
+    let slot = router.state.get(key).cloned().expect("slot exists");
+    let mut state = slot.lock();
+    let now = std::time::Instant::now();
+    let first = state.record_failure(
+        now,
+        routectl_core::failure_class::LastOutcome::TransportError,
+    );
+    let second = state.record_failure(
+        now,
+        routectl_core::failure_class::LastOutcome::TransportError,
+    );
+    (first, second)
+}
+
+#[test]
+fn a_pooled_models_own_slot_takes_the_pool_tuning() {
+    // Arrange: the breaker is configured ONLY on the pool block, so the
+    // model's nickname slot can learn it only by resolving through the pool.
+    let config: Config = toml::from_str(
+        r#"
+[providers.anthropic-a]
+kind = "anthropic-api"
+api_key_ref = "env://K"
+
+[pools.pool]
+members = ["anthropic-a"]
+circuit_failures = 2
+"#,
+    )
+    .expect("valid test toml");
+    let mut router = Router::new(Arc::new(config));
+
+    // Act
+    router.install_resolved_models(table(vec![("opus", pooled("opus", &["anthropic-a"]))]));
+
+    // Assert
+    assert_eq!(second_failure_opens(&router, "opus"), (false, true));
+    assert_eq!(
+        second_failure_opens(&router, "opus#anthropic-a"),
+        (false, true),
+        "the member seat inherits the pool tuning too"
+    );
+}

@@ -510,40 +510,24 @@ impl Router {
         self.config.retry.clone()
     }
 
-    /// Overlay the target provider's timeout config onto the
-    /// resolved `RetryPolicy`. Provider-level fills in only when the
-    /// base left the field None. Both None falls through to reqwest's
-    /// default.
-    ///
-    /// Resolution precedence for `stream_first_byte_timeout_ms`:
-    /// per-model (`model_first_byte_timeout_override`) >
-    /// per-provider (`ProviderRuntimePolicy.stream_first_byte_timeout_ms`) >
-    /// global (`[retry].stream_first_byte_timeout_ms` baked into
-    /// `base`). When the per-model override is `Some`, it wins
-    /// unconditionally over the provider + global tiers.
+    /// The per-attempt policy for one target: `base` with both timeouts
+    /// replaced by the tuning resolver's values for `provider_name` and
+    /// the model's first-content override. See
+    /// [`crate::config::tuning`] for the precedence.
     pub(super) fn compose_attempt_policy(
         &self,
         base: &RetryPolicy,
         provider_name: &str,
         model_first_byte_timeout_override: Option<u64>,
     ) -> RetryPolicy {
-        let provider_runtime = self
-            .config
-            .providers
-            .get(provider_name)
-            .map(crate::config::ProviderEntry::runtime);
+        let tuning = crate::config::resolve_tuning(
+            &self.config,
+            Some(provider_name),
+            model_first_byte_timeout_override,
+        );
         let mut out = base.clone();
-        if out.request_timeout_ms.is_none() {
-            out.request_timeout_ms = provider_runtime.and_then(|p| p.request_timeout_ms);
-        }
-        // Per-model override wins unconditionally over the
-        // provider + global resolution.
-        if let Some(ms) = model_first_byte_timeout_override {
-            out.stream_first_byte_timeout_ms = Some(ms);
-        } else if out.stream_first_byte_timeout_ms.is_none() {
-            out.stream_first_byte_timeout_ms =
-                provider_runtime.and_then(|p| p.stream_first_byte_timeout_ms);
-        }
+        out.request_timeout_ms = tuning.request_timeout_ms.value;
+        out.stream_first_byte_timeout_ms = tuning.stream_first_byte_timeout_ms.value;
         out
     }
 

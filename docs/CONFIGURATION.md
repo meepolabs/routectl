@@ -158,7 +158,9 @@ version = 5           # config schema version; see "Config schema version"
 
 [pools.X]             # a group of same-kind provider entries (OAuth
                       # accounts) dispatch spreads across: members,
-                      # seat_selection, accepts_new_logins. Optional.
+                      # seat_selection, accepts_new_logins, plus the
+                      # five tuning keys its members inherit (see
+                      # "Pool tuning keys"). Optional.
 
 [models.X]            # per-model behavior: provider ref, upstream id,
                       # reasoning defaults, header/payload extras
@@ -637,7 +639,7 @@ semantics in the [field-assignment table](#field-assignment-table).
 | `reasoning_dialect`            | `[models.X]`        | model-only (NO provider fallback)                                      |
 | `history_reasoning`            | `[models.X]`        | model-only (NO provider fallback)                                      |
 | `additional_request_fields`    | `[models.X]`        | model-only (Bedrock Converse / Invoke bag)                             |
-| `stream_first_byte_timeout_ms` | `[models.X]`        | model > provider > global                                              |
+| `stream_first_byte_timeout_ms` | `[models.X]`        | model > provider > pool > global > default (`0` on a model is ignored) |
 | `reported_model`               | `[models.X]`        | Option<String>, default None (-> echo client's requested alias); override for the response `model` label |
 | `visible_routectl_provider`    | `[models.X]`        | bool, default true; set false to drop the `routectl_provider` field from the client response (opaque proxy) |
 | `header_extras`                | BOTH                | model wins on key collision; `anthropic-beta` comma-unions (see below) |
@@ -646,7 +648,7 @@ semantics in the [field-assignment table](#field-assignment-table).
 | `auth_kind`, `anthropic_version`| `[providers.X]`    | provider-only; `anthropic_version` default `2023-06-01` (anthropic-api only) |
 | `credential_source`            | `[providers.X]` AnthropicApi    | string, default `"own"`; `"forwarded"` requires empty `api_key_ref` + `base_url` pinned to `api.anthropic.com` (see "credential_source" below) |
 | `user_agent`                   | `[providers.X]`     | provider-only                                                          |
-| `runtime` (RPM, breaker, timeouts) | `[providers.X]`             | provider-only                                                          |
+| `runtime` (RPM, breaker, timeouts) | `[providers.X]`, `[pools.X]` | provider > pool; the two timeouts then fall back to `[retry]`          |
 | `anthropic_beta`               | `[providers.X]` Bedrock         | provider-only; operator-asserted floor, always sent and never withheld                            |
 | `max_body_bytes`               | `[server]`                      | u32 bytes, default 33554432 (32 MiB); caps inbound body size; HTTP 413 on excess; restart required |
 | `allow_disable_fallbacks`      | `[server]`                      | bool, default true; when false the `x-routectl-disable-fallbacks` per-request header is ignored   |
@@ -1652,11 +1654,11 @@ accounting is per-attempt (not per-request).
 
 | Field                          | Type       | Default         | Effect |
 |--------------------------------|------------|-----------------|--------|
-| `rpm_limit`                    | Option<u32> | None (disabled) | Maximum requests per minute to this provider. When exceeded the router treats this provider as a fallbackable failure and tries the next chain entry. |
-| `circuit_failures`             | Option<u32> | None (disabled) | Trip the circuit breaker after this many consecutive failed attempts. Once tripped, the router skips this provider for `circuit_cooldown_ms`. |
-| `circuit_cooldown_ms`          | Option<u64> | 30000 (30s) when `circuit_failures` is set; unused otherwise | How long to keep the circuit open once tripped. |
-| `request_timeout_ms`           | Option<u64> | None (no cap)   | Per-attempt request timeout. Resolution order: per-provider `request_timeout_ms` > global `[retry] request_timeout_ms` > None (no cap). Per-alias retry overrides were removed in v0.6; to vary timeouts per route, split into distinct `[providers.X]` entries. |
-| `stream_first_byte_timeout_ms` | Option<u64> | None            | Per-provider first-content timeout for streaming responses (content-free leading chunks do not satisfy it). Resolution order: per-model > per-provider > global `[retry] stream_first_byte_timeout_ms`. |
+| `rpm_limit`                    | Option<u32> | None (disabled) | Maximum requests per minute to this provider. When exceeded the router treats this provider as a fallbackable failure and tries the next chain entry. Resolution order: per-provider > claiming pool > None. |
+| `circuit_failures`             | Option<u32> | None (disabled) | Trip the circuit breaker after this many consecutive failed attempts. Once tripped, the router skips this provider for `circuit_cooldown_ms`. Resolution order: per-provider > claiming pool > disabled. `0` opens on the first failure, the same as `1`. |
+| `circuit_cooldown_ms`          | Option<u64> | 30000 (30s) when `circuit_failures` is set; unused otherwise | How long to keep the circuit open once tripped. Resolution order: per-provider > claiming pool > 30s. |
+| `request_timeout_ms`           | Option<u64> | None (no cap)   | Per-attempt request timeout. Resolution order: per-provider `request_timeout_ms` > claiming pool > global `[retry] request_timeout_ms` > None (no cap). Per-alias retry overrides were removed in v0.6; to vary timeouts per route, split into distinct `[providers.X]` entries. |
+| `stream_first_byte_timeout_ms` | Option<u64> | None            | Per-provider first-content timeout for streaming responses (content-free leading chunks do not satisfy it). Resolution order: per-model > per-provider > claiming pool > global `[retry] stream_first_byte_timeout_ms` > 600000 (10 min). |
 
 `rpm_limit` and circuit breaker are both `None` (disabled) when omitted.
 `circuit_cooldown_ms` is only meaningful when `circuit_failures` is set;
@@ -2419,8 +2421,9 @@ Two other per-model overrides live on `[models.X]`:
   header_extras` that needs it.
 
 - `stream_first_byte_timeout_ms = N` -- per-model > per-provider >
-  global resolution. Pin opus xhigh adaptive thinking at 300s
-  without forcing haiku to wait 5 min on a dead upstream.
+  per-pool > global > default resolution. Pin opus xhigh adaptive
+  thinking at 300s without forcing haiku to wait 5 min on a dead
+  upstream. `0` is ignored with a warning and the next tier applies.
 
 Example:
 
@@ -5182,6 +5185,36 @@ upstream = "claude-sonnet-4-6"
 | `members` | `[providers]` table keys, required and non-empty, at most 32. Every member must exist, all must share one provider kind, and a provider entry belongs to at most one pool. This release's members are OAuth accounts. |
 | `seat_selection` | How dispatch picks among the members for one request. Documented per strategy below. Set on the POOL, because the strategy is a property of the SET, not of one transport. |
 | `accepts_new_logins` | Whether a future `routectl login` for this family may propose joining the new account to this pool. `false` (the default) pins the membership list, so only an explicit config edit grows it. There is no wildcard member token. |
+| `circuit_failures`, `circuit_cooldown_ms`, `rpm_limit`, `request_timeout_ms`, `stream_first_byte_timeout_ms` | Tuning every member inherits. See "Pool tuning keys" below. |
+
+**Pool tuning keys.** A pool accepts the five runtime-gate keys of
+[Per-provider runtime gates](#per-provider-runtime-gates), with the same
+names and meanings. Each applies to every member of the pool and to a
+pooled model's own runtime slot. A member's own value wins over the
+pool's, key by key, and the two timeouts fall back to `[retry]` when
+neither sets them:
+
+```
+circuit_failures, circuit_cooldown_ms, rpm_limit:
+    member provider > pool > default
+request_timeout_ms:
+    member provider > pool > [retry] > default
+stream_first_byte_timeout_ms:
+    [models.X] > member provider > pool > [retry] > default
+```
+
+A provider entry that is not a member of the pool never reads it.
+
+```toml
+[pools.anthropic]
+members          = ["anthropic-default", "anthropic-seat-b"]
+circuit_failures = 3        # every seat trips after 3 failures...
+
+[providers.anthropic-seat-b]
+kind             = "anthropic-api"
+api_key_ref      = "oauth://anthropic#seat-b"
+circuit_failures = 5        # ...except seat-b, whose own value wins
+```
 
 A pool name must not collide with a `[providers]` key or a `[models]`
 nickname -- `config check`, the `serve` gate, and the hot-reload gate all

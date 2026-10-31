@@ -46,6 +46,37 @@ pub struct PoolEntry {
     /// wildcard member token.
     #[serde(default)]
     pub accepts_new_logins: bool,
+
+    /// Consecutive failed attempts that open the circuit breaker on each
+    /// member of this pool. A member's own `circuit_failures` wins over
+    /// this value. None = inherit (the breaker stays off unless a member
+    /// sets it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub circuit_failures: Option<u32>,
+
+    /// How long an opened breaker on a member stays open, in
+    /// milliseconds. A member's own `circuit_cooldown_ms` wins over this
+    /// value. None = inherit the 30 s default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub circuit_cooldown_ms: Option<u64>,
+
+    /// Requests per minute allowed through each member of this pool. A
+    /// member's own `rpm_limit` wins over this value. None = inherit
+    /// (unlimited).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rpm_limit: Option<u32>,
+
+    /// Per-attempt request timeout for complete and count-tokens requests
+    /// through this pool's members. Precedence: member provider > this
+    /// pool > `[retry] request_timeout_ms` > no cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_timeout_ms: Option<u64>,
+
+    /// Per-attempt first-content timeout for streams through this pool's
+    /// members. Precedence: `[models.X]` > member provider > this pool >
+    /// `[retry] stream_first_byte_timeout_ms` > the 10 min default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_first_byte_timeout_ms: Option<u64>,
 }
 
 impl PoolEntry {
@@ -58,6 +89,11 @@ impl PoolEntry {
             members,
             seat_selection: SeatSelection::default(),
             accepts_new_logins: false,
+            circuit_failures: None,
+            circuit_cooldown_ms: None,
+            rpm_limit: None,
+            request_timeout_ms: None,
+            stream_first_byte_timeout_ms: None,
         }
     }
 
@@ -75,6 +111,51 @@ impl PoolEntry {
     pub fn with_accepts_new_logins(self, accepts_new_logins: bool) -> Self {
         Self {
             accepts_new_logins,
+            ..self
+        }
+    }
+
+    /// Same pool with `circuit_failures` set.
+    #[must_use]
+    pub fn with_circuit_failures(self, circuit_failures: u32) -> Self {
+        Self {
+            circuit_failures: Some(circuit_failures),
+            ..self
+        }
+    }
+
+    /// Same pool with `circuit_cooldown_ms` set.
+    #[must_use]
+    pub fn with_circuit_cooldown_ms(self, circuit_cooldown_ms: u64) -> Self {
+        Self {
+            circuit_cooldown_ms: Some(circuit_cooldown_ms),
+            ..self
+        }
+    }
+
+    /// Same pool with `rpm_limit` set.
+    #[must_use]
+    pub fn with_rpm_limit(self, rpm_limit: u32) -> Self {
+        Self {
+            rpm_limit: Some(rpm_limit),
+            ..self
+        }
+    }
+
+    /// Same pool with `request_timeout_ms` set.
+    #[must_use]
+    pub fn with_request_timeout_ms(self, request_timeout_ms: u64) -> Self {
+        Self {
+            request_timeout_ms: Some(request_timeout_ms),
+            ..self
+        }
+    }
+
+    /// Same pool with `stream_first_byte_timeout_ms` set.
+    #[must_use]
+    pub fn with_stream_first_byte_timeout_ms(self, stream_first_byte_timeout_ms: u64) -> Self {
+        Self {
+            stream_first_byte_timeout_ms: Some(stream_first_byte_timeout_ms),
             ..self
         }
     }

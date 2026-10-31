@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 mod pool;
 mod schema;
+pub mod tuning;
 mod validate;
 
 pub use pool::PoolEntry;
@@ -30,6 +31,7 @@ pub use schema::{
 };
 #[cfg(feature = "bedrock")]
 pub use schema::{BedrockApiShapeConfig, BedrockCredsConfig, BedrockMantleConfig};
+pub use tuning::{BreakerThreshold, Resolved, ResolvedTuning, TuningSource, resolve_tuning};
 use validate::default_config_version;
 pub use validate::{
     CONFIG_VERSION_REMEDIATION, CURRENT_CONFIG_VERSION, ConfigVersionError,

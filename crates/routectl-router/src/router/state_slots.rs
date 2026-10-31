@@ -7,7 +7,6 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
-use crate::config::ProviderRuntimePolicy;
 use crate::resolved::ResolvedModel;
 use crate::runtime_state::ProviderState;
 use crate::seat_pool::check_state_key_name;
@@ -58,20 +57,18 @@ fn slot_seeds(nickname: &str, m: &ResolvedModel) -> Vec<(String, SlotOwner)> {
 }
 
 impl Router {
-    /// Create the slot for `key` seeded from `policy` and record `owner`,
-    /// or leave an existing slot and its recorded owner untouched.
-    pub(super) fn claim_state_slot(
-        &mut self,
-        key: String,
-        owner: SlotOwner,
-        policy: &ProviderRuntimePolicy,
-    ) {
+    /// Create the slot for `key` seeded from the resolved tuning of `entry`
+    /// (a provider or pool name; `None` takes the shipped defaults) and
+    /// record `owner`, or leave an existing slot and its recorded owner
+    /// untouched.
+    pub(super) fn claim_state_slot(&mut self, key: String, owner: SlotOwner, entry: Option<&str>) {
         if self.state.contains_key(&key) {
             return;
         }
+        let gate = crate::config::resolve_tuning(&self.config, entry, None).gate();
         self.state.insert(
             key.clone(),
-            Arc::new(Mutex::new(ProviderState::new(policy))),
+            Arc::new(Mutex::new(ProviderState::from_gate(gate))),
         );
         self.slot_owners.insert(key, owner);
     }

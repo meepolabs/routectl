@@ -1571,6 +1571,15 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   mixed-kind pool, so the first resolvable member is representative), used by
   every catalog-selector read so a pool-backed model does not resolve an empty
   kind and miss its catalog cell
+- `src/config/tuning.rs` -- the ONE precedence for the tiered tuning keys
+  (`circuit_failures`, `circuit_cooldown_ms`, `rpm_limit`, `request_timeout_ms`,
+  `stream_first_byte_timeout_ms`): `resolve_tuning(config, entry, model_ms)`
+  walks model > provider > pool (the named pool, or the pool claiming the
+  provider) > `[retry]` > shipped default per key and returns
+  `ResolvedTuning`, each cell a `Resolved { value, source: TuningSource }`
+  (render tokens model / provider / pool / global / default); the shipped
+  defaults live only here. `gate()` yields the crate-internal `GateTuning`
+  every runtime-state slot is seeded from
 - `src/config/schema.rs` -- Config value types: `ProviderEntry` (one variant
   per provider kind incl. the `gemini`-feature-gated `Gemini { api_key_ref,
   base_url, header_extras, payload_extras, user_agent, auth_mode,

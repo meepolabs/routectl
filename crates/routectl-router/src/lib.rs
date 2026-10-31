@@ -143,15 +143,16 @@ pub use catalog_state::{
     selector_key as catalog_state_selector_key,
 };
 pub use config::{
-    AliasValue, CONFIG_PROVIDER_KINDS, CONFIG_VERSION_REMEDIATION, CURRENT_CONFIG_VERSION,
-    CacheCapability, CacheConfig, CalibrationConfig, CapabilityConfig, Config, ConfigVersionError,
-    HistoryReasoning, LegacyMitmCredentialSourceError, LogConfig, MitmConfig, ModelEntry,
-    OverrideEntry, PoolEntry, PricingConfig, ProviderEntry, ProviderRuntimePolicy,
-    RawConfigPreflightError, ReasoningDialect, ReductionConfig, RegistryEntry,
-    RemovedPaidProbeCapsError, RetiredCapabilityKeysError, RetiredModelKnobsError, RetryPolicy,
-    SeatQuotaConfig, ServerAuth, ServerConfig, TrimConfig, UsageConfig, VersionTooNewError,
-    WindowGateConfig, WireCheckConfig, is_config_provider_kind, preflight_config_version,
-    preflight_raw_config, validate_cache_pricing_retired,
+    AliasValue, BreakerThreshold, CONFIG_PROVIDER_KINDS, CONFIG_VERSION_REMEDIATION,
+    CURRENT_CONFIG_VERSION, CacheCapability, CacheConfig, CalibrationConfig, CapabilityConfig,
+    Config, ConfigVersionError, HistoryReasoning, LegacyMitmCredentialSourceError, LogConfig,
+    MitmConfig, ModelEntry, OverrideEntry, PoolEntry, PricingConfig, ProviderEntry,
+    ProviderRuntimePolicy, RawConfigPreflightError, ReasoningDialect, ReductionConfig,
+    RegistryEntry, RemovedPaidProbeCapsError, Resolved, ResolvedTuning, RetiredCapabilityKeysError,
+    RetiredModelKnobsError, RetryPolicy, SeatQuotaConfig, ServerAuth, ServerConfig, TrimConfig,
+    TuningSource, UsageConfig, VersionTooNewError, WindowGateConfig, WireCheckConfig,
+    is_config_provider_kind, preflight_config_version, preflight_raw_config, resolve_tuning,
+    validate_cache_pricing_retired,
 };
 #[cfg(feature = "bedrock")]
 pub use config::{BedrockApiShapeConfig, BedrockCredsConfig, BedrockMantleConfig};

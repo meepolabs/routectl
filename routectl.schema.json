@@ -699,7 +699,7 @@
           "type": "boolean"
         },
         "stream_first_byte_timeout_ms": {
-          "description": "Per-model first-content timeout for streaming responses. Resolved\nwith precedence per-model > per-provider > global, extending\nthe existing two-tier provider > global resolution on\n`RetryPolicy::stream_first_byte_timeout_ms`.\n\nUse case: opus xhigh adaptive thinking on large prompts can\ntake >90s to emit the first token while non-thinking models\n(haiku, llama) start responding in <5s. A per-model override\nlets opus sit at 300s without forcing every other model to\nwait 5 min on a dead upstream.",
+          "description": "Per-model first-content timeout for streaming responses. Resolved\nwith precedence per-model > per-provider > per-pool > global\n(`RetryPolicy::stream_first_byte_timeout_ms`) > shipped default.\n`0` is ignored with a warning and falls through to the next tier.\n\nUse case: opus xhigh adaptive thinking on large prompts can\ntake >90s to emit the first token while non-thinking models\n(haiku, llama) start responding in <5s. A per-model override\nlets opus sit at 300s without forcing every other model to\nwait 5 min on a dead upstream.",
           "format": "uint64",
           "minimum": 0,
           "type": [
@@ -755,6 +755,24 @@
           "description": "Whether a future `routectl login` for this pool's provider family\nmay propose joining the new account to this pool. False (the\ndefault) pins the membership list: only an explicit config edit\ngrows it. This is the only thing that grows a pool -- there is no\nwildcard member token.",
           "type": "boolean"
         },
+        "circuit_cooldown_ms": {
+          "description": "How long an opened breaker on a member stays open, in\nmilliseconds. A member's own `circuit_cooldown_ms` wins over this\nvalue. None = inherit the 30 s default.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "circuit_failures": {
+          "description": "Consecutive failed attempts that open the circuit breaker on each\nmember of this pool. A member's own `circuit_failures` wins over\nthis value. None = inherit (the breaker stays off unless a member\nsets it).",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "members": {
           "description": "Provider entry names that make up this pool. Required and\nnon-empty: an empty pool serves nothing, which is a silent\nno-serve rather than a configuration an operator meant to write.\nEvery member must name an existing `[providers.X]` entry of the\nsame kind, and a provider entry belongs to at most one pool.",
           "items": {
@@ -762,10 +780,37 @@
           },
           "type": "array"
         },
+        "request_timeout_ms": {
+          "description": "Per-attempt request timeout for complete and count-tokens requests\nthrough this pool's members. Precedence: member provider > this\npool > `[retry] request_timeout_ms` > no cap.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "rpm_limit": {
+          "description": "Requests per minute allowed through each member of this pool. A\nmember's own `rpm_limit` wins over this value. None = inherit\n(unlimited).",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "seat_selection": {
           "$ref": "#/$defs/SeatSelection",
           "default": "fill-first",
           "description": "How dispatch picks among this pool's members for one request.\n`fill-first` (the default) drains one member before moving to the\nnext; `round-robin` spreads load across members, advancing the\nstart member per request; `sticky-least-loaded` pins each\nconversation to one member for prompt-cache affinity while\nbalancing new conversations across members by load, and is the only\nstrategy quota-aware placement applies to. Applied per request\nwhenever the pool resolves to more than one usable member."
+        },
+        "stream_first_byte_timeout_ms": {
+          "description": "Per-attempt first-content timeout for streams through this pool's\nmembers. Precedence: `[models.X]` > member provider > this pool >\n`[retry] stream_first_byte_timeout_ms` > the 10 min default.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
         }
       },
       "required": [
@@ -873,7 +918,7 @@
               "description": "Operator override for this entry's prompt-cache capability.\n`None` -> use the conservative per-kind default."
             },
             "circuit_cooldown_ms": {
-              "description": "How long to keep the circuit open (skip provider) once tripped.\nDefaults to 30s when `circuit_failures` is set.",
+              "description": "How long to keep the circuit open (skip provider) once tripped.\nWins over the claiming pool's value; defaults to 30s.",
               "format": "uint64",
               "minimum": 0,
               "type": [
@@ -882,7 +927,7 @@
               ]
             },
             "circuit_failures": {
-              "description": "Trip the circuit breaker after this many consecutive failed\nattempts within the failure window. Once tripped, the router\nskips this provider for `circuit_cooldown_ms`.\nNone = breaker disabled.",
+              "description": "Trip the circuit breaker after this many consecutive failed\nattempts within the failure window. Once tripped, the router\nskips this provider for `circuit_cooldown_ms`. Wins over the\nclaiming pool's value. None = inherit the pool's value, else the\nbreaker is disabled.",
               "format": "uint32",
               "minimum": 0,
               "type": [
@@ -921,7 +966,7 @@
               ]
             },
             "request_timeout_ms": {
-              "description": "Per-attempt request timeout that applies to every alias chain\nentry routing through this provider. Two-tier resolution\n(per-provider > global): this field fills in only when the\nglobal `[retry] request_timeout_ms` left the timeout unset.\n\nResolution order (provider > global):\n  provider.request_timeout_ms (this field)\n    -> `[retry]` request_timeout_ms (workspace global)\n      -> None (no cap, reqwest's default)\n\nUse this when many models share the same upstream and the\ntimeout is an upstream characteristic (e.g., NIM cold-start),\nnot a routing decision. v0.6 removed per-alias retry overrides;\nonly the two tiers above remain.",
+              "description": "Per-attempt request timeout that applies to every alias chain\nentry routing through this provider.\n\nResolution order (first set wins):\n  provider.request_timeout_ms (this field)\n    -> the claiming `[pools.X]` request_timeout_ms\n      -> `[retry]` request_timeout_ms (workspace global)\n        -> None (no cap, reqwest's default)\n\nUse this when many models share the same upstream and the\ntimeout is an upstream characteristic (e.g., NIM cold-start),\nnot a routing decision. v0.6 removed per-alias retry overrides.",
               "format": "uint64",
               "minimum": 0,
               "type": [
@@ -930,7 +975,7 @@
               ]
             },
             "rpm_limit": {
-              "description": "Maximum requests per minute. When exceeded, the router treats\nthis provider as a fallbackable failure and tries the next entry\nin the chain. None = unlimited.",
+              "description": "Maximum requests per minute. When exceeded, the router treats\nthis provider as a fallbackable failure and tries the next entry\nin the chain. Wins over the claiming pool's value. None = inherit\nthe pool's value, else unlimited.",
               "format": "uint32",
               "minimum": 0,
               "type": [
@@ -939,7 +984,7 @@
               ]
             },
             "stream_first_byte_timeout_ms": {
-              "description": "Per-attempt first-content timeout for streaming responses through\nthis provider. Same provider > global resolution as\n`request_timeout_ms`.",
+              "description": "Per-attempt first-content timeout for streaming responses through\nthis provider. Resolution order: `[models.X]` > this field > the\nclaiming `[pools.X]` > `[retry]` > the shipped 10 min default.",
               "format": "uint64",
               "minimum": 0,
               "type": [
@@ -1023,7 +1068,7 @@
               "description": "Operator override for this entry's prompt-cache capability.\n`None` -> use the conservative per-kind default. Useful when a\nnon-Anthropic upstream behind this anthropic-api-shaped\nprovider does not honor a top-level breakpoint."
             },
             "circuit_cooldown_ms": {
-              "description": "How long to keep the circuit open (skip provider) once tripped.\nDefaults to 30s when `circuit_failures` is set.",
+              "description": "How long to keep the circuit open (skip provider) once tripped.\nWins over the claiming pool's value; defaults to 30s.",
               "format": "uint64",
               "minimum": 0,
               "type": [
@@ -1032,7 +1077,7 @@
               ]
             },
             "circuit_failures": {
-              "description": "Trip the circuit breaker after this many consecutive failed\nattempts within the failure window. Once tripped, the router\nskips this provider for `circuit_cooldown_ms`.\nNone = breaker disabled.",
+              "description": "Trip the circuit breaker after this many consecutive failed\nattempts within the failure window. Once tripped, the router\nskips this provider for `circuit_cooldown_ms`. Wins over the\nclaiming pool's value. None = inherit the pool's value, else the\nbreaker is disabled.",
               "format": "uint32",
               "minimum": 0,
               "type": [
@@ -1108,7 +1153,7 @@
               ]
             },
             "request_timeout_ms": {
-              "description": "Per-attempt request timeout that applies to every alias chain\nentry routing through this provider. Two-tier resolution\n(per-provider > global): this field fills in only when the\nglobal `[retry] request_timeout_ms` left the timeout unset.\n\nResolution order (provider > global):\n  provider.request_timeout_ms (this field)\n    -> `[retry]` request_timeout_ms (workspace global)\n      -> None (no cap, reqwest's default)\n\nUse this when many models share the same upstream and the\ntimeout is an upstream characteristic (e.g., NIM cold-start),\nnot a routing decision. v0.6 removed per-alias retry overrides;\nonly the two tiers above remain.",
+              "description": "Per-attempt request timeout that applies to every alias chain\nentry routing through this provider.\n\nResolution order (first set wins):\n  provider.request_timeout_ms (this field)\n    -> the claiming `[pools.X]` request_timeout_ms\n      -> `[retry]` request_timeout_ms (workspace global)\n        -> None (no cap, reqwest's default)\n\nUse this when many models share the same upstream and the\ntimeout is an upstream characteristic (e.g., NIM cold-start),\nnot a routing decision. v0.6 removed per-alias retry overrides.",
               "format": "uint64",
               "minimum": 0,
               "type": [
@@ -1117,7 +1162,7 @@
               ]
             },
             "rpm_limit": {
-              "description": "Maximum requests per minute. When exceeded, the router treats\nthis provider as a fallbackable failure and tries the next entry\nin the chain. None = unlimited.",
+              "description": "Maximum requests per minute. When exceeded, the router treats\nthis provider as a fallbackable failure and tries the next entry\nin the chain. Wins over the claiming pool's value. None = inherit\nthe pool's value, else unlimited.",
               "format": "uint32",
               "minimum": 0,
               "type": [
@@ -1126,7 +1171,7 @@
               ]
             },
             "stream_first_byte_timeout_ms": {
-              "description": "Per-attempt first-content timeout for streaming responses through\nthis provider. Same provider > global resolution as\n`request_timeout_ms`.",
+              "description": "Per-attempt first-content timeout for streaming responses through\nthis provider. Resolution order: `[models.X]` > this field > the\nclaiming `[pools.X]` > `[retry]` > the shipped 10 min default.",
               "format": "uint64",
               "minimum": 0,
               "type": [
@@ -1214,7 +1259,7 @@
               "description": "Operator override for this entry's prompt-cache capability.\n`None` -> use the conservative per-kind default."
             },
             "circuit_cooldown_ms": {
-              "description": "How long to keep the circuit open (skip provider) once tripped.\nDefaults to 30s when `circuit_failures` is set.",
+              "description": "How long to keep the circuit open (skip provider) once tripped.\nWins over the claiming pool's value; defaults to 30s.",
               "format": "uint64",
               "minimum": 0,
               "type": [
@@ -1223,7 +1268,7 @@
               ]
             },
             "circuit_failures": {
-              "description": "Trip the circuit breaker after this many consecutive failed\nattempts within the failure window. Once tripped, the router\nskips this provider for `circuit_cooldown_ms`.\nNone = breaker disabled.",
+              "description": "Trip the circuit breaker after this many consecutive failed\nattempts within the failure window. Once tripped, the router\nskips this provider for `circuit_cooldown_ms`. Wins over the\nclaiming pool's value. None = inherit the pool's value, else the\nbreaker is disabled.",
               "format": "uint32",
               "minimum": 0,
               "type": [
@@ -1269,7 +1314,7 @@
               ]
             },
             "request_timeout_ms": {
-              "description": "Per-attempt request timeout that applies to every alias chain\nentry routing through this provider. Two-tier resolution\n(per-provider > global): this field fills in only when the\nglobal `[retry] request_timeout_ms` left the timeout unset.\n\nResolution order (provider > global):\n  provider.request_timeout_ms (this field)\n    -> `[retry]` request_timeout_ms (workspace global)\n      -> None (no cap, reqwest's default)\n\nUse this when many models share the same upstream and the\ntimeout is an upstream characteristic (e.g., NIM cold-start),\nnot a routing decision. v0.6 removed per-alias retry overrides;\nonly the two tiers above remain.",
+              "description": "Per-attempt request timeout that applies to every alias chain\nentry routing through this provider.\n\nResolution order (first set wins):\n  provider.request_timeout_ms (this field)\n    -> the claiming `[pools.X]` request_timeout_ms\n      -> `[retry]` request_timeout_ms (workspace global)\n        -> None (no cap, reqwest's default)\n\nUse this when many models share the same upstream and the\ntimeout is an upstream characteristic (e.g., NIM cold-start),\nnot a routing decision. v0.6 removed per-alias retry overrides.",
               "format": "uint64",
               "minimum": 0,
               "type": [
@@ -1278,7 +1323,7 @@
               ]
             },
             "rpm_limit": {
-              "description": "Maximum requests per minute. When exceeded, the router treats\nthis provider as a fallbackable failure and tries the next entry\nin the chain. None = unlimited.",
+              "description": "Maximum requests per minute. When exceeded, the router treats\nthis provider as a fallbackable failure and tries the next entry\nin the chain. Wins over the claiming pool's value. None = inherit\nthe pool's value, else unlimited.",
               "format": "uint32",
               "minimum": 0,
               "type": [
@@ -1287,7 +1332,7 @@
               ]
             },
             "stream_first_byte_timeout_ms": {
-              "description": "Per-attempt first-content timeout for streaming responses through\nthis provider. Same provider > global resolution as\n`request_timeout_ms`.",
+              "description": "Per-attempt first-content timeout for streaming responses through\nthis provider. Resolution order: `[models.X]` > this field > the\nclaiming `[pools.X]` > `[retry]` > the shipped 10 min default.",
               "format": "uint64",
               "minimum": 0,
               "type": [
@@ -1353,7 +1398,7 @@
               "description": "Operator override for this entry's prompt-cache capability.\n`None` -> use the conservative per-kind default."
             },
             "circuit_cooldown_ms": {
-              "description": "How long to keep the circuit open (skip provider) once tripped.\nDefaults to 30s when `circuit_failures` is set.",
+              "description": "How long to keep the circuit open (skip provider) once tripped.\nWins over the claiming pool's value; defaults to 30s.",
               "format": "uint64",
               "minimum": 0,
               "type": [
@@ -1362,7 +1407,7 @@
               ]
             },
             "circuit_failures": {
-              "description": "Trip the circuit breaker after this many consecutive failed\nattempts within the failure window. Once tripped, the router\nskips this provider for `circuit_cooldown_ms`.\nNone = breaker disabled.",
+              "description": "Trip the circuit breaker after this many consecutive failed\nattempts within the failure window. Once tripped, the router\nskips this provider for `circuit_cooldown_ms`. Wins over the\nclaiming pool's value. None = inherit the pool's value, else the\nbreaker is disabled.",
               "format": "uint32",
               "minimum": 0,
               "type": [
@@ -1409,7 +1454,7 @@
               "type": "string"
             },
             "request_timeout_ms": {
-              "description": "Per-attempt request timeout that applies to every alias chain\nentry routing through this provider. Two-tier resolution\n(per-provider > global): this field fills in only when the\nglobal `[retry] request_timeout_ms` left the timeout unset.\n\nResolution order (provider > global):\n  provider.request_timeout_ms (this field)\n    -> `[retry]` request_timeout_ms (workspace global)\n      -> None (no cap, reqwest's default)\n\nUse this when many models share the same upstream and the\ntimeout is an upstream characteristic (e.g., NIM cold-start),\nnot a routing decision. v0.6 removed per-alias retry overrides;\nonly the two tiers above remain.",
+              "description": "Per-attempt request timeout that applies to every alias chain\nentry routing through this provider.\n\nResolution order (first set wins):\n  provider.request_timeout_ms (this field)\n    -> the claiming `[pools.X]` request_timeout_ms\n      -> `[retry]` request_timeout_ms (workspace global)\n        -> None (no cap, reqwest's default)\n\nUse this when many models share the same upstream and the\ntimeout is an upstream characteristic (e.g., NIM cold-start),\nnot a routing decision. v0.6 removed per-alias retry overrides.",
               "format": "uint64",
               "minimum": 0,
               "type": [
@@ -1418,7 +1463,7 @@
               ]
             },
             "rpm_limit": {
-              "description": "Maximum requests per minute. When exceeded, the router treats\nthis provider as a fallbackable failure and tries the next entry\nin the chain. None = unlimited.",
+              "description": "Maximum requests per minute. When exceeded, the router treats\nthis provider as a fallbackable failure and tries the next entry\nin the chain. Wins over the claiming pool's value. None = inherit\nthe pool's value, else unlimited.",
               "format": "uint32",
               "minimum": 0,
               "type": [
@@ -1427,7 +1472,7 @@
               ]
             },
             "stream_first_byte_timeout_ms": {
-              "description": "Per-attempt first-content timeout for streaming responses through\nthis provider. Same provider > global resolution as\n`request_timeout_ms`.",
+              "description": "Per-attempt first-content timeout for streaming responses through\nthis provider. Resolution order: `[models.X]` > this field > the\nclaiming `[pools.X]` > `[retry]` > the shipped 10 min default.",
               "format": "uint64",
               "minimum": 0,
               "type": [
@@ -1495,7 +1540,7 @@
               "description": "Operator override for this entry's prompt-cache capability.\n`None` -> use the conservative per-kind default."
             },
             "circuit_cooldown_ms": {
-              "description": "How long to keep the circuit open (skip provider) once tripped.\nDefaults to 30s when `circuit_failures` is set.",
+              "description": "How long to keep the circuit open (skip provider) once tripped.\nWins over the claiming pool's value; defaults to 30s.",
               "format": "uint64",
               "minimum": 0,
               "type": [
@@ -1504,7 +1549,7 @@
               ]
             },
             "circuit_failures": {
-              "description": "Trip the circuit breaker after this many consecutive failed\nattempts within the failure window. Once tripped, the router\nskips this provider for `circuit_cooldown_ms`.\nNone = breaker disabled.",
+              "description": "Trip the circuit breaker after this many consecutive failed\nattempts within the failure window. Once tripped, the router\nskips this provider for `circuit_cooldown_ms`. Wins over the\nclaiming pool's value. None = inherit the pool's value, else the\nbreaker is disabled.",
               "format": "uint32",
               "minimum": 0,
               "type": [
@@ -1550,7 +1595,7 @@
               ]
             },
             "request_timeout_ms": {
-              "description": "Per-attempt request timeout that applies to every alias chain\nentry routing through this provider. Two-tier resolution\n(per-provider > global): this field fills in only when the\nglobal `[retry] request_timeout_ms` left the timeout unset.\n\nResolution order (provider > global):\n  provider.request_timeout_ms (this field)\n    -> `[retry]` request_timeout_ms (workspace global)\n      -> None (no cap, reqwest's default)\n\nUse this when many models share the same upstream and the\ntimeout is an upstream characteristic (e.g., NIM cold-start),\nnot a routing decision. v0.6 removed per-alias retry overrides;\nonly the two tiers above remain.",
+              "description": "Per-attempt request timeout that applies to every alias chain\nentry routing through this provider.\n\nResolution order (first set wins):\n  provider.request_timeout_ms (this field)\n    -> the claiming `[pools.X]` request_timeout_ms\n      -> `[retry]` request_timeout_ms (workspace global)\n        -> None (no cap, reqwest's default)\n\nUse this when many models share the same upstream and the\ntimeout is an upstream characteristic (e.g., NIM cold-start),\nnot a routing decision. v0.6 removed per-alias retry overrides.",
               "format": "uint64",
               "minimum": 0,
               "type": [
@@ -1559,7 +1604,7 @@
               ]
             },
             "rpm_limit": {
-              "description": "Maximum requests per minute. When exceeded, the router treats\nthis provider as a fallbackable failure and tries the next entry\nin the chain. None = unlimited.",
+              "description": "Maximum requests per minute. When exceeded, the router treats\nthis provider as a fallbackable failure and tries the next entry\nin the chain. Wins over the claiming pool's value. None = inherit\nthe pool's value, else unlimited.",
               "format": "uint32",
               "minimum": 0,
               "type": [
@@ -1568,7 +1613,7 @@
               ]
             },
             "stream_first_byte_timeout_ms": {
-              "description": "Per-attempt first-content timeout for streaming responses through\nthis provider. Same provider > global resolution as\n`request_timeout_ms`.",
+              "description": "Per-attempt first-content timeout for streaming responses through\nthis provider. Resolution order: `[models.X]` > this field > the\nclaiming `[pools.X]` > `[retry]` > the shipped 10 min default.",
               "format": "uint64",
               "minimum": 0,
               "type": [
@@ -1719,7 +1764,7 @@
           "type": "integer"
         },
         "request_timeout_ms": {
-          "description": "End-to-end per-attempt timeout. `None` means rely on the\nreqwest client's default (no explicit cap). When set, the\nrouter wraps each upstream call in `tokio::time::timeout`\nand treats expiry as a network error (status 0, retryable).",
+          "description": "End-to-end per-attempt timeout. `None` means rely on the\nreqwest client's default (no explicit cap). When set, the\nrouter wraps each upstream call in `tokio::time::timeout`\nand treats expiry as a network error (status 0, retryable).\nThe workspace-wide tier: `[providers.X]` and `[pools.X]` values\nwin over this one.",
           "format": "uint64",
           "minimum": 0,
           "type": [
@@ -1755,8 +1800,7 @@
           ]
         },
         "stream_first_byte_timeout_ms": {
-          "default": 600000,
-          "description": "First-content timeout for streaming responses. If the upstream\nhasn't emitted a content-bearing chunk in this window, the stream\nis abandoned and (if no content has been delivered yet) the next\nprovider in the chain is tried. Content-free leading chunks (a\n`delta.role` opener, id/model metadata) neither reset nor satisfy\nthis timeout.",
+          "description": "First-content timeout for streaming responses. If the upstream\nhasn't emitted a content-bearing chunk in this window, the stream\nis abandoned and (if no content has been delivered yet) the next\nprovider in the chain is tried. Content-free leading chunks (a\n`delta.role` opener, id/model metadata) neither reset nor satisfy\nthis timeout.\n\nPrecedence: `[models.X]` > `[providers.X]` > `[pools.X]` > this\nglobal > the shipped 10 min default. None here means inherit the\ndefault, not \"no timeout\".",
           "format": "uint64",
           "minimum": 0,
           "type": [
@@ -2099,8 +2143,7 @@
         "jitter_ms": 50,
         "max_attempts": 2,
         "max_honored_retry_after_ms": null,
-        "probe_max_tokens": 1,
-        "stream_first_byte_timeout_ms": 600000
+        "probe_max_tokens": 1
       },
       "description": "Default retry policy applied per-provider attempt."
     },

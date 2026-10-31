@@ -20,8 +20,7 @@ use routectl_core::UpstreamReason;
 use routectl_core::failure_class::LastOutcome;
 
 use crate::config::ProviderRuntimePolicy;
-
-const DEFAULT_CIRCUIT_COOLDOWN_MS: u64 = 30_000;
+use crate::config::tuning::{BreakerThreshold, GateTuning, ResolvedTuning};
 const RPM_WINDOW_MS: u64 = 60_000;
 
 /// How long a credential park holds before the half-open path re-tests the
@@ -252,21 +251,26 @@ pub enum GateDecision {
 
 impl ProviderState {
     /// Build a provider's runtime state from its policy, seeding the RPM
-    /// token bucket and circuit-breaker thresholds.
+    /// token bucket and circuit-breaker thresholds. The policy is the only
+    /// configured tier; unset keys take the shipped defaults.
     pub fn new(policy: &ProviderRuntimePolicy) -> Self {
+        Self::from_gate(ResolvedTuning::from_provider_runtime(policy).gate())
+    }
+
+    /// Build a runtime state from resolved gate tuning.
+    pub(crate) fn from_gate(gate: GateTuning) -> Self {
         let now = Instant::now();
-        let circuit_cooldown = Duration::from_millis(
-            policy
-                .circuit_cooldown_ms
-                .unwrap_or(DEFAULT_CIRCUIT_COOLDOWN_MS),
-        );
+        let circuit_failure_threshold = match gate.threshold {
+            BreakerThreshold::Disabled => None,
+            BreakerThreshold::After(n) => Some(n.get()),
+        };
         Self {
-            rpm_capacity: policy.rpm_limit.map(|r| r as f64),
-            rpm_tokens: policy.rpm_limit.map_or(0.0, |r| r as f64),
+            rpm_capacity: gate.rpm_limit.map(f64::from),
+            rpm_tokens: gate.rpm_limit.map_or(0.0, f64::from),
             rpm_last_refill: now,
-            circuit_failure_threshold: policy.circuit_failures,
-            circuit_cooldown,
-            active_cooldown: circuit_cooldown,
+            circuit_failure_threshold,
+            circuit_cooldown: gate.cooldown,
+            active_cooldown: gate.cooldown,
             consecutive_failures: 0,
             circuit_opened_at: None,
             half_open_in_flight: false,

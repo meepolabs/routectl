@@ -2144,10 +2144,11 @@ impl Router {
     pub fn new(config: Arc<Config>) -> Self {
         let mut state = BTreeMap::new();
         let mut slot_owners = BTreeMap::new();
-        for (name, entry) in &config.providers {
+        for name in config.providers.keys() {
+            let gate = crate::config::resolve_tuning(&config, Some(name), None).gate();
             state.insert(
                 name.clone(),
-                Arc::new(Mutex::new(ProviderState::new(entry.runtime()))),
+                Arc::new(Mutex::new(ProviderState::from_gate(gate))),
             );
             slot_owners.insert(name.clone(), state_slots::SlotOwner::Provider(name.clone()));
         }
@@ -2288,9 +2289,9 @@ impl Router {
     /// models on the same `[providers.X]` therefore have independent
     /// gates so a flaky model-on-provider combination quarantines
     /// itself without taking healthy siblings down. Each per-model
-    /// state is initialized from the parent provider's
-    /// `ProviderRuntimePolicy` (rpm_limit, circuit_failures, etc.) so
-    /// the operator's TOML knobs apply per model out of the box.
+    /// state is seeded from the resolved tuning of the model's provider
+    /// entry or pool (rpm_limit, circuit_failures, etc.) so the
+    /// operator's TOML knobs apply per model out of the box.
     ///
     /// A model whose state keys are ambiguous is refused with a WARN and left
     /// out of the table: a nickname or pool member carrying the seat-key
@@ -2328,38 +2329,24 @@ impl Router {
             self.providers
                 .entry(m.provider_name.clone())
                 .or_insert_with(|| m.provider.clone());
-            // Per-model state: clone the parent provider's runtime
-            // policy (timeouts, RPM, circuit). Each model gets a
-            // FRESH state instance even when the policy is identical
-            // -- the breaker counters and RPM tokens must not be
-            // shared across models on one transport.
-            let policy = self
-                .config
-                .providers
-                .get(&m.provider_name)
-                .map(|e| e.runtime().clone())
-                .unwrap_or_default();
+            // Each model gets a FRESH state instance even when the tuning
+            // is identical -- the breaker counters and RPM tokens must not
+            // be shared across models on one transport.
+            //
             // A pooled model (Some seats) gets one state slot per seat,
             // each keyed by that seat's per-model `state_key`, so the breaker
             // + RPM bucket are per (model, seat) -- probe fast-fail, retry
-            // caps, and the reset park all apply per seat. Each seat's policy
-            // comes from its OWN member entry: a pool-backed model's
-            // `provider_name` is the POOL name, which has no runtime block, so
-            // reading the policy from it would silently hand every seat the
-            // defaults instead of the operator's per-account knobs.
+            // caps, and the reset park all apply per seat. Each seat resolves
+            // through its OWN member entry (member over pool), while the
+            // model's own nickname slot resolves through `provider_name`,
+            // which for a pool-backed model is the POOL name.
             // A non-pooled model (None seats) only gets the nickname slot.
             if let Some(seats) = m.seats.as_ref() {
                 for seat in seats.iter() {
-                    let seat_policy = self
-                        .config
-                        .providers
-                        .get(&seat.provider_name)
-                        .map(|e| e.runtime().clone())
-                        .unwrap_or_default();
                     self.claim_state_slot(
                         seat.state_key_for(nickname),
                         state_slots::SlotOwner::Provider(seat.provider_name.clone()),
-                        &seat_policy,
+                        Some(&seat.provider_name),
                     );
                 }
                 // Round-robin pools rotate the starting seat per request;
@@ -2375,7 +2362,7 @@ impl Router {
             self.claim_state_slot(
                 nickname.clone(),
                 state_slots::SlotOwner::of_model(m),
-                &policy,
+                Some(&m.provider_name),
             );
         }
         self.admit_quota_seats();
@@ -3219,7 +3206,7 @@ impl Router {
         self.claim_state_slot(
             name.clone(),
             state_slots::SlotOwner::Provider(name.clone()),
-            &Default::default(),
+            None,
         );
         self.providers.insert(name, provider);
     }

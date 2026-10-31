@@ -948,9 +948,9 @@ pub struct ModelEntry {
     pub payload_extras: Option<Value>,
 
     /// Per-model first-content timeout for streaming responses. Resolved
-    /// with precedence per-model > per-provider > global, extending
-    /// the existing two-tier provider > global resolution on
-    /// `RetryPolicy::stream_first_byte_timeout_ms`.
+    /// with precedence per-model > per-provider > per-pool > global
+    /// (`RetryPolicy::stream_first_byte_timeout_ms`) > shipped default.
+    /// `0` is ignored with a warning and falls through to the next tier.
     ///
     /// Use case: opus xhigh adaptive thinking on large prompts can
     /// take >90s to emit the first token while non-thinking models
@@ -2891,38 +2891,38 @@ fn redact_base_url(base_url: &str) -> String {
 pub struct ProviderRuntimePolicy {
     /// Maximum requests per minute. When exceeded, the router treats
     /// this provider as a fallbackable failure and tries the next entry
-    /// in the chain. None = unlimited.
+    /// in the chain. Wins over the claiming pool's value. None = inherit
+    /// the pool's value, else unlimited.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rpm_limit: Option<u32>,
     /// Trip the circuit breaker after this many consecutive failed
     /// attempts within the failure window. Once tripped, the router
-    /// skips this provider for `circuit_cooldown_ms`.
-    /// None = breaker disabled.
+    /// skips this provider for `circuit_cooldown_ms`. Wins over the
+    /// claiming pool's value. None = inherit the pool's value, else the
+    /// breaker is disabled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub circuit_failures: Option<u32>,
     /// How long to keep the circuit open (skip provider) once tripped.
-    /// Defaults to 30s when `circuit_failures` is set.
+    /// Wins over the claiming pool's value; defaults to 30s.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub circuit_cooldown_ms: Option<u64>,
     /// Per-attempt request timeout that applies to every alias chain
-    /// entry routing through this provider. Two-tier resolution
-    /// (per-provider > global): this field fills in only when the
-    /// global `[retry] request_timeout_ms` left the timeout unset.
+    /// entry routing through this provider.
     ///
-    /// Resolution order (provider > global):
+    /// Resolution order (first set wins):
     ///   provider.request_timeout_ms (this field)
-    ///     -> `[retry]` request_timeout_ms (workspace global)
-    ///       -> None (no cap, reqwest's default)
+    ///     -> the claiming `[pools.X]` request_timeout_ms
+    ///       -> `[retry]` request_timeout_ms (workspace global)
+    ///         -> None (no cap, reqwest's default)
     ///
     /// Use this when many models share the same upstream and the
     /// timeout is an upstream characteristic (e.g., NIM cold-start),
-    /// not a routing decision. v0.6 removed per-alias retry overrides;
-    /// only the two tiers above remain.
+    /// not a routing decision. v0.6 removed per-alias retry overrides.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_timeout_ms: Option<u64>,
     /// Per-attempt first-content timeout for streaming responses through
-    /// this provider. Same provider > global resolution as
-    /// `request_timeout_ms`.
+    /// this provider. Resolution order: `[models.X]` > this field > the
+    /// claiming `[pools.X]` > `[retry]` > the shipped 10 min default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_first_byte_timeout_ms: Option<u64>,
     /// Operator remap of a raw upstream status code to a config-facing
@@ -3126,6 +3126,8 @@ pub struct RetryPolicy {
     /// reqwest client's default (no explicit cap). When set, the
     /// router wraps each upstream call in `tokio::time::timeout`
     /// and treats expiry as a network error (status 0, retryable).
+    /// The workspace-wide tier: `[providers.X]` and `[pools.X]` values
+    /// win over this one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_timeout_ms: Option<u64>,
     /// First-content timeout for streaming responses. If the upstream
@@ -3134,10 +3136,11 @@ pub struct RetryPolicy {
     /// provider in the chain is tried. Content-free leading chunks (a
     /// `delta.role` opener, id/model metadata) neither reset nor satisfy
     /// this timeout.
-    #[serde(
-        default = "default_stream_first_byte_timeout_ms",
-        skip_serializing_if = "Option::is_none"
-    )]
+    ///
+    /// Precedence: `[models.X]` > `[providers.X]` > `[pools.X]` > this
+    /// global > the shipped 10 min default. None here means inherit the
+    /// default, not "no timeout".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_first_byte_timeout_ms: Option<u64>,
 
     /// Requests with `max_tokens` <= this are treated as availability
@@ -3181,15 +3184,7 @@ impl Default for RetryPolicy {
             retry_on_5xx: None,
             retry_on_network: None,
             request_timeout_ms: None,
-            // The early-response inversion holds the client warm, so a
-            // pinging-but-contentless upstream would otherwise be
-            // unbounded (the client no longer bails at ~300s). 600000ms
-            // mirrors the live deployment and sits well above the 300s
-            // read_timeout as a total-silence backstop. Shares
-            // `default_stream_first_byte_timeout_ms` with the serde
-            // field default so a `[retry]` block that omits this key
-            // gets the same backstop, not `None`.
-            stream_first_byte_timeout_ms: default_stream_first_byte_timeout_ms(),
+            stream_first_byte_timeout_ms: None,
             probe_max_tokens: default_probe_max_tokens(),
             max_honored_retry_after_ms: None,
             classes: BTreeMap::new(),
@@ -3243,17 +3238,6 @@ const DEFAULT_MAX_HONORED_RETRY_AFTER_MS: u64 = 3_600_000;
 
 const fn default_probe_max_tokens() -> u32 {
     1
-}
-
-/// Backstop for `RetryPolicy::stream_first_byte_timeout_ms` when a
-/// `[retry]` block is present but omits this key. Serde's bare
-/// `#[serde(default)]` would otherwise fill `Option::<u64>::default()`
-/// (`None`), reintroducing the unbounded pinging-but-contentless hang
-/// this field's `Some(600000)` default exists to prevent -- the struct
-/// `Default` impl only applies when the whole `[retry]` table is
-/// absent, not when individual keys within it are.
-const fn default_stream_first_byte_timeout_ms() -> Option<u64> {
-    Some(600_000)
 }
 
 const fn default_backoff_ms() -> u64 {

@@ -36,20 +36,8 @@ fn default_retry_policy_has_probe_max_tokens_one() {
     assert_eq!(RetryPolicy::default().probe_max_tokens, 1);
 }
 
-/// The code default for `stream_first_byte_timeout_ms` is `Some`,
-/// not `None` -- a pinging-but-contentless upstream must have a
-/// bound even when the operator sets no `[retry]` block at all.
-#[test]
-fn default_retry_policy_has_stream_first_byte_timeout_backstop() {
-    assert_eq!(
-        RetryPolicy::default().stream_first_byte_timeout_ms,
-        Some(600_000),
-        "default must be Some(600000) as a total-silence backstop"
-    );
-}
-
 /// An operator that sets `stream_first_byte_timeout_ms` explicitly
-/// must get exactly that value back, unaffected by the new default.
+/// must get exactly that value back.
 #[test]
 fn stream_first_byte_timeout_ms_explicit_override_round_trips_unchanged() {
     use crate::config::Config;
@@ -59,27 +47,6 @@ stream_first_byte_timeout_ms = 120000
 ";
     let cfg: Config = toml::from_str(toml_text).expect("parse");
     assert_eq!(cfg.retry.stream_first_byte_timeout_ms, Some(120_000));
-}
-
-/// A `[retry]` block that sets some OTHER field but omits
-/// `stream_first_byte_timeout_ms` must still get the `Some(600000)`
-/// backstop, not `None`. This is the case the struct-level
-/// `Default` impl does NOT cover, since that only applies when the
-/// whole `[retry]` table is absent.
-#[test]
-fn stream_first_byte_timeout_ms_defaults_to_backstop_when_omitted() {
-    use crate::config::Config;
-    let toml_text = r"
-[retry]
-max_attempts = 5
-";
-    let cfg: Config = toml::from_str(toml_text).expect("parse");
-    assert_eq!(
-        cfg.retry.stream_first_byte_timeout_ms,
-        Some(600_000),
-        "omitting the key inside a present [retry] block must not lose the backstop"
-    );
-    assert_eq!(cfg.retry.max_attempts, 5, "other fields unaffected");
 }
 
 /// A `[retry]` block omitting `max_honored_retry_after_ms` resolves

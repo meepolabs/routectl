@@ -13,10 +13,8 @@ fn overlay_at_revision(revision: u64) -> Arc<crate::catalog_overlay::CatalogOver
     })
 }
 
-/// Build a Router with one openai-compat provider that has the given
-/// runtime-policy timeouts, and an alias chain of length 1 pointing
-/// at it. The base RetryPolicy passed to compose_attempt_policy
-/// represents what `policy_for(alias)` resolved to.
+/// Build a Router with one openai-compat provider `p1` carrying the given
+/// runtime-policy timeouts.
 fn build_router_with_provider_timeouts(
     provider_request_timeout: Option<u64>,
     provider_first_byte_timeout: Option<u64>,
@@ -36,121 +34,42 @@ fn build_router_with_provider_timeouts(
     Router::new(Arc::new(cfg))
 }
 
+/// `compose_attempt_policy` takes both timeouts from the tuning resolver,
+/// not from `base`: the provider tier beats a global set on `base`'s
+/// source config, and the model override beats both.
 #[test]
-fn compose_inherits_timeout_from_provider_when_alias_left_none() {
-    // Alias-resolved policy has no timeout overrides.
-    // Provider config sets both timeouts.
-    // Expected: provider's values land in the per-attempt policy.
-    let router = build_router_with_provider_timeouts(Some(180_000), Some(60_000));
-    let base = RetryPolicy {
-        stream_first_byte_timeout_ms: None, // alias left this unset
-        ..RetryPolicy::default()
-    };
-    let composed = router.compose_attempt_policy(&base, "p1", None);
-    assert_eq!(composed.request_timeout_ms, Some(180_000));
-    assert_eq!(composed.stream_first_byte_timeout_ms, Some(60_000));
-}
+fn compose_takes_both_timeouts_from_the_resolver() {
+    // Arrange
+    let cfg: Config = toml::from_str(
+        r#"
+[providers.p1]
+kind = "openai-compat"
+base_url = "https://example.test/v1"
+api_key_ref = "env://K"
+request_timeout_ms = 120000
+stream_first_byte_timeout_ms = 60000
 
-#[test]
-fn compose_alias_override_wins_over_provider() {
-    // Alias-resolved policy has BOTH timeouts set explicitly.
-    // Provider config also sets values. Alias wins.
-    let router = build_router_with_provider_timeouts(Some(180_000), Some(60_000));
-    let base = RetryPolicy {
-        request_timeout_ms: Some(30_000),
-        stream_first_byte_timeout_ms: Some(5_000),
-        ..RetryPolicy::default()
-    };
-    let composed = router.compose_attempt_policy(&base, "p1", None);
-    assert_eq!(composed.request_timeout_ms, Some(30_000));
-    assert_eq!(composed.stream_first_byte_timeout_ms, Some(5_000));
-}
+[retry]
+request_timeout_ms = 1800000
+stream_first_byte_timeout_ms = 90000
+"#,
+    )
+    .expect("valid test toml");
+    let base = cfg.retry.clone();
+    let router = Router::new(Arc::new(cfg));
 
-#[test]
-fn compose_independent_per_field_resolution() {
-    // Alias sets ONLY request_timeout_ms; provider sets ONLY
-    // stream_first_byte_timeout_ms. Expected: each field falls
-    // through independently.
-    let router = build_router_with_provider_timeouts(None, Some(120_000));
-    let base = RetryPolicy {
-        request_timeout_ms: Some(45_000),
-        stream_first_byte_timeout_ms: None, // alias left this unset
-        ..RetryPolicy::default()
-    };
-    let composed = router.compose_attempt_policy(&base, "p1", None);
-    assert_eq!(composed.request_timeout_ms, Some(45_000));
-    assert_eq!(composed.stream_first_byte_timeout_ms, Some(120_000));
-}
+    // Act
+    let provider_tier = router.compose_attempt_policy(&base, "p1", None);
+    let model_tier = router.compose_attempt_policy(&base, "p1", Some(5_000));
 
-#[test]
-fn compose_no_provider_entry_passes_base_through_unchanged() {
-    // If the chain entry's provider isn't in config (e.g. test
-    // harness that registered a Provider without adding a config
-    // ProviderEntry), provider-level lookup returns None and the
-    // base policy survives unchanged.
-    let router = build_router_with_provider_timeouts(Some(99_999), Some(99_999));
-    let base = RetryPolicy {
-        request_timeout_ms: Some(7_000),
-        stream_first_byte_timeout_ms: None, // alias left this unset
-        ..RetryPolicy::default()
-    };
-    let composed = router.compose_attempt_policy(&base, "missing-provider", None);
-    assert_eq!(composed.request_timeout_ms, Some(7_000));
-    assert!(composed.stream_first_byte_timeout_ms.is_none());
-}
-
-#[test]
-fn compose_no_overrides_anywhere_yields_none() {
-    // Belt-and-braces: alias = None, provider = None, default
-    // policy = None. composed.request_timeout_ms stays None
-    // (router falls through to reqwest's default).
-    let router = build_router_with_provider_timeouts(None, None);
-    let base = RetryPolicy {
-        stream_first_byte_timeout_ms: None, // alias left this unset
-        ..RetryPolicy::default()
-    };
-    let composed = router.compose_attempt_policy(&base, "p1", None);
-    assert!(composed.request_timeout_ms.is_none());
-    assert!(composed.stream_first_byte_timeout_ms.is_none());
-}
-
-#[test]
-fn compose_model_first_byte_timeout_wins_over_provider_and_global() {
-    // Per-model > per-provider > global. The per-model override
-    // pins 5000 even though global is 90000 and provider is 60000.
-    let router = build_router_with_provider_timeouts(None, Some(60_000));
-    let base = RetryPolicy {
-        stream_first_byte_timeout_ms: Some(90_000),
-        ..RetryPolicy::default()
-    };
-    let composed = router.compose_attempt_policy(&base, "p1", Some(5_000));
-    assert_eq!(composed.stream_first_byte_timeout_ms, Some(5_000));
-}
-
-#[test]
-fn compose_model_first_byte_timeout_none_falls_back_to_provider_resolution() {
-    // No per-model override -> provider + global path resolves
-    // exactly as before. With base unset, the provider's value wins.
-    let router = build_router_with_provider_timeouts(None, Some(60_000));
-    let base = RetryPolicy {
-        stream_first_byte_timeout_ms: None, // alias left this unset
-        ..RetryPolicy::default()
-    };
-    let composed = router.compose_attempt_policy(&base, "p1", None);
-    assert_eq!(composed.stream_first_byte_timeout_ms, Some(60_000));
-}
-
-#[test]
-fn compose_model_first_byte_timeout_wins_over_base_too() {
-    // Per-model override beats base (global) even when base is set.
-    // Pins the per-model > global precedence regardless of provider state.
-    let router = build_router_with_provider_timeouts(None, None);
-    let base = RetryPolicy {
-        stream_first_byte_timeout_ms: Some(45_000),
-        ..RetryPolicy::default()
-    };
-    let composed = router.compose_attempt_policy(&base, "p1", Some(10_000));
-    assert_eq!(composed.stream_first_byte_timeout_ms, Some(10_000));
+    // Assert
+    assert_eq!(provider_tier.request_timeout_ms, Some(120_000));
+    assert_eq!(provider_tier.stream_first_byte_timeout_ms, Some(60_000));
+    assert_eq!(model_tier.stream_first_byte_timeout_ms, Some(5_000));
+    assert_eq!(
+        model_tier.max_attempts, base.max_attempts,
+        "non-tiered fields pass through"
+    );
 }
 
 #[test]
