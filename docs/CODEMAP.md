@@ -4239,6 +4239,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   completion retries under the hard cap and the class predicate unless the
   attempt parked); `should_fallback` (the chain-hop predicate: probe fast-fail
   and transcript rejections stay, an unknown provider always walks)
+- `src/router/breaker_transition.rs` -- the INFO transition lines
+  `breaker_opened` / `breaker_parked` / `breaker_closed` (event token and
+  sanitized `state_key` only), emitted by `runtime_gate`, `credential_park`
+  and `stream_commit` when a settle changes the circuit's state
 - `src/router/runtime_gate.rs` -- breaker/RPM gate + probe-slot admission
   RAII: `admit_client`/`admit_probe` (take the target's credential account;
   `admit_locked` checks the account park first, so a live park refuses before

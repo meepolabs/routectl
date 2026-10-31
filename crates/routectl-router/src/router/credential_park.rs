@@ -396,15 +396,19 @@ impl Router {
         let Some(state) = self.state.get(state_key) else {
             return;
         };
-        let mut accounts = self.credential_accounts.lock();
-        let mut state = state.lock();
-        if record_breaker {
-            state.record_success(Instant::now());
-        }
-        #[cfg(test)]
-        run_within_success_settle_hook();
-        if let Some(record) = account.and_then(|account| accounts.get_mut(account)) {
-            record.clear_in_generation(generation);
+        let closed = {
+            let mut accounts = self.credential_accounts.lock();
+            let mut state = state.lock();
+            let closed = record_breaker && state.record_success_closing(Instant::now());
+            #[cfg(test)]
+            run_within_success_settle_hook();
+            if let Some(record) = account.and_then(|account| accounts.get_mut(account)) {
+                record.clear_in_generation(generation);
+            }
+            closed
+        };
+        if closed {
+            super::breaker_transition::log_closed(state_key);
         }
     }
 }

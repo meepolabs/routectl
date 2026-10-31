@@ -35,7 +35,9 @@ use super::local_refusal::RefusalOrigin;
 use super::outcome_rule::retry_cap_for;
 use super::repair_budget::RepairBudget;
 use super::runtime_gate::is_probe_request;
-use super::stream_commit::{try_stream_with_first_content, wrap_with_breaker_accounting};
+use super::stream_commit::{
+    BreakerSlot, try_stream_with_first_content, wrap_with_breaker_accounting,
+};
 use super::stream_evidence::StreamEvidence;
 use super::wire_response::{declare_model_relabel, declare_provider_attribution};
 use super::{DispatchMeta, DispatchTarget, Dispatched, DispatchedStream, Router, RouterOptions};
@@ -239,7 +241,13 @@ impl SurfaceAdapter for StreamAdapter {
         // `circuit_failures`.
         let policy = router.policy_for(&client_req.model);
         let is_probe = is_probe_request(client_req, &policy);
-        let state = router.state.get(target.state_key.as_str()).cloned();
+        let slot = router
+            .state
+            .get(target.state_key.as_str())
+            .map(|state| BreakerSlot {
+                state: state.clone(),
+                state_key: target.state_key.clone(),
+            });
         // First content proves the capability is not rejected: clear any
         // learned negative this dispatch re-probed, and ride each clear out on
         // the meta so the ledger records it and a warm rebuild does not
@@ -282,7 +290,7 @@ impl SurfaceAdapter for StreamAdapter {
         };
         wrap_with_breaker_accounting(
             folded,
-            state,
+            slot,
             target.provider_kind,
             // Subscription-quota feed, the STREAMING half. Streaming quota
             // rides the FIRST canonical chunk only, so it is lifted as the

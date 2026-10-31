@@ -175,6 +175,16 @@ pub struct ProviderState {
     last_outcome_at: Option<Instant>,
 }
 
+/// What one failure debit did to the breaker; see
+/// [`ProviderState::record_failure_debit`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FailureDebit {
+    /// The debit tripped (or re-tripped) the breaker.
+    pub(crate) tripped: bool,
+    /// The debit moved a closed or half-open circuit to open.
+    pub(crate) opened: bool,
+}
+
 /// One gate admission: the decision, plus whether this call claimed the
 /// single half-open probe slot.
 ///
@@ -375,12 +385,20 @@ impl ProviderState {
     /// circuit-breaker failure counter and closes a tripped circuit
     /// if this was a half-open probe.
     pub const fn record_success(&mut self, now: Instant) {
+        self.record_success_closing(now);
+    }
+
+    /// [`Self::record_success`], returning whether this call closed a
+    /// circuit that was open or half-open.
+    pub(crate) const fn record_success_closing(&mut self, now: Instant) -> bool {
+        let was_open = self.circuit_opened_at.is_some();
         self.consecutive_failures = 0;
         self.circuit_opened_at = None;
         self.half_open_in_flight = false;
         self.active_cooldown = self.circuit_cooldown;
         self.last_outcome = Some(LastOutcome::Ok);
         self.last_outcome_at = Some(now);
+        was_open
     }
 
     /// Mark the most recent dispatch as failed. Trips the breaker
@@ -410,6 +428,26 @@ impl ProviderState {
             }
         }
         false
+    }
+
+    /// [`Self::record_failure`], also reporting whether the debit moved the
+    /// circuit into the open state. `tripped` is `record_failure`'s own
+    /// answer, which is also `true` for a debit at or past the threshold on
+    /// a circuit that is already open; `opened` is `true` only when the
+    /// circuit was closed before the debit, or the debit is the failure of
+    /// the half-open probe.
+    pub(crate) const fn record_failure_debit(
+        &mut self,
+        now: Instant,
+        outcome: LastOutcome,
+    ) -> FailureDebit {
+        let was_closed = self.circuit_opened_at.is_none();
+        let was_half_open_probe = self.half_open_in_flight;
+        let tripped = self.record_failure(now, outcome);
+        FailureDebit {
+            tripped,
+            opened: tripped && (was_closed || was_half_open_probe),
+        }
     }
 
     /// Park the provider immediately for `cooldown`, bypassing the

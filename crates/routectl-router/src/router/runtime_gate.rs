@@ -14,6 +14,7 @@ use crate::config::RetryPolicy;
 use crate::runtime_state::{AdmissionKind, GateAdmission, GateDecision, ProviderState};
 
 use super::Router;
+use super::breaker_transition;
 use super::outcome_rule::BreakerOutcome;
 
 #[cfg(test)]
@@ -259,11 +260,17 @@ impl Router {
     }
 
     /// Debit one breaker failure for `state_key`, returning whether this
-    /// debit tripped (opened) the breaker on this call.
+    /// debit tripped (or re-tripped) the breaker on this call. Logs the
+    /// transition when the debit opened a closed or half-open circuit.
     pub(super) fn record_failure_opened(&self, state_key: &str, outcome: LastOutcome) -> bool {
-        self.state
-            .get(state_key)
-            .is_some_and(|state| state.lock().record_failure(Instant::now(), outcome))
+        let Some(state) = self.state.get(state_key) else {
+            return false;
+        };
+        let debit = state.lock().record_failure_debit(Instant::now(), outcome);
+        if debit.opened {
+            breaker_transition::log_opened(state_key);
+        }
+        debit.tripped
     }
 
     /// Park the provider's breaker open for `cooldown`, bypassing the
@@ -278,6 +285,7 @@ impl Router {
     pub(super) fn park_provider(&self, state_key: &str, cooldown: Duration) {
         if let Some(state) = self.state.get(state_key) {
             state.lock().force_open(Instant::now(), cooldown);
+            breaker_transition::log_parked(state_key, cooldown);
         }
     }
 

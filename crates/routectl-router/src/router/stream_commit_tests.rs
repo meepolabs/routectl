@@ -2,7 +2,8 @@
 //! (natural end, first error frame, a drop after content) settles the
 //! breaker exactly once, on a closed breaker and on a half-open probe that
 //! first content already closed; and an error frame settles by its class
-//! after the target's remap, as a failure before content does.
+//! after the target's remap, as a failure before content does. A settle
+//! that moves the circuit logs the same transition line the walk does.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -12,8 +13,9 @@ use futures::stream::{self, StreamExt};
 use parking_lot::Mutex;
 use routectl_core::failure_class::{FailureClass, LastOutcome};
 use routectl_core::{ChatChunk, ChunkChoice, ChunkDelta, Error, Result};
+use routectl_testkit::with_capture;
 
-use super::stream_commit::wrap_with_breaker_accounting;
+use super::stream_commit::{BreakerSlot, wrap_with_breaker_accounting};
 use crate::config::ProviderRuntimePolicy;
 use crate::quota::feed::FirstChunkFeed;
 use crate::quota::store::QuotaStore;
@@ -106,7 +108,10 @@ fn wrap(
 ) -> futures::stream::BoxStream<'static, Result<ChatChunk>> {
     wrap_with_breaker_accounting(
         stream::iter(items).boxed(),
-        Some(state.clone()),
+        Some(BreakerSlot {
+            state: state.clone(),
+            state_key: "m-test".into(),
+        }),
         None,
         FirstChunkFeed::armed(Arc::new(QuotaStore::default()), None),
         matches!(breaker, Breaker::HalfOpenProbe),
@@ -328,5 +333,91 @@ async fn committed_frame_settles_by_class() {
     assert!(
         mismatches.is_empty(),
         "rows settled wrongly: {mismatches:#?}"
+    );
+}
+
+/// A threshold-1 slot, either closed or open for a minute.
+fn transition_state(open: bool) -> Arc<Mutex<ProviderState>> {
+    let policy = ProviderRuntimePolicy {
+        circuit_failures: Some(1),
+        circuit_cooldown_ms: Some(60_000),
+        ..Default::default()
+    };
+    let mut state = ProviderState::new(&policy);
+    if open {
+        state.force_open(Instant::now(), Duration::from_mins(1));
+    }
+    Arc::new(Mutex::new(state))
+}
+
+#[tokio::test]
+async fn a_committed_tail_logs_each_transition_it_settles() {
+    let opened = Some(("breaker_opened", None));
+    let parked = Some((
+        "breaker_parked",
+        Some(MAX_HONORED_RETRY_AFTER.as_millis().to_string()),
+    ));
+    let closed = Some(("breaker_closed", None));
+    let rows = [
+        (
+            "closed / 503 frame opens",
+            false,
+            Some(Error::upstream("p", 503, "boom")),
+            opened,
+        ),
+        (
+            "closed / long Retry-After parks",
+            false,
+            Some(rate_limited_for_an_hour()),
+            parked,
+        ),
+        ("open / end of stream closes", true, None, closed),
+        ("closed / end of stream logs nothing", false, None, None),
+        (
+            "open / 503 frame logs nothing",
+            true,
+            Some(Error::upstream("p", 503, "boom")),
+            None,
+        ),
+    ];
+    let mut mismatches = Vec::new();
+    for (name, open, frame, want) in rows {
+        // Arrange
+        let state = transition_state(open);
+        let mut items = vec![Ok(content("a"))];
+        items.extend(frame.map(Err));
+
+        // Act
+        let ((), events) = with_capture(async {
+            let mut wrapped = wrap(&state, Breaker::Closed, items, BTreeMap::new());
+            while wrapped.next().await.is_some() {}
+        })
+        .await;
+
+        // Assert
+        let got: Vec<Vec<(String, String)>> = events
+            .into_iter()
+            .filter(|e| e.target == "routectl_router::router::breaker_transition")
+            .inspect(|e| assert_eq!(e.level, tracing::Level::INFO, "{name}"))
+            .map(|e| e.fields)
+            .collect();
+        let want: Vec<Vec<(String, String)>> = want
+            .into_iter()
+            .map(|(token, cooldown_ms)| {
+                let mut f = vec![
+                    ("event".to_string(), token.to_string()),
+                    ("state_key".to_string(), "m-test".to_string()),
+                ];
+                f.extend(cooldown_ms.map(|ms| ("cooldown_ms".to_string(), ms)));
+                f
+            })
+            .collect();
+        if got != want {
+            mismatches.push(format!("{name}: want {want:?}, got {got:?}"));
+        }
+    }
+    assert!(
+        mismatches.is_empty(),
+        "rows logged wrongly: {mismatches:#?}"
     );
 }

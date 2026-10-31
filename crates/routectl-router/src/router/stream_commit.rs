@@ -13,6 +13,7 @@ use routectl_core::{
     failure_class::{FailureClass, LastOutcome, classify},
 };
 
+use super::breaker_transition;
 use super::class_observe::{apply_remap, upstream_status_for_remap};
 use super::outcome_rule::{BreakerOutcome, breaker_outcome, reset_hint_clamped_to};
 use super::precontent::{is_empty_reasoning_only, precontent_summary};
@@ -43,6 +44,10 @@ use super::precontent::{is_empty_reasoning_only, precontent_summary};
 /// site did NOT touch the breaker, so this wrap is where mid-stream failures
 /// accumulate toward the threshold and a natural end resets the counter.
 ///
+/// A settle that moves the circuit (a debit that opens it, a park, a natural
+/// end that closes an open circuit) logs the same transition line the
+/// dispatch walk does, keyed on the slot's `state_key`.
+///
 /// Also the streaming quota seam: `quota_feed` is offered every Ok chunk on
 /// its way through and takes the reading off the FIRST one carrying it, which
 /// is the only chunk that carries it. This wrap is where that happens because
@@ -50,7 +55,7 @@ use super::precontent::{is_empty_reasoning_only, precontent_summary};
 /// the reading is gone by end-of-stream.
 pub(super) fn wrap_with_breaker_accounting(
     inner: BoxStream<'static, Result<ChatChunk>>,
-    state: Option<Arc<Mutex<crate::runtime_state::ProviderState>>>,
+    slot: Option<BreakerSlot>,
     provider_kind: Option<&'static str>,
     quota_feed: crate::quota::feed::FirstChunkFeed,
     is_probe: bool,
@@ -60,7 +65,7 @@ pub(super) fn wrap_with_breaker_accounting(
     use futures::stream::StreamExt as _;
 
     let mut accounting = BreakerAccounting {
-        state,
+        slot,
         ctx: FrameErrorContext {
             provider_kind,
             is_probe,
@@ -84,6 +89,12 @@ pub(super) fn wrap_with_breaker_accounting(
     Box::pin(s)
 }
 
+/// The breaker slot a committed stream settles, and the key that names it.
+pub(super) struct BreakerSlot {
+    pub(super) state: Arc<Mutex<crate::runtime_state::ProviderState>>,
+    pub(super) state_key: String,
+}
+
 /// How a committed stream's tail ended, as far as the breaker is concerned.
 enum TailExit<'a> {
     EndOfStream,
@@ -99,17 +110,26 @@ struct FrameErrorContext {
 }
 
 struct BreakerAccounting {
-    state: Option<Arc<Mutex<crate::runtime_state::ProviderState>>>,
+    slot: Option<BreakerSlot>,
     ctx: FrameErrorContext,
     settled: bool,
 }
 
 impl BreakerAccounting {
-    fn with_state(&self, f: impl FnOnce(&mut crate::runtime_state::ProviderState)) {
-        let Some(st) = &self.state else {
+    /// Run `f` on the slot under its lock, then hand `f`'s verdict on
+    /// whether the circuit transitioned to `log` with the lock released.
+    fn with_state(
+        &self,
+        f: impl FnOnce(&mut crate::runtime_state::ProviderState) -> bool,
+        log: impl FnOnce(&str),
+    ) {
+        let Some(slot) = &self.slot else {
             return;
         };
-        f(&mut st.lock());
+        let transitioned = f(&mut slot.state.lock());
+        if transitioned {
+            log(&slot.state_key);
+        }
     }
 
     fn settle(&mut self, exit: TailExit<'_>) {
@@ -117,7 +137,10 @@ impl BreakerAccounting {
             return;
         }
         match exit {
-            TailExit::EndOfStream => self.with_state(|state| state.record_success(Instant::now())),
+            TailExit::EndOfStream => self.with_state(
+                |state| state.record_success_closing(Instant::now()),
+                breaker_transition::log_closed,
+            ),
             TailExit::FrameError(e) => self.settle_frame_error(e),
             TailExit::Cancelled => {}
         }
@@ -130,12 +153,20 @@ impl BreakerAccounting {
         let hint = reset_hint_clamped_to(e, ctx.max_honored_retry_after);
         match breaker_outcome(e, &cf.class, hint, ctx.is_probe) {
             BreakerOutcome::None => {}
-            BreakerOutcome::Debit => self.with_state(|state| {
-                state.record_failure(Instant::now(), LastOutcome::from_failure_class(&cf.class));
-            }),
-            BreakerOutcome::Park(cooldown) => {
-                self.with_state(|state| state.force_open(Instant::now(), cooldown));
-            }
+            BreakerOutcome::Debit => self.with_state(
+                |state| {
+                    let outcome = LastOutcome::from_failure_class(&cf.class);
+                    state.record_failure_debit(Instant::now(), outcome).opened
+                },
+                breaker_transition::log_opened,
+            ),
+            BreakerOutcome::Park(cooldown) => self.with_state(
+                |state| {
+                    state.force_open(Instant::now(), cooldown);
+                    true
+                },
+                |state_key| breaker_transition::log_parked(state_key, cooldown),
+            ),
         }
     }
 }

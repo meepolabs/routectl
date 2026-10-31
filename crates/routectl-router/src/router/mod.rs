@@ -27,6 +27,7 @@ use crate::runtime_state::ProviderState;
 
 mod beta_report_learn;
 mod beta_withhold;
+mod breaker_transition;
 mod cache_plan;
 mod capability_cleared;
 mod capability_health;

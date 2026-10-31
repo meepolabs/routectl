@@ -27,6 +27,7 @@ The first half is for operators (filtering, triage, redaction); the
   [config-reload transitions](#config-reload-transition-fields),
   [stream first-activity](#stream-first-activity-mark),
   [dispatch walk DEBUG lines](#dispatch-walk-debug-lines),
+  [circuit-breaker transitions](#circuit-breaker-transition-info-lines),
   [capability intelligence](#capability-intelligence-events)
 - [WARN and ERROR catalog](#warn-and-error-catalog)
 - [Visibility moved to DEBUG](#visibility-moved-to-debug)
@@ -1560,6 +1561,21 @@ walk, so its per-attempt lines carry the same text on every surface; the
 | DEBUG | `routectl_router::router::dispatch_loop` | `retry decision` | `provider`, `state_key`, `surface`, `attempt`, `status`, `upstream_type`, `retry_after_ms`, `breaker_effect`, `same_provider_retry`, `preserved_upstream_error` | Every surface, once per failed attempt that reaches the fallback decision. |
 | DEBUG | `routectl_router::router::dispatch_loop` | `retrying same provider` | `provider`, `model`, `attempt`, `error` | Completions only: streams and token counts never retry the same provider. |
 | DEBUG | `routectl_router::router::credential_park` | `gate blocked`, `count_tokens gate blocked` | `provider`, `model`, `gate_kind`, `error` | Every surface, when the refusing gate is a credential park (`gate_kind = credential_parked`); other gate refusals are WARN. |
+
+## Circuit-breaker transition INFO lines
+
+A target's circuit breaker logs one INFO line each time its state changes,
+on every surface and on a committed stream's tail alike. The failures and
+successes that leave the circuit where it was stay in the DEBUG `retry
+decision` line above. Each line carries the `event` token and the target's
+`state_key` (sanitized), plus `cooldown_ms` on a park; nothing from the
+request or the upstream response.
+
+| Level | Target | `event` | Fields | When |
+|---|---|---|---|---|
+| INFO | `routectl_router::router::breaker_transition` | `breaker_opened` | `state_key` | A failure debit opened a closed circuit (the count reached `circuit_failures`), or a half-open re-test failed and re-opened it. A further debit on a circuit that is already open logs nothing. |
+| INFO | `routectl_router::router::breaker_transition` | `breaker_parked` | `state_key`, `cooldown_ms` | An upstream reset hint longer than the in-loop retry cap parked the circuit open for `cooldown_ms` (the hint clamped to `max_honored_retry_after_ms`), whatever the failure count. |
+| INFO | `routectl_router::router::breaker_transition` | `breaker_closed` | `state_key` | A success closed a circuit that was open or half-open. A success on a closed circuit logs nothing. |
 
 ## Capability intelligence events
 
