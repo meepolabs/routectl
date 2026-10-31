@@ -1490,11 +1490,18 @@ mod tests {
     }
 
     /// The integer a `var <name> = <int>;` declaration assigns in the dashboard
-    /// script. Anchored on the declaration, which must occur exactly once, for
-    /// the same reason as [`literal_body`]: a comment naming the variable must
-    /// not stand in for the live value.
+    /// script. Anchored on the declaration, which must occur exactly once in
+    /// the code, for the same reason as [`literal_body`]: a comment naming the
+    /// variable must not stand in for the live value.
     fn script_ms(name: &str) -> u64 {
-        let script = script();
+        declared_int(&script(), name)
+    }
+
+    /// The integer `var <name> = <int>;` assigns in `src`, read from the code
+    /// with comments stripped so prose naming the declaration, or a block
+    /// comment before the `;`, cannot change the value read.
+    fn declared_int(src: &str, name: &str) -> u64 {
+        let script = strip_js_comments(src);
         let decl_needle = format!("var {name} =");
         assert_eq!(
             script.matches(&decl_needle).count(),
@@ -1512,11 +1519,6 @@ mod tests {
             .unwrap_or_else(|e| panic!("{name} is an integer literal: {e}"))
     }
 
-    /// Room the `/status` aggregate leaves after the usage panel's budget for
-    /// the health, config and doctor panels and the response write, none of
-    /// which carries a deadline of its own.
-    const AGGREGATE_RESERVE_MS: u64 = 1000;
-
     /// The sum identity in `crate::server::status_gate`'s module docs for the
     /// GET routes: the server's usage budget plus the aggregate's reserve must
     /// land inside the browser's per-GET abort, or the browser aborts a round
@@ -1527,7 +1529,8 @@ mod tests {
         let timeout_ms = script_ms("TIMEOUT_MS");
         let cadence_ms = script_ms("BASE_MS");
 
-        let server_ms = crate::server::status_gate::USAGE_BUDGET_MS + AGGREGATE_RESERVE_MS;
+        let server_ms = crate::server::status_gate::USAGE_BUDGET_MS
+            + crate::server::status_gate::AGGREGATE_RESERVE_MS;
 
         assert!(
             server_ms <= timeout_ms,
@@ -1561,5 +1564,14 @@ mod tests {
             timeout_ms < cadence_ms,
             "QUERY_TIMEOUT_MS = {timeout_ms}ms must stay under the BASE_MS = {cadence_ms}ms cadence"
         );
+    }
+
+    #[test]
+    fn a_declared_int_is_read_from_code_not_comments() {
+        let src = "// var TIMEOUT_MS = 1;\n\
+                   var TIMEOUT_MS = 3500 /* ms */;\n\
+                   /* var TIMEOUT_MS = 2; */\n";
+
+        assert_eq!(declared_int(src, "TIMEOUT_MS"), 3500);
     }
 }

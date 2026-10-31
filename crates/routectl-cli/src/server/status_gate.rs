@@ -78,10 +78,10 @@
 //! [`QUERY_BUDGET_MS`] is not one of those terms: `/status/query` is its own
 //! route with its own abort. The usage panel is the one budgeted term; the
 //! health, config and doctor panels and the response write share a fixed
-//! reserve:
+//! reserve, [`AGGREGATE_RESERVE_MS`]:
 //!
 //! ```text
-//! USAGE_BUDGET_MS + reserve = 2500 + 1000 = 3500 <= 3500 (TIMEOUT_MS)
+//! USAGE_BUDGET_MS + AGGREGATE_RESERVE_MS = 2500 + 1000 = 3500 <= 3500 (TIMEOUT_MS)
 //! ```
 //!
 //! The same GET abort covers `/status/usage` on its own, where the usage
@@ -155,8 +155,8 @@ pub const QUERY_BUDGET_MS: u64 = 2000;
 /// Sized to the all-time read on a large ledger: a one-million-row window
 /// collects in roughly 1.2s (the release bench
 /// `a_million_row_ledger_answers_inside_the_budget` in `handlers::status::usage`),
-/// so a 1000ms budget shed it as `query_timeout`. This leaves about twice the
-/// measured cost as headroom.
+/// so a 1000ms budget shed it as `query_timeout`. The budget is about twice
+/// the measured cost (about 1.3s of headroom).
 ///
 /// It is also sized against the CLIENT's per-GET abort: the `/status`
 /// aggregate composes its panels sequentially, so this budget is one term of a
@@ -165,6 +165,13 @@ pub const QUERY_BUDGET_MS: u64 = 2000;
 /// see this module's own docs for the coupled numbers and the occupancy
 /// relationship with [`STATUS_MAX_INFLIGHT`].
 pub const USAGE_BUDGET_MS: u64 = 2500;
+
+/// Room the `/status` aggregate leaves after [`USAGE_BUDGET_MS`],
+/// milliseconds, for the health, config and doctor panels and the response
+/// write, none of which carries a deadline of its own. It bounds nothing at
+/// runtime: it is the second term of the GET sum identity in this module's own
+/// docs.
+pub const AGGREGATE_RESERVE_MS: u64 = 1000;
 
 /// Wire schema version of the fixed transport-level envelopes this module
 /// emits (the overload 503 and the forbidden-host 403). These are NOT panel
