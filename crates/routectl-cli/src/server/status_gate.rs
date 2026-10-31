@@ -10,8 +10,8 @@
 //!
 //! # The coupled status-timing numbers
 //!
-//! Five numbers bound how long a `/status*` request may occupy the process, and
-//! none of them can be changed on its own. They are collected here once so a
+//! The numbers below bound how long a `/status*` request may occupy the process,
+//! and none of them can be changed on its own. They are collected here once so a
 //! reader of any one of them finds the whole derivation in one place; each
 //! const's own comment states what it is and points back here.
 //!
@@ -20,6 +20,7 @@
 //! | [`STATUS_MAX_INFLIGHT`] = 4 | this module | admitted concurrent `/status*` requests, and equally concurrent blocking panel builders |
 //! | [`QUERY_BUDGET_MS`] = 2000 | this module | one `/status/query` grouped aggregate |
 //! | [`USAGE_BUDGET_MS`] = 2500 | this module | one whole `/status/usage` panel build |
+//! | [`AGGREGATE_RESERVE_MS`] = 1000 | this module | room the `/status` aggregate leaves after the usage budget for its other panels and the response write |
 //! | `BODY_READ_TIMEOUT` = 1000ms | `handlers::status::query` | how long that route waits for the client's request body |
 //! | `TIMEOUT_MS` = 3500 / `QUERY_TIMEOUT_MS` = 3500 | `dash_00_state.js` | the browser's own aborts: the GET one covers `/status` and `/status/usage`, the QUERY one covers `/status/query` only |
 //!
