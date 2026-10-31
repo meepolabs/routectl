@@ -188,7 +188,7 @@ async fn build_panel_data_emits_the_field_verdict_snapshot_log() {
 #[test]
 fn no_config_path_yields_unavailable_panel() {
     let panel = Panel::<DoctorPanel>::unavailable(DOCTOR_SCHEMA_VERSION, codes::NO_CONFIG_PATH);
-    assert_eq!(panel.schema_version, 23);
+    assert_eq!(panel.schema_version, 24);
     assert_eq!(panel.unavailable.as_deref(), Some("no_config_path"));
     assert!(panel.data.is_none());
 }
@@ -233,7 +233,7 @@ fn defines_panel_version_from_the_report_constant(src: &str) -> bool {
 /// unavailable paths carry this constant while the success path carries the
 /// report's, so drift would make one panel speak two versions.
 ///
-/// Mutation check: define the constant as `23` -> red here.
+/// Mutation check: define the constant as `24` -> red here.
 #[test]
 fn panel_schema_version_is_defined_from_the_report_constant() {
     assert!(
@@ -241,7 +241,7 @@ fn panel_schema_version_is_defined_from_the_report_constant() {
         "DOCTOR_SCHEMA_VERSION must be defined as commands::doctor::SCHEMA_VERSION"
     );
     // Positive control: the scanner rejects a literal definition.
-    let literal = concat!("pub const DOCTOR_SCHEMA_VERSION", ": u32 = 23;\n");
+    let literal = concat!("pub const DOCTOR_SCHEMA_VERSION", ": u32 = 24;\n");
     assert!(!defines_panel_version_from_the_report_constant(literal));
 }
 
@@ -277,12 +277,12 @@ async fn handler_returns_report_with_no_probe_section() {
     let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
     let json: Value = serde_json::from_slice(&bytes).unwrap();
 
-    assert_eq!(json["schema_version"], 23);
+    assert_eq!(json["schema_version"], 24);
     assert!(json["unavailable"].is_null());
     let as_of = json["as_of"].as_str().expect("as_of present");
     assert!(chrono::DateTime::parse_from_rfc3339(as_of).is_ok());
 
-    assert_eq!(json["data"]["report"]["schema_version"], 23);
+    assert_eq!(json["data"]["report"]["schema_version"], 24);
     let findings = json["data"]["report"]["findings"].as_array().unwrap();
     assert!(
         !findings.is_empty(),

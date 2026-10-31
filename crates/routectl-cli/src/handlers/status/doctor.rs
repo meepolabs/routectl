@@ -55,7 +55,8 @@ use crate::commands::usage::{WindowBounds, WindowFlag, window_bounds};
 /// At 20 the embedded report's `config` section gained its old-folder finding.
 /// At 21 the embedded report's `knobs` section lost its config state. At 22
 /// every capability matrix cell gained the learned verdict's `value`. At 23 the
-/// panel gained `ledger_health` and today's `observation` block.
+/// panel gained `ledger_health` and today's `observation` block. At 24 the
+/// embedded report gained its `tuning` section.
 pub const DOCTOR_SCHEMA_VERSION: u32 = SCHEMA_VERSION;
 
 /// The no-network doctor report plus the circuit-derived reachability summary,

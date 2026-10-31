@@ -4,11 +4,12 @@ use routectl_auth::oauth::types::TokenRecord;
 use routectl_core::{sanitize_for_log, sanitize_for_log_with_cap};
 use routectl_router::{
     ActivationEntry, ActivationStatus, CONFIG_VERSION_REMEDIATION, CURRENT_CONFIG_VERSION,
-    ConfigVersionError, Finding, OverlaySoftDefect, PricingSource, Status, UnresolvedReason,
-    compute_activation, epoch_day_age, is_stale_days, preflight_config_version,
+    ConfigVersionError, Finding, OverlaySoftDefect, PricingSource, Status, TuningRow,
+    UnresolvedReason, compute_activation, epoch_day_age, is_stale_days, preflight_config_version,
 };
 
 use crate::commands::config::MAX_REPORTED_LINE_CHARS;
+use crate::commands::config_effective::{tuning_cells, tuning_kind};
 use crate::commands::probe::{login_id_for, probe_finding};
 use crate::commands::seat_report::{
     PoolHealth, PoolRow, describe_pool, describe_row, pool_rows, safe, stored_seat_pool_rows,
@@ -1042,6 +1043,25 @@ fn knob_finding(row: &KnobRow) -> Finding {
         name: safe(&row.nickname),
         status: Status::Pass,
         detail,
+        remediation: None,
+    }
+}
+
+/// Tuning section: one row per resolved-tuning target naming each breaker,
+/// RPM and timeout cell with the tier that supplied it (model, provider,
+/// pool, global or default), in the same `key=value(source)` form
+/// `config show --effective` prints. Purely informational: every row is a
+/// Pass with no remediation, so the section never moves the exit code.
+pub(super) fn section_tuning(ctx: &DoctorContext) -> Vec<Finding> {
+    ctx.tuning.iter().map(tuning_finding).collect()
+}
+
+fn tuning_finding(row: &TuningRow) -> Finding {
+    Finding {
+        section: "tuning",
+        name: format!("{} {}", tuning_kind(row.kind), safe(&row.target)),
+        status: Status::Pass,
+        detail: tuning_cells(&row.tuning).join(" "),
         remediation: None,
     }
 }

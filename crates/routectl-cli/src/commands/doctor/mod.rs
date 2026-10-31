@@ -46,6 +46,10 @@ mod legacy_folder_tests;
 #[path = "value_matrix_tests.rs"]
 mod value_matrix_tests;
 
+#[cfg(test)]
+#[path = "tuning_section_tests.rs"]
+mod tuning_section_tests;
+
 use std::path::Path;
 use std::time::Instant;
 
@@ -58,7 +62,7 @@ use routectl_core::ProbeOutcome;
 use routectl_router::{
     BetaSeedScope, CatalogImportState, Config, DoctorPanels, DoctorReport, Finding,
     LearnedRegistryEntry, MatrixReplaySummary, MatrixWarm, OverlaySoftDefect, PricingSource,
-    SeedClearMarker, Status, WouldTrimPanel, overall_exit,
+    SeedClearMarker, Status, TuningRow, WouldTrimPanel, overall_exit,
 };
 
 use self::gather::{SecretCheck, gather_context};
@@ -66,7 +70,7 @@ use self::render::render_human;
 use self::sections::{
     section_auth, section_capability, section_config, section_freshness, section_inventory,
     section_knobs, section_pricing, section_probe, section_seat_orphans, section_seat_pools,
-    section_secret_orphans, section_version,
+    section_secret_orphans, section_tuning, section_version,
 };
 
 pub(crate) use self::gather::gather_context_no_network;
@@ -200,7 +204,16 @@ pub(crate) use self::served::{GatherSources, ParkedSeat, ResidentLearned, Served
 /// summed per-request observation counts, its ledger gap rows, and whether
 /// its rows are complete (`null` when the usage ledger cannot be read). The
 /// report itself is unchanged.
-pub(crate) const SCHEMA_VERSION: u32 = 23;
+///
+/// v23 -> v24: additive. The `tuning` section joins the report, one Pass
+/// finding per `[providers.X]` entry (pool members included) and one per
+/// `[models.X]` entry with its own `stream_first_byte_timeout_ms` (one per
+/// seat for a pooled model), named `provider <id>` / `model <nickname>` /
+/// `model <nickname>#<member>`. Its detail lists the resolved
+/// `circuit_failures`, `circuit_cooldown_ms`, `rpm_limit`,
+/// `request_timeout_ms` and `stream_first_byte_timeout_ms` as
+/// `key=value(source)`, the same cells `config show --effective` prints.
+pub(crate) const SCHEMA_VERSION: u32 = 24;
 
 /// A section-producer: pure mapping of the read-only [`DoctorContext`] to a
 /// section's findings.
@@ -224,6 +237,7 @@ const SECTIONS: &[(&str, SectionFn)] = &[
     ("freshness", section_freshness),
     ("pricing", section_pricing),
     ("knobs", section_knobs),
+    ("tuning", section_tuning),
 ];
 
 /// The no-network subset of [`SECTIONS`]: [`SECTIONS`] MINUS the `probe`
@@ -247,6 +261,7 @@ const NO_NETWORK_SECTIONS: &[(&str, SectionFn)] = &[
     ("freshness", section_freshness),
     ("pricing", section_pricing),
     ("knobs", section_knobs),
+    ("tuning", section_tuning),
 ];
 
 /// The read-only inputs every section producer draws from, gathered once
@@ -331,6 +346,11 @@ pub(crate) struct DoctorContext {
     /// disables catalog ceilings, so without it no source attribution can be
     /// trusted and the section renders an honest unavailable line instead.
     knobs: Option<Vec<KnobRow>>,
+    /// The tuning section's rows: one per `[providers.X]` entry, then one per
+    /// model with its own first-content timeout, each cell carrying the tier
+    /// that supplied it. Read from the config alone, so an unloadable catalog
+    /// overlay leaves them intact.
+    tuning: Vec<TuningRow>,
     /// The running daemon's last rejected config / overlay reload, as a closed
     /// class and an age. Only a served gather sets it; the CLI reads the files
     /// itself, so their errors render directly.

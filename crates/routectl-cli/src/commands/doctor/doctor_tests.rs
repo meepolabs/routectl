@@ -14,8 +14,8 @@ use crate::commands::parse_error_redaction::redact_config_load_error;
 
 use super::gather::{
     build_capability_inputs, derive_knob_rows, derive_pricing_rows, derive_prior_cells,
-    gather_capability_matrix, gather_context, gather_context_no_network, gather_orphan_seats,
-    gather_orphan_secrets, gather_secret_checks, sanitize_store_open_error,
+    derive_tuning_rows, gather_capability_matrix, gather_context, gather_context_no_network,
+    gather_orphan_seats, gather_orphan_secrets, gather_secret_checks, sanitize_store_open_error,
 };
 use super::matrix::build_capability_matrix_panel;
 use super::sections::{
@@ -57,6 +57,7 @@ pub(super) fn ctx(
     let capability = build_capability_inputs(&config, None, Some(CatalogOverlay::default()));
     let pricing = Some(derive_pricing_rows(&config, &CatalogOverlay::default()));
     let knobs = Some(derive_knob_rows(&config, &CatalogOverlay::default()));
+    let tuning = derive_tuning_rows(&config);
     DoctorContext {
         config,
         raw_config: raw_config.map(str::to_string),
@@ -79,6 +80,7 @@ pub(super) fn ctx(
         freshness: sample_freshness(),
         pricing,
         knobs,
+        tuning,
         reload_failure: None,
         parked_seats: Vec::new(),
         overlay_soft_defects: Vec::new(),
@@ -704,8 +706,8 @@ fn capability_section_emits_no_finding_for_a_loaded_config() {
 }
 
 #[test]
-fn schema_version_is_twenty_three() {
-    assert_eq!(SCHEMA_VERSION, 23);
+fn schema_version_is_twenty_four() {
+    assert_eq!(SCHEMA_VERSION, 24);
 
     let context = ctx(
         config_with_overrides(),
@@ -714,7 +716,7 @@ fn schema_version_is_twenty_three() {
         Vec::new(),
     );
     let report = build_report(&context);
-    assert_eq!(report.schema_version, 23);
+    assert_eq!(report.schema_version, 24);
 
     // JSON mode carries the structured capability matrix panel; the
     // superseded override / prior / learned finding text is gone.
@@ -2444,6 +2446,7 @@ fn rendered_report_leaks_neither_a_config_secret_nor_a_store_path() {
         freshness: sample_freshness(),
         pricing: Some(Vec::new()),
         knobs: Some(Vec::new()),
+        tuning: Vec::new(),
         reload_failure: None,
         parked_seats: Vec::new(),
         overlay_soft_defects: Vec::new(),
@@ -2611,7 +2614,7 @@ fn build_report_no_network_matches_network_minus_probe() {
     let network = build_report(&context);
     let no_net = build_report_no_network(&context);
 
-    assert_eq!(no_net.schema_version, 23);
+    assert_eq!(no_net.schema_version, 24);
     assert!(
         no_net.findings.iter().all(|f| f.section != "probe"),
         "no-network report must have no probe rows"

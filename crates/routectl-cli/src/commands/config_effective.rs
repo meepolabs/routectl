@@ -20,8 +20,8 @@ use std::fmt::Display;
 
 use routectl_router::{
     BreakerThreshold, CatalogOverlay, ClassPolicyCell, ClassPolicySource, Config, EffectiveRow,
-    ModelCell, OverrideRow, OverrideVerdict, Resolved, Source, TuningRow, TuningTargetKind,
-    derive_effective_view,
+    ModelCell, OverrideRow, OverrideVerdict, Resolved, ResolvedTuning, Source, TuningRow,
+    TuningTargetKind, derive_effective_view,
 };
 
 /// Print the plain redacted config dump, then the provenance-annotated
@@ -115,11 +115,25 @@ fn render_tuning_cells(rows: &[TuningRow]) {
 /// Format one tuning row as `key=value(source)` cells. Pure so the line
 /// contract is unit-testable without capturing stdout.
 fn tuning_line(row: &TuningRow) -> String {
-    let t = &row.tuning;
-    let kind = match row.kind {
+    let [failures, cooldown, rpm, request, first_byte] = tuning_cells(&row.tuning);
+    format!(
+        "  {kind:<8} {target:<24} {failures} {cooldown} {rpm} {request} {first_byte}",
+        kind = tuning_kind(row.kind),
+        target = row.target,
+    )
+}
+
+/// The table a tuning row's target names, as its render token.
+pub(crate) const fn tuning_kind(kind: TuningTargetKind) -> &'static str {
+    match kind {
         TuningTargetKind::Provider => "provider",
         TuningTargetKind::Model => "model",
-    };
+    }
+}
+
+/// The five resolved tuning cells as `key=value(source)`, in render order. A
+/// disabled breaker renders `off`; an unset RPM cap or timeout renders `none`.
+pub(crate) fn tuning_cells(t: &ResolvedTuning) -> [String; 5] {
     let failures = Resolved {
         value: match t.circuit_failures.value {
             BreakerThreshold::Disabled => "off".to_string(),
@@ -127,18 +141,16 @@ fn tuning_line(row: &TuningRow) -> String {
         },
         source: t.circuit_failures.source,
     };
-    format!(
-        "  {kind:<8} {target:<24} {failures} {cooldown} {rpm} {request} {first_byte}",
-        target = row.target,
-        failures = cell("circuit_failures", &failures),
-        cooldown = cell("circuit_cooldown_ms", &t.circuit_cooldown_ms),
-        rpm = optional_cell("rpm_limit", &t.rpm_limit),
-        request = optional_cell("request_timeout_ms", &t.request_timeout_ms),
-        first_byte = optional_cell(
+    [
+        cell("circuit_failures", &failures),
+        cell("circuit_cooldown_ms", &t.circuit_cooldown_ms),
+        optional_cell("rpm_limit", &t.rpm_limit),
+        optional_cell("request_timeout_ms", &t.request_timeout_ms),
+        optional_cell(
             "stream_first_byte_timeout_ms",
-            &t.stream_first_byte_timeout_ms
+            &t.stream_first_byte_timeout_ms,
         ),
-    )
+    ]
 }
 
 /// `key=value(source)` for one resolved cell.

@@ -12,7 +12,7 @@ use routectl_core::ProbeOutcome;
 use routectl_router::{
     BetaSeedScope, CATALOG_VERSION, CapabilityEventRow, CapabilityRebuildSummary, CatalogOverlay,
     Config, EffectiveRow, LearnedCapabilityRegistry, MatrixReplaySummary, PricingSource,
-    ProviderEntry, ReplayTombstone, Source, StateKey, catalog_import_state_default_path,
+    ProviderEntry, ReplayTombstone, Source, StateKey, TuningRow, catalog_import_state_default_path,
     derive_effective_view, effective_pricing, load_last_import, rebuild_capabilities_with_values,
     today_epoch_day,
 };
@@ -117,6 +117,7 @@ pub async fn gather_context_no_network(
     let knobs = overlay
         .as_ref()
         .map(|overlay| derive_knob_rows(&config, overlay));
+    let tuning = derive_tuning_rows(&config);
     let overlay_soft_defects = overlay
         .as_ref()
         .map(routectl_router::overlay_soft_defects)
@@ -156,6 +157,7 @@ pub async fn gather_context_no_network(
         freshness,
         pricing,
         knobs,
+        tuning,
         reload_failure,
         parked_seats,
         overlay_soft_defects,
@@ -527,6 +529,14 @@ pub(super) fn build_capability_inputs(
         config: Some(CapabilityConfig { priors }),
         panel_unavailable: None,
     }
+}
+
+/// The resolved tuning table, through the same [`derive_effective_view`] path
+/// `config show --effective` renders.
+pub(super) fn derive_tuning_rows(config: &Config) -> Vec<TuningRow> {
+    // The tuning rows read the config alone, so any overlay yields the same
+    // rows; the empty one keeps this section independent of overlay loading.
+    derive_effective_view(config, &CatalogOverlay::default()).tuning
 }
 
 /// Derive the catalog/overlay capability prior cells: one per `[models.X]`
