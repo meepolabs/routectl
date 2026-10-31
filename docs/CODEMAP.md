@@ -6445,16 +6445,20 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   requests and assert no new blocking work starts until the detached builders
   finish (the next request is DELAYED, not shed). Also owns
   `QUERY_BUDGET_MS = 2000`, the per-request wall-clock budget for one
-  `/status/query` grouped aggregate, and `USAGE_BUDGET_MS = 1000`, the budget
+  `/status/query` grouped aggregate, `USAGE_BUDGET_MS = 2500`, the budget
   for one whole `/status/usage` collection (an overrun of either sheds as the
-  `query_timeout` unavailable panel). The MODULE doc block carries the five
-  coupled timing numbers once -- these two budgets, `STATUS_MAX_INFLIGHT`,
+  `query_timeout` unavailable panel), and `AGGREGATE_RESERVE_MS = 1000`, the
+  room the `/status` aggregate leaves after the usage budget for its other
+  panels and the response write (bounds nothing at runtime). The MODULE doc
+  block carries the coupled timing numbers once -- these three, `STATUS_MAX_INFLIGHT`,
   `handlers/status/query.rs`'s `BODY_READ_TIMEOUT`, and the dashboard's two
-  aborts -- plus the serial sum identity
-  (`BODY_READ_TIMEOUT + QUERY_BUDGET_MS = 3000 <= QUERY_TIMEOUT_MS`, which bounds
-  the two BUDGETED stretches and explicitly NOT end-to-end request time: the
+  aborts -- plus the two sum identities
+  (`BODY_READ_TIMEOUT + QUERY_BUDGET_MS = 3000 <= QUERY_TIMEOUT_MS` and
+  `USAGE_BUDGET_MS + AGGREGATE_RESERVE_MS = 3500 <= TIMEOUT_MS`, both pinned
+  against the served script by `handlers/status/page.rs` tests; they bound
+  the BUDGETED stretches and explicitly NOT end-to-end request time: the
   builder-capacity wait, worker queueing, ledger open, anchor probe, fold and
-  serialization sit outside it) and the
+  serialization sit outside them) and the
   occupancy relationship; each const's own comment points there instead of
   repeating it. No const here is a config knob (no `config_classify` section)
 - `src/server/secrets.rs` -- `CompositeStore` `SecretStore` dispatching
@@ -7313,7 +7317,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   aggregate's usage panel stays today-scoped for the readers that want today
   (the Health quota tiles, the Overview seat surface, the verdict strip). Also
   holds the cadence and budget constants (`BASE_MS`, the shared
-  `BACKOFF_STEPS_MS` ladder, `TIMEOUT_MS` = 2000 and `QUERY_TIMEOUT_MS` = 3500
+  `BACKOFF_STEPS_MS` ladder, `TIMEOUT_MS` = 3500 and `QUERY_TIMEOUT_MS` = 3500
   -- see `server::status_gate` for the coupled-timing derivation),
   `WINDOWLESS_TABS`, the selection state (window / group-by / provider scope /
   active tab), `SOURCES`, `RENDER_FAULTS`, `setSource`, and the one-line
