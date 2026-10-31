@@ -34,6 +34,7 @@ use crate::class_policy::ConfigFailureClass;
 use crate::config::BedrockCredsConfig;
 use crate::config::{Config, ProviderEntry, ResolvedTuning, resolve_tuning};
 use crate::override_registry::{OverrideRegistry, OverrideRow};
+use crate::seat_pool::seat_state_key;
 
 /// The catalog cell a single `[models.X]` entry resolves to, tagged with the
 /// `(provider_kind, upstream)` selector it was looked up under.
@@ -352,7 +353,7 @@ pub enum TuningTargetKind {
     /// A `[providers.X]` entry, pool members included.
     Provider,
     /// A `[models.X]` entry that sets its own
-    /// `stream_first_byte_timeout_ms`.
+    /// `stream_first_byte_timeout_ms`, or one seat of such a pooled model.
     Model,
 }
 
@@ -360,7 +361,8 @@ pub enum TuningTargetKind {
 /// the tier that supplied it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TuningRow {
-    /// The `[providers.X]` key or `[models.X]` nickname.
+    /// The `[providers.X]` key, a `[models.X]` nickname, or for a pooled
+    /// model one seat's runtime state key (`nickname#member`).
     pub target: String,
     /// Which table `target` names.
     pub kind: TuningTargetKind,
@@ -381,18 +383,34 @@ fn provider_tuning_rows(config: &Config) -> Vec<TuningRow> {
         .collect()
 }
 
-/// One row per `[models.X]` entry that sets a non-zero first-content
-/// override, in nickname order. The row resolves through the provider or
-/// pool the model names, so its other cells match that entry's.
-fn model_tuning_rows(config: &Config) -> impl Iterator<Item = TuningRow> + '_ {
-    config.models.iter().filter_map(|(nickname, entry)| {
-        let override_ms = entry.stream_first_byte_timeout_ms.filter(|&ms| ms > 0)?;
-        Some(TuningRow {
-            target: nickname.clone(),
+/// The rows for every `[models.X]` entry that sets a non-zero
+/// first-content override, in nickname order. A model on a provider gets one
+/// row under its nickname, resolved through that provider. A pooled model
+/// gets one row per seat, in member order, each keyed by the seat's runtime
+/// state key and resolved through its member entry, because dispatch stamps
+/// each seat from its member: a member's own breaker or RPM key beats the
+/// pool's.
+fn model_tuning_rows(config: &Config) -> Vec<TuningRow> {
+    let mut rows = Vec::new();
+    for (nickname, entry) in &config.models {
+        let Some(override_ms) = entry.stream_first_byte_timeout_ms.filter(|&ms| ms > 0) else {
+            continue;
+        };
+        let row = |target: String, resolve_through: &str| TuningRow {
+            target,
             kind: TuningTargetKind::Model,
-            tuning: resolve_tuning(config, Some(&entry.provider), Some(override_ms)),
-        })
-    })
+            tuning: resolve_tuning(config, Some(resolve_through), Some(override_ms)),
+        };
+        match config.pools.get(&entry.provider) {
+            Some(pool) => rows.extend(
+                pool.members
+                    .iter()
+                    .map(|member| row(seat_state_key(nickname, Some(member)), member)),
+            ),
+            None => rows.push(row(nickname.clone(), &entry.provider)),
+        }
+    }
+    rows
 }
 
 /// The provenance-annotated effective view: the layered surfaces only.
@@ -412,8 +430,9 @@ pub struct EffectiveView {
     pub aliases: Vec<AliasChain>,
     /// One secret-safe cell per `[providers.X]` entry, in provider-key order.
     pub providers: Vec<ProviderCell>,
-    /// The resolved tuning table: one row per `[providers.X]` entry, then one
-    /// per `[models.X]` first-content override (see [`TuningRow`]).
+    /// The resolved tuning table: one row per `[providers.X]` entry, then the
+    /// rows of each `[models.X]` first-content override, one per seat for a
+    /// pooled model (see [`TuningRow`]).
     pub tuning: Vec<TuningRow>,
 }
 

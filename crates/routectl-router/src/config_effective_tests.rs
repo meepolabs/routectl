@@ -824,7 +824,7 @@ fn live_shape_config_resolves_to_the_expected_tuning_table() {
 }
 
 #[test]
-fn a_model_first_byte_override_adds_a_row_resolved_through_its_pool() {
+fn a_pooled_model_first_byte_override_adds_one_row_per_seat_in_member_order() {
     let mut config = live_shape_config();
     config
         .models
@@ -840,15 +840,126 @@ fn a_model_first_byte_override_adds_a_row_resolved_through_its_pool() {
         .iter()
         .filter(|row| row.kind == TuningTargetKind::Model)
         .collect();
-    assert_eq!(model_rows.len(), 1);
-    let row = model_rows[0];
-    assert_eq!(row.target, "big");
+    let targets: Vec<&str> = model_rows.iter().map(|row| row.target.as_str()).collect();
     assert_eq!(
-        row.tuning.stream_first_byte_timeout_ms,
-        resolved(Some(90_000), TuningSource::Model)
+        targets,
+        [
+            "big#seat-1",
+            "big#seat-2",
+            "big#seat-3",
+            "big#seat-4",
+            "big#seat-5"
+        ]
     );
-    assert_eq!(row.tuning.rpm_limit, resolved(Some(20), TuningSource::Pool));
-    assert_eq!(view.tuning.last(), Some(row));
+    for row in &model_rows {
+        assert_eq!(
+            row.tuning.stream_first_byte_timeout_ms,
+            resolved(Some(90_000), TuningSource::Model),
+            "{}",
+            row.target
+        );
+        assert_eq!(
+            row.tuning.rpm_limit,
+            resolved(Some(20), TuningSource::Pool),
+            "{}",
+            row.target
+        );
+    }
+    assert_eq!(view.tuning.last(), model_rows.last().copied());
+}
+
+/// A two-member pool where member `seat-a` sets its own breaker and RPM keys
+/// and the pool sets different ones, a pooled model and a direct model each
+/// carrying a first-content override.
+fn member_override_config() -> Config {
+    toml::from_str(
+        r#"
+version = 2
+
+[providers.seat-a]
+kind = "anthropic-api"
+api_key_ref = "env://SEAT_A"
+rpm_limit = 7
+circuit_failures = 2
+
+[providers.seat-b]
+kind = "anthropic-api"
+api_key_ref = "env://SEAT_B"
+
+[providers.solo]
+kind = "anthropic-api"
+api_key_ref = "env://SOLO"
+rpm_limit = 9
+
+[pools.team]
+members = ["seat-a", "seat-b"]
+rpm_limit = 40
+circuit_failures = 8
+
+[models.pooled]
+provider = "team"
+upstream = "u"
+stream_first_byte_timeout_ms = 45000
+
+[models.direct]
+provider = "solo"
+upstream = "u"
+stream_first_byte_timeout_ms = 50000
+"#,
+    )
+    .expect("valid config")
+}
+
+/// Each seat row resolves through its member, as dispatch stamps it: the
+/// member's own keys beat the pool's, the untuned member inherits the pool,
+/// and the model's first-content override applies to both seats. A direct
+/// model keeps one row under its bare nickname.
+#[test]
+fn a_pooled_model_row_per_seat_resolves_through_its_member() {
+    let config = member_override_config();
+
+    let view = derive_effective_view(&config, &CatalogOverlay::default());
+
+    let model_row = |target: &str,
+                     failures: Resolved<BreakerThreshold>,
+                     rpm: Resolved<Option<u32>>,
+                     first_byte_ms: u64| TuningRow {
+        target: target.to_string(),
+        kind: TuningTargetKind::Model,
+        tuning: ResolvedTuning {
+            circuit_failures: failures,
+            circuit_cooldown_ms: resolved(60_000, TuningSource::ShippedDefault),
+            rpm_limit: rpm,
+            request_timeout_ms: resolved(Some(1_800_000), TuningSource::ShippedDefault),
+            stream_first_byte_timeout_ms: resolved(Some(first_byte_ms), TuningSource::Model),
+        },
+    };
+    let expected = vec![
+        model_row(
+            "direct",
+            resolved(after(5), TuningSource::ShippedDefault),
+            resolved(Some(9), TuningSource::Provider),
+            50_000,
+        ),
+        model_row(
+            "pooled#seat-a",
+            resolved(after(2), TuningSource::Provider),
+            resolved(Some(7), TuningSource::Provider),
+            45_000,
+        ),
+        model_row(
+            "pooled#seat-b",
+            resolved(after(8), TuningSource::Pool),
+            resolved(Some(40), TuningSource::Pool),
+            45_000,
+        ),
+    ];
+    let model_rows: Vec<TuningRow> = view
+        .tuning
+        .into_iter()
+        .filter(|row| row.kind == TuningTargetKind::Model)
+        .collect();
+    assert_eq!(model_rows, expected);
 }
 
 #[test]

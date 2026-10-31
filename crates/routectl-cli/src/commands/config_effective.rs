@@ -99,7 +99,8 @@ fn render_class_cells(cells: &[ClassPolicyCell]) {
 }
 
 /// Render one line per resolved-tuning row: each provider entry, then each
-/// model that sets its own first-content timeout.
+/// model that sets its own first-content timeout (one line per seat for a
+/// pooled model).
 fn render_tuning_cells(rows: &[TuningRow]) {
     println!("\nresolved tuning (model > provider > pool > global > default):");
     if rows.is_empty() {
@@ -322,7 +323,7 @@ upstream = "u"
             [
                 ["provider", "seat-b"],
                 ["provider", "tuned"],
-                ["model", "slow"],
+                ["model", "slow#seat-b"],
             ]
         );
     }
@@ -363,7 +364,7 @@ upstream = "u"
                 "request_timeout_ms=900000(global)",
                 "stream_first_byte_timeout_ms=70000(model)",
             ],
-            "model slow on pool team"
+            "model slow on pool team, seat seat-b"
         );
     }
 

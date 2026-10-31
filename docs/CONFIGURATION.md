@@ -3330,8 +3330,11 @@ Four sections are printed:
   - `baked-default` -- no operator leaf, so the baked class default
     applies (see "Per-class retry and fallback policy").
 - **resolved tuning** -- one row per `[providers.X]` entry (pool members
-  included), then one per `[models.X]` entry that sets its own
-  `stream_first_byte_timeout_ms`. Each row prints the five tiered keys
+  included), then the rows of each `[models.X]` entry that sets its own
+  `stream_first_byte_timeout_ms`: one row under the nickname for a model
+  on a provider, and one row per seat for a model on a pool, labelled
+  `nickname#member` (the seat's runtime state key) and resolved through
+  that member, so a member's own key beats the pool's. Each row prints the five tiered keys
   (`circuit_failures`, `circuit_cooldown_ms`, `rpm_limit`,
   `request_timeout_ms`, `stream_first_byte_timeout_ms`) as
   `key=value(source)`, where `source` is the tier that supplied the
