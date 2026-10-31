@@ -1564,7 +1564,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `accepts_new_logins: bool` growth marker, the pool tier of the tiered
   tuning keys; `deny_unknown_fields` +
   `non_exhaustive`, constructor `PoolEntry::new` + `with_seat_selection` /
-  `with_accepts_new_logins`), plus `Config::seat_selection_for(name)` -- the
+  `with_accepts_new_logins` and one `with_<key>` builder per tuning key),
+  plus `Config::seat_selection_for(name)` -- the
   ONE resolution of a dispatch target's in-force strategy (a pool's own, else
   its claiming pool's, else the `fill-first` default for a standalone provider)
   -- and `Config::provider_kind_for_target(name)` -- the ONE
