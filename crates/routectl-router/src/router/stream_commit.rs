@@ -27,12 +27,15 @@ use super::precontent::{is_empty_reasoning_only, precontent_summary};
 ///   nothing: neither a success that would reset the failure count nor a
 ///   failure.
 ///
-/// A non-probe stream records an error frame as a failure whatever its class.
-/// A probe stream (`is_probe`) settles it by the shared rule
-/// (`breaker_outcome`) on the class after the target's `class_overrides`
-/// remap, as before content: a probe's 429/529 leaves the breaker untouched;
-/// otherwise a debiting class takes the threshold-gated debit, a non-debiting
-/// class takes none, and a probe never parks.
+/// An error frame settles by the same rule as a failure before content
+/// (`breaker_outcome`), on the class after the target's `class_overrides`
+/// remap: a debiting (health) class takes the threshold-gated debit, a
+/// non-debiting class (auth, bad request, content policy, context window,
+/// unsupported feature, ...) records nothing, and a non-probe frame whose
+/// Retry-After, clamped to `max_honored_retry_after`, exceeds the in-loop
+/// cap parks the breaker for that long. A probe stream (`is_probe`) keeps
+/// the probe exceptions: its 429/529 leaves the breaker untouched and it
+/// never parks.
 ///
 /// For a half-open PROBE the call site already closed the breaker and
 /// released the probe slot on first content, so a mid-stream failure here
@@ -123,18 +126,12 @@ impl BreakerAccounting {
     fn settle_frame_error(&self, e: &Error) {
         let ctx = &self.ctx;
         let native = classify(e, ctx.provider_kind);
-        let (class, outcome) = if ctx.is_probe {
-            let (cf, _) = apply_remap(native, upstream_status_for_remap(e), &ctx.class_overrides);
-            let hint = reset_hint_clamped_to(e, ctx.max_honored_retry_after);
-            let outcome = breaker_outcome(e, &cf.class, hint, true);
-            (cf.class, outcome)
-        } else {
-            (native.class, BreakerOutcome::Debit)
-        };
-        match outcome {
+        let (cf, _) = apply_remap(native, upstream_status_for_remap(e), &ctx.class_overrides);
+        let hint = reset_hint_clamped_to(e, ctx.max_honored_retry_after);
+        match breaker_outcome(e, &cf.class, hint, ctx.is_probe) {
             BreakerOutcome::None => {}
             BreakerOutcome::Debit => self.with_state(|state| {
-                state.record_failure(Instant::now(), LastOutcome::from_failure_class(&class));
+                state.record_failure(Instant::now(), LastOutcome::from_failure_class(&cf.class));
             }),
             BreakerOutcome::Park(cooldown) => {
                 self.with_state(|state| state.force_open(Instant::now(), cooldown));

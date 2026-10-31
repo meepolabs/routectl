@@ -1909,9 +1909,13 @@ seat's breaker, and it is the same on completions, streams and
   such as a 400 takes none).
 
 Once a stream has delivered content, an error frame arriving later is
-settled once: a non-probe stream takes the ordinary failure debit
-whatever the error's class, and a probe stream follows the rule above
-(its 429 or 529 leaves the breaker untouched).
+settled once, by the same rule as a failure before content and on the
+class after the provider's `class_overrides` remap: a debiting class
+(rate-limit, server error, timeout, network error, overload) takes the
+ordinary debit or parks on a large reset as above, a non-debiting class
+(auth, bad request, content policy, context window, unsupported
+feature) takes none, and a probe stream keeps its exceptions (its 429
+or 529 leaves the breaker untouched, and it never parks).
 
 Completions additionally fold a reset at or below 5 seconds into the
 next same-provider retry sleep (it never blocks the request thread

@@ -233,7 +233,8 @@ impl SurfaceAdapter for StreamAdapter {
         // The walk has already closed a half-open probe's breaker at first
         // content and left a healthy breaker's failure count alone: the
         // wrapped stream's breaker accounting below owns the tail, so
-        // mid-stream errors still accumulate toward `circuit_failures`.
+        // mid-stream errors of a debiting class still accumulate toward
+        // `circuit_failures`.
         let policy = router.policy_for(&client_req.model);
         let is_probe = is_probe_request(client_req, &policy);
         let state = router.state.get(target.state_key.as_str()).cloned();

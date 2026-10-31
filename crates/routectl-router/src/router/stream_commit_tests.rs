@@ -1,7 +1,8 @@
 //! Breaker accounting on a committed stream's tail: each of the three exits
 //! (natural end, first error frame, a drop after content) settles the
 //! breaker exactly once, on a closed breaker and on a half-open probe that
-//! first content already closed.
+//! first content already closed; and an error frame settles by its class
+//! after the target's remap, as a failure before content does.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -9,14 +10,14 @@ use std::time::{Duration, Instant};
 
 use futures::stream::{self, StreamExt};
 use parking_lot::Mutex;
-use routectl_core::failure_class::LastOutcome;
+use routectl_core::failure_class::{FailureClass, LastOutcome};
 use routectl_core::{ChatChunk, ChunkChoice, ChunkDelta, Error, Result};
 
 use super::stream_commit::wrap_with_breaker_accounting;
 use crate::config::ProviderRuntimePolicy;
 use crate::quota::feed::FirstChunkFeed;
 use crate::quota::store::QuotaStore;
-use crate::runtime_state::{GateDecision, ProviderState};
+use crate::runtime_state::{CircuitPhase, GateDecision, ProviderState};
 
 /// High enough that no row's debits trip the breaker, so every row reads a
 /// closed breaker and the failure count alone tells the exits apart.
@@ -92,16 +93,28 @@ fn tail(exit: Exit) -> Vec<Result<ChatChunk>> {
     }
 }
 
-async fn run_exit(state: &Arc<Mutex<ProviderState>>, breaker: Breaker, exit: Exit) {
-    let mut wrapped = wrap_with_breaker_accounting(
-        stream::iter(tail(exit)).boxed(),
+/// The Retry-After ceiling every row runs under; well above the in-loop cap.
+const MAX_HONORED_RETRY_AFTER: Duration = Duration::from_mins(1);
+
+fn wrap(
+    state: &Arc<Mutex<ProviderState>>,
+    breaker: Breaker,
+    items: Vec<Result<ChatChunk>>,
+    class_overrides: BTreeMap<u16, FailureClass>,
+) -> futures::stream::BoxStream<'static, Result<ChatChunk>> {
+    wrap_with_breaker_accounting(
+        stream::iter(items).boxed(),
         Some(state.clone()),
         None,
         FirstChunkFeed::armed(Arc::new(QuotaStore::default()), None),
         matches!(breaker, Breaker::HalfOpenProbe),
-        BTreeMap::new(),
-        Duration::from_mins(1),
-    );
+        class_overrides,
+        MAX_HONORED_RETRY_AFTER,
+    )
+}
+
+async fn run_exit(state: &Arc<Mutex<ProviderState>>, breaker: Breaker, exit: Exit) {
+    let mut wrapped = wrap(state, breaker, tail(exit), BTreeMap::new());
     match exit {
         Exit::EndOfStream | Exit::FrameError => while wrapped.next().await.is_some() {},
         Exit::Cancel => {
@@ -165,6 +178,103 @@ async fn each_tail_exit_settles_the_breaker_once_by_its_own_rule() {
         );
         if got != (failures, Some(last)) {
             mismatches.push(format!("{name}: want ({failures}, {last:?}), got {got:?}"));
+        }
+    }
+    assert!(
+        mismatches.is_empty(),
+        "rows settled wrongly: {mismatches:#?}"
+    );
+}
+
+struct FrameRow {
+    name: &'static str,
+    breaker: Breaker,
+    frame: Error,
+    class_overrides: BTreeMap<u16, FailureClass>,
+    failures: u32,
+    last: LastOutcome,
+    circuit: CircuitPhase,
+}
+
+fn frame_row(name: &'static str, breaker: Breaker, frame: Error) -> FrameRow {
+    FrameRow {
+        name,
+        breaker,
+        frame,
+        class_overrides: BTreeMap::new(),
+        failures: 1,
+        last: SEEDED,
+        circuit: CircuitPhase::Closed,
+    }
+}
+
+fn rate_limited_for_an_hour() -> Error {
+    Error::upstream_with_retry_after("p", 429, "slow down", Some(Duration::from_hours(1)))
+}
+
+#[tokio::test]
+async fn committed_frame_settles_by_class() {
+    let rows = [
+        FrameRow {
+            failures: 2,
+            last: LastOutcome::Http5xx,
+            ..frame_row(
+                "closed / 503 debits",
+                Breaker::Closed,
+                Error::upstream("p", 503, "boom"),
+            )
+        },
+        frame_row(
+            "closed / 401 records nothing",
+            Breaker::Closed,
+            Error::upstream("p", 401, "denied"),
+        ),
+        frame_row(
+            "closed / 400 records nothing",
+            Breaker::Closed,
+            Error::upstream("p", 400, "bad"),
+        ),
+        FrameRow {
+            class_overrides: BTreeMap::from([(503, FailureClass::BadRequest)]),
+            ..frame_row(
+                "closed / 503 remapped to bad-request records nothing",
+                Breaker::Closed,
+                Error::upstream("p", 503, "boom"),
+            )
+        },
+        FrameRow {
+            circuit: CircuitPhase::Open,
+            ..frame_row(
+                "closed / 429 with a long Retry-After parks",
+                Breaker::Closed,
+                rate_limited_for_an_hour(),
+            )
+        },
+        frame_row(
+            "probe / 429 with a long Retry-After records nothing",
+            Breaker::HalfOpenProbe,
+            rate_limited_for_an_hour(),
+        ),
+    ];
+    let mut mismatches = Vec::new();
+    for row in rows {
+        let state = seeded_state(row.breaker);
+        let items = vec![Ok(content("a")), Err(row.frame), Ok(content("b"))];
+
+        let mut wrapped = wrap(&state, row.breaker, items, row.class_overrides);
+        while wrapped.next().await.is_some() {}
+        drop(wrapped);
+
+        let st = state.lock();
+        let status = st.gate_status(Instant::now());
+        let got = (
+            st.consecutive_failures_for_tests(),
+            status.last_outcome,
+            status.circuit,
+        );
+        let want = (row.failures, Some(row.last), row.circuit);
+        if got != want {
+            mismatches.push(format!("{}: want {want:?}, got {got:?}", row.name));
         }
     }
     assert!(

@@ -776,7 +776,7 @@ async fn settle_after_content(
 }
 
 #[tokio::test]
-async fn post_content_frame_error_settles_by_the_shared_rule_for_probes_only() {
+async fn post_content_frame_error_settles_by_the_shared_rule() {
     let plain = ChatRequest {
         model: "solo".into(),
         ..Default::default()
@@ -807,14 +807,14 @@ async fn post_content_frame_error_settles_by_the_shared_rule_for_probes_only() {
             PostContent::Untouched,
         ),
         ("non-probe 429", 429, &plain, &none, PostContent::Debited),
-        ("non-probe 400", 400, &plain, &none, PostContent::Debited),
+        ("non-probe 400", 400, &plain, &none, PostContent::Untouched),
         ("non-probe 503", 503, &plain, &none, PostContent::Debited),
         (
             "non-probe 503 remapped to bad-request",
             503,
             &plain,
             &remap_503,
-            PostContent::Debited,
+            PostContent::Untouched,
         ),
     ];
     let mut mismatches = Vec::new();
