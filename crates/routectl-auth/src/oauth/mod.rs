@@ -37,7 +37,7 @@ pub mod types;
 pub use login::{LoginOptions, run as run_login};
 pub use project_cache::OAuthStoreProjectCache;
 pub use providers::known_provider_ids;
-pub use store::{LocalProbe, OAuthStore, OpenOutcome};
+pub use store::{DefinitiveCause, LocalProbe, OAuthStore, OpenOutcome, RefreshOutcome};
 
 /// Where the credentials store lives by default
 /// (`$XDG_CONFIG_HOME/routectl/credentials.json`, falling back to
@@ -59,11 +59,15 @@ pub use types::{
 /// Test-only entry points into the OAuth provider surface. Not part of
 /// the supported public API -- the symbols here exist solely so the
 /// integration tests under `tests/` can drive private trace-emission
-/// helpers without spawning a full callback server. Hidden from rustdoc
+/// helpers without spawning a full callback server, and (with the
+/// `test-utils` feature) so a dependent crate's tests can script token
+/// refresh results. Hidden from rustdoc
 /// to keep this out of the published surface contract.
 #[doc(hidden)]
 pub mod testing {
     pub use super::providers::testing::*;
+    #[cfg(any(test, feature = "test-utils"))]
+    pub use super::store::scripted::{ScriptedRefresh, ScriptedRefreshFlow};
 }
 
 use thiserror::Error;

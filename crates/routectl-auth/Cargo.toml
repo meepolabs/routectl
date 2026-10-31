@@ -26,6 +26,10 @@ oauth = [
     "dep:webbrowser",
     "dep:fd-lock",
 ]
+# Scripted token-refresh seam (`OAuthStore::open_with_scripted_refresh_for_tests`,
+# `oauth::testing::ScriptedRefreshFlow`) for dependent crates' tests. Enable it
+# only from `[dev-dependencies]`, so a release build carries no override.
+test-utils = []
 
 [dependencies]
 routectl-core.workspace = true

@@ -32,5 +32,6 @@ pub use store::SecretStore;
 
 #[cfg(feature = "oauth")]
 pub use oauth::{
-    LocalProbe, LoginOptions, OAuthError, OAuthStore, OAuthStoreProjectCache, OpenOutcome,
+    DefinitiveCause, LocalProbe, LoginOptions, OAuthError, OAuthStore, OAuthStoreProjectCache,
+    OpenOutcome, RefreshOutcome,
 };

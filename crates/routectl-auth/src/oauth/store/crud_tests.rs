@@ -447,7 +447,7 @@ async fn probe_local_never_triggers_refresh() {
     .unwrap();
     drop(seed);
 
-    let flow = Arc::new(CountingFlow::new(RefreshOutcome::Mint(
+    let flow = Arc::new(CountingFlow::new(ScriptedRefresh::Mint(
         "tok-should-not-be-minted".into(),
     )));
     let store = open_with_flow(&path, flow.clone()).await;

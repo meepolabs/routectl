@@ -5439,6 +5439,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   key strings only), transient-failure cooldown
   bookkeeping, and the transient-vs-terminal error classifier
   (`refresh_failure_error`: `Error::Credential` only for a refused grant)
+- `src/oauth/store/scripted.rs` -- scripted refresh seam, compiled only under
+  `cfg(any(test, feature = "test-utils"))`: `ScriptedRefresh`,
+  `ScriptedRefreshFlow` (re-exported from `oauth::testing`),
+  `OAuthStore::open_with_scripted_refresh_for_tests`,
+  `set_cooldown_clock_for_tests`
 - `src/oauth/store/seat.rs` -- `SecretStore` impl for `OAuthStore`: resolves
   labeled seats by `seat_key`, `list_seats` enumerates one ref per stored seat
   for a bare `oauth://<provider>` ref (a store INVENTORY primitive -- no

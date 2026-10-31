@@ -181,7 +181,7 @@ async fn on_auth_failure_targets_only_the_named_seat() {
     .unwrap();
     drop(seed);
 
-    let flow = Arc::new(CountingFlow::new(RefreshOutcome::Mint(
+    let flow = Arc::new(CountingFlow::new(ScriptedRefresh::Mint(
         "tok-b-rotated".into(),
     )));
     let store = open_with_flow(&path, flow.clone()).await;

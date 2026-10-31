@@ -14,6 +14,39 @@ use crate::oauth::{OAuthError, OAuthResult};
 
 use super::{OAuthStore, REFRESH_LEAD_SECS};
 
+/// What one background refresh check did for a seat. Returned by
+/// [`OAuthStore::refresh_if_due`]; carries no token material.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefreshOutcome {
+    /// The access token is outside the refresh lead window; nothing was
+    /// POSTed.
+    NotDue,
+    /// The seat now holds a usable record: this call refreshed it, a
+    /// concurrent caller already had, or an external re-login replaced it
+    /// while the refresh was in flight.
+    Refreshed,
+    /// The refresh failed for a reason that may clear on its own (network,
+    /// any token-endpoint status other than a refused grant, an armed
+    /// cooldown, a degraded store). The seat stays usable until its access
+    /// token actually expires.
+    Transient {
+        /// True when the stored access token's `expires_at` is at or
+        /// before now (wall clock).
+        access_expired: bool,
+    },
+    /// The seat cannot be used again without a fresh login.
+    Definitive(DefinitiveCause),
+}
+
+/// Why a seat is definitively unusable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DefinitiveCause {
+    /// No record is stored for the seat (never logged in, or logged out).
+    NotLoggedIn,
+    /// The identity provider refused the stored refresh token.
+    Revoked,
+}
+
 impl OAuthStore {
     /// Base cooldown after the first transient refresh failure, in
     /// seconds. Each further consecutive failure doubles the window
@@ -41,6 +74,40 @@ impl OAuthStore {
         // failure it hits arms the cooldown for the request-time paths.
         self.force_refresh_seat(provider, &seat_key(provider, label), true)
             .await
+    }
+
+    /// Refresh one seat of `provider` if its access token is inside the
+    /// refresh lead window (`REFRESH_LEAD_SECS`), and report what happened.
+    /// `label` `None` targets the default seat. Goes through the same
+    /// per-seat single-flight gate and transient-failure cooldown as a
+    /// request-time refresh, so a background caller and live traffic never
+    /// POST the same seat twice. A token outside the lead window returns
+    /// [`RefreshOutcome::NotDue`] without touching the network.
+    ///
+    /// Only a refused refresh token and a missing seat are
+    /// [`RefreshOutcome::Definitive`]. Every other failure is
+    /// [`RefreshOutcome::Transient`], including a degraded store (its
+    /// cause clears on the next successful reload); a degraded store has no
+    /// readable record, so it reports `access_expired: false`.
+    pub async fn refresh_if_due(&self, provider: &str, label: Option<&str>) -> RefreshOutcome {
+        let seat = seat_key(provider, label);
+        let current = match self.read_record(&seat).await {
+            Ok(rec) => rec,
+            Err(err) => return classify_refresh_failure(&err, false),
+        };
+        if !current.near_expiry(REFRESH_LEAD_SECS, unix_now()) {
+            return RefreshOutcome::NotDue;
+        }
+        match self
+            .refresh_seat(provider, &seat, &current, false, false)
+            .await
+        {
+            Ok(_) => RefreshOutcome::Refreshed,
+            Err(failure) => {
+                let access_expired = current.expires_at_unix <= unix_now();
+                failure.outcome(access_expired)
+            }
+        }
     }
 
     /// Force a refresh for a specific `seat` of `provider`, regardless of
@@ -134,26 +201,11 @@ impl OAuthStore {
     /// tests may pin it through the `now_override` seam so backoff-window
     /// expiry is exercised deterministically without sleeping.
     fn now(&self) -> u64 {
-        #[cfg(test)]
-        {
-            let o = self
-                .inner
-                .now_override
-                .load(std::sync::atomic::Ordering::SeqCst);
-            if o != 0 {
-                return o;
-            }
+        #[cfg(any(test, feature = "test-utils"))]
+        if let Some(pinned) = self.pinned_now() {
+            return pinned;
         }
         unix_now()
-    }
-
-    /// Test seam: pin the cooldown clock to `now` unix seconds (`0`
-    /// restores the wall clock). Only compiled into test builds.
-    #[cfg(test)]
-    fn set_test_now(&self, now: u64) {
-        self.inner
-            .now_override
-            .store(now, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Test seam: snapshot a seat's cooldown as
@@ -292,6 +344,21 @@ impl OAuthStore {
         force: bool,
         bypass_cooldown: bool,
     ) -> Result<TokenRecord> {
+        self.refresh_seat(provider, seat, current, force, bypass_cooldown)
+            .await
+            .map_err(|failure| failure.into_error(provider))
+    }
+
+    /// `refresh_under_lock` with the failure kept typed, so a caller can
+    /// classify the `OAuthError` before it is flattened into `Error`.
+    async fn refresh_seat(
+        &self,
+        provider: &str,
+        seat: &str,
+        current: &TokenRecord,
+        force: bool,
+        bypass_cooldown: bool,
+    ) -> std::result::Result<TokenRecord, RefreshFailure> {
         // Step 1: get-or-insert the per-seat tokio mutex. The map is
         // guarded by a `std::sync::Mutex` -- the critical section is
         // CPU-only (BTreeMap entry + Arc clone) and never crosses an
@@ -311,7 +378,10 @@ impl OAuthStore {
 
         // Step 2: double-check after acquiring the lock. Another caller
         // may have refreshed THIS seat while we were parked.
-        let rec = self.read_record(seat).await.map_err(Error::from)?;
+        let rec = self
+            .read_record(seat)
+            .await
+            .map_err(RefreshFailure::Store)?;
         let still_stale = if force {
             // Forced (401) path: skip the expiry check, but if the
             // on-disk access token has already changed since the dead
@@ -344,10 +414,7 @@ impl OAuthStore {
         // accepted; the CLI force-refresh path is the escape hatch that
         // bypasses this gate to surface the terminal state immediately.
         if !bypass_cooldown && let Some(remaining) = self.cooldown_remaining(seat) {
-            return Err(Error::Auth(format!(
-                "oauth refresh temporarily unavailable for {provider}; \
-                 retry after ~{remaining}s"
-            )));
+            return Err(RefreshFailure::Cooldown { remaining });
         }
 
         // Snapshot the reload generation before the network round-trip.
@@ -369,7 +436,7 @@ impl OAuthStore {
         // while a terminal `RefreshExpired` stays entirely outside the
         // cooldown mechanism (never enters it, never suppressed by it --
         // re-login semantics preserved).
-        let flow = self.resolve_flow(provider)?;
+        let flow = self.resolve_flow(provider).map_err(RefreshFailure::Store)?;
         let mut new_rec = match flow
             .refresh_token(self.http(), rec.refresh_token.expose())
             .await
@@ -379,7 +446,7 @@ impl OAuthStore {
                 if is_transient_refresh_error(&e) {
                     self.record_transient_failure(provider, seat, &e);
                 }
-                return Err(refresh_failure_error(provider, &e));
+                return Err(RefreshFailure::Flow(e));
             }
         };
 
@@ -416,10 +483,9 @@ impl OAuthStore {
                 // through the same gate; cost is at most one extra POST
                 // per reload race (bounded by the operator-driven reload
                 // cadence of minutes to hours).
-                let reloaded = wguard
-                    .get(seat)
-                    .cloned()
-                    .ok_or_else(|| Error::from(OAuthError::NotLoggedIn(seat.to_string())))?;
+                let reloaded = wguard.get(seat).cloned().ok_or_else(|| {
+                    RefreshFailure::Store(OAuthError::NotLoggedIn(seat.to_string()))
+                })?;
                 return Ok(reloaded);
             }
             // No intra-process reload raced us: commit under the
@@ -441,7 +507,7 @@ impl OAuthStore {
             // at reload -- so this guard is a belt-and-braces boundary at
             // the actual write site rather than a reachable path today.
             if let Some(cause) = self.load_error_cause() {
-                return Err(Error::from(OAuthError::Degraded(cause)));
+                return Err(RefreshFailure::Store(OAuthError::Degraded(cause)));
             }
             let seat_owned = seat.to_string();
             let new_rec_for_commit = new_rec.clone();
@@ -464,12 +530,14 @@ impl OAuthStore {
                     },
                 })
                 .await
-                .map_err(Error::from)?;
+                .map_err(RefreshFailure::Store)?;
             match outcome {
                 RefreshCommit::Written => wguard.upsert(seat, new_rec.clone()),
                 RefreshCommit::Superseded(disk) => return Ok(*disk),
                 RefreshCommit::Absent => {
-                    return Err(Error::from(OAuthError::NotLoggedIn(seat.to_string())));
+                    return Err(RefreshFailure::Store(OAuthError::NotLoggedIn(
+                        seat.to_string(),
+                    )));
                 }
             }
         }
@@ -482,15 +550,61 @@ impl OAuthStore {
 
     /// Resolve the `OAuthFlow` for `provider`. Production lookup goes
     /// through the static registry in `providers::lookup`. The
-    /// `cfg(test)` branch lets unit tests inject a counting fake.
-    fn resolve_flow(&self, provider: &str) -> Result<&dyn providers::OAuthFlow> {
-        #[cfg(test)]
+    /// test seam branch lets tests inject a scripted or counting fake.
+    fn resolve_flow(&self, provider: &str) -> OAuthResult<&dyn providers::OAuthFlow> {
+        #[cfg(any(test, feature = "test-utils"))]
         if let Some(f) = &self.inner.refresh_flow {
             return Ok(f.as_ref());
         }
-        let flow: &'static dyn providers::OAuthFlow =
-            providers::lookup(provider).map_err(Error::from)?;
+        let flow: &'static dyn providers::OAuthFlow = providers::lookup(provider)?;
         Ok(flow)
+    }
+}
+
+/// Why `refresh_seat` did not return a record, before flattening.
+enum RefreshFailure {
+    /// The store could not read, resolve or commit the seat.
+    Store(OAuthError),
+    /// The provider's token endpoint refused or failed the refresh POST.
+    Flow(OAuthError),
+    /// The seat's transient-failure cooldown suppressed the POST.
+    Cooldown {
+        /// Coarse seconds until the cooldown window elapses.
+        remaining: u64,
+    },
+}
+
+impl RefreshFailure {
+    /// The `Error` request-time callers see.
+    fn into_error(self, provider: &str) -> Error {
+        match self {
+            Self::Store(err) => Error::from(err),
+            Self::Flow(err) => refresh_failure_error(provider, &err),
+            Self::Cooldown { remaining } => Error::Auth(format!(
+                "oauth refresh temporarily unavailable for {provider}; \
+                 retry after ~{remaining}s"
+            )),
+        }
+    }
+
+    const fn outcome(&self, access_expired: bool) -> RefreshOutcome {
+        match self {
+            Self::Store(err) | Self::Flow(err) => classify_refresh_failure(err, access_expired),
+            Self::Cooldown { .. } => RefreshOutcome::Transient { access_expired },
+        }
+    }
+}
+
+/// The background-refresh outcome for a failed refresh. Only exact
+/// evidence that the seat is dead is definitive: the identity provider
+/// refusing the grant, or no stored record. Every token-endpoint status
+/// short of a refused grant (any 4xx or 5xx), network failures and a
+/// degraded store may clear without a re-login.
+const fn classify_refresh_failure(err: &OAuthError, access_expired: bool) -> RefreshOutcome {
+    match err {
+        OAuthError::RefreshExpired(_) => RefreshOutcome::Definitive(DefinitiveCause::Revoked),
+        OAuthError::NotLoggedIn(_) => RefreshOutcome::Definitive(DefinitiveCause::NotLoggedIn),
+        _ => RefreshOutcome::Transient { access_expired },
     }
 }
 
@@ -604,3 +718,7 @@ fn changed_seats(before: &CredentialsFile, after: &CredentialsFile) -> BTreeSet<
 #[cfg(test)]
 #[path = "refresh_tests.rs"]
 mod refresh_tests;
+
+#[cfg(test)]
+#[path = "refresh_if_due_tests.rs"]
+mod refresh_if_due_tests;

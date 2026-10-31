@@ -43,7 +43,7 @@ use crate::oauth::file_io;
 use crate::oauth::types::{CredentialsFile, TokenRecord};
 use crate::oauth::{OAuthError, OAuthResult};
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 use crate::oauth::providers;
 
 /// Re-read window: a `get()` call within `near_expiry(REFRESH_LEAD_SECS)`
@@ -177,16 +177,16 @@ struct Inner {
     refresh_cooldowns: std::sync::Mutex<BTreeMap<String, SeatCooldown>>,
     /// Test seam: when set, `refresh_under_lock` uses this flow instead
     /// of `providers::lookup`. Lets the unit tests inject a counting
-    /// fake without standing up the real token endpoint. The field is
-    /// `cfg(test)`-gated so production binaries cannot carry an
-    /// override at all.
-    #[cfg(test)]
+    /// fake without standing up the real token endpoint. Compiled only
+    /// for tests and the dev-dependency `test-utils` feature, so
+    /// production binaries cannot carry an override at all.
+    #[cfg(any(test, feature = "test-utils"))]
     refresh_flow: Option<Arc<dyn providers::OAuthFlow>>,
     /// Test seam: overrides the cooldown clock. `0` means "use
     /// `unix_now()`". Lets a test advance past `next_allowed_unix`
-    /// deterministically instead of sleeping. `cfg(test)`-gated so it
-    /// cannot exist in a production binary.
-    #[cfg(test)]
+    /// deterministically instead of sleeping. Gated like `refresh_flow`,
+    /// so it cannot exist in a production binary.
+    #[cfg(any(test, feature = "test-utils"))]
     now_override: std::sync::atomic::AtomicU64,
 }
 
@@ -243,9 +243,9 @@ impl OAuthStore {
                 refresh_locks: std::sync::Mutex::new(BTreeMap::new()),
                 reload_gen: std::sync::atomic::AtomicU64::new(0),
                 refresh_cooldowns: std::sync::Mutex::new(BTreeMap::new()),
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-utils"))]
                 refresh_flow: None,
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-utils"))]
                 now_override: std::sync::atomic::AtomicU64::new(0),
             }),
         })
@@ -275,9 +275,9 @@ impl OAuthStore {
                 refresh_locks: std::sync::Mutex::new(BTreeMap::new()),
                 reload_gen: std::sync::atomic::AtomicU64::new(0),
                 refresh_cooldowns: std::sync::Mutex::new(BTreeMap::new()),
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-utils"))]
                 refresh_flow: None,
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-utils"))]
                 now_override: std::sync::atomic::AtomicU64::new(0),
             }),
         })
@@ -406,7 +406,11 @@ fn sanitize_open_error(err: &OAuthError) -> String {
 
 mod crud;
 mod refresh;
+#[cfg(any(test, feature = "test-utils"))]
+pub mod scripted;
 mod seat;
+
+pub use refresh::{DefinitiveCause, RefreshOutcome};
 
 #[cfg(test)]
 #[path = "test_support.rs"]

@@ -19,6 +19,7 @@ pub(super) use crate::oauth::types::{CredentialsFile, TokenRecord, seat_key, uni
 pub(super) use crate::oauth::{OAuthError, OAuthResult};
 pub(super) use crate::{SecretRef, SecretStore};
 
+pub(super) use super::scripted::ScriptedRefresh;
 pub(super) use super::{LocalProbe, OAuthStore, OpenOutcome};
 
 pub(super) fn rec_at(expires_at: u64) -> TokenRecord {
@@ -37,24 +38,6 @@ pub(super) fn rec_named(access: &str, expires_at: u64) -> TokenRecord {
         session_id: None,
         cloud_project_id: None,
     }
-}
-
-/// What the fake `OAuthFlow` should return on the next refresh.
-/// Cloned per call so the same fake can be reused across iterations.
-#[derive(Clone)]
-pub(super) enum RefreshOutcome {
-    /// Successful refresh that mints a record with this access
-    /// token and a 1h future expiry.
-    Mint(String),
-    /// Simulate Anthropic's `invalid_grant` mapping. Drives the
-    /// "actionable error" assertion.
-    RefreshExpired,
-    /// Simulate a transient upstream failure (network / 5xx) that
-    /// the cooldown classifier accepts. Drives the cooldown tests.
-    Transient,
-    /// A token endpoint that answered with this HTTP status, shaped the way
-    /// the provider flows format it (`"{status} {url}"`).
-    TokenEndpoint(u16),
 }
 
 /// Tracks simultaneous `refresh_token` invocations so a test can
@@ -98,7 +81,7 @@ impl ConcurrencyGauge {
 /// claude.ai token endpoint.
 pub(super) struct CountingFlow {
     calls: Arc<StdMutex<u32>>,
-    outcome: StdMutex<RefreshOutcome>,
+    outcome: StdMutex<ScriptedRefresh>,
     /// When true, `refresh_token` yields once before returning so a
     /// concurrent caller (in `tokio::join!`) can park on the
     /// per-seat single-flight mutex while we hold it.
@@ -123,7 +106,7 @@ pub(super) struct CountingFlow {
 }
 
 impl CountingFlow {
-    pub(super) fn new(outcome: RefreshOutcome) -> Self {
+    pub(super) fn new(outcome: ScriptedRefresh) -> Self {
         Self {
             calls: Arc::new(StdMutex::new(0)),
             outcome: StdMutex::new(outcome),
@@ -135,7 +118,7 @@ impl CountingFlow {
 
     /// Swap the outcome the next `refresh_token` will return. Lets a
     /// single injected fake model an outage that later recovers.
-    pub(super) fn set_outcome(&self, outcome: RefreshOutcome) {
+    pub(super) fn set_outcome(&self, outcome: ScriptedRefresh) {
         *self.outcome.lock().unwrap() = outcome;
     }
 
@@ -226,12 +209,12 @@ impl OAuthFlow for CountingFlow {
             gauge.leave();
         }
         match self.outcome.lock().unwrap().clone() {
-            RefreshOutcome::Mint(at) => Ok(rec_named(&at, unix_now() + 3600)),
-            RefreshOutcome::RefreshExpired => Err(OAuthError::RefreshExpired("anthropic".into())),
-            RefreshOutcome::Transient => {
+            ScriptedRefresh::Mint(at) => Ok(rec_named(&at, unix_now() + 3600)),
+            ScriptedRefresh::RefreshExpired => Err(OAuthError::RefreshExpired("anthropic".into())),
+            ScriptedRefresh::Transient => {
                 Err(OAuthError::Network("simulated upstream outage".into()))
             }
-            RefreshOutcome::TokenEndpoint(status) => Err(OAuthError::TokenEndpoint(format!(
+            ScriptedRefresh::TokenEndpoint(status) => Err(OAuthError::TokenEndpoint(format!(
                 "{status} https://idp.example/token"
             ))),
         }

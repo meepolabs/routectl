@@ -13,7 +13,7 @@ async fn get_near_expiry_triggers_refresh_and_returns_new_token() {
         .unwrap();
     drop(seed);
 
-    let flow = Arc::new(CountingFlow::new(RefreshOutcome::Mint(
+    let flow = Arc::new(CountingFlow::new(ScriptedRefresh::Mint(
         "tok-refreshed".into(),
     )));
     let store = open_with_flow(&path, flow.clone()).await;
@@ -49,7 +49,7 @@ async fn get_does_not_refresh_when_token_is_fresh_via_seam() {
         .unwrap();
     drop(seed);
 
-    let flow = Arc::new(CountingFlow::new(RefreshOutcome::Mint(
+    let flow = Arc::new(CountingFlow::new(ScriptedRefresh::Mint(
         "tok-should-not-be-used".into(),
     )));
     let store = open_with_flow(&path, flow.clone()).await;
@@ -84,7 +84,7 @@ async fn concurrent_get_calls_collapse_to_single_refresh() {
     drop(seed);
 
     let flow =
-        Arc::new(CountingFlow::new(RefreshOutcome::Mint("tok-refreshed".into())).with_yield());
+        Arc::new(CountingFlow::new(ScriptedRefresh::Mint("tok-refreshed".into())).with_yield());
     let store = open_with_flow(&path, flow.clone()).await;
     let store2 = store.clone();
     let r = SecretRef::OAuth {
@@ -133,7 +133,7 @@ async fn concurrent_on_auth_failure_calls_collapse_to_single_refresh() {
     drop(seed);
 
     let flow =
-        Arc::new(CountingFlow::new(RefreshOutcome::Mint("tok-after-401".into())).with_yield());
+        Arc::new(CountingFlow::new(ScriptedRefresh::Mint("tok-after-401".into())).with_yield());
     let store = open_with_flow(&path, flow.clone()).await;
     let store2 = store.clone();
     let r = SecretRef::OAuth {
@@ -166,7 +166,7 @@ async fn on_auth_failure_forces_refresh_even_when_token_not_near_expiry() {
         .unwrap();
     drop(seed);
 
-    let flow = Arc::new(CountingFlow::new(RefreshOutcome::Mint(
+    let flow = Arc::new(CountingFlow::new(ScriptedRefresh::Mint(
         "tok-after-401".into(),
     )));
     let store = open_with_flow(&path, flow.clone()).await;
@@ -201,7 +201,7 @@ async fn refresh_failure_surfaces_actionable_error() {
         .unwrap();
     drop(seed);
 
-    let flow = Arc::new(CountingFlow::new(RefreshOutcome::RefreshExpired));
+    let flow = Arc::new(CountingFlow::new(ScriptedRefresh::RefreshExpired));
     let store = open_with_flow(&path, flow).await;
 
     let err = store
@@ -238,7 +238,7 @@ async fn force_refresh_returns_new_record_for_cli() {
         .unwrap();
     drop(seed);
 
-    let flow = Arc::new(CountingFlow::new(RefreshOutcome::Mint(
+    let flow = Arc::new(CountingFlow::new(ScriptedRefresh::Mint(
         "tok-cli-refresh".into(),
     )));
     let store = open_with_flow(&path, flow).await;
@@ -272,7 +272,7 @@ async fn refresh_label_targets_named_seat() {
     .unwrap();
     drop(seed);
 
-    let flow = Arc::new(CountingFlow::new(RefreshOutcome::Mint(
+    let flow = Arc::new(CountingFlow::new(ScriptedRefresh::Mint(
         "tok-b-refreshed".into(),
     )));
     let store = open_with_flow(&path, flow.clone()).await;
@@ -415,7 +415,7 @@ async fn reload_after_an_in_process_refresh_reports_no_changed_seat() {
         .await
         .unwrap();
     drop(seed);
-    let flow = Arc::new(CountingFlow::new(RefreshOutcome::Mint(
+    let flow = Arc::new(CountingFlow::new(ScriptedRefresh::Mint(
         "tok-refreshed".into(),
     )));
     let store = open_with_flow(&path, flow.clone()).await;
@@ -458,7 +458,7 @@ async fn open_rendezvous_store(
     }
     drop(seed);
     let flow = Arc::new(
-        CountingFlow::new(RefreshOutcome::Mint("tok-a-refreshed".into())).with_rendezvous(barrier),
+        CountingFlow::new(ScriptedRefresh::Mint("tok-a-refreshed".into())).with_rendezvous(barrier),
     );
     let store = open_with_flow(path, flow.clone()).await;
     (store, flow)
@@ -667,7 +667,7 @@ async fn refresh_preserves_session_id_across_rotation() {
     seed.write_record("anthropic", seeded).await.unwrap();
     drop(seed);
 
-    let flow = Arc::new(CountingFlow::new(RefreshOutcome::Mint(
+    let flow = Arc::new(CountingFlow::new(ScriptedRefresh::Mint(
         "tok-refreshed".into(),
     )));
     let store = open_with_flow(&path, flow.clone()).await;
@@ -719,7 +719,7 @@ async fn reload_during_refresh_wins_over_stale_result() {
     // CountingFlow with yield_once: refresh POST suspends mid-flight
     // so the reload arm can run between gen-snapshot and write-back.
     let flow =
-        Arc::new(CountingFlow::new(RefreshOutcome::Mint("tok-from-refresh".into())).with_yield());
+        Arc::new(CountingFlow::new(ScriptedRefresh::Mint("tok-from-refresh".into())).with_yield());
     let store = open_with_flow(&path, flow.clone()).await;
 
     // Write a newer record to disk via a separate handle -- this is
@@ -806,7 +806,7 @@ async fn refresh_single_flight_is_per_seat() {
 
     let barrier = Arc::new(tokio::sync::Barrier::new(2));
     let flow = Arc::new(
-        CountingFlow::new(RefreshOutcome::Mint("tok-refreshed".into()))
+        CountingFlow::new(ScriptedRefresh::Mint("tok-refreshed".into()))
             .with_concurrency_gauge()
             .with_rendezvous(barrier.clone()),
     );
@@ -865,7 +865,7 @@ async fn concurrent_get_same_seat_collapses_to_one_refresh() {
     drop(seed);
 
     let flow =
-        Arc::new(CountingFlow::new(RefreshOutcome::Mint("tok-refreshed".into())).with_yield());
+        Arc::new(CountingFlow::new(ScriptedRefresh::Mint("tok-refreshed".into())).with_yield());
     let store = open_with_flow(&path, flow.clone()).await;
     let store2 = store.clone();
     let r = SecretRef::OAuth {
@@ -905,7 +905,7 @@ async fn session_id_preserved_per_seat_across_refresh() {
     seed.write_record("anthropic#seat-b", seat_b).await.unwrap();
     drop(seed);
 
-    let flow = Arc::new(CountingFlow::new(RefreshOutcome::Mint(
+    let flow = Arc::new(CountingFlow::new(ScriptedRefresh::Mint(
         "tok-b-refreshed".into(),
     )));
     let store = open_with_flow(&path, flow.clone()).await;
@@ -949,7 +949,7 @@ async fn refresh_commit_does_not_clobber_sibling_seat() {
         .await
         .unwrap();
     drop(seed);
-    let flow = Arc::new(CountingFlow::new(RefreshOutcome::Mint(
+    let flow = Arc::new(CountingFlow::new(ScriptedRefresh::Mint(
         "tok-a-refreshed".into(),
     )));
     let store = open_with_flow(&path, flow.clone()).await;
@@ -1002,7 +1002,7 @@ async fn refresh_does_not_resurrect_logged_out_seat() {
         .await
         .unwrap();
     drop(seed);
-    let flow = Arc::new(CountingFlow::new(RefreshOutcome::Mint(
+    let flow = Arc::new(CountingFlow::new(ScriptedRefresh::Mint(
         "tok-refreshed".into(),
     )));
     let store = open_with_flow(&path, flow.clone()).await;
@@ -1043,9 +1043,9 @@ async fn refresh_does_not_resurrect_logged_out_seat() {
 async fn transient_failure_enters_cooldown_second_call_skips_flow() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("creds.json");
-    let flow = Arc::new(CountingFlow::new(RefreshOutcome::Transient));
+    let flow = Arc::new(CountingFlow::new(ScriptedRefresh::Transient));
     let store = seed_near_expiry_with_flow(&path, flow.clone()).await;
-    store.set_test_now(1_000);
+    store.set_cooldown_clock_for_tests(1_000);
 
     // First get: the flow fires once and fails transiently, arming
     // the per-seat cooldown (5s base).
@@ -1072,9 +1072,9 @@ async fn transient_failure_enters_cooldown_second_call_skips_flow() {
 async fn cooldown_expiry_allows_exactly_one_retry_under_concurrency() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("creds.json");
-    let flow = Arc::new(CountingFlow::new(RefreshOutcome::Transient).with_yield());
+    let flow = Arc::new(CountingFlow::new(ScriptedRefresh::Transient).with_yield());
     let store = seed_near_expiry_with_flow(&path, flow.clone()).await;
-    store.set_test_now(1_000);
+    store.set_cooldown_clock_for_tests(1_000);
 
     // Arm the cooldown: one failed POST -> next_allowed = 1005.
     let _ = store.get(&anthropic_ref()).await;
@@ -1086,7 +1086,7 @@ async fn cooldown_expiry_allows_exactly_one_retry_under_concurrency() {
     // callers. The per-seat single-flight lets exactly one through the
     // POST; the other parks on the lock, re-double-checks, and is then
     // suppressed by the freshly re-armed cooldown. Net: +1 POST only.
-    store.set_test_now(1_005);
+    store.set_cooldown_clock_for_tests(1_005);
     let ref_a = anthropic_ref();
     let ref_b = anthropic_ref();
     let (a, b) = tokio::join!(store.get(&ref_a), store.get(&ref_b));
@@ -1106,17 +1106,17 @@ async fn cooldown_expiry_allows_exactly_one_retry_under_concurrency() {
 async fn success_clears_cooldown_and_resets_consecutive() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("creds.json");
-    let flow = Arc::new(CountingFlow::new(RefreshOutcome::Transient));
+    let flow = Arc::new(CountingFlow::new(ScriptedRefresh::Transient));
     let store = seed_near_expiry_with_flow(&path, flow.clone()).await;
-    store.set_test_now(1_000);
+    store.set_cooldown_clock_for_tests(1_000);
 
     // Fail once to arm the cooldown.
     let _ = store.get(&anthropic_ref()).await;
     assert!(store.cooldown_snapshot("anthropic").is_some());
 
     // Recover: advance past the window, flip the flow to success.
-    store.set_test_now(1_005);
-    flow.set_outcome(RefreshOutcome::Mint("tok-ok".into()));
+    store.set_cooldown_clock_for_tests(1_005);
+    flow.set_outcome(ScriptedRefresh::Mint("tok-ok".into()));
     let tok = store.get(&anthropic_ref()).await.unwrap();
     assert_eq!(tok, "tok-ok");
     assert_eq!(flow.call_count(), 2);
@@ -1127,7 +1127,7 @@ async fn success_clears_cooldown_and_resets_consecutive() {
 
     // A subsequent transient failure re-enters at the 5s base, proving
     // consecutive reset to zero (not carried over from before).
-    store.set_test_now(2_000);
+    store.set_cooldown_clock_for_tests(2_000);
     store.record_transient_failure("anthropic", "anthropic", &OAuthError::Network("x".into()));
     let (consecutive, next_allowed, _) = store.cooldown_snapshot("anthropic").unwrap();
     assert_eq!(
@@ -1141,9 +1141,9 @@ async fn success_clears_cooldown_and_resets_consecutive() {
 async fn refresh_expired_never_enters_cooldown() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("creds.json");
-    let flow = Arc::new(CountingFlow::new(RefreshOutcome::RefreshExpired));
+    let flow = Arc::new(CountingFlow::new(ScriptedRefresh::RefreshExpired));
     let store = seed_near_expiry_with_flow(&path, flow.clone()).await;
-    store.set_test_now(1_000);
+    store.set_cooldown_clock_for_tests(1_000);
 
     // A terminal RefreshExpired must not arm the cooldown, so both
     // calls attempt a POST (two attempts, no suppression).
@@ -1172,7 +1172,7 @@ async fn reset_triggers_clear_cooldown() {
         .unwrap();
     drop(seed);
     let store = OAuthStore::open(&path).await.unwrap();
-    store.set_test_now(1_000);
+    store.set_cooldown_clock_for_tests(1_000);
     let arm = |s: &OAuthStore| {
         s.record_transient_failure("anthropic", "anthropic", &OAuthError::Network("x".into()));
     };
@@ -1210,9 +1210,9 @@ async fn reset_triggers_clear_cooldown() {
 async fn cli_force_refresh_bypasses_active_cooldown() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("creds.json");
-    let flow = Arc::new(CountingFlow::new(RefreshOutcome::Transient));
+    let flow = Arc::new(CountingFlow::new(ScriptedRefresh::Transient));
     let store = seed_near_expiry_with_flow(&path, flow.clone()).await;
-    store.set_test_now(1_000);
+    store.set_cooldown_clock_for_tests(1_000);
 
     // Arm the cooldown via a request-time refresh.
     let _ = store.get(&anthropic_ref()).await;
@@ -1307,7 +1307,7 @@ async fn cooldown_observability_contract() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("creds.json");
     let store = OAuthStore::open(&path).await.unwrap();
-    store.set_test_now(1_000);
+    store.set_cooldown_clock_for_tests(1_000);
     // Provider refresh errors format as "{status} {url}"; the retained
     // reason and the log field must reduce that to a class-only label
     // with no URL.
@@ -1373,18 +1373,18 @@ async fn only_a_terminal_refresh_failure_carries_a_credential_reason() {
     let rows = [
         (
             "refresh expired",
-            RefreshOutcome::RefreshExpired,
+            ScriptedRefresh::RefreshExpired,
             Some(UpstreamReason::CredentialInvalid),
         ),
-        ("network", RefreshOutcome::Transient, None),
+        ("network", ScriptedRefresh::Transient, None),
         (
             "token endpoint 429",
-            RefreshOutcome::TokenEndpoint(429),
+            ScriptedRefresh::TokenEndpoint(429),
             None,
         ),
         (
             "token endpoint 503",
-            RefreshOutcome::TokenEndpoint(503),
+            ScriptedRefresh::TokenEndpoint(503),
             None,
         ),
     ];
