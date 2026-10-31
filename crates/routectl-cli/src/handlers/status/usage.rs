@@ -1688,7 +1688,7 @@ mod tests {
         let (status, json) =
             get_usage(state_with_ledger(path.clone()), "/status/usage?window=all").await;
 
-        // The budget is a whole second, so a 4000-row ledger answers inside it:
+        // The budget is seconds long, so a 4000-row ledger answers inside it:
         // this pins that wiring the deadline did not make the healthy path shed.
         assert_eq!(status, StatusCode::OK);
         assert!(

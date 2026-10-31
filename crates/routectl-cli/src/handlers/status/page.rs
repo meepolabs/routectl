@@ -1488,4 +1488,78 @@ mod tests {
             );
         }
     }
+
+    /// The integer a `var <name> = <int>;` declaration assigns in the dashboard
+    /// script. Anchored on the declaration, which must occur exactly once, for
+    /// the same reason as [`literal_body`]: a comment naming the variable must
+    /// not stand in for the live value.
+    fn script_ms(name: &str) -> u64 {
+        let script = script();
+        let decl_needle = format!("var {name} =");
+        assert_eq!(
+            script.matches(&decl_needle).count(),
+            1,
+            "dashboard JS declares `{decl_needle}` exactly once"
+        );
+        let decl = script.find(&decl_needle).expect("declaration present") + decl_needle.len();
+        let end = script[decl..]
+            .find(';')
+            .unwrap_or_else(|| panic!("{name} declaration ends in `;`"))
+            + decl;
+        script[decl..end]
+            .trim()
+            .parse()
+            .unwrap_or_else(|e| panic!("{name} is an integer literal: {e}"))
+    }
+
+    /// Room the `/status` aggregate leaves after the usage panel's budget for
+    /// the health, config and doctor panels and the response write, none of
+    /// which carries a deadline of its own.
+    const AGGREGATE_RESERVE_MS: u64 = 1000;
+
+    /// The sum identity in `crate::server::status_gate`'s module docs for the
+    /// GET routes: the server's usage budget plus the aggregate's reserve must
+    /// land inside the browser's per-GET abort, or the browser aborts a round
+    /// the server would have answered with a shed `query_timeout` panel. The
+    /// abort must also stay under the poll cadence.
+    #[test]
+    fn the_usage_budget_and_its_reserve_sum_inside_the_browser_get_abort() {
+        let timeout_ms = script_ms("TIMEOUT_MS");
+        let cadence_ms = script_ms("BASE_MS");
+
+        let server_ms = crate::server::status_gate::USAGE_BUDGET_MS + AGGREGATE_RESERVE_MS;
+
+        assert!(
+            server_ms <= timeout_ms,
+            "USAGE_BUDGET_MS + reserve = {server_ms}ms exceeds the browser GET abort \
+             TIMEOUT_MS = {timeout_ms}ms"
+        );
+        assert!(
+            timeout_ms < cadence_ms,
+            "TIMEOUT_MS = {timeout_ms}ms must stay under the BASE_MS = {cadence_ms}ms cadence"
+        );
+    }
+
+    /// The `/status/query` sum identity in `crate::server::status_gate`'s
+    /// module docs: the body read and the query budget run serially in one
+    /// handler, so together they must land inside the browser's QUERY abort.
+    #[test]
+    fn the_query_route_budgets_sum_inside_the_browser_query_abort() {
+        let timeout_ms = script_ms("QUERY_TIMEOUT_MS");
+        let cadence_ms = script_ms("BASE_MS");
+
+        let body_read_ms = u64::try_from(super::super::query::BODY_READ_TIMEOUT.as_millis())
+            .expect("body read timeout fits in u64 ms");
+        let server_ms = body_read_ms + crate::server::status_gate::QUERY_BUDGET_MS;
+
+        assert!(
+            server_ms <= timeout_ms,
+            "BODY_READ_TIMEOUT + QUERY_BUDGET_MS = {server_ms}ms exceeds the browser QUERY \
+             abort QUERY_TIMEOUT_MS = {timeout_ms}ms"
+        );
+        assert!(
+            timeout_ms < cadence_ms,
+            "QUERY_TIMEOUT_MS = {timeout_ms}ms must stay under the BASE_MS = {cadence_ms}ms cadence"
+        );
+    }
 }

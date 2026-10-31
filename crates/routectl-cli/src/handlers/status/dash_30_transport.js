@@ -32,7 +32,7 @@
     });
   }
 
-  // GET a status URL under the 2s budget. No request body, no mutating verb
+  // GET a status URL under the TIMEOUT_MS budget. No request body, no mutating verb
   // -- fetch defaults to GET and none is set.
   function fetchStatus(url, ctrl) {
     return safeRequest(url, null, ctrl, TIMEOUT_MS);

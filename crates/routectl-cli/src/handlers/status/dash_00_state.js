@@ -102,13 +102,19 @@
   // timers (a failing QUERY must not slow healthy GET polling) but share these
   // steps, so the two schedules cannot drift apart.
   var BACKOFF_STEPS_MS = [10000, 20000, 30000];
-  var TIMEOUT_MS = 2000;           // per-GET AbortController budget
+  // Per-GET AbortController budget, covering both the /status aggregate and
+  // the all-history /status/usage read. Sized so the server's own usage panel
+  // budget, plus a reserve for the three cheap panels and the response write,
+  // lands inside it: the server then sheds a slow ledger read as an
+  // unavailable panel instead of the browser aborting the whole round. Still
+  // under the 5s cadence, so a slow round cannot overlap its next attempt.
+  var TIMEOUT_MS = 3500;
   // Per-QUERY AbortController budget. Like TIMEOUT_MS this is ONE abort timer
   // covering the whole exchange -- connect, send, server work, and body decode
-  // (see safeRequest); the client enforces no decomposition of it. Larger than
-  // the GET budget because /status/query is the one route that reads a
-  // client-supplied body and then runs a grouped ledger scan, whose own
-  // server-side budgets are sized to sum below this. Those budgets do not cover
+  // (see safeRequest); the client enforces no decomposition of it.
+  // /status/query is the one route that reads a client-supplied body and then
+  // runs a grouped ledger scan, and those two server-side budgets are sized to
+  // sum below this. Those budgets do not cover
   // queueing, so a saturated surface can still abort here rather than returning
   // a served-but-unavailable panel; that is why a timeout is treated as
   // transport failure and backed off, not as a panel verdict. Still under the 5s

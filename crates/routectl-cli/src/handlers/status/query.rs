@@ -84,7 +84,7 @@ const MAX_BODY_BYTES: usize = 8 * 1024;
 /// `QUERY_BUDGET_MS` only AFTER this read completes -- so it cannot be changed
 /// on its own. The derivation lives in `crate::server::status_gate`'s module
 /// docs.
-const BODY_READ_TIMEOUT: Duration = Duration::from_secs(1);
+pub(super) const BODY_READ_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// The closed request vocabulary. `deny_unknown_fields` plus the two closed
 /// enums make every out-of-vocabulary body -- an unknown key, an unknown token,
