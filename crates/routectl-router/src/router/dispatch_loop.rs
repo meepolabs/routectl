@@ -571,8 +571,7 @@ impl Router {
                 // section that acquired the slot and never from a re-read of
                 // the shared half-open bit.
                 let mut probe_guard = {
-                    let (refusal, guard) =
-                        self.admit_client(state_key, target.account.as_deref(), provider_name);
+                    let (refusal, guard) = self.admit_client(state_key, target.account.as_deref());
                     if let Some((gate_kind, gate_err)) = refusal {
                         log_gate_refusal(
                             provider_name,
@@ -586,13 +585,12 @@ impl Router {
                         {
                             return Err(gate_err);
                         }
-                        // Keep the FIRST real error: a synthetic gate error
-                        // (status 0 "circuit breaker open" / RPM) on a later
-                        // chain entry must not overwrite an earlier entry's
-                        // genuine upstream failure, or the client sees the
-                        // synthetic error instead of the real 503/timeout.
-                        // Between two parked seats the earlier deadline wins, and
-                        // any other gate refusal replaces a parked one.
+                        // Keep the FIRST real error: a local refusal on a
+                        // later chain entry must not overwrite an earlier
+                        // entry's genuine upstream failure, or the client
+                        // sees the refusal instead of the real 503/timeout.
+                        // Local refusals fold into one: the highest-priority
+                        // reason and the earliest known wait.
                         merge_gate_refusal(&mut last_err, gate_err);
                         if opts.disable_fallbacks {
                             break 'chain;
@@ -803,8 +801,8 @@ impl Router {
                             // before re-gating. If the re-gate then refuses
                             // (CircuitOpen / RPM), the `last_err.is_none()`
                             // guard above keeps this real error rather than
-                            // overwriting it with the synthetic status-0 gate
-                            // error, so the client sees the true 401.
+                            // overwriting it with the local gate refusal, so
+                            // the client sees the true 401.
                             if A::SURFACE.holds_recovered_errors() {
                                 last_err = Some(e);
                             }
@@ -847,8 +845,8 @@ impl Router {
                             // re-gating the repaired attempt: if the re-gate
                             // refuses (CircuitOpen / RPM), the
                             // `last_err.is_none()` guard keeps the real upstream
-                            // rejection rather than surfacing the synthetic
-                            // status-0 gate error.
+                            // rejection rather than surfacing the local gate
+                            // refusal.
                             if A::SURFACE.holds_recovered_errors() {
                                 last_err = Some(last_err_body_free.unwrap_or(e));
                             }
@@ -895,8 +893,8 @@ impl Router {
                             // not mean the pooled model is out of quota: hop to
                             // the next sibling seat of the SAME pool when one
                             // exists (and fallbacks are enabled). Carry the
-                            // genuine 429/529 as last_err so a later synthetic
-                            // gate error cannot mask it; fast-fail once the
+                            // genuine 429/529 as last_err so a later local gate
+                            // refusal cannot mask it; fast-fail once the
                             // pool's seats are exhausted.
                             if !opts.disable_fallbacks
                                 && A::SURFACE.health_error_walks()
@@ -1006,8 +1004,8 @@ impl Router {
                             // last_err before re-probing. If the re-gate then
                             // refuses (CircuitOpen / RPM), the `last_err.is_none()`
                             // guard above leaves this real error in place rather
-                            // than overwriting it with the synthetic status-0
-                            // gate error, so the client sees the true failure.
+                            // than overwriting it with the local gate refusal,
+                            // so the client sees the true failure.
                             last_err = Some(e);
                             // Honor a SMALL non-probe upstream reset as the
                             // next in-loop sleep: bump `backoff` so the

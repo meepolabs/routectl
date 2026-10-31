@@ -25,7 +25,8 @@ overlays merge, what's reserved.
 - [Validating config](#validating-config)
 
 **Providers**
-- [Per-provider runtime gates](#per-provider-runtime-gates) (RPM, circuit breaker, timeouts)
+- [Per-provider runtime gates](#per-provider-runtime-gates) (RPM, circuit breaker, timeouts) -
+  [local refusals](#local-refusals)
 - [Per-provider capability filter](#per-provider-capability-filter)
 - [Gemini](#providersx-gemini-kind--gemini) -
   [ChatGPT / Codex](#chatgpt--codex-provider) -
@@ -1691,6 +1692,36 @@ circuit_failures       = 5
 circuit_cooldown_ms    = 60000
 request_timeout_ms     = 120000
 ```
+
+### Local refusals
+
+When routectl itself declines to send a request, because every target the
+request could use is refused before any upstream contact, the client gets
+HTTP 503 on chat completions, messages and responses. `error.type` (and
+`error.code` on the OpenAI shapes) is one of these tokens:
+
+| Token | Why the target was refused |
+|---|---|
+| `credential_unusable` | No usable credential seat (for example an empty pool). |
+| `account_parked` | The credential's account is parked after the upstream rejected it. |
+| `breaker_open` | The target's circuit breaker is open. |
+| `rate_limited` | The target's own `rpm_limit` has no request left this minute. |
+
+When several targets are refused for different reasons, the token is the
+first one in that table. A `Retry-After` header carries the earliest known
+recovery among the refused targets, rounded up to whole seconds and
+clamped to 1-3600 s: the rest of an open breaker window, the time until
+the RPM bucket holds one request again, or the rest of an account park.
+It is omitted when no recovery time is known (an empty pool, a zero
+`rpm_limit`, or a breaker or park whose one re-test request is in flight).
+A stream whose SSE head already went out ends with one terminal error
+event carrying the same token.
+
+If a target was dialed and failed, its own error is returned instead. An
+upstream 429 is passed through unchanged, with the upstream's status,
+error type and `Retry-After`. A token count stops at the first target
+whose breaker or RPM gate refuses it rather than trying the next one; it
+still answers 503 with that target's token.
 
 ## Retry and fallback defaults
 

@@ -182,7 +182,7 @@ fn shape(outcome: &Result<TokenCount>) -> String {
             ..
         }) => format!("{provider} upstream {status}: {body}"),
         Err(Error::NotImplemented(_, detail)) => format!("not implemented: {detail}"),
-        Err(Error::Credential { .. }) => "credential".into(),
+        Err(Error::LocallyUnavailable { reason, .. }) => format!("refused: {}", reason.as_str()),
         Err(other) => format!("other: {other:?}"),
     }
 }
@@ -272,7 +272,7 @@ async fn an_exhausted_count_returns_the_last_timeout_then_a_parked_seat_then_the
                 (SECOND, Behaviour::CannotCount),
             ],
             &[FIRST],
-            "credential".into(),
+            "refused: account_parked".into(),
         ),
         (
             "every capable seat refuses",

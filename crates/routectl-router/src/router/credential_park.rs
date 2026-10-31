@@ -15,9 +15,9 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
-use routectl_core::{Error, UpstreamReason, sanitize_for_log};
+use routectl_core::{EligibilityReason, Error, sanitize_for_log};
 
 use super::Router;
 use super::runtime_gate::ProbeSlotGuard;
@@ -58,50 +58,51 @@ fn run_within_success_settle_hook() {
     }
 }
 
-/// The refusal a credential-parked account answers with: the park's reason and
-/// its deadline as epoch ms, read against `now`, the admission's own instant.
-pub(super) fn parked_seat_error(reason: UpstreamReason, until: Instant, now: Instant) -> Error {
-    let deadline = SystemTime::now() + until.saturating_duration_since(now);
-    let parked_until_ms = deadline
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|d| u64::try_from(d.as_millis()).ok());
-    Error::Credential {
-        detail: format!("seat credential parked: {}", reason.as_str()),
-        reason,
-        parked_until_ms,
+/// The refusal a credential-parked account answers with, its wait read against
+/// `now`, the admission's own instant. A park that has already lapsed refuses
+/// only because its single re-test is in flight, whose outcome decides the
+/// recovery, so its wait is unknown.
+pub(super) fn parked_seat_error(until: Instant, now: Instant) -> Error {
+    Error::LocallyUnavailable {
+        reason: EligibilityReason::AccountParked,
+        retry_after: (until > now).then(|| until.saturating_duration_since(now)),
     }
 }
 
-/// Fold a gate refusal into the chain's running error. A parked-seat refusal
-/// is held only while every refusal so far is one: between two the earlier
-/// deadline wins, and any other gate refusal replaces it, so the all-parked
-/// error surfaces only when every seat was parked. Any other held error,
-/// including a dialed seat's real error, is kept.
+/// Fold a gate refusal into the chain's running error. Any held error that is
+/// not a local refusal (a dialed target's real error) is kept. Between local
+/// refusals the reason and the wait fold independently: the reason with the
+/// higher [`EligibilityReason::priority`] names the refusal, and the wait is
+/// the earliest known one, so a refusal with an unknown wait never erases a
+/// known one.
 pub(super) fn merge_gate_refusal(last_err: &mut Option<Error>, refusal: Error) {
-    let replace = match (last_err.as_ref(), &refusal) {
-        (None, _) => true,
+    match (last_err.as_ref(), refusal) {
+        (None, refusal) => *last_err = Some(refusal),
         (
-            Some(Error::Credential {
-                parked_until_ms: Some(held),
-                ..
+            Some(Error::LocallyUnavailable {
+                reason: held_reason,
+                retry_after: held_wait,
             }),
-            Error::Credential {
-                parked_until_ms: Some(new),
-                ..
+            Error::LocallyUnavailable {
+                reason,
+                retry_after,
             },
-        ) => new < held,
-        (
-            Some(Error::Credential {
-                parked_until_ms: Some(_),
-                ..
-            }),
-            _,
-        ) => true,
-        _ => false,
-    };
-    if replace {
-        *last_err = Some(refusal);
+        ) => {
+            let reason = if reason.priority() > held_reason.priority() {
+                reason
+            } else {
+                *held_reason
+            };
+            let retry_after = match (*held_wait, retry_after) {
+                (Some(held), Some(new)) => Some(held.min(new)),
+                (held, new) => held.or(new),
+            };
+            *last_err = Some(Error::LocallyUnavailable {
+                reason,
+                retry_after,
+            });
+        }
+        _ => {}
     }
 }
 
@@ -230,7 +231,7 @@ impl Router {
     #[doc(hidden)]
     pub fn admit_for_credential_tests(&self, state_key: &str) -> Option<u64> {
         let account = self.account_for_state_key(state_key);
-        let (refusal, mut guard) = self.admit_client(state_key, account.as_deref(), "test");
+        let (refusal, mut guard) = self.admit_client(state_key, account.as_deref());
         guard.release();
         refusal.is_none().then(|| guard.credential_generation())
     }
@@ -449,3 +450,7 @@ mod credential_park_lift_tests;
 #[cfg(test)]
 #[path = "credential_park_slotless_tests.rs"]
 mod credential_park_slotless_tests;
+
+#[cfg(test)]
+#[path = "credential_park_merge_tests.rs"]
+mod merge_tests;

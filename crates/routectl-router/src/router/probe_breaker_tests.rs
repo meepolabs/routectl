@@ -186,7 +186,7 @@ async fn a_probe_rate_limit_does_not_open_the_client_traffic_breaker() {
     );
     // And real traffic still flows.
     assert!(
-        router.gate_check("m1", "p1").is_none(),
+        router.gate_check("m1").is_none(),
         "client traffic must still be admitted after a probe rate limit"
     );
 }
@@ -234,7 +234,7 @@ async fn a_probe_server_error_does_not_re_trip_a_recovering_breaker() {
     );
     // The decisive consequence: a REAL request is still admitted.
     assert!(
-        router.gate_check("m1", "p1").is_none(),
+        router.gate_check("m1").is_none(),
         "the next real request must still be admitted"
     );
 }
@@ -279,7 +279,7 @@ async fn a_bad_request_probe_neither_debits_the_breaker_nor_claims_a_slot() {
         "routectl's own bad request must not debit the operator's breaker"
     );
     assert!(
-        router.gate_check("m1", "p1").is_none(),
+        router.gate_check("m1").is_none(),
         "the next real request must still be admitted"
     );
 }

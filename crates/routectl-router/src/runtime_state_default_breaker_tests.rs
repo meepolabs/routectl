@@ -42,7 +42,10 @@ fn the_shipped_default_opens_on_the_fifth_consecutive_failure() {
     assert_eq!(s.consecutive_failures_for_tests(), 4);
     assert_eq!(s.try_dispatch(t0), GateDecision::Allow);
     assert!(s.record_failure(t0, OUTCOME), "the fifth failure opens");
-    assert_eq!(s.try_dispatch(t0), GateDecision::CircuitOpen);
+    assert!(matches!(
+        s.try_dispatch(t0),
+        GateDecision::CircuitOpen { .. }
+    ));
 }
 
 #[test]
@@ -58,14 +61,20 @@ fn the_shipped_cooldown_admits_one_retest_at_sixty_seconds() {
     let concurrent = s.try_dispatch_admitting(opened_at + Duration::from_mins(1));
 
     // Assert
-    assert_eq!(just_before.decision, GateDecision::CircuitOpen);
+    assert!(matches!(
+        just_before.decision,
+        GateDecision::CircuitOpen { .. }
+    ));
     assert!(!just_before.claimed_half_open);
     assert_eq!(at_cooldown.decision, GateDecision::Allow);
     assert!(
         at_cooldown.claimed_half_open,
         "exactly one re-test is admitted"
     );
-    assert_eq!(concurrent.decision, GateDecision::CircuitOpen);
+    assert!(matches!(
+        concurrent.decision,
+        GateDecision::CircuitOpen { .. }
+    ));
     assert!(!concurrent.claimed_half_open);
 }
 

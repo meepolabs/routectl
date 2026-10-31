@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-use routectl_core::{ChatRequest, Error, Provider, UpstreamReason};
+use routectl_core::{ChatRequest, EligibilityReason, Error, Provider, UpstreamReason};
 
 use super::super::credential_park_dispatch_tests::{
     INVALID, ScriptedProvider, Step, Surface, park_reason, rejection,
@@ -137,15 +137,17 @@ async fn a_typed_rejection_parks_every_model_on_the_account_and_no_other() {
         let other = dispatch_err(&fx.router, surface, to("m-b")).await;
 
         // Assert: the sibling is refused with the park, never dialed.
-        let Some(Error::Credential {
-            reason,
-            parked_until_ms: Some(_),
-            ..
-        }) = sibling
-        else {
-            panic!("{label}: the sibling must be refused by the park, got {sibling:?}");
-        };
-        assert_eq!(Some(reason), INVALID, "{label}");
+        assert!(
+            matches!(
+                sibling,
+                Some(Error::LocallyUnavailable {
+                    reason: EligibilityReason::AccountParked,
+                    retry_after: Some(_),
+                })
+            ),
+            "{label}: the sibling must be refused by the park, got {sibling:?}",
+        );
+        assert_eq!(park_reason(&fx.router, "m-a2"), INVALID, "{label}");
         assert_eq!(
             calls(&fx.a2),
             0,
@@ -171,7 +173,7 @@ async fn a_sibling_retest_after_the_park_lapses_lifts_it_for_the_whole_account()
 
         // Act: m-a2 takes its own re-test, which succeeds.
         let retest = dispatch_err(&fx.router, surface, to("m-a2")).await;
-        let (refusal, guard) = fx.router.admit_dispatch("m-a", "p-a");
+        let (refusal, guard) = fx.router.admit_dispatch("m-a");
 
         // Assert
         assert!(
@@ -200,9 +202,9 @@ async fn a_lapsed_account_park_admits_one_retest_per_model_slot() {
     park(&fx.router, "m-a", Instant::now());
 
     // Act: two concurrent requests on m-a, then one on its sibling m-a2.
-    let (first, first_guard) = fx.router.admit_dispatch("m-a", "p-a");
-    let (second, second_guard) = fx.router.admit_dispatch("m-a", "p-a");
-    let (sibling, sibling_guard) = fx.router.admit_dispatch("m-a2", "p-a");
+    let (first, first_guard) = fx.router.admit_dispatch("m-a");
+    let (second, second_guard) = fx.router.admit_dispatch("m-a");
+    let (sibling, sibling_guard) = fx.router.admit_dispatch("m-a2");
 
     // Assert
     assert!(
@@ -212,7 +214,13 @@ async fn a_lapsed_account_park_admits_one_retest_per_model_slot() {
     assert!(
         matches!(
             second,
-            Some((super::CREDENTIAL_PARKED_GATE_KIND, Error::Credential { .. }))
+            Some((
+                super::CREDENTIAL_PARKED_GATE_KIND,
+                Error::LocallyUnavailable {
+                    reason: EligibilityReason::AccountParked,
+                    retry_after: None,
+                }
+            ))
         ),
         "the second on m-a is refused by the park, got {second:?}",
     );
@@ -243,9 +251,9 @@ async fn a_model_added_on_a_parked_account_is_refused_after_carry_over() {
         assert!(
             matches!(
                 err,
-                Some(Error::Credential {
-                    parked_until_ms: Some(_),
-                    ..
+                Some(Error::LocallyUnavailable {
+                    reason: EligibilityReason::AccountParked,
+                    retry_after: Some(_),
                 })
             ),
             "{label}: the new model is refused while the park is live, got {err:?}",
@@ -515,7 +523,7 @@ fn concurrent_admission_settlement_and_reads_across_one_account_never_deadlock()
             for round in 0..ROUNDS {
                 match (t + round) % 6 {
                     0 => {
-                        let (_, mut guard) = router.admit_dispatch(model, "p-a");
+                        let (_, mut guard) = router.admit_dispatch(model);
                         guard.release();
                     }
                     1 => {

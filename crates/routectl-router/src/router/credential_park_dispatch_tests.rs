@@ -13,7 +13,8 @@ use futures::stream::BoxStream;
 use parking_lot::Mutex;
 use routectl_core::schema::ForwardedBearer;
 use routectl_core::{
-    ChatChunk, ChatRequest, ChatResponse, Error, Provider, TokenCount, UpstreamReason,
+    ChatChunk, ChatRequest, ChatResponse, EligibilityReason, Error, Provider, TokenCount,
+    UpstreamReason,
 };
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
@@ -671,15 +672,6 @@ async fn requests_against_an_open_breaker_still_warn_per_request() {
     }
 }
 
-fn epoch_ms_in(from_now: Duration) -> u64 {
-    let at = std::time::SystemTime::now() + from_now;
-    let ms = at
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis();
-    u64::try_from(ms).unwrap()
-}
-
 /// Dispatch one request on `surface` and return its error, if any.
 async fn dispatch_err(router: &Router, surface: Surface, req: ChatRequest) -> Option<Error> {
     match surface {
@@ -690,15 +682,15 @@ async fn dispatch_err(router: &Router, surface: Surface, req: ChatRequest) -> Op
 }
 
 #[tokio::test]
-async fn every_seat_parked_fails_fast_with_the_earliest_deadline_and_its_reason() {
+async fn every_seat_parked_fails_fast_as_account_parked_with_the_earliest_wait() {
     const LATE: Duration = Duration::from_hours(1);
     const EARLY: Duration = Duration::from_mins(30);
     let rows = [
-        ("earliest first", (INVALID, EARLY), (EXPIRED, LATE), INVALID),
-        ("earliest last", (INVALID, LATE), (EXPIRED, EARLY), EXPIRED),
+        ("earliest first", (INVALID, EARLY), (EXPIRED, LATE)),
+        ("earliest last", (INVALID, LATE), (EXPIRED, EARLY)),
     ];
     for surface in SURFACES {
-        for (name, (a_reason, a_in), (b_reason, b_in), expected_reason) in rows {
+        for (name, (a_reason, a_in), (b_reason, b_in)) in rows {
             // Arrange
             let primary = ScriptedProvider::new("p-a", &[Step::Ok]);
             let sibling = ScriptedProvider::new("p-b", &[Step::Ok]);
@@ -715,19 +707,18 @@ async fn every_seat_parked_fails_fast_with_the_earliest_deadline_and_its_reason(
             let label = format!("{surface:?} {name}");
             assert_eq!(primary.calls.load(Ordering::SeqCst), 0, "{label}");
             assert_eq!(sibling.calls.load(Ordering::SeqCst), 0, "{label}");
-            let Some(Error::Credential {
-                reason,
-                parked_until_ms: Some(until_ms),
-                ..
+            let Some(Error::LocallyUnavailable {
+                reason: EligibilityReason::AccountParked,
+                retry_after: Some(wait),
             }) = err
             else {
-                panic!("{label}: expected an all-parked credential error, got {err:?}");
+                panic!("{label}: expected an all-parked local refusal, got {err:?}");
             };
-            assert_eq!(Some(reason), expected_reason, "{label}");
-            let expected_ms = epoch_ms_in(EARLY);
             assert!(
-                until_ms.abs_diff(expected_ms) < 5_000,
-                "{label}: deadline {until_ms} is not the earliest park ({expected_ms})",
+                EARLY
+                    .checked_sub(wait)
+                    .is_some_and(|gap| gap < Duration::from_secs(5)),
+                "{label}: wait {wait:?} is not the earliest park ({EARLY:?})",
             );
         }
     }
@@ -761,7 +752,7 @@ async fn a_dialed_seat_error_outranks_a_parked_seat() {
     }
 }
 
-/// The refusal a seat's gate answers with in [`a_parked_seat_never_masks_another_gate_refusal`].
+/// The refusal a seat's gate answers with in [`local_gate_refusals_fold_to_the_top_reason_and_earliest_known_wait`].
 #[derive(Clone, Copy, Debug)]
 enum Gate {
     Parked,
@@ -769,8 +760,14 @@ enum Gate {
     RpmExhausted,
 }
 
+/// How long a [`Gate::Parked`] seat stays parked.
+const GATE_PARK: Duration = Duration::from_mins(30);
+/// How long a [`Gate::BreakerOpen`] seat's breaker stays open.
+const GATE_BREAKER: Duration = Duration::from_mins(10);
+
 /// Alias `alias` -> `[m-a, m-b]` with the gate of each seat set to refuse as
-/// `gates` names. An RPM-exhausted seat gets a zero-request budget.
+/// `gates` names. An RPM-exhausted seat gets a zero-request budget, which
+/// never refills, so its wait is unknown.
 fn gated_chain_router(
     primary: Arc<ScriptedProvider>,
     sibling: Arc<ScriptedProvider>,
@@ -787,7 +784,7 @@ fn gated_chain_router(
             }
         }
     });
-    let until = Instant::now() + CREDENTIAL_PARK_BACKSTOP;
+    let until = Instant::now() + GATE_PARK;
     for ((key, _), gate) in seats.iter().zip(gates) {
         match gate {
             Gate::Parked => assert!(router.park_credential_for_tests(
@@ -796,7 +793,7 @@ fn gated_chain_router(
                 until
             )),
             Gate::BreakerOpen => {
-                assert!(router.force_open_breaker(key, Duration::from_hours(1)));
+                assert!(router.force_open_breaker(key, GATE_BREAKER));
             }
             Gate::RpmExhausted => {}
         }
@@ -804,27 +801,38 @@ fn gated_chain_router(
     router
 }
 
+/// The refusal one gated row ends in: its reason and its wait, `None` when
+/// unknown.
+type Folded = (EligibilityReason, Option<Duration>);
+
+/// A walking surface folds every seat's local refusal: the highest-priority
+/// reason, the earliest known wait. A token count ends at the first breaker or
+/// RPM refusal instead, which it reports alone.
 #[tokio::test]
-async fn a_parked_seat_never_masks_another_gate_refusal() {
-    let rows = [
+async fn local_gate_refusals_fold_to_the_top_reason_and_earliest_known_wait() {
+    use EligibilityReason::{AccountParked, BreakerOpen, RateLimited};
+    let rows: [(&str, [Gate; 2], Folded, Folded); 3] = [
         (
             "park then breaker",
             [Gate::Parked, Gate::BreakerOpen],
-            "circuit breaker open",
+            (AccountParked, Some(GATE_BREAKER)),
+            (BreakerOpen, Some(GATE_BREAKER)),
         ),
         (
             "breaker then park",
             [Gate::BreakerOpen, Gate::Parked],
-            "circuit breaker open",
+            (AccountParked, Some(GATE_BREAKER)),
+            (BreakerOpen, Some(GATE_BREAKER)),
         ),
         (
             "park then rpm",
             [Gate::Parked, Gate::RpmExhausted],
-            "local rpm_limit exceeded",
+            (AccountParked, Some(GATE_PARK)),
+            (RateLimited, None),
         ),
     ];
     for surface in SURFACES {
-        for (name, gates, expected_message) in rows {
+        for (name, gates, walked, counted) in rows {
             // Arrange
             let primary = ScriptedProvider::new("p-a", &[Step::Ok]);
             let sibling = ScriptedProvider::new("p-b", &[Step::Ok]);
@@ -837,13 +845,28 @@ async fn a_parked_seat_never_masks_another_gate_refusal() {
             let label = format!("{surface:?} {name}");
             assert_eq!(primary.calls.load(Ordering::SeqCst), 0, "{label}");
             assert_eq!(sibling.calls.load(Ordering::SeqCst), 0, "{label}");
-            let Some(err @ Error::Upstream { status: 0, .. }) = err else {
-                panic!("{label}: expected the other gate's refusal, got {err:?}");
+            let (want_reason, want_wait) = if matches!(surface, Surface::CountTokens) {
+                counted
+            } else {
+                walked
             };
-            assert!(
-                err.to_string().contains(expected_message),
-                "{label}: expected {expected_message:?}, got {err}",
-            );
+            let Some(Error::LocallyUnavailable {
+                reason,
+                retry_after,
+            }) = err
+            else {
+                panic!("{label}: expected a local refusal, got {err:?}");
+            };
+            assert_eq!(reason, want_reason, "{label}");
+            match (retry_after, want_wait) {
+                (None, None) => {}
+                (Some(got), Some(want)) => assert!(
+                    want.checked_sub(got)
+                        .is_some_and(|gap| gap < Duration::from_secs(5)),
+                    "{label}: wait {got:?} is not about {want:?}",
+                ),
+                (got, want) => panic!("{label}: wait {got:?}, want about {want:?}"),
+            }
         }
     }
 }
@@ -857,11 +880,8 @@ fn a_held_credential_error_without_a_park_deadline_outranks_a_parked_seat() {
         parked_until_ms: None,
     };
     let mut last_err = Some(dialed);
-    let parked = super::credential_park::parked_seat_error(
-        UpstreamReason::CredentialExpired,
-        Instant::now() + CREDENTIAL_PARK_BACKSTOP,
-        Instant::now(),
-    );
+    let now = Instant::now();
+    let parked = super::credential_park::parked_seat_error(now + CREDENTIAL_PARK_BACKSTOP, now);
 
     // Act
     super::credential_park::merge_gate_refusal(&mut last_err, parked);

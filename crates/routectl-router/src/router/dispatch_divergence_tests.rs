@@ -69,6 +69,7 @@ fn error_shape(err: &Error) -> String {
         Error::UnknownProvider(..) => "unknown provider".into(),
         Error::NotImplemented(_, detail) => format!("not implemented: {detail}"),
         Error::Credential { .. } => "credential".into(),
+        Error::LocallyUnavailable { reason, .. } => format!("refused: {}", reason.as_str()),
         other => format!("other: {other:?}"),
     }
 }
@@ -438,7 +439,7 @@ async fn count_exhaustion_names_why_no_seat_counted_and_a_parked_seat_outranks_i
         (
             "a parked seat outranks the refusal",
             parked_then_refusing,
-            failed("credential"),
+            failed("refused: account_parked"),
         ),
     ];
 

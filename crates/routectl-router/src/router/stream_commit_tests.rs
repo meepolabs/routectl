@@ -238,8 +238,8 @@ fn park_window_mismatch(
         state.try_dispatch(before + park.saturating_sub(margin)),
         state.try_dispatch(after + park + margin),
     );
-    let want = (GateDecision::CircuitOpen, GateDecision::Allow);
-    (got != want).then(|| format!("{name}: park window want {want:?}, got {got:?}"))
+    let as_want = matches!(got, (GateDecision::CircuitOpen { .. }, GateDecision::Allow));
+    (!as_want).then(|| format!("{name}: park window want (open, allow), got {got:?}"))
 }
 
 #[tokio::test]
@@ -512,7 +512,7 @@ async fn a_tail_settling_after_a_newer_half_open_claim_leaves_that_claim() {
         state
             .lock()
             .record_failure(Instant::now(), LastOutcome::Http5xx);
-        let (refusal, guard_b) = router.admit_dispatch("m", "p");
+        let (refusal, guard_b) = router.admit_dispatch("m");
         assert!(
             refusal.is_none() && guard_b.owns_slot(),
             "premise: {name}: B claims"
@@ -533,7 +533,7 @@ async fn a_tail_settling_after_a_newer_half_open_claim_leaves_that_claim() {
             "{name}: B's claim was freed"
         );
         assert_eq!(status.circuit, CircuitPhase::Open, "{name}: circuit moved");
-        let (third, _inert) = router.admit_dispatch("m", "p");
+        let (third, _inert) = router.admit_dispatch("m");
         assert_eq!(
             third.map(|(kind, _)| kind),
             Some("circuit_breaker"),

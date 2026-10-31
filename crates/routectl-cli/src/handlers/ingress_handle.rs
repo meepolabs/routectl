@@ -909,12 +909,13 @@ async fn warm_render_task<A: IngressAdapter>(
         Err(e) => {
             // Pre-content dispatch failure AFTER the SSE head committed: the
             // HTTP status is gone, so surface exactly ONE terminal in-stream
-            // error. Finalize the row as `UpstreamError` with the pre-content
-            // stage marker so the ledger keeps it distinct from a mid-stream
-            // cut.
+            // error. Finalize the row from the dispatch's attempt count (a
+            // refusal that dialed nothing is `gate_blocked`) with the
+            // pre-content stage marker so the ledger keeps it distinct from a
+            // mid-stream cut.
             capture.observe_error(&e);
             capture.mark_stream_stage(StreamStage::PreContentDispatch);
-            capture.finalize(Outcome::UpstreamError);
+            capture.finalize(outcome_for_dispatch_err(&dispatched.meta));
             let safe_msg = sanitize_stream_error_for_client(&e);
             let class = crate::ingress::StreamErrorClass::from_error(&e);
             for ev in adapter.render_error_eos(state.as_mut(), &safe_msg, &class) {
@@ -1475,14 +1476,15 @@ pub(crate) fn map_error(shape: ErrorEnvelopeShape, e: Error) -> Response {
             capability_unsupported_message(capability)
         }
         // A local routing decision: the fixed message carries only the reason
-        // token and the advertised wait. WARN, not ERROR: while every target
-        // stays ineligible, each request lands here.
+        // token and the advertised wait. DEBUG: while every target stays
+        // ineligible each request lands here, and the seat's own state change
+        // already logged once at WARN or INFO.
         Error::LocallyUnavailable {
             reason,
             retry_after,
         } => {
             let wait_secs = retry_after.map(super::local_unavailable::retry_after_secs);
-            tracing::warn!(
+            tracing::debug!(
                 reason = reason.as_str(),
                 retry_after_secs = ?wait_secs,
                 "no eligible target; refused before dispatch"
@@ -1917,3 +1919,7 @@ mod ingress_observation_tests;
 #[cfg(test)]
 #[path = "locally_unavailable_envelope_tests.rs"]
 mod locally_unavailable_envelope_tests;
+
+#[cfg(test)]
+#[path = "gate_refusal_ingress_tests.rs"]
+mod gate_refusal_ingress_tests;

@@ -2721,7 +2721,7 @@ async fn dispatch_err_gate_blocked_maps_to_gate_blocked() {
 
 /// A request whose every seat is credential-parked is refused before any
 /// upstream contact and still writes exactly one ledger row: gate_blocked,
-/// error class `auth`, no attempt charged.
+/// error class `locally_unavailable`, no attempt charged.
 #[tokio::test]
 async fn an_all_parked_request_is_never_dialed_and_still_writes_one_row() {
     use routectl_router::{AliasValue, Config, ModelEntry, ProviderEntry, RetryPolicy};
@@ -2780,9 +2780,9 @@ async fn an_all_parked_request_is_never_dialed_and_still_writes_one_row() {
     assert!(
         matches!(
             err,
-            Error::Credential {
-                parked_until_ms: Some(_),
-                ..
+            Error::LocallyUnavailable {
+                reason: routectl_core::EligibilityReason::AccountParked,
+                retry_after: Some(_),
             }
         ),
         "{err:?}"
@@ -2792,7 +2792,7 @@ async fn an_all_parked_request_is_never_dialed_and_still_writes_one_row() {
     assert_eq!(row.request_id, "req-all-parked");
     assert_eq!(row.outcome, "gate_blocked");
     assert_eq!(row.attempt_count, 0);
-    assert_eq!(row.error_class.as_deref(), Some("auth"));
+    assert_eq!(row.error_class.as_deref(), Some("locally_unavailable"));
     assert_eq!(
         row.http_status, None,
         "a local refusal has no upstream status"
@@ -3511,93 +3511,182 @@ async fn warm_render_first_byte_is_message_start_with_estimate_no_duplicate() {
     );
 }
 
+/// A router whose single target `m` (alias `a`, provider `p`) has a zero RPM
+/// cap, and the meta and error of one dispatch through it: refused at the gate
+/// before any upstream contact.
+async fn gate_blocked_router_and_meta() -> (
+    std::sync::Arc<routectl_router::Router>,
+    routectl_router::DispatchMeta,
+    Error,
+) {
+    use routectl_router::{
+        AliasValue, Config, ModelEntry, ProviderEntry, ProviderRuntimePolicy, RetryPolicy,
+    };
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    let closing = ClosingUpstream::start().await;
+    let mut runtime = ProviderRuntimePolicy::default();
+    runtime.rpm_limit = Some(0);
+    let mut providers = BTreeMap::new();
+    providers.insert(
+        "p".to_string(),
+        ProviderEntry::openai_compat(closing.base(), crate::test_secret::file_ref("k"))
+            .with_runtime(runtime),
+    );
+    let mut models = BTreeMap::new();
+    models.insert("m".to_string(), ModelEntry::new("p", "gpt-4o"));
+    let mut aliases = BTreeMap::new();
+    aliases.insert("a".to_string(), AliasValue::Single("m".to_string()));
+    let mut retry = RetryPolicy::default();
+    retry.max_attempts = 1;
+    let config = Arc::new(Config {
+        providers,
+        aliases,
+        models,
+        retry,
+        ..Default::default()
+    });
+    let router = Arc::new(build_test_router(config).await);
+    let dispatched = router
+        .complete_with_options(sample_request("a", true), Default::default())
+        .await;
+    assert_eq!(
+        closing.accepted(),
+        0,
+        "premise: the gate refused before dialing"
+    );
+    assert_eq!(dispatched.meta.attempt_count, 0, "premise: no attempt");
+    let err = dispatched.result.expect_err("premise: the gate refused");
+    (router, dispatched.meta, err)
+}
+
+/// One way a warm-held dispatch resolves `Err` after the SSE head went out.
+struct WarmErrRow {
+    name: &'static str,
+    router: std::sync::Arc<routectl_router::Router>,
+    meta: routectl_router::DispatchMeta,
+    err: Error,
+    error_type: &'static str,
+    outcome: &'static str,
+}
+
+async fn warm_err_rows() -> [WarmErrRow; 2] {
+    let (upstream_router, upstream_meta) = k_recording_router_and_meta().await;
+    let (gated_router, gated_meta, gated_err) = gate_blocked_router_and_meta().await;
+    [
+        WarmErrRow {
+            name: "an attempted upstream 529",
+            router: upstream_router,
+            meta: upstream_meta,
+            err: Error::upstream("p", 529, "overloaded"),
+            error_type: "overloaded_error",
+            outcome: "upstream_error",
+        },
+        WarmErrRow {
+            name: "a refusal that dialed nothing",
+            router: gated_router,
+            meta: gated_meta,
+            err: gated_err,
+            error_type: "rate_limited",
+            outcome: "gate_blocked",
+        },
+    ]
+}
+
 /// Branch 4 (GRACE-Err): warm-hold, then the dispatch resolves `Err`. The
 /// SSE head is already committed, so the failure surfaces as EXACTLY ONE
 /// terminal in-stream error via `render_error_eos`, and finalizes a single
-/// `upstream_error` row bearing the pre-content stage marker (distinct from a
-/// mid-stream cut). `observe_meta` ran inside the render task; neither a
-/// disconnect nor the Drop fallback fired.
+/// row bearing the pre-content stage marker (distinct from a mid-stream cut):
+/// `upstream_error` when an attempt reached an upstream, `gate_blocked` when
+/// the gate refused before any. `observe_meta` ran inside the render task;
+/// neither a disconnect nor the Drop fallback fired.
 #[tokio::test]
 async fn warm_render_dispatch_err_emits_one_terminal_error_and_pre_content_row() {
     use crate::ingress::anthropic::AnthropicIngress;
 
-    // Arrange: warm-hold, then a slow all-lanes-down 529.
-    let (router, meta) = k_recording_router_and_meta().await;
-    let fut = ready_dispatch(meta, Err(Error::upstream("p", 529, "overloaded")));
-    let rig = CaptureRig::new();
-    let capture = rig.capture("anthropic", &sample_request("m", true), "req-warm-err");
-    let stream_ctx = StreamRequestContext {
-        input_tokens_estimate: 10,
-        model: "m".into(),
-    };
-    let (tx, rx) = tokio::sync::mpsc::channel::<SseEvent>(64);
+    for row in warm_err_rows().await {
+        // Arrange: warm-hold, then the dispatch resolves Err.
+        let name = row.name;
+        let fut = ready_dispatch(row.meta, Err(row.err));
+        let rig = CaptureRig::new();
+        let capture = rig.capture("anthropic", &sample_request("m", true), "req-warm-err");
+        let stream_ctx = StreamRequestContext {
+            input_tokens_estimate: 10,
+            model: "m".into(),
+        };
+        let (tx, rx) = tokio::sync::mpsc::channel::<SseEvent>(64);
 
-    // Act
-    warm_render_task(
-        fut,
-        AnthropicIngress,
-        capture,
-        tx,
-        router,
-        std::sync::Arc::new(crate::server::confirmation_advance::ConfirmationTracker::new()),
-        StreamTurn::unmetered(None, stream_ctx),
-    )
-    .await;
-    let events = drain(rx).await;
+        // Act
+        warm_render_task(
+            fut,
+            AnthropicIngress,
+            capture,
+            tx,
+            row.router,
+            std::sync::Arc::new(crate::server::confirmation_advance::ConfirmationTracker::new()),
+            StreamTurn::unmetered(None, stream_ctx),
+        )
+        .await;
+        let events = drain(rx).await;
 
-    // Assert: the early frame, then exactly ONE terminal error event.
-    let names: Vec<&str> = events
-        .iter()
-        .map(|e| e.event.as_deref().unwrap_or(""))
-        .collect();
-    assert_eq!(
-        names,
-        vec!["message_start", "error"],
-        "warm dispatch Err: early frame + exactly one terminal error: {names:?}"
-    );
-    let err_ev = events
-        .iter()
-        .find(|e| e.event.as_deref() == Some("error"))
-        .expect("terminal error event present");
-    let payload: Value = serde_json::from_str(&err_ev.data).unwrap();
-    assert_eq!(payload["type"], "error");
-    assert_eq!(payload["error"]["type"], "overloaded_error");
+        // Assert: the early frame, then exactly ONE terminal error event.
+        let names: Vec<&str> = events
+            .iter()
+            .map(|e| e.event.as_deref().unwrap_or(""))
+            .collect();
+        assert_eq!(
+            names,
+            vec!["message_start", "error"],
+            "{name}: early frame + exactly one terminal error: {names:?}"
+        );
+        let err_ev = events
+            .iter()
+            .find(|e| e.event.as_deref() == Some("error"))
+            .expect("terminal error event present");
+        let payload: Value = serde_json::from_str(&err_ev.data).unwrap();
+        assert_eq!(payload["type"], "error", "{name}");
+        assert_eq!(payload["error"]["type"], row.error_type, "{name}");
 
-    // Exactly one usage row: upstream_error, pre-content stage marker,
-    // observe_meta fields stamped, NOT client_disconnect, ttfb None.
-    let rows = rig.flush_and_read().await;
-    assert_eq!(rows.len(), 1, "exactly one row on the warm-Err path");
-    let row = &rows[0];
-    assert_eq!(
-        row.outcome, "upstream_error",
-        "warm dispatch Err finalizes upstream_error, not a disconnect"
-    );
-    assert_eq!(row.request_id, "req-warm-err");
-    assert_eq!(
-        row.stream_stage.as_deref(),
-        Some("pre_content_dispatch"),
-        "the pre-content stage marker keeps it distinct from a mid-stream cut"
-    );
-    assert_eq!(
-        row.provider.as_deref(),
-        Some("p"),
-        "observe_meta ran INSIDE the render task (served_provider stamped)"
-    );
-    assert_eq!(
-        row.alias, "a",
-        "observe_meta stamped the resolved alias in the render task"
-    );
-    assert!(row.ttfb_ms.is_none(), "no content ever flowed -> ttfb None");
-    // Truth-table row 2 (RED before the commit-point fix): the early frame
-    // (message_start) flushed as the first body byte, committing the SSE head
-    // to a 200 status line BEFORE the dispatch resolved Err. The mid-flight
-    // upstream failure is carried by outcome / stream_stage; the client's
-    // transport status stays 200 and must not be overwritten to 529.
-    assert_eq!(
-        row.http_status,
-        Some(200),
-        "a committed SSE head keeps http_status 200 even when the dispatch then fails"
-    );
+        // Exactly one usage row: the outcome, pre-content stage marker,
+        // observe_meta fields stamped, NOT client_disconnect, ttfb None.
+        let rows = rig.flush_and_read().await;
+        assert_eq!(
+            rows.len(),
+            1,
+            "{name}: exactly one row on the warm-Err path"
+        );
+        let persisted = &rows[0];
+        assert_eq!(persisted.outcome, row.outcome, "{name}");
+        assert_eq!(persisted.request_id, "req-warm-err", "{name}");
+        assert_eq!(
+            persisted.stream_stage.as_deref(),
+            Some("pre_content_dispatch"),
+            "{name}: the pre-content stage marker keeps it distinct from a mid-stream cut"
+        );
+        assert_eq!(
+            persisted.provider.as_deref(),
+            Some("p"),
+            "{name}: observe_meta ran INSIDE the render task (served_provider stamped)"
+        );
+        assert_eq!(
+            persisted.alias, "a",
+            "{name}: observe_meta stamped the resolved alias in the render task"
+        );
+        assert!(
+            persisted.ttfb_ms.is_none(),
+            "{name}: no content ever flowed"
+        );
+        // The early frame (message_start) flushed as the first body byte,
+        // committing the SSE head to a 200 status line BEFORE the dispatch
+        // resolved Err. The failure is carried by outcome / stream_stage; the
+        // client's transport status stays 200.
+        assert_eq!(
+            persisted.http_status,
+            Some(200),
+            "{name}: a committed SSE head keeps http_status 200 even when the dispatch then fails"
+        );
+    }
 }
 
 /// A `DispatchFut` that never resolves and records its own drop, so a test can

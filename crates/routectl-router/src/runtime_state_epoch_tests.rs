@@ -99,7 +99,7 @@ fn the_epoch_advances_on_each_breaker_transition_and_nowhere_else() {
             },
             |s, t| {
                 let refused = s.try_dispatch_admitting(t + COOLDOWN);
-                assert_eq!(refused.decision, GateDecision::RateLimited);
+                assert!(matches!(refused.decision, GateDecision::RateLimited { .. }));
                 assert!(!s.half_open_probe_in_flight(), "nothing claimed");
             },
             0,
@@ -223,5 +223,8 @@ fn concurrent_closed_admissions_debit_toward_one_trip() {
     // Assert
     assert!(!first_debit.tripped, "one failure is below the threshold");
     assert!(second_debit.opened, "the second shares the epoch and trips");
-    assert_eq!(s.try_dispatch(t0), GateDecision::CircuitOpen);
+    assert!(matches!(
+        s.try_dispatch(t0),
+        GateDecision::CircuitOpen { .. }
+    ));
 }

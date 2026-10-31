@@ -373,8 +373,14 @@ async fn walk_reruns_gate_on_next_seat_and_respects_open_breaker() {
     let err = router.count_tokens(count_req()).await.unwrap_err();
 
     assert!(
-        matches!(&err, Error::Upstream { status: 0, body, .. } if body.contains("circuit breaker")),
-        "the walk must re-gate the second seat and surface its open-breaker block; got {err:?}",
+        matches!(
+            err,
+            Error::LocallyUnavailable {
+                reason: routectl_core::EligibilityReason::BreakerOpen,
+                retry_after: Some(_),
+            }
+        ),
+        "the walk must re-gate the second seat and surface its breaker_open refusal; got {err:?}",
     );
     assert_eq!(
         counters[0].load(Ordering::SeqCst),
@@ -385,6 +391,60 @@ async fn walk_reruns_gate_on_next_seat_and_respects_open_breaker() {
         counters[1].load(Ordering::SeqCst),
         0,
         "an open breaker on the walked-to seat must block the dispatch, not be bypassed",
+    );
+}
+
+#[tokio::test]
+async fn an_open_breaker_on_the_first_seat_ends_the_count_as_breaker_open_without_walking() {
+    // A breaker refusal is terminal for a count: the request answers the
+    // local breaker_open refusal with the remaining window and never reaches
+    // the healthy second seat.
+    let (router, counters) = build_router(vec![
+        Leg {
+            nickname: "anthropic-first",
+            provider_name: "anthropic-prov-a",
+            entry: anthropic_api_entry(),
+            behavior: CountBehavior::Ok(7),
+            upstream: None,
+        },
+        Leg {
+            nickname: "anthropic-second",
+            provider_name: "anthropic-prov-b",
+            entry: anthropic_api_entry(),
+            behavior: CountBehavior::Ok(42),
+            upstream: None,
+        },
+    ]);
+    let window = Duration::from_mins(1);
+    assert!(
+        router.force_open_breaker("anthropic-first", window),
+        "first seat breaker slot must exist",
+    );
+
+    let err = router.count_tokens(count_req()).await.unwrap_err();
+
+    let Error::LocallyUnavailable {
+        reason: routectl_core::EligibilityReason::BreakerOpen,
+        retry_after: Some(wait),
+    } = err
+    else {
+        panic!("an open first-seat breaker must end the count as breaker_open; got {err:?}");
+    };
+    assert!(
+        window
+            .checked_sub(wait)
+            .is_some_and(|gap| gap < Duration::from_secs(5)),
+        "the wait is the remaining window: {wait:?}",
+    );
+    assert_eq!(
+        counters[0].load(Ordering::SeqCst),
+        0,
+        "first seat never dialed"
+    );
+    assert_eq!(
+        counters[1].load(Ordering::SeqCst),
+        0,
+        "a breaker refusal must not walk to the next capable seat",
     );
 }
 
@@ -541,7 +601,7 @@ async fn a_cancelled_half_open_count_frees_the_probe_slot() {
         !half_open_in_flight(&router, "anthropic-only"),
         "the cancelled count must free the half-open slot",
     );
-    let (refusal, guard) = router.admit_dispatch("anthropic-only", "anthropic-prov");
+    let (refusal, guard) = router.admit_dispatch("anthropic-only");
     assert!(
         refusal.is_none(),
         "a later request is admitted; got {refusal:?}"

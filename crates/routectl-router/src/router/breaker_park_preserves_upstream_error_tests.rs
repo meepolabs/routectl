@@ -1,9 +1,9 @@
 //! Completion-path guard: when a debiting 429 carries an upstream reset
 //! large enough to force-open (park) the provider's breaker, the SAME
 //! request must surface the real upstream 429 + Retry-After, NOT the
-//! synthetic status-0 "circuit breaker open" gate error. The synthetic
-//! error stays reserved for a request blocked BEFORE dispatch (the next
-//! request that arrives during the active park).
+//! local `breaker_open` refusal. The refusal stays reserved for a request
+//! blocked BEFORE dispatch (the next request that arrives during the active
+//! park).
 use super::*;
 use crate::config::{AliasValue, Config, ProviderEntry, ProviderRuntimePolicy};
 use crate::resolved::ResolvedModel;
@@ -140,7 +140,7 @@ async fn parking_request_surfaces_real_429_not_synthetic_gate_error() {
     assert_eq!(
         upstream_status(&err),
         Some(429),
-        "client must receive the genuine upstream 429, not the synthetic status-0"
+        "client must receive the genuine upstream 429, not the local refusal"
     );
     assert_eq!(
         upstream_retry_after(&err),
@@ -148,8 +148,8 @@ async fn parking_request_surfaces_real_429_not_synthetic_gate_error() {
         "the upstream Retry-After must be preserved on the parking request"
     );
     assert!(
-        !err.to_string().contains("circuit breaker open"),
-        "the synthetic gate error must not surface on the parking request, got: {err}"
+        !matches!(err, Error::LocallyUnavailable { .. }),
+        "the local gate refusal must not surface on the parking request, got: {err:?}"
     );
 }
 
@@ -169,7 +169,7 @@ async fn parking_request_does_not_retry_the_self_parked_provider() {
 }
 
 #[tokio::test]
-async fn next_request_during_park_still_sees_synthetic_circuit_open() {
+async fn next_request_during_park_sees_the_breaker_open_refusal() {
     let (router, calls) = router_with_parking_entry();
     // First request parks the provider and surfaces the real 429.
     let first = router
@@ -180,20 +180,22 @@ async fn next_request_during_park_still_sees_synthetic_circuit_open() {
     let dials_after_first = calls.load(Ordering::SeqCst);
 
     // Second request during the active park is blocked BEFORE dispatch:
-    // it must see the synthetic status-0 gate error, and the provider
-    // body must not be reached again.
+    // it must see the local breaker_open refusal, and the provider body
+    // must not be reached again.
     let second = router
         .complete(solo_req())
         .await
         .expect_err("second request fails while the breaker is parked");
-    assert_eq!(
-        upstream_status(&second),
-        Some(0),
-        "a request blocked before dispatch keeps the synthetic status-0"
-    );
+    let Error::LocallyUnavailable {
+        reason: routectl_core::EligibilityReason::BreakerOpen,
+        retry_after: Some(wait),
+    } = second
+    else {
+        panic!("the pre-dispatch block must surface the breaker_open refusal, got: {second:?}");
+    };
     assert!(
-        second.to_string().contains("circuit breaker open"),
-        "the pre-dispatch block must surface the synthetic gate error, got: {second}"
+        wait <= RETRY_AFTER,
+        "the refusal's wait {wait:?} is what remains of the park ({RETRY_AFTER:?})"
     );
     assert_eq!(
         calls.load(Ordering::SeqCst),

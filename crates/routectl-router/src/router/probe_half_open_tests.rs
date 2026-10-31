@@ -107,7 +107,7 @@ async fn a_probe_completion_does_not_release_a_real_requests_half_open_claim() {
     // The client request admits AND KEEPS its ownership token, as a real
     // dispatch does across its own await. Dropping it here would release the
     // claim and there would be nothing for the probe to wrongly free.
-    let (client_refusal, client_guard) = router.admit_dispatch("m1", "p1");
+    let (client_refusal, client_guard) = router.admit_dispatch("m1");
     assert!(
         client_refusal.is_none(),
         "premise: the client request must be admitted as the half-open attempt"
@@ -259,10 +259,10 @@ fn a_refused_admission_claims_nothing() {
 
     // Within cooldown: refused, nothing claimed.
     let admission = state.try_dispatch_admitting(std::time::Instant::now());
-    assert_eq!(
+    assert!(matches!(
         admission.decision,
-        crate::runtime_state::GateDecision::CircuitOpen
-    );
+        crate::runtime_state::GateDecision::CircuitOpen { .. }
+    ));
     assert!(
         !admission.claimed_half_open,
         "a refusal must claim no half-open slot"
@@ -285,10 +285,10 @@ fn exactly_one_admission_claims_the_half_open_slot() {
 
     assert_eq!(first.decision, crate::runtime_state::GateDecision::Allow);
     assert!(first.claimed_half_open, "the first admission owns the slot");
-    assert_eq!(
+    assert!(matches!(
         second.decision,
-        crate::runtime_state::GateDecision::CircuitOpen
-    );
+        crate::runtime_state::GateDecision::CircuitOpen { .. }
+    ));
     assert!(
         !second.claimed_half_open,
         "a second concurrent admission must be refused and own nothing"
@@ -325,7 +325,7 @@ async fn a_probe_admission_at_the_gate_does_not_disturb_a_live_client_claim() {
     router.force_open_breaker("m1", Duration::from_millis(1));
     tokio::time::sleep(Duration::from_millis(5)).await;
 
-    let (client_refusal, client_guard) = router.admit_dispatch("m1", "p1");
+    let (client_refusal, client_guard) = router.admit_dispatch("m1");
     assert!(
         client_refusal.is_none(),
         "premise: the client takes the lapsed half-open attempt"
@@ -338,7 +338,7 @@ async fn a_probe_admission_at_the_gate_does_not_disturb_a_live_client_claim() {
     // A probe asks while the client's claim is outstanding. Probe mode refuses
     // a half-open-ready lane, and this lane's slot is already taken, so the
     // probe owns nothing -- its guard must be inert.
-    let (probe_refusal, probe_guard) = router.admit_probe_dispatch("m1", "p1");
+    let (probe_refusal, probe_guard) = router.admit_probe_dispatch("m1");
     assert!(
         probe_refusal.is_some(),
         "premise: a probe is declined while the breaker is not closed"
@@ -420,7 +420,7 @@ async fn a_deferred_probe_charges_no_rpm_token() {
     // The decisive consequence: a REAL request is still admitted as the
     // half-open attempt, with its token available.
     assert!(
-        router.gate_check("m1", "p1").is_none(),
+        router.gate_check("m1").is_none(),
         "the next real request must still be admitted as the half-open attempt"
     );
 }

@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use routectl_core::{ChatRequest, Error, Result};
+use routectl_core::{ChatRequest, EligibilityReason, Error, Result};
 
 use crate::config::AliasValue;
 use crate::resolved::ResolvedModel;
@@ -239,17 +239,17 @@ impl Router {
         session_key: Option<&str>,
     ) -> Result<Vec<DispatchTarget>> {
         if let Some(chain) = self.resolve_v6_alias(model)? {
-            return self.expand_resolved_chain(model, chain, session_key);
+            return self.expand_resolved_chain(chain, session_key);
         }
         // Wire model could ALSO be a direct nickname.
         if let Some(m) = self.resolve_nickname(model) {
-            return self.expand_resolved_chain(model, vec![m], session_key);
+            return self.expand_resolved_chain(vec![m], session_key);
         }
         // Catch-all: only consulted after exact alias / glob / direct
         // nickname all miss. This ordering means a wire model that's
         // a known nickname always wins over a configured default.
         if let Some(chain) = self.resolve_default_alias()? {
-            return self.expand_resolved_chain(model, chain, session_key);
+            return self.expand_resolved_chain(chain, session_key);
         }
         Err(Error::UnknownAlias(model.to_string()))
     }
@@ -261,21 +261,20 @@ impl Router {
     /// surface as `UnknownAlias` at the end of the dispatch loop -- a 404
     /// naming a route that IS configured, which sends the operator hunting a
     /// routing typo for a credential outage, and which no client retries. This
-    /// returns a retryable, fallbackable upstream-shaped error instead, so the
-    /// caller backs off and a client-side chain can move on.
+    /// returns the local `credential_unusable` refusal instead, a 503 a client
+    /// backs off from.
     ///
     /// Defensive: the build refuses a pool with zero usable members, so this
     /// is reachable only if a pooled model with no seats reached dispatch
     /// through some path that bypassed that refusal.
     fn expand_resolved_chain(
         &self,
-        model: &str,
         chain: Vec<Arc<ResolvedModel>>,
         session_key: Option<&str>,
     ) -> Result<Vec<DispatchTarget>> {
         let targets = self.expand_chain_to_targets(chain, session_key);
         if targets.is_empty() {
-            return Err(empty_pool_error(model));
+            return Err(empty_pool_error());
         }
         Ok(targets)
     }
@@ -354,9 +353,8 @@ impl Router {
         if seats.is_empty() {
             // Defensive only: the build refuses a pool with no usable member,
             // so a live pooled model always has at least one seat. The
-            // dispatch loop turns an empty target set into a retryable
-            // upstream-shaped error rather than `UnknownAlias`; see
-            // `Router::empty_pool_error`.
+            // chain expansion turns an empty target set into a local
+            // refusal rather than `UnknownAlias`; see `empty_pool_error`.
             self.metrics.incr_pool_unavailable();
             return;
         }
@@ -479,21 +477,14 @@ impl Router {
     }
 }
 
-/// The error a chain that expanded to zero dispatch targets returns.
-///
-/// Shaped as an `Upstream` 503 rather than `UnknownAlias`: the route exists,
-/// so a 404 would be wrong, and the condition is a credential-side outage that
-/// may clear. 503 lands on `FailureClass::ServerError`, which the baked retry
-/// matrix marks retryable AND fallbackable, so both the router's own chain walk
-/// and a client-side retry treat it as transient. The detail names only the
-/// wire model the caller already sent.
-pub(super) fn empty_pool_error(model: &str) -> Error {
-    Error::upstream(
-        model,
-        503,
-        "no usable credential seat is available for this route; \
-         every member of its pool is currently unusable",
-    )
+/// The error a chain that expanded to zero dispatch targets returns: the
+/// local `credential_unusable` refusal, never `UnknownAlias` (the route
+/// exists). Its recovery is unknown, so it advertises no wait.
+pub(super) const fn empty_pool_error() -> Error {
+    Error::LocallyUnavailable {
+        reason: EligibilityReason::CredentialUnusable,
+        retry_after: None,
+    }
 }
 
 /// Convert a chain of `Arc<ResolvedModel>` into the `DispatchTarget`

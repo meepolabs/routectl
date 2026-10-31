@@ -54,8 +54,14 @@ fn req(model: &str) -> ChatRequest {
     }
 }
 
-fn is_rpm_refusal(err: &Error) -> bool {
-    err.to_string().contains("rpm_limit")
+const fn is_rpm_refusal(err: &Error) -> bool {
+    matches!(
+        err,
+        Error::LocallyUnavailable {
+            reason: routectl_core::EligibilityReason::RateLimited,
+            ..
+        }
+    )
 }
 
 /// Two direct models `a` and `b` on the one rpm-1 provider `p`.

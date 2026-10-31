@@ -140,8 +140,8 @@ async fn complete_surfaces_real_error_not_gate_error() {
         "must surface entry1's real 503, got: {msg}"
     );
     assert!(
-        !msg.contains("circuit breaker open"),
-        "must NOT surface entry2's synthetic gate error, got: {msg}"
+        !matches!(err, Error::LocallyUnavailable { .. }),
+        "must NOT surface entry2's local gate refusal, got: {err:?}"
     );
 }
 
@@ -164,7 +164,7 @@ async fn stream_surfaces_real_error_not_gate_error() {
         "stream must surface entry1's real 503, got: {msg}"
     );
     assert!(
-        !msg.contains("circuit breaker open"),
-        "stream must NOT surface entry2's synthetic gate error, got: {msg}"
+        !matches!(err, Error::LocallyUnavailable { .. }),
+        "stream must NOT surface entry2's local gate refusal, got: {err:?}"
     );
 }

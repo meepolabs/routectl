@@ -139,7 +139,10 @@ fn build_router_with_breaker(
 /// happened (open) or did not (allow).
 fn breaker_open_at(router: &Router, now: Instant) -> bool {
     let st = router.state.get("m").expect("per-model state slot exists");
-    st.lock().try_dispatch(now) == GateDecision::CircuitOpen
+    matches!(
+        st.lock().try_dispatch(now),
+        GateDecision::CircuitOpen { .. }
+    )
 }
 
 /// Build a single-entry-chain Router around `provider` with a
@@ -888,7 +891,7 @@ async fn complete_half_open_non_fallbackable_429_does_not_lock_breaker() {
              breaker (CircuitOpen) and skips it: {calls_after_first} -> {calls_after_second}",
     );
     // Both dispatches must terminate in the upstream 429, never the
-    // gate's status-0 "circuit breaker open" error.
+    // gate's local breaker_open refusal.
     for (label, r) in [("first", &first), ("second", &second)] {
         match r {
             Err(Error::Upstream { status, .. }) => assert_eq!(
@@ -2066,13 +2069,13 @@ fn a_superseded_claims_guard_leaves_the_newer_claim() {
         // again under A's claim and lapses, and B claims the new slot.
         let (router, _calls) = build_first_chunk_router(false);
         arm_half_open(&router);
-        let (refusal, guard_a) = router.admit_dispatch("m", "p");
+        let (refusal, guard_a) = router.admit_dispatch("m");
         assert!(
             refusal.is_none() && guard_a.owns_slot(),
             "premise: {name}: A claims"
         );
         arm_half_open(&router);
-        let (refusal, guard_b) = router.admit_dispatch("m", "p");
+        let (refusal, guard_b) = router.admit_dispatch("m");
         assert!(
             refusal.is_none() && guard_b.owns_slot(),
             "premise: {name}: B claims"
@@ -2083,7 +2086,7 @@ fn a_superseded_claims_guard_leaves_the_newer_claim() {
 
         // Assert
         assert!(slot_in_flight(&router), "{name}: A freed B's claim");
-        let (third, _inert) = router.admit_dispatch("m", "p");
+        let (third, _inert) = router.admit_dispatch("m");
         assert_eq!(
             third.map(|(kind, _)| kind),
             Some("circuit_breaker"),

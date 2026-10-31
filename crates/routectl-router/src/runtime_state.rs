@@ -275,14 +275,23 @@ pub enum GateDecision {
     /// Provider is healthy and within rate limits; dispatch.
     Allow,
     /// Provider exceeded its RPM cap. Treat as a fallbackable failure.
-    RateLimited,
+    RateLimited {
+        /// Time until the bucket holds a whole token again; `None` when it
+        /// never refills (a zero cap).
+        retry_in: Option<Duration>,
+    },
     /// Circuit is open from prior failures (or a half-open probe is
     /// already in flight). Treat as a fallbackable failure and skip
     /// this provider until the next cooldown cycle.
-    CircuitOpen,
+    CircuitOpen {
+        /// Time left in the open window; `None` once the window lapsed and
+        /// the slot's single re-test is in flight or deferred, since its
+        /// outcome decides when the slot reopens.
+        retry_in: Option<Duration>,
+    },
     /// The target's account credential is parked (or this slot's re-test is
-    /// already in flight). Treat as a fallbackable failure; the reason and
-    /// deadline are what an all-seats-parked error reports.
+    /// already in flight). Treat as a fallbackable failure; the deadline is
+    /// the wait an account-parked refusal reports.
     CredentialParked {
         /// Why the upstream rejected the credential.
         reason: UpstreamReason,
@@ -388,7 +397,12 @@ impl ProviderState {
         }
         let retest_ready = match self.circuit_opened_at {
             Some(opened_at) if now.duration_since(opened_at) < self.active_cooldown() => {
-                return GateAdmission::refused(GateDecision::CircuitOpen);
+                let retry_in = self
+                    .active_cooldown()
+                    .saturating_sub(now.duration_since(opened_at));
+                return GateAdmission::refused(GateDecision::CircuitOpen {
+                    retry_in: Some(retry_in),
+                });
             }
             Some(_) => true,
             None => park.is_some(),
@@ -417,7 +431,9 @@ impl ProviderState {
             if self.rpm_tokens < 1.0 {
                 // Refused before the claim below, so a rate-limited re-test
                 // leaves the half-open slot and the epoch as they were.
-                return GateAdmission::refused(GateDecision::RateLimited);
+                return GateAdmission::refused(GateDecision::RateLimited {
+                    retry_in: self.rpm_retry_in(now, capacity),
+                });
             }
             self.rpm_tokens -= 1.0;
         }
@@ -544,7 +560,7 @@ impl ProviderState {
 
     /// [`Self::force_open_in_epoch`] at the current epoch. Test convenience:
     /// production settles carry their admission's epoch.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     pub(crate) const fn force_open(&mut self, now: Instant, cooldown: Duration) {
         self.force_open_in_epoch(now, cooldown, self.epoch);
     }
@@ -659,6 +675,17 @@ impl ProviderState {
             .min(capacity)
     }
 
+    /// Time from `now` until the bucket holds one whole token, rounded up
+    /// to the millisecond. `None` for a zero cap, which never refills.
+    fn rpm_retry_in(&self, now: Instant, capacity: f64) -> Option<Duration> {
+        if capacity <= 0.0 {
+            return None;
+        }
+        let deficit = (1.0 - self.projected_tokens(now, capacity)).max(0.0);
+        let wait_ms = (deficit * RPM_WINDOW_MS as f64 / capacity).ceil();
+        Some(Duration::from_millis(wait_ms as u64))
+    }
+
     /// Read the gate's capacity WITHOUT mutating it. Takes `&self`, so the
     /// borrow checker forbids touching the token bucket or the half-open
     /// probe slot; it must never call `try_dispatch` or `refill_tokens`.
@@ -735,10 +762,13 @@ impl ProviderState {
 }
 
 /// The refusal a half-open-ready gate gives a caller that cannot take the
-/// re-test: the account's credential park when one is set (it names the reason
-/// and deadline an all-parked error needs), else the breaker.
+/// re-test: the account's credential park when one is set (its refusal is
+/// `account_parked`), else the breaker.
 fn half_open_refusal(park: Option<CredentialPark>) -> GateDecision {
-    park.map_or(GateDecision::CircuitOpen, CredentialPark::refusal)
+    park.map_or(
+        GateDecision::CircuitOpen { retry_in: None },
+        CredentialPark::refusal,
+    )
 }
 
 /// Status view of a credential park: the reason and how long until the park
@@ -845,3 +875,7 @@ mod default_breaker_tests;
 #[cfg(test)]
 #[path = "runtime_state_epoch_tests.rs"]
 mod epoch_tests;
+
+#[cfg(test)]
+#[path = "runtime_state_retry_in_tests.rs"]
+mod retry_in_tests;

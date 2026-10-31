@@ -22,7 +22,10 @@ fn rpm_bucket_drains_and_refills() {
     s.record_success(Instant::now());
     assert_eq!(s.try_dispatch(t0), GateDecision::Allow);
     s.record_success(Instant::now());
-    assert_eq!(s.try_dispatch(t0), GateDecision::RateLimited);
+    assert!(matches!(
+        s.try_dispatch(t0),
+        GateDecision::RateLimited { .. }
+    ));
     let t1 = t0 + Duration::from_mins(1);
     assert_eq!(s.try_dispatch(t1), GateDecision::Allow);
 }
@@ -40,9 +43,15 @@ fn circuit_opens_after_threshold_and_skips_until_cooldown() {
     s.record_failure(t0, LastOutcome::Http5xx);
     assert_eq!(s.try_dispatch(t0), GateDecision::Allow);
     s.record_failure(t0, LastOutcome::Http5xx);
-    assert_eq!(s.try_dispatch(t0), GateDecision::CircuitOpen);
+    assert!(matches!(
+        s.try_dispatch(t0),
+        GateDecision::CircuitOpen { .. }
+    ));
     let t_mid = t0 + Duration::from_millis(500);
-    assert_eq!(s.try_dispatch(t_mid), GateDecision::CircuitOpen);
+    assert!(matches!(
+        s.try_dispatch(t_mid),
+        GateDecision::CircuitOpen { .. }
+    ));
     // After cooldown a single probe is allowed.
     let t_after = t0 + Duration::from_millis(1_500);
     assert_eq!(s.try_dispatch(t_after), GateDecision::Allow);
@@ -67,7 +76,10 @@ fn breaker_opens_on_own_threshold_below_class_retry_cap() {
     }
     // The 4th attempt is refused although the class retry cap (5) is
     // not yet reached.
-    assert_eq!(s.try_dispatch(t0), GateDecision::CircuitOpen);
+    assert!(matches!(
+        s.try_dispatch(t0),
+        GateDecision::CircuitOpen { .. }
+    ));
 }
 
 #[test]
@@ -87,7 +99,10 @@ fn release_probe_slot_frees_slot_without_recording_outcome() {
     // Trip the breaker (threshold = 1).
     assert_eq!(s.try_dispatch(t0), GateDecision::Allow);
     s.record_failure(t0, LastOutcome::Http5xx);
-    assert_eq!(s.try_dispatch(t0), GateDecision::CircuitOpen);
+    assert!(matches!(
+        s.try_dispatch(t0),
+        GateDecision::CircuitOpen { .. }
+    ));
     // After cooldown, the first dispatch claims the half-open slot.
     let t_after = t0 + Duration::from_millis(600);
     assert_eq!(s.try_dispatch(t_after), GateDecision::Allow);
@@ -130,17 +145,26 @@ fn half_open_is_single_probe_under_concurrent_dispatches() {
     s.record_failure(t0, LastOutcome::Http5xx);
     s.try_dispatch(t0);
     s.record_failure(t0, LastOutcome::Http5xx);
-    assert_eq!(s.try_dispatch(t0), GateDecision::CircuitOpen);
+    assert!(matches!(
+        s.try_dispatch(t0),
+        GateDecision::CircuitOpen { .. }
+    ));
     // Cooldown elapsed: first dispatch claims the half-open slot.
     let t_after = t0 + Duration::from_millis(1_500);
     assert_eq!(s.try_dispatch(t_after), GateDecision::Allow);
     // Second concurrent dispatch (probe NOT yet recorded) sees
     // CircuitOpen because someone already has the probe slot.
-    assert_eq!(s.try_dispatch(t_after), GateDecision::CircuitOpen);
+    assert!(matches!(
+        s.try_dispatch(t_after),
+        GateDecision::CircuitOpen { .. }
+    ));
     // Probe fails -> breaker re-trips.
     s.record_failure(t_after, LastOutcome::Http5xx);
     // Subsequent calls in the new cooldown window also see CircuitOpen.
-    assert_eq!(s.try_dispatch(t_after), GateDecision::CircuitOpen);
+    assert!(matches!(
+        s.try_dispatch(t_after),
+        GateDecision::CircuitOpen { .. }
+    ));
 }
 
 #[test]
@@ -202,7 +226,7 @@ fn half_open_slot_released_when_rpm_refuses_the_probe() {
     s.rpm_tokens = 0.0;
     s.rpm_last_refill = t_probe;
     let decision = s.try_dispatch(t_probe);
-    assert_eq!(decision, GateDecision::RateLimited);
+    assert!(matches!(decision, GateDecision::RateLimited { .. }));
     // The half-open slot is still free; bumping the clock past
     // a refill window lets the next dispatch claim it.
     let t_refill = t_probe + Duration::from_mins(1);
@@ -245,7 +269,10 @@ fn force_open_parks_immediately_bypassing_threshold() {
     s.force_open(t0, Duration::from_secs(10));
 
     // Assert: open right away, single probe only after the custom cooldown.
-    assert_eq!(s.try_dispatch(t0), GateDecision::CircuitOpen);
+    assert!(matches!(
+        s.try_dispatch(t0),
+        GateDecision::CircuitOpen { .. }
+    ));
     let t_after = t0 + Duration::from_secs(11);
     assert_eq!(s.try_dispatch(t_after), GateDecision::Allow);
 }
@@ -265,10 +292,10 @@ fn force_open_cooldown_outlasts_default() {
 
     // Assert: still open at t0+5s (default would already be elapsed),
     // probe only after the custom 60s window.
-    assert_eq!(
+    assert!(matches!(
         s.try_dispatch(t0 + Duration::from_secs(5)),
-        GateDecision::CircuitOpen,
-    );
+        GateDecision::CircuitOpen { .. }
+    ),);
     assert_eq!(
         s.try_dispatch(t0 + Duration::from_secs(61)),
         GateDecision::Allow,
@@ -301,7 +328,10 @@ fn force_open_releases_inflight_probe_slot() {
         !s.half_open_probe_in_flight(),
         "force_open must release the in-flight probe slot",
     );
-    assert_eq!(s.try_dispatch(t_after), GateDecision::CircuitOpen);
+    assert!(matches!(
+        s.try_dispatch(t_after),
+        GateDecision::CircuitOpen { .. }
+    ));
 }
 
 #[test]
@@ -325,12 +355,15 @@ fn force_open_then_probe_success_resets_to_default() {
     // (1s), not the stale 60s custom park.
     s.try_dispatch(t_probe);
     s.record_failure(t_probe, LastOutcome::Http5xx);
-    assert_eq!(s.try_dispatch(t_probe), GateDecision::CircuitOpen);
+    assert!(matches!(
+        s.try_dispatch(t_probe),
+        GateDecision::CircuitOpen { .. }
+    ));
     // Still open just before the 1s default elapses.
-    assert_eq!(
+    assert!(matches!(
         s.try_dispatch(t_probe + Duration::from_millis(500)),
-        GateDecision::CircuitOpen,
-    );
+        GateDecision::CircuitOpen { .. }
+    ),);
     // Allowed once the 1s default cooldown elapses -- proving the
     // window is the default, not 60s.
     assert_eq!(
@@ -357,7 +390,10 @@ fn force_open_recovery_is_single_probe() {
 
     // Assert: single-probe invariant holds under force_open.
     assert_eq!(s.try_dispatch(t_after), GateDecision::Allow);
-    assert_eq!(s.try_dispatch(t_after), GateDecision::CircuitOpen);
+    assert!(matches!(
+        s.try_dispatch(t_after),
+        GateDecision::CircuitOpen { .. }
+    ));
 }
 
 #[test]
@@ -416,7 +452,10 @@ fn snapshot_projects_refill_without_storing_it() {
     );
     // The projection was not stored: the live bucket is still drained
     // at t0 (rpm_last_refill unchanged), so a try_dispatch at t0 fails.
-    assert_eq!(s.try_dispatch(t0), GateDecision::RateLimited);
+    assert!(matches!(
+        s.try_dispatch(t0),
+        GateDecision::RateLimited { .. }
+    ));
 }
 
 #[test]
@@ -439,7 +478,10 @@ fn snapshot_does_not_consume_tokens() {
         assert_eq!(s.try_dispatch(t0), GateDecision::Allow);
         s.record_success(Instant::now());
     }
-    assert_eq!(s.try_dispatch(t0), GateDecision::RateLimited);
+    assert!(matches!(
+        s.try_dispatch(t0),
+        GateDecision::RateLimited { .. }
+    ));
 }
 
 #[test]
@@ -577,7 +619,10 @@ fn snapshot_half_open_ready_but_rpm_exhausted_is_not_dispatchable() {
     assert!(!snap.is_dispatchable());
     // The prediction matches the gate: try_dispatch refuses on RPM and
     // releases the half-open slot it briefly claimed.
-    assert_eq!(s.try_dispatch(t_ready), GateDecision::RateLimited);
+    assert!(matches!(
+        s.try_dispatch(t_ready),
+        GateDecision::RateLimited { .. }
+    ));
     assert!(!s.half_open_probe_in_flight());
 }
 
@@ -684,7 +729,10 @@ fn stored_outcome_never_holds_circuit_open() {
     s.record_failure(t0, LastOutcome::Http5xx);
     // The circuit is open, so the gate refuses -- but the STORED outcome is
     // still the failure kind, not CircuitOpen.
-    assert_eq!(s.try_dispatch(t0), GateDecision::CircuitOpen);
+    assert!(matches!(
+        s.try_dispatch(t0),
+        GateDecision::CircuitOpen { .. }
+    ));
     let status = s.gate_status(t0);
     assert_ne!(status.last_outcome, Some(LastOutcome::CircuitOpen));
     assert_eq!(status.last_outcome, Some(LastOutcome::Http5xx));
@@ -713,7 +761,10 @@ fn gate_status_does_not_perturb_new_fields() {
     assert_eq!(first.circuit_open_elapsed, Some(Duration::from_millis(200)));
     // The reads did not advance or settle any stored state: a real gate
     // decision at the same instant is unchanged.
-    assert_eq!(s.try_dispatch(read_at), GateDecision::CircuitOpen);
+    assert!(matches!(
+        s.try_dispatch(read_at),
+        GateDecision::CircuitOpen { .. }
+    ));
 }
 
 fn gate(threshold: u32, cooldown_ms: u64, rpm_limit: Option<u32>) -> GateTuning {
@@ -761,7 +812,10 @@ fn retune_keeps_counters_and_phase() {
         );
         assert_eq!(s.try_dispatch(t0), GateDecision::Allow, "{row}");
         assert!(s.record_failure(t0, LastOutcome::Http5xx), "{row}");
-        assert_eq!(s.try_dispatch(t0), GateDecision::CircuitOpen, "{row}");
+        assert!(
+            matches!(s.try_dispatch(t0), GateDecision::CircuitOpen { .. }),
+            "{row}"
+        );
     }
 }
 
@@ -785,7 +839,10 @@ fn retune_while_open_keeps_open_phase_and_probe_slot() {
         s.gate_status(t_probe).circuit_open_elapsed,
         Some(Duration::from_secs(2))
     );
-    assert_eq!(s.try_dispatch(t_probe), GateDecision::CircuitOpen);
+    assert!(matches!(
+        s.try_dispatch(t_probe),
+        GateDecision::CircuitOpen { .. }
+    ));
 }
 
 #[test]
@@ -800,10 +857,10 @@ fn retune_moves_a_baseline_window_to_the_new_cooldown() {
     s.retune(gate(1, 5_000, None));
 
     // Assert: the window follows the new 5 s baseline.
-    assert_eq!(
+    assert!(matches!(
         s.try_dispatch(t0 + Duration::from_secs(2)),
-        GateDecision::CircuitOpen
-    );
+        GateDecision::CircuitOpen { .. }
+    ));
     let t6 = t0 + Duration::from_secs(6);
     assert_eq!(s.try_dispatch(t6), GateDecision::Allow);
 
@@ -811,10 +868,10 @@ fn retune_moves_a_baseline_window_to_the_new_cooldown() {
     s.record_success(t6);
     assert_eq!(s.try_dispatch(t6), GateDecision::Allow);
     assert!(s.record_failure(t6, LastOutcome::Http5xx));
-    assert_eq!(
+    assert!(matches!(
         s.try_dispatch(t6 + Duration::from_secs(4)),
-        GateDecision::CircuitOpen
-    );
+        GateDecision::CircuitOpen { .. }
+    ));
     assert_eq!(
         s.try_dispatch(t6 + Duration::from_secs(5)),
         GateDecision::Allow
@@ -832,10 +889,10 @@ fn retune_keeps_a_forced_park_window() {
     s.retune(gate(5, 5_000, None));
 
     // Assert: the park keeps its own 10 s window, not the new 5 s baseline.
-    assert_eq!(
+    assert!(matches!(
         s.try_dispatch(t0 + Duration::from_secs(6)),
-        GateDecision::CircuitOpen
-    );
+        GateDecision::CircuitOpen { .. }
+    ));
     assert_eq!(
         s.try_dispatch(t0 + Duration::from_secs(11)),
         GateDecision::Allow
@@ -915,10 +972,10 @@ fn retune_to_disabled_keeps_a_live_window_until_it_lapses() {
     assert!(!s.record_failure(t1, LastOutcome::Http5xx));
 
     // Assert: the window already granted keeps refusing until it lapses.
-    assert_eq!(
+    assert!(matches!(
         s.try_dispatch(t0 + Duration::from_secs(2)),
-        GateDecision::CircuitOpen
-    );
+        GateDecision::CircuitOpen { .. }
+    ));
     assert_eq!(
         s.try_dispatch(t0 + Duration::from_secs(11)),
         GateDecision::Allow
@@ -939,7 +996,10 @@ fn retune_raising_rpm_keeps_the_current_token_level() {
     // Assert: one token left, not a refilled bucket of five.
     assert_eq!(s.capacity_snapshot(t0).rpm_available, Some(1.0));
     assert_eq!(s.try_dispatch(t0), GateDecision::Allow);
-    assert_eq!(s.try_dispatch(t0), GateDecision::RateLimited);
+    assert!(matches!(
+        s.try_dispatch(t0),
+        GateDecision::RateLimited { .. }
+    ));
 }
 
 #[test]
@@ -968,7 +1028,10 @@ fn retune_from_unlimited_rpm_starts_full() {
     for _ in 0..3 {
         assert_eq!(s.try_dispatch(t0), GateDecision::Allow);
     }
-    assert_eq!(s.try_dispatch(t0), GateDecision::RateLimited);
+    assert!(matches!(
+        s.try_dispatch(t0),
+        GateDecision::RateLimited { .. }
+    ));
 }
 
 #[test]
@@ -979,7 +1042,10 @@ fn retune_to_unlimited_rpm_never_rate_limits() {
     for _ in 0..3 {
         assert_eq!(s.try_dispatch(t0), GateDecision::Allow);
     }
-    assert_eq!(s.try_dispatch(t0), GateDecision::RateLimited);
+    assert!(matches!(
+        s.try_dispatch(t0),
+        GateDecision::RateLimited { .. }
+    ));
 
     // Act
     s.retune(gate(5, 1_000, None));

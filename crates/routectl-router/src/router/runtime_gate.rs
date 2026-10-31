@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 use routectl_core::{
-    ChatRequest, Error,
+    ChatRequest, EligibilityReason, Error,
     failure_class::{FailureClass, LastOutcome},
 };
 
@@ -48,9 +48,10 @@ impl Router {
     /// Trip the circuit breaker for the state slot keyed by `state_key`
     /// (a model nickname or a per-seat `nickname#label`), returning `false`
     /// when no such slot exists. Test seam for the hot-reload carry-over
-    /// assertions; `cfg(test)`-gated so it cannot widen the production
+    /// assertions; gated to test builds so it cannot widen the production
     /// surface.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
+    #[doc(hidden)]
     pub fn force_open_breaker(&self, state_key: &str, cooldown: std::time::Duration) -> bool {
         match self.state.get(state_key) {
             Some(slot) => {
@@ -78,7 +79,7 @@ impl Router {
         self.state.get(state_key).map(|slot| {
             matches!(
                 slot.lock().try_dispatch(std::time::Instant::now()),
-                GateDecision::CircuitOpen
+                GateDecision::CircuitOpen { .. }
             )
         })
     }
@@ -92,12 +93,8 @@ impl Router {
     /// with nothing left to release it. Test seam only -- every production
     /// caller uses `admit_dispatch` and carries the guard.
     #[cfg(test)]
-    pub(super) fn gate_check(
-        &self,
-        state_key: &str,
-        provider_name_for_err: &str,
-    ) -> Option<(&'static str, Error)> {
-        let (refusal, mut guard) = self.admit_dispatch(state_key, provider_name_for_err);
+    pub(super) fn gate_check(&self, state_key: &str) -> Option<(&'static str, Error)> {
+        let (refusal, mut guard) = self.admit_dispatch(state_key);
         guard.disarm();
         refusal
     }
@@ -108,10 +105,9 @@ impl Router {
     pub(super) fn admit_dispatch(
         &self,
         state_key: &str,
-        provider_name_for_err: &str,
     ) -> (Option<(&'static str, Error)>, ProbeSlotGuard) {
         let account = self.account_for_state_key_in_tests(state_key);
-        self.admit_client(state_key, account.as_deref(), provider_name_for_err)
+        self.admit_client(state_key, account.as_deref())
     }
 
     /// [`Self::admit_probe`] with the account resolved from `state_key`.
@@ -120,10 +116,9 @@ impl Router {
     pub(super) fn admit_probe_dispatch(
         &self,
         state_key: &str,
-        provider_name_for_err: &str,
     ) -> (Option<(&'static str, Error)>, ProbeSlotGuard) {
         let account = self.account_for_state_key_in_tests(state_key);
-        self.admit_probe(state_key, account.as_deref(), provider_name_for_err)
+        self.admit_probe(state_key, account.as_deref())
     }
 
     /// Run the account gate, then the RPM bucket + circuit breaker for
@@ -144,14 +139,8 @@ impl Router {
         &self,
         state_key: &str,
         account: Option<&str>,
-        provider_name_for_err: &str,
     ) -> (Option<(&'static str, Error)>, ProbeSlotGuard) {
-        self.admit(
-            state_key,
-            account,
-            provider_name_for_err,
-            AdmissionKind::ClientDispatch,
-        )
+        self.admit(state_key, account, AdmissionKind::ClientDispatch)
     }
 
     /// Admit a BACKGROUND PROBE, which defers a half-open-ready lane instead of
@@ -172,21 +161,14 @@ impl Router {
         &self,
         state_key: &str,
         account: Option<&str>,
-        provider_name_for_err: &str,
     ) -> (Option<(&'static str, Error)>, ProbeSlotGuard) {
-        self.admit(
-            state_key,
-            account,
-            provider_name_for_err,
-            AdmissionKind::BackgroundProbe,
-        )
+        self.admit(state_key, account, AdmissionKind::BackgroundProbe)
     }
 
     fn admit(
         &self,
         state_key: &str,
         account: Option<&str>,
-        provider_name_for_err: &str,
         kind: AdmissionKind,
     ) -> (Option<(&'static str, Error)>, ProbeSlotGuard) {
         let now = Instant::now();
@@ -203,17 +185,23 @@ impl Router {
         let guard = ProbeSlotGuard::new(claimed, admission.epoch, credential_generation);
         let refusal = match admission.decision {
             GateDecision::Allow => None,
-            GateDecision::RateLimited => Some((
+            GateDecision::RateLimited { retry_in } => Some((
                 "rate_limit",
-                Error::upstream(provider_name_for_err, 0, "local rpm_limit exceeded"),
+                Error::LocallyUnavailable {
+                    reason: EligibilityReason::RateLimited,
+                    retry_after: retry_in,
+                },
             )),
-            GateDecision::CircuitOpen => Some((
+            GateDecision::CircuitOpen { retry_in } => Some((
                 "circuit_breaker",
-                Error::upstream(provider_name_for_err, 0, "circuit breaker open"),
+                Error::LocallyUnavailable {
+                    reason: EligibilityReason::BreakerOpen,
+                    retry_after: retry_in,
+                },
             )),
-            GateDecision::CredentialParked { reason, until } => Some((
+            GateDecision::CredentialParked { until, .. } => Some((
                 super::credential_park::CREDENTIAL_PARKED_GATE_KIND,
-                super::credential_park::parked_seat_error(reason, until, now),
+                super::credential_park::parked_seat_error(until, now),
             )),
         };
         (refusal, guard)
@@ -232,7 +220,7 @@ impl Router {
         park.is_live_at(now).then(|| {
             (
                 super::credential_park::CREDENTIAL_PARKED_GATE_KIND,
-                super::credential_park::parked_seat_error(park.reason, park.until, now),
+                super::credential_park::parked_seat_error(park.until, now),
             )
         })
     }

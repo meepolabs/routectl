@@ -2,7 +2,6 @@
 //! model expands into one DispatchTarget per seat, each with its own
 //! breaker entry, ordered by the provider's `seat_selection`.
 
-use super::chain::empty_pool_error;
 use super::*;
 use crate::config::{AliasValue, PoolEntry, ProviderEntry, SeatSelection};
 use crate::seat_pool::SeatTarget;
@@ -317,21 +316,15 @@ async fn each_seat_has_independent_breaker() {
 
     // The default seat's breaker is open; siblings are untouched.
     assert!(
-        router
-            .gate_check("opus#anthropic-a", "anthropic-a")
-            .is_some(),
+        router.gate_check("opus#anthropic-a").is_some(),
         "parked default seat must gate-block"
     );
     assert!(
-        router
-            .gate_check("opus#anthropic-b", "anthropic-b")
-            .is_none(),
+        router.gate_check("opus#anthropic-b").is_none(),
         "sibling seat-b must remain dispatchable"
     );
     assert!(
-        router
-            .gate_check("opus#anthropic-c", "anthropic-c")
-            .is_none(),
+        router.gate_check("opus#anthropic-c").is_none(),
         "sibling seat-c must remain dispatchable"
     );
 }
@@ -966,7 +959,7 @@ fn a_pool_serving_fewer_seats_than_members_counts_a_degraded_dispatch() {
 }
 
 #[test]
-fn dispatch_on_an_empty_pool_returns_a_retryable_error_never_unknown_alias() {
+fn dispatch_on_an_empty_pool_refuses_credential_unusable_never_unknown_alias() {
     // The defect this pins: an empty seat set produced zero dispatch targets,
     // which surfaced at the end of the dispatch loop as `UnknownAlias` -- a 404
     // naming a route that IS configured, which no client retries and which
@@ -997,18 +990,16 @@ fn dispatch_on_an_empty_pool_returns_a_retryable_error_never_unknown_alias() {
         !matches!(err, Error::UnknownAlias(_)),
         "an empty pool is never an unknown route: {err:?}"
     );
-    let Error::Upstream { status, .. } = err else {
-        panic!("expected an upstream-shaped error, got {err:?}");
-    };
-    assert_eq!(status, 503, "must map to a retryable 5xx");
-    // And the class the router derives from it must be BOTH retryable and
-    // fallbackable, or the error shape would be cosmetic.
-    let classified =
-        routectl_core::failure_class::classify(&empty_pool_error("opus"), Some("anthropic-api"));
-    let policy = crate::config::RetryPolicy::default();
-    let (retry_cap, fallback) = policy.resolved_class(&classified.class);
-    assert!(retry_cap > 0, "the class must retry: {classified:?}");
-    assert!(fallback, "the class must fall back: {classified:?}");
+    assert!(
+        matches!(
+            err,
+            Error::LocallyUnavailable {
+                reason: routectl_core::EligibilityReason::CredentialUnusable,
+                retry_after: None,
+            }
+        ),
+        "an empty pool is the local credential_unusable refusal with no wait: {err:?}"
+    );
     assert_eq!(
         router.metrics.pool_totals().unavailable,
         1,

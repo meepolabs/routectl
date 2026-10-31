@@ -324,10 +324,12 @@ async fn a_rejected_key_parks(name: &str, capture: &str, reason: &str, dials: us
     );
     assert_eq!(second_status, 503, "{name}: {second_body}");
     assert_eq!(
-        rows[1],
-        ("gate_blocked".to_string(), Some(reason.into())),
-        "{name}"
+        second_body["error"]["type"], "account_parked",
+        "{name}: {second_body}"
     );
+    // The refusal names the eligibility reason, not the upstream's; the
+    // park's own reason stays on /status/health above.
+    assert_eq!(rows[1], ("gate_blocked".to_string(), None), "{name}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

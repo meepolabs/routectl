@@ -232,7 +232,7 @@ async fn only_a_debit_that_moves_the_circuit_to_open_logs_opened() {
                         ));
                     }
                     Step::ClaimProbe => {
-                        let (refusal, mut guard) = router.admit_dispatch(MODEL, "p");
+                        let (refusal, mut guard) = router.admit_dispatch(MODEL);
                         assert!(refusal.is_none(), "{label}: premise: probe admitted");
                         guard.disarm();
                     }

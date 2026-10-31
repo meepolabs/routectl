@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use routectl_core::{Error, Provider, UpstreamReason};
+use routectl_core::{EligibilityReason, Error, Provider, UpstreamReason};
 
 use super::super::credential_park_dispatch_tests::{ScriptedProvider, Step};
 use super::super::{Config, Router};
@@ -35,17 +35,17 @@ fn router() -> Router {
     router
 }
 
-/// The gate kind and credential reason of a refusal, or `None` for an allow.
+/// The gate kind and eligibility reason of a refusal, or `None` for an allow.
 fn refusal(
     router: &Router,
     state_key: &str,
     account: Option<&str>,
-) -> Option<(&'static str, UpstreamReason)> {
-    let (refusal, mut guard) = router.admit_client(state_key, account, "p-a");
+) -> Option<(&'static str, EligibilityReason)> {
+    let (refusal, mut guard) = router.admit_client(state_key, account);
     guard.release();
     refusal.map(|(kind, err)| match err {
-        Error::Credential { reason, .. } => (kind, reason),
-        other => panic!("a park refusal is a credential error, got {other:?}"),
+        Error::LocallyUnavailable { reason, .. } => (kind, reason),
+        other => panic!("a park refusal is a local refusal, got {other:?}"),
     })
 }
 
@@ -80,7 +80,7 @@ fn a_slotless_admission_refuses_only_a_live_account_park() {
         // Assert
         let expected = refused.then_some((
             CREDENTIAL_PARKED_GATE_KIND,
-            UpstreamReason::CredentialInvalid,
+            EligibilityReason::AccountParked,
         ));
         assert_eq!(got, expected, "{case}");
     }
@@ -105,7 +105,7 @@ fn a_slotless_park_refusal_matches_the_slotted_one() {
         slotted,
         Some((
             CREDENTIAL_PARKED_GATE_KIND,
-            UpstreamReason::CredentialExpired
+            EligibilityReason::AccountParked
         ))
     );
     assert_eq!(slotless, slotted);

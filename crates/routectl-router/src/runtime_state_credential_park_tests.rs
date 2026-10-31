@@ -104,7 +104,7 @@ fn a_retest_refused_by_rpm_hands_the_slot_back() {
     let refused = client(&mut s, lapsed, park);
 
     // Assert
-    assert_eq!(refused.decision, GateDecision::RateLimited);
+    assert!(matches!(refused.decision, GateDecision::RateLimited { .. }));
     assert!(
         !s.half_open_probe_in_flight(),
         "a re-test the RPM gate refused must not keep the probe slot",
@@ -151,7 +151,10 @@ fn a_failed_retest_without_a_reason_trips_a_configured_breaker() {
 
     // Assert
     assert!(opened, "a failed re-test re-trips like any half-open probe");
-    assert_eq!(s.try_dispatch(lapsed), GateDecision::CircuitOpen);
+    assert!(matches!(
+        s.try_dispatch(lapsed),
+        GateDecision::CircuitOpen { .. }
+    ));
 }
 
 #[test]
