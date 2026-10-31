@@ -2906,14 +2906,15 @@ pub struct ProviderRuntimePolicy {
     /// Wins over the claiming pool's value; defaults to 30s.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub circuit_cooldown_ms: Option<u64>,
-    /// Per-attempt request timeout that applies to every alias chain
-    /// entry routing through this provider.
+    /// Per-attempt timeout on complete and count-tokens requests for
+    /// every alias chain entry routing through this provider. A stream
+    /// that has committed content is not bounded by it.
     ///
     /// Resolution order (first set wins):
     ///   provider.request_timeout_ms (this field)
     ///     -> the claiming `[pools.X]` request_timeout_ms
     ///       -> `[retry]` request_timeout_ms (workspace global)
-    ///         -> None (no cap, reqwest's default)
+    ///         -> the shipped 30 min default
     ///
     /// Use this when many models share the same upstream and the
     /// timeout is an upstream characteristic (e.g., NIM cold-start),
@@ -2922,7 +2923,7 @@ pub struct ProviderRuntimePolicy {
     pub request_timeout_ms: Option<u64>,
     /// Per-attempt first-content timeout for streaming responses through
     /// this provider. Resolution order: `[models.X]` > this field > the
-    /// claiming `[pools.X]` > `[retry]` > the shipped 10 min default.
+    /// claiming `[pools.X]` > `[retry]` > the shipped 5 min default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_first_byte_timeout_ms: Option<u64>,
     /// Operator remap of a raw upstream status code to a config-facing
@@ -3130,12 +3131,13 @@ pub struct RetryPolicy {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_on_network: Option<u32>,
 
-    /// End-to-end per-attempt timeout. `None` means rely on the
-    /// reqwest client's default (no explicit cap). When set, the
-    /// router wraps each upstream call in `tokio::time::timeout`
-    /// and treats expiry as a network error (status 0, retryable).
-    /// The workspace-wide tier: `[providers.X]` and `[pools.X]` values
-    /// win over this one.
+    /// End-to-end per-attempt timeout on complete and count-tokens
+    /// requests. The router wraps each such upstream call in
+    /// `tokio::time::timeout` and treats expiry as a network error
+    /// (status 0, retryable). A stream that has committed content is not
+    /// bounded by it. The workspace-wide tier: `[providers.X]` and
+    /// `[pools.X]` values win over this one. None here means inherit the
+    /// shipped 30 min default, not "no timeout".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_timeout_ms: Option<u64>,
     /// First-content timeout for streaming responses. If the upstream
@@ -3146,7 +3148,7 @@ pub struct RetryPolicy {
     /// this timeout.
     ///
     /// Precedence: `[models.X]` > `[providers.X]` > `[pools.X]` > this
-    /// global > the shipped 10 min default. None here means inherit the
+    /// global > the shipped 5 min default. None here means inherit the
     /// default, not "no timeout".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_first_byte_timeout_ms: Option<u64>,

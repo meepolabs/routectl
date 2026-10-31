@@ -145,3 +145,20 @@ fn register_stamps_an_unconfigured_name_with_the_defaults() {
         crate::config::resolve_tuning(&router.config, None, None)
     );
 }
+
+#[test]
+fn an_untuned_slot_is_stamped_with_the_shipped_timeouts() {
+    let mut router = Router::new(Arc::new(Config::default()));
+
+    router.register("p-untuned", provider());
+
+    let stamp = router.tuning.get("p-untuned").expect("stamped");
+    assert_eq!(
+        stamp.stream_first_byte_timeout_ms,
+        at(300_000, TuningSource::ShippedDefault)
+    );
+    assert_eq!(
+        stamp.request_timeout_ms,
+        at(1_800_000, TuningSource::ShippedDefault)
+    );
+}

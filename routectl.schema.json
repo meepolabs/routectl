@@ -781,7 +781,7 @@
           "type": "array"
         },
         "request_timeout_ms": {
-          "description": "Per-attempt request timeout for complete and count-tokens requests\nthrough this pool's members. Precedence: member provider > this\npool > `[retry] request_timeout_ms` > no cap.",
+          "description": "Per-attempt request timeout for complete and count-tokens requests\nthrough this pool's members. Precedence: member provider > this\npool > `[retry] request_timeout_ms` > the shipped 30 min default.",
           "format": "uint64",
           "minimum": 0,
           "type": [
@@ -804,7 +804,7 @@
           "description": "How dispatch picks among this pool's members for one request.\n`fill-first` (the default) drains one member before moving to the\nnext; `round-robin` spreads load across members, advancing the\nstart member per request; `sticky-least-loaded` pins each\nconversation to one member for prompt-cache affinity while\nbalancing new conversations across members by load, and is the only\nstrategy quota-aware placement applies to. Applied per request\nwhenever the pool resolves to more than one usable member."
         },
         "stream_first_byte_timeout_ms": {
-          "description": "Per-attempt first-content timeout for streams through this pool's\nmembers. Precedence: `[models.X]` > member provider > this pool >\n`[retry] stream_first_byte_timeout_ms` > the 10 min default.",
+          "description": "Per-attempt first-content timeout for streams through this pool's\nmembers. Precedence: `[models.X]` > member provider > this pool >\n`[retry] stream_first_byte_timeout_ms` > the 5 min default.",
           "format": "uint64",
           "minimum": 0,
           "type": [
@@ -966,7 +966,7 @@
               ]
             },
             "request_timeout_ms": {
-              "description": "Per-attempt request timeout that applies to every alias chain\nentry routing through this provider.\n\nResolution order (first set wins):\n  provider.request_timeout_ms (this field)\n    -> the claiming `[pools.X]` request_timeout_ms\n      -> `[retry]` request_timeout_ms (workspace global)\n        -> None (no cap, reqwest's default)\n\nUse this when many models share the same upstream and the\ntimeout is an upstream characteristic (e.g., NIM cold-start),\nnot a routing decision. v0.6 removed per-alias retry overrides.",
+              "description": "Per-attempt timeout on complete and count-tokens requests for\nevery alias chain entry routing through this provider. A stream\nthat has committed content is not bounded by it.\n\nResolution order (first set wins):\n  provider.request_timeout_ms (this field)\n    -> the claiming `[pools.X]` request_timeout_ms\n      -> `[retry]` request_timeout_ms (workspace global)\n        -> the shipped 30 min default\n\nUse this when many models share the same upstream and the\ntimeout is an upstream characteristic (e.g., NIM cold-start),\nnot a routing decision. v0.6 removed per-alias retry overrides.",
               "format": "uint64",
               "minimum": 0,
               "type": [
@@ -984,7 +984,7 @@
               ]
             },
             "stream_first_byte_timeout_ms": {
-              "description": "Per-attempt first-content timeout for streaming responses through\nthis provider. Resolution order: `[models.X]` > this field > the\nclaiming `[pools.X]` > `[retry]` > the shipped 10 min default.",
+              "description": "Per-attempt first-content timeout for streaming responses through\nthis provider. Resolution order: `[models.X]` > this field > the\nclaiming `[pools.X]` > `[retry]` > the shipped 5 min default.",
               "format": "uint64",
               "minimum": 0,
               "type": [
@@ -1153,7 +1153,7 @@
               ]
             },
             "request_timeout_ms": {
-              "description": "Per-attempt request timeout that applies to every alias chain\nentry routing through this provider.\n\nResolution order (first set wins):\n  provider.request_timeout_ms (this field)\n    -> the claiming `[pools.X]` request_timeout_ms\n      -> `[retry]` request_timeout_ms (workspace global)\n        -> None (no cap, reqwest's default)\n\nUse this when many models share the same upstream and the\ntimeout is an upstream characteristic (e.g., NIM cold-start),\nnot a routing decision. v0.6 removed per-alias retry overrides.",
+              "description": "Per-attempt timeout on complete and count-tokens requests for\nevery alias chain entry routing through this provider. A stream\nthat has committed content is not bounded by it.\n\nResolution order (first set wins):\n  provider.request_timeout_ms (this field)\n    -> the claiming `[pools.X]` request_timeout_ms\n      -> `[retry]` request_timeout_ms (workspace global)\n        -> the shipped 30 min default\n\nUse this when many models share the same upstream and the\ntimeout is an upstream characteristic (e.g., NIM cold-start),\nnot a routing decision. v0.6 removed per-alias retry overrides.",
               "format": "uint64",
               "minimum": 0,
               "type": [
@@ -1171,7 +1171,7 @@
               ]
             },
             "stream_first_byte_timeout_ms": {
-              "description": "Per-attempt first-content timeout for streaming responses through\nthis provider. Resolution order: `[models.X]` > this field > the\nclaiming `[pools.X]` > `[retry]` > the shipped 10 min default.",
+              "description": "Per-attempt first-content timeout for streaming responses through\nthis provider. Resolution order: `[models.X]` > this field > the\nclaiming `[pools.X]` > `[retry]` > the shipped 5 min default.",
               "format": "uint64",
               "minimum": 0,
               "type": [
@@ -1314,7 +1314,7 @@
               ]
             },
             "request_timeout_ms": {
-              "description": "Per-attempt request timeout that applies to every alias chain\nentry routing through this provider.\n\nResolution order (first set wins):\n  provider.request_timeout_ms (this field)\n    -> the claiming `[pools.X]` request_timeout_ms\n      -> `[retry]` request_timeout_ms (workspace global)\n        -> None (no cap, reqwest's default)\n\nUse this when many models share the same upstream and the\ntimeout is an upstream characteristic (e.g., NIM cold-start),\nnot a routing decision. v0.6 removed per-alias retry overrides.",
+              "description": "Per-attempt timeout on complete and count-tokens requests for\nevery alias chain entry routing through this provider. A stream\nthat has committed content is not bounded by it.\n\nResolution order (first set wins):\n  provider.request_timeout_ms (this field)\n    -> the claiming `[pools.X]` request_timeout_ms\n      -> `[retry]` request_timeout_ms (workspace global)\n        -> the shipped 30 min default\n\nUse this when many models share the same upstream and the\ntimeout is an upstream characteristic (e.g., NIM cold-start),\nnot a routing decision. v0.6 removed per-alias retry overrides.",
               "format": "uint64",
               "minimum": 0,
               "type": [
@@ -1332,7 +1332,7 @@
               ]
             },
             "stream_first_byte_timeout_ms": {
-              "description": "Per-attempt first-content timeout for streaming responses through\nthis provider. Resolution order: `[models.X]` > this field > the\nclaiming `[pools.X]` > `[retry]` > the shipped 10 min default.",
+              "description": "Per-attempt first-content timeout for streaming responses through\nthis provider. Resolution order: `[models.X]` > this field > the\nclaiming `[pools.X]` > `[retry]` > the shipped 5 min default.",
               "format": "uint64",
               "minimum": 0,
               "type": [
@@ -1454,7 +1454,7 @@
               "type": "string"
             },
             "request_timeout_ms": {
-              "description": "Per-attempt request timeout that applies to every alias chain\nentry routing through this provider.\n\nResolution order (first set wins):\n  provider.request_timeout_ms (this field)\n    -> the claiming `[pools.X]` request_timeout_ms\n      -> `[retry]` request_timeout_ms (workspace global)\n        -> None (no cap, reqwest's default)\n\nUse this when many models share the same upstream and the\ntimeout is an upstream characteristic (e.g., NIM cold-start),\nnot a routing decision. v0.6 removed per-alias retry overrides.",
+              "description": "Per-attempt timeout on complete and count-tokens requests for\nevery alias chain entry routing through this provider. A stream\nthat has committed content is not bounded by it.\n\nResolution order (first set wins):\n  provider.request_timeout_ms (this field)\n    -> the claiming `[pools.X]` request_timeout_ms\n      -> `[retry]` request_timeout_ms (workspace global)\n        -> the shipped 30 min default\n\nUse this when many models share the same upstream and the\ntimeout is an upstream characteristic (e.g., NIM cold-start),\nnot a routing decision. v0.6 removed per-alias retry overrides.",
               "format": "uint64",
               "minimum": 0,
               "type": [
@@ -1472,7 +1472,7 @@
               ]
             },
             "stream_first_byte_timeout_ms": {
-              "description": "Per-attempt first-content timeout for streaming responses through\nthis provider. Resolution order: `[models.X]` > this field > the\nclaiming `[pools.X]` > `[retry]` > the shipped 10 min default.",
+              "description": "Per-attempt first-content timeout for streaming responses through\nthis provider. Resolution order: `[models.X]` > this field > the\nclaiming `[pools.X]` > `[retry]` > the shipped 5 min default.",
               "format": "uint64",
               "minimum": 0,
               "type": [
@@ -1595,7 +1595,7 @@
               ]
             },
             "request_timeout_ms": {
-              "description": "Per-attempt request timeout that applies to every alias chain\nentry routing through this provider.\n\nResolution order (first set wins):\n  provider.request_timeout_ms (this field)\n    -> the claiming `[pools.X]` request_timeout_ms\n      -> `[retry]` request_timeout_ms (workspace global)\n        -> None (no cap, reqwest's default)\n\nUse this when many models share the same upstream and the\ntimeout is an upstream characteristic (e.g., NIM cold-start),\nnot a routing decision. v0.6 removed per-alias retry overrides.",
+              "description": "Per-attempt timeout on complete and count-tokens requests for\nevery alias chain entry routing through this provider. A stream\nthat has committed content is not bounded by it.\n\nResolution order (first set wins):\n  provider.request_timeout_ms (this field)\n    -> the claiming `[pools.X]` request_timeout_ms\n      -> `[retry]` request_timeout_ms (workspace global)\n        -> the shipped 30 min default\n\nUse this when many models share the same upstream and the\ntimeout is an upstream characteristic (e.g., NIM cold-start),\nnot a routing decision. v0.6 removed per-alias retry overrides.",
               "format": "uint64",
               "minimum": 0,
               "type": [
@@ -1613,7 +1613,7 @@
               ]
             },
             "stream_first_byte_timeout_ms": {
-              "description": "Per-attempt first-content timeout for streaming responses through\nthis provider. Resolution order: `[models.X]` > this field > the\nclaiming `[pools.X]` > `[retry]` > the shipped 10 min default.",
+              "description": "Per-attempt first-content timeout for streaming responses through\nthis provider. Resolution order: `[models.X]` > this field > the\nclaiming `[pools.X]` > `[retry]` > the shipped 5 min default.",
               "format": "uint64",
               "minimum": 0,
               "type": [
@@ -1764,7 +1764,7 @@
           "type": "integer"
         },
         "request_timeout_ms": {
-          "description": "End-to-end per-attempt timeout. `None` means rely on the\nreqwest client's default (no explicit cap). When set, the\nrouter wraps each upstream call in `tokio::time::timeout`\nand treats expiry as a network error (status 0, retryable).\nThe workspace-wide tier: `[providers.X]` and `[pools.X]` values\nwin over this one.",
+          "description": "End-to-end per-attempt timeout on complete and count-tokens\nrequests. The router wraps each such upstream call in\n`tokio::time::timeout` and treats expiry as a network error\n(status 0, retryable). A stream that has committed content is not\nbounded by it. The workspace-wide tier: `[providers.X]` and\n`[pools.X]` values win over this one. None here means inherit the\nshipped 30 min default, not \"no timeout\".",
           "format": "uint64",
           "minimum": 0,
           "type": [
@@ -1800,7 +1800,7 @@
           ]
         },
         "stream_first_byte_timeout_ms": {
-          "description": "First-content timeout for streaming responses. If the upstream\nhasn't emitted a content-bearing chunk in this window, the stream\nis abandoned and (if no content has been delivered yet) the next\nprovider in the chain is tried. Content-free leading chunks (a\n`delta.role` opener, id/model metadata) neither reset nor satisfy\nthis timeout.\n\nPrecedence: `[models.X]` > `[providers.X]` > `[pools.X]` > this\nglobal > the shipped 10 min default. None here means inherit the\ndefault, not \"no timeout\".",
+          "description": "First-content timeout for streaming responses. If the upstream\nhasn't emitted a content-bearing chunk in this window, the stream\nis abandoned and (if no content has been delivered yet) the next\nprovider in the chain is tried. Content-free leading chunks (a\n`delta.role` opener, id/model metadata) neither reset nor satisfy\nthis timeout.\n\nPrecedence: `[models.X]` > `[providers.X]` > `[pools.X]` > this\nglobal > the shipped 5 min default. None here means inherit the\ndefault, not \"no timeout\".",
           "format": "uint64",
           "minimum": 0,
           "type": [

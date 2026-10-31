@@ -109,14 +109,8 @@ fn defaults_when_no_tier_sets_anything() {
             source: d
         }
     );
-    assert_eq!(
-        t.request_timeout_ms,
-        Resolved {
-            value: None,
-            source: d
-        }
-    );
-    assert_eq!(t.stream_first_byte_timeout_ms, at(600_000, d));
+    assert_eq!(t.request_timeout_ms, at(1_800_000, d));
+    assert_eq!(t.stream_first_byte_timeout_ms, at(300_000, d));
 }
 
 #[test]
@@ -127,7 +121,7 @@ fn defaults_when_the_config_has_no_retry_table_and_no_entry() {
 
     assert_eq!(
         t.stream_first_byte_timeout_ms,
-        at(600_000, TuningSource::ShippedDefault)
+        at(300_000, TuningSource::ShippedDefault)
     );
     assert_eq!(t.circuit_failures.value, BreakerThreshold::Disabled);
 }
@@ -372,13 +366,13 @@ fn provider_first_byte_reachable_when_global_omitted() {
 
 #[test]
 fn explicit_global_equal_to_default_reports_global() {
-    let cfg = config("", "", "stream_first_byte_timeout_ms = 600000");
+    let cfg = config("", "", "stream_first_byte_timeout_ms = 300000");
 
     let t = resolve_tuning(&cfg, Some(LONE), None);
 
     assert_eq!(
         t.stream_first_byte_timeout_ms,
-        at(600_000, TuningSource::Global)
+        at(300_000, TuningSource::Global)
     );
 }
 

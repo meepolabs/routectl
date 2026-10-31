@@ -50,11 +50,11 @@ stream_first_byte_timeout_ms = 300000   # 5 min, applies to every model
 request_timeout_ms           = 600000   # 10 min, applies to every model
 ```
 
-Need different timeouts for different models on the same upstream? For `stream_first_byte_timeout_ms` you can set a per-model override directly: `[models.X] stream_first_byte_timeout_ms = 300000` (resolution is `[models.X]` > `[providers.X]` > `[pools.X]` > `[retry]` > the 10 min default). For `request_timeout_ms` there is no per-model tier; split into separate `[providers.X]` entries (e.g. `bedrock-fast`, `bedrock-heavy`) with their own runtime knobs and route each `[models.X]` at the right one.
+Need different timeouts for different models on the same upstream? For `stream_first_byte_timeout_ms` you can set a per-model override directly: `[models.X] stream_first_byte_timeout_ms = 300000` (resolution is `[models.X]` > `[providers.X]` > `[pools.X]` > `[retry]` > the 5 min default). For `request_timeout_ms` there is no per-model tier; split into separate `[providers.X]` entries (e.g. `bedrock-fast`, `bedrock-heavy`) with their own runtime knobs and route each `[models.X]` at the right one.
 
 Resolution priority:
-- `stream_first_byte_timeout_ms`: `[models.X]` > `[providers.X]` > `[pools.X]` > `[retry]` > 600000 (10 min)
-- `request_timeout_ms`: `[providers.X]` > `[pools.X]` > `[retry]` > unset (no per-model tier)
+- `stream_first_byte_timeout_ms`: `[models.X]` > `[providers.X]` > `[pools.X]` > `[retry]` > 300000 (5 min)
+- `request_timeout_ms`: `[providers.X]` > `[pools.X]` > `[retry]` > 1800000 (30 min; no per-model tier). It bounds complete and count-tokens attempts; a stream that has committed content is not cut by it.
 
 **No model setting for adaptive thinking:** routectl forwards the client's thinking shape and learns per lane which shape a model takes, so no `[models.X]` key is needed.
 
@@ -741,7 +741,7 @@ the outer transport.
 
 ### `stream_first_byte_timeout_ms`
 
-The shipped default is 600000 (10 min); `[retry]`, a pool, a provider or a model can set a lower one. Long enough for any thinking model, but slow to give up on a dead upstream for a non-thinking model that starts responding in seconds.
+The shipped default is 300000 (5 min); `[retry]`, a pool, a provider or a model can set another. Long enough for most thinking models, but slow to give up on a dead upstream for a non-thinking model that starts responding in seconds; a max-effort thinking model may need a higher value.
 
 | Model class | Suggested timeout |
 |---|---|
@@ -752,10 +752,10 @@ The shipped default is 600000 (10 min); `[retry]`, a pool, a provider or a model
 | NIM cold-start (any model) | 180000+ |
 
 Resolution priority is model > provider > pool > global > default
-(`[models.X]` > `[providers.Y]` > `[pools.Z]` > `[retry]` > 10 min). The
-related `request_timeout_ms` full-request ceiling is provider > pool >
-global only (no per-model tier); bump it alongside the first-content timeout for
-long-thinking responses. For the full timeout/retry resolution rules
+(`[models.X]` > `[providers.Y]` > `[pools.Z]` > `[retry]` > 5 min). The
+related `request_timeout_ms` per-attempt ceiling on complete and
+count-tokens requests is provider > pool > global > 30 min (no per-model
+tier); a stream that has committed content is not cut by it. For the full timeout/retry resolution rules
 and how upstream `Retry-After` / `resets_at` hints are honored, see
 [CONFIGURATION.md](CONFIGURATION.md) "Retry and fallback defaults" and
 "Honoring upstream resets".

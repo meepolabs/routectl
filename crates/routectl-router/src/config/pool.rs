@@ -68,13 +68,13 @@ pub struct PoolEntry {
 
     /// Per-attempt request timeout for complete and count-tokens requests
     /// through this pool's members. Precedence: member provider > this
-    /// pool > `[retry] request_timeout_ms` > no cap.
+    /// pool > `[retry] request_timeout_ms` > the shipped 30 min default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_timeout_ms: Option<u64>,
 
     /// Per-attempt first-content timeout for streams through this pool's
     /// members. Precedence: `[models.X]` > member provider > this pool >
-    /// `[retry] stream_first_byte_timeout_ms` > the 10 min default.
+    /// `[retry] stream_first_byte_timeout_ms` > the 5 min default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_first_byte_timeout_ms: Option<u64>,
 }

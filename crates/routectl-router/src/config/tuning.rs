@@ -26,7 +26,10 @@ const DEFAULT_CIRCUIT_COOLDOWN_MS: u64 = 30_000;
 /// Stream first-content timeout when no tier sets
 /// `stream_first_byte_timeout_ms`: a pinging-but-contentless upstream must
 /// stay bounded even when the operator configures nothing.
-const DEFAULT_STREAM_FIRST_BYTE_TIMEOUT_MS: u64 = 600_000;
+const DEFAULT_STREAM_FIRST_BYTE_TIMEOUT_MS: u64 = 300_000;
+/// Per-attempt deadline on complete and count-tokens requests when no tier
+/// sets `request_timeout_ms`. A committed stream never reads it.
+const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 1_800_000;
 
 /// The tier a resolved tuning value came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -231,7 +234,7 @@ fn resolve_tiers(tiers: &Tiers<'_>) -> ResolvedTuning {
                     TuningSource::Global,
                 ),
             ],
-            None,
+            Some(DEFAULT_REQUEST_TIMEOUT_MS),
         ),
         stream_first_byte_timeout_ms: optional_cell(
             &[
