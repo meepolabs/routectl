@@ -655,6 +655,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn fallback_only_class_block_keeps_the_retry_on_compat_cap() {
+        // Arrange: retry_on_5xx set, and a server-error block that sets
+        // only `fallback`; overloaded has no block.
+        let toml_text = r"
+[retry]
+max_attempts = 7
+retry_on_5xx = 4
+
+[retry.classes.server-error]
+fallback = false
+";
+        let cfg: crate::config::Config = toml::from_str(toml_text).expect("parse");
+
+        // Act + Assert: the absent retry leaf falls through to the compat
+        // cap, not to max_attempts; the fallback leaf applies on its own.
+        assert_eq!(
+            cfg.retry.resolved_class(&FailureClass::ServerError),
+            (4, false)
+        );
+        assert_eq!(
+            cfg.retry.resolved_class(&FailureClass::Overloaded),
+            (4, expected_baked(&FailureClass::Overloaded, 7).1)
+        );
+    }
+
     // --- resolved_class: sparse operator overlay ---
 
     #[test]

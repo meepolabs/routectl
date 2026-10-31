@@ -1777,11 +1777,20 @@ retry = 3    # same-provider retries in place of max_attempts
 retry = 0    # stop retrying same-provider; fall over to the next chain entry immediately
 ```
 
-A class with no `[retry.classes.<class>]` block keeps the baked row
-above verbatim. Within a present block, an absent leaf (`retry` or
-`fallback`) still inherits the baked default for that leaf alone --
-`ClassPolicy`'s two leaves are independently optional, so setting
-`retry` does not force an implicit `fallback` value.
+The two leaves resolve independently; `ClassPolicy`'s leaves are
+separately optional, so setting one never forces an implicit value for
+the other:
+
+- **Retry cap:** the class's `[retry.classes.<class>] retry` leaf if
+  set; otherwise the deprecated `retry_on_*` key covering that class
+  (see below) if set; otherwise the baked cap from the table above.
+- **Fallback:** the class's `[retry.classes.<class>] fallback` leaf if
+  set; otherwise the baked fallback. No `retry_on_*` key affects it.
+
+So a missing block, or a missing `retry` leaf in a present block, does
+not by itself restore the baked cap: with `retry_on_5xx = 4` and a
+`[retry.classes.server-error]` block setting only `fallback = false`,
+`server-error` resolves to a cap of 4 with fallback off.
 
 #### Deprecated: `retry_on_429`, `retry_on_5xx`, `retry_on_network`
 
