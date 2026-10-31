@@ -181,10 +181,8 @@ impl Router {
     ) -> (Option<(&'static str, Error)>, ProbeSlotGuard) {
         let now = Instant::now();
         let Some(state) = self.state.get(state_key).cloned() else {
-            return (
-                self.slotless_park_refusal(account, now),
-                ProbeSlotGuard::new(None, 0, 0),
-            );
+            let (refusal, credential_generation) = self.admit_slotless_account(account, now);
+            return (refusal, ProbeSlotGuard::new(None, 0, credential_generation));
         };
         let (admission, credential_generation) = self.admit_locked(&state, account, now, kind);
         #[cfg(test)]
@@ -216,26 +214,39 @@ impl Router {
         (refusal, guard)
     }
 
-    /// The refusal for a target with no model slot: an unusable mark and a
-    /// park belong to the account, not the slot, so either refuses here
+    /// The account gate for a target with no model slot: an unusable mark and
+    /// a park belong to the account, not the slot, so either refuses here
     /// exactly as it does on the slotted path. Only a usable, unparked or
-    /// absent account keeps the slotless allow.
-    fn slotless_park_refusal(
+    /// absent account keeps the slotless allow. Like [`Self::admit_locked`]
+    /// it registers the account and reads the generation in the same critical
+    /// section as the decision, so the attempt's later settlement is fenced
+    /// by any reset after it.
+    fn admit_slotless_account(
         &self,
         account: Option<&str>,
         now: Instant,
-    ) -> Option<(&'static str, Error)> {
-        let record = self.account_record(account)?;
+    ) -> (Option<(&'static str, Error)>, u64) {
+        let Some(account) = account else {
+            return (None, 0);
+        };
+        let record = *self
+            .credential_accounts
+            .lock()
+            .entry(account.to_string())
+            .or_default();
         if record.unusable().is_some() {
-            return Some(unusable_refusal());
+            return (Some(unusable_refusal()), record.generation());
         }
-        let park = record.park()?;
-        park.is_live_at(now).then(|| {
-            (
-                super::credential_park::CREDENTIAL_PARKED_GATE_KIND,
-                super::credential_park::parked_seat_error(park.until, now),
-            )
-        })
+        let refusal = record
+            .park()
+            .filter(|park| park.is_live_at(now))
+            .map(|park| {
+                (
+                    super::credential_park::CREDENTIAL_PARKED_GATE_KIND,
+                    super::credential_park::parked_seat_error(park.until, now),
+                )
+            });
+        (refusal, record.generation())
     }
 
     /// The account gate, then the model gate, in the lock order the

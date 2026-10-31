@@ -15,7 +15,9 @@ use super::super::{AliasValue, Config, Router};
 use super::CREDENTIAL_UNUSABLE_GATE_KIND;
 use crate::config::{PoolEntry, ProviderEntry, ProviderRuntimePolicy, RetryPolicy, SeatSelection};
 use crate::resolved::ResolvedModel;
-use crate::runtime_state::UnusableCause;
+use crate::runtime_state::{
+    AccountReset, MarkOutcome, RefreshSettlement, ResetOutcome, UnusableCause,
+};
 use crate::seat_pool::{SeatPin, SeatTarget};
 
 const SURFACES: [Surface; 3] = [Surface::Complete, Surface::Stream, Surface::CountTokens];
@@ -168,10 +170,20 @@ fn a_reset_readmits_the_account_into_the_slot_and_token_it_left_untouched() {
     assert!(fx.router.admit_dispatch("m-a").0.is_some(), "premise");
 
     // Act
-    assert_eq!(fx.router.lift_credential_parks([ACCOUNT_A]), 0);
+    let resets = fx.router.lift_credential_parks([ACCOUNT_A]);
     let (refusal, mut guard) = fx.router.admit_dispatch("m-a");
 
     // Assert
+    assert_eq!(
+        resets,
+        [AccountReset {
+            account: ACCOUNT_A.to_string(),
+            outcome: ResetOutcome {
+                park_lifted: false,
+                unusable_cleared: Some(UnusableCause::Revoked),
+            },
+        }]
+    );
     assert!(refusal.is_none());
     assert!(
         guard.owns_slot(),
@@ -188,9 +200,10 @@ fn a_mark_on_an_account_no_admission_has_seen_is_lifted_by_a_reload() {
     // Arrange: nothing has admitted on `#p-a`, so the account has no
     // record until the mark creates one.
     let fx = chain(plain_entry);
-    assert!(
+    assert_eq!(
         fx.router
-            .mark_credential_unusable(ACCOUNT_A, UnusableCause::NotLoggedIn, None)
+            .mark_credential_unusable(ACCOUNT_A, UnusableCause::NotLoggedIn, None),
+        MarkOutcome::Transitioned
     );
     let generation = fx.router.credential_generation_for_tests("m-a");
     assert!(fx.router.admit_dispatch("m-a").0.is_some(), "premise");
@@ -220,37 +233,95 @@ fn a_mark_gathered_before_a_reload_does_not_mark_the_reloaded_credential() {
             .mark_credential_unusable(ACCOUNT_A, UnusableCause::Revoked, Some(observed_under));
 
     // Assert
-    assert!(!marked);
+    assert_eq!(marked, MarkOutcome::Stale);
     assert!(fx.router.admit_dispatch("m-a").0.is_none());
 }
 
 #[test]
-fn a_clear_in_the_current_generation_readmits_the_account() {
+fn a_mark_under_a_generation_acquired_before_a_reset_is_stale_on_an_unseen_account() {
+    // Arrange: nothing has admitted on `#p-a`; the acquire registers it.
+    let fx = chain(plain_entry);
+    let observed_under = fx.router.acquire_credential_generation(ACCOUNT_A);
+    let resets = fx.router.lift_credential_parks([ACCOUNT_A]);
+
+    // Act
+    let marked =
+        fx.router
+            .mark_credential_unusable(ACCOUNT_A, UnusableCause::Revoked, Some(observed_under));
+
+    // Assert
+    assert_eq!(marked, MarkOutcome::Stale);
+    assert!(fx.router.admit_dispatch("m-a").0.is_none());
+    assert_eq!(resets.len(), 1, "the acquired account is reset");
+}
+
+#[test]
+fn an_outcome_delayed_past_a_refresh_settle_is_stale() {
+    for cause in [UnusableCause::Revoked, UnusableCause::Expired] {
+        // Arrange: two outcomes observed the same generation; the refresh
+        // success settles first.
+        let fx = chain(plain_entry);
+        let observed_under = fx.router.acquire_credential_generation(ACCOUNT_A);
+        let settled = fx
+            .router
+            .credential_refreshed_in_generation(ACCOUNT_A, observed_under);
+
+        // Act
+        let marked = fx
+            .router
+            .mark_credential_unusable(ACCOUNT_A, cause, Some(observed_under));
+
+        // Assert
+        assert_eq!(marked, MarkOutcome::Stale, "{cause:?}");
+        assert!(fx.router.admit_dispatch("m-a").0.is_none(), "{cause:?}");
+        assert_eq!(
+            settled,
+            RefreshSettlement::Settled {
+                cleared_expired: false,
+                generation: observed_under.wrapping_add(1),
+            },
+            "{cause:?}"
+        );
+    }
+}
+
+#[test]
+fn a_refresh_settle_in_the_current_generation_readmits_an_expired_account() {
     let rows = [("current", false, true), ("stale", true, false)];
     for (name, reset_after_mark, readmitted) in rows {
         // Arrange
         let fx = chain(plain_entry);
-        let generation = fx.router.credential_generation_for_tests("m-a");
-        assert!(fx.router.mark_credential_unusable(
-            ACCOUNT_A,
-            UnusableCause::Expired,
-            Some(generation)
-        ));
+        let generation = fx.router.acquire_credential_generation(ACCOUNT_A);
+        assert_eq!(
+            fx.router
+                .mark_credential_unusable(ACCOUNT_A, UnusableCause::Expired, Some(generation)),
+            MarkOutcome::Transitioned,
+            "{name}"
+        );
         if reset_after_mark {
             fx.router.lift_credential_parks([ACCOUNT_A]);
             assert!(
                 fx.router
                     .mark_credential_unusable(ACCOUNT_A, UnusableCause::Expired, None)
+                    .applied()
             );
         }
 
         // Act
-        let cleared =
-            fx.router
-                .clear_unusable_in_generation(ACCOUNT_A, UnusableCause::Expired, generation);
+        let settled = fx
+            .router
+            .credential_refreshed_in_generation(ACCOUNT_A, generation);
 
         // Assert
-        assert_eq!(cleared, readmitted, "{name}");
+        let expected = if readmitted {
+            RefreshSettlement::Settled {
+                cleared_expired: true,
+                generation: generation.wrapping_add(1),
+            }
+        } else {
+            RefreshSettlement::Stale
+        };
+        assert_eq!(settled, expected, "{name}");
         assert_eq!(
             fx.router.admit_dispatch("m-a").0.is_none(),
             readmitted,

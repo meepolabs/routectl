@@ -2,7 +2,8 @@
 //! slot: the park belongs to the account, so a target admitted outside the
 //! slot table still cannot dial a parked credential. An unusable mark
 //! refuses the same way. Only a usable, unparked or absent account keeps the
-//! slotless allow.
+//! slotless allow. A slotless admission registers the account and carries its
+//! credential generation, so a reset fences its settlement as on a slot.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -10,7 +11,9 @@ use std::time::{Duration, Instant};
 
 use routectl_core::{EligibilityReason, Error, Provider, UpstreamReason};
 
-use super::super::credential_park_dispatch_tests::{ScriptedProvider, Step};
+use super::super::credential_park_dispatch_tests::{
+    INVALID, ScriptedProvider, Step, park_reason, rejection,
+};
 use super::super::{Config, Router};
 use super::{CREDENTIAL_PARKED_GATE_KIND, CREDENTIAL_UNUSABLE_GATE_KIND};
 use crate::config::ProviderEntry;
@@ -86,6 +89,67 @@ fn a_slotless_admission_refuses_only_a_live_account_park() {
         ));
         assert_eq!(got, expected, "{case}");
     }
+}
+
+/// The credential generation a slotless admission on `account` captured.
+fn slotless_generation(router: &Router, account: &str) -> u64 {
+    let (refusal, mut guard) = router.admit_client(SLOTLESS, Some(account));
+    guard.release();
+    assert!(refusal.is_none(), "a healthy account admits");
+    guard.credential_generation()
+}
+
+/// Settle a credential rejection of a slotless attempt admitted under
+/// `generation`, returning whether it parked the account.
+fn settle_rejection(router: &Router, generation: u64) -> bool {
+    router.park_credential_on_rejection(
+        Some(ACCOUNT),
+        &rejection("p-a", 403, INVALID),
+        false,
+        generation,
+    )
+}
+
+#[test]
+fn a_slotless_admission_captures_the_generation_a_reset_started() {
+    // Arrange
+    let router = router();
+    let first = slotless_generation(&router, ACCOUNT);
+    let resets = router.lift_credential_parks([ACCOUNT]);
+
+    // Act
+    let after_reset = slotless_generation(&router, ACCOUNT);
+
+    // Assert
+    assert_eq!(
+        resets.len(),
+        1,
+        "the slotless admission registered the account"
+    );
+    assert_eq!(after_reset, first.wrapping_add(1));
+    assert!(after_reset > 0);
+}
+
+#[test]
+fn a_reset_between_a_slotless_admission_and_its_settlement_fences_it() {
+    // Arrange: an attempt admitted slotless on an account nothing else has
+    // seen, then a reload resets the account.
+    let router = router();
+    let before = slotless_generation(&router, ACCOUNT);
+    router.lift_credential_parks([ACCOUNT]);
+
+    // Act
+    let stale_parked = settle_rejection(&router, before);
+    let stale_park = park_reason(&router, "m-a");
+    let current = slotless_generation(&router, ACCOUNT);
+    let current_parked = settle_rejection(&router, current);
+
+    // Assert: the stale settlement parks nothing; an attempt admitted after
+    // the reset parks under the generation its guard carries.
+    assert!(!stale_parked);
+    assert_eq!(stale_park, None);
+    assert!(current_parked);
+    assert_eq!(park_reason(&router, "m-a"), INVALID);
 }
 
 #[test]

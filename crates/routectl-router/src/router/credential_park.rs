@@ -21,7 +21,10 @@ use routectl_core::{EligibilityReason, Error, sanitize_for_log};
 
 use super::Router;
 use super::runtime_gate::ProbeSlotGuard;
-use crate::runtime_state::{AccountCredential, SuccessSettlement, UnusableCause};
+use crate::runtime_state::{
+    AccountCredential, AccountReset, MarkOutcome, RefreshSettlement, SuccessSettlement,
+    UnusableCause,
+};
 
 /// Every credential account's park and generation, keyed by
 /// [`crate::seat_pool::credential_account`]. Shared whole across a hot-reload,
@@ -182,21 +185,38 @@ impl Router {
         self.credential_accounts.lock().get(account).copied()
     }
 
-    /// Mark `account`'s credential unusable for `cause`, returning whether
-    /// the mark applied. With `Some(generation)` the mark applies only while
-    /// that credential generation is current, so evidence gathered before a
-    /// reload cannot mark the reloaded credential; `None` marks
-    /// unconditionally. The record is created when absent, so a later reload
-    /// has a mark to clear. A re-mark with the same cause keeps the original
-    /// `since`; a different cause replaces the mark. The account then refuses
-    /// every admission until a reload resets it or
-    /// [`Self::clear_unusable_in_generation`] clears it.
+    /// Register `account` and return its current credential generation. A
+    /// consumer that will act on delayed evidence (a refresh, a credential
+    /// read) acquires the generation before gathering it and passes it to
+    /// [`Self::mark_credential_unusable`] or
+    /// [`Self::credential_refreshed_in_generation`]. The record is created
+    /// when absent, so a reset landing between the acquire and the outcome
+    /// advances this record and the outcome is stale.
+    pub fn acquire_credential_generation(&self, account: &str) -> u64 {
+        self.credential_accounts
+            .lock()
+            .entry(account.to_string())
+            .or_default()
+            .generation()
+    }
+
+    /// Mark `account`'s credential unusable for `cause`. With
+    /// `Some(generation)` (from [`Self::acquire_credential_generation`]) the
+    /// mark applies only while that credential generation is current, so
+    /// evidence gathered before a reload or a successful refresh cannot mark
+    /// the newer credential; `None` marks unconditionally. The record is
+    /// created when absent, so a later reload has a mark to clear. A re-mark
+    /// with the same cause keeps the original `since` and reports
+    /// [`MarkOutcome::Unchanged`]; a new or different cause reports
+    /// [`MarkOutcome::Transitioned`]. The account then refuses every
+    /// admission until a reload resets it or a successful refresh clears an
+    /// expired mark.
     pub fn mark_credential_unusable(
         &self,
         account: &str,
         cause: UnusableCause,
         generation: Option<u64>,
-    ) -> bool {
+    ) -> MarkOutcome {
         self.credential_accounts
             .lock()
             .entry(account.to_string())
@@ -204,19 +224,21 @@ impl Router {
             .mark_unusable(cause, Instant::now(), generation)
     }
 
-    /// Clear `account`'s unusable mark when it carries `cause` and
-    /// `generation` is still current, returning whether it cleared one. An
-    /// account with no record has nothing to clear.
-    pub fn clear_unusable_in_generation(
+    /// Settle a successful refresh of `account`'s credential observed under
+    /// `generation`, in one critical section: while `generation` is current
+    /// the account starts a new generation, fencing out every outcome still
+    /// in flight from the old credential, and an expired mark is cleared; a
+    /// mark with another cause stays. A stale `generation` changes nothing.
+    pub fn credential_refreshed_in_generation(
         &self,
         account: &str,
-        cause: UnusableCause,
         generation: u64,
-    ) -> bool {
+    ) -> RefreshSettlement {
         self.credential_accounts
             .lock()
-            .get_mut(account)
-            .is_some_and(|record| record.clear_unusable_in_generation(cause, generation))
+            .entry(account.to_string())
+            .or_default()
+            .refreshed_in_generation(generation)
     }
 
     /// The credential account of the dispatch target keyed by `state_key`,
@@ -272,7 +294,10 @@ impl Router {
         cause: UnusableCause,
     ) -> bool {
         self.account_for_state_key(state_key)
-            .is_some_and(|account| self.mark_credential_unusable(&account, cause, None))
+            .is_some_and(|account| {
+                self.mark_credential_unusable(&account, cause, None)
+                    .applied()
+            })
     }
 
     /// [`Self::lift_credential_parks`] on the account of the target keyed by
@@ -329,13 +354,15 @@ impl Router {
         self.park_credential_on_rejection(account.as_deref(), err, false, generation)
     }
 
-    /// Lift the credential park on each of `accounts` and start a new
-    /// credential generation on each, returning how many were parked. The
-    /// generation advances even on an account with no park, so an attempt
-    /// admitted before this call cannot park its account after it. An account
-    /// no attempt has admitted on yet has no record and nothing in flight, so
-    /// it is skipped rather than given one.
-    pub fn lift_credential_parks<I>(&self, accounts: I) -> usize
+    /// Reset each of `accounts`: lift its credential park, clear its unusable
+    /// mark and start a new credential generation, returning one
+    /// [`AccountReset`] per account reset, in the order named. The generation
+    /// advances even on an account with no park or mark, so an attempt
+    /// admitted (or a generation acquired) before this call cannot park or
+    /// mark its account after it. An account with no record has neither an
+    /// attempt in flight nor an acquired generation, so it is skipped rather
+    /// than given one.
+    pub fn lift_credential_parks<I>(&self, accounts: I) -> Vec<AccountReset>
     where
         I: IntoIterator,
         I::Item: AsRef<str>,
@@ -343,12 +370,14 @@ impl Router {
         let mut records = self.credential_accounts.lock();
         accounts
             .into_iter()
-            .filter(|account| {
-                records
-                    .get_mut(account.as_ref())
-                    .is_some_and(AccountCredential::reset)
+            .filter_map(|account| {
+                let account = account.as_ref();
+                records.get_mut(account).map(|record| AccountReset {
+                    account: account.to_string(),
+                    outcome: record.reset(),
+                })
             })
-            .count()
+            .collect()
     }
 
     /// [`Self::lift_credential_parks`] over the OAuth seats among `seats`,
@@ -356,7 +385,7 @@ impl Router {
     /// credentials-file key is not validated against the seat grammar, so a
     /// key starting with the separator would otherwise name an entry account,
     /// whose credential the credentials file does not hold.
-    pub fn lift_oauth_credential_parks<I>(&self, seats: I) -> usize
+    pub fn lift_oauth_credential_parks<I>(&self, seats: I) -> Vec<AccountReset>
     where
         I: IntoIterator,
         I::Item: AsRef<str>,
@@ -372,13 +401,16 @@ impl Router {
     /// `[providers]` entry rather than an OAuth seat. A config reload
     /// re-resolves those credentials on rebuild; an OAuth seat's credential
     /// lives in the credentials file, whose own reload lifts it.
-    pub fn lift_entry_credential_parks(&self) -> usize {
+    pub fn lift_entry_credential_parks(&self) -> Vec<AccountReset> {
         self.credential_accounts
             .lock()
             .iter_mut()
             .filter(|(account, _)| crate::seat_pool::is_entry_account(account))
-            .filter_map(|(_, record)| record.reset().then_some(()))
-            .count()
+            .map(|(account, record)| AccountReset {
+                account: account.clone(),
+                outcome: record.reset(),
+            })
+            .collect()
     }
 
     /// Park `account` when `err` carries a typed credential reason and the

@@ -91,8 +91,8 @@ impl UnusableCause {
 /// An account whose credential is known to be unusable, and since when.
 ///
 /// Unlike a [`CredentialPark`] it never lapses and never re-tests: only a
-/// reload that may have changed the credential, or a generation-gated clear,
-/// readmits the account.
+/// reload that may have changed the credential, or a successful refresh of an
+/// expired one, readmits the account.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Unusable {
     /// Why the credential is unusable.
@@ -107,7 +107,9 @@ pub struct Unusable {
 /// admission, and its rejection parks (or its success lifts) only while it
 /// still matches, so an attempt admitted before a reload can neither re-park
 /// the account nor lift a park set after it. A generation-gated unusable mark
-/// or clear is fenced the same way.
+/// is fenced the same way, and a successful refresh also starts a new
+/// generation, so no outcome observed under the old credential applies after
+/// it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct AccountCredential {
     park: Option<CredentialPark>,
@@ -126,41 +128,49 @@ impl AccountCredential {
         self.unusable
     }
 
-    /// Mark the account unusable for `cause` at `now`, returning whether the
-    /// mark applied. With `Some(generation)` it applies only while that
-    /// generation is current; `None` marks unconditionally. A re-mark with the
-    /// same cause keeps the original `since`; a different cause replaces the
-    /// mark whole.
+    /// Mark the account unusable for `cause` at `now`. With
+    /// `Some(generation)` it applies only while that generation is current;
+    /// `None` marks unconditionally. A re-mark with the same cause keeps the
+    /// original `since` and reports [`MarkOutcome::Unchanged`]; a different
+    /// cause replaces the mark whole and reports a transition.
     pub(crate) fn mark_unusable(
         &mut self,
         cause: UnusableCause,
         now: Instant,
         generation: Option<u64>,
-    ) -> bool {
+    ) -> MarkOutcome {
         if generation.is_some_and(|generation| generation != self.generation) {
-            return false;
+            return MarkOutcome::Stale;
         }
-        let since = match self.unusable {
-            Some(mark) if mark.cause == cause => mark.since,
-            _ => now,
+        let (since, outcome) = match self.unusable {
+            Some(mark) if mark.cause == cause => (mark.since, MarkOutcome::Unchanged),
+            _ => (now, MarkOutcome::Transitioned),
         };
         self.unusable = Some(Unusable { cause, since });
-        true
+        outcome
     }
 
-    /// Clear an unusable mark carrying `cause`, only while `generation` is
-    /// current, returning whether it cleared one. A mark with another cause
-    /// was set from other evidence and stays.
-    pub(crate) fn clear_unusable_in_generation(
-        &mut self,
-        cause: UnusableCause,
-        generation: u64,
-    ) -> bool {
-        if generation != self.generation || self.unusable.map(|mark| mark.cause) != Some(cause) {
-            return false;
+    /// Settle a successful refresh of the credential observed under
+    /// `generation`. While that generation is current it starts a new one, so
+    /// every outcome still in flight from the old credential is fenced out,
+    /// and clears an [`UnusableCause::Expired`] mark, which the refresh
+    /// disproved. A mark with any other cause came from other evidence and
+    /// stays. A stale `generation` changes nothing.
+    pub(crate) fn refreshed_in_generation(&mut self, generation: u64) -> RefreshSettlement {
+        if generation != self.generation {
+            return RefreshSettlement::Stale;
         }
-        self.unusable = None;
-        true
+        let cleared_expired = self
+            .unusable
+            .is_some_and(|mark| mark.cause == UnusableCause::Expired);
+        if cleared_expired {
+            self.unusable = None;
+        }
+        self.generation = self.generation.wrapping_add(1);
+        RefreshSettlement::Settled {
+            cleared_expired,
+            generation: self.generation,
+        }
     }
 
     /// The generation an admission captures.
@@ -202,14 +212,72 @@ impl AccountCredential {
 
     /// Lift the park, clear any unusable mark and start a new generation.
     /// Advances even when nothing is parked: the attempt that would park may
-    /// still be in flight. Returns whether a park was lifted.
-    pub(crate) const fn reset(&mut self) -> bool {
-        let was_parked = self.park.is_some();
+    /// still be in flight. Reports what the reset lifted.
+    pub(crate) const fn reset(&mut self) -> ResetOutcome {
+        let outcome = ResetOutcome {
+            park_lifted: self.park.is_some(),
+            unusable_cleared: match self.unusable {
+                Some(mark) => Some(mark.cause),
+                None => None,
+            },
+        };
         self.park = None;
         self.unusable = None;
         self.generation = self.generation.wrapping_add(1);
-        was_parked
+        outcome
     }
+}
+
+/// What a generation-gated unusable mark did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MarkOutcome {
+    /// The generation was stale; nothing changed.
+    Stale,
+    /// The account was not unusable for this cause before: it was usable, or
+    /// unusable for another cause.
+    Transitioned,
+    /// The account was already unusable for this cause; `since` is kept.
+    Unchanged,
+}
+
+impl MarkOutcome {
+    /// Whether the mark is in place afterwards.
+    pub const fn applied(self) -> bool {
+        !matches!(self, Self::Stale)
+    }
+}
+
+/// What settling a successful credential refresh did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefreshSettlement {
+    /// The observed generation was stale; nothing changed.
+    Stale,
+    /// The generation advanced to `generation`; `cleared_expired` says
+    /// whether an expired mark was cleared.
+    Settled {
+        /// Whether an [`UnusableCause::Expired`] mark was cleared.
+        cleared_expired: bool,
+        /// The account's generation after the settlement.
+        generation: u64,
+    },
+}
+
+/// What a credential reset lifted from one account.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ResetOutcome {
+    /// Whether a credential park was lifted.
+    pub park_lifted: bool,
+    /// The cause of the unusable mark the reset cleared, if any.
+    pub unusable_cleared: Option<UnusableCause>,
+}
+
+/// One account a credential lift reset, and what the reset lifted from it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountReset {
+    /// The credential account that was reset.
+    pub account: String,
+    /// What the reset lifted.
+    pub outcome: ResetOutcome,
 }
 
 /// Runtime gate for a single model nickname. Created from a config

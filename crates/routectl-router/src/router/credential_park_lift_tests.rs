@@ -68,12 +68,18 @@ enum Lift {
     Entries,
 }
 
-fn apply(router: &Router, lift: Lift) -> usize {
-    match lift {
+/// The accounts `lift` reset, and how many of them had a park lifted.
+fn apply(router: &Router, lift: Lift) -> (Vec<String>, usize) {
+    let resets = match lift {
         Lift::Accounts(accounts) => router.lift_credential_parks(accounts),
         Lift::OauthSeats(seats) => router.lift_oauth_credential_parks(seats),
         Lift::Entries => router.lift_entry_credential_parks(),
-    }
+    };
+    let parks_lifted = resets.iter().filter(|r| r.outcome.park_lifted).count();
+    (
+        resets.into_iter().map(|r| r.account).collect(),
+        parks_lifted,
+    )
 }
 
 #[tokio::test]
@@ -128,7 +134,7 @@ async fn a_lift_clears_exactly_the_accounts_it_targets() {
         park_every_account(&router);
 
         // Act
-        let count = apply(&router, lift);
+        let (reset, count) = apply(&router, lift);
 
         // Assert
         for (model, lifted) in MODELS.into_iter().zip(lifted) {
@@ -136,6 +142,7 @@ async fn a_lift_clears_exactly_the_accounts_it_targets() {
             assert_eq!(park_reason(&router, model), expected, "{name}: {model}");
         }
         assert_eq!(count, lifted.iter().filter(|l| **l).count(), "{name}");
+        assert_eq!(reset.len(), count, "{name}: every reset account was parked");
     }
 }
 
@@ -194,10 +201,10 @@ async fn a_lift_of_an_account_with_no_record_leaves_it_without_one() {
         let router = three_accounts();
 
         // Act
-        let count = apply(&router, lift);
+        let (reset, count) = apply(&router, lift);
 
         // Assert
-        assert_eq!(count, 0, "{lift:?}");
+        assert_eq!((reset.len(), count), (0, 0), "{lift:?}");
         for model in MODELS {
             assert_eq!(
                 router.credential_generation_for_tests(model),

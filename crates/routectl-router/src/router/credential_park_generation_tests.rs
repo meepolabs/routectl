@@ -118,7 +118,11 @@ async fn a_reload_erases_a_park_and_the_next_rejection_parks_again() {
         assert_eq!(park_reason(&router, "m-a"), INVALID, "{surface:?} premise");
 
         // Act: the reload lifts the park, then traffic resumes.
-        let cleared = router.lift_entry_credential_parks();
+        let cleared = router
+            .lift_entry_credential_parks()
+            .iter()
+            .filter(|reset| reset.outcome.park_lifted)
+            .count();
         let after_clear = park_reason(&router, "m-a");
         dispatch(&router, surface, request(None, false)).await;
         let after_next = park_reason(&router, "m-a");

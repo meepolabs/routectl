@@ -248,7 +248,7 @@ fn a_rejection_parks_only_in_the_credential_generation_it_was_admitted_under() {
         }
         let admitted_under = account.generation();
         if reset {
-            assert_eq!(account.reset(), parked_before, "{name}");
+            assert_eq!(account.reset().park_lifted, parked_before, "{name}");
         }
 
         // Act

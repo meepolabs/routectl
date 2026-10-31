@@ -485,7 +485,7 @@ pub(super) async fn handle_credentials_reload(
     // A seat this process refreshed itself reads as unchanged, so a routine
     // token refresh lifts nothing.
     log_lifted_parks(
-        router_swap
+        &router_swap
             .load()
             .lift_oauth_credential_parks(&changed_seats),
         "credentials",
@@ -526,7 +526,11 @@ pub(super) async fn handle_credentials_reload(
 /// Log the parks a reload of `source` lifted, if any. The lift itself also
 /// started a new credential generation on each account it targeted, so an
 /// attempt admitted before the reload cannot re-park that account.
-fn log_lifted_parks(cleared: usize, source: &'static str) {
+fn log_lifted_parks(resets: &[routectl_router::runtime_state::AccountReset], source: &'static str) {
+    let cleared = resets
+        .iter()
+        .filter(|reset| reset.outcome.park_lifted)
+        .count();
     if cleared > 0 {
         tracing::info!(
             source,
@@ -732,7 +736,7 @@ pub(super) async fn handle_config_reload(
     // `[providers]` entry's credential, so each entry account may have a new
     // one; an OAuth seat's credential lives in the credentials file, whose own
     // reload lifts it.
-    log_lifted_parks(router_swap.load().lift_entry_credential_parks(), "config");
+    log_lifted_parks(&router_swap.load().lift_entry_credential_parks(), "config");
 
     // Soft overlay defects are logged once per accepted overlay revision, not
     // on every reload that happens to re-read an unchanged file.
