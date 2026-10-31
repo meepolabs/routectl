@@ -5,6 +5,7 @@ mod credential_message;
 pub mod health;
 pub mod ingress_handle;
 mod ingress_wire;
+mod local_unavailable;
 pub mod messages;
 pub mod messages_count_tokens;
 pub mod models;

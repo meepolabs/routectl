@@ -9,7 +9,7 @@ use std::fmt;
 
 use thiserror::Error;
 
-use crate::{ParsedErrorBody, RefusalReason, UpstreamBody, UpstreamReason};
+use crate::{EligibilityReason, ParsedErrorBody, RefusalReason, UpstreamBody, UpstreamReason};
 
 /// Convenience alias defaulting the error type to [`enum@Error`].
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -196,6 +196,19 @@ pub enum Error {
         lanes: Box<[Box<str>]>,
     },
 
+    /// routectl declined to send the request because no target in its chain
+    /// was eligible, decided locally before any upstream contact. Surfaces as
+    /// HTTP 503 whose error type is the reason token, with a `Retry-After`
+    /// header when the earliest recovery is known. The Display string names
+    /// only the token.
+    #[error("locally unavailable: {}", reason.as_str())]
+    LocallyUnavailable {
+        /// Why the request was refused.
+        reason: EligibilityReason,
+        /// Earliest known recovery; `None` when it is unknown.
+        retry_after: Option<std::time::Duration>,
+    },
+
     /// A bare `std::io::Error` carried verbatim.
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
@@ -295,6 +308,14 @@ impl fmt::Debug for Error {
                 .debug_struct("CapabilityUnsupportedEverywhere")
                 .field("capability", capability)
                 .field("lanes", lanes)
+                .finish(),
+            Self::LocallyUnavailable {
+                reason,
+                retry_after,
+            } => f
+                .debug_struct("LocallyUnavailable")
+                .field("reason", &reason.as_str())
+                .field("retry_after", retry_after)
                 .finish(),
             Self::Io(e) => f.debug_tuple("Io").field(e).finish(),
             Self::Json(e) => f.debug_tuple("Json").field(e).finish(),

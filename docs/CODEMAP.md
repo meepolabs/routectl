@@ -154,6 +154,12 @@ license.
   kebab-case token source (`credential-expired` / `credential-invalid`) and
   `from_token` matches exactly, `None` for an unknown token. Additive only;
   an absent reason means unclassified
+- `src/eligibility.rs` -- closed `EligibilityReason` (`credential_unusable`,
+  `account_parked`, `breaker_open`, `rate_limited`, `capability`,
+  `context_window`): why a target was locally ineligible, carried on
+  `Error::LocallyUnavailable`; frozen client-facing tokens via `as_str` /
+  `from_token`, `is_request_only` (the last two), and an explicit `priority`
+  (credential unusable highest, context window lowest)
 - `src/refusal_reason.rs` -- `#[non_exhaustive] RefusalReason`: the closed
   register of local-refusal reasons, with `as_str` / `from_token` tokens,
   `ALL` (a fixed-size array of every variant), and the per-reason
@@ -6659,6 +6665,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `src/handlers/credential_message.rs` -- the fixed client message for a
   local `Error::Credential`: the reason token and, when every reachable seat is parked,
   the remaining wait in seconds; never the provider id or OAuth detail
+- `src/handlers/local_unavailable.rs` -- the client-facing parts of an
+  `Error::LocallyUnavailable`: `retry_after_secs` (rounded up, clamped
+  1..=3600 s, `None` stays `None`) and the fixed message naming the reason
+  token and the wait
 - `src/handlers/reason_detail.rs` -- `with_reason_suffix`: appends
   ` (reason: <token>)` from the error's typed `UpstreamReason` to every
   client error message (non-stream envelope and stream terminal, all three

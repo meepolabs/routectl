@@ -149,8 +149,9 @@ pub struct StreamErrorClass {
 
 impl StreamErrorClass {
     /// Derive the terminal-error classifier from the upstream `Error`.
-    /// Non-`Upstream` errors (render failures, transport errors with no
-    /// HTTP status) fall back to the generic `api_error` bucket.
+    /// A local refusal carries its own type on every field; any other
+    /// non-`Upstream` error (render failures, transport errors with no HTTP
+    /// status) falls back to the generic `api_error` bucket.
     pub(crate) fn from_error(e: &Error) -> Self {
         match e {
             Error::Upstream {
@@ -185,6 +186,14 @@ impl StreamErrorClass {
                     anthropic_type: local.clone(),
                     openai_type: local.clone(),
                     openai_code: local,
+                }
+            }
+            Error::LocallyUnavailable { reason, .. } => {
+                let token = reason.as_str().to_string();
+                Self {
+                    anthropic_type: token.clone(),
+                    openai_type: token.clone(),
+                    openai_code: token,
                 }
             }
             _ => Self {

@@ -15,6 +15,7 @@ pub mod config_dir;
 pub mod content_part;
 pub mod context_reduction;
 mod converse_errors;
+pub mod eligibility;
 pub mod error;
 pub mod failure_class;
 pub mod identity;
@@ -67,6 +68,7 @@ pub use context_reduction::{
     ReductionDelta, ReductionOutcome, apply_json_minify, minify_json_whitespace,
 };
 pub use converse_errors::strip_converse_errors_prefix;
+pub use eligibility::EligibilityReason;
 pub use error::{Error, Result};
 pub use failure_class::ReplayAttempt;
 pub use log_safe::{

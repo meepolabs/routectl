@@ -1217,6 +1217,13 @@ fn sanitize_stream_error_for_client(e: &Error) -> String {
             parked_until_ms,
             ..
         } => super::credential_message::credential_error_message_now(*reason, *parked_until_ms),
+        Error::LocallyUnavailable {
+            reason,
+            retry_after,
+        } => super::local_unavailable::locally_unavailable_message(
+            *reason,
+            retry_after.map(super::local_unavailable::retry_after_secs),
+        ),
         _ => "upstream stream error".to_string(),
     };
     super::reason_detail::with_reason_suffix(message, e.upstream_reason())
@@ -1467,6 +1474,21 @@ pub(crate) fn map_error(shape: ErrorEnvelopeShape, e: Error) -> Response {
             );
             capability_unsupported_message(capability)
         }
+        // A local routing decision: the fixed message carries only the reason
+        // token and the advertised wait. WARN, not ERROR: while every target
+        // stays ineligible, each request lands here.
+        Error::LocallyUnavailable {
+            reason,
+            retry_after,
+        } => {
+            let wait_secs = retry_after.map(super::local_unavailable::retry_after_secs);
+            tracing::warn!(
+                reason = reason.as_str(),
+                retry_after_secs = ?wait_secs,
+                "no eligible target; refused before dispatch"
+            );
+            super::local_unavailable::locally_unavailable_message(*reason, wait_secs)
+        }
         // Caller-actionable classes: their Display string carries only
         // caller-derived input, so the verbose message stays. Kept as
         // explicit arms (no wildcard) so a new core Error variant fails
@@ -1496,6 +1518,14 @@ pub(crate) fn map_error(shape: ErrorEnvelopeShape, e: Error) -> Response {
         Error::LocalRefusal { .. } | Error::CapabilityUnsupportedEverywhere { .. } => {
             (Some(LOCAL_REFUSAL_TYPE), None, None, None)
         }
+        Error::LocallyUnavailable { retry_after, .. } => (
+            None,
+            None,
+            retry_after
+                .map(super::local_unavailable::retry_after_secs)
+                .map(Duration::from_secs),
+            None,
+        ),
         _ => (None, None, None, None),
     };
     // Surface the upstream's own `error.param` (the offending request
@@ -1622,6 +1652,9 @@ fn error_status_and_type(e: &Error) -> (StatusCode, &'static str) {
         Error::Auth(_) | Error::Credential { .. } => {
             (StatusCode::SERVICE_UNAVAILABLE, "auth_error")
         }
+        Error::LocallyUnavailable { reason, .. } => {
+            (StatusCode::SERVICE_UNAVAILABLE, reason.as_str())
+        }
         Error::Streaming(_) => (StatusCode::BAD_GATEWAY, "streaming_error"),
         Error::Config(_) => (StatusCode::INTERNAL_SERVER_ERROR, "config_error"),
         Error::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
@@ -1650,7 +1683,8 @@ fn error_status_and_type(e: &Error) -> (StatusCode, &'static str) {
 /// running its own 429 backoff keeps the upstream reset hint. A
 /// sub-second hint (e.g. from a `retry-after-ms` upstream header) rounds
 /// UP to at least 1s, since the header is second-granular. Only
-/// `Error::Upstream` on a rate-limit / overload path carries this value;
+/// `Error::Upstream` on a rate-limit / overload path and
+/// `Error::LocallyUnavailable` with a known recovery carry this value;
 /// every other caller passes `None`.
 ///
 /// `upstream_request_id`, when present, is echoed onto the client response
@@ -1754,7 +1788,9 @@ const fn retry_after_header_secs(hint: Duration) -> u64 {
 /// are richer (e.g. `validation_error`, `payload_too_large`,
 /// `unsupported_media_type`); collapse them to the closest Anthropic
 /// equivalent so claude-code's per-`error.type` handling fires
-/// correctly.
+/// correctly. The exception is a local eligibility refusal: its
+/// [`routectl_core::EligibilityReason`] token passes through verbatim, so
+/// a client reads the same type on both dialects.
 ///
 /// When the upstream supplied its own `error.type` and it is already a
 /// valid Anthropic-vocabulary member, prefer it verbatim over the
@@ -1772,6 +1808,9 @@ pub(crate) fn anthropic_error_type(
 ) -> &'static str {
     if let Some(member) = upstream_type.and_then(anthropic_vocab_member) {
         return member;
+    }
+    if let Some(reason) = routectl_core::EligibilityReason::from_token(err_type) {
+        return reason.as_str();
     }
     match (err_type, status.as_u16()) {
         ("unknown_alias" | "unknown_provider", _) => "not_found_error",
@@ -1874,3 +1913,7 @@ mod stream_evidence_settle_tests;
 #[cfg(test)]
 #[path = "ingress_observation_tests.rs"]
 mod ingress_observation_tests;
+
+#[cfg(test)]
+#[path = "locally_unavailable_envelope_tests.rs"]
+mod locally_unavailable_envelope_tests;
