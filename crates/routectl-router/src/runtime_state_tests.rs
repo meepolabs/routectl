@@ -727,22 +727,42 @@ fn gate(threshold: u32, cooldown_ms: u64, rpm_limit: Option<u32>) -> GateTuning 
 
 #[test]
 fn retune_keeps_counters_and_phase() {
-    // Arrange: three failures under a threshold of five leave it closed.
-    let mut s = ProviderState::from_gate(gate(5, 1_000, None));
-    let t0 = Instant::now();
-    for _ in 0..3 {
-        assert_eq!(s.try_dispatch(t0), GateDecision::Allow);
-        s.record_failure(t0, LastOutcome::Http5xx);
+    // (row, old threshold (0 = disabled), failures before retune, new threshold)
+    let rows = [
+        ("three under five, retuned to four", 5, 3, 4),
+        ("five under ten, retuned to three", 10, 5, 3),
+        ("five under disabled, retuned to three", 0, 5, 3),
+    ];
+    for (row, old_threshold, failures, new_threshold) in rows {
+        // Arrange: the failures stay under the old threshold, so it is closed.
+        let mut s = ProviderState::from_gate(gate(old_threshold, 1_000, None));
+        let t0 = Instant::now();
+        for _ in 0..failures {
+            assert_eq!(s.try_dispatch(t0), GateDecision::Allow, "{row}");
+            s.record_failure(t0, LastOutcome::Http5xx);
+        }
+        let read_at = t0 + Duration::from_millis(200);
+        let before = s.gate_status(read_at);
+
+        // Act
+        s.retune(gate(new_threshold, 1_000, None));
+
+        // Assert: the counter and the last outcome carried, the circuit stays
+        // closed until the next failure, which meets the new threshold.
+        assert_eq!(s.consecutive_failures_for_tests(), failures, "{row}");
+        let after = s.gate_status(read_at);
+        assert_eq!(after.circuit, CircuitPhase::Closed, "{row}");
+        assert_eq!(after.last_outcome, Some(LastOutcome::Http5xx), "{row}");
+        assert_eq!(after.last_outcome, before.last_outcome, "{row}");
+        assert_eq!(
+            after.last_outcome_elapsed,
+            Some(Duration::from_millis(200)),
+            "{row}"
+        );
+        assert_eq!(s.try_dispatch(t0), GateDecision::Allow, "{row}");
+        assert!(s.record_failure(t0, LastOutcome::Http5xx), "{row}");
+        assert_eq!(s.try_dispatch(t0), GateDecision::CircuitOpen, "{row}");
     }
-
-    // Act
-    s.retune(gate(4, 1_000, None));
-
-    // Assert: the counter carried, so the next failure meets the new threshold.
-    assert_eq!(s.consecutive_failures_for_tests(), 3);
-    assert_eq!(s.try_dispatch(t0), GateDecision::Allow);
-    assert!(s.record_failure(t0, LastOutcome::Http5xx));
-    assert_eq!(s.try_dispatch(t0), GateDecision::CircuitOpen);
 }
 
 #[test]
@@ -784,8 +804,19 @@ fn retune_moves_a_baseline_window_to_the_new_cooldown() {
         s.try_dispatch(t0 + Duration::from_secs(2)),
         GateDecision::CircuitOpen
     );
+    let t6 = t0 + Duration::from_secs(6);
+    assert_eq!(s.try_dispatch(t6), GateDecision::Allow);
+
+    // The next normal trip after a close also runs on the new baseline.
+    s.record_success(t6);
+    assert_eq!(s.try_dispatch(t6), GateDecision::Allow);
+    assert!(s.record_failure(t6, LastOutcome::Http5xx));
     assert_eq!(
-        s.try_dispatch(t0 + Duration::from_secs(6)),
+        s.try_dispatch(t6 + Duration::from_secs(4)),
+        GateDecision::CircuitOpen
+    );
+    assert_eq!(
+        s.try_dispatch(t6 + Duration::from_secs(5)),
         GateDecision::Allow
     );
 }
@@ -803,6 +834,89 @@ fn retune_keeps_a_forced_park_window() {
     // Assert: the park keeps its own 10 s window, not the new 5 s baseline.
     assert_eq!(
         s.try_dispatch(t0 + Duration::from_secs(6)),
+        GateDecision::CircuitOpen
+    );
+    assert_eq!(
+        s.try_dispatch(t0 + Duration::from_secs(11)),
+        GateDecision::Allow
+    );
+}
+
+#[test]
+fn retune_keeps_a_forced_park_equal_to_the_old_baseline() {
+    // Arrange: a forced park exactly as long as the 1 s baseline.
+    let mut s = ProviderState::from_gate(gate(5, 1_000, None));
+    let t0 = Instant::now();
+    s.force_open(t0, Duration::from_secs(1));
+
+    // Act
+    s.retune(gate(5, 5_000, None));
+
+    // Assert: the park keeps its 1 s window instead of growing to 5 s.
+    assert_eq!(
+        s.try_dispatch(t0 + Duration::from_secs(2)),
+        GateDecision::Allow
+    );
+}
+
+#[test]
+fn retune_to_disabled_closes_a_lapsed_circuit_on_failed_probe() {
+    type Open = fn(&mut ProviderState, Instant);
+    // (row, how the circuit opened)
+    let rows: [(&str, Open); 2] = [
+        ("failure-driven trip", |s, t0| {
+            assert_eq!(s.try_dispatch(t0), GateDecision::Allow);
+            assert!(s.record_failure(t0, LastOutcome::Http5xx));
+        }),
+        ("forced park", |s, t0| {
+            s.force_open(t0, Duration::from_secs(1))
+        }),
+    ];
+    for (row, open) in rows {
+        // Arrange: open the circuit, then a reload turns the breaker off.
+        let mut s = ProviderState::from_gate(gate(1, 1_000, None));
+        let t0 = Instant::now();
+        open(&mut s, t0);
+        s.retune(gate(0, 1_000, None));
+
+        // Act: the lapsed window admits one request, and it fails.
+        let t2 = t0 + Duration::from_secs(2);
+        assert_eq!(s.try_dispatch(t2), GateDecision::Allow, "{row}");
+        let debit = s.record_failure_debit(t2, LastOutcome::Http5xx);
+
+        // Assert: nothing tripped or opened, and the circuit stops gating:
+        // two admissions with no settle between them both pass.
+        assert_eq!(
+            debit,
+            FailureDebit {
+                tripped: false,
+                opened: false
+            },
+            "{row}"
+        );
+        assert_eq!(s.gate_status(t2).circuit, CircuitPhase::Closed, "{row}");
+        assert_eq!(s.try_dispatch(t2), GateDecision::Allow, "{row}");
+        assert_eq!(s.try_dispatch(t2), GateDecision::Allow, "{row}");
+    }
+}
+
+#[test]
+fn retune_to_disabled_keeps_a_live_window_until_it_lapses() {
+    // Arrange: a 10 s window opened before the breaker was turned off.
+    let mut s = ProviderState::from_gate(gate(1, 10_000, None));
+    let t0 = Instant::now();
+    assert_eq!(s.try_dispatch(t0), GateDecision::Allow);
+    assert!(s.record_failure(t0, LastOutcome::Http5xx));
+
+    // Act: a reload disables the breaker, then a failure admitted before the
+    // trip settles inside the live window.
+    s.retune(gate(0, 10_000, None));
+    let t1 = t0 + Duration::from_secs(1);
+    assert!(!s.record_failure(t1, LastOutcome::Http5xx));
+
+    // Assert: the window already granted keeps refusing until it lapses.
+    assert_eq!(
+        s.try_dispatch(t0 + Duration::from_secs(2)),
         GateDecision::CircuitOpen
     );
     assert_eq!(

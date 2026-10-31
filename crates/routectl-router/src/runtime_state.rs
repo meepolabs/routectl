@@ -134,7 +134,8 @@ impl AccountCredential {
 ///   Closed --(consecutive_failures hits threshold)--> Open
 ///   Open --(cooldown elapses, single probe issued)--> HalfOpen-pending
 ///   HalfOpen-pending --(probe success)--> Closed
-///   HalfOpen-pending --(probe failure)--> Open (re-tripped)
+///   HalfOpen-pending --(probe failure)--> Open (re-tripped), or Closed
+///     when the breaker is disabled
 ///
 /// Only ONE concurrent caller can hold the half-open probe slot. While
 /// `half_open_in_flight` is true, other `try_dispatch` callers see
@@ -149,14 +150,14 @@ pub struct ProviderState {
 
     /// Circuit-breaker config and state. `None` means disabled.
     circuit_failure_threshold: Option<u32>,
-    /// Baseline cooldown from config; the default for every normal
+    /// Baseline cooldown from config; the window of every normal
     /// failure-driven trip.
     circuit_cooldown: Duration,
-    /// Cooldown governing the CURRENT open window. Equals
-    /// `circuit_cooldown` for every normal trip; only `force_open` can
-    /// set a different value, and it is reset back to the baseline on the
-    /// next normal trip or on a successful close.
-    active_cooldown: Duration,
+    /// The window `force_open` set for the CURRENT open window, `None`
+    /// when the window runs on the baseline. Cleared by the next normal
+    /// trip and by every close, so a reload that changes the baseline
+    /// moves a baseline window and leaves a forced one alone.
+    forced_cooldown: Option<Duration>,
     consecutive_failures: u32,
     circuit_opened_at: Option<Instant>,
     /// True once `try_dispatch` has authorized a half-open probe and
@@ -280,7 +281,7 @@ impl ProviderState {
             rpm_last_refill: now,
             circuit_failure_threshold,
             circuit_cooldown: gate.cooldown,
-            active_cooldown: gate.cooldown,
+            forced_cooldown: None,
             consecutive_failures: 0,
             circuit_opened_at: None,
             half_open_in_flight: false,
@@ -292,17 +293,17 @@ impl ProviderState {
     /// Apply newly resolved gate tuning to a live state without resetting
     /// it: failure counters, the open / half-open phase and the last
     /// outcome carry. A window `force_open` set keeps its own length; only
-    /// a window running on the old baseline follows the new one. A bucket
-    /// that becomes limited starts full; one that stays limited keeps its
-    /// level, capped at the new capacity.
+    /// a window running on the old baseline follows the new one. Disabling
+    /// the breaker does not close an open circuit: a live window keeps
+    /// refusing until it lapses, and the outcome of the one request the
+    /// lapsed window then admits closes it. A bucket that becomes limited
+    /// starts full; one that stays limited keeps its level, capped at the
+    /// new capacity.
     pub(crate) fn retune(&mut self, gate: GateTuning) {
         self.circuit_failure_threshold = match gate.threshold {
             BreakerThreshold::Disabled => None,
             BreakerThreshold::After(n) => Some(n.get()),
         };
-        if self.active_cooldown == self.circuit_cooldown {
-            self.active_cooldown = gate.cooldown;
-        }
         self.circuit_cooldown = gate.cooldown;
         let new_capacity = gate.rpm_limit.map(f64::from);
         match (self.rpm_capacity, new_capacity) {
@@ -353,7 +354,7 @@ impl ProviderState {
             return GateAdmission::refused(park.refusal());
         }
         let retest_ready = match self.circuit_opened_at {
-            Some(opened_at) if now.duration_since(opened_at) < self.active_cooldown => {
+            Some(opened_at) if now.duration_since(opened_at) < self.active_cooldown() => {
                 return GateAdmission::refused(GateDecision::CircuitOpen);
             }
             Some(_) => true,
@@ -419,7 +420,7 @@ impl ProviderState {
         self.consecutive_failures = 0;
         self.circuit_opened_at = None;
         self.half_open_in_flight = false;
-        self.active_cooldown = self.circuit_cooldown;
+        self.forced_cooldown = None;
         self.last_outcome = Some(LastOutcome::Ok);
         self.last_outcome_at = Some(now);
         was_open
@@ -428,10 +429,13 @@ impl ProviderState {
     /// Mark the most recent dispatch as failed. Trips the breaker
     /// when consecutive failures hit the configured threshold. If
     /// this was a half-open probe, re-trip the breaker by setting
-    /// a fresh `circuit_opened_at = now`. Returns whether this call
-    /// opened (tripped) the breaker. The caller supplies the derived
-    /// `outcome` (via `LastOutcome::from_failure_class`); it is stamped
-    /// regardless of whether the breaker trips.
+    /// a fresh `circuit_opened_at = now`; with the breaker disabled, a
+    /// failed half-open probe closes the circuit instead, so an open
+    /// circuit left behind by a reload that turned the breaker off (or by
+    /// `force_open`) stops gating once its window has been served. Returns
+    /// whether this call opened (tripped) the breaker. The caller supplies
+    /// the derived `outcome` (via `LastOutcome::from_failure_class`); it is
+    /// stamped regardless of whether the breaker trips.
     pub const fn record_failure(&mut self, now: Instant, outcome: LastOutcome) -> bool {
         let was_half_open_probe = self.half_open_in_flight;
         self.half_open_in_flight = false;
@@ -439,19 +443,26 @@ impl ProviderState {
         self.last_outcome_at = Some(now);
 
         self.consecutive_failures = self.consecutive_failures.saturating_add(1);
-        if let Some(threshold) = self.circuit_failure_threshold {
+        match self.circuit_failure_threshold {
             // Re-trip the breaker if a half-open probe failed (regardless of
             // counter), or if the counter just crossed the threshold for
             // the first time.
-            if was_half_open_probe || self.consecutive_failures >= threshold {
+            Some(threshold) if was_half_open_probe || self.consecutive_failures >= threshold => {
                 self.circuit_opened_at = Some(now);
                 // A normal failure-driven trip always uses the baseline
                 // cooldown, discarding any custom park set by force_open.
-                self.active_cooldown = self.circuit_cooldown;
-                return true;
+                self.forced_cooldown = None;
+                true
             }
+            // The probe slot is only claimable once the window has lapsed,
+            // so a straggler failure inside a live window never lands here.
+            None if was_half_open_probe => {
+                self.circuit_opened_at = None;
+                self.forced_cooldown = None;
+                false
+            }
+            _ => false,
         }
-        false
     }
 
     /// [`Self::record_failure`], also reporting whether the debit moved the
@@ -486,7 +497,7 @@ impl ProviderState {
     /// The caller is responsible for clamping `cooldown` to any
     /// configured ceiling before calling; `force_open` honors whatever it
     /// is given. The consecutive-failure counter is left untouched -- the
-    /// open state is driven by `circuit_opened_at` + `active_cooldown`,
+    /// open state is driven by `circuit_opened_at` + the forced window,
     /// independent of the counter.
     ///
     /// Call only from a context that does NOT hold the half-open probe
@@ -496,7 +507,7 @@ impl ProviderState {
     /// another caller holds the slot would reset that caller's state.
     pub const fn force_open(&mut self, now: Instant, cooldown: Duration) {
         self.circuit_opened_at = Some(now);
-        self.active_cooldown = cooldown;
+        self.forced_cooldown = Some(cooldown);
         // Release any in-flight probe slot so the new park window starts
         // clean, mirroring the failure path.
         self.half_open_in_flight = false;
@@ -518,6 +529,15 @@ impl ProviderState {
     /// True while a half-open probe is in flight for this provider.
     pub const fn half_open_probe_in_flight(&self) -> bool {
         self.half_open_in_flight
+    }
+
+    /// The window governing the current open circuit: the forced one when
+    /// `force_open` set it, else the baseline.
+    const fn active_cooldown(&self) -> Duration {
+        match self.forced_cooldown {
+            Some(cooldown) => cooldown,
+            None => self.circuit_cooldown,
+        }
     }
 
     #[cfg(test)]
@@ -572,7 +592,7 @@ impl ProviderState {
         let circuit = match self.circuit_opened_at {
             None => CircuitPhase::Closed,
             Some(opened_at) => {
-                let cooldown_elapsed = now.duration_since(opened_at) >= self.active_cooldown;
+                let cooldown_elapsed = now.duration_since(opened_at) >= self.active_cooldown();
                 if !cooldown_elapsed || self.half_open_in_flight {
                     CircuitPhase::Open
                 } else {
