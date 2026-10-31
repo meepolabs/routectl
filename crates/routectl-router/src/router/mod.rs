@@ -190,6 +190,10 @@ pub struct Router {
     /// stamp rather than re-resolving per attempt. Rebuilt with the Router,
     /// so a reload stamps fresh values; never carried over.
     tuning: BTreeMap<String, Arc<crate::config::ResolvedTuning>>,
+    /// The `state` keys whose slot `carry_over_runtime_state_from` took from
+    /// the outgoing Router, still on that Router's breaker and RPM settings
+    /// until `apply_carried_retune` runs at publication.
+    carried_state_keys: Vec<String>,
     /// Every credential account's park and generation (see
     /// `credential_park`). One map for the router rather than a field per
     /// `state` slot, so a park observed through one model refuses every model
@@ -2230,6 +2234,7 @@ impl Router {
             state,
             slot_owners,
             tuning,
+            carried_state_keys: Vec::new(),
             credential_accounts: Arc::default(),
             resolved_models: BTreeMap::new(),
             alias_glob_index,
@@ -2438,11 +2443,12 @@ impl Router {
     /// with the prior one so that circuit-breaker counters, the open /
     /// half-open phase and RPM token buckets survive a hot-reload.
     ///
-    /// The carried state is retuned to this Router's resolved tuning for the
-    /// key, so a reload that changes `circuit_failures`,
-    /// `circuit_cooldown_ms` or `rpm_limit` applies to it at once. Both
-    /// routers share the carried `Arc`, so a request still in flight on the
-    /// outgoing one settles under the new values too.
+    /// The carried state keeps the outgoing Router's breaker and RPM settings
+    /// here: both routers share the carried `Arc`, and the outgoing one stays
+    /// published (with the config, stamps and diagnostics that describe those
+    /// settings) if the reload then fails or is abandoned. The keys are
+    /// recorded so [`Self::apply_carried_retune`], called at the publication
+    /// commit point, moves them to this Router's resolved tuning.
     ///
     /// A key whose owner changed across the rebuild (a direct model moved to
     /// another provider, a direct model turned pooled, or the reverse) keeps
@@ -2469,10 +2475,29 @@ impl Router {
                 _ => false,
             };
             if same_owner {
-                if let Some(tuning) = self.tuning.get(key) {
-                    state.lock().retune(tuning.gate());
-                }
                 *slot = state.clone();
+                self.carried_state_keys.push(key.clone());
+            }
+        }
+    }
+
+    /// Retune every slot carried by [`Self::carry_over_runtime_state_from`]
+    /// to this Router's resolved tuning for its key, so a reload that changes
+    /// `circuit_failures`, `circuit_cooldown_ms` or `rpm_limit` applies to the
+    /// carried counters, phase and bucket at once. The slot is shared with
+    /// the outgoing Router, so a request still in flight there settles under
+    /// the new values too.
+    ///
+    /// Separate from the carry-over because the retune reaches the outgoing
+    /// Router's live gates: a reload that can still fail or be abandoned
+    /// after carry-over must leave them on the settings that Router reports.
+    /// Call it at the commit point, immediately before publication, once
+    /// every failure and abandonment path has returned. Running it again is
+    /// harmless.
+    pub fn apply_carried_retune(&self) {
+        for key in &self.carried_state_keys {
+            if let (Some(state), Some(tuning)) = (self.state.get(key), self.tuning.get(key)) {
+                state.lock().retune(tuning.gate());
             }
         }
     }

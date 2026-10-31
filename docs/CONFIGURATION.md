@@ -1774,13 +1774,18 @@ set, independent of the retry/fallback decision:
 | `context-window` | 0 (fixed) | yes | no |
 | `feature-unsupported` | 0 (fixed, reserved -- see below) | yes | no |
 
-**Breaker debit is not configurable.** The "debits breaker?" column is
-a fixed set (`RateLimited`, `ServerError`, `Timeout`, `NetworkError`,
-`Overloaded`) baked into the router's `class_debits` predicate
-(`crates/routectl-router/src/router/outcome_rule.rs`); no `[retry.classes]` leaf,
-and no `[providers.X.class_overrides]` remap, changes whether a class
-counts against a seat's health. Routing (retry cap, fallback) and
-health accounting are deliberately separate concerns.
+**Breaker debit is not configurable per class.** The "debits breaker?"
+column is a fixed set (`RateLimited`, `ServerError`, `Timeout`,
+`NetworkError`, `Overloaded`) baked into the router's `class_debits`
+predicate (`crates/routectl-router/src/router/outcome_rule.rs`); no
+`[retry.classes]` leaf changes whether a class counts against a seat's
+health. Routing (retry cap, fallback) and health accounting are
+deliberately separate concerns. A `[providers.X.class_overrides]` remap
+is different: it runs BEFORE that fixed rule, so it changes which class
+a failure is settled as, and therefore whether it debits. Remapping a
+503 to `bad-request` stops that provider's 503s counting against its
+breaker, before content and after it alike; the load warns about any
+remap of a health status for exactly this reason.
 
 Every class above defaults to `fallback = true`.
 `[retry.classes.<class>]` overrides one or both leaves, sparsely:
@@ -3341,9 +3346,10 @@ Four sections are printed:
   value: `model`, `provider`, `pool`, `global` or `default` (the shipped
   default). A breaker turned off by `circuit_failures = 0` renders `off`;
   an unlimited RPM or an absent timeout renders `none`. These are the
-  same values dispatch runs under, from the same resolver. A pool's
-  `rpm_limit` also shows on each member in the `/status/config`
-  provider rows.
+  same values dispatch runs under, from the same resolver. The
+  `/status/config` provider rows keep each entry's own configured
+  `rpm_limit`, so a cap a member inherits from its pool shows here (and
+  in `routectl doctor`), not there.
 - **capability cells** -- one row per config-derived capability
   override, with its verdict and `source=override`.
 

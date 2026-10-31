@@ -5,7 +5,9 @@ use arc_swap::ArcSwap;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use routectl_router::config::AliasValue;
-use routectl_router::{CatalogOverlay, CatalogRow, Config, Router, derive_effective_view};
+use routectl_router::{
+    CatalogOverlay, CatalogRow, Config, Router, TuningSource, derive_effective_view,
+};
 use routectl_testkit::ScopedEnv;
 use serde_json::Value;
 use std::path::PathBuf;
@@ -357,11 +359,12 @@ fn zero_rpm_reaches_the_wire_as_an_explicit_zero_and_unlimited_as_null() {
     );
 }
 
-/// A pool's `rpm_limit` is what each member runs under, so the wire shows it
-/// on every member row; a provider outside the pool keeps its own state.
-/// The panel's shape is unchanged, so its version stays 3.
+/// The wire's `rpm_limit` is the provider entry's OWN configured cap, so a
+/// pool's `rpm_limit` leaves an unset member at `null`; the inherited value
+/// is visible on the member's resolved tuning row instead, sourced `pool`.
+/// The panel's shape and meaning are unchanged, so its version stays 3.
 #[test]
-fn a_pool_rpm_limit_shows_on_each_member_provider_row() {
+fn a_pool_rpm_limit_leaves_member_provider_rows_null() {
     let config: Config = toml::from_str(
         r#"
 version = 2
@@ -373,10 +376,7 @@ api_key_ref = "env://SEAT_A"
 [providers.seat-b]
 kind = "anthropic-api"
 api_key_ref = "env://SEAT_B"
-
-[providers.outside]
-kind = "anthropic-api"
-api_key_ref = "env://OUTSIDE"
+rpm_limit = 15
 
 [pools.seats]
 members = ["seat-a", "seat-b"]
@@ -385,15 +385,19 @@ rpm_limit = 40
     )
     .expect("valid config");
 
-    assert_eq!(
-        provider_json(&config, "seat-a")["rpm_limit"],
-        Value::from(40)
-    );
+    assert_eq!(provider_json(&config, "seat-a")["rpm_limit"], Value::Null);
     assert_eq!(
         provider_json(&config, "seat-b")["rpm_limit"],
-        Value::from(40)
+        Value::from(15)
     );
-    assert_eq!(provider_json(&config, "outside")["rpm_limit"], Value::Null);
+    let effective = derive_effective_view(&config, &CatalogOverlay::default());
+    let seat_a = effective
+        .tuning
+        .iter()
+        .find(|row| row.target == "seat-a")
+        .expect("seat-a tuning row");
+    assert_eq!(seat_a.tuning.rpm_limit.value, Some(40));
+    assert_eq!(seat_a.tuning.rpm_limit.source, TuningSource::Pool);
     assert_eq!(SCHEMA_VERSION, 3);
 }
 

@@ -191,6 +191,7 @@ fn reload_retunes_carried_slot() {
 
     // Act
     new.carry_over_runtime_state_from(&old);
+    new.apply_carried_retune();
 
     // Assert: the carried slot runs on the new threshold with its counter.
     assert!(Arc::ptr_eq(&new.state["m"], &old_slot));
@@ -220,6 +221,7 @@ fn reload_to_zero_turns_off_the_default_breaker_and_keeps_the_count() {
 
     // Act
     new.carry_over_runtime_state_from(&old);
+    new.apply_carried_retune();
 
     // Assert: six more failures, past the default threshold, never open it,
     // and the carried count keeps the two from before the reload.
@@ -232,4 +234,43 @@ fn reload_to_zero_turns_off_the_default_breaker_and_keeps_the_count() {
     assert_eq!(slot.consecutive_failures_for_tests(), 8);
     drop(slot);
     assert_eq!(new.breaker_open_for("m"), Some(false));
+}
+
+/// Carry-over alone leaves the shared slot on the outgoing Router's settings,
+/// which stays published if the reload then fails; only the commit-point
+/// retune moves it.
+#[test]
+fn carry_over_leaves_the_carried_slot_on_the_outgoing_tuning_until_the_retune() {
+    // Arrange: two failures under a threshold of five leave the breaker closed.
+    let old = built_with_threshold(Some(5));
+    let old_slot = old.state["m"].clone();
+    let t0 = std::time::Instant::now();
+    for _ in 0..2 {
+        old_slot
+            .lock()
+            .record_failure(t0, routectl_core::failure_class::LastOutcome::Http5xx);
+    }
+    let mut new = built_with_threshold(Some(2));
+
+    // Act
+    new.carry_over_runtime_state_from(&old);
+    let opened_before_retune = old_slot
+        .lock()
+        .record_failure(t0, routectl_core::failure_class::LastOutcome::Http5xx);
+    new.apply_carried_retune();
+    let opened_after_retune = old_slot
+        .lock()
+        .record_failure(t0, routectl_core::failure_class::LastOutcome::Http5xx);
+
+    // Assert: the third failure is still under the outgoing threshold of
+    // five; once retuned, the fourth is past the new threshold of two.
+    assert!(Arc::ptr_eq(&new.state["m"], &old_slot));
+    assert!(
+        !opened_before_retune,
+        "carry-over alone must not apply the candidate threshold"
+    );
+    assert!(
+        opened_after_retune,
+        "the commit-point retune must apply the candidate threshold"
+    );
 }

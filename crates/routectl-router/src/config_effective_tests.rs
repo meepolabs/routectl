@@ -981,14 +981,25 @@ fn a_zero_model_first_byte_override_adds_no_row() {
 }
 
 #[test]
-fn provider_cell_rpm_reads_the_pool_value_on_members_only() {
+fn a_pool_rpm_limit_leaves_member_provider_cells_unset_and_shows_on_their_tuning_rows() {
     let mut config = live_shape_config();
     config.pools.get_mut("seats").expect("seats pool").rpm_limit = Some(20);
 
     let view = derive_effective_view(&config, &CatalogOverlay::default());
 
     for cell in &view.providers {
-        let expected = cell.id.starts_with("seat-").then_some(20);
-        assert_eq!(cell.rpm_limit, expected, "provider {}", cell.id);
+        assert_eq!(cell.rpm_limit, None, "provider cell {}", cell.id);
+    }
+    for row in view
+        .tuning
+        .iter()
+        .filter(|row| row.kind == TuningTargetKind::Provider)
+    {
+        let expected = if row.target.starts_with("seat-") {
+            resolved(Some(20), TuningSource::Pool)
+        } else {
+            resolved(None, TuningSource::ShippedDefault)
+        };
+        assert_eq!(row.tuning.rpm_limit, expected, "tuning row {}", row.target);
     }
 }

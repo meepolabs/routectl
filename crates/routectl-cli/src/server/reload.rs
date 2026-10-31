@@ -586,7 +586,9 @@ async fn rebuild_router_for_seat_change(
     new_router.carry_over_pool_state_from(&router_swap.load_full());
     new_router.carry_over_learned_from(&router_swap.load_full());
     // Stamps then stores, in that order -- see `publish_router`. This is the
-    // commit point: every failure and abandonment path above has returned.
+    // commit point: every failure and abandonment path above has returned, so
+    // the carried gates move to the new tuning here and not at carry-over.
+    new_router.apply_carried_retune();
     publish_router(router_swap, Arc::new(new_router));
     tracing::info!(
         seats_before = before.len(),
@@ -716,9 +718,12 @@ pub(super) async fn handle_config_reload(
             }
         }
         // Past every failure and abandonment return, so this is the commit
-        // point for the boundary-rebuilt router.
+        // point for the boundary-rebuilt router: only now may the carried
+        // gates, still shared with the live router, move to the new tuning.
+        boundary_router.apply_carried_retune();
         publish_router(router_swap, boundary_router);
     } else {
+        new_router.apply_carried_retune();
         publish_router(router_swap, Arc::new(new_router));
     }
     // Only past the commit point: the candidate shares the live router's park

@@ -134,11 +134,12 @@ pub struct ProviderCell {
     /// vocabulary of its own. The extraction point states the prohibition that
     /// keeps this field secret-free.
     pub auth_token: Option<String>,
-    /// The resolved requests-per-minute cap: the entry's own `rpm_limit`, or
-    /// the value of the pool that claims it. Three states, none
+    /// The entry's OWN configured requests-per-minute cap. Three states, none
     /// interchangeable: `Some(n)` with `n > 0` is a live limit, `Some(0)` seeds
     /// a zero-capacity bucket and therefore means IMMEDIATELY rate-limited, and
-    /// `None` means unlimited.
+    /// `None` means the entry sets none. A pool's `rpm_limit` inherited by a
+    /// member does not appear here; the resolved cap, pool tier included, is
+    /// the member's [`EffectiveView::tuning`] row.
     pub rpm_limit: Option<u32>,
 }
 
@@ -334,16 +335,15 @@ fn configured_base_url(entry: &ProviderEntry) -> Option<&str> {
     }
 }
 
-/// Project one `[providers.X]` entry into its secret-safe cell. `tuning` is
-/// the entry's resolved tuning, the source of its RPM cap.
-fn provider_cell(id: &str, entry: &ProviderEntry, tuning: &ResolvedTuning) -> ProviderCell {
+/// Project one `[providers.X]` entry into its secret-safe cell.
+fn provider_cell(id: &str, entry: &ProviderEntry) -> ProviderCell {
     ProviderCell {
         id: id.to_string(),
         kind: entry.kind_str().to_string(),
         endpoint_origin: configured_base_url(entry).and_then(endpoint_origin),
         credential_ref_scheme: credential_ref_scheme(entry.api_key_ref()),
         auth_token: auth_token(entry).map(str::to_string),
-        rpm_limit: tuning.rpm_limit.value,
+        rpm_limit: entry.runtime().rpm_limit,
     }
 }
 
@@ -512,14 +512,12 @@ pub fn derive_effective_view(config: &Config, overlay: &CatalogOverlay) -> Effec
         })
         .collect();
 
-    let provider_tuning = provider_tuning_rows(config);
     let providers = config
         .providers
         .iter()
-        .zip(&provider_tuning)
-        .map(|((id, entry), row)| provider_cell(id, entry, &row.tuning))
+        .map(|(id, entry)| provider_cell(id, entry))
         .collect();
-    let tuning = provider_tuning
+    let tuning = provider_tuning_rows(config)
         .into_iter()
         .chain(model_tuning_rows(config))
         .collect();

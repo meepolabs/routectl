@@ -3111,3 +3111,6 @@ fn both_driver_selects_are_biased_with_shutdown_first() {
 
 #[path = "reload_credential_park_tests.rs"]
 mod credential_park;
+
+#[path = "reload_retune_tests.rs"]
+mod retune;
