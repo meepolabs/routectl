@@ -93,8 +93,10 @@ fn tail(exit: Exit) -> Vec<Result<ChatChunk>> {
     }
 }
 
-/// The Retry-After ceiling every row runs under; well above the in-loop cap.
-const MAX_HONORED_RETRY_AFTER: Duration = Duration::from_mins(1);
+/// The Retry-After ceiling every row runs under: well above the in-loop cap,
+/// and distinct from the seeded breaker's own cooldown so a park's length
+/// tells the clamped hint apart from that cooldown.
+const MAX_HONORED_RETRY_AFTER: Duration = Duration::from_secs(90);
 
 fn wrap(
     state: &Arc<Mutex<ProviderState>>,
@@ -194,6 +196,8 @@ struct FrameRow {
     failures: u32,
     last: LastOutcome,
     circuit: CircuitPhase,
+    /// How long the frame parks the slot, when it parks.
+    parked_for: Option<Duration>,
 }
 
 fn frame_row(name: &'static str, breaker: Breaker, frame: Error) -> FrameRow {
@@ -205,11 +209,31 @@ fn frame_row(name: &'static str, breaker: Breaker, frame: Error) -> FrameRow {
         failures: 1,
         last: SEEDED,
         circuit: CircuitPhase::Closed,
+        parked_for: None,
     }
 }
 
 fn rate_limited_for_an_hour() -> Error {
     Error::upstream_with_retry_after("p", 429, "slow down", Some(Duration::from_hours(1)))
+}
+
+/// The slot is refused just before `park` elapses from the earliest moment
+/// the park could have started, and admits a half-open probe just after it
+/// elapses from the latest. Claims the probe slot when it admits.
+fn park_window_mismatch(
+    state: &mut ProviderState,
+    name: &str,
+    before: Instant,
+    after: Instant,
+    park: Duration,
+) -> Option<String> {
+    let margin = Duration::from_secs(1);
+    let got = (
+        state.try_dispatch(before + park.saturating_sub(margin)),
+        state.try_dispatch(after + park + margin),
+    );
+    let want = (GateDecision::CircuitOpen, GateDecision::Allow);
+    (got != want).then(|| format!("{name}: park window want {want:?}, got {got:?}"))
 }
 
 #[tokio::test]
@@ -235,6 +259,24 @@ async fn committed_frame_settles_by_class() {
             Error::upstream("p", 400, "bad"),
         ),
         FrameRow {
+            failures: 2,
+            last: LastOutcome::TransportError,
+            ..frame_row(
+                "closed / status-less streaming error debits",
+                Breaker::Closed,
+                Error::Streaming("connection reset".into()),
+            )
+        },
+        FrameRow {
+            failures: 2,
+            last: LastOutcome::Http5xx,
+            ..frame_row(
+                "closed / 529 debits",
+                Breaker::Closed,
+                Error::upstream("p", 529, "overloaded"),
+            )
+        },
+        FrameRow {
             class_overrides: BTreeMap::from([(503, FailureClass::BadRequest)]),
             ..frame_row(
                 "closed / 503 remapped to bad-request records nothing",
@@ -244,8 +286,9 @@ async fn committed_frame_settles_by_class() {
         },
         FrameRow {
             circuit: CircuitPhase::Open,
+            parked_for: Some(MAX_HONORED_RETRY_AFTER),
             ..frame_row(
-                "closed / 429 with a long Retry-After parks",
+                "closed / 429 with a long Retry-After parks for the ceiling",
                 Breaker::Closed,
                 rate_limited_for_an_hour(),
             )
@@ -261,11 +304,13 @@ async fn committed_frame_settles_by_class() {
         let state = seeded_state(row.breaker);
         let items = vec![Ok(content("a")), Err(row.frame), Ok(content("b"))];
 
+        let before = Instant::now();
         let mut wrapped = wrap(&state, row.breaker, items, row.class_overrides);
         while wrapped.next().await.is_some() {}
         drop(wrapped);
+        let after = Instant::now();
 
-        let st = state.lock();
+        let mut st = state.lock();
         let status = st.gate_status(Instant::now());
         let got = (
             st.consecutive_failures_for_tests(),
@@ -275,6 +320,9 @@ async fn committed_frame_settles_by_class() {
         let want = (row.failures, Some(row.last), row.circuit);
         if got != want {
             mismatches.push(format!("{}: want {want:?}, got {got:?}", row.name));
+        }
+        if let Some(park) = row.parked_for {
+            mismatches.extend(park_window_mismatch(&mut st, row.name, before, after, park));
         }
     }
     assert!(
