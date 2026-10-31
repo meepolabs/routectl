@@ -1556,11 +1556,13 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   (`pricing_for`
   resolves an upstream-id glob -- provider-scoped beats agnostic, then
   longest-prefix -- to a `&PricingConfig`). Re-exports the `pool` + `schema` +
-  `validate` submodules so every internal `crate::config::X` path AND every
+  `tuning` + `validate` submodules so every internal `crate::config::X` path
+  AND every
   crate-root `routectl_router::` re-export resolves unchanged
 - `src/config/pool.rs` -- the `[pools.<name>]` block: `PoolEntry` (`members:
   Vec<String>` of provider entry names, `seat_selection: SeatSelection`,
-  `accepts_new_logins: bool` growth marker; `deny_unknown_fields` +
+  `accepts_new_logins: bool` growth marker, the pool tier of the tiered
+  tuning keys; `deny_unknown_fields` +
   `non_exhaustive`, constructor `PoolEntry::new` + `with_seat_selection` /
   `with_accepts_new_logins`), plus `Config::seat_selection_for(name)` -- the
   ONE resolution of a dispatch target's in-force strategy (a pool's own, else
@@ -1747,7 +1749,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   drift surface
 - `src/config_effective.rs` -- PURE effective-view derivation
   `derive_effective_view(&Config, &CatalogOverlay) -> EffectiveView{models,
-  classes, capabilities, aliases, provider_ids}` over the SAME lookups
+  classes, capabilities, aliases, providers, tuning}` over the SAME lookups
   `apply_catalog_overlay` uses
   (`lookup_baked_with_overrides` + `lookup_overlay_cell` + `merge`) -- no
   `build_resolved_models`, no secret resolution, no network. `ModelCell`
@@ -1759,8 +1761,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `resolved_class`; `AliasChain` flattens each `[aliases]` entry into its
   ORDERED fallback chain via `AliasValue::nicknames` (Single -> one element,
   Chain verbatim -- the order IS the sequence dispatch walks) and
-  `provider_ids` lists the `[providers.X]` keys, so a read surface counts
-  aliases/providers off the same view it renders. Consumed by `config show
+  `providers` lists the `[providers.X]` rows, so a read surface counts
+  aliases/providers off the same view it renders; `tuning` holds one
+  `TuningRow` (`TuningTargetKind`) per provider plus one per model
+  first-content override (per seat for a pooled model), via
+  `config::resolve_tuning`. Consumed by `config show
   --effective` (cli) and the `/status/config` panel. Also home to
   `endpoint_origin`, the crate's ONE `base_url` -> origin
   (`scheme://host:port`) reduction and the credential boundary for that field
@@ -1796,10 +1801,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `ClassPolicy { retry: Option<u32>, fallback: Option<bool> }`
   (`deny_unknown_fields`, each leaf independently optional) is the per-class
   overlay. `RetryPolicy::resolved_class(&FailureClass) -> (retry_cap,
-  fallback)` lives here as an `impl RetryPolicy` extension: it layers a
-  present `ClassPolicy` leaf over the baked class-default matrix (reproduces
-  the router's `retry_cap_for`/`should_fallback` outcomes for an empty
-  overlay), overriding only the leaf the operator set. Both
+  fallback)` lives here as an `impl RetryPolicy` extension (the router's
+  `retry_cap_for` reads it): baked row from `max_attempts`, then the
+  deprecated `retry_on_*` compat cap, then any `ClassPolicy` leaf. Both
   `ConfigFailureClass` and `ClassPolicy` derive `schemars::JsonSchema` so they
   surface in the committed `routectl.schema.json`
 - `src/factory/mod.rs` -- provider-factory module root; declares the private
@@ -1946,7 +1950,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `class_policy_warnings` is the advisory twin of `validate_class_policy` over
   the same surface (never fails): a `class_overrides` remap whose SOURCE
   status is a breaker health signal (`is_health_status`: 408, 429, any
-  500..=599), and an empty `[retry.classes.<c>]` block (both leaves `None`);
+  500..=599), an empty `[retry.classes.<c>]` block (both leaves `None`), and
+  each set deprecated `[retry] retry_on_*` key (`retry_on_deprecation_warnings`);
   `warn_context_management_needs_preserve` flags the `context_management` +
   `history_reasoning != "preserve"` inconsistency once at build time;
   `codex_identity_warnings` flags a chatgpt-oauth openai-responses provider
@@ -2548,7 +2553,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   itself refuses any ride-along EVENT stamped generation 0: loud via
   `debug_assert`, fail-closed in release, because per-event silent discards are
   the loss the barrier exists to prevent),
-  `apply_capability_tuning` (called at publication), `learned_registry` and
+  `apply_capability_tuning` and `apply_carried_retune` (both called at
+  publication; the latter retunes the runtime-state slots
+  `carry_over_runtime_state_from` recorded as carried), `learned_registry` and
   `provider_kind_for_state_key` (THE single owner of
   state_key -> provider-kind resolution, shared by restatement and the operator
   purge surface so the two cannot compute different registry keys; resolves
@@ -2653,8 +2660,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   applied through `apply_breaker_outcome`, the completion-only same-provider
   retry where a small honored reset becomes the next sleep's floor and a
   larger one parks the provider via the breaker instead) lives in
-  `dispatch_loop`. `policy_for` + `compose_attempt_policy` resolve the
-  per-attempt policy. Failure-class routing in the walk threads
+  `dispatch_loop`. `policy_for` resolves the retry policy; each adapter's
+  `deadline` reads the target's stamped `ResolvedTuning`. Failure-class
+  routing in the walk threads
   `routectl_core::failure_class::classify` through every error arm:
   `class_observe::apply_remap(native, status, overrides)` (status via
   `upstream_status_for_remap`) applies the target's `class_overrides` keeping
@@ -4084,10 +4092,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `precontent::is_empty_reasoning_only` do not count toward the cap and each
   consecutive run is buffered as one; its overflow and closed-before-content
   errors append `precontent::precontent_summary` of the buffered kinds) and
-  `wrap_with_breaker_accounting` (settles a post-content error frame once: a
-  non-probe stream debits whatever the class, a probe stream applies
-  `breaker_outcome`; also the STREAMING quota seam, offering each Ok chunk to
-  the armed `quota::feed::FirstChunkFeed`)
+  `wrap_with_breaker_accounting` over a `BreakerSlot` (settles a post-content
+  error frame once through the shared remap + `breaker_outcome` rule, logging
+  any `breaker_transition`; also the STREAMING quota seam, offering each Ok
+  chunk to the armed `quota::feed::FirstChunkFeed`)
 - `src/router/capability_owner_sweep.rs` -- `owns_learned_entry` (does this
   Router's config own a `RecordedLearnedEntry`) and
   `sweep_unowned_learned_entries`, which removes (through the generation
@@ -4262,7 +4270,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `BreakerOutcome`; Drop-settles the probe slot on every outcome incl. cancellation), and
   `emit_probe_settlement`/`is_probe_request`/`log_probe_fast_fail`
 - `src/router/state_slots.rs` -- runtime-state slot ownership: `SlotOwner`,
-  `claim_state_slot`, `state_slot_refusal`
+  `claim_state_slot`, `state_slot_refusal`; the per-slot tuning stamp
+  (`stamp_tuning` / `tuning_for`) every dispatch deadline reads
 - `src/router/sticky.rs` -- sticky seat ordering + capacity snapshots:
   `sticky_seat_order` (resolve session pin -> gather non-mutating per-seat
   `capacity_snapshot_for` reads -> gather subscription-quota tiers for a BIRTH
@@ -4320,7 +4329,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   exact skip count
 - `src/runtime_state.rs` -- per-state-key (bare nickname, or
   `nickname#member` for a pool seat) token-bucket RPM
-  limiter + circuit breaker state machine; `force_open` parks the breaker for
+  limiter + circuit breaker state machine, seeded by `from_gate` and retuned
+  in place by `retune`; `record_failure_debit` / `record_success_closing`
+  report the transitions; `force_open` parks the breaker for
   an explicit reset hint, bypassing the consecutive-failure threshold;
   `capacity_snapshot(&self, now)` is a non-mutating read (`CapacitySnapshot` =
   projected RPM headroom + `CircuitPhase` {Closed, Open, HalfOpenReady} +
@@ -6264,8 +6275,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   inventory at startup and after each reload; `await_reload_tasks` bounds
   graceful-shutdown joins. Unit tests live in the `#[path]`-included sibling
   sidecars `activation_tests.rs` (activation-recompute + audit-event tests,
-  run on the current-thread runtime for the capture subscriber) and
-  `reload_tests.rs` (reload-pipeline + coordinator tests, incl. the structural
+  run on the current-thread runtime for the capture subscriber),
+  `reload_retune_tests.rs` and `reload_tests.rs` (reload-pipeline +
+  coordinator tests, incl. the structural
   guards that BOTH carry-over blocks carry the per-seat quota readings and the
   per-session prefix-epoch baselines -- a one-site-only carry silently empties
   that store on the missed path, and an empty store reads exactly as health)
@@ -7755,10 +7767,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   logs nothing
 - `src/commands/config_effective.rs` -- `routectl config show --effective`
   render layer over `routectl_router::derive_effective_view`: the plain
-  redacted dump (unchanged), then provenance-annotated sections for the two
-  genuinely layered surfaces -- per-model catalog cells
-  (source=baked/import/user/disabled + verified_at) and per-class retry policy
-  (source=config vs baked-default). No generic per-key provenance tree
+  redacted dump (unchanged), then provenance-annotated sections for the
+  layered surfaces -- per-model catalog cells, per-class retry policy, the
+  resolved tuning table (`tuning_cells` / `tuning_kind`, shared with doctor's
+  tuning section) and capability cells. No generic per-key provenance tree
 - `src/commands/edit_pipeline.rs` -- building blocks shared by the
   config.toml-mutating commands (`config set/unset`, `provider add`, the login
   auto-surface, `init`): `preflight`, one call to
@@ -8365,7 +8377,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   (config/credentials/overlay/usage DB byte-identical). The aggregator is a
   FIXED ordered `SECTIONS` sequence of pure `fn(&DoctorContext) ->
   Vec<Finding>` producers (`inventory`, `version`, `config`, `auth`, `pools`,
-  `seats`, `secrets`, `probe`, `capability`, `freshness`, `pricing`, `knobs`) -- one
+  `seats`, `secrets`, `probe`, `capability`, `freshness`, `pricing`, `knobs`,
+  `tuning`) -- one
   extension point per
   new section (producer + `section_title`); `NO_NETWORK_SECTIONS` is that list
   MINUS `probe` for the offline status surface. `DoctorContext` (plus the
@@ -8457,6 +8470,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `served_tests.rs` also scans that the served arm never names the disk loads
   or the replay
 - `src/commands/doctor/gather.rs` -- doctor data collection.
+  `derive_tuning_rows(config)` reads the effective view's tuning rows.
   `derive_knob_rows(config, overlay)` resolves one `KnobRow` per `[models.X]`
   entry: the resolved cell's ceiling through the shared
   `EffectiveRow::output_ceiling_tokens` accessor the factory's fill reads, else
@@ -8591,6 +8605,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   as the correction) or neither (egress baseline), each detail naming the
   resolved figure and the `(kind, upstream)` selector; a `knobs: None` context collapses to the single
   `knobs_unavailable` Warn. NEVER `Fail`.
+  `section_tuning`/`tuning_finding`: one informational `Pass` per tuning row.
   `legacy_folder_finding` adds one config-section `legacy folder` Warn per old
   folder that still holds files or could not be listed, naming it only by its
   home-free display.
