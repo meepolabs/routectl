@@ -1665,6 +1665,16 @@ accounting is per-attempt (not per-request).
 its default of 30s applies when `circuit_failures` is present but
 `circuit_cooldown_ms` is absent.
 
+A hot reload applies changed `circuit_failures`, `circuit_cooldown_ms`
+and `rpm_limit` values (on a provider or a pool) to the running gates
+without resetting them: the consecutive-failure count and an open or
+half-open breaker carry, and the next failure is judged against the new
+threshold. An open window follows a changed cooldown, except one opened
+by an upstream reset, which keeps its own length. A raised or lowered
+`rpm_limit` keeps the bucket's current level, capped at the new limit;
+a newly set limit starts with a full bucket, and removing it makes the
+gate unlimited at once.
+
 Example:
 
 ```toml

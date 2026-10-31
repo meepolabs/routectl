@@ -289,6 +289,30 @@ impl ProviderState {
         }
     }
 
+    /// Apply newly resolved gate tuning to a live state without resetting
+    /// it: failure counters, the open / half-open phase and the last
+    /// outcome carry. A window `force_open` set keeps its own length; only
+    /// a window running on the old baseline follows the new one. A bucket
+    /// that becomes limited starts full; one that stays limited keeps its
+    /// level, capped at the new capacity.
+    pub(crate) fn retune(&mut self, gate: GateTuning) {
+        self.circuit_failure_threshold = match gate.threshold {
+            BreakerThreshold::Disabled => None,
+            BreakerThreshold::After(n) => Some(n.get()),
+        };
+        if self.active_cooldown == self.circuit_cooldown {
+            self.active_cooldown = gate.cooldown;
+        }
+        self.circuit_cooldown = gate.cooldown;
+        let new_capacity = gate.rpm_limit.map(f64::from);
+        match (self.rpm_capacity, new_capacity) {
+            (_, None) => {}
+            (None, Some(capacity)) => self.rpm_tokens = capacity,
+            (Some(_), Some(capacity)) => self.rpm_tokens = self.rpm_tokens.min(capacity),
+        }
+        self.rpm_capacity = new_capacity;
+    }
+
     /// Decide whether to dispatch right now. If `Allow`, the caller
     /// MUST follow up with `record_success` or `record_failure`
     /// (the breaker depends on every Allow being closed out).

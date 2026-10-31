@@ -715,3 +715,164 @@ fn gate_status_does_not_perturb_new_fields() {
     // decision at the same instant is unchanged.
     assert_eq!(s.try_dispatch(read_at), GateDecision::CircuitOpen);
 }
+
+fn gate(threshold: u32, cooldown_ms: u64, rpm_limit: Option<u32>) -> GateTuning {
+    GateTuning {
+        threshold: std::num::NonZeroU32::new(threshold)
+            .map_or(BreakerThreshold::Disabled, BreakerThreshold::After),
+        cooldown: Duration::from_millis(cooldown_ms),
+        rpm_limit,
+    }
+}
+
+#[test]
+fn retune_keeps_counters_and_phase() {
+    // Arrange: three failures under a threshold of five leave it closed.
+    let mut s = ProviderState::from_gate(gate(5, 1_000, None));
+    let t0 = Instant::now();
+    for _ in 0..3 {
+        assert_eq!(s.try_dispatch(t0), GateDecision::Allow);
+        s.record_failure(t0, LastOutcome::Http5xx);
+    }
+
+    // Act
+    s.retune(gate(4, 1_000, None));
+
+    // Assert: the counter carried, so the next failure meets the new threshold.
+    assert_eq!(s.consecutive_failures_for_tests(), 3);
+    assert_eq!(s.try_dispatch(t0), GateDecision::Allow);
+    assert!(s.record_failure(t0, LastOutcome::Http5xx));
+    assert_eq!(s.try_dispatch(t0), GateDecision::CircuitOpen);
+}
+
+#[test]
+fn retune_while_open_keeps_open_phase_and_probe_slot() {
+    // Arrange: trip the breaker, then claim the half-open probe.
+    let mut s = ProviderState::from_gate(gate(1, 1_000, None));
+    let t0 = Instant::now();
+    assert_eq!(s.try_dispatch(t0), GateDecision::Allow);
+    s.record_failure(t0, LastOutcome::Http5xx);
+    let t_probe = t0 + Duration::from_secs(2);
+    assert_eq!(s.try_dispatch(t_probe), GateDecision::Allow);
+    assert!(s.half_open_probe_in_flight());
+
+    // Act
+    s.retune(gate(5, 1_000, None));
+
+    // Assert: still open from t0, and the claimed probe still blocks others.
+    assert!(s.half_open_probe_in_flight());
+    assert_eq!(
+        s.gate_status(t_probe).circuit_open_elapsed,
+        Some(Duration::from_secs(2))
+    );
+    assert_eq!(s.try_dispatch(t_probe), GateDecision::CircuitOpen);
+}
+
+#[test]
+fn retune_moves_a_baseline_window_to_the_new_cooldown() {
+    // Arrange: a normal trip runs on the 1 s baseline.
+    let mut s = ProviderState::from_gate(gate(1, 1_000, None));
+    let t0 = Instant::now();
+    assert_eq!(s.try_dispatch(t0), GateDecision::Allow);
+    s.record_failure(t0, LastOutcome::Http5xx);
+
+    // Act
+    s.retune(gate(1, 5_000, None));
+
+    // Assert: the window follows the new 5 s baseline.
+    assert_eq!(
+        s.try_dispatch(t0 + Duration::from_secs(2)),
+        GateDecision::CircuitOpen
+    );
+    assert_eq!(
+        s.try_dispatch(t0 + Duration::from_secs(6)),
+        GateDecision::Allow
+    );
+}
+
+#[test]
+fn retune_keeps_a_forced_park_window() {
+    // Arrange: a 10 s forced park over a 1 s baseline.
+    let mut s = ProviderState::from_gate(gate(5, 1_000, None));
+    let t0 = Instant::now();
+    s.force_open(t0, Duration::from_secs(10));
+
+    // Act
+    s.retune(gate(5, 5_000, None));
+
+    // Assert: the park keeps its own 10 s window, not the new 5 s baseline.
+    assert_eq!(
+        s.try_dispatch(t0 + Duration::from_secs(6)),
+        GateDecision::CircuitOpen
+    );
+    assert_eq!(
+        s.try_dispatch(t0 + Duration::from_secs(11)),
+        GateDecision::Allow
+    );
+}
+
+#[test]
+fn retune_raising_rpm_keeps_the_current_token_level() {
+    // Arrange: drain a 2-token bucket to 1.
+    let mut s = ProviderState::from_gate(gate(5, 1_000, Some(2)));
+    let t0 = Instant::now();
+    assert_eq!(s.try_dispatch(t0), GateDecision::Allow);
+    s.record_success(t0);
+
+    // Act
+    s.retune(gate(5, 1_000, Some(5)));
+
+    // Assert: one token left, not a refilled bucket of five.
+    assert_eq!(s.capacity_snapshot(t0).rpm_available, Some(1.0));
+    assert_eq!(s.try_dispatch(t0), GateDecision::Allow);
+    assert_eq!(s.try_dispatch(t0), GateDecision::RateLimited);
+}
+
+#[test]
+fn retune_lowering_rpm_caps_the_token_level() {
+    // Arrange: a full 5-token bucket.
+    let mut s = ProviderState::from_gate(gate(5, 1_000, Some(5)));
+    let t0 = Instant::now();
+
+    // Act
+    s.retune(gate(5, 1_000, Some(2)));
+
+    // Assert
+    assert_eq!(s.capacity_snapshot(t0).rpm_available, Some(2.0));
+}
+
+#[test]
+fn retune_from_unlimited_rpm_starts_full() {
+    // Arrange
+    let mut s = ProviderState::from_gate(gate(5, 1_000, None));
+    let t0 = Instant::now();
+
+    // Act
+    s.retune(gate(5, 1_000, Some(3)));
+
+    // Assert
+    for _ in 0..3 {
+        assert_eq!(s.try_dispatch(t0), GateDecision::Allow);
+    }
+    assert_eq!(s.try_dispatch(t0), GateDecision::RateLimited);
+}
+
+#[test]
+fn retune_to_unlimited_rpm_never_rate_limits() {
+    // Arrange: drain a 3-token bucket.
+    let mut s = ProviderState::from_gate(gate(5, 1_000, Some(3)));
+    let t0 = Instant::now();
+    for _ in 0..3 {
+        assert_eq!(s.try_dispatch(t0), GateDecision::Allow);
+    }
+    assert_eq!(s.try_dispatch(t0), GateDecision::RateLimited);
+
+    // Act
+    s.retune(gate(5, 1_000, None));
+
+    // Assert
+    assert_eq!(s.capacity_snapshot(t0).rpm_available, None);
+    for _ in 0..10 {
+        assert_eq!(s.try_dispatch(t0), GateDecision::Allow);
+    }
+}

@@ -155,3 +155,52 @@ fn a_pooled_model_on_the_same_pool_keeps_its_exact_nickname_and_seat_slots() {
     assert_eq!(new.breaker_open_for("opus"), Some(true));
     assert_eq!(new.breaker_open_for("opus#anthropic-a"), Some(true));
 }
+
+/// A Router whose provider `p1` trips after `circuit_failures` failures, with
+/// a direct model `m` on it.
+fn built_with_threshold(circuit_failures: u32) -> Router {
+    let mut config = Config::default();
+    config.providers.insert(
+        "p1".to_string(),
+        ProviderEntry::anthropic_api("env://K").with_runtime(
+            crate::config::ProviderRuntimePolicy {
+                circuit_failures: Some(circuit_failures),
+                circuit_cooldown_ms: Some(60_000),
+                ..Default::default()
+            },
+        ),
+    );
+    let mut router = Router::new(Arc::new(config));
+    let table: BTreeMap<_, _> = std::iter::once(("m".to_string(), direct("m", "p1"))).collect();
+    router.install_resolved_models(table);
+    router
+}
+
+#[test]
+fn reload_retunes_carried_slot() {
+    // Arrange: two failures under a threshold of five leave the breaker closed.
+    let old = built_with_threshold(5);
+    let old_slot = old.state["m"].clone();
+    let t0 = std::time::Instant::now();
+    for _ in 0..2 {
+        old_slot
+            .lock()
+            .record_failure(t0, routectl_core::failure_class::LastOutcome::Http5xx);
+    }
+    let mut new = built_with_threshold(3);
+
+    // Act
+    new.carry_over_runtime_state_from(&old);
+
+    // Assert: the carried slot runs on the new threshold with its counter.
+    assert!(Arc::ptr_eq(&new.state["m"], &old_slot));
+    assert_eq!(new.breaker_open_for("m"), Some(false));
+    let opened = new.state["m"]
+        .lock()
+        .record_failure(t0, routectl_core::failure_class::LastOutcome::Http5xx);
+    assert!(
+        opened,
+        "the third failure must open under the reloaded threshold"
+    );
+    assert_eq!(new.breaker_open_for("m"), Some(true));
+}

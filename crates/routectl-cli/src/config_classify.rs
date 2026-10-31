@@ -447,6 +447,35 @@ mod tests {
         assert!(changes.contains(&"pools.members"), "got {changes:?}");
     }
 
+    /// A pool's breaker and RPM keys reach the live router through the
+    /// reload's retune of carried slots, so editing them needs no restart
+    /// and changes no credential.
+    #[test]
+    fn pool_tuning_edit_is_neither_restart_required_nor_high_consequence() {
+        use routectl_router::PoolEntry;
+
+        // Arrange
+        let mut prev = Config::default();
+        prev.pools
+            .insert("pool-a".into(), PoolEntry::new(vec!["seat-a".into()]));
+        let mut next = prev.clone();
+        next.pools.insert(
+            "pool-a".into(),
+            PoolEntry::new(vec!["seat-a".into()])
+                .with_circuit_failures(3)
+                .with_circuit_cooldown_ms(5_000)
+                .with_rpm_limit(10),
+        );
+
+        // Act
+        let restart = collect_restart_required_changes(&prev, &next);
+        let high = collect_high_consequence_changes(&prev, &next);
+
+        // Assert
+        assert!(restart.is_empty(), "got {restart:?}");
+        assert!(high.is_empty(), "got {high:?}");
+    }
+
     #[test]
     fn high_consequence_flags_provider_credential_source() {
         use routectl_router::ProviderEntry;

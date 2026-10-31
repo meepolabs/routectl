@@ -2435,8 +2435,14 @@ impl Router {
     /// Carry over per-nickname runtime state from a previous Router.
     /// For each key in `previous.state` that also exists in `self.state`
     /// with the SAME recorded slot owner, replaces the fresh-allocated `Arc`
-    /// with the prior one so that circuit-breaker counters and RPM token
-    /// buckets survive a hot-reload.
+    /// with the prior one so that circuit-breaker counters, the open /
+    /// half-open phase and RPM token buckets survive a hot-reload.
+    ///
+    /// The carried state is retuned to this Router's resolved tuning for the
+    /// key, so a reload that changes `circuit_failures`,
+    /// `circuit_cooldown_ms` or `rpm_limit` applies to it at once. Both
+    /// routers share the carried `Arc`, so a request still in flight on the
+    /// outgoing one settles under the new values too.
     ///
     /// A key whose owner changed across the rebuild (a direct model moved to
     /// another provider, a direct model turned pooled, or the reverse) keeps
@@ -2463,6 +2469,9 @@ impl Router {
                 _ => false,
             };
             if same_owner {
+                if let Some(tuning) = self.tuning.get(key) {
+                    state.lock().retune(tuning.gate());
+                }
                 *slot = state.clone();
             }
         }
