@@ -63,10 +63,9 @@ impl Provider for ParkingProvider {
 }
 
 /// Router with a sole alias entry dispatching to a provider that always
-/// 429s with a large reset. The default retry policy caps RateLimited at
-/// `max_attempts` (3), so a same-provider retry is admitted at attempt 1
-/// -- exactly the branch that used to discard the genuine error. The
-/// large reset parks the provider, so that retry re-gates to CircuitOpen.
+/// 429s with a large reset. The large reset parks the provider on the
+/// first failure, and a parking outcome is never retried on the same
+/// provider, so the request dials once and ends with the genuine 429.
 fn router_with_parking_entry() -> (Router, Arc<AtomicUsize>) {
     let mut config = Config::default();
     config

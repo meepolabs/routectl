@@ -117,7 +117,7 @@ async fn a_persistent_refusal_of_routectls_own_request_bounds_reactivation_to_on
     let router = remote_router_with_rpm(
         provider.clone() as Arc<dyn routectl_core::Provider>,
         100,
-        None,
+        Some(0),
     );
 
     let before = router
@@ -803,7 +803,7 @@ async fn a_transient_upstream_failure_on_a_closed_breaker_retries_without_a_mark
     // with `circuit_failures = Some(1)` the admitted dispatch's own 503 opens the
     // breaker, so the probe is gate-DEFERRED before dialing -- zero dials, one
     // deferral -- and the assertions below would pass on a path that never asked
-    // the upstream anything. `None` leaves the breaker closed, so the probe
+    // the upstream anything. `Some(0)` turns the breaker off, so the probe
     // actually dials, actually receives the 503, and actually settles
     // `Retryable`.
     let provider = Arc::new(FailingProvider {
@@ -814,7 +814,7 @@ async fn a_transient_upstream_failure_on_a_closed_breaker_retries_without_a_mark
     let router = router_on_base_with_failure_threshold(
         "https://api.anthropic.com",
         provider.clone() as Arc<dyn routectl_core::Provider>,
-        None,
+        Some(0),
     );
 
     let _ = router.complete(grounding_request()).await;

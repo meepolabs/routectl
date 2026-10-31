@@ -897,7 +897,8 @@ default = "claude"
 /// Config text wiring a single `anthropic-api` provider at `upstream_uri`
 /// with a `[retry.classes.rate-limited]` override of `retry_cap`. Zero
 /// backoff/jitter keeps a same-provider retry loop from adding latency
-/// the test would otherwise have to sleep through.
+/// the test would otherwise have to sleep through. The breaker is off: the reload poll sends one always-429 request after
+/// another, and an opened breaker would refuse them before they dial.
 fn config_text_with_rate_limited_cap(upstream_uri: &str, retry_cap: u32) -> String {
     let key_ref = common::file_ref("test-key");
     format!(
@@ -919,6 +920,7 @@ retry = {retry_cap}
 kind = "anthropic-api"
 base_url = "{upstream_uri}"
 api_key_ref = "{key_ref}"
+circuit_failures = 0
 
 [models.claude]
 provider = "up"

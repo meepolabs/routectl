@@ -49,14 +49,14 @@ pub struct PoolEntry {
 
     /// Consecutive failed attempts that open the circuit breaker on each
     /// member of this pool. A member's own `circuit_failures` wins over
-    /// this value. None = inherit (the breaker stays off unless a member
-    /// sets it).
+    /// this value. None = inherit the shipped default of 5. `0` turns the
+    /// breaker off for every member that sets no value of its own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub circuit_failures: Option<u32>,
 
     /// How long an opened breaker on a member stays open, in
     /// milliseconds. A member's own `circuit_cooldown_ms` wins over this
-    /// value. None = inherit the 30 s default.
+    /// value. None = inherit the 60 s default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub circuit_cooldown_ms: Option<u64>,
 

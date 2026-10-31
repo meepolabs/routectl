@@ -756,7 +756,7 @@
           "type": "boolean"
         },
         "circuit_cooldown_ms": {
-          "description": "How long an opened breaker on a member stays open, in\nmilliseconds. A member's own `circuit_cooldown_ms` wins over this\nvalue. None = inherit the 30 s default.",
+          "description": "How long an opened breaker on a member stays open, in\nmilliseconds. A member's own `circuit_cooldown_ms` wins over this\nvalue. None = inherit the 60 s default.",
           "format": "uint64",
           "minimum": 0,
           "type": [
@@ -765,7 +765,7 @@
           ]
         },
         "circuit_failures": {
-          "description": "Consecutive failed attempts that open the circuit breaker on each\nmember of this pool. A member's own `circuit_failures` wins over\nthis value. None = inherit (the breaker stays off unless a member\nsets it).",
+          "description": "Consecutive failed attempts that open the circuit breaker on each\nmember of this pool. A member's own `circuit_failures` wins over\nthis value. None = inherit the shipped default of 5. `0` turns the\nbreaker off for every member that sets no value of its own.",
           "format": "uint32",
           "minimum": 0,
           "type": [
@@ -918,7 +918,7 @@
               "description": "Operator override for this entry's prompt-cache capability.\n`None` -> use the conservative per-kind default."
             },
             "circuit_cooldown_ms": {
-              "description": "How long to keep the circuit open (skip provider) once tripped.\nWins over the claiming pool's value; defaults to 30s.",
+              "description": "How long to keep the circuit open (skip provider) once tripped.\nWins over the claiming pool's value; defaults to 60s.",
               "format": "uint64",
               "minimum": 0,
               "type": [
@@ -927,7 +927,7 @@
               ]
             },
             "circuit_failures": {
-              "description": "Trip the circuit breaker after this many consecutive failed\nattempts within the failure window. Once tripped, the router\nskips this provider for `circuit_cooldown_ms`. Wins over the\nclaiming pool's value. None = inherit the pool's value, else the\nbreaker is disabled.",
+              "description": "Trip the circuit breaker after this many consecutive failed\nattempts within the failure window. Once tripped, the router\nskips this provider for `circuit_cooldown_ms`. Wins over the\nclaiming pool's value. None = inherit the pool's value, else 5.\n`0` turns the breaker off for this provider, whatever the pool\nsets.",
               "format": "uint32",
               "minimum": 0,
               "type": [
@@ -1068,7 +1068,7 @@
               "description": "Operator override for this entry's prompt-cache capability.\n`None` -> use the conservative per-kind default. Useful when a\nnon-Anthropic upstream behind this anthropic-api-shaped\nprovider does not honor a top-level breakpoint."
             },
             "circuit_cooldown_ms": {
-              "description": "How long to keep the circuit open (skip provider) once tripped.\nWins over the claiming pool's value; defaults to 30s.",
+              "description": "How long to keep the circuit open (skip provider) once tripped.\nWins over the claiming pool's value; defaults to 60s.",
               "format": "uint64",
               "minimum": 0,
               "type": [
@@ -1077,7 +1077,7 @@
               ]
             },
             "circuit_failures": {
-              "description": "Trip the circuit breaker after this many consecutive failed\nattempts within the failure window. Once tripped, the router\nskips this provider for `circuit_cooldown_ms`. Wins over the\nclaiming pool's value. None = inherit the pool's value, else the\nbreaker is disabled.",
+              "description": "Trip the circuit breaker after this many consecutive failed\nattempts within the failure window. Once tripped, the router\nskips this provider for `circuit_cooldown_ms`. Wins over the\nclaiming pool's value. None = inherit the pool's value, else 5.\n`0` turns the breaker off for this provider, whatever the pool\nsets.",
               "format": "uint32",
               "minimum": 0,
               "type": [
@@ -1259,7 +1259,7 @@
               "description": "Operator override for this entry's prompt-cache capability.\n`None` -> use the conservative per-kind default."
             },
             "circuit_cooldown_ms": {
-              "description": "How long to keep the circuit open (skip provider) once tripped.\nWins over the claiming pool's value; defaults to 30s.",
+              "description": "How long to keep the circuit open (skip provider) once tripped.\nWins over the claiming pool's value; defaults to 60s.",
               "format": "uint64",
               "minimum": 0,
               "type": [
@@ -1268,7 +1268,7 @@
               ]
             },
             "circuit_failures": {
-              "description": "Trip the circuit breaker after this many consecutive failed\nattempts within the failure window. Once tripped, the router\nskips this provider for `circuit_cooldown_ms`. Wins over the\nclaiming pool's value. None = inherit the pool's value, else the\nbreaker is disabled.",
+              "description": "Trip the circuit breaker after this many consecutive failed\nattempts within the failure window. Once tripped, the router\nskips this provider for `circuit_cooldown_ms`. Wins over the\nclaiming pool's value. None = inherit the pool's value, else 5.\n`0` turns the breaker off for this provider, whatever the pool\nsets.",
               "format": "uint32",
               "minimum": 0,
               "type": [
@@ -1398,7 +1398,7 @@
               "description": "Operator override for this entry's prompt-cache capability.\n`None` -> use the conservative per-kind default."
             },
             "circuit_cooldown_ms": {
-              "description": "How long to keep the circuit open (skip provider) once tripped.\nWins over the claiming pool's value; defaults to 30s.",
+              "description": "How long to keep the circuit open (skip provider) once tripped.\nWins over the claiming pool's value; defaults to 60s.",
               "format": "uint64",
               "minimum": 0,
               "type": [
@@ -1407,7 +1407,7 @@
               ]
             },
             "circuit_failures": {
-              "description": "Trip the circuit breaker after this many consecutive failed\nattempts within the failure window. Once tripped, the router\nskips this provider for `circuit_cooldown_ms`. Wins over the\nclaiming pool's value. None = inherit the pool's value, else the\nbreaker is disabled.",
+              "description": "Trip the circuit breaker after this many consecutive failed\nattempts within the failure window. Once tripped, the router\nskips this provider for `circuit_cooldown_ms`. Wins over the\nclaiming pool's value. None = inherit the pool's value, else 5.\n`0` turns the breaker off for this provider, whatever the pool\nsets.",
               "format": "uint32",
               "minimum": 0,
               "type": [
@@ -1540,7 +1540,7 @@
               "description": "Operator override for this entry's prompt-cache capability.\n`None` -> use the conservative per-kind default."
             },
             "circuit_cooldown_ms": {
-              "description": "How long to keep the circuit open (skip provider) once tripped.\nWins over the claiming pool's value; defaults to 30s.",
+              "description": "How long to keep the circuit open (skip provider) once tripped.\nWins over the claiming pool's value; defaults to 60s.",
               "format": "uint64",
               "minimum": 0,
               "type": [
@@ -1549,7 +1549,7 @@
               ]
             },
             "circuit_failures": {
-              "description": "Trip the circuit breaker after this many consecutive failed\nattempts within the failure window. Once tripped, the router\nskips this provider for `circuit_cooldown_ms`. Wins over the\nclaiming pool's value. None = inherit the pool's value, else the\nbreaker is disabled.",
+              "description": "Trip the circuit breaker after this many consecutive failed\nattempts within the failure window. Once tripped, the router\nskips this provider for `circuit_cooldown_ms`. Wins over the\nclaiming pool's value. None = inherit the pool's value, else 5.\n`0` turns the breaker off for this provider, whatever the pool\nsets.",
               "format": "uint32",
               "minimum": 0,
               "type": [

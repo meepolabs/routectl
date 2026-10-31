@@ -1567,8 +1567,8 @@ walk, so its per-attempt lines carry the same text on every surface; the
 A target's circuit breaker logs one INFO line each time its state changes,
 on every surface and on a committed stream's tail alike. The failures and
 successes that leave the circuit where it was stay in the DEBUG `retry
-decision` line above. With the breaker disabled (`circuit_failures`
-unset), a failed re-test of a circuit that was still open closes it without
+decision` line above. With the breaker disabled (`circuit_failures
+= 0`), a failed re-test of a circuit that was still open closes it without
 a line; a disabled breaker never logs `breaker_opened`. Each line carries the `event` token and the target's
 `state_key` (sanitized), plus `cooldown_ms` on a park; nothing from the
 request or the upstream response.

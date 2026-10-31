@@ -2884,8 +2884,9 @@ fn redact_base_url(base_url: &str) -> String {
 }
 
 /// Per-provider runtime knobs that gate dispatch: rate limits, circuit
-/// breaker, timeouts, capability filters. All fields default to "off"
-/// so omitting the block leaves provider behavior unchanged.
+/// breaker, timeouts, capability filters. An unset rate-limit, breaker or
+/// timeout key inherits the claiming pool's value, then the shipped
+/// default.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 #[non_exhaustive]
 pub struct ProviderRuntimePolicy {
@@ -2898,12 +2899,13 @@ pub struct ProviderRuntimePolicy {
     /// Trip the circuit breaker after this many consecutive failed
     /// attempts within the failure window. Once tripped, the router
     /// skips this provider for `circuit_cooldown_ms`. Wins over the
-    /// claiming pool's value. None = inherit the pool's value, else the
-    /// breaker is disabled.
+    /// claiming pool's value. None = inherit the pool's value, else 5.
+    /// `0` turns the breaker off for this provider, whatever the pool
+    /// sets.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub circuit_failures: Option<u32>,
     /// How long to keep the circuit open (skip provider) once tripped.
-    /// Wins over the claiming pool's value; defaults to 30s.
+    /// Wins over the claiming pool's value; defaults to 60s.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub circuit_cooldown_ms: Option<u64>,
     /// Per-attempt timeout on complete and count-tokens requests for

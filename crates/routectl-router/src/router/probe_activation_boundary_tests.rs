@@ -206,7 +206,7 @@ async fn all_three_walks_share_one_lane_slot() {
     // The three surfaces resolve to the same lane and capability, so a
     // session mixing them queues exactly one job.
     //
-    // Breaker DISABLED (`None`) on purpose: this test's subject is the dedupe
+    // Breaker DISABLED (`Some(0)`) on purpose: this test's subject is the dedupe
     // count across walks, and `OkProvider::stream` returns a stream whose
     // first-content failure debits the lane. With a threshold of 1 that trip
     // would refuse the third walk's gate and the test would measure breaker
@@ -217,7 +217,7 @@ async fn all_three_walks_share_one_lane_slot() {
     let router = router_on_base_with_failure_threshold(
         "https://api.anthropic.com",
         provider as Arc<dyn Provider>,
-        None,
+        Some(0),
     );
 
     let _ = router.complete(grounding_request()).await;

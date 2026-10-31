@@ -156,15 +156,15 @@ fn a_pooled_model_on_the_same_pool_keeps_its_exact_nickname_and_seat_slots() {
     assert_eq!(new.breaker_open_for("opus#anthropic-a"), Some(true));
 }
 
-/// A Router whose provider `p1` trips after `circuit_failures` failures, with
-/// a direct model `m` on it.
-fn built_with_threshold(circuit_failures: u32) -> Router {
+/// A Router whose provider `p1` sets `circuit_failures` (`None` leaves the
+/// shipped default in force), with a direct model `m` on it.
+fn built_with_threshold(circuit_failures: Option<u32>) -> Router {
     let mut config = Config::default();
     config.providers.insert(
         "p1".to_string(),
         ProviderEntry::anthropic_api("env://K").with_runtime(
             crate::config::ProviderRuntimePolicy {
-                circuit_failures: Some(circuit_failures),
+                circuit_failures,
                 circuit_cooldown_ms: Some(60_000),
                 ..Default::default()
             },
@@ -179,7 +179,7 @@ fn built_with_threshold(circuit_failures: u32) -> Router {
 #[test]
 fn reload_retunes_carried_slot() {
     // Arrange: two failures under a threshold of five leave the breaker closed.
-    let old = built_with_threshold(5);
+    let old = built_with_threshold(Some(5));
     let old_slot = old.state["m"].clone();
     let t0 = std::time::Instant::now();
     for _ in 0..2 {
@@ -187,7 +187,7 @@ fn reload_retunes_carried_slot() {
             .lock()
             .record_failure(t0, routectl_core::failure_class::LastOutcome::Http5xx);
     }
-    let mut new = built_with_threshold(3);
+    let mut new = built_with_threshold(Some(3));
 
     // Act
     new.carry_over_runtime_state_from(&old);
@@ -203,4 +203,33 @@ fn reload_retunes_carried_slot() {
         "the third failure must open under the reloaded threshold"
     );
     assert_eq!(new.breaker_open_for("m"), Some(true));
+}
+
+#[test]
+fn reload_to_zero_turns_off_the_default_breaker_and_keeps_the_count() {
+    // Arrange: two failures under the shipped default leave the breaker closed.
+    let old = built_with_threshold(None);
+    let old_slot = old.state["m"].clone();
+    let t0 = std::time::Instant::now();
+    for _ in 0..2 {
+        old_slot
+            .lock()
+            .record_failure(t0, routectl_core::failure_class::LastOutcome::Http5xx);
+    }
+    let mut new = built_with_threshold(Some(0));
+
+    // Act
+    new.carry_over_runtime_state_from(&old);
+
+    // Assert: six more failures, past the default threshold, never open it,
+    // and the carried count keeps the two from before the reload.
+    assert!(Arc::ptr_eq(&new.state["m"], &old_slot));
+    let mut slot = new.state["m"].lock();
+    for n in 3..=8 {
+        let opened = slot.record_failure(t0, routectl_core::failure_class::LastOutcome::Http5xx);
+        assert!(!opened, "failure {n} must not open a disabled breaker");
+    }
+    assert_eq!(slot.consecutive_failures_for_tests(), 8);
+    drop(slot);
+    assert_eq!(new.breaker_open_for("m"), Some(false));
 }

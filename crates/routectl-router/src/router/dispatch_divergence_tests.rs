@@ -103,7 +103,8 @@ fn provider_of(nickname: &str) -> String {
 }
 
 /// An anthropic-api entry (count-capable) whose breaker opens on
-/// `circuit_failures` debits and then stays open for a minute.
+/// `circuit_failures` debits and then stays open for a minute; `Some(0)`
+/// turns it off, `None` leaves it on the shipped default.
 fn anthropic_entry(circuit_failures: Option<u32>) -> ProviderEntry {
     ProviderEntry::anthropic_api("literal:k").with_runtime(ProviderRuntimePolicy {
         circuit_failures,
@@ -254,7 +255,7 @@ async fn walk_rows(first: Answer, circuit_failures: Option<u32>) -> Vec<HealthRo
                     anthropic_entry(circuit_failures),
                     answering_with(first),
                 ),
-                seat(SECOND, anthropic_entry(None), second.clone()),
+                seat(SECOND, anthropic_entry(Some(0)), second.clone()),
             ],
             |_| {},
         );
@@ -273,8 +274,8 @@ async fn a_strict_strip_refusal_walks_on_the_message_surfaces_and_is_terminal_on
         let second = answering();
         let router = router_over(
             vec![
-                seat(FIRST, anthropic_entry(None), answering()),
-                seat(SECOND, anthropic_entry(None), second.clone()),
+                seat(FIRST, anthropic_entry(Some(0)), answering()),
+                seat(SECOND, anthropic_entry(Some(0)), second.clone()),
             ],
             |config| config.server.strict_translation = true,
         );
@@ -353,7 +354,7 @@ async fn only_complete_retries_a_retryable_503_on_the_same_seat_after_a_backoff_
     for surface in SURFACES {
         let only = answering_with(unavailable);
         let router = router_over(
-            vec![seat(FIRST, anthropic_entry(None), only.clone())],
+            vec![seat(FIRST, anthropic_entry(Some(0)), only.clone())],
             |config| {
                 config.retry.max_attempts = 2;
                 config.retry.initial_backoff_ms = BACKOFF.as_millis() as u64;
@@ -383,10 +384,10 @@ async fn count_exhaustion_names_why_no_seat_counted_and_a_parked_seat_outranks_i
     let parked_then_refusing: fn() -> Router = || {
         let router = router_over(
             vec![
-                seat(FIRST, anthropic_entry(None), answering()),
+                seat(FIRST, anthropic_entry(Some(0)), answering()),
                 seat(
                     SECOND,
-                    anthropic_entry(None),
+                    anthropic_entry(Some(0)),
                     answering_with(not_implemented_on_the_wire),
                 ),
             ],
@@ -417,12 +418,12 @@ async fn count_exhaustion_names_why_no_seat_counted_and_a_parked_seat_outranks_i
                     vec![
                         seat(
                             FIRST,
-                            anthropic_entry(None),
+                            anthropic_entry(Some(0)),
                             answering_with(not_implemented_on_the_wire),
                         ),
                         seat(
                             SECOND,
-                            anthropic_entry(None),
+                            anthropic_entry(Some(0)),
                             answering_with(not_implemented_locally),
                         ),
                     ],
@@ -457,7 +458,7 @@ async fn count_settles_a_re_probe_admission_up_front_while_the_message_surfaces_
     let mut observed: Vec<(&'static str, Option<bool>)> = Vec::new();
     for surface in SURFACES {
         let router = router_over(
-            vec![seat(FIRST, anthropic_entry(None), answering())],
+            vec![seat(FIRST, anthropic_entry(Some(0)), answering())],
             |config| {
                 config.capability.enabled = true;
             },
@@ -596,7 +597,7 @@ async fn a_chain_naming_one_seat_twice_visits_it_twice_and_learns_its_rejection_
     for surface in [Surface::Complete, Surface::Stream] {
         let only = answering_with(refuses_the_computer_tool);
         let router = router_over(
-            vec![seat(FIRST, anthropic_entry(None), only.clone())],
+            vec![seat(FIRST, anthropic_entry(Some(0)), only.clone())],
             |config| {
                 config.aliases.insert(
                     TWICE.into(),

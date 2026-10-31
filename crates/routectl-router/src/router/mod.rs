@@ -3432,6 +3432,10 @@ mod dispatch_divergence_tests;
 mod local_build_error_dispatch_tests;
 
 #[cfg(test)]
+#[path = "default_breaker_never_counts_tests.rs"]
+mod default_breaker_never_counts_tests;
+
+#[cfg(test)]
 #[path = "dispatch_surface_row_tests.rs"]
 mod dispatch_surface_row_tests;
 

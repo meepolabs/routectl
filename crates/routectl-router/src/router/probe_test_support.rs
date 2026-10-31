@@ -373,13 +373,12 @@ pub(super) fn router_on_base(base_url: &str, provider: Arc<dyn Provider>) -> Rou
 /// `router_on_base` with an explicit breaker failure threshold.
 ///
 /// `circuit_failures` is load-bearing for every test whose subject is the
-/// breaker: at the default (`None`) the breaker is DISABLED, so a mutation
-/// that made a probe debit the lane could not trip anything and a
-/// "must not open the breaker" assertion would pass vacuously. `Some(1)`
-/// means one recorded failure opens it, which is what makes those
-/// assertions falsifiable. A test whose subject is call counts rather than
-/// the breaker passes `None` deliberately, so an unrelated trip cannot
-/// suppress its dials.
+/// breaker: `Some(1)` means one recorded failure opens it, which is what
+/// makes a "must not open the breaker" assertion falsifiable against a
+/// mutation that made a probe debit the lane. A test whose subject is call
+/// counts rather than the breaker passes `Some(0)` (breaker off)
+/// deliberately, so an unrelated trip cannot suppress its dials. `None`
+/// leaves the shipped default threshold in force.
 pub(super) fn router_on_base_with_failure_threshold(
     base_url: &str,
     provider: Arc<dyn Provider>,

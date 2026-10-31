@@ -103,7 +103,8 @@ fn provider_of(nickname: &str) -> String {
 }
 
 /// An anthropic-api entry (count-capable) whose breaker opens on
-/// `circuit_failures` debits and then stays open for a minute.
+/// `circuit_failures` debits and then stays open for a minute; `Some(0)`
+/// turns it off, `None` leaves it on the shipped default.
 fn anthropic_entry(circuit_failures: Option<u32>) -> ProviderEntry {
     ProviderEntry::anthropic_api("literal:k").with_runtime(ProviderRuntimePolicy {
         circuit_failures,
@@ -286,7 +287,7 @@ async fn an_exhausted_count_returns_the_last_timeout_then_a_parked_seat_then_the
 
     for (name, seats, parked, expected) in rows {
         let seats = seats.map(|(nickname, behaviour)| (nickname, SeatProvider::new(behaviour)));
-        let router = router_over(&seats, &[FIRST, SECOND], None);
+        let router = router_over(&seats, &[FIRST, SECOND], Some(0));
         for nickname in parked {
             park(&router, nickname);
         }
@@ -302,12 +303,12 @@ async fn an_expired_count_carries_the_same_error_text_as_an_expired_completion()
     let complete_router = router_over(
         &[(FIRST, SeatProvider::new(Behaviour::Hangs))],
         &[FIRST],
-        None,
+        Some(0),
     );
     let count_router = router_over(
         &[(FIRST, SeatProvider::new(Behaviour::Hangs))],
         &[FIRST],
-        None,
+        Some(0),
     );
 
     let completed = tokio::time::timeout(
@@ -333,7 +334,7 @@ async fn an_expired_count_carries_the_same_error_text_as_an_expired_completion()
 #[tokio::test(start_paused = true)]
 async fn a_count_chain_naming_one_seat_twice_revisits_it_after_a_timeout() {
     let only = SeatProvider::new(Behaviour::HangsOnce);
-    let router = router_over(&[(FIRST, only.clone())], &[FIRST, FIRST], None);
+    let router = router_over(&[(FIRST, only.clone())], &[FIRST, FIRST], Some(0));
 
     let counted = tokio::time::timeout(
         OUTER_BOUND,

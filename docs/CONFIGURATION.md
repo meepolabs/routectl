@@ -1655,15 +1655,19 @@ accounting is per-attempt (not per-request).
 | Field                          | Type       | Default         | Effect |
 |--------------------------------|------------|-----------------|--------|
 | `rpm_limit`                    | Option<u32> | None (disabled) | Maximum requests per minute to this provider. When exceeded the router treats this provider as a fallbackable failure and tries the next chain entry. Resolution order: per-provider > claiming pool > None. |
-| `circuit_failures`             | Option<u32> | None (disabled) | Trip the circuit breaker after this many consecutive failed attempts. Once tripped, the router skips this provider for `circuit_cooldown_ms`. Resolution order: per-provider > claiming pool > disabled. `0` opens on the first failure, the same as `1`. |
-| `circuit_cooldown_ms`          | Option<u64> | 30000 (30s) when `circuit_failures` is set; unused otherwise | How long to keep the circuit open once tripped. Resolution order: per-provider > claiming pool > 30s. |
+| `circuit_failures`             | Option<u32> | 5               | Trip the circuit breaker after this many consecutive failed attempts. Once tripped, the router skips this provider for `circuit_cooldown_ms`. Resolution order: per-provider > claiming pool > 5. `0` turns the breaker off and stops the walk: a provider `0` wins over its pool's value, and a pool `0` wins over the default. |
+| `circuit_cooldown_ms`          | Option<u64> | 60000 (60s)     | How long to keep the circuit open once tripped. Resolution order: per-provider > claiming pool > 60s. Unused while the breaker is off. |
 | `request_timeout_ms`           | Option<u64> | 1800000 (30 min) | Per-attempt timeout on complete and count-tokens requests; a stream that has committed content is not cut by it. Resolution order: per-provider `request_timeout_ms` > claiming pool > global `[retry] request_timeout_ms` > 1800000 (30 min). Per-alias retry overrides were removed in v0.6; to vary timeouts per route, split into distinct `[providers.X]` entries. |
 | `stream_first_byte_timeout_ms` | Option<u64> | 300000 (5 min)  | Per-provider first-content timeout for streaming responses (content-free leading chunks do not satisfy it). Resolution order: per-model > per-provider > claiming pool > global `[retry] stream_first_byte_timeout_ms` > 300000 (5 min). |
 
-`rpm_limit` and circuit breaker are both `None` (disabled) when omitted.
-`circuit_cooldown_ms` is only meaningful when `circuit_failures` is set;
-its default of 30s applies when `circuit_failures` is present but
-`circuit_cooldown_ms` is absent.
+`rpm_limit` is unlimited when no tier sets it. The circuit breaker is
+on for every provider and pool seat: with nothing configured, 5
+consecutive failed attempts open it for 60s, after which one request
+re-tests the seat. Only rate-limit, server-error, overload, timeout and
+network-error failures count, and every retry is its own attempt, so a
+single request retried up to `max_attempts` can debit a seat several
+times. Set `circuit_failures = 0` on a provider or pool to turn the
+breaker off there.
 
 A hot reload applies changed `circuit_failures`, `circuit_cooldown_ms`
 and `rpm_limit` values (on a provider or a pool) to the running gates
@@ -1743,6 +1747,8 @@ provider may accept) keep the normal retry+fallback behavior.
 
 Most deployments need nothing here: the baked class matrix below IS
 the policy, and `max_attempts` (default 3) is the one knob it reads.
+`max_attempts` caps the attempts on each provider-chain entry; when a
+request falls back, the next target starts with a fresh count.
 To tune one class, set its `retry` (or `fallback`) leaf under
 `[retry.classes.<class>]`; this is the retry surface. A
 `[providers.X.class_overrides]` remap (next section) is an escape hatch
@@ -5216,7 +5222,10 @@ stream_first_byte_timeout_ms:
     [models.X] > member provider > pool > [retry] > default
 ```
 
-A provider entry that is not a member of the pool never reads it.
+A provider entry that is not a member of the pool never reads it. A
+pool `circuit_failures = 0` turns the breaker off for every member that
+sets no value of its own; a member's own `0` turns it off for that seat
+alone.
 
 ```toml
 [pools.anthropic]

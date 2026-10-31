@@ -748,3 +748,7 @@ mod tests;
 #[cfg(test)]
 #[path = "runtime_state_credential_park_tests.rs"]
 mod credential_park_tests;
+
+#[cfg(test)]
+#[path = "runtime_state_default_breaker_tests.rs"]
+mod default_breaker_tests;

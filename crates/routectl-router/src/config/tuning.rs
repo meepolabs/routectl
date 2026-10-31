@@ -12,6 +12,9 @@
 //! | `request_timeout_ms`           | provider > pool > global > default    |
 //! | `stream_first_byte_timeout_ms` | model > provider > pool > global > default |
 //!
+//! A `circuit_failures` of `0` at any tier turns the breaker off and ends
+//! the walk: a lower tier's threshold and the shipped default never apply.
+//!
 //! The shipped defaults live only in this module. Every resolved value
 //! carries the tier that supplied it, so a diagnostic can say where a
 //! number came from without re-deriving the precedence.
@@ -21,8 +24,11 @@ use std::time::Duration;
 
 use super::{Config, PoolEntry, ProviderRuntimePolicy, RetryPolicy};
 
+/// Breaker threshold when no tier sets `circuit_failures`: the breaker is
+/// on for every provider and pool seat unless a tier turns it off.
+const DEFAULT_CIRCUIT_FAILURES: NonZeroU32 = NonZeroU32::new(5).expect("non-zero");
 /// Breaker cooldown when no tier sets `circuit_cooldown_ms`.
-const DEFAULT_CIRCUIT_COOLDOWN_MS: u64 = 30_000;
+const DEFAULT_CIRCUIT_COOLDOWN_MS: u64 = 60_000;
 /// Stream first-content timeout when no tier sets
 /// `stream_first_byte_timeout_ms`: a pinging-but-contentless upstream must
 /// stay bounded even when the operator configures nothing.
@@ -80,13 +86,13 @@ pub enum BreakerThreshold {
 }
 
 impl BreakerThreshold {
-    /// The threshold for a configured `circuit_failures` value. `0` opens
-    /// on the first failure, the same as `1`.
+    /// The threshold for a configured `circuit_failures` value. `0` turns
+    /// the breaker off, shadowing every lower tier.
     #[must_use]
     const fn from_configured(failures: u32) -> Self {
         match NonZeroU32::new(failures) {
             Some(n) => Self::After(n),
-            None => Self::After(NonZeroU32::MIN),
+            None => Self::Disabled,
         }
     }
 }
@@ -196,7 +202,7 @@ fn resolve_tiers(tiers: &Tiers<'_>) -> ResolvedTuning {
     ResolvedTuning {
         circuit_failures: failures.map_or(
             Resolved {
-                value: BreakerThreshold::Disabled,
+                value: BreakerThreshold::After(DEFAULT_CIRCUIT_FAILURES),
                 source: TuningSource::ShippedDefault,
             },
             |r| Resolved {

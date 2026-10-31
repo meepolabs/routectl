@@ -32,7 +32,7 @@ fn client(s: &mut ProviderState, now: Instant, park: Option<CredentialPark>) -> 
 #[test]
 fn a_parked_credential_refuses_dispatch_with_its_reason_and_deadline() {
     // Arrange
-    let mut s = state_with_breaker(None);
+    let mut s = state_with_breaker(Some(0));
     let t0 = Instant::now();
 
     // Act
@@ -46,7 +46,7 @@ fn a_parked_credential_refuses_dispatch_with_its_reason_and_deadline() {
 #[test]
 fn a_lapsed_park_admits_exactly_one_half_open_retest_per_slot() {
     // Arrange
-    let mut s = state_with_breaker(None);
+    let mut s = state_with_breaker(Some(0));
     let t0 = Instant::now();
     let lapsed = t0 + CREDENTIAL_PARK_BACKSTOP;
 
@@ -67,7 +67,7 @@ fn a_lapsed_park_admits_exactly_one_half_open_retest_per_slot() {
 #[test]
 fn a_background_probe_never_takes_a_lapsed_park_retest() {
     // Arrange
-    let mut s = state_with_breaker(None);
+    let mut s = state_with_breaker(Some(0));
     let t0 = Instant::now();
     let lapsed = t0 + CREDENTIAL_PARK_BACKSTOP;
 
@@ -119,7 +119,7 @@ fn a_retest_settles_by_reparking_or_clearing_the_account() {
     ];
     for (name, reparked, dispatchable_after) in rows {
         // Arrange: a lapsed park whose re-test the router is settling.
-        let mut s = state_with_breaker(None);
+        let mut s = state_with_breaker(Some(0));
         let t0 = Instant::now();
         let lapsed = t0 + CREDENTIAL_PARK_BACKSTOP;
         assert!(client(&mut s, lapsed, parked_at(t0)).claimed_half_open);
@@ -157,7 +157,7 @@ fn a_failed_retest_without_a_reason_trips_a_configured_breaker() {
 #[test]
 fn gate_status_reports_the_park_reason_and_time_left() {
     // Arrange
-    let s = state_with_breaker(None);
+    let s = state_with_breaker(Some(0));
     let t0 = Instant::now();
     let park = Some(CredentialPark {
         reason: UpstreamReason::CredentialInvalid,
@@ -204,7 +204,7 @@ fn capacity_snapshot_reads_a_credential_blocked_seat_as_not_dispatchable() {
     ];
     for (name, parked, read_at, retest_in_flight, dispatchable) in rows {
         // Arrange
-        let mut s = state_with_breaker(None);
+        let mut s = state_with_breaker(Some(0));
         let park = parked.then(|| parked_at(t0)).flatten();
         if retest_in_flight {
             assert!(client(&mut s, lapsed, park).claimed_half_open);

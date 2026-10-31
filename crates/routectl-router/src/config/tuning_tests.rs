@@ -91,14 +91,14 @@ fn defaults_when_no_tier_sets_anything() {
     assert_eq!(
         t.circuit_failures,
         Resolved {
-            value: BreakerThreshold::Disabled,
+            value: after(5),
             source: d
         }
     );
     assert_eq!(
         t.circuit_cooldown_ms,
         Resolved {
-            value: 30_000,
+            value: 60_000,
             source: d
         }
     );
@@ -123,7 +123,7 @@ fn defaults_when_the_config_has_no_retry_table_and_no_entry() {
         t.stream_first_byte_timeout_ms,
         at(300_000, TuningSource::ShippedDefault)
     );
-    assert_eq!(t.circuit_failures.value, BreakerThreshold::Disabled);
+    assert_eq!(t.circuit_failures.value, after(5));
 }
 
 #[test]
@@ -136,19 +136,66 @@ fn an_unknown_entry_resolves_global_then_default() {
     assert_eq!(t.circuit_failures.source, TuningSource::ShippedDefault);
 }
 
+/// `circuit_failures = 0` turns the breaker off and is terminal at its
+/// tier: a provider 0 shadows the pool's threshold, and a pool 0 shadows
+/// the shipped default for a member that sets nothing.
 #[test]
-fn circuit_failures_zero_opens_on_the_first_failure() {
-    let cfg = config("circuit_failures = 0", "", "");
+fn circuit_failures_zero_disables_the_breaker_at_its_tier() {
+    // (row, member lines, pool lines, entry, expected source)
+    let rows = [
+        (
+            "provider 0, no pool value",
+            "circuit_failures = 0",
+            "",
+            MEMBER,
+            TuningSource::Provider,
+        ),
+        (
+            "provider 0 beats pool 5",
+            "circuit_failures = 0",
+            "circuit_failures = 5",
+            MEMBER,
+            TuningSource::Provider,
+        ),
+        (
+            "pool 0, member unset",
+            "",
+            "circuit_failures = 0",
+            MEMBER,
+            TuningSource::Pool,
+        ),
+        (
+            "pool 0 on the pool's own slot",
+            "",
+            "circuit_failures = 0",
+            POOL,
+            TuningSource::Pool,
+        ),
+    ];
+    for (row, member, pool, entry, source) in rows {
+        let cfg = config(member, pool, "");
+
+        let t = resolve_tuning(&cfg, Some(entry), None);
+
+        assert_eq!(
+            t.circuit_failures,
+            Resolved {
+                value: BreakerThreshold::Disabled,
+                source
+            },
+            "{row}"
+        );
+    }
+}
+
+#[test]
+fn member_threshold_beats_a_pool_zero() {
+    let cfg = config("circuit_failures = 3", "circuit_failures = 0", "");
 
     let t = resolve_tuning(&cfg, Some(MEMBER), None);
 
-    assert_eq!(
-        t.circuit_failures,
-        Resolved {
-            value: after(1),
-            source: TuningSource::Provider
-        }
-    );
+    assert_eq!(t.circuit_failures.value, after(3));
+    assert_eq!(t.circuit_failures.source, TuningSource::Provider);
 }
 
 /// Each row sets the key at the tier under test AND every lower tier, with
@@ -448,7 +495,7 @@ fn non_member_provider_ignores_the_pool() {
 
     let t = resolve_tuning(&cfg, Some(LONE), None);
 
-    assert_eq!(t.circuit_failures.value, BreakerThreshold::Disabled);
+    assert_eq!(t.circuit_failures.value, after(5));
     assert_eq!(t.circuit_failures.source, TuningSource::ShippedDefault);
     assert_eq!(t.request_timeout_ms.source, TuningSource::ShippedDefault);
 }
