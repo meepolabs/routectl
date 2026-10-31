@@ -32,7 +32,7 @@ use crate::catalog_overlay::CatalogOverlay;
 use crate::class_policy::ConfigFailureClass;
 #[cfg(feature = "bedrock")]
 use crate::config::BedrockCredsConfig;
-use crate::config::{Config, ProviderEntry};
+use crate::config::{Config, ProviderEntry, ResolvedTuning, resolve_tuning};
 use crate::override_registry::{OverrideRegistry, OverrideRow};
 
 /// The catalog cell a single `[models.X]` entry resolves to, tagged with the
@@ -133,7 +133,8 @@ pub struct ProviderCell {
     /// vocabulary of its own. The extraction point states the prohibition that
     /// keeps this field secret-free.
     pub auth_token: Option<String>,
-    /// The configured requests-per-minute cap. Three states, none
+    /// The resolved requests-per-minute cap: the entry's own `rpm_limit`, or
+    /// the value of the pool that claims it. Three states, none
     /// interchangeable: `Some(n)` with `n > 0` is a live limit, `Some(0)` seeds
     /// a zero-capacity bucket and therefore means IMMEDIATELY rate-limited, and
     /// `None` means unlimited.
@@ -332,16 +333,66 @@ fn configured_base_url(entry: &ProviderEntry) -> Option<&str> {
     }
 }
 
-/// Project one `[providers.X]` entry into its secret-safe cell.
-fn provider_cell(id: &str, entry: &ProviderEntry) -> ProviderCell {
+/// Project one `[providers.X]` entry into its secret-safe cell. `tuning` is
+/// the entry's resolved tuning, the source of its RPM cap.
+fn provider_cell(id: &str, entry: &ProviderEntry, tuning: &ResolvedTuning) -> ProviderCell {
     ProviderCell {
         id: id.to_string(),
         kind: entry.kind_str().to_string(),
         endpoint_origin: configured_base_url(entry).and_then(endpoint_origin),
         credential_ref_scheme: credential_ref_scheme(entry.api_key_ref()),
         auth_token: auth_token(entry).map(str::to_string),
-        rpm_limit: entry.runtime().rpm_limit,
+        rpm_limit: tuning.rpm_limit.value,
     }
+}
+
+/// What a [`TuningRow`]'s `target` names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TuningTargetKind {
+    /// A `[providers.X]` entry, pool members included.
+    Provider,
+    /// A `[models.X]` entry that sets its own
+    /// `stream_first_byte_timeout_ms`.
+    Model,
+}
+
+/// The tuning in force for one target, every cell carrying its value and
+/// the tier that supplied it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TuningRow {
+    /// The `[providers.X]` key or `[models.X]` nickname.
+    pub target: String,
+    /// Which table `target` names.
+    pub kind: TuningTargetKind,
+    /// The resolved cells, from [`resolve_tuning`].
+    pub tuning: ResolvedTuning,
+}
+
+/// One row per `[providers.X]` entry, in key order.
+fn provider_tuning_rows(config: &Config) -> Vec<TuningRow> {
+    config
+        .providers
+        .keys()
+        .map(|id| TuningRow {
+            target: id.clone(),
+            kind: TuningTargetKind::Provider,
+            tuning: resolve_tuning(config, Some(id), None),
+        })
+        .collect()
+}
+
+/// One row per `[models.X]` entry that sets a non-zero first-content
+/// override, in nickname order. The row resolves through the provider or
+/// pool the model names, so its other cells match that entry's.
+fn model_tuning_rows(config: &Config) -> impl Iterator<Item = TuningRow> + '_ {
+    config.models.iter().filter_map(|(nickname, entry)| {
+        let override_ms = entry.stream_first_byte_timeout_ms.filter(|&ms| ms > 0)?;
+        Some(TuningRow {
+            target: nickname.clone(),
+            kind: TuningTargetKind::Model,
+            tuning: resolve_tuning(config, Some(&entry.provider), Some(override_ms)),
+        })
+    })
 }
 
 /// The provenance-annotated effective view: the layered surfaces only.
@@ -361,6 +412,9 @@ pub struct EffectiveView {
     pub aliases: Vec<AliasChain>,
     /// One secret-safe cell per `[providers.X]` entry, in provider-key order.
     pub providers: Vec<ProviderCell>,
+    /// The resolved tuning table: one row per `[providers.X]` entry, then one
+    /// per `[models.X]` first-content override (see [`TuningRow`]).
+    pub tuning: Vec<TuningRow>,
 }
 
 /// Every operator-nameable failure class, in a stable render order.
@@ -439,10 +493,16 @@ pub fn derive_effective_view(config: &Config, overlay: &CatalogOverlay) -> Effec
         })
         .collect();
 
+    let provider_tuning = provider_tuning_rows(config);
     let providers = config
         .providers
         .iter()
-        .map(|(id, entry)| provider_cell(id, entry))
+        .zip(&provider_tuning)
+        .map(|((id, entry), row)| provider_cell(id, entry, &row.tuning))
+        .collect();
+    let tuning = provider_tuning
+        .into_iter()
+        .chain(model_tuning_rows(config))
         .collect();
 
     EffectiveView {
@@ -451,6 +511,7 @@ pub fn derive_effective_view(config: &Config, overlay: &CatalogOverlay) -> Effec
         capabilities,
         aliases,
         providers,
+        tuning,
     }
 }
 

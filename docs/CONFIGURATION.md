@@ -3298,7 +3298,7 @@ path, query, or embedded `user:pass@` credential. That reduction means
 the output is NOT round-trippable back into a config file, which the
 dump says in a leading `#` comment -- your own `config.toml` remains the
 authoritative source for verbatim `base_url` values.
-Adding `--effective` appends a provenance-annotated view of the two
+Adding `--effective` appends a provenance-annotated view of the
 surfaces where MORE THAN ONE LAYER can supply a value -- so you can see
 which layer actually won without cross-referencing the baked table, the
 overlay, and the retry defaults by hand. Every other config field is
@@ -3310,7 +3310,7 @@ catalog lookups the router runs at chain-build, over the loaded config
 and `catalog_overlay.json`. It resolves no secrets, builds no provider,
 and makes no network call, so it is safe to run against any config.
 
-Two sections are printed:
+Four sections are printed:
 
 - **model catalog cells** -- one row per `[models.X]` entry, showing its
   `provider_kind/upstream` selector and the merged catalog cell. The
@@ -3329,6 +3329,20 @@ Two sections are printed:
   - `config` -- a `[retry.classes.<class>]` leaf set this class;
   - `baked-default` -- no operator leaf, so the baked class default
     applies (see "Per-class retry and fallback policy").
+- **resolved tuning** -- one row per `[providers.X]` entry (pool members
+  included), then one per `[models.X]` entry that sets its own
+  `stream_first_byte_timeout_ms`. Each row prints the five tiered keys
+  (`circuit_failures`, `circuit_cooldown_ms`, `rpm_limit`,
+  `request_timeout_ms`, `stream_first_byte_timeout_ms`) as
+  `key=value(source)`, where `source` is the tier that supplied the
+  value: `model`, `provider`, `pool`, `global` or `default` (the shipped
+  default). A breaker turned off by `circuit_failures = 0` renders `off`;
+  an unlimited RPM or an absent timeout renders `none`. These are the
+  same values dispatch runs under, from the same resolver. A pool's
+  `rpm_limit` also shows on each member in the `/status/config`
+  provider rows.
+- **capability cells** -- one row per config-derived capability
+  override, with its verdict and `source=override`.
 
 ```sh
 routectl config show --effective

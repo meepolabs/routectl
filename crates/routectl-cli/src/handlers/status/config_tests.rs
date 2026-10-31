@@ -123,6 +123,7 @@ fn build_panel_maps_every_effective_surface_with_provenance() {
         }],
         aliases: Vec::new(),
         providers: Vec::new(),
+        tuning: Vec::new(),
     };
     let activation = ActivationState::default();
 
@@ -354,6 +355,46 @@ fn zero_rpm_reaches_the_wire_as_an_explicit_zero_and_unlimited_as_null() {
         provider_json(&config, "capped")["rpm_limit"],
         Value::from(60)
     );
+}
+
+/// A pool's `rpm_limit` is what each member runs under, so the wire shows it
+/// on every member row; a provider outside the pool keeps its own state.
+/// The panel's shape is unchanged, so its version stays 3.
+#[test]
+fn a_pool_rpm_limit_shows_on_each_member_provider_row() {
+    let config: Config = toml::from_str(
+        r#"
+version = 2
+
+[providers.seat-a]
+kind = "anthropic-api"
+api_key_ref = "env://SEAT_A"
+
+[providers.seat-b]
+kind = "anthropic-api"
+api_key_ref = "env://SEAT_B"
+
+[providers.outside]
+kind = "anthropic-api"
+api_key_ref = "env://OUTSIDE"
+
+[pools.seats]
+members = ["seat-a", "seat-b"]
+rpm_limit = 40
+"#,
+    )
+    .expect("valid config");
+
+    assert_eq!(
+        provider_json(&config, "seat-a")["rpm_limit"],
+        Value::from(40)
+    );
+    assert_eq!(
+        provider_json(&config, "seat-b")["rpm_limit"],
+        Value::from(40)
+    );
+    assert_eq!(provider_json(&config, "outside")["rpm_limit"], Value::Null);
+    assert_eq!(SCHEMA_VERSION, 3);
 }
 
 /// Every declared provider field reaches the wire, and the endpoint is the

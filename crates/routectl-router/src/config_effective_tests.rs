@@ -9,7 +9,7 @@ use routectl_core::{ChatChunk, ChatRequest, ChatResponse, Error, Provider, Resul
 use crate::catalog::Source;
 use crate::catalog_overlay::CatalogOverlay;
 use crate::class_policy::ClassPolicy;
-use crate::config::Config;
+use crate::config::{BreakerThreshold, Config, Resolved, ResolvedTuning, TuningSource};
 use crate::factory::apply_catalog_overlay;
 use crate::override_registry::OverrideVerdict;
 use crate::resolved::ResolvedModel;
@@ -691,4 +691,193 @@ fn derivation_source_is_pure_no_router_build() {
 
     assert!(!production.contains("build_resolved_models"));
     assert!(!production.contains("build_provider"));
+}
+
+/// A config in the recorded shape of a real multi-seat deployment: a
+/// five-seat pool of one provider kind, one standalone provider with its
+/// own breaker, a few untuned providers, an explicit `[retry]` block with
+/// both global timeouts set, and one class override. Models set no
+/// first-content override, so the table holds provider rows only.
+fn live_shape_config() -> Config {
+    toml::from_str(
+        r#"
+version = 2
+
+[retry]
+max_attempts = 3
+initial_backoff_ms = 250
+backoff_multiplier = 2.0
+jitter_ms = 50
+request_timeout_ms = 1800000
+stream_first_byte_timeout_ms = 600000
+
+[retry.classes.bad-request]
+fallback = false
+
+[providers.seat-1]
+kind = "anthropic-api"
+api_key_ref = "env://SEAT_1"
+
+[providers.seat-2]
+kind = "anthropic-api"
+api_key_ref = "env://SEAT_2"
+
+[providers.seat-3]
+kind = "anthropic-api"
+api_key_ref = "env://SEAT_3"
+
+[providers.seat-4]
+kind = "anthropic-api"
+api_key_ref = "env://SEAT_4"
+
+[providers.seat-5]
+kind = "anthropic-api"
+api_key_ref = "env://SEAT_5"
+
+[pools.seats]
+members = ["seat-1", "seat-2", "seat-3", "seat-4", "seat-5"]
+
+[providers.relay]
+kind = "anthropic-api"
+api_key_ref = "env://RELAY"
+base_url = "https://relay.example/v1"
+circuit_failures = 5
+circuit_cooldown_ms = 30000
+
+[providers.compat-a]
+kind = "openai-compat"
+base_url = "https://compat-a.example/v1"
+api_key_ref = "env://COMPAT_A"
+
+[providers.compat-b]
+kind = "openai-compat"
+base_url = "https://compat-b.example/v1"
+api_key_ref = "env://COMPAT_B"
+
+[models.big]
+provider = "seats"
+upstream = "claude-opus-4-8"
+
+[models.side]
+provider = "relay"
+upstream = "claude-sonnet-4-6"
+
+[models.cheap]
+provider = "compat-a"
+upstream = "u"
+"#,
+    )
+    .expect("valid config")
+}
+
+fn resolved<T>(value: T, source: TuningSource) -> Resolved<T> {
+    Resolved { value, source }
+}
+
+fn after(n: u32) -> BreakerThreshold {
+    BreakerThreshold::After(std::num::NonZeroU32::new(n).expect("non-zero"))
+}
+
+/// The row an entry with no breaker or RPM key of its own resolves to under
+/// the live-shape `[retry]` block.
+fn untuned_row(target: &str) -> TuningRow {
+    TuningRow {
+        target: target.to_string(),
+        kind: TuningTargetKind::Provider,
+        tuning: ResolvedTuning {
+            circuit_failures: resolved(after(5), TuningSource::ShippedDefault),
+            circuit_cooldown_ms: resolved(60_000, TuningSource::ShippedDefault),
+            rpm_limit: resolved(None, TuningSource::ShippedDefault),
+            request_timeout_ms: resolved(Some(1_800_000), TuningSource::Global),
+            stream_first_byte_timeout_ms: resolved(Some(600_000), TuningSource::Global),
+        },
+    }
+}
+
+/// The whole resolved-tuning table for the live config shape.
+///
+/// Against the behavior before resolved tuning existed, only the breaker
+/// cells of untuned entries changed: every pool seat and untuned provider
+/// went from breaker off to the shipped 5 failures / 60000 ms. The tuned
+/// provider keeps its own 5 / 30000, both global timeouts still apply to
+/// every row, and RPM stays unlimited everywhere.
+#[test]
+fn live_shape_config_resolves_to_the_expected_tuning_table() {
+    let config = live_shape_config();
+
+    let view = derive_effective_view(&config, &CatalogOverlay::default());
+
+    let mut relay = untuned_row("relay");
+    relay.tuning.circuit_failures = resolved(after(5), TuningSource::Provider);
+    relay.tuning.circuit_cooldown_ms = resolved(30_000, TuningSource::Provider);
+    let expected = vec![
+        untuned_row("compat-a"),
+        untuned_row("compat-b"),
+        relay,
+        untuned_row("seat-1"),
+        untuned_row("seat-2"),
+        untuned_row("seat-3"),
+        untuned_row("seat-4"),
+        untuned_row("seat-5"),
+    ];
+    assert_eq!(view.tuning, expected);
+}
+
+#[test]
+fn a_model_first_byte_override_adds_a_row_resolved_through_its_pool() {
+    let mut config = live_shape_config();
+    config
+        .models
+        .get_mut("big")
+        .expect("big model")
+        .stream_first_byte_timeout_ms = Some(90_000);
+    config.pools.get_mut("seats").expect("seats pool").rpm_limit = Some(20);
+
+    let view = derive_effective_view(&config, &CatalogOverlay::default());
+
+    let model_rows: Vec<&TuningRow> = view
+        .tuning
+        .iter()
+        .filter(|row| row.kind == TuningTargetKind::Model)
+        .collect();
+    assert_eq!(model_rows.len(), 1);
+    let row = model_rows[0];
+    assert_eq!(row.target, "big");
+    assert_eq!(
+        row.tuning.stream_first_byte_timeout_ms,
+        resolved(Some(90_000), TuningSource::Model)
+    );
+    assert_eq!(row.tuning.rpm_limit, resolved(Some(20), TuningSource::Pool));
+    assert_eq!(view.tuning.last(), Some(row));
+}
+
+#[test]
+fn a_zero_model_first_byte_override_adds_no_row() {
+    let mut config = live_shape_config();
+    config
+        .models
+        .get_mut("big")
+        .expect("big model")
+        .stream_first_byte_timeout_ms = Some(0);
+
+    let view = derive_effective_view(&config, &CatalogOverlay::default());
+
+    assert!(
+        view.tuning
+            .iter()
+            .all(|row| row.kind == TuningTargetKind::Provider)
+    );
+}
+
+#[test]
+fn provider_cell_rpm_reads_the_pool_value_on_members_only() {
+    let mut config = live_shape_config();
+    config.pools.get_mut("seats").expect("seats pool").rpm_limit = Some(20);
+
+    let view = derive_effective_view(&config, &CatalogOverlay::default());
+
+    for cell in &view.providers {
+        let expected = cell.id.starts_with("seat-").then_some(20);
+        assert_eq!(cell.rpm_limit, expected, "provider {}", cell.id);
+    }
 }
