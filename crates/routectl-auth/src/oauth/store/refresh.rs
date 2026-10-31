@@ -281,8 +281,9 @@ impl OAuthStore {
     ///    (`!near_expiry` for the get path, or the in-memory access
     ///    token differs from the dead token for the force path),
     ///    return it without touching the network.
-    /// 4. Otherwise POST to the upstream's refresh endpoint, persist
-    ///    atomically, return the new record.
+    /// 4. Otherwise POST to the upstream's refresh endpoint and persist
+    ///    atomically, unless the seat changed on disk meanwhile (then the
+    ///    disk record is returned and nothing is written).
     pub(crate) async fn refresh_under_lock(
         &self,
         provider: &str,
@@ -422,15 +423,17 @@ impl OAuthStore {
                 return Ok(reloaded);
             }
             // No intra-process reload raced us: commit under the
-            // cross-process advisory lock, merging the one-seat rotation
-            // onto the disk-fresh state so a sibling seat survives (the
+            // cross-process advisory lock, comparing the disk-fresh record
+            // for this seat with the one the refresh started from (the
             // `reload_gen` guard above covers the intra-process reload race;
-            // this lock covers the cross-process merge -- they are
-            // complementary). NO-RESURRECT: if the seat is absent from the
-            // disk-fresh state (a sibling logged it out mid-refresh), that
-            // logout is authoritative -- discard the refresh result rather
-            // than re-adding the seat. Only login (`write_record`) upserts
-            // unconditionally.
+            // this lock covers cross-process writers -- they are
+            // complementary). Only on a match is the rotation written, and
+            // then only this seat is upserted into the cache so a sibling
+            // seat's external change stays visible to `reload_from_disk`.
+            // A mismatch means an external re-login replaced the seat: it
+            // wins, and this seat's cache entry is left as it was so the
+            // next reload reports the seat changed. NO-RESURRECT: a seat
+            // absent from disk was logged out, which is authoritative.
             // A degraded store must never commit over a file it could not
             // read. Defensive: every refresh enters through `read_record`
             // (which already gates a degraded store out before the network
@@ -442,25 +445,32 @@ impl OAuthStore {
             }
             let seat_owned = seat.to_string();
             let new_rec_for_commit = new_rec.clone();
-            let (merged, seat_present) = file_io::update_under_lock(&self.inner.path, move |cf| {
-                if cf.get(&seat_owned).is_some() {
-                    cf.upsert(&seat_owned, new_rec_for_commit);
-                    file_io::Mutation {
-                        directive: file_io::WriteDirective::Write,
-                        report: true,
+            let (_, outcome) =
+                file_io::update_under_lock(&self.inner.path, move |cf| match cf.get(&seat_owned) {
+                    Some(disk) if *disk == rec => {
+                        cf.upsert(&seat_owned, new_rec_for_commit);
+                        file_io::Mutation {
+                            directive: file_io::WriteDirective::Write,
+                            report: RefreshCommit::Written,
+                        }
                     }
-                } else {
-                    file_io::Mutation {
+                    Some(disk) => file_io::Mutation {
                         directive: file_io::WriteDirective::Skip,
-                        report: false,
-                    }
+                        report: RefreshCommit::Superseded(Box::new(disk.clone())),
+                    },
+                    None => file_io::Mutation {
+                        directive: file_io::WriteDirective::Skip,
+                        report: RefreshCommit::Absent,
+                    },
+                })
+                .await
+                .map_err(Error::from)?;
+            match outcome {
+                RefreshCommit::Written => wguard.upsert(seat, new_rec.clone()),
+                RefreshCommit::Superseded(disk) => return Ok(*disk),
+                RefreshCommit::Absent => {
+                    return Err(Error::from(OAuthError::NotLoggedIn(seat.to_string())));
                 }
-            })
-            .await
-            .map_err(Error::from)?;
-            *wguard = merged;
-            if !seat_present {
-                return Err(Error::from(OAuthError::NotLoggedIn(seat.to_string())));
             }
         }
         // Ok-clear on the commit path: the refresh committed to disk, so
@@ -482,6 +492,17 @@ impl OAuthStore {
             providers::lookup(provider).map_err(Error::from)?;
         Ok(flow)
     }
+}
+
+/// What the refresh commit found for its seat on the disk-fresh state.
+enum RefreshCommit {
+    /// The seat still held the pre-refresh record; the rotation was written.
+    Written,
+    /// The seat holds a different record (an external re-login); nothing
+    /// was written.
+    Superseded(Box<TokenRecord>),
+    /// The seat is gone from disk (logged out); nothing was written.
+    Absent,
 }
 
 /// Classify an OAuth refresh failure as transient (cooldown-eligible)

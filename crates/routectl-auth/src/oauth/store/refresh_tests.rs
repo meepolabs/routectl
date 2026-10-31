@@ -432,11 +432,153 @@ async fn reload_after_an_in_process_refresh_reports_no_changed_seat() {
     );
     assert_eq!(flow.call_count(), 1, "premise: one refresh ran");
 
+    let reopened = OAuthStore::open(&path).await.unwrap();
+    let on_disk: BTreeMap<String, TokenRecord> = reopened.list().await.into_iter().collect();
+    let cached: BTreeMap<String, TokenRecord> = store.list().await.into_iter().collect();
+    assert_eq!(on_disk["anthropic"].access_token.expose(), "tok-refreshed");
+    assert_eq!(cached["anthropic"], on_disk["anthropic"]);
+
     // Act
     let changed = store.reload_from_disk().await.unwrap();
 
     // Assert
     assert!(changed.is_empty(), "got {changed:?}");
+}
+
+/// Seed `seats` on disk, then open a flow-backed store whose fake refresh
+/// blocks on `barrier` until the test's external writer has run.
+async fn open_rendezvous_store(
+    path: &std::path::Path,
+    seats: &[(&str, TokenRecord)],
+    barrier: Arc<tokio::sync::Barrier>,
+) -> (OAuthStore, Arc<CountingFlow>) {
+    let seed = OAuthStore::open(path).await.unwrap();
+    for (seat, rec) in seats {
+        seed.write_record(seat, rec.clone()).await.unwrap();
+    }
+    drop(seed);
+    let flow = Arc::new(
+        CountingFlow::new(RefreshOutcome::Mint("tok-a-refreshed".into())).with_rendezvous(barrier),
+    );
+    let store = open_with_flow(path, flow.clone()).await;
+    (store, flow)
+}
+
+/// Refresh seat-a through `store` while a second handle writes
+/// `external_seat` to disk between the refresh POST and its commit.
+async fn refresh_seat_a_racing_external_write(
+    store: &OAuthStore,
+    path: &std::path::Path,
+    barrier: Arc<tokio::sync::Barrier>,
+    external_seat: &str,
+    external_rec: TokenRecord,
+) -> routectl_core::Result<String> {
+    let external = OAuthStore::open(path).await.unwrap();
+    let seat_a = SecretRef::OAuth {
+        provider: "anthropic".into(),
+        label: Some("seat-a".into()),
+    };
+    let (got, ()) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        tokio::join!(store.get(&seat_a), async {
+            external
+                .write_record(external_seat, external_rec)
+                .await
+                .unwrap();
+            barrier.wait().await;
+        })
+    })
+    .await
+    .expect("the refresh must reach the token endpoint and rendezvous with the writer");
+    got
+}
+
+/// A refresh that races an external re-login of the SAME seat keeps the
+/// re-login on disk, hands it to the caller, and leaves the seat's cache
+/// entry stale so the next watcher reload reports the seat changed.
+#[tokio::test]
+async fn refresh_racing_a_relogin_of_the_same_seat_keeps_the_relogin() {
+    // Arrange
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("credentials.json");
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let seats = [(
+        "anthropic#seat-a",
+        rec_named("tok-a-stale", unix_now() + 10),
+    )];
+    let (store, flow) = open_rendezvous_store(&path, &seats, barrier.clone()).await;
+    let relogin = rec_named("tok-a-relogin", unix_now() + 7200);
+
+    // Act
+    let got =
+        refresh_seat_a_racing_external_write(&store, &path, barrier, "anthropic#seat-a", relogin)
+            .await;
+
+    // Assert
+    assert_eq!(flow.call_count(), 1, "premise: the refresh POST ran");
+    assert_eq!(
+        got.unwrap(),
+        "tok-a-relogin",
+        "the caller gets the re-login"
+    );
+    let reopened = OAuthStore::open(&path).await.unwrap();
+    let on_disk: BTreeMap<String, TokenRecord> = reopened.list().await.into_iter().collect();
+    assert_eq!(
+        on_disk["anthropic#seat-a"].access_token.expose(),
+        "tok-a-relogin",
+        "the re-login must survive on disk"
+    );
+    let changed = store.reload_from_disk().await.unwrap();
+    assert!(
+        changed.contains("anthropic#seat-a"),
+        "the watcher must see the re-login; got {changed:?}"
+    );
+}
+
+/// A sibling seat changed on disk during a refresh stays visible to the
+/// next watcher reload; the refreshed seat itself reports no change.
+#[tokio::test]
+async fn sibling_change_during_a_refresh_is_reported_by_the_next_reload() {
+    // Arrange
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("credentials.json");
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let seats = [
+        (
+            "anthropic#seat-a",
+            rec_named("tok-a-stale", unix_now() + 10),
+        ),
+        ("anthropic#seat-b", rec_named("tok-b", unix_now() + 3600)),
+    ];
+    let (store, flow) = open_rendezvous_store(&path, &seats, barrier.clone()).await;
+    let seat_b_relogin = rec_named("tok-b-relogin", unix_now() + 7200);
+
+    // Act
+    let got = refresh_seat_a_racing_external_write(
+        &store,
+        &path,
+        barrier,
+        "anthropic#seat-b",
+        seat_b_relogin,
+    )
+    .await;
+
+    // Assert
+    assert_eq!(flow.call_count(), 1, "premise: the refresh POST ran");
+    assert_eq!(got.unwrap(), "tok-a-refreshed");
+    let reopened = OAuthStore::open(&path).await.unwrap();
+    let on_disk: BTreeMap<String, TokenRecord> = reopened.list().await.into_iter().collect();
+    assert_eq!(
+        on_disk["anthropic#seat-a"].access_token.expose(),
+        "tok-a-refreshed",
+        "seat-a's refresh must be on disk"
+    );
+    assert_eq!(
+        on_disk["anthropic#seat-b"].access_token.expose(),
+        "tok-b-relogin"
+    );
+    let changed = store.reload_from_disk().await.unwrap();
+    let expected: BTreeSet<String> = ["anthropic#seat-b".to_string()].into();
+    assert_eq!(changed, expected);
 }
 
 /// `reload_from_disk` against a corrupted file (garbage bytes
@@ -889,6 +1031,11 @@ async fn refresh_does_not_resurrect_logged_out_seat() {
     assert!(
         reopened.list().await.is_empty(),
         "a logged-out seat must not be resurrected on disk"
+    );
+    let changed = store.reload_from_disk().await.unwrap();
+    assert!(
+        changed.contains("anthropic"),
+        "the watcher must still see the logout; got {changed:?}"
     );
 }
 
