@@ -1741,7 +1741,7 @@
         },
         "max_attempts": {
           "default": 2,
-          "description": "Default retry-attempts cap per provider in the chain. Used when\nno per-error-class override below is set.",
+          "description": "Retry-attempts cap per provider in the chain for the five health\nclasses (rate-limited, server-error, overloaded, timeout,\nnetwork-error); the other classes never retry on the same\nprovider. `[retry.classes.<class>] retry` overrides it per class.",
           "format": "uint32",
           "minimum": 0,
           "type": "integer"
@@ -1773,7 +1773,7 @@
           ]
         },
         "retry_on_429": {
-          "description": "Per-error-class retry caps. When set, override `max_attempts` for\nthat specific class. Useful because rate-limits often clear in\na single retry while flaky 5xx may need more attempts.",
+          "description": "Deprecated: use `[retry.classes.rate-limited] retry`. Retry cap\nfor the rate-limited class; still honored over `max_attempts`,\nand a `[retry.classes]` retry leaf wins over it. Setting it logs\nan advisory config warning.",
           "format": "uint32",
           "minimum": 0,
           "type": [
@@ -1782,7 +1782,7 @@
           ]
         },
         "retry_on_5xx": {
-          "description": "Retry cap for `5xx` responses. Overrides `max_attempts` when set.",
+          "description": "Deprecated: use `[retry.classes.server-error] retry` and\n`[retry.classes.overloaded] retry`. Retry cap for both classes;\nstill honored over `max_attempts`, and a `[retry.classes]` retry\nleaf wins over it. Setting it logs an advisory config warning.",
           "format": "uint32",
           "minimum": 0,
           "type": [
@@ -1791,7 +1791,7 @@
           ]
         },
         "retry_on_network": {
-          "description": "Network errors (status 0): DNS, TCP connect, TLS handshake,\nrequest body, request timeout. Default is `max_attempts`.",
+          "description": "Deprecated: use `[retry.classes.timeout] retry` and\n`[retry.classes.network-error] retry`. Retry cap for both classes;\nstill honored over `max_attempts`, and a `[retry.classes]` retry\nleaf wins over it. Setting it logs an advisory config warning.",
           "format": "uint32",
           "minimum": 0,
           "type": [

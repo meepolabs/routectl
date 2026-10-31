@@ -246,8 +246,11 @@ jitter_ms                     = 50
 # `[providers.X.class_overrides]` remap. See docs/CONFIGURATION.md.
 request_timeout_ms            = 300000        # 5 min per attempt
 stream_first_byte_timeout_ms  = 90000         # 90s -- thinking models stall
-# retry_on_429 = 1
-# retry_on_network = 2
+# retry_on_429 / retry_on_5xx / retry_on_network are deprecated (still
+# honored, with a config warning). Set the class cap instead, e.g.
+# `[retry.classes.rate-limited] retry = 1` in place of retry_on_429 = 1,
+# or `[retry.classes.timeout]` and `[retry.classes.network-error]`
+# `retry = 2` in place of retry_on_network = 2.
 
 # ---- Learned-capability subsystem (server-wide) ----
 # routectl learns, per target, which capabilities an upstream rejects

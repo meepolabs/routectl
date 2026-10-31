@@ -115,11 +115,15 @@ impl ConfigFailureClass {
 
 impl RetryPolicy {
     /// Resolve the `(retry_cap, fallback)` pair for `class`: the baked
-    /// class default, with any per-class [`ClassPolicy`] leaf the operator
-    /// set layered over the matching leaf.
+    /// class default, then the deprecated `retry_on_*` cap for its class
+    /// family, then any per-class [`ClassPolicy`] leaf the operator set,
+    /// each layer overriding the one below it.
     #[must_use]
     pub fn resolved_class(&self, class: &FailureClass) -> (u32, bool) {
         let (mut retry_cap, mut fallback) = baked_class_defaults(self, class);
+        if let Some(compat_cap) = self.retry_on_compat_cap(class) {
+            retry_cap = compat_cap;
+        }
         if let Some(cfg_class) = ConfigFailureClass::from_failure_class(class)
             && let Some(overlay) = self.classes.get(&cfg_class)
         {
@@ -132,25 +136,35 @@ impl RetryPolicy {
         }
         (retry_cap, fallback)
     }
+
+    /// The deprecated `retry_on_*` cap covering `class`, if the operator
+    /// set it: `retry_on_429` for rate-limited, `retry_on_5xx` for
+    /// server-error and overloaded, `retry_on_network` for timeout and
+    /// network-error.
+    const fn retry_on_compat_cap(&self, class: &FailureClass) -> Option<u32> {
+        match class {
+            FailureClass::RateLimited => self.retry_on_429,
+            FailureClass::ServerError | FailureClass::Overloaded => self.retry_on_5xx,
+            FailureClass::Timeout | FailureClass::NetworkError => self.retry_on_network,
+            _ => None,
+        }
+    }
 }
 
 /// The baked `(retry_cap, fallback)` default for `class` under `policy`,
-/// before any operator overlay. Reproduces the router's class-driven
-/// retry-cap and fallback outcomes for an empty overlay.
-fn baked_class_defaults(policy: &RetryPolicy, class: &FailureClass) -> (u32, bool) {
+/// before any operator overlay: `max_attempts` for the five health
+/// classes, 0 for the rest.
+const fn baked_class_defaults(policy: &RetryPolicy, class: &FailureClass) -> (u32, bool) {
     match class {
-        FailureClass::RateLimited => (policy.retry_on_429.unwrap_or(policy.max_attempts), true),
-        FailureClass::ServerError | FailureClass::Overloaded => {
-            (policy.retry_on_5xx.unwrap_or(policy.max_attempts), true)
+        FailureClass::RateLimited | FailureClass::ServerError | FailureClass::Overloaded => {
+            (policy.max_attempts, true)
         }
         // `Timeout` has no live producer in the classifier yet (router.rs's
         // predicate wildcard currently gives it a 0 cap); this arm
         // anticipates the classifier gaining a Timeout producer and
         // intentionally diverges from that wildcard so the two don't
         // silently drift once it does.
-        FailureClass::Timeout | FailureClass::NetworkError => {
-            (policy.retry_on_network.unwrap_or(policy.max_attempts), true)
-        }
+        FailureClass::Timeout | FailureClass::NetworkError => (policy.max_attempts, true),
         FailureClass::Auth
         | FailureClass::BadRequest
         | FailureClass::ContentPolicy
@@ -502,8 +516,8 @@ mod tests {
 
     // --- resolved_class: baked matrix over an empty overlay ---
 
-    /// A policy whose per-class retry caps are all set to distinct values,
-    /// so a resolved cap reveals which `retry_on_*` knob fed it.
+    /// A policy whose deprecated `retry_on_*` caps are all set to distinct
+    /// values, so a resolved cap reveals which knob fed it.
     fn distinct_caps_policy() -> RetryPolicy {
         RetryPolicy {
             max_attempts: 4,
@@ -514,11 +528,13 @@ mod tests {
         }
     }
 
-    fn expected_baked(class: &FailureClass) -> (u32, bool) {
+    fn expected_baked(class: &FailureClass, max_attempts: u32) -> (u32, bool) {
         match class {
-            FailureClass::RateLimited => (1, true),
-            FailureClass::ServerError | FailureClass::Overloaded => (2, true),
-            FailureClass::Timeout | FailureClass::NetworkError => (3, true),
+            FailureClass::RateLimited
+            | FailureClass::ServerError
+            | FailureClass::Overloaded
+            | FailureClass::Timeout
+            | FailureClass::NetworkError => (max_attempts, true),
             FailureClass::Auth
             | FailureClass::BadRequest
             | FailureClass::ContentPolicy
@@ -530,49 +546,113 @@ mod tests {
     }
 
     #[test]
-    fn resolved_class_empty_map_matches_baked_matrix_for_all_core_variants() {
-        // NOTE: `expected_baked` is a hand-duplicated twin of
-        // `baked_class_defaults`, not the router's live retry-cap
-        // predicates (module-private to router.rs), so this only pins the
-        // two copies here against each other. True differential coverage
-        // against the router's predicates lands once those predicates
-        // consume `resolved_class` directly.
-        // Arrange
-        let policy = distinct_caps_policy();
+    fn resolved_class_empty_overlay_without_compat_keys_is_the_baked_row() {
+        // Arrange: no retry_on_* key and no [retry.classes] block.
+        let policy = RetryPolicy {
+            max_attempts: 7,
+            ..Default::default()
+        };
 
-        // Act + Assert
+        // Act + Assert: the five health classes resolve max_attempts, the
+        // rest 0, for every core variant.
         for class in all_core_variants() {
             assert_eq!(
                 policy.resolved_class(&class),
-                expected_baked(&class),
+                expected_baked(&class, 7),
                 "class {class:?}"
             );
         }
     }
 
     #[test]
-    fn resolved_class_empty_map_falls_back_to_max_attempts_when_knobs_unset() {
-        // Arrange: default leaves every retry_on_* knob unset, so retryable
-        // classes fall back to max_attempts.
+    fn each_retry_on_key_caps_only_its_own_classes() {
+        // Arrange: one row per deprecated key, naming the classes it caps.
+        type Setter = fn(&mut RetryPolicy, u32);
+        let rows: [(&str, Setter, &[FailureClass]); 3] = [
+            (
+                "retry_on_429",
+                |p, n| p.retry_on_429 = Some(n),
+                &[FailureClass::RateLimited],
+            ),
+            (
+                "retry_on_5xx",
+                |p, n| p.retry_on_5xx = Some(n),
+                &[FailureClass::ServerError, FailureClass::Overloaded],
+            ),
+            (
+                "retry_on_network",
+                |p, n| p.retry_on_network = Some(n),
+                &[FailureClass::Timeout, FailureClass::NetworkError],
+            ),
+        ];
+
+        for (key, set, capped) in rows {
+            let mut policy = RetryPolicy {
+                max_attempts: 7,
+                ..Default::default()
+            };
+            set(&mut policy, 1);
+
+            // Act + Assert: the key's classes take its cap; every other
+            // class keeps the baked row.
+            for class in all_core_variants() {
+                let expected = if capped.contains(&class) {
+                    (1, true)
+                } else {
+                    expected_baked(&class, 7)
+                };
+                assert_eq!(
+                    policy.resolved_class(&class),
+                    expected,
+                    "{key}: class {class:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn retry_on_zero_caps_its_classes_at_zero() {
+        // Arrange: an explicit 0 is a cap, not "unset".
         let policy = RetryPolicy {
             max_attempts: 7,
+            retry_on_5xx: Some(0),
             ..Default::default()
         };
 
         // Act + Assert
+        assert_eq!(policy.resolved_class(&FailureClass::ServerError), (0, true));
+        assert_eq!(policy.resolved_class(&FailureClass::Overloaded), (0, true));
+    }
+
+    #[test]
+    fn retry_classes_beat_retry_on_compat() {
+        // Arrange: every compat key set, and a [retry.classes] retry leaf
+        // on one class of each key's family.
+        let mut policy = distinct_caps_policy();
         for class in [
-            FailureClass::RateLimited,
-            FailureClass::ServerError,
-            FailureClass::Overloaded,
-            FailureClass::Timeout,
-            FailureClass::NetworkError,
+            ConfigFailureClass::RateLimited,
+            ConfigFailureClass::Overloaded,
+            ConfigFailureClass::Timeout,
         ] {
-            assert_eq!(
-                policy.resolved_class(&class),
-                (7, true),
-                "class {class:?} must default to max_attempts"
+            policy.classes.insert(
+                class,
+                ClassPolicy {
+                    retry: Some(9),
+                    fallback: None,
+                },
             );
         }
+
+        // Act + Assert: the class leaf wins over the compat key; a sibling
+        // class with no leaf keeps the compat cap.
+        assert_eq!(policy.resolved_class(&FailureClass::RateLimited), (9, true));
+        assert_eq!(policy.resolved_class(&FailureClass::Overloaded), (9, true));
+        assert_eq!(policy.resolved_class(&FailureClass::ServerError), (2, true));
+        assert_eq!(policy.resolved_class(&FailureClass::Timeout), (9, true));
+        assert_eq!(
+            policy.resolved_class(&FailureClass::NetworkError),
+            (3, true)
+        );
     }
 
     // --- resolved_class: sparse operator overlay ---

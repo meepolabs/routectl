@@ -1701,9 +1701,9 @@ jitter_ms                     = 50
 request_timeout_ms            = 300000        # 5 min per attempt
 stream_first_byte_timeout_ms  = 90000         # 90s -- thinking models stall
 probe_max_tokens              = 1             # fast-fail availability probes
-# Per-error-class caps (each overrides max_attempts for that class only):
-# retry_on_429                = 1             # rate-limits usually clear in one retry
-# retry_on_network            = 2             # flaky DNS/TLS/connect
+# Per-class retry caps (each overrides max_attempts for that class only):
+# [retry.classes.rate-limited]
+# retry = 1                                   # rate-limits usually clear in one retry
 # To pin a class terminal (never fall back), set a per-class overlay:
 # [retry.classes.bad-request]
 # fallback = false
@@ -1729,37 +1729,14 @@ disable (no request is ever treated as a probe). Real requests
 every 4xx (including a capability-rejection 400, which a sibling
 provider may accept) keep the normal retry+fallback behavior.
 
-### Per-error-class retry caps
-
-Three optional knobs override `max_attempts` for a single error class
-each, leaving the other classes on the global ceiling. Rate-limits
-often clear in one retry while flaky 5xx may need more, so tuning the
-classes independently avoids over- or under-retrying any one of them.
-
-| Field              | Type        | Default | Effect |
-|--------------------|-------------|---------|--------|
-| `retry_on_429`     | Option<u32> | None    | Cap for 429 (rate-limit) responses. Unset -> falls back to `max_attempts`. |
-| `retry_on_5xx`     | Option<u32> | None    | Cap for 5xx responses. Unset -> falls back to `max_attempts`. |
-| `retry_on_network` | Option<u32> | None    | Cap for network errors (status 0: DNS, TCP connect, TLS handshake, request body, request timeout). Unset -> effectively `max_attempts`. |
-
-Resolution lives in `RetryPolicy::resolved_class`
-(`crates/routectl-router/src/class_policy.rs`): each knob, when `Some`,
-feeds the retry-same cap for its class family. A class pinned
-non-fallbackable via `[retry.classes.<class>].fallback = false` is
-terminal regardless of its `retry_on_*` cap. They ship commented in
-[`examples/config.toml`](../examples/config.toml).
-
-Each `retry_on_*` knob above is exactly the retry-same cap source the
-wider per-class policy below consults for its class family -- see
-`[retry.classes]`.
-
 ### Per-class retry and fallback policy (`[retry.classes]`)
 
-95% of deployments need nothing here: the baked class matrix below IS
-the policy. `[retry.classes]` and `[providers.X.class_overrides]`
-(next section) are escape hatches over that matrix, not the primary
-way to tune retry/fallback behavior -- reach for `retry_on_429` /
-`retry_on_5xx` / `retry_on_network` above first.
+Most deployments need nothing here: the baked class matrix below IS
+the policy, and `max_attempts` is the one knob it reads. To tune one
+class, set its `retry` (or `fallback`) leaf under
+`[retry.classes.<class>]`; this is the retry surface. A
+`[providers.X.class_overrides]` remap (next section) is an escape hatch
+for an upstream that reports a failure under the wrong status.
 
 Every upstream failure classifies into one of ten config-facing
 classes (`crates/routectl-router/src/class_policy.rs`). Each class
@@ -1770,11 +1747,11 @@ set, independent of the retry/fallback decision:
 
 | Class (kebab key) | Retry-same cap source | Falls back? | Debits breaker? |
 |--------------------|------------------------|--------------|-------------------|
-| `rate-limited` | `retry_on_429` (else `max_attempts`) | yes | yes |
-| `server-error` | `retry_on_5xx` (else `max_attempts`) | yes | yes |
-| `overloaded` | `retry_on_5xx` (else `max_attempts`) | yes | yes |
-| `timeout` | `retry_on_network` (else `max_attempts`) | yes | yes |
-| `network-error` | `retry_on_network` (else `max_attempts`) | yes | yes |
+| `rate-limited` | `max_attempts` | yes | yes |
+| `server-error` | `max_attempts` | yes | yes |
+| `overloaded` | `max_attempts` | yes | yes |
+| `timeout` | `max_attempts` | yes | yes |
+| `network-error` | `max_attempts` | yes | yes |
 | `auth` | 0 (fixed) | yes | no |
 | `bad-request` | 0 (fixed) | yes | no |
 | `content-policy` | 0 (fixed) | yes | no |
@@ -1794,7 +1771,7 @@ Every class above defaults to `fallback = true`.
 
 ```toml
 [retry.classes.server-error]
-retry = 3    # same-provider retries above retry_on_5xx / max_attempts
+retry = 3    # same-provider retries in place of max_attempts
 
 [retry.classes.overloaded]
 retry = 0    # stop retrying same-provider; fall over to the next chain entry immediately
@@ -1806,6 +1783,23 @@ above verbatim. Within a present block, an absent leaf (`retry` or
 `ClassPolicy`'s two leaves are independently optional, so setting
 `retry` does not force an implicit `fallback` value.
 
+#### Deprecated: `retry_on_429`, `retry_on_5xx`, `retry_on_network`
+
+The three `[retry]` keys below predate the class table. They still
+parse and are still honored, but each one that is set logs one advisory
+config warning (`class_policy_warnings`, never fails the load) naming
+its replacement. Move each to the class blocks it covers:
+
+| Deprecated key     | Replacement |
+|--------------------|-------------|
+| `retry_on_429 = n` | `[retry.classes.rate-limited] retry = n` |
+| `retry_on_5xx = n` | `[retry.classes.server-error] retry = n` and `[retry.classes.overloaded] retry = n` |
+| `retry_on_network = n` | `[retry.classes.timeout] retry = n` and `[retry.classes.network-error] retry = n` |
+
+While set, a key replaces `max_attempts` as the retry cap of its
+classes, and a `[retry.classes.<class>] retry` leaf on one of those
+classes wins over it. It never changes a class's fallback.
+
 Setting `[retry.classes.bad-request] fallback = false` is valid but
 flagged by an advisory warning (`class_policy_warnings`, never fails
 the load): the baked `bad-request` fallback is what walks a
@@ -1815,7 +1809,7 @@ target lacks then hard-fails instead of falling over.
 
 `feature-unsupported` is RESERVED: `[retry.classes.feature-unsupported]`,
 even empty, is rejected at config load (`validate_class_policy`,
-`crates/routectl-router/src/factory.rs`). The baked row above already
+`crates/routectl-router/src/factory/validate.rs`). The baked row above already
 governs it; there is no override path for this class yet.
 
 #### `[providers.X.class_overrides]` -- remapping a raw status to a class

@@ -83,11 +83,15 @@ pub(super) fn warn_context_management_needs_preserve(
 ///     so a request needing a capability the target lacks hard-fails
 ///     instead of falling over.
 ///
+/// Plus one deprecation line per `[retry] retry_on_*` key that is set,
+/// naming the `[retry.classes.<class>] retry` blocks that replace it. The
+/// key is still honored (above the baked row, below `[retry.classes]`).
+///
 /// Call once per process startup (or `routectl config check`) alongside
 /// `validate_class_policy`; unlike that function, warnings never fail
 /// the load.
 pub fn class_policy_warnings(config: &crate::config::Config) -> Vec<String> {
-    let mut warnings = Vec::new();
+    let mut warnings = retry_on_deprecation_warnings(&config.retry);
 
     for (provider_name, entry) in &config.providers {
         for (status, target) in &entry.runtime().class_overrides {
@@ -129,6 +133,48 @@ pub fn class_policy_warnings(config: &crate::config::Config) -> Vec<String> {
     }
 
     warnings
+}
+
+/// One advisory line per deprecated `[retry] retry_on_*` key that is set,
+/// naming its exact `[retry.classes.<class>] retry = <n>` replacement.
+fn retry_on_deprecation_warnings(retry: &crate::config::RetryPolicy) -> Vec<String> {
+    let keys: [(&str, Option<u32>, &[ConfigFailureClass]); 3] = [
+        (
+            "retry_on_429",
+            retry.retry_on_429,
+            &[ConfigFailureClass::RateLimited],
+        ),
+        (
+            "retry_on_5xx",
+            retry.retry_on_5xx,
+            &[
+                ConfigFailureClass::ServerError,
+                ConfigFailureClass::Overloaded,
+            ],
+        ),
+        (
+            "retry_on_network",
+            retry.retry_on_network,
+            &[
+                ConfigFailureClass::Timeout,
+                ConfigFailureClass::NetworkError,
+            ],
+        ),
+    ];
+    keys.into_iter()
+        .filter_map(|(key, value, classes)| {
+            let cap = value?;
+            let replacement = classes
+                .iter()
+                .map(|class| format!("[retry.classes.{}] retry = {cap}", class_token(*class)))
+                .collect::<Vec<_>>()
+                .join(" and ");
+            Some(format!(
+                "[retry] {key} = {cap} is deprecated: set {replacement} instead (the key is \
+                 still honored for now)"
+            ))
+        })
+        .collect()
 }
 
 /// Advisory (never fatal) load-time check on the per-block cache

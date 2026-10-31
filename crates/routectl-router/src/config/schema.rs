@@ -3094,8 +3094,10 @@ impl From<HistoryReasoning> for routectl_core::CoreHistoryReasoning {
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[non_exhaustive]
 pub struct RetryPolicy {
-    /// Default retry-attempts cap per provider in the chain. Used when
-    /// no per-error-class override below is set.
+    /// Retry-attempts cap per provider in the chain for the five health
+    /// classes (rate-limited, server-error, overloaded, timeout,
+    /// network-error); the other classes never retry on the same
+    /// provider. `[retry.classes.<class>] retry` overrides it per class.
     #[serde(default = "default_max_attempts")]
     pub max_attempts: u32,
     /// Initial backoff in ms.
@@ -3109,16 +3111,22 @@ pub struct RetryPolicy {
     #[serde(default = "default_jitter_ms")]
     pub jitter_ms: u64,
 
-    /// Per-error-class retry caps. When set, override `max_attempts` for
-    /// that specific class. Useful because rate-limits often clear in
-    /// a single retry while flaky 5xx may need more attempts.
+    /// Deprecated: use `[retry.classes.rate-limited] retry`. Retry cap
+    /// for the rate-limited class; still honored over `max_attempts`,
+    /// and a `[retry.classes]` retry leaf wins over it. Setting it logs
+    /// an advisory config warning.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_on_429: Option<u32>,
-    /// Retry cap for `5xx` responses. Overrides `max_attempts` when set.
+    /// Deprecated: use `[retry.classes.server-error] retry` and
+    /// `[retry.classes.overloaded] retry`. Retry cap for both classes;
+    /// still honored over `max_attempts`, and a `[retry.classes]` retry
+    /// leaf wins over it. Setting it logs an advisory config warning.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_on_5xx: Option<u32>,
-    /// Network errors (status 0): DNS, TCP connect, TLS handshake,
-    /// request body, request timeout. Default is `max_attempts`.
+    /// Deprecated: use `[retry.classes.timeout] retry` and
+    /// `[retry.classes.network-error] retry`. Retry cap for both classes;
+    /// still honored over `max_attempts`, and a `[retry.classes]` retry
+    /// leaf wins over it. Setting it logs an advisory config warning.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_on_network: Option<u32>,
 
