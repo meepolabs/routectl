@@ -33,8 +33,9 @@ license.
 
 - `src/lib.rs` -- crate root; re-exports schema types, error type, Provider
   trait, log helpers, the canonical-key allowlist, `UpstreamReason`,
-  `RefusalReason`, and the request-observation types; declares the `provider_kind`, `upstream_reason` and
-  `refusal_reason` modules
+  `RefusalReason`, `EligibilityReason`, and the request-observation types
+  (incl. `SkipCounts`); declares the `provider_kind`, `upstream_reason`,
+  `refusal_reason` and `eligibility` modules
 - `src/schema.rs` -- canonical wire types: `ChatRequest`, `ChatResponse`,
   `ChatChunk`, `Message`, `MessageContent` (`has_non_text_part`),
   `ReasoningDetail`, `ReasoningConfig` (`is_off`, `is_off_effort`), `Usage`,
@@ -59,7 +60,8 @@ license.
   header; deduped, first-seen order; skipped for background probes
 - `src/request_observation.rs` -- `RequestObservation`: the content-free
   per-request observation slot shared across fallback hops (+ `ServedIdentity`);
-  `snapshot` returns an `ObservationSnapshot`
+  `add_skip` tallies a locally ineligible target into `SkipCounts` (one count
+  per `EligibilityReason`); `snapshot` returns an `ObservationSnapshot`
 - `src/config_dir.rs` -- the shared routectl config-folder rule: pure
   `config_dir_from` (absolute `XDG_CONFIG_HOME`, else absolute home +
   `.config`, joined with `routectl`; empty or relative counts as unset; on
@@ -405,9 +407,11 @@ license.
   `ide_version`/`ide_name` metadata) and seeded into
   `GeminiConfig.user_agent` by `new_cloud_code`
 - `src/error.rs` -- `Error` enum
-  (Upstream/NormalizeRequest/Validation/LocalRefusal/Streaming/Auth/Credential/Config/NotImplemented/CapabilityUnsupportedEverywhere/...)
+  (Upstream/NormalizeRequest/Validation/LocalRefusal/Streaming/Auth/Credential/LocallyUnavailable/Config/NotImplemented/CapabilityUnsupportedEverywhere/...)
   and `Result` alias; `Error::Credential{detail, reason, parked_until_ms}` is a local
-  credential-unusable error (terminal OAuth refresh, or every reachable seat parked); `Error::LocalRefusal{provider, detail, reason}`,
+  credential-unusable error (a terminal OAuth refresh);
+  `Error::LocallyUnavailable{reason, retry_after}` is the local no-eligible-target
+  refusal carrying an `EligibilityReason`; `Error::LocalRefusal{provider, detail, reason}`,
   `Error::Validation` and `Error::NormalizeRequest` each carry a
   `RefusalReason`, read through `Error::refusal_reason()` (which also maps
   `Error::Json`, built explicitly at an ingress parse, to `Unparseable`);
@@ -1483,7 +1487,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `ActivationEntry`, `ActivationStatus`, `UnresolvedReason`,
   `ActivatedChange`, `DeactivatedChange`, `ActivationDelta`,
   `compute_activation`, `diff` as `diff_activation`,
-  `provider_kind_for_oauth_id`), and the `doctor` report
+  `provider_kind_for_oauth_id`), the pool build / eligibility types
+  (`PoolPlaceholder`, `PoolReport`, `PoolEligibility`), and the `doctor` report
   types (`Status`, `Finding`, `WouldTrimPanel`, `DoctorPanels`,
   `DoctorReport`, `ProbeOutcome`, `overall_exit`)
 - `src/activation.rs` -- PURE auto-activation inventory (leaf module; imports
@@ -1817,11 +1822,14 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `ConfigFailureClass` and `ClassPolicy` derive `schemars::JsonSchema` so they
   surface in the committed `routectl.schema.json`
 - `src/factory/mod.rs` -- provider-factory module root; declares the private
-  `build`/`validate`/`warnings` submodules (plus the cfg(`openai-responses`)
-  `installation_id` submodule) and re-exports the crate-facing surface
-  (`build_provider`, `build_provider_with_options`, `build_resolved_models`,
-  `build_resolved_models_reported`, `ResolvedModelBuild`,
-  `apply_catalog_overlay`, `BuildOptions`, the `validate_*` family,
+  `build`/`inert_provider`/`validate`/`warnings` submodules (plus the
+  cfg(`openai-responses`) `installation_id` submodule) and re-exports the
+  crate-facing surface (`build_provider`, `build_provider_with_options`,
+  `build_resolved_models`, `build_resolved_models_reported`,
+  `pool_member_refusals`, `ResolvedModelBuild`, `apply_catalog_overlay`,
+  `BuildOptions` (`strict_translation`, `normalize_tools`,
+  `mint_installation_id`; `config check` builds with minting off), the
+  `validate_*` family,
   `resolved_codex_version`, `collect_config_validation`, `ConfigValidation`,
   `validate_bedrock_invoke_model_family`,
   `class_policy_warnings`,
@@ -2007,7 +2015,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   the persistent per-installation UUIDv4 at `<config-dir>/installation_id`;
   `resolve_installation_id` adopts an existing valid file
   (lowercase-normalized), re-mints an empty/corrupt one, and mints an absent
-  one via `routectl_auth::atomic_write::write_0600_atomic` (owner-only 0600);
+  one via `routectl_auth::atomic_write::write_0600_atomic` (owner-only 0600),
+  and when `BuildOptions::mint_installation_id` is off only adopts a valid
+  file, writing nothing;
   any read/write failure yields `None` + a structured WARN naming the error
   class (never the UUID), so the egress simply omits the
   `x-codex-installation-id` header and the next construction retries; the
@@ -2502,7 +2512,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `dispatch.rs`. Holds the `Router` struct (providers map, per-`[models.X]`
   runtime gates, the router-level `credential_accounts` park map (one record
   per credential account, shared whole by `carry_over_runtime_state_from`, so
-  a park outlives any one model slot), resolved-model map, learned-capability
+  a park or unusable mark outlives any one model slot), the build's
+  `pool_reports` (read by `pool_reports()`; `log_placeholder_seats` logs one
+  `seat_unusable` per placeholder once a boot router is final), resolved-model
+  map, learned-capability
   + override + k-sample registries) and the `RouterOptions` / `DispatchMeta` / `Dispatched` /
   `DispatchedStream` / `RouterMetrics` / `DispatchTarget` types with their
   non-dispatch impls (`DispatchTarget.capability_prior`, the metric counters,
@@ -2628,7 +2641,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   chain resolution and probe admissions, per-target guards and request
   shaping, the gate, the attempt loop, auth refresh (a 401 the upstream typed
   `CredentialInvalid` skips the refresh-and-retry and falls through to the
-  terminal park), the learner repair
+  terminal park), the skip tally (`tally_gate_skip`: a gate refusal on a
+  target not yet attempted, and every placeholder seat, count one skip under
+  its `EligibilityReason`), the learner repair
   branch, classify and remap, breaker outcome, credential park, the one
   `same_provider_retry` call, fallback, the last error and `DispatchMeta`
   advancement. The per-attempt deadline is `tokio::time::timeout` around
@@ -3284,7 +3299,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `ResolvedModel::context_window_tokens`, no `default` fallback and never
   `dispatch_chain` (no metrics or rotation perturbation) -- and its sibling
   `first_target_oauth_id`, backing the discovery-time credential check in
-  `handlers/models.rs`
+  `handlers/models.rs`. Tallies each target the capability and window filters
+  drop into the request's `SkipCounts` (`tally_filter_drops`, the reason raised
+  to the target's own state reason by `higher_reason`), counts a degraded pool
+  dispatch (`count_pool_degradation`), and answers a chain with zero targets
+  with `empty_pool_error` (a local `credential_unusable`)
 - `src/router/learn_engine.rs` -- per-target learner state for one chain
   iteration of `dispatch_loop::run_walk` on any surface (a token-count seat
   included): `AttemptLearning` owns the
@@ -3416,9 +3435,13 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/router/status.rs` -- route-target status facade for the /status
   surface: `RouteTargetStatus` (re-exported from `router` for the crate-root
   path `routectl_router::router::RouteTargetStatus`), `Router::status_targets`
-  (per-target gate + seat snapshot; a parked account is reported on every
-  target of the account), `Router::seat_count_for`, and the private
-  `gate_status_for` gate read (state key + account park)
+  (per-target gate + seat snapshot, incl. the target's credential account; a
+  parked or unusable account is reported on every target of the account),
+  `Router::seat_count_for`, `Router::is_placeholder_account`,
+  `Router::pool_eligibility` -> `PoolEligibility` (live configured / eligible
+  seat counts per pool and the non-eligible seats by `EligibilityReason`, read
+  from the non-claiming capacity snapshot), and the private `gate_status_for`
+  gate read (state key + account park and unusable mark)
 - `src/router/count_tokens.rs` -- the token-counting dispatch path:
   `Router::count_tokens` (result-only, NON-SETTLING) and
   `count_tokens_with_meta` -> `CountedTokens` (SETTLING), both through
@@ -4235,20 +4258,28 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   an account when a terminal rejection (or a terminal auth refresh) carries a
   typed `UpstreamReason`, never for a probe or a forwarded credential (no
   account), and only in the credential generation the attempt was admitted
-  under; `settle_seat_success` records the breaker success and, in the same
-  generation only, lifts the account's park under both locks;
-  `lift_credential_parks(accounts)` lifts the named accounts' parks and
-  advances their generations, `lift_oauth_credential_parks` restricts that
-  to OAuth seat accounts (credentials reload) and
-  `lift_entry_credential_parks` lifts every `[providers]` entry account
-  (config reload); `log_gate_refusal` logs a park refusal at
-  DEBUG and every other gate kind at WARN; `parked_seat_error` builds a parked
-  seat's refusal (`Error::Credential` with the epoch-ms deadline) and
-  `merge_gate_refusal` folds a gate refusal into the chain's running error,
-  keeping the first real error and, between parked seats, the earliest deadline;
-  the walk walks past a parked seat (`CREDENTIAL_PARKED_GATE_KIND`) on every
-  surface and ends a token count on a breaker or RPM refusal
-  (`DispatchSurface::gate_refusal_walks`)
+  under; the unusable-credential mark: `acquire_credential_generation`,
+  `mark_credential_unusable` (applies only in the acquired generation),
+  `credential_refreshed_in_generation` (a successful refresh starts a new
+  generation and clears an expired mark) and `mark_unusable_on_refused_refresh`;
+  `settle_seat_success` records the breaker success under the admission's
+  breaker epoch and, in the same credential generation only, lifts the
+  account's park under both locks, returning the epoch now held;
+  `lift_credential_parks(accounts)` resets the named accounts (lifts the park,
+  clears the unusable mark, advances the generation) returning one
+  `AccountReset` each, `lift_oauth_credential_parks` restricts that to OAuth
+  seat accounts (credentials reload) and `lift_entry_credential_parks` resets
+  every `[providers]` entry account (config reload); `log_gate_refusal` logs a
+  park or unusable refusal at DEBUG and every other gate kind at WARN;
+  `parked_seat_error` / `unusable_seat_error` build the
+  `Error::LocallyUnavailable` refusal (`account_parked` with the remaining
+  wait, `credential_unusable` with none), `refuse_placeholder_seat` refuses a
+  placeholder seat, and `merge_gate_refusal` folds a gate refusal into the
+  chain's running error, keeping the first real error and, between local
+  refusals, the higher-priority reason and the earliest known wait; the walk
+  walks past a parked or unusable seat (`CREDENTIAL_PARKED_GATE_KIND`,
+  `CREDENTIAL_UNUSABLE_GATE_KIND`) on every surface and ends a token count on
+  a breaker or RPM refusal (`DispatchSurface::gate_refusal_walks`)
 - `src/router/seat_transitions.rs` -- the seat-transition log lines: one WARN
   `seat_unusable` when a credential account becomes unusable (or its cause
   changes) and one INFO `seat_recovered` when a reset or a successful refresh
@@ -4276,10 +4307,12 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   and `stream_commit` when a settle changes the circuit's state
 - `src/router/runtime_gate.rs` -- breaker/RPM gate + probe-slot admission
   RAII: `admit_client`/`admit_probe` (take the target's credential account;
-  `admit_locked` checks the account park first, so a live park refuses before
-  the slot is locked with no RPM token or half-open claim spent, then runs the
-  model gate under the park; `slotless_park_refusal` refuses a target with no
-  model slot on a live account park too; admission returns the half-open
+  `admit_locked` checks the account's unusable mark, then its park, first, so
+  either refuses before the slot is locked with no RPM token or half-open
+  claim spent, then runs the model gate under the park;
+  `admit_slotless_account` applies the same account gate to a target with no
+  model slot; every refusal is an `Error::LocallyUnavailable` carrying its
+  `EligibilityReason` and known wait; admission returns the half-open
   ownership guard, which also carries the account's credential generation
   read in the same critical section; `admit_dispatch`/`admit_probe_dispatch`
   survive only as test seams resolving the account from a state key), the
@@ -4353,8 +4386,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/runtime_state.rs` -- per-state-key (bare nickname, or
   `nickname#member` for a pool seat) token-bucket RPM
   limiter + circuit breaker state machine, seeded by `from_gate` and retuned
-  in place by `retune`; `record_failure_debit` / `record_success_closing`
-  report the transitions; `force_open` parks the breaker for
+  in place by `retune`; a breaker epoch advances on every breaker transition,
+  and every settlement (`record_success_closing`, `record_failure_debit`,
+  `force_open_in_epoch`, `release_probe_slot_in_epoch`) applies only under the
+  epoch its admission carried; `force_open` parks the breaker for
   an explicit reset hint, bypassing the consecutive-failure threshold;
   `capacity_snapshot(&self, now)` is a non-mutating read (`CapacitySnapshot` =
   projected RPM headroom + `CircuitPhase` {Closed, Open, HalfOpenReady} +
@@ -4364,11 +4399,17 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `try_dispatch`-based read would. A credential park (`CredentialPark`:
   `UpstreamReason` + deadline, `CREDENTIAL_PARK_BACKSTOP` = 1 h) is NOT held
   by `ProviderState`: it lives on the account's `AccountCredential` (park +
-  generation; `park_until` / `park_in_generation` / `clear_in_generation` /
-  `reset`, the generation advanced by every `reset` so a pre-reload attempt
-  cannot re-park or un-park the account), and the model gate takes it as an
-  input (`admit_under_park`, `capacity_snapshot_under`, `gate_status_under`).
-  A live park refuses with `GateDecision::CredentialParked { reason, until }`;
+  generation + the `Unusable` mark {`UnusableCause` NotLoggedIn / Unreadable /
+  Expired / Revoked, since}; `park_until` / `park_in_generation` /
+  `clear_in_generation` / `mark_unusable` -> `MarkOutcome` /
+  `refreshed_in_generation` -> `RefreshSettlement` / `reset` ->
+  `ResetOutcome`, the generation advanced by every `reset` and successful
+  refresh so earlier evidence cannot re-park, mark or un-park the account),
+  and the model gate takes it as an input (`admit_under_park`,
+  `capacity_snapshot_under`, `gate_status_under`; `CapacitySnapshot::reason`
+  names the highest-priority `EligibilityReason`). An unusable mark refuses
+  with `GateDecision::CredentialUnusable`, a live park with
+  `GateDecision::CredentialParked { reason, until }`;
   a lapsed park shares the slot's single half-open re-test with a lapsed
   cooldown, so each model slot on a lapsed account re-tests once.
 - `src/seat_naming.rs` -- THE naming convention for OAuth account entries and
@@ -4385,17 +4426,16 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `oauth://` ref, which is only correct while every login of a seat derives the
   same names from the same inputs
 - `src/pool_build.rs` -- the typed outcome of compiling a `[pools.<name>]`
-  block: `PoolOutcome` {Ready(shared seat set + omissions) / Unavailable},
-  `PoolReport` (pool, models routed at it, configured vs usable member counts,
-  omissions) with `is_degraded` / `is_unavailable`, `PoolMemberOmission` +
-  the allowlisted `PoolOmissionReason` {CredentialMissing,
-  CredentialUnreadable, CredentialInvalid, ProviderInitFailed} whose `token()`
-  is the vocabulary the omission WARN and the operator report share, and
-  `unavailable_pool_error` (the boot / reload refusal naming both the dead
-  pool and every model routed at it). Nothing here carries a store error
-  string, credential path, or account id
+  block: crate-private `PoolOutcome` {seats (built or placeholder, shared by
+  Arc), placeholders}, `PoolPlaceholder` (member key, kind token,
+  `UnusableCause`, credential account) and `PoolReport` (pool, models routed
+  at it, configured vs usable member counts, placeholders) with `is_degraded`
+  / `is_unavailable`. Nothing here carries a store error string or credential
+  path
 - `src/seat_pool.rs` -- pool dispatch glue: `SeatTarget` (built by
-  `SeatTarget::new`, which precomputes the seat's credential `account()`), the
+  `SeatTarget::new`, which precomputes the seat's credential `account()`, or
+  `SeatTarget::placeholder` for a member with no provider, `is_placeholder`),
+  the
   seat state-key grammar (`seat_state_key` / `split_seat_state_key` /
   `check_state_key_name`), `seat_identity`, `credential_account` (the park's
   account key: the OAuth seat identity, else the `[providers]` entry name
@@ -5372,9 +5412,12 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `SecretCaptureError`, `SecretCaptureResult`, `default_secret_dir`,
   `env_ref`); feature-gated re-exports of `LocalProbe`, `LoginOptions`,
   `OAuthError`, `OAuthStore`, `OAuthStoreProjectCache`, `OpenOutcome` under
-  `oauth`. Carries `#![warn(missing_docs)]`
+  `oauth` (incl. the `RefreshOutcome` / `DefinitiveCause` refresh-check
+  vocabulary), and the unconditional `CredentialProbeFailure`. Carries
+  `#![warn(missing_docs)]`
 - `src/store.rs` -- `SecretStore` async trait (get/set/delete) for credential
-  providers
+  providers, plus `probe_credential` returning a text-free
+  `CredentialProbeFailure` {NotLoggedIn, Unreadable}
 - `src/secret_ref.rs` -- `SecretRef` enum (`env://`, `file://`, `literal:`)
   plus URI parser
 - `src/memory_store.rs` -- default in-process `SecretStore` resolving
@@ -5437,7 +5480,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `open`/`open_or_degraded`/`open_default`/`open_default_degradable`
   (start-and-degrade contract),
   `path`/`http`/`read_record`/`load_error_cause`, HTTP client build,
-  `sanitize_open_error`; declares the `crud`/`refresh`/`seat` submodules
+  `sanitize_open_error`; declares the `crud`/`refresh`/`seat` submodules (and
+  the test-gated `scripted` seam)
 - `src/oauth/store/crud.rs` -- token-record CRUD + cloud-project-id cache
   adapter: `peek_account_id`/`peek_session_id`/`peek_cloud_project_id`,
   `set_cloud_project_id`, `clear_cloud_project_id_if_matches`
@@ -5446,7 +5490,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `write_record`/`remove_provider`/`credential_keys`/`probe_local`/`list`/`logout`
 - `src/oauth/store/refresh.rs` -- per-seat single-flight refresh:
   `force_refresh(provider, label)` targets one seat (drives `routectl refresh
-  --label`), `refresh_under_lock` (near-expiry 300s lead + 401-recovery +
+  --label`), `refresh_if_due(provider, label)` -> `RefreshOutcome` {NotDue,
+  Refreshed, Transient, Definitive(`DefinitiveCause` NotLoggedIn / Revoked)}
+  for the background seat driver, `refresh_under_lock` (near-expiry 300s lead + 401-recovery +
   reload-generation guard), `reload_from_disk` (returns the seat keys whose
   stored record the reload added, removed or changed, via `changed_seats`;
   key strings only), transient-failure cooldown
@@ -5464,7 +5510,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   at v4), `get` near-expiry refresh + `on_auth_failure` 401 recovery;
   preserves an existing `session_id` across token rotation (the codex provider
   flow mints the fresh `session_id` on first OAuth exchange);
-  `seat_ref_from_key` inverse of `seat_key`
+  `seat_ref_from_key` inverse of `seat_key`; `probe_credential` tells a missing
+  login apart from an unreadable one
 - `src/oauth/providers/mod.rs` -- `OAuthFlow` trait + `lookup` registry +
   `known_provider_ids` (anthropic, codex, antigravity); `AuthParams`,
   `token_parse_error`, and `token_status_error`/`safe_token_error_code`
@@ -5527,7 +5574,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `#![warn(missing_docs)]`. `prune`/`prune_capability_events`/`PruneOutcome`
   and the `META_*` schema keys are crate-internal (not re-exported)
 - `src/record.rs` -- `UsageRecord` (one field per WRITTEN capture column, the
-  v18 request-observation fields included) and the closed `Outcome`,
+  v18 request-observation fields and the v19 per-reason skip counts included)
+  and the closed `Outcome`,
   `Operation` and `Harness` enums with their `as_str`/`FromStr` wire tokens
 - `src/capability_event.rs` -- the unified `capability_events` ledger write
   shape: `CapabilityEvent` (plain-type fields keeping the crate a leaf --
@@ -5980,7 +6028,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   so `downgrade.rs` can hand the file back to a v16 binary. v18
   (`SCHEMA_VERSION = 18`) appends the eight nullable request-observation
   columns to `requests` and creates `ledger_gaps` +
-  `CREATE_LEDGER_GAPS_TS_INDEX` via `migrate_v17_to_v18`; also additive
+  `CREATE_LEDGER_GAPS_TS_INDEX` via `migrate_v17_to_v18`; also additive. v19
+  (`SCHEMA_VERSION = 19`) appends the six nullable `skip_<reason>` count
+  columns (`V19_REQUESTS_COLUMNS`, one per eligibility reason token) to
+  `requests` via `migrate_v18_to_v19`; also additive
 - `src/migrate.rs` -- forward-only schema migration / version stamping against
   the `meta` table; also `purge_legacy_capability_observations(conn)`, a
   one-shot data step (no version bump) that deletes NULL-vocabulary
@@ -5989,7 +6040,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   marker and delete in one transaction); called from the writer's open, not
   from `db::open`
 - `src/downgrade.rs` -- offline re-stamp rollback: `downgrade_to(path,
-  target)` runs the additive `STEPS` (18 -> 17, 17 -> 16) down to a target in
+  target)` runs the additive `STEPS` (19 -> 18, 18 -> 17, 17 -> 16) down to a
+  target in
   `SUPPORTED_TARGETS`; any refusal is a `DowngradeError` that leaves the file
   untouched (the daemon must be stopped)
 - `src/retention.rs` -- `prune` (startup-only, best-effort) dropping
@@ -6292,11 +6344,15 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `reload_from_disk` reports changed (`lift_oauth_credential_parks`, so a
   routine self-refresh lifts nothing), and an accepted config reload lifts
   only `[providers]` entry account parks (`lift_entry_credential_parks`),
-  past the commit point; `log_lifted_parks` logs the count. Two bounded
-  interval drivers ride the same pipeline and the same `shutdown_rx`, both
-  reading the live router PER TICK so a publication switches them onto the
-  replacement cleanly: `run_router_metrics_snapshot_driver` (in
-  `metrics_driver.rs`) and `run_probe_driver` (in `probe_driver.rs`). All three
+  past the commit point; `log_lifted_parks` logs the lifted parks and cleared
+  unusable marks from the `AccountReset`s; a changed record for a placeholder
+  seat's account (`is_placeholder_account`) forces the seat-set rebuild, since
+  a lift alone cannot readmit an unbuilt seat. Bounded interval drivers ride
+  the same pipeline and the same `shutdown_rx`, each reading the live router
+  PER TICK so a publication switches them onto the replacement cleanly:
+  `run_router_metrics_snapshot_driver` (in `metrics_driver.rs`),
+  `run_probe_driver` (in `probe_driver.rs`) and, when a credential store
+  exists, `run_seat_driver` (in `seat_driver.rs`). All three
   publication sites go through `router_publish::publish_router`, never a direct
   store. `apply_activation` (+ `gather_probes` /
   `emit_activation_delta`, `ActivationTrigger`) recomputes the auto-activation
@@ -6644,8 +6700,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `drive_stream` `tokio::select!`s each upstream poll (biased) against
   `tx.closed()`, so a client disconnect cancels the upstream immediately on
   channel close rather than waiting for a send to fail) or on `Err` emits ONE
-  terminal in-stream `render_error_eos` + finalizes `UpstreamError` with the
-  `pre_content_dispatch` stage marker (`observe_meta` relocated into the task;
+  terminal in-stream `render_error_eos` + finalizes from the dispatch's
+  attempt count (`outcome_for_dispatch_err`: a refusal that dialed nothing is
+  `gate_blocked`) with the `pre_content_dispatch` stage marker (`observe_meta` relocated into the task;
   Drop `cancelled` reserved for an unobserved exit). Also owns the
   forwarded-mode (pure-proxy) ingress path: `enforce_pure_proxy_admission`
   (the shared admission gate all three dialect handlers funnel through, backed
@@ -6663,7 +6720,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   at least 1s) so a client SDK's own 429/503 backoff keeps the upstream hint.
   An `Error::LocalRefusal` renders as a 400 `invalid_request_error` whose
   envelope and stream terminal match an upstream 400 carrying the same
-  refusal (pinned in `local_refusal_envelope_tests.rs`). A parse failure
+  refusal (pinned in `local_refusal_envelope_tests.rs`). An
+  `Error::LocallyUnavailable` renders as a 503 whose error type is the
+  eligibility reason token, with a `Retry-After` from its known wait (message
+  and seconds from `local_unavailable.rs`). A parse failure
   counts on `<ingress>->local` with its reason (`render_parse_failure`)
 - `src/handlers/refusal_reason_matrix_tests.rs` -- one request per reachable
   `RefusalReason` through the real ingress, a built router and its egress
@@ -6688,8 +6748,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   complete path; `PendingRow` holds the rendered response's usage row (and
   live samples) inside `CheckedBody` until the body is sent or dropped
 - `src/handlers/credential_message.rs` -- the fixed client message for a
-  local `Error::Credential`: the reason token and, when every reachable seat is parked,
-  the remaining wait in seconds; never the provider id or OAuth detail
+  local `Error::Credential`: the reason token and, when a wait is carried,
+  the remaining seconds; never the provider id or OAuth detail
 - `src/handlers/local_unavailable.rs` -- the client-facing parts of an
   `Error::LocallyUnavailable`: `retry_after_secs` (rounded up, clamped
   1..=3600 s, `None` stays `None`) and the fixed message naming the reason
@@ -6797,7 +6857,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   request whose exit was never observed (an observed hangup finalizes
   `client_disconnect` first). Also subsumes the egress stream
   trace-summary line. Owns the outcome-mapping helpers
-  (`outcome_for_dispatch_err`, `error_class_of`) and the auto-cache outcome
+  (`outcome_for_dispatch_err`, `error_class_of`; a `LocallyUnavailable` is
+  class `locally_unavailable`) and copies the observation's six skip counts
+  onto the row; also the auto-cache outcome
   signal (`is_cache_thrash` + `emit_cache_outcome`: `cache_auto_outcome` at
   DEBUG when an auto-emitted breakpoint is created-and-read, WARN when
   created-without-read this request). Also owns `StreamStage` +
@@ -6992,6 +7054,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   wraps the router `Arc<ArcSwap<Router>>` with a PRIVATE inner field; `view()`
   loads a snapshot into `StatusRouterView` (also private inner `Arc<Router>`)
   which exposes ONLY read methods -- `route_targets(now)`,
+  `pool_eligibility(now)` (live per-pool seat counts), `seat_fix(entry)` (the
+  `SeatFix` that readmits a seat, derived from the served config),
   `learned_capabilities(now)` (each resident entry with its cell resolved
   through `lane_cell::resolve_entries` -> `ResolvedEntry`),
   `field_repair_counters()` (the live Stage-1
@@ -7009,8 +7073,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `served_doctor_inputs(warm)` (an OWNED `commands::doctor::ServedInputs`:
   the pinned Router's config + overlay as one generation pair, the resident
   learned snapshot and seed-clear markers with clock anchors taken after the
-  read, the boot `WarmReport`, and the credential-parked seats read off the
-  same `status_targets` call `route_targets` uses; its fields are private to
+  read, the boot `WarmReport`, and the credential-parked and unusable seats
+  read off the same `status_targets` call `route_targets` uses; its fields are private to
   the doctor module), plus `pricer()` -> `QueryPricer`, an OWNED `'static`
   pricing facade over one pinned snapshot whose only method costs an `AggRow`
   through `commands::usage::cost_for_row` (so `/status/query` and the CLI usage
@@ -7032,7 +7096,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   and a backwards clock step clamps the age to zero (never negative).
   `record_reload_failure(class)` keeps the last rejected reload beside the
   stamp; `stamp_config_loaded` clears it, so `DaemonMetaHandle::reload_failure`
-  reports it only until a later load supersedes it
+  reports it only until a later load supersedes it. `DaemonMeta` also holds the
+  seat driver's `SeatDriverHealth` (`seat_driver_health()` hands the writer to
+  the driver); the handle reads it only as `seat_driver()` ->
+  `SeatDriverHealthSnapshot`
 - `src/handlers/status/usage.rs` --
   `/status/usage?window=today|week|month|all` (default today). Opens the
   ledger read-only PER REQUEST via `open_readonly_fastfail` inside
@@ -7061,11 +7128,15 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   deadline inside the blocking closure and `collect` installs a single
   `DeadlineGuard` on the per-request connection, so all five reads share one
   budget and an overrun sheds `query_timeout` instead of starving a worker
-- `src/handlers/status/health.rs` -- `/status/health` (schema_version 8).
+- `src/handlers/status/health.rs` -- `/status/health` (schema_version 9).
   Snapshots the router through the read-only facade ONCE (`router.view()`) and
-  reads `route_targets` + `learned_capabilities` from that single view,
-  mapping to `HealthPanel` (per-target
-  `state_key`/`learned_lane`/`nickname`/`provider_name`/`upstream`/`seat_label`/`circuit`/`rpm_available`/`half_open_probe_in_flight`/`open_since_ms`/`last_outcome`/`last_outcome_at_ms`/`park_reason`/`parked_until_ms`
+  reads `route_targets`, `pool_eligibility` + `learned_capabilities` from that
+  single view, mapping to `HealthPanel` (per-target
+  `state_key`/`learned_lane`/`nickname`/`provider_name`/`upstream`/`seat_label`/`account`/`circuit`/`rpm_available`/`half_open_probe_in_flight`/`open_since_ms`/`last_outcome`/`last_outcome_at_ms`/`park_reason`/`parked_until_ms`
+  and an `eligibility` object `{reason, cause, since_ms, fix}` (fix from
+  `seat_fix`, only for `credential_unusable`); `pools` rows
+  `{pool, configured, eligible, by_reason}`; a `seat_driver` row from the
+  daemon's `SeatDriverHealth`;
   + learned rows keyed by lane, joined to targets on `learned_lane`
   `state_key`/`capability_key`/`verdict`/`signal_tier`/`observations`/`phase`/`source`/`last_seen_ms`/`action`/`layer`/`overrode_layer`/`age_ms`/`expires_at_ms`/`value`,
   each resolved through `lane_cell::{ResolvedEntry, lapse_deadline_ms}`
@@ -7470,7 +7541,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   cards collapse a pooled model's seats by nickname through the same
   worst-circuit rule Routing uses and split into needs-attention / healthy /
   not-observed sections (a target with no settled outcome is `unknown`, never
-  `Healthy`), while the per-seat quota tiles read the usage panel's `quota[]`
+  `Healthy`; an unusable or parked seat puts its card in needs-attention, and
+  a card's `eligibility` cell names its blocked seats), followed by a pools
+  section (`healthPoolSection`: eligible / configured seats and the by-reason
+  counts) and a seat-driver section (`healthDriverSection`), while the per-seat quota tiles read the usage panel's `quota[]`
   discriminated by `provider_kind`, rendering one line per POPULATED
   utilization field (no synthesized second line, no cross-seat rollup) and
   distinguishing a missing snapshot, a null utilization, and a measured `0`.
@@ -7777,7 +7851,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   at the API-key surface -- a 401-on-first-dispatch shape that predates
   auth-selector enforcement, so it warns rather than errors (only `check`
   renders the warning half; the gate callers read `errors` alone, so it never
-  blocks a write). `EXAMPLE_CONFIG`
+  blocks a write). Once validation passes, `check` also runs the pool-member
+  build over `config_member_build::OfflineCheckStore`, so it refuses the same
+  member configs serve and reload refuse. `EXAMPLE_CONFIG`
   is the ONE `include_str!` of `examples/config.toml`, named by `config
   example` and by `init --scaffold`'s `STARTER_CONFIG`; an ungated test
   gate-loads it so no build can emit an example it cannot itself parse, and a
@@ -7793,7 +7869,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `src/commands/config_member_build.rs` -- the pool-member build `config
   check` runs: `OfflineCheckStore` (answers `oauth://` reads from the stored
   record, never refreshes or writes) and `member_build_errors`, which runs
-  `routectl_router::pool_member_refusals` with serve's build options
+  `routectl_router::pool_member_refusals` with serve's build options minus
+  installation-id minting
 - `src/commands/config_edit.rs` -- `routectl config set/unset`: the write
   pipeline through the shared gate. Order: RAW version preflight FIRST
   (refuses a missing `version` or `version < CURRENT_CONFIG_VERSION`
@@ -8272,9 +8349,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   (clamped never below the window's own lower bound), then widens the requested
   `hour`/`day` width by a whole multiple (i128 intermediates) until the count fits
   the cap, so the grid always covers the window and never exceeds it
-- `src/commands/usage_downgrade.rs` -- `routectl usage downgrade --to 17|16
-  [--db P]`: the offline rollback over `routectl_usage::downgrade_to` (a v18
-  file taken to 16 runs both steps); prints the re-stamped path, exits 1 on
+- `src/commands/usage_downgrade.rs` -- `routectl usage downgrade --to 18|17|16
+  [--db P]`: the offline rollback over `routectl_usage::downgrade_to` (a v19
+  file taken to 16 runs every step); prints the re-stamped path, exits 1 on
   refusal
 - `src/commands/opening_accuracy/mod.rs` -- `routectl usage
   --opening-accuracy`, the read-only context meter release-gate report over an
@@ -8507,7 +8584,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   seats (`ParkedSeat`: state key, reason, epoch-ms deadline; empty from the
   disk layers, so the CLI doctor reports no parks), which the auth section
   renders through `parked_seat_finding` as one `parked seat <state_key>` Warn
-  each naming the reason and the RFC3339 deadline. `served_layers` folds them into the shared gather's layers with
+  each naming the reason and the RFC3339 deadline; `with_unusable_seats`
+  likewise attaches `UnusableSeat`s (state key, cause, since, fix line from
+  `SeatFix` / `unusable_seat_fix`), rendered by `unusable_seat_finding` as one
+  `unusable seat <state_key>` Warn each. `served_layers` folds them into the shared gather's layers with
   `MatrixOrigin::Resident` (panel `source: resident`, `warm` set with an
   `unreadable` warm's class, no replay tally) and the accepted config's
   version, which the version finding reports instead of preflighting the
@@ -8607,7 +8687,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `routectl_router::overlay_soft_defects` off whichever overlay the gather
   holds -- the disk file for the CLI, the router's own overlay when served --
   selector `sanitize_for_log`-filtered), auth (no seats/expired -> WARN, store-open error ->
-  FAIL), pools
+  FAIL, plus the served gather's parked and unusable seat findings; a login
+  remediation names `oauth_login_command`, `--label` and shell-quoting
+  included), pools
   (`section_seat_pools` + `pool_finding`: one finding per `[pools.<name>]`
   block from `seat_report::describe_pool` -- Warn naming a member with no
   stored credential, Fail when no member has one, so this section CAN move the
