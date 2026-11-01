@@ -265,8 +265,8 @@ fn credential_ref_scheme(api_key_ref: Option<&str>) -> Option<String> {
     }
     let token = raw.split_once(':').map_or("", |(scheme, _)| scheme);
     let label = SecretScheme::ALL
-        .into_iter()
-        .map(SecretScheme::as_token)
+        .iter()
+        .map(|scheme| scheme.as_token())
         .find(|known| token.eq_ignore_ascii_case(known))
         .unwrap_or(UNKNOWN_CREDENTIAL_REF_SCHEME);
     Some(label.to_string())

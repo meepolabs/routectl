@@ -366,9 +366,8 @@ fn the_generic_mint_refuses_a_key_bedrock_stores_in_the_field_namespace() {
 /// namespace: it reports the refusal, records nothing, and leaves no field
 /// verdict acting. The ordinary key on the same lane is the control.
 ///
-/// Mutation check: remove the namespace refusal at the top of
-/// `observe_learned_capability` AND the one in the registry's
-/// `observe_in_generation` -> red (applied, one resident field row).
+/// Mutation check: remove the namespace screen at the top of the registry's
+/// `learn` -> red (applied, one resident field row).
 #[test]
 fn the_public_learn_entry_refuses_a_key_bedrock_stores_in_the_field_namespace() {
     let router = bedrock_router("unused");

@@ -245,17 +245,17 @@ pub enum ConfigCreateError {
     NoParent,
     /// Creating the temp file in the parent directory failed.
     #[error("tempfile: {0}")]
-    Tempfile(std::io::Error),
+    Tempfile(#[source] std::io::Error),
     /// Writing the bytes into the temp file failed.
     #[error("write: {0}")]
-    Write(std::io::Error),
+    Write(#[source] std::io::Error),
     /// Flushing the temp file to disk failed.
     #[error("fsync: {0}")]
-    Fsync(std::io::Error),
+    Fsync(#[source] std::io::Error),
     /// Linking the temp file into place failed for a reason other than an
     /// existing file.
     #[error("publish: {0}")]
-    Publish(std::io::Error),
+    Publish(#[source] std::io::Error),
 }
 
 /// Create `path` holding `bytes`, never replacing an existing file: a fsynced
@@ -624,6 +624,56 @@ mod tests {
 
         // Assert
         assert!(matches!(err, ConfigCreateError::NoParent), "err: {err:?}");
+    }
+
+    #[test]
+    fn config_create_error_chains_the_io_cause_of_each_io_stage() {
+        use std::error::Error as _;
+        let boom = || std::io::Error::other("boom");
+        let cases: [(&str, ConfigCreateError, Option<&str>, &str); 6] = [
+            (
+                "already_exists",
+                ConfigCreateError::AlreadyExists,
+                None,
+                "config already exists",
+            ),
+            (
+                "no_parent",
+                ConfigCreateError::NoParent,
+                None,
+                "path has no parent directory",
+            ),
+            (
+                "tempfile",
+                ConfigCreateError::Tempfile(boom()),
+                Some("boom"),
+                "tempfile: boom",
+            ),
+            (
+                "write",
+                ConfigCreateError::Write(boom()),
+                Some("boom"),
+                "write: boom",
+            ),
+            (
+                "fsync",
+                ConfigCreateError::Fsync(boom()),
+                Some("boom"),
+                "fsync: boom",
+            ),
+            (
+                "publish",
+                ConfigCreateError::Publish(boom()),
+                Some("boom"),
+                "publish: boom",
+            ),
+        ];
+
+        for (name, err, source, display) in cases {
+            let rendered_source = err.source().map(ToString::to_string);
+            assert_eq!(rendered_source.as_deref(), source, "{name}: source");
+            assert_eq!(err.to_string(), display, "{name}: display");
+        }
     }
 
     // -----------------------------------------------------------------------

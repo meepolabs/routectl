@@ -111,11 +111,14 @@ impl SecretRef {
     }
 }
 
-/// The closed set of secret-ref schemes: the one allowlist every leak-safe
-/// label site classifies against. A label derived from it never carries a
-/// byte of the ref body, so a value pasted into a ref field (which IS secret
-/// material) can only ever surface as "no scheme".
+/// The secret-ref scheme allowlist every leak-safe label site renders from.
+/// [`Self::classify`] returns `None` for anything off the list, and a label
+/// site classifying raw ref text renders `None` as the fixed label
+/// `unknown`; a site starting from a parsed [`SecretRef`] is always on the
+/// list. No label carries a byte of the ref body, so a value pasted into a
+/// ref field (which IS secret material) never reaches a label.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum SecretScheme {
     /// `env://VAR_NAME`.
     Env,
@@ -129,7 +132,7 @@ pub enum SecretScheme {
 
 impl SecretScheme {
     /// Every scheme, in classification order.
-    pub const ALL: [Self; 4] = [Self::Env, Self::File, Self::OAuth, Self::Literal];
+    pub const ALL: &'static [Self] = &[Self::Env, Self::File, Self::OAuth, Self::Literal];
 
     /// The scheme whose prefix `uri` starts with, matched case-sensitively
     /// exactly as [`SecretRef::parse`] matches. `None` for anything else,
@@ -137,7 +140,8 @@ impl SecretScheme {
     #[must_use]
     pub fn classify(uri: &str) -> Option<Self> {
         Self::ALL
-            .into_iter()
+            .iter()
+            .copied()
             .find(|scheme| uri.starts_with(scheme.as_prefix()))
     }
 
@@ -474,7 +478,7 @@ mod tests {
     #[test]
     fn secret_scheme_spells_prefix_and_token() {
         let spellings: Vec<_> = SecretScheme::ALL
-            .into_iter()
+            .iter()
             .map(|s| (s.as_prefix(), s.as_token()))
             .collect();
         assert_eq!(

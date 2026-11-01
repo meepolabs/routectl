@@ -465,12 +465,6 @@ impl Router {
         now: Instant,
     ) -> crate::learned_capability::GenerationOutcome<crate::learned_capability::ObserveOutcome>
     {
-        if crate::field_capability::learned_key_enters_field_namespace(
-            key.feature_key_raw,
-            key.provider_kind,
-        ) {
-            return crate::learned_capability::GenerationOutcome::FieldNamespace;
-        }
         self.learned_capabilities
             .observe_in_generation(generation, key, evidence, now)
     }
