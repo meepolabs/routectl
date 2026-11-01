@@ -295,7 +295,7 @@ impl OpenAiResponsesProvider {
         // api_key_ref only) still emits a full codex fingerprint. The
         // header_extras loop below OVERRIDES any matching key. ApiKey /
         // BedrockMantle get no defaults (no codex fingerprint).
-        if self.cfg.auth_kind == AuthKind::ChatgptOauth {
+        if self.cfg.auth_kind.is_codex_lane() {
             for (k, v) in routectl_core::identity::codex::default_identity_headers() {
                 crate::http_client::insert_header(&mut header_map, &self.cfg.id, k, v);
             }
@@ -338,7 +338,7 @@ impl OpenAiResponsesProvider {
         //     request, shared between the two. Codex pairs them.
         //   - x-codex-window-id: the per-provider UUID from
         //     `self.window_id`, stable across requests on this instance.
-        if self.cfg.auth_kind == AuthKind::ChatgptOauth {
+        if self.cfg.auth_kind.is_codex_lane() {
             let thread_id = uuid::Uuid::new_v4().to_string();
             crate::http_client::insert_header(
                 &mut header_map,

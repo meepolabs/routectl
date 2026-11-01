@@ -117,6 +117,15 @@ pub enum AuthKind {
     BedrockMantle,
 }
 
+impl AuthKind {
+    /// True for the ChatGPT-subscription codex surface, whose wire shape
+    /// omits `max_output_tokens` and carries the codex identity headers.
+    #[must_use]
+    pub(crate) const fn is_codex_lane(self) -> bool {
+        matches!(self, Self::ChatgptOauth)
+    }
+}
+
 /// The format tag this lane stamps on the reasoning artifacts it
 /// produces.
 ///

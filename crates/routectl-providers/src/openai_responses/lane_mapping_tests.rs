@@ -11,6 +11,17 @@ fn lane_format_tag_covers_every_auth_kind() {
 }
 
 #[test]
+fn is_codex_lane_is_true_only_for_chatgpt_oauth() {
+    for (kind, expected) in [
+        (AuthKind::ChatgptOauth, true),
+        (AuthKind::ApiKey, false),
+        (AuthKind::BedrockMantle, false),
+    ] {
+        assert_eq!(kind.is_codex_lane(), expected, "{kind:?}");
+    }
+}
+
+#[test]
 fn lane_format_tag_is_distinct_per_lane() {
     let tags = [
         lane_format_tag(AuthKind::ChatgptOauth),

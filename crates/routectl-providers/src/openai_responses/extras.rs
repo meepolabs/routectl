@@ -247,7 +247,7 @@ pub(super) fn apply_installation_id(
     installation_id: Option<&str>,
     tap: Option<&WireTap>,
 ) {
-    if auth_kind != AuthKind::ChatgptOauth {
+    if !auth_kind.is_codex_lane() {
         return;
     }
     let Some(iid) = installation_id else {

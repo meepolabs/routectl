@@ -72,8 +72,8 @@ pub fn translate(cfg: &OpenAiResponsesConfig, req: &ChatRequest) -> Result<Respo
         tool_choice,
         parallel_tool_calls: true,
         reasoning: None,
-        // ChatgptOauth always sends store=false. Other auth_kinds may
-        // override via provider_extras["store"] (handled in extras.rs).
+        // Every lane starts at store=false; extras.rs honors a
+        // provider_extras["store"] override only on lanes that allow it.
         store: false,
         stream: false,
         include: Vec::new(),
@@ -90,9 +90,10 @@ pub fn translate(cfg: &OpenAiResponsesConfig, req: &ChatRequest) -> Result<Respo
         // the stream has started, too late to retry invisibly.
         // SEED-VERDICT: acceptance-seed -- the refusal can arrive mid-stream
         // outside field repair, so the ceiling is withheld before send.
-        max_output_tokens: match cfg.auth_kind {
-            AuthKind::ChatgptOauth => None,
-            _ => req.max_tokens,
+        max_output_tokens: if cfg.auth_kind.is_codex_lane() {
+            None
+        } else {
+            req.max_tokens
         },
     };
 
@@ -232,7 +233,7 @@ fn declare_lane_gates(tap: &WireTap, auth_kind: AuthKind, req: &ChatRequest) {
     if let Some(kind) = parallel_kind {
         crate::wire_declare::declare(tap, site, "/parallel_tool_calls", kind);
     }
-    if auth_kind == AuthKind::ChatgptOauth && req.max_tokens.is_some() {
+    if auth_kind.is_codex_lane() && req.max_tokens.is_some() {
         crate::wire_declare::declare(
             tap,
             EditSite::AuthSurfaceGate,
