@@ -442,8 +442,13 @@ async fn the_sticky_snapshot_reads_every_seat_of_a_parked_account_as_blocked() {
         models.insert(
             nickname.into(),
             Arc::new(
-                ResolvedModel::new(nickname, "the-pool", seats[0].provider.clone(), "claude-x")
-                    .with_seats(Arc::clone(&seats)),
+                ResolvedModel::new(
+                    nickname,
+                    "the-pool",
+                    seats[0].provider.clone().expect("seat 0 is built"),
+                    "claude-x",
+                )
+                .with_seats(Arc::clone(&seats)),
             ),
         );
     }

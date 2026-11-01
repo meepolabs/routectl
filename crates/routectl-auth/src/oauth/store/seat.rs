@@ -4,9 +4,9 @@ use async_trait::async_trait;
 
 use routectl_core::{Error, Result};
 
-use crate::oauth::providers;
 use crate::oauth::types::{seat_key, unix_now};
-use crate::{SecretRef, SecretStore};
+use crate::oauth::{OAuthError, providers};
+use crate::{CredentialProbeFailure, SecretRef, SecretStore};
 
 use super::{OAuthStore, REFRESH_LEAD_SECS};
 
@@ -46,6 +46,28 @@ impl SecretStore for OAuthStore {
             return Ok(refreshed.access_token.expose().to_string());
         }
         Ok(rec.access_token.expose().to_string())
+    }
+
+    async fn probe_credential(
+        &self,
+        secret_ref: &SecretRef,
+    ) -> std::result::Result<(), CredentialProbeFailure> {
+        if self.get(secret_ref).await.is_ok() {
+            return Ok(());
+        }
+        let SecretRef::OAuth { provider, label } = secret_ref else {
+            return Err(CredentialProbeFailure::Unreadable);
+        };
+        if providers::lookup(provider).is_err() {
+            return Err(CredentialProbeFailure::Unreadable);
+        }
+        match self
+            .read_record(&seat_key(provider, label.as_deref()))
+            .await
+        {
+            Err(OAuthError::NotLoggedIn(_)) => Err(CredentialProbeFailure::NotLoggedIn),
+            _ => Err(CredentialProbeFailure::Unreadable),
+        }
     }
 
     async fn set(&self, _secret_ref: &SecretRef, _value: &str) -> Result<()> {

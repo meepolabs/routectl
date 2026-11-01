@@ -10,13 +10,15 @@ use crate::catalog_overlay::CatalogOverlay;
 use crate::config::{BedrockApiShapeConfig, BedrockCredsConfig};
 use crate::config::{Config, CredentialSource, PoolEntry, ProviderEntry};
 use crate::pool_build::{
-    PoolMemberOmission, PoolOmissionReason, PoolOutcome, PoolReport, unavailable_pool_error,
+    PoolMemberOmission, PoolOmissionReason, PoolOutcome, PoolPlaceholder, PoolReport,
+    unavailable_pool_error,
 };
 use crate::resolved::ResolvedModel;
+use crate::runtime_state::UnusableCause;
 use crate::seat_pool::SeatTarget;
 #[cfg(feature = "gemini")]
 use routectl_auth::OAuthStoreProjectCache;
-use routectl_auth::{SecretRef, SecretStore};
+use routectl_auth::{CredentialProbeFailure, SecretRef, SecretStore};
 #[cfg(feature = "gemini")]
 use routectl_core::CloudProjectCache;
 use routectl_core::{Provider, Result};
@@ -843,11 +845,12 @@ fn primary_api_key_uri(entry: &ProviderEntry) -> Option<&str> {
 /// arrives here by construction -- a member whose ref is a bare
 /// `oauth://<provider>` gets that provider's default seat and nothing else.
 ///
-/// A member that cannot be built is OMITTED with an allowlisted reason
-/// rather than sinking the pool, so a pool with one dead account keeps
-/// serving through its survivors. Zero usable members yields
-/// [`PoolOutcome::Unavailable`], which the caller turns into a build refusal
-/// for every model routed at the pool.
+/// A member whose credential probe fails is kept as a PLACEHOLDER seat (no
+/// provider) and reported with its unusable cause, so its account can be
+/// marked and a pool of placeholders alone still builds. A member that cannot
+/// be built for any other reason is OMITTED with an allowlisted reason. Zero
+/// kept members yields [`PoolOutcome::Unavailable`], which the caller turns
+/// into a build refusal for every model routed at the pool.
 ///
 /// Members are walked in declaration order, and the resulting seat order is
 /// the operator's declared order -- the strategy layer
@@ -860,6 +863,7 @@ async fn compile_pool(
     opts: &BuildOptions,
 ) -> PoolOutcome {
     let mut seats: Vec<SeatTarget> = Vec::with_capacity(pool.members.len());
+    let mut placeholders: Vec<PoolPlaceholder> = Vec::new();
     let mut omissions: Vec<PoolMemberOmission> = Vec::new();
 
     for member in &pool.members {
@@ -898,30 +902,33 @@ async fn compile_pool(
         // Probe the credential BEFORE building. An `oauth://` provider builds
         // with a LAZY token source (so rotation is picked up per request
         // without a restart), which means a logged-out member would otherwise
-        // build successfully and only fail at first traffic -- and the pool
-        // would report itself fully healthy. The probe is what makes "usable
-        // member" answerable at build time, which is the whole basis of the
-        // Ready / Unavailable split. One read per member per build, collapsed
-        // by the store's own cache + single-flight.
-        if secrets.get(&secret_ref).await.is_err() {
-            let reason = PoolOmissionReason::CredentialUnreadable;
-            omissions.push(PoolMemberOmission {
+        // build successfully and only fail at first traffic. A failed probe
+        // keeps the member as a placeholder seat whose account is marked
+        // unusable at install; a logged-out Codex member could not even
+        // build (it has no account id). One read per member per build,
+        // collapsed by the store's own cache + single-flight.
+        if let Err(failure) = secrets.probe_credential(&secret_ref).await {
+            let cause = unusable_cause_for_probe_failure(failure);
+            let seat = SeatTarget::placeholder(
+                member.clone(),
+                Some(secret_ref),
+                entry.forwarded_base_url().is_some(),
+            );
+            placeholders.push(PoolPlaceholder {
                 member: member.clone(),
                 provider_kind,
-                reason,
+                cause,
+                account: seat.account().map(str::to_string),
             });
-            // The store's error text is deliberately NOT logged: it inlines
-            // the credentials-file path and the account id it failed on, and a
-            // debug-level line ships to the same archived, audited destinations
-            // every other level does. The allowlisted reason token is the whole
-            // diagnostic -- sanitization that only holds at one log level is
-            // not sanitization.
+            seats.push(seat);
+            // The store's error text never reaches here: the probe returns
+            // only a variant. The cause token is the whole diagnostic.
             tracing::debug!(
                 pool = %pool_name,
                 member = %member,
                 provider_kind,
-                reason = reason.token(),
-                "pool member credential unreadable",
+                cause = cause.as_str(),
+                "pool member credential unreadable; kept as an unusable seat",
             );
             continue;
         }
@@ -960,8 +967,18 @@ async fn compile_pool(
     } else {
         PoolOutcome::Ready {
             seats: Arc::from(seats),
+            placeholders,
             omissions,
         }
+    }
+}
+
+/// The unusable cause a failed credential probe earns, by the failure's
+/// variant: only a missing login is `not_logged_in`.
+const fn unusable_cause_for_probe_failure(failure: CredentialProbeFailure) -> UnusableCause {
+    match failure {
+        CredentialProbeFailure::NotLoggedIn => UnusableCause::NotLoggedIn,
+        _ => UnusableCause::Unreadable,
     }
 }
 
@@ -1550,9 +1567,12 @@ fn apply_model_knobs(
 /// Assemble the `ResolvedModel` for a pool-backed model from the pool's
 /// shared seat set.
 ///
-/// `provider` and `auth_secret_ref` mirror the FIRST seat: those two fields
-/// are the single-target projection of a model, and dispatch reads them only
-/// for a model with no seats. `provider_name` keeps the POOL name -- it is
+/// `provider` and `auth_secret_ref` mirror the FIRST BUILT seat: those two
+/// fields are the single-target projection of a model, and dispatch reads
+/// them only for a model with no seats. A pool of placeholders alone has no
+/// built seat, so its projection is an inert provider that is never dialed
+/// (every seat is a placeholder, and dispatch refuses a placeholder before
+/// reading any provider). `provider_name` keeps the POOL name -- it is
 /// what the operator wrote, what the strategy lookup keys on, and what
 /// reload's rotation carry-over matches; every per-provider config lookup on
 /// the dispatch path resolves against the seat's own `provider_name` instead.
@@ -1561,14 +1581,17 @@ fn resolved_pool_model(
     entry: &crate::config::ModelEntry,
     seats: Arc<[SeatTarget]>,
 ) -> ResolvedModel {
-    let first = &seats[0];
+    let built = seats.iter().find(|seat| !seat.is_placeholder());
+    let provider = built
+        .and_then(|seat| seat.provider.clone())
+        .unwrap_or_else(super::inert_provider::inert_provider);
     let mut resolved = ResolvedModel::new(
         nickname,
         entry.provider.clone(),
-        first.provider.clone(),
+        provider,
         entry.upstream.clone(),
     );
-    if let Some(sr) = first.auth_secret_ref.clone() {
+    if let Some(sr) = built.unwrap_or(&seats[0]).auth_secret_ref.clone() {
         resolved = resolved.with_auth_secret_ref(sr);
     }
     resolved = apply_model_knobs(resolved, nickname, entry);
@@ -1586,12 +1609,16 @@ fn pool_reports(
         .iter()
         .filter_map(|(pool, models)| {
             let outcome = outcomes.get(pool)?;
-            let usable_members = outcome.seats().map_or(0, |seats| seats.len());
+            let placeholders = outcome.placeholders().to_vec();
+            let usable_members = outcome
+                .seats()
+                .map_or(0, |seats| seats.len() - placeholders.len());
             Some(PoolReport {
                 pool: pool.clone(),
                 models: models.clone(),
-                configured_members: usable_members + outcome.omissions().len(),
+                configured_members: usable_members + placeholders.len() + outcome.omissions().len(),
                 usable_members,
+                placeholders,
                 omissions: outcome.omissions().to_vec(),
             })
         })
@@ -1745,3 +1772,7 @@ fn scheme_of(uri: &str) -> &'static str {
 #[cfg(test)]
 #[path = "build_tests.rs"]
 mod build_tests;
+
+#[cfg(test)]
+#[path = "build_placeholder_tests.rs"]
+mod build_placeholder_tests;

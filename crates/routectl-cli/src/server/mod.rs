@@ -233,5 +233,9 @@ mod essential_routeaway_daemon_tests;
 mod observation_reconcile_daemon_tests;
 
 #[cfg(test)]
+#[path = "placeholder_seat_daemon_tests.rs"]
+mod placeholder_seat_daemon_tests;
+
+#[cfg(test)]
 #[path = "observation_lifecycle_daemon_tests.rs"]
 mod observation_lifecycle_daemon_tests;

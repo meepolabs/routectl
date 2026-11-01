@@ -1,5 +1,7 @@
 //! The structured degraded-pool WARN: `event="pool_member_omitted"`, one line
-//! per omitted member per build attempt.
+//! per omitted member per build attempt. A member whose credential the store
+//! refuses is not omitted: it is kept as an unusable placeholder seat, and its
+//! build diagnostic carries no store text either.
 //!
 //! Field content is the whole point of these tests. The line reaches operator
 //! log destinations that get archived, shipped to third parties, and audited,
@@ -74,6 +76,15 @@ fn pooled_config(members: &[&str]) -> Config {
     }
 }
 
+/// `pooled_config` with `member`'s entry carrying no credential reference,
+/// which omits it from the seat set.
+fn pooled_config_without_ref(members: &[&str], member: &str) -> Config {
+    let mut cfg = pooled_config(members);
+    cfg.providers
+        .insert(member.into(), ProviderEntry::anthropic_api(""));
+    cfg
+}
+
 /// Every `pool_member_omitted` event in a capture.
 fn omission_events(events: &[CapturedEvent]) -> Vec<&CapturedEvent> {
     events
@@ -84,11 +95,11 @@ fn omission_events(events: &[CapturedEvent]) -> Vec<&CapturedEvent> {
 
 #[tokio::test]
 async fn a_degraded_pool_warns_exactly_once_for_the_member_it_lost() {
-    // Arrange: two members, one of them unable to resolve a credential.
+    // Arrange: two members, one of them with no credential reference.
     let store: Arc<dyn SecretStore> = Arc::new(RefusingStore {
-        dead_provider: "anthropic-b".into(),
+        dead_provider: "nobody".into(),
     });
-    let cfg = pooled_config(&["anthropic-a", "anthropic-b"]);
+    let cfg = pooled_config_without_ref(&["anthropic-a", "anthropic-b"], "anthropic-b");
 
     // Act
     let (result, events) = with_capture(build_resolved_models_reported(
@@ -112,16 +123,16 @@ async fn a_degraded_pool_warns_exactly_once_for_the_member_it_lost() {
     assert_eq!(e.field("pool"), Some("anthropic-pool"));
     assert_eq!(e.field("member"), Some("anthropic-b"));
     assert_eq!(e.field("provider_kind"), Some("anthropic-api"));
-    assert_eq!(e.field("reason"), Some("credential_unreadable"));
+    assert_eq!(e.field("reason"), Some("credential_missing"));
     assert_eq!(e.field("configured_members"), Some("2"));
     assert_eq!(e.field("usable_members"), Some("1"));
 }
 
 #[tokio::test]
-async fn the_omission_warn_carries_no_store_error_text() {
+async fn a_store_refusal_keeps_the_member_and_emits_no_store_error_text() {
     // The store's refusal names a credentials-file path, an account id, and the
-    // provider it belongs to. None of it may reach the line: the reason is an
-    // allowlisted enum, never a formatted error.
+    // provider it belongs to. The member is kept as a placeholder seat rather
+    // than omitted, and none of the refusal's text reaches any event.
     let store: Arc<dyn SecretStore> = Arc::new(RefusingStore {
         dead_provider: "anthropic-b".into(),
     });
@@ -133,10 +144,11 @@ async fn the_omission_warn_carries_no_store_error_text() {
         BuildOptions::default(),
     ))
     .await;
-    result.expect("a degraded pool must still build");
+    let built = result.expect("a degraded pool must still build");
 
-    let omissions = omission_events(&events);
-    let rendered = format!("{:?}", omissions[0]);
+    assert!(omission_events(&events).is_empty(), "{events:?}");
+    assert_eq!(built.pool_reports[0].placeholders.len(), 1);
+    let rendered = format!("{events:?}");
     for banned in [
         "/home/operator",
         "credentials.json",
@@ -147,23 +159,26 @@ async fn the_omission_warn_carries_no_store_error_text() {
     ] {
         assert!(
             !rendered.contains(banned),
-            "the omission WARN must not carry `{banned}`: {rendered}"
+            "no build event may carry `{banned}`: {rendered}"
         );
     }
 }
 
 #[tokio::test]
 async fn the_reason_is_always_one_of_the_four_allowlisted_tokens() {
-    // Two distinct failure shapes across one build: a member with no credential
-    // reference at all, and a member whose reference the store refuses.
+    // Two distinct omission shapes across one build: a member with no
+    // credential reference at all, and a member whose reference does not parse.
     let store: Arc<dyn SecretStore> = Arc::new(RefusingStore {
-        dead_provider: "anthropic-b".into(),
+        dead_provider: "nobody".into(),
     });
-    let mut cfg = pooled_config(&["anthropic-a", "anthropic-b", "anthropic-c"]);
-    // An entry with an empty credential reference: nothing to authenticate an
-    // account with, which is a distinct cause from a refused one.
-    cfg.providers
-        .insert("anthropic-c".into(), ProviderEntry::anthropic_api(""));
+    let mut cfg = pooled_config_without_ref(
+        &["anthropic-a", "anthropic-b", "anthropic-c"],
+        "anthropic-c",
+    );
+    cfg.providers.insert(
+        "anthropic-b".into(),
+        ProviderEntry::anthropic_api("not a ref"),
+    );
 
     let (result, events) = with_capture(build_resolved_models_reported(
         &cfg,
@@ -252,9 +267,9 @@ async fn the_debug_diagnostic_for_a_lost_member_carries_no_store_error_text() {
             "no build diagnostic at any level may carry `{banned}`: {all}"
         );
     }
-    // And the debug line still says WHY, via the allowlisted token.
+    // And the debug line still says WHY, via the cause token.
     assert!(
-        all.contains("credential_unreadable"),
-        "the reason token must survive as the diagnostic: {all}"
+        all.contains("unreadable"),
+        "the cause token must survive as the diagnostic: {all}"
     );
 }

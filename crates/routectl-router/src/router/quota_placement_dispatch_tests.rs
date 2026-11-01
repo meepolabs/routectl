@@ -126,7 +126,7 @@ fn pooled_router_with_selection(selection: SeatSelection, quota_enabled: bool) -
             ProviderEntry::anthropic_api(member_ref.to_string()),
         );
     }
-    let default_provider = seats[0].provider.clone();
+    let default_provider = seats[0].provider.clone().expect("seat 0 is built");
 
     let mut pools = BTreeMap::new();
     pools.insert(

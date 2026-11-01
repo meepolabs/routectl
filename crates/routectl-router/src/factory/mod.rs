@@ -2,6 +2,7 @@
 
 mod beta_floor_warnings;
 mod build;
+mod inert_provider;
 #[cfg(feature = "openai-responses")]
 mod installation_id;
 mod validate;

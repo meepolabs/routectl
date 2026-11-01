@@ -580,7 +580,10 @@ mod build_resolved_models_tests {
         // And therefore each member's provider was built exactly once.
         for (a, b) in opus_seats.iter().zip(sonnet_seats.iter()) {
             assert!(
-                Arc::ptr_eq(&a.provider, &b.provider),
+                Arc::ptr_eq(
+                    a.provider.as_ref().expect("built"),
+                    b.provider.as_ref().expect("built")
+                ),
                 "member {} must not be built twice",
                 a.provider_name,
             );
@@ -588,9 +591,9 @@ mod build_resolved_models_tests {
     }
 
     #[tokio::test]
-    async fn a_pool_with_one_dead_member_serves_through_the_survivor() {
-        // Degraded, not failed: the pool keeps serving and reports exactly the
-        // member it lost, with an allowlisted reason.
+    async fn a_pool_with_one_dead_member_keeps_it_as_a_placeholder_seat() {
+        // Degraded, not failed: the pool keeps serving through the survivor,
+        // and the dead member stays in the seat set with no provider.
         let store: Arc<dyn SecretStore> = Arc::new(OneDeadCredentialStore {
             dead_provider: "anthropic-b".into(),
         });
@@ -601,8 +604,11 @@ mod build_resolved_models_tests {
             .expect("a degraded pool must still build");
 
         let seats = built.models["opus"].seats.as_ref().expect("seats");
-        assert_eq!(seats.len(), 1, "the survivor serves");
-        assert_eq!(seats[0].provider_name, "anthropic-a");
+        let shape: Vec<(&str, bool)> = seats
+            .iter()
+            .map(|seat| (seat.provider_name.as_str(), seat.is_placeholder()))
+            .collect();
+        assert_eq!(shape, vec![("anthropic-a", false), ("anthropic-b", true)]);
 
         let report = built
             .pool_reports
@@ -610,69 +616,41 @@ mod build_resolved_models_tests {
             .find(|r| r.pool == "anthropic-pool")
             .expect("the pool reports");
         assert!(report.is_degraded());
+        assert!(report.omissions.is_empty(), "a probe failure omits nothing");
         assert_eq!(report.configured_members, 2);
         assert_eq!(report.usable_members, 1);
-        assert_eq!(report.omissions.len(), 1, "exactly one member omitted");
-        assert_eq!(report.omissions[0].member, "anthropic-b");
         assert_eq!(
-            report.omissions[0].reason,
-            crate::pool_build::PoolOmissionReason::CredentialUnreadable
+            report.placeholders,
+            vec![crate::pool_build::PoolPlaceholder {
+                member: "anthropic-b".into(),
+                provider_kind: "anthropic-api",
+                cause: crate::runtime_state::UnusableCause::Unreadable,
+                account: Some("anthropic-b".into()),
+            }]
         );
-        assert_eq!(report.omissions[0].provider_kind, "anthropic-api");
+    }
+
+    /// A member with no credential reference: an omission arm, which still
+    /// refuses a pool left with no seat at all.
+    fn refless_pool_config(pool: &str, member: &str) -> Config {
+        let mut cfg = pooled_config(pool, &[member], &["opus"]);
+        cfg.providers
+            .insert(member.to_string(), ProviderEntry::anthropic_api(""));
+        cfg
     }
 
     #[tokio::test]
-    async fn an_omission_report_carries_no_store_error_text() {
-        // The report reaches a log field AND an operator-facing surface, so an
-        // error string routed into it would publish whatever the store put in
-        // its message -- here a provider id plus login guidance, elsewhere a
-        // credential path or account id. Anchored on the SHIPPED report, not on
-        // a Debug projection of it.
-        let store: Arc<dyn SecretStore> = Arc::new(OneDeadCredentialStore {
-            dead_provider: "anthropic-b".into(),
-        });
-        let cfg = pooled_config("anthropic-pool", &["anthropic-a", "anthropic-b"], &["opus"]);
-
-        let built = build_resolved_models_reported(&cfg, store, BuildOptions::default())
-            .await
-            .expect("a degraded pool must still build");
-
-        let omission = &built.pool_reports[0].omissions[0];
-        assert_eq!(
-            omission.reason.token(),
-            "credential_unreadable",
-            "the reason must be one of the four allowlisted tokens"
-        );
-        // Every field of the shipped omission, concatenated: nothing but the
-        // member key, the kind token, and the reason token may appear.
-        let shipped = format!(
-            "{}|{}|{}",
-            omission.member,
-            omission.provider_kind,
-            omission.reason.token()
-        );
-        for banned in ["routectl login", "no credentials", "token", "oauth://"] {
-            assert!(
-                !shipped.contains(banned),
-                "shipped omission must not carry `{banned}`: {shipped}"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn a_pool_with_no_usable_member_fails_the_build_naming_pool_and_model() {
-        // Zero usable members behind a selectable model is unroutable, so the
+    async fn a_pool_with_no_kept_member_fails_the_build_naming_pool_and_model() {
+        // Zero kept members behind a selectable model is unroutable, so the
         // build refuses rather than starting healthy and failing at first
         // traffic. Also the reload contract: a candidate build that returns Err
         // is discarded by every caller, leaving the previous router live.
-        let store: Arc<dyn SecretStore> = Arc::new(OneDeadCredentialStore {
-            dead_provider: "anthropic-a".into(),
-        });
-        let cfg = pooled_config("anthropic-pool", &["anthropic-a"], &["opus"]);
+        let store: Arc<dyn SecretStore> = Arc::new(MemoryStore::new());
+        let cfg = refless_pool_config("anthropic-pool", "anthropic-a");
 
         let err = build_resolved_models_reported(&cfg, store, BuildOptions::default())
             .await
-            .expect_err("a zero-usable pool must refuse the build");
+            .expect_err("a pool with no kept member must refuse the build");
 
         let msg = err.to_string();
         assert!(msg.contains("anthropic-pool"), "must name the pool: {msg}");
@@ -685,16 +663,16 @@ mod build_resolved_models_tests {
     #[tokio::test]
     async fn the_build_refusal_for_hostile_pool_keys_renders_one_neutral_line() {
         // Arrange
-        let dead = "anthropic-a\nINFO forged member line";
-        let store: Arc<dyn SecretStore> = Arc::new(OneDeadCredentialStore {
-            dead_provider: dead.into(),
-        });
-        let cfg = pooled_config("pool\n\u{1b}[31mINFO forged pool line", &[dead], &["opus"]);
+        let store: Arc<dyn SecretStore> = Arc::new(MemoryStore::new());
+        let cfg = refless_pool_config(
+            "pool\n\u{1b}[31mINFO forged pool line",
+            "anthropic-a\nINFO forged member line",
+        );
 
         // Act
         let err = build_resolved_models_reported(&cfg, store, BuildOptions::default())
             .await
-            .expect_err("a zero-usable pool must refuse the build");
+            .expect_err("a pool with no kept member must refuse the build");
 
         // Assert
         let msg = err.to_string();
@@ -718,6 +696,7 @@ mod build_resolved_models_tests {
             models: vec!["opus".to_string()],
             configured_members: 2,
             usable_members: 1,
+            placeholders: Vec::new(),
             omissions: vec![PoolMemberOmission {
                 member: "a-1\nWARN forged reason=all_good".to_string(),
                 provider_kind: "anthropic-api",

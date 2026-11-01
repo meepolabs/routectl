@@ -926,7 +926,7 @@ fn pool_then_sibling_router(
             )
         })
         .collect();
-    let default_provider = seat_targets[0].provider.clone();
+    let default_provider = seat_targets[0].provider.clone().expect("seat 0 is built");
     let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
     models.insert(
         "pooled".into(),

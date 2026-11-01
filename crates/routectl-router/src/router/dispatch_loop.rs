@@ -398,6 +398,23 @@ impl Router {
             };
             let mut learning = AttemptLearning::new(self, A::SURFACE, learned_probe_guard);
             let Some(provider) = target.provider.clone() else {
+                if target.is_placeholder_seat() {
+                    let identity = meta.mark_target(target, &req.model);
+                    if let Some(observation) = req.routectl_internal.observation.as_ref() {
+                        observation.set_last_target(identity);
+                    }
+                    meta.fallback_count = chain_idx as u32;
+                    super::credential_park::refuse_placeholder_seat(
+                        provider_name,
+                        target.nickname.as_deref().unwrap_or(""),
+                        A::SURFACE.gate_blocked_message(),
+                        &mut last_err,
+                    );
+                    if opts.disable_fallbacks {
+                        break 'chain;
+                    }
+                    continue;
+                }
                 let err = Error::UnknownProvider(provider_name.to_string());
                 if !A::SURFACE.unknown_provider_walks() {
                     return Err(err);

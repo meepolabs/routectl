@@ -1863,6 +1863,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `BedrockMantle` runtime auth-kind marker), so all three mantle lanes derive
   their endpoint from `region` alone -- the legacy us-east-1 default-endpoint
   fallback (and its WARN) is gone, unreachable behind the validation rejects
+- `src/factory/inert_provider.rs` -- the provider a pool-backed model
+  projects when none of its seats built (every member a placeholder); never
+  dialed, every method refuses a local `credential_unusable`
 - `src/factory/validate_region.rs` -- `validate_aws_regions`: config-load
   rejection of a non-canonical native `region` / `bedrock_mantle.region`
 - `src/factory/validate_cloak.rs` -- `validate_cloak_sensitive_words`:

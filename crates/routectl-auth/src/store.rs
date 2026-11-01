@@ -3,6 +3,18 @@ use routectl_core::Result;
 
 use crate::SecretRef;
 
+/// Why [`SecretStore::probe_credential`] found no usable credential, chosen
+/// by the failure's variant. Carries no error text: the store's message can
+/// name a credentials-file path or an account id.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CredentialProbeFailure {
+    /// No stored login exists for the reference's seat.
+    NotLoggedIn,
+    /// Any other failure: the source could not be read, parsed or refreshed.
+    Unreadable,
+}
+
 /// Resolves [`SecretRef`] values to their current secret and mediates
 /// rotation. Implementations back the individual reference schemes.
 #[async_trait]
@@ -14,6 +26,20 @@ pub trait SecretStore: Send + Sync {
     /// Remove a stored value for a reference whose backing store is
     /// writable.
     async fn delete(&self, secret_ref: &SecretRef) -> Result<()>;
+
+    /// Whether `secret_ref` resolves to a credential right now, and if not,
+    /// why. Default: resolve through [`Self::get`] and report any failure as
+    /// [`CredentialProbeFailure::Unreadable`]. A store that can tell a
+    /// missing login apart (the OAuth store) overrides this.
+    async fn probe_credential(
+        &self,
+        secret_ref: &SecretRef,
+    ) -> std::result::Result<(), CredentialProbeFailure> {
+        self.get(secret_ref)
+            .await
+            .map(|_| ())
+            .map_err(|_| CredentialProbeFailure::Unreadable)
+    }
 
     /// Hook invoked by the router when an upstream returns 401 against
     /// a credential resolved from this store. Default no-op: env://,

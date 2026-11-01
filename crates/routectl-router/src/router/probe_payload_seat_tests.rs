@@ -226,6 +226,28 @@ async fn a_pooled_identity_probes_the_seat_its_lane_names_not_seat_zero() {
 }
 
 #[tokio::test]
+async fn a_pooled_identity_on_a_placeholder_seat_resolves_no_seat_and_dials_nothing() {
+    // Arrange: seat-b is a placeholder; its lane is activated as if a
+    // negative had been learned on it before it lost its credential.
+    let (router, calls) =
+        pooled_router_with_placeholder("m1", ["seat-a", "seat-b"], Some("seat-b"));
+    let key = FieldVerdictKey::new(&pooled_lane("seat-b"), GROUNDED_PATH, "anthropic-api")
+        .expect("identity");
+    router.activate_probe_lane(&key, ProbeValidator::CountTokens);
+
+    // Act
+    let resolved = router.probe_seat_for(&key);
+    router.run_due_probes().await;
+
+    // Assert
+    assert!(
+        resolved.is_none(),
+        "a placeholder seat has nothing to probe"
+    );
+    assert!(calls.lock().is_empty(), "no seat was dialed: {calls:?}");
+}
+
+#[tokio::test]
 async fn a_pooled_identity_naming_no_live_member_probes_nothing() {
     // Converse: a lane whose entry is no current member must dial NOTHING
     // rather than falling back to an arbitrary seat.
@@ -439,6 +461,16 @@ fn pooled_router_named(
     nickname: &str,
     labels: [&'static str; 2],
 ) -> (Router, Arc<parking_lot::Mutex<Vec<&'static str>>>) {
+    pooled_router_with_placeholder(nickname, labels, None)
+}
+
+/// [`pooled_router_named`] with the member named `placeholder` kept as a
+/// placeholder seat (no provider).
+fn pooled_router_with_placeholder(
+    nickname: &str,
+    labels: [&'static str; 2],
+    placeholder: Option<&str>,
+) -> (Router, Arc<parking_lot::Mutex<Vec<&'static str>>>) {
     let calls = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let mut config = Config::default();
     for name in labels {
@@ -458,6 +490,9 @@ fn pooled_router_named(
     let seats: Vec<crate::seat_pool::SeatTarget> = labels
         .into_iter()
         .map(|name| {
+            if placeholder == Some(name) {
+                return crate::seat_pool::SeatTarget::placeholder(name.to_string(), None, false);
+            }
             crate::seat_pool::SeatTarget::new(
                 name.to_string(),
                 Arc::new(NamedSeatProvider {

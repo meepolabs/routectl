@@ -14,7 +14,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use routectl_auth::{MemoryStore, OAuthStore, OpenOutcome, SecretRef, SecretStore};
+use routectl_auth::{
+    CredentialProbeFailure, MemoryStore, OAuthStore, OpenOutcome, SecretRef, SecretStore,
+};
 use routectl_core::Result;
 
 /// Composite resolver wired by `routectl serve` / `test` / `config`.
@@ -179,6 +181,19 @@ impl SecretStore for CompositeStore {
             // trait's provided method; explicit dispatch here keeps the
             // shape symmetric and audit-readable.
             _ => self.fallback.on_auth_failure(secret_ref).await,
+        }
+    }
+
+    async fn probe_credential(
+        &self,
+        secret_ref: &SecretRef,
+    ) -> std::result::Result<(), CredentialProbeFailure> {
+        match secret_ref {
+            SecretRef::OAuth { .. } => match &self.oauth {
+                Some(oauth) => oauth.probe_credential(secret_ref).await,
+                None => Err(CredentialProbeFailure::Unreadable),
+            },
+            _ => self.fallback.probe_credential(secret_ref).await,
         }
     }
 
@@ -347,6 +362,30 @@ mod tests {
         assert!(
             msg.contains("--api-key-stdin") && msg.contains("env://"),
             "rejection must name the safe paths: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn probe_credential_routes_oauth_to_the_oauth_arm() {
+        // Arrange: an empty credentials file, so the oauth seat is logged
+        // out; an unset env var on the fallback arm.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creds.json");
+        let store = CompositeStore::open_at(&path).await.unwrap();
+        let oauth = SecretRef::OAuth {
+            provider: "anthropic".into(),
+            label: Some("seat-a".into()),
+        };
+        let env = SecretRef::Env("ROUTECTL_TEST_COMPOSITE_PROBE_UNSET".into());
+
+        // Act / Assert
+        assert_eq!(
+            store.probe_credential(&oauth).await,
+            Err(CredentialProbeFailure::NotLoggedIn)
+        );
+        assert_eq!(
+            store.probe_credential(&env).await,
+            Err(CredentialProbeFailure::Unreadable)
         );
     }
 

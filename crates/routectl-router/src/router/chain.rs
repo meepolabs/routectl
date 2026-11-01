@@ -567,7 +567,7 @@ pub(super) fn dispatch_target_for_seat(
         seat: crate::seat_pool::seat_identity(seat.auth_secret_ref.as_ref()),
         account: seat.account().map(Arc::from),
         upstream: m.upstream.clone(),
-        provider: Some(seat.provider.clone()),
+        provider: seat.provider.clone(),
         strip_capabilities: std::sync::Arc::default(),
         withheld_betas: std::sync::Arc::default(),
         nickname: Some(m.nickname.clone()),

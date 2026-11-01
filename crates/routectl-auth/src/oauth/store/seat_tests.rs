@@ -339,3 +339,63 @@ async fn set_cloud_project_id_via_secret_store_trait_non_oauth_ref_is_noop() {
         "non-oauth ref must be a no-op, not an error"
     );
 }
+
+fn oauth_ref(provider: &str, label: Option<&str>) -> SecretRef {
+    SecretRef::OAuth {
+        provider: provider.into(),
+        label: label.map(str::to_string),
+    }
+}
+
+#[tokio::test]
+async fn probe_credential_classifies_each_failure_by_its_variant() {
+    // Arrange: one logged-in seat, one missing seat, an unknown provider.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("creds.json");
+    let store = OAuthStore::open(&path).await.unwrap();
+    store
+        .write_record("anthropic#a", rec_at(unix_now() + 3600))
+        .await
+        .unwrap();
+    let rows = [
+        ("logged in", oauth_ref("anthropic", Some("a")), Ok(())),
+        (
+            "missing seat",
+            oauth_ref("anthropic", Some("b")),
+            Err(crate::CredentialProbeFailure::NotLoggedIn),
+        ),
+        (
+            "unknown provider",
+            oauth_ref("made-up", None),
+            Err(crate::CredentialProbeFailure::Unreadable),
+        ),
+        (
+            "non-oauth ref",
+            SecretRef::Env("FOO".into()),
+            Err(crate::CredentialProbeFailure::Unreadable),
+        ),
+    ];
+
+    for (name, secret_ref, expected) in rows {
+        // Act
+        let probed = store.probe_credential(&secret_ref).await;
+
+        // Assert
+        assert_eq!(probed, expected, "{name}");
+    }
+}
+
+#[tokio::test]
+async fn probe_credential_on_a_degraded_store_is_unreadable_not_logged_out() {
+    // Arrange: an unparseable credentials file opens degraded.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("credentials.json");
+    write_creds_0600(&path, b"{ not json");
+    let store = OAuthStore::open_or_degraded(&path).await.unwrap();
+
+    // Act
+    let probed = store.probe_credential(&oauth_ref("anthropic", None)).await;
+
+    // Assert
+    assert_eq!(probed, Err(crate::CredentialProbeFailure::Unreadable));
+}

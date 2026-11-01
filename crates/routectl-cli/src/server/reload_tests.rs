@@ -1032,14 +1032,13 @@ async fn spawn_reload_pipeline_watches_overlay_and_swaps_router_on_write() {
     drain_usage_writer_strict(writer).await;
 }
 
-/// Hot-reload posture: a candidate whose pool has NO usable member is rejected
-/// and the previous router stays live. A degraded pool serves its survivors, so
-/// the only refusal is a pool that serves nothing -- and refusing it at reload
-/// is what keeps a credential outage from replacing a working router with one
-/// whose route cannot dispatch at all.
+/// Hot-reload posture: a candidate whose pool members all have an unreadable
+/// credential is accepted. Each member is kept as an unusable seat, so the new
+/// router refuses locally until a credential recovers rather than the reload
+/// failing.
 #[tokio::test]
 #[serial_test::serial]
-async fn config_reload_rejects_a_candidate_whose_pool_has_no_usable_member() {
+async fn config_reload_accepts_a_candidate_whose_pool_members_are_all_unreadable() {
     // Arrange: a good current-version config, an initial router built from it.
     let dir = tempfile::tempdir().unwrap();
     let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
@@ -1101,106 +1100,24 @@ async fn config_reload_rejects_a_candidate_whose_pool_has_no_usable_member() {
     )
     .await;
 
-    // Assert: the reload rejects and the prior router stays installed.
-    assert_eq!(
-        result.err(),
-        Some(ReloadFailure::RouterBuildFailed),
-        "a zero-usable pool behind a selectable model must reject the reload"
-    );
+    // Assert: the reload applies and the new router holds the member as an
+    // unusable seat.
+    result
+        .expect("a pool of unreadable members must not reject the reload")
+        .expect("the reload returns its config");
     let router_after = swap.load_full();
     assert!(
-        Arc::ptr_eq(&router_before, &router_after),
-        "the previous router must stay live when a candidate is rejected"
+        !Arc::ptr_eq(&router_before, &router_after),
+        "the candidate router is published"
     );
-    drop(usage);
-    drain_usage_writer_strict(writer).await;
-}
-
-/// The reload rejection re-logs the build's refusal string verbatim, so a
-/// `[pools]` key bearing a newline plus an ANSI sequence must not forge a
-/// second log record inside that WARN. Drives `handle_config_reload` directly
-/// under `with_capture` so the thread-local capture subscriber sees the event.
-#[tokio::test]
-#[serial_test::serial]
-async fn the_reload_rejection_warn_neutralizes_control_bytes_in_a_pool_key() {
-    // Arrange: a good current-version config, an initial router built from it.
-    let dir = tempfile::tempdir().unwrap();
-    let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
-    let cfg_path = dir.path().join("config.toml");
-    std::fs::write(
-        &cfg_path,
-        format!("version = {CURRENT_CONFIG_VERSION}\n[server]\nhost = \"127.0.0.1\"\nport = 0\n"),
-    )
-    .unwrap();
-
-    let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::new());
-    let mut initial_config = Config {
-        version: CURRENT_CONFIG_VERSION,
-        ..Default::default()
-    };
-    let _usage_dir = isolate_usage_db(&mut initial_config);
-    let initial_config = Arc::new(initial_config);
-    let (usage, writer) = build_usage_writer(&initial_config);
-    let router = build_router_from_config_with_overlay(
-        initial_config.clone(),
-        &Arc::default(),
-        secrets.clone(),
-    )
-    .await
-    .expect("initial router build");
-    let swap = Arc::new(ArcSwap::from_pointee(router));
-
-    // Act: rewrite the config so a selectable model routes at a zero-usable
-    // pool whose NAME carries the bytes a forged log record needs.
-    std::fs::write(
-        &cfg_path,
-        format!(
-            "version = {CURRENT_CONFIG_VERSION}\n\
-             [server]\nhost = \"127.0.0.1\"\nport = 0\n\n\
-             [providers.anthropic-a]\n\
-             kind = \"anthropic-api\"\n\
-             base_url = \"https://api.anthropic.com\"\n\
-             api_key_ref = \"oauth://anthropic-a\"\n\
-             auth_kind = \"oauth-bearer\"\n\n\
-             [pools.\"pool\\n\\u001B[31mINFO forged line\"]\n\
-             members = [\"anthropic-a\"]\n\n\
-             [models.claude]\n\
-             provider = \"pool\\n\\u001B[31mINFO forged line\"\n\
-             upstream = \"claude-sonnet-4-6\"\n"
-        ),
-    )
-    .unwrap();
-    let (result, events) = routectl_testkit::with_capture(Box::pin(handle_config_reload(
-        Some(&cfg_path),
-        &initial_config,
-        secrets,
-        &swap,
-        &usage,
-        ReloadTrigger::ConfigFile,
-        &mut never_shutdown(),
-    )))
-    .await;
-
-    // Assert: the reload rejects, and the rejection WARN's error field is one
-    // neutral line.
-    assert_eq!(
-        result.err(),
-        Some(ReloadFailure::RouterBuildFailed),
-        "a zero-usable pool must reject the reload"
-    );
-    let error = events
+    let targets = router_after.status_targets(std::time::Instant::now());
+    let seat = targets
         .iter()
-        .find_map(|e| e.field("error"))
-        .expect("the rejection must log an error field");
-    assert!(
-        error.contains("no usable member"),
-        "the pool refusal must be what got logged: {error}"
-    );
-    assert!(!error.contains('\n'), "{error}");
-    assert!(!error.contains('\u{1b}'), "{error}");
-    assert!(
-        error.chars().all(|c| c.is_ascii_graphic() || c == ' '),
-        "{error}"
+        .find(|t| t.state_key == "claude#anthropic-a")
+        .expect("the member is kept as a seat");
+    assert_eq!(
+        seat.gate.credential_unusable.map(|mark| mark.cause),
+        Some(routectl_router::runtime_state::UnusableCause::Unreadable)
     );
     drop(usage);
     drain_usage_writer_strict(writer).await;

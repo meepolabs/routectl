@@ -5350,6 +5350,21 @@ and the seat each names, its strategy, whether it accepts new logins, and
 any member the credential store holds no seat for -- plus one line per
 provider entry no pool claims.
 
+**Pool seats are kept.** A member whose credential cannot be read when
+the router is built (a seat that is not logged in, or a credential that
+cannot be read or refreshed) stays in the pool as an unusable seat
+instead of being dropped. Its account is marked unusable with a cause
+(`not_logged_in` for a missing login, `unreadable` otherwise), dispatch
+walks past it without dialing it, and a config reload that still cannot
+read it keeps the mark and the time it was first set. A daemon whose
+every seat is unusable starts normally and answers each request, on all
+three ingresses and on `count_tokens`, with HTTP 503 and `error.type`
+`credential_unusable`, with no `Retry-After` (no recovery time is
+known). When an unusable seat shares the chain with a parked one, the
+refusal stays `credential_unusable` and carries the park's wait. A seat
+that was not logged in recovers once `routectl login <provider> --label
+<name>` adds it to the credential store.
+
 **Seat selection.** `seat_selection` takes effect only when a pool
 resolves to more than one usable member; with one member there is nothing
 to choose between and every strategy behaves identically:

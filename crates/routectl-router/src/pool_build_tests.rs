@@ -22,6 +22,7 @@ fn report(
         models: models.iter().map(|m| (*m).to_string()).collect(),
         configured_members: usable + omissions.len(),
         usable_members: usable,
+        placeholders: Vec::new(),
         omissions,
     }
 }

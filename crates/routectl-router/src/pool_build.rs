@@ -2,9 +2,11 @@
 //!
 //! A pool compiles down at build time into the same `ResolvedModel.seats`
 //! shape a seat-pinned provider set has always used: one seat per member
-//! provider entry, built from that member's OWN `api_key_ref`. A member that
-//! cannot be built is OMITTED rather than sinking the pool, so a pool with
-//! one dead account keeps serving through its survivors.
+//! provider entry, built from that member's OWN `api_key_ref`. A member whose
+//! credential cannot be read is kept as a PLACEHOLDER seat (no provider, its
+//! account marked unusable); a member that cannot be built for any other
+//! reason is OMITTED. Either way the pool keeps serving through its
+//! survivors, and a pool of placeholders alone still builds.
 //!
 //! The omission set is data, not a log line: the same sanitized report drives
 //! the degraded-pool WARN, the router's per-reason counters, and the
@@ -17,6 +19,7 @@ use std::sync::Arc;
 
 use routectl_core::sanitize_for_log;
 
+use crate::runtime_state::UnusableCause;
 use crate::seat_pool::SeatTarget;
 
 /// Why one pool member was left out of the compiled seat set.
@@ -73,6 +76,24 @@ pub struct PoolMemberOmission {
     pub reason: PoolOmissionReason,
 }
 
+/// One pool member kept as a placeholder seat, in the only facts that may
+/// leave the build: the member's `[providers]` table key, its fixed
+/// provider-kind token, why its credential is unusable, and the credential
+/// account the mark lands on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PoolPlaceholder {
+    /// The `[providers]` table key of the member.
+    pub member: String,
+    /// The member's stable provider-kind token.
+    pub provider_kind: &'static str,
+    /// Why the member's credential could not be read, chosen by the store
+    /// failure's variant.
+    pub cause: UnusableCause,
+    /// The seat's credential account (`crate::seat_pool::credential_account`),
+    /// or `None` for a forwarded member, which has no account to mark.
+    pub account: Option<String>,
+}
+
 /// The sanitized build report for one pool: what it was configured with,
 /// what it can actually serve, and every member it lost.
 ///
@@ -90,25 +111,28 @@ pub struct PoolReport {
     pub models: Vec<String>,
     /// How many members the block declared.
     pub configured_members: usize,
-    /// How many members compiled into a dispatch seat.
+    /// How many members compiled into a dispatch seat with a provider.
     pub usable_members: usize,
+    /// Every member kept as a placeholder seat, in declaration order.
+    pub placeholders: Vec<PoolPlaceholder>,
     /// Every member left out, in declaration order.
     pub omissions: Vec<PoolMemberOmission>,
 }
 
 impl PoolReport {
-    /// Whether this pool lost at least one member but still serves. A
-    /// degraded pool is a live operational state, not a failure: dispatch
-    /// runs on the survivors.
+    /// Whether this pool has fewer usable seats than configured members but
+    /// still has a seat. A degraded pool is a live operational state, not a
+    /// failure: dispatch runs on the survivors, and a pool of placeholders
+    /// alone answers a local refusal until a credential recovers.
     #[must_use]
     pub const fn is_degraded(&self) -> bool {
-        self.usable_members > 0 && !self.omissions.is_empty()
+        !self.is_unavailable() && (!self.omissions.is_empty() || !self.placeholders.is_empty())
     }
 
-    /// Whether this pool serves nothing.
+    /// Whether this pool compiled no seat at all, placeholder or built.
     #[must_use]
     pub const fn is_unavailable(&self) -> bool {
-        self.usable_members == 0
+        self.usable_members == 0 && self.placeholders.is_empty()
     }
 }
 
@@ -120,11 +144,14 @@ impl PoolReport {
 /// zero-usable case -- which is a boot refusal, not an empty walk.
 #[derive(Debug, Clone)]
 pub enum PoolOutcome {
-    /// At least one member compiled. The seat set is shared by every model
-    /// naming this pool.
+    /// At least one member compiled, as a built or a placeholder seat. The
+    /// seat set is shared by every model naming this pool.
     Ready {
-        /// One seat per usable member, in declaration order.
+        /// One seat per kept member, built or placeholder, in declaration
+        /// order.
         seats: Arc<[SeatTarget]>,
+        /// The placeholder set (empty when every kept member built).
+        placeholders: Vec<PoolPlaceholder>,
         /// The omission set (empty for a fully healthy pool).
         omissions: Vec<PoolMemberOmission>,
     },
@@ -142,6 +169,15 @@ impl PoolOutcome {
         match self {
             Self::Ready { seats, .. } => Some(seats),
             Self::Unavailable { .. } => None,
+        }
+    }
+
+    /// The placeholder set; empty for an unavailable pool.
+    #[must_use]
+    pub fn placeholders(&self) -> &[PoolPlaceholder] {
+        match self {
+            Self::Ready { placeholders, .. } => placeholders,
+            Self::Unavailable { .. } => &[],
         }
     }
 

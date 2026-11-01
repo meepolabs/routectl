@@ -528,7 +528,7 @@ fn sticky_pool() -> (Router, Arc<ScriptedProvider>, Arc<ScriptedProvider>) {
     let model = ResolvedModel::new(
         "pooled",
         "the-pool",
-        Arc::clone(&seats[0].provider),
+        seats[0].provider.clone().expect("seat 0 is built"),
         "claude-x",
     )
     .with_seats(seats);

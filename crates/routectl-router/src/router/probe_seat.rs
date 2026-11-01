@@ -155,15 +155,18 @@ impl Router {
                     upstream: model.upstream.clone(),
                     provider: std::sync::Arc::clone(&model.provider),
                 }),
+                // A placeholder member has no provider to probe through.
                 Some(seats) => seats
                     .iter()
                     .find(|seat| seat.provider_name == entry)
-                    .map(|seat| ProbeSeat {
-                        provider_name: seat.provider_name.clone(),
-                        state_key: seat.state_key_for(nickname),
-                        account: seat.account().map(str::to_string),
-                        upstream: model.upstream.clone(),
-                        provider: std::sync::Arc::clone(&seat.provider),
+                    .and_then(|seat| {
+                        Some(ProbeSeat {
+                            provider_name: seat.provider_name.clone(),
+                            state_key: seat.state_key_for(nickname),
+                            account: seat.account().map(str::to_string),
+                            upstream: model.upstream.clone(),
+                            provider: seat.provider.clone()?,
+                        })
                     }),
             })
     }

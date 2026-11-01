@@ -99,7 +99,7 @@ fn pooled_router_with_members(
             ProviderEntry::anthropic_api(format!("oauth://{member}")),
         );
     }
-    let default_provider = seats[0].provider.clone();
+    let default_provider = seats[0].provider.clone().expect("seat 0 is built");
 
     let mut pools = BTreeMap::new();
     pools.insert(
@@ -708,7 +708,7 @@ fn two_pool_sticky_chain_router() -> Router {
         ("sonnetPool", "sonnet-pool", "claude-sonnet", SONNET_MEMBERS),
     ] {
         let seats = seats_for(&members);
-        let default_provider = seats[0].provider.clone();
+        let default_provider = seats[0].provider.clone().expect("seat 0 is built");
         let model =
             ResolvedModel::new(nickname, pool, default_provider, wire).with_seats(Arc::from(seats));
         models.insert(nickname.to_string(), Arc::new(model));
@@ -838,8 +838,13 @@ fn one_pool_two_models_router() -> Router {
         ("opusShared", "claude-opus"),
         ("sonnetShared", "claude-sonnet"),
     ] {
-        let model = ResolvedModel::new(nickname, "shared-pool", seats[0].provider.clone(), wire)
-            .with_seats(Arc::clone(&seats));
+        let model = ResolvedModel::new(
+            nickname,
+            "shared-pool",
+            seats[0].provider.clone().expect("seat 0 is built"),
+            wire,
+        )
+        .with_seats(Arc::clone(&seats));
         models.insert(nickname.to_string(), Arc::new(model));
     }
     router.install_resolved_models(models);
@@ -1049,8 +1054,13 @@ fn one_pool_two_round_robin_models_router() -> Router {
     let mut router = Router::new(Arc::new(config));
     let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
     for (nickname, wire) in [("opusRr", "claude-opus"), ("sonnetRr", "claude-sonnet")] {
-        let model = ResolvedModel::new(nickname, "shared-pool", seats[0].provider.clone(), wire)
-            .with_seats(Arc::clone(&seats));
+        let model = ResolvedModel::new(
+            nickname,
+            "shared-pool",
+            seats[0].provider.clone().expect("seat 0 is built"),
+            wire,
+        )
+        .with_seats(Arc::clone(&seats));
         models.insert(nickname.to_string(), Arc::new(model));
     }
     router.install_resolved_models(models);
@@ -1206,7 +1216,7 @@ fn sticky_pool_router(members: &[&str]) -> Router {
         pools,
         ..Config::default()
     };
-    let default_provider = seats[0].provider.clone();
+    let default_provider = seats[0].provider.clone().expect("seat 0 is built");
     let mut router = Router::new(Arc::new(config));
     let model = ResolvedModel::new("opus", "shared-pool", default_provider, "claude-opus")
         .with_seats(Arc::from(seats));

@@ -46,8 +46,11 @@ pub struct SeatTarget {
     /// against THIS name rather than the model's `provider` value, which for
     /// a pool-backed model names the pool and not a provider entry.
     pub provider_name: String,
-    /// Provider instance built from this member's own credential reference.
-    pub provider: Arc<dyn Provider>,
+    /// Provider instance built from this member's own credential reference,
+    /// or `None` for a placeholder: a member whose credential could not be
+    /// read at build time. A placeholder keeps its seat and account so its
+    /// unusable mark is visible, and is never dialed.
+    pub provider: Option<Arc<dyn Provider>>,
     /// Source `SecretRef` for this specific seat. Retained for the
     /// account-scoped quota key and seat identity; the 401 self-heal does NOT
     /// read this field -- it works through the seat's own `ManagedToken`,
@@ -69,6 +72,26 @@ impl SeatTarget {
         auth_secret_ref: Option<SecretRef>,
         forwarded: bool,
     ) -> Self {
+        Self::with_provider(provider_name, Some(provider), auth_secret_ref, forwarded)
+    }
+
+    /// A placeholder seat for pool member `provider_name`: it has an
+    /// identity and an account but no provider, because the member's
+    /// credential could not be read when the seat set was built.
+    pub fn placeholder(
+        provider_name: String,
+        auth_secret_ref: Option<SecretRef>,
+        forwarded: bool,
+    ) -> Self {
+        Self::with_provider(provider_name, None, auth_secret_ref, forwarded)
+    }
+
+    fn with_provider(
+        provider_name: String,
+        provider: Option<Arc<dyn Provider>>,
+        auth_secret_ref: Option<SecretRef>,
+        forwarded: bool,
+    ) -> Self {
         let seat = seat_identity(auth_secret_ref.as_ref());
         let account = credential_account(seat.as_deref(), &provider_name, forwarded).map(Arc::from);
         Self {
@@ -77,6 +100,12 @@ impl SeatTarget {
             auth_secret_ref,
             account,
         }
+    }
+
+    /// Whether this seat has no provider to dial.
+    #[must_use]
+    pub const fn is_placeholder(&self) -> bool {
+        self.provider.is_none()
     }
 
     /// The seat's credential account, or `None` for a forwarded seat.
@@ -104,7 +133,7 @@ impl std::fmt::Debug for SeatTarget {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SeatTarget")
             .field("provider_name", &self.provider_name)
-            .field("provider_id", &self.provider.id())
+            .field("provider_id", &self.provider.as_ref().map(|p| p.id()))
             .field(
                 "auth_secret_scheme",
                 &self.auth_secret_ref.as_ref().map(secret_ref_scheme),

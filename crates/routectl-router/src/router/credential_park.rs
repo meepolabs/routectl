@@ -84,6 +84,26 @@ pub(super) const fn unusable_seat_error() -> Error {
     }
 }
 
+/// Refuse a placeholder seat: it has no provider to dial, whatever its
+/// account record says, so it answers the unusable refusal folded into the
+/// chain's running error like any other gate refusal.
+pub(super) fn refuse_placeholder_seat(
+    provider: &str,
+    model: &str,
+    message: &'static str,
+    last_err: &mut Option<Error>,
+) {
+    let refusal = unusable_seat_error();
+    log_gate_refusal(
+        provider,
+        model,
+        CREDENTIAL_UNUSABLE_GATE_KIND,
+        &refusal,
+        message,
+    );
+    merge_gate_refusal(last_err, refusal);
+}
+
 /// Fold a gate refusal into the chain's running error. Any held error that is
 /// not a local refusal (a dialed target's real error) is kept. Between local
 /// refusals the reason and the wait fold independently: the reason with the
@@ -613,3 +633,7 @@ mod credential_unusable_tests;
 #[cfg(test)]
 #[path = "credential_refused_refresh_tests.rs"]
 mod credential_refused_refresh_tests;
+
+#[cfg(test)]
+#[path = "placeholder_seat_dispatch_tests.rs"]
+mod placeholder_seat_dispatch_tests;

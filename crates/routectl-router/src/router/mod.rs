@@ -2106,6 +2106,12 @@ struct DispatchTarget {
 }
 
 impl DispatchTarget {
+    /// Whether this target is a pool's placeholder seat: a seat with no
+    /// provider, kept because its credential could not be read at build.
+    pub(crate) fn is_placeholder_seat(&self) -> bool {
+        self.provider.is_none() && self.model.seats.is_some()
+    }
+
     /// The catalog capability prior for `feature`: `Some(true)` /
     /// `Some(false)` when the resolved cell asserts support / absence, or
     /// `None` when the cell carries no prior for the key. The lowest-
@@ -2338,9 +2344,17 @@ impl Router {
             .map(|(nickname, m)| (nickname.clone(), Arc::clone(m)))
             .collect();
         for (nickname, m) in &installed {
-            self.providers
-                .entry(m.provider_name.clone())
-                .or_insert_with(|| m.provider.clone());
+            // A pool of placeholders alone projects an inert provider, which
+            // is never registered under the pool's name.
+            let has_built_seat = m
+                .seats
+                .as_ref()
+                .is_none_or(|seats| seats.iter().any(|seat| !seat.is_placeholder()));
+            if has_built_seat {
+                self.providers
+                    .entry(m.provider_name.clone())
+                    .or_insert_with(|| m.provider.clone());
+            }
             // Each model gets a FRESH state instance even when the tuning
             // is identical -- the breaker counters and RPM tokens must not
             // be shared across models on one transport.
@@ -2459,13 +2473,15 @@ impl Router {
     ///
     /// The credential-account map is shared whole, not per key: an account's
     /// park outlives any one model slot, so a model newly added on a parked
-    /// account starts refused.
+    /// account starts refused. This Router's placeholder marks were applied
+    /// to its own map at install, so they are re-applied to the shared one.
     ///
     /// Called by the hot-reload coordinator in routectl-cli immediately
     /// after building a replacement Router and before swapping it in, to
     /// avoid resetting gates that took time to build up across reloads.
     pub fn carry_over_runtime_state_from(&mut self, previous: &Self) {
         self.credential_accounts = Arc::clone(&previous.credential_accounts);
+        self.mark_placeholder_accounts();
         for (key, state) in &previous.state {
             let Some(slot) = self.state.get_mut(key.as_str()) else {
                 continue;
@@ -3313,6 +3329,11 @@ impl Router {
     /// the totals land on the router instance the metrics carry-over shares --
     /// a rejected reload's build never reaches this call, which is why a
     /// rejected candidate cannot inflate the live router's counters.
+    ///
+    /// Each placeholder seat's account is marked unusable with its build
+    /// cause here, on this Router's own account map; a hot reload shares the
+    /// outgoing map and re-applies the marks (see
+    /// [`Self::carry_over_runtime_state_from`]).
     pub fn install_pool_reports(&mut self, reports: Vec<crate::pool_build::PoolReport>) {
         for report in &reports {
             for omission in &report.omissions {
@@ -3320,6 +3341,18 @@ impl Router {
             }
         }
         self.pool_reports = reports;
+        self.mark_placeholder_accounts();
+    }
+
+    /// Mark every placeholder seat's account unusable with its build cause,
+    /// unconditionally. Idempotent: a re-mark with the same cause keeps the
+    /// original `since`.
+    fn mark_placeholder_accounts(&self) {
+        for placeholder in self.pool_reports.iter().flat_map(|r| &r.placeholders) {
+            if let Some(account) = placeholder.account.as_deref() {
+                self.mark_credential_unusable(account, placeholder.cause, None);
+            }
+        }
     }
 
     /// The sanitized per-pool build reports this Router was built from: what
