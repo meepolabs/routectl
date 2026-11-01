@@ -36,7 +36,9 @@ use rand::rngs::SysRng;
 use url::Url;
 
 use crate::oauth::providers::{
-    AuthParams, OAuthFlow, refresh_classify, token_parse_error, token_status_error,
+    AuthParams, OAuthFlow, TokenEndpoint, decode_jwt_payload, decode_token_response,
+    error_kind_label, read_capped_body, refresh_classify, send_token_request, token_parse_error,
+    token_status_error,
 };
 use crate::oauth::types::{AccountInfo, SecretToken, TokenRecord, unix_now};
 use crate::oauth::{OAuthError, OAuthResult};
@@ -46,6 +48,12 @@ use crate::oauth::{OAuthError, OAuthResult};
 const CLIENT_ID: &str = "b1a00492-073a-47ea-816f-4c329264a828";
 const AUTHORIZE_URL: &str = "https://auth.x.ai/oauth2/authorize";
 const TOKEN_URL: &str = "https://auth.x.ai/oauth2/token";
+
+pub(super) const ENDPOINT: TokenEndpoint = TokenEndpoint {
+    url: TOKEN_URL,
+    client_id: CLIENT_ID,
+    allowed_host: "auth.x.ai",
+};
 
 /// xAI registered its loopback redirect against this exact host, port,
 /// and path, so routectl must bind them rather than a kernel-assigned
@@ -71,12 +79,6 @@ const SCOPES: &[&str] = &[
 /// Number of random bytes behind the OIDC `nonce`. 32 bytes -> 43 chars
 /// base64url, matching the entropy of the PKCE state token.
 const NONCE_BYTES: usize = 32;
-
-/// Maximum number of bytes routectl will read from the token endpoint
-/// response. Real responses are well under 4 KiB even with a JWT
-/// id_token; a 64 KiB cap leaves generous headroom without letting a
-/// misbehaving or hostile upstream drive the loader toward OOM.
-const MAX_TOKEN_BODY_BYTES: usize = 64 * 1024;
 
 pub struct Xai;
 
@@ -173,16 +175,19 @@ impl OAuthFlow for Xai {
             ("grant_type", "authorization_code"),
             ("code", code),
             ("redirect_uri", redirect_uri),
-            ("client_id", CLIENT_ID),
+            ("client_id", ENDPOINT.client_id),
             ("code_verifier", verifier),
         ];
-        let resp = http
-            .post(TOKEN_URL)
-            .form(&form)
-            .send()
-            .await
-            .map_err(|e| OAuthError::Network(format!("token endpoint POST: {e}")))?;
-        decode_token_response(resp, None).await
+        let resp =
+            send_token_request(http, &ENDPOINT, "token endpoint POST", |rb| rb.form(&form)).await?;
+        decode_token_response(
+            resp,
+            None,
+            check_status_error,
+            parse_token_response_json,
+            map_to_record,
+        )
+        .await
     }
 
     async fn refresh_token(
@@ -192,7 +197,7 @@ impl OAuthFlow for Xai {
     ) -> OAuthResult<TokenRecord> {
         let form = [
             ("grant_type", "refresh_token"),
-            ("client_id", CLIENT_ID),
+            ("client_id", ENDPOINT.client_id),
             ("refresh_token", refresh_token),
         ];
 
@@ -207,12 +212,10 @@ impl OAuthFlow for Xai {
             "xai refresh request"
         );
 
-        let resp = http
-            .post(TOKEN_URL)
-            .form(&form)
-            .send()
-            .await
-            .map_err(|e| OAuthError::Network(format!("refresh endpoint POST: {e}")))?;
+        let resp = send_token_request(http, &ENDPOINT, "refresh endpoint POST", |rb| {
+            rb.form(&form)
+        })
+        .await?;
 
         decode_token_response_traced(resp, Some(refresh_token), &prior_sha8).await
     }
@@ -246,24 +249,6 @@ struct IdClaims {
     email: Option<String>,
     #[serde(default)]
     sub: Option<String>,
-}
-
-/// Shared decoder for both `exchange_code` and `refresh_token`.
-/// `prior_refresh` is `Some` on the refresh path (the previous refresh
-/// token, used as the fallback when xAI omits a fresh one); `None` on
-/// exchange, where a missing refresh_token is a hard error -- a login that
-/// yields no refresh token can never be refreshed later.
-async fn decode_token_response(
-    resp: reqwest::Response,
-    prior_refresh: Option<&str>,
-) -> OAuthResult<TokenRecord> {
-    let status = resp.status();
-    let url = resp.url().to_string();
-    let body = read_capped_body(resp).await?;
-
-    check_status_error(status, &url, &body, prior_refresh.is_some())?;
-    let parsed = parse_token_response_json(&body)?;
-    map_to_record(parsed, prior_refresh)
 }
 
 /// Refresh-only variant of [`decode_token_response`] that emits tracing
@@ -321,36 +306,6 @@ pub(super) async fn decode_token_response_traced(
     );
 
     Ok(record)
-}
-
-/// Short label for the error variant, used in the structured `error_kind`
-/// field on refresh-failure trace events.
-const fn error_kind_label(e: &OAuthError) -> &'static str {
-    match e {
-        OAuthError::Network(_) => "network",
-        OAuthError::TokenEndpoint(_) => "token_endpoint",
-        OAuthError::RefreshExpired(_) => "refresh_expired",
-        _ => "other",
-    }
-}
-
-/// Pull the response body as UTF-8, capped at `MAX_TOKEN_BODY_BYTES`.
-async fn read_capped_body(resp: reqwest::Response) -> OAuthResult<String> {
-    let bytes = resp
-        .bytes()
-        .await
-        .map_err(|e| OAuthError::Network(format!("read token response body: {e}")))?;
-    if bytes.len() > MAX_TOKEN_BODY_BYTES {
-        return Err(OAuthError::TokenEndpoint(format!(
-            "token response is {} bytes; refusing to load (cap is {} bytes)",
-            bytes.len(),
-            MAX_TOKEN_BODY_BYTES
-        )));
-    }
-    let s = std::str::from_utf8(&bytes).map_err(|e| {
-        OAuthError::TokenEndpoint(format!("token response is not valid UTF-8: {e}"))
-    })?;
-    Ok(s.to_string())
 }
 
 /// Map status + body to an `OAuthError`. On the refresh path a 400/401
@@ -427,7 +382,7 @@ fn map_to_record(parsed: Resp, prior_refresh: Option<&str>) -> OAuthResult<Token
     let claims = parsed
         .id_token
         .as_deref()
-        .and_then(|jwt| decode_jwt_payload::<IdClaims>(jwt).ok())
+        .and_then(|jwt| decode_jwt_payload::<IdClaims>(jwt, "id_token").ok())
         .unwrap_or_default();
 
     let scopes = parsed
@@ -449,23 +404,6 @@ fn map_to_record(parsed: Resp, prior_refresh: Option<&str>) -> OAuthResult<Token
         session_id: None,
         cloud_project_id: None,
     })
-}
-
-/// Decode a base64url-no-pad JWT payload into `T`. The signature is NOT
-/// verified (the upstream is the verifier; routectl never makes a trust
-/// decision on these claims -- they are display-only). Returns
-/// `TokenEndpoint` on a malformed JWT rather than panicking.
-fn decode_jwt_payload<T: serde::de::DeserializeOwned>(jwt: &str) -> OAuthResult<T> {
-    let mut parts = jwt.split('.');
-    let payload_b64 = match (parts.next(), parts.next(), parts.next()) {
-        (Some(h), Some(p), Some(s)) if !h.is_empty() && !p.is_empty() && !s.is_empty() => p,
-        _ => return Err(OAuthError::TokenEndpoint("id_token is not a JWT".into())),
-    };
-    let bytes = URL_SAFE_NO_PAD
-        .decode(payload_b64)
-        .map_err(|e| OAuthError::TokenEndpoint(format!("JWT payload base64 decode: {e}")))?;
-    serde_json::from_slice(&bytes)
-        .map_err(|e| OAuthError::TokenEndpoint(format!("JWT payload JSON parse: {e}")))
 }
 
 #[cfg(test)]

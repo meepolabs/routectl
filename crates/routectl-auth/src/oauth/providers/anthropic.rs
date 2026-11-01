@@ -24,7 +24,8 @@ use async_trait::async_trait;
 use url::Url;
 
 use crate::oauth::providers::{
-    AuthParams, OAuthFlow, refresh_classify, token_parse_error, token_status_error,
+    AuthParams, OAuthFlow, TokenEndpoint, decode_token_response, error_kind_label,
+    read_capped_body, refresh_classify, send_token_request, token_parse_error, token_status_error,
 };
 use crate::oauth::types::{AccountInfo, SecretToken, TokenRecord, unix_now};
 use crate::oauth::{OAuthError, OAuthResult};
@@ -35,12 +36,11 @@ pub const TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
 pub const MANUAL_REDIRECT_URL: &str = "https://platform.claude.com/oauth/code/callback";
 pub const OAUTH_BETA_HEADER: &str = "oauth-2025-04-20";
 
-/// Maximum number of bytes routectl will read from the token endpoint
-/// response. Real responses are well under 4 KiB; a 64 KiB cap leaves
-/// generous headroom for future fields (id_token, granted_scopes,
-/// vendor extensions) without letting a misbehaving or hostile upstream
-/// drive the loader toward OOM.
-const MAX_TOKEN_BODY_BYTES: usize = 64 * 1024;
+pub(super) const ENDPOINT: TokenEndpoint = TokenEndpoint {
+    url: TOKEN_URL,
+    client_id: CLIENT_ID,
+    allowed_host: "platform.claude.com",
+};
 
 /// Scopes claude-code requests on the claude.ai (subscription) flow.
 /// `user:inference` is the load-bearing one for routectl -- it is
@@ -70,6 +70,15 @@ fn anthropic_identity(rb: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
     rb.header(
         reqwest::header::USER_AGENT,
         routectl_core::identity::anthropic::default_claude_code_user_agent(),
+    )
+}
+
+/// Headers both token-endpoint POSTs carry: the beta flag, the JSON
+/// content type, and the claude.ai identity.
+fn token_request(rb: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    anthropic_identity(
+        rb.header("anthropic-beta", OAUTH_BETA_HEADER)
+            .header("content-type", "application/json"),
     )
 }
 
@@ -122,18 +131,20 @@ impl OAuthFlow for Anthropic {
             "code_verifier": verifier,
             "state": state,
             "redirect_uri": redirect_uri,
-            "client_id": CLIENT_ID,
+            "client_id": ENDPOINT.client_id,
         });
-        let resp = anthropic_identity(
-            http.post(TOKEN_URL)
-                .header("anthropic-beta", OAUTH_BETA_HEADER)
-                .header("content-type", "application/json"),
+        let resp = send_token_request(http, &ENDPOINT, "token endpoint POST", |rb| {
+            token_request(rb).json(&body)
+        })
+        .await?;
+        decode_token_response(
+            resp,
+            None,
+            check_status_error,
+            parse_token_response_json,
+            map_to_record,
         )
-        .json(&body)
-        .send()
         .await
-        .map_err(|e| OAuthError::Network(format!("token endpoint POST: {e}")))?;
-        decode_token_response(resp, None).await
     }
 
     async fn refresh_token(
@@ -146,7 +157,7 @@ impl OAuthFlow for Anthropic {
         let body = serde_json::json!({
             "grant_type": "refresh_token",
             "refresh_token": refresh_token,
-            "client_id": CLIENT_ID,
+            "client_id": ENDPOINT.client_id,
         });
 
         // Compute sha8 once; reuse on pre-POST debug and failure error
@@ -160,15 +171,10 @@ impl OAuthFlow for Anthropic {
             "anthropic refresh request"
         );
 
-        let resp = anthropic_identity(
-            http.post(TOKEN_URL)
-                .header("anthropic-beta", OAUTH_BETA_HEADER)
-                .header("content-type", "application/json"),
-        )
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| OAuthError::Network(format!("refresh endpoint POST: {e}")))?;
+        let resp = send_token_request(http, &ENDPOINT, "refresh endpoint POST", |rb| {
+            token_request(rb).json(&body)
+        })
+        .await?;
         decode_token_response_traced(resp, Some(refresh_token), &prior_sha8).await
     }
 }
@@ -202,28 +208,6 @@ pub(super) struct AccountField {
     email: Option<String>,
     #[serde(default, alias = "uuid", alias = "id")]
     account_id: Option<String>,
-}
-
-/// Shared response decoder for both `exchange_code` and `refresh_token`.
-/// Three discrete steps (status check + parse + map) so each is small
-/// enough to keep in head with its failure modes. `prior_refresh` is
-/// `Some` on the refresh path (the previous refresh token) and `None` on
-/// the exchange path; it is threaded to `map_to_record` (fallback +
-/// session-id minting) and drives how `invalid_grant` is bucketed: a
-/// fresh login (`None`) that hits invalid_grant means the auth code is
-/// bad (expired, already used, or PKCE/redirect mismatch); a refresh
-/// (`Some`) that hits invalid_grant means the refresh token is gone.
-async fn decode_token_response(
-    resp: reqwest::Response,
-    prior_refresh: Option<&str>,
-) -> OAuthResult<TokenRecord> {
-    let status = resp.status();
-    let url = resp.url().to_string();
-    let body = read_capped_body(resp).await?;
-
-    check_status_error(status, &url, &body, prior_refresh.is_some())?;
-    let parsed = parse_token_response_json(&body)?;
-    map_to_record(parsed, prior_refresh)
 }
 
 /// Refresh-only variant of [`decode_token_response`] with structured
@@ -287,40 +271,6 @@ pub(super) async fn decode_token_response_traced(
     );
 
     Ok(record)
-}
-
-/// Short label for the error variant returned by the token endpoint.
-/// Used in the structured `error_kind` field on refresh-failure trace
-/// events so operators can grep for the failure mode without scraping
-/// the human-readable message.
-const fn error_kind_label(e: &OAuthError) -> &'static str {
-    match e {
-        OAuthError::Network(_) => "network",
-        OAuthError::TokenEndpoint(_) => "token_endpoint",
-        OAuthError::RefreshExpired(_) => "refresh_expired",
-        _ => "other",
-    }
-}
-
-/// Pull the response body as UTF-8, capped at `MAX_TOKEN_BODY_BYTES`.
-/// Anthropic's token endpoint speaks JSON; non-UTF-8 is a hard error
-/// rather than something to silently lose via `unwrap_or_default`.
-async fn read_capped_body(resp: reqwest::Response) -> OAuthResult<String> {
-    let bytes = resp
-        .bytes()
-        .await
-        .map_err(|e| OAuthError::Network(format!("read token response body: {e}")))?;
-    if bytes.len() > MAX_TOKEN_BODY_BYTES {
-        return Err(OAuthError::TokenEndpoint(format!(
-            "token response is {} bytes; refusing to load (cap is {} bytes)",
-            bytes.len(),
-            MAX_TOKEN_BODY_BYTES
-        )));
-    }
-    let s = std::str::from_utf8(&bytes).map_err(|e| {
-        OAuthError::TokenEndpoint(format!("token response is not valid UTF-8: {e}"))
-    })?;
-    Ok(s.to_string())
 }
 
 /// Map status + body to an `OAuthError`. On the refresh path a 400/401

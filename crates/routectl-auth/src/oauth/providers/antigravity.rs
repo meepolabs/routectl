@@ -36,12 +36,12 @@
 //! a separate slice; this file only owns token acquisition + refresh.
 
 use async_trait::async_trait;
-use base64::Engine as _;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use url::Url;
 
 use crate::oauth::providers::{
-    AuthParams, OAuthFlow, refresh_classify, token_parse_error, token_status_error,
+    AuthParams, OAuthFlow, TokenEndpoint, decode_jwt_payload, decode_token_response,
+    error_kind_label, read_capped_body, refresh_classify, send_token_request, token_parse_error,
+    token_status_error,
 };
 use crate::oauth::types::{AccountInfo, SecretToken, TokenRecord, unix_now};
 use crate::oauth::{OAuthError, OAuthResult};
@@ -54,6 +54,12 @@ const CLIENT_SECRET: &str = "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";
 
 const AUTHORIZE_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
+
+pub(super) const ENDPOINT: TokenEndpoint = TokenEndpoint {
+    url: TOKEN_URL,
+    client_id: CLIENT_ID,
+    allowed_host: "oauth2.googleapis.com",
+};
 
 /// The upstream registered this exact `localhost` redirect against the
 /// OAuth client, so routectl must bind this port and path rather than a
@@ -73,12 +79,6 @@ const SCOPES: &[&str] = &[
     "https://www.googleapis.com/auth/cclog",
     "https://www.googleapis.com/auth/experimentsandconfigs",
 ];
-
-/// Maximum number of bytes routectl will read from the token endpoint
-/// response. Real responses are well under 4 KiB; a 64 KiB cap leaves
-/// generous headroom without letting a misbehaving or hostile upstream
-/// drive the loader toward OOM.
-const MAX_TOKEN_BODY_BYTES: usize = 64 * 1024;
 
 pub struct Antigravity;
 
@@ -151,16 +151,19 @@ impl OAuthFlow for Antigravity {
             ("grant_type", "authorization_code"),
             ("code", code),
             ("redirect_uri", redirect_uri),
-            ("client_id", CLIENT_ID),
+            ("client_id", ENDPOINT.client_id),
             ("client_secret", CLIENT_SECRET),
         ];
-        let resp = http
-            .post(TOKEN_URL)
-            .form(&form)
-            .send()
-            .await
-            .map_err(|e| OAuthError::Network(format!("token endpoint POST: {e}")))?;
-        decode_token_response(resp, None).await
+        let resp =
+            send_token_request(http, &ENDPOINT, "token endpoint POST", |rb| rb.form(&form)).await?;
+        decode_token_response(
+            resp,
+            None,
+            check_status_error,
+            parse_token_response_json,
+            map_to_record,
+        )
+        .await
     }
 
     async fn refresh_token(
@@ -171,7 +174,7 @@ impl OAuthFlow for Antigravity {
         let form = [
             ("grant_type", "refresh_token"),
             ("refresh_token", refresh_token),
-            ("client_id", CLIENT_ID),
+            ("client_id", ENDPOINT.client_id),
             ("client_secret", CLIENT_SECRET),
         ];
 
@@ -186,12 +189,10 @@ impl OAuthFlow for Antigravity {
             "antigravity refresh request"
         );
 
-        let resp = http
-            .post(TOKEN_URL)
-            .form(&form)
-            .send()
-            .await
-            .map_err(|e| OAuthError::Network(format!("refresh endpoint POST: {e}")))?;
+        let resp = send_token_request(http, &ENDPOINT, "refresh endpoint POST", |rb| {
+            rb.form(&form)
+        })
+        .await?;
 
         decode_token_response_traced(resp, Some(refresh_token), &prior_sha8).await
     }
@@ -223,24 +224,6 @@ struct Resp {
 struct IdClaims {
     #[serde(default)]
     email: Option<String>,
-}
-
-/// Shared decoder for both `exchange_code` and `refresh_token`.
-/// `prior_refresh` is `Some` on the refresh path (the previous refresh
-/// token, used as the fallback when Google omits a fresh one); `None` on
-/// exchange, where a missing refresh_token is a hard error -- a login
-/// that yields no refresh token can never be refreshed later.
-async fn decode_token_response(
-    resp: reqwest::Response,
-    prior_refresh: Option<&str>,
-) -> OAuthResult<TokenRecord> {
-    let status = resp.status();
-    let url = resp.url().to_string();
-    let body = read_capped_body(resp).await?;
-
-    check_status_error(status, &url, &body, prior_refresh.is_some())?;
-    let parsed = parse_token_response_json(&body)?;
-    map_to_record(parsed, prior_refresh)
 }
 
 /// Refresh-only variant of [`decode_token_response`] that emits
@@ -296,36 +279,6 @@ async fn decode_token_response_traced(
     );
 
     Ok(record)
-}
-
-/// Short label for the error variant, used in the structured
-/// `error_kind` field on refresh-failure trace events.
-const fn error_kind_label(e: &OAuthError) -> &'static str {
-    match e {
-        OAuthError::Network(_) => "network",
-        OAuthError::TokenEndpoint(_) => "token_endpoint",
-        OAuthError::RefreshExpired(_) => "refresh_expired",
-        _ => "other",
-    }
-}
-
-/// Pull the response body as UTF-8, capped at `MAX_TOKEN_BODY_BYTES`.
-async fn read_capped_body(resp: reqwest::Response) -> OAuthResult<String> {
-    let bytes = resp
-        .bytes()
-        .await
-        .map_err(|e| OAuthError::Network(format!("read token response body: {e}")))?;
-    if bytes.len() > MAX_TOKEN_BODY_BYTES {
-        return Err(OAuthError::TokenEndpoint(format!(
-            "token response is {} bytes; refusing to load (cap is {} bytes)",
-            bytes.len(),
-            MAX_TOKEN_BODY_BYTES
-        )));
-    }
-    let s = std::str::from_utf8(&bytes).map_err(|e| {
-        OAuthError::TokenEndpoint(format!("token response is not valid UTF-8: {e}"))
-    })?;
-    Ok(s.to_string())
 }
 
 /// Map status + body to an `OAuthError`. On the refresh path a 400/401
@@ -402,7 +355,7 @@ fn map_to_record(parsed: Resp, prior_refresh: Option<&str>) -> OAuthResult<Token
     let email = parsed
         .id_token
         .as_deref()
-        .and_then(|jwt| decode_jwt_payload::<IdClaims>(jwt).ok())
+        .and_then(|jwt| decode_jwt_payload::<IdClaims>(jwt, "id_token").ok())
         .and_then(|c| c.email);
 
     let scopes = parsed
@@ -426,26 +379,11 @@ fn map_to_record(parsed: Resp, prior_refresh: Option<&str>) -> OAuthResult<Token
     })
 }
 
-/// Decode a base64url-no-pad JWT payload into `T`. The signature is NOT
-/// verified (the upstream is the verifier; routectl never makes a trust
-/// decision on these claims -- they are display-only). Returns
-/// `TokenEndpoint` on a malformed JWT rather than panicking.
-fn decode_jwt_payload<T: serde::de::DeserializeOwned>(jwt: &str) -> OAuthResult<T> {
-    let mut parts = jwt.split('.');
-    let payload_b64 = match (parts.next(), parts.next(), parts.next()) {
-        (Some(h), Some(p), Some(s)) if !h.is_empty() && !p.is_empty() && !s.is_empty() => p,
-        _ => return Err(OAuthError::TokenEndpoint("id_token is not a JWT".into())),
-    };
-    let bytes = URL_SAFE_NO_PAD
-        .decode(payload_b64)
-        .map_err(|e| OAuthError::TokenEndpoint(format!("JWT payload base64 decode: {e}")))?;
-    serde_json::from_slice(&bytes)
-        .map_err(|e| OAuthError::TokenEndpoint(format!("JWT payload JSON parse: {e}")))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine as _;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use routectl_testkit::with_capture;
 
     /// A 200 token-exchange body carrying a freshly minted token but a
@@ -744,46 +682,6 @@ mod tests {
             .body(bytes::Bytes::from(body))
             .expect("build http response");
         reqwest::Response::from(http_resp)
-    }
-
-    // NOTE: `read_capped_body` is byte-identical across all four
-    // OAuth providers (anthropic/codex/xai/antigravity). These two arms
-    // are pinned here on the antigravity copy as the representative; the
-    // other three copies are the same source.
-    #[tokio::test]
-    async fn read_capped_body_rejects_over_cap_response() {
-        // A token-endpoint response larger than the 64 KiB cap must be
-        // refused with a TokenEndpoint error rather than buffered whole.
-        let oversized = vec![b'x'; MAX_TOKEN_BODY_BYTES + 1];
-        let resp = synthetic_response(200, oversized);
-
-        let err = read_capped_body(resp).await.unwrap_err();
-
-        match err {
-            OAuthError::TokenEndpoint(m) => {
-                assert!(m.contains("refusing to load"), "got: {m}");
-                assert!(m.contains(&MAX_TOKEN_BODY_BYTES.to_string()), "got: {m}");
-            }
-            other => panic!("expected TokenEndpoint over-cap error, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn read_capped_body_rejects_non_utf8_response() {
-        // Invalid UTF-8 bytes must hard-error, never silently lossy-decode.
-        // The error text must NOT echo the raw body content.
-        let invalid_utf8 = vec![0xff, 0xfe, 0x80, 0x00];
-        let resp = synthetic_response(200, invalid_utf8);
-
-        let err = read_capped_body(resp).await.unwrap_err();
-
-        match err {
-            OAuthError::TokenEndpoint(m) => {
-                assert!(m.contains("not valid UTF-8"), "got: {m}");
-                assert!(!m.contains('\u{fffd}'), "must not echo lossy body: {m}");
-            }
-            other => panic!("expected TokenEndpoint UTF-8 error, got {other:?}"),
-        }
     }
 
     #[tokio::test]

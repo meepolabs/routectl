@@ -17,6 +17,9 @@ mod refresh_classify;
 pub mod xai;
 
 use async_trait::async_trait;
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
 use url::Url;
 
@@ -310,9 +313,456 @@ pub(super) fn sha8(token: &str) -> String {
     out
 }
 
+/// Maximum number of bytes routectl will read from a token endpoint
+/// response. Real responses are well under 4 KiB even with a JWT
+/// access_token or id_token; a 64 KiB cap leaves generous headroom for
+/// future fields without letting a misbehaving or hostile upstream drive
+/// the loader toward OOM.
+pub(super) const MAX_TOKEN_BODY_BYTES: usize = 64 * 1024;
+
+/// Where a provider's token-endpoint POSTs go. `url` and `allowed_host`
+/// are repo constants: [`send_token_request`] refuses to send unless the
+/// parsed `url` is https, carries no userinfo, and has a host exactly
+/// equal to `allowed_host`, and refuses a response whose final URL fails
+/// the same check.
+pub(super) struct TokenEndpoint {
+    pub(super) url: &'static str,
+    pub(super) client_id: &'static str,
+    pub(super) allowed_host: &'static str,
+}
+
+/// The one URL rule for token-endpoint traffic: https, no userinfo, and a
+/// host string exactly equal to `allowed_host` (no suffix or subdomain
+/// match). Refusals name the failed rule only; the URL itself is never
+/// echoed.
+pub(super) fn check_token_url(url: &Url, allowed_host: &str) -> OAuthResult<()> {
+    if url.scheme() != "https" {
+        return Err(OAuthError::TokenEndpoint(
+            "token endpoint URL is not https".into(),
+        ));
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(OAuthError::TokenEndpoint(
+            "token endpoint URL carries userinfo".into(),
+        ));
+    }
+    if url.host_str() != Some(allowed_host) {
+        return Err(OAuthError::TokenEndpoint(
+            "token endpoint host is not the expected host".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Apply [`check_token_url`] to the URL a response was actually served
+/// from, passing the response through untouched when it holds.
+fn checked_response(resp: reqwest::Response, allowed_host: &str) -> OAuthResult<reqwest::Response> {
+    check_token_url(resp.url(), allowed_host)?;
+    Ok(resp)
+}
+
+/// POST once to `endpoint`. The URL is parsed and checked before any byte
+/// leaves the process, and the request builder handed to `build` is
+/// already bound to that checked URL, so the vendor closure adds only the
+/// body and headers. A transport failure maps to `OAuthError::Network`
+/// prefixed with `network_label`. No retries.
+pub(super) async fn send_token_request(
+    http: &reqwest::Client,
+    endpoint: &TokenEndpoint,
+    network_label: &'static str,
+    build: impl FnOnce(reqwest::RequestBuilder) -> reqwest::RequestBuilder,
+) -> OAuthResult<reqwest::Response> {
+    let url = Url::parse(endpoint.url).map_err(|e| {
+        OAuthError::TokenEndpoint(format!("token endpoint URL does not parse: {e}"))
+    })?;
+    check_token_url(&url, endpoint.allowed_host)?;
+    let resp = build(http.post(url))
+        .send()
+        .await
+        .map_err(|e| OAuthError::Network(format!("{network_label}: {e}")))?;
+    checked_response(resp, endpoint.allowed_host)
+}
+
+/// Short label for the error variant returned by the token endpoint.
+/// Used in the structured `error_kind` field on refresh-failure trace
+/// events so operators can grep for the failure mode without scraping
+/// the human-readable message.
+pub(super) const fn error_kind_label(e: &OAuthError) -> &'static str {
+    match e {
+        OAuthError::Network(_) => "network",
+        OAuthError::TokenEndpoint(_) => "token_endpoint",
+        OAuthError::RefreshExpired(_) => "refresh_expired",
+        _ => "other",
+    }
+}
+
+/// Pull the response body as UTF-8, capped at [`MAX_TOKEN_BODY_BYTES`].
+/// Token endpoints speak JSON; non-UTF-8 is a hard error rather than
+/// something to silently lose via `unwrap_or_default`.
+pub(super) async fn read_capped_body(resp: reqwest::Response) -> OAuthResult<String> {
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| OAuthError::Network(format!("read token response body: {e}")))?;
+    if bytes.len() > MAX_TOKEN_BODY_BYTES {
+        return Err(OAuthError::TokenEndpoint(format!(
+            "token response is {} bytes; refusing to load (cap is {} bytes)",
+            bytes.len(),
+            MAX_TOKEN_BODY_BYTES
+        )));
+    }
+    let s = std::str::from_utf8(&bytes).map_err(|e| {
+        OAuthError::TokenEndpoint(format!("token response is not valid UTF-8: {e}"))
+    })?;
+    Ok(s.to_string())
+}
+
+/// A provider's status-to-error mapping: `(status, url, body, is_refresh)`.
+pub(super) type CheckStatusFn = fn(reqwest::StatusCode, &str, &str, bool) -> OAuthResult<()>;
+
+/// Untraced response decoder for both grants: read the capped body, then
+/// run the vendor's status mapping, parser and record projection in that
+/// order. `prior_refresh` is `Some`
+/// on the refresh path (the previous refresh token) and `None` on the
+/// exchange path; it selects the refresh arm of `check_status` and is
+/// threaded to `map_to_record`.
+pub(super) async fn decode_token_response<R>(
+    resp: reqwest::Response,
+    prior_refresh: Option<&str>,
+    check_status: CheckStatusFn,
+    parse: fn(&str) -> OAuthResult<R>,
+    map_to_record: fn(R, Option<&str>) -> OAuthResult<TokenRecord>,
+) -> OAuthResult<TokenRecord> {
+    let status = resp.status();
+    let url = resp.url().to_string();
+    let body = read_capped_body(resp).await?;
+
+    check_status(status, &url, &body, prior_refresh.is_some())?;
+    let parsed = parse(&body)?;
+    map_to_record(parsed, prior_refresh)
+}
+
+/// Decode the payload segment of a JWT (`header.payload.signature`, all
+/// three non-empty, payload base64url without padding) into `T`.
+///
+/// Decode only: the signature is NOT verified and no claim is validated.
+/// Callers must treat the result as untrusted hints (refresh timing,
+/// display-only identity), never as an authorization decision.
+/// `token_label` names the token in the not-a-JWT error.
+pub(super) fn decode_jwt_payload<T: DeserializeOwned>(
+    jwt: &str,
+    token_label: &str,
+) -> OAuthResult<T> {
+    let mut parts = jwt.split('.');
+    let payload_b64 = match (parts.next(), parts.next(), parts.next()) {
+        (Some(h), Some(p), Some(s)) if !h.is_empty() && !p.is_empty() && !s.is_empty() => p,
+        _ => {
+            return Err(OAuthError::TokenEndpoint(format!(
+                "{token_label} is not a JWT"
+            )));
+        }
+    };
+    let bytes = URL_SAFE_NO_PAD
+        .decode(payload_b64)
+        .map_err(|e| OAuthError::TokenEndpoint(format!("JWT payload base64 decode: {e}")))?;
+    serde_json::from_slice(&bytes)
+        .map_err(|e| OAuthError::TokenEndpoint(format!("JWT payload JSON parse: {e}")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const PRODUCTION_ENDPOINTS: [(&str, &TokenEndpoint); 4] = [
+        ("anthropic", &anthropic::ENDPOINT),
+        ("codex", &codex::ENDPOINT),
+        ("xai", &xai::ENDPOINT),
+        ("antigravity", &antigravity::ENDPOINT),
+    ];
+
+    fn parsed(url: &str) -> Url {
+        Url::parse(url).expect("test URL parses")
+    }
+
+    #[test]
+    fn check_token_url_accepts_every_production_endpoint() {
+        for (name, endpoint) in PRODUCTION_ENDPOINTS {
+            let result = check_token_url(&parsed(endpoint.url), endpoint.allowed_host);
+            assert!(result.is_ok(), "{name}: {result:?}");
+        }
+    }
+
+    #[test]
+    fn check_token_url_refuses_off_rule_urls() {
+        for (name, endpoint) in PRODUCTION_ENDPOINTS {
+            let host = endpoint.allowed_host;
+            let rows = [
+                ("http", format!("http://{host}/token"), "not https"),
+                (
+                    "userinfo",
+                    format!("https://user:pw@{host}/token"),
+                    "userinfo",
+                ),
+                (
+                    "username only",
+                    format!("https://user@{host}/token"),
+                    "userinfo",
+                ),
+                (
+                    "other host",
+                    "https://token.example.invalid/token".to_string(),
+                    "expected host",
+                ),
+                (
+                    "suffix lookalike",
+                    format!("https://{host}.example.invalid/token"),
+                    "expected host",
+                ),
+                (
+                    "subdomain lookalike",
+                    format!("https://lookalike.{host}/token"),
+                    "expected host",
+                ),
+            ];
+            for (row, url, reason) in rows {
+                match check_token_url(&parsed(&url), host) {
+                    Err(OAuthError::TokenEndpoint(m)) => {
+                        assert!(m.contains(reason), "{name}/{row}: {m}");
+                        assert!(!m.contains(host), "{name}/{row}: URL echoed: {m}");
+                    }
+                    other => panic!("{name}/{row}: expected refusal, got {other:?}"),
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn send_token_request_refuses_before_sending_off_rule_endpoint() {
+        let rows = [
+            (
+                "http",
+                "http://token.example.invalid/token",
+                "token.example.invalid",
+            ),
+            (
+                "host mismatch",
+                "https://token.example.invalid/token",
+                "other.example.invalid",
+            ),
+        ];
+        for (row, url, allowed_host) in rows {
+            let endpoint = TokenEndpoint {
+                url,
+                client_id: "client-a",
+                allowed_host,
+            };
+            let mut built = false;
+            let result = send_token_request(
+                &reqwest::Client::new(),
+                &endpoint,
+                "token endpoint POST",
+                |rb| {
+                    built = true;
+                    rb
+                },
+            )
+            .await;
+            assert!(
+                matches!(result, Err(OAuthError::TokenEndpoint(_))),
+                "{row}: {result:?}"
+            );
+            assert!(!built, "{row}: request was built for a refused URL");
+        }
+    }
+
+    fn response_from(url: &str) -> reqwest::Response {
+        use reqwest::ResponseBuilderExt as _;
+        let http_resp: http::Response<bytes::Bytes> = http::Response::builder()
+            .status(200)
+            .url(parsed(url))
+            .body(bytes::Bytes::new())
+            .expect("build http response");
+        reqwest::Response::from(http_resp)
+    }
+
+    #[test]
+    fn checked_response_applies_the_host_rule_to_the_final_url() {
+        let host = codex::ENDPOINT.allowed_host;
+        let rows = [
+            ("same host", format!("https://{host}/oauth/token"), true),
+            ("http", format!("http://{host}/oauth/token"), false),
+            (
+                "suffix lookalike",
+                format!("https://{host}.example.invalid/x"),
+                false,
+            ),
+            (
+                "subdomain lookalike",
+                format!("https://lookalike.{host}/x"),
+                false,
+            ),
+        ];
+        for (row, url, accepted) in rows {
+            let result = checked_response(response_from(&url), host);
+            assert_eq!(result.is_ok(), accepted, "{row}: {:?}", result.err());
+        }
+    }
+
+    const SINKHOLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+    /// A client that sends every connection for the production token hosts
+    /// to a test-owned loopback listener that closes each connection on
+    /// accept, so a POST passes the URL check and then fails in transport
+    /// without leaving the machine. The listener lives until the returned
+    /// task is aborted, so no other test can take its port mid-run.
+    async fn sinkhole_client() -> (reqwest::Client, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback");
+        let addr = listener.local_addr().expect("listener address");
+        let sinkhole = tokio::spawn(async move {
+            while let Ok((conn, _)) = listener.accept().await {
+                drop(conn);
+            }
+        });
+        let mut builder = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(SINKHOLE_TIMEOUT)
+            .timeout(SINKHOLE_TIMEOUT);
+        for (_, endpoint) in PRODUCTION_ENDPOINTS {
+            builder = builder.resolve(endpoint.allowed_host, addr);
+        }
+        (builder.build().expect("build client"), sinkhole)
+    }
+
+    fn network_message(result: OAuthResult<TokenRecord>) -> String {
+        match result {
+            Err(OAuthError::Network(m)) => m,
+            other => panic!("expected Network error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn transport_failures_carry_the_grant_network_label() {
+        let (http, sinkhole) = sinkhole_client().await;
+        for id in known_provider_ids() {
+            let flow = lookup(id).expect("registered provider");
+
+            let exchange = network_message(
+                flow.exchange_code(
+                    &http,
+                    "code-a",
+                    "verifier-a",
+                    "state-a",
+                    "http://localhost/cb",
+                )
+                .await,
+            );
+            let refresh = network_message(flow.refresh_token(&http, "refresh-a").await);
+
+            assert!(
+                exchange.starts_with("token endpoint POST: "),
+                "{id}: {exchange}"
+            );
+            assert!(
+                refresh.starts_with("refresh endpoint POST: "),
+                "{id}: {refresh}"
+            );
+        }
+        sinkhole.abort();
+    }
+
+    #[test]
+    fn jwt_payload_decode_names_the_token_label_when_not_a_jwt() {
+        let rows = [
+            ("access_token", "not-a-jwt", "access_token is not a JWT"),
+            ("id_token", "not-a-jwt", "id_token is not a JWT"),
+            ("access_token", "a..c", "access_token is not a JWT"),
+            ("id_token", "a.b", "id_token is not a JWT"),
+        ];
+        for (label, jwt, expected) in rows {
+            match decode_jwt_payload::<serde_json::Value>(jwt, label) {
+                Err(OAuthError::TokenEndpoint(m)) => assert_eq!(m, expected, "{label}/{jwt}"),
+                other => panic!("{label}/{jwt}: expected TokenEndpoint, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn jwt_payload_decode_keeps_base64_and_json_messages() {
+        let not_json = URL_SAFE_NO_PAD.encode(b"not json");
+        let rows = [
+            (
+                "base64",
+                "h.!!!.s".to_string(),
+                "JWT payload base64 decode: ",
+            ),
+            (
+                "json",
+                format!("h.{not_json}.s"),
+                "JWT payload JSON parse: ",
+            ),
+        ];
+        for (row, jwt, prefix) in rows {
+            match decode_jwt_payload::<serde_json::Value>(&jwt, "id_token") {
+                Err(OAuthError::TokenEndpoint(m)) => assert!(m.starts_with(prefix), "{row}: {m}"),
+                other => panic!("{row}: expected TokenEndpoint, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn jwt_payload_decode_returns_the_payload_claims() {
+        let payload = URL_SAFE_NO_PAD.encode(br#"{"sub":"seat-a"}"#);
+        let claims: serde_json::Value =
+            decode_jwt_payload(&format!("h.{payload}.s"), "id_token").expect("decodes");
+        assert_eq!(claims["sub"], "seat-a");
+    }
+
+    fn synthetic_response(status: u16, body: Vec<u8>) -> reqwest::Response {
+        let http_resp: http::Response<bytes::Bytes> = http::Response::builder()
+            .status(status)
+            .body(bytes::Bytes::from(body))
+            .expect("build http response");
+        reqwest::Response::from(http_resp)
+    }
+
+    #[tokio::test]
+    async fn capped_body_read_rejects_over_cap_response() {
+        // A token-endpoint response larger than the 64 KiB cap must be
+        // refused with a TokenEndpoint error rather than buffered whole.
+        let oversized = vec![b'x'; MAX_TOKEN_BODY_BYTES + 1];
+        let resp = synthetic_response(200, oversized);
+
+        let err = read_capped_body(resp).await.unwrap_err();
+
+        match err {
+            OAuthError::TokenEndpoint(m) => {
+                assert!(m.contains("refusing to load"), "got: {m}");
+                assert!(m.contains(&MAX_TOKEN_BODY_BYTES.to_string()), "got: {m}");
+            }
+            other => panic!("expected TokenEndpoint over-cap error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn capped_body_read_rejects_non_utf8_response() {
+        // Invalid UTF-8 bytes must hard-error, never silently lossy-decode.
+        // The error text must NOT echo the raw body content.
+        let invalid_utf8 = vec![0xff, 0xfe, 0x80, 0x00];
+        let resp = synthetic_response(200, invalid_utf8);
+
+        let err = read_capped_body(resp).await.unwrap_err();
+
+        match err {
+            OAuthError::TokenEndpoint(m) => {
+                assert!(m.contains("not valid UTF-8"), "got: {m}");
+                assert!(!m.contains('\u{fffd}'), "must not echo lossy body: {m}");
+            }
+            other => panic!("expected TokenEndpoint UTF-8 error, got {other:?}"),
+        }
+    }
 
     #[test]
     fn safe_token_error_code_accepts_bounded_oauth_codes() {
