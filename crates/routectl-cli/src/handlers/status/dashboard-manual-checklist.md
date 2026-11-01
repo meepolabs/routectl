@@ -187,6 +187,14 @@ banner, no retry signal -- silently mislabeled data.
   With one of two seats out it reads `Some seats unusable in <pool> - see
   Health` in amber; with both logged in it reads `All routes healthy`. A
   rate-limited or breaker-open seat also turns the line amber while it lasts.
+- With a seat still unusable, block `/status/usage?window=all` in the
+  browser devtools (request blocking; it is the one source fetched on its
+  own, while config, health and doctor ride the `/status` aggregate) and wait
+  two polls. The status line reports BOTH: `No usable seat in <pool> - see
+  Health; all-history usage unavailable` (red with every seat out, amber with
+  some), never the seat sentence alone and never "Routing healthy - ...".
+  Log every seat in with the block still on: the line reads `Routing healthy
+  - all-history usage unavailable` in amber.
 - The Health tab badge counts each target with an eligibility reason or a
   non-closed breaker once: two logged-out seats badge `2`, and a seat that is
   both logged out and breaker-open still counts once. The favicon turns amber

@@ -447,10 +447,14 @@
   }
 
   // Precedence: a stopped page, then a dead aggregate, then the today
-  // aggregate's own overload, then seats a request cannot use, then any source
-  // a fresh round found unusable or left STALE, then healthy. Every arm reads the EFFECTIVE state, so a source
-  // whose section threw during render counts as unusable here rather than
-  // letting the strip claim health beside an error card -- and a source
+  // aggregate's own overload. Past those, seats a request cannot use and
+  // sources a fresh round found unusable or left STALE are BOTH reported:
+  // with both, the seat sentence leads and the source phrases follow it, at the
+  // worse of the two kinds (a seat verdict is bad or warn, a source problem
+  // always warn, so the seat kind); a source problem alone keeps "Routing
+  // healthy - ..."; neither present is healthy. Every arm reads the EFFECTIVE state, so a
+  // source whose section threw during render counts as unusable here rather
+  // than letting the strip claim health beside an error card -- and a source
   // serving RETAINED values after a 503 is reported as stale rather than
   // passing as healthy beside the retained figures it is showing.
   function verdictState() {
@@ -463,7 +467,24 @@
       return { kind: 'warn', text: 'Status overloaded - showing last known values' };
     }
     var seats = seatVerdict();
+    var problems = sourceProblems();
+    if (seats && problems.length) {
+      return { kind: seats.kind, text: seats.text + '; ' + problems.join('; ') };
+    }
     if (seats) { return seats; }
+    if (problems.length) {
+      return { kind: 'warn', text: 'Routing healthy - ' + problems.join('; ') };
+    }
+    if (ALL_SOURCES.every(function (n) { return SOURCES[n].state === 'loading'; })) {
+      return { kind: 'idle', text: 'Checking routes' };
+    }
+    return { kind: 'ok', text: 'All routes healthy' };
+  }
+
+  // One phrase per kind of source problem: the sources a fresh round found
+  // unusable, then the sources serving retained values. Empty when every
+  // source is current. Every check reads the EFFECTIVE state.
+  function sourceProblems() {
     var degraded = ALL_SOURCES.filter(function (n) {
       var s = effectiveState(SOURCES[n]);
       return s === 'unavailable' || s === 'incompatible' || s === 'dead' ||
@@ -472,18 +493,12 @@
     var staleSources = ALL_SOURCES.filter(function (n) {
       return effectiveState(SOURCES[n]) === 'stale';
     });
-    if (degraded.length || staleSources.length) {
-      var parts = [];
-      if (degraded.length) { parts.push(degraded.map(sourceLabel).join(', ') + ' unavailable'); }
-      if (staleSources.length) {
-        parts.push(staleSources.map(sourceLabel).join(', ') + ' data stale');
-      }
-      return { kind: 'warn', text: 'Routing healthy - ' + parts.join('; ') };
+    var parts = [];
+    if (degraded.length) { parts.push(degraded.map(sourceLabel).join(', ') + ' unavailable'); }
+    if (staleSources.length) {
+      parts.push(staleSources.map(sourceLabel).join(', ') + ' data stale');
     }
-    if (ALL_SOURCES.every(function (n) { return SOURCES[n].state === 'loading'; })) {
-      return { kind: 'idle', text: 'Checking routes' };
-    }
-    return { kind: 'ok', text: 'All routes healthy' };
+    return parts;
   }
 
   // A live health payload reporting seats a request cannot use: a pool with no
