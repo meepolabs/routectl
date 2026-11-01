@@ -600,10 +600,12 @@ impl FieldVerdictRegistry {
         let observed = self.learned.observe_field_verdict_in_generation(
             generation,
             key,
-            tier,
-            FailurePhase::F1,
-            EvidenceSource::Live,
-            None,
+            crate::learned_capability::NegativeEvidence {
+                tier,
+                phase: FailurePhase::F1,
+                source: EvidenceSource::Live,
+                evidence_class: None,
+            },
             now,
         );
         let crate::learned_capability::GenerationOutcome::Applied {
@@ -1219,10 +1221,12 @@ impl FieldRepairGuard<'_> {
         let observed = self.registry.learned.observe_field_verdict_in_generation(
             self.generation,
             &key,
-            tier,
-            FailurePhase::F1,
-            EvidenceSource::Live,
-            None,
+            crate::learned_capability::NegativeEvidence {
+                tier,
+                phase: FailurePhase::F1,
+                source: EvidenceSource::Live,
+                evidence_class: None,
+            },
             now,
         );
         let (acting, observations, persistence_generation, incarnation) = match observed {

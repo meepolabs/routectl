@@ -66,13 +66,17 @@ fn write(reg: &LearnedCapabilityRegistry, entry: Entry, key: &str, kind: &str) -
         Entry::WithObservations => reg
             .observe_in_generation_with_observations(
                 reg.generation(),
-                LANE,
-                key,
-                kind,
-                tier,
-                phase,
-                source,
-                None,
+                crate::learned_capability::LearnKey {
+                    state_key: LANE,
+                    feature_key_raw: key,
+                    provider_kind: kind,
+                },
+                crate::learned_capability::NegativeEvidence {
+                    tier,
+                    phase,
+                    source,
+                    evidence_class: None,
+                },
                 now,
             )
             .applied()
@@ -113,19 +117,23 @@ fn the_field_verdict_entries_record_the_minted_identity() {
 
     let observed = reg.observe_field_verdict(
         &key,
-        SignalTier::SelfIdentifying,
-        FailurePhase::F1,
-        EvidenceSource::Live,
-        None,
+        crate::learned_capability::NegativeEvidence {
+            tier: SignalTier::SelfIdentifying,
+            phase: FailurePhase::F1,
+            source: EvidenceSource::Live,
+            evidence_class: None,
+        },
         now,
     );
     let counted = reg.observe_field_verdict_in_generation(
         reg.generation(),
         &key,
-        SignalTier::SelfIdentifying,
-        FailurePhase::F1,
-        EvidenceSource::Live,
-        None,
+        crate::learned_capability::NegativeEvidence {
+            tier: SignalTier::SelfIdentifying,
+            phase: FailurePhase::F1,
+            source: EvidenceSource::Live,
+            evidence_class: None,
+        },
         now,
     );
 

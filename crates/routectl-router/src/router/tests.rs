@@ -1609,13 +1609,17 @@ fn carry_over_learned_from_keeps_field_entries_and_clears_catalog_scoped_on_cata
     let before = Router::new(config.clone());
     for capability in [field_key.as_str(), "web_search"] {
         before.learned_capabilities.observe_any_key_for_tests(
-            "nick",
-            capability,
-            "anthropic-api",
-            SignalTier::SelfIdentifying,
-            FailurePhase::F1,
-            EvidenceSource::Live,
-            None,
+            crate::learned_capability::LearnKey {
+                state_key: "nick",
+                feature_key_raw: capability,
+                provider_kind: "anthropic-api",
+            },
+            crate::learned_capability::NegativeEvidence {
+                tier: SignalTier::SelfIdentifying,
+                phase: FailurePhase::F1,
+                source: EvidenceSource::Live,
+                evidence_class: None,
+            },
             Instant::now(),
         );
     }
@@ -1712,13 +1716,17 @@ fn field_entry_survives_a_catalog_change_across_reload_and_cold_replay() {
     let before = Router::new(config.clone());
     for capability in [field_key.as_str(), "web_search"] {
         before.learned_capabilities.observe_any_key_for_tests(
-            "nick",
-            capability,
-            "anthropic-api",
-            SignalTier::SelfIdentifying,
-            FailurePhase::F1,
-            EvidenceSource::Live,
-            None,
+            crate::learned_capability::LearnKey {
+                state_key: "nick",
+                feature_key_raw: capability,
+                provider_kind: "anthropic-api",
+            },
+            crate::learned_capability::NegativeEvidence {
+                tier: SignalTier::SelfIdentifying,
+                phase: FailurePhase::F1,
+                source: EvidenceSource::Live,
+                evidence_class: None,
+            },
             at,
         );
     }

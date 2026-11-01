@@ -81,13 +81,17 @@ fn a_stale_generation_field_observation_is_accepted_into_the_live_registry() {
 
     let outcome = reg.observe_any_key_in_generation_for_tests(
         stale,
-        "nick",
-        &key,
-        "anthropic-api",
-        SignalTier::SelfIdentifying,
-        FailurePhase::F1,
-        EvidenceSource::Live,
-        None,
+        crate::learned_capability::LearnKey {
+            state_key: "nick",
+            feature_key_raw: &key,
+            provider_kind: "anthropic-api",
+        },
+        crate::learned_capability::NegativeEvidence {
+            tier: SignalTier::SelfIdentifying,
+            phase: FailurePhase::F1,
+            source: EvidenceSource::Live,
+            evidence_class: None,
+        },
         Instant::now(),
     );
 
@@ -114,13 +118,17 @@ fn stale_generation_reads_are_scoped_by_key_class() {
     // Learn both classes at the current generation.
     for capability in [key.as_str(), "web_search"] {
         reg.observe_any_key_for_tests(
-            "nick",
-            capability,
-            "anthropic-api",
-            SignalTier::SelfIdentifying,
-            FailurePhase::F1,
-            EvidenceSource::Live,
-            None,
+            crate::learned_capability::LearnKey {
+                state_key: "nick",
+                feature_key_raw: capability,
+                provider_kind: "anthropic-api",
+            },
+            crate::learned_capability::NegativeEvidence {
+                tier: SignalTier::SelfIdentifying,
+                phase: FailurePhase::F1,
+                source: EvidenceSource::Live,
+                evidence_class: None,
+            },
             now,
         );
     }
@@ -153,13 +161,17 @@ fn pruning_catalog_scoped_entries_keeps_the_field_entries() {
     let key = field_key("thinking.enabled.display");
     for capability in [key.as_str(), "web_search", "computer_use"] {
         reg.observe_any_key_for_tests(
-            "nick",
-            capability,
-            "anthropic-api",
-            SignalTier::SelfIdentifying,
-            FailurePhase::F1,
-            EvidenceSource::Live,
-            None,
+            crate::learned_capability::LearnKey {
+                state_key: "nick",
+                feature_key_raw: capability,
+                provider_kind: "anthropic-api",
+            },
+            crate::learned_capability::NegativeEvidence {
+                tier: SignalTier::SelfIdentifying,
+                phase: FailurePhase::F1,
+                source: EvidenceSource::Live,
+                evidence_class: None,
+            },
             now,
         );
     }
@@ -265,13 +277,17 @@ fn the_boundary_cut_excludes_observations_between_snapshot_and_submit() {
     let reg = Arc::new(registry());
     let now = Instant::now();
     reg.observe_any_key_for_tests(
-        "nick",
-        &field_key("thinking.enabled.display"),
-        "anthropic-api",
-        SignalTier::SelfIdentifying,
-        FailurePhase::F1,
-        EvidenceSource::Live,
-        None,
+        crate::learned_capability::LearnKey {
+            state_key: "nick",
+            feature_key_raw: &field_key("thinking.enabled.display"),
+            provider_kind: "anthropic-api",
+        },
+        crate::learned_capability::NegativeEvidence {
+            tier: SignalTier::SelfIdentifying,
+            phase: FailurePhase::F1,
+            source: EvidenceSource::Live,
+            evidence_class: None,
+        },
         now,
     );
     let resident_before = reg.snapshot().len();
@@ -341,13 +357,17 @@ fn the_boundary_cut_snapshots_only_catalog_independent_entries() {
     let key = field_key("thinking.enabled.display");
     for capability in [key.as_str(), "web_search"] {
         reg.observe_any_key_for_tests(
-            "nick",
-            capability,
-            "anthropic-api",
-            SignalTier::SelfIdentifying,
-            FailurePhase::F1,
-            EvidenceSource::Live,
-            None,
+            crate::learned_capability::LearnKey {
+                state_key: "nick",
+                feature_key_raw: capability,
+                provider_kind: "anthropic-api",
+            },
+            crate::learned_capability::NegativeEvidence {
+                tier: SignalTier::SelfIdentifying,
+                phase: FailurePhase::F1,
+                source: EvidenceSource::Live,
+                evidence_class: None,
+            },
             now,
         );
     }
@@ -751,13 +771,17 @@ fn a_debug_render_concurrent_with_a_boundary_commit_does_not_deadlock() {
     let reg = Arc::new(registry());
     // `entries` non-empty, so the render has something to count.
     reg.observe_any_key_for_tests(
-        "nick",
-        &field_key("thinking.enabled.display"),
-        "anthropic-api",
-        SignalTier::SelfIdentifying,
-        FailurePhase::F1,
-        EvidenceSource::Live,
-        None,
+        crate::learned_capability::LearnKey {
+            state_key: "nick",
+            feature_key_raw: &field_key("thinking.enabled.display"),
+            provider_kind: "anthropic-api",
+        },
+        crate::learned_capability::NegativeEvidence {
+            tier: SignalTier::SelfIdentifying,
+            phase: FailurePhase::F1,
+            source: EvidenceSource::Live,
+            evidence_class: None,
+        },
         Instant::now(),
     );
 

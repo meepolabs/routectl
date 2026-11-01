@@ -208,6 +208,7 @@ pub use k_estimator::{
 pub use learned_capability::{
     BoundaryCut, BoundaryReceipt, BoundarySettlement, GenerationOutcome, LearnedCapabilityRegistry,
     LearnedRegistryEntry, NegativeState, RECHECK_BACKSTOP, RecordedLearnedEntry, SeedClearMarker,
+    negative_lapsed,
 };
 pub use override_registry::{
     OverrideRegistry, OverrideRow, OverrideVerdict, validate_capability_overrides,

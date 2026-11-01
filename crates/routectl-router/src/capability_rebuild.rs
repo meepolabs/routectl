@@ -737,10 +737,12 @@ fn mint_field_negative(
     };
     registry.observe_field_verdict(
         &key,
-        tier,
-        phase,
-        source,
-        row.evidence_class.as_deref(),
+        crate::learned_capability::NegativeEvidence {
+            tier,
+            phase,
+            source,
+            evidence_class: row.evidence_class.as_deref(),
+        },
         row.observed_at,
     );
     true

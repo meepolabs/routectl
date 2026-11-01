@@ -497,13 +497,17 @@ fn commit_emits_its_own_captured_count_despite_a_sibling_observation_during_the_
             .learned()
             .observe_in_generation_with_observations(
                 generation,
-                &lane_key,
-                &capability_key,
-                PROVIDER,
-                SignalTier::SelfIdentifying,
-                FailurePhase::F1,
-                EvidenceSource::Live,
-                None,
+                crate::learned_capability::LearnKey {
+                    state_key: &lane_key,
+                    feature_key_raw: &capability_key,
+                    provider_kind: PROVIDER,
+                },
+                crate::learned_capability::NegativeEvidence {
+                    tier: SignalTier::SelfIdentifying,
+                    phase: FailurePhase::F1,
+                    source: EvidenceSource::Live,
+                    evidence_class: None,
+                },
                 t0,
             );
     }));

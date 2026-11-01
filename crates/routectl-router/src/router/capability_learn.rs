@@ -1139,15 +1139,19 @@ impl Router {
             .learned_capabilities
             .observe_in_generation_with_observations(
                 self.registry_generation(),
-                &learned_key,
-                &feature_key,
-                provider_kind,
-                tier,
-                phase,
-                EvidenceSource::Live,
-                // A learned `broken` negative carries no evidence class; the
-                // positive-detection verdicts are the ones that do.
-                None,
+                crate::learned_capability::LearnKey {
+                    state_key: &learned_key,
+                    feature_key_raw: &feature_key,
+                    provider_kind,
+                },
+                crate::learned_capability::NegativeEvidence {
+                    tier,
+                    phase,
+                    source: EvidenceSource::Live,
+                    // A learned `broken` negative carries no evidence class; the
+                    // positive-detection verdicts are the ones that do.
+                    evidence_class: None,
+                },
                 Instant::now(),
             );
         // The generation, the outcome, and the observation count all come FROM

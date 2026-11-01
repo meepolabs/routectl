@@ -402,10 +402,12 @@ pub fn observe_field_verdict_for_tests(
         .observe_field_verdict_in_generation(
             router.registry_generation(),
             &key,
-            tier,
-            FailurePhase::F1,
-            EvidenceSource::Live,
-            None,
+            crate::learned_capability::NegativeEvidence {
+                tier,
+                phase: FailurePhase::F1,
+                source: EvidenceSource::Live,
+                evidence_class: None,
+            },
             now,
         )
 }

@@ -288,10 +288,12 @@ fn commit_emits_its_own_captured_count_despite_a_sibling_observation_during_the_
         let _ = sibling_reg.learned().observe_field_verdict_in_generation(
             1,
             &sibling_key,
-            SignalTier::SelfIdentifying,
-            FailurePhase::F1,
-            EvidenceSource::Live,
-            None,
+            crate::learned_capability::NegativeEvidence {
+                tier: SignalTier::SelfIdentifying,
+                phase: FailurePhase::F1,
+                source: EvidenceSource::Live,
+                evidence_class: None,
+            },
             t0,
         );
     }));

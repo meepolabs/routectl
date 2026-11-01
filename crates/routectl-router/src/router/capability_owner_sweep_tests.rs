@@ -318,10 +318,12 @@ fn the_owner_sweep_resets_a_dropped_field_verdict_canary() {
         .expect("a qualified dotted path on a pass-through kind");
     before.learned_capabilities.observe_field_verdict(
         &key,
-        SignalTier::SelfIdentifying,
-        FailurePhase::F1,
-        routectl_core::capability::EvidenceSource::Live,
-        None,
+        crate::learned_capability::NegativeEvidence {
+            tier: SignalTier::SelfIdentifying,
+            phase: FailurePhase::F1,
+            source: routectl_core::capability::EvidenceSource::Live,
+            evidence_class: None,
+        },
         Instant::now(),
     );
     before

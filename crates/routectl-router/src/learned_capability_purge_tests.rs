@@ -28,13 +28,17 @@ fn registry() -> LearnedCapabilityRegistry {
 /// Plant one acting self-identifying negative.
 fn plant(reg: &LearnedCapabilityRegistry, state_key: &str, capability: &str) {
     reg.observe_any_key_for_tests(
-        state_key,
-        capability,
-        "",
-        SignalTier::SelfIdentifying,
-        FailurePhase::F1,
-        EvidenceSource::Live,
-        None,
+        crate::learned_capability::LearnKey {
+            state_key,
+            feature_key_raw: capability,
+            provider_kind: "",
+        },
+        crate::learned_capability::NegativeEvidence {
+            tier: SignalTier::SelfIdentifying,
+            phase: FailurePhase::F1,
+            source: EvidenceSource::Live,
+            evidence_class: None,
+        },
         Instant::now(),
     );
 }

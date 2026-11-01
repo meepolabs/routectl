@@ -216,10 +216,12 @@ fn purge_hook(
             let observed = registry.observe_field_verdict_in_generation(
                 generation,
                 &key,
-                SignalTier::SelfIdentifying,
-                FailurePhase::F1,
-                EvidenceSource::Live,
-                None,
+                crate::learned_capability::NegativeEvidence {
+                    tier: SignalTier::SelfIdentifying,
+                    phase: FailurePhase::F1,
+                    source: EvidenceSource::Live,
+                    evidence_class: None,
+                },
                 Instant::now(),
             );
             assert!(matches!(observed, GenerationOutcome::Applied { .. }));

@@ -105,15 +105,19 @@ fn plant_negative(router: &Router, state_key: &str, capability: &str) {
 /// [`plant_negative`] recorded under `provider_kind`.
 fn plant_negative_under(router: &Router, state_key: &str, capability: &str, provider_kind: &str) {
     router.learned_capabilities.observe_any_key_for_tests(
-        state_key,
-        capability,
-        provider_kind,
-        SignalTier::SelfIdentifying,
-        FailurePhase::F1,
-        EvidenceSource::Live,
-        // develop's `observe` gained an evidence-class argument; a learned
-        // negative carries none (only positive / suspect rows do).
-        None,
+        crate::learned_capability::LearnKey {
+            state_key,
+            feature_key_raw: capability,
+            provider_kind,
+        },
+        crate::learned_capability::NegativeEvidence {
+            tier: SignalTier::SelfIdentifying,
+            phase: FailurePhase::F1,
+            source: EvidenceSource::Live,
+            // develop's `observe` gained an evidence-class argument; a learned
+            // negative carries none (only positive / suspect rows do).
+            evidence_class: None,
+        },
         Instant::now(),
     );
 }

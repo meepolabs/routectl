@@ -404,16 +404,20 @@ impl ReplayProbeGuard<'_> {
             .learned
             .observe_in_generation_with_observations(
                 self.generation,
-                key.lane_key(),
-                &key.capability_key,
-                &key.provider_kind,
-                SignalTier::SelfIdentifying,
-                FailurePhase::F1,
-                EvidenceSource::Live,
-                // A `broken` verdict carries no evidence class (only the
-                // positive-detection verdicts do), matching what the ledger
-                // persists for this shape.
-                None,
+                crate::learned_capability::LearnKey {
+                    state_key: key.lane_key(),
+                    feature_key_raw: &key.capability_key,
+                    provider_kind: &key.provider_kind,
+                },
+                crate::learned_capability::NegativeEvidence {
+                    tier: SignalTier::SelfIdentifying,
+                    phase: FailurePhase::F1,
+                    source: EvidenceSource::Live,
+                    // A `broken` verdict carries no evidence class (only the
+                    // positive-detection verdicts do), matching what the ledger
+                    // persists for this shape.
+                    evidence_class: None,
+                },
                 now,
             );
         // The generation comes FROM the mutation, under its guard.

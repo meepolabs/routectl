@@ -31,13 +31,17 @@ fn plant_negative(reg: &LearnedCapabilityRegistry, capability: &str, kind: &str)
 fn plant_negative_at(reg: &LearnedCapabilityRegistry, capability: &str, kind: &str, now: Instant) {
     let outcome = reg.observe_any_key_in_generation_for_tests(
         reg.generation(),
-        LANE,
-        capability,
-        kind,
-        SignalTier::SelfIdentifying,
-        FailurePhase::F1,
-        EvidenceSource::Live,
-        None,
+        crate::learned_capability::LearnKey {
+            state_key: LANE,
+            feature_key_raw: capability,
+            provider_kind: kind,
+        },
+        crate::learned_capability::NegativeEvidence {
+            tier: SignalTier::SelfIdentifying,
+            phase: FailurePhase::F1,
+            source: EvidenceSource::Live,
+            evidence_class: None,
+        },
         now,
     );
     assert!(outcome.applied().is_some(), "the fixture must plant");

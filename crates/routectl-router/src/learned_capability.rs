@@ -1120,6 +1120,213 @@ pub struct AppliedMutation<T> {
     pub generation: u64,
 }
 
+/// The three components a learn write keys on, before normalization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[expect(
+    clippy::redundant_pub_crate,
+    reason = "this module is private, so pub(crate) reads as redundant, but sibling \
+              modules build this type for the crate-internal observe doors; `pub` would \
+              publish a registry-internal shape as semver surface"
+)]
+pub(crate) struct LearnKey<'a> {
+    /// The serialized learned lane the entry applies to.
+    pub(crate) state_key: &'a str,
+    /// The capability key as the caller spelled it; normalized per kind.
+    pub(crate) feature_key_raw: &'a str,
+    /// The provider kind the capability key normalizes under.
+    pub(crate) provider_kind: &'a str,
+}
+
+impl<'a> LearnKey<'a> {
+    /// The key a field verdict is stored under: its minted identity.
+    pub(crate) fn field_verdict(key: &'a FieldVerdictKey) -> Self {
+        Self {
+            state_key: key.registry_key(),
+            feature_key_raw: key.capability_key(),
+            provider_kind: key.provider_kind(),
+        }
+    }
+
+    fn registry_key(self) -> RegistryKey {
+        LearnedCapabilityRegistry::make_key(
+            self.state_key,
+            self.feature_key_raw,
+            self.provider_kind,
+        )
+    }
+}
+
+/// What one negative observation says about a key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[expect(
+    clippy::redundant_pub_crate,
+    reason = "this module is private, so pub(crate) reads as redundant, but sibling \
+              modules build this type for the crate-internal observe doors; `pub` would \
+              publish a registry-internal shape as semver surface"
+)]
+pub(crate) struct NegativeEvidence<'a> {
+    /// How directly the failure named the capability.
+    pub(crate) tier: SignalTier,
+    /// The detection phase that attributed the failure.
+    pub(crate) phase: FailurePhase,
+    /// Live traffic or an out-of-band probe.
+    pub(crate) source: EvidenceSource,
+    /// The pinned observation-evidence token, when the verdict carries one.
+    pub(crate) evidence_class: Option<&'a str>,
+}
+
+/// Whether a learn write is submitted on behalf of a router generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LearnGate {
+    /// Validated against the generation barrier and refused under a purge
+    /// lease, in the one critical section [`LearnedCapabilityRegistry::guarded_keyed`]
+    /// holds.
+    InGeneration(u64),
+    /// No generation to validate against (rebuild, replay, tests): takes the
+    /// entries and lease locks directly and stamps no incarnation.
+    Ungated,
+}
+
+/// What one positive (VerifiedWorking) observation says about a key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PositiveEvidence<'a> {
+    source: EvidenceSource,
+    evidence_class: Option<&'a str>,
+}
+
+/// An admitted beta re-probe the upstream accepted: replaces a resident
+/// negative rather than being suppressed by it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AcceptedBetaEvidence {
+    source: EvidenceSource,
+}
+
+/// Whether a learn write's key is screened against the envelope-field
+/// namespace before anything is locked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LearnTarget<'a> {
+    /// A free-form key the caller named: refused with
+    /// [`GenerationOutcome::FieldNamespace`] when it is, or normalizes into, a
+    /// field-namespace key.
+    Screened(LearnKey<'a>),
+    /// Written as given: a minted field identity, a test plant, or a positive
+    /// (the positive doors have never screened).
+    Unscreened(LearnKey<'a>),
+}
+
+impl<'a> LearnTarget<'a> {
+    const fn key(self) -> LearnKey<'a> {
+        match self {
+            Self::Screened(key) | Self::Unscreened(key) => key,
+        }
+    }
+
+    fn is_refused(self) -> bool {
+        match self {
+            Self::Screened(key) => {
+                learned_key_enters_field_namespace(key.feature_key_raw, key.provider_kind)
+            }
+            Self::Unscreened(_) => false,
+        }
+    }
+}
+
+/// One kind of learn evidence: how it mutates a key's entry, on guards the
+/// writer already holds.
+trait LearnEvidence: Copy {
+    type Outcome;
+
+    fn apply(
+        self,
+        registry: &LearnedCapabilityRegistry,
+        entries: &mut BTreeMap<RegistryKey, LearnedEntry>,
+        leased: &std::collections::HashSet<RegistryKey>,
+        key: &RegistryKey,
+        now: Instant,
+    ) -> Self::Outcome;
+}
+
+impl LearnEvidence for NegativeEvidence<'_> {
+    type Outcome = ObserveOutcome;
+
+    fn apply(
+        self,
+        registry: &LearnedCapabilityRegistry,
+        entries: &mut BTreeMap<RegistryKey, LearnedEntry>,
+        leased: &std::collections::HashSet<RegistryKey>,
+        key: &RegistryKey,
+        now: Instant,
+    ) -> ObserveOutcome {
+        registry.observe_in(entries, leased, key, self, now)
+    }
+}
+
+impl LearnEvidence for PositiveEvidence<'_> {
+    type Outcome = PositiveOutcome;
+
+    fn apply(
+        self,
+        registry: &LearnedCapabilityRegistry,
+        entries: &mut BTreeMap<RegistryKey, LearnedEntry>,
+        leased: &std::collections::HashSet<RegistryKey>,
+        key: &RegistryKey,
+        now: Instant,
+    ) -> PositiveOutcome {
+        registry.observe_positive_in(entries, leased, key, self, now)
+    }
+}
+
+impl LearnEvidence for AcceptedBetaEvidence {
+    type Outcome = PositiveOutcome;
+
+    fn apply(
+        self,
+        registry: &LearnedCapabilityRegistry,
+        entries: &mut BTreeMap<RegistryKey, LearnedEntry>,
+        leased: &std::collections::HashSet<RegistryKey>,
+        key: &RegistryKey,
+        now: Instant,
+    ) -> PositiveOutcome {
+        registry.accept_beta_in(entries, leased, key, self.source, now)
+    }
+}
+
+/// The value of an ungated write whose key is not screened: neither refusal
+/// a [`GenerationOutcome`] can carry is reachable from it.
+fn unrefusable<T>(outcome: GenerationOutcome<(T, u32)>) -> T {
+    match outcome {
+        GenerationOutcome::Applied {
+            value: (value, _), ..
+        } => value,
+        GenerationOutcome::Stale
+        | GenerationOutcome::Reserved
+        | GenerationOutcome::Exhausted
+        | GenerationOutcome::FieldNamespace => {
+            unreachable!("an ungated, unscreened learn write has no refusal path")
+        }
+    }
+}
+
+impl<T> GenerationOutcome<T> {
+    fn map_value<U>(self, f: impl FnOnce(T) -> U) -> GenerationOutcome<U> {
+        match self {
+            Self::Applied {
+                value,
+                incarnation,
+                generation,
+            } => GenerationOutcome::Applied {
+                value: f(value),
+                incarnation,
+                generation,
+            },
+            Self::Stale => GenerationOutcome::Stale,
+            Self::Reserved => GenerationOutcome::Reserved,
+            Self::Exhausted => GenerationOutcome::Exhausted,
+            Self::FieldNamespace => GenerationOutcome::FieldNamespace,
+        }
+    }
+}
+
 impl<T> GenerationOutcome<T> {
     /// The applied result with its metadata, or `None` for either refusal.
     pub fn applied(self) -> Option<AppliedMutation<T>> {
@@ -1229,98 +1436,103 @@ impl LearnedCapabilityRegistry {
         evidence_class: Option<&str>,
         now: Instant,
     ) -> Option<ObserveOutcome> {
-        if learned_key_enters_field_namespace(feature_key_raw, provider_kind) {
-            return None;
-        }
-        Some(self.observe_unchecked(
+        let key = LearnKey {
             state_key,
             feature_key_raw,
             provider_kind,
+        };
+        let evidence = NegativeEvidence {
             tier,
             phase,
             source,
             evidence_class,
+        };
+        self.learn(
+            LearnGate::Ungated,
+            LearnTarget::Screened(key),
+            evidence,
             now,
-        ))
+        )
+        .value()
+        .map(|(outcome, _)| outcome)
     }
 
     /// [`Self::observe`] for a field verdict, keyed by its minted identity.
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn observe_field_verdict(
         &self,
         key: &FieldVerdictKey,
-        tier: SignalTier,
-        phase: FailurePhase,
-        source: EvidenceSource,
-        evidence_class: Option<&str>,
+        evidence: NegativeEvidence<'_>,
         now: Instant,
     ) -> ObserveOutcome {
-        self.observe_unchecked(
-            key.registry_key(),
-            key.capability_key(),
-            key.provider_kind(),
-            tier,
-            phase,
-            source,
-            evidence_class,
-            now,
-        )
+        let target = LearnTarget::Unscreened(LearnKey::field_verdict(key));
+        unrefusable(self.learn(LearnGate::Ungated, target, evidence, now))
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn observe_unchecked(
+    /// THE learn-store write: every observe door is a typed shim onto this.
+    ///
+    /// The namespace screen runs first, before any lock, so a refused key
+    /// reserves no incarnation. Everything after it is one critical section:
+    /// for a gated write, [`Self::guarded_keyed`] validates the generation,
+    /// refuses a leased key, reserves the incarnation and runs the mutation
+    /// with every guard held; the seed-clear lift happens inside the
+    /// mutation; and the resulting observation count is captured inside the
+    /// same closure. Reading the count after the guards drop would let a
+    /// concurrent purge or sibling mutation report a count this write never
+    /// produced.
+    fn learn<E: LearnEvidence>(
         &self,
-        state_key: &str,
-        feature_key_raw: &str,
-        provider_kind: &str,
-        tier: SignalTier,
-        phase: FailurePhase,
-        source: EvidenceSource,
-        evidence_class: Option<&str>,
+        gate: LearnGate,
+        target: LearnTarget<'_>,
+        evidence: E,
         now: Instant,
-    ) -> ObserveOutcome {
-        let key = Self::make_key(state_key, feature_key_raw, provider_kind);
-        let mut entries = self.entries.write();
-        let leased = self.purge_leases.read();
-        self.observe_in(
-            &mut entries,
-            &leased,
-            &key,
-            tier,
-            phase,
-            source,
-            evidence_class,
-            now,
-        )
+    ) -> GenerationOutcome<(E::Outcome, u32)> {
+        if target.is_refused() {
+            return GenerationOutcome::FieldNamespace;
+        }
+        let learn_key = target.key();
+        let key = learn_key.registry_key();
+        let write = |entries: &mut BTreeMap<RegistryKey, LearnedEntry>,
+                     leased: &std::collections::HashSet<RegistryKey>| {
+            let outcome = evidence.apply(self, entries, leased, &key, now);
+            let observations = entries.get(&key).map_or(0, |entry| entry.observations);
+            (outcome, observations)
+        };
+        match gate {
+            LearnGate::InGeneration(generation) => self.guarded_keyed(
+                generation,
+                Some(&key),
+                Intent::Mutate,
+                learn_key.feature_key_raw,
+                write,
+            ),
+            LearnGate::Ungated => {
+                let mut entries = self.entries.write();
+                let leased = self.purge_leases.read();
+                let value = write(&mut entries, &leased);
+                let incarnation = entries.get(&key).map_or(0, |entry| entry.incarnation);
+                GenerationOutcome::Applied {
+                    value,
+                    incarnation,
+                    generation: 0,
+                }
+            }
+        }
     }
 
-    /// [`Self::observe`]'s body, operating on an already-held `entries` write
-    /// guard and an already-held `leased` read guard rather than acquiring
-    /// its own -- so [`Self::guarded_keyed`] can run this under the single
-    /// critical section it holds, without a reentrant second acquisition of
-    /// either lock on the same thread.
-    #[allow(clippy::too_many_arguments)]
+    /// The negative mutation plus its seed-clear upkeep, operating on an
+    /// already-held `entries` write guard and an already-held `leased` read
+    /// guard rather than acquiring its own -- so [`Self::learn`] can run this
+    /// under the single critical section it holds, without a reentrant
+    /// second acquisition of either lock on the same thread.
     fn observe_in(
         &self,
         entries: &mut BTreeMap<RegistryKey, LearnedEntry>,
         leased: &std::collections::HashSet<RegistryKey>,
         key: &RegistryKey,
-        tier: SignalTier,
-        phase: FailurePhase,
-        source: EvidenceSource,
-        evidence_class: Option<&str>,
+        evidence: NegativeEvidence<'_>,
         now: Instant,
     ) -> ObserveOutcome {
-        let outcome = self.observe_entry_in(
-            entries,
-            leased,
-            key,
-            tier,
-            phase,
-            source,
-            evidence_class,
-            now,
-        );
+        let outcome = self.observe_entry_in(entries, leased, key, evidence, now);
         if outcome == ObserveOutcome::Acting {
             self.lift_seed_clear(key);
         }
@@ -1328,18 +1540,20 @@ impl LearnedCapabilityRegistry {
     }
 
     /// [`Self::observe_in`]'s entry mutation, without the seed-clear upkeep.
-    #[allow(clippy::too_many_arguments)]
     fn observe_entry_in(
         &self,
         entries: &mut BTreeMap<RegistryKey, LearnedEntry>,
         leased: &std::collections::HashSet<RegistryKey>,
         key: &RegistryKey,
-        tier: SignalTier,
-        phase: FailurePhase,
-        source: EvidenceSource,
-        evidence_class: Option<&str>,
+        evidence: NegativeEvidence<'_>,
         now: Instant,
     ) -> ObserveOutcome {
+        let NegativeEvidence {
+            tier,
+            phase,
+            source,
+            evidence_class,
+        } = evidence;
         if let Some(existing) = entries.get_mut(key) {
             return match existing.verdict {
                 // A resident negative runs the normal observe path.
@@ -1394,24 +1608,26 @@ impl LearnedCapabilityRegistry {
         evidence_class: Option<&str>,
         now: Instant,
     ) -> PositiveOutcome {
-        let key = Self::make_key(state_key, feature_key_raw, provider_kind);
-        let mut entries = self.entries.write();
-        let leased = self.purge_leases.read();
-        self.observe_positive_in(&mut entries, &leased, &key, source, evidence_class, now)
+        let target = LearnTarget::Unscreened(LearnKey {
+            state_key,
+            feature_key_raw,
+            provider_kind,
+        });
+        let evidence = PositiveEvidence {
+            source,
+            evidence_class,
+        };
+        unrefusable(self.learn(LearnGate::Ungated, target, evidence, now))
     }
 
-    /// [`Self::observe_positive`]'s body, operating on already-held guards;
-    /// see [`Self::observe_in`].
-    // Mirrors `observe_positive` over held guards; grouping the arguments would
-    // only introduce a type that exists to satisfy a lint.
-    #[allow(clippy::too_many_arguments)]
+    /// [`Self::observe_positive`]'s mutation, operating on already-held
+    /// guards; see [`Self::observe_in`].
     fn observe_positive_in(
         &self,
         entries: &mut BTreeMap<RegistryKey, LearnedEntry>,
         leased: &std::collections::HashSet<RegistryKey>,
         key: &RegistryKey,
-        source: EvidenceSource,
-        evidence_class: Option<&str>,
+        evidence: PositiveEvidence<'_>,
         now: Instant,
     ) -> PositiveOutcome {
         if let Some(existing) = entries.get_mut(key) {
@@ -1429,7 +1645,7 @@ impl LearnedCapabilityRegistry {
         }
         entries.insert(
             key.clone(),
-            Self::fresh_positive(source, evidence_class, now),
+            Self::fresh_positive(evidence.source, evidence.evidence_class, now),
         );
         PositiveOutcome::Recorded
     }
@@ -2480,110 +2696,52 @@ impl LearnedCapabilityRegistry {
         evidence_class: Option<&str>,
         now: Instant,
     ) -> GenerationOutcome<ObserveOutcome> {
-        if learned_key_enters_field_namespace(feature_key_raw, provider_kind) {
-            return GenerationOutcome::FieldNamespace;
-        }
-        self.observe_in_generation_unchecked(
-            generation,
+        let key = LearnKey {
             state_key,
             feature_key_raw,
             provider_kind,
+        };
+        let evidence = NegativeEvidence {
             tier,
             phase,
             source,
             evidence_class,
+        };
+        self.learn(
+            LearnGate::InGeneration(generation),
+            LearnTarget::Screened(key),
+            evidence,
             now,
         )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn observe_in_generation_unchecked(
-        &self,
-        generation: u64,
-        state_key: &str,
-        feature_key_raw: &str,
-        provider_kind: &str,
-        tier: SignalTier,
-        phase: FailurePhase,
-        source: EvidenceSource,
-        evidence_class: Option<&str>,
-        now: Instant,
-    ) -> GenerationOutcome<ObserveOutcome> {
-        self.guarded_for(
-            generation,
-            state_key,
-            feature_key_raw,
-            provider_kind,
-            |entries, leased| {
-                let key = Self::make_key(state_key, feature_key_raw, provider_kind);
-                self.observe_in(
-                    entries,
-                    leased,
-                    &key,
-                    tier,
-                    phase,
-                    source,
-                    evidence_class,
-                    now,
-                )
-            },
-        )
+        .map_value(|(outcome, _)| outcome)
     }
 
     /// [`Self::observe`] without the namespace refusal, for tests that plant a
     /// field-namespace entry under a bare lane no field identity can carry.
     #[cfg(test)]
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn observe_any_key_for_tests(
         &self,
-        state_key: &str,
-        feature_key_raw: &str,
-        provider_kind: &str,
-        tier: SignalTier,
-        phase: FailurePhase,
-        source: EvidenceSource,
-        evidence_class: Option<&str>,
+        key: LearnKey<'_>,
+        evidence: NegativeEvidence<'_>,
         now: Instant,
     ) -> ObserveOutcome {
-        self.observe_unchecked(
-            state_key,
-            feature_key_raw,
-            provider_kind,
-            tier,
-            phase,
-            source,
-            evidence_class,
-            now,
-        )
+        let target = LearnTarget::Unscreened(key);
+        unrefusable(self.learn(LearnGate::Ungated, target, evidence, now))
     }
 
     /// [`Self::observe_in_generation`] without the namespace refusal; see
     /// [`Self::observe_any_key_for_tests`].
     #[cfg(test)]
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn observe_any_key_in_generation_for_tests(
         &self,
         generation: u64,
-        state_key: &str,
-        feature_key_raw: &str,
-        provider_kind: &str,
-        tier: SignalTier,
-        phase: FailurePhase,
-        source: EvidenceSource,
-        evidence_class: Option<&str>,
+        key: LearnKey<'_>,
+        evidence: NegativeEvidence<'_>,
         now: Instant,
     ) -> GenerationOutcome<ObserveOutcome> {
-        self.observe_in_generation_unchecked(
-            generation,
-            state_key,
-            feature_key_raw,
-            provider_kind,
-            tier,
-            phase,
-            source,
-            evidence_class,
-            now,
-        )
+        let gate = LearnGate::InGeneration(generation);
+        self.learn(gate, LearnTarget::Unscreened(key), evidence, now)
+            .map_value(|(outcome, _)| outcome)
     }
 
     /// [`Self::observe_in_generation`], additionally reporting the entry's
@@ -2600,96 +2758,41 @@ impl LearnedCapabilityRegistry {
     /// Refuses a field-namespace key exactly as [`Self::observe_in_generation`]
     /// does; a field verdict goes through
     /// [`Self::observe_field_verdict_in_generation`].
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn observe_in_generation_with_observations(
         &self,
         generation: u64,
-        state_key: &str,
-        feature_key_raw: &str,
-        provider_kind: &str,
-        tier: SignalTier,
-        phase: FailurePhase,
-        source: EvidenceSource,
-        evidence_class: Option<&str>,
+        key: LearnKey<'_>,
+        evidence: NegativeEvidence<'_>,
         now: Instant,
     ) -> GenerationOutcome<(ObserveOutcome, u32)> {
-        if learned_key_enters_field_namespace(feature_key_raw, provider_kind) {
-            return GenerationOutcome::FieldNamespace;
-        }
-        self.observe_counted_in_generation(
-            generation,
-            state_key,
-            feature_key_raw,
-            provider_kind,
-            tier,
-            phase,
-            source,
-            evidence_class,
-            now,
-        )
+        self.observe_counted_in_generation(generation, LearnTarget::Screened(key), evidence, now)
     }
 
     /// [`Self::observe_in_generation_with_observations`] for a field verdict,
     /// keyed by its minted identity.
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn observe_field_verdict_in_generation(
         &self,
         generation: u64,
         key: &FieldVerdictKey,
-        tier: SignalTier,
-        phase: FailurePhase,
-        source: EvidenceSource,
-        evidence_class: Option<&str>,
+        evidence: NegativeEvidence<'_>,
         now: Instant,
     ) -> GenerationOutcome<(ObserveOutcome, u32)> {
-        self.observe_counted_in_generation(
-            generation,
-            key.registry_key(),
-            key.capability_key(),
-            key.provider_kind(),
-            tier,
-            phase,
-            source,
-            evidence_class,
-            now,
-        )
+        let target = LearnTarget::Unscreened(LearnKey::field_verdict(key));
+        self.observe_counted_in_generation(generation, target, evidence, now)
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn observe_counted_in_generation(
         &self,
         generation: u64,
-        state_key: &str,
-        feature_key_raw: &str,
-        provider_kind: &str,
-        tier: SignalTier,
-        phase: FailurePhase,
-        source: EvidenceSource,
-        evidence_class: Option<&str>,
+        target: LearnTarget<'_>,
+        evidence: NegativeEvidence<'_>,
         now: Instant,
     ) -> GenerationOutcome<(ObserveOutcome, u32)> {
-        let result = self.guarded_for(
-            generation,
-            state_key,
-            feature_key_raw,
-            provider_kind,
-            |entries, leased| {
-                let key = Self::make_key(state_key, feature_key_raw, provider_kind);
-                let outcome = self.observe_in(
-                    entries,
-                    leased,
-                    &key,
-                    tier,
-                    phase,
-                    source,
-                    evidence_class,
-                    now,
-                );
-                let observations = entries.get(&key).map_or(0, |entry| entry.observations);
-                (outcome, observations)
-            },
-        );
-        // `guarded_for` has already released every lock it took by the time it
+        let result = self.learn(LearnGate::InGeneration(generation), target, evidence, now);
+        if result == GenerationOutcome::FieldNamespace {
+            return result;
+        }
+        // `learn` has already released every lock it took by the time it
         // returns, so this fires with no lock held: the exact point a test
         // needs to run a sibling mutation on the same key and prove THIS
         // call's captured `observations` survives it unread-back.
@@ -2712,16 +2815,17 @@ impl LearnedCapabilityRegistry {
         evidence_class: Option<&str>,
         now: Instant,
     ) -> GenerationOutcome<PositiveOutcome> {
-        self.guarded_for(
-            generation,
+        let target = LearnTarget::Unscreened(LearnKey {
             state_key,
             feature_key_raw,
             provider_kind,
-            |entries, leased| {
-                let key = Self::make_key(state_key, feature_key_raw, provider_kind);
-                self.observe_positive_in(entries, leased, &key, source, evidence_class, now)
-            },
-        )
+        });
+        let evidence = PositiveEvidence {
+            source,
+            evidence_class,
+        };
+        self.learn(LearnGate::InGeneration(generation), target, evidence, now)
+            .map_value(|(outcome, _)| outcome)
     }
 
     /// Settle an admitted beta re-probe the upstream ACCEPTED, on behalf of
@@ -2745,16 +2849,16 @@ impl LearnedCapabilityRegistry {
         provider_kind: &str,
         now: Instant,
     ) -> GenerationOutcome<PositiveOutcome> {
-        self.guarded_for(
-            generation,
+        let target = LearnTarget::Unscreened(LearnKey {
             state_key,
             feature_key_raw,
             provider_kind,
-            |entries, leased| {
-                let key = Self::make_key(state_key, feature_key_raw, provider_kind);
-                self.accept_beta_in(entries, leased, &key, EvidenceSource::Live, now)
-            },
-        )
+        });
+        let evidence = AcceptedBetaEvidence {
+            source: EvidenceSource::Live,
+        };
+        self.learn(LearnGate::InGeneration(generation), target, evidence, now)
+            .map_value(|(outcome, _)| outcome)
     }
 
     /// Replay an accepted-beta row: the same replacement as
@@ -2769,10 +2873,13 @@ impl LearnedCapabilityRegistry {
         source: EvidenceSource,
         now: Instant,
     ) -> PositiveOutcome {
-        let key = Self::make_key(state_key, feature_key_raw, provider_kind);
-        let mut entries = self.entries.write();
-        let leased = self.purge_leases.read();
-        self.accept_beta_in(&mut entries, &leased, &key, source, now)
+        let target = LearnTarget::Unscreened(LearnKey {
+            state_key,
+            feature_key_raw,
+            provider_kind,
+        });
+        let evidence = AcceptedBetaEvidence { source };
+        unrefusable(self.learn(LearnGate::Ungated, target, evidence, now))
     }
 
     /// Replace a resident negative for `key` with a verified accepted-beta
@@ -2791,14 +2898,11 @@ impl LearnedCapabilityRegistry {
         {
             entries.remove(key);
         }
-        self.observe_positive_in(
-            entries,
-            leased,
-            key,
+        let evidence = PositiveEvidence {
             source,
-            Some(routectl_core::capability::BETA_ACCEPTED),
-            now,
-        )
+            evidence_class: Some(routectl_core::capability::BETA_ACCEPTED),
+        };
+        self.observe_positive_in(entries, leased, key, evidence, now)
     }
 
     /// The routing decision for `generation`, or `None` when that generation

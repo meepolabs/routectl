@@ -1264,13 +1264,17 @@ fn commit_emits_its_own_captured_count_despite_a_sibling_observation_during_the_
             move || {
                 let _ = sibling_registry.observe_in_generation_with_observations(
                     generation,
-                    &state_key,
-                    "web_search",
-                    "anthropic-api",
-                    SignalTier::SelfIdentifying,
-                    FailurePhase::F1,
-                    EvidenceSource::Live,
-                    None,
+                    crate::learned_capability::LearnKey {
+                        state_key: &state_key,
+                        feature_key_raw: "web_search",
+                        provider_kind: "anthropic-api",
+                    },
+                    crate::learned_capability::NegativeEvidence {
+                        tier: SignalTier::SelfIdentifying,
+                        phase: FailurePhase::F1,
+                        source: EvidenceSource::Live,
+                        evidence_class: None,
+                    },
                     Instant::now(),
                 );
             }

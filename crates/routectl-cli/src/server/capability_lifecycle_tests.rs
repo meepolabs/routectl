@@ -22,7 +22,7 @@
 use crate::server::test_support::drain_usage_writer_strict;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use routectl_auth::{MemoryStore, SecretStore};
 use routectl_core::capability::{
@@ -218,7 +218,7 @@ fn acting_decision(entry: &LearnedRegistryEntry, now: Instant) -> ActingDecision
             ActingDecision::Allow
         }
         Verdict::LearnedBroken(_) => {
-            if now >= entry.expires_at {
+            if routectl_router::negative_lapsed(entry.expires_at, entry.recheck_owned, now) {
                 ActingDecision::Reprobe
             } else {
                 ActingDecision::RouteAway
@@ -646,6 +646,46 @@ async fn stale_event_lapses_to_a_single_reprobe_across_restart() {
         acting_decision(recent_entry, now),
         ActingDecision::RouteAway
     );
+}
+
+/// A negative whose decay window closes at `expires_at`, owned or not by the
+/// free re-check.
+fn negative_expiring_at(expires_at: Instant, recheck_owned: bool) -> LearnedRegistryEntry {
+    LearnedRegistryEntry {
+        state_key: "seat-a#upstream".into(),
+        feature_key: WEB_SEARCH.into(),
+        verdict: Verdict::LearnedBroken(FailurePhase::F1),
+        signal_tier: SignalTier::SelfIdentifying,
+        observations: 1,
+        first_seen: expires_at,
+        last_seen: expires_at,
+        expires_at,
+        evidence_class: None,
+        phase: FailurePhase::F1,
+        source: EvidenceSource::Live,
+        recheck_owned,
+        value: None,
+    }
+}
+
+/// Past its decay deadline, an ordinary negative lapses to a re-probe while a
+/// re-check-owned one keeps routing away until the backstop.
+#[test]
+fn a_recheck_owned_negative_past_expiry_routes_away_until_the_backstop() {
+    let expires_at = Instant::now();
+    let past_expiry = Duration::from_hours(1);
+    assert!(past_expiry < routectl_router::RECHECK_BACKSTOP);
+    let now = expires_at + past_expiry;
+    let rows = [
+        ("ordinary", false, ActingDecision::Reprobe),
+        ("recheck-owned", true, ActingDecision::RouteAway),
+    ];
+
+    for (label, recheck_owned, expected) in rows {
+        let entry = negative_expiring_at(expires_at, recheck_owned);
+
+        assert_eq!(acting_decision(&entry, now), expected, "row {label}");
+    }
 }
 
 // --- Scenario 5: reload-then-restart replays post-reload negatives -------
