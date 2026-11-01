@@ -616,7 +616,6 @@ mod build_resolved_models_tests {
             .find(|r| r.pool == "anthropic-pool")
             .expect("the pool reports");
         assert!(report.is_degraded());
-        assert!(report.omissions.is_empty(), "a probe failure omits nothing");
         assert_eq!(report.configured_members, 2);
         assert_eq!(report.usable_members, 1);
         assert_eq!(
@@ -697,46 +696,6 @@ mod build_resolved_models_tests {
             msg.chars().all(|c| c.is_ascii_graphic() || c == ' '),
             "{msg}"
         );
-    }
-
-    /// Both operator-written keys on the omission WARN are `%` fields, which
-    /// pass their bytes into the log line verbatim. A member key bearing a
-    /// newline and a second `reason=` must not forge a second record or
-    /// override the real reason.
-    #[test]
-    fn the_omission_warn_neutralizes_control_bytes_in_the_pool_and_member_keys() {
-        use crate::pool_build::{PoolMemberOmission, PoolOmissionReason};
-
-        // Arrange
-        let reports = vec![PoolReport {
-            pool: "pool\n\u{1b}[31mWARN forged".to_string(),
-            models: vec!["opus".to_string()],
-            configured_members: 2,
-            usable_members: 1,
-            placeholders: Vec::new(),
-            omissions: vec![PoolMemberOmission {
-                member: "a-1\nWARN forged reason=all_good".to_string(),
-                provider_kind: "anthropic-api",
-                reason: PoolOmissionReason::CredentialMissing,
-            }],
-        }];
-
-        // Act
-        let events = routectl_testkit::capture_events(|| warn_pool_omissions(&reports));
-
-        // Assert
-        assert_eq!(events.len(), 1, "one WARN per omission: {events:?}");
-        let event = &events[0];
-        assert_eq!(event.field("reason"), Some("credential_missing"));
-        for field in ["pool", "member"] {
-            let value = event.field(field).expect("field present");
-            assert!(!value.contains('\n'), "{field}: {value}");
-            assert!(!value.contains('\u{1b}'), "{field}: {value}");
-            assert!(
-                value.chars().all(|c| c.is_ascii_graphic() || c == ' '),
-                "{field}: {value}"
-            );
-        }
     }
 
     #[tokio::test]

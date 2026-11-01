@@ -211,7 +211,6 @@ async fn a_logged_out_codex_member_is_a_placeholder_not_a_build_error() {
     // Assert
     assert!(built.failed.is_empty(), "{:?}", built.failed);
     let report = &built.pool_reports[0];
-    assert!(report.omissions.is_empty(), "{:?}", report.omissions);
     assert_eq!(report.placeholders.len(), 1);
     assert_eq!(report.placeholders[0].cause, UnusableCause::NotLoggedIn);
     assert_eq!(

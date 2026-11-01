@@ -56,7 +56,6 @@ crates/routectl-router/tests/learned_capability_loop/learned_tail.rs
 crates/routectl-router/tests/learned_capability_loop/never_learn.rs
 crates/routectl-router/tests/learned_capability_loop/real_envelope.rs
 crates/routectl-router/tests/learned_capability_loop/streaming.rs
-crates/routectl-router/tests/pool_member_omission_warn.rs
 crates/routectl-router/tests/router/default_alias.rs
 crates/routectl-router/tests/router/dispatch_fallback.rs
 crates/routectl-router/tests/router/dispatch_meta.rs

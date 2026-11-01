@@ -2,8 +2,12 @@
 
 use std::time::Instant;
 
+use routectl_core::EligibilityReason;
+
 use super::Router;
+use crate::resolved::ResolvedModel;
 use crate::runtime_state::{CircuitPhase, ProviderGateStatus};
+use crate::seat_pool::SeatTarget;
 use crate::state_key::StateKey;
 
 /// One dispatch target's read-only health for the status surface: a
@@ -128,5 +132,136 @@ impl Router {
             }
         }
         out
+    }
+
+    /// Live seat counts for every pool a selectable model routes at, in
+    /// pool-name order, read from the same side-effect-free capacity
+    /// snapshot sticky placement reads: no RPM token is charged and no
+    /// half-open slot is claimed, however often it is called.
+    ///
+    /// A pool named by several models has one breaker and RPM bucket per
+    /// (model, seat), so a seat counts as eligible only when it is
+    /// dispatchable for every model routed at the pool; otherwise its reason
+    /// is the highest-priority one any of those models reports. A placeholder
+    /// seat is never eligible, and a seat with no state slot reads as
+    /// breaker-open, as the status view reads it.
+    #[must_use]
+    pub fn pool_eligibility(&self, now: Instant) -> Vec<PoolEligibility> {
+        self.pool_reports
+            .iter()
+            .filter_map(|report| {
+                let models: Vec<&ResolvedModel> = report
+                    .models
+                    .iter()
+                    .filter_map(|nickname| self.resolved_models.get(nickname))
+                    .map(AsRef::as_ref)
+                    .collect();
+                let seats = models.first()?.seats.as_ref()?;
+                let mut counts = PoolEligibility {
+                    pool: report.pool.clone(),
+                    configured: seats.len(),
+                    eligible: 0,
+                    by_reason: Vec::new(),
+                };
+                for seat in seats.iter() {
+                    match self.seat_ineligibility(seat, &models, now) {
+                        None => counts.eligible += 1,
+                        Some(reason) => counts.add_reason(reason),
+                    }
+                }
+                Some(counts)
+            })
+            .collect()
+    }
+
+    /// Why `seat` is not dispatchable for some model among `models`, by
+    /// priority, or `None` when every model would admit it.
+    fn seat_ineligibility(
+        &self,
+        seat: &SeatTarget,
+        models: &[&ResolvedModel],
+        now: Instant,
+    ) -> Option<EligibilityReason> {
+        if seat.is_placeholder() {
+            return Some(EligibilityReason::CredentialUnusable);
+        }
+        models
+            .iter()
+            .filter_map(|model| {
+                self.capacity_snapshot_for(
+                    &seat.state_key_for(&model.nickname),
+                    seat.account(),
+                    now,
+                )
+                .map_or(Some(EligibilityReason::BreakerOpen), |snapshot| {
+                    snapshot.reason()
+                })
+            })
+            .max_by_key(|reason| reason.priority())
+    }
+}
+
+/// One pool's live seat counts: how many seats it has, how many a request
+/// could dispatch to right now, and why each of the others cannot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PoolEligibility {
+    /// The `[pools]` table key.
+    pub pool: String,
+    /// How many seats the pool compiled, built or placeholder.
+    pub configured: usize,
+    /// How many seats are dispatchable now.
+    pub eligible: usize,
+    /// The non-eligible seats by reason, highest priority first, nonzero
+    /// counts only. Only target-state reasons appear (unusable, parked,
+    /// breaker open, rate limited).
+    pub by_reason: Vec<(EligibilityReason, usize)>,
+}
+
+impl PoolEligibility {
+    /// The count of seats not eligible for `reason`.
+    #[must_use]
+    pub fn count_for(&self, reason: EligibilityReason) -> usize {
+        self.by_reason
+            .iter()
+            .find(|(r, _)| *r == reason)
+            .map_or(0, |(_, n)| *n)
+    }
+
+    fn add_reason(&mut self, reason: EligibilityReason) {
+        match self.by_reason.iter_mut().find(|(r, _)| *r == reason) {
+            Some((_, n)) => *n += 1,
+            None => {
+                self.by_reason.push((reason, 1));
+                self.by_reason
+                    .sort_by_key(|(r, _)| std::cmp::Reverse(r.priority()));
+            }
+        }
+    }
+}
+
+/// Seat counts summed over every pool, for the metrics snapshot line.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct PoolSeatTotals {
+    pub(super) configured: u64,
+    pub(super) eligible: u64,
+    pub(super) credential_unusable: u64,
+    pub(super) account_parked: u64,
+    pub(super) breaker_open: u64,
+    pub(super) rate_limited: u64,
+}
+
+impl PoolSeatTotals {
+    pub(super) fn of(pools: &[PoolEligibility]) -> Self {
+        let sum = |count: fn(&PoolEligibility) -> usize| -> u64 {
+            pools.iter().map(|p| count(p) as u64).sum()
+        };
+        Self {
+            configured: sum(|p| p.configured),
+            eligible: sum(|p| p.eligible),
+            credential_unusable: sum(|p| p.count_for(EligibilityReason::CredentialUnusable)),
+            account_parked: sum(|p| p.count_for(EligibilityReason::AccountParked)),
+            breaker_open: sum(|p| p.count_for(EligibilityReason::BreakerOpen)),
+            rate_limited: sum(|p| p.count_for(EligibilityReason::RateLimited)),
+        }
     }
 }

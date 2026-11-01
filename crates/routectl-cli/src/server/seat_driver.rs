@@ -19,7 +19,7 @@ use std::time::Instant;
 use arc_swap::ArcSwap;
 use routectl_auth::{DefinitiveCause, OAuthStore, RefreshOutcome, SecretRef};
 use routectl_core::sanitize_for_log;
-use routectl_router::runtime_state::{MarkOutcome, RefreshSettlement, UnusableCause};
+use routectl_router::runtime_state::{MarkOutcome, UnusableCause};
 use routectl_router::{Config, Router};
 use tokio::sync::watch;
 use tokio::time::MissedTickBehavior;
@@ -153,32 +153,18 @@ const fn unusable_cause(cause: DefinitiveCause) -> UnusableCause {
 
 fn mark_unusable(router: &Router, seat: &ManagedSeat, cause: UnusableCause, generation: u64) {
     let account = sanitize_for_log(&seat.account);
-    match router.mark_credential_unusable(&seat.account, cause, Some(generation)) {
-        MarkOutcome::Transitioned => tracing::warn!(
-            account = %account,
-            cause = cause.as_str(),
-            "background refresh marked the seat unusable",
-        ),
-        MarkOutcome::Unchanged => {}
-        MarkOutcome::Stale => tracing::debug!(
+    if router.mark_credential_unusable(&seat.account, cause, Some(generation)) == MarkOutcome::Stale
+    {
+        tracing::debug!(
             account = %account,
             cause = cause.as_str(),
             "background refresh outcome overtaken by a newer credential; not marking",
-        ),
+        );
     }
 }
 
 fn settle_refreshed(router: &Router, seat: &ManagedSeat, generation: u64) {
-    match router.credential_refreshed_in_generation(&seat.account, generation) {
-        RefreshSettlement::Settled {
-            cleared_expired: true,
-            ..
-        } => tracing::info!(
-            account = %sanitize_for_log(&seat.account),
-            "background refresh cleared the seat's expired mark",
-        ),
-        RefreshSettlement::Settled { .. } | RefreshSettlement::Stale => {}
-    }
+    let _ = router.credential_refreshed_in_generation(&seat.account, generation);
 }
 
 /// The deduplicated managed-login seats the config's models dispatch

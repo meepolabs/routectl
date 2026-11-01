@@ -265,8 +265,8 @@ impl Router {
     /// returns the local `credential_unusable` refusal instead, a 503 a client
     /// backs off from.
     ///
-    /// Defensive: the build refuses a pool with zero usable members, so this
-    /// is reachable only if a pooled model with no seats reached dispatch
+    /// Defensive: the build refuses a pool with no member, so this is
+    /// reachable only if a pooled model with no seats reached dispatch
     /// through some path that bypassed that refusal.
     fn expand_resolved_chain(
         &self,
@@ -352,17 +352,15 @@ impl Router {
         out: &mut Vec<DispatchTarget>,
     ) {
         if seats.is_empty() {
-            // Defensive only: the build refuses a pool with no usable member,
-            // so a live pooled model always has at least one seat. The
-            // chain expansion turns an empty target set into a local
-            // refusal rather than `UnknownAlias`; see `empty_pool_error`.
+            // Defensive only: the build refuses a pool with no member, so a
+            // live pooled model always has at least one seat. The chain
+            // expansion turns an empty target set into a local refusal
+            // rather than `UnknownAlias`; see `empty_pool_error`.
             self.metrics.incr_pool_unavailable();
             return;
         }
         self.metrics.incr_pool_dispatch();
-        if seats.len() < self.configured_member_count(&m.provider_name) {
-            self.metrics.incr_pool_degraded_dispatch();
-        }
+        self.count_pool_degradation(m, seats);
         let selection = self.config.seat_selection_for(&m.provider_name);
 
         // Sticky least-loaded only engages with a real session key on a
@@ -407,15 +405,30 @@ impl Router {
         }
     }
 
-    /// How many members the `[pools]` block behind a dispatch target declared,
-    /// or `0` when the name is not a pool. The compiled seat count sitting
-    /// BELOW this is exactly what "degraded" means: the build dropped a
-    /// member the operator configured.
-    fn configured_member_count(&self, name: &str) -> usize {
-        self.config
-            .pools
-            .get(name)
-            .map_or(0, |pool| pool.members.len())
+    /// Count a degraded dispatch when at least one of `m`'s seats is not
+    /// dispatchable now, and an unavailable one too when none is. Read from
+    /// the side-effect-free capacity snapshot, so no gate moves.
+    fn count_pool_degradation(&self, m: &ResolvedModel, seats: &[crate::seat_pool::SeatTarget]) {
+        let now = Instant::now();
+        let dispatchable = seats
+            .iter()
+            .filter(|seat| {
+                !seat.is_placeholder()
+                    && self
+                        .capacity_snapshot_for(
+                            &seat.state_key_for(&m.nickname),
+                            seat.account(),
+                            now,
+                        )
+                        .is_some_and(|snapshot| snapshot.is_dispatchable())
+            })
+            .count();
+        if dispatchable < seats.len() {
+            self.metrics.incr_pool_degraded_dispatch();
+        }
+        if dispatchable == 0 {
+            self.metrics.incr_pool_unavailable();
+        }
     }
 
     /// Resolve the dispatch chain for a request and pre-filter against

@@ -3982,6 +3982,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   note naming model and capture date, lane per directory, `request_shape`
   roots, and the sent effort level and thinking shape each read at its
   dialect's own wire path and no other
+- `tests/pool_member_refusal.rs` -- a pool member with a missing or malformed
+  credential reference refuses the build, one message naming every refused
+  member with its own rule; a member the store refuses is kept as a
+  placeholder seat, and no build event at any level carries the store's text
 - `src/router/probe_terminal_state_tests.rs` -- tombstones, their own capacity
   bound, stale settlement, and the lane's last-outcome stamp
 - `src/router/probe_breaker_tests.rs` -- breaker non-interference: a probe
@@ -4245,6 +4249,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   the walk walks past a parked seat (`CREDENTIAL_PARKED_GATE_KIND`) on every
   surface and ends a token count on a breaker or RPM refusal
   (`DispatchSurface::gate_refusal_walks`)
+- `src/router/seat_transitions.rs` -- the seat-transition log lines: one WARN
+  `seat_unusable` when a credential account becomes unusable (or its cause
+  changes) and one INFO `seat_recovered` when a reset or a successful refresh
+  clears the mark, each naming the pool and member with the pool's live
+  eligible / configured counts; logged at the mark / reset API only
 - `src/router/outcome_rule.rs` -- the failure-outcome rule:
   `INLOOP_RETRY_AFTER_CAP`, `rate_limit_reset_hint` (clamps an
   `Error::Upstream.retry_after` to the configured ceiling; a zero hint is

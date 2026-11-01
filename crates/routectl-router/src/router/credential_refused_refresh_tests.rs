@@ -20,7 +20,7 @@ use crate::runtime_state::UnusableCause;
 const SURFACES: [Surface; 3] = [Surface::Complete, Surface::Stream, Surface::CountTokens];
 const REFUSED: Option<RefreshErr> = Some(INVALID);
 const TRANSIENT: Option<RefreshErr> = Some(None);
-const MARK_WARN: &str = "seat refresh token refused; marking the seat unusable";
+const MARK_EVENT: &str = "seat_unusable";
 
 fn unusable_cause(router: &Router, state_key: &str) -> Option<UnusableCause> {
     router
@@ -73,14 +73,14 @@ async fn a_refused_refresh_marks_the_seat_unusable_and_the_next_seat_serves() {
         assert_eq!(primary.calls.load(Ordering::SeqCst), 1, "{label}");
         assert_eq!(primary.refreshes.load(Ordering::SeqCst), 1, "{label}");
         assert_eq!(sibling.calls.load(Ordering::SeqCst), 2, "{label}");
-        let warns: Vec<(&str, Option<&str>, Option<&str>)> = events
+        let warns: Vec<(Option<&str>, Option<&str>, Option<&str>)> = events
             .iter()
-            .filter(|e| e.level == tracing::Level::WARN && e.message == MARK_WARN)
-            .map(|e| (e.message.as_str(), e.field("account"), e.field("cause")))
+            .filter(|e| e.level == tracing::Level::WARN)
+            .map(|e| (e.field("event"), e.field("account"), e.field("cause")))
             .collect();
         assert_eq!(
             warns,
-            [(MARK_WARN, Some("#p-a"), Some("revoked"))],
+            [(Some(MARK_EVENT), Some("#p-a"), Some("revoked"))],
             "{label}: one WARN at the transition"
         );
     }

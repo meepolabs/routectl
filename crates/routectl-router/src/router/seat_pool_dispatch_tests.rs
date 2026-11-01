@@ -935,32 +935,41 @@ fn a_healthy_pool_dispatch_counts_once_and_is_not_degraded() {
 }
 
 #[test]
-fn a_pool_serving_fewer_seats_than_members_counts_a_degraded_dispatch() {
-    // The counter's whole job: traffic is concentrating on fewer accounts than
-    // the operator configured. Built with the third member declared in the pool
-    // but absent from the compiled seat set, which is exactly the shape a
-    // build-time omission leaves behind.
-    let (mut router, _counters) =
-        pooled_router_with_members(SeatSelection::FillFirst, &["anthropic-a", "anthropic-b"]);
-    let mut config = (*router.config).clone();
-    config.pools.insert(
-        "anthropic-pool".to_string(),
-        PoolEntry::new(vec![
-            "anthropic-a".to_string(),
-            "anthropic-b".to_string(),
-            "anthropic-c".to_string(),
-        ]),
-    );
-    router.config = Arc::new(config);
+fn a_pool_with_an_undispatchable_seat_counts_degraded_and_with_none_left_unavailable() {
+    // (case, seats marked unusable, degraded, unavailable)
+    let rows: [(&str, &[&str], u64, u64); 3] = [
+        ("every seat dispatchable", &[], 0, 0),
+        ("one seat unusable", &["anthropic-b"], 1, 0),
+        (
+            "no seat dispatchable",
+            &["anthropic-a", "anthropic-b"],
+            1,
+            1,
+        ),
+    ];
+    for (case, unusable, degraded, unavailable) in rows {
+        // Arrange
+        let (router, _counters) =
+            pooled_router_with_members(SeatSelection::FillFirst, &["anthropic-a", "anthropic-b"]);
+        for member in unusable {
+            assert!(
+                router.mark_credential_unusable_for_tests(
+                    &format!("opus#{member}"),
+                    crate::runtime_state::UnusableCause::Revoked,
+                ),
+                "{case}: {member} has an account"
+            );
+        }
 
-    let _ = router.dispatch_chain("opus", None).expect("chain resolves");
+        // Act
+        let _ = router.dispatch_chain("opus", None);
 
-    let pool = router.metrics.pool_totals();
-    assert_eq!(pool.dispatch, 1);
-    assert_eq!(
-        pool.degraded_dispatch, 1,
-        "two seats against three configured members is a degraded serve"
-    );
+        // Assert
+        let pool = router.metrics.pool_totals();
+        assert_eq!(pool.dispatch, 1, "{case}");
+        assert_eq!(pool.degraded_dispatch, degraded, "{case}");
+        assert_eq!(pool.unavailable, unavailable, "{case}");
+    }
 }
 
 #[test]

@@ -1579,6 +1579,42 @@ request or the upstream response.
 | INFO | `routectl_router::router::breaker_transition` | `breaker_parked` | `state_key`, `cooldown_ms` | An upstream reset hint longer than the in-loop retry cap parked the circuit open for `cooldown_ms` (the hint clamped to `max_honored_retry_after_ms`), whatever the failure count. |
 | INFO | `routectl_router::router::breaker_transition` | `breaker_closed` | `state_key` | A success closed a circuit that was open or half-open. A success on a closed circuit logs nothing. |
 
+## Seat transition lines
+
+A credential account logs one WARN when it becomes unusable and one INFO
+when it recovers. Nothing logs per request: a seat that refuses a thousand
+requests logs once, and a re-mark with the same cause logs nothing. A mark
+with a different cause (an `expired` seat whose refresh token is then
+refused) is a new transition and logs again with the new cause. Every
+source of the mark logs through these two lines: the background seat
+driver, a refused refresh during a request, and a pool member whose
+credential could not be read at build.
+
+| Level | Target | `event` | Fields | When |
+|---|---|---|---|---|
+| WARN | `routectl_router::router::seat_transitions` | `seat_unusable` | `pool`, `member`, `account`, `cause`, `eligible`, `configured` | The account's credential became unusable. `cause` is `revoked` (the identity provider refused the refresh token), `not_logged_in` (no login is stored), `unreadable` (the credential source exists but cannot be read) or `expired` (the access token passed its expiry while background refreshes kept failing on network errors, 429 or 5xx). `eligible` / `configured` are the pool's live seat counts after the change. Every model on the account answers `credential_unusable` until it recovers: re-login the seat (`routectl login <provider> --label <label>`, or `routectl login <provider>` for the default seat). |
+| INFO | `routectl_router::router::seat_transitions` | `seat_recovered` | `pool`, `member`, `account`, `cause`, `eligible`, `configured` | A reload that may have changed the credential reset the account, or a background refresh succeeded on an `expired` seat. `cause` is the cause that was cleared. |
+
+One line is logged per pool seat on the account. An account no pool holds
+(a direct model's login) logs one line with `account` and `cause` only. A
+pool member that is unusable at startup logs its WARN once when the daemon
+starts; a reload logs only a member that is newly unusable. A mark or a
+refresh outcome that a re-login or another refresh already overtook changes
+nothing and logs at DEBUG only (`background refresh outcome overtaken by a
+newer credential; not marking`, `seat refresh token refused before a reload
+reset the seat; not marking`).
+
+The router metrics snapshot (DEBUG, target
+`routectl_router::router::metrics`) carries the same live counts summed
+over every pool: `rc_pool_seats_configured`, `rc_pool_seats_eligible`, and
+the non-eligible seats by reason, `rc_pool_seats_credential_unusable`,
+`rc_pool_seats_account_parked`, `rc_pool_seats_breaker_open` and
+`rc_pool_seats_rate_limited`. These are gauges read at snapshot time, not
+running totals. `rc_pool_degraded_dispatch_total` counts the pooled chain
+expansions that found at least one seat not dispatchable, and
+`rc_pool_unavailable_total` the subset that found none (plus any expansion
+of a pooled model with no seats at all, which no current build produces).
+
 ## Capability intelligence events
 
 routectl's learned-capability subsystem (see CONFIGURATION.md,
@@ -2327,7 +2363,6 @@ Repeat behavior is noted where the line is latched, sampled, or aggregated
 | ERROR | `routectl_cli::server::{purge_settlement,serve}` | `capability purge settlements did not finish before the shutdown deadline`, `a capability purge settlement did not complete ...`, `a capability purge settlement could not be accounted for` | The registry and ledger may disagree for a purged key; the daemon stops on purpose in the terminal cases. Check usage DB health, restart, and re-check the purged keys. |
 | WARN | `routectl_cli::server::reload` | `file-watch init failed`, `failed to install SIGHUP handler`, `activation inventory: no OAuth credential store available to probe`, `credentials reload failed`, `credentials seat-set changed but router rebuild failed`, `config reload failed: ...`, `config reload swapped routing state, but the listed fields require a daemon restart ...` | A reload path is off or a reload was rejected and the previous state kept. Fix the named config or credentials (`routectl doctor` shows why the file is refused; the last rejected reload is shown on `/status/doctor` and the dashboard), set HOME/XDG for OAuth providers, restart for `restart_required` fields, and file a bug for a panicked loader. |
 | WARN | `routectl_cli::server::reload_shutdown` | `reload task join failed during shutdown`, `reload task did not stop within deadline` | A reload task panicked or hung at shutdown: file a bug with the preceding lines; check the usage DB if it recurs. |
-| WARN | `routectl_cli::server::seat_driver` | `background refresh marked the seat unusable` (once per transition); fields `account`, `cause` (`revoked`, `not_logged_in` or `expired`) | The background seat driver found a configured Anthropic or Codex login it cannot refresh. `revoked`: the identity provider refused the refresh token; `not_logged_in`: no login is stored for the seat; `expired`: the access token passed its expiry while refreshes kept failing on network errors, 429 or 5xx. Every model on `account` answers `credential_unusable` until it recovers: re-login the seat (`routectl login <provider> --label <label>`, or `routectl login <provider>` for the default seat); an `expired` seat also recovers on its own when a later background refresh succeeds, which logs `background refresh cleared the seat's expired mark` (INFO). An outcome a re-login or another refresh overtook marks nothing (DEBUG). |
 | ERROR | `routectl_cli::server::seat_driver` | `seat driver stopped before shutdown; managed logins are no longer refreshed in the background`; field `exit` | The background refresh loop ended while the daemon kept serving. Seats still refresh on demand when a request uses them; restart the daemon to restore background refresh, and file a bug with the preceding lines. |
 | WARN | `routectl_cli::server::router_build` | `class policy warning`, `codex identity warning`, `per-block breakpoint warning`, `cloud-code host warning`, `cloud-code model warning` (once per build) | A config advisory: adjust or remove the named knob, or accept it. |
 | WARN | `routectl_cli::server::secrets` | `OAuth credentials store unavailable ...`, `OAuth credentials store could not be constructed` | `oauth://` references will fail: set HOME/XDG, or fix the credentials directory per `error`. |
@@ -2378,8 +2413,8 @@ Repeat behavior is noted where the line is latched, sampled, or aggregated
 | WARN | `routectl_router::router::dispatch` | `cache_volatile_in_caller_prefix` (once per process per kind) | The client marks volatile content cacheable, so each request writes a cache entry nothing reads: fix the client's breakpoint placement. |
 | WARN | `routectl_router::router::dispatch` | `reasoning context/mode dropped ...` (once per request) | The client's `reasoning.context` / `mode` cannot be represented on `provider`: route Responses-dialect clients to an OpenAI Responses target. |
 | WARN | `routectl_router::router::credential_park` | `gate blocked` (completions and streams), `count_tokens gate blocked` (token counts); fields `provider`, `model`, `gate_kind`, `error` | `provider` is rate-limited or its breaker is open: check upstream health or raise `rpm_limit`. A refusal by a credential park (`gate_kind = credential_parked`) logs at DEBUG instead: the park already warned once when it parked. |
+| WARN | `routectl_router::router::seat_transitions` | `seat_unusable` event (once per transition) | A seat's credential became unusable; see "Seat transition lines" for the fields and the fix. |
 | WARN | `routectl_router::router::credential_park` | `seat credential rejected; parking the seat` (once per park); fields `account`, `reason`, `parked_for_secs` | The upstream rejected the credential of `account` (the OAuth seat `provider#label`, or `#<provider entry>` for any other credential) for `reason`; every model on that account is skipped for `parked_for_secs`, then each re-tests once and the first success lifts the park for all of them. Re-login or fix the credential. A credentials reload lifts the park of each OAuth seat whose stored record it added, removed or changed, and no other; routectl's own token refresh changes no record, so it lifts nothing. An accepted config reload lifts every `#<provider entry>` account and no OAuth seat; a rejected one lifts nothing. A reload that lifts parks logs `reload cleared credential parks; parked seats will be retried` (INFO, fields `source` = `credentials` or `config`, `cleared`). |
-| WARN | `routectl_router::router::credential_park` | `seat refresh token refused; marking the seat unusable` (once per transition); fields `account`, `cause` (`revoked`) | A request's 401 triggered a token refresh and the upstream refused the refresh token, so `account` is marked unusable: every model on it answers `credential_unusable` and is skipped until a reload changes its credential. The request walks on to the next target. Re-login the seat. A refusal that arrives after a reload already replaced the credential marks nothing and logs `seat refresh token refused before a reload reset the seat; not marking` at DEBUG. |
 | WARN | `routectl_router::router::dispatch_loop` | `fallback to next` (completions and streams on a fallbackable error; token counts only when the attempt's `request_timeout_ms` expired); fields `provider`, `model`, `state_key`, `error` | An upstream failed and the request moved on: investigate `provider` if it persists. |
 | WARN | `routectl_router::router::dispatch_loop` | `chain exhausted; no fallback target available; request will fail` (the same surfaces and fields as `fallback to next`, on the last target) | The request failed with no fallback left: check `provider` health, or add a fallback target. |
 | WARN | `routectl_router::router::dispatch_loop` | `forwarded-token upstream auth failure surfaced verbatim`, `forwarded target has no captured client bearer; refusing` (every surface) | The client's forwarded credential was rejected or absent: the client must re-authenticate, or fix the forwarded-credential config. |
@@ -2418,7 +2453,6 @@ Repeat behavior is noted where the line is latched, sampled, or aggregated
 | WARN | `routectl_router::factory::build` | `max_thinking_entry_bytes` zero / below minimum / above ceiling | Remove the key or set it within the logged bounds. |
 | WARN | `routectl_router::factory::build` | `codex_version changed but requires a daemon restart ...` | Restart the daemon to apply the new `codex_version`. |
 | WARN | `routectl_router::factory::build` | `skipping Bedrock model (...)`, `skipping provider (build failed)` | That provider or model is unavailable: fix its credential or config per `error`. |
-| WARN | `routectl_router::factory::build` | `pool_member_omitted` event (once per build per member) | No current build emits it: a member that cannot be built refuses the config instead (the build error names the pool, the member and the rule). |
 | WARN | `routectl_router::factory::build` | `[models.X] stream_first_byte_timeout_ms = 0 ...` | Remove the key or set it to a positive value. |
 | WARN | `routectl_router::factory::installation_id` | `installation-id file unreadable ...`, `installation-id could not be written ...` | Egress omits the installation header: fix permissions or disk space in the config directory. |
 | WARN | `routectl_router::factory::warnings` | `context_management = true on this anthropic-api provider but history_reasoning is not 'preserve'` | Set `history_reasoning = "preserve"` on that model. |

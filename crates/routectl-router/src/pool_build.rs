@@ -5,76 +5,18 @@
 //! provider entry, built from that member's OWN `api_key_ref`. A member whose
 //! credential cannot be read is kept as a PLACEHOLDER seat (no provider, its
 //! account marked unusable); a member that cannot be built for any other
-//! reason is OMITTED. Either way the pool keeps serving through its
-//! survivors, and a pool of placeholders alone still builds.
+//! reason refuses the config. The pool keeps serving through its built seats,
+//! and a pool of placeholders alone still builds.
 //!
-//! The omission set is data, not a log line: the same sanitized report drives
-//! the degraded-pool WARN, the router's per-reason counters, and the
-//! operator-facing pools report. Nothing here carries token material, a
-//! credential path, an account id, or a store error string -- a member is
+//! Nothing here carries token material, a credential path, an account id
+//! beyond the seat's own account key, or a store error string: a member is
 //! named by its `[providers]` table key, its kind by the fixed kind token,
-//! and its failure by one of four allowlisted reasons.
+//! and its failure by an allowlisted cause.
 
 use std::sync::Arc;
 
-use routectl_core::sanitize_for_log;
-
 use crate::runtime_state::UnusableCause;
 use crate::seat_pool::SeatTarget;
-
-/// Why one pool member was left out of the compiled seat set.
-///
-/// An ALLOWLIST, deliberately: the reason reaches a structured log field and
-/// an operator-facing report, and a store or provider error string routed
-/// there would publish credential paths, account ids, and upstream response
-/// bytes. Each variant is derived from the SHAPE of the failure (an absent
-/// ref, an unparseable ref, the error variant a build returned), never from
-/// the text of an error.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PoolOmissionReason {
-    /// The member's provider entry declares no credential reference at all,
-    /// so there is nothing to authenticate the account with.
-    CredentialMissing,
-    /// The member's credential reference is present but the store could not
-    /// produce a credential for it (not logged in, refresh refused, backing
-    /// file unreadable).
-    CredentialUnreadable,
-    /// The member's credential reference is present but not a well-formed
-    /// secret reference.
-    CredentialInvalid,
-    /// The credential was usable but the provider instance itself failed to
-    /// construct (a rejected base URL, an incoherent provider block).
-    ProviderInitFailed,
-}
-
-impl PoolOmissionReason {
-    /// The stable token for this reason: the `reason` field of the
-    /// degraded-pool WARN and the operator-facing report's vocabulary.
-    #[must_use]
-    pub const fn token(self) -> &'static str {
-        match self {
-            Self::CredentialMissing => "credential_missing",
-            Self::CredentialUnreadable => "credential_unreadable",
-            Self::CredentialInvalid => "credential_invalid",
-            Self::ProviderInitFailed => "provider_init_failed",
-        }
-    }
-}
-
-/// One omitted pool member, in the only three facts that may leave the build:
-/// the member's `[providers]` table key, its fixed provider-kind token, and
-/// an allowlisted reason.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PoolMemberOmission {
-    /// The `[providers]` table key of the omitted member.
-    pub member: String,
-    /// The member's stable provider-kind token, or `unknown` when the member
-    /// names no provider entry (validation rejects that; the build stays
-    /// defensive).
-    pub provider_kind: &'static str,
-    /// Why the member was omitted.
-    pub reason: PoolOmissionReason,
-}
 
 /// One pool member kept as a placeholder seat, in the only facts that may
 /// leave the build: the member's `[providers]` table key, its fixed
@@ -95,14 +37,12 @@ pub struct PoolPlaceholder {
 }
 
 /// The sanitized build report for one pool: what it was configured with,
-/// what it can actually serve, and every member it lost.
+/// what it built, and every member it kept as a placeholder.
 ///
 /// Retained on the built `Router` (see `Router::pool_reports`) so the read
 /// side reports the same facts the build observed rather than re-deriving
-/// them from config, which cannot see a credential failure at all.
-///
-/// `usable_members == 0` is the Unavailable outcome: the pool serves nothing,
-/// and every model naming it is unroutable.
+/// them from config, which cannot see a credential failure at all. The live
+/// per-seat eligibility is `Router::pool_eligibility`, not this report.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PoolReport {
     /// The `[pools]` table key.
@@ -115,18 +55,16 @@ pub struct PoolReport {
     pub usable_members: usize,
     /// Every member kept as a placeholder seat, in declaration order.
     pub placeholders: Vec<PoolPlaceholder>,
-    /// Every member left out, in declaration order.
-    pub omissions: Vec<PoolMemberOmission>,
 }
 
 impl PoolReport {
-    /// Whether this pool has fewer usable seats than configured members but
-    /// still has a seat. A degraded pool is a live operational state, not a
-    /// failure: dispatch runs on the survivors, and a pool of placeholders
-    /// alone answers a local refusal until a credential recovers.
+    /// Whether the build kept at least one member as a placeholder seat.
+    /// A degraded pool is a live operational state, not a failure: dispatch
+    /// runs on the built seats, and a pool of placeholders alone answers a
+    /// local refusal until a credential recovers.
     #[must_use]
     pub const fn is_degraded(&self) -> bool {
-        !self.is_unavailable() && (!self.omissions.is_empty() || !self.placeholders.is_empty())
+        !self.placeholders.is_empty()
     }
 
     /// Whether this pool compiled no seat at all, placeholder or built.
@@ -136,108 +74,13 @@ impl PoolReport {
     }
 }
 
-/// The compiled outcome of one pool: a seat set to dispatch across, or
-/// nothing.
-///
-/// Two variants rather than an `Option<Arc<[SeatTarget]>>` plus a side
-/// channel, so a caller cannot reach the seats without having handled the
-/// zero-usable case -- which is a boot refusal, not an empty walk.
+/// The compiled seat set of one pool, shared by every model naming it.
 #[derive(Debug, Clone)]
-pub enum PoolOutcome {
-    /// At least one member compiled, as a built or a placeholder seat. The
-    /// seat set is shared by every model naming this pool.
-    Ready {
-        /// One seat per kept member, built or placeholder, in declaration
-        /// order.
-        seats: Arc<[SeatTarget]>,
-        /// The placeholder set (empty when every kept member built).
-        placeholders: Vec<PoolPlaceholder>,
-        /// The omission set (empty for a fully healthy pool).
-        omissions: Vec<PoolMemberOmission>,
-    },
-    /// No member compiled. The pool serves nothing.
-    Unavailable {
-        /// Why each member was lost.
-        omissions: Vec<PoolMemberOmission>,
-    },
-}
-
-impl PoolOutcome {
-    /// The seat set, or `None` for an unavailable pool.
-    #[must_use]
-    pub const fn seats(&self) -> Option<&Arc<[SeatTarget]>> {
-        match self {
-            Self::Ready { seats, .. } => Some(seats),
-            Self::Unavailable { .. } => None,
-        }
-    }
-
-    /// The placeholder set; empty for an unavailable pool.
-    #[must_use]
-    pub fn placeholders(&self) -> &[PoolPlaceholder] {
-        match self {
-            Self::Ready { placeholders, .. } => placeholders,
-            Self::Unavailable { .. } => &[],
-        }
-    }
-
-    /// The omission set, whichever outcome this is.
-    #[must_use]
-    pub fn omissions(&self) -> &[PoolMemberOmission] {
-        match self {
-            Self::Ready { omissions, .. } | Self::Unavailable { omissions } => omissions,
-        }
-    }
-}
-
-/// The boot / reload refusal for every pool that serves nothing, naming BOTH
-/// the pool and the models routed at it. `None` when every pool that any
-/// model names has at least one usable member.
-///
-/// A zero-usable pool behind a selectable model is not a degraded state that
-/// dispatch can walk past: every request for that model would find an empty
-/// seat set. Refusing at build time gives the operator the pool and the
-/// model, instead of a server that starts healthy and fails at first
-/// traffic.
-///
-/// Every operator-written key the sentence names -- the pool, each omitted
-/// member, each routed model nickname -- is rendered through the shared log
-/// sanitizer. The string is returned as a config error that is both printed to
-/// the operator and re-logged verbatim by the reload path, so a table key
-/// bearing a newline would otherwise forge a whole log record there.
-#[must_use]
-pub fn unavailable_pool_error(reports: &[PoolReport]) -> Option<String> {
-    let lines: Vec<String> = reports
-        .iter()
-        .filter(|report| report.is_unavailable() && !report.models.is_empty())
-        .map(|report| {
-            let models: Vec<String> = report.models.iter().map(|m| sanitize_for_log(m)).collect();
-            format!(
-                "pool `{}` has no usable member of {} configured (omitted: {}); \
-                 models routed at it: {}",
-                sanitize_for_log(&report.pool),
-                report.configured_members,
-                omission_summary(&report.omissions),
-                models.join(", "),
-            )
-        })
-        .collect();
-    if lines.is_empty() {
-        None
-    } else {
-        Some(lines.join("\n"))
-    }
-}
-
-/// `member=reason` pairs for an operator-facing message. Only the member key
-/// and the allowlisted reason token, never an error string -- and the member
-/// key is sanitized, since it is the one half of the pair the operator writes.
-fn omission_summary(omissions: &[PoolMemberOmission]) -> String {
-    omissions
-        .iter()
-        .map(|o| format!("{}={}", sanitize_for_log(&o.member), o.reason.token()))
-        .collect::<Vec<_>>()
-        .join(", ")
+pub(crate) struct PoolOutcome {
+    /// One seat per member, built or placeholder, in declaration order.
+    pub(crate) seats: Arc<[SeatTarget]>,
+    /// The placeholder set (empty when every member built).
+    pub(crate) placeholders: Vec<PoolPlaceholder>,
 }
 
 #[cfg(test)]

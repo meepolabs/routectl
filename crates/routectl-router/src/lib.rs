@@ -212,9 +212,7 @@ pub use learned_capability::{
 pub use override_registry::{
     OverrideRegistry, OverrideRow, OverrideVerdict, validate_capability_overrides,
 };
-pub use pool_build::{
-    PoolMemberOmission, PoolOmissionReason, PoolOutcome, PoolPlaceholder, PoolReport,
-};
+pub use pool_build::{PoolPlaceholder, PoolReport};
 pub use pricing::{PricingSource, effective_pricing};
 pub use probe_scheduler::ProbeSchedulerSnapshot;
 pub use resolved::ResolvedModel;
@@ -223,8 +221,8 @@ pub use router::{
     DispatchMeta, Dispatched, DispatchedStream, FidelitySnapshot, FieldPreflight,
     FieldPreflightAuthorizationRecord, FieldRepairCounters, FieldVerdictStatus,
     LaneBudgetExhaustions, LaneLossyRepairs, LearnedLaneProjection, LiveSampleSink, OpeningLane,
-    PreflightBlockedReason, ProbeClearAcknowledgement, ResolvedLearnedLane, ResponseCheck, Router,
-    RouterOptions, StreamEvidence, acting_field_verdicts, class_debits,
+    PoolEligibility, PreflightBlockedReason, ProbeClearAcknowledgement, ResolvedLearnedLane,
+    ResponseCheck, Router, RouterOptions, StreamEvidence, acting_field_verdicts, class_debits,
 };
 #[cfg(any(test, feature = "test-utils"))]
 pub use router::{

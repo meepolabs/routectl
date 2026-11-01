@@ -1,8 +1,7 @@
-//! The structured degraded-pool WARN: `event="pool_member_omitted"`. A member
-//! whose credential the store refuses is not omitted: it is kept as an
-//! unusable placeholder seat, and its build diagnostic carries no store text
-//! either. A member that cannot be built at all refuses the config instead,
-//! so no build emits the WARN.
+//! Pool member refusals and placeholders at build. A member that cannot be
+//! built refuses the config, naming the member and its rule. A member whose
+//! credential the store refuses is kept as an unusable placeholder seat, and
+//! its build diagnostic carries no store text.
 //!
 //! Field content is the whole point of these tests. Build output reaches
 //! operator log destinations that get archived, shipped to third parties, and
@@ -85,11 +84,11 @@ fn pooled_config_without_ref(members: &[&str], member: &str) -> Config {
     cfg
 }
 
-/// Every `pool_member_omitted` event in a capture.
-fn omission_events(events: &[CapturedEvent]) -> Vec<&CapturedEvent> {
+/// Every WARN-or-louder event in a capture.
+fn warnings(events: &[CapturedEvent]) -> Vec<&CapturedEvent> {
     events
         .iter()
-        .filter(|e| e.field("event") == Some("pool_member_omitted"))
+        .filter(|e| e.level <= tracing::Level::WARN)
         .collect()
 }
 
@@ -116,14 +115,14 @@ async fn a_member_with_no_credential_ref_refuses_the_build_and_warns_nothing() {
             .contains("member `anthropic-b` has no credential reference"),
         "{err}"
     );
-    assert!(omission_events(&events).is_empty(), "{events:?}");
+    assert!(warnings(&events).is_empty(), "{events:?}");
 }
 
 #[tokio::test]
 async fn a_store_refusal_keeps_the_member_and_emits_no_store_error_text() {
     // The store's refusal names a credentials-file path, an account id, and the
-    // provider it belongs to. The member is kept as a placeholder seat rather
-    // than omitted, and none of the refusal's text reaches any event.
+    // provider it belongs to. The member is kept as a placeholder seat, and
+    // none of the refusal's text reaches any event.
     let store: Arc<dyn SecretStore> = Arc::new(RefusingStore {
         dead_provider: "anthropic-b".into(),
     });
@@ -137,7 +136,7 @@ async fn a_store_refusal_keeps_the_member_and_emits_no_store_error_text() {
     .await;
     let built = result.expect("a degraded pool must still build");
 
-    assert!(omission_events(&events).is_empty(), "{events:?}");
+    assert!(warnings(&events).is_empty(), "{events:?}");
     assert_eq!(built.pool_reports[0].placeholders.len(), 1);
     let rendered = format!("{events:?}");
     for banned in [
@@ -196,13 +195,13 @@ async fn one_refusal_names_every_refused_member_with_its_own_rule() {
         !msg.contains("not a ref"),
         "the ref value is withheld: {msg}"
     );
-    assert!(omission_events(&events).is_empty(), "{events:?}");
+    assert!(warnings(&events).is_empty(), "{events:?}");
 }
 
 #[tokio::test]
-async fn a_fully_healthy_pool_emits_no_omission_warn() {
-    // The line must be an exception report, not a per-build heartbeat: an
-    // operator who sees it should know something was lost.
+async fn a_fully_built_pool_emits_no_warning() {
+    // A build with nothing wrong is silent: warnings are exception reports,
+    // not a per-build heartbeat.
     let store: Arc<dyn SecretStore> = Arc::new(RefusingStore {
         dead_provider: "nobody".into(),
     });
@@ -217,7 +216,7 @@ async fn a_fully_healthy_pool_emits_no_omission_warn() {
     let built = result.expect("a healthy pool builds");
 
     assert!(
-        omission_events(&events).is_empty(),
+        warnings(&events).is_empty(),
         "a healthy pool must be silent: {events:?}"
     );
     assert_eq!(built.pool_reports.len(), 1);
@@ -226,12 +225,11 @@ async fn a_fully_healthy_pool_emits_no_omission_warn() {
 }
 
 #[tokio::test]
-async fn the_debug_diagnostic_for_a_lost_member_carries_no_store_error_text() {
-    // The omission's own fields are sanitized by construction, but the build
-    // ALSO emits a debug-level line beside each one. That line reached the same
-    // archived, audited destinations every other level does, so formatting the
-    // raw store error into it defeated the sanitization contract whenever debug
-    // logging was on -- a leak that only opens at one verbosity is still a leak.
+async fn the_debug_diagnostic_for_a_placeholder_member_carries_no_store_error_text() {
+    // The placeholder's report fields are sanitized by construction, but the
+    // build ALSO emits a debug-level line for each one. That line reaches the
+    // same archived, audited destinations every other level does, so the raw
+    // store error must stay out of it at every verbosity.
     // Captures at TRACE so the debug line is in scope.
     let store: Arc<dyn SecretStore> = Arc::new(RefusingStore {
         dead_provider: "anthropic-b".into(),
@@ -246,8 +244,8 @@ async fn the_debug_diagnostic_for_a_lost_member_carries_no_store_error_text() {
     .await;
     result.expect("a degraded pool must still build");
 
-    // EVERY event this build emitted, not just the WARN -- the debug line is
-    // the surface under test and it carries no `event` field to filter on.
+    // EVERY event this build emitted: the debug line is the surface under test
+    // and it carries no `event` field to filter on.
     let all = format!("{events:?}");
     for banned in [
         "/home/operator",

@@ -197,9 +197,7 @@ fn driver_warnings(events: &[routectl_testkit::CapturedEvent]) -> usize {
     events
         .iter()
         .filter(|event| {
-            event.level == tracing::Level::WARN
-                && event.target.ends_with("seat_driver")
-                && event.message == "background refresh marked the seat unusable"
+            event.level == tracing::Level::WARN && event.field("event") == Some("seat_unusable")
         })
         .count()
 }

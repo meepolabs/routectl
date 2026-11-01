@@ -9,7 +9,7 @@ use crate::catalog_overlay::CatalogOverlay;
 #[cfg(feature = "bedrock")]
 use crate::config::{BedrockApiShapeConfig, BedrockCredsConfig};
 use crate::config::{Config, CredentialSource, PoolEntry, ProviderEntry};
-use crate::pool_build::{PoolOutcome, PoolPlaceholder, PoolReport, unavailable_pool_error};
+use crate::pool_build::{PoolOutcome, PoolPlaceholder, PoolReport};
 use crate::resolved::ResolvedModel;
 use crate::runtime_state::UnusableCause;
 use crate::seat_pool::SeatTarget;
@@ -937,16 +937,15 @@ async fn compile_pool(
         return Err(pool_refusal_message(pool_name, &refusals));
     }
     if seats.is_empty() {
-        Ok(PoolOutcome::Unavailable {
-            omissions: Vec::new(),
-        })
-    } else {
-        Ok(PoolOutcome::Ready {
-            seats: Arc::from(seats),
-            placeholders,
-            omissions: Vec::new(),
-        })
+        return Err(format!(
+            "pool `{}`: `members` is empty; list at least one provider entry or remove the pool",
+            routectl_core::sanitize_for_log(pool_name),
+        ));
     }
+    Ok(PoolOutcome {
+        seats: Arc::from(seats),
+        placeholders,
+    })
 }
 
 /// Why one pool member refuses the config. Each variant is chosen from the
@@ -1291,12 +1290,11 @@ pub struct ResolvedModelBuild {
 /// [`build_resolved_models`] with the per-pool build reports retained.
 ///
 /// Fails with `Error::Config` when any pool that a selectable model names has
-/// a member that refuses the config (see `compile_pool`), or has ZERO usable
-/// members: every request for such a model would find an empty seat set, so
-/// the refusal names both the pool and the models routed at it instead of
-/// letting the server start healthy and fail at first traffic. On a hot
-/// reload the candidate build is rejected and the previous router stays live,
-/// which is the existing behavior for any build error.
+/// a member that refuses the config, or no member at all (see
+/// `compile_pool`). A pool whose members are all placeholders builds: it
+/// answers a local refusal until a credential recovers. On a hot reload the
+/// candidate build is rejected and the previous router stays live, which is
+/// the existing behavior for any build error.
 pub async fn build_resolved_models_reported(
     config: &Config,
     secrets: Arc<dyn SecretStore>,
@@ -1373,14 +1371,7 @@ pub async fn build_resolved_models_reported(
                 .entry(entry.provider.clone())
                 .or_default()
                 .push(nickname.clone());
-            let Some(seats) = outcome.seats() else {
-                // Zero usable members. The build refusal that names both the
-                // pool and every model routed at it is assembled after the
-                // walk (`unavailable_pool_error`), so one message covers the
-                // whole pool rather than one per model.
-                continue;
-            };
-            let resolved = resolved_pool_model(nickname, entry, seats.clone());
+            let resolved = resolved_pool_model(nickname, entry, outcome.seats);
             models.insert(nickname.clone(), Arc::new(resolved));
             continue;
         }
@@ -1552,45 +1543,12 @@ pub async fn build_resolved_models_reported(
     }
 
     let reports = pool_reports(&pool_cache, &pool_models);
-    if let Some(detail) = unavailable_pool_error(&reports) {
-        return Err(routectl_core::Error::Config(detail));
-    }
-    warn_pool_omissions(&reports);
 
     Ok(ResolvedModelBuild {
         models,
         failed,
         pool_reports: reports,
     })
-}
-
-/// Emit one structured WARN per omitted pool member, once per build attempt.
-///
-/// Every field is either a config table key the operator wrote, a fixed
-/// provider-kind token, an allowlisted reason token, or a count. No store
-/// error, credential path, token, or account id reaches this line -- the
-/// omission type carries none of those, so the constraint is structural
-/// rather than a rule to remember here.
-///
-/// The two operator-written keys (the pool name, the member key) are rendered
-/// through the shared log sanitizer: a `%` field passes its bytes into the log
-/// line verbatim, so a table key bearing a newline would forge a whole second
-/// record with fields of its choosing.
-fn warn_pool_omissions(reports: &[PoolReport]) {
-    for report in reports {
-        for omission in &report.omissions {
-            tracing::warn!(
-                event = "pool_member_omitted",
-                pool = %routectl_core::sanitize_for_log(&report.pool),
-                member = %routectl_core::sanitize_for_log(&omission.member),
-                provider_kind = omission.provider_kind,
-                reason = omission.reason.token(),
-                configured_members = report.configured_members,
-                usable_members = report.usable_members,
-                "pool member omitted from the dispatch seat set",
-            );
-        }
-    }
 }
 
 /// Apply every `[models.X]` knob that is independent of how the model's
@@ -1682,17 +1640,14 @@ fn pool_reports(
         .iter()
         .filter_map(|(pool, models)| {
             let outcome = outcomes.get(pool)?;
-            let placeholders = outcome.placeholders().to_vec();
-            let usable_members = outcome
-                .seats()
-                .map_or(0, |seats| seats.len() - placeholders.len());
+            let placeholders = outcome.placeholders.clone();
+            let usable_members = outcome.seats.len() - placeholders.len();
             Some(PoolReport {
                 pool: pool.clone(),
                 models: models.clone(),
-                configured_members: usable_members + placeholders.len() + outcome.omissions().len(),
+                configured_members: outcome.seats.len(),
                 usable_members,
                 placeholders,
-                omissions: outcome.omissions().to_vec(),
             })
         })
         .collect()

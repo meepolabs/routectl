@@ -103,7 +103,6 @@ fn pool(placeholders: &[&str]) -> Pool {
                 account: Some(account_of(member)),
             })
             .collect(),
-        omissions: Vec::new(),
     };
     let mut router = Router::new(Arc::new(config));
     router.install_pool_reports(vec![report]);

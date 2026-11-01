@@ -2362,11 +2362,13 @@ fn log_snapshot_emits_one_complete_event_with_current_counter_values() {
         "rc_pool_dispatch_total",
         "rc_pool_degraded_dispatch_total",
         "rc_pool_unavailable_total",
-        "rc_pool_member_omitted_credential_missing_total",
-        "rc_pool_member_omitted_credential_unreadable_total",
-        "rc_pool_member_omitted_credential_invalid_total",
-        "rc_pool_member_omitted_provider_init_failed_total",
         "rc_pool_removed_pin_repick_total",
+        "rc_pool_seats_configured",
+        "rc_pool_seats_eligible",
+        "rc_pool_seats_credential_unusable",
+        "rc_pool_seats_account_parked",
+        "rc_pool_seats_breaker_open",
+        "rc_pool_seats_rate_limited",
     ] {
         assert_eq!(
             snapshot.field(field),

@@ -231,7 +231,25 @@ impl Router {
     /// [`MarkOutcome::Transitioned`]. The account then refuses every
     /// admission until a reload resets it or a successful refresh clears an
     /// expired mark.
+    ///
+    /// A transition logs one `seat_unusable` WARN; an unchanged or stale mark
+    /// logs nothing, so repeated evidence for the same cause stays quiet.
     pub fn mark_credential_unusable(
+        &self,
+        account: &str,
+        cause: UnusableCause,
+        generation: Option<u64>,
+    ) -> MarkOutcome {
+        let outcome = self.mark_credential_unusable_quietly(account, cause, generation);
+        if outcome == MarkOutcome::Transitioned {
+            self.log_seat_unusable(account, cause);
+        }
+        outcome
+    }
+
+    /// [`Self::mark_credential_unusable`] without the transition log, for a
+    /// mark on an account map no request reads yet.
+    pub(super) fn mark_credential_unusable_quietly(
         &self,
         account: &str,
         cause: UnusableCause,
@@ -249,16 +267,26 @@ impl Router {
     /// the account starts a new generation, fencing out every outcome still
     /// in flight from the old credential, and an expired mark is cleared; a
     /// mark with another cause stays. A stale `generation` changes nothing.
+    /// Clearing an expired mark logs one `seat_recovered` INFO.
     pub fn credential_refreshed_in_generation(
         &self,
         account: &str,
         generation: u64,
     ) -> RefreshSettlement {
-        self.credential_accounts
+        let settlement = self
+            .credential_accounts
             .lock()
             .entry(account.to_string())
             .or_default()
-            .refreshed_in_generation(generation)
+            .refreshed_in_generation(generation);
+        if let RefreshSettlement::Settled {
+            cleared_expired: true,
+            ..
+        } = settlement
+        {
+            self.log_seat_recovered(account, UnusableCause::Expired);
+        }
+        settlement
     }
 
     /// The credential account of the dispatch target keyed by `state_key`,
@@ -381,23 +409,28 @@ impl Router {
     /// admitted (or a generation acquired) before this call cannot park or
     /// mark its account after it. An account with no record has neither an
     /// attempt in flight nor an acquired generation, so it is skipped rather
-    /// than given one.
+    /// than given one. Each cleared unusable mark logs one `seat_recovered`
+    /// INFO.
     pub fn lift_credential_parks<I>(&self, accounts: I) -> Vec<AccountReset>
     where
         I: IntoIterator,
         I::Item: AsRef<str>,
     {
-        let mut records = self.credential_accounts.lock();
-        accounts
-            .into_iter()
-            .filter_map(|account| {
-                let account = account.as_ref();
-                records.get_mut(account).map(|record| AccountReset {
-                    account: account.to_string(),
-                    outcome: record.reset(),
+        let resets: Vec<AccountReset> = {
+            let mut records = self.credential_accounts.lock();
+            accounts
+                .into_iter()
+                .filter_map(|account| {
+                    let account = account.as_ref();
+                    records.get_mut(account).map(|record| AccountReset {
+                        account: account.to_string(),
+                        outcome: record.reset(),
+                    })
                 })
-            })
-            .collect()
+                .collect()
+        };
+        self.log_recovered_resets(&resets);
+        resets
     }
 
     /// [`Self::lift_credential_parks`] over the OAuth seats among `seats`,
@@ -422,7 +455,8 @@ impl Router {
     /// re-resolves those credentials on rebuild; an OAuth seat's credential
     /// lives in the credentials file, whose own reload lifts it.
     pub fn lift_entry_credential_parks(&self) -> Vec<AccountReset> {
-        self.credential_accounts
+        let resets: Vec<AccountReset> = self
+            .credential_accounts
             .lock()
             .iter_mut()
             .filter(|(account, _)| crate::seat_pool::is_entry_account(account))
@@ -430,7 +464,9 @@ impl Router {
                 account: account.clone(),
                 outcome: record.reset(),
             })
-            .collect()
+            .collect();
+        self.log_recovered_resets(&resets);
+        resets
     }
 
     /// Park `account` when `err` carries a typed credential reason and the
@@ -501,18 +537,12 @@ impl Router {
         };
         let cause = UnusableCause::Revoked;
         let outcome = self.mark_credential_unusable(account, cause, Some(generation));
-        match outcome {
-            MarkOutcome::Transitioned => tracing::warn!(
-                account = %sanitize_for_log(account),
-                cause = cause.as_str(),
-                "seat refresh token refused; marking the seat unusable",
-            ),
-            MarkOutcome::Unchanged => {}
-            MarkOutcome::Stale => tracing::debug!(
+        if outcome == MarkOutcome::Stale {
+            tracing::debug!(
                 account = %sanitize_for_log(account),
                 cause = cause.as_str(),
                 "seat refresh token refused before a reload reset the seat; not marking",
-            ),
+            );
         }
         outcome.applied()
     }

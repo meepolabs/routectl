@@ -410,6 +410,7 @@ async fn serve_inner(
         build_router_from_config_with_overlay(config.clone(), &catalog_overlay, secrets.clone())
             .await?
     };
+    router.log_placeholder_seats();
 
     // Cross-version catalog drift observability: AFTER the router
     // build, so the in-use selectors below are the same set
