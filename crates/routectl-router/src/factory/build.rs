@@ -2,7 +2,10 @@
 
 #[cfg(feature = "openai-responses")]
 use super::validate::validate_openai_responses_account_id;
-use super::validate::{validate_base_url_scheme, validate_managed_oauth_credentials};
+use super::validate::{
+    ModelProviderTarget, resolve_model_provider, validate_base_url_scheme,
+    validate_managed_oauth_credentials,
+};
 use super::warnings::warn_context_management_needs_preserve;
 use crate::catalog::resolve_effective_row;
 use crate::catalog_overlay::CatalogOverlay;
@@ -1361,42 +1364,41 @@ pub async fn build_resolved_models_reported(
             failed.push((nickname.clone(), reason));
             continue;
         }
-        // Provider-or-pool resolution: `[models.X] provider` names either a
-        // `[providers]` entry or a `[pools]` block, in ONE namespace.
-        // Validation rejects a name held by both, so the order below is not a
-        // precedence rule -- at most one lookup can hit.
-        if let Some(pool) = config.pools.get(&entry.provider) {
-            let outcome = match pool_cache.get(&entry.provider) {
-                Some(cached) => cached.clone(),
-                None => {
-                    // Computed ONCE per pool: every model naming this pool
-                    // shares the same seat set by Arc, so the members'
-                    // providers are built exactly once regardless of how many
-                    // models route at the pool.
-                    let built = compile_pool(&entry.provider, pool, config, &secrets, &opts)
-                        .await
-                        .map_err(routectl_core::Error::Config)?;
-                    pool_cache.insert(entry.provider.clone(), built.clone());
-                    built
-                }
-            };
-            pool_models
-                .entry(entry.provider.clone())
-                .or_default()
-                .push(nickname.clone());
-            let resolved = resolved_pool_model(nickname, entry, outcome.seats);
-            models.insert(nickname.clone(), Arc::new(resolved));
-            continue;
-        }
-        let Some(provider_entry) = config.providers.get(&entry.provider) else {
-            failed.push((
-                nickname.clone(),
-                format!(
-                    "model `{nickname}` references unknown provider or pool `{}`",
-                    entry.provider
-                ),
-            ));
-            continue;
+        let provider_entry = match resolve_model_provider(config, &entry.provider) {
+            Some(ModelProviderTarget::Pool(pool)) => {
+                let outcome = match pool_cache.get(&entry.provider) {
+                    Some(cached) => cached.clone(),
+                    None => {
+                        // Computed ONCE per pool: every model naming this pool
+                        // shares the same seat set by Arc, so the members'
+                        // providers are built exactly once regardless of how many
+                        // models route at the pool.
+                        let built = compile_pool(&entry.provider, pool, config, &secrets, &opts)
+                            .await
+                            .map_err(routectl_core::Error::Config)?;
+                        pool_cache.insert(entry.provider.clone(), built.clone());
+                        built
+                    }
+                };
+                pool_models
+                    .entry(entry.provider.clone())
+                    .or_default()
+                    .push(nickname.clone());
+                let resolved = resolved_pool_model(nickname, entry, outcome.seats);
+                models.insert(nickname.clone(), Arc::new(resolved));
+                continue;
+            }
+            Some(ModelProviderTarget::Provider(provider_entry)) => provider_entry,
+            None => {
+                failed.push((
+                    nickname.clone(),
+                    format!(
+                        "model `{nickname}` references unknown provider or pool `{}`",
+                        entry.provider
+                    ),
+                ));
+                continue;
+            }
         };
 
         // Bedrock: one Arc per model. The factory pumps the model's

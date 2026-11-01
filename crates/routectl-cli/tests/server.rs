@@ -919,6 +919,36 @@ async fn server_starts_when_unbuildable_provider_is_unreferenced() {
 }
 
 #[tokio::test]
+async fn server_starts_when_a_model_naming_an_unknown_provider_is_unreferenced() {
+    // A model whose provider is in neither [providers] nor [pools] is
+    // dropped as a failed entry at build time; with no alias or route
+    // naming it, startup proceeds on the remaining models.
+    let mut providers = BTreeMap::new();
+    providers.insert(
+        "working".into(),
+        ProviderEntry::openai_compat("http://127.0.0.1:2", common::file_ref("test")),
+    );
+    let mut models = BTreeMap::new();
+    models.insert("working-gpt".into(), ModelEntry::new("working", "gpt-4o"));
+    models.insert("orphan".into(), ModelEntry::new("ghost-provider", "gpt-4o"));
+    let mut aliases = BTreeMap::new();
+    aliases.insert("fast".into(), AliasValue::Single("working-gpt".into()));
+    let config = Arc::new(Config {
+        server: ServerConfig::default(),
+        providers,
+        aliases,
+        retry: RetryPolicy::default(),
+        models,
+        ..Default::default()
+    });
+
+    let base = helpers::spawn_test_server(config).await;
+
+    let resp = reqwest::get(format!("{base}/health")).await.unwrap();
+    assert_eq!(resp.status(), 200);
+}
+
+#[tokio::test]
 async fn malformed_json_returns_400() {
     let config = openai_compat_config("http://127.0.0.1:1", "p", "fast");
     let base = helpers::spawn_test_server(config).await;

@@ -2,7 +2,9 @@
 
 use routectl_auth::{OAuthStore, SecretRef, SecretStore};
 use routectl_core::{Error, Result, sanitize_for_log_with_cap};
-use routectl_router::{Config, ProviderEntry, collect_config_validation, locate_dotted_path};
+use routectl_router::{
+    Config, ProviderEntry, collect_config_validation, locate_dotted_path, resolve_model_provider,
+};
 
 use crate::commands::config_member_build::{OfflineCheckStore, member_build_errors};
 use crate::commands::login_provider_block::auth_selector_gap;
@@ -236,12 +238,7 @@ pub fn validation_report(config: &Config, raw_text: Option<&str>) -> CheckReport
     let mut errors: Vec<String> = Vec::new();
 
     for (nickname, model) in &config.models {
-        // A `[models.X] provider` value resolves against providers AND pools
-        // in ONE namespace (the factory's build walk reads it that way), so a
-        // pool name here is a valid target, not an unknown provider.
-        if !config.providers.contains_key(&model.provider)
-            && !config.pools.contains_key(&model.provider)
-        {
+        if resolve_model_provider(config, &model.provider).is_none() {
             errors.push(locate(
                 raw_text,
                 format!(

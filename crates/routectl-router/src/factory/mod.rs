@@ -29,10 +29,11 @@ pub use validate::validate_provider_bedrock_mantle;
 #[cfg(feature = "bedrock")]
 pub use validate::validate_provider_openai_mantle;
 pub use validate::{
-    ConfigValidation, MAX_POOL_MEMBERS, collect_config_validation, resolved_codex_version,
-    validate_alias_chain_targets, validate_alias_patterns, validate_class_policy,
-    validate_codex_version, validate_managed_anthropic_credential, validate_mitm_config,
-    validate_pools, validate_provider_credential_sources, validate_registry_patterns,
+    ConfigValidation, MAX_POOL_MEMBERS, ModelProviderTarget, collect_config_validation,
+    resolve_model_provider, resolved_codex_version, validate_alias_chain_targets,
+    validate_alias_patterns, validate_class_policy, validate_codex_version,
+    validate_managed_anthropic_credential, validate_mitm_config, validate_pools,
+    validate_provider_credential_sources, validate_registry_patterns,
 };
 #[cfg(feature = "bedrock")]
 pub use validate_region::validate_aws_regions;

@@ -2,7 +2,7 @@
 
 use super::build::ipv4_compatible_embedded;
 use super::warnings::class_policy_warnings;
-use crate::config::{Config, CredentialSource, ProviderEntry};
+use crate::config::{Config, CredentialSource, PoolEntry, ProviderEntry};
 use routectl_core::Result;
 use routectl_core::capability::{REASONING_REPLAY, WELL_KNOWN_CAPABILITY_KEYS};
 use routectl_core::identity::anthropic::is_anthropic_api_host;
@@ -1714,6 +1714,34 @@ fn validate_prefix_impact_target_spec(config: &Config, spec: &str) -> Result<(),
         }
     }
     Ok(())
+}
+
+/// What a `[models.X] provider` value names: a `[pools]` block or a
+/// `[providers]` entry.
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+pub enum ModelProviderTarget<'a> {
+    /// A `[pools.<name>]` block.
+    Pool(&'a PoolEntry),
+    /// A `[providers.<name>]` entry.
+    Provider(&'a ProviderEntry),
+}
+
+/// Resolve a `[models.X] provider` value against `[pools]` and `[providers]`,
+/// which share ONE namespace. [`validate_pools`] rejects a name held by both,
+/// so on a validated config at most one lookup can hit; on an unvalidated
+/// one the pool wins. `None` means the name is in neither table.
+pub fn resolve_model_provider<'a>(
+    config: &'a Config,
+    provider: &str,
+) -> Option<ModelProviderTarget<'a>> {
+    if let Some(pool) = config.pools.get(provider) {
+        return Some(ModelProviderTarget::Pool(pool));
+    }
+    config
+        .providers
+        .get(provider)
+        .map(ModelProviderTarget::Provider)
 }
 
 /// Collected outcome of the shared config-validation suite:

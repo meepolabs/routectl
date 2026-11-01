@@ -3699,3 +3699,69 @@ mod managed_anthropic_credential_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod model_provider_resolution_tests {
+    //! `resolve_model_provider` over the shared pools-and-providers
+    //! namespace a `[models.X] provider` value names.
+
+    use super::{ModelProviderTarget, resolve_model_provider};
+    use crate::config::{Config, PoolEntry, ProviderEntry};
+
+    #[derive(Debug, PartialEq)]
+    enum Expected {
+        Pool,
+        Provider,
+        Unresolved,
+    }
+
+    fn config_with_one_pool_and_one_provider() -> Config {
+        let mut cfg = Config::default();
+        cfg.providers.insert(
+            "seat-a".into(),
+            ProviderEntry::anthropic_api("literal:sk-ant-test"),
+        );
+        cfg.pools.insert(
+            "alpha".into(),
+            PoolEntry {
+                members: vec!["seat-a".into()],
+                ..Default::default()
+            },
+        );
+        cfg
+    }
+
+    #[test]
+    fn resolves_a_model_provider_name_to_its_pool_or_provider_entry() {
+        // Arrange
+        let cfg = config_with_one_pool_and_one_provider();
+        let rows = [
+            ("provider name", "seat-a", Expected::Provider),
+            ("pool name", "alpha", Expected::Pool),
+            ("unknown name", "ghost-provider", Expected::Unresolved),
+        ];
+
+        for (label, name, expected) in rows {
+            // Act
+            let target = resolve_model_provider(&cfg, name);
+
+            // Assert: the variant AND the borrowed entry it carries.
+            match (&expected, target) {
+                (Expected::Pool, Some(ModelProviderTarget::Pool(pool))) => {
+                    assert!(
+                        std::ptr::eq(pool, cfg.pools.get(name).unwrap()),
+                        "row `{label}`"
+                    );
+                }
+                (Expected::Provider, Some(ModelProviderTarget::Provider(entry))) => {
+                    assert!(
+                        std::ptr::eq(entry, cfg.providers.get(name).unwrap()),
+                        "row `{label}`"
+                    );
+                }
+                (Expected::Unresolved, None) => {}
+                (_, got) => panic!("row `{label}`: expected {expected:?}, got {got:?}"),
+            }
+        }
+    }
+}

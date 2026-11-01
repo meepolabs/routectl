@@ -187,14 +187,15 @@ pub use factory::validate_provider_bedrock_mantle;
 #[cfg(feature = "bedrock")]
 pub use factory::validate_provider_openai_mantle;
 pub use factory::{
-    BuildOptions, ConfigValidation, MAX_POOL_MEMBERS, ResolvedModelBuild, apply_catalog_overlay,
-    build_provider, build_provider_with_options, build_resolved_models,
+    BuildOptions, ConfigValidation, MAX_POOL_MEMBERS, ModelProviderTarget, ResolvedModelBuild,
+    apply_catalog_overlay, build_provider, build_provider_with_options, build_resolved_models,
     build_resolved_models_reported, class_policy_warnings, cloudcode_host_warnings,
     cloudcode_model_warnings, codex_identity_warnings, collect_config_validation,
-    per_block_breakpoint_warnings, pool_member_refusals, resolved_codex_version,
-    validate_alias_chain_targets, validate_alias_patterns, validate_class_policy,
-    validate_codex_version, validate_managed_anthropic_credential, validate_mitm_config,
-    validate_pools, validate_provider_credential_sources, validate_registry_patterns,
+    per_block_breakpoint_warnings, pool_member_refusals, resolve_model_provider,
+    resolved_codex_version, validate_alias_chain_targets, validate_alias_patterns,
+    validate_class_policy, validate_codex_version, validate_managed_anthropic_credential,
+    validate_mitm_config, validate_pools, validate_provider_credential_sources,
+    validate_registry_patterns,
 };
 pub use field_canary::CanaryOutcome;
 pub use field_capability::capability_key_is_field_verdict;
