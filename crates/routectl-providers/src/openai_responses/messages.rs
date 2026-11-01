@@ -84,6 +84,7 @@ use routectl_core::{
 };
 
 use crate::bounded_diagnostics::BoundedLogSample;
+use crate::skipped_format::render_skipped_format;
 
 use super::types::{
     FunctionCallOutputBody, FunctionCallOutputContentItem, ReasoningContentItem,
@@ -612,9 +613,10 @@ fn lift_reasoning_details(
     let mut groups: std::collections::HashMap<Option<String>, ReasoningGroup> =
         std::collections::HashMap::new();
     let mut skipped_count: u32 = 0;
-    // Sanitized before the distinctness test so each entry is
-    // length-bounded at collection time and tags differing only in
-    // control characters share one slot.
+    // Rendered before the distinctness test so each entry is
+    // length-bounded at collection time, tags differing only in control
+    // characters share one slot, and under prompt redaction every
+    // unrecognized tag shares the placeholder's slot.
     let mut skipped_formats: BoundedLogSample<String> = BoundedLogSample::new();
     let mut stripped_count: u32 = 0;
     let mut unsupported_kind_count: u32 = 0;
@@ -637,7 +639,10 @@ fn lift_reasoning_details(
         // TRANSLATION-DROP: lane=openai-responses class=reasoning_format_foreign test=foreign_format_detail_drops_from_the_wire_and_counts
         if !is_responses_family(format) {
             skipped_count += 1;
-            skipped_formats.push_distinct(sanitize_for_log(format.unwrap_or("<none>")));
+            skipped_formats.push_distinct(render_skipped_format(
+                format,
+                routectl_core::redact_prompts_enabled(),
+            ));
             tally.record_reasoning_format_foreign();
             continue;
         }

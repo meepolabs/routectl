@@ -545,6 +545,12 @@ license.
   them share one cap while a gemini-only build carries none of it;
   `push_distinct_lazily` / `is_full` are narrowed further to `anthropic-api`,
   their only caller. The per-request tally types stay per translator
+- `src/skipped_format.rs` -- the reasoning-format vocabulary
+  (`ANTHROPIC_FORMAT`, re-exported by `anthropic_api`) and
+  `render_skipped_format`, the one renderer both the Anthropic and the
+  OpenAI Responses egresses use for a skipped detail's format tag: a known
+  tag echoes, an unrecognized one becomes `<unrecognized>` under
+  `ROUTECTL_LOG_REDACT_PROMPTS`; gated on `anthropic-api` / `openai-responses`
 - `src/model_profile.rs` -- `uses_modern_chat_shape`, the OpenAI chat-lane
   shape rule (sampling params dropped, `max_tokens` sent as
   `max_completion_tokens`); read only by the openai and deepseek dialects
@@ -1379,6 +1385,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `ROUTECTL_LOG_REDACT_PROMPTS=1`: a recognized format tag still echoes, an
   unrecognized one collapses to `<unrecognized>`; isolated because the
   redaction knob freezes on first read per process
+- `tests/responses_reasoning_format_redaction.rs` -- isolated binary pinning
+  the OpenAI Responses foreign-format DEBUG `formats` field under
+  `ROUTECTL_LOG_REDACT_PROMPTS=1`: a recognized non-Responses tag still
+  echoes, an unrecognized one collapses to `<unrecognized>`; isolated because
+  the redaction knob freezes on first read per process
 - `tests/egress_proxy_policy.rs` -- isolated binary pinning the host-keyed
   egress proxy policy across every provider transport, loopback and external,
   `http://` and `https://`; isolated because proxy variables are process-global

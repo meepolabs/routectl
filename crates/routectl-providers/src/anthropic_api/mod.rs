@@ -89,10 +89,7 @@ pub(crate) const PROVIDER_KIND: &str = routectl_core::provider_kind::trace::ANTH
 /// field can never drift apart.
 pub(crate) const LANE: &str = PROVIDER_KIND;
 
-/// Anthropic wire-format tag for reasoning details. A single canonical
-/// definition shared by all sub-modules (context_management, request,
-/// response, sse) via `super::ANTHROPIC_FORMAT` paths.
-pub(crate) const ANTHROPIC_FORMAT: &str = "anthropic-claude-v1";
+pub(crate) use crate::skipped_format::ANTHROPIC_FORMAT;
 
 use crate::stream_completion::StreamCompletion;
 use sse::SseState;
