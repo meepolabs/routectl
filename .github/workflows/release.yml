@@ -181,8 +181,7 @@ jobs:
       # refs are BRANCHES, not tags: the only tag this action publishes is
       # v1, and each `@1.NN.N` is v1 plus a one-line commit hardcoding that
       # default. A branch is the weakest ref there is, and this file pins
-      # everything else precisely because refs move -- the v1 tag itself
-      # moved during the audit that produced this change. Passing the
+      # everything else precisely because refs move, tags included. Passing the
       # version here also keeps it legible in the workflow instead of
       # encoded in a ref name.
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
@@ -191,7 +190,7 @@ jobs:
           components: rustfmt, clippy
 
       # No dependency cache in this job: it gates the signed release, and
-      # a restored cache is written by other, lower-trust workflow runs.
+      # a restored cache is written by other, lower-privilege workflow runs.
       # These checks build from the checkout alone.
 
       - name: cargo fmt --check
