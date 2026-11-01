@@ -11,8 +11,7 @@
 use std::sync::Arc;
 
 use routectl_core::wire_check::{
-    AttemptRecord, DeclaredEdit, DiffOutcome, EgressKind, IngressDialect, Lane, LaneClass, Leg,
-    WireTap, diff,
+    AttemptRecord, DeclaredEdit, DiffOutcome, IngressDialect, Lane, LaneClass, Leg, WireTap, diff,
 };
 use routectl_core::{ChatRequest, RequestObservation};
 use serde_json::Value;
@@ -20,16 +19,6 @@ use serde_json::Value;
 use crate::wire_check_state::WireCheckState;
 
 use super::{DispatchTarget, Router};
-
-/// Whether an `egress` must send `max_tokens` and so fills it when the
-/// client sent none: the Anthropic Messages body, direct, through Bedrock's
-/// managed surface, or on Invoke.
-pub(super) const fn fills_max_tokens(egress: EgressKind) -> bool {
-    matches!(
-        egress,
-        EgressKind::AnthropicApi | EgressKind::AnthropicApiMantle | EgressKind::BedrockInvoke
-    )
-}
 
 impl Router {
     /// Give this provider call a fresh [`WireTap`] and return the router's

@@ -79,8 +79,6 @@ pub enum EditSite {
     Cloak,
     /// Provider: Claude sampling-parameter normalization.
     ClaudeSamplingNormalize,
-    /// Provider: reconciliation of mutually exclusive sampling parameters.
-    SamplingReconcile,
     /// Provider: sampling parameters pinned to the values thinking mode
     /// requires.
     ThinkingSamplingClamp,
@@ -171,7 +169,7 @@ pub enum EditSite {
 
 impl EditSite {
     /// Every site, in declaration order.
-    pub const ALL: [Self; 50] = [
+    pub const ALL: [Self; 49] = [
         Self::ModelRename,
         Self::OperatorPayloadExtras,
         Self::ContextReduction,
@@ -185,7 +183,6 @@ impl EditSite {
         Self::SystemMessageLift,
         Self::Cloak,
         Self::ClaudeSamplingNormalize,
-        Self::SamplingReconcile,
         Self::ThinkingSamplingClamp,
         Self::ThinkingStripForcedToolUse,
         Self::StreamStrip,
@@ -240,7 +237,6 @@ impl EditSite {
             Self::SystemMessageLift => "system_message_lift",
             Self::Cloak => "cloak",
             Self::ClaudeSamplingNormalize => "claude_sampling_normalize",
-            Self::SamplingReconcile => "sampling_reconcile",
             Self::ThinkingSamplingClamp => "thinking_sampling_clamp",
             Self::ThinkingStripForcedToolUse => "thinking_strip_forced_tool_use",
             Self::StreamStrip => "stream_strip",

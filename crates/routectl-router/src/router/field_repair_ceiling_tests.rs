@@ -153,6 +153,31 @@ fn a_max_tokens_clamp_lowers_only_a_value_above_the_ceiling() {
     }
 }
 
+/// The emitted `max_tokens` truth table: the client's value wins whatever
+/// the egress; an omitted limit stays omitted unless the egress fills it, and
+/// a filling egress sends the ceiling slot, or its 64000 baseline when the
+/// slot is zero.
+#[test]
+fn the_emitted_max_tokens_is_the_client_value_else_the_fill_else_none() {
+    // (name, client value, egress fills, ceiling slot, emitted)
+    let rows = [
+        ("client, fill on", Some(4096), true, 8192, Some(4096)),
+        ("client, fill off", Some(4096), false, 8192, Some(4096)),
+        ("none, fill off", None, false, 8192, None),
+        ("none, fill on, slot zero", None, true, 0, Some(64_000)),
+        ("none, fill on, slot set", None, true, 8192, Some(8192)),
+    ];
+
+    for (name, sent, fills, slot, emitted) in rows {
+        let mut req = req_on(ALIAS);
+        req.max_tokens = sent;
+        req.routectl_internal.fills_max_tokens = fills;
+        req.routectl_internal.max_output_tokens = slot;
+
+        assert_eq!(super::emitted_max_tokens(&req), emitted, "{name}");
+    }
+}
+
 #[test]
 fn a_max_tokens_clamp_declares_a_rewrite_of_its_root_pointer_on_a_root_spelling_wire() {
     use routectl_core::wire_check::IngressDialect;

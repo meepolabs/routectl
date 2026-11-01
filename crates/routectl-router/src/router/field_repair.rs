@@ -623,19 +623,14 @@ impl FieldSurface {
 }
 
 /// The `max_tokens` the request's egress sends: the client's value; else,
-/// on an egress that fills it, the model's nonzero ceiling or the egress
-/// baseline; else none.
+/// on an egress that fills it, the value the provider resolves; else none.
 const fn emitted_max_tokens(req: &ChatRequest) -> Option<u32> {
-    let internal = &req.routectl_internal;
-    match (
-        req.max_tokens,
-        internal.fills_max_tokens,
-        internal.max_output_tokens,
-    ) {
-        (Some(client), _, _) => Some(client),
-        (None, false, _) => None,
-        (None, true, 0) => Some(routectl_providers::anthropic_api::DEFAULT_MAX_OUTPUT_TOKENS),
-        (None, true, ceiling) => Some(ceiling),
+    match req.max_tokens {
+        Some(client) => Some(client),
+        None if req.routectl_internal.fills_max_tokens => {
+            Some(routectl_providers::anthropic_api::resolve_max_tokens(req))
+        }
+        None => None,
     }
 }
 
@@ -1553,6 +1548,11 @@ pub(super) fn grounded_field_feature_keys(
 /// uses. The diagnostic-only feature-naming-drift path is deliberately NOT
 /// one of those call sites: a field verdict is never a feature-naming-table
 /// candidate, so that diagnostic stays on the bare catalog derivation.
+///
+/// The keys describe CLIENT input. They are built once per request, before
+/// any target is chosen, while what an egress emits depends on that target:
+/// `field:max_tokens` names a limit the client sent, never one an egress
+/// fills for a client that sent none.
 pub(super) fn request_feature_keys(table: FieldRepairTable, req: &ChatRequest) -> Vec<String> {
     crate::feature_keys::derive_feature_keys(
         req.tools.as_deref().unwrap_or(&[]),
@@ -2269,7 +2269,7 @@ mod table_tests {
         assert_eq!(
             FIELD_REPAIRS[0].class,
             TransformClass::Envelope,
-            "the one grounded row removes envelope metadata only -- it is NOT \
+            "the first grounded row removes envelope metadata only -- it is NOT \
              prefix-impacting, and a row whose class changed would silently change \
              which gates its pre-flight application must clear",
         );

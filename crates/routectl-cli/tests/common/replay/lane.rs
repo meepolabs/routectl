@@ -981,19 +981,17 @@ fn outgoing_credential_is_bearer(fixture: &Fixture) -> bool {
 /// (`enabled` or `adaptive`), the condition under which
 /// `clamp_sampling_for_thinking`
 /// (`crates/routectl-providers/src/anthropic_api/request.rs`) rewrites a
-/// client temperature. Mirrors `is_active_thinking_type`
+/// client temperature. Calls `is_active_thinking_type`
 /// (`crates/routectl-providers/src/anthropic_api/extras.rs`). Keyed on the
 /// wire body, never the ingress: the clamp reads the thinking type that
 /// ships, which an override or a strip may have changed from the client's.
 fn outgoing_thinking_is_active(fixture: &Fixture) -> bool {
-    matches!(
-        fixture
-            .outgoing_request
-            .get("thinking")
-            .and_then(|thinking| thinking.get("type"))
-            .and_then(Value::as_str),
-        Some("enabled" | "adaptive")
-    )
+    fixture
+        .outgoing_request
+        .get("thinking")
+        .and_then(|thinking| thinking.get("type"))
+        .and_then(Value::as_str)
+        .is_some_and(routectl_providers::anthropic_api::is_active_thinking_type)
 }
 
 /// The single-underscore prefix whose result is DOUBLED rather than

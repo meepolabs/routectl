@@ -2029,8 +2029,8 @@ struct DispatchTarget {
     history_reasoning: Option<HistoryReasoning>,
     /// Per-model `max_tokens` ceiling for the Anthropic-shape egresses:
     /// the catalog prior, threaded from `ResolvedModel.max_output_tokens`.
-    /// Zero means no ceiling known -- `apply_layered_overlays` then fills
-    /// the egress baseline for an egress that sends the field.
+    /// Zero means no ceiling known: an egress that sends the field then
+    /// selects its own baseline.
     max_output_tokens: u32,
     /// Operator-declared label echoed back in the response `model`
     /// field. Threaded from `ResolvedModel.reported_model`. `None`

@@ -120,12 +120,19 @@ pub use context_management::CONTEXT_MANAGEMENT_BETA;
 /// The `max_tokens` this egress sends when neither the client nor the
 /// router-filled `routectl_internal.max_output_tokens` supplies one.
 pub use extras::DEFAULT_MAX_OUTPUT_TOKENS;
+/// Whether an egress fills `max_tokens` when the client sent none.
+pub use extras::egress_fills_max_tokens;
 /// The `thinking.type` this egress composes for a request, for a caller
 /// that must reason about the shape before the body is built.
 pub use extras::emitted_thinking_type;
+/// Whether a `thinking.type` spends reasoning budget.
+pub use extras::is_active_thinking_type;
 /// The `budget_tokens` the legacy enabled thinking shape composes for a
 /// request, for a caller that rewrites a thinking type to `enabled`.
 pub use extras::legacy_thinking_budget;
+/// The `max_tokens` this egress sends for a request: the client's value,
+/// else the nonzero ceiling slot, else [`DEFAULT_MAX_OUTPUT_TOKENS`].
+pub use extras::resolve_max_tokens;
 
 #[async_trait]
 impl Provider for AnthropicApiProvider {

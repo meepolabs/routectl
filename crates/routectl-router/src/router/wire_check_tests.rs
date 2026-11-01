@@ -15,9 +15,9 @@ use routectl_core::{
     ChatChunk, ChatRequest, ChatResponse, Choice, ChunkChoice, ChunkDelta, Error, Message,
     MessageContent, Provider, RequestObservation, Result, Role,
 };
+use routectl_providers::anthropic_api::egress_fills_max_tokens;
 use serde_json::{Value, json};
 
-use super::fills_max_tokens;
 use crate::config::{Config, ProviderEntry};
 use crate::resolved::ResolvedModel;
 use crate::router::Router;
@@ -592,7 +592,8 @@ const MANTLE: &str =
 /// Each row pins the egress kind a provider entry derives and whether that
 /// egress fills `max_tokens` for a client that sent none.
 ///
-/// Mutation check: drop any arm of `fills_max_tokens` -> red on its rows.
+/// Mutation check: drop any arm of `egress_fills_max_tokens` -> red on its
+/// rows.
 #[test]
 fn each_provider_entry_shape_derives_its_egress_kind_and_fill() {
     let mut rows: Vec<(&str, String, EgressKind, bool)> = vec![
@@ -676,10 +677,14 @@ fn each_provider_entry_shape_derives_its_egress_kind_and_fill() {
         let derived = only_entry(&body).egress_kind();
 
         assert_eq!(derived, expected, "{name}");
-        assert_eq!(fills_max_tokens(derived), fills, "{name}: fills max_tokens");
+        assert_eq!(
+            egress_fills_max_tokens(derived),
+            fills,
+            "{name}: fills max_tokens"
+        );
     }
     assert!(
-        !fills_max_tokens(EgressKind::Local),
+        !egress_fills_max_tokens(EgressKind::Local),
         "a local answer sends no body to fill",
     );
 }

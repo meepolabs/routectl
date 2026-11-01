@@ -168,7 +168,7 @@ pub(super) fn apply_layered_overlays(
     internal.max_output_tokens = target.max_output_tokens;
     internal.fills_max_tokens = target
         .egress_kind
-        .is_some_and(super::wire_check::fills_max_tokens);
+        .is_some_and(routectl_providers::anthropic_api::egress_fills_max_tokens);
     // Operator-configured beta floor: the provider + model
     // `header_extras["anthropic-beta"]` betas, EXCLUDING the
     // client/ingress betas already on `req.anthropic_beta`. The

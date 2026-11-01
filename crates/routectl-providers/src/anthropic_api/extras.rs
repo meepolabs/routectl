@@ -19,6 +19,7 @@
 
 use serde_json::Value;
 
+use routectl_core::wire_check::EgressKind;
 use routectl_core::{AnthropicThinking, ChatRequest, ThinkingObject, sanitize_for_log};
 
 use crate::effort::{budget_from_level, wire_effort};
@@ -28,8 +29,10 @@ use super::tools::forced_tool_choice_type;
 use super::types::{OutputConfig, ThinkingConfig, WireThinking};
 
 /// Hardcoded baseline `max_tokens` value injected on outbound
-/// Anthropic-shape requests when the caller omits the field AND no
-/// per-model ceiling is known (no catalog prior, no learned ceiling). The
+/// Anthropic-shape requests when the caller omits the field AND the
+/// per-model ceiling slot (`routectl_internal.max_output_tokens`) is zero.
+/// Any nonzero value in that slot suppresses the baseline, whatever put it
+/// there: an operator override, a catalog prior, or a learned ceiling. The
 /// Anthropic Messages API requires `max_tokens` and 400s on omission;
 /// 64000 is above the 64K ceiling of Sonnet 4.5/4.6 and Opus 4.5 and
 /// within Opus 4.7's 128K window.
@@ -38,6 +41,18 @@ use super::types::{OutputConfig, ThinkingConfig, WireThinking};
 /// (`routectl catalog set ... max_output_tokens`) or learns it from the
 /// upstream's refusal. See docs/CONFIGURATION.md.
 pub const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 64_000;
+
+/// Whether `egress` must send `max_tokens` and so fills it when the client
+/// sent none: the Anthropic Messages body, direct, through Bedrock's managed
+/// surface, or on Invoke. Every other egress forwards an omitted limit as
+/// omitted.
+#[must_use]
+pub const fn egress_fills_max_tokens(egress: EgressKind) -> bool {
+    matches!(
+        egress,
+        EgressKind::AnthropicApi | EgressKind::AnthropicApiMantle | EgressKind::BedrockInvoke
+    )
+}
 
 /// Resolve the `max_tokens` the request is sized to: caller's request
 /// wins; absent that, the router-supplied per-model ceiling from
@@ -52,7 +67,8 @@ pub const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 64_000;
 /// calls `build_thinking` itself. Converse, like openai-compat and
 /// openai-responses, still forwards `req.max_tokens` cleanly when None
 /// per the good-translator principle.
-pub(super) const fn resolve_max_tokens(req: &ChatRequest) -> u32 {
+#[must_use]
+pub const fn resolve_max_tokens(req: &ChatRequest) -> u32 {
     if let Some(v) = req.max_tokens {
         return v;
     }
@@ -763,6 +779,10 @@ mod tests {
 #[cfg(test)]
 #[path = "extras_thinking_display_tests.rs"]
 mod thinking_display_tests;
+
+#[cfg(test)]
+#[path = "extras_max_tokens_tests.rs"]
+mod max_tokens_tests;
 
 // The spend coupling: which legacy-path thinking budgets move when the
 // router injects a higher `max_output_tokens` ceiling, and which do not.
