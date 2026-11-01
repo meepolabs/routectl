@@ -21,6 +21,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use parking_lot::Mutex;
 
 use crate::server::reload_failure::{ReloadFailure, ReloadFailureSnapshot};
+use crate::server::seat_driver::SeatDriverHealth;
 
 /// Epoch-ms sentinel for "no config load has been stamped yet". Never
 /// reaches the wire: [`DaemonMetaHandle::snapshot`] maps it to `None` rather
@@ -34,17 +35,25 @@ pub struct DaemonMeta {
     config_loaded_at_ms: AtomicI64,
     /// The last rejected reload's class and epoch-ms instant.
     last_reload_failure: Mutex<Option<(ReloadFailure, i64)>>,
+    /// The background seat driver's health, written by the driver task.
+    seat_driver: Arc<SeatDriverHealth>,
 }
 
 impl DaemonMeta {
     /// Build the meta for a bound listener, with the config-load instant
     /// unstamped. `stamp_config_loaded` records the first load.
-    pub const fn new(listen_addr: String) -> Self {
+    pub fn new(listen_addr: String) -> Self {
         Self {
             listen_addr,
             config_loaded_at_ms: AtomicI64::new(UNSTAMPED),
             last_reload_failure: Mutex::new(None),
+            seat_driver: Arc::default(),
         }
+    }
+
+    /// The background seat driver's health, shared with the driver task.
+    pub fn seat_driver_health(&self) -> Arc<SeatDriverHealth> {
+        Arc::clone(&self.seat_driver)
     }
 
     /// Record that the live config was loaded (or reloaded) now. Called at

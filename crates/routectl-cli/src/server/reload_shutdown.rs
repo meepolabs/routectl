@@ -9,7 +9,8 @@
 /// observe the shutdown signal and return. Each task selects on the
 /// shutdown `watch` channel and exits promptly, so this is a safety
 /// cap, not the expected wait.
-const RELOAD_TASK_SHUTDOWN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
+pub(super) const RELOAD_TASK_SHUTDOWN_DEADLINE: std::time::Duration =
+    std::time::Duration::from_secs(2);
 
 /// Await each reload-side task, under a bounded per-task deadline, and
 /// GUARANTEE it is finished before returning.

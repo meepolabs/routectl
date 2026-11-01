@@ -23,6 +23,7 @@ use super::probe_driver::PROBE_DRIVER_INTERVAL;
 use super::probe_driver::run_probe_driver;
 use super::reload_failure::ReloadFailure;
 use super::router_publish::publish_router;
+use super::seat_driver::{RefreshJob, run_seat_driver};
 
 #[cfg(test)]
 use super::{CompositeStore, build_router_from_config};
@@ -84,6 +85,17 @@ pub(super) fn spawn_reload_pipeline(
         router_swap.clone(),
         shutdown_rx.clone(),
     )));
+
+    // Background seat driver. Only with a credential store: without one no
+    // managed login can be read, so there is nothing to keep refreshed.
+    if let Some(store) = oauth_store.as_ref() {
+        handles.push(tokio::spawn(run_seat_driver(
+            RefreshJob::new(store.clone()),
+            router_swap.clone(),
+            shutdown_rx.clone(),
+            daemon_meta.seat_driver_health(),
+        )));
+    }
 
     match file_watch::spawn_watcher(targets, reload_tx.clone(), shutdown_rx.clone()) {
         Ok(handle) => handles.push(handle),

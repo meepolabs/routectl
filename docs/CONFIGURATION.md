@@ -5200,6 +5200,30 @@ static credential (`api_key_ref = "env://OPENAI_JWT"` plus
    `oauth://anthropic` token has expired -- re-run `routectl login
    anthropic` (auto-refresh is a follow-up).
 
+### Background refresh of managed logins
+
+While `routectl serve` runs, a background seat driver checks once a minute
+every Anthropic and Codex managed login (`oauth://anthropic[#label]`,
+`oauth://codex[#label]`) that a `[models]` entry reaches, directly or through
+a `[pools]` member. Logins no entry names, and the other managed providers
+(xAI, antigravity), are left alone. A login is refreshed only when it is due:
+its access token expires within the same 5-minute lead window a request-time
+refresh uses. Otherwise the check sends nothing.
+
+- A refused refresh token, or a configured seat with no stored login, makes the
+  seat unusable at once: every model on it answers `credential_unusable` and is
+  skipped. It rejoins after `routectl login <provider> [--label <label>]`, with
+  no restart. Until then the driver does not retry it.
+- Network errors, 429 and 5xx keep the seat in service until its access token
+  actually expires; then it is marked `expired` until a later refresh succeeds.
+- A revocation is only seen when a refresh is attempted, so it can surface up to
+  one access-token lifetime after it happened.
+- The driver's health (running, last sweep, last sweep with no failure, sweep
+  and failure counts) is held in memory only and starts from zero on restart.
+
+Each background refresh rewrites `credentials.json`, so the credentials watcher
+reloads once per seat per token lifetime.
+
 ### Credential pools (multiple accounts per provider)
 
 A single OAuth provider can hold more than one credential ("seat") in

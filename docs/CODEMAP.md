@@ -6301,6 +6301,13 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   that store on the missed path, and an empty store reads exactly as health)
 - `src/server/probe_driver.rs` -- `run_probe_driver` and
   `PROBE_DRIVER_INTERVAL`: the daemon task that ticks the router's probe pass.
+- `src/server/seat_driver.rs` -- the background seat driver: `run_seat_driver`
+  sweeps every `SEAT_DRIVER_INTERVAL` over the configured managed Anthropic and
+  Codex seats (`managed_seats`) through one `SeatJob` (`RefreshJob`: due, run,
+  apply), acquiring each seat's credential generation before the refresh and
+  marking or clearing under it; keeps the memory-only `SeatDriverHealth` that
+  `DaemonMeta` holds. Spawned by `spawn_reload_pipeline` when a credential
+  store exists; tests in `seat_driver_tests.rs`
 - `src/server/capability_health.rs` -- bridges the router's
   capability-persistence gate to the usage writer whose health answers it,
   installed at boot after the writer exists and before publication.

@@ -34,6 +34,7 @@ mod reload_shutdown;
 pub mod request_id;
 mod router_build;
 mod router_publish;
+pub mod seat_driver;
 pub mod secrets;
 mod serve;
 pub mod status_gate;
