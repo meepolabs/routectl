@@ -4777,8 +4777,8 @@ n`). It loads config through the never-migrating loader and reads the raw
 bytes for a schema-version preflight that never stamps the file.
 
 `doctor` NEVER auto-fixes anything. Every WARN or FAIL finding carries a
-remediation that NAMES the fix (`run \`routectl login anthropic\``, `run
-\`routectl init\``, ...) for the operator to run -- the command
+remediation that NAMES the fix (`` run `routectl login anthropic` ``,
+`` run `routectl init` ``, ...) for the operator to run -- the command
 diagnoses, it does not mutate.
 
 The battery sections, in render order:
@@ -5219,9 +5219,12 @@ static credential (`api_key_ref = "env://OPENAI_JWT"` plus
 
    The `routectl serve` log should show one
    `INFO request{method=POST path=/v1/messages ...}: ... close
-   time.busy=N time.idle=N` line per request. If you see a 401, the
-   `oauth://anthropic` token has expired -- re-run `routectl login
-   anthropic` (auto-refresh is a follow-up).
+   time.busy=N time.idle=N` line per request. routectl refreshes the
+   `oauth://anthropic` token itself (see
+   [Background refresh of managed logins](#background-refresh-of-managed-logins)),
+   and on an upstream 401 it refreshes once and retries. A 401 that
+   persists, or a `credential_unusable` refusal, means the stored login
+   was refused: re-run `routectl login anthropic`.
 
 ### Background refresh of managed logins
 
@@ -5567,7 +5570,7 @@ What each family does (one line each):
 | `/v1/messages` (sync + streaming) | works | full forward + headers union |
 | `/v1/messages/count_tokens` | works | proxied to upstream; first-target only (no fallback chain walk) |
 | `/v1/models` (`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`) | works | glob alias keys and `default` skipped |
-| OAuth refresh on 401 | not yet | re-run `routectl login anthropic` to refresh today; auto-refresh is a follow-up |
+| OAuth refresh on 401 | works | an upstream 401 forces one token refresh and one retry; the background seat driver also refreshes a due login; a refused refresh token needs `routectl login anthropic` |
 | `WebSearch` tool on Bedrock | upstream-rejected | claude-code's `web_search_<v>` tool isn't supported by Bedrock; the router learns the rejection after the first miss per Bedrock lane and skips that lane for later web-search requests. Optionally declare `unsupported = ["web_search"]` under `[capability.overrides.<bedrock-provider>]` to skip even that first miss (see "Per-provider capability filter" above) |
 | Tool use + streaming | works | end-to-end SSE, multi-turn |
 | Subagent / agent-team dispatch | works | every subagent call flows through the same `/v1/messages` route |

@@ -34,6 +34,12 @@ release cut. Highlights, roughly in dependency order:
   the usage ledger and rebuilt at boot; operator overrides
   (`[capability.overrides]`); a doctor truth-matrix panel and
   staleness hints.
+- **Learned sampling and output limits:** a refused `temperature`,
+  `top_p`, `presence_penalty` or `frequency_penalty` is dropped and
+  learned per lane; a `max_tokens` above the model's limit is clamped
+  to the limit the refusal names and learned; an omitted `max_tokens`
+  is filled from the catalog ceiling (else 64000) and capped by a
+  learned ceiling.
 - **Read-only status dashboard** -- `GET /` single-file dashboard +
   `/status/{usage,health,config,doctor}` JSON panels; structurally
   read-only.
