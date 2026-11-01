@@ -409,3 +409,50 @@ fn the_public_learn_entry_refuses_a_key_bedrock_stores_in_the_field_namespace() 
     let verdict = FieldVerdictKey::new(&lane, SEGMENT_PATH, "bedrock").expect("identity");
     assert!(!router.field_verdicts().is_negative_acting(&verdict, now));
 }
+
+/// The namespace refusal runs before the generation barrier: a key Bedrock
+/// stores in the field namespace, submitted through a superseded Router, is
+/// reported as FieldNamespace rather than Stale, and records nothing. Its raw
+/// spelling is catalog-scoped, so the barrier alone would call it Stale; an
+/// ordinary catalog key through the same Router is the staleness control.
+///
+/// Mutation check: make the registry's `learn` screen only on the ungated
+/// path -> red (Stale instead of FieldNamespace).
+#[test]
+fn a_stale_learned_submission_in_the_field_namespace_is_refused_before_the_barrier() {
+    let (old, live) =
+        super::generation_barrier_tests::superseded_pair_with(Arc::new(Config::default()));
+    let lane_key = format!("p0#{WIRE}");
+    let segment = crate::field_capability::field_capability_key(SEGMENT_PATH).expect("a path");
+    let now = Instant::now();
+    let observe = |feature_key: &str| {
+        old.observe_learned_capability(
+            crate::learned_capability::LearnKey {
+                state_key: &lane_key,
+                feature_key_raw: feature_key,
+                provider_kind: "bedrock",
+            },
+            crate::learned_capability::NegativeEvidence {
+                tier: SignalTier::SelfIdentifying,
+                phase: FailurePhase::F1,
+                source: routectl_core::capability::EvidenceSource::Live,
+                evidence_class: None,
+            },
+            now,
+        )
+    };
+
+    let control = observe("web_search");
+    let refused = observe(&format!("toolConfig.{segment}"));
+
+    assert_eq!(
+        control,
+        crate::learned_capability::GenerationOutcome::Stale,
+        "the old Router's generation is superseded",
+    );
+    assert_eq!(
+        refused,
+        crate::learned_capability::GenerationOutcome::FieldNamespace
+    );
+    assert!(live.learned_capability_snapshot().is_empty());
+}
