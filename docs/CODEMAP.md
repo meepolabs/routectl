@@ -2017,8 +2017,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   (lowercase-normalized), re-mints an empty/corrupt one, and mints an absent
   one via `routectl_auth::atomic_write::write_0600_atomic` (owner-only 0600),
   and when `BuildOptions::mint_installation_id` is off only adopts a valid
-  file, writing nothing;
-  any read/write failure yields `None` + a structured WARN naming the error
+  file, writing nothing and returning `None` silently on any read failure;
+  on the minting path any read/write failure yields `None` + a structured WARN naming the error
   class (never the UUID), so the egress simply omits the
   `x-codex-installation-id` header and the next construction retries; the
   openai-responses `build` arm resolves it for the ChatgptOauth surface only
@@ -4401,7 +4401,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   by `ProviderState`: it lives on the account's `AccountCredential` (park +
   generation + the `Unusable` mark {`UnusableCause` NotLoggedIn / Unreadable /
   Expired / Revoked, since}; `park_until` / `park_in_generation` /
-  `clear_in_generation` / `mark_unusable` -> `MarkOutcome` /
+  `clear_in_generation` -> bool (generation matched) / `mark_unusable` -> `MarkOutcome` /
   `refreshed_in_generation` -> `RefreshSettlement` / `reset` ->
   `ResetOutcome`, the generation advanced by every `reset` and successful
   refresh so earlier evidence cannot re-park, mark or un-park the account),
@@ -6702,7 +6702,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   channel close rather than waiting for a send to fail) or on `Err` emits ONE
   terminal in-stream `render_error_eos` + finalizes from the dispatch's
   attempt count (`outcome_for_dispatch_err`: a refusal that dialed nothing is
-  `gate_blocked`) with the `pre_content_dispatch` stage marker (`observe_meta` relocated into the task;
+  `gate_blocked`) with the `pre_content_dispatch` stage marker (`observe_meta` runs inside the task;
   Drop `cancelled` reserved for an unobserved exit). Also owns the
   forwarded-mode (pure-proxy) ingress path: `enforce_pure_proxy_admission`
   (the shared admission gate all three dialect handlers funnel through, backed
@@ -7074,7 +7074,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   the pinned Router's config + overlay as one generation pair, the resident
   learned snapshot and seed-clear markers with clock anchors taken after the
   read, the boot `WarmReport`, and the credential-parked and unusable seats
-  read off the same `status_targets` call `route_targets` uses; its fields are private to
+  read through the same non-mutating `status_targets` path `route_targets` uses; its fields are private to
   the doctor module), plus `pricer()` -> `QueryPricer`, an OWNED `'static`
   pricing facade over one pinned snapshot whose only method costs an `AggRow`
   through `commands::usage::cost_for_row` (so `/status/query` and the CLI usage
