@@ -10,8 +10,9 @@
 //! typed [`ScaffoldError::AlreadyExists`] signal the orchestrator matches to
 //! route the operator onto the existing-config path.
 
-use std::io::Write as _;
 use std::path::Path;
+
+use routectl_router::ConfigCreateError;
 
 use super::super::edit_pipeline::gate;
 
@@ -83,40 +84,26 @@ fn scaffold_from_text(config_path: &Path, text: &str) -> std::result::Result<(),
         reason: format!("create parent directory: {e}"),
     })?;
 
-    let mut tmp = tempfile::Builder::new()
-        .prefix(".config.tmp.")
-        .suffix(".toml")
-        .tempfile_in(parent)
-        .map_err(|e| ScaffoldError::Io {
-            path: parent.display().to_string(),
-            reason: format!("tempfile: {e}"),
-        })?;
-    tmp.write_all(text.as_bytes())
-        .map_err(|e| ScaffoldError::Io {
-            path: config_path.display().to_string(),
-            reason: format!("write: {e}"),
-        })?;
-    tmp.as_file().sync_all().map_err(|e| ScaffoldError::Io {
-        path: config_path.display().to_string(),
-        reason: format!("fsync: {e}"),
-    })?;
+    routectl_router::write_config_new(config_path, text.as_bytes())
+        .map_err(|e| map_create_error(config_path, parent, e))
+}
 
-    tmp.persist_noclobber(config_path).map_err(|e| {
-        if e.error.kind() == std::io::ErrorKind::AlreadyExists {
-            ScaffoldError::AlreadyExists
-        } else {
-            ScaffoldError::Io {
-                path: config_path.display().to_string(),
-                reason: format!("publish: {}", e.error),
-            }
-        }
-    })?;
-
-    if let Ok(dir) = std::fs::File::open(parent) {
-        let _ = dir.sync_all();
+/// Translate a create-new failure into scaffold's own error, attributing a
+/// temp-file failure to the parent directory and every later stage to the
+/// config file itself.
+fn map_create_error(config_path: &Path, parent: &Path, err: ConfigCreateError) -> ScaffoldError {
+    let io = |path: &Path, reason: String| ScaffoldError::Io {
+        path: path.display().to_string(),
+        reason,
+    };
+    match err {
+        ConfigCreateError::AlreadyExists => ScaffoldError::AlreadyExists,
+        ConfigCreateError::NoParent => io(config_path, "path has no parent directory".to_string()),
+        ConfigCreateError::Tempfile(e) => io(parent, format!("tempfile: {e}")),
+        ConfigCreateError::Write(e) => io(config_path, format!("write: {e}")),
+        ConfigCreateError::Fsync(e) => io(config_path, format!("fsync: {e}")),
+        ConfigCreateError::Publish(e) => io(config_path, format!("publish: {e}")),
     }
-
-    Ok(())
 }
 
 #[cfg(test)]
@@ -214,6 +201,85 @@ mod tests {
 
         assert!(matches!(err, ScaffoldError::Gate(_)), "err: {err}");
         assert!(!path.exists(), "no file written on a gate failure");
+        assert!(temp_residue(dir.path()).is_empty(), "no temp residue");
+    }
+
+    #[test]
+    fn create_errors_map_to_the_stage_reason_and_the_stage_path() {
+        let config_path = Path::new("/cfg/dir/config.toml");
+        let parent = Path::new("/cfg/dir");
+        let boom = || std::io::Error::other("boom");
+        let cases: [(&str, ConfigCreateError, &str, &str); 5] = [
+            (
+                "no-parent",
+                ConfigCreateError::NoParent,
+                "/cfg/dir/config.toml",
+                "path has no parent directory",
+            ),
+            (
+                "tempfile",
+                ConfigCreateError::Tempfile(boom()),
+                "/cfg/dir",
+                "tempfile: boom",
+            ),
+            (
+                "write",
+                ConfigCreateError::Write(boom()),
+                "/cfg/dir/config.toml",
+                "write: boom",
+            ),
+            (
+                "fsync",
+                ConfigCreateError::Fsync(boom()),
+                "/cfg/dir/config.toml",
+                "fsync: boom",
+            ),
+            (
+                "publish",
+                ConfigCreateError::Publish(boom()),
+                "/cfg/dir/config.toml",
+                "publish: boom",
+            ),
+        ];
+
+        for (label, err, want_path, want_reason) in cases {
+            match map_create_error(config_path, parent, err) {
+                ScaffoldError::Io { path, reason } => {
+                    assert_eq!(path, want_path, "{label}: path");
+                    assert_eq!(reason, want_reason, "{label}: reason");
+                }
+                other => panic!("{label}: expected Io, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn create_error_already_exists_maps_to_the_existing_config_signal() {
+        let err = map_create_error(
+            Path::new("/cfg/config.toml"),
+            Path::new("/cfg"),
+            ConfigCreateError::AlreadyExists,
+        );
+
+        assert!(matches!(err, ScaffoldError::AlreadyExists), "err: {err}");
+    }
+
+    #[test]
+    fn a_publish_failure_surfaces_as_an_io_error_on_the_config_path() {
+        // A file name past NAME_MAX fails at the publish step, not as an
+        // existing file.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("c".repeat(300));
+
+        let err = scaffold_fresh(&path).expect_err("name too long");
+
+        match err {
+            ScaffoldError::Io { path: p, reason } => {
+                assert_eq!(p, path.display().to_string());
+                assert!(reason.starts_with("publish: "), "reason: {reason}");
+            }
+            other => panic!("expected Io, got {other:?}"),
+        }
         assert!(temp_residue(dir.path()).is_empty(), "no temp residue");
     }
 }

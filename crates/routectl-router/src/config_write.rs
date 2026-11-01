@@ -1,10 +1,12 @@
 //! The single `config.toml` write path: an advisory-lock + base-bytes
 //! revision-checked, format-preserving atomic edit primitive.
 //!
-//! Every cooperative routectl writer of `config.toml` (`config set`,
-//! `init`, the login config surface) goes through
-//! [`edit_config_toml`]. It owns three concerns and nothing else -- it is a
-//! write primitive, NOT a mutation-DTO layer and NOT a validator:
+//! Every cooperative routectl writer that edits an existing `config.toml`
+//! (`config set`, `init`, the login config surface) goes through
+//! [`edit_config_toml`]; laying down a fresh file goes through
+//! [`write_config_new`], which never replaces one. [`edit_config_toml`] owns
+//! three concerns and nothing else -- it is a write primitive, NOT a
+//! mutation-DTO layer and NOT a validator:
 //!
 //!   1. Sibling advisory lock (`config.toml.lock`, mirroring
 //!      [`crate::catalog_overlay::with_overlay_write_lock`]) so two
@@ -214,16 +216,11 @@ pub fn write_config_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
         std::fs::metadata(path).ok().map(|m| m.permissions().mode())
     };
 
-    let mut tmp = tempfile::Builder::new()
-        .prefix(".config.tmp.")
-        .suffix(".toml")
-        .tempfile_in(parent)
-        .map_err(|e| format!("tempfile: {e}"))?;
-    tmp.write_all(bytes)
-        .map_err(|e| format!("write tempfile: {e}"))?;
-    tmp.as_file()
-        .sync_all()
-        .map_err(|e| format!("fsync tempfile: {e}"))?;
+    let tmp = synced_temp_in(parent, bytes).map_err(|(stage, e)| match stage {
+        TempStage::Create => format!("tempfile: {e}"),
+        TempStage::Write => format!("write tempfile: {e}"),
+        TempStage::Fsync => format!("fsync tempfile: {e}"),
+    })?;
     tmp.persist(path).map_err(|e| format!("rename: {e}"))?;
 
     #[cfg(unix)]
@@ -232,10 +229,97 @@ pub fn write_config_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
         let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode));
     }
 
+    sync_parent_dir(parent);
+    Ok(())
+}
+
+/// Why a [`write_config_new`] call failed, by stage. On every error nothing
+/// is written at the target path and the temp file is removed.
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigCreateError {
+    /// A file is already present at the target path; it was left untouched.
+    #[error("config already exists")]
+    AlreadyExists,
+    /// The target path has no (or an empty) parent directory component.
+    #[error("path has no parent directory")]
+    NoParent,
+    /// Creating the temp file in the parent directory failed.
+    #[error("tempfile: {0}")]
+    Tempfile(std::io::Error),
+    /// Writing the bytes into the temp file failed.
+    #[error("write: {0}")]
+    Write(std::io::Error),
+    /// Flushing the temp file to disk failed.
+    #[error("fsync: {0}")]
+    Fsync(std::io::Error),
+    /// Linking the temp file into place failed for a reason other than an
+    /// existing file.
+    #[error("publish: {0}")]
+    Publish(std::io::Error),
+}
+
+/// Create `path` holding `bytes`, never replacing an existing file: a fsynced
+/// temp file in the parent directory is linked into place with a no-clobber
+/// publish, then the parent directory is fsynced. A file already at `path`
+/// (including one that appears between any caller check and the publish)
+/// yields [`ConfigCreateError::AlreadyExists`].
+///
+/// The parent directory must already exist; it is not created.
+pub fn write_config_new(path: &Path, bytes: &[u8]) -> Result<(), ConfigCreateError> {
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .ok_or(ConfigCreateError::NoParent)?;
+
+    let tmp = synced_temp_in(parent, bytes).map_err(|(stage, e)| match stage {
+        TempStage::Create => ConfigCreateError::Tempfile(e),
+        TempStage::Write => ConfigCreateError::Write(e),
+        TempStage::Fsync => ConfigCreateError::Fsync(e),
+    })?;
+    tmp.persist_noclobber(path).map_err(|e| {
+        if e.error.kind() == std::io::ErrorKind::AlreadyExists {
+            ConfigCreateError::AlreadyExists
+        } else {
+            ConfigCreateError::Publish(e.error)
+        }
+    })?;
+
+    sync_parent_dir(parent);
+    Ok(())
+}
+
+/// Which step of [`synced_temp_in`] failed.
+enum TempStage {
+    Create,
+    Write,
+    Fsync,
+}
+
+/// A temp file in `parent` (so the publish is a same-filesystem rename)
+/// holding `bytes`, already fsynced.
+fn synced_temp_in(
+    parent: &Path,
+    bytes: &[u8],
+) -> Result<tempfile::NamedTempFile, (TempStage, std::io::Error)> {
+    let mut tmp = tempfile::Builder::new()
+        .prefix(".config.tmp.")
+        .suffix(".toml")
+        .tempfile_in(parent)
+        .map_err(|e| (TempStage::Create, e))?;
+    tmp.write_all(bytes).map_err(|e| (TempStage::Write, e))?;
+    tmp.as_file()
+        .sync_all()
+        .map_err(|e| (TempStage::Fsync, e))?;
+    Ok(tmp)
+}
+
+/// Best-effort fsync of the parent directory so a just-published directory
+/// entry survives a crash. A failure is ignored: the file is already
+/// published and readable by the time this runs.
+fn sync_parent_dir(parent: &Path) {
     if let Ok(dir) = std::fs::File::open(parent) {
         let _ = dir.sync_all();
     }
-    Ok(())
 }
 
 /// Path to the sibling advisory-lock file for `path`, e.g.
@@ -458,6 +542,88 @@ mod tests {
         // Assert
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o640, "mode must survive the atomic rewrite");
+    }
+
+    // -----------------------------------------------------------------------
+    // Create-new: lays down a fresh file, never replaces an existing one.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn write_config_new_creates_the_file_with_the_bytes() {
+        // Arrange
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let bytes = b"version = 2\n[server]\nport = 8787\n";
+
+        // Act
+        write_config_new(&path, bytes).expect("fresh create");
+
+        // Assert
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert!(temp_residue(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn write_config_new_refuses_an_existing_file_and_leaves_it_byte_identical() {
+        // Arrange
+        let dir = tempfile::tempdir().unwrap();
+        let existing = "version = 2\n# operator file\n";
+        let path = write_config(dir.path(), existing);
+
+        // Act
+        let err = write_config_new(&path, b"version = 2\nport = 1\n")
+            .expect_err("existing file must refuse");
+
+        // Assert
+        assert!(
+            matches!(err, ConfigCreateError::AlreadyExists),
+            "err: {err}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), existing);
+        assert!(temp_residue(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn write_config_new_reports_a_missing_parent_as_the_tempfile_stage() {
+        // Arrange
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("absent").join("config.toml");
+
+        // Act
+        let err = write_config_new(&path, b"version = 2\n").expect_err("no parent dir");
+
+        // Assert
+        assert!(
+            matches!(&err, ConfigCreateError::Tempfile(e) if e.kind() == std::io::ErrorKind::NotFound),
+            "err: {err:?}"
+        );
+        assert!(err.to_string().starts_with("tempfile: "), "err: {err}");
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn write_config_new_reports_a_non_existence_publish_failure_as_the_publish_stage() {
+        // Arrange: a file name past NAME_MAX fails only at the link into place.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("c".repeat(300));
+
+        // Act
+        let err = write_config_new(&path, b"version = 2\n").expect_err("name too long");
+
+        // Assert
+        assert!(matches!(err, ConfigCreateError::Publish(_)), "err: {err:?}");
+        assert!(err.to_string().starts_with("publish: "), "err: {err}");
+        assert!(temp_residue(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn write_config_new_refuses_a_path_without_a_parent_component() {
+        // Act
+        let err = write_config_new(Path::new("config.toml"), b"version = 2\n")
+            .expect_err("bare file name has an empty parent");
+
+        // Assert
+        assert!(matches!(err, ConfigCreateError::NoParent), "err: {err:?}");
     }
 
     // -----------------------------------------------------------------------

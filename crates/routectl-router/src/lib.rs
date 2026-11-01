@@ -163,6 +163,7 @@ pub use config_effective::{
 pub use config_error::parse_config;
 pub use config_locate::locate_dotted_path;
 pub use config_path::{PathError, PathShape, validate_config_path};
+pub use config_write::{ConfigCreateError, write_config_new};
 pub use config_write::{ConfigWriteError, EditOutcome, EditResult, edit_config_toml};
 pub use context_trim::{
     BYTES_PER_TOKEN_ESTIMATE, ElisionMark, NearLosslessMarks, RequestEstimate,
