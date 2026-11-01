@@ -49,6 +49,19 @@ impl Router {
             .map(|seats| seats.len())
     }
 
+    /// Whether `account`, a credential account key (an OAuth seat key such
+    /// as `provider#label`), belongs to a pool member this Router kept as a
+    /// placeholder seat because its credential could not be read at build.
+    /// Such a seat has no provider, so a fresh credential reaches it only
+    /// through a rebuild, never through an in-place lift.
+    #[must_use]
+    pub fn is_placeholder_account(&self, account: &str) -> bool {
+        self.pool_reports
+            .iter()
+            .flat_map(|report| &report.placeholders)
+            .any(|placeholder| placeholder.account.as_deref() == Some(account))
+    }
+
     /// Non-mutating gate health for the state slot keyed by `state_key`.
     /// Fails safe when no slot exists: reports a circuit-Open,
     /// not-dispatchable gate rather than panicking, so a status view of a

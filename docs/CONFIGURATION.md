@@ -5385,9 +5385,22 @@ every seat is unusable starts normally and answers each request, on all
 three ingresses and on `count_tokens`, with HTTP 503 and `error.type`
 `credential_unusable`, with no `Retry-After` (no recovery time is
 known). When an unusable seat shares the chain with a parked one, the
-refusal stays `credential_unusable` and carries the park's wait. A seat
-that was not logged in recovers once `routectl login <provider> --label
-<name>` adds it to the credential store.
+refusal stays `credential_unusable` and carries the park's wait.
+
+**Live recovery after re-login.** `routectl login <provider> --label
+<name>` readmits an unusable seat with no restart, whether it was
+unusable at startup or became unusable later. The daemon watches the
+credential store, and a reload that sees the seat's stored record added
+or changed acts on it at once. A seat that was built and later found
+unusable (for example a refused refresh token) is readmitted in place:
+its mark is cleared and the router is not rebuilt. A seat kept as an
+unusable placeholder at build (never logged in, or a stored credential
+that could not be read or refreshed) has nothing to dial, so the reload
+rebuilds the router for it even when the set of stored seats is
+unchanged; every other seat keeps its breaker, rate and park state
+across that rebuild, and a seat still not logged in keeps its mark.
+routectl's own token refresh changes no stored record, so it causes no
+rebuild.
 
 **Seat selection.** `seat_selection` takes effect only when a pool
 resolves to more than one usable member; with one member there is nothing

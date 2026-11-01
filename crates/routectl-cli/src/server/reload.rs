@@ -453,7 +453,9 @@ async fn apply_config_reload(
 /// --label` / `logout --label` or a hand-edit added or removed a
 /// credential key) the live Router is rebuilt from the CURRENT
 /// (unchanged) config so a bare-pool `oauth://provider` re-expands to
-/// the new per-seat target set without a daemon restart. The common
+/// the new per-seat target set without a daemon restart. A changed record
+/// for a seat the live Router holds as a placeholder rebuilds too, since a
+/// placeholder has no provider for the in-place lift to readmit. The common
 /// case -- routectl's own hourly-ish token auto-refresh, which rewrites
 /// credentials.json with the same keys but new token values -- leaves
 /// the seat set identical and skips the rebuild, so a routine refresh
@@ -496,12 +498,18 @@ pub(super) async fn handle_credentials_reload(
     // token-only change. A seat-set rebuild carries the lifted state onward.
     // A seat this process refreshed itself reads as unchanged, so a routine
     // token refresh lifts nothing.
+    let live = router_swap.load_full();
     log_lifted_parks(
-        &router_swap
-            .load()
-            .lift_oauth_credential_parks(&changed_seats),
+        &live.lift_oauth_credential_parks(&changed_seats),
         "credentials",
     );
+    // A placeholder seat was never built, so the lift alone cannot readmit
+    // it: a changed record for one forces the rebuild below even when the
+    // key set is unchanged (a dead record re-logged under the same seat).
+    let readmits_placeholder = changed_seats
+        .iter()
+        .any(|seat| live.is_placeholder_account(seat));
+    drop(live);
 
     // Recompute activation on EVERY successful credentials reload, before the
     // seat-gated router-rebuild early return below: activation tracks token
@@ -516,11 +524,12 @@ pub(super) async fn handle_credentials_reload(
     )
     .await;
 
-    // Gate the Router rebuild on a real seat-set change. A token-value-only
-    // refresh (same keys) must not rebuild, or every routine auto-refresh
-    // would needlessly re-run the startup validators and re-expand the pool.
+    // Gate the Router rebuild on a real seat-set change or a changed
+    // placeholder seat. A token-value-only refresh of built seats (same keys)
+    // must not rebuild, or every routine auto-refresh would needlessly re-run
+    // the startup validators and re-expand the pool.
     let after = store.credential_keys().await;
-    if before == after {
+    if before == after && !readmits_placeholder {
         return;
     }
 
