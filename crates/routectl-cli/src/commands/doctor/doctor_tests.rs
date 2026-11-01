@@ -1485,6 +1485,42 @@ fn a_missing_labeled_oauth_ref_names_the_labeled_login() {
     );
 }
 
+/// The login remediation shows a plain label bare and single-quotes any other,
+/// so the command pastes into a shell as written.
+///
+/// Mutation check: make `shell_word` return its input unchanged -> the
+/// space row goes red.
+#[test]
+fn a_labeled_login_remediation_quotes_a_label_the_shell_would_split() {
+    let rows = [
+        ("plain", "seat-a.1_b", "seat-a.1_b"),
+        ("space", "seat a", "'seat a'"),
+        ("single quote", "seat'a", "'seat'\\''a'"),
+        ("redirect", "seat>a", "'seat>a'"),
+    ];
+    for (name, label, shown) in rows {
+        // Arrange
+        let cfg: Config = toml::from_str(&format!(
+            "version = 3\n\
+             [providers.alpha-a]\n\
+             kind = \"anthropic-api\"\n\
+             api_key_ref = \"oauth://anthropic#{label}\"\n",
+        ))
+        .unwrap_or_else(|e| panic!("{name}: fixture parses: {e}"));
+
+        // Act
+        let checks = gather_secret_checks(&cfg, &[("anthropic", LocalProbe::Missing)]);
+        let finding = secret_finding(&checks[0]);
+
+        // Assert
+        assert_eq!(
+            finding.remediation.as_deref(),
+            Some(format!("run `routectl login anthropic --label {shown}`").as_str()),
+            "{name}"
+        );
+    }
+}
+
 /// An `oauth://` ref whose local probe reports an expired, non-revivable
 /// credential is a Warn carrying a `routectl login` remediation.
 #[test]

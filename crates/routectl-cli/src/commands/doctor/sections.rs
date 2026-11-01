@@ -17,7 +17,7 @@ use crate::commands::seat_report::{
 use crate::server::reload_failure::ReloadFailureSnapshot;
 
 use super::gather::{SecretCheck, SecretPresence};
-use super::served::{parked_seat_finding, unusable_seat_finding};
+use super::served::{SeatFix, parked_seat_finding, unusable_seat_finding};
 use super::{
     DoctorContext, EquivalenceBasis, FreshnessInputs, KnobRow, LegacyFolder, OutputCeilingSource,
     PricingRow, PricingRowSource,
@@ -421,7 +421,13 @@ fn missing_remediation(check: &SecretCheck) -> String {
 }
 
 fn check_login_remediation(check: &SecretCheck) -> String {
-    oauth_login_remediation(check.oauth_id.as_deref(), check.oauth_label.as_deref())
+    check.oauth_id.as_ref().map_or_else(
+        || oauth_login_remediation(None, None),
+        |provider| {
+            SeatFix::for_oauth_ref(&check.provider, provider.clone(), check.oauth_label.clone())
+                .remediation()
+        },
+    )
 }
 
 /// The remediation line naming [`oauth_login_command`] for an
@@ -438,11 +444,30 @@ pub(super) fn oauth_login_remediation(provider: Option<&str>, label: Option<&str
 /// `oauth://<provider>[#<label>]` ref. A labeled seat needs `--label`, or the
 /// bare form would log in the default seat and leave this one unchanged. The
 /// label is operator-written, so both halves route through the log-safe
-/// helper before they reach a copy-pasteable command.
+/// helper, and the label is shell-quoted, before they reach a copy-pasteable
+/// command.
 pub(super) fn oauth_login_command(provider: &str, label: Option<&str>) -> String {
     match label {
-        Some(label) => format!("routectl login {} --label {}", safe(provider), safe(label)),
+        Some(label) => format!(
+            "routectl login {} --label {}",
+            safe(provider),
+            shell_word(&safe(label))
+        ),
         None => format!("routectl login {}", safe(provider)),
+    }
+}
+
+/// `word` as one POSIX shell word: bare when every character is in
+/// `[A-Za-z0-9_.-]`, else single-quoted with each `'` written as `'\''`.
+fn shell_word(word: &str) -> String {
+    let is_plain = !word.is_empty()
+        && word
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'));
+    if is_plain {
+        word.to_string()
+    } else {
+        format!("'{}'", word.replace('\'', "'\\''"))
     }
 }
 

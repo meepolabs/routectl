@@ -144,12 +144,18 @@ const CODEX_LABELED: Seat = (
 const CODEX_DEFAULT: Seat = ("c-def", "beta", "openai-responses", "oauth://codex");
 const ENV_VAR: &str = "GAMMA_KEY_FOR_TESTS";
 const ENV_SEAT: Seat = ("env", "gamma", "openai-compat", "env://GAMMA_KEY_FOR_TESTS");
-const FILE_PATH: &str = "/var/lib/routectl-fixture/delta.key";
+const FILE_PATH: &str = "/fixture/delta.key";
 const FILE_SEAT: Seat = (
     "file",
     "delta",
     "openai-compat",
-    "file:///var/lib/routectl-fixture/delta.key",
+    "file:///fixture/delta.key",
+);
+const UNKNOWN_PROVIDER: Seat = (
+    "unknown",
+    "epsilon",
+    "anthropic-api",
+    "oauth://made-up#seat-e",
 );
 const FREE: Seat = (
     "free",
@@ -157,13 +163,14 @@ const FREE: Seat = (
     "anthropic-api",
     "oauth://anthropic#seat-free",
 );
-const MARKED: [(Seat, UnusableCause); 6] = [
+const MARKED: [(Seat, UnusableCause); 7] = [
     (ANTHROPIC_LABELED, UnusableCause::Revoked),
     (ANTHROPIC_DEFAULT, UnusableCause::NotLoggedIn),
     (CODEX_LABELED, UnusableCause::Expired),
     (CODEX_DEFAULT, UnusableCause::Revoked),
     (ENV_SEAT, UnusableCause::Unreadable),
     (FILE_SEAT, UnusableCause::Unreadable),
+    (UNKNOWN_PROVIDER, UnusableCause::Unreadable),
 ];
 
 fn direct_config(seats: &[Seat]) -> Config {
@@ -209,9 +216,12 @@ fn marked_direct_router() -> Router {
 /// and the exact command that readmits it; an unmarked seat's row is all
 /// null. An env or file seat's row names the entry and scheme only, and the
 /// serialized payload carries neither the variable name nor the file path.
+/// A seat whose `oauth://` provider `routectl login` does not accept names a
+/// config correction, never a login command.
 ///
 /// Mutation check: make `oauth_login_command` drop the label -> the two
-/// labeled rows go red.
+/// labeled rows go red; make `SeatFix::for_oauth_ref` skip the registry check
+/// -> the unknown-provider row goes red.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn each_unusable_seat_row_names_its_reason_cause_since_and_exact_fix() {
     // Arrange
@@ -224,7 +234,7 @@ async fn each_unusable_seat_row_names_its_reason_cause_since_and_exact_fix() {
     let after_ms = chrono::Utc::now().timestamp_millis();
 
     // Assert
-    let rows: [(Seat, &str, &str); 6] = [
+    let rows: [(Seat, &str, &str); 7] = [
         (
             ANTHROPIC_LABELED,
             "anthropic#seat-a",
@@ -249,6 +259,12 @@ async fn each_unusable_seat_row_names_its_reason_cause_since_and_exact_fix() {
             "provide a readable file:// credential for provider entry `delta`, then reload the \
              config",
         ),
+        (
+            UNKNOWN_PROVIDER,
+            "made-up#seat-e",
+            "correct the unknown oauth provider `made-up` of provider entry `epsilon`, then \
+             reload the config",
+        ),
     ];
     for ((seat, account, fix), (_, cause)) in rows.into_iter().zip(MARKED) {
         let target = row(&json, seat.0);
@@ -269,7 +285,7 @@ async fn each_unusable_seat_row_names_its_reason_cause_since_and_exact_fix() {
         );
     }
     let text = json.to_string();
-    for secret in [ENV_VAR, FILE_PATH, "routectl-fixture"] {
+    for secret in [ENV_VAR, FILE_PATH, "delta.key"] {
         assert!(
             !text.contains(secret),
             "the payload names `{secret}`: {text}"

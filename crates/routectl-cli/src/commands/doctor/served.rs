@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use routectl_auth::SecretRef;
+use routectl_auth::oauth::known_provider_ids;
 use routectl_core::{EligibilityReason, UpstreamReason};
 use routectl_router::runtime_state::UnusableCause;
 use routectl_router::{
@@ -80,8 +81,10 @@ pub struct UnusableSeat {
 }
 
 /// What readmits a seat dispatching through one `[providers]` entry: a
-/// re-login for an `oauth://` seat, else a readable credential for the entry.
-/// Derived from the served config each time it is shown, never stored.
+/// re-login for an `oauth://` seat whose provider this build can log in to, a
+/// config correction for one whose provider it cannot, else a readable
+/// credential for the entry. Derived from the served config each time it is
+/// shown, never stored.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SeatFix {
     /// Log the seat in again.
@@ -90,6 +93,14 @@ pub enum SeatFix {
         provider: String,
         /// The ref's seat label, `None` for the default seat.
         label: Option<String>,
+    },
+    /// Correct an `oauth://` ref whose provider `routectl login` does not
+    /// accept, then reload the config.
+    UnknownProvider {
+        /// The `[providers]` entry.
+        entry: String,
+        /// The ref's provider token.
+        provider: String,
     },
     /// Provide a readable credential for the entry and reload the config.
     Credential {
@@ -113,7 +124,7 @@ impl SeatFix {
             _ => None,
         });
         match oauth {
-            Some((provider, label)) => Self::Login { provider, label },
+            Some((provider, label)) => Self::for_oauth_ref(entry, provider, label),
             None => Self::Credential {
                 entry: entry.to_string(),
                 scheme: uris.first().map(|uri| scheme_label(uri)),
@@ -121,12 +132,26 @@ impl SeatFix {
         }
     }
 
+    /// The fix for an `oauth://<provider>[#<label>]` ref on `[providers]`
+    /// entry `entry`: a login only when `routectl login` accepts `provider`.
+    pub fn for_oauth_ref(entry: &str, provider: String, label: Option<String>) -> Self {
+        if known_provider_ids().contains(&provider.as_str()) {
+            Self::Login { provider, label }
+        } else {
+            Self::UnknownProvider {
+                entry: entry.to_string(),
+                provider,
+            }
+        }
+    }
+
     /// The bare line: the exact `routectl login` command for a login fix,
-    /// else the credential sentence. Names the entry and scheme, never the
-    /// ref's value.
+    /// else the correction sentence. Names the entry, scheme or provider
+    /// token, never the ref's value.
     pub fn command(&self) -> String {
         match self {
             Self::Login { provider, label } => oauth_login_command(provider, label.as_deref()),
+            Self::UnknownProvider { entry, provider } => unknown_provider_sentence(entry, provider),
             Self::Credential { entry, scheme } => credential_sentence(entry, *scheme),
         }
     }
@@ -138,9 +163,18 @@ impl SeatFix {
             Self::Login { provider, label } => {
                 oauth_login_remediation(Some(provider), label.as_deref())
             }
+            Self::UnknownProvider { entry, provider } => unknown_provider_sentence(entry, provider),
             Self::Credential { entry, scheme } => credential_sentence(entry, *scheme),
         }
     }
+}
+
+fn unknown_provider_sentence(entry: &str, provider: &str) -> String {
+    format!(
+        "correct the unknown oauth provider `{}` of provider entry `{}`, then reload the config",
+        safe(provider),
+        safe(entry),
+    )
 }
 
 fn credential_sentence(entry: &str, scheme: Option<&str>) -> String {

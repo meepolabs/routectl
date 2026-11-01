@@ -222,8 +222,10 @@ pub(crate) use self::served::{
 /// running daemon holds as unusable, naming the reason
 /// (`credential_unusable`), the cause (`not_logged_in`, `unreadable`,
 /// `expired` or `revoked`) and since when, with the fix as its remediation:
-/// `routectl login <provider> --label <label>` for a labeled OAuth seat,
-/// `routectl login <provider>` for an unlabeled one. The CLI cannot see daemon
+/// `routectl login <provider> --label <label>` for a labeled OAuth seat (a
+/// label outside `[A-Za-z0-9_.-]` single-quoted), `routectl login <provider>`
+/// for an unlabeled one, and a correction of the ref for an OAuth provider
+/// `routectl login` does not accept. The CLI cannot see daemon
 /// memory and reports none. The `pools` remediations name the local
 /// `credential_unusable` refusal.
 pub(crate) const SCHEMA_VERSION: u32 = 25;

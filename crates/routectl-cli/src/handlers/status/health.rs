@@ -64,9 +64,10 @@ struct TargetEligibility {
     /// `None` for a park or a rate limit, whose start is not recorded.
     since_ms: Option<i64>,
     /// What readmits a `credential_unusable` target: the exact
-    /// `routectl login` command for an `oauth://` seat, else the provider
-    /// entry and its credential scheme (never a value or path). `None` for
-    /// every other reason.
+    /// `routectl login` command for an `oauth://` seat whose provider
+    /// `routectl login` accepts, a correction naming the entry and provider
+    /// token for one it does not, else the provider entry and its credential
+    /// scheme (never a value or path). `None` for every other reason.
     fix: Option<String>,
 }
 

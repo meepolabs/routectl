@@ -25,12 +25,14 @@ use crate::server::AppState;
 const LABELED: (&str, &str, &str) = ("seat-a", "alpha-a", "oauth://anthropic#seat-a");
 const UNLABELED: (&str, &str, &str) = ("seat-b", "alpha", "oauth://anthropic");
 const ENV_SEAT: (&str, &str, &str) = ("seat-env", "beta", "env://BETA_KEY_FOR_TESTS");
+const UNKNOWN_PROVIDER: (&str, &str, &str) = ("seat-unknown", "gamma", "oauth://made-up");
 const FREE: (&str, &str, &str) = ("seat-free", "alpha-free", "oauth://anthropic#seat-free");
-const SEATS: [(&str, &str, &str); 4] = [LABELED, UNLABELED, ENV_SEAT, FREE];
-const MARKED: [((&str, &str, &str), UnusableCause); 3] = [
+const SEATS: [(&str, &str, &str); 5] = [LABELED, UNLABELED, ENV_SEAT, UNKNOWN_PROVIDER, FREE];
+const MARKED: [((&str, &str, &str), UnusableCause); 4] = [
     (LABELED, UnusableCause::Revoked),
     (UNLABELED, UnusableCause::NotLoggedIn),
     (ENV_SEAT, UnusableCause::Unreadable),
+    (UNKNOWN_PROVIDER, UnusableCause::Unreadable),
 ];
 
 struct Unused;
@@ -207,11 +209,13 @@ async fn the_served_doctor_names_each_unusable_seat_and_the_offline_doctor_names
 }
 
 /// The fix line is the re-login command for the seat's own credential: with
-/// `--label` for a labeled OAuth seat, without it for an unlabeled one, and the
-/// entry and scheme, never the value, for an env seat.
+/// `--label` for a labeled OAuth seat, without it for an unlabeled one, the
+/// entry and scheme, never the value, for an env seat, and a config correction,
+/// never a login command, for an `oauth://` provider `routectl login` rejects.
 ///
 /// Mutation check: make the labeled arm of `oauth_login_command` drop the
-/// label -> the seat-a row goes red.
+/// label -> the seat-a row goes red; make `SeatFix::for_oauth_ref` skip the
+/// registry check -> the seat-unknown row goes red.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial_test::serial]
 async fn each_unusable_seat_names_the_command_that_readmits_it() {
@@ -232,13 +236,18 @@ async fn each_unusable_seat_names_the_command_that_readmits_it() {
             .unwrap_or_else(|| panic!("{key} carries a fix"))
             .to_string()
     };
-    let rows: [(&str, &str); 3] = [
+    let rows: [(&str, &str); 4] = [
         (LABELED.0, "run `routectl login anthropic --label seat-a`"),
         (UNLABELED.0, "run `routectl login anthropic`"),
         (
             ENV_SEAT.0,
             "provide a readable env:// credential for provider entry `beta`, then reload the \
              config",
+        ),
+        (
+            UNKNOWN_PROVIDER.0,
+            "correct the unknown oauth provider `made-up` of provider entry `gamma`, then reload \
+             the config",
         ),
     ];
     for (key, expected) in rows {

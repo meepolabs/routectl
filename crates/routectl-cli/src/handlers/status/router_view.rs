@@ -271,22 +271,19 @@ mod tests {
     }
 
     #[test]
-    fn view_exposes_only_the_nine_read_methods() {
+    fn every_view_read_method_resolves_on_a_default_router() {
         let handle = handle();
         let view = handle.view();
 
-        // The full read surface: route health, pool seat counts, a seat's fix
-        // line, learned negatives, live field-repair counters, the coherent
-        // fidelity snapshot, the wire-check snapshot, effective view, the
-        // doctor's served inputs. If a future edit widens this surface (e.g.
-        // exposes `&Router` or a dispatch method), it lands here in review
-        // against a facade whose contract is these nine calls.
         let _targets: Vec<RouteTargetStatus> = view.route_targets(Instant::now());
         let _pools: Vec<PoolEligibility> = view.pool_eligibility(Instant::now());
         let _fix: SeatFix = view.seat_fix("absent");
         let _learned: Vec<ResolvedEntry> =
             view.learned_capabilities((Instant::now(), chrono::Utc::now().timestamp_millis()));
         let _counters: FieldRepairCounters = view.field_repair_counters();
+        let _lossy: Vec<LaneLossyRepairs> = view.lossy_repairs_by_lane();
+        let _exhaustions: Vec<LaneBudgetExhaustions> = view.budget_exhaustions_by_lane();
+        let _per_request: Vec<u64> = view.repairs_per_request();
         let _fidelity: FidelitySnapshot = view.fidelity_snapshot();
         let _wire_check: WireCheckSnapshot = view.wire_check_snapshot();
         let _effective: EffectiveView = view.effective_view();
