@@ -529,7 +529,8 @@ license.
   crate-internal feature-gated helper modules `system_filter`,
   `claude_signing`, `tool_id`, `upstream_log`, `anthropic_error`,
   `retry_after`, `sampling_drop_guard`, `bounded_diagnostics`,
-  `stream_completion`, `upstream_error`, `aws_error`; re-exports
+  `model_profile`, `skipped_format`, `stream_completion`, `upstream_error`,
+  `aws_error`; re-exports
   `system_filter::is_billing_attribution_block` for the ingress system lift
 - `src/alloc_probe.rs` -- test-only thread-local allocation counter for
   OpenAI Responses request tests; absent from other feature combinations
@@ -759,8 +760,9 @@ license.
   Provider for AnthropicApiProvider`
   (`normalize_request`/`normalize_response`, `complete`, `stream` + SSE drain,
   `count_tokens`, `on_auth_failure`, `probe`), the public
-  `emitted_thinking_type` and `DEFAULT_MAX_OUTPUT_TOKENS` re-exports from
-  `extras.rs`, plus
+  `DEFAULT_MAX_OUTPUT_TOKENS`, `resolve_max_tokens`, `egress_fills_max_tokens`,
+  `emitted_thinking_type`, `is_active_thinking_type` and
+  `legacy_thinking_budget` re-exports from `extras.rs`, plus
   `read_anthropic_error` / `anthropic_error_from_read` (the error mapper all
   three HTTP paths share, built from an `upstream_error::UpstreamErrorRead`,
   mantle 403 scrubbed through `aws_error`) and `build_count_tokens_body` (the
@@ -856,7 +858,15 @@ license.
   thinking, effort and post-merge body passes; a legacy `enabled` budget is
   fitted by `clamp_budget_to_legacy_window`; public `legacy_thinking_budget`
   (the `budget_tokens` the legacy shape composes, read by the router's
-  `thinking.type` repair)
+  `thinking.type` repair); owns the `max_tokens` fill rule: public
+  `egress_fills_max_tokens(EgressKind)` (true for `AnthropicApi`,
+  `AnthropicApiMantle`, `BedrockInvoke`; the router stamps it into
+  `routectl_internal.fills_max_tokens`) and public `resolve_max_tokens` (the
+  client's value, else the nonzero ceiling slot, else
+  `DEFAULT_MAX_OUTPUT_TOKENS`; also read by the router's `max_tokens` repair)
+- `src/anthropic_api/extras_max_tokens_tests.rs` -- `#[path]` sidecar pinning
+  `egress_fills_max_tokens` per `EgressKind`, each kind's answer spelled
+  explicitly
 - `src/anthropic_api/output_schema.rs` -- surgical repair of the ONE field
   Anthropic requires on every object in `output_config.format.schema`:
   `inject_additional_properties_false` walks the ASSEMBLED body (after the
@@ -1058,7 +1068,10 @@ license.
   helpers bridging `AuthKind` to the core tag vocabulary: `lane_format_tag`
   -> the lane-faithful tag this lane EMITS (an observation), `lane_scheme`
   -> the `ReplayScheme` this lane ACCEPTS (a revisable judgment; both
-  first-party lanes share `Codex`, mantle is `Mantle`)
+  first-party lanes share `Codex`, mantle is `Mantle`), and the crate-internal
+  `AuthKind::is_codex_lane` (true only for the ChatGPT-subscription OAuth
+  lane), the one predicate request, extras and client read for the codex
+  wire shape (no `max_output_tokens`, codex identity headers)
 - `src/openai_responses/client.rs` -- provider construction, config, and auth
   wiring: `OpenAiResponsesConfig` (incl. `session_id` and `installation_id:
   Option<String>`, plus cfg `bedrock` `mantle: Option<MantleAuth>`),
@@ -1501,7 +1514,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `provider_kind_for_oauth_id`), the pool build / eligibility types
   (`PoolPlaceholder`, `PoolReport`, `PoolEligibility`), and the `doctor` report
   types (`Status`, `Finding`, `WouldTrimPanel`, `DoctorPanels`,
-  `DoctorReport`, `ProbeOutcome`, `overall_exit`)
+  `DoctorReport`, `ProbeOutcome`, `overall_exit`); also the typed learn-write
+  inputs `LearnKey` / `NegativeEvidence` with the lapse rule
+  `negative_lapsed`, the provider-or-pool resolver `resolve_model_provider` /
+  `ModelProviderTarget`, and the create-new config writer `write_config_new` /
+  `ConfigCreateError`
 - `src/activation.rs` -- PURE auto-activation inventory (leaf module; imports
   ONLY `config` types, `config::is_config_provider_kind`, and
   `routectl_auth::LocalProbe` -- no `router`/`factory` dep, so activation
@@ -1762,7 +1779,13 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `committed_len`, deliberately NOT the document bytes (config.toml can hold
   `literal:` secrets; the audit contract forbids logging values). The lock is
   never held across interactive prompts (callers confirm first); consumers:
-  `config set`/`unset`, `init`, and the login config surface
+  `config set`/`unset`, `init`, and the login config surface. A NEW file goes
+  through `write_config_new(path, bytes)` instead: a fsynced temp file in the
+  parent published with a no-clobber link (`persist_noclobber`) plus a
+  parent-dir fsync, never replacing an existing file
+  (`ConfigCreateError::AlreadyExists`; the other variants name the failed
+  stage: `NoParent`, `Tempfile`, `Write`, `Fsync`, `Publish`); its consumer is
+  the `init` scaffold
 - `src/config_path.rs` -- schema-driven dotted-path validator:
   `validate_config_path(dotted) -> Result<PathShape{Scalar,Table}, PathError>`
   walks the OnceLock'd `schema_for!(Config)` object graph segment by segment
@@ -1895,7 +1918,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   config-load check of `[models]` and `[providers]` names that key runtime state
 - `src/factory/validate.rs` -- the config-row `validate_*` family + validation
   collection (incl. `validate_registry_patterns`, rejecting malformed
-  `[registry]` glob keys at startup); `validate_class_policy` HARD-rejects an
+  `[registry]` glob keys at startup); public `resolve_model_provider` ->
+  `Option<ModelProviderTarget{Pool, Provider}>`, the one lookup of a
+  `[models.X] provider` value in the shared `[pools]` / `[providers]`
+  namespace (pool wins on an unvalidated config), read by the factory build
+  and `config check`; `validate_class_policy` HARD-rejects an
   operator override of the reserved `[retry.classes.feature-unsupported]` key
   and any `[providers.X.class_overrides]` remap whose target falls outside
   `{bad-request, content-policy, context-window, feature-unsupported}`
@@ -2844,7 +2871,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `FieldSurface::SamplingParam` (one canonical request field each); and the
   `max_tokens` Ceiling over `FieldSurface::MaxTokens`, present when the client
   sent a limit or the egress fills one (`routectl_internal.fills_max_tokens`,
-  emitting the model ceiling or `anthropic_api::DEFAULT_MAX_OUTPUT_TOKENS`);
+  emitting the value `anthropic_api::resolve_max_tokens` resolves);
   `FieldRepairRow { path, surface, transform, class,
   count_tokens_validates }` -- the qualified dotted path a real captured
   rejection named, the private `FieldSurface` enum naming the request-side
@@ -3534,7 +3561,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   readers form
 - `src/router/overlays.rs` -- layered header/payload overlay merge:
   `apply_layered_overlays` (which also stamps `routectl_internal.max_output_tokens`
-  on every egress and `fills_max_tokens` from `wire_check::fills_max_tokens`,
+  on every egress and `fills_max_tokens` from
+  `routectl_providers::anthropic_api::egress_fills_max_tokens`,
   and the operator beta floor from `beta_capability::operator_betas`),
   `operator_payload_extras`, the
   `merge_header_extras` / `merge_payload_extras` helpers, and the reserved-key guards
@@ -3548,9 +3576,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `*_declare_tests.rs` fragments of the repair, pre-flight, canary and strip
   suites
 - `src/router/wire_check.rs` -- the live request-leg wire check on a successful
-  attempt: `fills_max_tokens(EgressKind)` (whether the egress sends
-  `max_tokens` when the client sent none: `AnthropicApi`, `AnthropicApiMantle`,
-  `BedrockInvoke`), `install_wire_tap` (a fresh `WireTap` per provider call on both
+  attempt: `install_wire_tap` (a fresh `WireTap` per provider call on both
   surfaces, only when the request carries an ingress body; the sampler decides
   admission here and returns `(Option<WireTap>, SampleCharge)` -- a FIDELITY
   admission also checks the response, and `traced_translation_fold` adds a
@@ -4537,7 +4563,16 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   a leased key (`GenerationOutcome::Reserved`), reserves the entry's next
   incarnation BEFORE calling `op` so an exhausted counter mutates nothing, and
   hands `op` the write guard's map directly alongside the held lease set so
-  nothing it calls needs to re-acquire either lock. Every mutating operation
+  nothing it calls needs to re-acquire either lock. Every observe door
+  (negative, positive, accepted beta, field verdict; gated or ungated) is a
+  typed shim onto ONE private writer, `learn`, taking the public `LearnKey
+  { state_key, feature_key_raw, provider_kind }` (root re-export), the
+  evidence (public `NegativeEvidence { tier, phase, source, evidence_class }`
+  or a private positive kind) and a gate; it runs the field-namespace screen
+  before any lock (a screened key in that namespace is refused as
+  `GenerationOutcome::FieldNamespace`, reserving nothing), then the generation
+  check, lease refusal, mutation, seed-clear lift and count capture in one
+  `guarded_keyed` section. Every mutating operation
   also has an `_in` inner variant (`observe_in`, `observe_positive_in`,
   `record_probe_outcome_in`, `expire_keyed_in`, `remove_keyed_in`) that acts
   only on a supplied `&mut HashMap` and never reacquires `self.entries` --
@@ -4585,9 +4620,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   generation when a boundary is in flight, otherwise the active one; it is what
   every event producer reads to stamp its row.
   Also: `negative_lapsed(expires_at, recheck_owned, now)` is THE lapse rule
-  (crate-visible only: `learned_capability` is a `pub(crate)` module and the
-  crate root re-exports `RECHECK_BACKSTOP`, a fixed 48h, and `NegativeState`,
-  not the function): an ordinary negative lapses at `expires_at`, one whose
+  (re-exported at the crate root beside `RECHECK_BACKSTOP`, a fixed 48h, and
+  `NegativeState`, so an out-of-crate reader applies the same rule): an ordinary negative lapses at `expires_at`, one whose
   key only the free re-check recovers (`negative_recovers_only_by_recheck`, read against
   the registry's `field_repair_table`) only `RECHECK_BACKSTOP` later, so a
   re-check that never answers cannot pin it forever.
@@ -5419,7 +5453,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/lib.rs` -- crate root; the public facade. `memory_store`,
   `secret_capture`, `secret_ref`, and `store` are crate-internal modules
   surfaced only through root re-exports: `MemoryStore`, `SecretRef`,
-  `SecretStore`, and the secret-capture surface (`ManagedSecretStore`,
+  `SecretScheme`, `SecretStore`, and the secret-capture surface (`ManagedSecretStore`,
   `SecretCaptureError`, `SecretCaptureResult`, `default_secret_dir`,
   `env_ref`); feature-gated re-exports of `LocalProbe`, `LoginOptions`,
   `OAuthError`, `OAuthStore`, `OAuthStoreProjectCache`, `OpenOutcome` under
@@ -5429,8 +5463,12 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/store.rs` -- `SecretStore` async trait (get/set/delete) for credential
   providers, plus `probe_credential` returning a text-free
   `CredentialProbeFailure` {NotLoggedIn, Unreadable}
-- `src/secret_ref.rs` -- `SecretRef` enum (`env://`, `file://`, `literal:`)
-  plus URI parser
+- `src/secret_ref.rs` -- `SecretRef` enum (`env://`, `file://`, `oauth://`,
+  `literal:`) plus URI parser; public `SecretScheme` (root re-export), the
+  scheme allowlist (`ALL`, `classify`, `as_prefix`, `as_token`, `From<&SecretRef>`)
+  every leak-safe ref label renders from (router build, effective view, seat
+  pool; cli `config`, `doctor`, `provider add`), an off-list ref rendering as
+  `unknown`
 - `src/memory_store.rs` -- default in-process `SecretStore` resolving
   env/file/literal references at read-time
 - `src/atomic_write.rs` -- crate-internal (`pub(crate)`), unconditional (not
@@ -5498,7 +5536,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `set_cloud_project_id`, `clear_cloud_project_id_if_matches`
   (compare-and-clear only when the stored id matches, disk-first under
   `update_under_lock`; missing/differing is a no-write `Ok(false)`),
-  `write_record`/`remove_provider`/`credential_keys`/`probe_local`/`list`/`logout`
+  `write_record`/`remove_provider`/`credential_keys`/`probe_local`/`list`/`logout`,
+  and `probe_all_local` (read-only `probe_local` over every
+  `known_provider_ids()` id, in that order; the one probe gatherer `init`,
+  `doctor` and the server reload read)
 - `src/oauth/store/refresh.rs` -- per-seat single-flight refresh:
   `force_refresh(provider, label)` targets one seat (drives `routectl refresh
   --label`), `refresh_if_due(provider, label)` -> `RefreshOutcome` {NotDue,
@@ -5524,9 +5565,15 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `seat_ref_from_key` inverse of `seat_key`; `probe_credential` tells a missing
   login apart from an unreadable one
 - `src/oauth/providers/mod.rs` -- `OAuthFlow` trait + `lookup` registry +
-  `known_provider_ids` (anthropic, codex, antigravity); `AuthParams`,
+  `known_provider_ids` (anthropic, codex, xai, antigravity); `AuthParams`,
   `token_parse_error`, and `token_status_error`/`safe_token_error_code`
-  (body-free token-endpoint error mapping)
+  (body-free token-endpoint error mapping); also the token-endpoint mechanics
+  every provider flow shares (`pub(super)`): `TokenEndpoint` with
+  `check_token_url` (https, no userinfo, exact host; applied to the request
+  URL and the response's final URL), `send_token_request`,
+  `read_capped_body` (`MAX_TOKEN_BODY_BYTES`, 64 KiB, UTF-8 only),
+  `decode_token_response`, `error_kind_label`, and `decode_jwt_payload`
+  (unverified payload decode, hints only)
 - `src/oauth/providers/anthropic.rs` -- claude.ai OAuth flow:
   `claude.com/cai/oauth/authorize` + `platform.claude.com/v1/oauth/token`,
   `anthropic-beta: oauth-2025-04-20`, manual-paste redirect support
@@ -8034,8 +8081,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `version`-only anchor
   the wizard needs on disk before `provider add`/the final write can edit
   through the one write path. Both go through `scaffold_from_text`:
-  shared-gate-validate the text, then publish via fsynced temp file +
-  no-clobber (`persist_noclobber`, O_EXCL) atomic rename + parent-dir fsync,
+  shared-gate-validate the text, then publish through
+  `routectl_router::write_config_new` (no-clobber, never replaces a file;
+  `map_create_error` folds `ConfigCreateError` onto `ScaffoldError`),
   so neither a gate failure nor a mid-write error leaves a partial/invalid
   file and a racing file routes to the typed `ScaffoldError::AlreadyExists`
   the orchestrator matches onto the existing-config walk (`ScaffoldError`:
