@@ -424,20 +424,25 @@ fn check_login_remediation(check: &SecretCheck) -> String {
     oauth_login_remediation(check.oauth_id.as_deref(), check.oauth_label.as_deref())
 }
 
+/// The remediation line naming [`oauth_login_command`] for an
+/// `oauth://<provider>[#<label>]` ref, or the generic form when the ref names
+/// no provider.
+pub(super) fn oauth_login_remediation(provider: Option<&str>, label: Option<&str>) -> String {
+    provider.map_or_else(
+        || "run `routectl login <provider>`".to_string(),
+        |provider| format!("run `{}`", oauth_login_command(provider, label)),
+    )
+}
+
 /// The `routectl login` command that stores a fresh credential for an
 /// `oauth://<provider>[#<label>]` ref. A labeled seat needs `--label`, or the
 /// bare form would log in the default seat and leave this one unchanged. The
 /// label is operator-written, so both halves route through the log-safe
 /// helper before they reach a copy-pasteable command.
-pub(super) fn oauth_login_remediation(provider: Option<&str>, label: Option<&str>) -> String {
-    match (provider, label) {
-        (Some(provider), Some(label)) => format!(
-            "run `routectl login {} --label {}`",
-            safe(provider),
-            safe(label)
-        ),
-        (Some(provider), None) => format!("run `routectl login {}`", safe(provider)),
-        (None, _) => "run `routectl login <provider>`".to_string(),
+pub(super) fn oauth_login_command(provider: &str, label: Option<&str>) -> String {
+    match label {
+        Some(label) => format!("routectl login {} --label {}", safe(provider), safe(label)),
+        None => format!("routectl login {}", safe(provider)),
     }
 }
 

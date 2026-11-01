@@ -1,13 +1,29 @@
 {
-  "as_of": "2026-10-29T06:54:31Z",
+  "as_of": "2026-11-01T04:11:46Z",
   "data": {
     "learned_negatives": [],
+    "pools": [],
+    "seat_driver": {
+      "definitive": 0,
+      "last_good_sweep_ms": null,
+      "last_sweep_ms": null,
+      "running": true,
+      "sweeps": 0,
+      "transient": 0
+    },
     "targets": [
       {
+        "account": "#mock",
         "circuit": "closed",
+        "eligibility": {
+          "cause": null,
+          "fix": null,
+          "reason": null,
+          "since_ms": null
+        },
         "half_open_probe_in_flight": false,
         "last_outcome": "ok",
-        "last_outcome_at_ms": 1793256871243,
+        "last_outcome_at_ms": 1793506306979,
         "learned_lane": "mock#planted-upstream",
         "nickname": "planted",
         "open_since_ms": null,
@@ -25,7 +41,7 @@
         {
           "count": 2,
           "lane": "chat->openai-compat",
-          "last_seen_unix_secs": 1793256871,
+          "last_seen_unix_secs": 1793506306,
           "outcome": "clean"
         }
       ],
@@ -36,6 +52,6 @@
       "window_secs": 86400
     }
   },
-  "schema_version": 8,
+  "schema_version": 9,
   "unavailable": null
 }

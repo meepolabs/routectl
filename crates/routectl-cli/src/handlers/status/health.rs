@@ -1,5 +1,6 @@
 //! `/status/health` panel: read-only per-dispatch-target circuit / RPM /
-//! probe health plus the learned-capability negatives.
+//! probe health and eligibility, per-pool seat counts, the background seat
+//! driver's health, plus the learned-capability negatives.
 //!
 //! The panel snapshots the live router through the read-only facade ONCE
 //! per request (`state.router.view()`), reads per-target gate health and
@@ -16,7 +17,9 @@ use axum::Json;
 use axum::extract::State;
 use serde::Serialize;
 
+use routectl_core::EligibilityReason;
 use routectl_core::failure_class::LastOutcome;
+use routectl_router::PoolEligibility;
 use routectl_router::router::RouteTargetStatus;
 use routectl_router::runtime_state::CircuitPhase;
 
@@ -26,17 +29,75 @@ use super::vocabulary::codes;
 use super::wire_check_rows::{WireCheckRows, project as project_wire_check};
 use super::{Panel, StatusState, guard_panel, now_utc_rfc3339};
 use crate::lane_cell::{ResolvedEntry, lapse_deadline_ms};
+use crate::server::seat_driver::SeatDriverHealthSnapshot;
 
 /// Wire-shape version of the health panel payload.
-pub const SCHEMA_VERSION: u32 = 8;
+///
+/// 9: each target carries `account` and `eligibility`, and the panel gained
+/// `pools` and `seat_driver`.
+pub const SCHEMA_VERSION: u32 = 9;
 
-/// Per-target health plus learned negatives for the routing surface, and the
+/// Per-target health plus learned negatives for the routing surface, the
+/// live per-pool seat counts, the background seat driver's health, and the
 /// live wire check's rows inside the status window.
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct HealthPanel {
     targets: Vec<TargetHealth>,
+    pools: Vec<PoolHealth>,
+    seat_driver: SeatDriverRow,
     learned_negatives: Vec<LearnedNegative>,
     wire_check: WireCheckRows,
+}
+
+/// Why a target cannot be dispatched to right now, read from the same
+/// side-effect-free capacity snapshot placement reads. Every key is always
+/// present; `reason` is `None` for a dispatchable target.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct TargetEligibility {
+    /// The target-state eligibility token (`credential_unusable`,
+    /// `account_parked`, `breaker_open`, `rate_limited`), or `None`.
+    reason: Option<&'static str>,
+    /// The unusable cause token for `credential_unusable`, else `None`.
+    cause: Option<&'static str>,
+    /// Epoch-ms the reason began, where the router knows it: when the
+    /// credential was first marked unusable, or when the breaker opened.
+    /// `None` for a park or a rate limit, whose start is not recorded.
+    since_ms: Option<i64>,
+    /// What readmits a `credential_unusable` target: the exact
+    /// `routectl login` command for an `oauth://` seat, else the provider
+    /// entry and its credential scheme (never a value or path). `None` for
+    /// every other reason.
+    fix: Option<String>,
+}
+
+/// One pool's live seat counts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct PoolHealth {
+    pool: String,
+    configured: usize,
+    eligible: usize,
+    /// The non-eligible seats by reason, highest priority first, nonzero
+    /// counts only.
+    by_reason: Vec<ReasonCount>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ReasonCount {
+    reason: &'static str,
+    seats: usize,
+}
+
+/// The background seat driver's health. Memory-only: a restart starts it
+/// from zero. `running` is false on a daemon with no credential store, which
+/// runs no driver.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct SeatDriverRow {
+    running: bool,
+    last_sweep_ms: Option<i64>,
+    last_good_sweep_ms: Option<i64>,
+    sweeps: u64,
+    transient: u64,
+    definitive: u64,
 }
 
 /// One dispatch target's non-mutating gate health. Field names mirror the
@@ -57,6 +118,12 @@ struct TargetHealth {
     provider_name: String,
     upstream: String,
     seat_label: Option<String>,
+    /// The credential account the target's park and unusable mark cover
+    /// (`provider#label` for an OAuth seat, `#entry` for any other own
+    /// credential), or `None` for a target forwarding the client's
+    /// credential.
+    account: Option<String>,
+    eligibility: TargetEligibility,
     /// Snake_case circuit phase owned by this module (see [`circuit_token`]).
     circuit: &'static str,
     /// Projected available RPM tokens; `None` under an unlimited policy.
@@ -176,8 +243,36 @@ fn epoch_ms_of(now_ms: i64, elapsed: Duration) -> i64 {
     now_ms - i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
 }
 
-fn map_target(target: RouteTargetStatus, now_ms: i64) -> TargetHealth {
+/// A target's eligibility row from its gate status. `fix` is the line that
+/// readmits the seat, kept only when the reason is an unusable credential.
+fn eligibility_of(
+    target: &RouteTargetStatus,
+    now_ms: i64,
+    fix: Option<String>,
+) -> TargetEligibility {
+    let gate = &target.gate;
+    let unusable = gate
+        .credential_unusable
+        .filter(|_| gate.reason == Some(EligibilityReason::CredentialUnusable));
+    let since = match gate.reason {
+        Some(EligibilityReason::CredentialUnusable) => unusable.map(|mark| mark.since_elapsed),
+        Some(EligibilityReason::BreakerOpen) => gate.circuit_open_elapsed,
+        _ => None,
+    };
+    TargetEligibility {
+        reason: gate.reason.map(EligibilityReason::as_str),
+        cause: unusable.map(|mark| mark.cause.as_str()),
+        since_ms: since.map(|d| epoch_ms_of(now_ms, d)),
+        fix: unusable.and(fix),
+    }
+}
+
+/// Map one target to its row. `fix` is the line that readmits the target's
+/// seat, derived by the caller from the served config; it is shown only when
+/// the target's credential is unusable.
+fn map_target(target: RouteTargetStatus, now_ms: i64, fix: Option<String>) -> TargetHealth {
     let park = target.gate.credential_park;
+    let eligibility = eligibility_of(&target, now_ms, fix);
     TargetHealth {
         state_key: target.state_key,
         learned_lane: target
@@ -188,6 +283,8 @@ fn map_target(target: RouteTargetStatus, now_ms: i64) -> TargetHealth {
         provider_name: target.provider_name,
         upstream: target.upstream,
         seat_label: target.seat_label,
+        account: target.account,
+        eligibility,
         circuit: circuit_token(target.gate.circuit),
         rpm_available: target.gate.rpm_available,
         half_open_probe_in_flight: target.gate.half_open_probe_in_flight,
@@ -204,6 +301,33 @@ fn map_target(target: RouteTargetStatus, now_ms: i64) -> TargetHealth {
         parked_until_ms: park.map(|p| {
             now_ms.saturating_add(i64::try_from(p.remaining.as_millis()).unwrap_or(i64::MAX))
         }),
+    }
+}
+
+fn map_pool(pool: PoolEligibility) -> PoolHealth {
+    PoolHealth {
+        pool: pool.pool,
+        configured: pool.configured,
+        eligible: pool.eligible,
+        by_reason: pool
+            .by_reason
+            .into_iter()
+            .map(|(reason, seats)| ReasonCount {
+                reason: reason.as_str(),
+                seats,
+            })
+            .collect(),
+    }
+}
+
+const fn map_seat_driver(health: SeatDriverHealthSnapshot) -> SeatDriverRow {
+    SeatDriverRow {
+        running: health.running,
+        last_sweep_ms: health.last_sweep_ms,
+        last_good_sweep_ms: health.last_good_sweep_ms,
+        sweeps: health.sweeps,
+        transient: health.transient,
+        definitive: health.definitive,
     }
 }
 
@@ -242,11 +366,13 @@ fn map_learned(resolved: ResolvedEntry, now: Instant, now_ms: i64) -> LearnedNeg
 /// reads, so the target health and the learned negatives are internally
 /// consistent (no interleaved hot-swap).
 ///
-/// `writer_degraded` is read by the caller, which holds the counters facade --
-/// keeping this function a projection over the pinned snapshot.
+/// `writer_degraded` and `seat_driver` are read by the caller, which holds
+/// the counters and daemon-meta facades -- keeping this function a
+/// projection over the pinned snapshot.
 fn build_from_view(
     view: &StatusRouterView,
     writer_degraded: bool,
+    seat_driver: SeatDriverHealthSnapshot,
     emission: FidelityEmission,
     gate: &FidelityGate,
 ) -> HealthPanel {
@@ -257,7 +383,18 @@ fn build_from_view(
     let targets = view
         .route_targets(now)
         .into_iter()
-        .map(|target| map_target(target, now_ms))
+        .map(|target| {
+            let fix = target
+                .gate
+                .credential_unusable
+                .map(|_| view.seat_fix(&target.provider_name).command());
+            map_target(target, now_ms, fix)
+        })
+        .collect();
+    let pools = view
+        .pool_eligibility(now)
+        .into_iter()
+        .map(map_pool)
         .collect();
     let entries = view.learned_capabilities((now, now_ms));
     log_field_verdict_snapshot(view, writer_degraded, emission, gate);
@@ -269,6 +406,8 @@ fn build_from_view(
     let wire_check = project_wire_check(&view.wire_check_snapshot(), now_unix_secs);
     HealthPanel {
         targets,
+        pools,
+        seat_driver: map_seat_driver(seat_driver),
         learned_negatives,
         wire_check,
     }
@@ -293,6 +432,7 @@ pub(super) async fn build_with_emission(
     // A counter read, not I/O, so it stays out here beside the router snapshot --
     // one read time for the whole build.
     let writer_degraded = state.usage_health.writer_degraded();
+    let seat_driver = state.daemon_meta.seat_driver();
     let gate = Arc::clone(&state.fidelity_gate);
     // The snapshot is pinned at `view()`, so request time IS the read time.
     let as_of = now_utc_rfc3339();
@@ -315,7 +455,7 @@ pub(super) async fn build_with_emission(
         move || {
             #[cfg(test)]
             assert!(!fail, "injected health-builder failure");
-            let dto = build_from_view(&view, writer_degraded, emission, &gate);
+            let dto = build_from_view(&view, writer_degraded, seat_driver, emission, &gate);
             Panel::available(SCHEMA_VERSION, as_of, dto)
         },
     )
@@ -335,6 +475,10 @@ mod lane_tests;
 #[cfg(test)]
 #[path = "health_wire_check_tests.rs"]
 mod wire_check_tests;
+
+#[cfg(test)]
+#[path = "health_eligibility_tests.rs"]
+mod eligibility_tests;
 
 #[cfg(test)]
 #[path = "health_tests.rs"]

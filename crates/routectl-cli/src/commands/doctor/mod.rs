@@ -75,7 +75,8 @@ use self::sections::{
 
 pub(crate) use self::gather::gather_context_no_network;
 pub(crate) use self::served::{
-    GatherSources, ParkedSeat, ResidentLearned, ServedInputs, UnusableSeat, unusable_seat_fix,
+    GatherSources, ParkedSeat, ResidentLearned, SeatFix, ServedInputs, UnusableSeat,
+    unusable_seat_fix,
 };
 
 /// UNSTABLE report schema version. Bumped on ANY structural or semantic

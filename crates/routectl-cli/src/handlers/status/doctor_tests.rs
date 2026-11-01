@@ -83,7 +83,9 @@ fn sample_target(last_outcome: Option<LastOutcome>) -> RouteTargetStatus {
         upstream: "claude-opus-wire".into(),
         seat_label: Some("seat-a".into()),
         learned_lane: None,
+        account: Some("anthropic#seat-a".into()),
         gate: ProviderGateStatus {
+            reason: None,
             rpm_available: Some(12.0),
             circuit: CircuitPhase::Closed,
             half_open_probe_in_flight: false,

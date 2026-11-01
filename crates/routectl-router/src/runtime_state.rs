@@ -916,6 +916,7 @@ impl ProviderState {
     ) -> ProviderGateStatus {
         let snapshot = self.capacity_snapshot_under(now, park, unusable);
         ProviderGateStatus {
+            reason: snapshot.reason(),
             rpm_available: snapshot.rpm_available,
             circuit: snapshot.circuit,
             half_open_probe_in_flight: self.half_open_in_flight,
@@ -974,6 +975,10 @@ pub struct CredentialUnusableStatus {
 /// `CircuitPhase::Open`; this field exposes it on its own).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ProviderGateStatus {
+    /// Why admission would refuse a dispatch right now, from the same
+    /// capacity snapshot placement reads ([`CapacitySnapshot::reason`]);
+    /// `None` when the target is dispatchable.
+    pub reason: Option<EligibilityReason>,
     /// Projected available RPM tokens right now. `None` when the policy is
     /// unlimited; otherwise the lazily-refilled bucket level computed
     /// without storing it back.

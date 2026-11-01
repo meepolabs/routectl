@@ -29,7 +29,9 @@ fn sample_target(circuit: CircuitPhase) -> RouteTargetStatus {
         upstream: "claude-opus-wire".into(),
         seat_label: Some("seat-a".into()),
         learned_lane: StateKey::parse("anthropic#claude-opus-wire"),
+        account: Some("anthropic#seat-a".into()),
         gate: ProviderGateStatus {
+            reason: None,
             rpm_available: Some(12.0),
             circuit,
             half_open_probe_in_flight: true,
@@ -57,7 +59,9 @@ fn target_with_ages(
         upstream: "claude-opus-wire".into(),
         seat_label: Some("seat-a".into()),
         learned_lane: StateKey::parse("anthropic#claude-opus-wire"),
+        account: Some("anthropic#seat-a".into()),
         gate: ProviderGateStatus {
+            reason: None,
             rpm_available: Some(12.0),
             circuit,
             half_open_probe_in_flight: false,
@@ -111,7 +115,7 @@ fn open_circuit_derives_circuit_open_and_open_since() {
         Some(LastOutcome::Http5xx),
         Some(Duration::from_millis(400)),
     );
-    let mapped = map_target(target, 10_000);
+    let mapped = map_target(target, 10_000, None);
     // The phase overrides the stored kind: an open circuit renders
     // `circuit_open`, never the stored failure family.
     assert_eq!(mapped.last_outcome.as_deref(), Some("circuit_open"));
@@ -122,7 +126,7 @@ fn open_circuit_derives_circuit_open_and_open_since() {
 #[test]
 fn closed_never_seen_target_has_all_none() {
     let target = target_with_ages(CircuitPhase::Closed, None, None, None);
-    let mapped = map_target(target, 10_000);
+    let mapped = map_target(target, 10_000, None);
     assert_eq!(mapped.open_since_ms, None);
     assert_eq!(mapped.last_outcome, None);
     assert_eq!(mapped.last_outcome_at_ms, None);
@@ -136,7 +140,7 @@ fn closed_target_renders_stored_outcome_not_circuit_open() {
         Some(LastOutcome::RateLimited),
         Some(Duration::from_secs(2)),
     );
-    let mapped = map_target(target, 10_000);
+    let mapped = map_target(target, 10_000, None);
     // Closed circuit: the stored outcome surfaces verbatim, open_since
     // stays None.
     assert_eq!(mapped.last_outcome.as_deref(), Some("rate_limited"));
@@ -152,7 +156,7 @@ fn half_open_target_renders_stored_outcome() {
         Some(LastOutcome::Timeout),
         Some(Duration::from_millis(100)),
     );
-    let mapped = map_target(target, 10_000);
+    let mapped = map_target(target, 10_000, None);
     // Only an OPEN phase derives circuit_open; half-open surfaces the
     // stored kind while still exposing its open-since age.
     assert_eq!(mapped.last_outcome.as_deref(), Some("timeout"));
@@ -172,6 +176,7 @@ fn new_fields_serialize_under_stable_keys_with_null_semantics() {
             Some(Duration::from_millis(400)),
         ),
         10_000,
+        None,
     ))
     .unwrap();
     assert_eq!(open["open_since_ms"], Value::from(9_600));
@@ -181,6 +186,7 @@ fn new_fields_serialize_under_stable_keys_with_null_semantics() {
     let closed = serde_json::to_value(map_target(
         target_with_ages(CircuitPhase::Closed, None, None, None),
         10_000,
+        None,
     ))
     .unwrap();
     let obj = closed.as_object().unwrap();
@@ -207,7 +213,7 @@ fn a_parked_target_carries_its_reason_and_deadline() {
         remaining: Duration::from_secs(3),
     });
 
-    let value = serde_json::to_value(map_target(target, 10_000)).unwrap();
+    let value = serde_json::to_value(map_target(target, 10_000, None)).unwrap();
 
     assert_eq!(value["park_reason"], Value::from("credential-expired"));
     assert_eq!(value["parked_until_ms"], Value::from(13_000));
@@ -304,7 +310,7 @@ impl Provider for Unused {
 
 #[test]
 fn map_target_carries_event_surface_fields() {
-    let mapped = map_target(sample_target(CircuitPhase::HalfOpenReady), 1_000);
+    let mapped = map_target(sample_target(CircuitPhase::HalfOpenReady), 1_000, None);
     assert_eq!(mapped.state_key, "opus#seat-a");
     assert_eq!(mapped.nickname, "opus");
     assert_eq!(mapped.provider_name, "anthropic");
@@ -647,6 +653,7 @@ fn build_from_view_emits_the_field_verdict_snapshot_log() {
         build_from_view(
             &view,
             false,
+            crate::server::seat_driver::SeatDriverHealth::default().snapshot(),
             FidelityEmission::always(),
             &FidelityGate::default(),
         );
@@ -669,6 +676,7 @@ fn build_from_view_uses_a_single_snapshot() {
     let panel = build_from_view(
         &view,
         false,
+        crate::server::seat_driver::SeatDriverHealth::default().snapshot(),
         FidelityEmission::always(),
         &FidelityGate::default(),
     );
@@ -706,7 +714,11 @@ async fn handler_returns_available_panel_with_rfc3339_as_of() {
 #[test]
 fn payload_carries_only_stable_identifiers_and_fixed_vocabulary() {
     let panel = HealthPanel {
-        targets: vec![map_target(sample_target(CircuitPhase::Open), 1_000)],
+        targets: vec![map_target(sample_target(CircuitPhase::Open), 1_000, None)],
+        pools: Vec::new(),
+        seat_driver: map_seat_driver(
+            crate::server::seat_driver::SeatDriverHealth::default().snapshot(),
+        ),
         learned_negatives: vec![map_learned(
             resolved(LearnedRegistryEntry {
                 state_key: "anthropic#claude-opus-wire".into(),

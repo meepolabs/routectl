@@ -78,6 +78,7 @@ fn panel_of(status: &StatusState) -> HealthPanel {
     build_from_view(
         &status.router.view(),
         false,
+        crate::server::seat_driver::SeatDriverHealth::default().snapshot(),
         FidelityEmission::always(),
         &FidelityGate::default(),
     )
@@ -115,10 +116,13 @@ async fn a_loss_found_on_a_real_dispatch_renders_its_lane_and_class_and_never_th
     );
 }
 
-/// The panel as it serialized before the wire-check section was added.
+/// The panel's other fields, in the order they serialize ahead of the
+/// wire-check section.
 #[derive(Serialize)]
 struct PanelWithoutWireCheck<'a> {
     targets: &'a Vec<TargetHealth>,
+    pools: &'a Vec<PoolHealth>,
+    seat_driver: &'a SeatDriverRow,
     learned_negatives: &'a Vec<LearnedNegative>,
 }
 
@@ -139,6 +143,8 @@ fn the_existing_panel_fields_serialize_byte_for_byte_as_before() {
     let text = serde_json::to_string(&panel).expect("panel serializes");
     let before = serde_json::to_string(&PanelWithoutWireCheck {
         targets: &panel.targets,
+        pools: &panel.pools,
+        seat_driver: &panel.seat_driver,
         learned_negatives: &panel.learned_negatives,
     })
     .expect("legacy shape serializes");

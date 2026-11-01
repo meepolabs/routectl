@@ -148,8 +148,8 @@ pub struct StatusState {
     /// Resolved config-file path, when serving from a real on-disk config.
     pub config_path: Option<PathBuf>,
     /// Process-level daemon facts (bound address, binary version, last
-    /// config-load instant) behind a read-only facade. The config panel's
-    /// source strip is the only reader.
+    /// config-load instant, last rejected reload, seat driver health) behind
+    /// a read-only facade, read by the config, doctor and health panels.
     pub daemon_meta: DaemonMetaHandle,
     /// Per-panel availability + shed-count tracking. Each panel build
     /// records its outcome here; an availability edge logs a single
@@ -919,9 +919,9 @@ mod tests {
                 "{name} panel should carry data"
             );
         }
-        // Each panel carries its OWN schema_version (usage 4, health 8,
+        // Each panel carries its OWN schema_version (usage 4, health 9,
         // doctor 25, config 3).
-        assert_eq!(panels["health"]["schema_version"], 8);
+        assert_eq!(panels["health"]["schema_version"], 9);
         assert_eq!(panels["config"]["schema_version"], 3);
         assert_eq!(panels["doctor"]["schema_version"], 25);
     }

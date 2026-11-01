@@ -271,6 +271,19 @@ impl SeatDriverHealth {
         }
     }
 
+    /// Record a running driver that finished one sweep with no failing seat,
+    /// then one with `transient` and `definitive` failing seats. Test seam
+    /// for readers of the health that cannot run the driver.
+    #[cfg(test)]
+    pub(crate) fn record_two_sweeps_for_tests(&self, transient: u64, definitive: u64) {
+        self.set_running(true);
+        self.record_sweep(SweepTally::default());
+        self.record_sweep(SweepTally {
+            transient,
+            definitive,
+        });
+    }
+
     fn set_running(&self, running: bool) {
         self.running.store(running, Ordering::Relaxed);
     }

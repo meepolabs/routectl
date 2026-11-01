@@ -30,6 +30,11 @@ pub struct RouteTargetStatus {
     /// member seat of a pool-backed model (the member's `[providers]` table
     /// key).
     pub seat_label: Option<String>,
+    /// The credential account the target's park and unusable mark are
+    /// scoped to (`provider#label` for an OAuth seat, `#entry` for any other
+    /// own credential), or `None` for a target forwarding the client's
+    /// credential.
+    pub account: Option<String>,
     /// The learned lane this target's capability facts key on, taken from the
     /// dispatch target chain expansion builds. `None` only for a provider
     /// entry carrying the reserved separator, which config validation refuses.
@@ -82,6 +87,7 @@ impl Router {
         let record = self.account_record(account).unwrap_or_default();
         self.state.get(state_key).map_or(
             ProviderGateStatus {
+                reason: Some(EligibilityReason::BreakerOpen),
                 rpm_available: None,
                 circuit: CircuitPhase::Open,
                 half_open_probe_in_flight: false,
@@ -124,6 +130,7 @@ impl Router {
                     gate: self.gate_status_for(&target.state_key, target.account.as_deref(), now),
                     nickname: model.nickname.clone(),
                     seat_label: model.seats.as_ref().map(|_| target.provider_name.clone()),
+                    account: target.account.as_deref().map(str::to_string),
                     provider_name: target.provider_name,
                     upstream: target.upstream,
                     learned_lane: target.learned_lane,

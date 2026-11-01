@@ -31,6 +31,8 @@
   function buildHealth(rec) {
     var stack = tabStack();
     stack.appendChild(healthTargetSection(rec));
+    stack.appendChild(healthPoolSection(rec));
+    stack.appendChild(healthDriverSection(rec));
     stack.appendChild(healthQuotaSection());
     return stack;
   }
@@ -56,9 +58,9 @@
     }
     var nowMs = panelNowMs(rec);
     var negatives = learnedByLane(rec.data.learned_negatives);
-    var attention = groups.filter(function (g) { return targetPhase(g) === 'attention'; });
-    var healthy = groups.filter(function (g) { return targetPhase(g) === 'healthy'; });
-    var unknown = groups.filter(function (g) { return targetPhase(g) === 'unknown'; });
+    var attention = groups.filter(function (g) { return healthTargetPhase(g) === 'attention'; });
+    var healthy = groups.filter(function (g) { return healthTargetPhase(g) === 'healthy'; });
+    var unknown = groups.filter(function (g) { return healthTargetPhase(g) === 'unknown'; });
     if (!attention.length && !healthy.length) { return unprobedEmpty(unknown.length); }
     var stack = tabStack();
     if (attention.length) {
@@ -80,6 +82,24 @@
   }
 
   function phrase(n, one, many) { return n === 1 ? one : many; }
+
+  // The Routing tab's phase, except that a seat whose credential is unusable
+  // or parked needs attention even before anything was dispatched to it: a
+  // dead login is never "not observed yet".
+  function healthTargetPhase(group) {
+    if (blockedSeats(group).some(function (t) {
+      var reason = t.eligibility.reason;
+      return reason === 'credential_unusable' || reason === 'account_parked';
+    })) { return 'attention'; }
+    return targetPhase(group);
+  }
+
+  // The seats of a card a request cannot dispatch to right now.
+  function blockedSeats(group) {
+    return group.members.filter(function (t) {
+      return !!(t && t.eligibility && t.eligibility.reason);
+    });
+  }
 
   // Every target is configured but none has a settled outcome: a welcoming
   // state, never a list of cards claiming health nobody has observed.
@@ -142,7 +162,7 @@
   }
 
   function targetCard(group, negatives, nowMs) {
-    var phase = targetPhase(group);
+    var phase = healthTargetPhase(group);
     var cardEl = document.createElement('div');
     cardEl.className = 'hcard hcard--' + phase;
     cardEl.appendChild(targetCardHead(group, phase, nowMs));
@@ -199,6 +219,11 @@
   }
 
   function targetReasonText(group, phase, nowMs) {
+    var blocked = blockedSeats(group);
+    if (blocked.length) {
+      return blocked.length + ' of ' + group.count + phrase(group.count, ' seat', ' seats') +
+        ' not eligible';
+    }
     if (phase === 'unknown') { return 'nothing dispatched to it yet'; }
     var target = group.worst;
     var parts = [];
@@ -261,7 +286,111 @@
     grid.appendChild(gridCell('last outcome', lastOutcomeValue(group.worst, nowMs)));
     grid.appendChild(gridCell('circuit', circuitValue(group.worst, nowMs)));
     grid.appendChild(gridCell('learned negatives', negativeChips(group, negatives, nowMs)));
+    grid.appendChild(gridCell('eligibility', eligibilityCell(group, nowMs)));
     return grid;
+  }
+
+  // One line per seat that cannot be dispatched to: its reason, the cause
+  // of an unusable credential, how long ago it began, and the fix to run.
+  function eligibilityCell(group, nowMs) {
+    var blocked = blockedSeats(group);
+    if (!blocked.length) { return faintFigure('eligible'); }
+    var wrap = document.createElement('span');
+    wrap.className = 'helig';
+    blocked.forEach(function (t) { wrap.appendChild(eligibilityRow(t, group.count > 1, nowMs)); });
+    return wrap;
+  }
+
+  function eligibilityRow(t, named, nowMs) {
+    var e = t.eligibility;
+    var line = document.createElement('span');
+    line.className = 'helig-row neg';
+    var parts = [];
+    if (named) { parts.push(t.seat_label || t.state_key); }
+    parts.push(e.cause ? e.reason + ' (' + e.cause + ')' : e.reason);
+    if (e.since_ms !== null && e.since_ms !== undefined) {
+      var since = ageSince(e.since_ms, nowMs);
+      if (since !== '-') { parts.push('since ' + since + ' ago'); }
+    }
+    line.appendChild(document.createTextNode(parts.join(' - ')));
+    if (e.fix) {
+      var fix = document.createElement('code');
+      fix.className = 'helig-fix';
+      fix.textContent = e.fix;
+      line.appendChild(fix);
+    }
+    return line;
+  }
+
+  // ---- health: pool seat counts and the seat driver --------------------
+
+  function seatCountText(v) {
+    return (v === null || v === undefined || !isFinite(Number(v))) ? '-' : String(Number(v));
+  }
+
+  function healthPoolSection(rec) {
+    var wrap = routingSection('Pool seats', stateCard(rec)
+      ? 'Health data unavailable - pool seats are not shown'
+      : 'reported now - seats a request could dispatch to, and why the others cannot');
+    wrap.appendChild(safeSection(rec, buildPoolList));
+    return wrap;
+  }
+
+  function buildPoolList(rec) {
+    if (!rec.data || !Array.isArray(rec.data.pools)) {
+      throw new Error('health payload carries no pools');
+    }
+    if (!rec.data.pools.length) {
+      var note = document.createElement('p');
+      note.className = 'footnote';
+      note.textContent = 'No pool configured.';
+      return note;
+    }
+    var list = document.createElement('div');
+    list.className = 'hlist';
+    rec.data.pools.forEach(function (pool) { list.appendChild(poolRow(pool)); });
+    return list;
+  }
+
+  function poolRow(pool) {
+    var pairs = [['eligible', seatCountText(pool.eligible) + ' of ' + seatCountText(pool.configured)]];
+    (pool.by_reason || []).forEach(function (r) {
+      pairs.push([r.reason, seatCountText(r.seats)]);
+    });
+    var card = document.createElement('div');
+    var blocked = Number(pool.eligible) < Number(pool.configured);
+    card.className = 'hcard hcard--' + (blocked ? 'attention' : 'healthy');
+    card.appendChild(sectionHead(pool.pool, null));
+    card.appendChild(buildDefList(pairs));
+    return card;
+  }
+
+  function healthDriverSection(rec) {
+    var wrap = routingSection('Background seat driver', stateCard(rec)
+      ? 'Health data unavailable - the seat driver is not shown'
+      : 'keeps managed logins refreshed - memory only, a restart starts it from zero');
+    wrap.appendChild(safeSection(rec, buildDriverCard));
+    return wrap;
+  }
+
+  function buildDriverCard(rec) {
+    var d = rec.data && rec.data.seat_driver;
+    if (!d || typeof d !== 'object') {
+      throw new Error('health payload carries no seat driver');
+    }
+    var nowMs = panelNowMs(rec);
+    var stamp = function (ms) {
+      var age = ageSince(ms, nowMs);
+      return age === '-' ? 'never' : age + ' ago';
+    };
+    return buildDefList([
+      ['running', d.running ? 'yes' : 'no'],
+      ['last sweep', stamp(d.last_sweep_ms)],
+      ['last clean sweep', stamp(d.last_good_sweep_ms)],
+      ['sweeps', seatCountText(d.sweeps)],
+      ['transient failures', seatCountText(d.transient)],
+      ['definitive failures', seatCountText(d.definitive)]
+    ]);
   }
 
   function gridCell(label, valueNode) {

@@ -8,12 +8,13 @@
 //! copied into [`super::StatusState`] at construction: a panel built after a
 //! hot-reload must report the NEW load instant, not the boot one. Beside that
 //! stamp sits the last REJECTED reload (its redacted class and instant), which
-//! the doctor panel reads while no later load has superseded it.
+//! the doctor panel reads while no later load has superseded it, and the
+//! background seat driver's health, which the health panel reads.
 //!
 //! Same enforcement shape as [`super::router_view`]: the `Arc<DaemonMeta>`
 //! is PRIVATE to [`DaemonMetaHandle`], so a panel module holding a handle can
-//! call only [`DaemonMetaHandle::snapshot`] -- it can never name the inner
-//! field and so can never reach the stamp writer.
+//! call only its read methods -- it can never name the inner field and so can
+//! never reach the stamp writer or the driver's health writer.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -21,7 +22,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use parking_lot::Mutex;
 
 use crate::server::reload_failure::{ReloadFailure, ReloadFailureSnapshot};
-use crate::server::seat_driver::SeatDriverHealth;
+use crate::server::seat_driver::{SeatDriverHealth, SeatDriverHealthSnapshot};
 
 /// Epoch-ms sentinel for "no config load has been stamped yet". Never
 /// reaches the wire: [`DaemonMetaHandle::snapshot`] maps it to `None` rather
@@ -99,6 +100,11 @@ impl DaemonMetaHandle {
             version: env!("CARGO_PKG_VERSION"),
             config_loaded_age_ms: (stamped != UNSTAMPED).then(|| (now_ms - stamped).max(0)),
         }
+    }
+
+    /// One read of the background seat driver's health.
+    pub fn seat_driver(&self) -> SeatDriverHealthSnapshot {
+        self.inner.seat_driver.snapshot()
     }
 
     /// The last rejected reload, when no config load has been stamped since

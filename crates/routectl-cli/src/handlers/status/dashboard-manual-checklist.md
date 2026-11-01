@@ -161,3 +161,24 @@ banner, no retry signal -- silently mislabeled data.
   recognized `evidence_class` (for example `schema_parse`): replay skips a
   `verified` row whose class is missing or unrecognized, so a row seeded
   without one never reaches the registry and the check passes vacuously.
+
+## 7. Health tab eligibility, pool seats and the seat driver
+
+- Serve a config with a pool of two `oauth://anthropic#<label>` members,
+  one logged in and one never logged in, against a throwaway credentials
+  file. Before any request, the never-logged-in seat's card must sit under
+  "Needs attention", never "Not observed yet": its reason line reads `1 of 2
+  seats not eligible`, and its eligibility cell names the seat,
+  `credential_unusable (not_logged_in)`, how long ago it was marked, and the
+  exact `routectl login anthropic --label <label>` command, selectable as one
+  unit. A logged-in seat's eligibility cell reads `eligible`.
+- The "Pool seats" section shows the pool with `eligible 1 of 2` and a
+  `credential_unusable 1` line. Log the seat in (against the same throwaway
+  file); within one poll the count reads `2 of 2` and the reason line is
+  gone, with no restart.
+- A pool whose every seat is eligible renders as a healthy card; a config
+  with no pool reads "No pool configured."
+- The "Background seat driver" section reads `running yes` on a daemon with
+  a credential store, `never` for the sweep stamps before the first sweep,
+  and `0` (not `-`) for zero counts. After a minute the last sweep
+  age appears and `sweeps` reads `1`.

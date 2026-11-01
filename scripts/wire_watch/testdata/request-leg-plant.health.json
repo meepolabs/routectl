@@ -1,13 +1,29 @@
 {
-  "as_of": "2026-10-29T06:54:29Z",
+  "as_of": "2026-11-01T04:11:45Z",
   "data": {
     "learned_negatives": [],
+    "pools": [],
+    "seat_driver": {
+      "definitive": 0,
+      "last_good_sweep_ms": null,
+      "last_sweep_ms": null,
+      "running": true,
+      "sweeps": 0,
+      "transient": 0
+    },
     "targets": [
       {
+        "account": "#mock",
         "circuit": "closed",
+        "eligibility": {
+          "cause": null,
+          "fix": null,
+          "reason": null,
+          "since_ms": null
+        },
         "half_open_probe_in_flight": false,
         "last_outcome": "ok",
-        "last_outcome_at_ms": 1793256869428,
+        "last_outcome_at_ms": 1793506305219,
         "learned_lane": "mock#planted-upstream",
         "nickname": "planted",
         "open_since_ms": null,
@@ -25,13 +41,13 @@
         {
           "count": 1,
           "lane": "responses->openai-responses",
-          "last_seen_unix_secs": 1793256869,
+          "last_seen_unix_secs": 1793506305,
           "outcome": "clean"
         },
         {
           "count": 1,
           "lane": "responses->openai-responses",
-          "last_seen_unix_secs": 1793256869,
+          "last_seen_unix_secs": 1793506305,
           "outcome": "loss"
         }
       ],
@@ -40,7 +56,7 @@
         {
           "count": 1,
           "lane": "responses->openai-responses",
-          "last_seen_unix_secs": 1793256869,
+          "last_seen_unix_secs": 1793506305,
           "path_class": "missing"
         }
       ],
@@ -50,13 +66,13 @@
           "leg": "request",
           "path": "/temperature",
           "path_class": "missing",
-          "ts_unix_secs": 1793256869
+          "ts_unix_secs": 1793506305
         }
       ],
       "unrepaired_rejections": [],
       "window_secs": 86400
     }
   },
-  "schema_version": 8,
+  "schema_version": 9,
   "unavailable": null
 }

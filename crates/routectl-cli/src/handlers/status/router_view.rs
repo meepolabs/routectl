@@ -20,12 +20,12 @@ use routectl_router::router::RouteTargetStatus;
 use routectl_router::wire_check_state::WireCheckSnapshot;
 use routectl_router::{
     EffectiveView, FidelitySnapshot, FieldRepairCounters, LaneBudgetExhaustions, LaneLossyRepairs,
-    Router, derive_effective_view, shipped_beta_seed_scope,
+    PoolEligibility, Router, derive_effective_view, shipped_beta_seed_scope,
 };
 use routectl_usage::{AggRow, RowCost};
 
 use crate::commands::doctor::{
-    ParkedSeat, ResidentLearned, ServedInputs, UnusableSeat, unusable_seat_fix,
+    ParkedSeat, ResidentLearned, SeatFix, ServedInputs, UnusableSeat, unusable_seat_fix,
 };
 use crate::commands::usage::cost_for_row;
 use crate::lane_cell::{CellSources, LearnedSnapshot, ResolvedEntry, resolve_entries};
@@ -84,13 +84,13 @@ impl QueryPricer {
 }
 
 /// A read-only view over one pinned router snapshot. The `router` field is
-/// private, so the only router state a panel can observe is what the seven
-/// methods below expose -- route health, learned negatives, the live
-/// envelope-field repair counters, the per-verdict fidelity rows, the live
-/// wire-check counters and findings, the derived
-/// effective config view (which is computed here so panels never handle raw
-/// `Config`), and the doctor's served inputs (an opaque value only the doctor
-/// gather can read).
+/// private, so the only router state a panel can observe is what the
+/// methods below expose -- route health, per-pool seat counts, the fix line
+/// of a seat, learned negatives, the live envelope-field repair counters, the
+/// per-verdict fidelity rows, the live wire-check counters and findings, the
+/// derived effective config view (which is computed here so panels never
+/// handle raw `Config`), and the doctor's served inputs (an opaque value only
+/// the doctor gather can read).
 pub struct StatusRouterView {
     router: Arc<Router>,
 }
@@ -99,6 +99,19 @@ impl StatusRouterView {
     /// Per-dispatch-target health for the health panel.
     pub fn route_targets(&self, now: Instant) -> Vec<RouteTargetStatus> {
         self.router.status_targets(now)
+    }
+
+    /// Live seat counts for every pool, read from the same side-effect-free
+    /// capacity snapshot [`Self::route_targets`] reads.
+    pub fn pool_eligibility(&self, now: Instant) -> Vec<PoolEligibility> {
+        self.router.pool_eligibility(now)
+    }
+
+    /// What readmits a seat dispatching through `[providers]` entry `entry`,
+    /// derived from the served config. Carries the entry, credential scheme,
+    /// and `oauth://` provider and label only, never a ref's value.
+    pub fn seat_fix(&self, entry: &str) -> SeatFix {
+        SeatFix::of(&self.router.config, entry)
     }
 
     /// Every resident learned-capability entry for the health panel, each with
@@ -258,17 +271,19 @@ mod tests {
     }
 
     #[test]
-    fn view_exposes_only_the_seven_read_methods() {
+    fn view_exposes_only_the_nine_read_methods() {
         let handle = handle();
         let view = handle.view();
 
-        // The full read surface: route health, learned negatives, live
-        // field-repair counters, the coherent fidelity snapshot, the wire-check
-        // snapshot, effective view, the doctor's served inputs. If a future edit
-        // widens this surface (e.g. exposes `&Router` or a dispatch method), it
-        // lands here in review against a facade whose contract is these seven
-        // calls.
+        // The full read surface: route health, pool seat counts, a seat's fix
+        // line, learned negatives, live field-repair counters, the coherent
+        // fidelity snapshot, the wire-check snapshot, effective view, the
+        // doctor's served inputs. If a future edit widens this surface (e.g.
+        // exposes `&Router` or a dispatch method), it lands here in review
+        // against a facade whose contract is these nine calls.
         let _targets: Vec<RouteTargetStatus> = view.route_targets(Instant::now());
+        let _pools: Vec<PoolEligibility> = view.pool_eligibility(Instant::now());
+        let _fix: SeatFix = view.seat_fix("absent");
         let _learned: Vec<ResolvedEntry> =
             view.learned_capabilities((Instant::now(), chrono::Utc::now().timestamp_millis()));
         let _counters: FieldRepairCounters = view.field_repair_counters();

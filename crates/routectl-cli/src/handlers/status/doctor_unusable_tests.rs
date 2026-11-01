@@ -210,7 +210,7 @@ async fn the_served_doctor_names_each_unusable_seat_and_the_offline_doctor_names
 /// `--label` for a labeled OAuth seat, without it for an unlabeled one, and the
 /// entry and scheme, never the value, for an env seat.
 ///
-/// Mutation check: make the labeled arm of `oauth_login_remediation` drop the
+/// Mutation check: make the labeled arm of `oauth_login_command` drop the
 /// label -> the seat-a row goes red.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial_test::serial]

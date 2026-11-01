@@ -21,7 +21,7 @@ use crate::server::capability_rebuild::{WarmOutcome, WarmReport};
 use crate::server::reload_failure::ReloadFailureSnapshot;
 
 use super::gather::{replay_summary, scheme_label};
-use super::sections::oauth_login_remediation;
+use super::sections::{oauth_login_command, oauth_login_remediation};
 use super::{CapabilityMatrixSource, MatrixOrigin};
 
 /// Where the no-network gather takes its config, overlay, and learned layer
@@ -79,31 +79,85 @@ pub struct UnusableSeat {
     pub fix: String,
 }
 
-/// The fix line for a seat dispatching through `[providers]` entry `entry`
-/// of `config`: the re-login command for an `oauth://` seat (with `--label`
-/// for a labeled one), else the entry and the scheme of its credential ref,
-/// never the ref's value.
-pub fn unusable_seat_fix(config: &Config, entry: &str) -> String {
-    let uris = config
-        .providers
-        .get(entry)
-        .map(routectl_router::ProviderEntry::secret_uris)
-        .unwrap_or_default();
-    let oauth = uris.iter().find_map(|uri| match SecretRef::parse(uri) {
-        Ok(SecretRef::OAuth { provider, label }) => Some((provider, label)),
-        _ => None,
-    });
-    if let Some((provider, label)) = oauth {
-        return oauth_login_remediation(Some(&provider), label.as_deref());
+/// What readmits a seat dispatching through one `[providers]` entry: a
+/// re-login for an `oauth://` seat, else a readable credential for the entry.
+/// Derived from the served config each time it is shown, never stored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SeatFix {
+    /// Log the seat in again.
+    Login {
+        /// The `oauth://` ref's provider.
+        provider: String,
+        /// The ref's seat label, `None` for the default seat.
+        label: Option<String>,
+    },
+    /// Provide a readable credential for the entry and reload the config.
+    Credential {
+        /// The `[providers]` entry.
+        entry: String,
+        /// The scheme of the entry's credential ref, `None` when it has none.
+        scheme: Option<&'static str>,
+    },
+}
+
+impl SeatFix {
+    /// The fix for a seat on `[providers]` entry `entry` of `config`.
+    pub fn of(config: &Config, entry: &str) -> Self {
+        let uris = config
+            .providers
+            .get(entry)
+            .map(routectl_router::ProviderEntry::secret_uris)
+            .unwrap_or_default();
+        let oauth = uris.iter().find_map(|uri| match SecretRef::parse(uri) {
+            Ok(SecretRef::OAuth { provider, label }) => Some((provider, label)),
+            _ => None,
+        });
+        match oauth {
+            Some((provider, label)) => Self::Login { provider, label },
+            None => Self::Credential {
+                entry: entry.to_string(),
+                scheme: uris.first().map(|uri| scheme_label(uri)),
+            },
+        }
     }
+
+    /// The bare line: the exact `routectl login` command for a login fix,
+    /// else the credential sentence. Names the entry and scheme, never the
+    /// ref's value.
+    pub fn command(&self) -> String {
+        match self {
+            Self::Login { provider, label } => oauth_login_command(provider, label.as_deref()),
+            Self::Credential { entry, scheme } => credential_sentence(entry, *scheme),
+        }
+    }
+
+    /// The line as a doctor remediation: the login command wrapped as an
+    /// instruction to run it, else the credential sentence.
+    pub fn remediation(&self) -> String {
+        match self {
+            Self::Login { provider, label } => {
+                oauth_login_remediation(Some(provider), label.as_deref())
+            }
+            Self::Credential { entry, scheme } => credential_sentence(entry, *scheme),
+        }
+    }
+}
+
+fn credential_sentence(entry: &str, scheme: Option<&str>) -> String {
     let shown = safe(entry);
-    match uris.first() {
-        Some(uri) => format!(
-            "provide a readable {} credential for provider entry `{shown}`, then reload the config",
-            scheme_label(uri),
+    match scheme {
+        Some(scheme) => format!(
+            "provide a readable {scheme} credential for provider entry `{shown}`, then reload the \
+             config",
         ),
         None => format!("fix the credential of provider entry `{shown}`, then reload the config"),
     }
+}
+
+/// The doctor remediation for a seat dispatching through `[providers]` entry
+/// `entry` of `config` ([`SeatFix::remediation`]).
+pub fn unusable_seat_fix(config: &Config, entry: &str) -> String {
+    SeatFix::of(config, entry).remediation()
 }
 
 /// The resident learned registry, read once, with the clock anchors the read

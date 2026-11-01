@@ -4844,7 +4844,7 @@ Two structured panels render after the sections:
   learned `beta:` negative shows action `withhold` rather than `strip` or
   `route_away`.
 
-  The running daemon's `/status/health` (schema 8) lists the same resident
+  The running daemon's `/status/health` (schema 9) lists the same resident
   learned entries under `learned_negatives`, one row per entry (a
   `verified` positive included), each resolved the same way against the
   served config. Beside `state_key`, `capability_key`, `verdict`,
@@ -4861,6 +4861,26 @@ Two structured panels render after the sections:
   opinion (an inferred negative awaiting corroboration, an advisory live
   F3 negative) or beat a prior, the matrix can show a `prior` layer the
   health row lacks.
+  Each `/status/health` target row also carries `account`, the credential
+  account its park and unusable mark cover (`<provider>[#<label>]` for an
+  `oauth://` seat, `#<entry>` for any other own credential, null for a
+  forwarded one), and `eligibility`: `reason` is why a request cannot
+  dispatch to the target right now (`credential_unusable`, `account_parked`,
+  `breaker_open` or `rate_limited`, read from the same side-effect-free
+  snapshot placement reads; null when it can), `cause` the unusable cause
+  (`not_logged_in`, `unreadable`, `expired` or `revoked`), `since_ms` when
+  the reason began (the first unusable mark or the breaker opening; null for
+  a park or a rate limit, whose start is not recorded), and `fix` the exact
+  command that readmits an unusable seat: `routectl login <provider> --label
+  <label>` for a labeled `oauth://` seat, `routectl login <provider>` for an
+  unlabeled one, and for an `env://` or `file://` credential the provider
+  entry and scheme (never the variable name, path or value). Every key is
+  always present. `pools` lists each pool's `configured` and `eligible` seat
+  counts and `by_reason` (`reason`, `seats`) for the others, highest
+  priority first; `seat_driver` is the background seat driver's health (see
+  [Background refresh of managed logins](#background-refresh-of-managed-logins)).
+  Reading the panel spends no rate-limit token and claims no half-open
+  probe slot.
 - **`panels.would_trim`** -- the steady-state would-trim opportunity,
   read-only over all recorded history. Its fields are documented under
   [Steady-state would-trim opportunity](#steady-state-would-trim-opportunity)
@@ -5221,6 +5241,10 @@ refresh uses. Otherwise the check sends nothing.
   one access-token lifetime after it happened.
 - The driver's health (running, last sweep, last sweep with no failure, sweep
   and failure counts) is held in memory only and starts from zero on restart.
+  `/status/health` shows it as `seat_driver`: `running`, `last_sweep_ms`,
+  `last_good_sweep_ms` (epoch ms, null before the first such sweep), `sweeps`,
+  `transient` and `definitive`. `running` is false on a daemon with no
+  credential store, which runs no driver.
 
 Each background refresh rewrites `credentials.json`, so the credentials watcher
 reloads once per seat per token lifetime.
