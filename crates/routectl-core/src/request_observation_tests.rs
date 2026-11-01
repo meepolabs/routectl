@@ -1,4 +1,5 @@
-use super::{ObservationSnapshot, RequestObservation, ServedIdentity};
+use super::{ObservationSnapshot, RequestObservation, ServedIdentity, SkipCounts};
+use crate::EligibilityReason;
 
 fn identity(model: &str) -> ServedIdentity {
     ServedIdentity {
@@ -31,6 +32,7 @@ fn clones_share_one_state() {
     riding.note_translation_drop("lane-a", "class-a");
     riding.set_probe(true);
     riding.set_last_target(identity("m1"));
+    riding.add_skip(EligibilityReason::BreakerOpen);
 
     let snap = kept.snapshot();
     assert_eq!(snap.wire_losses, 2);
@@ -40,6 +42,66 @@ fn clones_share_one_state() {
     assert_eq!(snap.translation_drops, 1);
     assert!(snap.probe);
     assert_eq!(snap.last_target, Some(identity("m1")));
+    assert_eq!(snap.skips.breaker_open, 1);
+}
+
+#[test]
+fn add_skip_counts_under_its_own_reason_only() {
+    let rows = [
+        (
+            EligibilityReason::CredentialUnusable,
+            SkipCounts {
+                credential_unusable: 2,
+                ..SkipCounts::default()
+            },
+        ),
+        (
+            EligibilityReason::AccountParked,
+            SkipCounts {
+                account_parked: 2,
+                ..SkipCounts::default()
+            },
+        ),
+        (
+            EligibilityReason::BreakerOpen,
+            SkipCounts {
+                breaker_open: 2,
+                ..SkipCounts::default()
+            },
+        ),
+        (
+            EligibilityReason::RateLimited,
+            SkipCounts {
+                rate_limited: 2,
+                ..SkipCounts::default()
+            },
+        ),
+        (
+            EligibilityReason::Capability,
+            SkipCounts {
+                capability: 2,
+                ..SkipCounts::default()
+            },
+        ),
+        (
+            EligibilityReason::ContextWindow,
+            SkipCounts {
+                context_window: 2,
+                ..SkipCounts::default()
+            },
+        ),
+    ];
+    for (reason, expected) in rows {
+        let slot = RequestObservation::new();
+
+        slot.add_skip(reason);
+        slot.add_skip(reason);
+
+        let skips = slot.snapshot().skips;
+        assert_eq!(skips, expected, "{reason:?}");
+        assert_eq!(skips.get(reason), 2, "{reason:?}");
+        assert_eq!(skips.total(), 2, "{reason:?}");
+    }
 }
 
 #[test]

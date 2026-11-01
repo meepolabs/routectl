@@ -22,6 +22,8 @@
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, PoisonError};
 
+use crate::EligibilityReason;
+
 /// The target a request was last dispatched to, by its routing names. The
 /// alias and upstream id can be the client's requested model id on a
 /// forwarded-credential or default-alias route; never body, header,
@@ -42,6 +44,62 @@ pub struct ServedIdentity {
     pub seat: Option<String>,
 }
 
+/// Targets a request passed over without an attempt, one count per
+/// [`EligibilityReason`]. Each skipped target counts once, under one reason.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SkipCounts {
+    /// Targets whose credential was unusable.
+    pub credential_unusable: u64,
+    /// Targets whose credential account was parked.
+    pub account_parked: u64,
+    /// Targets whose circuit breaker was open.
+    pub breaker_open: u64,
+    /// Targets whose local request-rate limit had no capacity left.
+    pub rate_limited: u64,
+    /// Targets lacking a capability the request needs.
+    pub capability: u64,
+    /// Targets whose context window could not hold the request.
+    pub context_window: u64,
+}
+
+impl SkipCounts {
+    /// The count kept for `reason`.
+    #[must_use]
+    pub const fn get(&self, reason: EligibilityReason) -> u64 {
+        match reason {
+            EligibilityReason::CredentialUnusable => self.credential_unusable,
+            EligibilityReason::AccountParked => self.account_parked,
+            EligibilityReason::BreakerOpen => self.breaker_open,
+            EligibilityReason::RateLimited => self.rate_limited,
+            EligibilityReason::Capability => self.capability,
+            EligibilityReason::ContextWindow => self.context_window,
+        }
+    }
+
+    /// Every skipped target, whatever its reason.
+    #[must_use]
+    pub const fn total(&self) -> u64 {
+        self.credential_unusable
+            .saturating_add(self.account_parked)
+            .saturating_add(self.breaker_open)
+            .saturating_add(self.rate_limited)
+            .saturating_add(self.capability)
+            .saturating_add(self.context_window)
+    }
+
+    const fn add(&mut self, reason: EligibilityReason) {
+        let count = match reason {
+            EligibilityReason::CredentialUnusable => &mut self.credential_unusable,
+            EligibilityReason::AccountParked => &mut self.account_parked,
+            EligibilityReason::BreakerOpen => &mut self.breaker_open,
+            EligibilityReason::RateLimited => &mut self.rate_limited,
+            EligibilityReason::Capability => &mut self.capability,
+            EligibilityReason::ContextWindow => &mut self.context_window,
+        };
+        *count = count.saturating_add(1);
+    }
+}
+
 /// Point-in-time copy of a [`RequestObservation`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
@@ -56,6 +114,8 @@ pub struct ObservationSnapshot {
     pub field_repairs: u64,
     /// Streams that ended without their terminal event.
     pub missing_terminals: u64,
+    /// Targets skipped without an attempt, by reason.
+    pub skips: SkipCounts,
     /// The last target dispatched to, if any.
     pub last_target: Option<ServedIdentity>,
     /// Whether the request is routectl's own probe traffic.
@@ -70,6 +130,7 @@ struct State {
     missing_terminals: u64,
     translation_drops: BTreeSet<(&'static str, &'static str)>,
     lanes_seen: BTreeSet<&'static str>,
+    skips: SkipCounts,
     last_target: Option<ServedIdentity>,
     probe: bool,
 }
@@ -127,6 +188,11 @@ impl RequestObservation {
         self.with_state(|s| s.lanes_seen.insert(lane))
     }
 
+    /// Count one target skipped for `reason` without an attempt.
+    pub fn add_skip(&self, reason: EligibilityReason) {
+        self.with_state(|s| s.skips.add(reason));
+    }
+
     /// Record the target currently being dispatched; the last call wins.
     pub fn set_last_target(&self, identity: ServedIdentity) {
         self.with_state(|s| s.last_target = Some(identity));
@@ -146,6 +212,7 @@ impl RequestObservation {
             local_refusals: s.local_refusals,
             field_repairs: s.field_repairs,
             missing_terminals: s.missing_terminals,
+            skips: s.skips,
             last_target: s.last_target.clone(),
             probe: s.probe,
         })

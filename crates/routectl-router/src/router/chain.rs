@@ -2,8 +2,9 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Instant;
 
-use routectl_core::{ChatRequest, EligibilityReason, Error, Result};
+use routectl_core::{ChatRequest, EligibilityReason, Error, RequestObservation, Result};
 
 use crate::config::AliasValue;
 use crate::resolved::ResolvedModel;
@@ -458,22 +459,97 @@ impl Router {
             &req.model,
             req.routectl_internal.inbound_session_key.as_deref(),
         )?;
+        let observation = req.routectl_internal.observation.as_ref();
         let features = super::field_repair::request_feature_keys(self.field_repair_table(), req);
         let mut admissions = Vec::new();
-        let chain =
-            self.filter_chain_by_features(chain, &features, &req.model, surface, &mut admissions)?;
+        let before = observation.map(|_| tally_keys(&chain));
+        let filtered =
+            self.filter_chain_by_features(chain, &features, &req.model, surface, &mut admissions);
+        if let (Some(observation), Some(before)) = (observation, before.as_deref()) {
+            // An error means the filter dropped every target, so each one
+            // is tallied before the error propagates.
+            let after = filtered.as_deref().unwrap_or_default();
+            self.tally_filter_drops(observation, before, after, EligibilityReason::Capability);
+        }
+        let chain = filtered?;
         // Window pass AFTER the feature filter, never before: "the last
         // surviving target" must be counted against the chain the HARD
         // capability drops left behind. Reversed, the window pass could skip
         // a target that feature filtering then makes the last one, and the
         // feature filter would fabricate an empty-chain error.
+        let before = observation.map(|_| tally_keys(&chain));
         let chain = self.filter_chain_by_window(chain, req);
+        if let (Some(observation), Some(before)) = (observation, before.as_deref()) {
+            self.tally_filter_drops(
+                observation,
+                before,
+                &chain,
+                EligibilityReason::ContextWindow,
+            );
+        }
         // Beta withholding runs as its own pass: the feature filter returns
         // early for a request with no feature keys, and beta flags are not
         // feature keys. After the window pass so a skipped target never claims
         // a re-probe slot.
         let chain = self.withhold_betas_on_chain(chain, req, surface, &mut admissions);
         Ok((chain, admissions))
+    }
+
+    /// Count each target of `before` that `after` no longer holds as one
+    /// skip. The reason is `filter_reason` unless the target's own state
+    /// names a higher-priority one, read without touching any gate.
+    fn tally_filter_drops(
+        &self,
+        observation: &RequestObservation,
+        before: &[TallyKey],
+        after: &[DispatchTarget],
+        filter_reason: EligibilityReason,
+    ) {
+        let mut kept: BTreeMap<&str, usize> = BTreeMap::new();
+        for target in after {
+            *kept.entry(target.state_key.as_str()).or_default() += 1;
+        }
+        let now = Instant::now();
+        for key in before {
+            if let Some(remaining) = kept.get_mut(key.state_key.as_str())
+                && *remaining > 0
+            {
+                *remaining -= 1;
+                continue;
+            }
+            let state_reason = self
+                .capacity_snapshot_for(&key.state_key, key.account.as_deref(), now)
+                .and_then(|snapshot| snapshot.reason());
+            observation.add_skip(higher_reason(filter_reason, state_reason));
+        }
+    }
+}
+
+/// The state key and credential account of one chain target, captured
+/// before a filter consumes the chain.
+struct TallyKey {
+    state_key: String,
+    account: Option<Arc<str>>,
+}
+
+fn tally_keys(chain: &[DispatchTarget]) -> Vec<TallyKey> {
+    chain
+        .iter()
+        .map(|target| TallyKey {
+            state_key: target.state_key.clone(),
+            account: target.account.clone(),
+        })
+        .collect()
+}
+
+/// `filter_reason`, or `state_reason` when it ranks higher.
+pub(super) const fn higher_reason(
+    filter_reason: EligibilityReason,
+    state_reason: Option<EligibilityReason>,
+) -> EligibilityReason {
+    match state_reason {
+        Some(state) if state.priority() > filter_reason.priority() => state,
+        _ => filter_reason,
     }
 }
 

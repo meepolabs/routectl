@@ -5,7 +5,7 @@
 //! the writer failed to bind would show here.
 
 use super::*;
-use routectl_core::{Message, MessageContent, Role};
+use routectl_core::{EligibilityReason, Message, MessageContent, Role};
 use routectl_usage::{CHANNEL_CAPACITY, UsageWriter};
 
 const ROW_ID: &str = "observed-row";
@@ -90,6 +90,23 @@ impl Rig {
         drop(handle);
         writer.shutdown();
         read_row(&db_path)
+    }
+
+    /// Finalize and flush like [`Self::persist`], handing back the temp dir
+    /// so the caller reads the database before it is removed.
+    fn persist_keeping_dir(self, finish: impl FnOnce(UsageCapture)) -> tempfile::TempDir {
+        let Self {
+            capture,
+            slot: _,
+            handle,
+            writer,
+            _dir,
+            db_path: _,
+        } = self;
+        finish(capture);
+        drop(handle);
+        writer.shutdown();
+        _dir
     }
 }
 
@@ -254,4 +271,102 @@ async fn observed_meta_identity_wins_over_the_slots_last_target() {
     assert_eq!(row.provider, meta.served_provider);
     assert_eq!(row.upstream, meta.served_upstream);
     assert_eq!(row.seat, meta.served_seat);
+}
+
+const SKIP_COLUMNS: &str = "skip_credential_unusable, skip_account_parked, skip_breaker_open, \
+     skip_rate_limited, skip_capability, skip_context_window";
+
+/// The six skip columns of the one persisted row, in [`SKIP_COLUMNS`] order.
+fn read_skips(db_path: &std::path::Path) -> [Option<i64>; 6] {
+    let conn = rusqlite::Connection::open(db_path).expect("read open");
+    conn.query_row(
+        &format!("SELECT {SKIP_COLUMNS} FROM requests WHERE request_id = ?1"),
+        [ROW_ID],
+        |r| {
+            Ok([
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+            ])
+        },
+    )
+    .expect("exactly one persisted row")
+}
+
+#[test]
+fn each_skip_reason_on_the_slot_persists_in_its_own_column_only() {
+    let reasons = [
+        EligibilityReason::CredentialUnusable,
+        EligibilityReason::AccountParked,
+        EligibilityReason::BreakerOpen,
+        EligibilityReason::RateLimited,
+        EligibilityReason::Capability,
+        EligibilityReason::ContextWindow,
+    ];
+    for (column, reason) in reasons.into_iter().enumerate() {
+        // Arrange
+        let rig = rig();
+        rig.slot.add_skip(reason);
+        rig.slot.add_skip(reason);
+        let db_path = rig.db_path.clone();
+
+        // Act
+        let dir = rig.persist_keeping_dir(finalize_ok);
+
+        // Assert
+        let mut expected = [Some(0); 6];
+        expected[column] = Some(2);
+        assert_eq!(read_skips(&db_path), expected, "{reason:?}");
+        drop(dir);
+    }
+}
+
+#[test]
+fn the_skip_columns_are_named_for_exactly_the_eligibility_tokens() {
+    // Arrange
+    let rig = rig();
+    let db_path = rig.db_path.clone();
+    let dir = rig.persist_keeping_dir(finalize_ok);
+    let conn = rusqlite::Connection::open(&db_path).expect("read open");
+
+    // Act
+    let mut stmt = conn
+        .prepare(
+            "SELECT name FROM pragma_table_info('requests') WHERE name LIKE 'skip\\_%' ESCAPE '\\'",
+        )
+        .expect("prepare");
+    let suffixes: Vec<String> = stmt
+        .query_map([], |r| r.get::<_, String>(0))
+        .expect("query")
+        .map(|name| {
+            let name = name.expect("column name");
+            name.strip_prefix("skip_")
+                .expect("filtered prefix")
+                .to_string()
+        })
+        .collect();
+
+    // Assert
+    let tokens: Vec<&str> = [
+        EligibilityReason::CredentialUnusable,
+        EligibilityReason::AccountParked,
+        EligibilityReason::BreakerOpen,
+        EligibilityReason::RateLimited,
+        EligibilityReason::Capability,
+        EligibilityReason::ContextWindow,
+    ]
+    .iter()
+    .map(|reason| reason.as_str())
+    .collect();
+    assert_eq!(suffixes, tokens, "one column per token, in token order");
+    for suffix in &suffixes {
+        assert!(
+            EligibilityReason::from_token(suffix).is_some(),
+            "{suffix} names a reason"
+        );
+    }
+    drop(dir);
 }

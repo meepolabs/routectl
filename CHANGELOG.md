@@ -16,6 +16,8 @@ list with more narrative.
 
 ### Added
 
+- **Each usage row records how many targets the request skipped and why (`skip_credential_unusable`, `skip_account_parked`, `skip_breaker_open`, `skip_rate_limited`, `skip_capability`, `skip_context_window`).** A target counts once, under one reason: a target a capability or context-window filter dropped counts under its own credential, park, breaker or rate-limit state when that ranks higher, and a target the gate refuses counts only when it got no attempt, so a refusal on a retry of the same target is not a skip.
+
 - **Managed Anthropic and Codex logins named in the config are refreshed in the background when due.** A seat whose refresh token is refused becomes unusable at once and rejoins after `routectl login`; network errors, 429 and 5xx keep the seat until its access token expires. See [docs/CONFIGURATION.md](docs/CONFIGURATION.md#background-refresh-of-managed-logins).
 
 - **`routectl doctor` and `/status/doctor` report the resolved tuning table (doctor schema 24).** A new `tuning` section carries one PASS finding per `[providers.X]` entry (pool members included) and per `[models.X]` entry with its own `stream_first_byte_timeout_ms` (one per seat, named `model nickname#member`, for a pooled model), listing `circuit_failures`, `circuit_cooldown_ms`, `rpm_limit`, `request_timeout_ms` and `stream_first_byte_timeout_ms` as `key=value(source)`, the same cells `config show --effective` prints. The section is additive and never moves the exit code; the dashboard expects doctor schema 24. See [docs/CONFIGURATION.md](docs/CONFIGURATION.md#inspecting-the-effective-config-config-show---effective).

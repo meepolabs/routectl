@@ -3,8 +3,9 @@
 //! each member as a placeholder seat, the daemon starts, every ingress answers
 //! 503 `credential_unusable` with no `Retry-After`, the configured upstream
 //! accepts no connection, and the usage row records a gate-blocked request
-//! with no attempt and the last seat walked. A config reload with the
-//! placeholders unchanged keeps each mark and its `since`.
+//! with no attempt, the last seat walked, and each seat skipped as
+//! `credential_unusable`. A config reload with the placeholders unchanged
+//! keeps each mark and its `since`.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -151,17 +152,43 @@ async fn refusal_of(resp: reqwest::Response) -> (u16, Option<String>, Value) {
     (status, retry_after, body["error"]["type"].clone())
 }
 
-/// `(attempt_count, outcome, provider, model)` of `request_id`'s row, once
-/// the writer has committed it.
-async fn usage_row(db: &std::path::Path, request_id: &str) -> (i64, String, String, String) {
+/// The persisted columns of one request row this suite asserts on.
+#[derive(Debug)]
+struct UsageRow {
+    attempt_count: i64,
+    outcome: String,
+    provider: String,
+    model: String,
+    /// The six skip counts, in eligibility-token order.
+    skips: [i64; 6],
+}
+
+/// `request_id`'s row, once the writer has committed it.
+async fn usage_row(db: &std::path::Path, request_id: &str) -> UsageRow {
     let deadline = Instant::now() + WAIT;
     loop {
         if let Ok(conn) = routectl_usage::open_readonly(db)
             && let Ok(row) = conn.conn().query_row(
-                "SELECT attempt_count, outcome, provider, model FROM requests \
-                 WHERE request_id = ?1",
+                "SELECT attempt_count, outcome, provider, model, skip_credential_unusable, \
+                 skip_account_parked, skip_breaker_open, skip_rate_limited, skip_capability, \
+                 skip_context_window FROM requests WHERE request_id = ?1",
                 [request_id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                |r| {
+                    Ok(UsageRow {
+                        attempt_count: r.get(0)?,
+                        outcome: r.get(1)?,
+                        provider: r.get(2)?,
+                        model: r.get(3)?,
+                        skips: [
+                            r.get(4)?,
+                            r.get(5)?,
+                            r.get(6)?,
+                            r.get(7)?,
+                            r.get(8)?,
+                            r.get(9)?,
+                        ],
+                    })
+                },
             )
         {
             return row;
@@ -194,11 +221,16 @@ async fn an_all_placeholder_daemon_starts_and_refuses_every_ingress_without_dial
         assert_eq!(status, 503, "{route}: {error_type}");
         assert_eq!(error_type, "credential_unusable", "{route}");
         assert_eq!(retry_after, None, "{route}: no recovery time is known");
-        let (attempts, outcome, provider, model) = usage_row(&usage_db, &request_id).await;
-        assert_eq!(attempts, 0, "{route}");
-        assert_eq!(outcome, "gate_blocked", "{route}");
-        assert_eq!(provider, "seat-b", "{route}: the last seat walked");
-        assert_eq!(model, "grok", "{route}");
+        let row = usage_row(&usage_db, &request_id).await;
+        assert_eq!(row.attempt_count, 0, "{route}");
+        assert_eq!(row.outcome, "gate_blocked", "{route}");
+        assert_eq!(row.provider, "seat-b", "{route}: the last seat walked");
+        assert_eq!(row.model, "grok", "{route}");
+        assert_eq!(
+            row.skips,
+            [2, 0, 0, 0, 0, 0],
+            "{route}: both seats skipped as credential_unusable"
+        );
     }
     let accepted = tokio::time::timeout(Duration::from_millis(200), upstream.accept()).await;
     assert!(accepted.is_err(), "the upstream must accept no connection");

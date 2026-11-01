@@ -19,8 +19,8 @@ use routectl_core::context_reduction::{ReductionDelta, ReductionOutcome, apply_j
 use routectl_core::failure_class::{ClassifiedFailure, FailureClass};
 use routectl_core::wire_check::{IngressDialect, WireTap};
 use routectl_core::{
-    ChatRequest, Error, Provider, RefusalReason, RequestObservation, Result, TranslationReport,
-    UpstreamReason, sanitize_for_log,
+    ChatRequest, EligibilityReason, Error, Provider, RefusalReason, RequestObservation, Result,
+    TranslationReport, UpstreamReason, sanitize_for_log,
 };
 
 use crate::config::{ResolvedTuning, RetryPolicy};
@@ -402,6 +402,7 @@ impl Router {
                     let identity = meta.mark_target(target, &req.model);
                     if let Some(observation) = req.routectl_internal.observation.as_ref() {
                         observation.set_last_target(identity);
+                        observation.add_skip(EligibilityReason::CredentialUnusable);
                     }
                     meta.fallback_count = chain_idx as u32;
                     super::credential_park::refuse_placeholder_seat(
@@ -593,6 +594,11 @@ impl Router {
                 let mut probe_guard = {
                     let (refusal, guard) = self.admit_client(state_key, target.account.as_deref());
                     if let Some((gate_kind, gate_err)) = refusal {
+                        // A refusal on a same-target retry follows an attempt
+                        // already made, so the target was dialed, not skipped.
+                        if attempts_made == 0 {
+                            tally_gate_skip(req.routectl_internal.observation.as_ref(), &gate_err);
+                        }
                         log_gate_refusal(
                             provider_name,
                             target.nickname.as_deref().unwrap_or(""),
@@ -1397,6 +1403,14 @@ pub(super) fn missing_forwarded_bearer_error(
     ))
 }
 
+/// Count a target the gate refused before any attempt as one skip under the
+/// refusal's reason.
+fn tally_gate_skip(observation: Option<&RequestObservation>, refusal: &Error) {
+    if let (Some(observation), Error::LocallyUnavailable { reason, .. }) = (observation, refusal) {
+        observation.add_skip(*reason);
+    }
+}
+
 pub(super) fn add_jitter(base: Duration, jitter_ms: u64) -> Duration {
     if jitter_ms == 0 {
         return base;
@@ -1430,3 +1444,7 @@ pub(super) fn next_is_sibling_seat(
         .get(chain_idx + 1)
         .is_some_and(|next| std::sync::Arc::ptr_eq(&next.model, &target.model))
 }
+
+#[cfg(test)]
+#[path = "skip_tally_tests.rs"]
+mod skip_tally_tests;

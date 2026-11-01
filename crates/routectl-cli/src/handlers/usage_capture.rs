@@ -1252,16 +1252,22 @@ impl UsageCapture {
         self.usage.try_send(std::mem::take(&mut self.record));
     }
 
-    /// Copy the request's observation into the row: the five counts and the
-    /// probe flag always; the served identity only when `observe_meta` never
-    /// ran (a dispatch dropped mid-flight), so a row still names the last
-    /// target tried.
+    /// Copy the request's observation into the row: the five counts, the six
+    /// skip counts and the probe flag always; the served identity only when
+    /// `observe_meta` never ran (a dispatch dropped mid-flight), so a row
+    /// still names the last target tried.
     fn stamp_observation(&mut self, snapshot: ObservationSnapshot) {
         self.record.wire_losses = snapshot.wire_losses;
         self.record.translation_drops = snapshot.translation_drops;
         self.record.local_refusals = snapshot.local_refusals;
         self.record.field_repairs = snapshot.field_repairs;
         self.record.missing_terminals = snapshot.missing_terminals;
+        self.record.skip_credential_unusable = snapshot.skips.credential_unusable;
+        self.record.skip_account_parked = snapshot.skips.account_parked;
+        self.record.skip_breaker_open = snapshot.skips.breaker_open;
+        self.record.skip_rate_limited = snapshot.skips.rate_limited;
+        self.record.skip_capability = snapshot.skips.capability;
+        self.record.skip_context_window = snapshot.skips.context_window;
         self.record.probe = snapshot.probe;
         if !self.meta_observed
             && let Some(target) = snapshot.last_target

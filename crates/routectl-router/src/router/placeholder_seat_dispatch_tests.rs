@@ -9,7 +9,9 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-use routectl_core::{ChatRequest, EligibilityReason, Error, Provider, UpstreamReason};
+use routectl_core::{
+    ChatRequest, EligibilityReason, Error, Provider, RequestObservation, SkipCounts, UpstreamReason,
+};
 
 use super::super::credential_park_dispatch_tests::{ScriptedProvider, Step, Surface};
 use super::super::{DispatchMeta, Router, RouterOptions};
@@ -118,21 +120,29 @@ fn request() -> ChatRequest {
 
 /// Dispatch one request on `surface` and return its meta and error, if any.
 async fn dispatch(router: &Router, surface: Surface) -> (DispatchMeta, Option<Error>) {
+    dispatch_request(router, surface, request()).await
+}
+
+async fn dispatch_request(
+    router: &Router,
+    surface: Surface,
+    request: ChatRequest,
+) -> (DispatchMeta, Option<Error>) {
     match surface {
         Surface::Complete => {
             let out = router
-                .complete_with_options(request(), RouterOptions::new())
+                .complete_with_options(request, RouterOptions::new())
                 .await;
             (out.meta, out.result.err())
         }
         Surface::Stream => {
             let out = router
-                .stream_with_options(request(), RouterOptions::new())
+                .stream_with_options(request, RouterOptions::new())
                 .await;
             (out.meta, out.result.err())
         }
         Surface::CountTokens => {
-            let out = router.count_tokens_with_meta(request()).await;
+            let out = router.count_tokens_with_meta(request).await;
             (out.meta, out.result.err())
         }
     }
@@ -228,6 +238,58 @@ async fn a_placeholder_beside_a_parked_seat_refuses_unusable_with_the_parks_wait
         );
         assert_eq!(meta.attempt_count, 0, "{surface:?}");
         assert_eq!(fx.built.calls.load(Ordering::SeqCst), 0, "{surface:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_placeholder_seat_counts_one_credential_unusable_skip_on_every_surface() {
+    let rows: [(&str, bool, SkipCounts); 2] = [
+        (
+            "seat-b serves",
+            false,
+            SkipCounts {
+                credential_unusable: 1,
+                ..SkipCounts::default()
+            },
+        ),
+        (
+            "seat-b parked",
+            true,
+            SkipCounts {
+                credential_unusable: 1,
+                account_parked: 1,
+                ..SkipCounts::default()
+            },
+        ),
+    ];
+    for surface in SURFACES {
+        for (name, park_b, expected) in rows {
+            // Arrange
+            let fx = pool(&["seat-a"]);
+            if park_b {
+                assert!(fx.router.park_credential_for_tests(
+                    "pooled#seat-b",
+                    UpstreamReason::CredentialExpired,
+                    Instant::now() + Duration::from_mins(2),
+                ));
+            }
+            let observation = RequestObservation::new();
+            let mut req = request();
+            req.routectl_internal.observation = Some(observation.clone());
+
+            // Act
+            let (meta, _) = dispatch_request(&fx.router, surface, req).await;
+
+            // Assert
+            let skips = observation.snapshot().skips;
+            assert_eq!(skips, expected, "{surface:?} {name}");
+            let dialed = u64::from(meta.attempt_count > 0);
+            assert_eq!(
+                skips.total() + dialed,
+                2,
+                "{surface:?} {name}: both evaluated"
+            );
+        }
     }
 }
 
