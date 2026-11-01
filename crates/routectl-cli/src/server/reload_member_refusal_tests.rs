@@ -179,6 +179,19 @@ async fn a_reload_carrying_a_refused_pool_member_keeps_the_running_router_servin
         let mut current_overlay: Arc<CatalogOverlay> = Arc::default();
         let candidate = candidate.replace("http://placeholder", &upstream.uri());
         std::fs::write(&cfg_path, &candidate).unwrap();
+        let check_lines = if expected_class == ReloadFailure::RouterBuildFailed {
+            let candidate_config =
+                routectl_router::parse_config(&candidate).expect("candidate parses");
+            let offline: Arc<dyn SecretStore> = Arc::new(
+                crate::commands::config_member_build::OfflineCheckStore::over(Some(
+                    (*oauth).clone(),
+                )),
+            );
+            crate::commands::config_member_build::member_build_errors(&candidate_config, offline)
+                .await
+        } else {
+            Vec::new()
+        };
 
         // Act
         let ((), events) = routectl_testkit::with_capture(Box::pin(apply_config_reload(
@@ -212,10 +225,18 @@ async fn a_reload_carrying_a_refused_pool_member_keeps_the_running_router_servin
         // for the same rows is pinned by
         // `a_hot_reload_carrying_any_bad_pool_is_declined`.
         if expected_class == ReloadFailure::RouterBuildFailed {
-            assert!(
-                events.iter().any(|e| e.level == tracing::Level::WARN
-                    && e.message.contains("config reload failed")),
-                "`{name}`: a rejected reload warns: {events:?}"
+            let warned: Vec<Option<&str>> = events
+                .iter()
+                .filter(|e| {
+                    e.level == tracing::Level::WARN && e.message.contains("config reload failed")
+                })
+                .map(|e| e.field("error"))
+                .collect();
+            assert_eq!(check_lines.len(), 1, "`{name}`: {check_lines:?}");
+            assert_eq!(
+                warned,
+                vec![Some(check_lines[0].as_str())],
+                "`{name}`: the reload WARN carries the refusal `config check` reports"
             );
         }
         assert!(

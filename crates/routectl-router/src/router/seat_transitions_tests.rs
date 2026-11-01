@@ -35,6 +35,12 @@ fn state_key_of(member: &str) -> String {
 /// failure, so an admission visibly spends the bucket. Members named in
 /// `placeholders` are placeholder seats reported with cause `not_logged_in`.
 fn router(placeholders: &[&str]) -> Router {
+    router_for_models(placeholders, &["pooled"])
+}
+
+/// [`router`] with `the-pool` routed by every model in `nicknames`, all
+/// sharing the one seat list.
+fn router_for_models(placeholders: &[&str], nicknames: &[&str]) -> Router {
     let mut config = Config {
         retry: RetryPolicy {
             max_attempts: 1,
@@ -79,11 +85,18 @@ fn router(placeholders: &[&str]) -> Router {
             }
         })
         .collect();
-    let model = ResolvedModel::new("pooled", "the-pool", built as Arc<dyn Provider>, "claude-x")
-        .with_seats(seats);
+    let models: BTreeMap<String, Arc<ResolvedModel>> = nicknames
+        .iter()
+        .map(|nickname| {
+            let provider = Arc::clone(&built) as Arc<dyn Provider>;
+            let model = ResolvedModel::new(*nickname, "the-pool", provider, "claude-x")
+                .with_seats(Arc::clone(&seats));
+            ((*nickname).to_string(), Arc::new(model))
+        })
+        .collect();
     let report = PoolReport {
         pool: "the-pool".into(),
-        models: vec!["pooled".into()],
+        models: nicknames.iter().map(|n| (*n).to_string()).collect(),
         configured_members: MEMBERS.len(),
         usable_members: MEMBERS.len() - placeholders.len(),
         placeholders: placeholders
@@ -98,7 +111,7 @@ fn router(placeholders: &[&str]) -> Router {
     };
     let mut router = Router::new(Arc::new(config));
     router.install_pool_reports(vec![report]);
-    router.install_resolved_models(BTreeMap::from([("pooled".to_string(), Arc::new(model))]));
+    router.install_resolved_models(models);
     router
 }
 
@@ -198,6 +211,94 @@ fn pool_eligibility_counts_each_seat_by_its_reason_and_reading_it_moves_no_gate(
         gate_state(&router, "seat-c"),
         before,
         "an admission spends the token"
+    );
+}
+
+#[test]
+fn a_pool_seat_is_eligible_when_any_model_routed_at_the_pool_admits_it() {
+    // (row, breakers forced open as (model, member), expected eligible,
+    // expected reasons). Model `pooled-b` shares `the-pool` with `pooled`.
+    type Row = (
+        &'static str,
+        &'static [(&'static str, &'static str)],
+        usize,
+        Vec<(EligibilityReason, usize)>,
+    );
+    let rows: Vec<Row> = vec![
+        ("every model admits every seat", &[], 3, vec![]),
+        (
+            "model B breaker open, model A healthy",
+            &[("pooled-b", "seat-a")],
+            3,
+            vec![],
+        ),
+        (
+            "both models breaker open on one seat",
+            &[("pooled", "seat-a"), ("pooled-b", "seat-a")],
+            2,
+            vec![(EligibilityReason::BreakerOpen, 1)],
+        ),
+    ];
+    for (name, open, eligible, by_reason) in rows {
+        // Arrange
+        let router = router_for_models(&[], &["pooled", "pooled-b"]);
+        for (model, member) in open {
+            assert!(
+                router.force_open_breaker(&format!("{model}#{member}"), Duration::from_hours(1)),
+                "`{name}`: the fixture has a state slot for {model}#{member}"
+            );
+        }
+
+        // Act
+        let counts = router.pool_eligibility(Instant::now());
+
+        // Assert
+        assert_eq!(
+            counts,
+            vec![PoolEligibility {
+                pool: "the-pool".into(),
+                configured: 3,
+                eligible,
+                by_reason,
+            }],
+            "`{name}`"
+        );
+    }
+}
+
+#[test]
+fn a_seat_every_model_refuses_reports_the_highest_priority_reason() {
+    // Arrange: on seat-a, `pooled` reads breaker open and `pooled-b` rate
+    // limited (its one-token bucket spent); the breaker outranks either way
+    // round the models are walked.
+    let router = router_for_models(&[], &["pooled", "pooled-b"]);
+    assert!(router.force_open_breaker("pooled#seat-a", Duration::from_hours(1)));
+    assert!(
+        router
+            .admit_for_credential_tests("pooled-b#seat-a")
+            .is_some()
+    );
+    let rate_limited_only = router_for_models(&[], &["pooled-b"]);
+    assert!(
+        rate_limited_only
+            .admit_for_credential_tests("pooled-b#seat-a")
+            .is_some()
+    );
+
+    // Act
+    let counts = router.pool_eligibility(Instant::now());
+    let control = rate_limited_only.pool_eligibility(Instant::now());
+
+    // Assert
+    assert_eq!(counts[0].eligible, 2);
+    assert_eq!(
+        counts[0].by_reason,
+        vec![(EligibilityReason::BreakerOpen, 1)]
+    );
+    assert_eq!(
+        control[0].by_reason,
+        vec![(EligibilityReason::RateLimited, 1)],
+        "control: the spent bucket alone reads rate limited"
     );
 }
 

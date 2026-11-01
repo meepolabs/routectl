@@ -147,11 +147,11 @@ impl Router {
     /// half-open slot is claimed, however often it is called.
     ///
     /// A pool named by several models has one breaker and RPM bucket per
-    /// (model, seat), so a seat counts as eligible only when it is
-    /// dispatchable for every model routed at the pool; otherwise its reason
-    /// is the highest-priority one any of those models reports. A placeholder
-    /// seat is never eligible, and a seat with no state slot reads as
-    /// breaker-open, as the status view reads it.
+    /// (model, seat), so a seat counts as eligible when it is dispatchable
+    /// for any model routed at the pool; when every one of those models
+    /// refuses it, its reason is the highest-priority one they report. A
+    /// placeholder seat is never eligible, and a seat with no state slot
+    /// reads as breaker-open, as the status view reads it.
     #[must_use]
     pub fn pool_eligibility(&self, now: Instant) -> Vec<PoolEligibility> {
         self.pool_reports
@@ -181,8 +181,9 @@ impl Router {
             .collect()
     }
 
-    /// Why `seat` is not dispatchable for some model among `models`, by
-    /// priority, or `None` when every model would admit it.
+    /// Why no model among `models` can dispatch to `seat`, the
+    /// highest-priority reason they report, or `None` when at least one
+    /// model would admit it.
     fn seat_ineligibility(
         &self,
         seat: &SeatTarget,
@@ -192,19 +193,18 @@ impl Router {
         if seat.is_placeholder() {
             return Some(EligibilityReason::CredentialUnusable);
         }
-        models
-            .iter()
-            .filter_map(|model| {
-                self.capacity_snapshot_for(
-                    &seat.state_key_for(&model.nickname),
-                    seat.account(),
-                    now,
-                )
+        let mut highest: Option<EligibilityReason> = None;
+        for model in models {
+            let reason = self
+                .capacity_snapshot_for(&seat.state_key_for(&model.nickname), seat.account(), now)
                 .map_or(Some(EligibilityReason::BreakerOpen), |snapshot| {
                     snapshot.reason()
-                })
-            })
-            .max_by_key(|reason| reason.priority())
+                })?;
+            if highest.is_none_or(|h| reason.priority() > h.priority()) {
+                highest = Some(reason);
+            }
+        }
+        highest
     }
 }
 

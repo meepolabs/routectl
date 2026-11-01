@@ -5,7 +5,9 @@
 //! provider construction: an existing valid file is ADOPTED (normalized
 //! to lowercase); an absent one is MINTED via an atomic create+rename
 //! (owner-only `0o600`, reusing the shared secret-file writer); an empty
-//! or corrupt file is re-minted. Any failure yields `None` and one
+//! or corrupt file is re-minted. A build that may not write (a read-only
+//! command) adopts a valid file and otherwise resolves `None`, touching
+//! nothing on disk. Any failure yields `None` and one
 //! structured WARN naming the error class -- the egress simply omits the
 //! header, the request path is unaffected, and the next construction
 //! retries. The id is a stable machine fingerprint and never enters logs.
@@ -15,10 +17,24 @@ use std::path::Path;
 /// Filename under the config dir holding the persistent installation-id.
 const INSTALLATION_ID_FILE: &str = "installation_id";
 
-/// Read-or-create the persistent installation-id under routectl's config
-/// dir. Returns `None` on any I/O failure (the header is then omitted).
-pub(super) fn resolve_installation_id() -> Option<String> {
-    resolve_installation_id_in(&crate::config::routectl_config_dir())
+/// Read the persistent installation-id under routectl's config dir,
+/// creating it when `may_mint` and it is absent or invalid. Returns `None`
+/// on any I/O failure, or when no valid id exists and minting is not
+/// allowed (the header is then omitted).
+pub(super) fn resolve_installation_id(may_mint: bool) -> Option<String> {
+    let config_dir = crate::config::routectl_config_dir();
+    if may_mint {
+        resolve_installation_id_in(&config_dir)
+    } else {
+        adopt_installation_id_in(&config_dir)
+    }
+}
+
+/// The valid installation-id already stored under `config_dir`, or `None`
+/// when it is absent, unreadable, empty or corrupt. Never writes.
+fn adopt_installation_id_in(config_dir: &Path) -> Option<String> {
+    let contents = std::fs::read_to_string(config_dir.join(INSTALLATION_ID_FILE)).ok()?;
+    parse_uuid_lowercase(&contents)
 }
 
 /// Config-dir-parameterized core of [`resolve_installation_id`], split
@@ -75,6 +91,30 @@ mod tests {
 
     fn is_lowercase_uuid(s: &str) -> bool {
         uuid::Uuid::try_parse(s).is_ok() && s == s.to_lowercase()
+    }
+
+    #[test]
+    fn adopt_only_reads_a_valid_id_and_never_creates_or_replaces_one() {
+        // Arrange
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(INSTALLATION_ID_FILE);
+
+        // Act + Assert: absent stays absent.
+        assert!(adopt_installation_id_in(dir.path()).is_none());
+        assert!(!path.exists(), "adopt-only must not mint");
+
+        // Corrupt stays corrupt.
+        std::fs::write(&path, "not-a-uuid").unwrap();
+        assert!(adopt_installation_id_in(dir.path()).is_none());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "not-a-uuid");
+
+        // Valid is adopted, lowercased.
+        let seeded = "8F14E45F-CEEA-4E7A-9B2C-1D2E3F405162";
+        std::fs::write(&path, seeded).unwrap();
+        assert_eq!(
+            adopt_installation_id_in(dir.path()).as_deref(),
+            Some(seeded.to_lowercase().as_str())
+        );
     }
 
     #[test]

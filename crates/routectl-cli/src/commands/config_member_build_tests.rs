@@ -221,3 +221,36 @@ async fn the_check_build_never_refreshes_a_due_credential() {
         "control: the live probe refreshes"
     );
 }
+
+#[tokio::test]
+#[serial_test::serial]
+async fn the_check_build_mints_no_installation_id_while_the_serve_build_does() {
+    // Arrange: a Codex seat logged in with an account id, so its provider
+    // builds and reaches the installation-id resolution.
+    let rig = Rig::new(&[(
+        "codex#seat-c",
+        record("tok-c", unix_now() + 3600, Some("acct-seat-c")),
+    )])
+    .await;
+    let config = parse(CODEX_POOL);
+    let id_file = rig._dir.path().join("routectl").join("installation_id");
+
+    // Act
+    let refusals = member_build_errors(&config, rig.offline()).await;
+    let after_check = id_file.exists();
+    let served = build_resolved_models_reported(&config, rig.live(), BuildOptions::default())
+        .await
+        .expect("serve builds the pool");
+
+    // Assert: the check built the member and left no id behind; the serve
+    // build over the same fixture mints one, so the absence is the check's
+    // posture and not a fixture that never reaches the mint.
+    assert!(refusals.is_empty(), "{refusals:?}");
+    assert!(
+        !after_check,
+        "config check must not create an installation id"
+    );
+    assert!(served.failed.is_empty(), "{:?}", served.failed);
+    assert!(id_file.exists(), "control: the serve build mints the id");
+    assert_eq!(rig.flow.post_count(), 0, "a fresh seat needs no refresh");
+}

@@ -58,6 +58,11 @@ pub struct BuildOptions {
     /// `CloakConfig` at build time (the same global-to-provider channel
     /// `strict_translation` uses). Default `true`.
     pub normalize_tools: bool,
+    /// Whether a ChatGPT-OAuth openai-responses build may create (or
+    /// replace a corrupt) `<config-dir>/installation_id`. `false` adopts an
+    /// existing valid id and otherwise builds without one, writing nothing:
+    /// the posture of a read-only command. Default `true`.
+    pub mint_installation_id: bool,
 }
 
 impl Default for BuildOptions {
@@ -65,6 +70,7 @@ impl Default for BuildOptions {
         Self {
             strict_translation: false,
             normalize_tools: true,
+            mint_installation_id: true,
         }
     }
 }
@@ -84,6 +90,12 @@ impl BuildOptions {
     /// Set the anthropic-cloak tool-array canonicalization switch.
     pub const fn with_normalize_tools(mut self, normalize: bool) -> Self {
         self.normalize_tools = normalize;
+        self
+    }
+
+    /// Set whether the build may mint a missing installation id.
+    pub const fn with_mint_installation_id(mut self, mint: bool) -> Self {
+        self.mint_installation_id = mint;
         self
     }
 }
@@ -541,10 +553,11 @@ async fn build_provider_inner(
             };
             // Resolve the persistent per-installation id for the
             // ChatgptOauth surface only (adopt an existing file, mint one
-            // otherwise; a read/write failure yields None + a WARN, never a
-            // build failure). ApiKey / BedrockMantle get None.
+            // otherwise when the options allow it; a read/write failure
+            // yields None + a WARN, never a build failure). ApiKey /
+            // BedrockMantle get None.
             let installation_id = if *auth_kind == OpenaiResponsesAuthKind::ChatgptOauth {
-                super::installation_id::resolve_installation_id()
+                super::installation_id::resolve_installation_id(opts.mint_installation_id)
             } else {
                 None
             };
@@ -910,8 +923,8 @@ async fn compile_pool(
             // The store's error text never reaches here: the probe returns
             // only a variant. The cause token is the whole diagnostic.
             tracing::debug!(
-                pool = %pool_name,
-                member = %member,
+                pool = %routectl_core::sanitize_for_log(pool_name),
+                member = %routectl_core::sanitize_for_log(member),
                 provider_kind,
                 cause = cause.as_str(),
                 "pool member credential unreadable; kept as an unusable seat",

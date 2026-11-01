@@ -5,7 +5,9 @@
 //! (`routectl_router::pool_member_refusals`) so the three surfaces refuse the
 //! same configs, but over [`OfflineCheckStore`]: a store that answers every
 //! read from the credentials file as it stands and never refreshes, so the
-//! check dials no token endpoint and rewrites no credential.
+//! check dials no token endpoint and rewrites no credential. The build also
+//! runs with installation-id minting off: an existing id is adopted, a
+//! missing one is left missing.
 
 use std::sync::Arc;
 
@@ -142,12 +144,14 @@ impl SecretStore for OfflineCheckStore {
 }
 
 /// Build every pool member a selectable model routes at with the options
-/// serve builds with, and return each pool's refusal as a `config: `-prefixed
-/// error line, the text serve and reload report for the same config.
+/// serve builds with, minus installation-id minting, and return each pool's
+/// refusal as a `config: `-prefixed error line, the text serve and reload
+/// report for the same config.
 pub async fn member_build_errors(config: &Config, secrets: Arc<dyn SecretStore>) -> Vec<String> {
     let opts = BuildOptions::new()
         .with_strict_translation(config.server.strict_translation)
-        .with_normalize_tools(config.cache.normalize_tools);
+        .with_normalize_tools(config.cache.normalize_tools)
+        .with_mint_installation_id(false);
     routectl_router::pool_member_refusals(config, secrets, opts)
         .await
         .into_iter()
