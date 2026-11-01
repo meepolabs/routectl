@@ -377,13 +377,17 @@ fn the_public_learn_entry_refuses_a_key_bedrock_stores_in_the_field_namespace() 
     let now = Instant::now();
     let observe = |feature_key: &str| {
         router.observe_learned_capability(
-            &lane_key,
-            feature_key,
-            "bedrock",
-            SignalTier::SelfIdentifying,
-            FailurePhase::F1,
-            routectl_core::capability::EvidenceSource::Live,
-            None,
+            crate::learned_capability::LearnKey {
+                state_key: &lane_key,
+                feature_key_raw: feature_key,
+                provider_kind: "bedrock",
+            },
+            crate::learned_capability::NegativeEvidence {
+                tier: SignalTier::SelfIdentifying,
+                phase: FailurePhase::F1,
+                source: routectl_core::capability::EvidenceSource::Live,
+                evidence_class: None,
+            },
             now,
         )
     };

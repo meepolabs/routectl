@@ -688,13 +688,17 @@ fn mint_negative(
     } else {
         registry
             .observe(
-                &row.state_key,
-                &row.capability,
-                &row.provider_kind,
-                tier,
-                phase,
-                source,
-                row.evidence_class.as_deref(),
+                crate::learned_capability::LearnKey {
+                    state_key: &row.state_key,
+                    feature_key_raw: &row.capability,
+                    provider_kind: &row.provider_kind,
+                },
+                crate::learned_capability::NegativeEvidence {
+                    tier,
+                    phase,
+                    source,
+                    evidence_class: row.evidence_class.as_deref(),
+                },
                 row.observed_at,
             )
             .is_some()

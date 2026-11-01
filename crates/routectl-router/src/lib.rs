@@ -206,9 +206,9 @@ pub use k_estimator::{
     ShadowOutcome, ShadowStore, rebuild_into,
 };
 pub use learned_capability::{
-    BoundaryCut, BoundaryReceipt, BoundarySettlement, GenerationOutcome, LearnedCapabilityRegistry,
-    LearnedRegistryEntry, NegativeState, RECHECK_BACKSTOP, RecordedLearnedEntry, SeedClearMarker,
-    negative_lapsed,
+    BoundaryCut, BoundaryReceipt, BoundarySettlement, GenerationOutcome, LearnKey,
+    LearnedCapabilityRegistry, LearnedRegistryEntry, NegativeEvidence, NegativeState,
+    RECHECK_BACKSTOP, RecordedLearnedEntry, SeedClearMarker, negative_lapsed,
 };
 pub use override_registry::{
     OverrideRegistry, OverrideRow, OverrideVerdict, validate_capability_overrides,

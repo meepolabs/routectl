@@ -149,13 +149,17 @@ fn key(flag: &str) -> String {
 
 fn seed_negative(router: &Router, target: &DispatchTarget, flag: &str) {
     router.learned_capabilities.observe(
-        &lane_of(target),
-        &key(flag),
-        BEDROCK,
-        SignalTier::SelfIdentifying,
-        FailurePhase::F1,
-        EvidenceSource::Live,
-        None,
+        crate::learned_capability::LearnKey {
+            state_key: &lane_of(target),
+            feature_key_raw: &key(flag),
+            provider_kind: BEDROCK,
+        },
+        crate::learned_capability::NegativeEvidence {
+            tier: SignalTier::SelfIdentifying,
+            phase: FailurePhase::F1,
+            source: EvidenceSource::Live,
+            evidence_class: None,
+        },
         Instant::now(),
     );
 }
@@ -697,13 +701,17 @@ fn a_cleared_seed_stays_sent_after_its_accepted_positive_is_evicted() {
     let bound = crate::learned_capability::MAX_BETA_ENTRIES_PER_LANE;
     let fill = |n: usize| {
         router.learned_capabilities.observe(
-            &lane,
-            &key(&format!("zz-fill-{n}")),
-            BEDROCK,
-            SignalTier::SelfIdentifying,
-            FailurePhase::F1,
-            EvidenceSource::Live,
-            None,
+            crate::learned_capability::LearnKey {
+                state_key: &lane,
+                feature_key_raw: &key(&format!("zz-fill-{n}")),
+                provider_kind: BEDROCK,
+            },
+            crate::learned_capability::NegativeEvidence {
+                tier: SignalTier::SelfIdentifying,
+                phase: FailurePhase::F1,
+                source: EvidenceSource::Live,
+                evidence_class: None,
+            },
             base + std::time::Duration::from_secs(u64::try_from(n).expect("small")),
         );
     };
@@ -1130,13 +1138,17 @@ enum CellSeed {
 fn seed_cell(router: &Router, target: &DispatchTarget, flag: &str, seed: CellSeed) {
     let observe = |tier, phase| {
         router.learned_capabilities.observe(
-            &lane_of(target),
-            &key(flag),
-            BEDROCK,
-            tier,
-            phase,
-            EvidenceSource::Live,
-            None,
+            crate::learned_capability::LearnKey {
+                state_key: &lane_of(target),
+                feature_key_raw: &key(flag),
+                provider_kind: BEDROCK,
+            },
+            crate::learned_capability::NegativeEvidence {
+                tier,
+                phase,
+                source: EvidenceSource::Live,
+                evidence_class: None,
+            },
             Instant::now(),
         );
     };

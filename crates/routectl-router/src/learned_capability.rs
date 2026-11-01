@@ -1122,19 +1122,13 @@ pub struct AppliedMutation<T> {
 
 /// The three components a learn write keys on, before normalization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[expect(
-    clippy::redundant_pub_crate,
-    reason = "this module is private, so pub(crate) reads as redundant, but sibling \
-              modules build this type for the crate-internal observe doors; `pub` would \
-              publish a registry-internal shape as semver surface"
-)]
-pub(crate) struct LearnKey<'a> {
+pub struct LearnKey<'a> {
     /// The serialized learned lane the entry applies to.
-    pub(crate) state_key: &'a str,
+    pub state_key: &'a str,
     /// The capability key as the caller spelled it; normalized per kind.
-    pub(crate) feature_key_raw: &'a str,
+    pub feature_key_raw: &'a str,
     /// The provider kind the capability key normalizes under.
-    pub(crate) provider_kind: &'a str,
+    pub provider_kind: &'a str,
 }
 
 impl<'a> LearnKey<'a> {
@@ -1158,21 +1152,15 @@ impl<'a> LearnKey<'a> {
 
 /// What one negative observation says about a key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[expect(
-    clippy::redundant_pub_crate,
-    reason = "this module is private, so pub(crate) reads as redundant, but sibling \
-              modules build this type for the crate-internal observe doors; `pub` would \
-              publish a registry-internal shape as semver surface"
-)]
-pub(crate) struct NegativeEvidence<'a> {
+pub struct NegativeEvidence<'a> {
     /// How directly the failure named the capability.
-    pub(crate) tier: SignalTier,
+    pub tier: SignalTier,
     /// The detection phase that attributed the failure.
-    pub(crate) phase: FailurePhase,
+    pub phase: FailurePhase,
     /// Live traffic or an out-of-band probe.
-    pub(crate) source: EvidenceSource,
+    pub source: EvidenceSource,
     /// The pinned observation-evidence token, when the verdict carries one.
-    pub(crate) evidence_class: Option<&'a str>,
+    pub evidence_class: Option<&'a str>,
 }
 
 /// Whether a learn write is submitted on behalf of a router generation.
@@ -1424,29 +1412,12 @@ impl LearnedCapabilityRegistry {
     /// a field verdict is written only through the crate's field-verdict
     /// entries, which take the identity the field namespace minted rather
     /// than a free-form string.
-    #[allow(clippy::too_many_arguments)]
     pub fn observe(
         &self,
-        state_key: &str,
-        feature_key_raw: &str,
-        provider_kind: &str,
-        tier: SignalTier,
-        phase: FailurePhase,
-        source: EvidenceSource,
-        evidence_class: Option<&str>,
+        key: LearnKey<'_>,
+        evidence: NegativeEvidence<'_>,
         now: Instant,
     ) -> Option<ObserveOutcome> {
-        let key = LearnKey {
-            state_key,
-            feature_key_raw,
-            provider_kind,
-        };
-        let evidence = NegativeEvidence {
-            tier,
-            phase,
-            source,
-            evidence_class,
-        };
         self.learn(
             LearnGate::Ungated,
             LearnTarget::Screened(key),
@@ -2683,30 +2654,13 @@ impl LearnedCapabilityRegistry {
     ///
     /// Returns [`GenerationOutcome::FieldNamespace`] when the stored key would
     /// sit in the envelope-field namespace; see [`Self::observe`].
-    #[allow(clippy::too_many_arguments)]
     pub fn observe_in_generation(
         &self,
         generation: u64,
-        state_key: &str,
-        feature_key_raw: &str,
-        provider_kind: &str,
-        tier: SignalTier,
-        phase: FailurePhase,
-        source: EvidenceSource,
-        evidence_class: Option<&str>,
+        key: LearnKey<'_>,
+        evidence: NegativeEvidence<'_>,
         now: Instant,
     ) -> GenerationOutcome<ObserveOutcome> {
-        let key = LearnKey {
-            state_key,
-            feature_key_raw,
-            provider_kind,
-        };
-        let evidence = NegativeEvidence {
-            tier,
-            phase,
-            source,
-            evidence_class,
-        };
         self.learn(
             LearnGate::InGeneration(generation),
             LearnTarget::Screened(key),
@@ -2802,24 +2756,15 @@ impl LearnedCapabilityRegistry {
 
     /// Record a positive observation on behalf of `generation`, with the same
     /// staleness rule as [`Self::observe_in_generation`].
-    // Mirrors `observe_positive` plus the generation; grouping the arguments
-    // would only introduce a type that exists to satisfy a lint.
-    #[allow(clippy::too_many_arguments)]
     pub fn observe_positive_in_generation(
         &self,
         generation: u64,
-        state_key: &str,
-        feature_key_raw: &str,
-        provider_kind: &str,
+        key: LearnKey<'_>,
         source: EvidenceSource,
         evidence_class: Option<&str>,
         now: Instant,
     ) -> GenerationOutcome<PositiveOutcome> {
-        let target = LearnTarget::Unscreened(LearnKey {
-            state_key,
-            feature_key_raw,
-            provider_kind,
-        });
+        let target = LearnTarget::Unscreened(key);
         let evidence = PositiveEvidence {
             source,
             evidence_class,
@@ -4222,13 +4167,17 @@ mod tests {
 
         // Act
         let outcome = reg.observe(
-            "nick",
-            "web_search",
-            "openai-compat",
-            SignalTier::SelfIdentifying,
-            FailurePhase::F1,
-            EvidenceSource::Live,
-            None,
+            crate::learned_capability::LearnKey {
+                state_key: "nick",
+                feature_key_raw: "web_search",
+                provider_kind: "openai-compat",
+            },
+            crate::learned_capability::NegativeEvidence {
+                tier: SignalTier::SelfIdentifying,
+                phase: FailurePhase::F1,
+                source: EvidenceSource::Live,
+                evidence_class: None,
+            },
             t0,
         );
 
@@ -4251,13 +4200,17 @@ mod tests {
 
         // Act
         let outcome = reg.observe(
-            "nick",
-            "web_search",
-            "anthropic-api",
-            SignalTier::Inferred,
-            FailurePhase::F1,
-            EvidenceSource::Live,
-            None,
+            crate::learned_capability::LearnKey {
+                state_key: "nick",
+                feature_key_raw: "web_search",
+                provider_kind: "anthropic-api",
+            },
+            crate::learned_capability::NegativeEvidence {
+                tier: SignalTier::Inferred,
+                phase: FailurePhase::F1,
+                source: EvidenceSource::Live,
+                evidence_class: None,
+            },
             t0,
         );
 
@@ -4275,26 +4228,34 @@ mod tests {
         let reg = registry();
         let t0 = Instant::now();
         reg.observe(
-            "nick",
-            "web_search",
-            "anthropic-api",
-            SignalTier::Inferred,
-            FailurePhase::F1,
-            EvidenceSource::Live,
-            None,
+            crate::learned_capability::LearnKey {
+                state_key: "nick",
+                feature_key_raw: "web_search",
+                provider_kind: "anthropic-api",
+            },
+            crate::learned_capability::NegativeEvidence {
+                tier: SignalTier::Inferred,
+                phase: FailurePhase::F1,
+                source: EvidenceSource::Live,
+                evidence_class: None,
+            },
             t0,
         );
         let within = t0 + WINDOW / 2;
 
         // Act
         let outcome = reg.observe(
-            "nick",
-            "web_search",
-            "anthropic-api",
-            SignalTier::Inferred,
-            FailurePhase::F1,
-            EvidenceSource::Live,
-            None,
+            crate::learned_capability::LearnKey {
+                state_key: "nick",
+                feature_key_raw: "web_search",
+                provider_kind: "anthropic-api",
+            },
+            crate::learned_capability::NegativeEvidence {
+                tier: SignalTier::Inferred,
+                phase: FailurePhase::F1,
+                source: EvidenceSource::Live,
+                evidence_class: None,
+            },
             within,
         );
 
@@ -4315,26 +4276,34 @@ mod tests {
         let reg = registry();
         let t0 = Instant::now();
         reg.observe(
-            "nick",
-            "web_search",
-            "anthropic-api",
-            SignalTier::Inferred,
-            FailurePhase::F1,
-            EvidenceSource::Live,
-            None,
+            crate::learned_capability::LearnKey {
+                state_key: "nick",
+                feature_key_raw: "web_search",
+                provider_kind: "anthropic-api",
+            },
+            crate::learned_capability::NegativeEvidence {
+                tier: SignalTier::Inferred,
+                phase: FailurePhase::F1,
+                source: EvidenceSource::Live,
+                evidence_class: None,
+            },
             t0,
         );
         let after = t0 + WINDOW + Duration::from_secs(1);
 
         // Act
         let outcome = reg.observe(
-            "nick",
-            "web_search",
-            "anthropic-api",
-            SignalTier::Inferred,
-            FailurePhase::F1,
-            EvidenceSource::Live,
-            None,
+            crate::learned_capability::LearnKey {
+                state_key: "nick",
+                feature_key_raw: "web_search",
+                provider_kind: "anthropic-api",
+            },
+            crate::learned_capability::NegativeEvidence {
+                tier: SignalTier::Inferred,
+                phase: FailurePhase::F1,
+                source: EvidenceSource::Live,
+                evidence_class: None,
+            },
             after,
         );
 
@@ -4355,13 +4324,17 @@ mod tests {
         let reg = registry();
         let t0 = Instant::now();
         reg.observe(
-            "nick",
-            "web_search",
-            "openai-compat",
-            SignalTier::SelfIdentifying,
-            FailurePhase::F1,
-            EvidenceSource::Live,
-            None,
+            crate::learned_capability::LearnKey {
+                state_key: "nick",
+                feature_key_raw: "web_search",
+                provider_kind: "openai-compat",
+            },
+            crate::learned_capability::NegativeEvidence {
+                tier: SignalTier::SelfIdentifying,
+                phase: FailurePhase::F1,
+                source: EvidenceSource::Live,
+                evidence_class: None,
+            },
             t0,
         );
         let expired = t0 + DECAY + Duration::from_secs(1);
@@ -4388,13 +4361,17 @@ mod tests {
         let reg = registry();
         let t0 = Instant::now();
         reg.observe(
-            "nick",
-            "web_search",
-            "openai-compat",
-            SignalTier::SelfIdentifying,
-            FailurePhase::F1,
-            EvidenceSource::Live,
-            None,
+            crate::learned_capability::LearnKey {
+                state_key: "nick",
+                feature_key_raw: "web_search",
+                provider_kind: "openai-compat",
+            },
+            crate::learned_capability::NegativeEvidence {
+                tier: SignalTier::SelfIdentifying,
+                phase: FailurePhase::F1,
+                source: EvidenceSource::Live,
+                evidence_class: None,
+            },
             t0,
         );
         let expired = t0 + DECAY + Duration::from_secs(1);
@@ -4420,13 +4397,17 @@ mod tests {
         let reg = registry();
         let t0 = Instant::now();
         reg.observe(
-            "nick",
-            "web_search",
-            "openai-compat",
-            SignalTier::SelfIdentifying,
-            FailurePhase::F1,
-            EvidenceSource::Live,
-            None,
+            crate::learned_capability::LearnKey {
+                state_key: "nick",
+                feature_key_raw: "web_search",
+                provider_kind: "openai-compat",
+            },
+            crate::learned_capability::NegativeEvidence {
+                tier: SignalTier::SelfIdentifying,
+                phase: FailurePhase::F1,
+                source: EvidenceSource::Live,
+                evidence_class: None,
+            },
             t0,
         );
         let expired = t0 + DECAY + Duration::from_secs(1);
@@ -4458,13 +4439,17 @@ mod tests {
         let reg = registry();
         let t0 = Instant::now();
         reg.observe(
-            "nick",
-            "web_search",
-            "openai-compat",
-            SignalTier::SelfIdentifying,
-            FailurePhase::F1,
-            EvidenceSource::Live,
-            None,
+            crate::learned_capability::LearnKey {
+                state_key: "nick",
+                feature_key_raw: "web_search",
+                provider_kind: "openai-compat",
+            },
+            crate::learned_capability::NegativeEvidence {
+                tier: SignalTier::SelfIdentifying,
+                phase: FailurePhase::F1,
+                source: EvidenceSource::Live,
+                evidence_class: None,
+            },
             t0,
         );
         let expired = t0 + DECAY + Duration::from_secs(1);
@@ -4497,13 +4482,17 @@ mod tests {
         let reg = registry();
         let t0 = Instant::now();
         reg.observe(
-            "nick",
-            "web_search",
-            "openai-compat",
-            SignalTier::SelfIdentifying,
-            FailurePhase::F1,
-            EvidenceSource::Live,
-            None,
+            crate::learned_capability::LearnKey {
+                state_key: "nick",
+                feature_key_raw: "web_search",
+                provider_kind: "openai-compat",
+            },
+            crate::learned_capability::NegativeEvidence {
+                tier: SignalTier::SelfIdentifying,
+                phase: FailurePhase::F1,
+                source: EvidenceSource::Live,
+                evidence_class: None,
+            },
             t0,
         );
         let expired = t0 + DECAY + Duration::from_secs(1);
@@ -4533,13 +4522,17 @@ mod tests {
             LearnedCapabilityRegistry::new(decay, Duration::from_mins(10), DEFAULT_MAX_ENTRIES);
         let t0 = Instant::now();
         reg.observe(
-            "n",
-            "web_search",
-            "openai-compat",
-            SignalTier::SelfIdentifying,
-            FailurePhase::F1,
-            EvidenceSource::Live,
-            None,
+            crate::learned_capability::LearnKey {
+                state_key: "n",
+                feature_key_raw: "web_search",
+                provider_kind: "openai-compat",
+            },
+            crate::learned_capability::NegativeEvidence {
+                tier: SignalTier::SelfIdentifying,
+                phase: FailurePhase::F1,
+                source: EvidenceSource::Live,
+                evidence_class: None,
+            },
             t0,
         );
         let now = t0 + decay + Duration::from_secs(1);
@@ -4574,13 +4567,17 @@ mod tests {
             LearnedCapabilityRegistry::new(decay, Duration::from_mins(10), DEFAULT_MAX_ENTRIES);
         let t0 = Instant::now();
         reg.observe(
-            "n",
-            "web_search",
-            "openai-compat",
-            SignalTier::SelfIdentifying,
-            FailurePhase::F1,
-            EvidenceSource::Live,
-            None,
+            crate::learned_capability::LearnKey {
+                state_key: "n",
+                feature_key_raw: "web_search",
+                provider_kind: "openai-compat",
+            },
+            crate::learned_capability::NegativeEvidence {
+                tier: SignalTier::SelfIdentifying,
+                phase: FailurePhase::F1,
+                source: EvidenceSource::Live,
+                evidence_class: None,
+            },
             t0,
         );
         let now = t0 + decay + Duration::from_secs(1);
@@ -4612,36 +4609,48 @@ mod tests {
             LearnedCapabilityRegistry::new(Duration::from_hours(1), Duration::from_mins(10), 2);
         let t0 = Instant::now();
         reg.observe(
-            "n",
-            "cap_a",
-            "openai-compat",
-            SignalTier::SelfIdentifying,
-            FailurePhase::F1,
-            EvidenceSource::Live,
-            None,
+            crate::learned_capability::LearnKey {
+                state_key: "n",
+                feature_key_raw: "cap_a",
+                provider_kind: "openai-compat",
+            },
+            crate::learned_capability::NegativeEvidence {
+                tier: SignalTier::SelfIdentifying,
+                phase: FailurePhase::F1,
+                source: EvidenceSource::Live,
+                evidence_class: None,
+            },
             t0,
         );
         reg.observe(
-            "n",
-            "cap_b",
-            "openai-compat",
-            SignalTier::SelfIdentifying,
-            FailurePhase::F1,
-            EvidenceSource::Live,
-            None,
+            crate::learned_capability::LearnKey {
+                state_key: "n",
+                feature_key_raw: "cap_b",
+                provider_kind: "openai-compat",
+            },
+            crate::learned_capability::NegativeEvidence {
+                tier: SignalTier::SelfIdentifying,
+                phase: FailurePhase::F1,
+                source: EvidenceSource::Live,
+                evidence_class: None,
+            },
             t0 + Duration::from_secs(1),
         );
 
         // Act -- the third insert forces eviction of the oldest (cap_a).
         let events = routectl_testkit::capture_events(|| {
             reg.observe(
-                "n",
-                "cap_c",
-                "openai-compat",
-                SignalTier::SelfIdentifying,
-                FailurePhase::F1,
-                EvidenceSource::Live,
-                None,
+                crate::learned_capability::LearnKey {
+                    state_key: "n",
+                    feature_key_raw: "cap_c",
+                    provider_kind: "openai-compat",
+                },
+                crate::learned_capability::NegativeEvidence {
+                    tier: SignalTier::SelfIdentifying,
+                    phase: FailurePhase::F1,
+                    source: EvidenceSource::Live,
+                    evidence_class: None,
+                },
                 t0 + Duration::from_secs(2),
             );
         });
@@ -4670,13 +4679,17 @@ mod tests {
         let reg = registry();
         let t0 = Instant::now();
         reg.observe(
-            "nick",
-            "web_search",
-            "openai-compat",
-            SignalTier::SelfIdentifying,
-            FailurePhase::F1,
-            EvidenceSource::Live,
-            None,
+            crate::learned_capability::LearnKey {
+                state_key: "nick",
+                feature_key_raw: "web_search",
+                provider_kind: "openai-compat",
+            },
+            crate::learned_capability::NegativeEvidence {
+                tier: SignalTier::SelfIdentifying,
+                phase: FailurePhase::F1,
+                source: EvidenceSource::Live,
+                evidence_class: None,
+            },
             t0,
         );
 
@@ -4704,13 +4717,17 @@ mod tests {
         let reg = registry();
         let t0 = Instant::now();
         reg.observe(
-            "nick",
-            "additionalModelRequestFields.anthropic_beta",
-            "bedrock",
-            SignalTier::SelfIdentifying,
-            FailurePhase::F1,
-            EvidenceSource::Live,
-            None,
+            crate::learned_capability::LearnKey {
+                state_key: "nick",
+                feature_key_raw: "additionalModelRequestFields.anthropic_beta",
+                provider_kind: "bedrock",
+            },
+            crate::learned_capability::NegativeEvidence {
+                tier: SignalTier::SelfIdentifying,
+                phase: FailurePhase::F1,
+                source: EvidenceSource::Live,
+                evidence_class: None,
+            },
             t0,
         );
 
@@ -4747,23 +4764,31 @@ mod tests {
         let reg = registry();
         let t0 = Instant::now();
         reg.observe(
-            "n1",
-            "web_search",
-            "openai-compat",
-            SignalTier::SelfIdentifying,
-            FailurePhase::F1,
-            EvidenceSource::Live,
-            None,
+            crate::learned_capability::LearnKey {
+                state_key: "n1",
+                feature_key_raw: "web_search",
+                provider_kind: "openai-compat",
+            },
+            crate::learned_capability::NegativeEvidence {
+                tier: SignalTier::SelfIdentifying,
+                phase: FailurePhase::F1,
+                source: EvidenceSource::Live,
+                evidence_class: None,
+            },
             t0,
         );
         reg.observe(
-            "n2",
-            "computer_use",
-            "anthropic-api",
-            SignalTier::Inferred,
-            FailurePhase::F1,
-            EvidenceSource::Live,
-            None,
+            crate::learned_capability::LearnKey {
+                state_key: "n2",
+                feature_key_raw: "computer_use",
+                provider_kind: "anthropic-api",
+            },
+            crate::learned_capability::NegativeEvidence {
+                tier: SignalTier::Inferred,
+                phase: FailurePhase::F1,
+                source: EvidenceSource::Live,
+                evidence_class: None,
+            },
             t0,
         );
         // A non-default (phase, source) pair proves both survive the
@@ -4846,13 +4871,17 @@ mod tests {
         let reg = registry();
         let t0 = Instant::now();
         reg.observe(
-            "n",
-            "web_search",
-            "openai-compat",
-            SignalTier::SelfIdentifying,
-            FailurePhase::F1,
-            EvidenceSource::Live,
-            None,
+            crate::learned_capability::LearnKey {
+                state_key: "n",
+                feature_key_raw: "web_search",
+                provider_kind: "openai-compat",
+            },
+            crate::learned_capability::NegativeEvidence {
+                tier: SignalTier::SelfIdentifying,
+                phase: FailurePhase::F1,
+                source: EvidenceSource::Live,
+                evidence_class: None,
+            },
             t0,
         );
         assert!(!reg.is_empty());
@@ -4883,13 +4912,17 @@ mod tests {
         let reg = registry();
         let t0 = Instant::now();
         reg.observe(
-            "nick",
-            "web_search",
-            "openai-compat",
-            SignalTier::SelfIdentifying,
-            FailurePhase::F1,
-            EvidenceSource::Live,
-            None,
+            crate::learned_capability::LearnKey {
+                state_key: "nick",
+                feature_key_raw: "web_search",
+                provider_kind: "openai-compat",
+            },
+            crate::learned_capability::NegativeEvidence {
+                tier: SignalTier::SelfIdentifying,
+                phase: FailurePhase::F1,
+                source: EvidenceSource::Live,
+                evidence_class: None,
+            },
             t0,
         );
         assert_eq!(
@@ -4931,13 +4964,17 @@ mod tests {
         let reg = registry();
         let t0 = Instant::now();
         reg.observe(
-            "nick",
-            "web_search",
-            "openai-compat",
-            SignalTier::SelfIdentifying,
-            FailurePhase::F1,
-            EvidenceSource::Live,
-            None,
+            crate::learned_capability::LearnKey {
+                state_key: "nick",
+                feature_key_raw: "web_search",
+                provider_kind: "openai-compat",
+            },
+            crate::learned_capability::NegativeEvidence {
+                tier: SignalTier::SelfIdentifying,
+                phase: FailurePhase::F1,
+                source: EvidenceSource::Live,
+                evidence_class: None,
+            },
             t0,
         );
         let expired = t0 + DECAY + Duration::from_secs(1);
@@ -4966,13 +5003,17 @@ mod tests {
         let reg = registry();
         let t0 = Instant::now();
         reg.observe(
-            "nick",
-            "web_search",
-            "openai-compat",
-            SignalTier::SelfIdentifying,
-            FailurePhase::F1,
-            EvidenceSource::Live,
-            None,
+            crate::learned_capability::LearnKey {
+                state_key: "nick",
+                feature_key_raw: "web_search",
+                provider_kind: "openai-compat",
+            },
+            crate::learned_capability::NegativeEvidence {
+                tier: SignalTier::SelfIdentifying,
+                phase: FailurePhase::F1,
+                source: EvidenceSource::Live,
+                evidence_class: None,
+            },
             t0,
         );
         let expired = t0 + DECAY + Duration::from_secs(1);
@@ -5097,13 +5138,17 @@ mod tests {
             };
             let negative = || {
                 reg.observe(
-                    "nick",
-                    "web_search",
-                    "openai-compat",
-                    SignalTier::SelfIdentifying,
-                    FailurePhase::F1,
-                    EvidenceSource::Live,
-                    None,
+                    crate::learned_capability::LearnKey {
+                        state_key: "nick",
+                        feature_key_raw: "web_search",
+                        provider_kind: "openai-compat",
+                    },
+                    crate::learned_capability::NegativeEvidence {
+                        tier: SignalTier::SelfIdentifying,
+                        phase: FailurePhase::F1,
+                        source: EvidenceSource::Live,
+                        evidence_class: None,
+                    },
                     t0,
                 )
             };
@@ -5177,13 +5222,17 @@ mod tests {
         let reg = registry();
         let t0 = Instant::now();
         reg.observe(
-            "nick",
-            "web_search",
-            "openai-compat",
-            SignalTier::SelfIdentifying,
-            FailurePhase::F1,
-            EvidenceSource::Live,
-            None,
+            crate::learned_capability::LearnKey {
+                state_key: "nick",
+                feature_key_raw: "web_search",
+                provider_kind: "openai-compat",
+            },
+            crate::learned_capability::NegativeEvidence {
+                tier: SignalTier::SelfIdentifying,
+                phase: FailurePhase::F1,
+                source: EvidenceSource::Live,
+                evidence_class: None,
+            },
             t0,
         );
 
@@ -5229,13 +5278,17 @@ mod tests {
 
         // Act -- a fresh self-identifying negative supersedes it.
         let outcome = reg.observe(
-            "nick",
-            "web_search",
-            "openai-compat",
-            SignalTier::SelfIdentifying,
-            FailurePhase::F1,
-            EvidenceSource::Live,
-            None,
+            crate::learned_capability::LearnKey {
+                state_key: "nick",
+                feature_key_raw: "web_search",
+                provider_kind: "openai-compat",
+            },
+            crate::learned_capability::NegativeEvidence {
+                tier: SignalTier::SelfIdentifying,
+                phase: FailurePhase::F1,
+                source: EvidenceSource::Live,
+                evidence_class: None,
+            },
             t0,
         );
 
@@ -5271,13 +5324,17 @@ mod tests {
         // than the structural positive: it must be dropped, leaving the
         // verified entry resident.
         let outcome = reg.observe(
-            "nick",
-            "web_search",
-            "openai-compat",
-            SignalTier::Inferred,
-            FailurePhase::F3,
-            EvidenceSource::Live,
-            None,
+            crate::learned_capability::LearnKey {
+                state_key: "nick",
+                feature_key_raw: "web_search",
+                provider_kind: "openai-compat",
+            },
+            crate::learned_capability::NegativeEvidence {
+                tier: SignalTier::Inferred,
+                phase: FailurePhase::F3,
+                source: EvidenceSource::Live,
+                evidence_class: None,
+            },
             t0,
         );
 
@@ -5295,13 +5352,17 @@ mod tests {
 
         // A later SELF-IDENTIFYING negative still replaces the survivor.
         let outcome = reg.observe(
-            "nick",
-            "web_search",
-            "openai-compat",
-            SignalTier::SelfIdentifying,
-            FailurePhase::F1,
-            EvidenceSource::Live,
-            None,
+            crate::learned_capability::LearnKey {
+                state_key: "nick",
+                feature_key_raw: "web_search",
+                provider_kind: "openai-compat",
+            },
+            crate::learned_capability::NegativeEvidence {
+                tier: SignalTier::SelfIdentifying,
+                phase: FailurePhase::F1,
+                source: EvidenceSource::Live,
+                evidence_class: None,
+            },
             t0,
         );
         assert_eq!(outcome, Some(ObserveOutcome::Acting));
@@ -5318,24 +5379,32 @@ mod tests {
         let reg = registry();
         let t0 = Instant::now();
         reg.observe(
-            "nick",
-            "structured_output",
-            "openai-compat",
-            SignalTier::Inferred,
-            FailurePhase::F3,
-            EvidenceSource::Live,
-            None,
+            crate::learned_capability::LearnKey {
+                state_key: "nick",
+                feature_key_raw: "structured_output",
+                provider_kind: "openai-compat",
+            },
+            crate::learned_capability::NegativeEvidence {
+                tier: SignalTier::Inferred,
+                phase: FailurePhase::F3,
+                source: EvidenceSource::Live,
+                evidence_class: None,
+            },
             t0,
         );
         let confirm = t0 + WINDOW / 2;
         let outcome = reg.observe(
-            "nick",
-            "structured_output",
-            "openai-compat",
-            SignalTier::Inferred,
-            FailurePhase::F3,
-            EvidenceSource::Live,
-            None,
+            crate::learned_capability::LearnKey {
+                state_key: "nick",
+                feature_key_raw: "structured_output",
+                provider_kind: "openai-compat",
+            },
+            crate::learned_capability::NegativeEvidence {
+                tier: SignalTier::Inferred,
+                phase: FailurePhase::F3,
+                source: EvidenceSource::Live,
+                evidence_class: None,
+            },
             confirm,
         );
 
@@ -5361,24 +5430,32 @@ mod tests {
         let reg = registry();
         let t0 = Instant::now();
         reg.observe(
-            "nick",
-            "structured_output",
-            "openai-compat",
-            SignalTier::Inferred,
-            FailurePhase::F3,
-            EvidenceSource::Probe,
-            None,
+            crate::learned_capability::LearnKey {
+                state_key: "nick",
+                feature_key_raw: "structured_output",
+                provider_kind: "openai-compat",
+            },
+            crate::learned_capability::NegativeEvidence {
+                tier: SignalTier::Inferred,
+                phase: FailurePhase::F3,
+                source: EvidenceSource::Probe,
+                evidence_class: None,
+            },
             t0,
         );
         let confirm = t0 + WINDOW / 2;
         let outcome = reg.observe(
-            "nick",
-            "structured_output",
-            "openai-compat",
-            SignalTier::Inferred,
-            FailurePhase::F3,
-            EvidenceSource::Probe,
-            None,
+            crate::learned_capability::LearnKey {
+                state_key: "nick",
+                feature_key_raw: "structured_output",
+                provider_kind: "openai-compat",
+            },
+            crate::learned_capability::NegativeEvidence {
+                tier: SignalTier::Inferred,
+                phase: FailurePhase::F3,
+                source: EvidenceSource::Probe,
+                evidence_class: None,
+            },
             confirm,
         );
 
@@ -5417,13 +5494,17 @@ mod tests {
 
         // A negative on a different key: not verified.
         reg.observe(
-            "nick",
-            "computer_use",
-            "openai-compat",
-            SignalTier::SelfIdentifying,
-            FailurePhase::F1,
-            EvidenceSource::Live,
-            None,
+            crate::learned_capability::LearnKey {
+                state_key: "nick",
+                feature_key_raw: "computer_use",
+                provider_kind: "openai-compat",
+            },
+            crate::learned_capability::NegativeEvidence {
+                tier: SignalTier::SelfIdentifying,
+                phase: FailurePhase::F1,
+                source: EvidenceSource::Live,
+                evidence_class: None,
+            },
             t0,
         );
         assert!(!reg.is_verified_working("nick", "computer_use", "openai-compat", t0));
@@ -5443,13 +5524,17 @@ mod tests {
             t0,
         );
         reg.observe(
-            "nn",
-            "computer_use",
-            "openai-compat",
-            SignalTier::SelfIdentifying,
-            FailurePhase::F2,
-            EvidenceSource::Live,
-            None,
+            crate::learned_capability::LearnKey {
+                state_key: "nn",
+                feature_key_raw: "computer_use",
+                provider_kind: "openai-compat",
+            },
+            crate::learned_capability::NegativeEvidence {
+                tier: SignalTier::SelfIdentifying,
+                phase: FailurePhase::F2,
+                source: EvidenceSource::Live,
+                evidence_class: None,
+            },
             t0,
         );
 
@@ -5487,33 +5572,45 @@ mod tests {
                 t0,
             );
             reg.observe(
-                "nn",
-                "structured_output",
-                "openai-compat",
-                SignalTier::Inferred,
-                FailurePhase::F3,
-                EvidenceSource::Live,
-                None,
+                crate::learned_capability::LearnKey {
+                    state_key: "nn",
+                    feature_key_raw: "structured_output",
+                    provider_kind: "openai-compat",
+                },
+                crate::learned_capability::NegativeEvidence {
+                    tier: SignalTier::Inferred,
+                    phase: FailurePhase::F3,
+                    source: EvidenceSource::Live,
+                    evidence_class: None,
+                },
                 t0,
             );
             reg.observe(
-                "nn",
-                "structured_output",
-                "openai-compat",
-                SignalTier::Inferred,
-                FailurePhase::F3,
-                EvidenceSource::Live,
-                None,
+                crate::learned_capability::LearnKey {
+                    state_key: "nn",
+                    feature_key_raw: "structured_output",
+                    provider_kind: "openai-compat",
+                },
+                crate::learned_capability::NegativeEvidence {
+                    tier: SignalTier::Inferred,
+                    phase: FailurePhase::F3,
+                    source: EvidenceSource::Live,
+                    evidence_class: None,
+                },
                 t0 + WINDOW / 2,
             );
             reg.observe(
-                "ns",
-                "computer_use",
-                "openai-compat",
-                SignalTier::SelfIdentifying,
-                FailurePhase::F1,
-                EvidenceSource::Live,
-                None,
+                crate::learned_capability::LearnKey {
+                    state_key: "ns",
+                    feature_key_raw: "computer_use",
+                    provider_kind: "openai-compat",
+                },
+                crate::learned_capability::NegativeEvidence {
+                    tier: SignalTier::SelfIdentifying,
+                    phase: FailurePhase::F1,
+                    source: EvidenceSource::Live,
+                    evidence_class: None,
+                },
                 t0,
             );
             let mut snap = reg.snapshot();

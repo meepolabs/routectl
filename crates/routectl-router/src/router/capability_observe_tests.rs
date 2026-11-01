@@ -389,13 +389,17 @@ fn verified_positive_no_ops_when_a_negative_resides() {
     let router = router_with(OPENAI_P1, NoopProvider::new());
     let target = openai_target(&router);
     router.learned_capabilities.observe(
-        "p1#wire-model",
-        STRUCTURED_OUTPUT,
-        "openai-compat",
-        SignalTier::SelfIdentifying,
-        FailurePhase::F1,
-        EvidenceSource::Live,
-        None,
+        crate::learned_capability::LearnKey {
+            state_key: "p1#wire-model",
+            feature_key_raw: STRUCTURED_OUTPUT,
+            provider_kind: "openai-compat",
+        },
+        crate::learned_capability::NegativeEvidence {
+            tier: SignalTier::SelfIdentifying,
+            phase: FailurePhase::F1,
+            source: EvidenceSource::Live,
+            evidence_class: None,
+        },
         Instant::now(),
     );
     let req = structured_output_request(&["name"]);
@@ -462,13 +466,17 @@ fn only_a_positive_verdict_transition_rides_out_for_the_ledger() {
             }
             Prior::NegativeClearedByReprobe => {
                 router.learned_capabilities.observe(
-                    "p1#wire-model",
-                    STRUCTURED_OUTPUT,
-                    "openai-compat",
-                    SignalTier::SelfIdentifying,
-                    FailurePhase::F1,
-                    EvidenceSource::Live,
-                    None,
+                    crate::learned_capability::LearnKey {
+                        state_key: "p1#wire-model",
+                        feature_key_raw: STRUCTURED_OUTPUT,
+                        provider_kind: "openai-compat",
+                    },
+                    crate::learned_capability::NegativeEvidence {
+                        tier: SignalTier::SelfIdentifying,
+                        phase: FailurePhase::F1,
+                        source: EvidenceSource::Live,
+                        evidence_class: None,
+                    },
                     t0,
                 );
                 let expired = router.learned_capabilities.snapshot()[0].expires_at

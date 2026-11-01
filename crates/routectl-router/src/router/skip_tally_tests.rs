@@ -475,13 +475,17 @@ async fn a_capability_refused_on_every_lane_keeps_its_capability_skips() {
     for idx in 0..row.targets {
         let lane = format!("{}#claude-{}", provider_name(idx), nickname(idx));
         let observed = fx.router.learned_capabilities.observe(
-            &lane,
-            SEARCH,
-            PROVIDER_KIND,
-            SignalTier::SelfIdentifying,
-            FailurePhase::F1,
-            EvidenceSource::Live,
-            None,
+            crate::learned_capability::LearnKey {
+                state_key: &lane,
+                feature_key_raw: SEARCH,
+                provider_kind: PROVIDER_KIND,
+            },
+            crate::learned_capability::NegativeEvidence {
+                tier: SignalTier::SelfIdentifying,
+                phase: FailurePhase::F1,
+                source: EvidenceSource::Live,
+                evidence_class: None,
+            },
             Instant::now(),
         );
         assert!(observed.is_some(), "premise: {lane} learned the negative");

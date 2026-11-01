@@ -678,13 +678,17 @@ fn fill_and_lease_lane(router: &Router) -> Vec<crate::learned_capability::PurgeL
             let key = crate::beta_capability::beta_capability_key(&format!("zz-fill-{n}"))
                 .expect("the filler flag is well formed");
             let _ = registry.observe(
-                LANE,
-                &key,
-                "bedrock",
-                SignalTier::SelfIdentifying,
-                FailurePhase::F1,
-                EvidenceSource::Live,
-                None,
+                crate::learned_capability::LearnKey {
+                    state_key: LANE,
+                    feature_key_raw: &key,
+                    provider_kind: "bedrock",
+                },
+                crate::learned_capability::NegativeEvidence {
+                    tier: SignalTier::SelfIdentifying,
+                    phase: FailurePhase::F1,
+                    source: EvidenceSource::Live,
+                    evidence_class: None,
+                },
                 Instant::now(),
             );
             match registry.prepare_purge(registry.generation(), LANE, &key, "bedrock") {

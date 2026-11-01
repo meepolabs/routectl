@@ -52,13 +52,17 @@ fn observe_reporting(
 ) -> AppliedMutation<ObserveOutcome> {
     reg.observe_in_generation(
         reg.generation(),
-        state_key,
-        capability,
-        "",
-        SignalTier::SelfIdentifying,
-        FailurePhase::F1,
-        EvidenceSource::Live,
-        None,
+        crate::learned_capability::LearnKey {
+            state_key,
+            feature_key_raw: capability,
+            provider_kind: "",
+        },
+        crate::learned_capability::NegativeEvidence {
+            tier: SignalTier::SelfIdentifying,
+            phase: FailurePhase::F1,
+            source: EvidenceSource::Live,
+            evidence_class: None,
+        },
         now,
     )
     .applied()
@@ -105,20 +109,26 @@ impl MutationPath {
         match self {
             Self::ObserveNegative => PathOutcome::from(reg.observe_in_generation(
                 generation,
-                state_key,
-                capability,
-                "",
-                SignalTier::SelfIdentifying,
-                FailurePhase::F1,
-                EvidenceSource::Live,
-                None,
+                crate::learned_capability::LearnKey {
+                    state_key,
+                    feature_key_raw: capability,
+                    provider_kind: "",
+                },
+                crate::learned_capability::NegativeEvidence {
+                    tier: SignalTier::SelfIdentifying,
+                    phase: FailurePhase::F1,
+                    source: EvidenceSource::Live,
+                    evidence_class: None,
+                },
                 now,
             )),
             Self::ObservePositive => PathOutcome::from(reg.observe_positive_in_generation(
                 generation,
-                state_key,
-                capability,
-                "",
+                crate::learned_capability::LearnKey {
+                    state_key,
+                    feature_key_raw: capability,
+                    provider_kind: "",
+                },
                 EvidenceSource::Live,
                 Some("schema_mismatch"),
                 now,
@@ -338,13 +348,17 @@ fn a_same_key_observation_is_refused_while_a_lease_is_open() {
     // Act: a fresh observation on the reserved key.
     let outcome = reg.observe_in_generation(
         reg.generation(),
-        "nick",
-        "web_search",
-        "",
-        SignalTier::SelfIdentifying,
-        FailurePhase::F1,
-        EvidenceSource::Live,
-        None,
+        crate::learned_capability::LearnKey {
+            state_key: "nick",
+            feature_key_raw: "web_search",
+            provider_kind: "",
+        },
+        crate::learned_capability::NegativeEvidence {
+            tier: SignalTier::SelfIdentifying,
+            phase: FailurePhase::F1,
+            source: EvidenceSource::Live,
+            evidence_class: None,
+        },
         Instant::now(),
     );
 
@@ -383,13 +397,17 @@ fn an_observation_after_release_relearns_normally() {
     // Act
     let outcome = reg.observe_in_generation(
         reg.generation(),
-        "nick",
-        "web_search",
-        "",
-        SignalTier::SelfIdentifying,
-        FailurePhase::F1,
-        EvidenceSource::Live,
-        None,
+        crate::learned_capability::LearnKey {
+            state_key: "nick",
+            feature_key_raw: "web_search",
+            provider_kind: "",
+        },
+        crate::learned_capability::NegativeEvidence {
+            tier: SignalTier::SelfIdentifying,
+            phase: FailurePhase::F1,
+            source: EvidenceSource::Live,
+            evidence_class: None,
+        },
         Instant::now(),
     );
 
@@ -607,13 +625,17 @@ fn a_negative_observation_reports_a_monotonic_incarnation() {
     let first = reg
         .observe_in_generation(
             reg.generation(),
-            "t",
-            "web_search",
-            "",
-            SignalTier::SelfIdentifying,
-            FailurePhase::F1,
-            EvidenceSource::Live,
-            None,
+            crate::learned_capability::LearnKey {
+                state_key: "t",
+                feature_key_raw: "web_search",
+                provider_kind: "",
+            },
+            crate::learned_capability::NegativeEvidence {
+                tier: SignalTier::SelfIdentifying,
+                phase: FailurePhase::F1,
+                source: EvidenceSource::Live,
+                evidence_class: None,
+            },
             now,
         )
         .applied()
@@ -621,13 +643,17 @@ fn a_negative_observation_reports_a_monotonic_incarnation() {
     let second = reg
         .observe_in_generation(
             reg.generation(),
-            "t",
-            "web_search",
-            "",
-            SignalTier::SelfIdentifying,
-            FailurePhase::F1,
-            EvidenceSource::Live,
-            None,
+            crate::learned_capability::LearnKey {
+                state_key: "t",
+                feature_key_raw: "web_search",
+                provider_kind: "",
+            },
+            crate::learned_capability::NegativeEvidence {
+                tier: SignalTier::SelfIdentifying,
+                phase: FailurePhase::F1,
+                source: EvidenceSource::Live,
+                evidence_class: None,
+            },
             now,
         )
         .applied()
@@ -935,13 +961,17 @@ fn a_purge_cannot_take_the_lease_between_validation_and_the_mutation() {
 
     let outcome = reg.observe_in_generation(
         reg.generation(),
-        "t",
-        "web_search",
-        "",
-        SignalTier::SelfIdentifying,
-        FailurePhase::F1,
-        EvidenceSource::Live,
-        None,
+        crate::learned_capability::LearnKey {
+            state_key: "t",
+            feature_key_raw: "web_search",
+            provider_kind: "",
+        },
+        crate::learned_capability::NegativeEvidence {
+            tier: SignalTier::SelfIdentifying,
+            phase: FailurePhase::F1,
+            source: EvidenceSource::Live,
+            evidence_class: None,
+        },
         Instant::now(),
     );
 
@@ -1001,13 +1031,17 @@ fn a_paused_mutation_does_not_deadlock_a_concurrent_purge_on_the_same_key() {
         std::thread::spawn(move || {
             reg.observe_in_generation(
                 generation,
-                "nick",
-                "web_search",
-                "",
-                SignalTier::SelfIdentifying,
-                FailurePhase::F1,
-                EvidenceSource::Live,
-                None,
+                crate::learned_capability::LearnKey {
+                    state_key: "nick",
+                    feature_key_raw: "web_search",
+                    provider_kind: "",
+                },
+                crate::learned_capability::NegativeEvidence {
+                    tier: SignalTier::SelfIdentifying,
+                    phase: FailurePhase::F1,
+                    source: EvidenceSource::Live,
+                    evidence_class: None,
+                },
                 Instant::now(),
             )
         })
@@ -1053,13 +1087,17 @@ fn an_exhausted_incarnation_sequence_refuses_without_mutating() {
 
     let outcome = reg.observe_in_generation(
         reg.generation(),
-        "t",
-        "web_search",
-        "",
-        SignalTier::SelfIdentifying,
-        FailurePhase::F1,
-        EvidenceSource::Live,
-        None,
+        crate::learned_capability::LearnKey {
+            state_key: "t",
+            feature_key_raw: "web_search",
+            provider_kind: "",
+        },
+        crate::learned_capability::NegativeEvidence {
+            tier: SignalTier::SelfIdentifying,
+            phase: FailurePhase::F1,
+            source: EvidenceSource::Live,
+            evidence_class: None,
+        },
         Instant::now(),
     );
 

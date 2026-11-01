@@ -47,18 +47,35 @@ fn write(reg: &LearnedCapabilityRegistry, entry: Entry, key: &str, kind: &str) -
     );
     match entry {
         Entry::Observe => reg
-            .observe(LANE, key, kind, tier, phase, source, None, now)
+            .observe(
+                crate::learned_capability::LearnKey {
+                    state_key: LANE,
+                    feature_key_raw: key,
+                    provider_kind: kind,
+                },
+                crate::learned_capability::NegativeEvidence {
+                    tier,
+                    phase,
+                    source,
+                    evidence_class: None,
+                },
+                now,
+            )
             .is_some(),
         Entry::InGeneration => reg
             .observe_in_generation(
                 reg.generation(),
-                LANE,
-                key,
-                kind,
-                tier,
-                phase,
-                source,
-                None,
+                crate::learned_capability::LearnKey {
+                    state_key: LANE,
+                    feature_key_raw: key,
+                    provider_kind: kind,
+                },
+                crate::learned_capability::NegativeEvidence {
+                    tier,
+                    phase,
+                    source,
+                    evidence_class: None,
+                },
                 now,
             )
             .applied()

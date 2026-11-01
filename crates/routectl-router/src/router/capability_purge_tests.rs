@@ -754,13 +754,17 @@ fn a_bedrock_dotted_key_purges_on_an_unresolved_model() {
     // Plant the way the learn path does: under the bedrock kind, so the stored
     // key is the REDUCED one.
     router.learned_capabilities.observe(
-        "prov#upstream-id",
-        raw,
-        "bedrock",
-        SignalTier::SelfIdentifying,
-        FailurePhase::F1,
-        EvidenceSource::Live,
-        None,
+        crate::learned_capability::LearnKey {
+            state_key: "prov#upstream-id",
+            feature_key_raw: raw,
+            provider_kind: "bedrock",
+        },
+        crate::learned_capability::NegativeEvidence {
+            tier: SignalTier::SelfIdentifying,
+            phase: FailurePhase::F1,
+            source: EvidenceSource::Live,
+            evidence_class: None,
+        },
         Instant::now(),
     );
     assert!(

@@ -2567,13 +2567,17 @@ async fn purging_a_resident_seeded_negative_is_a_learned_purge_that_also_marks()
     // Arrange
     let fixture = bedrock_fixture();
     let _ = fixture.router.load().learned_registry().observe(
-        BEDROCK_LANE,
-        &beta("fx-seeded"),
-        BEDROCK,
-        routectl_core::capability::SignalTier::SelfIdentifying,
-        routectl_core::capability::FailurePhase::F1,
-        routectl_core::capability::EvidenceSource::Live,
-        None,
+        routectl_router::LearnKey {
+            state_key: BEDROCK_LANE,
+            feature_key_raw: &beta("fx-seeded"),
+            provider_kind: BEDROCK,
+        },
+        routectl_router::NegativeEvidence {
+            tier: routectl_core::capability::SignalTier::SelfIdentifying,
+            phase: routectl_core::capability::FailurePhase::F1,
+            source: routectl_core::capability::EvidenceSource::Live,
+            evidence_class: None,
+        },
         Instant::now(),
     );
     assert!(fixture.resident(BEDROCK_LANE, &beta("fx-seeded")));

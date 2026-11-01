@@ -33,13 +33,17 @@ fn beta(flag: &str) -> String {
 
 fn learn(reg: &LearnedCapabilityRegistry, key: &str, tier: SignalTier, at: Instant) {
     reg.observe(
-        LANE,
-        key,
-        KIND,
-        tier,
-        FailurePhase::F1,
-        EvidenceSource::Live,
-        None,
+        crate::learned_capability::LearnKey {
+            state_key: LANE,
+            feature_key_raw: key,
+            provider_kind: KIND,
+        },
+        crate::learned_capability::NegativeEvidence {
+            tier,
+            phase: FailurePhase::F1,
+            source: EvidenceSource::Live,
+            evidence_class: None,
+        },
         at,
     );
 }
@@ -423,14 +427,18 @@ fn a_finalizing_seed_lift_never_exposes_its_marker_while_the_lease_is_held() {
     assert!(
         reg.observe_in_generation(
             reg.generation(),
-            LANE,
-            &beta("fx-a"),
-            KIND,
-            SignalTier::SelfIdentifying,
-            FailurePhase::F1,
-            EvidenceSource::Live,
-            None,
-            Instant::now(),
+            crate::learned_capability::LearnKey {
+                state_key: LANE,
+                feature_key_raw: &beta("fx-a"),
+                provider_kind: KIND
+            },
+            crate::learned_capability::NegativeEvidence {
+                tier: SignalTier::SelfIdentifying,
+                phase: FailurePhase::F1,
+                source: EvidenceSource::Live,
+                evidence_class: None
+            },
+            Instant::now()
         )
         .applied()
         .is_some(),

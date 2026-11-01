@@ -383,13 +383,17 @@ fn scenario_c_self_identifying_negative_replaces_resident_verified() {
     // Act: a fresh self-identifying negative arrives for the same key -- the
     // signal the error-arm learn path mints.
     let outcome = router.learned_capabilities.observe(
-        "p1#m1",
-        STRUCTURED_OUTPUT,
-        KIND,
-        SignalTier::SelfIdentifying,
-        FailurePhase::F1,
-        EvidenceSource::Live,
-        None,
+        crate::learned_capability::LearnKey {
+            state_key: "p1#m1",
+            feature_key_raw: STRUCTURED_OUTPUT,
+            provider_kind: KIND,
+        },
+        crate::learned_capability::NegativeEvidence {
+            tier: SignalTier::SelfIdentifying,
+            phase: FailurePhase::F1,
+            source: EvidenceSource::Live,
+            evidence_class: None,
+        },
         now,
     );
 

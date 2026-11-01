@@ -234,13 +234,17 @@ mod doctor_agreement {
 
     fn plant_negative(router: &Router, lane: &str, key: &str, now: Instant) {
         let outcome = router.observe_learned_capability(
-            lane,
-            key,
-            KIND,
-            SignalTier::SelfIdentifying,
-            FailurePhase::F1,
-            EvidenceSource::Live,
-            None,
+            routectl_router::LearnKey {
+                state_key: lane,
+                feature_key_raw: key,
+                provider_kind: KIND,
+            },
+            routectl_router::NegativeEvidence {
+                tier: SignalTier::SelfIdentifying,
+                phase: FailurePhase::F1,
+                source: EvidenceSource::Live,
+                evidence_class: None,
+            },
             now,
         );
         assert!(

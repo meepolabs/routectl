@@ -788,13 +788,17 @@ async fn learned_capability_snapshot_surfaces_negatives() {
     // version a dispatch through this Router would read.
     let provider_kind = router.provider_kind_for_state_key("alpha").to_string();
     router.learned_capabilities.observe(
-        "alpha",
-        "web_search",
-        &provider_kind,
-        SignalTier::SelfIdentifying,
-        routectl_core::capability::FailurePhase::F1,
-        EvidenceSource::Live,
-        None,
+        crate::learned_capability::LearnKey {
+            state_key: "alpha",
+            feature_key_raw: "web_search",
+            provider_kind: &provider_kind,
+        },
+        crate::learned_capability::NegativeEvidence {
+            tier: SignalTier::SelfIdentifying,
+            phase: routectl_core::capability::FailurePhase::F1,
+            source: EvidenceSource::Live,
+            evidence_class: None,
+        },
         Instant::now(),
     );
     let snap = router.learned_capability_snapshot();
@@ -1273,13 +1277,17 @@ fn learned_negative_deprioritizes_target_to_tail() {
     let front = learned_target(&router, "front");
     let back = learned_target(&router, "back");
     router.learned_capabilities.observe(
-        &learned_lane("front"),
-        "web_search",
-        "anthropic-api",
-        routectl_core::capability::SignalTier::SelfIdentifying,
-        routectl_core::capability::FailurePhase::F1,
-        EvidenceSource::Live,
-        None,
+        crate::learned_capability::LearnKey {
+            state_key: &learned_lane("front"),
+            feature_key_raw: "web_search",
+            provider_kind: "anthropic-api",
+        },
+        crate::learned_capability::NegativeEvidence {
+            tier: routectl_core::capability::SignalTier::SelfIdentifying,
+            phase: routectl_core::capability::FailurePhase::F1,
+            source: EvidenceSource::Live,
+            evidence_class: None,
+        },
         std::time::Instant::now(),
     );
     let features = vec!["web_search".to_string()];
@@ -1370,13 +1378,17 @@ fn sole_learned_tail_target_still_attempts_and_counts_d17() {
     let only = learned_target(&router, "only");
     for _ in 0..2 {
         router.learned_capabilities.observe(
-            &learned_lane("only"),
-            "web_search",
-            "anthropic-api",
-            routectl_core::capability::SignalTier::Inferred,
-            routectl_core::capability::FailurePhase::F1,
-            EvidenceSource::Live,
-            None,
+            crate::learned_capability::LearnKey {
+                state_key: &learned_lane("only"),
+                feature_key_raw: "web_search",
+                provider_kind: "anthropic-api",
+            },
+            crate::learned_capability::NegativeEvidence {
+                tier: routectl_core::capability::SignalTier::Inferred,
+                phase: routectl_core::capability::FailurePhase::F1,
+                source: EvidenceSource::Live,
+                evidence_class: None,
+            },
             std::time::Instant::now(),
         );
     }
@@ -1418,13 +1430,17 @@ fn kill_switch_off_skips_the_learned_consult() {
     let front = learned_target(&router, "front");
     let back = learned_target(&router, "back");
     router.learned_capabilities.observe(
-        &learned_lane("front"),
-        "web_search",
-        "anthropic-api",
-        routectl_core::capability::SignalTier::SelfIdentifying,
-        routectl_core::capability::FailurePhase::F1,
-        EvidenceSource::Live,
-        None,
+        crate::learned_capability::LearnKey {
+            state_key: &learned_lane("front"),
+            feature_key_raw: "web_search",
+            provider_kind: "anthropic-api",
+        },
+        crate::learned_capability::NegativeEvidence {
+            tier: routectl_core::capability::SignalTier::SelfIdentifying,
+            phase: routectl_core::capability::FailurePhase::F1,
+            source: EvidenceSource::Live,
+            evidence_class: None,
+        },
         std::time::Instant::now(),
     );
     let features = vec!["web_search".to_string()];
@@ -1458,13 +1474,17 @@ fn expired_learned_negative_admits_one_probe_through_filter() {
     let router = Router::new(Arc::new(config));
     let only = learned_target(&router, "only");
     router.learned_capabilities.observe(
-        &learned_lane("only"),
-        "web_search",
-        "anthropic-api",
-        routectl_core::capability::SignalTier::SelfIdentifying,
-        routectl_core::capability::FailurePhase::F1,
-        EvidenceSource::Live,
-        None,
+        crate::learned_capability::LearnKey {
+            state_key: &learned_lane("only"),
+            feature_key_raw: "web_search",
+            provider_kind: "anthropic-api",
+        },
+        crate::learned_capability::NegativeEvidence {
+            tier: routectl_core::capability::SignalTier::SelfIdentifying,
+            phase: routectl_core::capability::FailurePhase::F1,
+            source: EvidenceSource::Live,
+            evidence_class: None,
+        },
         std::time::Instant::now(),
     );
     let features = vec!["web_search".to_string()];

@@ -82,13 +82,17 @@ fn the_rebuild_scratch_is_empty_and_carries_the_source_configuration() {
     let scope = BetaSeedScope::new("bedrock", &["fx-scratch"]);
     source.set_seed_scope(scope);
     source.observe(
-        "lane",
-        "computer_use",
-        "openai-compat",
-        SignalTier::SelfIdentifying,
-        FailurePhase::F1,
-        EvidenceSource::Live,
-        None,
+        crate::learned_capability::LearnKey {
+            state_key: "lane",
+            feature_key_raw: "computer_use",
+            provider_kind: "openai-compat",
+        },
+        crate::learned_capability::NegativeEvidence {
+            tier: SignalTier::SelfIdentifying,
+            phase: FailurePhase::F1,
+            source: EvidenceSource::Live,
+            evidence_class: None,
+        },
         Instant::now(),
     );
     assert!(

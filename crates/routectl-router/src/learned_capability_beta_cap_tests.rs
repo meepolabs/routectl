@@ -22,13 +22,17 @@ fn beta(n: usize) -> String {
 
 fn learn(reg: &LearnedCapabilityRegistry, lane: &str, kind: &str, key: &str, at: Instant) {
     reg.observe(
-        lane,
-        key,
-        kind,
-        SignalTier::SelfIdentifying,
-        FailurePhase::F1,
-        EvidenceSource::Live,
-        None,
+        crate::learned_capability::LearnKey {
+            state_key: lane,
+            feature_key_raw: key,
+            provider_kind: kind,
+        },
+        crate::learned_capability::NegativeEvidence {
+            tier: SignalTier::SelfIdentifying,
+            phase: FailurePhase::F1,
+            source: EvidenceSource::Live,
+            evidence_class: None,
+        },
         at,
     );
 }
@@ -223,13 +227,17 @@ fn a_new_beta_on_a_fully_leased_lane_is_refused_until_a_lease_releases() {
     let mut outcome = None;
     let events = routectl_testkit::capture_events(|| {
         outcome = reg.observe(
-            LANE,
-            &newcomer,
-            KIND,
-            SignalTier::SelfIdentifying,
-            FailurePhase::F1,
-            EvidenceSource::Live,
-            None,
+            crate::learned_capability::LearnKey {
+                state_key: LANE,
+                feature_key_raw: &newcomer,
+                provider_kind: KIND,
+            },
+            crate::learned_capability::NegativeEvidence {
+                tier: SignalTier::SelfIdentifying,
+                phase: FailurePhase::F1,
+                source: EvidenceSource::Live,
+                evidence_class: None,
+            },
             base + secs(100),
         );
     });

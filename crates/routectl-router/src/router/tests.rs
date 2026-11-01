@@ -1136,13 +1136,17 @@ fn router_new_builds_learned_registry_reflecting_config_knobs() {
     // exactly at the configured 1h decay -- not the registry default.
     let t0 = Instant::now();
     router.learned_capabilities.observe(
-        "nick",
-        "web_search",
-        "openai-compat",
-        SignalTier::SelfIdentifying,
-        FailurePhase::F1,
-        EvidenceSource::Live,
-        None,
+        crate::learned_capability::LearnKey {
+            state_key: "nick",
+            feature_key_raw: "web_search",
+            provider_kind: "openai-compat",
+        },
+        crate::learned_capability::NegativeEvidence {
+            tier: SignalTier::SelfIdentifying,
+            phase: FailurePhase::F1,
+            source: EvidenceSource::Live,
+            evidence_class: None,
+        },
         t0,
     );
     assert_eq!(
@@ -1220,13 +1224,17 @@ fn carry_over_learned_from_carries_when_catalog_and_overlay_unchanged() {
     let config = Arc::new(Config::default());
     let before = Router::new(config.clone());
     before.learned_capabilities.observe(
-        "nick",
-        "web_search",
-        "openai-compat",
-        SignalTier::SelfIdentifying,
-        FailurePhase::F1,
-        EvidenceSource::Live,
-        None,
+        crate::learned_capability::LearnKey {
+            state_key: "nick",
+            feature_key_raw: "web_search",
+            provider_kind: "openai-compat",
+        },
+        crate::learned_capability::NegativeEvidence {
+            tier: SignalTier::SelfIdentifying,
+            phase: FailurePhase::F1,
+            source: EvidenceSource::Live,
+            evidence_class: None,
+        },
         Instant::now(),
     );
     let mut after = Router::new(config);
@@ -1257,13 +1265,17 @@ fn carry_over_learned_from_clears_in_flight_slot() {
     let before = Router::new(config.clone());
     let t0 = Instant::now();
     before.learned_capabilities.observe(
-        "nick",
-        "web_search",
-        "openai-compat",
-        SignalTier::SelfIdentifying,
-        FailurePhase::F1,
-        EvidenceSource::Live,
-        None,
+        crate::learned_capability::LearnKey {
+            state_key: "nick",
+            feature_key_raw: "web_search",
+            provider_kind: "openai-compat",
+        },
+        crate::learned_capability::NegativeEvidence {
+            tier: SignalTier::SelfIdentifying,
+            phase: FailurePhase::F1,
+            source: EvidenceSource::Live,
+            evidence_class: None,
+        },
         t0,
     );
     let t_probe = t0 + Duration::from_hours(1) + Duration::from_secs(1);
@@ -1349,23 +1361,31 @@ fn carry_over_expires_learned_entries_whose_override_cell_changed() {
     // A masked entry (the cell that changes) plus an unrelated healthy
     // entry (no override in either config).
     before.learned_capabilities.observe(
-        "p",
-        "web_search",
-        "openai-compat",
-        SignalTier::SelfIdentifying,
-        FailurePhase::F1,
-        EvidenceSource::Live,
-        None,
+        crate::learned_capability::LearnKey {
+            state_key: "p",
+            feature_key_raw: "web_search",
+            provider_kind: "openai-compat",
+        },
+        crate::learned_capability::NegativeEvidence {
+            tier: SignalTier::SelfIdentifying,
+            phase: FailurePhase::F1,
+            source: EvidenceSource::Live,
+            evidence_class: None,
+        },
         t0,
     );
     before.learned_capabilities.observe(
-        "p",
-        "computer_use",
-        "openai-compat",
-        SignalTier::SelfIdentifying,
-        FailurePhase::F1,
-        EvidenceSource::Live,
-        None,
+        crate::learned_capability::LearnKey {
+            state_key: "p",
+            feature_key_raw: "computer_use",
+            provider_kind: "openai-compat",
+        },
+        crate::learned_capability::NegativeEvidence {
+            tier: SignalTier::SelfIdentifying,
+            phase: FailurePhase::F1,
+            source: EvidenceSource::Live,
+            evidence_class: None,
+        },
         t0,
     );
 
@@ -1425,13 +1445,17 @@ fn carry_over_preserves_learned_entries_across_an_essential_flip() {
     let before = Router::new(Arc::new(Config::default()));
     let t0 = Instant::now();
     before.learned_capabilities.observe(
-        "p",
-        "advisor",
-        "",
-        SignalTier::SelfIdentifying,
-        FailurePhase::F1,
-        EvidenceSource::Live,
-        None,
+        crate::learned_capability::LearnKey {
+            state_key: "p",
+            feature_key_raw: "advisor",
+            provider_kind: "",
+        },
+        crate::learned_capability::NegativeEvidence {
+            tier: SignalTier::SelfIdentifying,
+            phase: FailurePhase::F1,
+            source: EvidenceSource::Live,
+            evidence_class: None,
+        },
         t0,
     );
 
@@ -1493,13 +1517,17 @@ fn carry_over_learned_from_clears_and_warns_on_catalog_bump() {
     let config = Arc::new(Config::default());
     let before = Router::new(config.clone());
     before.learned_capabilities.observe(
-        "nick",
-        "web_search",
-        "openai-compat",
-        SignalTier::SelfIdentifying,
-        FailurePhase::F1,
-        EvidenceSource::Live,
-        None,
+        crate::learned_capability::LearnKey {
+            state_key: "nick",
+            feature_key_raw: "web_search",
+            provider_kind: "openai-compat",
+        },
+        crate::learned_capability::NegativeEvidence {
+            tier: SignalTier::SelfIdentifying,
+            phase: FailurePhase::F1,
+            source: EvidenceSource::Live,
+            evidence_class: None,
+        },
         Instant::now(),
     );
     let mut after = Router::new(config);
@@ -1546,13 +1574,17 @@ fn carry_over_learned_from_clears_and_warns_on_overlay_revision_change() {
     let mut before = Router::new(config.clone());
     before.install_catalog_overlay(overlay_at_revision(3));
     before.learned_capabilities.observe(
-        "nick",
-        "web_search",
-        "openai-compat",
-        SignalTier::SelfIdentifying,
-        FailurePhase::F1,
-        EvidenceSource::Live,
-        None,
+        crate::learned_capability::LearnKey {
+            state_key: "nick",
+            feature_key_raw: "web_search",
+            provider_kind: "openai-compat",
+        },
+        crate::learned_capability::NegativeEvidence {
+            tier: SignalTier::SelfIdentifying,
+            phase: FailurePhase::F1,
+            source: EvidenceSource::Live,
+            evidence_class: None,
+        },
         Instant::now(),
     );
     // The rebuild picked up a newer overlay revision.

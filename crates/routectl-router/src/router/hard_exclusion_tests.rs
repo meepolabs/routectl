@@ -94,13 +94,17 @@ fn lane_target(router: &Router, nickname: &str, pinned: bool) -> DispatchTarget 
 fn seed_inferred(router: &Router, nickname: &str, feature: &str) {
     for _ in 0..2 {
         router.learned_capabilities.observe(
-            &lane_of(nickname),
-            feature,
-            KIND,
-            SignalTier::Inferred,
-            FailurePhase::F1,
-            EvidenceSource::Live,
-            None,
+            crate::learned_capability::LearnKey {
+                state_key: &lane_of(nickname),
+                feature_key_raw: feature,
+                provider_kind: KIND,
+            },
+            crate::learned_capability::NegativeEvidence {
+                tier: SignalTier::Inferred,
+                phase: FailurePhase::F1,
+                source: EvidenceSource::Live,
+                evidence_class: None,
+            },
             Instant::now(),
         );
     }

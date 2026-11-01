@@ -100,13 +100,17 @@ fn an_old_router_catalog_scoped_observation_is_inert() {
     let (old, live) = superseded_pair();
 
     let outcome = old.observe_learned_capability(
-        "nick",
-        "web_search",
-        "anthropic-api",
-        SignalTier::SelfIdentifying,
-        FailurePhase::F1,
-        EvidenceSource::Live,
-        None,
+        crate::learned_capability::LearnKey {
+            state_key: "nick",
+            feature_key_raw: "web_search",
+            provider_kind: "anthropic-api",
+        },
+        crate::learned_capability::NegativeEvidence {
+            tier: SignalTier::SelfIdentifying,
+            phase: FailurePhase::F1,
+            source: EvidenceSource::Live,
+            evidence_class: None,
+        },
         Instant::now(),
     );
 
@@ -131,13 +135,17 @@ fn old_router_reads_are_scoped_by_key_class() {
     let key = field_key("thinking.enabled.display");
     // Both classes learned on the LIVE generation.
     live.observe_learned_capability(
-        "nick#upstream",
-        "web_search",
-        "anthropic-api",
-        SignalTier::SelfIdentifying,
-        FailurePhase::F1,
-        EvidenceSource::Live,
-        None,
+        crate::learned_capability::LearnKey {
+            state_key: "nick#upstream",
+            feature_key_raw: "web_search",
+            provider_kind: "anthropic-api",
+        },
+        crate::learned_capability::NegativeEvidence {
+            tier: SignalTier::SelfIdentifying,
+            phase: FailurePhase::F1,
+            source: EvidenceSource::Live,
+            evidence_class: None,
+        },
         now,
     );
     let _ = crate::router::observe_field_verdict_for_tests(
@@ -169,13 +177,17 @@ fn an_old_router_probe_settlement_on_a_scoped_key_is_inert() {
     let (old, live) = superseded_pair();
     let now = Instant::now();
     live.observe_learned_capability(
-        "nick",
-        "web_search",
-        "anthropic-api",
-        SignalTier::SelfIdentifying,
-        FailurePhase::F1,
-        EvidenceSource::Live,
-        None,
+        crate::learned_capability::LearnKey {
+            state_key: "nick",
+            feature_key_raw: "web_search",
+            provider_kind: "anthropic-api",
+        },
+        crate::learned_capability::NegativeEvidence {
+            tier: SignalTier::SelfIdentifying,
+            phase: FailurePhase::F1,
+            source: EvidenceSource::Live,
+            evidence_class: None,
+        },
         now,
     );
 

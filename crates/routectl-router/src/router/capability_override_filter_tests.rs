@@ -155,13 +155,17 @@ fn force_supported_flips_acting_learned_route_away_to_allow() {
     ));
     let target = override_test_target("p", "nick");
     masked.learned_capabilities.observe(
-        "p#upstream",
-        "web_search",
-        "openai-compat",
-        SignalTier::SelfIdentifying,
-        FailurePhase::F1,
-        EvidenceSource::Live,
-        None,
+        crate::learned_capability::LearnKey {
+            state_key: "p#upstream",
+            feature_key_raw: "web_search",
+            provider_kind: "openai-compat",
+        },
+        crate::learned_capability::NegativeEvidence {
+            tier: SignalTier::SelfIdentifying,
+            phase: FailurePhase::F1,
+            source: EvidenceSource::Live,
+            evidence_class: None,
+        },
         Instant::now(),
     );
 
@@ -188,13 +192,17 @@ fn force_supported_flips_acting_learned_route_away_to_allow() {
         "{OVERRIDE_PROVIDER_P}[capability]\nenabled = true\n"
     ));
     unmasked.learned_capabilities.observe(
-        "p#upstream",
-        "web_search",
-        "openai-compat",
-        SignalTier::SelfIdentifying,
-        FailurePhase::F1,
-        EvidenceSource::Live,
-        None,
+        crate::learned_capability::LearnKey {
+            state_key: "p#upstream",
+            feature_key_raw: "web_search",
+            provider_kind: "openai-compat",
+        },
+        crate::learned_capability::NegativeEvidence {
+            tier: SignalTier::SelfIdentifying,
+            phase: FailurePhase::F1,
+            source: EvidenceSource::Live,
+            evidence_class: None,
+        },
         Instant::now(),
     );
     let mut ctrl_admissions = Vec::new();
@@ -229,13 +237,17 @@ fn force_supported_mask_admits_no_probe_where_unmasked_would() {
     // Control -- unmasked: the lapsed negative admits exactly one probe.
     let control = override_router_from_toml(base);
     control.learned_capabilities.observe(
-        "p#upstream",
-        "web_search",
-        "openai-compat",
-        SignalTier::SelfIdentifying,
-        FailurePhase::F1,
-        EvidenceSource::Live,
-        None,
+        crate::learned_capability::LearnKey {
+            state_key: "p#upstream",
+            feature_key_raw: "web_search",
+            provider_kind: "openai-compat",
+        },
+        crate::learned_capability::NegativeEvidence {
+            tier: SignalTier::SelfIdentifying,
+            phase: FailurePhase::F1,
+            source: EvidenceSource::Live,
+            evidence_class: None,
+        },
         Instant::now(),
     );
     let mut ctrl_admissions = Vec::new();
@@ -259,13 +271,17 @@ fn force_supported_mask_admits_no_probe_where_unmasked_would() {
                  force_supported = [\"web_search\"]\n"
     ));
     masked.learned_capabilities.observe(
-        "p#upstream",
-        "web_search",
-        "openai-compat",
-        SignalTier::SelfIdentifying,
-        FailurePhase::F1,
-        EvidenceSource::Live,
-        None,
+        crate::learned_capability::LearnKey {
+            state_key: "p#upstream",
+            feature_key_raw: "web_search",
+            provider_kind: "openai-compat",
+        },
+        crate::learned_capability::NegativeEvidence {
+            tier: SignalTier::SelfIdentifying,
+            phase: FailurePhase::F1,
+            source: EvidenceSource::Live,
+            evidence_class: None,
+        },
         Instant::now(),
     );
     let mut admissions = Vec::new();
@@ -303,13 +319,17 @@ fn override_route_away_beats_learned_strip_for_non_overridden_precedence() {
     ));
     let target = override_test_target("p", "nick");
     router.learned_capabilities.observe(
-        "p#upstream",
-        "advisor",
-        "openai-compat",
-        SignalTier::SelfIdentifying,
-        FailurePhase::F1,
-        EvidenceSource::Live,
-        None,
+        crate::learned_capability::LearnKey {
+            state_key: "p#upstream",
+            feature_key_raw: "advisor",
+            provider_kind: "openai-compat",
+        },
+        crate::learned_capability::NegativeEvidence {
+            tier: SignalTier::SelfIdentifying,
+            phase: FailurePhase::F1,
+            source: EvidenceSource::Live,
+            evidence_class: None,
+        },
         Instant::now(),
     );
 

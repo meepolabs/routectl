@@ -114,13 +114,17 @@ pub(super) fn lane_of(nickname: &str) -> String {
 /// in the given detection phase.
 pub(super) fn seed_learned(router: &Router, nickname: &str, feature: &str, phase: FailurePhase) {
     router.learned_capabilities.observe(
-        &lane_of(nickname),
-        feature,
-        KIND,
-        SignalTier::SelfIdentifying,
-        phase,
-        EvidenceSource::Live,
-        None,
+        crate::learned_capability::LearnKey {
+            state_key: &lane_of(nickname),
+            feature_key_raw: feature,
+            provider_kind: KIND,
+        },
+        crate::learned_capability::NegativeEvidence {
+            tier: SignalTier::SelfIdentifying,
+            phase,
+            source: EvidenceSource::Live,
+            evidence_class: None,
+        },
         Instant::now(),
     );
 }

@@ -37,7 +37,9 @@ use crate::capability_detect::{
     self, CapabilityObservation, DetectorContext, ObservationDirection,
 };
 use crate::feature_keys::ToolChoiceForce;
-use crate::learned_capability::{GenerationOutcome, ObserveOutcome, PositiveOutcome};
+use crate::learned_capability::{
+    GenerationOutcome, LearnKey, NegativeEvidence, ObserveOutcome, PositiveOutcome,
+};
 
 /// Install a fresh, empty translation report on the request about to go
 /// upstream and return the handle the router reads after the call.
@@ -339,9 +341,11 @@ impl Router {
             ObservationDirection::Verified => {
                 let outcome = self.observe_verified_capability_in(
                     scope.generation,
-                    learned_key,
-                    obs.capability_key,
-                    provider_kind,
+                    LearnKey {
+                        state_key: learned_key,
+                        feature_key_raw: obs.capability_key,
+                        provider_kind,
+                    },
                     EvidenceSource::Live,
                     // Retained on the resident entry, not merely logged: the
                     // warm rebuild fails closed on a `verified` row without a
@@ -372,15 +376,19 @@ impl Router {
             ObservationDirection::SuspectAbsence => {
                 let outcome = self.observe_learned_capability_in(
                     scope.generation,
-                    learned_key,
-                    obs.capability_key,
-                    provider_kind,
-                    obs.tier,
-                    FailurePhase::F3,
-                    EvidenceSource::Live,
-                    // As above: a `suspect` row also requires a recognized
-                    // class on replay.
-                    Some(obs.evidence_class),
+                    LearnKey {
+                        state_key: learned_key,
+                        feature_key_raw: obs.capability_key,
+                        provider_kind,
+                    },
+                    NegativeEvidence {
+                        tier: obs.tier,
+                        phase: FailurePhase::F3,
+                        source: EvidenceSource::Live,
+                        // As above: a `suspect` row also requires a recognized
+                        // class on replay.
+                        evidence_class: Some(obs.evidence_class),
+                    },
                     now,
                 );
                 match outcome {

@@ -50,9 +50,11 @@ fn plant_negative_at(reg: &LearnedCapabilityRegistry, capability: &str, kind: &s
 fn plant_positive(reg: &LearnedCapabilityRegistry, capability: &str, kind: &str) {
     let outcome = reg.observe_positive_in_generation(
         reg.generation(),
-        LANE,
-        capability,
-        kind,
+        crate::learned_capability::LearnKey {
+            state_key: LANE,
+            feature_key_raw: capability,
+            provider_kind: kind,
+        },
         EvidenceSource::Live,
         None,
         Instant::now(),
@@ -205,9 +207,11 @@ fn a_positive_under_a_new_kind_is_not_suppressed_by_an_old_kind_negative() {
 
     let outcome = reg.observe_positive_in_generation(
         reg.generation(),
-        LANE,
-        "web_search",
-        NEW,
+        crate::learned_capability::LearnKey {
+            state_key: LANE,
+            feature_key_raw: "web_search",
+            provider_kind: NEW,
+        },
         EvidenceSource::Live,
         None,
         Instant::now(),

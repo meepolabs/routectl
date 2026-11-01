@@ -53,13 +53,17 @@ fn registry_with_claimed_probe() -> (Arc<LearnedCapabilityRegistry>, Instant) {
     let reg = registry();
     let t0 = Instant::now();
     reg.observe(
-        "nick",
-        &probe_key(),
-        PROVIDER,
-        SignalTier::SelfIdentifying,
-        FailurePhase::F1,
-        EvidenceSource::Live,
-        None,
+        crate::learned_capability::LearnKey {
+            state_key: "nick",
+            feature_key_raw: &probe_key(),
+            provider_kind: PROVIDER,
+        },
+        crate::learned_capability::NegativeEvidence {
+            tier: SignalTier::SelfIdentifying,
+            phase: FailurePhase::F1,
+            source: EvidenceSource::Live,
+            evidence_class: None,
+        },
         t0,
     );
     // Lapse the decay so the read admits a re-probe and latches `in_flight`.

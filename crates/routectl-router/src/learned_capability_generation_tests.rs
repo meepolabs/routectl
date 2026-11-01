@@ -48,13 +48,17 @@ fn a_stale_generation_catalog_scoped_observation_is_rejected_and_inert() {
 
     let outcome = reg.observe_in_generation(
         stale,
-        "nick",
-        "web_search",
-        "openai-compat",
-        SignalTier::SelfIdentifying,
-        FailurePhase::F1,
-        EvidenceSource::Live,
-        None,
+        crate::learned_capability::LearnKey {
+            state_key: "nick",
+            feature_key_raw: "web_search",
+            provider_kind: "openai-compat",
+        },
+        crate::learned_capability::NegativeEvidence {
+            tier: SignalTier::SelfIdentifying,
+            phase: FailurePhase::F1,
+            source: EvidenceSource::Live,
+            evidence_class: None,
+        },
         Instant::now(),
     );
 
@@ -195,13 +199,17 @@ fn a_stale_generation_probe_settlement_on_a_scoped_key_is_a_no_op() {
     let reg = registry();
     let now = Instant::now();
     reg.observe(
-        "nick",
-        "web_search",
-        "anthropic-api",
-        SignalTier::SelfIdentifying,
-        FailurePhase::F1,
-        EvidenceSource::Live,
-        None,
+        crate::learned_capability::LearnKey {
+            state_key: "nick",
+            feature_key_raw: "web_search",
+            provider_kind: "anthropic-api",
+        },
+        crate::learned_capability::NegativeEvidence {
+            tier: SignalTier::SelfIdentifying,
+            phase: FailurePhase::F1,
+            source: EvidenceSource::Live,
+            evidence_class: None,
+        },
         now,
     );
     let stale = reg.generation();
@@ -238,13 +246,17 @@ fn retuning_applies_new_timing_and_capacity_to_the_shared_registry() {
 
     // The new decay governs a subsequently learned negative.
     reg.observe(
-        "nick",
-        "web_search",
-        "anthropic-api",
-        SignalTier::SelfIdentifying,
-        FailurePhase::F1,
-        EvidenceSource::Live,
-        None,
+        crate::learned_capability::LearnKey {
+            state_key: "nick",
+            feature_key_raw: "web_search",
+            provider_kind: "anthropic-api",
+        },
+        crate::learned_capability::NegativeEvidence {
+            tier: SignalTier::SelfIdentifying,
+            phase: FailurePhase::F1,
+            source: EvidenceSource::Live,
+            evidence_class: None,
+        },
         now,
     );
     let entry = &reg.snapshot()[0];
@@ -300,13 +312,17 @@ fn the_boundary_cut_excludes_observations_between_snapshot_and_submit() {
             started.store(true, Ordering::SeqCst);
             // Blocks until the cut releases the guard.
             reg.observe(
-                "nick",
-                "web_search",
-                "anthropic-api",
-                SignalTier::SelfIdentifying,
-                FailurePhase::F1,
-                EvidenceSource::Live,
-                None,
+                crate::learned_capability::LearnKey {
+                    state_key: "nick",
+                    feature_key_raw: "web_search",
+                    provider_kind: "anthropic-api",
+                },
+                crate::learned_capability::NegativeEvidence {
+                    tier: SignalTier::SelfIdentifying,
+                    phase: FailurePhase::F1,
+                    source: EvidenceSource::Live,
+                    evidence_class: None,
+                },
                 Instant::now(),
             );
         })
@@ -487,13 +503,17 @@ fn a_stale_observe_cannot_slip_through_a_pause_after_validation() {
 
     armed.reg.observe_in_generation(
         generation_at_call,
-        "nick",
-        "web_search",
-        "anthropic-api",
-        SignalTier::SelfIdentifying,
-        FailurePhase::F1,
-        EvidenceSource::Live,
-        None,
+        crate::learned_capability::LearnKey {
+            state_key: "nick",
+            feature_key_raw: "web_search",
+            provider_kind: "anthropic-api",
+        },
+        crate::learned_capability::NegativeEvidence {
+            tier: SignalTier::SelfIdentifying,
+            phase: FailurePhase::F1,
+            source: EvidenceSource::Live,
+            evidence_class: None,
+        },
         Instant::now(),
     );
     armed.settle();
@@ -517,9 +537,11 @@ fn a_stale_positive_cannot_slip_through_a_pause_after_validation() {
 
     armed.reg.observe_positive_in_generation(
         generation_at_call,
-        "nick",
-        "web_search",
-        "anthropic-api",
+        crate::learned_capability::LearnKey {
+            state_key: "nick",
+            feature_key_raw: "web_search",
+            provider_kind: "anthropic-api",
+        },
         EvidenceSource::Live,
         Some("search_blocks"),
         Instant::now(),
@@ -546,13 +568,17 @@ fn a_stale_removal_cannot_slip_through_a_pause_after_validation() {
     let now = Instant::now();
     // Seeded BEFORE the hook can fire, via the ungated path.
     armed.reg.observe(
-        "nick",
-        "web_search",
-        "anthropic-api",
-        SignalTier::SelfIdentifying,
-        FailurePhase::F1,
-        EvidenceSource::Live,
-        None,
+        crate::learned_capability::LearnKey {
+            state_key: "nick",
+            feature_key_raw: "web_search",
+            provider_kind: "anthropic-api",
+        },
+        crate::learned_capability::NegativeEvidence {
+            tier: SignalTier::SelfIdentifying,
+            phase: FailurePhase::F1,
+            source: EvidenceSource::Live,
+            evidence_class: None,
+        },
         now,
     );
     let generation_at_call = armed.reg.generation();
@@ -587,13 +613,17 @@ fn a_stale_read_cannot_slip_through_a_pause_after_validation() {
     let armed = PausedBoundary::arm();
     let now = Instant::now();
     armed.reg.observe(
-        "nick",
-        "web_search",
-        "anthropic-api",
-        SignalTier::SelfIdentifying,
-        FailurePhase::F1,
-        EvidenceSource::Live,
-        None,
+        crate::learned_capability::LearnKey {
+            state_key: "nick",
+            feature_key_raw: "web_search",
+            provider_kind: "anthropic-api",
+        },
+        crate::learned_capability::NegativeEvidence {
+            tier: SignalTier::SelfIdentifying,
+            phase: FailurePhase::F1,
+            source: EvidenceSource::Live,
+            evidence_class: None,
+        },
         now,
     );
     let generation_at_call = armed.reg.generation();
@@ -624,13 +654,17 @@ fn a_stale_expiry_cannot_slip_through_a_pause_after_validation() {
     let armed = PausedBoundary::arm();
     let now = Instant::now();
     armed.reg.observe(
-        "nick",
-        "web_search",
-        "anthropic-api",
-        SignalTier::SelfIdentifying,
-        FailurePhase::F1,
-        EvidenceSource::Live,
-        None,
+        crate::learned_capability::LearnKey {
+            state_key: "nick",
+            feature_key_raw: "web_search",
+            provider_kind: "anthropic-api",
+        },
+        crate::learned_capability::NegativeEvidence {
+            tier: SignalTier::SelfIdentifying,
+            phase: FailurePhase::F1,
+            source: EvidenceSource::Live,
+            evidence_class: None,
+        },
         now,
     );
     let generation_at_call = armed.reg.generation();
@@ -661,13 +695,17 @@ fn a_stale_probe_settlement_cannot_slip_through_a_pause_after_validation() {
     let armed = PausedBoundary::arm();
     let now = Instant::now();
     armed.reg.observe(
-        "nick",
-        "web_search",
-        "anthropic-api",
-        SignalTier::SelfIdentifying,
-        FailurePhase::F1,
-        EvidenceSource::Live,
-        None,
+        crate::learned_capability::LearnKey {
+            state_key: "nick",
+            feature_key_raw: "web_search",
+            provider_kind: "anthropic-api",
+        },
+        crate::learned_capability::NegativeEvidence {
+            tier: SignalTier::SelfIdentifying,
+            phase: FailurePhase::F1,
+            source: EvidenceSource::Live,
+            evidence_class: None,
+        },
         now,
     );
     let generation_at_call = armed.reg.generation();
@@ -717,13 +755,17 @@ fn the_reported_generation_cannot_be_moved_by_a_later_boundary() {
 
     let outcome = reg.observe_in_generation(
         active,
-        "nick",
-        "web_search",
-        "anthropic-api",
-        SignalTier::SelfIdentifying,
-        FailurePhase::F1,
-        EvidenceSource::Live,
-        None,
+        crate::learned_capability::LearnKey {
+            state_key: "nick",
+            feature_key_raw: "web_search",
+            provider_kind: "anthropic-api",
+        },
+        crate::learned_capability::NegativeEvidence {
+            tier: SignalTier::SelfIdentifying,
+            phase: FailurePhase::F1,
+            source: EvidenceSource::Live,
+            evidence_class: None,
+        },
         Instant::now(),
     );
     // The boundary lands AFTER the operation returned. A generation the
@@ -1075,13 +1117,17 @@ fn a_stale_receipt_cannot_settle_a_later_boundary() {
     let reg = registry();
     let now = Instant::now();
     reg.observe(
-        "nick",
-        "web_search",
-        "anthropic-api",
-        SignalTier::SelfIdentifying,
-        FailurePhase::F1,
-        EvidenceSource::Live,
-        None,
+        crate::learned_capability::LearnKey {
+            state_key: "nick",
+            feature_key_raw: "web_search",
+            provider_kind: "anthropic-api",
+        },
+        crate::learned_capability::NegativeEvidence {
+            tier: SignalTier::SelfIdentifying,
+            phase: FailurePhase::F1,
+            source: EvidenceSource::Live,
+            evidence_class: None,
+        },
         now,
     );
     let BoundaryCut::Taken { receipt: a, .. } = admit_boundary(&reg) else {
@@ -1091,13 +1137,17 @@ fn a_stale_receipt_cannot_settle_a_later_boundary() {
     // B is admitted and unsettled; the catalog-scoped entry is re-seeded so a
     // wrongful prune would be visible.
     reg.observe(
-        "nick",
-        "web_search",
-        "anthropic-api",
-        SignalTier::SelfIdentifying,
-        FailurePhase::F1,
-        EvidenceSource::Live,
-        None,
+        crate::learned_capability::LearnKey {
+            state_key: "nick",
+            feature_key_raw: "web_search",
+            provider_kind: "anthropic-api",
+        },
+        crate::learned_capability::NegativeEvidence {
+            tier: SignalTier::SelfIdentifying,
+            phase: FailurePhase::F1,
+            source: EvidenceSource::Live,
+            evidence_class: None,
+        },
         now,
     );
     let BoundaryCut::Taken { receipt: b, .. } = admit_boundary(&reg) else {
@@ -1139,13 +1189,17 @@ fn an_exhausted_generation_refuses_the_boundary_before_any_change() {
     let reg = registry();
     let now = Instant::now();
     reg.observe(
-        "nick",
-        "web_search",
-        "anthropic-api",
-        SignalTier::SelfIdentifying,
-        FailurePhase::F1,
-        EvidenceSource::Live,
-        None,
+        crate::learned_capability::LearnKey {
+            state_key: "nick",
+            feature_key_raw: "web_search",
+            provider_kind: "anthropic-api",
+        },
+        crate::learned_capability::NegativeEvidence {
+            tier: SignalTier::SelfIdentifying,
+            phase: FailurePhase::F1,
+            source: EvidenceSource::Live,
+            evidence_class: None,
+        },
         now,
     );
     reg.set_generation_for_test(u64::MAX);
@@ -1245,13 +1299,17 @@ fn a_rolled_back_receipt_cannot_settle_a_later_boundary_at_the_same_generation()
     let reg = registry();
     let now = Instant::now();
     reg.observe(
-        "nick",
-        "web_search",
-        "anthropic-api",
-        SignalTier::SelfIdentifying,
-        FailurePhase::F1,
-        EvidenceSource::Live,
-        None,
+        crate::learned_capability::LearnKey {
+            state_key: "nick",
+            feature_key_raw: "web_search",
+            provider_kind: "anthropic-api",
+        },
+        crate::learned_capability::NegativeEvidence {
+            tier: SignalTier::SelfIdentifying,
+            phase: FailurePhase::F1,
+            source: EvidenceSource::Live,
+            evidence_class: None,
+        },
         now,
     );
     let entries_before = reg.snapshot().len();
@@ -1410,13 +1468,17 @@ fn an_acting_negative_reading_carries_the_entry_signal_tier_and_source() {
         let reg = registry();
         for _ in 0..observations {
             reg.observe(
-                "nick",
-                key,
-                "openai-compat",
-                tier,
-                FailurePhase::F2,
-                source,
-                None,
+                crate::learned_capability::LearnKey {
+                    state_key: "nick",
+                    feature_key_raw: key,
+                    provider_kind: "openai-compat",
+                },
+                crate::learned_capability::NegativeEvidence {
+                    tier,
+                    phase: FailurePhase::F2,
+                    source,
+                    evidence_class: None,
+                },
                 now,
             );
         }

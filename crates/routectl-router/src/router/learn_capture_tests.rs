@@ -455,13 +455,17 @@ async fn masked_cell_rejection_does_not_refresh_resident_entry() {
     // Plant a resident acting negative at a fixed instant.
     let t0 = Instant::now();
     router.learned_capabilities.observe(
-        WIRE_LANE,
-        "web_search",
-        "openai-compat",
-        SignalTier::SelfIdentifying,
-        FailurePhase::F1,
-        EvidenceSource::Live,
-        None,
+        crate::learned_capability::LearnKey {
+            state_key: WIRE_LANE,
+            feature_key_raw: "web_search",
+            provider_kind: "openai-compat",
+        },
+        crate::learned_capability::NegativeEvidence {
+            tier: SignalTier::SelfIdentifying,
+            phase: FailurePhase::F1,
+            source: EvidenceSource::Live,
+            evidence_class: None,
+        },
         t0,
     );
     let before = router.learned_capabilities.snapshot();
