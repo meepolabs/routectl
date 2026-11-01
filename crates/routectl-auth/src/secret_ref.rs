@@ -101,23 +101,13 @@ impl SecretRef {
                 label: label.map(str::to_string),
             });
         }
-        // The fallthrough must never echo the raw `uri`: a bare,
-        // unprefixed value (e.g. an API key pasted without a scheme) IS
-        // secret material, and this error can reach operator-facing
-        // stdout via `config check` -> shell history / CI logs. Report
-        // only the scheme-shaped prefix (validated as an RFC 3986
-        // scheme), or a generic message when none exists -- never the
-        // value itself. The expected-scheme list stays for the operator.
-        match scheme_token(uri) {
-            Some(scheme) => Err(Error::Auth(format!(
-                "unrecognized secret URI scheme `{scheme}` (expected env://, file://, or oauth://)"
-            ))),
-            None => Err(Error::Auth(
-                "unrecognized secret URI scheme: no recognized scheme prefix \
-                 (expected env://, file://, or oauth://)"
-                    .into(),
-            )),
-        }
+        // The fallthrough never renders any byte of `uri`: an unprefixed
+        // or unknown-scheme value may be an API key pasted in by mistake,
+        // and this error reaches operator-facing stdout via `config check`
+        // -> shell history / CI logs.
+        Err(Error::Auth(
+            "unrecognized secret URI scheme (expected env://, file://, or oauth://)".into(),
+        ))
     }
 }
 
@@ -197,25 +187,6 @@ pub fn literal_rejected() -> Error {
          variable with `env://VAR`."
             .into(),
     )
-}
-
-/// Extract the scheme-shaped prefix of `uri` -- the text before the
-/// first `:` -- but only when it is a syntactically valid URI scheme per
-/// RFC 3986: `ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )`. Returns `None`
-/// for a bare value with no `:` delimiter, or one whose prefix is not
-/// scheme-shaped. This guarantees secret material (which is not
-/// scheme-shaped) is never echoed back to the caller in an error.
-fn scheme_token(uri: &str) -> Option<&str> {
-    let (scheme, _) = uri.split_once(':')?;
-    let mut chars = scheme.chars();
-    if !chars.next()?.is_ascii_alphabetic() {
-        return None;
-    }
-    if chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')) {
-        Some(scheme)
-    } else {
-        None
-    }
 }
 
 impl fmt::Debug for SecretRef {
@@ -465,6 +436,18 @@ mod tests {
             !msg.contains(fake),
             "error must not echo the raw value: {msg}"
         );
+        assert!(
+            msg.contains("oauth://"),
+            "error should still list expected schemes: {msg}"
+        );
+    }
+
+    #[test]
+    fn scheme_shaped_prefix_of_unknown_ref_is_not_echoed() {
+        let err = SecretRef::parse("AKIAEXAMPLE:wJalrXUtnFEMI").unwrap_err();
+        let msg = err.to_string();
+        assert!(!msg.contains("AKIAEXAMPLE"), "prefix echoed: {msg}");
+        assert!(!msg.contains("wJalr"), "body echoed: {msg}");
         assert!(
             msg.contains("oauth://"),
             "error should still list expected schemes: {msg}"
