@@ -17,7 +17,7 @@ use crate::commands::seat_report::{
 use crate::server::reload_failure::ReloadFailureSnapshot;
 
 use super::gather::{SecretCheck, SecretPresence};
-use super::served::parked_seat_finding;
+use super::served::{parked_seat_finding, unusable_seat_finding};
 use super::{
     DoctorContext, EquivalenceBasis, FreshnessInputs, KnobRow, LegacyFolder, OutputCeilingSource,
     PricingRow, PricingRowSource,
@@ -379,12 +379,12 @@ pub(super) fn secret_finding(check: &SecretCheck) -> Finding {
         SecretPresence::Expired => (
             Status::Warn,
             format!("{} credential is expired", check.scheme),
-            Some(oauth_login_remediation(check)),
+            Some(check_login_remediation(check)),
         ),
         SecretPresence::StoreUnavailable => (
             Status::Warn,
             "oauth credential store is unavailable".to_string(),
-            Some(oauth_login_remediation(check)),
+            Some(check_login_remediation(check)),
         ),
         SecretPresence::UnknownOauthProvider => (
             Status::Warn,
@@ -413,17 +413,31 @@ pub(super) fn secret_finding(check: &SecretCheck) -> Finding {
 
 fn missing_remediation(check: &SecretCheck) -> String {
     match check.scheme {
-        "oauth://" => oauth_login_remediation(check),
+        "oauth://" => check_login_remediation(check),
         "env://" => "set the environment variable this provider references".to_string(),
         "file://" => "create the secret file this provider references".to_string(),
         _ => "provide a resolvable secret reference for this provider".to_string(),
     }
 }
 
-fn oauth_login_remediation(check: &SecretCheck) -> String {
-    match &check.oauth_id {
-        Some(id) => format!("run `routectl login {id}`"),
-        None => "run `routectl login <provider>`".to_string(),
+fn check_login_remediation(check: &SecretCheck) -> String {
+    oauth_login_remediation(check.oauth_id.as_deref(), check.oauth_label.as_deref())
+}
+
+/// The `routectl login` command that stores a fresh credential for an
+/// `oauth://<provider>[#<label>]` ref. A labeled seat needs `--label`, or the
+/// bare form would log in the default seat and leave this one unchanged. The
+/// label is operator-written, so both halves route through the log-safe
+/// helper before they reach a copy-pasteable command.
+pub(super) fn oauth_login_remediation(provider: Option<&str>, label: Option<&str>) -> String {
+    match (provider, label) {
+        (Some(provider), Some(label)) => format!(
+            "run `routectl login {} --label {}`",
+            safe(provider),
+            safe(label)
+        ),
+        (Some(provider), None) => format!("run `routectl login {}`", safe(provider)),
+        (None, _) => "run `routectl login <provider>`".to_string(),
     }
 }
 
@@ -453,7 +467,7 @@ pub(super) fn section_secret_orphans(ctx: &DoctorContext) -> Vec<Finding> {
 /// logins, and any member the credential store holds no seat for. A pool
 /// missing a member's credential is a `Warn` naming the member; a pool no
 /// member of which has a stored credential is a `Fail` -- every model naming
-/// it is unroutable. Standalone ref rows stay purely informational `Pass`
+/// it is refused locally until one member has a credential. Standalone ref rows stay purely informational `Pass`
 /// findings with no remediation.
 ///
 /// LIMIT, deliberate: this section runs on a doctor pass that builds NO
@@ -506,7 +520,7 @@ fn pool_finding(row: &PoolRow) -> Finding {
         PoolHealth::Degraded => (
             Status::Warn,
             Some(
-                "log in the account each omitted member names \
+                "log in the account each member without a stored credential names \
                  (`routectl login <provider> --label <label>`) or remove it from the pool"
                     .to_string(),
             ),
@@ -515,8 +529,9 @@ fn pool_finding(row: &PoolRow) -> Finding {
             Status::Fail,
             Some(
                 "log in at least one of this pool's accounts \
-                 (`routectl login <provider> --label <label>`); every model naming \
-                 the pool is unroutable until one member resolves"
+                 (`routectl login <provider> --label <label>`); requests to a model naming \
+                 the pool are refused with `credential_unusable` until one member has a \
+                 credential"
                     .to_string(),
             ),
         ),
@@ -576,6 +591,7 @@ fn logout_target(seat_key: &str) -> String {
 pub(super) fn section_auth(ctx: &DoctorContext) -> Vec<Finding> {
     let mut findings = oauth_seat_findings(ctx);
     findings.extend(ctx.parked_seats.iter().map(parked_seat_finding));
+    findings.extend(ctx.unusable_seats.iter().map(unusable_seat_finding));
     findings
 }
 

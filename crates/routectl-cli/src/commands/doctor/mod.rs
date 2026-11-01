@@ -74,7 +74,9 @@ use self::sections::{
 };
 
 pub(crate) use self::gather::gather_context_no_network;
-pub(crate) use self::served::{GatherSources, ParkedSeat, ResidentLearned, ServedInputs};
+pub(crate) use self::served::{
+    GatherSources, ParkedSeat, ResidentLearned, ServedInputs, UnusableSeat, unusable_seat_fix,
+};
 
 /// UNSTABLE report schema version. Bumped on ANY structural or semantic
 /// change a consumer would care about -- including an ADDITIVE one, since the
@@ -213,7 +215,17 @@ pub(crate) use self::served::{GatherSources, ParkedSeat, ResidentLearned, Served
 /// `circuit_failures`, `circuit_cooldown_ms`, `rpm_limit`,
 /// `request_timeout_ms` and `stream_first_byte_timeout_ms` as
 /// `key=value(source)`, the same cells `config show --effective` prints.
-pub(crate) const SCHEMA_VERSION: u32 = 24;
+///
+/// v24 -> v25: additive, served report only. The `auth` section gains one
+/// Warn `unusable seat <state_key>` per dispatch seat whose credential the
+/// running daemon holds as unusable, naming the reason
+/// (`credential_unusable`), the cause (`not_logged_in`, `unreadable`,
+/// `expired` or `revoked`) and since when, with the fix as its remediation:
+/// `routectl login <provider> --label <label>` for a labeled OAuth seat,
+/// `routectl login <provider>` for an unlabeled one. The CLI cannot see daemon
+/// memory and reports none. The `pools` remediations name the local
+/// `credential_unusable` refusal.
+pub(crate) const SCHEMA_VERSION: u32 = 25;
 
 /// A section-producer: pure mapping of the read-only [`DoctorContext`] to a
 /// section's findings.
@@ -358,6 +370,9 @@ pub(crate) struct DoctorContext {
     /// The running daemon's credential-parked seats. Only a served gather
     /// sets any; the CLI cannot see daemon state and reports no parks.
     parked_seats: Vec<ParkedSeat>,
+    /// The running daemon's unusable seats. The mark lives only in daemon
+    /// memory, so only a served gather sets any; the CLI reports none.
+    unusable_seats: Vec<UnusableSeat>,
     /// Every soft cell-value defect of the overlay this gather holds: the
     /// on-disk overlay for the CLI, the router's own overlay when served.
     /// Read off the overlay itself, so a hand edit that kept the revision

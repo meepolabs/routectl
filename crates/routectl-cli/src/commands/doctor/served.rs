@@ -9,7 +9,9 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use routectl_core::UpstreamReason;
+use routectl_auth::SecretRef;
+use routectl_core::{EligibilityReason, UpstreamReason};
+use routectl_router::runtime_state::UnusableCause;
 use routectl_router::{
     CatalogOverlay, Config, Finding, LearnedRegistryEntry, MatrixWarm, SeedClearMarker, Status,
 };
@@ -18,7 +20,8 @@ use crate::commands::seat_report::safe;
 use crate::server::capability_rebuild::{WarmOutcome, WarmReport};
 use crate::server::reload_failure::ReloadFailureSnapshot;
 
-use super::gather::replay_summary;
+use super::gather::{replay_summary, scheme_label};
+use super::sections::oauth_login_remediation;
 use super::{CapabilityMatrixSource, MatrixOrigin};
 
 /// Where the no-network gather takes its config, overlay, and learned layer
@@ -41,6 +44,7 @@ pub struct ServedInputs {
     warm: WarmReport,
     reload_failure: Option<ReloadFailureSnapshot>,
     parked_seats: Vec<ParkedSeat>,
+    unusable_seats: Vec<UnusableSeat>,
 }
 
 /// One dispatch seat whose credential the running daemon has parked: the
@@ -55,6 +59,51 @@ pub struct ParkedSeat {
     pub reason: UpstreamReason,
     /// Epoch-ms the park lapses.
     pub parked_until_ms: i64,
+}
+
+/// One dispatch seat whose credential the running daemon holds as unusable:
+/// the seat's runtime key, the eligibility reason requests skip it for, the
+/// cause, the epoch-ms the mark was first set, and the command that clears it.
+/// The mark lives only in daemon memory, so only a served gather carries any.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnusableSeat {
+    /// The seat's runtime state key (`nickname[#member]`).
+    pub state_key: String,
+    /// Why requests skip the seat; always `credential_unusable`.
+    pub reason: EligibilityReason,
+    /// Why the credential is unusable.
+    pub cause: UnusableCause,
+    /// Epoch-ms the seat was first marked with this cause.
+    pub since_ms: i64,
+    /// What the operator runs or changes to readmit the seat.
+    pub fix: String,
+}
+
+/// The fix line for a seat dispatching through `[providers]` entry `entry`
+/// of `config`: the re-login command for an `oauth://` seat (with `--label`
+/// for a labeled one), else the entry and the scheme of its credential ref,
+/// never the ref's value.
+pub fn unusable_seat_fix(config: &Config, entry: &str) -> String {
+    let uris = config
+        .providers
+        .get(entry)
+        .map(routectl_router::ProviderEntry::secret_uris)
+        .unwrap_or_default();
+    let oauth = uris.iter().find_map(|uri| match SecretRef::parse(uri) {
+        Ok(SecretRef::OAuth { provider, label }) => Some((provider, label)),
+        _ => None,
+    });
+    if let Some((provider, label)) = oauth {
+        return oauth_login_remediation(Some(&provider), label.as_deref());
+    }
+    let shown = safe(entry);
+    match uris.first() {
+        Some(uri) => format!(
+            "provide a readable {} credential for provider entry `{shown}`, then reload the config",
+            scheme_label(uri),
+        ),
+        None => format!("fix the credential of provider entry `{shown}`, then reload the config"),
+    }
 }
 
 /// The resident learned registry, read once, with the clock anchors the read
@@ -86,6 +135,7 @@ impl ServedInputs {
             warm,
             reload_failure: None,
             parked_seats: Vec::new(),
+            unusable_seats: Vec::new(),
         }
     }
 
@@ -94,6 +144,15 @@ impl ServedInputs {
     pub fn with_parked_seats(self, parked_seats: Vec<ParkedSeat>) -> Self {
         Self {
             parked_seats,
+            ..self
+        }
+    }
+
+    /// Attach the seats whose credential the daemon holds as unusable.
+    #[must_use]
+    pub fn with_unusable_seats(self, unusable_seats: Vec<UnusableSeat>) -> Self {
+        Self {
+            unusable_seats,
             ..self
         }
     }
@@ -112,11 +171,7 @@ impl ServedInputs {
 /// and the deadline as RFC3339 UTC. The state key carries an operator-written
 /// member label, so it routes through the log-safe helper.
 pub(super) fn parked_seat_finding(seat: &ParkedSeat) -> Finding {
-    let deadline = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(seat.parked_until_ms)
-        .map_or_else(
-            || format!("epoch ms {}", seat.parked_until_ms),
-            |at| at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-        );
+    let deadline = rfc3339_or_epoch_ms(seat.parked_until_ms);
     Finding {
         section: "auth",
         name: format!("parked seat {}", safe(&seat.state_key)),
@@ -132,6 +187,31 @@ pub(super) fn parked_seat_finding(seat: &ParkedSeat) -> Finding {
                 .to_string(),
         ),
     }
+}
+
+/// One unusable seat as an `auth` Warn: the seat's state key, the reason and
+/// cause tokens, the instant it was first marked as RFC3339 UTC, and its fix
+/// line as the remediation.
+pub(super) fn unusable_seat_finding(seat: &UnusableSeat) -> Finding {
+    Finding {
+        section: "auth",
+        name: format!("unusable seat {}", safe(&seat.state_key)),
+        status: Status::Warn,
+        detail: format!(
+            "{} ({}) since {}; requests skip this seat until its credential is fixed",
+            seat.reason.as_str(),
+            seat.cause.as_str(),
+            rfc3339_or_epoch_ms(seat.since_ms),
+        ),
+        remediation: Some(seat.fix.clone()),
+    }
+}
+
+fn rfc3339_or_epoch_ms(epoch_ms: i64) -> String {
+    chrono::DateTime::<chrono::Utc>::from_timestamp_millis(epoch_ms).map_or_else(
+        || format!("epoch ms {epoch_ms}"),
+        |at| at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+    )
 }
 
 /// The per-layer inputs the shared gather body draws from, whichever source
@@ -154,6 +234,9 @@ pub(super) struct GatheredLayers {
     /// The daemon's credential-parked seats; always empty from disk, which
     /// cannot see daemon state.
     pub(super) parked_seats: Vec<ParkedSeat>,
+    /// The daemon's unusable seats; always empty from disk, which cannot see
+    /// daemon memory.
+    pub(super) unusable_seats: Vec<UnusableSeat>,
 }
 
 /// The served layers. The daemon accepted this config and overlay, so neither
@@ -166,6 +249,7 @@ pub(super) fn served_layers(inputs: Box<ServedInputs>) -> GatheredLayers {
         warm,
         reload_failure,
         parked_seats,
+        unusable_seats,
     } = *inputs;
     GatheredLayers {
         accepted_config_version: Some(config.version),
@@ -177,6 +261,7 @@ pub(super) fn served_layers(inputs: Box<ServedInputs>) -> GatheredLayers {
         matrix_origin: MatrixOrigin::Resident(matrix_warm(&warm)),
         reload_failure,
         parked_seats,
+        unusable_seats,
     }
 }
 

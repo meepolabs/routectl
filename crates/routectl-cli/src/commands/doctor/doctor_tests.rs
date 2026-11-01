@@ -83,6 +83,7 @@ pub(super) fn ctx(
         tuning,
         reload_failure: None,
         parked_seats: Vec::new(),
+        unusable_seats: Vec::new(),
         overlay_soft_defects: Vec::new(),
         legacy_folders: Vec::new(),
     }
@@ -706,8 +707,8 @@ fn capability_section_emits_no_finding_for_a_loaded_config() {
 }
 
 #[test]
-fn schema_version_is_twenty_four() {
-    assert_eq!(SCHEMA_VERSION, 24);
+fn schema_version_is_twenty_five() {
+    assert_eq!(SCHEMA_VERSION, 25);
 
     let context = ctx(
         config_with_overrides(),
@@ -716,7 +717,7 @@ fn schema_version_is_twenty_four() {
         Vec::new(),
     );
     let report = build_report(&context);
-    assert_eq!(report.schema_version, 24);
+    assert_eq!(report.schema_version, 25);
 
     // JSON mode carries the structured capability matrix panel; the
     // superseded override / prior / learned finding text is gone.
@@ -1460,6 +1461,30 @@ fn oauth_secret_present_passes_missing_warns_with_login() {
     );
 }
 
+/// A missing `oauth://<provider>#<label>` ref's remediation logs in that
+/// labeled seat, not the default one.
+#[test]
+fn a_missing_labeled_oauth_ref_names_the_labeled_login() {
+    // Arrange
+    let cfg: Config = toml::from_str(
+        "version = 3\n\
+         [providers.alpha-a]\n\
+         kind = \"anthropic-api\"\n\
+         api_key_ref = \"oauth://anthropic#seat-a\"\n",
+    )
+    .expect("labeled fixture parses");
+
+    // Act
+    let checks = gather_secret_checks(&cfg, &[("anthropic", LocalProbe::Missing)]);
+    let finding = secret_finding(&checks[0]);
+
+    // Assert
+    assert_eq!(
+        finding.remediation.as_deref(),
+        Some("run `routectl login anthropic --label seat-a`")
+    );
+}
+
 /// An `oauth://` ref whose local probe reports an expired, non-revivable
 /// credential is a Warn carrying a `routectl login` remediation.
 #[test]
@@ -2126,6 +2151,54 @@ fn a_pool_missing_credentials_warns_and_a_pool_with_none_fails() {
     assert!(unusable.remediation.is_some(), "{unusable:?}");
 }
 
+/// A pool's remediations name the login command and the local refusal a
+/// request meets, never the retired omission wording.
+#[test]
+fn pool_remediations_name_the_login_and_never_the_omission_wording() {
+    // Arrange
+    let degraded_ctx = ctx(
+        config_with_a_named_pool(),
+        Some(&current_version_stamp()),
+        Vec::new(),
+        vec![("anthropic".to_string(), token_record(9_000))],
+    );
+    let unusable_ctx = ctx(
+        config_with_a_named_pool(),
+        Some(&current_version_stamp()),
+        Vec::new(),
+        Vec::new(),
+    );
+
+    // Act
+    let rows = [
+        ("degraded", section_seat_pools(&degraded_ctx)),
+        ("unusable", section_seat_pools(&unusable_ctx)),
+    ];
+
+    // Assert
+    for (name, findings) in &rows {
+        let remediation = find(findings, "pools", "anthropic-pool")
+            .remediation
+            .clone()
+            .unwrap_or_else(|| panic!("{name} pool carries a remediation"));
+        assert!(
+            remediation.contains("routectl login"),
+            "{name}: {remediation}"
+        );
+        for retired in ["omitted", "unroutable"] {
+            assert!(!remediation.contains(retired), "{name}: {remediation}");
+        }
+    }
+    let unusable = find(&rows[1].1, "pools", "anthropic-pool");
+    assert!(
+        unusable
+            .remediation
+            .as_deref()
+            .is_some_and(|r| r.contains("credential_unusable")),
+        "{unusable:?}"
+    );
+}
+
 /// An unreadable credential store still renders the rows, with presence
 /// unknown and the strategy retained -- and claims neither Warn nor Fail. The
 /// store Fail stays the auth section's alone.
@@ -2449,6 +2522,7 @@ fn rendered_report_leaks_neither_a_config_secret_nor_a_store_path() {
         tuning: Vec::new(),
         reload_failure: None,
         parked_seats: Vec::new(),
+        unusable_seats: Vec::new(),
         overlay_soft_defects: Vec::new(),
         legacy_folders: Vec::new(),
     };
@@ -2614,7 +2688,7 @@ fn build_report_no_network_matches_network_minus_probe() {
     let network = build_report(&context);
     let no_net = build_report_no_network(&context);
 
-    assert_eq!(no_net.schema_version, 24);
+    assert_eq!(no_net.schema_version, 25);
     assert!(
         no_net.findings.iter().all(|f| f.section != "probe"),
         "no-network report must have no probe rows"

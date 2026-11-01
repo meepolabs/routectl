@@ -89,6 +89,7 @@ pub async fn gather_context_no_network(
         matrix_origin,
         reload_failure,
         parked_seats,
+        unusable_seats,
     } = layers;
 
     let overlay_verified_at = overlay
@@ -160,6 +161,7 @@ pub async fn gather_context_no_network(
         tuning,
         reload_failure,
         parked_seats,
+        unusable_seats,
         overlay_soft_defects,
         legacy_folders,
     }
@@ -278,6 +280,7 @@ pub(super) fn disk_layers(config_path: &Path) -> GatheredLayers {
         matrix_origin: MatrixOrigin::LedgerReplay,
         reload_failure: None,
         parked_seats: Vec::new(),
+        unusable_seats: Vec::new(),
     }
 }
 
@@ -689,6 +692,7 @@ pub(super) struct SecretCheck {
     pub(super) scheme: &'static str,
     pub(super) presence: SecretPresence,
     pub(super) oauth_id: Option<String>,
+    pub(super) oauth_label: Option<String>,
 }
 
 /// Outcome of a read-only presence check. Discriminants only.
@@ -706,7 +710,7 @@ pub(super) enum SecretPresence {
 /// The leak-safe scheme prefix of a secret URI. A bare, unprefixed value
 /// IS secret material, so it collapses to `"unknown"` rather than echoing
 /// any of its bytes.
-fn scheme_label(uri: &str) -> &'static str {
+pub(super) fn scheme_label(uri: &str) -> &'static str {
     if uri.starts_with("oauth://") {
         "oauth://"
     } else if uri.starts_with("env://") {
@@ -727,9 +731,9 @@ fn scheme_label(uri: &str) -> &'static str {
 fn classify_secret_ref(
     uri: &str,
     probes: &[(&'static str, LocalProbe)],
-) -> (SecretPresence, Option<String>) {
+) -> (SecretPresence, Option<(String, Option<String>)>) {
     match SecretRef::parse(uri) {
-        Ok(SecretRef::OAuth { provider, .. }) => {
+        Ok(SecretRef::OAuth { provider, label }) => {
             let presence = match probes.iter().find(|p| p.0 == provider.as_str()) {
                 Some((_, LocalProbe::Present)) => SecretPresence::Present,
                 Some((_, LocalProbe::Expired)) => SecretPresence::Expired,
@@ -737,7 +741,7 @@ fn classify_secret_ref(
                 Some((_, LocalProbe::StoreUnavailable)) => SecretPresence::StoreUnavailable,
                 Some(_) | None => SecretPresence::UnknownOauthProvider,
             };
-            (presence, Some(provider))
+            (presence, Some((provider, label)))
         }
         Ok(SecretRef::Env(var)) => {
             let present = std::env::var(&var).is_ok_and(|v| !v.is_empty());
@@ -782,12 +786,14 @@ pub(super) fn gather_secret_checks(
     for (name, entry) in &config.providers {
         for uri in entry.secret_uris() {
             let scheme = scheme_label(uri);
-            let (presence, oauth_id) = classify_secret_ref(uri, probes);
+            let (presence, oauth) = classify_secret_ref(uri, probes);
+            let (oauth_id, oauth_label) = oauth.unzip();
             out.push(SecretCheck {
                 provider: name.clone(),
                 scheme,
                 presence,
                 oauth_id,
+                oauth_label: oauth_label.flatten(),
             });
         }
     }

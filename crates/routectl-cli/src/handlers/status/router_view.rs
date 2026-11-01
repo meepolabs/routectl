@@ -15,6 +15,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use arc_swap::ArcSwap;
+use routectl_core::EligibilityReason;
 use routectl_router::router::RouteTargetStatus;
 use routectl_router::wire_check_state::WireCheckSnapshot;
 use routectl_router::{
@@ -23,7 +24,9 @@ use routectl_router::{
 };
 use routectl_usage::{AggRow, RowCost};
 
-use crate::commands::doctor::{ParkedSeat, ResidentLearned, ServedInputs};
+use crate::commands::doctor::{
+    ParkedSeat, ResidentLearned, ServedInputs, UnusableSeat, unusable_seat_fix,
+};
 use crate::commands::usage::cost_for_row;
 use crate::lane_cell::{CellSources, LearnedSnapshot, ResolvedEntry, resolve_entries};
 use crate::server::capability_rebuild::WarmReport;
@@ -185,8 +188,9 @@ impl StatusRouterView {
     /// generation, and neither is re-read from disk. The learned layer is the
     /// resident registry, read once; its clock anchors are taken after that
     /// read, so every entry's instants lie at or before them. `warm` is the
-    /// boot warm that filled the registry. The credential-parked seats come off
-    /// the same per-target status read the health panel uses.
+    /// boot warm that filled the registry. The credential-parked and unusable
+    /// seats come off one per-target status read, the same one the health
+    /// panel uses, which changes no gate state.
     ///
     /// The returned value's fields are private to the doctor module: a panel
     /// holding it can pass it to the gather and nothing else.
@@ -199,33 +203,47 @@ impl StatusRouterView {
             now: Instant::now(),
             now_ms: chrono::Utc::now().timestamp_millis(),
         };
+        let (parked, unusable) = self.credential_marked_seats();
         ServedInputs::new(
             Arc::clone(&self.router.config),
             self.router.catalog_overlay().clone(),
             learned,
             warm,
         )
-        .with_parked_seats(self.parked_seats())
+        .with_parked_seats(parked)
+        .with_unusable_seats(unusable)
     }
 
     /// Every seat whose credential is parked right now, with its deadline as
-    /// epoch ms.
-    fn parked_seats(&self) -> Vec<ParkedSeat> {
+    /// epoch ms, and every seat whose credential is unusable, with the instant
+    /// it was first marked as epoch ms and its fix line. A seat carrying both
+    /// marks is in both lists.
+    fn credential_marked_seats(&self) -> (Vec<ParkedSeat>, Vec<UnusableSeat>) {
         let now = Instant::now();
         let now_ms = chrono::Utc::now().timestamp_millis();
-        self.router
-            .status_targets(now)
-            .into_iter()
-            .filter_map(|target| {
-                let park = target.gate.credential_park?;
+        let mut parked = Vec::new();
+        let mut unusable = Vec::new();
+        for target in self.router.status_targets(now) {
+            if let Some(park) = target.gate.credential_park {
                 let remaining_ms = i64::try_from(park.remaining.as_millis()).unwrap_or(i64::MAX);
-                Some(ParkedSeat {
-                    state_key: target.state_key,
+                parked.push(ParkedSeat {
+                    state_key: target.state_key.clone(),
                     reason: park.reason,
                     parked_until_ms: now_ms.saturating_add(remaining_ms),
-                })
-            })
-            .collect()
+                });
+            }
+            if let Some(mark) = target.gate.credential_unusable {
+                let elapsed_ms = i64::try_from(mark.since_elapsed.as_millis()).unwrap_or(i64::MAX);
+                unusable.push(UnusableSeat {
+                    fix: unusable_seat_fix(&self.router.config, &target.provider_name),
+                    state_key: target.state_key,
+                    reason: EligibilityReason::CredentialUnusable,
+                    cause: mark.cause,
+                    since_ms: now_ms.saturating_sub(elapsed_ms),
+                });
+            }
+        }
+        (parked, unusable)
     }
 }
 

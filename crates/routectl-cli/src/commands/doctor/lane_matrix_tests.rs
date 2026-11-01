@@ -90,6 +90,7 @@ pub(super) fn context(config: Config, source: CapabilityMatrixSource) -> DoctorC
         tuning: Vec::new(),
         reload_failure: None,
         parked_seats: Vec::new(),
+        unusable_seats: Vec::new(),
         overlay_soft_defects: Vec::new(),
         legacy_folders: Vec::new(),
     }
