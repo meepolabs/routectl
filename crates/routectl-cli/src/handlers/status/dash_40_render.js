@@ -152,13 +152,6 @@
   // multi-source builder that lets a secondary source throw here would wipe
   // out healthy primary content. Multi-source builders confine each source to
   // its own section via `safeSection` instead.
-  // Render the active tab's body from its sources. The tab builder runs in its
-  // own try/catch so a malformed same-version payload degrades to one
-  // `invalid_payload` card instead of a blank page or a failed round. This is
-  // the LAST RESORT, not the containment plan: it replaces the WHOLE tab, so a
-  // multi-source builder that lets a secondary source throw here would wipe
-  // out healthy primary content. Multi-source builders confine each source to
-  // its own section via `safeSection` instead.
   //
   // The BODY is built before the status line is drawn: building is what
   // discovers a render fault (see safeSection), and a status line drawn first
@@ -179,7 +172,7 @@
     var host = el('modal-host');
     if (host) { host.replaceChildren(); }
     try {
-      body.replaceChildren(BUILDERS[tab](primary));
+      paintBody(tab, body, BUILDERS[tab](primary));
     } catch (e) {
       pass.faults[primary.name] = true;
       pass.touched[primary.name] = true;
@@ -206,6 +199,17 @@
       renderVerdict();
       syncTabBadges();
     }
+  }
+
+  // Tabs whose markup carries no event listeners, so a repaint may keep the
+  // nodes a poll did not change: a selected fix command survives the poll.
+  var PATCHED_TABS = { health: true };
+
+  function paintBody(tab, body, fresh) {
+    if (!PATCHED_TABS[tab]) { body.replaceChildren(fresh); return; }
+    var wrap = document.createElement('div');
+    wrap.appendChild(fresh);
+    patchChildren(body, wrap);
   }
 
   // The sections built during the current render pass: which sources they read
@@ -443,8 +447,8 @@
   }
 
   // Precedence: a stopped page, then a dead aggregate, then the today
-  // aggregate's own overload, then any source a fresh round found unusable or
-  // left STALE, then healthy. Every arm reads the EFFECTIVE state, so a source
+  // aggregate's own overload, then seats a request cannot use, then any source
+  // a fresh round found unusable or left STALE, then healthy. Every arm reads the EFFECTIVE state, so a source
   // whose section threw during render counts as unusable here rather than
   // letting the strip claim health beside an error card -- and a source
   // serving RETAINED values after a 503 is reported as stale rather than
@@ -458,6 +462,8 @@
     if (SOURCES.health.state === 'stale' || SOURCES.usage.state === 'stale') {
       return { kind: 'warn', text: 'Status overloaded - showing last known values' };
     }
+    var seats = seatVerdict();
+    if (seats) { return seats; }
     var degraded = ALL_SOURCES.filter(function (n) {
       var s = effectiveState(SOURCES[n]);
       return s === 'unavailable' || s === 'incompatible' || s === 'dead' ||
@@ -478,6 +484,42 @@
       return { kind: 'idle', text: 'Checking routes' };
     }
     return { kind: 'ok', text: 'All routes healthy' };
+  }
+
+  // A live health payload reporting seats a request cannot use: a pool with no
+  // eligible seat is bad; a pool missing some seats, or any target with an
+  // eligibility reason, is a warning. Pool seats are also targets, so the pool
+  // arms come first and a pool's outage is named once, by the pool. Null when
+  // every seat is usable or health has no live payload to read.
+  function seatVerdict() {
+    var rec = SOURCES.health;
+    if (effectiveState(rec) !== 'live' || !rec.data) { return null; }
+    var pools = Array.isArray(rec.data.pools) ? rec.data.pools : [];
+    var empty = pools.filter(function (p) { return Number(p.eligible) <= 0 && Number(p.configured) > 0; });
+    if (empty.length) {
+      return { kind: 'bad', text: 'No usable seat in ' + namedFew(empty.map(poolName)) + ' - see Health' };
+    }
+    var short = pools.filter(function (p) { return Number(p.eligible) < Number(p.configured); });
+    if (short.length) {
+      return { kind: 'warn', text: 'Some seats unusable in ' + namedFew(short.map(poolName)) + ' - see Health' };
+    }
+    var blocked = [];
+    (rec.data.targets || []).forEach(function (t) {
+      if (!t || !t.eligibility || !t.eligibility.reason) { return; }
+      if (blocked.indexOf(t.nickname) < 0) { blocked.push(t.nickname); }
+    });
+    if (blocked.length) {
+      return { kind: 'warn', text: namedFew(blocked) + ' not usable right now - see Health' };
+    }
+    return null;
+  }
+
+  function poolName(p) { return p.pool; }
+
+  // The first name, and how many more, so the sentence stays one line.
+  function namedFew(names) {
+    if (names.length <= 1) { return names[0] || ''; }
+    return names[0] + ' and ' + (names.length - 1) + ' more';
   }
 
   // req/span for the ACTIVE tab: a query-backed tab reads the adapter's
@@ -542,8 +584,8 @@
   // ---- tab badges ------------------------------------------------------
 
   // The badge for a source, computed ONLY from a fresh successful render.
-  // Counts a genuine problem: usage errors, health non-closed circuits,
-  // doctor warn+fail findings. Config carries no error concept, so it never
+  // Counts a genuine problem: usage errors, health targets with a non-closed
+  // circuit or an eligibility reason (once each), doctor warn+fail findings. Config carries no error concept, so it never
   // badges. A zero count returns null so a clean source shows nothing.
   function sourceBadge(name, data) {
     if (name === 'usage') {
@@ -552,7 +594,7 @@
     }
     if (name === 'health') {
       var open = (data.targets || []).filter(function (t) {
-        return t.circuit && t.circuit !== 'closed';
+        return (t.circuit && t.circuit !== 'closed') || !!(t.eligibility && t.eligibility.reason);
       }).length;
       return open > 0 ? { label: String(open), kind: 'warn' } : null;
     }

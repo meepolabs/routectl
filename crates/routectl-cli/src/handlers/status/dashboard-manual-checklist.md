@@ -182,3 +182,27 @@ banner, no retry signal -- silently mislabeled data.
   a credential store, `never` for the sweep stamps before the first sweep,
   and `0` (not `-`) for zero counts. After a minute the last sweep
   age appears and `sweeps` reads `1`.
+- With both pool seats logged out, the status line at the top reads `No
+  usable seat in <pool> - see Health` in red, never "All routes healthy".
+  With one of two seats out it reads `Some seats unusable in <pool> - see
+  Health` in amber; with both logged in it reads `All routes healthy`. A
+  rate-limited or breaker-open seat also turns the line amber while it lasts.
+- The Health tab badge counts each target with an eligibility reason or a
+  non-closed breaker once: two logged-out seats badge `2`, and a seat that is
+  both logged out and breaker-open still counts once. The favicon turns amber
+  with it.
+- The Routing "Live target state" row for the same target shows a red dot,
+  a non-green pill (`no seat` when every seat is out, otherwise the reason),
+  and `<n> of <m> not eligible`; never `unknown - nothing dispatched to it
+  yet`. The Health card's state pill shows the same label, never a green `ok`.
+- Select a fix command with the mouse and wait through three polls with
+  nothing changing: the selection stays, and Ctrl+C copies the full command.
+  The `since <age> ago` text beside it keeps advancing (ages update every
+  poll; only the nodes that changed are replaced).
+- At 800 px wide, the eligibility cell spans the whole card row and each fix
+  command sits on one line; a command wider than the card scrolls inside its
+  own box instead of wrapping at a hyphen.
+- Zero counts render faint: `0` in `eligible 0 of 2` and the seat driver's
+  zero failure counts, never full brightness and never red.
+- In the light theme, faint text (hints, labels, zeros) stays readable on
+  both the page background and a card; the faint token clears 4.5:1 on each.

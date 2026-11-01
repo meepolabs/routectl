@@ -144,6 +144,14 @@ tr.exp-row { cursor: pointer; }
 .circuit-half_open_ready, .status-Warn {
   background: var(--pill-warn-bg); color: var(--pill-warn-fg);
 }
+/* Eligibility reasons. A seat that cannot authenticate, is parked, or sits
+   behind an open breaker is broken; a rate limit is degraded. */
+.elig-credential_unusable, .elig-account_parked, .elig-breaker_open {
+  background: var(--pill-err-bg); color: var(--pill-err-fg);
+}
+.elig-rate_limited {
+  background: var(--pill-warn-bg); color: var(--pill-warn-fg);
+}
 .verdict-force-supported, .tier-self-identifying, .src-import {
   background: var(--pill-info-bg); color: var(--pill-info-fg);
 }

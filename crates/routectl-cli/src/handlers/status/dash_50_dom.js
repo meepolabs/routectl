@@ -171,7 +171,7 @@
   // fallback, so an unknown token stays readable and unstyled. Families that
   // carry a colorblind-safe leading dot get an explicit `.tok-dot` marker so
   // the dot is keyed on the family, never on a substring of the raw token.
-  var DOT_FAMILIES = { circuit: 1, reach: 1, status: 1, qstatus: 1, actstatus: 1 };
+  var DOT_FAMILIES = { circuit: 1, elig: 1, reach: 1, status: 1, qstatus: 1, actstatus: 1 };
   function tok(prefix, raw) {
     var span = document.createElement('span');
     span.className = 'tok ' + prefix + '-' + raw + (DOT_FAMILIES[prefix] ? ' tok-dot' : '');
@@ -420,6 +420,42 @@
     var stack = document.createElement('div');
     stack.className = 'tabstack';
     return stack;
+  }
+
+  // Bring `parent`'s children in line with `fresh` (a freshly built node) by
+  // keeping every existing node whose replacement would be identical, only
+  // updating a changed text node's value, and replacing what differs. A text
+  // selection is anchored to the node it sits in, so a selected command
+  // survives a poll that changed nothing around it, while an age that ticked
+  // beside it still updates. Only for markup with no event listeners: a kept
+  // node keeps the old node's handlers.
+  function patchChildren(parent, fresh) {
+    var next = Array.prototype.slice.call(fresh.childNodes);
+    next.forEach(function (node, i) {
+      var cur = parent.childNodes[i];
+      if (!cur) { parent.appendChild(node); return; }
+      patchNode(parent, cur, node);
+    });
+    while (parent.childNodes.length > next.length) { parent.removeChild(parent.lastChild); }
+  }
+
+  function patchNode(parent, cur, node) {
+    if (cur.isEqualNode(node)) { return; }
+    if (cur.nodeType === 3 && node.nodeType === 3) { cur.nodeValue = node.nodeValue; return; }
+    if (cur.nodeType === 1 && cur.nodeName === node.nodeName && sameAttributes(cur, node)) {
+      patchChildren(cur, node);
+      return;
+    }
+    parent.replaceChild(node, cur);
+  }
+
+  function sameAttributes(a, b) {
+    if (a.attributes.length !== b.attributes.length) { return false; }
+    for (var i = 0; i < a.attributes.length; i++) {
+      var attr = a.attributes[i];
+      if (b.getAttribute(attr.name) !== attr.value) { return false; }
+    }
+    return true;
   }
 
   // A big figure: the numeral plus an optional faint unit slot on either side

@@ -114,7 +114,8 @@
     --border-strong: #cfcfca;
     --fg: #101317;
     --muted: #4b545d;
-    --faint: #6e7883;
+    /* At least 4.5:1 on --bg, --surface and --surface-2. */
+    --faint: #646e79;
 
     --accent: oklch(0.55 0.14 248);
     --accent-soft: rgba(40, 100, 200, 0.07);

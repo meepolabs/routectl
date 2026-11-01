@@ -358,6 +358,7 @@
 }
 .hcell-value .unit { font-size: 0.8em; color: var(--faint); }
 .hage { color: var(--faint); padding-left: var(--sp-2); }
+.hcell--wide { grid-column: 1 / -1; }
 .helig {
   display: flex;
   flex-direction: column;
@@ -371,6 +372,9 @@
   font-size: var(--fs-xs);
   color: var(--muted);
   user-select: all;
+  white-space: nowrap;
+  overflow-x: auto;
+  max-width: 100%;
 }
 .hchips {
   display: flex;

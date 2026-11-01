@@ -58,9 +58,9 @@
     }
     var nowMs = panelNowMs(rec);
     var negatives = learnedByLane(rec.data.learned_negatives);
-    var attention = groups.filter(function (g) { return healthTargetPhase(g) === 'attention'; });
-    var healthy = groups.filter(function (g) { return healthTargetPhase(g) === 'healthy'; });
-    var unknown = groups.filter(function (g) { return healthTargetPhase(g) === 'unknown'; });
+    var attention = groups.filter(function (g) { return targetPhase(g) === 'attention'; });
+    var healthy = groups.filter(function (g) { return targetPhase(g) === 'healthy'; });
+    var unknown = groups.filter(function (g) { return targetPhase(g) === 'unknown'; });
     if (!attention.length && !healthy.length) { return unprobedEmpty(unknown.length); }
     var stack = tabStack();
     if (attention.length) {
@@ -82,24 +82,6 @@
   }
 
   function phrase(n, one, many) { return n === 1 ? one : many; }
-
-  // The Routing tab's phase, except that a seat whose credential is unusable
-  // or parked needs attention even before anything was dispatched to it: a
-  // dead login is never "not observed yet".
-  function healthTargetPhase(group) {
-    if (blockedSeats(group).some(function (t) {
-      var reason = t.eligibility.reason;
-      return reason === 'credential_unusable' || reason === 'account_parked';
-    })) { return 'attention'; }
-    return targetPhase(group);
-  }
-
-  // The seats of a card a request cannot dispatch to right now.
-  function blockedSeats(group) {
-    return group.members.filter(function (t) {
-      return !!(t && t.eligibility && t.eligibility.reason);
-    });
-  }
 
   // Every target is configured but none has a settled outcome: a welcoming
   // state, never a list of cards claiming health nobody has observed.
@@ -162,7 +144,7 @@
   }
 
   function targetCard(group, negatives, nowMs) {
-    var phase = healthTargetPhase(group);
+    var phase = targetPhase(group);
     var cardEl = document.createElement('div');
     cardEl.className = 'hcard hcard--' + phase;
     cardEl.appendChild(targetCardHead(group, phase, nowMs));
@@ -286,7 +268,9 @@
     grid.appendChild(gridCell('last outcome', lastOutcomeValue(group.worst, nowMs)));
     grid.appendChild(gridCell('circuit', circuitValue(group.worst, nowMs)));
     grid.appendChild(gridCell('learned negatives', negativeChips(group, negatives, nowMs)));
-    grid.appendChild(gridCell('eligibility', eligibilityCell(group, nowMs)));
+    var elig = gridCell('eligibility', eligibilityCell(group, nowMs));
+    if (blockedSeats(group).length) { elig.classList.add('hcell--wide'); }
+    grid.appendChild(elig);
     return grid;
   }
 
@@ -328,6 +312,19 @@
     return (v === null || v === undefined || !isFinite(Number(v))) ? '-' : String(Number(v));
   }
 
+  // A seat count as a node: a zero renders faint, never at full weight.
+  function seatCountNode(v) {
+    var text = seatCountText(v);
+    return text === '0' ? faintFigure('0') : document.createTextNode(text);
+  }
+
+  function eligibleOfNode(pool) {
+    var wrap = document.createElement('span');
+    wrap.appendChild(seatCountNode(pool.eligible));
+    wrap.appendChild(document.createTextNode(' of ' + seatCountText(pool.configured)));
+    return wrap;
+  }
+
   function healthPoolSection(rec) {
     var wrap = routingSection('Pool seats', stateCard(rec)
       ? 'Health data unavailable - pool seats are not shown'
@@ -353,9 +350,9 @@
   }
 
   function poolRow(pool) {
-    var pairs = [['eligible', seatCountText(pool.eligible) + ' of ' + seatCountText(pool.configured)]];
+    var pairs = [['eligible', eligibleOfNode(pool)]];
     (pool.by_reason || []).forEach(function (r) {
-      pairs.push([r.reason, seatCountText(r.seats)]);
+      pairs.push([r.reason, seatCountNode(r.seats)]);
     });
     var card = document.createElement('div');
     var blocked = Number(pool.eligible) < Number(pool.configured);
@@ -387,9 +384,9 @@
       ['running', d.running ? 'yes' : 'no'],
       ['last sweep', stamp(d.last_sweep_ms)],
       ['last clean sweep', stamp(d.last_good_sweep_ms)],
-      ['sweeps', seatCountText(d.sweeps)],
-      ['transient failures', seatCountText(d.transient)],
-      ['definitive failures', seatCountText(d.definitive)]
+      ['sweeps', seatCountNode(d.sweeps)],
+      ['transient failures', seatCountNode(d.transient)],
+      ['definitive failures', seatCountNode(d.definitive)]
     ]);
   }
 

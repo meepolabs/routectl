@@ -1407,6 +1407,25 @@ mod tests {
         }
     }
 
+    /// The eligibility reasons the shared target-phase rule treats as needing
+    /// attention must be tokens the server emits; a renamed or misspelled
+    /// token would file a dead login back under "not observed yet".
+    #[test]
+    fn unusable_seat_reasons_are_eligibility_tokens() {
+        let reasons = string_array("UNUSABLE_SEAT_REASONS");
+        assert!(
+            !reasons.is_empty(),
+            "UNUSABLE_SEAT_REASONS must name at least one eligibility reason"
+        );
+        for reason in &reasons {
+            assert!(
+                routectl_core::EligibilityReason::from_token(reason).is_some(),
+                "dashboard reason `{reason}` (in UNUSABLE_SEAT_REASONS) is not an \
+                 eligibility token the health panel emits"
+            );
+        }
+    }
+
     /// Self-containment guard on the ASSEMBLED page (what the handler serves,
     /// not the three authoring sources). The single-file, renders-offline
     /// constraint is what the compile-time assembly must preserve: no

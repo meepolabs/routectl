@@ -248,12 +248,33 @@
     return CIRCUIT_RANK[circuit] || 0;
   }
 
+  // The eligibility reasons that make a seat need attention before anything
+  // was dispatched to it: a dead login or a parked account is never "not
+  // observed yet".
+  var UNUSABLE_SEAT_REASONS = ['credential_unusable', 'account_parked'];
+
+  // The seats of a group a request cannot dispatch to right now.
+  function blockedSeats(group) {
+    return group.members.filter(function (t) {
+      return !!(t && t.eligibility && t.eligibility.reason);
+    });
+  }
+
+  function hasUnusableSeat(group) {
+    return blockedSeats(group).some(function (t) {
+      return UNUSABLE_SEAT_REASONS.indexOf(t.eligibility.reason) >= 0;
+    });
+  }
+
   // The ONE target-state rule, shared by the Routing state list and the Health
   // target cards so the two tabs can never disagree about the same target. A
-  // target with no settled outcome anywhere is `unknown`, NEVER healthy: no
+  // seat whose credential is unusable or whose account is parked needs
+  // attention first, whatever its breaker or outcome says. Otherwise a target
+  // with no settled outcome anywhere is `unknown`, NEVER healthy: no
   // observation is not evidence of health. Healthy means a closed breaker AND
   // an ok last outcome on every seat that has reported one.
   function targetPhase(group) {
+    if (hasUnusableSeat(group)) { return 'attention'; }
     if (group.worst.circuit !== 'closed') { return 'attention'; }
     var settled = group.members.filter(function (t) { return !!t.last_outcome; });
     if (!settled.length) { return 'unknown'; }
@@ -262,26 +283,45 @@
   }
 
   // The circuit pill both tabs render: the neutral unknown token when nothing
-  // has been observed, the worst seat's circuit otherwise.
+  // has been observed, the worst seat's circuit otherwise. A closed breaker on
+  // a target that needs attention because of its seats names the seats
+  // instead: a green "ok" there would contradict the card it sits on.
   function circuitPill(group, phase) {
-    return phase === 'unknown'
-      ? tok('circuit', 'unknown')
-      : tokLabeled('circuit', 'circuit', group.worst.circuit);
+    if (phase === 'unknown') { return tok('circuit', 'unknown'); }
+    var blocked = blockedSeats(group);
+    if (phase === 'attention' && group.worst.circuit === 'closed' && blocked.length) {
+      return seatPill(group, blocked);
+    }
+    return tokLabeled('circuit', 'circuit', group.worst.circuit);
+  }
+
+  // "no seat" when every seat is out, otherwise the first blocked seat's
+  // reason, humanized.
+  function seatPill(group, blocked) {
+    var reason = blocked[0].eligibility.reason;
+    var pill = tokLabeled('elig', 'elig', reason);
+    if (blocked.length === group.count) { pill.textContent = 'no seat'; }
+    pill.title = blocked.length + ' of ' + group.count +
+      phrase(group.count, ' seat', ' seats') + ' not eligible - ' + reason;
+    return pill;
   }
 
   var PHASE_DOT = { attention: 'tdot--bad', healthy: 'tdot--ok', unknown: 'tdot--unknown' };
 
   // The dot follows the PHASE, not the raw circuit: a closed breaker nobody has
-  // probed is unknown, and a green dot beside it would contradict Health.
+  // probed is unknown, and a closed breaker on a target that needs attention is
+  // not green; either would contradict Health.
   function phaseDot(group, phase) {
     if (phase === 'unknown') { return PHASE_DOT.unknown; }
+    if (phase === 'attention' && group.worst.circuit === 'closed') { return PHASE_DOT.attention; }
     return CIRCUIT_DOT[group.worst.circuit] || PHASE_DOT[phase] || 'tdot--unknown';
   }
 
-  // A configured member health has never dispatched to is `unknown`, never
-  // healthy: no observation is not evidence of health. The dot, the pill, and
-  // the reason all read the SHARED `targetPhase`, so this row and the Health
-  // card for the same target can never disagree.
+  // The dot, the pill, and the reason all read the SHARED `targetPhase`, so
+  // this row and the Health card for the same target can never disagree: a
+  // target with an unusable or parked seat needs attention, one with no
+  // settled outcome is `unknown`, never healthy. A chain member with no health
+  // target at all is `unknown` too.
   function targetStateRow(model, found, nowMs) {
     var row = document.createElement('div');
     row.className = 'staterow';
@@ -315,6 +355,8 @@
     var target = found.worst;
     var parts = [];
     if (found.count > 1) { parts.push(found.count + ' targets'); }
+    var blocked = blockedSeats(found).length;
+    if (blocked) { parts.push(blocked + ' of ' + found.count + ' not eligible'); }
     if (phase === 'unknown') {
       parts.push('nothing dispatched to it yet');
     } else {

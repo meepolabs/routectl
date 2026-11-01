@@ -98,6 +98,13 @@
       open: { label: 'open', title: 'open - failing fast, requests shed' },
       half_open_ready: { label: 'half-open', title: 'half_open_ready - probing recovery' }
     },
+    // Target eligibility reasons (the health panel's `eligibility.reason`).
+    elig: {
+      credential_unusable: { label: 'credential unusable', title: 'credential_unusable - the seat cannot authenticate until it is fixed' },
+      account_parked: { label: 'account parked', title: 'account_parked - the account is resting after an upstream rejection' },
+      breaker_open: { label: 'breaker open', title: 'breaker_open - the breaker is failing fast' },
+      rate_limited: { label: 'rate limited', title: 'rate_limited - the local request-rate limit has no capacity left' }
+    },
     reach: {
       reachable: { label: 'reachable', title: 'last dispatch outcome was ok' },
       degraded: { label: 'degraded', title: 'last dispatch outcome was a failure family or gate refusal' },
