@@ -2418,7 +2418,7 @@ Repeat behavior is noted where the line is latched, sampled, or aggregated
 | WARN | `routectl_router::factory::build` | `max_thinking_entry_bytes` zero / below minimum / above ceiling | Remove the key or set it within the logged bounds. |
 | WARN | `routectl_router::factory::build` | `codex_version changed but requires a daemon restart ...` | Restart the daemon to apply the new `codex_version`. |
 | WARN | `routectl_router::factory::build` | `skipping Bedrock model (...)`, `skipping provider (build failed)` | That provider or model is unavailable: fix its credential or config per `error`. |
-| WARN | `routectl_router::factory::build` | `pool_member_omitted` event (once per build per member) | The pool runs with fewer seats: fix the member's credential or provider config per `reason`. |
+| WARN | `routectl_router::factory::build` | `pool_member_omitted` event (once per build per member) | No current build emits it: a member that cannot be built refuses the config instead (the build error names the pool, the member and the rule). |
 | WARN | `routectl_router::factory::build` | `[models.X] stream_first_byte_timeout_ms = 0 ...` | Remove the key or set it to a positive value. |
 | WARN | `routectl_router::factory::installation_id` | `installation-id file unreadable ...`, `installation-id could not be written ...` | Egress omits the installation header: fix permissions or disk space in the config directory. |
 | WARN | `routectl_router::factory::warnings` | `context_management = true on this anthropic-api provider but history_reasoning is not 'preserve'` | Set `history_reasoning = "preserve"` on that model. |

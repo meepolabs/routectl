@@ -1,13 +1,13 @@
-//! The structured degraded-pool WARN: `event="pool_member_omitted"`, one line
-//! per omitted member per build attempt. A member whose credential the store
-//! refuses is not omitted: it is kept as an unusable placeholder seat, and its
-//! build diagnostic carries no store text either.
+//! The structured degraded-pool WARN: `event="pool_member_omitted"`. A member
+//! whose credential the store refuses is not omitted: it is kept as an
+//! unusable placeholder seat, and its build diagnostic carries no store text
+//! either. A member that cannot be built at all refuses the config instead,
+//! so no build emits the WARN.
 //!
-//! Field content is the whole point of these tests. The line reaches operator
-//! log destinations that get archived, shipped to third parties, and audited,
-//! and the same sanitized facts feed the operator-facing pools report -- so the
-//! `reason` must be one of four allowlisted tokens and no store error string,
-//! credential path, token, or account id may appear in ANY field.
+//! Field content is the whole point of these tests. Build output reaches
+//! operator log destinations that get archived, shipped to third parties, and
+//! audited -- so no store error string, credential path, token, or account id
+//! may appear in ANY field, and a refusal names the member and its rule only.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -77,7 +77,7 @@ fn pooled_config(members: &[&str]) -> Config {
 }
 
 /// `pooled_config` with `member`'s entry carrying no credential reference,
-/// which omits it from the seat set.
+/// which refuses the pool.
 fn pooled_config_without_ref(members: &[&str], member: &str) -> Config {
     let mut cfg = pooled_config(members);
     cfg.providers
@@ -94,7 +94,7 @@ fn omission_events(events: &[CapturedEvent]) -> Vec<&CapturedEvent> {
 }
 
 #[tokio::test]
-async fn a_degraded_pool_warns_exactly_once_for_the_member_it_lost() {
+async fn a_member_with_no_credential_ref_refuses_the_build_and_warns_nothing() {
     // Arrange: two members, one of them with no credential reference.
     let store: Arc<dyn SecretStore> = Arc::new(RefusingStore {
         dead_provider: "nobody".into(),
@@ -108,24 +108,15 @@ async fn a_degraded_pool_warns_exactly_once_for_the_member_it_lost() {
         BuildOptions::default(),
     ))
     .await;
-    result.expect("a degraded pool must still build");
 
-    // Assert: one line, for the lost member only -- the survivor is not an
-    // event, and the loss is not repeated per model or per retry.
-    let omissions = omission_events(&events);
-    assert_eq!(
-        omissions.len(),
-        1,
-        "exactly one omission WARN, got {}: {events:?}",
-        omissions.len()
+    // Assert: a config refusal naming the member, not a degraded pool.
+    let err = result.expect_err("a member with no credential ref refuses the build");
+    assert!(
+        err.to_string()
+            .contains("member `anthropic-b` has no credential reference"),
+        "{err}"
     );
-    let e = omissions[0];
-    assert_eq!(e.field("pool"), Some("anthropic-pool"));
-    assert_eq!(e.field("member"), Some("anthropic-b"));
-    assert_eq!(e.field("provider_kind"), Some("anthropic-api"));
-    assert_eq!(e.field("reason"), Some("credential_missing"));
-    assert_eq!(e.field("configured_members"), Some("2"));
-    assert_eq!(e.field("usable_members"), Some("1"));
+    assert!(omission_events(&events).is_empty(), "{events:?}");
 }
 
 #[tokio::test]
@@ -165,8 +156,8 @@ async fn a_store_refusal_keeps_the_member_and_emits_no_store_error_text() {
 }
 
 #[tokio::test]
-async fn the_reason_is_always_one_of_the_four_allowlisted_tokens() {
-    // Two distinct omission shapes across one build: a member with no
+async fn one_refusal_names_every_refused_member_with_its_own_rule() {
+    // Two distinct refusal shapes across one build: a member with no
     // credential reference at all, and a member whose reference does not parse.
     let store: Arc<dyn SecretStore> = Arc::new(RefusingStore {
         dead_provider: "nobody".into(),
@@ -186,23 +177,26 @@ async fn the_reason_is_always_one_of_the_four_allowlisted_tokens() {
         BuildOptions::default(),
     ))
     .await;
-    result.expect("one survivor keeps the pool serving");
 
-    let omissions = omission_events(&events);
-    assert_eq!(omissions.len(), 2, "one line per lost member");
-    let allowlist = [
-        "credential_missing",
-        "credential_unreadable",
-        "credential_invalid",
-        "provider_init_failed",
-    ];
-    for e in &omissions {
-        let reason = e.field("reason").expect("every omission names a reason");
-        assert!(
-            allowlist.contains(&reason),
-            "`{reason}` is not an allowlisted omission reason"
-        );
-    }
+    let msg = result
+        .expect_err("a survivor does not keep a misconfigured pool serving")
+        .to_string();
+    assert!(
+        msg.contains(
+            "member `anthropic-b` has a credential reference that is not a well-formed \
+             secret reference"
+        ),
+        "{msg}"
+    );
+    assert!(
+        msg.contains("member `anthropic-c` has no credential reference"),
+        "{msg}"
+    );
+    assert!(
+        !msg.contains("not a ref"),
+        "the ref value is withheld: {msg}"
+    );
+    assert!(omission_events(&events).is_empty(), "{events:?}");
 }
 
 #[tokio::test]

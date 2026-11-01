@@ -630,8 +630,7 @@ mod build_resolved_models_tests {
         );
     }
 
-    /// A member with no credential reference: an omission arm, which still
-    /// refuses a pool left with no seat at all.
+    /// A member with no credential reference, which refuses the pool.
     fn refless_pool_config(pool: &str, member: &str) -> Config {
         let mut cfg = pooled_config(pool, &[member], &["opus"]);
         cfg.providers
@@ -640,21 +639,33 @@ mod build_resolved_models_tests {
     }
 
     #[tokio::test]
-    async fn a_pool_with_no_kept_member_fails_the_build_naming_pool_and_model() {
-        // Zero kept members behind a selectable model is unroutable, so the
-        // build refuses rather than starting healthy and failing at first
-        // traffic. Also the reload contract: a candidate build that returns Err
-        // is discarded by every caller, leaving the previous router live.
-        let store: Arc<dyn SecretStore> = Arc::new(MemoryStore::new());
-        let cfg = refless_pool_config("anthropic-pool", "anthropic-a");
+    async fn a_pool_member_with_no_credential_ref_refuses_the_build_naming_pool_and_member() {
+        // A member that cannot be built is a config defect, not a degraded
+        // pool: the build refuses rather than serving through the survivors.
+        // Also the reload contract: a candidate build that returns Err is
+        // discarded by every caller, leaving the previous router live.
+        let store: Arc<dyn SecretStore> = Arc::new(SeatEnumerationSpy::default());
+        let mut cfg = pooled_config("anthropic-pool", &["anthropic-a", "anthropic-b"], &["opus"]);
+        cfg.providers
+            .insert("anthropic-b".to_string(), ProviderEntry::anthropic_api(""));
 
         let err = build_resolved_models_reported(&cfg, store, BuildOptions::default())
             .await
-            .expect_err("a pool with no kept member must refuse the build");
+            .expect_err("a member with no credential ref must refuse the build");
 
         let msg = err.to_string();
-        assert!(msg.contains("anthropic-pool"), "must name the pool: {msg}");
-        assert!(msg.contains("opus"), "must name the model: {msg}");
+        assert!(
+            msg.contains("pool `anthropic-pool`"),
+            "must name the pool: {msg}"
+        );
+        assert!(
+            msg.contains("member `anthropic-b` has no credential reference"),
+            "must name the member and the rule: {msg}"
+        );
+        assert!(
+            !msg.contains("anthropic-a"),
+            "the healthy member is not refused: {msg}"
+        );
     }
 
     /// The build refusal for a pool whose keys carry control bytes stays one
@@ -672,10 +683,14 @@ mod build_resolved_models_tests {
         // Act
         let err = build_resolved_models_reported(&cfg, store, BuildOptions::default())
             .await
-            .expect_err("a pool with no kept member must refuse the build");
+            .expect_err("a member with no credential ref must refuse the build");
 
         // Assert
         let msg = err.to_string();
+        assert!(
+            msg.contains("forged member line"),
+            "names the member: {msg}"
+        );
         assert!(!msg.contains('\n'), "{msg}");
         assert!(!msg.contains('\u{1b}'), "{msg}");
         assert!(
@@ -690,6 +705,8 @@ mod build_resolved_models_tests {
     /// override the real reason.
     #[test]
     fn the_omission_warn_neutralizes_control_bytes_in_the_pool_and_member_keys() {
+        use crate::pool_build::{PoolMemberOmission, PoolOmissionReason};
+
         // Arrange
         let reports = vec![PoolReport {
             pool: "pool\n\u{1b}[31mWARN forged".to_string(),
@@ -2458,7 +2475,7 @@ mod managed_credential_factory_tests {
     }
 
     #[tokio::test]
-    async fn a_pool_member_on_a_foreign_host_is_omitted_without_touching_the_store() {
+    async fn a_pool_member_on_a_foreign_host_is_refused_without_touching_the_store() {
         let mut cfg = Config::default();
         cfg.providers.insert(
             "gw".into(),
@@ -2476,9 +2493,14 @@ mod managed_credential_factory_tests {
 
         let err = build_resolved_models_reported(&cfg, store, BuildOptions::default())
             .await
-            .expect_err("a pool with no usable member refuses to build");
+            .expect_err("a member outside containment refuses the build");
 
-        assert!(!err.to_string().contains("sentinel-host"), "{err}");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("member `gw` carries a managed credential outside the lane"),
+            "{msg}"
+        );
+        assert!(!msg.contains("sentinel-host"), "{msg}");
     }
 
     /// Managed Codex and Antigravity refs on a lane their rule rejects. The
@@ -2661,7 +2683,7 @@ mod managed_credential_factory_tests {
 
     #[cfg(feature = "openai-responses")]
     #[tokio::test]
-    async fn a_codex_pool_member_on_a_foreign_host_is_omitted_without_touching_the_store() {
+    async fn a_codex_pool_member_on_a_foreign_host_is_refused_without_touching_the_store() {
         let mut cfg = Config::default();
         cfg.providers.insert(
             "gw".into(),
@@ -2678,25 +2700,29 @@ mod managed_credential_factory_tests {
 
         let err = build_resolved_models_reported(&cfg, store, BuildOptions::default())
             .await
-            .expect_err("a pool with no usable member refuses to build");
+            .expect_err("a member outside containment refuses the build");
 
-        assert!(!err.to_string().contains("sentinel-host"), "{err}");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("member `gw` carries a managed credential outside the lane"),
+            "{msg}"
+        );
+        assert!(!msg.contains("sentinel-host"), "{msg}");
     }
 }
 
 #[cfg(test)]
-mod omission_reason_tests {
+mod member_refusal_tests {
     use super::*;
-    use crate::pool_build::PoolOmissionReason;
     use routectl_core::{Error, UpstreamReason};
 
     #[test]
-    fn a_credential_failure_omits_the_member_as_credential_unreadable() {
+    fn a_build_failure_is_classified_by_its_error_variant() {
         let rows = [
             (
                 "auth",
                 Error::Auth("not logged in".into()),
-                PoolOmissionReason::CredentialUnreadable,
+                MemberRefusal::CredentialUnresolvedAtBuild,
             ),
             (
                 "credential",
@@ -2705,16 +2731,16 @@ mod omission_reason_tests {
                     reason: UpstreamReason::CredentialInvalid,
                     parked_until_ms: None,
                 },
-                PoolOmissionReason::CredentialUnreadable,
+                MemberRefusal::CredentialUnresolvedAtBuild,
             ),
             (
                 "config",
                 Error::Config("bad base url".into()),
-                PoolOmissionReason::ProviderInitFailed,
+                MemberRefusal::ProviderBuildFailed,
             ),
         ];
         for (name, err, expected) in rows {
-            assert_eq!(omission_reason_for_build_error(&err), expected, "{name}");
+            assert_eq!(refusal_for_build_error(&err), expected, "{name}");
         }
     }
 }

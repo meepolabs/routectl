@@ -5324,8 +5324,20 @@ circuit_failures = 5        # ...except seat-b, whose own value wins
 A pool name must not collide with a `[providers]` key or a `[models]`
 nickname -- `config check`, the `serve` gate, and the hot-reload gate all
 reject that, along with a mixed-kind pool, an unknown member, a member
-claimed by two pools, and an empty member list. A rejected hot reload
-leaves the running router serving the previous config.
+claimed by two pools, and an empty member list. They also reject a pool
+member with no credential reference or one that does not parse (every
+member must authenticate with an `oauth://` reference), and a member
+carrying a managed credential outside the lane that credential is
+accepted on. A member whose credential reads but whose provider cannot
+be built from its entry (for example a Codex login with no stored
+account id) refuses the config too: `serve` refuses to start, a hot
+reload is rejected, and `config check` reports it, because check runs
+the same member build offline (it reads the stored credentials as they
+are and never refreshes or writes one). Each refusal names the pool,
+the member and the rule, never a credential value or path. A rejected
+hot reload leaves the running router serving the previous config. A
+member that is only logged out or whose credential cannot be read is
+not refused; see "Pool seats are kept" below.
 
 **Naming convention.** `routectl login` derives names the same way every
 time, so a name it generated is recognized on the next login: the POOL

@@ -1837,12 +1837,13 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `GeminiConfig::new_cloud_code`, forwarding `cloud_project_id` with an empty
   string normalized to unset); provider-or-pool resolution -- a
   `[models.X] provider` naming a `[pools]` block compiles through
-  `compile_pool` into one seat per usable member (built from that member's own
-  `api_key_ref`, credential probed first so a logged-out member is OMITTED
-  rather than lazily failing at first traffic), computed ONCE per pool and
-  shared by Arc, with `build_resolved_models_reported` returning the sanitized
-  `PoolReport` set and refusing the build when a pool a selectable model names
-  has zero usable members. A bare `oauth://<provider>` on a plain provider
+  `compile_pool` into one seat per member (built from that member's own
+  `api_key_ref`, credential probed first so a logged-out member is kept as an
+  unusable placeholder seat rather than lazily failing at first traffic; a
+  member that cannot be built for any other reason refuses the build, naming
+  pool, member and rule), computed ONCE per pool and shared by Arc, with
+  `build_resolved_models_reported` returning the sanitized `PoolReport` set;
+  `pool_member_refusals` runs the same member walk alone for `config check`. A bare `oauth://<provider>` on a plain provider
   entry resolves to that account's DEFAULT seat only -- no `list_seats`
   enumeration on either path; `apply_catalog_overlay`
   runs the two-layer catalog merge once at chain-build/load time and stamps
@@ -7780,6 +7781,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   one `#` TOML comment declaring the dump NOT round-trippable, since operators
   paste this output into bug reports. There is deliberately no
   `--raw`/`--no-redact` escape hatch
+- `src/commands/config_member_build.rs` -- the pool-member build `config
+  check` runs: `OfflineCheckStore` (answers `oauth://` reads from the stored
+  record, never refreshes or writes) and `member_build_errors`, which runs
+  `routectl_router::pool_member_refusals` with serve's build options
 - `src/commands/config_edit.rs` -- `routectl config set/unset`: the write
   pipeline through the shared gate. Order: RAW version preflight FIRST
   (refuses a missing `version` or `version < CURRENT_CONFIG_VERSION`

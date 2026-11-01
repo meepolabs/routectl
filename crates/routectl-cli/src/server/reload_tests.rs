@@ -3034,3 +3034,6 @@ mod retune;
 
 #[path = "reload_placeholder_readmit_tests.rs"]
 mod placeholder_readmit;
+
+#[path = "reload_member_refusal_tests.rs"]
+mod member_refusal;

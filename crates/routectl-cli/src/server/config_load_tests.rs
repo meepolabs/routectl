@@ -366,6 +366,53 @@ fn rejected_pool_configs() -> Vec<(&'static str, String)> {
             ),
         ),
         (
+            "member-with-no-credential-ref",
+            format!(
+                "version = {CURRENT_CONFIG_VERSION}\n{POOL_ACCOUNTS}\
+                 [providers.passthrough]\n\
+                 kind = \"anthropic-api\"\n\
+                 credential_source = \"forwarded\"\n\
+                 base_url = \"https://api.anthropic.com\"\n\
+                 [pools.anthropic]\n\
+                 members = [\"anthropic-default\", \"passthrough\"]\n"
+            ),
+        ),
+        (
+            "member-with-an-empty-own-ref",
+            format!(
+                "version = {CURRENT_CONFIG_VERSION}\n{POOL_ACCOUNTS}\
+                 [providers.blank]\n\
+                 kind = \"anthropic-api\"\n\
+                 api_key_ref = \"\"\n\
+                 [pools.anthropic]\n\
+                 members = [\"anthropic-default\", \"blank\"]\n"
+            ),
+        ),
+        (
+            "member-with-a-malformed-ref",
+            format!(
+                "version = {CURRENT_CONFIG_VERSION}\n{POOL_ACCOUNTS}\
+                 [providers.typo]\n\
+                 kind = \"anthropic-api\"\n\
+                 api_key_ref = \"oauth://\"\n\
+                 [pools.anthropic]\n\
+                 members = [\"anthropic-default\", \"typo\"]\n"
+            ),
+        ),
+        (
+            "member-outside-managed-containment",
+            format!(
+                "version = {CURRENT_CONFIG_VERSION}\n{POOL_ACCOUNTS}\
+                 [providers.gateway]\n\
+                 kind = \"anthropic-api\"\n\
+                 auth_kind = \"oauth-bearer\"\n\
+                 api_key_ref = \"oauth://anthropic#gw\"\n\
+                 base_url = \"https://gateway.example/v1\"\n\
+                 [pools.anthropic]\n\
+                 members = [\"anthropic-default\", \"gateway\"]\n"
+            ),
+        ),
+        (
             "empty-members",
             format!("version = {CURRENT_CONFIG_VERSION}\n[pools.empty]\nmembers = []\n"),
         ),
@@ -399,6 +446,19 @@ fn rejected_pool_configs() -> Vec<(&'static str, String)> {
             text
         }),
     ]
+}
+
+/// The provider entry each member-rule row is refused for, so the report is
+/// checked for naming it.
+fn named_member(row: &str) -> Option<&'static str> {
+    match row {
+        "member-with-no-credential-ref" => Some("passthrough"),
+        "member-with-an-empty-own-ref" => Some("blank"),
+        "member-with-a-malformed-ref" => Some("typo"),
+        "member-outside-managed-containment" => Some("gateway"),
+        "unknown-member" => Some("ghost"),
+        _ => None,
+    }
 }
 
 /// A valid pool config the surfaces below must ACCEPT, so the rejections
@@ -490,6 +550,16 @@ fn config_check_reports_every_bad_pool() {
             !report.errors.is_empty(),
             "config check must report `{name}`"
         );
+        if let Some(member) = named_member(name) {
+            assert!(
+                report
+                    .errors
+                    .iter()
+                    .any(|e| e.contains(&format!("`{member}`"))),
+                "config check must name `{member}` for `{name}`: {:?}",
+                report.errors
+            );
+        }
     }
 
     let body = accepted_pool_config();

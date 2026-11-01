@@ -4,6 +4,7 @@ use routectl_auth::{OAuthStore, SecretRef, SecretStore};
 use routectl_core::{Error, Result, sanitize_for_log_with_cap};
 use routectl_router::{Config, ProviderEntry, collect_config_validation, locate_dotted_path};
 
+use crate::commands::config_member_build::{OfflineCheckStore, member_build_errors};
 use crate::commands::login_provider_block::auth_selector_gap;
 use crate::commands::seat_report::{
     pool_rows, seat_pool_lines, seat_reference_is_stored, stored_seat_pool_rows,
@@ -42,6 +43,20 @@ pub async fn check(config: &Config, raw_text: Option<&str>) -> Result<()> {
     let report = validation_report(config, raw_text);
     errors.extend(report.errors);
     warnings.extend(report.warnings);
+
+    // Serve and reload build each pool member once validation passes and
+    // refuse the config when one cannot be built; check runs the same build,
+    // over a store that never refreshes, so it refuses the same configs.
+    if errors.is_empty() {
+        let offline: std::sync::Arc<dyn SecretStore> =
+            std::sync::Arc::new(OfflineCheckStore::open_default().await);
+        errors.extend(
+            member_build_errors(config, offline)
+                .await
+                .into_iter()
+                .map(|e| locate(raw_text, e)),
+        );
+    }
 
     println!("config check:");
     println!("  providers: {}", config.providers.len());

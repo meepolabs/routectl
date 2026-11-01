@@ -1834,3 +1834,51 @@ fn config_check_renders_a_benign_long_validator_message_verbatim() {
         "a benign message must survive byte-unchanged: {stdout}"
     );
 }
+
+/// `config check` exits non-zero for a pool member whose login reads but
+/// whose provider cannot be built (a Codex seat with no stored account id),
+/// naming the pool, the entry and the rule, and never the stored token.
+#[test]
+fn config_check_exits_non_zero_for_a_pool_member_that_cannot_be_built() {
+    // Arrange
+    let tmp = tempfile::tempdir().unwrap();
+    seed_credentials(tmp.path(), &[("codex#seat-c", "seat-c@example.com")]);
+    let creds_path = tmp.path().join("routectl").join("credentials.json");
+    let mut creds: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&creds_path).unwrap()).unwrap();
+    creds["providers"]["codex#seat-c"]["account"]["account_id"] = serde_json::Value::Null;
+    std::fs::write(&creds_path, serde_json::to_vec_pretty(&creds).unwrap()).unwrap();
+    let config_path = tmp.path().join("config.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            "version = {CURRENT}\n\
+             [providers.seat-c]\n\
+             kind = \"openai-responses\"\n\
+             api_key_ref = \"oauth://codex#seat-c\"\n\
+             [pools.beta]\n\
+             members = [\"seat-c\"]\n\
+             [models.gpt]\n\
+             provider = \"beta\"\n\
+             upstream = \"gpt-5-codex\"\n"
+        ),
+    )
+    .unwrap();
+
+    // Act
+    let (code, stdout, stderr) = run_routectl_with_xdg(
+        tmp.path(),
+        &["--config", config_path.to_str().unwrap(), "config", "check"],
+    );
+
+    // Assert
+    assert_ne!(code, 0, "{stdout} / {stderr}");
+    assert!(
+        stdout.contains(
+            "pool `beta`: member `seat-c` has a readable credential but its provider could \
+             not be built"
+        ),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("seeded-access"), "{stdout}");
+}

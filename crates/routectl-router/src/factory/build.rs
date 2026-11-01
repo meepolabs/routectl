@@ -9,10 +9,7 @@ use crate::catalog_overlay::CatalogOverlay;
 #[cfg(feature = "bedrock")]
 use crate::config::{BedrockApiShapeConfig, BedrockCredsConfig};
 use crate::config::{Config, CredentialSource, PoolEntry, ProviderEntry};
-use crate::pool_build::{
-    PoolMemberOmission, PoolOmissionReason, PoolOutcome, PoolPlaceholder, PoolReport,
-    unavailable_pool_error,
-};
+use crate::pool_build::{PoolOutcome, PoolPlaceholder, PoolReport, unavailable_pool_error};
 use crate::resolved::ResolvedModel;
 use crate::runtime_state::UnusableCause;
 use crate::seat_pool::SeatTarget;
@@ -848,9 +845,12 @@ fn primary_api_key_uri(entry: &ProviderEntry) -> Option<&str> {
 /// A member whose credential probe fails is kept as a PLACEHOLDER seat (no
 /// provider) and reported with its unusable cause, so its account can be
 /// marked and a pool of placeholders alone still builds. A member that cannot
-/// be built for any other reason is OMITTED with an allowlisted reason. Zero
-/// kept members yields [`PoolOutcome::Unavailable`], which the caller turns
-/// into a build refusal for every model routed at the pool.
+/// be built for any other reason REFUSES the pool: the returned message names
+/// the pool, every refused member and the rule each broke, and the caller
+/// turns it into a config error. Config validation refuses the unknown,
+/// missing-ref, malformed-ref and containment cases first; they are repeated
+/// here for a directly-constructed `Config`. A member whose credential reads
+/// but whose provider then fails to build is visible only here.
 ///
 /// Members are walked in declaration order, and the resulting seat order is
 /// the operator's declared order -- the strategy layer
@@ -861,42 +861,28 @@ async fn compile_pool(
     config: &Config,
     secrets: &Arc<dyn SecretStore>,
     opts: &BuildOptions,
-) -> PoolOutcome {
+) -> std::result::Result<PoolOutcome, String> {
     let mut seats: Vec<SeatTarget> = Vec::with_capacity(pool.members.len());
     let mut placeholders: Vec<PoolPlaceholder> = Vec::new();
-    let mut omissions: Vec<PoolMemberOmission> = Vec::new();
+    let mut refusals: Vec<(&str, MemberRefusal)> = Vec::new();
 
     for member in &pool.members {
         let Some(entry) = config.providers.get(member) else {
-            // Validation rejects an unknown member; stay defensive so a
-            // directly-constructed Config cannot panic the build path.
-            omissions.push(PoolMemberOmission {
-                member: member.clone(),
-                provider_kind: "unknown",
-                reason: PoolOmissionReason::CredentialMissing,
-            });
+            refusals.push((member, MemberRefusal::UnknownMember));
             continue;
         };
         let provider_kind = entry.kind_str();
         let secret_ref = match member_secret_ref(entry) {
             Ok(sr) => sr,
-            Err(reason) => {
-                omissions.push(PoolMemberOmission {
-                    member: member.clone(),
-                    provider_kind,
-                    reason,
-                });
+            Err(refusal) => {
+                refusals.push((member, refusal));
                 continue;
             }
         };
         // The credential probe below reads the store, so the managed
         // credential containment rules must already hold.
         if validate_managed_oauth_credentials(member, entry).is_err() {
-            omissions.push(PoolMemberOmission {
-                member: member.clone(),
-                provider_kind,
-                reason: PoolOmissionReason::ProviderInitFailed,
-            });
+            refusals.push((member, MemberRefusal::OutsideContainment));
             continue;
         }
         // Probe the credential BEFORE building. An `oauth://` provider builds
@@ -939,38 +925,85 @@ async fn compile_pool(
                 Some(secret_ref),
                 entry.forwarded_base_url().is_some(),
             )),
-            Err(e) => {
-                // The error text is deliberately NOT carried into the
-                // omission OR the log line: it can inline a credential path,
-                // an account id, or upstream response bytes, and both surfaces
-                // reach operator log destinations. Only the variant SHAPE
-                // classifies.
-                let reason = omission_reason_for_build_error(&e);
-                omissions.push(PoolMemberOmission {
-                    member: member.clone(),
-                    provider_kind,
-                    reason,
-                });
-                tracing::debug!(
-                    pool = %pool_name,
-                    member = %member,
-                    provider_kind,
-                    reason = reason.token(),
-                    "pool member failed to build",
-                );
-            }
+            // The error text is deliberately NOT carried into the refusal:
+            // it can inline a credential path, an account id, or upstream
+            // response bytes, and the refusal reaches operator stdout and
+            // the reload WARN. Only the variant SHAPE classifies.
+            Err(e) => refusals.push((member, refusal_for_build_error(&e))),
         }
     }
 
+    if !refusals.is_empty() {
+        return Err(pool_refusal_message(pool_name, &refusals));
+    }
     if seats.is_empty() {
-        PoolOutcome::Unavailable { omissions }
+        Ok(PoolOutcome::Unavailable {
+            omissions: Vec::new(),
+        })
     } else {
-        PoolOutcome::Ready {
+        Ok(PoolOutcome::Ready {
             seats: Arc::from(seats),
             placeholders,
-            omissions,
+            omissions: Vec::new(),
+        })
+    }
+}
+
+/// Why one pool member refuses the config. Each variant is chosen from the
+/// SHAPE of the defect (an absent entry or ref, a ref that does not parse, a
+/// containment verdict, the variant a build returned), never from the text
+/// of an error, so the rule it renders carries no credential material.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MemberRefusal {
+    UnknownMember,
+    MissingRef,
+    MalformedRef,
+    OutsideContainment,
+    CredentialUnresolvedAtBuild,
+    ProviderBuildFailed,
+}
+
+impl MemberRefusal {
+    /// The rule the member broke, as the tail of a sentence naming it.
+    const fn rule(self) -> &'static str {
+        match self {
+            Self::UnknownMember => "is not a known provider entry in [providers]",
+            Self::MissingRef => "has no credential reference",
+            Self::MalformedRef => {
+                "has a credential reference that is not a well-formed secret reference"
+            }
+            Self::OutsideContainment => {
+                "carries a managed credential outside the lane that credential is accepted on"
+            }
+            Self::CredentialUnresolvedAtBuild => {
+                "has a stored credential that could not be resolved when its provider was built"
+            }
+            Self::ProviderBuildFailed => {
+                "has a readable credential but its provider could not be built from the entry"
+            }
         }
     }
+}
+
+/// One line naming the pool and each refused member with its rule. Both
+/// keys are operator-written and the line is re-logged verbatim by the
+/// reload path, so each is rendered through the shared log sanitizer.
+fn pool_refusal_message(pool_name: &str, refusals: &[(&str, MemberRefusal)]) -> String {
+    let members: Vec<String> = refusals
+        .iter()
+        .map(|(member, refusal)| {
+            format!(
+                "member `{}` {}",
+                routectl_core::sanitize_for_log(member),
+                refusal.rule()
+            )
+        })
+        .collect();
+    format!(
+        "pool `{}`: {}; fix each named provider entry or remove it from the pool",
+        routectl_core::sanitize_for_log(pool_name),
+        members.join("; "),
+    )
 }
 
 /// The unusable cause a failed credential probe earns, by the failure's
@@ -982,35 +1015,72 @@ const fn unusable_cause_for_probe_failure(failure: CredentialProbeFailure) -> Un
     }
 }
 
-/// The parsed credential reference of one pool member, or the omission
-/// reason its absence / malformedness earns.
+/// The parsed credential reference of one pool member, or the refusal its
+/// absence / malformedness earns.
 ///
 /// A member with no credential ref at all cannot authenticate an account, and
 /// a member whose ref does not parse cannot be resolved -- both are
 /// pre-build refusals, distinguished so the operator knows whether to add a
 /// ref or fix one.
-fn member_secret_ref(entry: &ProviderEntry) -> std::result::Result<SecretRef, PoolOmissionReason> {
-    let uri = primary_api_key_uri(entry).ok_or(PoolOmissionReason::CredentialMissing)?;
+fn member_secret_ref(entry: &ProviderEntry) -> std::result::Result<SecretRef, MemberRefusal> {
+    let uri = primary_api_key_uri(entry).ok_or(MemberRefusal::MissingRef)?;
     if uri.is_empty() {
-        return Err(PoolOmissionReason::CredentialMissing);
+        return Err(MemberRefusal::MissingRef);
     }
-    SecretRef::parse(uri).map_err(|_| PoolOmissionReason::CredentialInvalid)
+    SecretRef::parse(uri).map_err(|_| MemberRefusal::MalformedRef)
 }
 
-/// Classify a member build failure into an allowlisted omission reason by the
-/// error VARIANT, never its text.
+/// Classify a member build failure by the error VARIANT, never its text.
 ///
 /// `Error::Auth` is the credential lane: the store could not produce a usable
-/// credential for the ref (not logged in, refresh refused, backing file
-/// unreadable). Everything else is a provider-construction fault (a rejected
-/// base URL, an incoherent provider block).
-const fn omission_reason_for_build_error(e: &routectl_core::Error) -> PoolOmissionReason {
+/// credential for the ref after its probe passed. Everything else is a
+/// provider-construction fault (a rejected base URL, an incoherent provider
+/// block, a Codex login with no stored account id).
+const fn refusal_for_build_error(e: &routectl_core::Error) -> MemberRefusal {
     match e {
         routectl_core::Error::Auth(_) | routectl_core::Error::Credential { .. } => {
-            PoolOmissionReason::CredentialUnreadable
+            MemberRefusal::CredentialUnresolvedAtBuild
         }
-        _ => PoolOmissionReason::ProviderInitFailed,
+        _ => MemberRefusal::ProviderBuildFailed,
     }
+}
+
+/// Build every member of every pool a selectable model routes at, exactly as
+/// [`build_resolved_models_reported`] does, and return each pool's refusal.
+///
+/// This is how `config check` refuses the configs serve and reload refuse at
+/// build: same member walk, same credential probe, same provider
+/// construction. Only pools are built; no non-pool provider is constructed.
+/// Whether the build touches the network is the store's business: a caller
+/// that must stay offline passes a store whose reads never refresh.
+pub async fn pool_member_refusals(
+    config: &Config,
+    secrets: Arc<dyn SecretStore>,
+    opts: BuildOptions,
+) -> Vec<String> {
+    install_resolved_codex_identity(config);
+    let mut refusals = Vec::new();
+    for (pool_name, pool) in routed_pools(config) {
+        if let Err(refusal) = compile_pool(pool_name, pool, config, &secrets, &opts).await {
+            refusals.push(refusal);
+        }
+    }
+    refusals
+}
+
+/// The pools a selectable, buildable model names: the set
+/// [`build_resolved_models_reported`] compiles.
+fn routed_pools(config: &Config) -> BTreeMap<&str, &PoolEntry> {
+    config
+        .models
+        .iter()
+        .filter(|(nickname, entry)| {
+            entry.selectable
+                && crate::seat_pool::check_state_key_name("model nickname", nickname).is_ok()
+        })
+        .filter_map(|(_, entry)| config.pools.get_key_value(&entry.provider))
+        .map(|(name, pool)| (name.as_str(), pool))
+        .collect()
 }
 
 /// Build a `TokenSource` for a provider that needs per-request token
@@ -1221,11 +1291,12 @@ pub struct ResolvedModelBuild {
 /// [`build_resolved_models`] with the per-pool build reports retained.
 ///
 /// Fails with `Error::Config` when any pool that a selectable model names has
-/// ZERO usable members: every request for such a model would find an empty
-/// seat set, so the refusal names both the pool and the models routed at it
-/// instead of letting the server start healthy and fail at first traffic. On
-/// a hot reload the candidate build is rejected and the previous router stays
-/// live, which is the existing behavior for any build error.
+/// a member that refuses the config (see `compile_pool`), or has ZERO usable
+/// members: every request for such a model would find an empty seat set, so
+/// the refusal names both the pool and the models routed at it instead of
+/// letting the server start healthy and fail at first traffic. On a hot
+/// reload the candidate build is rejected and the previous router stays live,
+/// which is the existing behavior for any build error.
 pub async fn build_resolved_models_reported(
     config: &Config,
     secrets: Arc<dyn SecretStore>,
@@ -1291,7 +1362,9 @@ pub async fn build_resolved_models_reported(
                     // shares the same seat set by Arc, so the members'
                     // providers are built exactly once regardless of how many
                     // models route at the pool.
-                    let built = compile_pool(&entry.provider, pool, config, &secrets, &opts).await;
+                    let built = compile_pool(&entry.provider, pool, config, &secrets, &opts)
+                        .await
+                        .map_err(routectl_core::Error::Config)?;
                     pool_cache.insert(entry.provider.clone(), built.clone());
                     built
                 }

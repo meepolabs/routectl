@@ -445,6 +445,8 @@ list with more narrative.
 
 ### Changed
 
+- **BREAKING: a pool member routectl cannot build once its credential reads now refuses the config** at serve, `config check` and hot reload (a refused reload keeps the running config). The refusal names the pool, the member and the rule, never a value. Example: a logged-in Codex member whose stored login carries no account id. Such a member used to be dropped from the pool with a `pool_member_omitted` WARN. `config check` now runs the same member build offline (no credential is refreshed or written). A member that is only logged out or whose credential cannot be read still loads, as an unusable seat. A pool member with a missing or malformed credential reference, an unknown member, or a managed credential outside its lane was already refused by config validation and still is.
+
 - **When a seat's refresh token is refused during a request, the seat is marked unusable and the request moves to the next seat instead of failing; count_tokens also walks past unusable seats.** The mark is the same one a reload clears, so later requests skip the seat without dialing it; with a single seat, or with fallbacks disabled, the request answers 503 `credential_unusable`. A refresh that fails any other way still surfaces its error unchanged, and a probe request never marks. See [docs/LOGGING.md](docs/LOGGING.md).
 - A pool member whose credential cannot be read at startup stays in the pool as an unusable seat, and a daemon whose every seat is unusable now starts and answers 503 `credential_unusable` until one recovers; it used to refuse to start. See [docs/CONFIGURATION.md](docs/CONFIGURATION.md#credential-pools-multiple-accounts-per-provider).
 
