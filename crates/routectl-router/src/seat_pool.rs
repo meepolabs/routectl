@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use lru::LruCache;
 use parking_lot::Mutex;
-use routectl_auth::SecretRef;
+use routectl_auth::{SecretRef, SecretScheme};
 use routectl_core::Provider;
 
 use crate::config::SeatSelection;
@@ -147,14 +147,8 @@ impl std::fmt::Debug for SeatTarget {
 /// `file://` key path (and, for a reference constructed in code rather than
 /// parsed, inline secret material) into every log line that debug-formats a
 /// seat.
-const fn secret_ref_scheme(secret_ref: &SecretRef) -> &'static str {
-    match secret_ref {
-        SecretRef::OAuth { .. } => "oauth://",
-        SecretRef::Env(_) => "env://",
-        SecretRef::File(_) => "file://",
-        SecretRef::Literal(_) => "literal:",
-        _ => "unknown",
-    }
+fn secret_ref_scheme(secret_ref: &SecretRef) -> &'static str {
+    SecretScheme::from(secret_ref).as_prefix()
 }
 
 /// The byte that joins a model nickname to a pool member in a seat's

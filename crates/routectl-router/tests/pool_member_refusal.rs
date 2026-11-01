@@ -145,13 +145,21 @@ async fn a_store_refusal_keeps_the_member_and_emits_no_store_error_text() {
         "acct_9f3b21c8",
         "routectl login",
         "no credentials",
-        "oauth://",
+        "oauth://anthropic",
     ] {
         assert!(
             !rendered.contains(banned),
             "no build event may carry `{banned}`: {rendered}"
         );
     }
+    let schemes: Vec<&str> = events
+        .iter()
+        .flat_map(|event| &event.fields)
+        .filter(|(name, _)| name == "secret_scheme")
+        .map(|(_, value)| value.as_str())
+        .collect();
+    assert!(!schemes.is_empty(), "{events:?}");
+    assert!(schemes.iter().all(|s| *s == "oauth://"), "{schemes:?}");
 }
 
 #[tokio::test]

@@ -7,7 +7,7 @@ use chrono::Local;
 use routectl_auth::LocalProbe;
 use routectl_auth::oauth::types::{TokenRecord, seat_key, unix_now};
 use routectl_auth::{OAuthError, OAuthStore};
-use routectl_auth::{SecretRef, default_secret_dir};
+use routectl_auth::{SecretRef, SecretScheme, default_secret_dir};
 use routectl_core::ProbeOutcome;
 use routectl_router::{
     BetaSeedScope, CATALOG_VERSION, CapabilityEventRow, CapabilityRebuildSummary, CatalogOverlay,
@@ -708,17 +708,7 @@ pub(super) enum SecretPresence {
 /// IS secret material, so it collapses to `"unknown"` rather than echoing
 /// any of its bytes.
 pub(super) fn scheme_label(uri: &str) -> &'static str {
-    if uri.starts_with("oauth://") {
-        "oauth://"
-    } else if uri.starts_with("env://") {
-        "env://"
-    } else if uri.starts_with("file://") {
-        "file://"
-    } else if uri.starts_with("literal:") {
-        "literal:"
-    } else {
-        "unknown"
-    }
+    SecretScheme::classify(uri).map_or("unknown", SecretScheme::as_prefix)
 }
 
 /// Classify one secret ref without resolving its value or refreshing any

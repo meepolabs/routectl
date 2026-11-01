@@ -302,31 +302,59 @@ fn credential_ref_scheme_carries_the_scheme_only() {
     );
 }
 
+fn config_with_provider_api_key_ref(api_key_ref: &str) -> Config {
+    let mut config = config_with_provider_base_url("https://upstream.example");
+    if let Some(ProviderEntry::AnthropicApi {
+        api_key_ref: slot, ..
+    }) = config.providers.get_mut("acme")
+    {
+        *slot = api_key_ref.to_string();
+    }
+    config
+}
+
 /// An unrecognized ref is a bare value someone pasted into the field, not a
 /// ref with an exotic scheme -- and a bare value IS secret material, so the
 /// text before its first colon is a key id, not a scheme.
 #[test]
 fn unrecognized_credential_ref_publishes_none_of_its_bytes() {
-    for pasted in [
-        "AKIAEXAMPLE:wJalrXUtnFEMI",
-        "sk-live-abc:def",
-        "sk-live-no-colon-at-all",
-        ":sk-live-leading",
+    for (pasted, marker) in [
+        ("AKIAEXAMPLE:wJalrXUtnFEMI", "AKIAEXAMPLE"),
+        ("sk-live-abc:def", "sk-live-abc"),
+        ("sk-live-no-colon-at-all", "sk-live-no-colon"),
+        (":sk-live-leading", "sk-live-leading"),
     ] {
+        let config = config_with_provider_api_key_ref(pasted);
+        let view = derive_effective_view(&config, &CatalogOverlay::default());
+        let cell = &view.providers[0];
         assert_eq!(
-            credential_ref_scheme(Some(pasted)),
-            None,
-            "`{pasted}` is not an allowlisted ref scheme; it must project nothing"
+            cell.credential_ref_scheme.as_deref(),
+            Some("unknown"),
+            "`{pasted}` is not an allowlisted ref scheme; it must project the fixed label"
+        );
+        let rendered = format!("{cell:?}");
+        assert!(
+            !rendered.contains(marker),
+            "no byte run of `{pasted}` may reach the cell: {rendered}"
         );
     }
-    // The allowlisted four still project, case-insensitively.
+    // The allowlisted four still project, case-insensitively, and the
+    // single-colon `env:VAR` spelling still reads as env.
     for (raw, expected) in [
         ("env://VAR", "env"),
+        ("env:VAR", "env"),
         ("FILE:///etc/k", "file"),
         ("oauth://anthropic", "oauth"),
         ("literal:k", "literal"),
     ] {
         assert_eq!(credential_ref_scheme(Some(raw)).as_deref(), Some(expected));
+    }
+}
+
+#[test]
+fn absent_or_blank_credential_ref_projects_none() {
+    for absent in [None, Some(""), Some("   ")] {
+        assert_eq!(credential_ref_scheme(absent), None, "{absent:?}");
     }
 }
 

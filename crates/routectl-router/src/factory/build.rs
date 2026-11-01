@@ -18,7 +18,7 @@ use crate::runtime_state::UnusableCause;
 use crate::seat_pool::SeatTarget;
 #[cfg(feature = "gemini")]
 use routectl_auth::OAuthStoreProjectCache;
-use routectl_auth::{CredentialProbeFailure, SecretRef, SecretStore};
+use routectl_auth::{CredentialProbeFailure, SecretRef, SecretScheme, SecretStore};
 #[cfg(feature = "gemini")]
 use routectl_core::CloudProjectCache;
 use routectl_core::{Provider, Result};
@@ -1789,20 +1789,11 @@ pub fn ipv4_compatible_embedded(ip: &std::net::Ipv6Addr) -> Option<std::net::Ipv
 }
 
 /// Returns the URI scheme of a SecretRef literal (`env://`, `file://`,
-/// `literal:`, or `unknown`) without leaking the value. Used for
-/// structured tracing fields so log lines indicate WHICH source resolved
-/// (env var vs. file vs. inline) without revealing the secret name or
-/// its content.
+/// `oauth://`, `literal:`, or `unknown`) without leaking the value. Used
+/// for structured tracing fields and config errors so they indicate WHICH
+/// source a ref names without revealing the secret name or its content.
 fn scheme_of(uri: &str) -> &'static str {
-    if uri.starts_with("env://") {
-        "env://"
-    } else if uri.starts_with("file://") {
-        "file://"
-    } else if uri.starts_with("literal:") {
-        "literal:"
-    } else {
-        "unknown"
-    }
+    SecretScheme::classify(uri).map_or("unknown", SecretScheme::as_prefix)
 }
 
 // v0.6.0: ReasoningDialect / HistoryReasoning mappings moved to

@@ -1819,6 +1819,25 @@ mod gemini_cloud_code_factory_tests {
     }
 
     #[tokio::test]
+    async fn cloud_code_malformed_oauth_ref_error_names_the_oauth_scheme() {
+        let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore);
+        let entry =
+            ProviderEntry::gemini("oauth://").with_gemini_auth_mode(GeminiAuthMode::CloudCode);
+
+        let err = match build_provider("gemini-cc", &entry, secrets).await {
+            Ok(_) => panic!("cloud-code mode must reject an oauth:// ref with no provider"),
+            Err(e) => e,
+        };
+        match err {
+            Error::Config(msg) => assert!(
+                msg.contains("scheme `oauth://`") && msg.contains("not a valid secret URI"),
+                "the parse refusal must name the oauth:// scheme; got: {msg}"
+            ),
+            other => panic!("expected Error::Config, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn cloud_code_build_does_not_leak_token_in_debug() {
         let secret_ref = SecretRef::parse("oauth://antigravity").expect("parse oauth ref");
         let secrets: Arc<dyn SecretStore> = Arc::new(OAuthTokenStub);
@@ -1959,6 +1978,24 @@ mod gemini_cloud_code_factory_tests {
             .complete(base_req())
             .await
             .expect("an empty configured id must leave discovery in charge");
+    }
+}
+
+mod scheme_of_tests {
+    use super::scheme_of;
+
+    #[test]
+    fn scheme_of_labels_each_allowlisted_prefix_and_collapses_the_rest() {
+        for (uri, expected) in [
+            ("env://VAR", "env://"),
+            ("file:///abs/key", "file://"),
+            ("oauth://x", "oauth://"),
+            ("literal:value", "literal:"),
+            ("OAUTH://x", "unknown"),
+            ("test-pasted-value-not-real", "unknown"),
+        ] {
+            assert_eq!(scheme_of(uri), expected, "scheme_of({uri:?})");
+        }
     }
 }
 

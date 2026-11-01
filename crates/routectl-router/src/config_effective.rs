@@ -20,6 +20,7 @@
 //! are in-memory runtime state on a live router, not config, so they are out
 //! of scope for this pure view.
 
+use routectl_auth::SecretScheme;
 use routectl_core::failure_class::FailureClass;
 use routectl_providers::anthropic_api::AuthKind;
 #[cfg(feature = "gemini")]
@@ -121,8 +122,9 @@ pub struct ProviderCell {
     /// so such an entry reports the effective cloud-code host instead.
     pub endpoint_origin: Option<String>,
     /// The URI SCHEME of the entry's primary `api_key_ref` (`env`, `file`,
-    /// `oauth`, ...), never the ref body. `None` for a variant with no single
-    /// canonical key slot, or a ref with no `scheme:` prefix.
+    /// `oauth`, `literal`), never the ref body. `unknown` for a present ref
+    /// off that allowlist (a pasted bare value included); `None` for a
+    /// variant with no single canonical key slot, or a blank ref.
     pub credential_ref_scheme: Option<String>,
     /// This variant's OWN existing serde auth token (`api-key`,
     /// `oauth-bearer`, `chatgpt-oauth`, `bedrock-mantle`, `cloud-code`,
@@ -249,14 +251,29 @@ pub fn endpoint_origin(base_url: &str) -> Option<String> {
 /// and a bare value IS secret material. `api_key_ref` is a plain `String` and
 /// `SecretRef::parse` never runs for a provider no model references, so a
 /// pasted `AKIA<id>:<secret>` reaches here intact -- returning the text before
-/// its first colon would publish the key id. Anything off the list collapses to
-/// `None`, echoing none of its bytes.
+/// its first colon would publish the key id. A present ref off the list
+/// (colon or not) collapses to the fixed `unknown`, echoing none of its bytes;
+/// only an absent or blank ref is `None`.
+///
+/// The token match is deliberately looser than [`SecretScheme::classify`]
+/// (case-insensitive, `env:VAR` counts as `env`): this surface reports which
+/// credential class the operator MEANT, not whether the ref parses.
 fn credential_ref_scheme(api_key_ref: Option<&str>) -> Option<String> {
     let raw = api_key_ref?.trim();
-    let (scheme, _) = raw.split_once(':')?;
-    let scheme = scheme.to_ascii_lowercase();
-    matches!(scheme.as_str(), "env" | "file" | "oauth" | "literal").then_some(scheme)
+    if raw.is_empty() {
+        return None;
+    }
+    let token = raw.split_once(':').map_or("", |(scheme, _)| scheme);
+    let label = SecretScheme::ALL
+        .into_iter()
+        .map(SecretScheme::as_token)
+        .find(|known| token.eq_ignore_ascii_case(known))
+        .unwrap_or(UNKNOWN_CREDENTIAL_REF_SCHEME);
+    Some(label.to_string())
 }
+
+/// What a present `api_key_ref` off the scheme allowlist renders as.
+const UNKNOWN_CREDENTIAL_REF_SCHEME: &str = "unknown";
 
 /// Extract the entry's own auth-mechanism token.
 ///

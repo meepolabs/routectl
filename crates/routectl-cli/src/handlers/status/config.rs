@@ -87,7 +87,8 @@ struct ProviderWire {
     /// factory time, which a pure derivation over the config cannot reach.
     endpoint_origin: Option<String>,
     /// The URI SCHEME of the entry's primary `api_key_ref` (`env`, `file`,
-    /// `oauth`, ...), never the ref body.
+    /// `oauth`, `literal`), never the ref body; `unknown` for a present ref
+    /// off that allowlist.
     credential_ref_scheme: Option<String>,
     /// This variant's OWN auth-mechanism token, or `null` for a kind with no
     /// auth discriminant. A closed vocabulary from the router's single

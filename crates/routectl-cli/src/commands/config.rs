@@ -1,6 +1,6 @@
 //! `routectl config <subcommand>` -- check, show, example.
 
-use routectl_auth::{OAuthStore, SecretRef, SecretStore};
+use routectl_auth::{OAuthStore, SecretRef, SecretScheme, SecretStore};
 use routectl_core::{Error, Result, sanitize_for_log_with_cap};
 use routectl_router::{
     Config, ProviderEntry, collect_config_validation, locate_dotted_path, resolve_model_provider,
@@ -436,17 +436,7 @@ pub fn example() -> Result<()> {
 /// error/warning lines so a `literal:hunter2` in a TOML doesn't
 /// leak into shell history or CI logs via stdout.
 fn scheme_of(uri: &str) -> &'static str {
-    if uri.starts_with("env://") {
-        "env://"
-    } else if uri.starts_with("file://") {
-        "file://"
-    } else if uri.starts_with("literal:") {
-        "literal:"
-    } else if uri.starts_with("oauth://") {
-        "oauth://"
-    } else {
-        "unknown"
-    }
+    SecretScheme::classify(uri).map_or("unknown", SecretScheme::as_prefix)
 }
 
 #[cfg(test)]

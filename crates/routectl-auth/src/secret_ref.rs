@@ -121,6 +121,70 @@ impl SecretRef {
     }
 }
 
+/// The closed set of secret-ref schemes: the one allowlist every leak-safe
+/// label site classifies against. A label derived from it never carries a
+/// byte of the ref body, so a value pasted into a ref field (which IS secret
+/// material) can only ever surface as "no scheme".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SecretScheme {
+    /// `env://VAR_NAME`.
+    Env,
+    /// `file:///absolute/path`.
+    File,
+    /// `oauth://<provider>[#label]`.
+    OAuth,
+    /// `literal:<value>` (rejected at parse; still a recognized scheme).
+    Literal,
+}
+
+impl SecretScheme {
+    /// Every scheme, in classification order.
+    pub const ALL: [Self; 4] = [Self::Env, Self::File, Self::OAuth, Self::Literal];
+
+    /// The scheme whose prefix `uri` starts with, matched case-sensitively
+    /// exactly as [`SecretRef::parse`] matches. `None` for anything else,
+    /// including a bare value with no scheme.
+    #[must_use]
+    pub fn classify(uri: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|scheme| uri.starts_with(scheme.as_prefix()))
+    }
+
+    /// The URI prefix spelling: `env://`, `file://`, `oauth://`, `literal:`.
+    #[must_use]
+    pub const fn as_prefix(self) -> &'static str {
+        match self {
+            Self::Env => "env://",
+            Self::File => "file://",
+            Self::OAuth => "oauth://",
+            Self::Literal => "literal:",
+        }
+    }
+
+    /// The bare token spelling: `env`, `file`, `oauth`, `literal`.
+    #[must_use]
+    pub const fn as_token(self) -> &'static str {
+        match self {
+            Self::Env => "env",
+            Self::File => "file",
+            Self::OAuth => "oauth",
+            Self::Literal => "literal",
+        }
+    }
+}
+
+impl From<&SecretRef> for SecretScheme {
+    fn from(secret_ref: &SecretRef) -> Self {
+        match secret_ref {
+            SecretRef::Env(_) => Self::Env,
+            SecretRef::File(_) => Self::File,
+            SecretRef::OAuth { .. } => Self::OAuth,
+            SecretRef::Literal(_) => Self::Literal,
+        }
+    }
+}
+
 /// The rejection error for a `literal:` secret ref, shared by parse and by
 /// resolve so both boundaries speak with one voice. Names the safe
 /// key-setting paths and NEVER echoes the key value.
@@ -405,5 +469,57 @@ mod tests {
             msg.contains("oauth://"),
             "error should still list expected schemes: {msg}"
         );
+    }
+
+    #[test]
+    fn secret_scheme_classifies_each_allowlisted_prefix_and_nothing_else() {
+        for (uri, expected) in [
+            ("env://VAR", Some(SecretScheme::Env)),
+            ("file:///abs/key", Some(SecretScheme::File)),
+            ("oauth://anthropic#seat-a", Some(SecretScheme::OAuth)),
+            ("literal:value", Some(SecretScheme::Literal)),
+            ("ENV://X", None),
+            ("env:VAR", None),
+            ("vault://secret", None),
+            ("test-unprefixed-value-not-real", None),
+            ("", None),
+        ] {
+            assert_eq!(SecretScheme::classify(uri), expected, "classify({uri:?})");
+        }
+    }
+
+    #[test]
+    fn secret_scheme_spells_prefix_and_token() {
+        let spellings: Vec<_> = SecretScheme::ALL
+            .into_iter()
+            .map(|s| (s.as_prefix(), s.as_token()))
+            .collect();
+        assert_eq!(
+            spellings,
+            [
+                ("env://", "env"),
+                ("file://", "file"),
+                ("oauth://", "oauth"),
+                ("literal:", "literal"),
+            ]
+        );
+    }
+
+    #[test]
+    fn secret_scheme_from_secret_ref_covers_every_variant() {
+        for (secret_ref, expected) in [
+            (SecretRef::Env("VAR".into()), SecretScheme::Env),
+            (SecretRef::File("/abs/key".into()), SecretScheme::File),
+            (
+                SecretRef::OAuth {
+                    provider: "anthropic".into(),
+                    label: Some("seat-a".into()),
+                },
+                SecretScheme::OAuth,
+            ),
+            (SecretRef::Literal("value".into()), SecretScheme::Literal),
+        ] {
+            assert_eq!(SecretScheme::from(&secret_ref), expected, "{secret_ref:?}");
+        }
     }
 }

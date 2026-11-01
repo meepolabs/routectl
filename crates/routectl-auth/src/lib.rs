@@ -27,7 +27,7 @@ pub use memory_store::MemoryStore;
 pub use secret_capture::{
     ManagedSecretStore, SecretCaptureError, SecretCaptureResult, default_secret_dir, env_ref,
 };
-pub use secret_ref::SecretRef;
+pub use secret_ref::{SecretRef, SecretScheme};
 pub use store::{CredentialProbeFailure, SecretStore};
 
 #[cfg(feature = "oauth")]

@@ -1,6 +1,6 @@
 //! Interactive/stdin secret capture + pending-secret execution.
 
-use routectl_auth::{ManagedSecretStore, SecretRef, default_secret_dir, env_ref};
+use routectl_auth::{ManagedSecretStore, SecretRef, SecretScheme, default_secret_dir, env_ref};
 use routectl_core::{Error, Result};
 
 use super::{AddIo, ProviderAddArgs};
@@ -156,12 +156,6 @@ fn clean_key(raw: &str) -> String {
 
 /// Scheme/class label for a secret ref -- what the audit event records in
 /// place of the value or the full ref string.
-pub(super) const fn ref_class(sref: &SecretRef) -> &'static str {
-    match sref {
-        SecretRef::Env(_) => "env",
-        SecretRef::File(_) => "file",
-        SecretRef::Literal(_) => "literal",
-        SecretRef::OAuth { .. } => "oauth",
-        _ => "unknown",
-    }
+pub(super) fn ref_class(sref: &SecretRef) -> &'static str {
+    SecretScheme::from(sref).as_token()
 }
