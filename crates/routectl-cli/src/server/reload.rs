@@ -265,7 +265,7 @@ impl ActivationTrigger {
 
 /// Local-only probe of every routectl-owned OAuth provider id. When the
 /// OAuth arm is present each id is probed against the in-memory cache
-/// (`probe_local`: no network, no refresh); when it is absent (no HOME/XDG)
+/// (`probe_all_local`: no network, no refresh); when it is absent (no HOME/XDG)
 /// every id yields [`LocalProbe::StoreUnavailable`]. The id set is the
 /// stable `known_provider_ids()` candidate universe -- the same every
 /// recompute, so diffs never lose a provider.
@@ -274,13 +274,7 @@ async fn gather_probes(
 ) -> Vec<(&'static str, LocalProbe)> {
     let ids = routectl_auth::oauth::known_provider_ids();
     match oauth_store {
-        Some(store) => {
-            let mut probes = Vec::with_capacity(ids.len());
-            for id in ids {
-                probes.push((*id, store.probe_local(id).await));
-            }
-            probes
-        }
+        Some(store) => store.probe_all_local().await,
         None => ids
             .iter()
             .map(|id| (*id, LocalProbe::StoreUnavailable))

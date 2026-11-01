@@ -430,13 +430,7 @@ fn read_config_text(config_path: &Path) -> Result<String> {
 pub(super) async fn gather_probes() -> Vec<(&'static str, LocalProbe)> {
     let ids = routectl_auth::oauth::known_provider_ids();
     match OAuthStore::open_default().await {
-        Ok(store) => {
-            let mut probes = Vec::with_capacity(ids.len());
-            for id in ids {
-                probes.push((*id, store.probe_local(id).await));
-            }
-            probes
-        }
+        Ok(store) => store.probe_all_local().await,
         Err(_) => ids
             .iter()
             .map(|id| (*id, LocalProbe::StoreUnavailable))

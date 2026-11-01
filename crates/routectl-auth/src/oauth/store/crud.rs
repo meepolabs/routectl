@@ -279,6 +279,19 @@ impl OAuthStore {
         LocalProbe::Expired
     }
 
+    /// [`Self::probe_local`] for every routectl-owned OAuth provider, in
+    /// the stable `known_provider_ids()` order. Same read-only contract:
+    /// no network, no refresh, no writes. A store that cannot be opened is
+    /// the caller's arm to map to [`LocalProbe::StoreUnavailable`].
+    pub async fn probe_all_local(&self) -> Vec<(&'static str, LocalProbe)> {
+        let ids = crate::oauth::known_provider_ids();
+        let mut probes = Vec::with_capacity(ids.len());
+        for id in ids {
+            probes.push((*id, self.probe_local(id).await));
+        }
+        probes
+    }
+
     /// Snapshot all known provider records (for `routectl whoami`).
     pub async fn list(&self) -> Vec<(String, TokenRecord)> {
         self.inner

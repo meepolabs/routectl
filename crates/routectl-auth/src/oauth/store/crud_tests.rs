@@ -462,6 +462,34 @@ async fn probe_local_never_triggers_refresh() {
     );
 }
 
+#[tokio::test]
+async fn probe_all_local_reports_every_known_provider_in_order() {
+    // Seeded at a non-first id so neither the head of the list nor a
+    // reversed order can pass by accident.
+    let ids = crate::oauth::known_provider_ids();
+    let seeded = ids[1];
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("creds.json");
+    let store = OAuthStore::open(&path).await.unwrap();
+    store
+        .write_record(seeded, rec_at(unix_now() + 3600))
+        .await
+        .unwrap();
+
+    let probes = store.probe_all_local().await;
+
+    let order: Vec<&str> = probes.iter().map(|(id, _)| *id).collect();
+    assert_eq!(order, ids, "one row per known provider, in registry order");
+    for (id, probe) in &probes {
+        let expected = if *id == seeded {
+            LocalProbe::Present
+        } else {
+            LocalProbe::Missing
+        };
+        assert_eq!(*probe, expected, "probe for `{id}`");
+    }
+}
+
 // ---- cross-process re-read-under-lock merge ----
 //
 // Two `OAuthStore::open` handles on ONE credentials file model the

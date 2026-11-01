@@ -626,7 +626,7 @@ async fn gather_probe_results(config: &Config) -> Vec<(String, ProbeOutcome)> {
 }
 
 /// Probe every routectl-owned OAuth id and list stored seats through the
-/// default store. Read-only: `probe_local` performs no network or refresh
+/// default store. Read-only: `probe_all_local` performs no network or refresh
 /// and `list` no writes. A store that fails to OPEN (schema mismatch,
 /// corrupted file) returns a sanitized, path-free error string (see
 /// [`sanitize_store_open_error`]) rather than being masked as an absent
@@ -639,10 +639,7 @@ async fn gather_auth() -> (
     let ids = routectl_auth::oauth::known_provider_ids();
     match OAuthStore::open_default().await {
         Ok(store) => {
-            let mut probes = Vec::with_capacity(ids.len());
-            for id in ids {
-                probes.push((*id, store.probe_local(id).await));
-            }
+            let probes = store.probe_all_local().await;
             (probes, store.list().await, None)
         }
         Err(e) => (
