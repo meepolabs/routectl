@@ -4568,9 +4568,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   typed shim onto ONE private writer, `learn`, taking the public `LearnKey
   { state_key, feature_key_raw, provider_kind }` (root re-export), the
   evidence (public `NegativeEvidence { tier, phase, source, evidence_class }`
-  or a private positive kind) and a gate; it runs the field-namespace screen
-  before any lock (a screened key in that namespace is refused as
-  `GenerationOutcome::FieldNamespace`, reserving nothing), then the generation
+  or a private positive kind), a gate and a screen choice; for a screened
+  target (the generic negative doors) it runs the field-namespace check before
+  any lock (a key in that namespace is refused as
+  `GenerationOutcome::FieldNamespace`, reserving nothing), while positive
+  observations and minted field-verdict identities pass unscreened; then the generation
   check, lease refusal, mutation, seed-clear lift and count capture in one
   `guarded_keyed` section. Every mutating operation
   also has an `_in` inner variant (`observe_in`, `observe_positive_in`,
@@ -4621,7 +4623,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   every event producer reads to stamp its row.
   Also: `negative_lapsed(expires_at, recheck_owned, now)` is THE lapse rule
   (re-exported at the crate root beside `RECHECK_BACKSTOP`, a fixed 48h, and
-  `NegativeState`, so an out-of-crate reader applies the same rule): an ordinary negative lapses at `expires_at`, one whose
+  `NegativeState`, so an out-of-crate reader applies the same rule): an
+  ordinary negative lapses at `expires_at`, one whose
   key only the free re-check recovers (`negative_recovers_only_by_recheck`, read against
   the registry's `field_repair_table`) only `RECHECK_BACKSTOP` later, so a
   re-check that never answers cannot pin it forever.
