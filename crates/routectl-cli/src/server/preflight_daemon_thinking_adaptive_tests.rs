@@ -20,8 +20,7 @@ mod thinking_adaptive {
     /// classifies as a non-Anthropic model, the second as an Anthropic one.
     const NON_CLAUDE_MODEL: &str = "zz.thinking-variant-test";
     const CLAUDE_MODEL: &str = "us.anthropic.zz-thinking-variant-test";
-    const ERROR_TYPE_HEADER: &str =
-        "ValidationException:http://internal.amazon.com/coral/com.amazon.bedrock/";
+    const ERROR_TYPE_HEADER: &str = "ValidationException:http://example.invalid/errtype/";
     /// The client's `max_tokens`: large enough that the legacy enabled shape
     /// has a budget window, as a Claude Code thinking turn's is.
     const CLIENT_MAX_TOKENS: u32 = 32_000;

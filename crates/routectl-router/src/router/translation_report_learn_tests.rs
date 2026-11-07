@@ -86,8 +86,7 @@ mod bedrock_lanes {
             .collect()
     }
 
-    const ERROR_TYPE_HEADER: &str =
-        "ValidationException:http://internal.amazon.com/coral/com.amazon.bedrock/";
+    const ERROR_TYPE_HEADER: &str = "ValidationException:http://example.invalid/errtype/";
 
     /// The captured Invoke rejection of a web-search tool, and the prefix
     /// Converse wraps it in.

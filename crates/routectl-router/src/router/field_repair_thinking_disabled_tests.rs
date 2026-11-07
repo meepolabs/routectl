@@ -333,8 +333,7 @@ mod bedrock_thinking_off {
     /// A synthetic wire id keeps every baked catalog prior out of play.
     const WIRE: &str = "us.anthropic.zz-thinking-off";
 
-    const ERROR_TYPE_HEADER: &str =
-        "ValidationException:http://internal.amazon.com/coral/com.amazon.bedrock/";
+    const ERROR_TYPE_HEADER: &str = "ValidationException:http://example.invalid/errtype/";
 
     /// What answers a request whose thinking is no longer `disabled`.
     #[derive(Clone, Copy)]

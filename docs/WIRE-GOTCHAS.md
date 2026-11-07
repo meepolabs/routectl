@@ -775,8 +775,10 @@ Surfaces: [openai-compat](#openai-compat-surface) -
   bedrock-runtime `InvokeModel` 400s serve a flat MINIMAL body with NO
   `__type` -- just `{"message":"..."}` -- and put the discriminator in
   the `x-amzn-ErrorType` response header
-  (`ValidationException:http://internal.amazon.com/coral/...`, a fixed
-  public value, not account-specific). The capability matcher gates its
+  (`ValidationException:<vendor URL tail>`, a fixed public value, not
+  account-specific; the verbatim value is `error_type_header` in
+  `crates/routectl-router/tests/fixtures/bedrock_validation_capture.json`).
+  The capability matcher gates its
   learn path on this token, so the native lane lifts it:
   `UpstreamErrorRead` in `crates/routectl-providers/src/upstream_error.rs`
   reads the header BEFORE the body read consumes the response and falls

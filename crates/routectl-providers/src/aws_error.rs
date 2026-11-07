@@ -1027,11 +1027,10 @@ mod tests {
 
     const ERROR_TYPE_HEADER_NAME: &str = "x-amzn-errortype";
 
-    /// The exact value bedrock-runtime serves on a 400: the bare exception
-    /// name followed by `:` and the coral URL tail. The URL tail must never
-    /// survive the lift.
-    const REAL_ERROR_TYPE_VALUE: &str =
-        "ValidationException:http://internal.amazon.com/coral/com.amazon.bedrock/";
+    /// The shape bedrock-runtime serves on a 400: the bare exception name
+    /// followed by `:` and a vendor URL tail. The URL tail must never survive
+    /// the lift.
+    const ERROR_TYPE_VALUE: &str = "ValidationException:http://example.invalid/errtype/";
 
     fn headers_with_error_type(values: &[&str]) -> HeaderMap {
         let name = HeaderName::from_static(ERROR_TYPE_HEADER_NAME);
@@ -1042,11 +1041,12 @@ mod tests {
         headers
     }
 
-    /// The real captured header value lifts to the bare, namespace-stripped
-    /// exception name -- the coral URL tail past the first `:` is dropped.
+    /// A header value of the served shape lifts to the bare,
+    /// namespace-stripped exception name -- the URL tail past the first `:`
+    /// is dropped.
     #[test]
-    fn header_lift_reads_real_captured_value() {
-        let headers = headers_with_error_type(&[REAL_ERROR_TYPE_VALUE]);
+    fn header_lift_strips_url_tail() {
+        let headers = headers_with_error_type(&[ERROR_TYPE_VALUE]);
         assert_eq!(
             lifted_header_type(&headers),
             Some("ValidationException".to_string())
@@ -1076,7 +1076,7 @@ mod tests {
     /// duplicated or proxy-merged header can never seed a false classifier.
     #[test]
     fn header_lift_fails_closed_on_duplicate_and_conflicting_values() {
-        let duplicate = headers_with_error_type(&[REAL_ERROR_TYPE_VALUE, REAL_ERROR_TYPE_VALUE]);
+        let duplicate = headers_with_error_type(&[ERROR_TYPE_VALUE, ERROR_TYPE_VALUE]);
         assert_eq!(lifted_header_type(&duplicate), None);
         assert_eq!(
             classify_aws_error_type_header(&duplicate).unusable_reason(),
@@ -1115,8 +1115,7 @@ mod tests {
             Some("invalid")
         );
 
-        let url_tail_only =
-            headers_with_error_type(&[":http://internal.amazon.com/coral/com.amazon.bedrock/"]);
+        let url_tail_only = headers_with_error_type(&[":http://example.invalid/errtype/"]);
         assert_eq!(lifted_header_type(&url_tail_only), None);
         assert_eq!(
             classify_aws_error_type_header(&url_tail_only).unusable_reason(),

@@ -1699,11 +1699,12 @@ mod tests {
 
     /// A native-lane 400 whose flat `{"message":...}` body omits `__type`
     /// lifts the `ValidationException` discriminator from the
-    /// `x-amzn-errortype` header, and the coral URL tail that rides in that
-    /// header value never reaches any `Error::Upstream` field.
+    /// `x-amzn-errortype` header, and the URL tail that rides in that header
+    /// value never reaches any `Error::Upstream` field.
     #[tokio::test]
-    async fn error_type_header_lifts_without_leaking_coral_url() {
-        let error_type = "x-amzn-ErrorType: ValidationException:http://internal.amazon.com/coral/com.amazon.bedrock/\r\n";
+    async fn error_type_header_lifts_without_leaking_url_tail() {
+        let error_type =
+            "x-amzn-ErrorType: ValidationException:http://example.invalid/errtype/\r\n";
         let body = r#"{"message":"tool type 'advisor' is not supported for this model"}"#;
         let url = spawn_chunked_error_server_with_headers(400, body, error_type).await;
         let resp = reqwest::get(url).await.unwrap();
@@ -1732,8 +1733,8 @@ mod tests {
         .flatten()
         {
             assert!(
-                !field.contains("internal.amazon.com") && !field.contains("coral"),
-                "the coral URL tail leaked into an Error field: {field}"
+                !field.contains("example.invalid") && !field.contains("errtype"),
+                "the URL tail leaked into an Error field: {field}"
             );
         }
     }
@@ -1745,7 +1746,8 @@ mod tests {
     /// body classifier.
     #[tokio::test]
     async fn body_type_wins_over_error_type_header() {
-        let error_type = "x-amzn-ErrorType: ValidationException:http://internal.amazon.com/coral/com.amazon.bedrock/\r\n";
+        let error_type =
+            "x-amzn-ErrorType: ValidationException:http://example.invalid/errtype/\r\n";
         let body =
             r#"{"__type":"com.amazon.coral.service#ThrottlingException","message":"slow down"}"#;
         let url = spawn_chunked_error_server_with_headers(400, body, error_type).await;

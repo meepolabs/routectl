@@ -30,8 +30,7 @@ const INVOKE_NAMING_REJECTION: &str = "Unexpected value(s) `zz-probe-2099-01-01`
 /// Converse wraps the Invoke message in this captured prefix.
 const CONVERSE_ERRORS_PREFIX: &str = "The model returned the following errors: ";
 
-const ERROR_TYPE_HEADER: &str =
-    "ValidationException:http://internal.amazon.com/coral/com.amazon.bedrock/";
+const ERROR_TYPE_HEADER: &str = "ValidationException:http://example.invalid/errtype/";
 
 const PROVIDER: &str = "bed";
 const NICKNAME: &str = "m1";

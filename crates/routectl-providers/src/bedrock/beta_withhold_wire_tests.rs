@@ -29,8 +29,7 @@ fn rejection_message() -> String {
     format!("Unexpected value(s) `{REJECTED}` for the `anthropic-beta` header.")
 }
 const KEPT_BETA: &str = "context-management-2025-06-27";
-const ERROR_TYPE_HEADER: &str =
-    "ValidationException:http://internal.amazon.com/coral/com.amazon.bedrock/";
+const ERROR_TYPE_HEADER: &str = "ValidationException:http://example.invalid/errtype/";
 
 /// Which wire call a test drives; selects the success body the mock serves.
 #[derive(Clone, Copy)]

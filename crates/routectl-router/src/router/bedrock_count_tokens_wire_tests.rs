@@ -34,8 +34,7 @@ const REGION: &str = "us-east-1";
 /// baked catalog prior applies.
 const WIRE: &str = "us.anthropic.zz-count-wire";
 const EDIT_REJECTED: &str = "routectl_edit_rejected";
-const ERROR_TYPE_HEADER: &str =
-    "ValidationException:http://internal.amazon.com/coral/com.amazon.bedrock/";
+const ERROR_TYPE_HEADER: &str = "ValidationException:http://example.invalid/errtype/";
 /// A field the Invoke egress adds to every body and declares as added.
 const DECLARED_FIELD: &str = "anthropic_version";
 /// A non-canonical key the operator's payload extras add to every body.
