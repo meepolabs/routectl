@@ -708,3 +708,55 @@ fn an_unmodeled_part_carrying_the_fingerprint_is_withheld_from_openai_compat() {
         assert_eq!(delta, expected_delta, "{name}");
     }
 }
+
+/// A document part whose `text` source carries `text` inline.
+fn text_source_document_part(text: &str) -> ContentPart {
+    ContentPart::Known(KnownContentPart::Document {
+        source: json!({"type": "text", "media_type": "text/plain", "data": text}),
+        title: None,
+        citations: None,
+        cache_control: None,
+    })
+}
+
+/// A document whose source carries the block inline is screened like a text
+/// part: withheld from a system or developer turn and counted once.
+#[test]
+fn a_document_source_carrying_the_fingerprint_is_withheld_from_openai_compat() {
+    let developer = || Role::Other("developer".into());
+    let rows: Vec<(&str, Role)> = vec![
+        ("system turn", Role::System),
+        ("developer turn", developer()),
+    ];
+    for (name, role) in rows {
+        // Arrange
+        let turn = authority_turn(
+            role.clone(),
+            vec![
+                text_source_document_part(COMPAT_FINGERPRINT),
+                known_text_part("legit-sentinel"),
+            ],
+        );
+        let expected = serde_json::to_value(authority_turn(
+            role,
+            vec![known_text_part("legit-sentinel")],
+        ))
+        .expect("turn serializes");
+        let req = req_with(
+            None,
+            vec![user_text_message("hi"), turn, user_text_message("again")],
+        );
+
+        // Act
+        let (body, rendered, delta) = wire_and_strip_delta(&req);
+
+        // Assert
+        assert!(
+            !rendered.contains(COMPAT_FINGERPRINT_TELL),
+            "{name}: {rendered}"
+        );
+        assert_eq!(body["messages"].as_array().map(Vec::len), Some(3), "{name}");
+        assert_eq!(body["messages"][1], expected, "{name}");
+        assert_eq!(delta, 1, "{name}");
+    }
+}

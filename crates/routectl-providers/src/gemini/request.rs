@@ -16,7 +16,7 @@ use serde_json::Value;
 
 use routectl_core::cache_control::{BreakpointPosition, CacheBreakpointSource};
 use routectl_core::{ChatRequest, ReasoningDetail, RefusalReason, Result, sanitize_for_log};
-use routectl_core::{ContentPart, KnownContentPart, MessageContent, Role, ToolDef};
+use routectl_core::{ContentPart, KnownContentPart, Message, MessageContent, Role, ToolDef};
 
 use crate::managed_keys::{Dialect, MatchingIngress, client_extras_for, is_managed_key};
 use crate::translation_drop_metrics::{
@@ -332,7 +332,7 @@ fn build_body(
     );
     note_dropped_system_parts(provider_id, req, tally);
     let system_instruction = build_system_instruction(req, fingerprint);
-    let contents = build_contents(provider_id, req, tally)?;
+    let contents = build_contents(provider_id, req, tally, fingerprint)?;
     let mut schema_budget = super::schema::SchemaBudget::default();
     let (tools, tool_config) = build_tools_and_config(provider_id, req, tally, &mut schema_budget)?;
     let generation_config = build_generation_config(provider_id, req, tally, &mut schema_budget)?;
@@ -498,6 +498,7 @@ fn build_contents(
     provider_id: &str,
     req: &ChatRequest,
     tally: &mut GeminiDropTally,
+    fingerprint: &mut ClientFingerprintStripTally,
 ) -> Result<Vec<Content>> {
     let mut contents: Vec<Content> = Vec::new();
     let tool_name_by_id = build_tool_call_name_index(req);
@@ -592,6 +593,10 @@ fn build_contents(
                     role = %sanitize_for_log(tag),
                     "gemini egress: unrecognized message role forwarded as user"
                 );
+                let Some(msg) = withhold_developer_billing_block(provider_id, msg, fingerprint)
+                else {
+                    continue;
+                };
                 let parts = content_to_parts(provider_id, &msg.content, &tool_name_by_id, tally)?;
                 if !parts.is_empty() {
                     contents.push(Content {
@@ -604,6 +609,29 @@ fn build_contents(
     }
 
     Ok(contents)
+}
+
+/// `msg` with the billing/attribution block withheld when it is a `developer`
+/// turn, which carries system authority, or `None` when nothing is left of it.
+/// Withheld by routectl, not by the wire: the coerced user turn would carry
+/// the text fine, and this upstream must not receive the client fingerprint.
+/// One more site of the lane's one policy action, sharing its tally.
+/// TRANSLATION-DROP: policy-action class=client_fingerprint_stripped test=a_fingerprint_only_in_a_developer_turn_is_withheld_from_gemini_and_counted
+fn withhold_developer_billing_block<'m>(
+    provider_id: &str,
+    msg: &'m Message,
+    fingerprint: &mut ClientFingerprintStripTally,
+) -> Option<std::borrow::Cow<'m, Message>> {
+    if !crate::system_filter::system_message_carries_billing_block(msg) {
+        return Some(std::borrow::Cow::Borrowed(msg));
+    }
+    fingerprint.record();
+    tracing::debug!(
+        provider = %provider_id,
+        "gemini egress: Claude Code billing/attribution block dropped from a developer-role \
+         message",
+    );
+    crate::system_filter::without_billing_attribution(msg).map(std::borrow::Cow::Owned)
 }
 
 /// Build a `correlation-id -> tool-name` index over every tool call in the
@@ -4098,7 +4126,13 @@ mod tests {
         // Act
         let mut contents = Vec::new();
         let events = routectl_testkit::capture_events(|| {
-            contents = build_contents("prov", &req, &mut GeminiDropTally::default()).unwrap();
+            contents = build_contents(
+                "prov",
+                &req,
+                &mut GeminiDropTally::default(),
+                &mut ClientFingerprintStripTally::default(),
+            )
+            .unwrap();
         });
 
         // Assert
@@ -4130,7 +4164,13 @@ mod tests {
         // Act
         let mut contents = Vec::new();
         let events = routectl_testkit::capture_events(|| {
-            contents = build_contents("prov", &req, &mut GeminiDropTally::default()).unwrap();
+            contents = build_contents(
+                "prov",
+                &req,
+                &mut GeminiDropTally::default(),
+                &mut ClientFingerprintStripTally::default(),
+            )
+            .unwrap();
         });
 
         // Assert

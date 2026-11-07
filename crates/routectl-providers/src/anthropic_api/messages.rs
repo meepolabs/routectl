@@ -1359,9 +1359,9 @@ impl<'a> SystemTurnTally<'a> {
                 system_turn_breakpoints_moved = self.breakpoints_moved,
                 system_turn_breakpoints_dropped = self.breakpoints_dropped,
                 system_turn_merges_skipped = self.merges_skipped,
-                "anthropic-api egress: forwarded Role::System turns screened; Claude Code \
-                 billing/attribution blocks are dropped, and a turn left with no content, \
-                 or arriving empty or blank-text-only, is omitted entirely",
+                "anthropic-api egress: forwarded Role::System and developer turns screened; \
+                 Claude Code billing/attribution blocks are dropped, and a turn left with no \
+                 content, or arriving empty or blank-text-only, is omitted entirely",
             );
         }
     }
@@ -1508,14 +1508,7 @@ fn translate_messages_threaded(
                     role = %sanitize_for_log(tag),
                     "anthropic egress: unrecognized message role forwarded as user"
                 );
-                wire.push(
-                    i,
-                    AnthropicMessage {
-                        role: AnthropicRole::User,
-                        content: translate_simple_content(&msg.content, envelopes),
-                    },
-                    &mut ledger,
-                );
+                emit_other_role_turn(i, msg, &mut wire, &mut ledger, system_turns, envelopes);
                 i += 1;
             }
         }
@@ -1781,6 +1774,52 @@ fn emit_forwarded_system_turn(
         }
     }
     if let Some(fate) = wire.drop_system_turn(last_breakpoint(content)) {
+        system_turns.record_breakpoint(fate);
+    }
+}
+
+/// Emit one unrecognized-role turn as `user`. A `developer` turn speaks with
+/// system authority, so the billing/attribution block is withheld from it the
+/// same way it is from a forwarded system turn, before the coercion erases the
+/// role that marked it; a turn left with nothing is dropped like one.
+fn emit_other_role_turn(
+    index: usize,
+    msg: &Message,
+    wire: &mut WireMessages,
+    ledger: &mut MessageLedger,
+    system_turns: &mut SystemTurnTally<'_>,
+    envelopes: &mut EnvelopeUnwrapTally,
+) {
+    let user_turn =
+        |content: &MessageContent, envelopes: &mut EnvelopeUnwrapTally| AnthropicMessage {
+            role: AnthropicRole::User,
+            content: translate_simple_content(content, envelopes),
+        };
+    if !crate::system_filter::system_message_carries_billing_block(msg) {
+        wire.push(index, user_turn(&msg.content, envelopes), ledger);
+        return;
+    }
+    let parts_before = match &msg.content {
+        MessageContent::Parts(parts) => parts.len(),
+        MessageContent::Text(_) | MessageContent::Null => 1,
+    };
+    if let Some(kept) = crate::system_filter::without_billing_attribution(msg) {
+        let parts_after = match &kept.content {
+            MessageContent::Parts(parts) => parts.len(),
+            MessageContent::Text(_) | MessageContent::Null => 1,
+        };
+        system_turns.record_billing_stripped(parts_before.saturating_sub(parts_after));
+        wire.push(index, user_turn(&kept.content, envelopes), ledger);
+        return;
+    }
+    system_turns.record_billing_stripped(parts_before);
+    system_turns.record_billing_dropped_turn();
+    ledger.system_turns_dropped_by_billing_strip += 1;
+    system_turns.dropped_turns.push((
+        index,
+        routectl_core::wire_check::EditSite::ClientFingerprintStrip,
+    ));
+    if let Some(fate) = wire.drop_system_turn(last_breakpoint(&msg.content)) {
         system_turns.record_breakpoint(fate);
     }
 }

@@ -399,6 +399,11 @@ const EXPECTED_RESOLVED_LOG_COUNTS: &[(&str, &str, usize)] = &[
     ("bedrock/converse/messages.rs", "translate_image_url", 1),
     ("bedrock/converse/messages.rs", "translate_known_part", 1),
     ("bedrock/converse/messages.rs", "translate_messages", 2),
+    (
+        "bedrock/converse/messages.rs",
+        "withhold_developer_billing_block",
+        1,
+    ),
     ("bedrock/converse/system.rs", "build_system", 2),
     (
         "bedrock/converse/system.rs",
@@ -446,6 +451,7 @@ const EXPECTED_RESOLVED_LOG_COUNTS: &[(&str, &str, usize)] = &[
     ("gemini/request.rs", "report_withheld_ingress_extras", 1),
     ("gemini/request.rs", "strip_client_metadata", 1),
     ("gemini/request.rs", "tool_call_to_function_call_part", 1),
+    ("gemini/request.rs", "withhold_developer_billing_block", 1),
     (
         "openai_compat/request.rs",
         "check_dropped_anthropic_fields",

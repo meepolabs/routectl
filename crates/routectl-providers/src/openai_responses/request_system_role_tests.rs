@@ -500,3 +500,58 @@ fn an_unmodeled_part_carrying_the_fingerprint_is_withheld_from_responses_and_cou
         assert_eq!(delta, expected_delta, "{name}");
     }
 }
+
+/// A document part whose `text` source carries `text` inline.
+fn text_source_document_part(text: &str) -> ContentPart {
+    ContentPart::Known(KnownContentPart::Document {
+        source: json!({"type": "text", "media_type": "text/plain", "data": text}),
+        title: None,
+        citations: None,
+        cache_control: None,
+    })
+}
+
+/// A document whose source carries the block inline is screened like a text
+/// part: withheld from a system or developer turn kept in place and counted
+/// once.
+#[test]
+fn a_document_source_carrying_the_fingerprint_is_withheld_from_responses_and_counted() {
+    let rows: [(&str, Role); 2] = [
+        ("system turn", Role::System),
+        ("developer turn", Role::Other("developer".into())),
+    ];
+    for (name, role) in rows {
+        // Arrange
+        let wire_role = match &role {
+            Role::Other(tag) => tag.clone(),
+            _ => "system".to_string(),
+        };
+        let turn = Message {
+            role,
+            content: MessageContent::Parts(vec![
+                text_source_document_part(RESPONSES_FINGERPRINT),
+                text_part("legit-sentinel"),
+            ]),
+            ..system_text("")
+        };
+        let req = req_with(vec![user_text("hi"), turn, user_text("again")]);
+
+        // Act
+        let (wire, delta) = wire_with_strip_delta(&req);
+
+        // Assert
+        assert!(
+            !wire.to_string().contains(RESPONSES_FINGERPRINT_TELL),
+            "{name}: {wire}"
+        );
+        let input = wire["input"].as_array().expect("input array");
+        assert_eq!(input.len(), 3, "{name}: {wire}");
+        assert_eq!(input[1]["role"], json!(wire_role), "{name}");
+        assert_eq!(
+            input[1]["content"],
+            json!([{"type": "input_text", "text": "legit-sentinel"}]),
+            "{name}"
+        );
+        assert_eq!(delta, 1, "{name}");
+    }
+}

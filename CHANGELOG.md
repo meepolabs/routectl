@@ -764,6 +764,8 @@ list with more narrative.
 
 - **A corrupted `credentials.json` error now names only the JSON error class with its line and column (for example `data error at line 1 column 20`), never the file's contents; the same applies to an unparseable token JWT payload.** On Windows there is no owner-only mode check on the credentials file; it relies on the user-profile directory ACL.
 
+- **The Claude Code billing/attribution block no longer reaches the anthropic-api, Bedrock Converse or Gemini upstream through a `developer` turn.** These wires have no `developer` role and send the turn as a `user` turn, and the block it carried went with it. It is now withheld before that conversion, as it already was on the OpenAI-compatible and OpenAI Responses egresses: the rest of the turn is kept, a turn that held only the block is removed, and the withhold counts once per request under `client_fingerprint_stripped`. Turns with any other unrecognized role are still sent as `user` turns unchanged.
+
 - **`routectl login <provider> --label <seat>` readmits a seat that was unusable at startup or became unusable later, without restarting the daemon.**
 
 - **A stream that ends after its half-open test was superseded no longer closes or reopens the breaker for the newer test.** Each admission now carries the breaker state it was admitted under, and a success, failure, park or slot release from an older state is dropped. Settlements from requests admitted through a closed breaker that land after an open and close cycle are dropped the same way; concurrent requests admitted through one closed breaker still count toward the same trip.

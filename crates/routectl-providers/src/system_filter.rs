@@ -151,11 +151,11 @@ pub fn strip_system_role_messages(
     )
 }
 
-/// Whether `role` speaks with system authority on an OpenAI-shape wire:
-/// `system`, or `developer`, its successor there. Only the Anthropic ingress
-/// leaves a `developer` turn as `Role::Other`; the OpenAI ingresses already
-/// map it onto `Role::System`.
-#[cfg(any(feature = "openai-compat", feature = "openai-responses"))]
+/// Whether `role` speaks with system authority: `system`, or `developer`, its
+/// successor on the OpenAI wires. Only the Anthropic ingress leaves a
+/// `developer` turn as `Role::Other`; the OpenAI ingresses already map it onto
+/// `Role::System`. An egress with no `developer` role still screens such a
+/// turn before sending it as `user`.
 fn is_system_authority(role: &routectl_core::Role) -> bool {
     use routectl_core::Role;
 
@@ -169,7 +169,6 @@ fn is_system_authority(role: &routectl_core::Role) -> bool {
 /// Whether `message` is a system-authority turn (see [`is_system_authority`])
 /// carrying the billing/attribution block in any part
 /// [`is_billing_attribution_part`] matches.
-#[cfg(any(feature = "openai-compat", feature = "openai-responses"))]
 pub fn system_message_carries_billing_block(message: &routectl_core::Message) -> bool {
     use routectl_core::MessageContent;
 
@@ -187,11 +186,6 @@ pub fn system_message_carries_billing_block(message: &routectl_core::Message) ->
 /// unmodeled `type` tag still reaches the wire verbatim), or a document
 /// whose source carries the text inline. Blocks with no text at all (image
 /// bytes, tool blocks, base64 document payloads) can never match.
-#[cfg(any(
-    feature = "openai-compat",
-    feature = "openai-responses",
-    feature = "anthropic-api"
-))]
 pub fn is_billing_attribution_part(part: &routectl_core::ContentPart) -> bool {
     use routectl_core::{ContentPart, KnownContentPart};
     use serde_json::Value;
@@ -215,11 +209,6 @@ pub fn is_billing_attribution_part(part: &routectl_core::ContentPart) -> bool {
 /// bare string form or in any string field of the source object (`data` for
 /// a `text` source, and every sibling, so an unmodeled source field cannot
 /// smuggle the fingerprint past the screen).
-#[cfg(any(
-    feature = "openai-compat",
-    feature = "openai-responses",
-    feature = "anthropic-api"
-))]
 fn value_carries_billing_text(source: &serde_json::Value) -> bool {
     use serde_json::Value;
 
@@ -236,7 +225,6 @@ fn value_carries_billing_text(source: &serde_json::Value) -> bool {
 /// `message` with the block withheld, or `None` when nothing is left of it.
 /// A message [`system_message_carries_billing_block`] rejects is returned
 /// unchanged.
-#[cfg(any(feature = "openai-compat", feature = "openai-responses"))]
 pub fn without_billing_attribution(
     message: &routectl_core::Message,
 ) -> Option<routectl_core::Message> {

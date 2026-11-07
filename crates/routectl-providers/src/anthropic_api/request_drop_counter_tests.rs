@@ -765,3 +765,147 @@ fn mantle_withholds_an_operator_payload_mcp_servers() {
     assert_eq!(delta, 1);
     assert_eq!(strips, vec![(EditKind::Remove, "/mcp_servers".to_string())]);
 }
+
+// ---------------------------------------------------------------------------
+// `developer` turns: system authority, coerced to `user` on this wire.
+// ---------------------------------------------------------------------------
+
+const DEVELOPER_FINGERPRINT: &str = "x-anthropic-billing-header: cc_version=9.9.9; cch=devfp9";
+const DEVELOPER_FINGERPRINT_TELL: &str = "devfp9";
+
+fn other_role_turn(tag: &str, content: MessageContent) -> Message {
+    Message {
+        role: Role::Other(tag.into()),
+        content,
+        ..user_turn("")
+    }
+}
+
+fn text_parts(texts: &[&str]) -> MessageContent {
+    MessageContent::Parts(
+        texts
+            .iter()
+            .map(|text| {
+                routectl_core::ContentPart::Known(routectl_core::KnownContentPart::Text {
+                    text: (*text).into(),
+                    citations: None,
+                    cache_control: None,
+                })
+            })
+            .collect(),
+    )
+}
+
+/// The request with `turn` between an assistant reply and a closing user turn,
+/// so a dropped turn leaves no same-role pair to join.
+fn req_with_turn(turn: Message) -> ChatRequest {
+    let mut req = base_req();
+    req.messages = vec![
+        user_turn("hello"),
+        Message {
+            role: Role::Assistant,
+            ..user_turn("ok")
+        },
+        turn,
+        user_turn("again"),
+    ]
+    .into();
+    req
+}
+
+/// SINGLE-SOURCE pin for the developer-turn strip: the fingerprint rides only
+/// a `developer` turn, which ships as `user` with its legitimate part intact.
+#[test]
+fn a_fingerprint_only_in_a_developer_turn_is_withheld_from_anthropic_and_counted() {
+    // Arrange
+    let req = req_with_turn(other_role_turn(
+        "developer",
+        text_parts(&[DEVELOPER_FINGERPRINT, "dev-legit-sentinel"]),
+    ));
+
+    // Act
+    let before = fingerprint_strip_count();
+    let body = assemble(&req);
+    let after = fingerprint_strip_count();
+
+    // Assert
+    let rendered = serde_json::to_string(&body).expect("the body must serialize");
+    assert!(
+        !rendered.contains(DEVELOPER_FINGERPRINT_TELL),
+        "the fingerprint in a developer turn reached the wire: {rendered}"
+    );
+    let messages = body["messages"].as_array().expect("messages array");
+    assert_eq!(messages.len(), 4, "{rendered}");
+    assert_eq!(messages[2]["role"], "user");
+    assert_eq!(
+        messages[2]["content"],
+        serde_json::json!([{"type": "text", "text": "dev-legit-sentinel"}])
+    );
+    assert_eq!(after - before, 1, "the withhold is one policy action");
+}
+
+/// The rest of the `Other`-role contract on this lane: a developer turn that
+/// is wholly the fingerprint leaves the wire and still counts; a developer
+/// turn without it, and any non-authority tag even when it carries the text,
+/// ship as `user` unchanged and count nothing.
+#[test]
+fn other_role_turns_are_screened_on_anthropic_only_when_they_carry_system_authority() {
+    let rows: [(&str, Message, Option<serde_json::Value>, u64); 3] = [
+        (
+            "developer text that is wholly the fingerprint leaves the wire",
+            other_role_turn(
+                "developer",
+                MessageContent::Text(DEVELOPER_FINGERPRINT.into()),
+            ),
+            None,
+            1,
+        ),
+        (
+            "developer without the fingerprint ships unchanged",
+            other_role_turn("developer", MessageContent::Text("dev plain".into())),
+            Some(serde_json::json!("dev plain")),
+            0,
+        ),
+        (
+            "a non-authority tag carrying the text ships as a user turn unchanged",
+            other_role_turn(
+                "moderator",
+                MessageContent::Text(DEVELOPER_FINGERPRINT.into()),
+            ),
+            Some(serde_json::json!(DEVELOPER_FINGERPRINT)),
+            0,
+        ),
+    ];
+    for (name, turn, expected_content, expected_delta) in rows {
+        // Arrange
+        let req = req_with_turn(turn);
+
+        // Act
+        let before = fingerprint_strip_count();
+        let body = assemble(&req);
+        let after = fingerprint_strip_count();
+
+        // Assert
+        let messages = body["messages"].as_array().expect("messages array");
+        let contents: Vec<&serde_json::Value> = messages.iter().map(|m| &m["content"]).collect();
+        match expected_content {
+            Some(content) => {
+                assert_eq!(messages.len(), 4, "{name}: {body}");
+                assert_eq!(messages[2]["role"], "user", "{name}");
+                assert_eq!(messages[2]["content"], content, "{name}");
+            }
+            None => {
+                assert_eq!(
+                    contents,
+                    vec![
+                        &serde_json::json!("hello"),
+                        &serde_json::json!("ok"),
+                        &serde_json::json!("again")
+                    ],
+                    "{name}: {body}"
+                );
+            }
+        }
+        assert_eq!(after - before, expected_delta, "{name}");
+    }
+}

@@ -110,6 +110,115 @@ fn a_fingerprint_only_in_a_system_role_message_is_withheld_from_gemini_and_count
     );
 }
 
+/// The serialized `contents` of `turn` between an assistant reply and a
+/// closing user turn, plus the policy-action delta it caused.
+fn contents_with_turn(turn: Message) -> (Value, u64) {
+    let req = ChatRequest {
+        model: "gemini-2.5-pro".into(),
+        messages: vec![
+            make_user("hi"),
+            make_assistant("ok"),
+            turn,
+            make_user("again"),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let (body, delta) = wire_and_strip_delta(&req);
+    (body["contents"].clone(), delta)
+}
+
+fn other_role_with_parts(tag: &str, texts: &[&str]) -> Message {
+    Message {
+        role: Role::Other(tag.into()),
+        ..system_with_parts(texts)
+    }
+}
+
+fn other_role_text(tag: &str, text: &str) -> Message {
+    Message {
+        role: Role::Other(tag.into()),
+        ..make_system(text)
+    }
+}
+
+/// Single-source pin for the developer-turn strip site: the fingerprint rides
+/// ONLY a `developer` turn, which ships as `user` with its legitimate part.
+#[test]
+fn a_fingerprint_only_in_a_developer_turn_is_withheld_from_gemini_and_counted() {
+    // Arrange
+    let turn = other_role_with_parts("developer", &[FINGERPRINT, "dev-legit-sentinel"]);
+
+    // Act
+    let (contents, delta) = contents_with_turn(turn);
+
+    // Assert
+    assert!(
+        !contents.to_string().contains(FINGERPRINT_TELL),
+        "the fingerprint in a developer turn reached Gemini: {contents}"
+    );
+    assert_eq!(contents.as_array().map(Vec::len), Some(4), "{contents}");
+    assert_eq!(contents[2]["role"], json!("user"));
+    assert_eq!(
+        contents[2]["parts"],
+        json!([{"text": "dev-legit-sentinel"}])
+    );
+    assert_eq!(delta, 1, "the developer-turn withhold is one policy action");
+}
+
+/// The rest of the `Other`-role contract on this lane: a developer turn that
+/// is wholly the fingerprint leaves the wire and still counts; a developer
+/// turn without it, and any non-authority tag even when it carries the text,
+/// ship as `user` unchanged and count nothing.
+#[test]
+fn other_role_turns_are_screened_on_gemini_only_when_they_carry_system_authority() {
+    let rows: [(&str, Message, Option<Value>, u64); 3] = [
+        (
+            "developer text that is wholly the fingerprint leaves the wire",
+            other_role_text("developer", FINGERPRINT),
+            None,
+            1,
+        ),
+        (
+            "developer without the fingerprint ships unchanged",
+            other_role_text("developer", "dev plain"),
+            Some(json!([{"text": "dev plain"}])),
+            0,
+        ),
+        (
+            "a non-authority tag carrying the text ships as a user turn unchanged",
+            other_role_text("moderator", FINGERPRINT),
+            Some(json!([{"text": FINGERPRINT}])),
+            0,
+        ),
+    ];
+    for (name, turn, expected_parts, expected_delta) in rows {
+        // Act
+        let (contents, delta) = contents_with_turn(turn);
+
+        // Assert
+        let roles: Vec<&Value> = contents
+            .as_array()
+            .expect("contents array")
+            .iter()
+            .map(|c| &c["role"])
+            .collect();
+        match expected_parts {
+            Some(parts) => {
+                assert_eq!(roles.len(), 4, "{name}: {contents}");
+                assert_eq!(contents[2]["role"], json!("user"), "{name}");
+                assert_eq!(contents[2]["parts"], parts, "{name}");
+            }
+            None => assert_eq!(
+                roles,
+                vec![&json!("user"), &json!("model"), &json!("user")],
+                "{name}: {contents}"
+            ),
+        }
+        assert_eq!(delta, expected_delta, "{name}");
+    }
+}
+
 /// Single-source pin for the top-level `system` strip site: the fingerprint
 /// rides ONLY `req.system`, beside a clean system-role message.
 #[test]

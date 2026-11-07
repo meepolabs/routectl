@@ -73,6 +73,7 @@ use crate::anthropic_api::parts::strip_text_after_tool_use;
 use crate::bounded_diagnostics::BoundedLogSample;
 use crate::translation_drop_metrics::{record_translation_drop, record_translation_lane_seen};
 
+use super::request::ClientFingerprintStripTally;
 use super::types::{
     CachePoint, ConverseCitationsConfig, ConverseContentBlock, ConverseDocument,
     ConverseDocumentSource, ConverseImage, ConverseImageSource, ConverseMessage,
@@ -98,12 +99,25 @@ use super::types::{
 /// `translate_document_citations`). A `ReasoningSkipTally` threads through
 /// the assistant path for the same reason, collapsing unsigned-reasoning
 /// skips across every turn into one aggregated DEBUG line.
-pub(super) fn build_messages(id: &str, messages: &[Message]) -> Result<Vec<ConverseMessage>> {
+///
+/// A `developer` turn's billing/attribution withhold records into the
+/// caller's `fingerprint` tally, which the caller flushes once per request.
+pub(super) fn build_messages_counted(
+    id: &str,
+    messages: &[Message],
+    fingerprint: &mut ClientFingerprintStripTally,
+) -> Result<Vec<ConverseMessage>> {
     let mut tally = CitationsDropTally::new(id);
     let mut reasoning = ReasoningSkipTally::new(id);
     let mut content_drops = ContentDropTally::default();
-    let translated =
-        translate_messages(id, messages, &mut tally, &mut reasoning, &mut content_drops);
+    let translated = translate_messages(
+        id,
+        messages,
+        &mut tally,
+        &mut reasoning,
+        &mut content_drops,
+        fingerprint,
+    );
     // Flush on both arms: a request that records a drop and only then
     // hits a translation error still owes the operator its aggregate lines.
     tally.flush();
@@ -112,12 +126,20 @@ pub(super) fn build_messages(id: &str, messages: &[Message]) -> Result<Vec<Conve
     translated
 }
 
+/// Test-only shim: drive [`build_messages_counted`] without threading a
+/// fingerprint tally, for tests asserting message SHAPE only.
+#[cfg(test)]
+pub(super) fn build_messages(id: &str, messages: &[Message]) -> Result<Vec<ConverseMessage>> {
+    build_messages_counted(id, messages, &mut ClientFingerprintStripTally::default())
+}
+
 fn translate_messages(
     id: &str,
     messages: &[Message],
     tally: &mut CitationsDropTally<'_>,
     reasoning: &mut ReasoningSkipTally<'_>,
     content_drops: &mut ContentDropTally,
+    fingerprint: &mut ClientFingerprintStripTally,
 ) -> Result<Vec<ConverseMessage>> {
     let mut out: Vec<ConverseMessage> = Vec::with_capacity(messages.len());
     for (i, msg) in messages.iter().enumerate() {
@@ -167,6 +189,9 @@ fn translate_messages(
                     role = %sanitize_for_log(tag),
                     "converse egress: unrecognized message role forwarded as user"
                 );
+                let Some(msg) = withhold_developer_billing_block(id, msg, fingerprint) else {
+                    continue;
+                };
                 let mut blocks = build_user_content_blocks(id, &msg.content, tally, content_drops)?;
                 ensure_document_has_text_sibling(&mut blocks);
                 if blocks.is_empty() {
@@ -178,6 +203,29 @@ fn translate_messages(
         }
     }
     Ok(out)
+}
+
+/// `msg` with the billing/attribution block withheld when it is a `developer`
+/// turn, which carries system authority, or `None` when nothing is left of it.
+/// Withheld by routectl, not by the wire: the coerced user turn would carry
+/// the text fine, and this upstream must not receive the client fingerprint.
+/// One more site of the lane's one policy action, sharing its tally.
+/// TRANSLATION-DROP: policy-action class=client_fingerprint_stripped test=a_fingerprint_only_in_a_developer_turn_is_withheld_from_converse_and_counted
+fn withhold_developer_billing_block<'m>(
+    id: &str,
+    msg: &'m Message,
+    fingerprint: &mut ClientFingerprintStripTally,
+) -> Option<std::borrow::Cow<'m, Message>> {
+    if !crate::system_filter::system_message_carries_billing_block(msg) {
+        return Some(std::borrow::Cow::Borrowed(msg));
+    }
+    fingerprint.record();
+    tracing::debug!(
+        provider = id,
+        "bedrock-converse egress: Claude Code billing/attribution block dropped from a \
+         developer-role message",
+    );
+    crate::system_filter::without_billing_attribution(msg).map(std::borrow::Cow::Owned)
 }
 
 /// Per-request record of canonical content parts dropped on the plain

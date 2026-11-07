@@ -48,7 +48,7 @@ use crate::anthropic_api::request::clamp_sampling_for_thinking;
 
 use super::super::BedrockConfig;
 use super::extras::build_additional_fields;
-use super::messages::build_messages;
+use super::messages::build_messages_counted;
 use super::system::{build_system, count_dropped_system_parts};
 use super::tools::build_tool_config;
 use super::types::{ConverseRequest, InferenceConfig};
@@ -115,7 +115,7 @@ fn translate_tallied(
     crate::sampling_drop_guard::log_dropped_sampling_fields(&cfg.id, req, &[]);
     count_dropped_system_parts(req);
     let system = build_system(req, fingerprint);
-    let messages = build_messages(&cfg.id, &req.messages)?;
+    let messages = build_messages_counted(&cfg.id, &req.messages, fingerprint)?;
     let tool_config = build_tool_config(&cfg.id, req, &messages)?;
     // Reach into the post-translation toolChoice so build_additional_fields
     // can decide whether to strip thinking. Done here (not inside
