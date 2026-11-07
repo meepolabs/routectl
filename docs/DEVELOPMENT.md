@@ -205,7 +205,8 @@ The full detail of every leg -- exact command, flags, and skip/fail
 conditions -- lives in the config itself, each leg named as it runs;
 treat the list below as a same-order summary, not a substitute for
 reading it. In order: a toolchain preflight, the gitleaks staged-secret
-scan (its `rev` pins the binary, equal to the gitleaks version the shared
+scan (its `rev` pins the binary as the full commit sha of a release tag,
+named in a trailing comment, equal to the gitleaks version the shared
 `meepolabs/meepolabs-conventions` security-floor action pins, which
 `.github/workflows/security.yml` runs; it also loads the root
 `.gitleaks.toml`, which adds a `GOCSPX-` Google client-secret rule the

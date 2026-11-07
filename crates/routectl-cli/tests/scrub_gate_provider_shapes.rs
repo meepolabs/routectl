@@ -464,10 +464,24 @@ fn is_yaml_comment_or_blank(line: &str) -> bool {
     trimmed.is_empty() || trimmed.starts_with('#')
 }
 
+const COMMIT_SHA_LEN: usize = 40;
+
+fn is_commit_sha(token: &str) -> bool {
+    token.len() == COMMIT_SHA_LEN
+        && token
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+/// A rev must be a full lowercase commit sha, which upstream cannot move the
+/// way it can a tag, optionally followed by a `# ...` comment naming the
+/// release.
 fn is_valid_rev_line(line: &str) -> bool {
-    line.strip_prefix("    rev: ").is_some_and(|rev| {
-        !rev.is_empty() && !rev.contains(char::is_whitespace) && !rev.contains('#')
-    })
+    let Some(value) = line.strip_prefix("    rev: ") else {
+        return false;
+    };
+    let (sha, rest) = value.split_at(value.find(char::is_whitespace).unwrap_or(value.len()));
+    is_commit_sha(sha) && (rest.is_empty() || rest.trim_start().starts_with('#'))
 }
 
 /// Checks that the config holds exactly one gitleaks repo block, laid out as
@@ -533,7 +547,15 @@ fn the_gitleaks_hook_reader_rejects_overrides_and_unknown_layouts() {
         .find(|line| line.starts_with("    rev: "))
         .expect("control: the gitleaks block carries a rev line");
     let block = format!("{GITLEAKS_REPO_LINE}\n{rev_line}\n{hooks_block}");
-    let rev = rev_line.trim_start_matches("    rev: ");
+    let rev = rev_line
+        .trim_start_matches("    rev: ")
+        .split_whitespace()
+        .next()
+        .expect("control: the rev line carries a value");
+    assert!(
+        is_commit_sha(rev),
+        "control: the real gitleaks rev is a full commit sha: {rev:?}"
+    );
     let flow_block = format!(
         "  - {{repo: https://{GITLEAKS_REPO_URL}, rev: {rev}, hooks: [{{id: gitleaks}}]}}\n"
     );
@@ -543,7 +565,8 @@ fn the_gitleaks_hook_reader_rejects_overrides_and_unknown_layouts() {
         "control: the real config holds the gitleaks block in block style"
     );
 
-    let cases: [(&str, String); 6] = [
+    let rev_with = |value: &str| original.replacen(rev_line, &format!("    rev: {value}"), 1);
+    let cases: [(&str, String); 9] = [
         (
             "args added",
             original.replacen(
@@ -577,12 +600,65 @@ fn the_gitleaks_hook_reader_rejects_overrides_and_unknown_layouts() {
             ),
         ),
         ("block removed", original.replacen(&block, "", 1)),
+        ("tag rev", rev_with("v8.30.1")),
+        ("short sha rev", rev_with(&rev[..12])),
+        ("uppercase sha rev", rev_with(&rev.to_ascii_uppercase())),
     ];
     for (name, mutated) in cases {
         assert_ne!(mutated, original, "control: the {name} edit must apply");
         assert!(
             check_gitleaks_hook_block(&mutated).is_err(),
             "{name}: the reader must reject this layout"
+        );
+    }
+}
+
+#[test]
+fn the_rev_line_check_accepts_only_a_full_lowercase_commit_sha() {
+    let sha = "83d9cd684c87d95d656c1458ef04895a7f1cbd8e";
+    let accepted = [
+        ("bare sha", format!("    rev: {sha}")),
+        (
+            "sha with release comment",
+            format!("    rev: {sha}  # v8.30.1"),
+        ),
+        (
+            "sha with tab before comment",
+            format!("    rev: {sha}\t# v8.30.1"),
+        ),
+    ];
+    let rejected = [
+        ("tag", "    rev: v8.30.1".to_owned()),
+        ("tag with comment", "    rev: v8.30.1  # v8.30.1".to_owned()),
+        ("short sha", format!("    rev: {}", &sha[..12])),
+        (
+            "uppercase sha",
+            format!("    rev: {}", sha.to_ascii_uppercase()),
+        ),
+        ("41 hex digits", format!("    rev: {sha}0")),
+        ("non-hex character", format!("    rev: {}g", &sha[..39])),
+        (
+            "comment without whitespace",
+            format!("    rev: {sha}#v8.30.1"),
+        ),
+        (
+            "trailing token that is not a comment",
+            format!("    rev: {sha}  v8.30.1"),
+        ),
+        ("quoted sha", format!("    rev: '{sha}'")),
+        ("empty value", "    rev: ".to_owned()),
+        ("wrong indent", format!("  rev: {sha}")),
+    ];
+    for (name, line) in accepted {
+        assert!(
+            is_valid_rev_line(&line),
+            "{name}: must be accepted: {line:?}"
+        );
+    }
+    for (name, line) in rejected {
+        assert!(
+            !is_valid_rev_line(&line),
+            "{name}: must be rejected: {line:?}"
         );
     }
 }
