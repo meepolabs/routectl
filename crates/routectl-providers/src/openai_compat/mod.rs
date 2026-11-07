@@ -218,6 +218,22 @@ impl OpenAiCompatProvider {
         Ok(())
     }
 
+    /// On the mantle lane, refuse a finished body whose `messages` carry a
+    /// media URL the upstream would fetch under the operator's AWS identity,
+    /// unless it is `https` or `data`. Walks the translated body, so a part
+    /// forwarded verbatim and a tool-result image hoisted into a user turn
+    /// are checked like a translated one; top-level `tools` are never walked.
+    /// A no-op on the first-party lane.
+    #[cfg(feature = "bedrock")]
+    fn refuse_unforwardable_mantle_media(&self, body: &Value) -> Result<()> {
+        match body.get("messages") {
+            Some(messages) if self.is_mantle() => {
+                crate::mantle::refuse_unforwardable_media_urls(&self.cfg.id, messages, "messages")
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// Record the mantle lane context (`lane`, `auth_mode`, `region`) on
     /// the current tracing span so every event within it -- including the
     /// shared upstream-failure WARN -- carries the lane fields. A no-op on
@@ -312,14 +328,17 @@ impl Provider for OpenAiCompatProvider {
     fn normalize_request(&self, req: &ChatRequest) -> Result<Value> {
         let dialect = self.dialect_for(req);
         let history = self.history_reasoning_for(req);
-        request::normalize(
+        let body = request::normalize(
             &self.cfg.id,
             req,
             dialect,
             history,
             self.cfg.payload_extras.as_ref(),
             self.cfg.strict_translation,
-        )
+        )?;
+        #[cfg(feature = "bedrock")]
+        self.refuse_unforwardable_mantle_media(&body)?;
+        Ok(body)
     }
 
     fn normalize_response(&self, raw: Value) -> Result<ChatResponse> {
