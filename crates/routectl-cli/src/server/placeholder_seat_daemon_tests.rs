@@ -24,7 +24,7 @@ use super::test_support::{drain_usage_writer_strict, isolate_usage_db, never_shu
 
 const WAIT: Duration = Duration::from_secs(10);
 
-/// Alias `a` -> model `grok` on pool `compat-pool` of two `oauth://xai` seats
+/// Alias `a` -> model `grok` on pool `compat-pool` of two `oauth://test-loopback` seats
 /// whose entries point at `upstream`; alias `c` -> model `claude` on pool
 /// `claude-pool` of two `oauth://anthropic` seats, the token-count lane.
 fn config_text(upstream: &str) -> String {
@@ -32,9 +32,9 @@ fn config_text(upstream: &str) -> String {
         "version = {CURRENT_CONFIG_VERSION}\n\
          [retry]\nmax_attempts = 1\n\n\
          [providers.seat-a]\nkind = \"openai-compat\"\nbase_url = \"{upstream}\"\n\
-         api_key_ref = \"oauth://xai#seat-a\"\n\n\
+         api_key_ref = \"oauth://test-loopback#seat-a\"\n\n\
          [providers.seat-b]\nkind = \"openai-compat\"\nbase_url = \"{upstream}\"\n\
-         api_key_ref = \"oauth://xai#seat-b\"\n\n\
+         api_key_ref = \"oauth://test-loopback#seat-b\"\n\n\
          [providers.claude-a]\nkind = \"anthropic-api\"\n\
          api_key_ref = \"oauth://anthropic#seat-a\"\nauth_kind = \"oauth-bearer\"\n\n\
          [providers.claude-b]\nkind = \"anthropic-api\"\n\

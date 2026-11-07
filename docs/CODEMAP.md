@@ -5591,6 +5591,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   backing `routectl login antigravity`; mints the `oauth://antigravity`
   credential used by the Gemini cloud-code egress; `invalid_grant` on refresh
   status-gates to `RefreshExpired`
+- `src/oauth/providers/test_loopback.rs` -- test-only `oauth://test-loopback`
+  flow, compiled under `cfg(any(test, feature = "test-utils"))` and resolved
+  by `lookup` but absent from `known_provider_ids`; lets dependent crates'
+  tests dispatch a seeded managed token to a loopback mock; both token legs
+  return an error with no network call
 - `src/oauth/project_cache.rs` -- `OAuthStoreProjectCache`: a
   `CloudProjectCache` (trait in routectl-core) backed by the OAuth store;
   `get` delegates to `SecretStore::peek_cloud_project_id`, `put` to

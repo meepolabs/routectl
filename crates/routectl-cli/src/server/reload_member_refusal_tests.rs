@@ -20,7 +20,7 @@ fn config_text(upstream: &str, members: &str, extra: &str) -> String {
         "version = {CURRENT_CONFIG_VERSION}\n\
          [retry]\nmax_attempts = 1\n\n\
          [providers.seat-a]\nkind = \"anthropic-api\"\nbase_url = \"{upstream}\"\n\
-         api_key_ref = \"oauth://xai#seat-a\"\nauth_kind = \"oauth-bearer\"\n\n\
+         api_key_ref = \"oauth://test-loopback#seat-a\"\nauth_kind = \"oauth-bearer\"\n\n\
          {extra}\
          [pools.alpha]\nmembers = [{members}]\n\n\
          [models.grok]\nprovider = \"alpha\"\nupstream = \"claude-sonnet-4-6\"\n"
@@ -67,7 +67,7 @@ fn write_credentials(creds: &Path) {
     // builds, so the pool is refused for seat-c alone, not for having no
     // usable member.
     for (seat, account_id) in [
-        ("xai#seat-a", None),
+        ("test-loopback#seat-a", None),
         ("codex#seat-c", None),
         ("codex#seat-d", Some("acct-seat-d")),
     ] {

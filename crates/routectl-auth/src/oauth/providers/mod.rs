@@ -14,6 +14,8 @@ pub mod anthropic;
 pub mod antigravity;
 pub mod codex;
 mod refresh_classify;
+#[cfg(any(test, feature = "test-utils"))]
+mod test_loopback;
 pub mod xai;
 
 use async_trait::async_trait;
@@ -139,6 +141,8 @@ pub fn lookup(provider_id: &str) -> OAuthResult<&'static dyn OAuthFlow> {
         "codex" => Ok(&codex::Codex),
         "xai" => Ok(&xai::Xai),
         "antigravity" => Ok(&antigravity::Antigravity),
+        #[cfg(any(test, feature = "test-utils"))]
+        test_loopback::PROVIDER_ID => Ok(&test_loopback::TestLoopback),
         other => Err(OAuthError::UnknownProvider(other.to_string())),
     }
 }

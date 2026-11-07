@@ -690,7 +690,7 @@ fn write_credentials_atomic(creds_path: &Path, access_token: &str) {
     let creds_json = json!({
         "schema_version": 1,
         "providers": {
-            "xai": {
+            "test-loopback": {
                 "access_token": access_token,
                 "refresh_token": "seeded-refresh-token",
                 "token_type": "Bearer",
@@ -756,7 +756,7 @@ async fn spawn_server_with_config_text(config_text: &str) -> (String, tempfile::
     panic!("test server failed to come up at {base_url}");
 }
 
-/// End-to-end credentials hot-reload: seed an `oauth://xai`
+/// End-to-end credentials hot-reload: seed an `oauth://test-loopback`
 /// credential under a tempdir XDG, point routectl at a wiremock
 /// upstream that matches per-bearer, rewrite `credentials.json` via
 /// the same atomic-rename flow `routectl login` / `refresh` use, and
@@ -809,7 +809,7 @@ async fn credentials_atomic_rewrite_surfaces_new_bearer_on_next_request() {
         .mount(&mock)
         .await;
 
-    // Build a config that resolves api_key_ref via oauth://xai
+    // Build a config that resolves api_key_ref via oauth://test-loopback
     // and dispatches to the mock upstream.
     let config_text = format!(
         r#"
@@ -821,7 +821,7 @@ strict_translation = false
 [providers.anthropic_oauth]
 kind = "anthropic-api"
 base_url = "{}"
-api_key_ref = "oauth://xai"
+api_key_ref = "oauth://test-loopback"
 auth_kind = "oauth-bearer"
 
 [models.claude]
@@ -1473,7 +1473,7 @@ async fn serve_starts_degraded_on_broken_credentials_then_hot_reloads_recovery()
         .await;
 
     // Two anthropic-api providers sharing the mock upstream: one resolves
-    // via oauth://xai (degraded at boot), one via a file:// static
+    // via oauth://test-loopback (degraded at boot), one via a file:// static
     // key (unaffected). The oauth base_url never dispatches while degraded.
     let file_key_ref = common::file_ref("file-secret-key");
     let config_text = format!(
@@ -1486,7 +1486,7 @@ strict_translation = false
 [providers.anthropic_oauth]
 kind = "anthropic-api"
 base_url = "{uri}"
-api_key_ref = "oauth://xai"
+api_key_ref = "oauth://test-loopback"
 auth_kind = "oauth-bearer"
 
 [providers.static_file]
@@ -1549,7 +1549,7 @@ filealias = "claude_file"
     );
 
     // Act 2 + Assert (recovery): write a VALID credentials.json atomically
-    // (fresh xai seat) and poll for recovery. The write is re-issued
+    // (fresh test-loopback seat) and poll for recovery. The write is re-issued
     // on an interval to defeat the async watcher-arming race; recovery is a
     // 200 carrying the oauth mock's marker (proof the recovered bearer was
     // resolved AND sent upstream), never a restart.

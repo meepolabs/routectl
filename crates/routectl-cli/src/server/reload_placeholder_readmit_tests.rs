@@ -16,8 +16,8 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-const SEAT_A: &str = "xai#seat-a";
-const SEAT_B: &str = "xai#seat-b";
+const SEAT_A: &str = "test-loopback#seat-a";
+const SEAT_B: &str = "test-loopback#seat-b";
 const NEW_TOKEN: &str = "tok-a-relogged";
 
 /// How seat a's record stands in the credentials file before the re-login.
@@ -42,7 +42,7 @@ fn config_text(upstream: &str) -> String {
     for member in ["seat-a", "seat-b", "seat-c"] {
         text.push_str(&format!(
             "[providers.{member}]\nkind = \"anthropic-api\"\nbase_url = \"{upstream}\"\n\
-             api_key_ref = \"oauth://xai#{member}\"\nauth_kind = \"oauth-bearer\"\n\n"
+             api_key_ref = \"oauth://test-loopback#{member}\"\nauth_kind = \"oauth-bearer\"\n\n"
         ));
     }
     text.push_str(
@@ -130,7 +130,7 @@ impl Rig {
         Arc::new((**oauth).clone())
     }
 
-    /// `routectl login xai --label seat-a`: seat a's record becomes a
+    /// `routectl login test-loopback --label seat-a`: seat a's record becomes a
     /// fresh one carrying [`NEW_TOKEN`]; seat b's record is rewritten as it
     /// was, so only seat a changed.
     fn relogin_seat_a(&self) {
