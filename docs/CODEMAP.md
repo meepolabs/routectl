@@ -34,7 +34,8 @@ license.
 - `src/lib.rs` -- crate root; re-exports schema types, error type, Provider
   trait, log helpers, the canonical-key allowlist, `UpstreamReason`,
   `RefusalReason`, `EligibilityReason`, and the request-observation types
-  (incl. `SkipCounts`); declares the `provider_kind`, `upstream_reason`,
+  (incl. `SkipCounts`), and the upstream-text scrub (`scrub_upstream_text`,
+  `names_aws_principal`); declares the `provider_kind`, `upstream_reason`,
   `refusal_reason` and `eligibility` modules
 - `src/schema.rs` -- canonical wire types: `ChatRequest`, `ChatResponse`,
   `ChatChunk`, `Message`, `MessageContent` (`has_non_text_part`),
@@ -537,6 +538,7 @@ license.
   `model_profile`, `skipped_format`, `stream_completion`, `upstream_error`,
   `aws_error`; re-exports
   `system_filter::is_billing_attribution_block` for the ingress system lift
+  and `aws_error::is_client_safe_token` for the cli error-envelope sinks
 - `src/alloc_probe.rs` -- test-only thread-local allocation counter for
   OpenAI Responses request tests; absent from other feature combinations
 - `src/bounded_diagnostics.rs` -- `MAX_LOGGED_DIAGNOSTIC_ITEMS` (8) and
@@ -719,8 +721,10 @@ license.
   reduction and a
   still-namespaced discriminator is never silently missed by an exact match
   against the bare name; `strip_aws_namespace` itself stays crate-private.
-  Also `AccessDeniedDetail` (the 403 scrub input) and
-  `aws_stream_exception_status` (in-stream exception member -> HTTP status)
+  Also `AccessDeniedDetail` (the 403 scrub input),
+  `aws_stream_exception_status` (in-stream exception member -> HTTP status),
+  `is_client_safe_token` (root re-export; the client-facing token bound), and
+  `names_aws_principal`, which delegates to `routectl_core::names_aws_principal`
 - `src/translation_drop_metrics.rs` -- process-wide `(lane, class)` translation
   drop and policy-action counters with their snapshot readers; inside a lane's
   `ObservationScope` the drop and lane-seen counters advance once per client
@@ -757,7 +761,10 @@ license.
   inference host. Also the shared home (cfg `bedrock`) for `MantleAuth`
   (`region` + resolved `ResolvedCreds`, redacting Debug, `auth_mode` ->
   `bearer`|`sigv4`), reused by the anthropic-api and both OpenAI mantle lanes;
-  `anthropic_api::MantleAuth` re-exports it so downstream paths are unchanged
+  `anthropic_api::MantleAuth` re-exports it so downstream paths are unchanged.
+  Also (cfg `bedrock`) `is_forwardable_media_url` and the lane-neutral
+  forwarded-media walker `refuse_unforwardable_media_urls`, called by all
+  three mantle lanes on the finished body
 
 ### anthropic_api
 
@@ -829,7 +836,9 @@ license.
   Err arm, shared by the three surfaces that can withhold the fingerprint --
   the canonical `system`, the legacy lift, and a forwarded `Role::System` turn
   screened in `messages.rs` -- so one request counts one policy action however
-  many of them stripped
+  many of them stripped; on the mantle lane `normalize` ends with
+  `withhold_mantle_credential_fields` (drops `mcp_servers`) and (cfg
+  `bedrock`) `refuse_unforwardable_mantle_media` over `system` / `messages`
 - `src/anthropic_api/request_drop_counter_tests.rs` -- the lane's telemetry
   pinning set: the denominator counts a failed assembly as well as a clean
   one, and one single-source test per fingerprint-strip site (plus the
@@ -854,7 +863,8 @@ license.
   `build_tool_message`, `normalize_replay_invariants`; owns
   `SystemTurnPolicy` (forward a mid-conversation `role: "system"` turn in
   place vs treat it as lift-consumed, resolved by `request.rs`), the
-  billing/attribution and empty-turn screen on the forwarded path, and the
+  billing/attribution and empty-turn screen on the forwarded path (also
+  applied to a `developer` turn via `emit_other_role_turn`), and the
   accounted-identity ledger that turns an unaccounted message drop into a
   normalize error. Sidecar `request_body_beta_tests.rs` pins that the shared
   normalizer leaves the body `anthropic_beta` carrier to each egress
@@ -976,7 +986,9 @@ license.
   id) and routes a non-envelope (flat AWS mantle) 403 through the
   `aws_error` scrub; the optional `OpenAiCompatConfig::mantle` selects the
   Bedrock mantle lane (SigV4/bearer-signed body bytes via `mantle::sign`, no
-  first-party Bearer, no-redirect client, `mantle::probe` credential check)
+  first-party Bearer, no-redirect client, `mantle::probe` credential check;
+  cfg `bedrock` `refuse_unforwardable_mantle_media` walks the finished
+  `messages`)
 - `src/openai_compat/dialect.rs` -- public `ReasoningDialect` enum +
   format-tag accessors
 - `src/openai_compat/request.rs` -- `normalize`, `select_client_extras`,
@@ -1077,11 +1089,9 @@ license.
   `AuthKind::is_codex_lane` (true only for the ChatGPT-subscription OAuth
   lane), the one predicate request, extras and client read for the codex
   wire shape (no `max_output_tokens`, codex identity headers)
-- `src/openai_responses/mantle_media.rs` -- (cfg `bedrock`) Mantle-lane check
-  run on the serialized body in `normalize_request`: every `input_image.image_url`
-  and `input_file.file_url` under `input[*].content` / `input[*].output`
-  (passthrough items included) must pass `mantle::is_forwardable_media_url`, else
-  a local `unrepresentable` refusal naming the field and position only
+- `src/openai_responses/mantle_media.rs` -- (cfg `bedrock`)
+  `check_forwarded_media_urls`: on the Mantle lane `normalize_request` passes
+  the serialized body's `input` to `mantle::refuse_unforwardable_media_urls`
 - `src/openai_responses/client.rs` -- provider construction, config, and auth
   wiring: `OpenAiResponsesConfig` (incl. `session_id` and `installation_id:
   Option<String>`, plus cfg `bedrock` `mantle: Option<MantleAuth>`),
@@ -1254,7 +1264,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/gemini/request.rs` -- `ChatRequest` -> Gemini body: `translate`,
   `provider_body` (full-body assembly incl. extras selection through
   `client_extras_for` with `MatchingIngress::LibraryOnly`), system,
-  contents, tools, thinking, and response-format builders, `merge_payload_extras`
+  contents, tools, thinking, and response-format builders, `merge_payload_extras`;
+  `withhold_developer_billing_block` screens a `developer` turn
 - `src/gemini/request_drop_counter_tests.rs` -- `include!`d into
   `request.rs`'s `tests` module: the three-assertion pinning set per counted
   drop (warn/debug captured via `capture_events`, field absent from the
@@ -1356,12 +1367,14 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   sites (the top-level system field and the Role::System message lift) record
   into the request's shared tally rather than counting separately
 - `src/bedrock/converse/messages.rs` -- canonical messages -> Converse
-  messages: `build_messages` per-role dispatch, the three document paths
+  messages: `build_messages_counted` per-role dispatch (threads the caller's
+  `ClientFingerprintStripTally` for a `developer` turn's withhold;
+  `build_messages` is a test-only shim), the three document paths
   (`translate_document`, `document_to_tool_result`, the raw
   Anthropic-shape array element), image/tool_result carriers; a tool-role
   turn's part markers collapse into one sibling `cachePoint` after its
   `toolResult`. Three per-request drop tallies flush unconditionally from
-  `build_messages` (so the
+  `build_messages_counted` (so the
   Err arm counts too); `ReasoningSkipTally::flush` also owns this lane's single
   request-volume denominator
 - `src/bedrock/converse/tools.rs` -- canonical tools/tool_choice -> Converse
@@ -1398,7 +1411,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `.../bedrock-mantle/aws4_request` + `x-amz-date`), no `x-api-key`,
   `anthropic-version` + bare model id on the wire, a signed `count_tokens`, a
   no-redirect client, and an AWS-shaped 403 (`SignatureDoesNotMatch`)
-  round-tripping to `FailureClass::Auth`
+  round-tripping to `FailureClass::Auth`; also the mantle `mcp_servers`
+  withhold and forwarded-media URL refusal on messages and count_tokens
 - `tests/anthropic_overage_tracing.rs` -- captured-subscriber tracing coverage
   for the overage-flip log: a flip into overage emits one WARN with the
   non-secret quota fields, steady state is silent, recovery emits one INFO;
@@ -1425,8 +1439,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   openai-compat egress (DeepSeek multi-turn, etc.); the cfg(`bedrock`)
   `mantle` submodule pins the mantle lane on the wire (bearer + SigV4
   `bedrock-mantle` scope, no first-party Bearer, no-redirect 3xx, 501
-  count_tokens, credential-resolve probe, and end-to-end AWS-403 scrub->Auth +
-  429 retry_after preservation)
+  count_tokens, credential-resolve probe, end-to-end AWS-403 scrub->Auth +
+  429 retry_after preservation, and the forwarded-media URL refusal)
 - `tests/aws_region_egress.rs` -- raw-socket tripwire pins: native Bedrock
   built directly with a host-altering region is refused at construction, and
   each mantle lane present in the feature set sends nothing (no connection,
@@ -1939,11 +1953,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   (`ALLOWED_REMAP_TARGETS`) -- a remap may only move a status into a terminal,
   non-retrying class, naming the offending provider/status/target on reject;
   `validate_managed_anthropic_credential` (public; also called by the
-  factory) confines an `oauth://anthropic` ref, and its
-  crate-private siblings confine `oauth://codex` to the ChatGPT backend host
-  and `oauth://antigravity` to the Cloud Code hosts
-  (`validate_managed_oauth_credentials` runs all three, in validation and the
-  factory);
+  factory) confines an `oauth://anthropic` ref, and the
+  `MANAGED_OAUTH_FAMILIES` table (anthropic, codex, xai, antigravity) drives
+  `check_managed_oauth_family`, confining each managed token to its one lane
+  and host (`validate_managed_oauth_credentials` runs every row, in validation
+  and the factory);
   `class_token` renders a `ConfigFailureClass` as its kebab-case TOML
   spelling; `collect_config_validation(&Config) -> ConfigValidation` is the
   single ordered invocation of the whole `validate_*` suite (bare-message
@@ -5511,7 +5525,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   defines `OAuthError` and re-exports `OAuthStore`, `LoginOptions`,
   `run_login`, `known_provider_ids`, token types, plus
   `credentials_default_path()` for a caller that opens the store at an
-  explicit path (hermetic in tests) and still needs the production one
+  explicit path (hermetic in tests) and still needs the production one;
+  `serde_error_summary` renders a JSON parse error as class + position only
 - `src/oauth/types.rs` -- on-disk schema: `CredentialsFile`, `TokenRecord`
   (incl. optional `session_id` and optional `cloud_project_id`),
   `AccountInfo`, `SecretToken` (Drop-zeroized, redacted Debug),
@@ -5582,9 +5597,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `token_parse_error`, and `token_status_error`/`safe_token_error_code`
   (body-free token-endpoint error mapping); also the token-endpoint mechanics
   every provider flow shares (`pub(super)`): `TokenEndpoint` with
-  `check_token_url` (https, no userinfo, exact host; applied to the request
-  URL and the response's final URL), `send_token_request`,
-  `read_capped_body` (`MAX_TOKEN_BODY_BYTES`, 64 KiB, UTF-8 only),
+  `check_token_url` (https, no userinfo, exact host, no explicit port),
+  `send_token_request` (checks the built request's URL, which must equal the
+  parsed endpoint URL, before executing),
+  `read_capped_body` (`MAX_TOKEN_BODY_BYTES`, 64 KiB, enforced while
+  streaming; UTF-8 only),
   `decode_token_response`, `error_kind_label`, and `decode_jwt_payload`
   (unverified payload decode, hints only)
 - `src/oauth/providers/anthropic.rs` -- claude.ai OAuth flow:
@@ -6800,7 +6817,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `Error::LocallyUnavailable` renders as a 503 whose error type is the
   eligibility reason token, with a `Retry-After` from its known wait (message
   and seconds from `local_unavailable.rs`). A parse failure
-  counts on `<ingress>->local` with its reason (`render_parse_failure`)
+  counts on `<ingress>->local` with its reason (`render_parse_failure`).
+  Upstream-authored text (extracted message / param, `Error::Streaming`)
+  reaches a client envelope only through `client_upstream_detail` (core
+  `scrub_upstream_text`, control-char filter, length bound); upstream type,
+  code and request id pass `is_client_safe_token` or are dropped
 - `src/handlers/refusal_reason_matrix_tests.rs` -- one request per reachable
   `RefusalReason` through the real ingress, a built router and its egress
   against a mock upstream: each row asserts a 400, zero upstream calls and
@@ -6833,7 +6854,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `src/handlers/reason_detail.rs` -- `with_reason_suffix`: appends
   ` (reason: <token>)` from the error's typed `UpstreamReason` to every
   client error message (non-stream envelope and stream terminal, all three
-  dialects), skipped when the message already names the token
+  dialects), skipped when the message already carries a routectl-rendered
+  reason segment (` (reason: <token>)`, or `: <token>` at the end or before `: `)
 - `src/handlers/pure_proxy_metrics.rs` -- forwarded-mode (pure-proxy) ingress
   admission-rejection counter + structured rejection log.
   `PureProxyRejectionReason` (closed 2-variant enum: `TokenMissing` /
@@ -7705,7 +7727,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   (`x-routectl-mitm-proxied`) -- the seam header the MITM front-proxy stamps
   on the re-injected `api.anthropic.com` inference leg, shared between the
   proxy set site and the `handlers::ingress_handle` forwarded-mode
-  capture/admission read sites so the two cannot drift on the literal
+  capture/admission read sites so the two cannot drift on the literal;
+  `StreamErrorClass` (the stream terminal's error class; drops an upstream
+  type / code failing `is_client_safe_token`)
 - `src/ingress/response_edits.rs` -- `ResponseEdits`: collector a renderer
   declares its intended response edits into (`render_response_declared` /
   `render_chunk_declared` / `declare_early_frame_edits` on `IngressAdapter`,
@@ -9180,7 +9204,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `description` / `regexTarget = "secret"` / `regexes`, with `regexes`
   exactly the `^...$`-anchored `CLIENT_SECRET` read from
   `routectl-auth/src/oauth/providers/antigravity.rs`; and asserts no root
-  `.gitleaksignore` exists
+  `.gitleaksignore` exists; and pins the pre-commit gitleaks hook block to
+  the upstream defaults (no `args` / `entry` override)
 - `tests/cross_mode_pair.rs` -- pins the committed cross-mode fixture pair
   (`driver/anthropic-api/plain-turn-01` and its `-fp` twin): asserts each
   half's `meta.client.connection_mode`, the MITM seam header and
