@@ -1955,8 +1955,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `validate_managed_anthropic_credential` (public; also called by the
   factory) confines an `oauth://anthropic` ref, and the
   `MANAGED_OAUTH_FAMILIES` table (anthropic, codex, xai, antigravity) drives
-  `check_managed_oauth_family`, confining each managed token to its one lane
-  and host (`validate_managed_oauth_credentials` runs every row, in validation
+  `check_managed_oauth_family`, confining each managed token to its allowed lane
+  and host set (`validate_managed_oauth_credentials` runs every row, in validation
   and the factory);
   `class_token` renders a `ConfigFailureClass` as its kebab-case TOML
   spelling; `collect_config_validation(&Config) -> ConfigValidation` is the
@@ -5597,7 +5597,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `token_parse_error`, and `token_status_error`/`safe_token_error_code`
   (body-free token-endpoint error mapping); also the token-endpoint mechanics
   every provider flow shares (`pub(super)`): `TokenEndpoint` with
-  `check_token_url` (https, no userinfo, exact host, no explicit port),
+  `check_token_url` (https, no userinfo, exact host, no non-default port),
   `send_token_request` (checks the built request's URL, which must equal the
   parsed endpoint URL, before executing),
   `read_capped_body` (`MAX_TOKEN_BODY_BYTES`, 64 KiB, enforced while
