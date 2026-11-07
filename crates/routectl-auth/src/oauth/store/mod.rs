@@ -419,3 +419,7 @@ mod test_support;
 #[cfg(test)]
 #[path = "open_tests.rs"]
 mod open_tests;
+
+#[cfg(test)]
+#[path = "http_client_tests.rs"]
+mod http_client_tests;
