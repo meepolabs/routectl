@@ -3,6 +3,7 @@ use crate::oauth::store::scripted::{ScriptedRefreshFlow, token_record};
 use crate::oauth::store::test_support::*;
 
 const SEAT_A: &str = "anthropic#seat-a";
+const UNKNOWN_PROVIDER: &str = "no-such-provider";
 
 /// Seed `seat` on disk with an access token expiring at `expires_at`, then
 /// open a store whose refresh POSTs are answered by `script`.
@@ -277,22 +278,63 @@ async fn relogin_landing_during_the_refresh_counts_as_refreshed() {
 }
 
 #[tokio::test]
-async fn degraded_store_is_transient() {
-    // Arrange
+async fn degraded_store_is_transient_for_a_known_provider_and_not_logged_in_for_an_unknown_one() {
+    let rows: [(&str, &str, RefreshOutcome); 2] = [
+        (
+            "known provider",
+            "anthropic",
+            RefreshOutcome::Transient {
+                access_expired: false,
+            },
+        ),
+        (
+            "unknown provider",
+            UNKNOWN_PROVIDER,
+            RefreshOutcome::Definitive(DefinitiveCause::NotLoggedIn),
+        ),
+    ];
+    for (name, provider, expected) in rows {
+        // Arrange
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credentials.json");
+        write_creds_0600(&path, b"{ not json");
+        let store = OAuthStore::open_or_degraded(&path).await.unwrap();
+
+        // Act
+        let outcome = store.refresh_if_due(provider, None).await;
+
+        // Assert
+        assert_eq!(outcome, expected, "{name}");
+    }
+}
+
+#[tokio::test]
+async fn unknown_provider_is_not_logged_in_without_a_refresh_post() {
+    // Arrange: a due record stored under the unknown id, so only the
+    // provider check stands between the call and the injected flow.
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("credentials.json");
-    write_creds_0600(&path, b"{ not json");
-    let store = OAuthStore::open_or_degraded(&path).await.unwrap();
+    let (store, flow) = scripted_store_with_seat(
+        &path,
+        UNKNOWN_PROVIDER,
+        unix_now() + 10,
+        ScriptedRefresh::Mint("tok-minted".into()),
+    )
+    .await;
 
     // Act
-    let outcome = store.refresh_if_due("anthropic", None).await;
+    let outcome = store.refresh_if_due(UNKNOWN_PROVIDER, None).await;
 
     // Assert
     assert_eq!(
         outcome,
-        RefreshOutcome::Transient {
-            access_expired: false
-        }
+        RefreshOutcome::Definitive(DefinitiveCause::NotLoggedIn)
+    );
+    assert_eq!(flow.post_count(), 0, "an unknown provider must not POST");
+    assert_eq!(
+        disk_access_token(&path, UNKNOWN_PROVIDER).await.as_deref(),
+        Some("tok-stale"),
+        "the stored record is left untouched"
     );
 }
 

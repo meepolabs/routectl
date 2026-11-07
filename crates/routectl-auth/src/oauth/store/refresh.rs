@@ -84,12 +84,17 @@ impl OAuthStore {
     /// POST the same seat twice. A token outside the lead window returns
     /// [`RefreshOutcome::NotDue`] without touching the network.
     ///
-    /// Only a refused refresh token and a missing seat are
-    /// [`RefreshOutcome::Definitive`]. Every other failure is
-    /// [`RefreshOutcome::Transient`], including a degraded store (its
-    /// cause clears on the next successful reload); a degraded store has no
-    /// readable record, so it reports `access_expired: false`.
+    /// An unknown `provider` is checked first and reads as not logged in:
+    /// it returns [`DefinitiveCause::NotLoggedIn`] without reading the
+    /// store or calling a refresh flow. Otherwise only a refused refresh
+    /// token and a missing seat are [`RefreshOutcome::Definitive`]. Every
+    /// other failure is [`RefreshOutcome::Transient`], including a degraded
+    /// store (its cause clears on the next successful reload); a degraded
+    /// store has no readable record, so it reports `access_expired: false`.
     pub async fn refresh_if_due(&self, provider: &str, label: Option<&str>) -> RefreshOutcome {
+        if providers::lookup(provider).is_err() {
+            return RefreshOutcome::Definitive(DefinitiveCause::NotLoggedIn);
+        }
         let seat = seat_key(provider, label);
         let current = match self.read_record(&seat).await {
             Ok(rec) => rec,
