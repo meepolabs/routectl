@@ -9,6 +9,12 @@ fn key(prefix: &str, body: &str, len: usize) -> String {
     format!("{prefix}{}", body.repeat(len))
 }
 
+/// An older OpenAI user key: `sk-`, `before` opaque chars, the `T3BlbkFJ`
+/// infix, then `after` opaque chars; assembled at runtime.
+fn openai_infix_key(before: usize, after: usize) -> String {
+    format!("sk-{}T3BlbkFJ{}", "j".repeat(before), "k".repeat(after))
+}
+
 /// Asserts `input` scrubs to an owned string carrying the placeholder and
 /// none of `planted`.
 fn assert_redacts(name: &str, input: &str, planted: &str) {
@@ -136,6 +142,8 @@ fn redacts_each_token_prefix_at_its_floor() {
         ("nvapi", key("nvapi-", "g", 20)),
         ("bedrock-api-key", key("bedrock-api-key-", "h", 20)),
         ("ABSK", format!("{}==", key("ABSK", "i", 100))),
+        ("sk-None", key("sk-None-", "m", 16)),
+        ("openai infix", openai_infix_key(8, 16)),
     ];
     for (name, token) in &rows {
         let input = format!("invalid key: {token}, check config");
@@ -172,6 +180,9 @@ fn leaves_each_token_prefix_one_below_its_floor() {
         ("nvapi", key("nvapi-", "g", 19)),
         ("bedrock-api-key", key("bedrock-api-key-", "h", 19)),
         ("ABSK", key("ABSK", "i", 99)),
+        ("sk-None", key("sk-None-", "m", 15)),
+        ("openai infix short tail", openai_infix_key(8, 15)),
+        ("openai infix short head", openai_infix_key(7, 16)),
     ];
     for (name, token) in &rows {
         assert_clean(name, &format!("value {token} rejected"));
@@ -198,6 +209,8 @@ fn anchored_prefixes_inside_a_token_stay() {
             key("bedrock-api-key-", "h", 20),
         ),
         ("ABSK mid-token", key("ABSK", "i", 100)),
+        ("sk-None mid-token", key("sk-None-", "m", 16)),
+        ("openai infix mid-token", openai_infix_key(8, 16)),
     ];
     for (name, token) in &rows {
         assert_clean(name, &format!("value x{token} rejected"));

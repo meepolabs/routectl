@@ -274,6 +274,14 @@ async fn mantle_refuses_non_forwardable_media_urls_without_an_upstream_call() {
             })),
         ),
         (
+            "passthrough file bare url s3",
+            passthrough_request(json!({
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "file", "url": s3}]
+            })),
+        ),
+        (
             "passthrough source url gs",
             passthrough_request(json!({
                 "type": "agent_message",

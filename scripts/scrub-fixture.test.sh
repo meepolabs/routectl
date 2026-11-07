@@ -1286,6 +1286,21 @@ assert_caught "an upstream req_ id in a percent-encoded body" \
     "$(body_with "callback?body=%7B%22request_id%22%3A%20%22$UPSTREAM_REQ_ID%22%7D")" \
     upstream-request-id
 
+assert_caught "an upstream req_ id in a percent-encoded json-escaped body" \
+    ingress_request.json \
+    "$(body_with 'callback?body=%7B%5C%22request_id%5C%22%3A%5C%22req_ABCDEFGHIJKLMNOPQRSTUV%5C%22%7D')" \
+    upstream-request-id
+
+assert_caught "an upstream req_ id in a lowercase-hex percent-encoded json-escaped body" \
+    ingress_request.json \
+    "$(body_with "callback?body=%7b%5c%22request_id%5c%22%3a%5c%22$UPSTREAM_REQ_ID%5c%22%7d")" \
+    upstream-request-id
+
+assert_caught "an upstream req_ id after a percent-encoded escaped newline" \
+    ingress_request.json \
+    "$(body_with "callback?body=%7B%5C%22request_id%5C%22%3A%5Cn%20%5C%22$UPSTREAM_REQ_ID%5C%22%7D")" \
+    upstream-request-id
+
 assert_clean "the uuid request_id routectl records in meta.json is accepted" \
     meta.json \
     '{"case_id":"plain-turn-01","request_id": "01a157ea-bbc2-7323-921f-14cc6fc18e0e"}'

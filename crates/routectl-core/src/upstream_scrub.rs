@@ -1,5 +1,5 @@
 //! Redaction of credential- and principal-shaped substrings from upstream
-//! error text before it reaches a client envelope or a log line.
+//! error text before it reaches a client error envelope.
 //!
 //! Callers pass DECODED string values (an `error.message` after JSON
 //! decoding), never raw JSON text. One decode can still leave escapes: a
@@ -38,7 +38,9 @@ const NBSP: &[u8] = "\u{a0}".as_bytes();
 ///   and, each starting a token, `sk-admin-` (16+), `ASIA` (16 of
 ///   `A-Z0-9`), `AIza` (35), `ya29.` with an optional 1-3 digit legacy
 ///   segment (20+), a three-segment `eyJ` JWT (10+ per segment), `nvapi-`
-///   (20+), `bedrock-api-key-` (20+) and `ABSK` (100+ base64);
+///   (20+), `bedrock-api-key-` (20+), `ABSK` (100+ base64), `sk-None-`
+///   (16+), and `sk-` plus an opaque run carrying `T3BlbkFJ` with 8+ run
+///   chars before it and 16+ after;
 /// - the value of an echoed `x-amz-security-token` (any case; then an
 ///   optional `"`, `'` or `\"`; `:` or `=`; optional spaces or tabs; an
 ///   optional `"`, `'` or `\"`; then 20+ of `[A-Za-z0-9+/=_%-]`), keeping
@@ -302,7 +304,13 @@ const TOKEN_RULES: &[TokenRule] = &[
     rule(b"AIza", true, opaque, 35),
     rule(b"nvapi-", true, opaque, 20),
     rule(b"bedrock-api-key-", true, bedrock_key_char, 20),
+    rule(b"sk-None-", true, opaque, 16),
 ];
+
+/// The base64 of `OpenAI`, carried inside older OpenAI user keys.
+const OPENAI_KEY_INFIX: &[u8] = b"T3BlbkFJ";
+const OPENAI_INFIX_MIN_BEFORE: usize = 8;
+const OPENAI_INFIX_MIN_AFTER: usize = 16;
 
 /// A prefix-keyed credential at `at`; the span is prefix plus body run.
 fn token_at(bytes: &[u8], at: usize) -> Option<Range<usize>> {
@@ -312,6 +320,7 @@ fn token_at(bytes: &[u8], at: usize) -> Option<Range<usize>> {
         .or_else(|| google_oauth_at(bytes, at))
         .or_else(|| jwt_at(bytes, at))
         .or_else(|| bedrock_long_term_key_at(bytes, at))
+        .or_else(|| openai_infix_key_at(bytes, at))
 }
 
 fn prefixed_token_at(bytes: &[u8], at: usize, rule: &TokenRule) -> Option<Range<usize>> {
@@ -358,6 +367,26 @@ fn jwt_at(bytes: &[u8], at: usize) -> Option<Range<usize>> {
         end += len;
     }
     Some(at..end)
+}
+
+/// `sk-` starting a token, then an opaque run holding [`OPENAI_KEY_INFIX`]
+/// at some position with 8+ run chars before it and 16+ after; the span is
+/// the whole run.
+fn openai_infix_key_at(bytes: &[u8], at: usize) -> Option<Range<usize>> {
+    if !bytes.get(at..)?.starts_with(b"sk-") || !starts_token(bytes, at) {
+        return None;
+    }
+    let run_at = at + "sk-".len();
+    let run = &bytes[run_at..run_at + run_len(bytes, run_at, opaque)];
+    let carries_infix = run
+        .windows(OPENAI_KEY_INFIX.len())
+        .enumerate()
+        .any(|(i, window)| {
+            window == OPENAI_KEY_INFIX
+                && i >= OPENAI_INFIX_MIN_BEFORE
+                && run.len() - i - OPENAI_KEY_INFIX.len() >= OPENAI_INFIX_MIN_AFTER
+        });
+    carries_infix.then_some(at..run_at + run.len())
 }
 
 /// `ABSK` then 100+ base64 characters and up to two `=`.

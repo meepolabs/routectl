@@ -120,10 +120,16 @@ pub(crate) fn is_forwardable_media_url(url: &str) -> bool {
 #[cfg(feature = "bedrock")]
 const MEDIA_WALK_SKIPPED_MEMBERS: [&str; 3] = ["tools", "input_schema", "parameters"];
 
-/// `source.type` values whose payload is not a URL, so a `url` member beside
-/// them is not one the upstream fetches.
+/// `source.type` values whose payload is not a URL, so the `source` rule
+/// skips a `url` member beside them. A `file`-typed object's own bare `url`
+/// is still checked as a media carrier's.
 #[cfg(feature = "bedrock")]
 const NON_URL_SOURCE_KINDS: [&str; 4] = ["base64", "text", "file", "content"];
+
+/// Object `type` values naming a media carrier, whose bare `url` member is
+/// one the upstream fetches.
+#[cfg(feature = "bedrock")]
+const MEDIA_CARRIER_KINDS: [&str; 5] = ["image", "file", "document", "input_image", "input_file"];
 
 /// Longest object key rendered verbatim in a refusal path.
 #[cfg(feature = "bedrock")]
@@ -140,12 +146,15 @@ const MAX_RENDERED_KEY_LEN: usize = 64;
 ///   `image_url` may also be an object whose `url` is a string;
 /// - a member named `source` holding an object, by its `url`, when its
 ///   `type` is `url`, or when it carries a `url` member and its `type` is
-///   not a non-URL kind (`base64`, `text`, `file`, `content`).
+///   not a non-URL kind (`base64`, `text`, `file`, `content`);
+/// - a bare `url` member, when present on an object whose `type` names a
+///   media carrier (`image`, `file`, `document`, `input_image`,
+///   `input_file`).
 ///
 /// A matched member that is null, empty or of another shape, or a `url`
-/// source missing its `url`, refuses. A bare `url` member elsewhere is not
-/// checked: citation annotations and search results carry one the upstream
-/// does not fetch.
+/// source missing its `url`, refuses. A bare `url` member on any other
+/// object is not checked: citation annotations and search results carry
+/// one the upstream does not fetch.
 ///
 /// It never descends into string values (function-call `arguments` are
 /// JSON-encoded strings), any member named `tools`, `input_schema` or
@@ -218,11 +227,24 @@ fn refused_media_member(members: &serde_json::Map<String, serde_json::Value>) ->
     if let Some((key, _)) = refused_url_member {
         return Some(render_key(key));
     }
+    let carrier_url = members.get("url").filter(|_| is_media_carrier(members));
+    if carrier_url.is_some_and(|url| !passes_media_url_check(Some(url))) {
+        return Some("url");
+    }
     let source = members.get("source").filter(|s| s.is_object())?;
     if is_url_source(source) && !passes_media_url_check(source.get("url")) {
         return Some("source");
     }
     None
+}
+
+/// Whether this object's `type` names a media carrier.
+#[cfg(feature = "bedrock")]
+fn is_media_carrier(members: &serde_json::Map<String, serde_json::Value>) -> bool {
+    members
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|kind| MEDIA_CARRIER_KINDS.contains(&kind))
 }
 
 /// Whether a member whose key ends in `_url` carries a forwardable URL.
@@ -558,6 +580,41 @@ mod tests {
                     json!({"source": {"type": "s3_location", "url": S3}}),
                     "`source` at root ",
                 ),
+                (
+                    "file carrier bare url s3",
+                    json!({"type": "file", "url": "s3://planted-bucket-zq7/k"}),
+                    "`url` at root ",
+                ),
+                (
+                    "image carrier bare url gs",
+                    json!({"type": "image", "url": "gs://planted-bucket-zq7/o"}),
+                    "`url` at root ",
+                ),
+                (
+                    "document carrier bare url s3",
+                    json!({"type": "document", "url": S3}),
+                    "`url` at root ",
+                ),
+                (
+                    "input_image carrier bare url s3",
+                    json!({"type": "input_image", "url": S3}),
+                    "`url` at root ",
+                ),
+                (
+                    "input_file carrier bare url s3",
+                    json!({"type": "input_file", "url": S3}),
+                    "`url` at root ",
+                ),
+                (
+                    "file carrier bare url null",
+                    json!({"type": "file", "url": null}),
+                    "`url` at root ",
+                ),
+                (
+                    "file-typed source beside a bare url",
+                    json!({"source": {"type": "file", "file_id": "f1", "url": S3}}),
+                    "`url` at root.source ",
+                ),
             ];
 
             for (row, root, expected) in rows {
@@ -624,12 +681,24 @@ mod tests {
                     json!({"source": {"type": "base64", "data": "AAAA", "url": S3}}),
                 ),
                 (
-                    "source file beside a url member",
-                    json!({"source": {"type": "file", "file_id": "f1", "url": S3}}),
-                ),
-                (
                     "bare url member",
                     json!({"type": "url_citation", "url": S3, "title": "t"}),
+                ),
+                (
+                    "url_citation bare url http",
+                    json!({"type": "url_citation", "url": "http://x"}),
+                ),
+                (
+                    "web_search_call bare url http",
+                    json!({"type": "web_search_call", "url": "http://x"}),
+                ),
+                (
+                    "file carrier bare url https",
+                    json!({"type": "file", "url": "https://x/a"}),
+                ),
+                (
+                    "file carrier without a url",
+                    json!({"type": "file", "file_id": "f1"}),
                 ),
                 (
                     "url-like key without the underscore suffix",

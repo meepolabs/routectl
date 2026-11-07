@@ -855,11 +855,12 @@ OPENAI_NONE_KEY_RE="$ANCHOR_LEFT"'sk-None-[A-Za-z0-9_-]{16,}'
 # response header, kept visible on purpose, and the uuid `request_id` in
 # meta.json are not refused. The quotes, colon and whitespace are matched in
 # every encoding a capture writes: raw, JSON-escaped at any depth, escaped
-# newlines from a pretty-printed body, and percent-encoded. The 16-char
-# floor keeps the `req_REDACTED` placeholder accepted. Scanned with `-z` so
-# a key and value a pretty-printer split across lines still match.
-REQ_ID_QUOTE='(\\*"|%22)'
-REQ_ID_GAP='([[:space:]]|\\+[nrt]|%20|%09|%0[Aa]|%0[Dd])*'
+# newlines from a pretty-printed body, percent-encoded, and percent-encoded
+# after JSON escaping (`%5C%22`, `%5Cn`). The 16-char floor keeps the
+# `req_REDACTED` placeholder accepted. Scanned with `-z` so a key and value a
+# pretty-printer split across lines still match.
+REQ_ID_QUOTE='(\\*"|(%5[Cc])*%22)'
+REQ_ID_GAP='([[:space:]]|\\+[nrt]|(%5[Cc])+[nrt]|%20|%09|%0[Aa]|%0[Dd])*'
 UPSTREAM_REQUEST_ID_RE="$REQ_ID_QUOTE"'request_id'"$REQ_ID_QUOTE$REQ_ID_GAP"'(:|%3[Aa])'"$REQ_ID_GAP$REQ_ID_QUOTE"'req_[A-Za-z0-9]{16,}'
 
 # The two AWS credentials that have NO prefix of their own: the secret access
