@@ -243,34 +243,47 @@ fn redacts_double_encoded_arn_in_a_signing_canonical_request() {
 #[test]
 fn redacts_echoed_session_token_value_and_keeps_the_header_name() {
     let token = key("Tok", "Ab+/9=", 6);
+    let encoded = format!("{}%2F{}", "a".repeat(10), "b".repeat(10));
     let rows = [
         (
             "canonical header colon",
+            &token,
             format!("x-amz-security-token:{token}\nhost"),
             "x-amz-security-token:[redacted]\nhost",
         ),
         (
             "query string equals",
+            &token,
             format!("X-Amz-Security-Token={token}&X-Amz-Date=1"),
             "X-Amz-Security-Token=[redacted]&X-Amz-Date=1",
         ),
         (
             "mixed case header with space",
+            &token,
             format!("X-AMZ-security-Token: {token}"),
             "X-AMZ-security-Token: [redacted]",
         ),
         (
             "percent-encoded value",
-            format!(
-                "x-amz-security-token={}%2F{}",
-                "a".repeat(10),
-                "b".repeat(10)
-            ),
+            &encoded,
+            format!("x-amz-security-token={encoded}"),
             "x-amz-security-token=[redacted]",
         ),
+        (
+            "escaped-quote json key",
+            &token,
+            format!(r#"{{\"x-amz-security-token\":\"{token}\"}}"#),
+            r#"{\"x-amz-security-token\":\"[redacted]\"}"#,
+        ),
+        (
+            "single-quoted key",
+            &token,
+            format!("{{'x-amz-security-token': '{token}'}}"),
+            "{'x-amz-security-token': '[redacted]'}",
+        ),
     ];
-    for (name, input, expected) in &rows {
-        assert_redacts(name, input, &token);
+    for (name, planted, input, expected) in &rows {
+        assert_redacts(name, input, planted);
         assert_eq!(scrub_upstream_text(input), *expected, "{name}");
     }
 }
@@ -321,6 +334,19 @@ fn redacts_url_userinfo_and_keeps_scheme_and_host() {
             r"x\nhttps://u:pw0rd@host",
             "pw0rd",
         ),
+        (
+            "domain user in proxy url",
+            r"proxy http://CORP\alice:Pw0rd123@proxy:8080 refused",
+            "Pw0rd123",
+        ),
+        (
+            "domain user in nested json url",
+            r"http:\/\/CORP\\alice:pw0rd@proxy",
+            "pw0rd",
+        ),
+        ("scheme inside a token", "cfg_https://u:pw0rd@h", "pw0rd"),
+        ("no scheme", "://u:pw0rd@host", "pw0rd"),
+        ("at sign after a backslash", r"https://host\a@b", "host"),
     ];
     for (name, input, planted) in rows {
         assert_redacts(name, input, planted);
@@ -333,19 +359,19 @@ fn redacts_url_userinfo_and_keeps_scheme_and_host() {
         scrub_upstream_text(r"https:\/\/u:pw@host"),
         r"https:\/\/[redacted]@host"
     );
+    assert_eq!(
+        scrub_upstream_text(r"proxy http://CORP\alice:pw@proxy:8080"),
+        "proxy http://[redacted]@proxy:8080"
+    );
 }
 
 #[test]
-fn userinfo_without_a_valid_scheme_stays() {
-    let rows = [
-        ("no scheme", "parse error: ://alice@host"),
-        ("scheme starting with a digit", "1abc://x@y"),
-        ("scheme inside a token", "x_https://u:pw@host"),
-        ("at sign after a backslash path", r"https://host\a@b"),
-    ];
-    for (name, input) in rows {
-        assert_clean(name, input);
-    }
+fn userinfo_shape_is_redacted_whatever_precedes_the_slashes() {
+    assert_eq!(
+        scrub_upstream_text("parse error: ://alice@host"),
+        "parse error: ://[redacted]@host"
+    );
+    assert_eq!(scrub_upstream_text("1abc://x@y"), "1abc://[redacted]@y");
 }
 
 #[test]
@@ -412,6 +438,21 @@ fn redacts_arn_head_in_any_case() {
     ];
     for (name, input) in rows {
         assert_redacts(name, input, "role/x");
+        assert!(names_aws_principal(input), "{name}: not named a principal");
+    }
+}
+
+#[test]
+fn redacts_account_id_after_json_escaped_separators() {
+    let id = "123456789012";
+    let rows = [
+        ("tab escape", format!(r"account\t{id}")),
+        ("no-break space escape", format!(r"account\u00a0{id}")),
+        ("upper hex escape", format!(r"account\u00A0{id}")),
+        ("quote escape", format!(r"account\u0022{id}\u0022")),
+    ];
+    for (name, input) in &rows {
+        assert_redacts(name, input, id);
         assert!(names_aws_principal(input), "{name}: not named a principal");
     }
 }

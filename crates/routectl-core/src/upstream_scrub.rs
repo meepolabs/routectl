@@ -39,13 +39,15 @@ const NBSP: &[u8] = "\u{a0}".as_bytes();
 ///   `A-Z0-9`), `AIza` (35), `ya29.` with an optional 1-3 digit legacy
 ///   segment (20+), a three-segment `eyJ` JWT (10+ per segment), `nvapi-`
 ///   (20+), `bedrock-api-key-` (20+) and `ABSK` (100+ base64);
-/// - the value of an echoed `x-amz-security-token` (`:` or `=` after the
-///   name, any case, optional spaces or tabs, then 20+ of
-///   `[A-Za-z0-9+/=_%-]`), keeping the name;
-/// - the userinfo of a URL (`scheme://user:pass@` or `scheme://token@`, the
-///   slashes optionally JSON-escaped as `:\/\/`), keeping the scheme and
-///   the `@`. The scheme must be `[A-Za-z][A-Za-z0-9+.-]*` starting a token
-///   or following a `-` (as in `--https://`).
+/// - the value of an echoed `x-amz-security-token` (any case; then an
+///   optional `"`, `'` or `\"`; `:` or `=`; optional spaces or tabs; an
+///   optional `"`, `'` or `\"`; then 20+ of `[A-Za-z0-9+/=_%-]`), keeping
+///   the name;
+/// - the userinfo after any `://` (or JSON-escaped `:\/\/`), keeping what
+///   precedes it and the `@`. No scheme is required: the text is displayed,
+///   not parsed, so `://user:pass@` is redacted whatever stands before it.
+///   The authority runs to `/` (so to an escaped `\/`), never to a bare `\`, so
+///   a domain user such as `CORP\alice:pw@` is userinfo.
 #[must_use = "the returned text carries required redactions"]
 pub fn scrub_upstream_text(s: &str) -> Cow<'_, str> {
     let bytes = s.as_bytes();
@@ -79,8 +81,10 @@ pub fn scrub_upstream_text(s: &str) -> Cow<'_, str> {
 /// account id after the word `account` (any case), optionally followed by
 /// the word `id` or `number` (any case). Between `account`, the optional
 /// word and the digits, only these separators are skipped: space, tab,
-/// no-break space (U+00A0), `:`, `=`, `#`, `_`, `-`, `"`, `'`, `(`, `)` and
-/// `\`. A loose marker (a word ending in `arn:`, a long number such as a
+/// no-break space (U+00A0), `:`, `=`, `#`, `_`, `-`, `"`, `'`, `(`, `)`,
+/// `\`, the JSON escape `\t`, and the JSON escapes `\u0020`, `\u0009`,
+/// `\u00a0`, `\u0022`, `\u0027`, `\u0028` and `\u0029` (any hex case).
+/// A loose marker (a word ending in `arn:`, a long number such as a
 /// timestamp, an 11- or 13-digit run) is not one.
 #[must_use]
 pub fn names_aws_principal(text: &str) -> bool {
@@ -215,9 +219,25 @@ fn account_id_at(bytes: &[u8], at: usize) -> Option<Range<usize>> {
     (digits == ACCOUNT_ID_DIGITS).then_some(pos..pos + digits)
 }
 
+/// JSON `\u` escapes of the account-id separators, lowercase hex.
+const ESCAPED_ACCOUNT_SEPARATORS: [&[u8]; 7] = [
+    b"\\u0020", b"\\u0009", b"\\u00a0", b"\\u0022", b"\\u0027", b"\\u0028", b"\\u0029",
+];
+
 /// Skips the separators [`names_aws_principal`] documents.
 fn skip_account_separators(bytes: &[u8], mut at: usize) -> usize {
     loop {
+        if bytes.get(at..at + 2) == Some(b"\\t") {
+            at += 2;
+            continue;
+        }
+        if let Some(escape) = ESCAPED_ACCOUNT_SEPARATORS
+            .iter()
+            .find(|escape| has_prefix_ci(bytes, at, escape))
+        {
+            at += escape.len();
+            continue;
+        }
         match bytes.get(at) {
             Some(
                 b' ' | b'\t' | b':' | b'=' | b'#' | b'_' | b'-' | b'"' | b'\'' | b'(' | b')'
@@ -364,21 +384,30 @@ fn session_token_at(bytes: &[u8], at: usize) -> Option<Range<usize>> {
     if !has_prefix_ci(bytes, at, NAME) || !starts_token(bytes, at) {
         return None;
     }
-    let sep = at + NAME.len();
+    let sep = after_optional_quote(bytes, at + NAME.len());
     if !matches!(bytes.get(sep), Some(b':' | b'=')) {
         return None;
     }
-    let start = sep + 1 + run_len(bytes, sep + 1, |b| b == b' ' || b == b'\t');
+    let value_at = sep + 1 + run_len(bytes, sep + 1, |b| b == b' ' || b == b'\t');
+    let start = after_optional_quote(bytes, value_at);
     let len = run_len(bytes, start, |b| {
         b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'=' | b'_' | b'%' | b'-')
     });
     (len >= SESSION_TOKEN_MIN).then_some(start..start + len)
 }
 
-/// The userinfo of a URL whose `://` (or JSON-escaped `:\/\/`) sits at
-/// `at` after a valid scheme: everything after the slashes up to the LAST
-/// `@` before the authority ends (the WHATWG URL parser's split). The span
-/// is the userinfo alone.
+/// Past an optional `"`, `'` or `\"` at `at`.
+fn after_optional_quote(bytes: &[u8], at: usize) -> usize {
+    match bytes.get(at..) {
+        Some([b'\\', b'"', ..]) => at + 2,
+        Some([b'"' | b'\'', ..]) => at + 1,
+        _ => at,
+    }
+}
+
+/// The userinfo after a `://` (or JSON-escaped `:\/\/`) at `at`:
+/// everything after the slashes up to the LAST `@` before the authority
+/// ends. The span is the userinfo alone.
 fn userinfo_at(bytes: &[u8], at: usize) -> Option<Range<usize>> {
     let slashes = [b"://".as_slice(), b":\\/\\/"]
         .into_iter()
@@ -387,9 +416,6 @@ fn userinfo_at(bytes: &[u8], at: usize) -> Option<Range<usize>> {
                 .get(at..)
                 .is_some_and(|rest| rest.starts_with(slashes))
         })?;
-    if !has_scheme_before(bytes, at) {
-        return None;
-    }
     let start = at + slashes.len();
     let authority = run_len(bytes, start, |b| !ends_authority(b));
     let last_at = bytes[start..start + authority]
@@ -398,27 +424,12 @@ fn userinfo_at(bytes: &[u8], at: usize) -> Option<Range<usize>> {
     (last_at > 0).then_some(start..start + last_at)
 }
 
-/// True when the bytes before `colon` end in a URL scheme
-/// `[A-Za-z][A-Za-z0-9+.-]*` that starts a token or follows a `-`.
-fn has_scheme_before(bytes: &[u8], colon: usize) -> bool {
-    let is_scheme_char = |b: u8| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'.' | b'-');
-    let run = bytes[..colon]
-        .iter()
-        .rev()
-        .take_while(|&&b| is_scheme_char(b))
-        .count();
-    (colon - run..colon).any(|start| {
-        bytes[start].is_ascii_alphabetic()
-            && (starts_token(bytes, start) || bytes[start - 1] == b'-')
-    })
-}
-
-/// A backslash ends the authority as the WHATWG parser does for special
-/// schemes.
+/// A bare backslash is not here: it stays inside the authority, and an
+/// escaped `\/` still ends at its `/`.
 const fn ends_authority(b: u8) -> bool {
     b.is_ascii_whitespace()
         || b.is_ascii_control()
-        || matches!(b, b'/' | b'\\' | b'?' | b'#' | b'"' | b'<' | b'>')
+        || matches!(b, b'/' | b'?' | b'#' | b'"' | b'<' | b'>')
 }
 
 #[cfg(test)]
