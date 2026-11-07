@@ -29,7 +29,7 @@
 //! and the full set this weld needs is no longer compiled in.
 
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Sentinels bounding the declared block. Renaming either in the shell
 /// without updating them here turns the parse into a loud failure rather
@@ -412,12 +412,177 @@ fn the_repo_gitleaks_config_exempts_only_the_antigravity_client_secret() {
     );
 }
 
+/// True when anything sits at `path`, a dangling symlink included:
+/// `Path::exists` follows the link and reports false for one, yet gitleaks
+/// still opens the name and a later target would take effect.
+fn path_is_present(path: &Path) -> bool {
+    path.symlink_metadata().is_ok()
+}
+
 #[test]
 fn the_repo_root_carries_no_gitleaksignore() {
     let ignore = repo_root().join(".gitleaksignore");
     assert!(
-        !ignore.exists(),
+        !path_is_present(&ignore),
         "{} must not exist: the local hook would skip every fingerprint it lists",
         ignore.display()
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn path_presence_counts_a_dangling_symlink_and_rejects_an_absent_path() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let dangling = dir.path().join("dangling");
+    std::os::unix::fs::symlink(dir.path().join("no-such-target"), &dangling)
+        .expect("create dangling symlink");
+    let absent = dir.path().join("absent");
+
+    assert!(
+        !dangling.exists(),
+        "control: Path::exists must report false for the dangling symlink"
+    );
+    assert!(path_is_present(&dangling), "a dangling symlink is present");
+    assert!(!path_is_present(&absent), "an absent path is not present");
+}
+
+// ---------------------------------------------------------------------------
+// The gitleaks pre-commit hook runs with its upstream defaults
+// ---------------------------------------------------------------------------
+//
+// An `args` or `entry` override on the upstream hook can narrow what it scans
+// (a different subcommand, a path, `--config`, `--no-git`) without touching
+// `.gitleaks.toml`. No YAML parser is in the dependency tree, so the reader
+// below accepts exactly one block layout and rejects everything else: an
+// unrecognized layout is a failure, never a pass.
+
+const GITLEAKS_REPO_LINE: &str = "  - repo: https://github.com/gitleaks/gitleaks";
+const GITLEAKS_REPO_URL: &str = "github.com/gitleaks/gitleaks";
+
+fn is_yaml_comment_or_blank(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    trimmed.is_empty() || trimmed.starts_with('#')
+}
+
+fn is_valid_rev_line(line: &str) -> bool {
+    line.strip_prefix("    rev: ").is_some_and(|rev| {
+        !rev.is_empty() && !rev.contains(char::is_whitespace) && !rev.contains('#')
+    })
+}
+
+/// Checks that the config holds exactly one gitleaks repo block, laid out as
+/// `rev:`, `hooks:`, and a single `- id: gitleaks` with no other key.
+fn check_gitleaks_hook_block(config: &str) -> Result<(), String> {
+    let lines: Vec<&str> = config.lines().collect();
+    let mentions: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| !is_yaml_comment_or_blank(line) && line.contains(GITLEAKS_REPO_URL))
+        .map(|(index, _)| index)
+        .collect();
+    let start = match mentions.as_slice() {
+        [] => return Err("no gitleaks repo block".to_owned()),
+        [index] if lines[*index] == GITLEAKS_REPO_LINE => *index,
+        [index] => {
+            return Err(format!(
+                "unrecognized gitleaks repo line: {:?}",
+                lines[*index]
+            ));
+        }
+        _ => return Err(format!("{} gitleaks repo mentions", mentions.len())),
+    };
+
+    let body: Vec<&str> = lines[start + 1..]
+        .iter()
+        .copied()
+        .take_while(|line| {
+            is_yaml_comment_or_blank(line) || line.len() - line.trim_start().len() >= 4
+        })
+        .filter(|line| !is_yaml_comment_or_blank(line))
+        .collect();
+    match body.as_slice() {
+        [rev, "    hooks:", "      - id: gitleaks"] if is_valid_rev_line(rev) => Ok(()),
+        _ => Err(format!("unrecognized gitleaks repo block layout: {body:?}")),
+    }
+}
+
+fn load_pre_commit_config() -> String {
+    let path = repo_root().join(".pre-commit-config.yaml");
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("control: read {}: {e}", path.display()))
+}
+
+#[test]
+fn the_gitleaks_hook_runs_with_upstream_defaults() {
+    let config = load_pre_commit_config();
+    if let Err(reason) = check_gitleaks_hook_block(&config) {
+        panic!(
+            "the gitleaks hook must be the upstream hook with no args or entry \
+             override: {reason}"
+        );
+    }
+}
+
+#[test]
+fn the_gitleaks_hook_reader_rejects_overrides_and_unknown_layouts() {
+    let original = load_pre_commit_config();
+    let hook_line = "      - id: gitleaks\n";
+    let hooks_block = format!("    hooks:\n{hook_line}");
+    let rev_line = original
+        .lines()
+        .find(|line| line.starts_with("    rev: "))
+        .expect("control: the gitleaks block carries a rev line");
+    let block = format!("{GITLEAKS_REPO_LINE}\n{rev_line}\n{hooks_block}");
+    let rev = rev_line.trim_start_matches("    rev: ");
+    let flow_block = format!(
+        "  - {{repo: https://{GITLEAKS_REPO_URL}, rev: {rev}, hooks: [{{id: gitleaks}}]}}\n"
+    );
+    assert_eq!(
+        original.matches(&block).count(),
+        1,
+        "control: the real config holds the gitleaks block in block style"
+    );
+
+    let cases: [(&str, String); 6] = [
+        (
+            "args added",
+            original.replacen(
+                hook_line,
+                &format!("{hook_line}        args: [--redact]\n"),
+                1,
+            ),
+        ),
+        (
+            "entry added",
+            original.replacen(
+                hook_line,
+                &format!("{hook_line}        entry: gitleaks git --staged\n"),
+                1,
+            ),
+        ),
+        (
+            "repo block in flow style",
+            original.replacen(&block, &flow_block, 1),
+        ),
+        (
+            "hooks list in flow style",
+            original.replacen(&hooks_block, "    hooks: [{id: gitleaks}]\n", 1),
+        ),
+        (
+            "second hook",
+            original.replacen(
+                hook_line,
+                &format!("{hook_line}      - id: gitleaks-system\n"),
+                1,
+            ),
+        ),
+        ("block removed", original.replacen(&block, "", 1)),
+    ];
+    for (name, mutated) in cases {
+        assert_ne!(mutated, original, "control: the {name} edit must apply");
+        assert!(
+            check_gitleaks_hook_block(&mutated).is_err(),
+            "{name}: the reader must reject this layout"
+        );
+    }
 }
