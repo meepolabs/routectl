@@ -5028,10 +5028,10 @@ provider permits -- see the README "Responsible use" section.
 `oauth://anthropic` or `oauth://anthropic#<label>` is the subscription
 token, and it is accepted only on an `anthropic-api` provider with
 `credential_source = "own"`, no `bedrock_mantle` block, and a `base_url`
-that is omitted or is `https://` on exactly `api.anthropic.com`. Any
-other provider kind, and any other host (a gateway, a passthrough, a
-loopback address, a lookalike or subdomain of the Anthropic host), is
-rejected. Static `env://` and `file://` credentials are not affected, so
+that is omitted or is `https://` on exactly `api.anthropic.com` with no
+`user:pass@` prefix and no explicit non-default port. Any other provider
+kind, and any other host (a gateway, a passthrough, a loopback address, a
+lookalike or subdomain of the Anthropic host), is rejected. Static `env://` and `file://` credentials are not affected, so
 an `anthropic-api` provider on `https://gateway.example/api` with an
 `env://` key, or on `http://127.0.0.1:18080` with a `file://` key, stays
 valid.
@@ -5054,27 +5054,34 @@ valid.
   that relaxes this check; loopback is not treated as local because a
   loopback port can be a tunnel to another machine.
 
-The managed Codex and Antigravity subscription tokens follow the same
-rule, each pinned to its own first-party lane:
+The managed Codex, xAI, and Antigravity subscription tokens follow the
+same rule, each pinned to its own first-party lane:
 
 - `oauth://codex` or `oauth://codex#<label>` (in `api_key_ref` or
   `account_id_ref`) is accepted only on an `openai-responses` provider
   with `auth_kind = "chatgpt-oauth"`, no `bedrock_mantle` block, and a
   `base_url` that is omitted or is `https://` on exactly `chatgpt.com`.
+- `oauth://xai` or `oauth://xai#<label>` is accepted only on an
+  `openai-compat` provider with no `bedrock_mantle` block and a `base_url`
+  that is `https://` on exactly `api.x.ai` (the path is free, so both
+  `https://api.x.ai/v1`, which `routectl login xai` writes, and
+  `https://api.x.ai` are valid).
 - `oauth://antigravity` or `oauth://antigravity#<label>` is accepted only
   on a `gemini` provider with `auth_mode = "cloud-code"` and a `base_url`
   that is omitted or is `https://` on exactly
   `cloudcode-pa.googleapis.com` or `daily-cloudcode-pa.googleapis.com`.
 
-For both, a `user:pass@` prefix, an explicit non-default port, a trailing
+For each, a `user:pass@` prefix, an explicit non-default port, a trailing
 dot, a lookalike or subdomain host, `http://`, and loopback are all
 rejected. The error names the provider and the rule (`provider `<name>`:
-the managed Codex credential ...` / `... the managed Antigravity
-credential ...`) and withholds the `base_url`, the ref, and the seat
-label; the startup, `config check`, and hot-reload behavior is the same
-as above. A staging shard, mirror, or mock for the Responses lane takes a
-static credential (`api_key_ref = "env://OPENAI_JWT"` plus
-`account_id_ref`), which stays valid on any host. There is no override.
+the managed Codex credential ...` / `... the managed xAI credential ...`
+/ `... the managed Antigravity credential ...`) and withholds the
+`base_url`, the ref, and the seat label; the startup, `config check`, and
+hot-reload behavior is the same as above. A staging shard, mirror, or
+mock for the Responses lane takes a static credential (`api_key_ref =
+"env://OPENAI_JWT"` plus `account_id_ref`), and an xAI-compatible gateway
+or mock takes an `env://` or `file://` key; both stay valid on any host.
+There is no override.
 
 ### Operator setup checklist
 

@@ -2740,3 +2740,264 @@ mod member_refusal_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod managed_family_store_read_tests {
+    //! Every managed family's containment refusal lands before the factory
+    //! reads the secret store, and its accepted lane still reaches the store.
+
+    use super::*;
+    use crate::config::{Config, ModelEntry, ProviderEntry};
+    use async_trait::async_trait;
+    use routectl_auth::{CredentialProbeFailure, SecretRef, SecretStore};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Counts every store access, defaulted trait methods included, and
+    /// counts credential probes on their own.
+    #[derive(Default)]
+    struct CountingStore {
+        accesses: AtomicUsize,
+        probes: AtomicUsize,
+    }
+
+    impl CountingStore {
+        fn touch(&self) {
+            self.accesses.fetch_add(1, Ordering::SeqCst);
+        }
+        fn accesses(&self) -> usize {
+            self.accesses.load(Ordering::SeqCst)
+        }
+        fn probes(&self) -> usize {
+            self.probes.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl SecretStore for CountingStore {
+        async fn get(&self, _: &SecretRef) -> routectl_core::Result<String> {
+            self.touch();
+            Ok("counted-token".to_string())
+        }
+        async fn set(&self, _: &SecretRef, _: &str) -> routectl_core::Result<()> {
+            self.touch();
+            Ok(())
+        }
+        async fn delete(&self, _: &SecretRef) -> routectl_core::Result<()> {
+            self.touch();
+            Ok(())
+        }
+        async fn probe_credential(
+            &self,
+            _: &SecretRef,
+        ) -> std::result::Result<(), CredentialProbeFailure> {
+            self.touch();
+            self.probes.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        async fn on_auth_failure(&self, _: &SecretRef) -> routectl_core::Result<()> {
+            self.touch();
+            Ok(())
+        }
+        async fn account_id(&self, _: &SecretRef) -> routectl_core::Result<Option<String>> {
+            self.touch();
+            Ok(Some("counted-account".to_string()))
+        }
+        async fn list_seats(&self, sr: &SecretRef) -> routectl_core::Result<Vec<SecretRef>> {
+            self.touch();
+            Ok(vec![sr.clone()])
+        }
+        async fn peek_session_id(&self, _: &SecretRef) -> Option<String> {
+            self.touch();
+            None
+        }
+        async fn peek_cloud_project_id(&self, _: &SecretRef) -> Option<String> {
+            self.touch();
+            None
+        }
+        async fn set_cloud_project_id(&self, _: &SecretRef, _: &str) -> routectl_core::Result<()> {
+            self.touch();
+            Ok(())
+        }
+        async fn clear_cloud_project_id_if_matches(
+            &self,
+            _: &SecretRef,
+            _: &str,
+        ) -> routectl_core::Result<bool> {
+            self.touch();
+            Ok(false)
+        }
+    }
+
+    const VENDOR_BASES: [&str; 4] = [
+        "https://api.anthropic.com",
+        "https://chatgpt.com/backend-api/codex",
+        "https://api.x.ai/v1",
+        "https://cloudcode-pa.googleapis.com",
+    ];
+
+    struct Lane {
+        family: &'static str,
+        own_base: &'static str,
+        host: &'static str,
+        upstream: &'static str,
+        entry: fn(&str, &str) -> ProviderEntry,
+    }
+
+    fn anthropic_entry(r: &str, base_url: &str) -> ProviderEntry {
+        ProviderEntry::anthropic_api(r)
+            .with_auth_kind(routectl_providers::anthropic_api::AuthKind::OauthBearer)
+            .with_base_url(base_url)
+    }
+
+    fn xai_entry(r: &str, base_url: &str) -> ProviderEntry {
+        ProviderEntry::openai_compat(base_url, r)
+    }
+
+    #[cfg(feature = "openai-responses")]
+    fn codex_entry(r: &str, base_url: &str) -> ProviderEntry {
+        ProviderEntry::openai_responses(r).with_openai_responses_base_url(base_url)
+    }
+
+    #[cfg(feature = "gemini")]
+    fn antigravity_entry(r: &str, base_url: &str) -> ProviderEntry {
+        let cfg: Config = toml::from_str(&format!(
+            "[providers.p]\n\
+             kind = \"gemini\"\n\
+             auth_mode = \"cloud-code\"\n\
+             api_key_ref = \"{r}\"\n\
+             base_url = \"{base_url}\"\n"
+        ))
+        .expect("fixture parses");
+        cfg.providers["p"].clone()
+    }
+
+    fn lanes() -> Vec<Lane> {
+        #[cfg_attr(
+            not(any(feature = "openai-responses", feature = "gemini")),
+            allow(unused_mut)
+        )]
+        let mut v = vec![
+            Lane {
+                family: "anthropic",
+                own_base: VENDOR_BASES[0],
+                host: "api.anthropic.com",
+                upstream: "claude-opus-4-7",
+                entry: anthropic_entry,
+            },
+            Lane {
+                family: "xai",
+                own_base: VENDOR_BASES[2],
+                host: "api.x.ai",
+                upstream: "grok-4",
+                entry: xai_entry,
+            },
+        ];
+        #[cfg(feature = "openai-responses")]
+        v.push(Lane {
+            family: "codex",
+            own_base: VENDOR_BASES[1],
+            host: "chatgpt.com",
+            upstream: "gpt-5-codex",
+            entry: codex_entry,
+        });
+        #[cfg(feature = "gemini")]
+        v.push(Lane {
+            family: "antigravity",
+            own_base: VENDOR_BASES[3],
+            host: "cloudcode-pa.googleapis.com",
+            upstream: "gemini-3.1-flash-lite",
+            entry: antigravity_entry,
+        });
+        v
+    }
+
+    fn refused_bases(lane: &Lane) -> Vec<String> {
+        let mut v: Vec<String> = VENDOR_BASES
+            .iter()
+            .filter(|b| **b != lane.own_base)
+            .map(|b| (*b).to_string())
+            .collect();
+        v.push("http://127.0.0.1:18080".to_string());
+        v.push(format!("https://{}:8443", lane.host));
+        v.push(format!("https://user:pass@{}", lane.host));
+        v
+    }
+
+    fn one_member_pool(entry: ProviderEntry, upstream: &str) -> Config {
+        let mut cfg = Config::default();
+        cfg.providers.insert("member".into(), entry);
+        cfg.pools.insert(
+            "pool".into(),
+            crate::config::PoolEntry::new(vec!["member".into()]),
+        );
+        cfg.models
+            .insert("m".into(), ModelEntry::new("pool", upstream));
+        cfg
+    }
+
+    fn quiet_options() -> BuildOptions {
+        BuildOptions {
+            mint_installation_id: false,
+            ..BuildOptions::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refused_managed_family_reads_no_secret_on_either_build_path() {
+        for lane in lanes() {
+            let r = format!("oauth://{}", lane.family);
+            for base in refused_bases(&lane) {
+                let direct = Arc::new(CountingStore::default());
+                let store: Arc<dyn SecretStore> = direct.clone();
+                let built = build_provider_with_options(
+                    "member",
+                    &(lane.entry)(&r, &base),
+                    store,
+                    quiet_options(),
+                )
+                .await;
+                assert!(built.is_err(), "{r} on {base} must be refused");
+                assert_eq!(direct.accesses(), 0, "{r} on {base}: direct build");
+
+                let pooled = Arc::new(CountingStore::default());
+                let store: Arc<dyn SecretStore> = pooled.clone();
+                let cfg = one_member_pool((lane.entry)(&r, &base), lane.upstream);
+                let refused = build_resolved_models_reported(&cfg, store, quiet_options()).await;
+                assert!(refused.is_err(), "{r} on {base}: pool must refuse");
+                assert_eq!(pooled.accesses(), 0, "{r} on {base}: pool build");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn an_accepted_managed_family_probes_its_credential_once() {
+        for lane in lanes() {
+            let r = format!("oauth://{}", lane.family);
+            let counting = Arc::new(CountingStore::default());
+            let store: Arc<dyn SecretStore> = counting.clone();
+            let cfg = one_member_pool((lane.entry)(&r, lane.own_base), lane.upstream);
+
+            let built = build_resolved_models_reported(&cfg, store, quiet_options()).await;
+
+            let built = built.unwrap_or_else(|e| panic!("{r} on {}: {e}", lane.own_base));
+            assert!(built.failed.is_empty(), "{r}: {:?}", built.failed);
+            assert!(built.models.contains_key("m"), "{r}: model built");
+            assert_eq!(counting.probes(), 1, "{r}: one credential probe");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_xai_token_on_the_bare_api_host_builds() {
+        let counting = Arc::new(CountingStore::default());
+        let store: Arc<dyn SecretStore> = counting.clone();
+        let cfg = one_member_pool(xai_entry("oauth://xai", "https://api.x.ai"), "grok-4");
+
+        let built = build_resolved_models_reported(&cfg, store, quiet_options())
+            .await
+            .expect("the bare xAI host is the xAI lane");
+
+        assert!(built.models.contains_key("m"));
+        assert_eq!(counting.probes(), 1);
+    }
+}

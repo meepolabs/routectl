@@ -1,11 +1,14 @@
-//! Containment of the managed Codex and Antigravity subscription tokens: an
-//! `oauth://codex[#label]` reference rides only the ChatGPT backend lane and
-//! an `oauth://antigravity[#label]` reference only the Cloud Code lane, each
-//! on its exact first-party host over https.
+//! Containment of the managed subscription tokens: each `oauth://<family>`
+//! reference, bare or labeled, rides only its own family's lane on that
+//! vendor's exact first-party host over https. The Anthropic family's own
+//! shape cases live with `validate_managed_anthropic_credential`.
 
 #[cfg(any(feature = "openai-responses", feature = "gemini"))]
 use super::collect_config_validation;
-use super::{validate_managed_antigravity_credential, validate_managed_codex_credential};
+use super::{
+    MANAGED_ANTIGRAVITY, MANAGED_CODEX, MANAGED_OAUTH_FAMILIES, check_managed_oauth_family,
+    validate_managed_oauth_credentials,
+};
 #[cfg(any(feature = "bedrock", feature = "openai-responses", feature = "gemini"))]
 use crate::config::Config;
 use crate::config::ProviderEntry;
@@ -49,11 +52,11 @@ fn only_entry(text: &str) -> ProviderEntry {
 }
 
 fn codex_rejects(entry: &ProviderEntry) -> bool {
-    validate_managed_codex_credential("p", entry).is_err()
+    check_managed_oauth_family(&MANAGED_CODEX, "p", entry).is_err()
 }
 
 fn antigravity_rejects(entry: &ProviderEntry) -> bool {
-    validate_managed_antigravity_credential("p", entry).is_err()
+    check_managed_oauth_family(&MANAGED_ANTIGRAVITY, "p", entry).is_err()
 }
 
 #[cfg(feature = "openai-responses")]
@@ -463,7 +466,7 @@ fn config_validation_keeps_the_deployed_default_shapes_valid() {
 }
 
 /// The shipped example config carries the deployed codex entry; it must
-/// clear the containment rule as written.
+/// clear every managed containment rule as written.
 #[cfg(all(feature = "openai-responses", feature = "gemini", feature = "bedrock"))]
 #[test]
 fn shipped_example_config_clears_managed_containment() {
@@ -476,12 +479,205 @@ fn shipped_example_config_clears_managed_containment() {
 
     for (name, entry) in &config.providers {
         assert!(
-            validate_managed_codex_credential(name, entry).is_ok(),
-            "example provider `{name}`"
-        );
-        assert!(
-            validate_managed_antigravity_credential(name, entry).is_ok(),
+            validate_managed_oauth_credentials(name, entry).is_ok(),
             "example provider `{name}`"
         );
     }
+}
+
+/// Every `oauth://` provider routectl can log into has exactly one
+/// containment row, and the table names no other family.
+#[test]
+fn the_containment_table_covers_exactly_the_known_oauth_providers() {
+    let table: std::collections::BTreeSet<&str> = MANAGED_OAUTH_FAMILIES
+        .iter()
+        .map(|row| row.family)
+        .collect();
+    let known: std::collections::BTreeSet<&str> = routectl_auth::oauth::known_provider_ids()
+        .iter()
+        .copied()
+        .collect();
+
+    assert_eq!(table, known);
+    assert_eq!(
+        table.len(),
+        MANAGED_OAUTH_FAMILIES.len(),
+        "one row per family"
+    );
+}
+
+/// One vendor's managed lane: its family, its first-party host and path, and
+/// how to build an entry on that lane at a given `base_url`.
+struct VendorLane {
+    family: &'static str,
+    host: &'static str,
+    path: &'static str,
+    entry: fn(&str, &str) -> ProviderEntry,
+}
+
+/// Each vendor's first-party base, listed even when that vendor's lane is
+/// compiled out: it is still a foreign host for every other family.
+const VENDOR_BASES: [&str; 4] = [
+    "https://api.anthropic.com",
+    "https://chatgpt.com/backend-api/codex",
+    "https://api.x.ai/v1",
+    "https://cloudcode-pa.googleapis.com",
+];
+
+fn anthropic_lane(r: &str, base_url: &str) -> ProviderEntry {
+    ProviderEntry::anthropic_api(r)
+        .with_auth_kind(routectl_providers::anthropic_api::AuthKind::OauthBearer)
+        .with_base_url(base_url)
+}
+
+fn xai_lane(r: &str, base_url: &str) -> ProviderEntry {
+    ProviderEntry::openai_compat(base_url, r)
+}
+
+#[cfg(feature = "openai-responses")]
+fn codex_lane(r: &str, base_url: &str) -> ProviderEntry {
+    ProviderEntry::openai_responses(r).with_openai_responses_base_url(base_url)
+}
+
+#[cfg(feature = "gemini")]
+fn antigravity_lane(r: &str, base_url: &str) -> ProviderEntry {
+    only_entry(&format!(
+        "[providers.g]\n\
+         kind = \"gemini\"\n\
+         api_key_ref = \"{r}\"\n\
+         auth_mode = \"cloud-code\"\n\
+         base_url = {}\n",
+        toml::Value::String(base_url.to_string())
+    ))
+}
+
+fn vendor_lanes() -> Vec<VendorLane> {
+    #[cfg_attr(
+        not(any(feature = "openai-responses", feature = "gemini")),
+        allow(unused_mut)
+    )]
+    let mut lanes = vec![
+        VendorLane {
+            family: "anthropic",
+            host: "api.anthropic.com",
+            path: "",
+            entry: anthropic_lane,
+        },
+        VendorLane {
+            family: "xai",
+            host: "api.x.ai",
+            path: "/v1",
+            entry: xai_lane,
+        },
+    ];
+    #[cfg(feature = "openai-responses")]
+    lanes.push(VendorLane {
+        family: "codex",
+        host: "chatgpt.com",
+        path: "/backend-api/codex",
+        entry: codex_lane,
+    });
+    #[cfg(feature = "gemini")]
+    lanes.push(VendorLane {
+        family: "antigravity",
+        host: "cloudcode-pa.googleapis.com",
+        path: "",
+        entry: antigravity_lane,
+    });
+    lanes
+}
+
+/// Each managed family on its own lane: accepted on its vendor's host, and
+/// refused on every other vendor's host, on loopback, with an explicit port,
+/// and with userinfo on its own host.
+#[test]
+fn each_managed_family_is_accepted_only_on_its_own_vendor_host() {
+    for lane in vendor_lanes() {
+        let own = format!("https://{}{}", lane.host, lane.path);
+        assert!(VENDOR_BASES.contains(&own.as_str()), "{own} is listed");
+        let mut refused: Vec<String> = VENDOR_BASES
+            .iter()
+            .filter(|base| **base != own)
+            .map(|base| (*base).to_string())
+            .collect();
+        refused.push("http://127.0.0.1:18080".to_string());
+        refused.push(format!("https://{}:8443{}", lane.host, lane.path));
+        refused.push(format!("https://user:pass@{}{}", lane.host, lane.path));
+        refused.push(format!("https://user@{}{}", lane.host, lane.path));
+
+        for r in [
+            format!("oauth://{}", lane.family),
+            format!("oauth://{}#seat-secret-label", lane.family),
+        ] {
+            let accepted = validate_managed_oauth_credentials("p", &(lane.entry)(&r, &own));
+            assert!(accepted.is_ok(), "{r} on {own}: {accepted:?}");
+            for url in &refused {
+                let entry = (lane.entry)(&r, url);
+                let err = validate_managed_oauth_credentials("p", &entry)
+                    .expect_err(&format!("{r} must be refused on {url}"));
+                let msg = err.to_string();
+                assert!(msg.contains("provider `p`"), "{r} on {url}: {msg}");
+                for leaked in ["seat-secret-label", "oauth://", "127.0.0.1", "user:pass"] {
+                    assert!(!msg.contains(leaked), "{r} on {url} leaks {leaked}: {msg}");
+                }
+            }
+        }
+    }
+}
+
+/// The xAI row's own shape cases: the login-written base and the bare host
+/// are accepted (the path is not constrained); lookalikes, cleartext, smuggles
+/// and the Bedrock mantle lane are refused.
+#[test]
+fn the_xai_token_rides_only_openai_compat_on_exactly_api_x_ai() {
+    let accepted = [
+        "https://api.x.ai/v1",
+        "https://api.x.ai",
+        "https://api.x.ai/",
+        "https://API.X.AI/v1",
+        "https://api.x.ai:443/v1",
+        "https://api.x.ai/other/path?q=1",
+    ];
+    let refused = [
+        "http://api.x.ai/v1",
+        "https://api.x.ai.evil.test/v1",
+        "https://evil-api.x.ai/v1",
+        "https://x.ai/v1",
+        "https://api.x.ai./v1",
+        "https://api.x.ai@evil.example/v1",
+        "https://evil.example\\@api.x.ai/v1",
+        "https://evil.example/api.x.ai",
+        "https://evil.example?h=api.x.ai",
+        "http://localhost:18080/v1",
+        "",
+        "not a url",
+    ];
+    for r in ["oauth://xai", "oauth://xai#seat-secret-label"] {
+        for url in accepted {
+            let verdict = validate_managed_oauth_credentials("p", &xai_lane(r, url));
+            assert!(verdict.is_ok(), "{r} on {url}: {verdict:?}");
+        }
+        for url in refused {
+            let verdict = validate_managed_oauth_credentials("p", &xai_lane(r, url));
+            assert!(verdict.is_err(), "{r} must be refused on {url:?}");
+        }
+        assert!(
+            validate_managed_oauth_credentials("p", &anthropic_lane(r, "https://api.x.ai/v1"))
+                .is_err(),
+            "{r} on anthropic-api"
+        );
+    }
+}
+
+#[cfg(feature = "bedrock")]
+#[test]
+fn the_xai_token_is_refused_on_the_openai_compat_mantle_lane() {
+    let entry = only_entry(
+        "[providers.m]\n\
+         kind = \"openai-compat\"\n\
+         api_key_ref = \"oauth://xai\"\n\
+         bedrock_mantle = { region = \"us-east-1\", creds = { kind = \"bearer-key\", key_ref = \"env://K\" } }\n",
+    );
+
+    assert!(validate_managed_oauth_credentials("p", &entry).is_err());
 }
