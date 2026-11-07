@@ -91,7 +91,9 @@ impl std::fmt::Debug for MantleAuth {
 /// `https://` or `data:` prefix, no ASCII whitespace or control character)
 /// and `url::Url` must agree: the upstream's parser is unpublished, and
 /// `Url::parse` silently strips tabs, newlines and edge spaces that another
-/// parser may read differently. The empty string refuses.
+/// parser may read differently. Non-ASCII bytes refuse too, so one URL has
+/// one raw layout rather than a raw and a normalized one. The empty string
+/// refuses.
 #[cfg(feature = "bedrock")]
 #[cfg_attr(not(feature = "openai-responses"), allow(dead_code))]
 pub(crate) fn is_forwardable_media_url(url: &str) -> bool {
@@ -102,13 +104,148 @@ pub(crate) fn is_forwardable_media_url(url: &str) -> bool {
     } else {
         return false;
     };
-    if url
-        .bytes()
-        .any(|b| b.is_ascii_whitespace() || b.is_ascii_control())
+    if !url.is_ascii()
+        || url
+            .bytes()
+            .any(|b| b.is_ascii_whitespace() || b.is_ascii_control())
     {
         return false;
     }
     url::Url::parse(url).is_ok_and(|parsed| parsed.scheme() == scheme)
+}
+
+/// Object members the media-URL walker never descends into: tool
+/// definitions and their JSON schemas are client-authored declarations the
+/// upstream does not fetch from.
+#[cfg(feature = "bedrock")]
+#[cfg_attr(not(feature = "openai-responses"), allow(dead_code))]
+const MEDIA_WALK_SKIPPED_MEMBERS: [&str; 3] = ["tools", "input_schema", "parameters"];
+
+/// Longest object key rendered verbatim in a refusal path.
+#[cfg(feature = "bedrock")]
+#[cfg_attr(not(feature = "openai-responses"), allow(dead_code))]
+const MAX_RENDERED_KEY_LEN: usize = 64;
+
+/// Refuse a Mantle request value that carries a media URL the upstream
+/// would fetch under the operator's AWS identity, unless it passes
+/// [`is_forwardable_media_url`]. Lane-neutral: it reads no lane's schema,
+/// only member names, so the Responses, anthropic-api and openai-compat
+/// Mantle lanes share it.
+///
+/// It descends every object and array under `root` and checks:
+/// - a member named `image_url` holding a string, or an object whose `url`
+///   is a string;
+/// - a member named `file_url` holding a string;
+/// - a member named `source` holding an object whose `type` is `url`, by
+///   its `url`.
+///
+/// A matched member that is present but null, empty, non-string, or (for
+/// the object forms) missing its `url` refuses.
+///
+/// It never descends into string values (function-call `arguments` are
+/// JSON-encoded strings), any member named `tools`, `input_schema` or
+/// `parameters`, or the `input` member of an object whose `type` is
+/// `tool_use` (client-authored tool arguments on Anthropic shapes).
+///
+/// `path` names `root` in the refusal message. The message names the
+/// field, its position and the accepted scheme class, never the URL; an
+/// object key that is not a short ASCII identifier renders as `<key>`
+/// because client keys are client bytes.
+#[cfg(feature = "bedrock")]
+#[cfg_attr(not(feature = "openai-responses"), allow(dead_code))]
+pub(crate) fn refuse_unforwardable_media_urls(
+    provider_id: &str,
+    root: &serde_json::Value,
+    path: &str,
+) -> routectl_core::Result<()> {
+    match find_unforwardable_media_url(root, path) {
+        None => Ok(()),
+        Some((field, at)) => Err(routectl_core::Error::normalize_request(
+            provider_id,
+            format!(
+                "`{field}` at {at} is not an https or data URL; bedrock-mantle fetches media \
+                 URLs itself and accepts only https and data"
+            ),
+            routectl_core::RefusalReason::Unrepresentable,
+        )),
+    }
+}
+
+/// The first refused media member under `value`, as its field name and the
+/// rendered path of the object holding it.
+#[cfg(feature = "bedrock")]
+#[cfg_attr(not(feature = "openai-responses"), allow(dead_code))]
+fn find_unforwardable_media_url(
+    value: &serde_json::Value,
+    path: &str,
+) -> Option<(&'static str, String)> {
+    use serde_json::Value;
+
+    match value {
+        Value::Array(items) => items
+            .iter()
+            .enumerate()
+            .find_map(|(i, item)| find_unforwardable_media_url(item, &format!("{path}[{i}]"))),
+        Value::Object(members) => {
+            if let Some(field) = refused_media_member(members) {
+                return Some((field, path.to_owned()));
+            }
+            let is_tool_use = members.get("type").and_then(Value::as_str) == Some("tool_use");
+            members
+                .iter()
+                .filter(|(key, _)| !MEDIA_WALK_SKIPPED_MEMBERS.contains(&key.as_str()))
+                .filter(|(key, _)| !(is_tool_use && key.as_str() == "input"))
+                .find_map(|(key, child)| {
+                    find_unforwardable_media_url(child, &format!("{path}.{}", render_key(key)))
+                })
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => None,
+    }
+}
+
+/// The media member of this object that refuses, if any.
+#[cfg(feature = "bedrock")]
+#[cfg_attr(not(feature = "openai-responses"), allow(dead_code))]
+fn refused_media_member(
+    members: &serde_json::Map<String, serde_json::Value>,
+) -> Option<&'static str> {
+    use serde_json::Value;
+
+    if let Some(v) = members.get("image_url") {
+        let url = if v.is_object() { v.get("url") } else { Some(v) };
+        if !passes_media_url_check(url) {
+            return Some("image_url");
+        }
+    }
+    if members
+        .get("file_url")
+        .is_some_and(|v| !passes_media_url_check(Some(v)))
+    {
+        return Some("file_url");
+    }
+    if let Some(source) = members.get("source").filter(|s| s.is_object()) {
+        let is_url_source = source.get("type").and_then(Value::as_str) == Some("url");
+        if is_url_source && !passes_media_url_check(source.get("url")) {
+            return Some("source");
+        }
+    }
+    None
+}
+
+#[cfg(feature = "bedrock")]
+#[cfg_attr(not(feature = "openai-responses"), allow(dead_code))]
+fn passes_media_url_check(url: Option<&serde_json::Value>) -> bool {
+    url.and_then(serde_json::Value::as_str)
+        .is_some_and(is_forwardable_media_url)
+}
+
+#[cfg(feature = "bedrock")]
+#[cfg_attr(not(feature = "openai-responses"), allow(dead_code))]
+fn render_key(key: &str) -> &str {
+    let is_identifier = !key.is_empty()
+        && key.len() <= MAX_RENDERED_KEY_LEN
+        && key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_');
+    if is_identifier { key } else { "<key>" }
 }
 
 /// Sign `req` in place for a mantle lane under the `bedrock-mantle` SigV4
@@ -268,6 +405,9 @@ mod tests {
             ("embedded tab", "https://exam\tple.com/a.png"),
             ("single slash", "https:/x"),
             ("empty host", "https://"),
+            ("control not whitespace", "https://x/\u{1}"),
+            ("delete", "https://example.com/\u{7f}"),
+            ("non-ascii host", "https://example\u{3002}com/a.png"),
         ];
 
         for (name, url) in accepted {
@@ -281,6 +421,179 @@ mod tests {
                 !super::is_forwardable_media_url(url),
                 "{name} must be refused"
             );
+        }
+    }
+
+    #[cfg(feature = "bedrock")]
+    mod media_walk {
+        use serde_json::{Value, json};
+
+        use super::super::refuse_unforwardable_media_urls;
+
+        const S3: &str = "s3://planted-bucket-zq7/secret-key-path-k3.png";
+        const HTTPS: &str = "https://example.com/a.png";
+
+        fn refusal_message(root: &Value) -> Option<String> {
+            match refuse_unforwardable_media_urls("mantle:walk", root, "root") {
+                Ok(()) => None,
+                Err(routectl_core::Error::NormalizeRequest(
+                    _,
+                    msg,
+                    routectl_core::RefusalReason::Unrepresentable,
+                )) => Some(msg),
+                Err(other) => panic!("unexpected error kind: {other:?}"),
+            }
+        }
+
+        #[test]
+        fn refuses_each_fetched_url_shape_and_names_its_path() {
+            let rows: Vec<(&str, Value, &str)> = vec![
+                (
+                    "image_url string",
+                    json!({"type": "input_image", "image_url": S3}),
+                    "`image_url` at root ",
+                ),
+                (
+                    "image_url object url",
+                    json!({"type": "image_url", "image_url": {"url": S3}}),
+                    "`image_url` at root ",
+                ),
+                (
+                    "image_url object without url",
+                    json!({"image_url": {"detail": "auto"}}),
+                    "`image_url` at root ",
+                ),
+                (
+                    "image_url null",
+                    json!({"image_url": null}),
+                    "`image_url` at root ",
+                ),
+                (
+                    "image_url empty",
+                    json!({"image_url": ""}),
+                    "`image_url` at root ",
+                ),
+                (
+                    "image_url number",
+                    json!({"image_url": 7}),
+                    "`image_url` at root ",
+                ),
+                (
+                    "file_url string",
+                    json!({"file_url": S3}),
+                    "`file_url` at root ",
+                ),
+                (
+                    "file_url object",
+                    json!({"file_url": {"url": HTTPS}}),
+                    "`file_url` at root ",
+                ),
+                (
+                    "source url",
+                    json!({"type": "image", "source": {"type": "url", "url": S3}}),
+                    "`source` at root ",
+                ),
+                (
+                    "source url missing url",
+                    json!({"source": {"type": "url"}}),
+                    "`source` at root ",
+                ),
+                (
+                    "object under array under object",
+                    json!({"output": {"type": "computer_screenshot", "image_url": S3}}),
+                    "`image_url` at root.output ",
+                ),
+                (
+                    "nested two levels in arrays",
+                    json!([{"content": [{"image_url": {"url": S3}}]}]),
+                    "`image_url` at root[0].content[0] ",
+                ),
+                (
+                    "non-identifier key renders as placeholder",
+                    json!({S3: {"image_url": S3}}),
+                    "`image_url` at root.<key> ",
+                ),
+                (
+                    "input of a non tool_use object is walked",
+                    json!({"type": "tool_result", "input": {"image_url": S3}}),
+                    "`image_url` at root.input ",
+                ),
+                (
+                    "parameters-like key outside the skip set is walked",
+                    json!({"params": {"image_url": S3}}),
+                    "`image_url` at root.params ",
+                ),
+            ];
+
+            for (row, root, expected) in rows {
+                let msg = refusal_message(&root).unwrap_or_else(|| panic!("{row}: must refuse"));
+                assert!(msg.contains(expected), "{row}: {msg}");
+                assert!(msg.contains("https or data"), "{row}: {msg}");
+                assert!(
+                    !msg.contains("planted-bucket-zq7") && !msg.contains("secret-key-path-k3"),
+                    "{row}: message must not echo the URL: {msg}"
+                );
+            }
+        }
+
+        #[test]
+        fn never_descends_into_strings_tool_definitions_or_tool_use_input() {
+            let rows: Vec<(&str, Value)> = vec![
+                (
+                    "string argument",
+                    json!({"type": "function_call", "arguments": json!({"image_url": S3}).to_string()}),
+                ),
+                (
+                    "tools",
+                    json!({"tools": [{"type": "function", "image_url": S3}]}),
+                ),
+                (
+                    "input_schema",
+                    json!({"input_schema": {"properties": {"image_url": {"default": S3}}, "image_url": S3}}),
+                ),
+                (
+                    "parameters",
+                    json!({"parameters": {"image_url": S3, "source": {"type": "url", "url": S3}}}),
+                ),
+                (
+                    "tool_use input",
+                    json!({"type": "tool_use", "id": "t1", "input": {"image_url": S3, "file_url": S3}}),
+                ),
+            ];
+
+            for (row, root) in rows {
+                assert_eq!(refusal_message(&root), None, "{row}: must not be walked");
+            }
+        }
+
+        #[test]
+        fn forwards_https_data_and_non_fetched_shapes() {
+            let rows: Vec<(&str, Value)> = vec![
+                ("image_url https", json!({"image_url": HTTPS})),
+                (
+                    "image_url object data",
+                    json!({"image_url": {"url": "data:image/png;base64,AAAA"}}),
+                ),
+                ("file_url https", json!({"file_url": HTTPS})),
+                (
+                    "source url https",
+                    json!({"source": {"type": "url", "url": HTTPS}}),
+                ),
+                (
+                    "source base64",
+                    json!({"source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}}),
+                ),
+                ("source string", json!({"source": S3})),
+                (
+                    "plain text mentioning s3",
+                    json!([{"type": "input_text", "text": S3}]),
+                ),
+                ("scalars", json!([null, true, 1, "x"])),
+            ];
+
+            for (row, root) in rows {
+                assert_eq!(refusal_message(&root), None, "{row}: must pass");
+            }
         }
     }
 

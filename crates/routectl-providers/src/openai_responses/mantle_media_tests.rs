@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use futures::StreamExt;
 use routectl_core::{
-    ChatRequest, ContentPart, Error, KnownContentPart, Message, MessageContent, Provider,
-    RefusalReason, ResponsesPassthroughItem, Role, StaticToken,
+    ChatRequest, ContentPart, CustomTool, Error, KnownContentPart, Message, MessageContent,
+    Provider, RefusalReason, ResponsesPassthroughItem, Role, StaticToken, ToolDef,
 };
 use serde_json::{Value, json};
 use wiremock::matchers::{method, path};
@@ -24,6 +24,10 @@ const PLANTED_PATH: &str = "secret-key-path-k3";
 
 fn planted_s3() -> String {
     format!("s3://{PLANTED_HOST}/{PLANTED_PATH}.png")
+}
+
+fn planted_gs() -> String {
+    format!("gs://{PLANTED_HOST}/{PLANTED_PATH}.png")
 }
 
 fn config(
@@ -246,11 +250,44 @@ async fn mantle_refuses_non_forwardable_media_urls_without_an_upstream_call() {
             })),
         ),
         (
-            "passthrough input_image non-string",
+            "passthrough input_image object url s3",
             passthrough_request(json!({
                 "type": "message",
                 "role": "user",
                 "content": [{"type": "input_image", "image_url": {"url": s3}}]
+            })),
+        ),
+        (
+            "passthrough computer_call_output object output s3",
+            passthrough_request(json!({
+                "type": "computer_call_output",
+                "call_id": "call_c",
+                "output": {"type": "computer_screenshot", "image_url": s3}
+            })),
+        ),
+        (
+            "passthrough image_url object two levels deep",
+            passthrough_request(json!({
+                "type": "custom_tool_call_output",
+                "call_id": "call_d",
+                "output": {"parts": [{"image": {"image_url": {"url": s3}}}]}
+            })),
+        ),
+        (
+            "passthrough source url gs",
+            passthrough_request(json!({
+                "type": "agent_message",
+                "content": [{
+                    "type": "image",
+                    "source": {"type": "url", "url": planted_gs()}
+                }]
+            })),
+        ),
+        (
+            "passthrough url-shaped key above image_url",
+            passthrough_request(json!({
+                "type": "agent_message",
+                "meta": {s3.clone(): {"image_url": s3}}
             })),
         ),
     ];
@@ -390,4 +427,36 @@ async fn mantle_does_not_inspect_function_call_arguments() {
         .and_then(Value::as_str)
         .expect("function_call arguments on the wire");
     assert!(arguments.contains(&planted_s3()), "{body}");
+}
+
+#[tokio::test]
+async fn mantle_does_not_inspect_tool_schemas() {
+    let server = mock_upstream().await;
+    let provider = mantle_provider(&server.uri()).await;
+    let schema = json!({
+        "type": "object",
+        "properties": {"image_url": {"type": "string", "default": planted_s3()}}
+    });
+    let mut req = request(vec![message(Role::User, MessageContent::Text("hi".into()))]);
+    req.tools = Some(vec![ToolDef::Custom(CustomTool {
+        name: "fetch".into(),
+        description: None,
+        input_schema: schema,
+        cache_control: None,
+        defer_loading: None,
+        strict: None,
+        type_tag: None,
+    })]);
+
+    provider
+        .complete(req)
+        .await
+        .expect("a tool schema default naming s3 is not a media URL");
+
+    let body = wire_body(&server).await;
+    assert_eq!(
+        body.pointer("/tools/0/parameters/properties/image_url/default"),
+        Some(&Value::String(planted_s3())),
+        "{body}"
+    );
 }
