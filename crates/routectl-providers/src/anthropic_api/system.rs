@@ -220,8 +220,9 @@ mod tests {
             ..Default::default()
         };
 
-        let wire = crate::anthropic_api::request::normalize("test", &req, false, None, false, true)
-            .expect("normalize must succeed");
+        let wire =
+            crate::anthropic_api::request::normalize("test", &req, false, None, false, true, false)
+                .expect("normalize must succeed");
 
         assert_eq!(wire["system"], "you are helpful", "{wire}");
         assert!(

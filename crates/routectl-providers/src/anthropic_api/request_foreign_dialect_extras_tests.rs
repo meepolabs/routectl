@@ -39,7 +39,7 @@ fn egresses() -> [Egress; 3] {
 }
 
 fn anthropic_body(req: &ChatRequest) -> Value {
-    super::normalize("test", req, false, None, false, true).expect("anthropic body")
+    super::normalize("test", req, false, None, false, true, false).expect("anthropic body")
 }
 
 fn bedrock_cfg(api_shape: BedrockApiShape) -> BedrockConfig {

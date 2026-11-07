@@ -161,6 +161,7 @@ impl Provider for AnthropicApiProvider {
             // cannot start shipping the shape on a lane whose target API has
             // no such role.
             true,
+            self.is_mantle(),
         )
     }
 

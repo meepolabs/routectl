@@ -38,7 +38,7 @@ fn base(extra: Value) -> ChatRequest {
 /// Assemble the Anthropic body through the shared normalizer with a tap.
 fn assemble(req: ChatRequest) -> (Value, Vec<DeclaredEdit>) {
     let (req, tap) = tapped(req);
-    let body = request::normalize("wire-edits-test", &req, false, None, true, true)
+    let body = request::normalize("wire-edits-test", &req, false, None, true, true, false)
         .expect("fixture assembles");
     (body, tap.take_request().edits(Leg::Request).to_vec())
 }
@@ -334,8 +334,8 @@ fn an_untapped_assembly_produces_the_same_body() {
         "tool_choice": {"type": "any"},
     }));
 
-    let untapped =
-        request::normalize("wire-edits-test", &req, false, None, true, true).expect("assembles");
+    let untapped = request::normalize("wire-edits-test", &req, false, None, true, true, false)
+        .expect("assembles");
     let (tapped_body, _) = assemble(req);
 
     assert_eq!(untapped, tapped_body);

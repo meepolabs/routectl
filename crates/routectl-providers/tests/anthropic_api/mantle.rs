@@ -167,6 +167,85 @@ async fn complete_on_mantle_lane_is_signed_with_no_x_api_key() {
     );
 }
 
+fn req_with_mcp_servers() -> ChatRequest {
+    let mut req = base_req("claude-3-opus", vec![user_msg("hello")]);
+    req.provider_extras = Some(json!({"mcp_servers": [{
+        "type": "url",
+        "url": "https://mcp.example.com/sse",
+        "name": "remote",
+        "authorization_token": "zz-mcp-connector-token",
+    }]}));
+    req
+}
+
+/// Mount a 200 on both body-carrying endpoints, send one messages and one
+/// count_tokens request carrying a client `mcp_servers`, and return the two
+/// bodies the upstream received, messages first.
+async fn mcp_servers_bodies_received(mantle: bool) -> Vec<Value> {
+    let mock_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-3-opus",
+            "content": [{ "type": "text", "text": "hi" }],
+            "stop_reason": "end_turn",
+            "usage": { "input_tokens": 1, "output_tokens": 1 }
+        })))
+        .mount(&mock_server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages/count_tokens"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "input_tokens": 3 })))
+        .mount(&mock_server)
+        .await;
+    let provider = if mantle {
+        mantle_provider_bearer(&mock_server.uri()).await
+    } else {
+        make_provider(&mock_server.uri())
+    };
+
+    provider.complete(req_with_mcp_servers()).await.unwrap();
+    provider.count_tokens(req_with_mcp_servers()).await.unwrap();
+
+    let received = mock_server.received_requests().await.unwrap();
+    assert_eq!(received.len(), 2);
+    assert_eq!(received[0].url.path(), "/v1/messages");
+    assert_eq!(received[1].url.path(), "/v1/messages/count_tokens");
+    received
+        .iter()
+        .map(|r| serde_json::from_slice(&r.body).unwrap())
+        .collect()
+}
+
+/// A client `mcp_servers` carries connector credentials for a remote MCP
+/// server: on the mantle lane neither the messages body nor the
+/// count_tokens body may carry it.
+#[tokio::test]
+async fn mantle_lane_withholds_mcp_servers_from_messages_and_count_tokens() {
+    for body in mcp_servers_bodies_received(true).await {
+        assert!(body.get("mcp_servers").is_none(), "{body}");
+        assert!(
+            !body.to_string().contains("zz-mcp-connector-token"),
+            "{body}"
+        );
+    }
+}
+
+/// Positive control: the first-party lane forwards `mcp_servers` on both
+/// endpoints, so the mantle absence above is the withhold, not the fixture.
+#[tokio::test]
+async fn first_party_lane_forwards_mcp_servers_to_messages_and_count_tokens() {
+    for body in mcp_servers_bodies_received(false).await {
+        assert_eq!(
+            body["mcp_servers"][0]["authorization_token"], "zz-mcp-connector-token",
+            "{body}"
+        );
+    }
+}
+
 /// The mantle lane uses a no-redirect client: a 3xx is surfaced as an
 /// upstream failure and NEVER followed to its `Location` target.
 #[tokio::test]

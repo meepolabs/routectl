@@ -379,8 +379,8 @@ fn a_context_cache_miss_is_the_one_case_the_read_over_reports() {
 
     // Act
     let read = emitted_thinking_type(&req);
-    let wire =
-        super::normalize("p", &req, true, Some(&empty_cache), false, true).expect("normalize");
+    let wire = super::normalize("p", &req, true, Some(&empty_cache), false, true, false)
+        .expect("normalize");
 
     // Assert
     assert_eq!(read.as_deref(), Some("adaptive"));

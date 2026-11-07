@@ -91,7 +91,7 @@ fn canonical_reasoning(t: &Value) -> Option<ReasoningConfig> {
 }
 
 pub(super) fn body(req: &ChatRequest) -> Value {
-    normalize("p", req, false, None, false, true).expect("normalize")
+    normalize("p", req, false, None, false, true, false).expect("normalize")
 }
 
 fn assert_verbatim(sent: &Value, wire: &Value, row: &str) {

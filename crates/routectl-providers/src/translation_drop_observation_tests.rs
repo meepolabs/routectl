@@ -42,7 +42,7 @@ fn bedrock_cfg(api_shape: BedrockApiShape) -> BedrockConfig {
 }
 
 fn anthropic(req: &ChatRequest) {
-    let _ = crate::anthropic_api::request::normalize("test", req, false, None, false, true);
+    let _ = crate::anthropic_api::request::normalize("test", req, false, None, false, true, false);
 }
 
 fn openai_compat(req: &ChatRequest) {

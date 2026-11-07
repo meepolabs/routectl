@@ -44,7 +44,7 @@ fn req_with_carrier() -> ChatRequest {
 fn carrier_reaches_the_wire_body_on_the_legacy_shape() {
     let req = req_with_carrier();
 
-    let body = normalize("p", &req, false, None, false, true).expect("normalize");
+    let body = normalize("p", &req, false, None, false, true, false).expect("normalize");
 
     assert_eq!(body["thinking"]["type"], "enabled");
     assert_eq!(body["thinking"]["display"], UNMODELED_DISPLAY);
@@ -57,7 +57,7 @@ fn absent_carrier_leaves_no_display_key_on_the_wire_body() {
     let mut req = req_with_carrier();
     req.routectl_internal.anthropic_thinking_display = None;
 
-    let body = normalize("p", &req, false, None, false, true).expect("normalize");
+    let body = normalize("p", &req, false, None, false, true, false).expect("normalize");
 
     assert_eq!(body["thinking"]["type"], "enabled");
     assert!(
@@ -70,7 +70,7 @@ fn absent_carrier_leaves_no_display_key_on_the_wire_body() {
 #[test]
 fn cloak_leaves_the_thinking_object_untouched() {
     let req = req_with_carrier();
-    let plain = normalize("p", &req, false, None, false, true).expect("normalize");
+    let plain = normalize("p", &req, false, None, false, true, false).expect("normalize");
 
     let mut cloaked = plain.clone();
     cloak_oauth_egress(
@@ -126,7 +126,7 @@ fn a_probe_shaped_body_serializes_both_thinking_type_and_display() {
     };
     req.routectl_internal.anthropic_thinking_display = Some("summarized".to_string());
 
-    let body = normalize("p", &req, false, None, false, true).expect("normalize");
+    let body = normalize("p", &req, false, None, false, true, false).expect("normalize");
 
     assert_eq!(
         body["thinking"]["type"], "enabled",
@@ -163,7 +163,7 @@ fn the_carrier_without_a_reasoning_state_serializes_no_thinking_object() {
     };
     req.routectl_internal.anthropic_thinking_display = Some("summarized".to_string());
 
-    let body = normalize("p", &req, false, None, false, true).expect("normalize");
+    let body = normalize("p", &req, false, None, false, true, false).expect("normalize");
 
     assert!(
         body.get("thinking").is_none(),

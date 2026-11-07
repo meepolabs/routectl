@@ -377,6 +377,11 @@ const EXPECTED_RESOLVED_LOG_COUNTS: &[(&str, &str, usize)] = &[
         5,
     ),
     (
+        "anthropic_api/request.rs",
+        "withhold_mantle_credential_fields",
+        1,
+    ),
+    (
         "bedrock/converse/extras.rs",
         "flush_foreign_dialect_tally",
         1,

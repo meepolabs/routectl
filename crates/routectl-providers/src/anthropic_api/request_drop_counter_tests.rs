@@ -3,6 +3,7 @@
 //! the Claude Code client fingerprint is withheld.
 
 use super::request::normalize;
+use routectl_core::wire_check::{EditKind, EditSite, Leg, WireTap};
 use routectl_core::{ChatRequest, Message, MessageContent, Role, SystemBlock, SystemContent};
 
 /// This lane's request-volume denominator, read through the registry's own
@@ -65,7 +66,7 @@ fn base_req() -> ChatRequest {
 }
 
 fn assemble(req: &ChatRequest) -> serde_json::Value {
-    normalize("test", req, false, None, false, true).expect("normalize must succeed")
+    normalize("test", req, false, None, false, true, false).expect("normalize must succeed")
 }
 
 // ---------------------------------------------------------------------------
@@ -99,9 +100,9 @@ fn every_assembled_request_counts_toward_the_lane_denominator() {
 
     // Act
     let before = lane_seen_count();
-    let _ =
-        normalize("test", &clean, false, None, false, true).expect("the clean request assembles");
-    let _ = normalize("test", &rejected, false, None, false, true)
+    let _ = normalize("test", &clean, false, None, false, true, false)
+        .expect("the clean request assembles");
+    let _ = normalize("test", &rejected, false, None, false, true, false)
         .expect_err("the malformed request is rejected");
     let after = lane_seen_count();
 
@@ -286,7 +287,7 @@ fn a_request_that_strips_then_fails_assembly_still_counts_the_policy_action() {
 
     // Act
     let before = fingerprint_strip_count();
-    let outcome = normalize("test", &req, false, None, false, true);
+    let outcome = normalize("test", &req, false, None, false, true, false);
     let after = fingerprint_strip_count();
 
     // Assert
@@ -378,7 +379,7 @@ fn an_unrecognized_response_format_still_counts_when_assembly_fails() {
 
     // Act
     let before = response_format_drop_count();
-    let outcome = normalize("test", &req, false, None, false, true);
+    let outcome = normalize("test", &req, false, None, false, true, false);
     let after = response_format_drop_count();
 
     // Assert
@@ -494,7 +495,7 @@ fn response_format_name_still_counts_when_assembly_fails() {
 
     // Act
     let before = format_keys_drop_count();
-    let outcome = normalize("test", &req, false, None, false, true);
+    let outcome = normalize("test", &req, false, None, false, true, false);
     let after = format_keys_drop_count();
 
     // Assert
@@ -628,4 +629,139 @@ fn a_forwarded_system_turn_keeps_its_image_and_counts_no_drop() {
         serde_json::json!("https://example.com/a.png"),
         "{body}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The Mantle credential-bearing field withhold.
+// ---------------------------------------------------------------------------
+
+/// The `(anthropic, credential_bearing_field_withheld)` policy-action
+/// counter. Zero before its first bump.
+fn credential_withhold_count() -> u64 {
+    crate::translation_drop_metrics::translation_policy_action_snapshot()
+        .into_iter()
+        .find(|e| e.lane == super::LANE && e.policy_class == "credential_bearing_field_withheld")
+        .map_or(0, |e| e.action_count)
+}
+
+fn with_mcp_servers() -> ChatRequest {
+    ChatRequest {
+        provider_extras: Some(serde_json::json!({"mcp_servers": [
+            {"type": "url", "url": "https://mcp.example.com/a", "name": "a",
+             "authorization_token": "zz-mcp-token-a"},
+            {"type": "url", "url": "https://mcp.example.com/b", "name": "b",
+             "authorization_token": "zz-mcp-token-b"},
+        ]})),
+        ..base_req()
+    }
+}
+
+/// The assembled body, the policy-action delta, and the tap's
+/// `ManagedExtrasStrip` declarations for one request on the given lane.
+fn assemble_on_lane(
+    req: &ChatRequest,
+    mantle_lane: bool,
+) -> (serde_json::Value, u64, Vec<(EditKind, String)>) {
+    let mut req = req.clone();
+    let tap = WireTap::admitted();
+    req.routectl_internal.wire_tap = Some(tap.clone());
+    let before = credential_withhold_count();
+    let body = normalize("test", &req, false, None, false, true, mantle_lane)
+        .expect("normalize must succeed");
+    let after = credential_withhold_count();
+    let strips = tap
+        .take_request()
+        .edits(Leg::Request)
+        .iter()
+        .filter(|edit| edit.site() == EditSite::ManagedExtrasStrip)
+        .map(|edit| (edit.kind(), edit.path().to_string()))
+        .collect();
+    (body, after - before, strips)
+}
+
+/// Two servers, each with a connector credential, are one withheld field:
+/// the count is per request, and the declaration names the field once.
+#[test]
+fn mantle_mcp_servers_is_absent_from_the_body_and_counted_once() {
+    // Arrange
+    let req = with_mcp_servers();
+
+    // Act
+    let (body, delta, strips) = assemble_on_lane(&req, true);
+
+    // Assert
+    let rendered = body.to_string();
+    assert!(body.get("mcp_servers").is_none(), "{rendered}");
+    assert!(!rendered.contains("zz-mcp-token"), "{rendered}");
+    assert_eq!(delta, 1);
+    assert_eq!(strips, vec![(EditKind::Remove, "/mcp_servers".to_string())]);
+}
+
+/// Positive control for the absence pin: off Mantle the same fixture ships
+/// `mcp_servers` verbatim and nothing is withheld or declared.
+#[test]
+fn the_non_mantle_lane_forwards_mcp_servers_and_counts_nothing() {
+    // Arrange
+    let req = with_mcp_servers();
+
+    // Act
+    let (body, delta, strips) = assemble_on_lane(&req, false);
+
+    // Assert
+    assert_eq!(
+        body["mcp_servers"],
+        req.provider_extras.as_ref().unwrap()["mcp_servers"]
+    );
+    assert_eq!(delta, 0);
+    assert!(strips.is_empty(), "{strips:?}");
+}
+
+/// A Mantle request with no `mcp_servers` withholds nothing; a background
+/// probe still has the field removed but leaves the client-traffic counter
+/// untouched.
+#[test]
+fn mantle_requests_without_client_mcp_servers_count_nothing() {
+    let mut probe = with_mcp_servers();
+    probe.routectl_internal.background_probe = true;
+    let rows = [
+        ("no mcp_servers", base_req(), 0),
+        ("background probe", probe, 1),
+    ];
+    for (row, req, expected_strips) in rows {
+        // Act
+        let (body, delta, strips) = assemble_on_lane(&req, true);
+
+        // Assert
+        assert!(body.get("mcp_servers").is_none(), "row {row}: {body}");
+        assert_eq!(delta, 0, "row {row}");
+        assert_eq!(strips.len(), expected_strips, "row {row}: {strips:?}");
+    }
+}
+
+/// An operator `payload_extras` value is withheld on Mantle too: a Chat
+/// client's request carries `mcp_servers` only because the operator set it,
+/// and the off-Mantle row proves that value reaches the assembled body.
+#[test]
+fn mantle_withholds_an_operator_payload_mcp_servers() {
+    // Arrange
+    let servers = serde_json::json!([{"type": "url", "url": "https://mcp.example.com/op",
+        "name": "op", "authorization_token": "zz-mcp-token-op"}]);
+    let mut req = ChatRequest {
+        provider_extras: Some(serde_json::json!({"mcp_servers": servers.clone()})),
+        ..base_req()
+    };
+    req.routectl_internal.provenance = routectl_core::RequestProvenance::OpenaiIngress;
+    req.routectl_internal.operator_payload_extras = Some(std::sync::Arc::new(
+        serde_json::json!({"mcp_servers": servers.clone()}),
+    ));
+
+    // Act
+    let (off_mantle, _, _) = assemble_on_lane(&req, false);
+    let (on_mantle, delta, strips) = assemble_on_lane(&req, true);
+
+    // Assert
+    assert_eq!(off_mantle["mcp_servers"], servers, "{off_mantle}");
+    assert!(on_mantle.get("mcp_servers").is_none(), "{on_mantle}");
+    assert_eq!(delta, 1);
+    assert_eq!(strips, vec![(EditKind::Remove, "/mcp_servers".to_string())]);
 }

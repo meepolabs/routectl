@@ -1182,6 +1182,7 @@ pub(crate) fn normalize(
     >,
     terminal_anthropic_host: bool,
     forward_system_turns: bool,
+    mantle_lane: bool,
 ) -> Result<Value> {
     let _observation = crate::translation_drop_metrics::ObservationScope::enter(req);
     // The one point every anthropic-api egress request passes exactly once,
@@ -1234,9 +1235,46 @@ pub(crate) fn normalize(
     flush_response_format_tally(&response_format, req);
     flush_foreign_dialect_tally(&foreign, id, req);
     flush_system_part_tally(&system_parts, id, req);
-    let (body, deferred) = assembled?;
+    let (mut body, deferred) = assembled?;
+    if mantle_lane {
+        withhold_mantle_credential_fields(id, &mut body, req);
+    }
     deferred.warn(id);
     Ok(body)
+}
+
+/// Remove `mcp_servers` from a Bedrock Mantle body, client and operator
+/// values alike: its entries can carry a connector credential issued for a
+/// remote MCP server, never for this upstream. Runs as the LAST mutation of
+/// [`normalize`], after every provider-extras merge, so no assembly writer can
+/// reintroduce the key; `count_tokens` builds its body from this one. Logs
+/// the key name only: a value may hold a credential.
+/// TRANSLATION-DROP: policy-action class=credential_bearing_field_withheld test=mantle_mcp_servers_is_absent_from_the_body_and_counted_once
+fn withhold_mantle_credential_fields(id: &str, body: &mut Value, req: &ChatRequest) {
+    const FIELD: &str = "mcp_servers";
+    let Some(obj) = body.as_object_mut() else {
+        return;
+    };
+    if obj.remove(FIELD).is_none() {
+        return;
+    }
+    super::wire_edits::declare(
+        super::wire_edits::tap_of(req),
+        routectl_core::wire_check::EditSite::ManagedExtrasStrip,
+        "/mcp_servers",
+        routectl_core::wire_check::EditKind::Remove,
+    );
+    tracing::debug!(
+        provider = id,
+        field = FIELD,
+        "anthropic-api Mantle egress: credential-bearing body field dropped before egress",
+    );
+    if super::is_client_traffic(req) {
+        crate::translation_drop_metrics::record_translation_policy_action(
+            super::LANE,
+            "credential_bearing_field_withheld",
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1328,7 +1366,7 @@ mod reasoning_leak_guard_tests {
         let mut req = user_req();
         req.provider_extras = Some(json!({"reasoning": {"context": "all_turns", "mode": "pro"}}));
 
-        let body = normalize("anthropic:test", &req, false, None, false, true).unwrap();
+        let body = normalize("anthropic:test", &req, false, None, false, true, false).unwrap();
 
         assert!(body.get("reasoning").is_none());
         assert!(body.get("context").is_none());
@@ -1376,7 +1414,8 @@ mod sampling_leak_guard_tests {
 
         let mut body = None;
         let events = routectl_testkit::capture_events(|| {
-            body = Some(normalize("anthropic:test", &req, false, None, false, true).unwrap());
+            body =
+                Some(normalize("anthropic:test", &req, false, None, false, true, false).unwrap());
         });
         let body = body.expect("normalize ran inside the capture");
 
@@ -1401,8 +1440,8 @@ mod sampling_leak_guard_tests {
         control.n = Some(3);
 
         let events = routectl_testkit::capture_events(|| {
-            let _ = normalize("anthropic:test", &req, false, None, false, true).unwrap();
-            let _ = normalize(CONTROL_PROVIDER, &control, false, None, false, true).unwrap();
+            let _ = normalize("anthropic:test", &req, false, None, false, true, false).unwrap();
+            let _ = normalize(CONTROL_PROVIDER, &control, false, None, false, true, false).unwrap();
         });
 
         // The control's dropped `n` proves the capture saw the callsite.
@@ -1502,7 +1541,7 @@ mod response_format_tests {
                 "strict": true
             }
         })));
-        let body = normalize("anthropic:test", &req, false, None, false, true).unwrap();
+        let body = normalize("anthropic:test", &req, false, None, false, true, false).unwrap();
         let fmt = &body["output_config"]["format"];
         assert_eq!(fmt["type"], "json_schema", "got: {body}");
         assert_eq!(fmt["schema"]["required"][0], "x", "got: {body}");
@@ -1528,7 +1567,7 @@ mod response_format_tests {
             "type": "json_schema",
             "json_schema": {"name": "widget", "schema": schema.clone(), "strict": true}
         })));
-        let body = normalize("anthropic:test", &req, false, None, false, true).unwrap();
+        let body = normalize("anthropic:test", &req, false, None, false, true, false).unwrap();
         let mut expected = schema;
         expected["additionalProperties"] = json!(false);
         assert_eq!(
@@ -1555,7 +1594,7 @@ mod response_format_tests {
                 }
             }
         }));
-        let body = normalize("anthropic:test", &req, false, None, false, true).unwrap();
+        let body = normalize("anthropic:test", &req, false, None, false, true, false).unwrap();
         let fmt = &body["output_config"]["format"];
         assert_json_schema_format_members(fmt);
         assert!(
@@ -1576,7 +1615,7 @@ mod response_format_tests {
         })));
 
         let events = routectl_testkit::capture_events(|| {
-            let _ = normalize("anthropic:test", &req, false, None, false, true).unwrap();
+            let _ = normalize("anthropic:test", &req, false, None, false, true, false).unwrap();
         });
 
         let warn = sole_format_key_drop(&events, "anthropic:test");
@@ -1605,8 +1644,18 @@ mod response_format_tests {
 
         let mut body = None;
         let events = routectl_testkit::capture_events(|| {
-            body = Some(normalize("anthropic:test", &req, false, None, false, true).unwrap());
-            let _ = normalize(FORMAT_CONTROL_PROVIDER, &control, false, None, false, true).unwrap();
+            body =
+                Some(normalize("anthropic:test", &req, false, None, false, true, false).unwrap());
+            let _ = normalize(
+                FORMAT_CONTROL_PROVIDER,
+                &control,
+                false,
+                None,
+                false,
+                true,
+                false,
+            )
+            .unwrap();
         });
         let body = body.expect("normalize ran inside the capture");
 
@@ -1622,7 +1671,7 @@ mod response_format_tests {
     #[test]
     fn json_object_response_format_maps_to_output_config_format() {
         let req = user_req(Some(json!({"type": "json_object"})));
-        let body = normalize("anthropic:test", &req, false, None, false, true).unwrap();
+        let body = normalize("anthropic:test", &req, false, None, false, true, false).unwrap();
         assert_eq!(
             body["output_config"]["format"]["type"], "json_object",
             "got: {body}"
@@ -1633,14 +1682,14 @@ mod response_format_tests {
     fn text_response_format_emits_no_output_config() {
         // A plain-text directive is not structured output; nothing maps.
         let req = user_req(Some(json!({"type": "text"})));
-        let body = normalize("anthropic:test", &req, false, None, false, true).unwrap();
+        let body = normalize("anthropic:test", &req, false, None, false, true, false).unwrap();
         assert!(body.get("output_config").is_none(), "got: {body}");
     }
 
     #[test]
     fn absent_response_format_emits_no_output_config() {
         let req = user_req(None);
-        let body = normalize("anthropic:test", &req, false, None, false, true).unwrap();
+        let body = normalize("anthropic:test", &req, false, None, false, true, false).unwrap();
         assert!(body.get("output_config").is_none(), "got: {body}");
     }
 
@@ -1652,7 +1701,7 @@ mod response_format_tests {
         req.provider_extras = Some(json!({
             "output_config": {"format": {"type": "json_schema", "schema": {"type": "string"}}}
         }));
-        let body = normalize("anthropic:test", &req, false, None, false, true).unwrap();
+        let body = normalize("anthropic:test", &req, false, None, false, true, false).unwrap();
         assert_eq!(
             body["output_config"]["format"]["type"], "json_schema",
             "provider_extras format must win: {body}"
@@ -1667,7 +1716,7 @@ mod response_format_tests {
         // replacing the non-object value, not silently no-op.
         let mut req = user_req(Some(json!({"type": "json_object"})));
         req.provider_extras = Some(json!({"output_config": null}));
-        let body = normalize("anthropic:test", &req, false, None, false, true).unwrap();
+        let body = normalize("anthropic:test", &req, false, None, false, true, false).unwrap();
         assert_eq!(
             body["output_config"]["format"]["type"], "json_object",
             "response_format must survive a null provider_extras output_config: {body}"
@@ -1678,7 +1727,7 @@ mod response_format_tests {
     fn scalar_provider_extras_output_config_does_not_drop_response_format() {
         let mut req = user_req(Some(json!({"type": "json_object"})));
         req.provider_extras = Some(json!({"output_config": 7}));
-        let body = normalize("anthropic:test", &req, false, None, false, true).unwrap();
+        let body = normalize("anthropic:test", &req, false, None, false, true, false).unwrap();
         assert_eq!(
             body["output_config"]["format"]["type"], "json_object",
             "response_format must survive a scalar provider_extras output_config: {body}"
@@ -1689,7 +1738,7 @@ mod response_format_tests {
     fn array_provider_extras_output_config_does_not_drop_response_format() {
         let mut req = user_req(Some(json!({"type": "json_object"})));
         req.provider_extras = Some(json!({"output_config": [1, 2, 3]}));
-        let body = normalize("anthropic:test", &req, false, None, false, true).unwrap();
+        let body = normalize("anthropic:test", &req, false, None, false, true, false).unwrap();
         assert_eq!(
             body["output_config"]["format"]["type"], "json_object",
             "response_format must survive an array provider_extras output_config: {body}"
@@ -1806,7 +1855,7 @@ mod parallel_tool_calls_tests {
     }
 
     fn run(req: &ChatRequest) -> Value {
-        normalize("anthropic:test", req, false, None, false, true).unwrap()
+        normalize("anthropic:test", req, false, None, false, true, false).unwrap()
     }
 
     #[test]

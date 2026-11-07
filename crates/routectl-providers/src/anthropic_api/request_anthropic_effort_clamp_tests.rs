@@ -38,7 +38,8 @@ fn provider_extras_effort_passes_through() {
     };
 
     // Act
-    let body = normalize("test", &req, false, None, false, true).expect("normalize must succeed");
+    let body =
+        normalize("test", &req, false, None, false, true, false).expect("normalize must succeed");
 
     // Assert
     let oc = body
