@@ -9205,7 +9205,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   exactly the `^...$`-anchored `CLIENT_SECRET` read from
   `routectl-auth/src/oauth/providers/antigravity.rs`; and asserts no root
   `.gitleaksignore` exists; and pins the pre-commit gitleaks hook block to
-  the upstream defaults (no `args` / `entry` override)
+  the upstream defaults (no `args` / `entry` override) with its `rev` a full
+  40-hex lowercase commit sha, optionally followed by a `# ...` release
+  comment (`is_valid_rev_line` / `is_commit_sha`; a tag, short or uppercase
+  sha is rejected)
 - `tests/cross_mode_pair.rs` -- pins the committed cross-mode fixture pair
   (`driver/anthropic-api/plain-turn-01` and its `-fp` twin): asserts each
   half's `meta.client.connection_mode`, the MITM seam header and
