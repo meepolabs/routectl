@@ -40,6 +40,7 @@ pub(crate) mod tool_pairing;
 mod translation_report;
 pub mod upstream_meta;
 pub mod upstream_reason;
+mod upstream_scrub;
 pub(crate) mod volatile;
 pub mod warn_dedup;
 pub mod wire_check;
@@ -115,6 +116,7 @@ pub use upstream_meta::{
     UpstreamMeta, UsageInputSource,
 };
 pub use upstream_reason::UpstreamReason;
+pub use upstream_scrub::{names_aws_principal, scrub_upstream_text};
 pub use volatile::{
     CallerPrefixAdvisory, CallerPrefixFinding, PrefixComponent, VolatileConfidence, VolatileKind,
     VolatileReport, scan_caller_prefix_advisory, scan_volatile,

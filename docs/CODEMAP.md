@@ -76,6 +76,11 @@ license.
   files and inline test modules. A small lexer finds each module's closing
   line, ignoring braces in comments (nested too) and string, raw-string and
   char literals, and panics on a module that never closes
+- `src/upstream_scrub.rs` -- `scrub_upstream_text`: replaces AWS ARNs (plain
+  and percent-encoded), 12-digit account ids after `account`, prefix-keyed
+  vendor credentials and URL userinfo in decoded upstream error text with
+  `[redacted]`, borrowing when nothing matches; `names_aws_principal`: the
+  ARN / account-id verdict alone. Hand-rolled, no regex
 - `src/warn_dedup.rs` -- `CappedWarnSet<K>::admit`: the bounded warn-once
   dedup decision shared by the cli's `proxy::metrics::WarnOnce` and
   `server::cc_pin_drift` and the router's wire-check WARN. Decides only --
