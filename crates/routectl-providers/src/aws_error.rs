@@ -141,8 +141,8 @@ fn has_account_id_after_account(text: &str) -> bool {
 }
 
 /// True when `token` may reach a client-facing `error.type` / `error.code`
-/// from a 403: bounded ([`is_bounded_aws_token`]) and free of an
-/// account-id-shaped digit run.
+/// or correlation id: non-empty, at most 128 bytes, only ASCII alphanumerics
+/// and `.`, `#`, `_`, `-`, and free of an account-id-shaped digit run.
 pub fn is_client_safe_token(token: &str) -> bool {
     is_bounded_aws_token(token) && !has_account_id_run(token)
 }

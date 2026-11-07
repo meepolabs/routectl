@@ -313,15 +313,18 @@ pub(crate) mod aws_error;
 // compares through `aws_exception_type_is` (or the already-stripped
 // `upstream_type` the lift lands) so the namespaced wire form
 // (`com.amazon.coral.validate#ValidationException`) can never be silently
-// missed by an exact match against the bare name. The rest of `aws_error`
-// stays crate-private: the redaction and lift entry points are lane-internal.
+// missed by an exact match against the bare name. `is_client_safe_token` is
+// the bound a client-facing `error.type` / `error.code` / correlation id must
+// pass, so the cli envelope sinks apply the same verdict the 403 scrub does.
+// The rest of `aws_error` stays crate-private: the redaction and lift entry
+// points are lane-internal.
 #[cfg(any(
     feature = "anthropic-api",
     feature = "bedrock",
     feature = "openai-compat",
     feature = "openai-responses"
 ))]
-pub use aws_error::{VALIDATION_EXCEPTION_TYPE, aws_exception_type_is};
+pub use aws_error::{VALIDATION_EXCEPTION_TYPE, aws_exception_type_is, is_client_safe_token};
 
 // Egress-side wire-tap reporting: deposit the bytes sent and declare the
 // body edits made on the way. Gated on the egresses that report through it.

@@ -2,7 +2,9 @@
 //! non-stream envelope and the stream terminal event of the OpenAI chat,
 //! Anthropic and Responses dialects. The token comes from the error's typed
 //! reason, never from upstream text, and appears exactly once even when the
-//! bounded upstream detail already names it.
+//! message already renders it as a ` (reason: <token>)` segment or as the
+//! Bedrock access-denied `: <token>` segment. A message naming the bare token
+//! in other text still gets the suffix.
 
 use super::*;
 use axum::body::to_bytes;
@@ -135,7 +137,11 @@ async fn a_reasoned_error_names_its_token_exactly_once_on_every_sink() {
     type Row = (&'static str, fn() -> Error, &'static str);
     let rows: [Row; 4] = [
         ("detail without the token", mantle_invalid, INVALID),
-        ("provider detail with the token", bedrock_expired, EXPIRED),
+        (
+            "access-denied detail with the token",
+            bedrock_expired,
+            EXPIRED,
+        ),
         ("local credential message", local_credential, EXPIRED),
         ("token truncated off the detail", oversized_expired, EXPIRED),
     ];
@@ -161,6 +167,104 @@ async fn an_upstream_error_without_its_detail_token_gains_the_reason_suffix() {
             message.ends_with(&format!("Invalid bearer token (reason: {INVALID})")),
             "{sink:?}: {message}"
         );
+    }
+}
+
+#[tokio::test]
+async fn a_detail_naming_the_bare_token_in_prose_still_gains_the_reason_suffix() {
+    let body = json!({"error": {"message": format!("the {EXPIRED} key was refused"),
+                                "type": "authentication_error"}});
+    for sink in SINKS {
+        let err = Error::upstream_full(
+            "p-internal",
+            401,
+            body.to_string(),
+            None,
+            Some("authentication_error".into()),
+            None,
+        )
+        .with_upstream_reason(Some(UpstreamReason::CredentialExpired));
+
+        let message = client_message(sink, err).await;
+
+        assert!(
+            message.ends_with(&format!(
+                "the {EXPIRED} key was refused (reason: {EXPIRED})"
+            )),
+            "{sink:?}: {message}"
+        );
+    }
+}
+
+#[test]
+fn the_suffix_is_skipped_only_when_a_rendered_reason_segment_names_the_token() {
+    let suffix = format!(" (reason: {EXPIRED})");
+    let rows = [
+        ("bare token in prose", format!("the {EXPIRED} key"), true),
+        ("token in a longer word", format!("x{EXPIRED}y"), true),
+        (
+            "segment without its lead space",
+            format!("x(reason: {EXPIRED})"),
+            true,
+        ),
+        (
+            "segment for another token",
+            format!("x (reason: {INVALID})"),
+            true,
+        ),
+        (
+            "colon token then more text",
+            format!("denied: {EXPIRED} now"),
+            true,
+        ),
+        (
+            "colon token then a paren",
+            format!("denied: {EXPIRED} (later)"),
+            true,
+        ),
+        (
+            "colon token as a prefix",
+            format!("denied: {EXPIRED}-ish"),
+            true,
+        ),
+        (
+            "colon segment for another token",
+            format!("denied: {INVALID}"),
+            true,
+        ),
+        (
+            "reason segment at the end",
+            format!("auth error{suffix}"),
+            false,
+        ),
+        (
+            "reason segment before a parked wait",
+            format!("auth error{suffix}; every seat is parked for another 5s"),
+            false,
+        ),
+        (
+            "access-denied token at the end",
+            format!("bedrock access denied (AccessDeniedException): {EXPIRED}"),
+            false,
+        ),
+        (
+            "access-denied token before the IAM action",
+            format!("bedrock access denied: {EXPIRED}: missing IAM action bedrock:InvokeModel"),
+            false,
+        ),
+    ];
+    for (name, message, gains_suffix) in rows {
+        let out = crate::handlers::reason_detail::with_reason_suffix(
+            message.clone(),
+            Some(UpstreamReason::CredentialExpired),
+        );
+
+        let expected = if gains_suffix {
+            format!("{message}{suffix}")
+        } else {
+            message
+        };
+        assert_eq!(out, expected, "{name}");
     }
 }
 

@@ -25,7 +25,7 @@ use routectl_core::{
     ChatChunk, ChatRequest, ChatResponse, ContentPart, Error, KnownContentPart, Message,
     MessageContent, RefusalReason, Result, Role, SystemBlock, SystemContent,
 };
-use routectl_providers::is_billing_attribution_block;
+use routectl_providers::{is_billing_attribution_block, is_client_safe_token};
 use serde_json::Value;
 
 pub mod anthropic;
@@ -149,9 +149,12 @@ pub struct StreamErrorClass {
 
 impl StreamErrorClass {
     /// Derive the terminal-error classifier from the upstream `Error`.
-    /// A local refusal carries its own type on every field; any other
-    /// non-`Upstream` error (render failures, transport errors with no HTTP
-    /// status) falls back to the generic `api_error` bucket.
+    /// An upstream type or code failing [`is_client_safe_token`] is dropped,
+    /// so the status-mapped class stands in for it. A local refusal carries
+    /// its own type on every field and a local credential error the class
+    /// its non-stream envelope carries; any other non-`Upstream` error
+    /// (render failures, transport errors with no HTTP status) falls back to
+    /// the generic `api_error` bucket.
     pub(crate) fn from_error(e: &Error) -> Self {
         match e {
             Error::Upstream {
@@ -160,24 +163,35 @@ impl StreamErrorClass {
                 upstream_code,
                 ..
             } => {
+                let upstream_type = upstream_type.as_deref().filter(|t| is_client_safe_token(t));
+                let upstream_code = upstream_code.as_deref().filter(|c| is_client_safe_token(c));
                 let st = StatusCode::from_u16(*status).unwrap_or(StatusCode::BAD_GATEWAY);
                 let anthropic_type = crate::handlers::ingress_handle::anthropic_error_type(
                     "upstream_error",
                     st,
-                    upstream_type.as_deref(),
+                    upstream_type,
                 )
                 .to_string();
-                let openai_type = upstream_type
-                    .as_deref()
-                    .map_or_else(|| anthropic_type.clone(), str::to_string);
+                let openai_type =
+                    upstream_type.map_or_else(|| anthropic_type.clone(), str::to_string);
                 let openai_code = upstream_code
-                    .as_deref()
-                    .or(upstream_type.as_deref())
+                    .or(upstream_type)
                     .map_or_else(|| anthropic_type.clone(), str::to_string);
                 Self {
                     anthropic_type,
                     openai_type,
                     openai_code,
+                }
+            }
+            Error::Credential { .. } => {
+                let (status, err_type) = crate::handlers::ingress_handle::error_status_and_type(e);
+                let anthropic_type =
+                    crate::handlers::ingress_handle::anthropic_error_type(err_type, status, None)
+                        .to_string();
+                Self {
+                    anthropic_type,
+                    openai_type: err_type.to_string(),
+                    openai_code: err_type.to_string(),
                 }
             }
             Error::LocalRefusal { .. } | Error::CapabilityUnsupportedEverywhere { .. } => {
@@ -623,6 +637,98 @@ mod stream_error_class_tests {
         let err = Error::upstream_full("p", 502, "x", None, Some("rate_limit_error".into()), None);
         let class = StreamErrorClass::from_error(&err);
         assert_eq!(class.anthropic_type, "rate_limit_error");
+    }
+
+    fn stream_upstream_400(upstream_type: Option<&str>, upstream_code: Option<&str>) -> Error {
+        Error::upstream_full(
+            "p",
+            400,
+            "x",
+            None,
+            upstream_type.map(str::to_string),
+            upstream_code.map(str::to_string),
+        )
+    }
+
+    fn stream_unsafe_tokens() -> [(&'static str, String); 3] {
+        [
+            (
+                "twelve-digit run",
+                "invalid_request_123456789012".to_string(),
+            ),
+            ("129 bytes", "a".repeat(129)),
+            ("contains a space", "invalid request".to_string()),
+        ]
+    }
+
+    fn fields(class: &StreamErrorClass) -> [&str; 3] {
+        [
+            &class.anthropic_type,
+            &class.openai_type,
+            &class.openai_code,
+        ]
+    }
+
+    /// An upstream type failing the client-token filter is dropped, so the
+    /// terminal event carries the class the same error has with no type.
+    #[test]
+    fn stream_unsafe_upstream_type_yields_the_status_mapped_class() {
+        let baseline = StreamErrorClass::from_error(&stream_upstream_400(None, None));
+        for (name, token) in stream_unsafe_tokens() {
+            let class = StreamErrorClass::from_error(&stream_upstream_400(Some(&token), None));
+
+            assert_eq!(fields(&class), fields(&baseline), "{name}");
+        }
+    }
+
+    #[test]
+    fn stream_unsafe_upstream_code_falls_back_to_the_upstream_type() {
+        for (name, token) in stream_unsafe_tokens() {
+            let err = stream_upstream_400(Some("invalid_request_error"), Some(&token));
+
+            let class = StreamErrorClass::from_error(&err);
+
+            assert_eq!(class.openai_type, "invalid_request_error", "{name}");
+            assert_eq!(class.openai_code, "invalid_request_error", "{name}");
+        }
+    }
+
+    #[test]
+    fn stream_safe_upstream_type_and_code_pass_through() {
+        let err = stream_upstream_400(Some("invalid_request_error"), Some("rate_limit_exceeded"));
+
+        let class = StreamErrorClass::from_error(&err);
+
+        assert_eq!(class.anthropic_type, "invalid_request_error");
+        assert_eq!(class.openai_type, "invalid_request_error");
+        assert_eq!(class.openai_code, "rate_limit_exceeded");
+    }
+
+    /// A local credential error carries the class its non-stream envelope
+    /// carries, on all three fields.
+    #[tokio::test]
+    async fn credential_error_matches_the_non_stream_envelope_class() {
+        use crate::handlers::ingress_handle::map_error;
+        use axum::body::to_bytes;
+
+        let credential = || Error::Credential {
+            detail: "oauth refresh failed".into(),
+            reason: routectl_core::UpstreamReason::CredentialExpired,
+            parked_until_ms: None,
+        };
+        let envelope = |shape| async move {
+            let resp = map_error(shape, credential());
+            let bytes = to_bytes(resp.into_body(), 8 * 1024).await.unwrap();
+            serde_json::from_slice::<Value>(&bytes).unwrap()["error"].clone()
+        };
+        let openai = envelope(ErrorEnvelopeShape::OpenAi).await;
+        let anthropic = envelope(ErrorEnvelopeShape::Anthropic).await;
+
+        let class = StreamErrorClass::from_error(&credential());
+
+        assert_eq!(class.anthropic_type, anthropic["type"]);
+        assert_eq!(class.openai_type, openai["type"]);
+        assert_eq!(class.openai_code, openai["code"]);
     }
 
     /// Non-`Upstream` errors (no HTTP status) fall back to the generic

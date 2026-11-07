@@ -22,6 +22,7 @@ use routectl_core::Error;
 use routectl_core::ForwardedBearer;
 use routectl_core::ParsedErrorBody;
 use routectl_core::wire_check::{IngressDialect, StreamExit};
+use routectl_providers::is_client_safe_token;
 use routectl_router::{DispatchedStream, ResponseCheck, Router, RouterOptions};
 use routectl_usage::{Outcome, UsageHandle, UsageRecord};
 use serde_json::{Value, json};
@@ -1503,7 +1504,9 @@ pub(crate) fn map_error(shape: ErrorEnvelopeShape, e: Error) -> Response {
     // other variant uses the static `type_str` mapping unchanged. The
     // parsed `retry_after` reset hint (populated only on a rate-limit /
     // overload upstream response) rides through to a client-facing
-    // `Retry-After` header so an SDK's own backoff keeps the hint.
+    // `Retry-After` header so an SDK's own backoff keeps the hint. The
+    // upstream authors the type, code and correlation id, so each one failing
+    // `is_client_safe_token` is dropped and the status-mapped class stands.
     let (upstream_type, upstream_code, retry_after, upstream_request_id) = match &e {
         Error::Upstream {
             upstream_type,
@@ -1512,10 +1515,10 @@ pub(crate) fn map_error(shape: ErrorEnvelopeShape, e: Error) -> Response {
             extras,
             ..
         } => (
-            upstream_type.as_deref(),
-            upstream_code.as_deref(),
+            upstream_type.as_deref().filter(|t| is_client_safe_token(t)),
+            upstream_code.as_deref().filter(|c| is_client_safe_token(c)),
             *retry_after,
-            extras.request_id(),
+            extras.request_id().filter(|id| is_client_safe_token(id)),
         ),
         Error::LocalRefusal { .. } | Error::CapabilityUnsupportedEverywhere { .. } => {
             (Some(LOCAL_REFUSAL_TYPE), None, None, None)
@@ -1631,7 +1634,7 @@ fn bound_upstream_detail(detail: &str) -> String {
     bounded
 }
 
-fn error_status_and_type(e: &Error) -> (StatusCode, &'static str) {
+pub(crate) fn error_status_and_type(e: &Error) -> (StatusCode, &'static str) {
     match e {
         Error::UnknownAlias(_) | Error::UnknownProvider(_) => {
             (StatusCode::NOT_FOUND, "unknown_alias")
@@ -1895,6 +1898,10 @@ mod credential_error_envelope_tests;
 #[cfg(test)]
 #[path = "reason_detail_tests.rs"]
 mod reason_detail_tests;
+
+#[cfg(test)]
+#[path = "upstream_token_envelope_tests.rs"]
+mod upstream_token_envelope_tests;
 
 #[cfg(test)]
 #[path = "ingress_refusal_count_tests.rs"]
