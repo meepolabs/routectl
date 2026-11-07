@@ -326,7 +326,8 @@ fn punch_list_cleared_when_overlay_supplies_a_window() {
     );
 }
 
-/// The baked snapshot date as an epoch-day count.
+/// Inverts the public `epoch_day_age` through a fixed far-future day, since
+/// the router's `parse_epoch_day` is private.
 fn snapshot_epoch_day() -> i64 {
     const FAR_FUTURE_DAY: i64 = 1_000_000;
     let age = epoch_day_age(CATALOG_SNAPSHOT_DATE, FAR_FUTURE_DAY).expect("snapshot date parses");

@@ -208,7 +208,9 @@ reading it. In order: a toolchain preflight, the gitleaks staged-secret
 scan (its `rev` pins the binary as the full commit sha of a release tag,
 named in a trailing comment, equal to the gitleaks version the shared
 `meepolabs/meepolabs-conventions` security-floor action pins, which
-`.github/workflows/security.yml` runs; it also loads the root
+`.github/workflows/security.yml` runs; bump it by hand from
+`git ls-remote` on that tag as the config comment describes, never with
+`pre-commit autoupdate`; it also loads the root
 `.gitleaks.toml`, which adds a `GOCSPX-` Google client-secret rule the
 defaults lack and exempts one exact public value, with no repo path
 allowlist, though gitleaks' built-in default path skips still apply; the CI

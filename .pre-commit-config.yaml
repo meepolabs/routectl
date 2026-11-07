@@ -65,10 +65,17 @@ repos:
   # commit cannot. Keep that release equal to GITLEAKS_VERSION
   # in the shared security-floor action's floor.sh, at the release that
   # .github/workflows/security.yml pins, so local and CI scan with the same
-  # detection rules; bump it when that pin moves. This hook also loads the
-  # repo-root .gitleaks.toml: the default rules plus one extra rule for
-  # GOCSPX- Google client secrets (absent from the defaults) and one
-  # value-scoped allowlist entry, with no repo path allowlist (gitleaks'
+  # detection rules; bump it when that pin moves. To bump: run
+  #   git ls-remote https://github.com/gitleaks/gitleaks 'refs/tags/vX.Y.Z*'
+  # for the shared action's version, write the 40-hex commit (the peeled
+  # `^{}` line if the tag is annotated) as the rev, and the version as the
+  # trailing comment. Never run `pre-commit autoupdate` on this file: it
+  # takes the newest tag reachable from gitleaks' default branch, not the
+  # shared pin, and without --freeze writes that mutable tag as the rev.
+  # This hook also loads the repo-root .gitleaks.toml: the default rules
+  # plus one extra rule for GOCSPX- Google client secrets (absent from the
+  # defaults) and one value-scoped allowlist entry, with no repo path
+  # allowlist (gitleaks'
   # built-in default path skips still apply here). The shared action ignores
   # that file: it runs the default rules with the default path skips removed.
   - repo: https://github.com/gitleaks/gitleaks
