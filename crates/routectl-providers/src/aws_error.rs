@@ -100,44 +100,11 @@ fn has_account_id_run(text: &str) -> bool {
     })
 }
 
-/// True when `text` names an AWS principal or account in an AWS shape: an
-/// AWS ARN (`arn:aws:` or a partition variant `arn:aws-<x>:`, starting a
-/// token), which covers `User: arn:`, `Principal: arn:` and the
-/// `assumed-role/` / `user/` paths that follow one, or an account id
-/// written after the word `account`. A loose marker (a word ending in
-/// `arn:`, `User:` before free text, a long number such as a timestamp)
-/// is not one. Run it over decoded strings, never raw JSON text, where an
-/// escape can spell any marker.
+/// True when `text` names an AWS principal or account, by the rules of
+/// [`routectl_core::names_aws_principal`], the same rules the client envelope
+/// scrub redacts by. Run it over decoded strings, never raw JSON text.
 pub fn names_aws_principal(text: &str) -> bool {
-    has_aws_arn(text) || has_account_id_after_account(text)
-}
-
-/// True when an AWS ARN starts a token in `text`: `arn:aws:` or
-/// `arn:aws-<partition>:`, with no letter, digit, `_` or `-` before it.
-fn has_aws_arn(text: &str) -> bool {
-    text.match_indices("arn:aws").any(|(at, _)| {
-        let starts_token = text[..at]
-            .chars()
-            .next_back()
-            .is_none_or(|c| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'));
-        let rest = &text[at + "arn:aws".len()..];
-        let partition = rest.strip_prefix('-').map_or(Some(rest), |tail| {
-            let end = tail.find(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))?;
-            (end > 0).then(|| &tail[end..])
-        });
-        starts_token && partition.is_some_and(|after| after.starts_with(':'))
-    })
-}
-
-/// True when an [`ACCOUNT_ID_DIGITS`]-digit run follows the word `account`
-/// (any case), separated only by spaces, `:`, `=` or `#`.
-fn has_account_id_after_account(text: &str) -> bool {
-    let lower = text.to_ascii_lowercase();
-    lower.match_indices("account").any(|(at, word)| {
-        let after = lower[at + word.len()..].trim_start_matches([' ', ':', '=', '#', '_', '-']);
-        let digits = after.bytes().take_while(u8::is_ascii_digit).count();
-        digits == ACCOUNT_ID_DIGITS
-    })
+    routectl_core::names_aws_principal(text)
 }
 
 /// True when `token` may reach a client-facing `error.type` / `error.code`

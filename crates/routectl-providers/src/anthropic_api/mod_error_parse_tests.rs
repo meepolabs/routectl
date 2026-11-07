@@ -191,3 +191,39 @@ fn a_403_carries_the_envelope_only_when_it_is_aws_shaped() {
         );
     }
 }
+
+/// A loose-marker 403 keeps its upstream message. An envelope with an
+/// `error.type` is carried as read; one without takes the lane's AWS-lift
+/// path, which carries the message alone.
+#[test]
+fn a_403_with_only_loose_markers_keeps_its_upstream_message() {
+    use crate::upstream_error::reason_tests::LOOSE_MARKER_403_ROWS;
+    for (name, body) in LOOSE_MARKER_403_ROWS {
+        let upstream = UpstreamBody::new(body.to_string());
+        let parsed = upstream.parsed().expect("row parses");
+        let upstream_message = parsed.error_message().expect("row has a message");
+        let has_type = parsed.error_type().is_some();
+
+        let (msg, err) = parses_during(|| read(403, body.to_string())).0;
+
+        assert_eq!(msg, upstream_message, "{name}");
+        let Error::Upstream { body: carried, .. } = &err else {
+            panic!("{name}: expected Error::Upstream, got {err:?}");
+        };
+        let want = if has_type { body } else { upstream_message };
+        assert_eq!(carried, want, "{name}");
+    }
+}
+
+#[test]
+fn a_403_naming_a_principal_inside_a_json_string_is_scrubbed() {
+    use crate::upstream_error::reason_tests::{
+        PRINCIPAL_IN_JSON_STRING_403_ROWS, assert_json_string_principal_scrubbed,
+    };
+    for row in &PRINCIPAL_IN_JSON_STRING_403_ROWS {
+        let (msg, err) = parses_during(|| read(403, row.1.to_string())).0;
+
+        assert_eq!(msg, row.2, "anthropic-api {}", row.0);
+        assert_json_string_principal_scrubbed("anthropic-api", row, &err);
+    }
+}

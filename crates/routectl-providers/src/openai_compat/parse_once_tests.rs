@@ -183,3 +183,15 @@ fn a_403_with_only_loose_markers_is_carried_as_read() {
         assert_eq!(carried, body, "{name}");
     }
 }
+
+#[test]
+fn a_403_naming_a_principal_inside_a_json_string_is_scrubbed() {
+    use crate::upstream_error::reason_tests::{
+        PRINCIPAL_IN_JSON_STRING_403_ROWS, assert_json_string_principal_scrubbed,
+    };
+    for row in &PRINCIPAL_IN_JSON_STRING_403_ROWS {
+        let (err, _) = map(403, row.1);
+
+        assert_json_string_principal_scrubbed("openai-compat", row, &err);
+    }
+}

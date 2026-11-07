@@ -159,3 +159,28 @@ fn a_403_naming_a_principal_is_scrubbed_on_every_surface() {
         "a first-party 403 is carried as read"
     );
 }
+
+#[test]
+fn a_403_with_only_loose_markers_is_carried_as_read() {
+    use crate::upstream_error::reason_tests::LOOSE_MARKER_403_ROWS;
+    for (name, body) in LOOSE_MARKER_403_ROWS {
+        let (err, _) = map(403, body);
+
+        let Error::Upstream { body: carried, .. } = &err else {
+            panic!("{name}: expected Error::Upstream");
+        };
+        assert_eq!(carried, body, "{name}");
+    }
+}
+
+#[test]
+fn a_403_naming_a_principal_inside_a_json_string_is_scrubbed() {
+    use crate::upstream_error::reason_tests::{
+        PRINCIPAL_IN_JSON_STRING_403_ROWS, assert_json_string_principal_scrubbed,
+    };
+    for row in &PRINCIPAL_IN_JSON_STRING_403_ROWS {
+        let (err, _) = map(403, row.1);
+
+        assert_json_string_principal_scrubbed("openai-responses", row, &err);
+    }
+}

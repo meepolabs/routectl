@@ -592,3 +592,85 @@ fn a_403_with_only_loose_markers_on_a_non_aws_seat_needs_no_scrub() {
         assert!(!read.needs_access_denied_scrub(), "{name}");
     }
 }
+
+fn string_leaves<'a>(value: &'a Value, out: &mut Vec<&'a str>) {
+    match value {
+        Value::String(s) => out.push(s),
+        Value::Array(items) => items.iter().for_each(|v| string_leaves(v, out)),
+        Value::Object(map) => map.values().for_each(|v| string_leaves(v, out)),
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
+}
+
+#[test]
+fn the_envelope_scrub_leaves_every_loose_marker_string_unchanged() {
+    let planted = "User: arn:aws:iam::123456789012:user/alice";
+    assert!(
+        matches!(
+            routectl_core::scrub_upstream_text(planted),
+            std::borrow::Cow::Owned(_)
+        ),
+        "the scrub rewrites a principal-bearing string"
+    );
+    for (name, body) in LOOSE_MARKER_403_ROWS {
+        let parsed: Value = serde_json::from_str(body).expect("row parses");
+        let mut leaves = Vec::new();
+        string_leaves(&parsed, &mut leaves);
+        assert!(leaves.len() > 1, "{name}: the row holds string leaves");
+
+        for leaf in leaves {
+            let scrubbed = routectl_core::scrub_upstream_text(leaf);
+
+            assert!(
+                matches!(scrubbed, std::borrow::Cow::Borrowed(_)),
+                "{name}: {leaf:?} became {scrubbed:?}"
+            );
+        }
+    }
+}
+
+/// A first-party 403 whose `error.message` names a principal inside a JSON
+/// string, and the scrubbed message its envelope must carry.
+pub const PRINCIPAL_IN_JSON_STRING_403_ROWS: [Principal403Row; 3] = [
+    (
+        "plain ARN in error.message",
+        r#"{"type":"error","error":{"type":"permission_error","message":"denied for arn:aws:iam::123456789012:role/App"}}"#,
+        "bedrock access denied (permission_error)",
+    ),
+    (
+        "percent-encoded ARN in error.message",
+        r#"{"type":"error","error":{"type":"permission_error","message":"denied for arn%3Aaws%3Aiam%3A%3A123456789012%3Arole%2FApp"}}"#,
+        "bedrock access denied (permission_error)",
+    ),
+    (
+        "accountId key in error.message",
+        r#"{"type":"error","error":{"type":"permission_error","message":"denied: accountId=123456789012"}}"#,
+        "bedrock access denied (permission_error)",
+    ),
+];
+
+/// Assert a [`PRINCIPAL_IN_JSON_STRING_403_ROWS`] row was carried as the
+/// scrubbed envelope, with no ARN head or account id left in the body.
+pub fn assert_json_string_principal_scrubbed(
+    lane: &str,
+    row: &Principal403Row,
+    err: &routectl_core::Error,
+) {
+    let (name, _, want) = row;
+    let routectl_core::Error::Upstream { body, .. } = err else {
+        panic!("{lane} {name}: expected Error::Upstream, got {err:?}");
+    };
+    let carried = err
+        .parsed_body()
+        .and_then(routectl_core::ParsedErrorBody::error_message);
+    assert_eq!(carried, Some(*want), "{lane} {name}");
+    let lower = body.to_ascii_lowercase();
+    assert!(
+        !lower.contains("arn:") && !lower.contains("arn%3a"),
+        "{lane} {name} leaked an ARN: {body}"
+    );
+    assert!(
+        !has_account_id_run(body),
+        "{lane} {name} leaked an account id: {body}"
+    );
+}
