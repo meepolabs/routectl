@@ -443,3 +443,285 @@ async fn aws_shaped_403_classifies_as_auth_end_to_end() {
         "an AWS-shaped 403 on the mantle lane must classify as Auth end-to-end"
     );
 }
+
+const PLANTED_HOST: &str = "planted-bucket-zq7";
+const PLANTED_PATH: &str = "secret-key-path-k3";
+
+fn planted(scheme: &str) -> String {
+    format!("{scheme}://{PLANTED_HOST}/{PLANTED_PATH}.png")
+}
+
+const fn parts_msg(role: Role, parts: Vec<ContentPart>) -> Message {
+    Message {
+        refusal: None,
+        role,
+        content: MessageContent::Parts(parts),
+        reasoning: None,
+        reasoning_details: vec![],
+        name: None,
+        tool_call_id: None,
+        tool_calls: None,
+    }
+}
+
+fn user_parts_req(part: ContentPart) -> ChatRequest {
+    let text = ContentPart::Known(KnownContentPart::Text {
+        text: "look".into(),
+        citations: None,
+        cache_control: None,
+    });
+    base_req(
+        "claude-3-opus",
+        vec![parts_msg(Role::User, vec![text, part])],
+    )
+}
+
+fn native_image(url: &str) -> ContentPart {
+    ContentPart::Known(KnownContentPart::Image {
+        source: json!({"type": "url", "url": url}),
+        cache_control: None,
+    })
+}
+
+fn image_url_part(url: &str) -> ContentPart {
+    ContentPart::Known(KnownContentPart::ImageUrl {
+        image_url: json!({"url": url}),
+        cache_control: None,
+    })
+}
+
+fn url_document(url: &str) -> ContentPart {
+    ContentPart::Known(KnownContentPart::Document {
+        source: json!({"type": "url", "url": url}),
+        title: None,
+        citations: None,
+        cache_control: None,
+    })
+}
+
+fn file_url_part(url: &str) -> ContentPart {
+    ContentPart::Known(KnownContentPart::File {
+        file: json!({"file_url": url}),
+        cache_control: None,
+    })
+}
+
+/// A user turn, an assistant `tool_use` whose input is `input`, and a tool
+/// result carrying `result_part`.
+fn tool_round_req(input: Value, result_part: ContentPart) -> ChatRequest {
+    let tool_use = ContentPart::Known(KnownContentPart::ToolUse {
+        id: "toolu_1".into(),
+        name: "screenshot".into(),
+        input,
+        cache_control: None,
+    });
+    let mut tool = parts_msg(Role::Tool, vec![result_part]);
+    tool.tool_call_id = Some("toolu_1".into());
+    base_req(
+        "claude-3-opus",
+        vec![
+            user_msg("take one"),
+            parts_msg(Role::Assistant, vec![tool_use]),
+            tool,
+        ],
+    )
+}
+
+fn text_part(text: &str) -> ContentPart {
+    ContentPart::Known(KnownContentPart::Text {
+        text: text.into(),
+        citations: None,
+        cache_control: None,
+    })
+}
+
+async fn media_upstream() -> MockServer {
+    let mock_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-3-opus",
+            "content": [{ "type": "text", "text": "hi" }],
+            "stop_reason": "end_turn",
+            "usage": { "input_tokens": 1, "output_tokens": 1 }
+        })))
+        .mount(&mock_server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages/count_tokens"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "input_tokens": 3 })))
+        .mount(&mock_server)
+        .await;
+    mock_server
+}
+
+fn assert_media_refusal(result: Result<(), Error>, row: &str, field_at: &str) {
+    match result {
+        Err(Error::NormalizeRequest(_, msg, routectl_core::RefusalReason::Unrepresentable)) => {
+            assert!(msg.contains(field_at), "{row}: names the field: {msg}");
+            assert!(
+                msg.contains("https or data"),
+                "{row}: names the class: {msg}"
+            );
+            assert!(
+                !msg.contains(PLANTED_HOST) && !msg.contains(PLANTED_PATH),
+                "{row}: refusal must not echo the URL: {msg}"
+            );
+        }
+        other => panic!("{row}: expected a local unrepresentable refusal, got {other:?}"),
+    }
+}
+
+/// Every image or document URL Mantle would fetch under the operator's AWS
+/// identity is refused locally on both the messages and the count_tokens
+/// path unless it is https or data, and the upstream is never called.
+#[tokio::test]
+async fn mantle_lane_refuses_unforwardable_media_urls_on_messages_and_count_tokens() {
+    let rows: Vec<(&str, ChatRequest, &str)> = vec![
+        (
+            "native image s3",
+            user_parts_req(native_image(&planted("s3"))),
+            "`source` at messages[0].content[1] ",
+        ),
+        (
+            "openai image_url gs",
+            user_parts_req(image_url_part(&planted("gs"))),
+            "`source` at messages[0].content[1] ",
+        ),
+        (
+            "document source http",
+            user_parts_req(url_document(&planted("http"))),
+            "`source` at messages[0].content[1] ",
+        ),
+        (
+            "tool_result nested image s3",
+            tool_round_req(json!({}), native_image(&planted("s3"))),
+            "`source` at messages[2].content[0].content[0] ",
+        ),
+        (
+            "verbatim file block file_url s3",
+            user_parts_req(file_url_part(&planted("s3"))),
+            "`file_url` at messages[0].content[1].file ",
+        ),
+        (
+            "empty image url",
+            user_parts_req(image_url_part("")),
+            "`source` at messages[0].content[1] ",
+        ),
+    ];
+
+    for (row, req, field_at) in rows {
+        let mock_server = media_upstream().await;
+        let provider = mantle_provider_bearer(&mock_server.uri()).await;
+
+        let complete = provider.complete(req.clone()).await.map(|_| ());
+        let count = provider.count_tokens(req).await.map(|_| ());
+
+        assert_media_refusal(complete, &format!("{row} (messages)"), field_at);
+        assert_media_refusal(count, &format!("{row} (count_tokens)"), field_at);
+        let received = mock_server.received_requests().await.unwrap();
+        assert!(received.is_empty(), "{row}: no upstream call");
+    }
+}
+
+/// https and data media URLs reach the Mantle upstream on both paths.
+#[tokio::test]
+async fn mantle_lane_forwards_https_and_data_media_urls() {
+    let rows: Vec<(&str, ChatRequest)> = vec![
+        (
+            "native image https",
+            user_parts_req(native_image("https://example.com/a.png")),
+        ),
+        (
+            "openai image_url data",
+            user_parts_req(image_url_part("data:image/png;base64,AAAA")),
+        ),
+        (
+            "document source https",
+            user_parts_req(url_document("https://example.com/a.pdf")),
+        ),
+        (
+            "tool_result nested image https",
+            tool_round_req(json!({}), native_image("https://example.com/b.png")),
+        ),
+        (
+            "verbatim file block file_url https",
+            user_parts_req(file_url_part("https://example.com/c.pdf")),
+        ),
+    ];
+
+    for (row, req) in rows {
+        let mock_server = media_upstream().await;
+        let provider = mantle_provider_bearer(&mock_server.uri()).await;
+
+        provider
+            .complete(req.clone())
+            .await
+            .unwrap_or_else(|e| panic!("{row}: messages must reach the upstream, got {e:?}"));
+        provider
+            .count_tokens(req)
+            .await
+            .unwrap_or_else(|e| panic!("{row}: count_tokens must reach the upstream, got {e:?}"));
+
+        let received = mock_server.received_requests().await.unwrap();
+        assert_eq!(received.len(), 2, "{row}");
+    }
+}
+
+/// Client tool arguments are not media: a `tool_use.input` naming an s3 URL
+/// in a media-shaped member reaches the Mantle upstream verbatim.
+#[tokio::test]
+async fn mantle_lane_does_not_inspect_tool_use_input() {
+    let mock_server = media_upstream().await;
+    let provider = mantle_provider_bearer(&mock_server.uri()).await;
+    let input =
+        json!({"image_url": planted("s3"), "source": {"type": "url", "url": planted("s3")}});
+    let req = tool_round_req(input.clone(), text_part("done"));
+
+    provider
+        .complete(req)
+        .await
+        .expect("a tool_use input naming s3 is not a media URL");
+
+    let received = mock_server.received_requests().await.unwrap();
+    let body: Value = serde_json::from_slice(&received[0].body).unwrap();
+    assert_eq!(body["messages"][1]["content"][0]["input"], input, "{body}");
+}
+
+/// Off Mantle the URL check does not run: an empty OpenAI `image_url` still
+/// ships as an empty url source, and an s3 image reaches the upstream.
+#[tokio::test]
+async fn first_party_lane_forwards_media_urls_unchanged() {
+    let rows = [
+        (
+            "empty image_url",
+            user_parts_req(image_url_part("")),
+            json!({"type": "url", "url": ""}),
+        ),
+        (
+            "native image s3",
+            user_parts_req(native_image(&planted("s3"))),
+            json!({"type": "url", "url": planted("s3")}),
+        ),
+    ];
+
+    for (row, req, expected_source) in rows {
+        let mock_server = media_upstream().await;
+        let provider = make_provider(&mock_server.uri());
+
+        provider
+            .complete(req)
+            .await
+            .unwrap_or_else(|e| panic!("{row}: first-party lane must forward, got {e:?}"));
+
+        let received = mock_server.received_requests().await.unwrap();
+        let body: Value = serde_json::from_slice(&received[0].body).unwrap();
+        assert_eq!(
+            body["messages"][0]["content"][1]["source"], expected_source,
+            "{row}: {body}"
+        );
+    }
+}

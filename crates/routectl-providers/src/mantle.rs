@@ -95,7 +95,6 @@ impl std::fmt::Debug for MantleAuth {
 /// one raw layout rather than a raw and a normalized one. The empty string
 /// refuses.
 #[cfg(feature = "bedrock")]
-#[cfg_attr(not(feature = "openai-responses"), allow(dead_code))]
 pub(crate) fn is_forwardable_media_url(url: &str) -> bool {
     let scheme = if url.starts_with("https://") {
         "https"
@@ -115,15 +114,19 @@ pub(crate) fn is_forwardable_media_url(url: &str) -> bool {
 }
 
 /// Object members the media-URL walker never descends into: tool
-/// definitions and their JSON schemas are client-authored declarations the
-/// upstream does not fetch from.
+/// definitions and their JSON schemas. Mantle does not fetch from tool
+/// definitions today; if it enables image generation, the image generation
+/// tool's `input_image_mask.image_url` is the member to revisit.
 #[cfg(feature = "bedrock")]
-#[cfg_attr(not(feature = "openai-responses"), allow(dead_code))]
 const MEDIA_WALK_SKIPPED_MEMBERS: [&str; 3] = ["tools", "input_schema", "parameters"];
+
+/// `source.type` values whose payload is not a URL, so a `url` member beside
+/// them is not one the upstream fetches.
+#[cfg(feature = "bedrock")]
+const NON_URL_SOURCE_KINDS: [&str; 4] = ["base64", "text", "file", "content"];
 
 /// Longest object key rendered verbatim in a refusal path.
 #[cfg(feature = "bedrock")]
-#[cfg_attr(not(feature = "openai-responses"), allow(dead_code))]
 const MAX_RENDERED_KEY_LEN: usize = 64;
 
 /// Refuse a Mantle request value that carries a media URL the upstream
@@ -133,26 +136,28 @@ const MAX_RENDERED_KEY_LEN: usize = 64;
 /// Mantle lanes share it.
 ///
 /// It descends every object and array under `root` and checks:
-/// - a member named `image_url` holding a string, or an object whose `url`
-///   is a string;
-/// - a member named `file_url` holding a string;
-/// - a member named `source` holding an object whose `type` is `url`, by
-///   its `url`.
+/// - every member whose key ends in `_url`: it must be a string, except that
+///   `image_url` may also be an object whose `url` is a string;
+/// - a member named `source` holding an object, by its `url`, when its
+///   `type` is `url`, or when it carries a `url` member and its `type` is
+///   not a non-URL kind (`base64`, `text`, `file`, `content`).
 ///
-/// A matched member that is present but null, empty, non-string, or (for
-/// the object forms) missing its `url` refuses.
+/// A matched member that is null, empty or of another shape, or a `url`
+/// source missing its `url`, refuses. A bare `url` member elsewhere is not
+/// checked: citation annotations and search results carry one the upstream
+/// does not fetch.
 ///
 /// It never descends into string values (function-call `arguments` are
 /// JSON-encoded strings), any member named `tools`, `input_schema` or
 /// `parameters`, or the `input` member of an object whose `type` is
-/// `tool_use` (client-authored tool arguments on Anthropic shapes).
+/// `tool_use` (client-authored tool arguments on Anthropic shapes). Server
+/// tool inputs (`server_tool_use`, `mcp_tool_use`) are walked.
 ///
 /// `path` names `root` in the refusal message. The message names the
 /// field, its position and the accepted scheme class, never the URL; an
 /// object key that is not a short ASCII identifier renders as `<key>`
 /// because client keys are client bytes.
 #[cfg(feature = "bedrock")]
-#[cfg_attr(not(feature = "openai-responses"), allow(dead_code))]
 pub(crate) fn refuse_unforwardable_media_urls(
     provider_id: &str,
     root: &serde_json::Value,
@@ -171,14 +176,13 @@ pub(crate) fn refuse_unforwardable_media_urls(
     }
 }
 
-/// The first refused media member under `value`, as its field name and the
-/// rendered path of the object holding it.
+/// The first refused media member under `value`, as its rendered field name
+/// and the rendered path of the object holding it.
 #[cfg(feature = "bedrock")]
-#[cfg_attr(not(feature = "openai-responses"), allow(dead_code))]
-fn find_unforwardable_media_url(
-    value: &serde_json::Value,
+fn find_unforwardable_media_url<'v>(
+    value: &'v serde_json::Value,
     path: &str,
-) -> Option<(&'static str, String)> {
+) -> Option<(&'v str, String)> {
     use serde_json::Value;
 
     match value {
@@ -203,44 +207,50 @@ fn find_unforwardable_media_url(
     }
 }
 
-/// The media member of this object that refuses, if any.
+/// The rendered name of the media member of this object that refuses, if
+/// any.
 #[cfg(feature = "bedrock")]
-#[cfg_attr(not(feature = "openai-responses"), allow(dead_code))]
-fn refused_media_member(
-    members: &serde_json::Map<String, serde_json::Value>,
-) -> Option<&'static str> {
-    use serde_json::Value;
-
-    if let Some(v) = members.get("image_url") {
-        let url = if v.is_object() { v.get("url") } else { Some(v) };
-        if !passes_media_url_check(url) {
-            return Some("image_url");
-        }
+fn refused_media_member(members: &serde_json::Map<String, serde_json::Value>) -> Option<&str> {
+    let refused_url_member = members
+        .iter()
+        .filter(|(key, _)| key.ends_with("_url"))
+        .find(|(key, value)| !url_member_passes(key, value));
+    if let Some((key, _)) = refused_url_member {
+        return Some(render_key(key));
     }
-    if members
-        .get("file_url")
-        .is_some_and(|v| !passes_media_url_check(Some(v)))
-    {
-        return Some("file_url");
-    }
-    if let Some(source) = members.get("source").filter(|s| s.is_object()) {
-        let is_url_source = source.get("type").and_then(Value::as_str) == Some("url");
-        if is_url_source && !passes_media_url_check(source.get("url")) {
-            return Some("source");
-        }
+    let source = members.get("source").filter(|s| s.is_object())?;
+    if is_url_source(source) && !passes_media_url_check(source.get("url")) {
+        return Some("source");
     }
     None
 }
 
+/// Whether a member whose key ends in `_url` carries a forwardable URL.
 #[cfg(feature = "bedrock")]
-#[cfg_attr(not(feature = "openai-responses"), allow(dead_code))]
+fn url_member_passes(key: &str, value: &serde_json::Value) -> bool {
+    if key == "image_url" && value.is_object() {
+        return passes_media_url_check(value.get("url"));
+    }
+    passes_media_url_check(Some(value))
+}
+
+/// Whether a `source` object names a URL the upstream fetches.
+#[cfg(feature = "bedrock")]
+fn is_url_source(source: &serde_json::Value) -> bool {
+    match source.get("type").and_then(serde_json::Value::as_str) {
+        Some("url") => true,
+        Some(kind) if NON_URL_SOURCE_KINDS.contains(&kind) => false,
+        _ => source.get("url").is_some(),
+    }
+}
+
+#[cfg(feature = "bedrock")]
 fn passes_media_url_check(url: Option<&serde_json::Value>) -> bool {
     url.and_then(serde_json::Value::as_str)
         .is_some_and(is_forwardable_media_url)
 }
 
 #[cfg(feature = "bedrock")]
-#[cfg_attr(not(feature = "openai-responses"), allow(dead_code))]
 fn render_key(key: &str) -> &str {
     let is_identifier = !key.is_empty()
         && key.len() <= MAX_RENDERED_KEY_LEN
@@ -523,6 +533,31 @@ mod tests {
                     json!({"params": {"image_url": S3}}),
                     "`image_url` at root.params ",
                 ),
+                (
+                    "file_url null",
+                    json!({"file_url": null}),
+                    "`file_url` at root ",
+                ),
+                (
+                    "any _url member string s3",
+                    json!({"type": "video", "video_url": S3}),
+                    "`video_url` at root ",
+                ),
+                (
+                    "non-identifier _url key renders as placeholder",
+                    json!({"planted-bucket-zq7_url": S3}),
+                    "`<key>` at root ",
+                ),
+                (
+                    "source with url and no type",
+                    json!({"type": "image", "source": {"url": S3}}),
+                    "`source` at root ",
+                ),
+                (
+                    "source with url and an unknown type",
+                    json!({"source": {"type": "s3_location", "url": S3}}),
+                    "`source` at root ",
+                ),
             ];
 
             for (row, root, expected) in rows {
@@ -584,6 +619,22 @@ mod tests {
                     json!({"source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}}),
                 ),
                 ("source string", json!({"source": S3})),
+                (
+                    "source base64 beside a url member",
+                    json!({"source": {"type": "base64", "data": "AAAA", "url": S3}}),
+                ),
+                (
+                    "source file beside a url member",
+                    json!({"source": {"type": "file", "file_id": "f1", "url": S3}}),
+                ),
+                (
+                    "bare url member",
+                    json!({"type": "url_citation", "url": S3, "title": "t"}),
+                ),
+                (
+                    "url-like key without the underscore suffix",
+                    json!({"imageurl": S3, "urls": [S3]}),
+                ),
                 (
                     "plain text mentioning s3",
                     json!([{"type": "input_text", "text": S3}]),

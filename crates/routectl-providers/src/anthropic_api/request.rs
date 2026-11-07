@@ -1238,9 +1238,26 @@ pub(crate) fn normalize(
     let (mut body, deferred) = assembled?;
     if mantle_lane {
         withhold_mantle_credential_fields(id, &mut body, req);
+        #[cfg(feature = "bedrock")]
+        refuse_unforwardable_mantle_media(id, &body)?;
     }
     deferred.warn(id);
     Ok(body)
+}
+
+/// Refuse a Bedrock Mantle body whose `system` or `messages` carries a media
+/// URL the upstream would fetch under the operator's AWS identity, unless it
+/// is `https` or `data`. Walks the final body, so a block copied verbatim
+/// and a nested `tool_result` are checked like a translated one; top-level
+/// `tools` are never walked.
+#[cfg(feature = "bedrock")]
+fn refuse_unforwardable_mantle_media(id: &str, body: &Value) -> Result<()> {
+    for member in ["system", "messages"] {
+        if let Some(value) = body.get(member) {
+            crate::mantle::refuse_unforwardable_media_urls(id, value, member)?;
+        }
+    }
+    Ok(())
 }
 
 /// Remove `mcp_servers` from a Bedrock Mantle body, client and operator
