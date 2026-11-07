@@ -92,7 +92,7 @@ fn load_blocking(path: &Path) -> OAuthResult<CredentialsFile> {
     let parsed: CredentialsFile =
         serde_json::from_slice(&bytes).map_err(|e| OAuthError::CorruptedFile {
             path: display.clone(),
-            detail: e.to_string(),
+            detail: crate::oauth::serde_error_summary(&e),
         })?;
 
     if parsed.schema_version != SCHEMA_VERSION {
@@ -128,6 +128,8 @@ fn read_validated_blocking(path: &Path) -> OAuthResult<Option<Vec<u8>>> {
         )));
     }
 
+    // No mode check on Windows: the file is kept owner-only by the
+    // user-profile directory ACL it lives under.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -439,6 +441,20 @@ mod tests {
             OAuthError::CorruptedFile { .. } => {}
             other => panic!("expected CorruptedFile, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn load_corrupted_reports_class_and_position_without_the_value() {
+        use crate::oauth::parse_error_fixture as fx;
+        fx::assert_raw_serde_quotes_sentinel();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credentials.json");
+        fx::write_credentials(&path);
+
+        let err = load(&path).await.unwrap_err();
+
+        assert!(matches!(err, OAuthError::CorruptedFile { .. }), "{err:?}");
+        fx::assert_value_free_with_position(&err.to_string());
     }
 
     #[tokio::test]

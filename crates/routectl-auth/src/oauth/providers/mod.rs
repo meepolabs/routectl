@@ -227,16 +227,9 @@ pub mod testing {
 /// that are enough to triage a shape mismatch. Shared by every provider's
 /// `parse_token_response_json` so the four cannot drift.
 pub(super) fn token_parse_error(e: &serde_json::Error) -> OAuthError {
-    let kind = match e.classify() {
-        serde_json::error::Category::Io => "io",
-        serde_json::error::Category::Syntax => "syntax",
-        serde_json::error::Category::Data => "data",
-        serde_json::error::Category::Eof => "eof",
-    };
     OAuthError::TokenEndpoint(format!(
-        "parse token response: {kind} error at line {} column {}",
-        e.line(),
-        e.column()
+        "parse token response: {}",
+        crate::oauth::serde_error_summary(e)
     ))
 }
 
@@ -497,8 +490,12 @@ pub(super) fn decode_jwt_payload<T: DeserializeOwned>(
     let bytes = URL_SAFE_NO_PAD
         .decode(payload_b64)
         .map_err(|e| OAuthError::TokenEndpoint(format!("JWT payload base64 decode: {e}")))?;
-    serde_json::from_slice(&bytes)
-        .map_err(|e| OAuthError::TokenEndpoint(format!("JWT payload JSON parse: {e}")))
+    serde_json::from_slice(&bytes).map_err(|e| {
+        OAuthError::TokenEndpoint(format!(
+            "JWT payload JSON parse: {}",
+            crate::oauth::serde_error_summary(&e)
+        ))
+    })
 }
 
 #[cfg(test)]
@@ -688,6 +685,27 @@ mod tests {
                 other => panic!("{row}: expected TokenEndpoint, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn jwt_payload_parse_error_omits_the_claim_value() {
+        let marker = ["claim", "marker", "91c2"].join("-");
+        let raw = format!(r#"{{"sub":"{marker}"}}"#);
+        let control = serde_json::from_str::<std::collections::BTreeMap<String, u64>>(&raw)
+            .unwrap_err()
+            .to_string();
+        assert!(control.contains(&marker), "fixture control: {control}");
+        let payload = URL_SAFE_NO_PAD.encode(raw.as_bytes());
+
+        let err = decode_jwt_payload::<std::collections::BTreeMap<String, u64>>(
+            &format!("h.{payload}.s"),
+            "id_token",
+        )
+        .unwrap_err();
+
+        let msg = err.to_string();
+        assert!(!msg.contains(&marker), "value leaked: {msg}");
+        assert!(msg.contains("data error at line 1 column"), "{msg}");
     }
 
     #[test]

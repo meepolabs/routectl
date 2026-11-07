@@ -166,6 +166,8 @@ impl ManagedSecretStore {
                         path: dir.display().to_string(),
                     });
                 }
+                // No mode check on Windows: the directory is kept
+                // owner-only by the user-profile ACL it lives under.
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;

@@ -168,17 +168,89 @@ impl From<serde_json::Error> for OAuthError {
     fn from(e: serde_json::Error) -> Self {
         Self::CorruptedFile {
             path: "<unknown>".into(),
-            detail: e.to_string(),
+            detail: serde_error_summary(&e),
         }
     }
+}
+
+/// Value-free description of a JSON parse failure: the error class plus
+/// its line and column. serde's own `Display` quotes the offending value,
+/// which in credential and token JSON can be a secret, so no
+/// operator-visible error may carry it.
+pub(crate) fn serde_error_summary(e: &serde_json::Error) -> String {
+    let kind = match e.classify() {
+        serde_json::error::Category::Io => "io",
+        serde_json::error::Category::Syntax => "syntax",
+        serde_json::error::Category::Data => "data",
+        serde_json::error::Category::Eof => "eof",
+    };
+    format!("{kind} error at line {} column {}", e.line(), e.column())
 }
 
 /// `OAuthError`-flavored Result alias for use within this module.
 pub type OAuthResult<T> = std::result::Result<T, OAuthError>;
 
 #[cfg(test)]
+pub(crate) mod parse_error_fixture {
+    //! A credentials file whose `schema_version` holds a string marker
+    //! where a number belongs, so serde's raw message quotes the marker.
+
+    use std::path::Path;
+
+    pub fn sentinel() -> String {
+        ["SENTINEL", "7f3a"].join("-")
+    }
+
+    pub fn credentials_bytes() -> Vec<u8> {
+        format!(r#"{{"schema_version":"{}","providers":{{}}}}"#, sentinel()).into_bytes()
+    }
+
+    /// Writes the fixture owner-only so the loader reaches the parse step.
+    pub fn write_credentials(path: &Path) {
+        std::fs::write(path, credentials_bytes()).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+    }
+
+    /// The raw serde message for the fixture carries the marker; without
+    /// this the value-free assertions below would hold vacuously.
+    pub fn assert_raw_serde_quotes_sentinel() {
+        let raw =
+            serde_json::from_slice::<crate::oauth::types::CredentialsFile>(&credentials_bytes())
+                .unwrap_err()
+                .to_string();
+        assert!(raw.contains(&sentinel()), "fixture control: {raw}");
+    }
+
+    pub fn assert_value_free_with_position(msg: &str) {
+        assert!(!msg.contains(&sentinel()), "value leaked: {msg}");
+        assert!(msg.contains("line 1"), "position missing: {msg}");
+    }
+}
+
+#[cfg(test)]
 mod tests {
+    use super::parse_error_fixture::{
+        assert_raw_serde_quotes_sentinel, assert_value_free_with_position, credentials_bytes,
+    };
     use super::{OAuthError, known_provider_ids};
+
+    #[test]
+    fn from_serde_error_reports_class_and_position_without_the_value() {
+        assert_raw_serde_quotes_sentinel();
+        let e = serde_json::from_slice::<super::types::CredentialsFile>(&credentials_bytes())
+            .unwrap_err();
+
+        let err = OAuthError::from(e);
+
+        assert!(matches!(err, OAuthError::CorruptedFile { .. }), "{err:?}");
+        let msg = err.to_string();
+        assert_value_free_with_position(&msg);
+        assert!(msg.contains("data error at line 1 column"), "{msg}");
+    }
 
     /// The `UnknownProvider` operator message must enumerate the live
     /// registry, not a stale hardcoded literal. Pins that the newly

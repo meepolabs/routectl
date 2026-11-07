@@ -5609,7 +5609,9 @@ on port 1455 (the codex public PKCE client registers fixed redirect URIs
 against that port), opens the browser to OpenAI's auth flow, exchanges
 the authorization code for an access + refresh token pair, and persists
 them to `~/.config/routectl/credentials.json` (atomic write, mode 0600
-on Unix; same hygiene as the `file://` secret-ref path).
+on Unix; same hygiene as the `file://` secret-ref path). Windows has no
+mode check: the file relies on the user-profile directory ACL to stay
+owner-only.
 
 The login flow is browser-only -- `routectl login codex --print-url`
 is rejected, because the OpenAI auth flow has no headless paste-back

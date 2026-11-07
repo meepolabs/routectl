@@ -762,6 +762,8 @@ list with more narrative.
 
 ### Fixed
 
+- **A corrupted `credentials.json` error now names only the JSON error class with its line and column (for example `data error at line 1 column 20`), never the file's contents; the same applies to an unparseable token JWT payload.** On Windows there is no owner-only mode check on the credentials file; it relies on the user-profile directory ACL.
+
 - **`routectl login <provider> --label <seat>` readmits a seat that was unusable at startup or became unusable later, without restarting the daemon.**
 
 - **A stream that ends after its half-open test was superseded no longer closes or reopens the breaker for the newer test.** Each admission now carries the breaker state it was admitted under, and a success, failure, park or slot release from an older state is dropped. Settlements from requests admitted through a closed breaker that land after an open and close cycle are dropped the same way; concurrent requests admitted through one closed breaker still count toward the same trip.

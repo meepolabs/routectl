@@ -358,3 +358,20 @@ async fn open_default_degradable_yields_no_config_dir_without_home_or_xdg() {
         "no HOME/XDG must yield NoConfigDir, not a degraded Present store"
     );
 }
+
+#[tokio::test]
+async fn open_corrupted_file_reports_class_and_position_without_the_value() {
+    use crate::oauth::parse_error_fixture as fx;
+    fx::assert_raw_serde_quotes_sentinel();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("credentials.json");
+    fx::write_credentials(&path);
+
+    let err = OAuthStore::open(&path)
+        .await
+        .err()
+        .expect("corrupt file must fail open");
+
+    assert!(matches!(err, OAuthError::CorruptedFile { .. }), "{err:?}");
+    fx::assert_value_free_with_position(&err.to_string());
+}
