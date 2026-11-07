@@ -1496,7 +1496,10 @@ pub(crate) fn map_error(shape: ErrorEnvelopeShape, e: Error) -> Response {
         // caller-derived input, so the verbose message stays. Kept as
         // explicit arms (no wildcard) so a new core Error variant fails
         // to compile here and forces a client-exposure decision.
-        Error::UnknownAlias(_) | Error::Validation(..) | Error::Streaming(_) => e.to_string(),
+        Error::UnknownAlias(_) | Error::Validation(..) => e.to_string(),
+        // A stream framing failure quotes upstream bytes (a serde error
+        // over an SSE frame, an in-stream error message).
+        Error::Streaming(_) => client_upstream_detail(&e.to_string()),
     };
     // Lift the upstream classifier so an SDK that branches on
     // `error.type` / `error.code` keeps the upstream signal instead of
@@ -1584,16 +1587,15 @@ fn sanitize_upstream_for_client(status: u16, parsed: Option<&ParsedErrorBody>) -
 /// caller falls back to a status-only message rather than leaking sibling
 /// keys or the raw body.
 ///
-/// The extracted detail is length-bounded ([`MAX_UPSTREAM_DETAIL_CHARS`])
-/// before it reaches the client: a legitimate upstream classifier is short,
-/// but a non-AWS nested `{"error":{"message":...}}` envelope (a reverse
-/// proxy or custom endpoint) could otherwise reflect an oversized message
-/// verbatim. This is the client-facing sink counterpart to the
-/// provider-side cap on what a request-fault body may carry raw.
+/// The extracted detail passes [`client_upstream_detail`] before it reaches
+/// the client: scrubbed, control-char filtered and length-bounded
+/// ([`MAX_UPSTREAM_DETAIL_CHARS`]), since a non-AWS nested
+/// `{"error":{"message":...}}` envelope (a reverse proxy or custom endpoint)
+/// could otherwise reflect credential-shaped or oversized text verbatim.
 fn upstream_error_detail(parsed: Option<&ParsedErrorBody>) -> Option<String> {
     let parsed = parsed?;
     let detail = parsed.error_message().or_else(|| parsed.error_type())?;
-    Some(bound_upstream_detail(detail))
+    Some(client_upstream_detail(detail))
 }
 
 /// Read the upstream's own top-level `error.param` from the error's
@@ -1603,12 +1605,22 @@ fn upstream_error_detail(parsed: Option<&ParsedErrorBody>) -> Option<String> {
 /// non-string value, so the OpenAI
 /// envelope emits `param: null` unless the upstream genuinely named one.
 ///
-/// Length-bounded through the same [`bound_upstream_detail`] cap the
-/// message extractor uses: a real `param` is a short field name, but a
-/// proxied or abusive envelope could otherwise reflect an oversized
-/// string verbatim.
+/// Passes the same [`client_upstream_detail`] the message extractor uses:
+/// a real `param` is a short field name, but a proxied or abusive envelope
+/// could otherwise reflect credential-shaped or oversized text verbatim.
 fn upstream_error_param(parsed: Option<&ParsedErrorBody>) -> Option<String> {
-    Some(bound_upstream_detail(parsed?.error_param()?))
+    Some(client_upstream_detail(parsed?.error_param()?))
+}
+
+/// The one rendering of upstream-authored text for a client envelope: the
+/// credential and principal scrub, then the control-char filter, then the
+/// length bound.
+fn client_upstream_detail(detail: &str) -> String {
+    let scrubbed = routectl_core::scrub_upstream_text(detail);
+    // Uncapped here: a cap at this step would cut without the marker the
+    // bound below appends.
+    let filtered = routectl_core::sanitize_for_log_with_cap(&scrubbed, usize::MAX);
+    bound_upstream_detail(&filtered)
 }
 
 /// Upper bound on the upstream-authored detail surfaced verbatim in a
@@ -1914,6 +1926,10 @@ mod refusal_reason_matrix_tests;
 #[cfg(test)]
 #[path = "upstream_parse_cap_tests.rs"]
 mod upstream_parse_cap_tests;
+
+#[cfg(test)]
+#[path = "upstream_detail_scrub_tests.rs"]
+mod upstream_detail_scrub_tests;
 
 #[cfg(test)]
 #[path = "stream_evidence_settle_tests.rs"]
