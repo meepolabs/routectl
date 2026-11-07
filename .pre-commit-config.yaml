@@ -58,11 +58,10 @@ repos:
 
   # Staged secret scan. The rev is what pins the gitleaks BINARY (pre-commit
   # builds it from this commit), which is the whole point of using the upstream
-  # hook here: an unversioned local gitleaks silently lacks rules the CI
-  # action has, and that bit this repo once -- an old system gitleaks missed a
-  # `jwt` finding the action caught. The rev is the full commit sha of the
-  # release tag named in its trailing comment: a tag can be moved upstream, a
-  # commit cannot. Keep that release equal to GITLEAKS_VERSION
+  # hook here: it keeps the local scan on the same gitleaks release, and so
+  # the same detection rules, as the CI action. The rev is the full commit
+  # sha of the release tag named in its trailing comment: a tag can be moved
+  # upstream, a commit cannot. Keep that release equal to GITLEAKS_VERSION
   # in the shared security-floor action's floor.sh, at the release that
   # .github/workflows/security.yml pins, so local and CI scan with the same
   # detection rules; bump it when that pin moves. To bump: run
