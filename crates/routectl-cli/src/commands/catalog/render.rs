@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use routectl_router::{
     CachePricingSelector, CatalogOverlay, CatalogRow, EffectiveRow, OverlaySource, Source,
-    baked_table_rows, is_stale_today, merge, overlay_revision,
+    baked_table_rows, is_stale_days, merge, overlay_revision, stale_after_days, today_epoch_day,
 };
 
 /// Table column header, in order.
@@ -50,7 +50,7 @@ const fn source_str(source: Source) -> &'static str {
 /// show" shape (dashes for every economics / provenance column) -- the two
 /// states share the same downstream sentinel treatment, so the display
 /// treats them identically apart from the status label itself.
-fn render_row(key: &str, effective: &EffectiveRow) -> Vec<String> {
+fn render_row(key: &str, effective: &EffectiveRow, today: i64) -> Vec<String> {
     let (provider_kind, model_glob) = split_selector(key);
     match effective {
         EffectiveRow::Present {
@@ -58,7 +58,7 @@ fn render_row(key: &str, effective: &EffectiveRow) -> Vec<String> {
             source,
             verified_at,
         } => {
-            let stale = if is_stale_today(verified_at) {
+            let stale = if is_stale_days(verified_at, today, stale_after_days()) {
                 "WARN"
             } else {
                 "-"
@@ -108,6 +108,12 @@ fn dashed_row(provider_kind: String, model_glob: String, status: &str) -> Vec<St
 /// construction. See the `missing state renders` test below for the
 /// direct classification/render coverage `MISSING` still needs.
 pub fn build_list_data(overlay: &CatalogOverlay) -> (Vec<Vec<String>>, Vec<String>) {
+    build_list_data_at(overlay, today_epoch_day())
+}
+
+/// [`build_list_data`] with "today" supplied as an epoch-day count, which
+/// decides the `stale` column.
+fn build_list_data_at(overlay: &CatalogOverlay, today: i64) -> (Vec<Vec<String>>, Vec<String>) {
     let baked = baked_table_rows();
     let mut baked_map: BTreeMap<String, &CatalogRow> = BTreeMap::new();
     for cell in &baked {
@@ -131,7 +137,7 @@ pub fn build_list_data(overlay: &CatalogOverlay) -> (Vec<Vec<String>>, Vec<Strin
         {
             punch_set.insert(key.clone());
         }
-        rows.push(render_row(key, &effective));
+        rows.push(render_row(key, &effective, today));
     }
 
     (rows, punch_set.into_iter().collect())

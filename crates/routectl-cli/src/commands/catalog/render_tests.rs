@@ -1,6 +1,6 @@
 use super::*;
 
-use routectl_router::{OverlayCell, load_catalog_overlay};
+use routectl_router::{CATALOG_SNAPSHOT_DATE, OverlayCell, epoch_day_age, load_catalog_overlay};
 
 // -----------------------------------------------------------------------
 // overlay_summary_line: list's header (revision + counts by source).
@@ -55,17 +55,35 @@ fn overlay_summary_line_on_an_empty_overlay_reports_zero_counts() {
 
 #[test]
 fn present_baked_row_shows_baked_source_and_no_stale_warn() {
-    // Arrange: no overlay entry -- the baked cell wins as-is.
+    // Arrange: no overlay entry, so the baked cell wins as-is; today is the
+    // last day of the staleness window after the snapshot date.
     let overlay = CatalogOverlay::default();
+    let today = snapshot_epoch_day() + stale_after_days();
 
     // Act
-    let (rows, _) = build_list_data(&overlay);
+    let (rows, _) = build_list_data_at(&overlay, today);
 
     // Assert
     let row = find_row(&rows, "openai-compat", "grok-*").expect("baked row present");
     assert_eq!(row[2], "PRESENT");
     assert_eq!(row[10], "baked");
-    assert_eq!(row[12], "-", "the fresh baked snapshot date is not stale");
+    assert_eq!(row[11], CATALOG_SNAPSHOT_DATE);
+    assert_eq!(row[12], "-", "a baked row inside the window is not stale");
+}
+
+#[test]
+fn present_baked_row_past_the_window_shows_stale_warn() {
+    // Arrange: the same baked row, one day past the staleness window.
+    let overlay = CatalogOverlay::default();
+    let today = snapshot_epoch_day() + stale_after_days() + 1;
+
+    // Act
+    let (rows, _) = build_list_data_at(&overlay, today);
+
+    // Assert
+    let row = find_row(&rows, "openai-compat", "grok-*").expect("baked row present");
+    assert_eq!(row[10], "baked");
+    assert_eq!(row[12], "WARN");
 }
 
 #[test]
@@ -173,7 +191,7 @@ fn stale_verified_at_renders_warn_marker() {
     );
 
     // Act
-    let (rows, _) = build_list_data(&overlay);
+    let (rows, _) = build_list_data_at(&overlay, snapshot_epoch_day());
 
     // Assert
     let row = find_row(&rows, "openai-compat", "grok-*").expect("row present");
@@ -249,7 +267,7 @@ fn missing_state_renders_missing_status() {
     let effective = merge(None, None);
     assert_eq!(effective, EffectiveRow::Missing);
 
-    let row = render_row("openai-compat:nowhere-*", &effective);
+    let row = render_row("openai-compat:nowhere-*", &effective, snapshot_epoch_day());
     assert_eq!(row[2], "MISSING");
     for col in &row[3..] {
         assert_eq!(col, "-");
@@ -306,6 +324,13 @@ fn punch_list_cleared_when_overlay_supplies_a_window() {
         !punch_list.contains(&"anthropic-api:*".to_string()),
         "punch_list: {punch_list:?}"
     );
+}
+
+/// The baked snapshot date as an epoch-day count.
+fn snapshot_epoch_day() -> i64 {
+    const FAR_FUTURE_DAY: i64 = 1_000_000;
+    let age = epoch_day_age(CATALOG_SNAPSHOT_DATE, FAR_FUTURE_DAY).expect("snapshot date parses");
+    FAR_FUTURE_DAY - age
 }
 
 /// Locate a rendered row by `(provider_kind, model_glob)`.
