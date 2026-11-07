@@ -1,10 +1,14 @@
 //! Redaction of credential- and principal-shaped substrings from upstream
 //! error text before it reaches a client envelope or a log line.
 //!
-//! Every matcher runs over DECODED string values (an `error.message` after
-//! JSON decoding), never raw JSON text, where an escape can spell any
-//! marker. Matching is hand-rolled over bytes: every marker is ASCII, so a
-//! byte offset at a marker is always a char boundary.
+//! Callers pass DECODED string values (an `error.message` after JSON
+//! decoding), never raw JSON text. One decode can still leave escapes: a
+//! gateway nests another provider's JSON body inside its own message, and
+//! a signing error echoes a canonical request whose path is percent-encoded
+//! twice. So a JSON escape (`\n`, `\u0022`, `\"`, `\/`) or a `%XX` /
+//! `%25XX` escape counts as a delimiter, and the encoded spellings of the
+//! ARN markers match. Matching is hand-rolled over bytes: every marker is
+//! ASCII, so a byte offset at a marker is always a char boundary.
 
 use std::borrow::Cow;
 use std::ops::Range;
@@ -22,9 +26,10 @@ const NBSP: &[u8] = "\u{a0}".as_bytes();
 /// `[redacted]`. Deterministic; borrows `s` unchanged when nothing matches.
 ///
 /// Redacted shapes:
-/// - an AWS ARN starting a token, plain (`arn:aws:`, `arn:aws-<partition>:`)
-///   or percent-encoded (`arn%3aaws`, any case), with `:` or `%3a` after
-///   `aws` / the partition in either form, through the end of the token;
+/// - an AWS ARN starting a token, plain (`arn:aws:`, `arn:aws-<partition>:`),
+///   percent-encoded (`arn%3aaws`) or encoded twice (`arn%253aaws`), any
+///   case, with `:`, `%3a` or `%253a` after `aws` / the partition in any
+///   form, through the end of the token;
 /// - a 12-digit AWS account id written after the word `account` (see
 ///   [`names_aws_principal`]), the digits only;
 /// - a vendor credential keyed on its prefix: `sk-ant-api03-`,
@@ -34,8 +39,14 @@ const NBSP: &[u8] = "\u{a0}".as_bytes();
 ///   `A-Z0-9`), `AIza` (35), `ya29.` with an optional 1-3 digit legacy
 ///   segment (20+), a three-segment `eyJ` JWT (10+ per segment), `nvapi-`
 ///   (20+), `bedrock-api-key-` (20+) and `ABSK` (100+ base64);
-/// - the userinfo of a URL (`scheme://user:pass@` or `scheme://token@`),
-///   keeping the scheme and the `@`.
+/// - the value of an echoed `x-amz-security-token` (`:` or `=` after the
+///   name, any case, optional spaces or tabs, then 20+ of
+///   `[A-Za-z0-9+/=_%-]`), keeping the name;
+/// - the userinfo of a URL (`scheme://user:pass@` or `scheme://token@`, the
+///   slashes optionally JSON-escaped as `:\/\/`), keeping the scheme and
+///   the `@`. The scheme must be `[A-Za-z][A-Za-z0-9+.-]*` starting a token
+///   or following a `-` (as in `--https://`).
+#[must_use = "the returned text carries required redactions"]
 pub fn scrub_upstream_text(s: &str) -> Cow<'_, str> {
     let bytes = s.as_bytes();
     let mut out: Option<String> = None;
@@ -63,14 +74,15 @@ pub fn scrub_upstream_text(s: &str) -> Cow<'_, str> {
 
 /// True when `text` names an AWS principal or account in an AWS shape: an
 /// AWS ARN starting a token, plain (`arn:aws:` or a partition variant
-/// `arn:aws-<x>:`) or percent-encoded (`arn%3aaws`, any case, then `:` or
-/// `%3a`), or a
-/// 12-digit account id after the word `account` (any case), optionally
-/// followed by the word `id` or `number` (any case). Between `account`, the
-/// optional word and the digits, only these separators are skipped: space,
-/// tab, no-break space (U+00A0), `:`, `=`, `#`, `_`, `-`, `"`, `'`, `(` and
-/// `)`. A loose marker (a word ending in `arn:`, a long number such as a
+/// `arn:aws-<x>:`), percent-encoded (`arn%3aaws`) or encoded twice
+/// (`arn%253aaws`), any case, then `:`, `%3a` or `%253a`; or a 12-digit
+/// account id after the word `account` (any case), optionally followed by
+/// the word `id` or `number` (any case). Between `account`, the optional
+/// word and the digits, only these separators are skipped: space, tab,
+/// no-break space (U+00A0), `:`, `=`, `#`, `_`, `-`, `"`, `'`, `(`, `)` and
+/// `\`. A loose marker (a word ending in `arn:`, a long number such as a
 /// timestamp, an 11- or 13-digit run) is not one.
+#[must_use]
 pub fn names_aws_principal(text: &str) -> bool {
     let bytes = text.as_bytes();
     (0..bytes.len()).any(|at| arn_at(bytes, at).is_some() || account_id_at(bytes, at).is_some())
@@ -81,6 +93,7 @@ fn match_at(bytes: &[u8], at: usize) -> Option<Range<usize>> {
     arn_at(bytes, at)
         .or_else(|| account_id_at(bytes, at))
         .or_else(|| token_at(bytes, at))
+        .or_else(|| session_token_at(bytes, at))
         .or_else(|| userinfo_at(bytes, at))
 }
 
@@ -89,15 +102,34 @@ const fn is_token_char(b: u8) -> bool {
 }
 
 /// True when position `at` begins a token: nothing before it, a byte outside
-/// `[A-Za-z0-9_-]`, or a complete `%XX` escape (an encoded delimiter).
+/// `[A-Za-z0-9_-]`, or an escaped delimiter ending at `at`.
 fn starts_token(bytes: &[u8], at: usize) -> bool {
     if at == 0 || !is_token_char(bytes[at - 1]) {
         return true;
     }
-    at >= 3
-        && bytes[at - 3] == b'%'
-        && bytes[at - 2].is_ascii_hexdigit()
-        && bytes[at - 1].is_ascii_hexdigit()
+    let before = &bytes[..at];
+    ends_percent_escape(before) || ends_json_escape(before)
+}
+
+/// True when `before` ends in `%XX` or `%25XX` (a delimiter encoded once
+/// or twice).
+fn ends_percent_escape(before: &[u8]) -> bool {
+    match before {
+        [.., b'%', b'2', b'5', x, y] | [.., b'%', x, y] => {
+            x.is_ascii_hexdigit() && y.is_ascii_hexdigit()
+        }
+        _ => false,
+    }
+}
+
+/// True when `before` ends in a JSON escape that leaves a letter or digit
+/// last: `\b`, `\f`, `\n`, `\r`, `\t` or `\uXXXX`.
+fn ends_json_escape(before: &[u8]) -> bool {
+    match before {
+        [.., b'\\', b'u', a, b, c, d] if [a, b, c, d].iter().all(|h| h.is_ascii_hexdigit()) => true,
+        [.., b'\\', last] => matches!(last, b'b' | b'f' | b'n' | b'r' | b't'),
+        _ => false,
+    }
 }
 
 fn has_prefix_ci(bytes: &[u8], at: usize, prefix: &[u8]) -> bool {
@@ -125,31 +157,28 @@ fn arn_at(bytes: &[u8], at: usize) -> Option<Range<usize>> {
 
 /// End of `arn:aws` / `arn:aws-<partition>` and its separator at `at`.
 fn plain_arn_head(bytes: &[u8], at: usize) -> Option<usize> {
-    let rest = at + "arn:aws".len();
-    if bytes.get(at..rest)? != b"arn:aws" {
+    if !has_prefix_ci(bytes, at, b"arn:aws") {
         return None;
     }
-    after_arn_separator(bytes, after_partition(bytes, rest)?)
+    after_arn_separator(bytes, after_partition(bytes, at + "arn:aws".len())?)
 }
 
-/// End of `arn%3aaws` / `arn%3aaws-<partition>` (any case) and its
-/// separator at `at`.
+/// End of `arn%3aaws` / `arn%253aaws` (any case), an optional
+/// `-<partition>`, and its separator at `at`.
 fn encoded_arn_head(bytes: &[u8], at: usize) -> Option<usize> {
-    let rest = at + "arn%3aaws".len();
-    if !has_prefix_ci(bytes, at, b"arn%3aaws") {
-        return None;
-    }
-    after_arn_separator(bytes, after_partition(bytes, rest)?)
+    let head = [b"arn%3aaws".as_slice(), b"arn%253aaws"]
+        .into_iter()
+        .find(|head| has_prefix_ci(bytes, at, head))?;
+    after_arn_separator(bytes, after_partition(bytes, at + head.len())?)
 }
 
-/// Past a `:` or `%3a` (any case) at `at`: either spelling may follow
-/// either form of the head, since a partly encoded ARN is still one.
+/// Past a `:`, `%3a` or `%253a` (any case) at `at`: any spelling may follow
+/// any form of the head, since a partly encoded ARN is still one.
 fn after_arn_separator(bytes: &[u8], at: usize) -> Option<usize> {
-    if bytes.get(at) == Some(&b':') {
-        Some(at + 1)
-    } else {
-        has_prefix_ci(bytes, at, b"%3a").then_some(at + 3)
-    }
+    [b":".as_slice(), b"%3a", b"%253a"]
+        .into_iter()
+        .find(|sep| has_prefix_ci(bytes, at, sep))
+        .map(|sep| at + sep.len())
 }
 
 /// Skips an optional `-<partition>` at `at`; `None` for a bare `-`.
@@ -190,9 +219,10 @@ fn account_id_at(bytes: &[u8], at: usize) -> Option<Range<usize>> {
 fn skip_account_separators(bytes: &[u8], mut at: usize) -> usize {
     loop {
         match bytes.get(at) {
-            Some(b' ' | b'\t' | b':' | b'=' | b'#' | b'_' | b'-' | b'"' | b'\'' | b'(' | b')') => {
-                at += 1;
-            }
+            Some(
+                b' ' | b'\t' | b':' | b'=' | b'#' | b'_' | b'-' | b'"' | b'\'' | b'(' | b')'
+                | b'\\',
+            ) => at += 1,
             _ if bytes.get(at..at + NBSP.len()) == Some(NBSP) => at += NBSP.len(),
             _ => return at,
         }
@@ -324,14 +354,43 @@ fn bedrock_long_term_key_at(bytes: &[u8], at: usize) -> Option<Range<usize>> {
     Some(at..body_at + body + pad)
 }
 
-/// The userinfo of a URL whose `://` sits at `at`: everything after `://`
-/// up to the LAST `@` before the authority ends (the WHATWG URL parser's
-/// split). The span is the userinfo alone.
-fn userinfo_at(bytes: &[u8], at: usize) -> Option<Range<usize>> {
-    if !bytes.get(at..)?.starts_with(b"://") {
+/// Minimum length of an echoed session-token value.
+const SESSION_TOKEN_MIN: usize = 20;
+
+/// The value of an echoed `x-amz-security-token` header or query parameter
+/// whose name starts at `at`; the span is the value alone.
+fn session_token_at(bytes: &[u8], at: usize) -> Option<Range<usize>> {
+    const NAME: &[u8] = b"x-amz-security-token";
+    if !has_prefix_ci(bytes, at, NAME) || !starts_token(bytes, at) {
         return None;
     }
-    let start = at + "://".len();
+    let sep = at + NAME.len();
+    if !matches!(bytes.get(sep), Some(b':' | b'=')) {
+        return None;
+    }
+    let start = sep + 1 + run_len(bytes, sep + 1, |b| b == b' ' || b == b'\t');
+    let len = run_len(bytes, start, |b| {
+        b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'=' | b'_' | b'%' | b'-')
+    });
+    (len >= SESSION_TOKEN_MIN).then_some(start..start + len)
+}
+
+/// The userinfo of a URL whose `://` (or JSON-escaped `:\/\/`) sits at
+/// `at` after a valid scheme: everything after the slashes up to the LAST
+/// `@` before the authority ends (the WHATWG URL parser's split). The span
+/// is the userinfo alone.
+fn userinfo_at(bytes: &[u8], at: usize) -> Option<Range<usize>> {
+    let slashes = [b"://".as_slice(), b":\\/\\/"]
+        .into_iter()
+        .find(|slashes| {
+            bytes
+                .get(at..)
+                .is_some_and(|rest| rest.starts_with(slashes))
+        })?;
+    if !has_scheme_before(bytes, at) {
+        return None;
+    }
+    let start = at + slashes.len();
     let authority = run_len(bytes, start, |b| !ends_authority(b));
     let last_at = bytes[start..start + authority]
         .iter()
@@ -339,10 +398,27 @@ fn userinfo_at(bytes: &[u8], at: usize) -> Option<Range<usize>> {
     (last_at > 0).then_some(start..start + last_at)
 }
 
+/// True when the bytes before `colon` end in a URL scheme
+/// `[A-Za-z][A-Za-z0-9+.-]*` that starts a token or follows a `-`.
+fn has_scheme_before(bytes: &[u8], colon: usize) -> bool {
+    let is_scheme_char = |b: u8| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'.' | b'-');
+    let run = bytes[..colon]
+        .iter()
+        .rev()
+        .take_while(|&&b| is_scheme_char(b))
+        .count();
+    (colon - run..colon).any(|start| {
+        bytes[start].is_ascii_alphabetic()
+            && (starts_token(bytes, start) || bytes[start - 1] == b'-')
+    })
+}
+
+/// A backslash ends the authority as the WHATWG parser does for special
+/// schemes.
 const fn ends_authority(b: u8) -> bool {
     b.is_ascii_whitespace()
         || b.is_ascii_control()
-        || matches!(b, b'/' | b'?' | b'#' | b'"' | b'<' | b'>')
+        || matches!(b, b'/' | b'\\' | b'?' | b'#' | b'"' | b'<' | b'>')
 }
 
 #[cfg(test)]

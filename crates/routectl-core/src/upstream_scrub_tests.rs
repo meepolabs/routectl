@@ -180,11 +180,111 @@ fn leaves_each_token_prefix_one_below_its_floor() {
 
 #[test]
 fn anchored_prefixes_inside_a_token_stay() {
-    assert_clean(
-        "sk-admin mid-token",
-        &format!("flask-{}", key("sk-admin-", "a", 16)),
+    let jwt = format!(
+        "{}.{}.{}",
+        key("eyJ", "d", 10),
+        "e".repeat(10),
+        "f".repeat(10)
     );
-    assert_clean("AIza mid-token", &format!("x{}", key("AIza", "b", 35)));
+    let rows = [
+        ("sk-admin mid-token", key("sk-admin-", "a", 16)),
+        ("ASIA mid-token", key("ASIA", "Z", 16)),
+        ("AIza mid-token", key("AIza", "b", 35)),
+        ("ya29 mid-token", key("ya29.", "c", 20)),
+        ("jwt mid-token", jwt),
+        ("nvapi mid-token", key("nvapi-", "g", 20)),
+        (
+            "bedrock-api-key mid-token",
+            key("bedrock-api-key-", "h", 20),
+        ),
+        ("ABSK mid-token", key("ABSK", "i", 100)),
+    ];
+    for (name, token) in &rows {
+        assert_clean(name, &format!("value x{token} rejected"));
+    }
+}
+
+#[test]
+fn anchored_prefix_after_a_json_escape_is_redacted() {
+    let asia = key("ASIA", "Z", 16);
+    let rows = [
+        ("newline escape", format!(r"line\n{asia}")),
+        ("tab escape", format!(r"field\t{asia}")),
+        ("unicode escape", format!(r"quote\u0022{asia}")),
+        (
+            "tab escape after short unicode",
+            format!(r"bad\u00\t{asia}"),
+        ),
+    ];
+    for (name, input) in &rows {
+        assert_redacts(name, input, &asia);
+    }
+}
+
+#[test]
+fn redacts_double_encoded_arn_in_a_signing_canonical_request() {
+    let canonical = "POST\n/model/arn%253Aaws%253Abedrock%253Aus-east-1%253A123456789012\
+                     %253Ainference-profile%252Fabc/converse\n";
+    assert_redacts(
+        "arn double-encoded canonical path",
+        canonical,
+        "123456789012",
+    );
+    assert!(names_aws_principal(canonical));
+    let boundary = "path=%252Farn%253aAWS%253Aiam%253A%253A123456789012%253Arole x";
+    assert_redacts(
+        "arn double-encoded after encoded slash",
+        boundary,
+        "123456789012",
+    );
+    assert!(names_aws_principal(boundary));
+}
+
+#[test]
+fn redacts_echoed_session_token_value_and_keeps_the_header_name() {
+    let token = key("Tok", "Ab+/9=", 6);
+    let rows = [
+        (
+            "canonical header colon",
+            format!("x-amz-security-token:{token}\nhost"),
+            "x-amz-security-token:[redacted]\nhost",
+        ),
+        (
+            "query string equals",
+            format!("X-Amz-Security-Token={token}&X-Amz-Date=1"),
+            "X-Amz-Security-Token=[redacted]&X-Amz-Date=1",
+        ),
+        (
+            "mixed case header with space",
+            format!("X-AMZ-security-Token: {token}"),
+            "X-AMZ-security-Token: [redacted]",
+        ),
+        (
+            "percent-encoded value",
+            format!(
+                "x-amz-security-token={}%2F{}",
+                "a".repeat(10),
+                "b".repeat(10)
+            ),
+            "x-amz-security-token=[redacted]",
+        ),
+    ];
+    for (name, input, expected) in &rows {
+        assert_redacts(name, input, &token);
+        assert_eq!(scrub_upstream_text(input), *expected, "{name}");
+    }
+}
+
+#[test]
+fn short_session_token_value_stays() {
+    assert_clean(
+        "session token below floor",
+        &format!("x-amz-security-token:{}", "a".repeat(19)),
+    );
+    assert_clean(
+        "signed headers list",
+        &["host", "x-amz-date", "x-amz-security-token"].join(";"),
+    );
 }
 
 #[test]
@@ -201,6 +301,26 @@ fn redacts_url_userinfo_and_keeps_scheme_and_host() {
             "tok3n",
         ),
         ("at sign in password", "s3://u:p@ss@bucket/key", "p@ss"),
+        (
+            "escaped slashes",
+            r#"{\"url\":\"https:\/\/u:pw0rd@host\/x\"}"#,
+            "pw0rd",
+        ),
+        (
+            "scheme after arrow",
+            "redirect ->https://u:pw0rd@host",
+            "pw0rd",
+        ),
+        (
+            "scheme after double hyphen",
+            "--https://u:pw0rd@host",
+            "pw0rd",
+        ),
+        (
+            "scheme after newline escape",
+            r"x\nhttps://u:pw0rd@host",
+            "pw0rd",
+        ),
     ];
     for (name, input, planted) in rows {
         assert_redacts(name, input, planted);
@@ -209,6 +329,23 @@ fn redacts_url_userinfo_and_keeps_scheme_and_host() {
         scrub_upstream_text("fetch https://alice:pw@example.com/x"),
         "fetch https://[redacted]@example.com/x"
     );
+    assert_eq!(
+        scrub_upstream_text(r"https:\/\/u:pw@host"),
+        r"https:\/\/[redacted]@host"
+    );
+}
+
+#[test]
+fn userinfo_without_a_valid_scheme_stays() {
+    let rows = [
+        ("no scheme", "parse error: ://alice@host"),
+        ("scheme starting with a digit", "1abc://x@y"),
+        ("scheme inside a token", "x_https://u:pw@host"),
+        ("at sign after a backslash path", r"https://host\a@b"),
+    ];
+    for (name, input) in rows {
+        assert_clean(name, input);
+    }
 }
 
 #[test]
@@ -230,6 +367,17 @@ fn near_misses_return_borrowed() {
         ),
         ("email in prose", "contact support@example.com"),
         ("empty", ""),
+        ("account word in prose", "check your account settings"),
+        ("short number after account", "account 12345 of 3"),
+        (
+            "at sign in url path",
+            "see https://docs.example.com/a@b/c for details",
+        ),
+        ("arn word in prose", "learn: arn: aws docs"),
+        (
+            "at sign in escaped url path",
+            r"see https:\/\/docs.example.com\/a@b\/c",
+        ),
     ];
     for (name, input) in rows {
         assert_clean(name, input);
@@ -238,11 +386,41 @@ fn near_misses_return_borrowed() {
 }
 
 #[test]
-fn scrub_is_deterministic_and_preserves_multibyte_text() {
+fn scrub_is_deterministic() {
+    let input = format!(
+        "account 123456789012 arn:aws:iam::1:root {} https://u:p@h",
+        key("sk-proj-", "a", 16)
+    );
+    let outputs: Vec<_> = (0..3).map(|_| scrub_upstream_text(&input)).collect();
+    assert!(outputs.windows(2).all(|pair| pair[0] == pair[1]));
+}
+
+#[test]
+fn scrub_preserves_multibyte_text_around_redactions() {
     let input = "caf\u{e9} account 123456789012 \u{2014} arn:aws:iam::1:root";
-    let first = scrub_upstream_text(input);
-    assert_eq!(first, scrub_upstream_text(input));
-    assert_eq!(first, "caf\u{e9} account [redacted] \u{2014} [redacted]");
+    assert_eq!(
+        scrub_upstream_text(input),
+        "caf\u{e9} account [redacted] \u{2014} [redacted]"
+    );
+}
+
+#[test]
+fn redacts_arn_head_in_any_case() {
+    let rows = [
+        ("upper ARN", "ARN:aws:iam::123456789012:role/x denied"),
+        ("upper AWS", "arn:AWS:iam::123456789012:role/x denied"),
+    ];
+    for (name, input) in rows {
+        assert_redacts(name, input, "role/x");
+        assert!(names_aws_principal(input), "{name}: not named a principal");
+    }
+}
+
+#[test]
+fn redacts_account_id_after_escaped_quotes() {
+    let input = r#"{\"accountId\":\"123456789012\"}"#;
+    assert_redacts("escaped quotes", input, "123456789012");
+    assert!(names_aws_principal(input));
 }
 
 fn fixtures_dir() -> PathBuf {
