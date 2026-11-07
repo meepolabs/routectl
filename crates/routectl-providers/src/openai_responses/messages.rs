@@ -21,7 +21,9 @@
 //!   base64 `data` or `url` is absent or empty, and a file part naming none
 //!   of `file_data`, `file_id`, `file_url` all ship as sent (`image_url: ""`,
 //!   a bare `input_file`). The upstream decides, and its rejection is
-//!   learnable.
+//!   learnable. Bedrock Mantle is the exception for media URLs: it fetches
+//!   them itself, so a non-`https`/`data` (or empty) `image_url` or
+//!   `file_url` is refused on that lane after translation.
 //! - REFUSED (`unrepresentable`): no slot can hold the value -- an
 //!   `image_url` that is not an object, an image `data` / `url` that is
 //!   not a string, or a file part whose only carriers are not strings.

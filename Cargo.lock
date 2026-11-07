@@ -2853,6 +2853,7 @@ dependencies = [
  "tracing",
  "tracing-core",
  "tracing-test",
+ "url",
  "uuid",
  "wiremock",
  "xxhash-rust",

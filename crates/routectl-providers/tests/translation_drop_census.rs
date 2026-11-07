@@ -182,6 +182,7 @@ const EXPECTED_TEST_FILES: &[&str] = &[
     "openai_responses/header_merge_tests.rs",
     "openai_responses/lane_mapping_tests.rs",
     "openai_responses/lane_tag_emission_tests.rs",
+    "openai_responses/mantle_media_tests.rs",
     "openai_responses/parse_once_tests.rs",
     "openai_responses/reasoning_continuity_tests.rs",
     "openai_responses/redirect_tests.rs",

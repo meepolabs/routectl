@@ -64,6 +64,8 @@ pub use client::{OpenAiResponsesConfig, OpenAiResponsesProvider};
 pub(crate) mod auth;
 pub(crate) mod cookies;
 pub(crate) mod extras;
+#[cfg(feature = "bedrock")]
+mod mantle_media;
 pub(crate) mod messages;
 mod quota_headers;
 pub(crate) mod request;
@@ -165,12 +167,17 @@ impl Provider for OpenAiResponsesProvider {
 
     fn normalize_request(&self, req: &ChatRequest) -> Result<Value> {
         let r = request::translate(&self.cfg, req)?;
-        serde_json::to_value(&r).map_err(|e| {
+        let body = serde_json::to_value(&r).map_err(|e| {
             Error::Internal(format!(
                 "provider `{}`: serialize request body: {e}",
                 self.cfg.id
             ))
-        })
+        })?;
+        #[cfg(feature = "bedrock")]
+        if self.is_mantle() {
+            mantle_media::check_forwarded_media_urls(&self.cfg.id, &body)?;
+        }
+        Ok(body)
     }
 
     fn normalize_response(&self, raw: Value) -> Result<ChatResponse> {

@@ -84,6 +84,33 @@ impl std::fmt::Debug for MantleAuth {
     }
 }
 
+/// Whether a client-supplied image or file URL may be forwarded to a Mantle
+/// upstream, which fetches it server-side under the operator's AWS identity.
+///
+/// Accepts only `https` and `data` URLs. Both the raw layout (a lowercase
+/// `https://` or `data:` prefix, no ASCII whitespace or control character)
+/// and `url::Url` must agree: the upstream's parser is unpublished, and
+/// `Url::parse` silently strips tabs, newlines and edge spaces that another
+/// parser may read differently. The empty string refuses.
+#[cfg(feature = "bedrock")]
+#[cfg_attr(not(feature = "openai-responses"), allow(dead_code))]
+pub(crate) fn is_forwardable_media_url(url: &str) -> bool {
+    let scheme = if url.starts_with("https://") {
+        "https"
+    } else if url.starts_with("data:") {
+        "data"
+    } else {
+        return false;
+    };
+    if url
+        .bytes()
+        .any(|b| b.is_ascii_whitespace() || b.is_ascii_control())
+    {
+        return false;
+    }
+    url::Url::parse(url).is_ok_and(|parsed| parsed.scheme() == scheme)
+}
+
 /// Sign `req` in place for a mantle lane under the `bedrock-mantle` SigV4
 /// scope.
 ///
@@ -216,6 +243,44 @@ mod tests {
                     other => panic!("{region:?} must be refused, got {other:?}"),
                 }
             }
+        }
+    }
+
+    #[cfg(feature = "bedrock")]
+    #[test]
+    fn forwardable_media_url_accepts_only_https_and_data() {
+        let accepted = [
+            ("https", "https://example.com/a.png"),
+            ("https with query", "https://example.com/a.png?sig=abc&x=1"),
+            ("data image", "data:image/png;base64,AAAA"),
+            ("data pdf", "data:application/pdf;base64,AAAA"),
+        ];
+        let refused = [
+            ("empty", ""),
+            ("s3", "s3://b/k"),
+            ("http", "http://x"),
+            ("file", "file:///etc/passwd"),
+            ("gs", "gs://b/o"),
+            ("javascript", "javascript:x"),
+            ("uppercase scheme", "HTTPS://x"),
+            ("leading space", " https://example.com/a.png"),
+            ("trailing newline", "https://example.com/a.png\n"),
+            ("embedded tab", "https://exam\tple.com/a.png"),
+            ("single slash", "https:/x"),
+            ("empty host", "https://"),
+        ];
+
+        for (name, url) in accepted {
+            assert!(
+                super::is_forwardable_media_url(url),
+                "{name} must be accepted"
+            );
+        }
+        for (name, url) in refused {
+            assert!(
+                !super::is_forwardable_media_url(url),
+                "{name} must be refused"
+            );
         }
     }
 

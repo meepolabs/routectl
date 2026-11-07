@@ -1077,6 +1077,11 @@ license.
   `AuthKind::is_codex_lane` (true only for the ChatGPT-subscription OAuth
   lane), the one predicate request, extras and client read for the codex
   wire shape (no `max_output_tokens`, codex identity headers)
+- `src/openai_responses/mantle_media.rs` -- (cfg `bedrock`) Mantle-lane check
+  run on the serialized body in `normalize_request`: every `input_image.image_url`
+  and `input_file.file_url` under `input[*].content` / `input[*].output`
+  (passthrough items included) must pass `mantle::is_forwardable_media_url`, else
+  a local `unrepresentable` refusal naming the field and position only
 - `src/openai_responses/client.rs` -- provider construction, config, and auth
   wiring: `OpenAiResponsesConfig` (incl. `session_id` and `installation_id:
   Option<String>`, plus cfg `bedrock` `mantle: Option<MantleAuth>`),

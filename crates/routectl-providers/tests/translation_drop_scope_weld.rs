@@ -146,6 +146,11 @@ const EXPECTED_OUT_OF_SCOPE: &[(&str, &str)] = &[
         "Cloudflare cookie-jar persistence; transport state with no request body in hand",
     ),
     (
+        "openai_responses/mantle_media.rs",
+        "Mantle-lane check over the serialized body: it refuses the whole request on a media URL \
+         that is not https or data and never drops or edits content",
+    ),
+    (
         "openai_responses/mod.rs",
         "provider dispatch and SSE drain: the only REQUEST-body edit is setting the stream flag, and the \
          translation it delegates to is in scope",
