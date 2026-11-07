@@ -997,6 +997,33 @@ assert_clean "a flask-admin package name is not an admin key" \
     ingress_request.json \
     "$(body_with "pip install flask-admin-dashboard-starter-kit")"
 
+# --- older openai key shapes ----------------------------------------------
+# A user key carrying the `T3BlbkFJ` infix in its opaque run, and the
+# `sk-None-` form. Neither carries a prefix the list above keys on.
+assert_caught "an openai key carrying the T3BlbkFJ infix in a captured body" \
+    ingress_request.json \
+    "$(body_with "OPENAI_API_KEY=$(fake_key 'sk-' "${FAKE_RUN}T3BlbkFJ${FAKE_RUN}")")" \
+    provider-key
+
+assert_caught "an openai sk-None key in a captured body" \
+    ingress_request.json \
+    "$(body_with "OPENAI_API_KEY=$(fake_key 'sk-None-')")" \
+    provider-key
+
+assert_caught "an openai sk-None key beginning an escaped line is caught" \
+    ingress_request.json \
+    "$(body_with "here:\\n$(fake_key 'sk-None-')\\nend")" \
+    provider-key
+
+assert_clean "prose naming the T3BlbkFJ infix with no key around it is accepted" \
+    ingress_request.json \
+    "$(body_with "classic openai user keys carry the T3BlbkFJ infix mid-key")"
+
+# `sk-None-` lands mid-word in hyphenated names the way `sk-admin-` does.
+assert_clean "an sk-None sequence inside a hyphenated name is accepted" \
+    ingress_request.json \
+    "$(body_with "volume disk-None-attached-placeholder-label is unmounted")"
+
 # --- escaped-newline boundary, both directions -------------------------
 # A captured body is single-line JSON, so an embedded newline is the two
 # BYTES `\` + `n`. `n` is a token character, so a credential that BEGINS an
@@ -1029,6 +1056,26 @@ assert_caught "an nvidia api key beginning an escaped line is caught" \
     ingress_request.json \
     "$(body_with "here:\\n$(fake_key 'nvapi-')\\nend")" \
     nvidia-api-key
+
+# --- percent-encoded boundary, both directions --------------------------
+# The URL-encoded twin of the escaped newline: after `%22` or `%3D` the
+# token follows a hex digit, which is a token character, so no boundary is
+# presented unless ANCHOR_LEFT accepts the `%XX` triplet. The fixture
+# carries no other boundary before the key, so this row is what keeps the
+# alternative in ANCHOR_LEFT.
+assert_caught "a google api key after a percent-encoded quote is caught" \
+    ingress_request.json \
+    "$(body_with "GET /search?q=%22$(fake_key 'AIza' "$FAKE_RUN_35")%22")" \
+    google-api-key
+
+assert_caught "an openai admin key after a percent-encoded space is caught" \
+    ingress_request.json \
+    "$(body_with "authorization=Bearer%20$(fake_key 'sk-admin-')")" \
+    provider-key
+
+assert_clean "percent-encoded prose with no token after the anchor is accepted" \
+    ingress_request.json \
+    "$(body_with "GET /search?q=%22google%20keys%20start%20AIza%22&path=%2Fhome%2Fuser%3Dnvapi-%2C")"
 
 assert_shape_table_rule_ids_exist() {
     local block rows regexes row ids id missing="" row_count=0
@@ -1212,6 +1259,44 @@ assert_clean "arbitrary uuids in a captured body are accepted" \
 assert_clean "per-request correlation headers stay visible" \
     upstream_response.headers.json \
     "[[\"request-id\",\"req_011CeWXWuCqEVv1rSy1zBpZq\"],[\"traceresponse\",\"00-70542af3ab8ac1366b24adc35a5f7d9b-671e9b3152a4ace9-01\"],[\"cf-ray\",\"a32952d20e9aba30-SEA\"],[\"x-client-request-id\",\"$(fresh_uuid_v4)\"]]"
+
+# --- upstream-request-id ------------------------------------------------
+# The same `req_` id as the BODY field an upstream rejection carries. A
+# capture copies that body byte for byte, so the key is refused in every
+# encoding one writes, while the header above stays visible.
+UPSTREAM_REQ_ID="req_011CQ1a2B3c4D5e6F7g8H9"
+
+assert_caught "an upstream req_ id in a raw rejection body" \
+    upstream_response.json \
+    "{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\"},\"request_id\":\"$UPSTREAM_REQ_ID\"}" \
+    upstream-request-id
+
+assert_caught "an upstream req_ id in a pretty-printed rejection body" \
+    upstream_response.json \
+    "$(printf '{\n  "type": "error",\n  "request_id" :\n    "%s"\n}\n' "$UPSTREAM_REQ_ID")" \
+    upstream-request-id
+
+assert_caught "an upstream req_ id in a json-escaped body inside a log line" \
+    ingress_request.json \
+    "$(body_with "upstream said {\\\"type\\\":\\\"error\\\",\\n\\\"request_id\\\": \\\"$UPSTREAM_REQ_ID\\\"}")" \
+    upstream-request-id
+
+assert_caught "an upstream req_ id in a percent-encoded body" \
+    ingress_request.json \
+    "$(body_with "callback?body=%7B%22request_id%22%3A%20%22$UPSTREAM_REQ_ID%22%7D")" \
+    upstream-request-id
+
+assert_clean "the uuid request_id routectl records in meta.json is accepted" \
+    meta.json \
+    '{"case_id":"plain-turn-01","request_id": "01a157ea-bbc2-7323-921f-14cc6fc18e0e"}'
+
+assert_clean "a redacted req_ placeholder under the request_id key is accepted" \
+    upstream_response.json \
+    '{"type":"error","request_id":"req_REDACTED"}'
+
+assert_clean "prose naming the request_id field and the req_ prefix is accepted" \
+    ingress_request.json \
+    "$(body_with "anthropic errors carry a request_id field whose value starts req_")"
 
 # --write redacts them the same way it redacts a credential: the NAME
 # survives so the wire shape the fixture pins is intact, only the VALUE
@@ -1400,7 +1485,7 @@ assert_help_lists_new_classes() {
         return
     fi
     for class in google-oauth-token google-api-key jwt aws-temp-key-id nvidia-api-key seat-session-id \
-        anthropic-account-id claude-session-header chatgpt-account-id user-identity; do
+        anthropic-account-id claude-session-header chatgpt-account-id user-identity upstream-request-id; do
         printf '%s\n' "$out" | grep -qF -- "$class" || missing+=" $class"
     done
     if [ -n "$missing" ]; then
@@ -1635,6 +1720,8 @@ assert_grep_error_refuses "the nvidia key scan" ingress_request.json "nvapi-"
 assert_grep_error_refuses "the bedrock key scan" ingress_request.json "bedrock-api-key-"
 assert_grep_error_refuses "the bedrock long-term key scan" ingress_request.json "ABSK[A-Za-z0-9+/]"
 assert_grep_error_refuses "the aws credential assignment scan" ingress_request.json "AWS_SECRET_ACCESS_KEY"
+assert_grep_error_refuses "the upstream request id scan" ingress_request.json "request_id"
+assert_grep_error_refuses "the scratch task id scan" ingress_request.json "f[0-9]+"
 
 # An error AFTER grep has streamed output must still refuse: the consumer
 # sees only neutral matches, drains, and grep's own status is the verdict.
@@ -1799,6 +1886,20 @@ assert_caught "a board-shaped task id whose slug mixes hex and other letters" \
     ingress_request.json \
     "$(body_with "picked up $(task_id deadbeef-x 1 02) today")" \
     scratch-task-id
+
+# Case-insensitive in both directions: a capitalised id is the same id, and
+# the all-hex exclusion still holds when the hex is uppercase.
+task_id_upper() { printf '%s.F%s.%s' "$1" "$2" "$3"; }
+assert_caught "an uppercase board-shaped task id is caught" \
+    ingress_request.json \
+    "$(body_with "see $(task_id_upper Demo-Slug 3 07) for details")" \
+    scratch-task-id
+assert_clean "an all-hex task-id-like slug is accepted" \
+    ingress_request.json \
+    "$(body_with "token $(task_id abc 1 02) in a digest listing")"
+assert_clean "an uppercase dotted hex triple is accepted" \
+    ingress_request.json \
+    "$(body_with "fingerprint $(hex_pairs . DE F7 62 AB) and $(task_id_upper ABC 1 02)")"
 
 # --- non-regular targets ----------------------------------------------
 # `find -type f` skips a symlink, so a symlinked target or a link inside a

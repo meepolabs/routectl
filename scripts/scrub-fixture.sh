@@ -92,6 +92,9 @@
 #                      scheme word matched case-insensitively
 #   provider-key       a raw vendor credential carrying no scheme word at
 #                      all (`sk-ant-api03-...`, `ghp_...`, `AKIA...`)
+#   upstream-request-id  a vendor `req_` request id under a JSON
+#                      `request_id` key, the field an upstream rejection
+#                      body carries
 #   bedrock-long-term-key  an `ABSK`-prefixed Bedrock long-term API key
 #   google-oauth-token a `ya29.`-prefixed Google OAuth access token
 #   google-api-key     an `AIza`-prefixed Google API key
@@ -765,7 +768,8 @@ PROVIDER_KEY_RE='(sk-ant-api03-|sk-ant-oat01-|sk-ant-ort01-|sk-ant-admin01-|sk-p
 # it must begin a token: it carries ANCHOR_LEFT (defined below) and its own
 # regex, under the same finding class. The accept direction is asserted.
 has_provider_key() {
-  grep_has -qE -e "$PROVIDER_KEY_RE" -e "$OPENAI_ADMIN_KEY_RE" "$1"
+  grep_has -qE -e "$PROVIDER_KEY_RE" -e "$OPENAI_ADMIN_KEY_RE" \
+    -e "$OPENAI_INFIX_KEY_RE" -e "$OPENAI_NONE_KEY_RE" "$1"
 }
 
 # Vendor shapes the prefix set above does not carry, each its OWN named
@@ -804,7 +808,11 @@ has_provider_key() {
 # corpus files carry `\n` immediately followed by a token character. Adding the
 # escapes closes all five classes at zero measured false-positive cost across
 # that corpus and the whole accept set.
-ANCHOR_LEFT='(^|[^A-Za-z0-9_-]|\\[bfnrt]|\\u[0-9a-fA-F]{4})'
+#
+# The `%XX` alternative is the same defect in URL encoding: a token after
+# `%22` or `%3D` follows a hex digit, which is a token character. `%` never
+# occurs in base64, so the alternative only fires inside percent-encoded text.
+ANCHOR_LEFT='(^|[^A-Za-z0-9_-]|\\[bfnrt]|\\u[0-9a-fA-F]{4}|%[0-9A-Fa-f]{2})'
 
 # TWO alternatives, not one widened class. The modern form is a single
 # opaque run; the LEGACY form is `ya29.<1-3 digits>.<opaque>` and its short
@@ -835,6 +843,25 @@ BEDROCK_LONG_TERM_KEY_RE="$ANCHOR_LEFT"'ABSK[A-Za-z0-9+/]{100,}={0,2}'
 
 OPENAI_ADMIN_KEY_RE="$ANCHOR_LEFT"'sk-admin-[A-Za-z0-9_-]{16,}'
 
+# Older OpenAI shapes with no prefix of their own past `sk-`: a user key
+# carrying the `T3BlbkFJ` infix (base64 of `OpenAI`) inside its opaque run,
+# and the `sk-None-` form. Both begin a token, like the admin key.
+OPENAI_INFIX_KEY_RE="$ANCHOR_LEFT"'sk-[A-Za-z0-9_-]{8,}T3BlbkFJ[A-Za-z0-9_-]{16,}'
+OPENAI_NONE_KEY_RE="$ANCHOR_LEFT"'sk-None-[A-Za-z0-9_-]{16,}'
+
+# A vendor request id (`req_` plus an opaque run) as the value of a JSON
+# `request_id` key: the field an upstream rejection body carries, which a
+# capture copies byte for byte. Keyed on the key so the `request-id`
+# response header, kept visible on purpose, and the uuid `request_id` in
+# meta.json are not refused. The quotes, colon and whitespace are matched in
+# every encoding a capture writes: raw, JSON-escaped at any depth, escaped
+# newlines from a pretty-printed body, and percent-encoded. The 16-char
+# floor keeps the `req_REDACTED` placeholder accepted. Scanned with `-z` so
+# a key and value a pretty-printer split across lines still match.
+REQ_ID_QUOTE='(\\*"|%22)'
+REQ_ID_GAP='([[:space:]]|\\+[nrt]|%20|%09|%0[Aa]|%0[Dd])*'
+UPSTREAM_REQUEST_ID_RE="$REQ_ID_QUOTE"'request_id'"$REQ_ID_QUOTE$REQ_ID_GAP"'(:|%3[Aa])'"$REQ_ID_GAP$REQ_ID_QUOTE"'req_[A-Za-z0-9]{16,}'
+
 # The two AWS credentials that have NO prefix of their own: the secret access
 # key is 40 opaque base64 characters and the session token is a long opaque
 # run, so neither can be keyed on its value the way every rule above is.
@@ -856,12 +883,15 @@ AWS_CRED_ASSIGN_RE='(AWS_SECRET_ACCESS_KEY|aws_secret_access_key|AWS_SESSION_TOK
 # MAC printed as six dotted hex pairs, a digest printed in dotted pairs -- is
 # otherwise indistinguishable from `<slug>.f<n>.<nn>`, because ANCHOR_LEFT
 # accepts `.` as a boundary and every pair is a valid all-hex slug.
+#
+# Matched case-insensitively: a slug or `.F` typed in capitals names the
+# same task. The all-hex exclusion holds in either case.
 SCRATCH_TASK_SLUG='([g-z][a-z0-9-]*|[a-f][a-f0-9]*[g-z-][a-z0-9-]*)'
 SCRATCH_TASK_ID_RE="$ANCHOR_LEFT$SCRATCH_TASK_SLUG"'\.f[0-9]+\.[0-9]{2}([^0-9A-Za-z]|$)'
 SCRATCH_WORKTREE_RE='\.claude/worktrees/[A-Za-z0-9_][A-Za-z0-9_.-]*'
 
 has_scratch_task_id() {
-  grep_has -qE "$SCRATCH_TASK_ID_RE" "$1"
+  grep_has -qiE "$SCRATCH_TASK_ID_RE" "$1"
 }
 
 has_scratch_worktree() {
@@ -898,6 +928,10 @@ has_bedrock_long_term_key() {
 
 has_aws_cred_assignment() {
   grep_has -qE "$AWS_CRED_ASSIGN_RE" "$1"
+}
+
+has_upstream_request_id() {
+  grep_has -qzE "$UPSTREAM_REQUEST_ID_RE" "$1"
 }
 
 # A `user_identity` key and its value, found in the RAW text rather than in
@@ -1184,6 +1218,7 @@ run_check() {
     has_bedrock_api_key "$f" && findings+="  $f  bedrock-api-key"$'\n'
     has_bedrock_long_term_key "$f" && findings+="  $f  bedrock-long-term-key"$'\n'
     has_aws_cred_assignment "$f" && findings+="  $f  aws-credential-assignment"$'\n'
+    has_upstream_request_id "$f" && findings+="  $f  upstream-request-id"$'\n'
     has_scratch_task_id "$f" && findings+="  $f  scratch-task-id"$'\n'
     has_scratch_worktree "$f" && findings+="  $f  scratch-worktree-path"$'\n'
     has_user_identity "$f" && findings+="  $f  user-identity"$'\n'
