@@ -9,7 +9,9 @@ use std::fmt;
 
 use thiserror::Error;
 
-use crate::{EligibilityReason, ParsedErrorBody, RefusalReason, UpstreamBody, UpstreamReason};
+use crate::{
+    EligibilityReason, ParsedErrorBody, RefusalReason, ScopeRow, UpstreamBody, UpstreamReason,
+};
 
 /// Convenience alias defaulting the error type to [`enum@Error`].
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -17,7 +19,7 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 // `Error` is returned pervasively as `Result<_, Error>`, so its size is the
 // success slot's size too. The two upstream classifier strings are
 // `Box<str>` (16 bytes) rather than `String` (24), and the request id,
-// parsed body and typed reason share one boxed `UpstreamExtras`, to keep the enum below
+// parsed body, typed reason and scope row share one boxed `UpstreamExtras`, to keep the enum below
 // clippy's `result_large_err` threshold (it fires AT 128 bytes) without a
 // lint suppression.
 const _: () = assert!(std::mem::size_of::<Error>() <= 128);
@@ -63,10 +65,11 @@ pub enum Error {
         /// envelope; numeric codes are stringified). `None` when absent.
         /// NOT surfaced in the Display string.
         upstream_code: Option<Box<str>>,
-        /// The upstream correlation id, the parsed body and the typed
-        /// [`UpstreamReason`]; read them through
-        /// [`Error::upstream_request_id`], [`Error::parsed_body`] and
-        /// [`Error::upstream_reason`]. NOT surfaced in the Display string.
+        /// The upstream correlation id, the parsed body, the typed
+        /// [`UpstreamReason`] and the recognized [`ScopeRow`]; read them
+        /// through [`Error::upstream_request_id`], [`Error::parsed_body`],
+        /// [`Error::upstream_reason`] and [`Error::scope_row`]. NOT surfaced
+        /// in the Display string.
         extras: UpstreamExtras,
     },
 
@@ -258,6 +261,7 @@ impl fmt::Debug for Error {
                     "upstream_reason",
                     &extras.reason().map(UpstreamReason::as_str),
                 )
+                .field("scope_row", &extras.scope_row().map(ScopeRow::as_str))
                 .finish(),
             Self::NormalizeRequest(a, b, reason) => f
                 .debug_tuple("NormalizeRequest")
@@ -324,8 +328,8 @@ impl fmt::Debug for Error {
 }
 
 /// Boxed tail of [`Error::Upstream`]: the upstream correlation id, the
-/// parsed body and the typed reason, one pointer wide, allocated only when
-/// any of them is present.
+/// parsed body, the typed reason and the scope row, one pointer wide,
+/// allocated only when any of them is present.
 /// Built only by the `Error::upstream*` constructors -- it has no public
 /// constructor, so no struct literal outside this crate can build the variant
 /// -- and a carried parse therefore always describes the variant's `body`.
@@ -336,12 +340,14 @@ struct UpstreamExtrasInner {
     request_id: Option<Box<str>>,
     parsed: Option<ParsedErrorBody>,
     reason: Option<UpstreamReason>,
+    scope_row: Option<ScopeRow>,
 }
 
 type ExtrasParts = (
     Option<Box<str>>,
     Option<ParsedErrorBody>,
     Option<UpstreamReason>,
+    Option<ScopeRow>,
 );
 
 impl UpstreamExtras {
@@ -349,21 +355,28 @@ impl UpstreamExtras {
         request_id: Option<Box<str>>,
         parsed: Option<ParsedErrorBody>,
         reason: Option<UpstreamReason>,
+        scope_row: Option<ScopeRow>,
     ) -> Self {
-        if request_id.is_none() && parsed.is_none() && reason.is_none() {
+        if request_id.is_none() && parsed.is_none() && reason.is_none() && scope_row.is_none() {
             return Self(None);
         }
         Self(Some(Box::new(UpstreamExtrasInner {
             request_id,
             parsed,
             reason,
+            scope_row,
         })))
     }
 
     fn take_parts(&mut self) -> ExtrasParts {
         match self.0.take() {
-            Some(inner) => (inner.request_id, inner.parsed, inner.reason),
-            None => (None, None, None),
+            Some(inner) => (
+                inner.request_id,
+                inner.parsed,
+                inner.reason,
+                inner.scope_row,
+            ),
+            None => (None, None, None, None),
         }
     }
 
@@ -380,6 +393,11 @@ impl UpstreamExtras {
     /// The typed reason; see [`Error::upstream_reason`].
     pub fn reason(&self) -> Option<UpstreamReason> {
         self.0.as_ref()?.reason
+    }
+
+    /// The recognized scope row; see [`Error::scope_row`].
+    pub fn scope_row(&self) -> Option<ScopeRow> {
+        self.0.as_ref()?.scope_row
     }
 }
 
@@ -521,7 +539,7 @@ impl Error {
             retry_after,
             upstream_type: upstream_type.map(Into::into),
             upstream_code: upstream_code.map(Into::into),
-            extras: UpstreamExtras::new(None, parsed_body, None),
+            extras: UpstreamExtras::new(None, parsed_body, None, None),
         }
     }
 
@@ -535,8 +553,8 @@ impl Error {
     #[must_use]
     pub fn with_upstream_request_id(mut self, id: Option<String>) -> Self {
         if let Self::Upstream { extras, .. } = &mut self {
-            let (_, parsed, reason) = extras.take_parts();
-            *extras = UpstreamExtras::new(id.map(Into::into), parsed, reason);
+            let (_, parsed, reason, scope_row) = extras.take_parts();
+            *extras = UpstreamExtras::new(id.map(Into::into), parsed, reason, scope_row);
         }
         self
     }
@@ -547,10 +565,33 @@ impl Error {
     #[must_use]
     pub fn with_upstream_reason(mut self, reason: Option<UpstreamReason>) -> Self {
         if let Self::Upstream { extras, .. } = &mut self {
-            let (request_id, parsed, _) = extras.take_parts();
-            *extras = UpstreamExtras::new(request_id, parsed, reason);
+            let (request_id, parsed, _, scope_row) = extras.take_parts();
+            *extras = UpstreamExtras::new(request_id, parsed, reason, scope_row);
         }
         self
+    }
+
+    /// Attach the recognized upstream pattern that sets how far the failure
+    /// reaches, returning the updated error. A no-op on any other variant, so
+    /// a mapper can chain it unconditionally. Pass `None` to leave the
+    /// failure unrecognized (target scope).
+    #[must_use]
+    pub fn with_scope_row(mut self, scope_row: Option<ScopeRow>) -> Self {
+        if let Self::Upstream { extras, .. } = &mut self {
+            let (request_id, parsed, reason, _) = extras.take_parts();
+            *extras = UpstreamExtras::new(request_id, parsed, reason, scope_row);
+        }
+        self
+    }
+
+    /// The recognized upstream pattern attached by [`Error::with_scope_row`].
+    /// `None` on any other variant, or when the failure is unrecognized,
+    /// which reads as target scope.
+    pub fn scope_row(&self) -> Option<ScopeRow> {
+        match self {
+            Self::Upstream { extras, .. } => extras.scope_row(),
+            _ => None,
+        }
     }
 
     /// The typed reason a credential was rejected for: the one attached by

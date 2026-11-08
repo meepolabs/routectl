@@ -18,6 +18,7 @@ mod converse_errors;
 pub mod eligibility;
 pub mod error;
 pub mod failure_class;
+pub mod failure_scope;
 pub mod identity;
 pub mod log_safe;
 pub mod parsed_error_body;
@@ -72,6 +73,7 @@ pub use converse_errors::strip_converse_errors_prefix;
 pub use eligibility::EligibilityReason;
 pub use error::{Error, Result};
 pub use failure_class::ReplayAttempt;
+pub use failure_scope::{FailureScope, ScopeRow};
 pub use log_safe::{
     HDR_MSG_EGRESS, HDR_MSG_INGRESS, HDR_MSG_OUTGOING, HDR_MSG_UPSTREAM, MAX_TRACE_BODY_BYTES,
     StructuralSummary, body_trace_enabled, debug_upstream_error_body, extract_upstream_message,

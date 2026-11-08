@@ -163,6 +163,13 @@ license.
   kebab-case token source (`credential-expired` / `credential-invalid`) and
   `from_token` matches exactly, `None` for an unknown token. Additive only;
   an absent reason means unclassified
+- `src/failure_scope.rs` -- `#[non_exhaustive] FailureScope` (`Target` /
+  `Account` / `Endpoint` / `Model`: how far an upstream failure reaches) and
+  the closed recognizer `ScopeRow` (`anthropic-bare-rate-limit`), each row
+  with `const fn scope()` / `retryable()`; carried on `Error::Upstream` via
+  `with_scope_row` / `scope_row()`, a separate axis from `UpstreamReason`.
+  `as_str` / exact `from_token`; additive only; an absent row means target
+  scope
 - `src/eligibility.rs` -- closed `EligibilityReason` (`credential_unusable`,
   `account_parked`, `breaker_open`, `rate_limited`, `capability`,
   `context_window`): why a target was locally ineligible, carried on

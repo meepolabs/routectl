@@ -1,9 +1,9 @@
 //! Tests for `Error`: the `Upstream` constructors and their single body
-//! parse, the request-id attachment, and the bounded, redacted `Debug`
-//! rendering.
+//! parse, the request-id, reason and scope-row attachments, and the bounded,
+//! redacted `Debug` rendering.
 
 use super::{Error, UpstreamBody};
-use crate::RefusalReason;
+use crate::{RefusalReason, ScopeRow, UpstreamReason};
 use std::time::Duration;
 
 #[test]
@@ -378,4 +378,141 @@ fn capability_unsupported_everywhere_displays_the_capability_and_no_lane() {
     assert!(!display.contains("lane-beta"), "{display}");
     assert!(format!("{err:?}").contains("lane-beta#up-2"));
     assert_eq!(err.refusal_reason(), None);
+}
+
+type Attach = fn(Error) -> Error;
+
+fn attach_request_id(err: Error) -> Error {
+    err.with_upstream_request_id(Some("req-1".to_string()))
+}
+
+fn attach_reason(err: Error) -> Error {
+    err.with_upstream_reason(Some(UpstreamReason::CredentialExpired))
+}
+
+fn attach_scope_row(err: Error) -> Error {
+    err.with_scope_row(Some(ScopeRow::AnthropicBareRateLimit))
+}
+
+#[test]
+fn every_attachment_order_keeps_the_parse_request_id_reason_and_scope_row() {
+    let rows: [(&str, [Attach; 3]); 6] = [
+        (
+            "id, reason, row",
+            [attach_request_id, attach_reason, attach_scope_row],
+        ),
+        (
+            "id, row, reason",
+            [attach_request_id, attach_scope_row, attach_reason],
+        ),
+        (
+            "reason, id, row",
+            [attach_reason, attach_request_id, attach_scope_row],
+        ),
+        (
+            "reason, row, id",
+            [attach_reason, attach_scope_row, attach_request_id],
+        ),
+        (
+            "row, id, reason",
+            [attach_scope_row, attach_request_id, attach_reason],
+        ),
+        (
+            "row, reason, id",
+            [attach_scope_row, attach_reason, attach_request_id],
+        ),
+    ];
+    for (name, steps) in rows {
+        let err = steps.into_iter().fold(
+            Error::upstream("prov", 429, r#"{"error":{"type":"rate_limit_error"}}"#),
+            |err, step| step(err),
+        );
+
+        assert_eq!(
+            err.scope_row(),
+            Some(ScopeRow::AnthropicBareRateLimit),
+            "{name}"
+        );
+        assert_eq!(
+            err.upstream_reason(),
+            Some(UpstreamReason::CredentialExpired),
+            "{name}"
+        );
+        assert_eq!(err.upstream_request_id(), Some("req-1"), "{name}");
+        let parsed = err.parsed_body().expect("parse survives");
+        assert_eq!(parsed.error_type(), Some("rate_limit_error"), "{name}");
+    }
+}
+
+#[test]
+fn scope_row_is_none_when_unset_and_off_the_upstream_variant() {
+    let unset = Error::upstream("prov", 429, "slow down")
+        .with_upstream_request_id(Some("req-1".to_string()));
+    let off_variant = Error::Validation("bad".to_string(), RefusalReason::FieldType)
+        .with_scope_row(Some(ScopeRow::AnthropicBareRateLimit));
+
+    assert_eq!(unset.scope_row(), None);
+    assert_eq!(off_variant.scope_row(), None);
+    assert_eq!(
+        format!("{off_variant:?}"),
+        "Validation(\"bad\", \"field-type\")"
+    );
+}
+
+#[test]
+fn extras_stay_unallocated_when_every_part_is_none() {
+    let err = Error::upstream("prov", 500, "boom")
+        .with_upstream_request_id(None)
+        .with_upstream_reason(None)
+        .with_scope_row(None);
+
+    let Error::Upstream { extras, .. } = &err else {
+        panic!("expected Error::Upstream, got {err:?}");
+    };
+    assert!(extras.0.is_none());
+}
+
+#[test]
+fn clearing_the_only_carried_scope_row_releases_the_extras() {
+    let err = Error::upstream("prov", 500, "boom")
+        .with_scope_row(Some(ScopeRow::AnthropicBareRateLimit))
+        .with_scope_row(None);
+
+    let Error::Upstream { extras, .. } = &err else {
+        panic!("expected Error::Upstream, got {err:?}");
+    };
+    assert!(extras.0.is_none());
+}
+
+#[test]
+fn extras_debug_prints_only_the_request_id() {
+    let err = attach_scope_row(attach_request_id(Error::upstream(
+        "prov",
+        429,
+        r#"{"error":{"type":"rate_limit_error"}}"#,
+    )));
+    let Error::Upstream { extras, .. } = &err else {
+        panic!("expected Error::Upstream, got {err:?}");
+    };
+    assert_eq!(extras.scope_row(), Some(ScopeRow::AnthropicBareRateLimit));
+
+    let rendered = format!("{extras:?}");
+
+    assert_eq!(
+        rendered,
+        "UpstreamExtras { request_id: Some(\"req-1\"), .. }"
+    );
+}
+
+#[test]
+fn upstream_debug_renders_the_scope_row_token_only_when_carried() {
+    let carried = format!("{:?}", attach_scope_row(Error::upstream("prov", 429, "x")));
+    let unset = format!("{:?}", Error::upstream("prov", 429, "x"));
+
+    assert!(
+        carried.contains("scope_row: Some(\"anthropic-bare-rate-limit\")"),
+        "{carried}"
+    );
+    assert!(unset.contains("scope_row: None"), "{unset}");
+    assert!(!unset.contains("anthropic-bare-rate-limit"), "{unset}");
 }
