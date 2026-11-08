@@ -2855,3 +2855,254 @@ fn a_valueless_verdict_corroborates_another_valueless_commit() {
 
     assert_eq!(again.observations, 2);
 }
+
+// --- settlement interleavings at the value record ---
+
+/// The tick a sibling settles at: past the first commit's decay, so the
+/// verdict that commit just made acting reads lapsed and admits one repair.
+fn past_decay(t0: Instant) -> Instant {
+    t0 + DECAY + Duration::from_secs(1)
+}
+
+/// Commit `value` for `k` at `t0`, running `sibling` inside the window between
+/// the commit's learned mutation and its value record.
+fn commit_with_sibling_at_record(
+    reg: &Arc<FieldVerdictRegistry>,
+    k: &FieldVerdictKey,
+    value: VerdictValue,
+    t0: Instant,
+    sibling: impl Fn(&FieldVerdictRegistry) + Send + Sync + 'static,
+) -> CapabilityLearnEvent {
+    let guard = reg
+        .admit_provisional(k, REMOTE_BASE, 1, t0)
+        .admitted()
+        .expect("an unknown pair admits");
+    let hook_reg = Arc::clone(reg);
+    reg.set_value_record_pause_hook(Box::new(move || sibling(&hook_reg)));
+    guard
+        .commit(SignalTier::SelfIdentifying, Some(value), 400, vec![], t0)
+        .expect("a live commit emits its row")
+}
+
+/// Acknowledge one confirmation for whatever incarnation of `k` is resident,
+/// so pre-flight would act on it.
+fn confirm_resident(reg: &FieldVerdictRegistry, k: &FieldVerdictKey) -> u64 {
+    let incarnation = resident_incarnation(reg.learned(), k);
+    reg.canaries().acknowledge_confirmation(k, incarnation, 1);
+    incarnation
+}
+
+/// Paired control for the clear test below: the same window, a confirmation
+/// and no clear, and pre-flight acts on the committed verdict with its value.
+#[test]
+fn a_confirmed_commit_with_no_sibling_clear_is_applied_by_pre_flight() {
+    // Arrange
+    let reg = registry();
+    let k = key("t");
+    let t0 = Instant::now();
+
+    // Act
+    let event = commit_with_sibling_at_record(&reg, &k, VALUE_A, t0, {
+        let k = k.clone();
+        move |sibling| {
+            let _ = confirm_resident(sibling, &k);
+        }
+    });
+
+    // Assert
+    let authorization = reg
+        .preflight_authorization(&k, reg.learned().generation(), t0)
+        .expect("a confirmed acting verdict is pre-flight eligible");
+    assert_eq!(authorization.incarnation, event.incarnation);
+    assert_eq!(
+        reg.verdict_value(&k, authorization.incarnation),
+        Some(VALUE_A)
+    );
+}
+
+/// An accepted clear landing between a commit's learned mutation and its value
+/// record removes the verdict that commit made. The late value is then recorded
+/// for an incarnation no longer resident: pre-flight does not act on the key,
+/// and a relearn answers only its own value, never the removed one's.
+#[test]
+fn a_clear_inside_a_commits_record_window_leaves_nothing_for_pre_flight_to_apply() {
+    // Arrange
+    let reg = registry();
+    let k = key("t");
+    let t0 = Instant::now();
+    let cleared = Arc::new(Mutex::new(None));
+
+    // Act
+    let event = commit_with_sibling_at_record(&reg, &k, VALUE_A, t0, {
+        let k = k.clone();
+        let cleared = Arc::clone(&cleared);
+        move |sibling| {
+            let _ = confirm_resident(sibling, &k);
+            *cleared.lock() = sibling.clear_accepted(&k, sibling.learned().generation());
+        }
+    });
+
+    // Assert
+    let cleared = cleared
+        .lock()
+        .take()
+        .expect("the clear removed a resident row");
+    assert_eq!(cleared.capability_key, k.capability_key());
+    assert_eq!(
+        resident_incarnation(reg.learned(), &k),
+        0,
+        "nothing is resident"
+    );
+    assert!(
+        reg.preflight_authorization(&k, reg.learned().generation(), t0)
+            .is_none(),
+        "pre-flight must not act on a cleared verdict",
+    );
+
+    // Act -- relearn the identity with a different value.
+    let relearned = commit_valued(&reg, &k, Some(VALUE_B), t0);
+    let confirmed = confirm_resident(&reg, &k);
+
+    // Assert
+    assert_eq!(confirmed, relearned.incarnation);
+    assert!(relearned.incarnation > event.incarnation);
+    let authorization = reg
+        .preflight_authorization(&k, reg.learned().generation(), t0)
+        .expect("the relearned verdict is pre-flight eligible once confirmed");
+    assert_eq!(
+        reg.verdict_value(&k, authorization.incarnation),
+        Some(VALUE_B),
+        "the resident incarnation answers its own value",
+    );
+    assert_eq!(
+        reg.verdict_value(&k, event.incarnation),
+        None,
+        "the removed incarnation's value is never answered",
+    );
+}
+
+/// Two commits carrying different values on one key: a sibling admitted while
+/// the first commit is between its learned mutation and its value record must
+/// end resident with its OWN value. The sibling settles inside the window when
+/// it can claim the slot there, otherwise right after the first commit returns.
+///
+/// Mutation check: release the slot before the value record (the record then
+/// runs after a sibling may have admitted, committed and recorded) -> red on
+/// the resident incarnation's value.
+#[test]
+fn the_later_of_two_opposite_commits_keeps_its_own_value() {
+    // Arrange
+    let reg = registry();
+    let k = key("t");
+    let t0 = Instant::now();
+    let t1 = past_decay(t0);
+    let sibling_event = Arc::new(Mutex::new(None));
+
+    // Act
+    let first = commit_with_sibling_at_record(&reg, &k, VALUE_A, t0, {
+        let k = k.clone();
+        let sibling_event = Arc::clone(&sibling_event);
+        move |sibling| {
+            if let FieldAdmission::Admitted(guard) =
+                sibling.admit_provisional(&k, REMOTE_BASE, 1, t1)
+            {
+                *sibling_event.lock() =
+                    guard.commit(SignalTier::SelfIdentifying, Some(VALUE_B), 400, vec![], t1);
+            }
+        }
+    });
+    let inside_window = sibling_event.lock().take();
+    let later = inside_window.unwrap_or_else(|| commit_valued(&reg, &k, Some(VALUE_B), t1));
+
+    // Assert
+    assert!(later.incarnation > first.incarnation);
+    assert_eq!(
+        resident_incarnation(reg.learned(), &k),
+        later.incarnation,
+        "the later commit's incarnation is resident",
+    );
+    assert_eq!(
+        reg.verdict_value(&k, later.incarnation),
+        Some(VALUE_B),
+        "the resident incarnation keeps its own value",
+    );
+    assert_eq!(reg.verdict_value(&k, first.incarnation), None);
+    let _ = confirm_resident(&reg, &k);
+    let authorization = reg
+        .preflight_authorization(&k, reg.learned().generation(), t1)
+        .expect("the later verdict is pre-flight eligible once confirmed");
+    assert_eq!(authorization.incarnation, later.incarnation);
+    assert_eq!(
+        reg.verdict_value(&k, authorization.incarnation),
+        Some(VALUE_B),
+        "pre-flight finds the value of the incarnation it acts on",
+    );
+}
+
+// --- the per-lane beta bound never reaches a field verdict ---
+
+/// A field-verdict key is never a beta flag, so a lane whose beta bound is
+/// full of leased entries still admits it: the commit applies and acts.
+///
+/// Mutation check: make `admit_to_beta_lane` refuse every non-beta key -> red.
+#[test]
+fn a_field_verdict_applies_on_a_lane_full_of_leased_beta_entries() {
+    use crate::beta_capability::beta_capability_key;
+    use crate::learned_capability::{
+        LearnKey, MAX_BETA_ENTRIES_PER_LANE, NegativeEvidence, PurgePreparation,
+    };
+
+    // Arrange
+    let reg = registry();
+    let k = key("t");
+    let t0 = Instant::now();
+    let generation = reg.learned().generation();
+    let betas: Vec<String> = (0..MAX_BETA_ENTRIES_PER_LANE)
+        .map(|n| beta_capability_key(&format!("zz-flag-{n}")).expect("well-formed flag"))
+        .collect();
+    for beta in &betas {
+        let _ = reg.learned().observe(
+            LearnKey {
+                state_key: k.state_key(),
+                feature_key_raw: beta,
+                provider_kind: k.provider_kind(),
+            },
+            NegativeEvidence {
+                tier: SignalTier::SelfIdentifying,
+                phase: FailurePhase::F1,
+                source: EvidenceSource::Live,
+                evidence_class: None,
+            },
+            t0,
+        );
+    }
+    let leases: Vec<_> = betas
+        .iter()
+        .map(|beta| {
+            match reg
+                .learned()
+                .prepare_purge(generation, k.state_key(), beta, k.provider_kind())
+            {
+                PurgePreparation::Reserved(lease) => lease,
+                other => panic!("expected a reservation, got {other:?}"),
+            }
+        })
+        .collect();
+
+    // Act
+    let event = reg
+        .admit_provisional(&k, REMOTE_BASE, 1, t0)
+        .admitted()
+        .expect("an unknown pair admits")
+        .commit(SignalTier::SelfIdentifying, None, 400, vec![], t0);
+
+    // Assert
+    assert!(event.is_some(), "the commit applied");
+    assert!(
+        reg.is_negative_acting(&k, t0),
+        "the verdict is stored and acting, not refused by the beta bound",
+    );
+    for lease in leases {
+        reg.learned().restore_purge(lease);
+    }
+}

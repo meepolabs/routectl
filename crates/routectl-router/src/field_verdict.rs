@@ -297,6 +297,24 @@ pub struct FieldVerdictRegistry {
     /// above: a commit settling through the outgoing facade records the value
     /// the replacement's pre-flight reads.
     values: Arc<FieldValueStore>,
+    /// Test-only hook fired inside a commit, after the learned mutation
+    /// applied and before its value is recorded. See
+    /// [`Self::set_value_record_pause_hook`].
+    #[cfg(test)]
+    value_record_pause: ValueRecordPause,
+}
+
+/// The one-shot hook a test parks between a commit's learned mutation and its
+/// value record. A newtype only so the registry can keep deriving `Debug`.
+#[cfg(test)]
+#[derive(Default)]
+struct ValueRecordPause(Mutex<Option<Box<dyn Fn() + Send + Sync>>>);
+
+#[cfg(test)]
+impl std::fmt::Debug for ValueRecordPause {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ValueRecordPause")
+    }
 }
 
 impl FieldVerdictRegistry {
@@ -308,6 +326,8 @@ impl FieldVerdictRegistry {
             in_flight: Arc::new(Mutex::new(HashSet::new())),
             canaries: Arc::new(FieldCanaryRegistry::new()),
             values: Arc::new(FieldValueStore::default()),
+            #[cfg(test)]
+            value_record_pause: ValueRecordPause::default(),
         }
     }
 
@@ -324,6 +344,8 @@ impl FieldVerdictRegistry {
             in_flight: Arc::clone(&self.in_flight),
             canaries: Arc::clone(&self.canaries),
             values: Arc::clone(&self.values),
+            #[cfg(test)]
+            value_record_pause: ValueRecordPause::default(),
         }
     }
 
@@ -609,7 +631,7 @@ impl FieldVerdictRegistry {
             now,
         );
         let crate::learned_capability::GenerationOutcome::Applied {
-            value: (_, observations),
+            value: (outcome, observations),
             incarnation,
             generation: persistence_generation,
         } = observed
@@ -625,6 +647,8 @@ impl FieldVerdictRegistry {
             claim.settle(crate::field_canary::CanaryOutcome::Inconclusive);
             return None;
         };
+        // `Refused` is the per-lane beta bound, and a field key is never a beta flag.
+        debug_assert_ne!(outcome, crate::learned_capability::ObserveOutcome::Refused);
         tracing::info!(
             event = "field_canary_confirmed",
             state_key = %routectl_core::sanitize_for_log(key.registry_key()),
@@ -1020,6 +1044,28 @@ impl FieldVerdictRegistry {
         self.in_flight.lock().remove(key);
     }
 
+    /// Install a one-shot hook the next commit fires after its learned
+    /// mutation applied and before it records the value, with no lock held, so
+    /// a test can land a sibling settlement on the same key inside that window.
+    #[cfg(test)]
+    pub(crate) fn set_value_record_pause_hook(&self, hook: Box<dyn Fn() + Send + Sync>) {
+        *self.value_record_pause.0.lock() = Some(hook);
+    }
+
+    /// Taken out before it runs, so a sibling commit the hook drives on this
+    /// registry cannot fire it again.
+    #[cfg(test)]
+    fn pause_before_value_record(&self) {
+        let hook = self.value_record_pause.0.lock().take();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
+    #[cfg(not(test))]
+    #[inline]
+    const fn pause_before_value_record(&self) {}
+
     /// The field `key` names was proven ACCEPTED by a request whose own guard
     /// on it, if any, settles elsewhere: drop any resident verdict, read as
     /// `generation`, and return the cleared row for the ledger.
@@ -1033,6 +1079,11 @@ impl FieldVerdictRegistry {
     /// Drops the identity's canary and value state only when a row was
     /// actually removed: a removal that found nothing resident leaves them,
     /// so a pre-flight suspension a canary disproof retained still stands.
+    ///
+    /// A removal refused because an operator purge holds the key's lease
+    /// leaves the verdict resident and acting. That window closes on its own:
+    /// a completed purge removes the row, and a failed one releases the lease
+    /// so the next accepted request clears it again.
     pub fn clear_accepted(
         &self,
         key: &FieldVerdictKey,
@@ -1096,6 +1147,8 @@ impl FieldVerdictRegistry {
                 "field_verdict_clear_stale",
                 "field-verdict clear refused: its admission predates the live capability generation",
             ),
+            // The verdict stays resident and acting until the purge holding
+            // the lease settles; see `clear_accepted`.
             crate::learned_capability::GenerationOutcome::Reserved => (
                 "field_verdict_clear_reserved",
                 "field-verdict clear refused: an operator purge holds this key's lease",
@@ -1269,12 +1322,16 @@ impl FieldRepairGuard<'_> {
                 value: (outcome, observations),
                 incarnation,
                 generation,
-            } => (
-                outcome == crate::learned_capability::ObserveOutcome::Acting,
-                observations,
-                generation,
-                incarnation,
-            ),
+            } => {
+                // `Refused` is the per-lane beta bound, and a field key is never a beta flag.
+                debug_assert_ne!(outcome, crate::learned_capability::ObserveOutcome::Refused);
+                (
+                    outcome == crate::learned_capability::ObserveOutcome::Acting,
+                    observations,
+                    generation,
+                    incarnation,
+                )
+            }
             crate::learned_capability::GenerationOutcome::Stale => {
                 self.registry.release_slot(&key);
                 tracing::debug!(
@@ -1315,8 +1372,16 @@ impl FieldRepairGuard<'_> {
                 return None;
             }
         };
-        self.registry.release_slot(&key);
+        // Recorded while the slot is still held. `record` replaces by key and
+        // only a slot holder records, so the last value written is always the
+        // newest commit's; released first, a sibling admitted in between would
+        // record its newer incarnation's value and then lose it to this one.
+        // A clear needs no slot and may still land in this window: it removes
+        // the row this commit minted, so the value recorded here names an
+        // incarnation no longer resident and `value_at` never answers it.
+        self.registry.pause_before_value_record();
         self.registry.values.record(&key, incarnation, value);
+        self.registry.release_slot(&key);
         // This admission is IN-MEMORY only: `Applied` means the shared
         // registry accepted the mutation through the generation barrier,
         // not that the event below has been durably written. The

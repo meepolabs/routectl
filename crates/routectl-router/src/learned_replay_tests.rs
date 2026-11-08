@@ -915,3 +915,72 @@ fn a_live_admission_on_an_unknown_pair_is_admitted() {
     assert!(!admission.is_stale());
     assert!(admission.admitted().is_some(), "an unknown pair admits");
 }
+
+// --- the per-lane beta bound never reaches a replay negative ---
+
+/// A replay key is never a beta flag, so a lane whose beta bound is full of
+/// leased entries still admits it: the commit applies and acts.
+///
+/// Mutation check: make `admit_to_beta_lane` refuse every non-beta key -> red.
+#[test]
+fn a_replay_negative_applies_on_a_lane_full_of_leased_beta_entries() {
+    use crate::beta_capability::beta_capability_key;
+    use crate::learned_capability::{
+        LearnKey, MAX_BETA_ENTRIES_PER_LANE, NegativeEvidence, PurgePreparation,
+    };
+
+    // Arrange
+    let reg = registry();
+    let key = key("lane-a");
+    let t0 = Instant::now();
+    let generation = reg.learned().generation();
+    let lane_key = key.lane_key().to_string();
+    let betas: Vec<String> = (0..MAX_BETA_ENTRIES_PER_LANE)
+        .map(|n| beta_capability_key(&format!("zz-flag-{n}")).expect("well-formed flag"))
+        .collect();
+    for beta in &betas {
+        let _ = reg.learned().observe(
+            LearnKey {
+                state_key: &lane_key,
+                feature_key_raw: beta,
+                provider_kind: PROVIDER,
+            },
+            NegativeEvidence {
+                tier: SignalTier::SelfIdentifying,
+                phase: FailurePhase::F1,
+                source: EvidenceSource::Live,
+                evidence_class: None,
+            },
+            t0,
+        );
+    }
+    let leases: Vec<_> = betas
+        .iter()
+        .map(|beta| {
+            match reg
+                .learned()
+                .prepare_purge(generation, &lane_key, beta, PROVIDER)
+            {
+                PurgePreparation::Reserved(lease) => lease,
+                other => panic!("expected a reservation, got {other:?}"),
+            }
+        })
+        .collect();
+
+    // Act
+    let event = reg
+        .admit_provisional(&key, generation, t0)
+        .admitted()
+        .expect("an unknown pair admits")
+        .commit(400, vec![], t0);
+
+    // Assert
+    assert!(event.is_some(), "the commit applied");
+    assert!(
+        reg.is_negative_acting(&key, t0),
+        "the negative is stored and acting, not refused by the beta bound",
+    );
+    for lease in leases {
+        reg.learned().restore_purge(lease);
+    }
+}

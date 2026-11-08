@@ -423,10 +423,14 @@ impl ReplayProbeGuard<'_> {
         // The generation comes FROM the mutation, under its guard.
         let (observations, persistence_generation, incarnation) = match observed {
             crate::learned_capability::GenerationOutcome::Applied {
-                value: (_, observations),
+                value: (outcome, observations),
                 incarnation,
                 generation,
-            } => (observations, generation, incarnation),
+            } => {
+                // `Refused` is the per-lane beta bound, and a replay key is never a beta flag.
+                debug_assert_ne!(outcome, crate::learned_capability::ObserveOutcome::Refused);
+                (observations, generation, incarnation)
+            }
             crate::learned_capability::GenerationOutcome::Stale => {
                 self.registry.release_slot(&key);
                 tracing::debug!(
