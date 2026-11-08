@@ -32,6 +32,8 @@ use std::borrow::Cow;
 ))]
 use serde_json::{Map, Value};
 
+#[cfg(feature = "anthropic-api")]
+use crate::anthropic_api::PARALLEL_TOOL_CALLS_KEY;
 use routectl_core::is_canonical_request_key;
 #[cfg(any(feature = "anthropic-api", feature = "openai-compat"))]
 use routectl_core::wire_check::{EditKind, EditSite, WireTap};
@@ -78,7 +80,7 @@ pub fn is_managed_key(dialect: Dialect, key: &str) -> bool {
                     "thinking"
                         // Consumed into `tool_choice.disable_parallel_tool_use`;
                         // not a valid top-level Anthropic field.
-                        | "parallel_tool_calls"
+                        | PARALLEL_TOOL_CALLS_KEY
                 )
         }
         #[cfg(feature = "bedrock")]

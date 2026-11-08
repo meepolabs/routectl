@@ -6,13 +6,15 @@
 //! a predicate that gains or loses a key fails here with the pair named.
 //!
 //! The universe is closed against the sources it summarizes: every string
-//! literal in the canonical list and in each predicate's own arms must appear
-//! in it, so a key added to a list without a universe entry cannot escape the
+//! literal or key constant in the canonical list and in each predicate's own
+//! arms must appear in it, so a key added to a list without a universe entry cannot escape the
 //! equality check.
 
 use std::collections::BTreeSet;
 
 use super::{Dialect, is_managed_key};
+#[cfg(feature = "anthropic-api")]
+use crate::anthropic_api::PARALLEL_TOOL_CALLS_KEY;
 
 use syn::buffer::{Cursor, TokenBuffer};
 use syn::{Expr, Item, Stmt};
@@ -492,8 +494,8 @@ fn the_openai_compat_set_is_the_canonical_set_only() {
     assert_eq!(compat, canonical);
 }
 
-/// String literals inside every macro invocation (`matches!`) in the body of
-/// `fn <fn_name>` in `source`.
+/// String literals and resolved key constants inside every macro invocation
+/// (`matches!`) in the body of `fn <fn_name>` in `source`.
 fn literals_in_fn(source: &str, fn_name: &str) -> BTreeSet<String> {
     let file = syn::parse_file(source).expect("source parses");
     let body = file
@@ -555,6 +557,14 @@ fn collect_literals(mut cursor: Cursor<'_>, out: &mut BTreeSet<String>) {
                 out.insert(s.value());
             }
             cursor = next;
+        } else if let Some((ident, next)) = cursor.ident() {
+            let name = ident.to_string();
+            if is_const_shaped(&name)
+                && let Some(value) = resolve_key_const(&name)
+            {
+                out.insert(value.to_owned());
+            }
+            cursor = next;
         } else if let Some((_, next)) = cursor.token_tree() {
             cursor = next;
         } else {
@@ -563,13 +573,52 @@ fn collect_literals(mut cursor: Cursor<'_>, out: &mut BTreeSet<String>) {
     }
 }
 
+fn is_const_shaped(name: &str) -> bool {
+    name.starts_with(|c: char| c.is_ascii_uppercase())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+}
+
+/// Key constants a predicate arm may name in place of a literal, resolved to
+/// the compiled value so the scan reads the same key the predicate matches.
+const KEY_CONSTS: &[(&str, &str)] = &[
+    #[cfg(feature = "anthropic-api")]
+    ("PARALLEL_TOOL_CALLS_KEY", PARALLEL_TOOL_CALLS_KEY),
+];
+
+/// Key constants whose arm is compiled out of this build, so the scan sees
+/// the name in the source text but has no value to read.
+const KEY_CONSTS_COMPILED_OUT: &[&str] = &[
+    #[cfg(not(feature = "anthropic-api"))]
+    "PARALLEL_TOOL_CALLS_KEY",
+];
+
+/// The value of a key constant named in a scanned arm. An unknown constant
+/// fails the scan: an arm key the scan cannot read would escape the universe
+/// check.
+fn resolve_key_const(name: &str) -> Option<&'static str> {
+    if let Some((_, value)) = KEY_CONSTS.iter().find(|(n, _)| *n == name) {
+        return Some(value);
+    }
+    assert!(
+        KEY_CONSTS_COMPILED_OUT.contains(&name),
+        "scanned arm names constant {name}; add it to KEY_CONSTS"
+    );
+    None
+}
+
+/// The fewest literals the canonical-list scan may find. A lower count means
+/// the AST walk missed arms of `is_canonical_request_key`.
+const MIN_CANONICAL_KEYS: usize = 27;
+
 const CANONICAL_SOURCE: &str = include_str!("../../routectl-core/src/reserved.rs");
 
 #[test]
 fn universe_covers_the_canonical_list() {
     let canonical = literals_in_fn(CANONICAL_SOURCE, "is_canonical_request_key");
     assert!(
-        canonical.len() >= 27 && canonical.contains("max_completion_tokens"),
+        canonical.len() >= MIN_CANONICAL_KEYS && canonical.contains("max_completion_tokens"),
         "canonical extraction found {canonical:?}"
     );
     let missing: Vec<_> = canonical
@@ -596,6 +645,11 @@ fn universe_covers_every_predicate_arm() {
     assert!(
         literals.contains("anthropic_version") && literals.contains("generationConfig"),
         "arm extraction found {literals:?}"
+    );
+    #[cfg(feature = "anthropic-api")]
+    assert!(
+        literals.contains(PARALLEL_TOOL_CALLS_KEY),
+        "arm constant not resolved: {literals:?}"
     );
     let missing: Vec<_> = literals
         .iter()

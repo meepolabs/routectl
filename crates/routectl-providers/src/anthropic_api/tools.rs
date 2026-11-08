@@ -281,7 +281,7 @@ pub(super) fn forced_tool_choice_type(tc: Option<&Value>) -> Option<&'static str
 /// `provider_extras` on the Anthropic egress (never a canonical
 /// `ChatRequest` field) and is consumed here into the Anthropic-native
 /// `disable_parallel_tool_use` toggle. See `apply_parallel_tool_use`.
-pub(super) const PARALLEL_TOOL_CALLS_KEY: &str = "parallel_tool_calls";
+pub const PARALLEL_TOOL_CALLS_KEY: &str = "parallel_tool_calls";
 
 /// Read the OpenAI-dialect `parallel_tool_calls` toggle (a JSON bool)
 /// out of `provider_extras`. Returns `None` when the key is absent or

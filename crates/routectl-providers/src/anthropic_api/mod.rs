@@ -90,6 +90,7 @@ pub(crate) const PROVIDER_KIND: &str = routectl_core::provider_kind::trace::ANTH
 pub(crate) const LANE: &str = PROVIDER_KIND;
 
 pub(crate) use crate::skipped_format::ANTHROPIC_FORMAT;
+pub(crate) use tools::PARALLEL_TOOL_CALLS_KEY;
 
 use crate::stream_completion::StreamCompletion;
 use sse::SseState;
