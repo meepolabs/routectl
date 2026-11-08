@@ -27,6 +27,12 @@
 //! on the effort field commits the level the LAST of them wrote, which is the
 //! level the upstream accepted, each under its own key and only where its own
 //! refusal may be learned.
+//!
+//! A level that pre-flight wrote is not a step here: when the upstream then
+//! refuses that level, the commit learns the written level's own row and
+//! leaves the source level's verdict naming the level pre-flight wrote. The
+//! pre-flight effort chain follows that verdict through each acting row to the
+//! final level, so the source verdict is not rewritten.
 
 use std::borrow::Cow;
 use std::time::Instant;

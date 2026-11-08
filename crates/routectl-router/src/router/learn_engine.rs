@@ -550,7 +550,7 @@ impl<'a> AttemptLearning<'a> {
     /// set only on its `Some`. It also selects WHICH admitted row to repair --
     /// the one the rejection names -- and releases every other candidate's
     /// guard. `thinking` is the thinking shape the refused attempt sent.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     fn try_field_repair(
         &mut self,
         named: NamedRejection,
