@@ -16,6 +16,10 @@ list with more narrative.
 
 ### Added
 
+- **`rc_field_named_no_row_total` counts field rejections that name a path routectl has no repair for.** An upstream rejection whose located field path resolves no repair row on its lane now counts there, and `rc_parser_unlocalized_total` counts only rejections no field path was located in (plus those laid to a defective tool-call transcript). A rejection counts in at most one of the two, once per request per target, and both ride the INFO status snapshot beside the repair and learned counts. Library callers can read the same count from `FieldRepairCounters::field_named_no_row`. See [docs/LOGGING.md](docs/LOGGING.md).
+
+- **Pre-flight effort rewrites log the level they chose and its direction.** Each per-decision DEBUG line carries `chosen_level` and `direction` (`lower` or `higher`) for an acting effort rewrite, the same tokens as the repair WARN, and `none` for every other decision. The per-request WARN carries those fields for the decision it names, and `decisions_planned` counts the refusal that ends each effort chain. Library callers receive the same optional tokens on each `FieldPreflight` record. See [docs/LOGGING.md](docs/LOGGING.md).
+
 - **`/status/health` (schema 9) shows each target's eligibility reason, since and the exact re-login command, per-pool seat counts, and the background seat driver's health; the dashboard expects health schema 9.** Each target row gains `account` and `eligibility` (`reason`, `cause`, `since_ms`, `fix`), the panel gains `pools` and `seat_driver`, and the Health tab renders them. See [docs/CONFIGURATION.md](docs/CONFIGURATION.md#routectl-doctor----the-health-battery).
 
 - **Doctor schema 25 lists unusable seats with reason, since and the re-login command.** On `/status/doctor`, each seat whose credential the daemon holds as unusable is one `auth` WARN `unusable seat <state_key>` naming the reason (`credential_unusable`), the cause (`not_logged_in`, `unreadable`, `expired` or `revoked`) and when it was first marked, with the fix as its remediation: `routectl login <provider> --label <label>` for a labeled seat (a label outside `A-Z a-z 0-9 _ . -` single-quoted for the shell), `routectl login <provider>` for an unlabeled one, and a correction naming the entry and provider token for an `oauth://` provider `routectl login` does not accept. The same fix is the health `fix` field. The CLI `routectl doctor` cannot see daemon memory and reports none. A missing labeled `oauth://` ref's remediation now includes `--label`, and the `pools` remediations name the local `credential_unusable` refusal. The dashboard expects doctor schema 25. See [docs/CONFIGURATION.md](docs/CONFIGURATION.md#routectl-doctor----the-health-battery).
@@ -442,6 +446,10 @@ list with more narrative.
 
 ### Changed
 
+- **A learned output ceiling applies only at 4096 or above.** Pre-flight and reactive repair share one clamp gate, which lowers `max_tokens` to a learned ceiling only when that ceiling is at least 4096; a stored ceiling below 4096 is inert, the request keeps its own limit and pre-flight reports `within_ceiling`. A rejection naming a limit below 4096 reaches the client unchanged. A ceiling still only ever lowers a limit.
+
+- **A request rejected for a field another request is already learning is repaired too.** While one request holds the learning claim for a field, another request rejected for the same field repairs its own retry from the same deterministic row and is served; it holds no claim and commits no verdict, so only the claim holder learns. An acting negative still drops the row.
+
 - **BREAKING: a pool member routectl cannot build once its credential reads now refuses the config** at serve, `config check` and hot reload (a refused reload keeps the running config). The refusal names the pool, the member and the rule, never a value. Example: a logged-in Codex member whose stored login carries no account id. Such a member used to be dropped from the pool with a `pool_member_omitted` WARN. `config check` now runs the same member build offline (no credential is refreshed or written, and no installation id is created). A member that is only logged out or whose credential cannot be read still loads, as an unusable seat. A pool member with a missing or malformed credential reference, an unknown member, or a managed credential outside its lane was already refused by config validation and still is.
 
 - **When a seat's refresh token is refused during a request, the seat is marked unusable and the request moves to the next seat instead of failing; count_tokens also walks past unusable seats.** The mark is the same one a reload clears, so later requests skip the seat without dialing it; with a single seat, or with fallbacks disabled, the request answers 503 `credential_unusable`. A refresh that fails any other way still surfaces its error unchanged, and a probe request never marks. See [docs/LOGGING.md](docs/LOGGING.md).
@@ -739,6 +747,7 @@ list with more narrative.
 
 ### Removed
 
+- **`RecordedLearnedEntry::value` (routectl-router).** A recorded entry carries a field verdict's stored value in one place, `RecordedLearnedEntry::entry.value` (`LearnedRegistryEntry::value`); library callers read it there.
 - `rc_pool_member_omitted_*` and the `pool_member_omitted` WARN are gone; live per-pool seat counts replace them, and one WARN (one INFO) logs when a seat becomes unusable (recovers).
 - **`DispatchMeta::selection_decision` (routectl-router).** The seat-selection token it carried was no longer written to the usage ledger, and nothing read it. Library callers that read it have no replacement. The sticky birth-pick and overflow-repin DEBUG lines are unchanged.
 - **`EditSite::SamplingReconcile` (routectl-core), and the loose-argument forms of the learned-capability observe calls (routectl-router).** Nothing emitted `SamplingReconcile`; `EditSite::ALL` is now `[Self; 49]`. `LearnedCapabilityRegistry::observe`, `observe_in_generation` and `observe_positive_in_generation`, and `Router::observe_learned_capability`, now take a `LearnKey { state_key, feature_key_raw, provider_kind }` in place of the three string arguments; the negative-evidence calls (all but `observe_positive_in_generation`) also take a `NegativeEvidence { tier, phase, source, evidence_class }` in place of the separate `SignalTier`, `FailurePhase`, `EvidenceSource` and evidence-class arguments. `LearnKey` and `NegativeEvidence` are new public types; library callers build one of each and pass them where the separate arguments went.
@@ -752,6 +761,20 @@ list with more narrative.
 - **Unwired development scripts.** `scripts/coverage.sh`, `scripts/test-inventory.sh`, `scripts/stray-build-dirs.sh` and `scripts/bootstrap.sh` are gone; their commands are now recipes in [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) "Maintenance recipes" (coverage snapshot, test inventory, stray build dirs) and "Commit gate (one-time setup)" (`pre-commit install --install-hooks`). The driver credential-resolution probe (`scripts/drivers/config/credential_probe.sh`, its self-test and `scripts/drivers/lib/resolve_bin.sh`), `scripts/container/build.test.sh`, and `scripts/drivers/profiles/README.md` are removed; the client-profile rules now live in docs/DEVELOPMENT.md "Client profiles".
 
 ### Fixed
+
+- **A response carrying a refusal block is never read as positive capability evidence.** The clean-stop gate rejects a response whose content holds a refusal block, the shape the OpenAI Responses lane maps a model refusal to; other unknown blocks stay inert.
+
+- **Positive capability observations never store a field-namespace key.** Positive, accepted-beta and replayed accepted-beta observations pass the field-namespace screen at the learned store's single writer, and a ledger rebuild counts only the positives the store kept.
+
+- **A tool-type rejection teaches a negative only when its message ends in the expected list.** Both unsupported-tool-type readers accept only a comma-and-space separated list of safe tokens closed by `?` or by the last quoted entry, through the end of the message; any other tail learns nothing.
+
+- **A field-verdict commit records its stored value while it holds the key's single-flight slot**, so the verdict that stays resident acts with its own value.
+
+- **A wire revert waiting on its retry's outcome stays pending across the same-body retry after a 401 token refresh**, so a success after the refresh credits the revert; any other failure clears it.
+
+- **A thinking-type repair that ships sets the request's canonical reasoning to match the type sent.** The wire bytes are unchanged.
+
+- **The live wire check reads the Bedrock Converse field bag, declares operator extras per leaf, and declares the token-cap fold.** A client extra carried as a top-level key of `additionalModelRequestFields` counts as consumed; an operator payload extra that adds a whole container is declared at the container and at each leaf, so a rejection naming one leaf reverts only that leaf; folding `max_completion_tokens` into `max_tokens` on the Chat Completions and Anthropic Messages ingresses is declared as a relocation, or as a drop when both were sent.
 
 - **A corrupted `credentials.json` error now names only the JSON error class with its line and column (for example `data error at line 1 column 20`), never the file's contents; the same applies to an unparseable token JWT payload.** On Windows there is no owner-only mode check on the credentials file; it relies on the user-profile directory ACL.
 
