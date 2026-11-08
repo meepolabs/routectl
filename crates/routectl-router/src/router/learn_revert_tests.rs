@@ -18,6 +18,7 @@ use serde_json::{Value, json};
 
 use super::super::field_repair::{TEST_UNSUPPORTED_PATH, TEST_UNSUPPORTED_SENTINEL};
 use super::super::scripted_provider_test_support::{Answer, ScriptedProvider, Shape};
+use super::WireRevert;
 use crate::config::Config;
 use crate::resolved::ResolvedModel;
 use crate::router::{Router, RouterOptions};
@@ -47,6 +48,15 @@ const CONTROL_KEY: &str = "op\u{1b}[31mkey";
 /// `[providers.pN]` entry configured by `provider_block`, one call per
 /// attempt. `cache` turns on the top-level cache marker placement.
 fn router(provider_block: &str, cache: bool, providers: &[Arc<ScriptedProvider>]) -> Router {
+    let providers: Vec<Arc<dyn Provider>> = providers
+        .iter()
+        .map(|provider| Arc::clone(provider) as Arc<dyn Provider>)
+        .collect();
+    router_over(provider_block, cache, &providers)
+}
+
+/// [`router`] over any providers.
+fn router_over(provider_block: &str, cache: bool, providers: &[Arc<dyn Provider>]) -> Router {
     let mut toml_text = format!(
         "version = 5\n[retry]\nmax_attempts = 1\ninitial_backoff_ms = 0\njitter_ms = 0\n\
          [cache]\nauto_emit_top_level_breakpoint = {cache}\n[wire_check]\n{NEVER_SAMPLED}\n"
@@ -67,8 +77,12 @@ fn router(provider_block: &str, cache: bool, providers: &[Arc<ScriptedProvider>]
         .enumerate()
         .map(|(idx, provider)| {
             let nickname = format!("m{idx}");
-            let provider = Arc::clone(provider) as Arc<dyn Provider>;
-            let model = ResolvedModel::new(&nickname, format!("p{idx}"), provider, "upstream");
+            let model = ResolvedModel::new(
+                &nickname,
+                format!("p{idx}"),
+                Arc::clone(provider),
+                "upstream",
+            );
             (nickname, Arc::new(model))
         })
         .collect::<BTreeMap<_, _>>();
@@ -295,6 +309,7 @@ struct Outcome {
     served: bool,
     field_repairs: usize,
     learned: usize,
+    wire_reverts: Vec<WireRevert>,
     events: Vec<CapturedEvent>,
 }
 
@@ -316,6 +331,7 @@ async fn dispatch(router: &Router, surface: Surface, req: ChatRequest) -> Outcom
         served,
         field_repairs: meta.field_repairs.len(),
         learned: meta.learned_capabilities.len(),
+        wire_reverts: meta.wire_reverts,
         events,
     }
 }

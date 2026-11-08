@@ -490,11 +490,17 @@ impl<'a> AttemptLearning<'a> {
         provider_kind: Option<&str>,
     ) -> ClassifiedFailure {
         self.canary_lossy_repair = None;
-        self.revert.on_failure();
         match self.replay_plan.as_ref() {
             Some(plan) => classify_with_attempt(err, provider_kind, plan.attempt()),
             None => classify(err, provider_kind),
         }
+    }
+
+    /// Settle a failed attempt that auth recovery did not retry: a revert it
+    /// re-sent did not succeed. An auth-refresh retry re-sends the same body,
+    /// so a revert awaiting its outcome must survive it.
+    pub(super) const fn settle_failure(&mut self) {
+        self.revert.on_failure();
     }
 
     /// Reasoning-replay strip repair: when the optimistically carried variant

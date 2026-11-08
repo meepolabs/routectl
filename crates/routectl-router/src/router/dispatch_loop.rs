@@ -843,6 +843,7 @@ impl Router {
                             }
                             continue;
                         }
+                        learning.settle_failure();
                         if adapter.disposition(target, &e) == ErrorDisposition::WalkWithoutDebit {
                             probe_guard.release();
                             if opts.disable_fallbacks {

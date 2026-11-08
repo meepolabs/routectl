@@ -5,13 +5,16 @@
 //! site whose rejection still reaches the proposers.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
+use futures::stream::BoxStream;
 use routectl_core::wire_check::{DeclaredEdit, EditKind, EditSite, IngressDialect};
-use routectl_core::{ChatRequest, Result};
+use routectl_core::{ChatChunk, ChatRequest, ChatResponse, Result};
 use serde_json::json;
 
 use super::super::super::field_repair::TEST_UNSUPPORTED_SENTINEL;
 use super::super::super::repair_budget::REPAIRS_PER_REQUEST;
+use super::super::RevertState;
 use super::*;
 use crate::wire_check_state::FieldRepairOutcome;
 
@@ -25,37 +28,133 @@ fn refuse_op_key_then_test_row(req: &ChatRequest) -> Result<()> {
     refuse_test_row_while_carried(req)
 }
 
-/// A reverted retry that drew a second rejection did not succeed, even when
-/// a later repair of that second rejection serves the request: the revert's
-/// rejection stays unrepaired and only the later one is repaired.
+/// A provider that answers its `expired_on`-th call (counting from one)
+/// with an expired-token 401 in place of the scripted answer, and counts the
+/// auth refreshes the router asks of it.
+struct ExpiresOnce {
+    inner: Arc<ScriptedProvider>,
+    expired_on: Option<usize>,
+    refreshes: AtomicUsize,
+}
+
+impl ExpiresOnce {
+    fn new(answer: Answer, expired_on: Option<usize>) -> Arc<Self> {
+        Arc::new(Self {
+            inner: ScriptedProvider::new(Some(faithful), answer),
+            expired_on,
+            refreshes: AtomicUsize::new(0),
+        })
+    }
+
+    fn expired_now(&self) -> bool {
+        self.expired_on == Some(self.inner.calls())
+    }
+}
+
+fn expired_token() -> Error {
+    Error::upstream("scripted", 401, "token expired")
+}
+
+#[async_trait::async_trait]
+impl Provider for ExpiresOnce {
+    fn id(&self) -> &'static str {
+        "scripted"
+    }
+    fn normalize_request(&self, req: &ChatRequest) -> Result<Value> {
+        self.inner.normalize_request(req)
+    }
+    fn normalize_response(&self, raw: Value) -> Result<ChatResponse> {
+        self.inner.normalize_response(raw)
+    }
+    async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
+        let answered = self.inner.complete(req).await;
+        if self.expired_now() {
+            return Err(expired_token());
+        }
+        answered
+    }
+    async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
+        let answered = self.inner.stream(req).await;
+        if self.expired_now() {
+            return Err(expired_token());
+        }
+        answered
+    }
+    async fn on_auth_failure(&self) -> Result<()> {
+        self.refreshes.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+/// One reverted dispatch whose outcome may arrive across an auth refresh.
+struct SettleRow {
+    name: &'static str,
+    answer: Answer,
+    /// The call answered with an expired-token 401, if any.
+    expired_on: Option<usize>,
+    calls: usize,
+    findings: &'static [(&'static str, FieldRepairOutcome)],
+}
+
+/// A revert awaits the outcome of the body it re-sent. An auth refresh
+/// re-sends that same body, so the revert is credited when the refreshed
+/// retry succeeds; a definitive failure settles it unrepaired, even when a
+/// later repair then serves the request.
 #[tokio::test]
-async fn a_later_repair_does_not_credit_a_revert_whose_retry_failed() {
-    for surface in SURFACES {
-        let provider = ScriptedProvider::new(Some(faithful), refuse_op_key_then_test_row);
-        let block = format!("{ANTHROPIC}{OPERATOR_EXTRA}");
-        let router = router(&block, false, &[Arc::clone(&provider)]);
-        let mut req = anthropic_request();
-        carry_test_row(&mut req);
-
-        let outcome = dispatch(&router, surface, req).await;
-
-        assert_eq!(
-            provider.calls(),
-            3,
-            "{surface:?}: revert, then field repair"
-        );
-        assert!(
-            outcome.served,
-            "{surface:?}: premise, the field repair serves"
-        );
-        assert_eq!(
-            rejections(&router.wire_check_snapshot()),
-            [
+async fn a_revert_is_settled_by_a_definitive_outcome_not_by_an_auth_refresh() {
+    let rows = [
+        SettleRow {
+            name: "revert, 401, refresh, served",
+            answer: refuse_op_key_while_carried,
+            expired_on: Some(2),
+            calls: 3,
+            findings: &[("routectl_added", FieldRepairOutcome::Repaired)],
+        },
+        SettleRow {
+            name: "revert, 401, refresh, rejected again, field repair serves",
+            answer: refuse_op_key_then_test_row,
+            expired_on: Some(2),
+            calls: 4,
+            findings: &[
                 ("routectl_added", FieldRepairOutcome::Unrepaired),
                 ("routectl_added", FieldRepairOutcome::Repaired),
             ],
-            "{surface:?}"
-        );
+        },
+        SettleRow {
+            name: "revert, rejected again, field repair serves",
+            answer: refuse_op_key_then_test_row,
+            expired_on: None,
+            calls: 3,
+            findings: &[
+                ("routectl_added", FieldRepairOutcome::Unrepaired),
+                ("routectl_added", FieldRepairOutcome::Repaired),
+            ],
+        },
+    ];
+    for surface in SURFACES {
+        for row in &rows {
+            let name = format!("{surface:?} {}", row.name);
+            let provider = ExpiresOnce::new(row.answer, row.expired_on);
+            let block = format!("{ANTHROPIC}{OPERATOR_EXTRA}");
+            let router = router_over(&block, false, &[Arc::clone(&provider) as Arc<dyn Provider>]);
+            let mut req = anthropic_request();
+            carry_test_row(&mut req);
+
+            let outcome = dispatch(&router, surface, req).await;
+
+            assert_eq!(provider.inner.calls(), row.calls, "{name}: upstream calls");
+            assert_eq!(
+                provider.refreshes.load(Ordering::SeqCst),
+                usize::from(row.expired_on.is_some()),
+                "{name}: auth refreshes"
+            );
+            assert!(outcome.served, "{name}: premise, the request is served");
+            assert_eq!(
+                rejections(&router.wire_check_snapshot()),
+                row.findings,
+                "{name}: one finding per rejection"
+            );
+        }
     }
 }
 
@@ -348,6 +447,16 @@ async fn an_unrevertible_required_field_default_reaches_the_field_repair() {
         assert_eq!(provider.calls(), 2, "{surface:?}: repaired and re-sent");
         assert!(outcome.served, "{surface:?}: the repaired retry serves");
         assert_eq!(outcome.field_repairs, 1, "{surface:?}: one field repair");
+        assert_eq!(
+            outcome.wire_reverts.len(),
+            1,
+            "{surface:?}: one revert record for the matched edit"
+        );
+        assert_eq!(
+            outcome.wire_reverts[0].state,
+            RevertState::Declined,
+            "{surface:?}: the unrevertible edit declines its revert"
+        );
         assert_eq!(
             router.field_verdicts().snapshot_len(),
             1,
