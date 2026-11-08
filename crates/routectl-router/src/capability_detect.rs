@@ -5,8 +5,9 @@
 //! Each detector reads STRUCTURAL evidence from the canonical response --
 //! never "no error occurred" -- and emits a [`CapabilityObservation`]. A
 //! shared clean-stop gate runs FIRST and fails closed: unless the response
-//! is an unambiguous clean success (exactly one choice, no refusal, a
-//! finish_reason in the explicit allow set), every detector is skipped and
+//! is an unambiguous clean success (exactly one choice, no refusal field or
+//! refusal content block, a finish_reason in the explicit allow set), every
+//! detector is skipped and
 //! `detect` returns an empty vector. New or degraded stop vocabulary can
 //! never misclassify.
 //!
@@ -39,6 +40,11 @@ use serde_json::Value;
 /// finish_reason, and any unknown token all reject.
 const CLEAN_STOP_ALLOW: &[&str] = &["stop", "tool_calls", "pause_turn"];
 
+/// Content-block `type` discriminant of a model refusal surfaced as a
+/// forward-compat [`ContentPart::Other`] block (the Responses dialect maps
+/// its refusal output content this way).
+const REFUSAL_TYPE_TAG: &str = "refusal";
+
 /// Content-block `type` discriminants that constitute web-search evidence
 /// when they appear as a forward-compat [`ContentPart::Other`] block (no
 /// typed search block exists in the canonical schema).
@@ -63,6 +69,18 @@ const WEB_SEARCH_REQUEST_KEYS: &[&str] = &["web_search_requests"];
 /// missing from it is never admitted: a new detector adds its key here.
 pub const DETECTABLE_CAPABILITIES: [&str; 4] =
     [STRUCTURED_OUTPUT, WEB_SEARCH, PROMPT_CACHING, THINKING];
+
+/// The uniform detector shape: request intent, the clean-stop choice, and
+/// the response usage in; at most one observation out.
+type Detector = fn(&DetectorContext, &Choice, Option<&Usage>) -> Option<CapabilityObservation>;
+
+/// Every detector `detect` runs, in emission order.
+const DETECTORS: &[Detector] = &[
+    detect_structured_output,
+    detect_web_search,
+    detect_prompt_caching,
+    detect_thinking,
+];
 
 /// Per-capability request intent, derived router-side while the request is
 /// still in hand. Detectors read intent from here; they never consult the
@@ -119,24 +137,17 @@ pub fn detect(ctx: &DetectorContext, resp: &ChatResponse) -> Vec<CapabilityObser
         return Vec::new();
     };
 
-    let mut observations = Vec::new();
-    if let Some(obs) = detect_structured_output(ctx, choice) {
-        observations.push(obs);
-    }
-    if let Some(obs) = detect_web_search(ctx, resp.usage.as_ref(), &choice.message) {
-        observations.push(obs);
-    }
-    if let Some(obs) = detect_prompt_caching(resp.usage.as_ref()) {
-        observations.push(obs);
-    }
-    if let Some(obs) = detect_thinking(ctx, resp.usage.as_ref(), &choice.message) {
-        observations.push(obs);
-    }
-    observations
+    let usage = resp.usage.as_ref();
+    DETECTORS
+        .iter()
+        .filter_map(|detector| detector(ctx, choice, usage))
+        .collect()
 }
 
 /// The single clean-stop choice, or `None` when the gate rejects. Requires
-/// exactly one choice, a finish_reason in the allow set, and no refusal.
+/// exactly one choice, a finish_reason in the allow set, and no refusal,
+/// whether carried as the message's refusal field or as a refusal content
+/// block.
 fn clean_stop_choice(resp: &ChatResponse) -> Option<&Choice> {
     let [choice] = resp.choices.as_slice() else {
         return None;
@@ -145,15 +156,30 @@ fn clean_stop_choice(resp: &ChatResponse) -> Option<&Choice> {
     if !CLEAN_STOP_ALLOW.contains(&reason) {
         return None;
     }
-    if choice.message.refusal.is_some() {
+    if choice.message.refusal.is_some() || has_refusal_block(&choice.message) {
         return None;
     }
     Some(choice)
 }
 
+/// Whether the message carries a refusal content block. Only the refusal
+/// discriminant counts; any other unknown block leaves the gate open.
+fn has_refusal_block(message: &Message) -> bool {
+    let MessageContent::Parts(parts) = &message.content else {
+        return false;
+    };
+    parts.iter().any(|part| {
+        matches!(
+            part,
+            ContentPart::Other { type_tag, .. } if type_tag == REFUSAL_TYPE_TAG
+        )
+    })
+}
+
 fn detect_structured_output(
     ctx: &DetectorContext,
     choice: &Choice,
+    _usage: Option<&Usage>,
 ) -> Option<CapabilityObservation> {
     if !ctx.strict_output_requested {
         return None;
@@ -183,10 +209,10 @@ fn detect_structured_output(
 
 fn detect_web_search(
     ctx: &DetectorContext,
+    choice: &Choice,
     usage: Option<&Usage>,
-    message: &Message,
 ) -> Option<CapabilityObservation> {
-    if web_search_requests_positive(usage) || has_search_evidence_block(message) {
+    if web_search_requests_positive(usage) || has_search_evidence_block(&choice.message) {
         return Some(verified(WEB_SEARCH, SEARCH_BLOCKS));
     }
     // tool_choice=auto with no evidence never produces an observation;
@@ -197,7 +223,11 @@ fn detect_web_search(
     None
 }
 
-fn detect_prompt_caching(usage: Option<&Usage>) -> Option<CapabilityObservation> {
+fn detect_prompt_caching(
+    _ctx: &DetectorContext,
+    _choice: &Choice,
+    usage: Option<&Usage>,
+) -> Option<CapabilityObservation> {
     let usage = usage?;
     let created = usage.cache_creation_input_tokens.unwrap_or(0) > 0;
     let read = usage.cache_read_input_tokens.unwrap_or(0) > 0;
@@ -210,8 +240,8 @@ fn detect_prompt_caching(usage: Option<&Usage>) -> Option<CapabilityObservation>
 
 fn detect_thinking(
     ctx: &DetectorContext,
+    choice: &Choice,
     usage: Option<&Usage>,
-    message: &Message,
 ) -> Option<CapabilityObservation> {
     if !ctx.reasoning_requested {
         return None;
@@ -219,7 +249,7 @@ fn detect_thinking(
     // Thinking blocks are lifted to reasoning_details by the normalizer and
     // are never present as ContentPart, so this reads reasoning_details and
     // the usage counter -- not the content blocks.
-    let details_present = !message.reasoning_details.is_empty();
+    let details_present = !choice.message.reasoning_details.is_empty();
     let tokens_positive = usage
         .and_then(|u| u.reasoning_tokens)
         .is_some_and(|n| n > 0);

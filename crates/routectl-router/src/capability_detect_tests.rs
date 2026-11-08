@@ -105,6 +105,60 @@ fn gate_rejects_refusal_on_a_clean_token() {
     assert!(clean_stop_choice(&resp).is_none());
 }
 
+/// A strict-output reply whose message holds a JSON body as a text part,
+/// plus an optional trailing extra block. With a refusal block this is the
+/// Responses dialect's mapping of an `output_text` beside a `refusal`
+/// output content: text as a typed text part, the refusal as an
+/// `Other { type: "refusal", refusal }` block, the whole message as parts.
+fn strict_parts_reply(extra_block: Option<Value>) -> ChatResponse {
+    let mut parts = vec![json!({"type": "text", "text": "{\"name\":\"ok\"}"})];
+    parts.extend(extra_block);
+    chat_response(json!({
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": parts},
+            "finish_reason": "stop"
+        }]
+    }))
+}
+
+#[test]
+fn refusal_content_block_is_never_read_as_structured_output_acceptance() {
+    // Arrange
+    let ctx = strict_ctx(&["name"]);
+    let refusal = json!({"type": "refusal", "refusal": "declined"});
+    let resp = strict_parts_reply(Some(refusal));
+
+    // Act
+    let observations = detect(&ctx, &resp);
+
+    // Assert
+    assert!(clean_stop_choice(&resp).is_none());
+    assert!(
+        observations.is_empty(),
+        "a refusal block must close the gate, got {observations:?}"
+    );
+}
+
+#[test]
+fn strict_reply_without_extra_block_or_with_an_unknown_one_verifies() {
+    let unknown = json!({"type": "x_unknown", "payload": 1});
+    for (row, extra) in [("no extra block", None), ("unknown block", Some(unknown))] {
+        // Arrange
+        let resp = strict_parts_reply(extra);
+
+        // Act
+        let observations = detect(&strict_ctx(&["name"]), &resp);
+
+        // Assert
+        assert_eq!(
+            observations,
+            vec![verified_obs(STRUCTURED_OUTPUT, SCHEMA_PARSE)],
+            "{row}: a clean strict reply verifies structured output"
+        );
+    }
+}
+
 #[test]
 fn gate_requires_exactly_one_choice() {
     let two = chat_response(json!({
@@ -550,27 +604,29 @@ fn every_detector_suspect() -> (DetectorContext, ChatResponse) {
     (ctx, gate_response(Some("stop")))
 }
 
-/// Every key a detector can emit is in the list an evidence reader keys its
-/// lanes on, and every listed key has a detector: a key missing from the list
-/// would have its evidence silently dropped.
+/// Every key a registered detector can emit is in the list an evidence reader
+/// keys its lanes on, and every listed key has a registered detector: a key
+/// missing from the list would have its evidence silently dropped.
 #[test]
 fn detectable_capabilities_is_exactly_the_set_the_detectors_emit() {
     // Arrange
     let (verified_ctx, verified_resp) = every_detector_verified();
     let (suspect_ctx, suspect_resp) = every_detector_suspect();
+    let verified_choice = clean_stop_choice(&verified_resp).expect("clean verified fixture");
 
     // Act
-    let verified = detect(&verified_ctx, &verified_resp);
+    let verified: Vec<CapabilityObservation> = DETECTORS
+        .iter()
+        .enumerate()
+        .map(|(index, detector)| {
+            detector(&verified_ctx, verified_choice, verified_resp.usage.as_ref())
+                .unwrap_or_else(|| panic!("registered detector {index} needs a firing fixture"))
+        })
+        .collect();
     let suspect = detect(&suspect_ctx, &suspect_resp);
 
-    // Assert: the fixtures cover every detector `detect` runs, so a new
-    // detector fails here until a fixture makes it fire.
-    let detectors = include_str!("capability_detect.rs")
-        .lines()
-        .filter(|line| line.starts_with("fn detect_"))
-        .count();
-    assert_eq!(detectors, 4, "a new detector needs a firing fixture here");
-    assert_eq!(verified.len(), 4, "every verified detector fires once");
+    // Assert
+    assert_eq!(detect(&verified_ctx, &verified_resp), verified);
     assert_eq!(suspect.len(), 2, "every suspect detector fires once");
     let emitted: std::collections::BTreeSet<&str> = verified
         .iter()
