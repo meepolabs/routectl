@@ -21,6 +21,10 @@ use super::path::{MAX_WIRE_PATH_DEPTH, WirePath};
 /// Deepest nesting level the engine descends to; the root is level 0.
 pub const MAX_DIFF_DEPTH: usize = 64;
 
+/// Egress key under which a Converse body carries provider fields it has
+/// no native slot for.
+const CONVERSE_FIELD_BAG: &str = "additionalModelRequestFields";
+
 /// Most nodes one diff visits. Every value a comparison, fingerprint or
 /// finding touches counts once per touch, every element of an array pair is
 /// charged before the pair is aligned, every declared edit is charged once
@@ -64,8 +68,11 @@ pub struct DiffOutcome {
 /// move across parents.
 ///
 /// TRANSLATION: `input` is the canonical top-level `provider_extras`
-/// object; each of its keys absent from the top level of `output` is
-/// `translation_unconsumed`. Nothing nested is compared.
+/// object; each of its keys present neither at the top level of `output`
+/// nor as a top-level key of an object at `output`'s
+/// `additionalModelRequestFields` (the Converse field bag) is
+/// `translation_unconsumed`, which a Remove declared at the key explains.
+/// Nothing else nested is compared.
 pub fn diff(input: &Value, output: &Value, lane: LaneClass, edits: &[DeclaredEdit]) -> DiffOutcome {
     let mut walker = Walker::new(edits);
     if walker.truncated {
@@ -692,12 +699,18 @@ impl<'v, 'e> Walker<'v, 'e> {
         let Value::Object(extras) = extras else {
             return;
         };
-        let carried = egress.as_object();
+        let top = egress.as_object();
+        let bag = top
+            .and_then(|top| top.get(CONVERSE_FIELD_BAG))
+            .and_then(Value::as_object);
+        let carried_in = |fields: Option<&Map<String, Value>>, key: &str| {
+            fields.is_some_and(|fields| fields.contains_key(key))
+        };
         for key in extras.keys() {
             if !self.charge() {
                 return;
             }
-            if !carried.is_some_and(|top| top.contains_key(key)) {
+            if !carried_in(top, key) && !carried_in(bag, key) {
                 self.record(
                     WirePath::root().child(key),
                     PathClass::TranslationUnconsumed,
@@ -711,8 +724,10 @@ impl<'v, 'e> Walker<'v, 'e> {
 const fn explains(kind: EditKind, class: PathClass) -> bool {
     matches!(
         (kind, class),
-        (EditKind::Remove, PathClass::Missing)
-            | (EditKind::Add, PathClass::Added)
+        (
+            EditKind::Remove,
+            PathClass::Missing | PathClass::TranslationUnconsumed
+        ) | (EditKind::Add, PathClass::Added)
             | (EditKind::Rewrite, PathClass::Changed)
             | (
                 EditKind::Relocate,

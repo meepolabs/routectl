@@ -371,6 +371,83 @@ fn translation_tolerates_non_object_bodies() {
 }
 
 #[test]
+fn translation_counts_a_key_carried_in_the_converse_field_bag_as_consumed() {
+    let unconsumed = || vec![finding("/thinking", PathClass::TranslationUnconsumed)];
+    let rows: [(&str, Value, Vec<Finding>); 6] = [
+        ("top level", json!({"thinking": 1}), vec![]),
+        (
+            "field bag",
+            json!({"additionalModelRequestFields": {"thinking": 1}}),
+            vec![],
+        ),
+        (
+            "absent from both",
+            json!({"additionalModelRequestFields": {"other": 1}}),
+            unconsumed(),
+        ),
+        (
+            "nested below the field bag",
+            json!({"additionalModelRequestFields": {"inner": {"thinking": 1}}}),
+            unconsumed(),
+        ),
+        (
+            "non-object field bag",
+            json!({"additionalModelRequestFields": ["thinking"]}),
+            unconsumed(),
+        ),
+        (
+            "field bag under another key",
+            json!({"inner": {"additionalModelRequestFields": {"thinking": 1}}}),
+            unconsumed(),
+        ),
+    ];
+    let extras = json!({"thinking": {"type": "enabled"}});
+
+    for (name, egress, expected) in rows {
+        let outcome = diff(&extras, &egress, LaneClass::Translation, &[]);
+
+        assert_eq!(outcome.findings, expected, "row {name}");
+    }
+}
+
+#[test]
+fn declared_remove_explains_an_unconsumed_translation_key() {
+    let extras = json!({"dropped": true, "kept": 1});
+    let egress = json!({"model": "m", "kept": 1});
+
+    let outcome = diff(
+        &extras,
+        &egress,
+        LaneClass::Translation,
+        &[edit("/dropped", EditKind::Remove)],
+    );
+
+    assert_eq!(outcome.findings, []);
+}
+
+#[test]
+fn only_a_remove_explains_an_unconsumed_translation_key() {
+    let extras = json!({"dropped": true});
+    let egress = json!({"model": "m"});
+
+    for kind in EditKind::ALL.into_iter().filter(|k| *k != EditKind::Remove) {
+        let outcome = diff(
+            &extras,
+            &egress,
+            LaneClass::Translation,
+            &[edit("/dropped", kind)],
+        );
+
+        assert_eq!(
+            outcome.findings,
+            [finding("/dropped", PathClass::TranslationUnconsumed)],
+            "kind {}",
+            kind.label()
+        );
+    }
+}
+
+#[test]
 fn non_object_roots_compare_without_panic() {
     let rows: [(&str, Value, Value, Vec<Finding>); 5] = [
         ("null roots", Value::Null, Value::Null, vec![]),
