@@ -556,11 +556,14 @@ const PYDANTIC_TAG_TAIL: &str = " found using 'type' does not match any of the e
 
 const TOOL_TYPES_SEAM: &str = " does not support tool types: ";
 const SUGGESTION_SEAM: &str = ". Did you mean one of ";
+const LIST_SEPARATOR: &str = ", ";
+const LIST_DELIMITERS: [char; 3] = [',', '\'', '?'];
 
 /// The middle-anchored Bedrock tool-type rejections the single-token
 /// templates cannot bracket, because each ends in a variable list of
 /// accepted types. Each extractor reads the already-trimmed, already-unwrapped
-/// message as-is, parses its whole head, and fails closed on any deviation;
+/// message as-is, parses it whole from head to the end of that list, and
+/// fails closed on any deviation;
 /// the extracted type keys through [`tool_type_key`].
 fn match_bedrock_tool_rejection(unwrapped: &str) -> Option<(FeatureKey, SignalTier, FailurePhase)> {
     let token = extract_pydantic_tool_tag(unwrapped)
@@ -615,17 +618,46 @@ fn rejected_tool_type_capability(token: &str) -> Option<(FeatureKey, SignalTier,
 }
 
 /// The tool type in
-/// `tools.<index>: Input tag '<type>' found using 'type' does not match any of the expected tags: <list>`.
-/// The `tools.<index>` head is what keeps the same pydantic tag rejection on
-/// a `messages.*` path (a refused content block, not a tool) from learning.
+/// `tools.<index>: Input tag '<type>' found using 'type' does not match any of the expected tags: <list>`,
+/// where `<list>` runs to the end of the message as `', '`-separated
+/// single-quoted [`is_list_item`] entries. The `tools.<index>` head is what
+/// keeps the same pydantic tag rejection on a `messages.*` path (a refused
+/// content block, not a tool) from learning; the anchored list is what keeps
+/// a message carrying anything after the captured sentence from learning.
 fn extract_pydantic_tool_tag(message: &str) -> Option<&str> {
     let (head, rest) = message.split_once(PYDANTIC_TAG_SEAM)?;
     if !is_tools_index_head(head) {
         return None;
     }
     let (token, tail) = rest.split_once('\'')?;
-    tail.strip_prefix(PYDANTIC_TAG_TAIL)?;
-    is_safe_token(token).then_some(token)
+    let tags = tail.strip_prefix(PYDANTIC_TAG_TAIL)?;
+    (is_list_item(token) && is_quoted_tag_list(tags)).then_some(token)
+}
+
+/// True when `tags` is the whole remainder of a pydantic tag rejection:
+/// one or more `'<item>'` entries joined by `", "`, nothing after the last.
+fn is_quoted_tag_list(tags: &str) -> bool {
+    tags.split(LIST_SEPARATOR).all(|entry| {
+        entry
+            .strip_prefix('\'')
+            .and_then(|quoted| quoted.strip_suffix('\''))
+            .is_some_and(is_list_item)
+    })
+}
+
+/// True when `suggestions` is the whole remainder of a tool-type rejection
+/// after [`SUGGESTION_SEAM`]: one or more [`is_list_item`] entries joined by
+/// `", "` and closed by the `?` that ends the message.
+fn is_suggestion_list(suggestions: &str) -> bool {
+    suggestions
+        .strip_suffix('?')
+        .is_some_and(|list| list.split(LIST_SEPARATOR).all(is_list_item))
+}
+
+/// A safe token that carries none of the list grammar's own delimiters, so a
+/// list entry can never swallow a separator, a quote or the closing `?`.
+fn is_list_item(item: &str) -> bool {
+    is_safe_token(item) && !item.contains(LIST_DELIMITERS)
 }
 
 /// True for `tools.` followed by 1 to [`MAX_TOOL_INDEX_DIGITS`] ASCII digits.
@@ -637,19 +669,20 @@ fn is_tools_index_head(head: &str) -> bool {
 }
 
 /// The tool type in
-/// `'<model>' does not support tool types: <type>. Did you mean one of <list>`.
+/// `'<model>' does not support tool types: <type>. Did you mean one of <list>?`,
+/// where the [`is_suggestion_list`] `<list>?` runs to the end of the message.
 /// Exactly one rejected type is accepted: a comma-separated pair names more
-/// than one capability, and a message without the suggestion seam is not
-/// the captured shape.
+/// than one capability, and a message without the suggestion seam, or with
+/// anything after the closing `?`, is not the captured shape.
 fn extract_unsupported_tool_type(message: &str) -> Option<&str> {
     let (model, rest) = message.strip_prefix('\'')?.split_once('\'')?;
     if !is_safe_token(model) {
         return None;
     }
-    let (token, _) = rest
+    let (token, suggestions) = rest
         .strip_prefix(TOOL_TYPES_SEAM)?
         .split_once(SUGGESTION_SEAM)?;
-    (is_safe_token(token) && !token.contains(',')).then_some(token)
+    (is_list_item(token) && is_suggestion_list(suggestions)).then_some(token)
 }
 
 /// The exact-phrase leg of the Bedrock arm: the already-unwrapped message
@@ -784,8 +817,8 @@ mod tests {
         ANTHROPIC_EXACT_PHRASES, BEDROCK_TOKEN_TRANSLATIONS, BEDROCK_VALIDATION_EXCEPTION_TYPE,
         BEDROCK_VALIDATION_PHRASES, BEDROCK_VALIDATION_TEMPLATES, BedrockTemplate,
         FORCED_TOOL_CHOICE_REJECTION, TokenKey, bedrock_validation_message,
-        extract_bedrock_capability, extract_feature_naming_capability,
-        is_bedrock_validation_exception, tool_type_key,
+        extract_bedrock_capability, extract_feature_naming_capability, extract_pydantic_tool_tag,
+        extract_unsupported_tool_type, is_bedrock_validation_exception, tool_type_key,
     };
     use crate::capability_strip::{CapabilityAction, action_for};
     use crate::feature_keys::{FORCED_TOOL_CHOICE, derive_feature_keys, tool_choice_force};
@@ -2160,6 +2193,205 @@ mod tests {
             control.is_some(),
             "the same harness resolves the captured message"
         );
+    }
+
+    // --- Tool-type rejection grammar: whole message, anchored at the tail ---
+
+    /// The `message` of a captured Bedrock canary's flat body.
+    fn canary_message(fx: &serde_json::Value, name: &str) -> String {
+        let body = fx["canaries"][name]["body"]
+            .as_str()
+            .unwrap_or_else(|| panic!("canary {name}"));
+        let body: serde_json::Value = serde_json::from_str(body).expect("canary body json");
+        body["message"]
+            .as_str()
+            .expect("canary message")
+            .to_string()
+    }
+
+    /// Every captured `does not support tool types` message, as `(name, message)`.
+    fn captured_unsupported_tool_type_messages() -> Vec<(&'static str, String)> {
+        let fx = capture_fixture();
+        let (body, _) = anthropic_tool_type_rejection();
+        let first_party: serde_json::Value =
+            serde_json::from_str(&body).expect("fixture body json");
+        vec![
+            (
+                "bedrock_sonnet_4_6",
+                canary_message(&fx, "computer-aws-sonnet-4-6"),
+            ),
+            (
+                "bedrock_sonnet_5",
+                canary_message(&fx, "computer-aws-sonnet-5"),
+            ),
+            (
+                "anthropic_haiku_5_5",
+                first_party["error"]["message"]
+                    .as_str()
+                    .expect("captured message")
+                    .to_string(),
+            ),
+        ]
+    }
+
+    /// Rejected rows built from one accepted capture, so each row differs from
+    /// a message the extractor accepts by exactly the named deviation.
+    fn unsupported_tool_type_rejected_rows(captured: &str) -> Vec<(&'static str, String)> {
+        let (head, _) = captured
+            .split_once(". Did you mean one of ")
+            .expect("captured suggestion seam");
+        vec![
+            ("trailing_sentence", format!("{captured} Please retry.")),
+            ("doubled_terminator", format!("{captured}?")),
+            ("text_after_terminator", format!("{captured}x")),
+            ("terminator_inside_last_entry", format!("{captured}x?")),
+            (
+                "missing_terminator",
+                captured
+                    .strip_suffix('?')
+                    .expect("captured ends in ?")
+                    .to_string(),
+            ),
+            ("empty_list", format!("{head}. Did you mean one of ?")),
+            ("empty_trailing_entry", captured.replacen('?', ", ?", 1)),
+            ("no_seam", format!("{head}.")),
+            (
+                "pair",
+                captured.replacen("computer_20250124.", "computer_20250124, bash_20250124.", 1),
+            ),
+            (
+                "pair_without_space",
+                captured.replacen("computer_20250124.", "computer_20250124,bash_20250124.", 1),
+            ),
+        ]
+    }
+
+    #[test]
+    fn unsupported_tool_type_grammar_accepts_captures_and_rejects_tail_drift() {
+        let fx = capture_fixture();
+        let near = &fx["near_miss_messages"];
+        let mut failures = Vec::new();
+        for (base, captured) in captured_unsupported_tool_type_messages() {
+            assert_eq!(
+                extract_unsupported_tool_type(&captured),
+                Some("computer_20250124"),
+                "captured {base} must extract its tool type"
+            );
+            for (row, message) in unsupported_tool_type_rejected_rows(&captured) {
+                if let Some(token) = extract_unsupported_tool_type(&message) {
+                    failures.push(format!("{base}/{row} extracted {token}"));
+                }
+            }
+        }
+        for row in ["aws_two_tokens", "aws_no_suggestion"] {
+            let message = near[row].as_str().expect("fixture near-miss");
+            if let Some(token) = extract_unsupported_tool_type(message) {
+                failures.push(format!("fixture/{row} extracted {token}"));
+            }
+        }
+        assert!(failures.is_empty(), "rejected rows extracted: {failures:?}");
+    }
+
+    /// The captured `tools.<index>` pydantic tag rejection.
+    fn captured_pydantic_tool_tag_message() -> String {
+        canary_message(&capture_fixture(), "web-search-pydantic-sonnet-4-6")
+    }
+
+    /// Rejected rows built from the accepted pydantic capture, each differing
+    /// from it by exactly the named deviation.
+    fn pydantic_tool_tag_rejected_rows(captured: &str) -> Vec<(&'static str, String)> {
+        let (head, _) = captured
+            .split_once(" does not match any of the expected tags: ")
+            .expect("captured tag seam");
+        vec![
+            ("trailing_sentence", format!("{captured} Please retry.")),
+            ("text_after_last_quote", format!("{captured}x")),
+            ("quote_inside_last_entry", format!("{captured}x'")),
+            ("unquoted_entry", captured.replacen("'custom'", "custom", 1)),
+            (
+                "half_quoted_entry",
+                captured.replacen("'custom'", "'custom", 1),
+            ),
+            (
+                "empty_quoted_list",
+                format!("{head} does not match any of the expected tags: ''"),
+            ),
+            ("empty_trailing_entry", format!("{captured}, ''")),
+            (
+                "entries_without_separator_space",
+                captured.replacen("', 'custom'", "','custom'", 1),
+            ),
+            ("no_list", head.to_string()),
+            (
+                "pair",
+                captured.replacen(
+                    "'web_search_20250305'",
+                    "'web_search_20250305', 'bash_20250124'",
+                    1,
+                ),
+            ),
+            (
+                "comma_inside_tag",
+                captured.replacen("'web_search_20250305'", "'web_search_20250305,bash'", 1),
+            ),
+        ]
+    }
+
+    #[test]
+    fn pydantic_tool_tag_grammar_accepts_capture_and_rejects_tail_drift() {
+        let captured = captured_pydantic_tool_tag_message();
+        assert_eq!(
+            extract_pydantic_tool_tag(&captured),
+            Some("web_search_20250305"),
+            "the captured tag rejection must extract its tool type"
+        );
+        let failures: Vec<String> = pydantic_tool_tag_rejected_rows(&captured)
+            .into_iter()
+            .filter_map(|(row, message)| {
+                extract_pydantic_tool_tag(&message).map(|token| format!("{row} extracted {token}"))
+            })
+            .collect();
+        assert!(failures.is_empty(), "rejected rows extracted: {failures:?}");
+    }
+
+    /// The trailing-text rows reach the learned store only through the
+    /// resolver, so they are refused there too, on every surface that reads
+    /// the tool-type grammar; the captured messages on the same harness learn.
+    #[test]
+    fn tool_type_rejection_with_trailing_text_does_not_learn() {
+        let fx = capture_fixture();
+        let ty = lifted_type(&fx);
+        let bedrock = |message: &str| {
+            let err = upstream(400, &flat_validation_body(message), Some(&ty), None);
+            resolve_requested_capability("bedrock", &err, &cf(FailureClass::BadRequest))
+        };
+        let anthropic = |message: &str| {
+            let err = upstream(400, &anthropic_body(message), None, None);
+            resolve_requested_capability("anthropic-api", &err, &cf(FailureClass::BadRequest))
+        };
+        let pydantic = captured_pydantic_tool_tag_message();
+        let mut cases: Vec<(&str, String, bool)> = vec![("pydantic", pydantic.clone(), false)];
+        for (base, captured) in captured_unsupported_tool_type_messages() {
+            cases.push((base, captured, true));
+        }
+        for (base, captured, first_party) in cases {
+            let resolvers: Vec<&dyn Fn(&str) -> _> = if first_party {
+                vec![&bedrock, &anthropic]
+            } else {
+                vec![&bedrock]
+            };
+            for resolve in resolvers {
+                assert!(resolve(&captured).is_some(), "captured {base} must learn");
+                for suffix in [" Please retry.", "x", "?"] {
+                    let drifted = format!("{captured}{suffix}");
+                    assert_eq!(
+                        resolve(&drifted),
+                        None,
+                        "{base} + {suffix:?} must not learn"
+                    );
+                }
+            }
+        }
     }
 
     // --- Arm 3: F2 feature-naming anchored-template engine ---
