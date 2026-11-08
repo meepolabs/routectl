@@ -262,6 +262,60 @@ fn count_tokens_engine_counts_an_unlocalized_rejection() {
     assert!(meta.learned_capabilities.is_empty());
 }
 
+/// An anthropic-api 400 whose message locates a field path no closed-table
+/// row repairs: the parser sees the field, routectl has no repair for it.
+fn named_no_row_rejection() -> Error {
+    let body = json!({
+        "type": "error",
+        "error": {
+            "type": "invalid_request_error",
+            "message": "unrepaired_knob: Extra inputs are not permitted",
+        },
+    });
+    Error::upstream("p1", 400, body.to_string())
+}
+
+/// A field-eligible rejection that resolves no repair row is counted by WHY,
+/// once, in exactly one counter: no path located is parser blindness, a
+/// located path with no repair row is not. Each row is the other's control,
+/// so a counter that rose on every unresolved rejection fails one of them.
+///
+/// Mutation check: swap the two counts in `observe_field_parser_blindness`
+/// -> red on both rows.
+#[test]
+fn an_unresolved_field_rejection_counts_in_the_counter_for_its_cause() {
+    type Row = (&'static str, fn() -> Error, (u64, u64));
+    let rows: [Row; 2] = [
+        ("unlocated", unlocalized_rejection, (1, 0)),
+        ("named no row", named_no_row_rejection, (0, 1)),
+    ];
+    let mut mismatches = Vec::new();
+    for surface in SURFACES {
+        for (row, rejection, expected) in rows {
+            // Arrange
+            let router = router(ANTHROPIC, ReplayScheme::Gray);
+            let req = request();
+            let target = target(&router, &req);
+            let mut learning = AttemptLearning::new(&router, surface, LearnedProbeGuard::inert());
+            let mut meta = DispatchMeta::for_alias(NICKNAME);
+
+            // Act
+            reject_and_observe(&mut learning, &rejection(), &target, &req, &mut meta);
+
+            // Assert, collected so one run reports every row that is wrong.
+            let counters = router.field_repair_counters();
+            let got = (counters.parser_unlocalized, counters.field_named_no_row);
+            if got != expected {
+                mismatches.push(format!("{surface:?} {row}: got {got:?}, want {expected:?}"));
+            }
+        }
+    }
+    assert!(
+        mismatches.is_empty(),
+        "(parser_unlocalized, field_named_no_row) per row: {mismatches:#?}",
+    );
+}
+
 #[test]
 fn count_tokens_engine_skips_the_generic_drift_observers() {
     for surface in SURFACES {

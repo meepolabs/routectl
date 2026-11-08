@@ -140,6 +140,9 @@ pub fn seed_distinct_fidelity_counters_for_tests(router: &Router) -> FieldRepair
     for _ in 0..17 {
         router.metrics.incr_parser_unlocalized();
     }
+    for _ in 0..61 {
+        router.metrics.incr_field_named_no_row();
+    }
     router.metrics.field_chain_steps.add_committed(19);
     router.metrics.field_chain_steps.add_dropped(29);
     for _ in 0..31 {

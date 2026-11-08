@@ -1683,6 +1683,15 @@ fn class_can_name_a_field(class: &FailureClass, provider_kind: &str) -> bool {
     }
 }
 
+/// How a rejection eligible to name a field failed to resolve a repair row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum UnresolvedFieldRejection {
+    /// The parser located no field path in the rejection at all.
+    Unlocated,
+    /// The parser located a path the lane's repair table resolved no row for.
+    NamedNoRow,
+}
+
 /// Whether a dispatch walk can SETTLE an envelope-field verdict.
 ///
 /// A settlement mutates the shared learned registry and returns an event row
@@ -1916,28 +1925,56 @@ impl Router {
         .filter(|named| named.row.surface == surface)
     }
 
-    /// Whether a rejection eligible to name a field localized NO field path from
-    /// its envelope.
+    /// Why a rejection eligible to name a field resolved to no repair row, or
+    /// `None` when it is not eligible or a row was resolved.
     ///
-    /// The am-I-flying-blind predicate, read through the SAME resolver the repair's
-    /// own candidate selection uses.
-    pub(super) fn rejection_localizes_no_field(
+    /// Resolution reads the SAME resolver the repair's own candidate selection
+    /// uses, without the sent effort level, so a located effort path or one
+    /// ending in an array index resolves no row here and is `NamedNoRow`.
+    pub(super) fn unresolved_field_rejection(
         table: FieldRepairTable,
         native_class: &FailureClass,
         err: &Error,
         provider_kind: &str,
         egress: Option<routectl_core::wire_check::EgressKind>,
-    ) -> bool {
-        class_can_name_a_field(native_class, provider_kind)
-            && rejected_field(
-                table,
-                native_class,
-                err,
-                provider_kind,
-                egress,
-                SentEffort::Unknown,
-            )
-            .is_none()
+    ) -> Option<UnresolvedFieldRejection> {
+        if !class_can_name_a_field(native_class, provider_kind) {
+            return None;
+        }
+        if rejected_field(
+            table,
+            native_class,
+            err,
+            provider_kind,
+            egress,
+            SentEffort::Unknown,
+        )
+        .is_some()
+        {
+            return None;
+        }
+        #[cfg(test)]
+        if matches!(
+            provisional::injected(),
+            provisional::Injected::Resolution(None)
+        ) {
+            return Some(UnresolvedFieldRejection::NamedNoRow);
+        }
+        let located = super::class_observe::upstream_facts(err)
+            .status
+            .and_then(|status| {
+                super::rejection_parser::rejected_wire_path(
+                    provider_kind,
+                    status,
+                    err.parsed_body(),
+                )
+            })
+            .is_some();
+        Some(if located {
+            UnresolvedFieldRejection::NamedNoRow
+        } else {
+            UnresolvedFieldRejection::Unlocated
+        })
     }
 
     /// Record that the field repair fired for this request, for the

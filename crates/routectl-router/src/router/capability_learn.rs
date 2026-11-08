@@ -8,6 +8,7 @@ use routectl_core::failure_class::{ClassifiedFailure, FailureClass};
 use routectl_core::{ChatRequest, Error};
 
 use super::capability_observe::UntranslatedCapabilities;
+use super::field_repair::UnresolvedFieldRejection;
 use super::{DispatchMeta, DispatchTarget, LearnedProbeGuard, Router};
 use crate::field_verdict_value::VerdictValue;
 use crate::learned_capability::{LearnKey, NegativeEvidence};
@@ -47,6 +48,11 @@ pub(super) enum LearnDedupeKey {
     },
     /// One field-parser blindness signal per target per request.
     FieldParserUnlocalized {
+        /// Breaker state key of the rejecting target.
+        state_key: String,
+    },
+    /// One located-path-with-no-repair-row signal per target per request.
+    FieldNamedNoRow {
         /// Breaker state key of the rejecting target.
         state_key: String,
     },
@@ -1372,14 +1378,15 @@ impl Router {
 
     /// Blindness observability for the envelope-field rejection parser. When a
     /// rejection's CLASS could have named a field of the request envelope and
-    /// the parser localized no path from it, this build could not attribute a
-    /// wire-shape fact it may well have been told: count it, so "the parser
-    /// knows no shape for this" is distinguishable from "no such rejection
-    /// arrived".
+    /// it resolved no repair row, count why: the parser located no path at all
+    /// (`parser_unlocalized`, blindness), or it located a path the lane's
+    /// repair table has no row for (`field_named_no_row`). Without the split, a
+    /// rejection naming a field routectl simply does not repair would read as
+    /// a parser that cannot see.
     ///
     /// Modeled on the two matcher-drift observers above, and deduped the same
-    /// way -- once per request per target, so a same-request retry or a
-    /// per-target re-entry cannot inflate the rate.
+    /// way -- once per request per target per counter, so a same-request retry
+    /// or a per-target re-entry cannot inflate the rate.
     ///
     /// COUNTED BUT NOT LOGGED AT ALL, unlike `observe_bedrock_validation_drift`
     /// (WARN) and `observe_feature_naming_drift` (DEBUG). Those fire only when a
@@ -1405,16 +1412,21 @@ impl Router {
         // explicitly before this is reached -- see
         // `observe_unlocalized_field_rejection`. What arrives is an unremapped
         // class.
-        if !Self::rejection_localizes_no_field(
+        match Self::unresolved_field_rejection(
             self.field_repair_table(),
             &cf.class,
             err,
             provider_kind,
             target.egress_kind,
         ) {
-            return;
+            Some(UnresolvedFieldRejection::Unlocated) => {
+                self.count_parser_unlocalized(target, dedupe);
+            }
+            Some(UnresolvedFieldRejection::NamedNoRow) => {
+                self.count_field_named_no_row(target, dedupe);
+            }
+            None => {}
         }
-        self.count_parser_unlocalized(target, dedupe);
     }
 
     /// Count one rejection the field parser did not localize, at most once
@@ -1430,6 +1442,20 @@ impl Router {
             state_key: target.state_key.clone(),
         }) {
             self.metrics.incr_parser_unlocalized();
+        }
+    }
+
+    /// Count one rejection whose located field path resolved no repair row,
+    /// at most once per request per target.
+    fn count_field_named_no_row(
+        &self,
+        target: &DispatchTarget,
+        dedupe: &mut HashSet<LearnDedupeKey>,
+    ) {
+        if dedupe.insert(LearnDedupeKey::FieldNamedNoRow {
+            state_key: target.state_key.clone(),
+        }) {
+            self.metrics.incr_field_named_no_row();
         }
     }
 }

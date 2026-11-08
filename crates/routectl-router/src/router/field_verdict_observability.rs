@@ -44,9 +44,9 @@ pub struct FieldRepairCounters {
     pub repair_lossy: u64,
     /// Cumulative fired repairs whose re-dispatch succeeded.
     pub repair_succeeded: u64,
-    /// Cumulative envelope-field verdicts inserted into the live learned
-    /// registry after a confirmed repair. Counts the insert, not the durable
-    /// write, which can still be refused.
+    /// Cumulative envelope-field verdicts STAGED after a confirmed repair:
+    /// inserted into the live, in-memory learned registry. Counts the insert,
+    /// not the durable write, which can still be refused.
     pub verdicts_learned: u64,
     /// Requests currently riding on a verdict no canary has re-confirmed yet,
     /// summed over every resident identity -- the OUTSTANDING half of the
@@ -69,14 +69,21 @@ pub struct FieldRepairCounters {
     /// REACTIVE arm, so a rising pre-flight count against a flat reactive one
     /// means the upstream is no longer seeing the field -- the feature working.
     pub preflight_actions: u64,
-    /// Cumulative field-eligible upstream rejections the parser localized no
-    /// field path from -- the am-I-flying-blind metric.
+    /// Cumulative field-eligible upstream rejections the parser located no
+    /// field path in -- the am-I-flying-blind metric. A located path with no
+    /// repair row counts in `field_named_no_row` instead; a rejection laid to a
+    /// defective transcript counts here whatever path it names.
     ///
     /// Expected NON-ZERO on real traffic even when everything is healthy: most
     /// caller-shaped 4xxs are not field rejections. What carries the signal is
     /// its ratio against the learned and repaired counts above, which is why it
     /// is reported beside them.
     pub parser_unlocalized: u64,
+    /// Cumulative field-eligible upstream rejections whose located field path
+    /// the lane's repair table resolved no row for: the parser saw the field
+    /// and routectl has no repair for it. Never counted for the same
+    /// rejection as `parser_unlocalized`.
+    pub field_named_no_row: u64,
     /// Chained repair steps settled as PROVEN: the repaired retry succeeded, or
     /// was refused for a different field the body carried. One per step, on a
     /// walk that can settle; a non-settling token count proves nothing it can
@@ -291,6 +298,7 @@ impl Router {
             disproved_requests: canaries.disproved_requests_total(),
             preflight_actions: self.metrics.field_preflight_actions_total(),
             parser_unlocalized: self.metrics.parser_unlocalized_total(),
+            field_named_no_row: self.metrics.field_named_no_row_total(),
             chain_steps_committed: self.metrics.field_chain_steps.committed(),
             chain_steps_dropped: self.metrics.field_chain_steps.dropped(),
             budget_exhausted: self.metrics.repair_budget_exhausted.total(),

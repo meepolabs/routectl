@@ -884,7 +884,7 @@ runner itself).
 |---|---|---|
 | `health.json` | after the driver exits, before the daemon stops | `GET /status/health` body, byte for byte |
 | `usage.json` | same | `GET /status/usage?window=all` body, byte for byte |
-| `fidelity.log` | after the daemon stops, before workspace removal | every `envelope field verdict snapshot` INFO line in the trace, ANSI-stripped, one per line (the `rc_parser_unlocalized_total` and `rc_field_verdict_rows` fields live only here, not in the health JSON) |
+| `fidelity.log` | after the daemon stops, before workspace removal | every `envelope field verdict snapshot` INFO line in the trace, ANSI-stripped, one per line (the `rc_parser_unlocalized_total`, `rc_field_named_no_row_total`, and `rc_field_verdict_rows` fields live only here, not in the health JSON) |
 | `ingress_kinds.txt` | same | the distinct traced ingress dialect tokens (`anthropic`, `openai`, `openai-responses`), sorted, one per line |
 | `upstream_errors.jsonl` | same | one JSON object per `upstream error body` line: `{"excerpt": str, "provider_kind": str, "status": int}`, excerpt capped at 512 bytes; when `scripts/scrub-fixture.sh --check` flags the error body (a key or token echoed into its text), the body contains the value (16+ chars) of any `ROUTECTL_DRIVER_*_API_KEY`, `*_TOKEN` or `*_ACCOUNT_ID` the run holds, or the check cannot give a verdict, the excerpt is the fixed `[omitted: credential-shaped content]` instead |
 | `client_result.json` | last, from the cleanup trap | see below |

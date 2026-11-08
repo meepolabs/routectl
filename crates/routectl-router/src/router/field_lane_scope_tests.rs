@@ -256,20 +256,20 @@ fn a_refusal_names_its_row_on_the_direct_lane_and_none_on_its_mantle_sibling() {
     }
 }
 
-/// A refusal the Mantle scope resolves to no row is counted as one the
-/// parser did not localize there, and the same refusal on the direct lane is
-/// not: the blindness count reads the lane's own view. `temperature` is not
-/// admitted on compat Mantle: the one temperature refusal captured there
-/// arrives with the `unsupported_value` code, which the field class gate does
-/// not pass on openai-compat, so it grounds nothing.
+/// A refusal the Mantle scope resolves to no row is classified there as a
+/// located path with no repair row, and the same refusal on the direct lane
+/// resolves a row: the classification reads the lane's own view. `temperature`
+/// is not admitted on compat Mantle: the one temperature refusal captured
+/// there arrives with the `unsupported_value` code, which the field class gate
+/// does not pass on openai-compat, so it grounds nothing.
 ///
 /// Mutation check: map the compat Mantle egress to its kind's scope in
 /// `RowScope::of_lane` -> red on the Mantle assertion.
 #[test]
-fn a_compat_refusal_on_compat_mantle_counts_as_unlocalized() {
+fn a_compat_refusal_on_compat_mantle_counts_as_named_no_row() {
     let err = unlifted_fixture_error("openai-compat", "unsupported-parameter-temperature");
-    let unlocalized = |egress| {
-        Router::rejection_localizes_no_field(
+    let unresolved = |egress| {
+        Router::unresolved_field_rejection(
             FieldRepairTable::grounded_only(),
             &FailureClass::BadRequest,
             &err,
@@ -278,11 +278,39 @@ fn a_compat_refusal_on_compat_mantle_counts_as_unlocalized() {
         )
     };
 
-    assert!(
-        !unlocalized(EgressKind::OpenaiCompat),
-        "control: the direct lane localizes it",
+    assert_eq!(
+        unresolved(EgressKind::OpenaiCompat),
+        None,
+        "control: the direct lane resolves a row",
     );
-    assert!(unlocalized(EgressKind::OpenaiCompatMantle));
+    assert_eq!(
+        unresolved(EgressKind::OpenaiCompatMantle),
+        Some(super::UnresolvedFieldRejection::NamedNoRow),
+    );
+}
+
+/// A located effort-level refusal classifies as named-no-row when observed
+/// without the sent level: the ranked row is chosen by the level the request
+/// carried, which the observer does not have.
+///
+/// Mutation check: classify every unresolved rejection as unlocated in
+/// `unresolved_field_rejection` -> red.
+#[test]
+fn a_located_effort_refusal_without_the_sent_level_is_named_no_row() {
+    let err = unlifted_fixture_error(ANTHROPIC_API, "effort-xhigh-unsupported-opus-4-5");
+
+    let classified = Router::unresolved_field_rejection(
+        FieldRepairTable::default(),
+        &FailureClass::BadRequest,
+        &err,
+        ANTHROPIC_API,
+        Some(EgressKind::AnthropicApi),
+    );
+
+    assert_eq!(
+        classified,
+        Some(super::UnresolvedFieldRejection::NamedNoRow)
+    );
 }
 
 /// Each admitted Mantle row is named on its sub-lane by the refusal captured

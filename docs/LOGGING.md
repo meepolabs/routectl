@@ -417,7 +417,7 @@ upstream body, and the session key are never carried:
 | `reason` | Why the repair fired (`upstream_field_rejection`) |
 | `repair_attempted` | The repair arm fired |
 | `repair_succeeded` | The repaired re-dispatch reached success / first chunk / a count, or was refused for a different field the sent body carried (which proves this repair) |
-| `learned` | The confirmed verdict was persisted to the learned registry |
+| `learned` | The confirmed verdict was STAGED: admitted into the in-memory learned registry. The durable write is separate and can still be refused; a refused write shows on the doctor panel's `capability_writes`, never here |
 | `refused_level` | Effort rewrites only: the refused effort level, a member of the effort rank (`minimal`, `low`, `medium`, `high`, `xhigh`, `max`) |
 | `chosen_level` | Effort rewrites only: the level written in its place, a member of the same rank |
 | `direction` | Effort rewrites only: `lower` or `higher`, where the chosen level sits relative to the refused one |
@@ -451,8 +451,8 @@ Four counters ride the router metrics snapshot (DEBUG, target
 `routectl_router::router::metrics`) so the arm is answerable without a
 log level: `rc_field_repair_attempted_total`,
 `rc_field_repair_lossy_total`, `rc_field_repair_succeeded_total`, and
-`rc_field_verdicts_learned_total`. All four, plus the pre-flight and
-parser-blindness counters, also ride the INFO snapshot below -- the DEBUG snapshot is not readable at a live log level, so an
+`rc_field_verdicts_learned_total`. All four, plus the pre-flight,
+parser-blindness, and named-no-row counters, also ride the INFO snapshot below -- the DEBUG snapshot is not readable at a live log level, so an
 observability floor satisfied only there would be a floor no operator can
 read.
 Read them as a pair -- a rising attempted count with a flat succeeded
@@ -809,11 +809,12 @@ consume the slots real traffic needs.
 | `rc_field_repair_lossy_lanes_omitted` | Lane rows the render ceiling dropped; non-zero says the map field is a SUBSET |
 | `rc_field_repair_lossy_by_lane` | The lossy map rows that fit, one `{ lane, lossy }` per lane in lane-key order then `other`: `lane` is the sanitized learned lane or the overflow token `other`, `lossy` its share of `rc_field_repair_lossy_total`. Capped at the same 32-row code constant as the verdict rows |
 | `rc_field_repair_succeeded_total` | Same counter as the repair WARN section above |
-| `rc_field_verdicts_learned_total` | Same counter as the repair WARN section above |
+| `rc_field_verdicts_learned_total` | Same counter as the repair WARN section above: verdicts STAGED (admitted into the in-memory learned registry) after a confirmed repair, from the same settlement that sets a repair line's `learned`. Not a count of durable writes; a refused write shows on the doctor panel's `capability_writes` |
 | `rc_field_outstanding_unconfirmed_total` | CURRENT: requests riding on a verdict no canary has re-confirmed yet, summed over every resident identity. Rises and falls -- exposure that MIGHT later be disproved |
 | `rc_field_disproved_requests_total` | LIFETIME: requests that applied a repair a canary later DISPROVED. Monotonic, never falls (including across a clear or reload), and counts requests AFFECTED rather than canary attempts -- one disproof of a verdict that repaired forty requests charges forty |
 | `rc_field_preflight_actions_total` | ADOPTED ROW REWRITES: one per closed-table row whose transform was applied before dispatch, NOT one per request. A request carrying rows of two classes rewrites two surfaces and exposes two identities, so it counts two. Read alongside the per-REQUEST WARN below, whose unit is deliberately the other one -- this counter measures exposure, that line reports an event. The count that answers "is pre-flight acting at all", which no log level can. Rising here while `rc_field_repair_attempted_total` stays flat is the feature working: the upstream no longer sees the field, so the reactive arm has nothing to repair |
-| `rc_parser_unlocalized_total` | Upstream rejections eligible to name a field whose envelope the parser localized NO field path from -- the am-I-flying-blind metric, modeled on `rc_bedrock_validation_unmatched_total`. Expected NON-ZERO on real traffic even when everything is healthy, since most caller-shaped 4xxs are not field rejections; the signal is its RATIO against the learned and repaired counts, which is why it is reported beside them. Deduped once per request per target |
+| `rc_parser_unlocalized_total` | Upstream rejections eligible to name a field whose envelope the parser located NO field path in -- the am-I-flying-blind metric, modeled on `rc_bedrock_validation_unmatched_total`. A rejection whose located path has no repair row is NOT counted here; it counts in `rc_field_named_no_row_total`. Also counts every rejection laid to a defective tool-call transcript, whatever path it names, since no field verdict may be drawn from one. Expected NON-ZERO on real traffic even when everything is healthy, since most caller-shaped 4xxs are not field rejections; the signal is its RATIO against the learned and repaired counts, which is why it is reported beside them. Deduped once per request per target |
+| `rc_field_named_no_row_total` | Upstream rejections eligible to name a field whose located path the lane's repair table resolved no row for: the parser saw the field and routectl has no repair for it, so this is not parser blindness. Resolved as the repair's own candidate selection would be without the sent effort level, so a located effort-level path, or one ending in an array index, counts here too. Never counted for the same rejection as `rc_parser_unlocalized_total`. Deduped once per request per target |
 | `rc_field_chain_steps_committed_total` | Chained field-repair steps settled as PROVEN: the repaired retry succeeded, or was refused for a different field the sent body carried. One per step, on walks that can settle (a non-settling token count is not counted). Not `rc_field_verdicts_learned_total`: a proven step whose repair teaches nothing (a refused value repaired by a drop) is committed here and persists no verdict. Neither claims durability; a failed durable write shows on the doctor panel's `capability_writes` |
 | `rc_field_chain_steps_dropped_total` | Chained field-repair steps still pending when their plan ended unproven: the same field refused again, an unrelated error, a fallback to another target, or the request ending there. The reason is on the repair WARN above, not a label here. With the committed count, sums to the steps applied on settling walks |
 | `rc_field_repair_budget_exhausted_total` | Rejections a repair (field, canary, replay, beta, or declared-edit revert) was proposed for that the request's shared repair allowance could not pay, once per rejection. A rejection no repair proposed for is not counted, empty allowance or not |

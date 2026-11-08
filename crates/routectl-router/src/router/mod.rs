@@ -718,10 +718,12 @@ struct RouterMetrics {
     /// count means the dropped field was not what the upstream objected to,
     /// which is a spent budget buying nothing.
     field_repair_succeeded_total: AtomicU64,
-    /// Envelope-field verdicts persisted after a confirmed repair -- the
-    /// two-phase learn's commits. Never exceeds the succeeded count: a
-    /// suppressed (loopback) target repairs nothing at all, so it cannot
-    /// contribute a success either.
+    /// Envelope-field verdicts STAGED after a confirmed repair -- the
+    /// two-phase learn's commits, admitted into the in-memory learned
+    /// registry. Counts the in-memory admission, not the durable write, which
+    /// can still be refused and is reported on the capability write counters.
+    /// Never exceeds the succeeded count: a suppressed (loopback) target
+    /// repairs nothing at all, so it cannot contribute a success either.
     field_verdicts_learned_total: AtomicU64,
     /// Requests a PRE-FLIGHT rewrite modified before dispatch: one per acting
     /// pre-flight decision, counted where the rewrite is adopted.
@@ -735,7 +737,11 @@ struct RouterMetrics {
     /// feature working, not a discrepancy.
     field_preflight_actions_total: AtomicU64,
     /// Upstream rejections eligible to name a field whose envelope the parser
-    /// localized NO field path from.
+    /// located NO field path in. A located path the lane's repair table has no
+    /// row for counts in
+    /// [`field_named_no_row_total`](Self::field_named_no_row_total) instead;
+    /// a rejection laid to a defective transcript counts here whatever it
+    /// names.
     ///
     /// The am-I-flying-blind metric, modeled on
     /// [`bedrock_validation_unmatched_total`](Self::bedrock_validation_unmatched_total):
@@ -751,6 +757,13 @@ struct RouterMetrics {
     /// RATIO against the localized counts that carries the signal, which is why
     /// it is reported beside them rather than alone.
     parser_unlocalized_total: AtomicU64,
+    /// Upstream rejections eligible to name a field whose located path the
+    /// lane's repair table resolved no row for: the parser saw the field and
+    /// routectl has no repair for it. Bumped once per request per target by
+    /// the same observer as
+    /// [`parser_unlocalized_total`](Self::parser_unlocalized_total), and never
+    /// for the same rejection.
+    field_named_no_row_total: AtomicU64,
     /// Chained field-repair steps by how their settling plan ended them:
     /// committed as proven, or dropped still pending.
     field_chain_steps: field_verdict_observability::ChainStepTally,
@@ -931,7 +944,8 @@ impl RouterMetrics {
             .fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Count one envelope-field verdict persisted after a confirmed repair.
+    /// Count one envelope-field verdict staged (admitted in memory) after a
+    /// confirmed repair.
     fn incr_field_verdicts_learned(&self) {
         self.field_verdicts_learned_total
             .fetch_add(1, Ordering::Relaxed);
@@ -947,7 +961,7 @@ impl RouterMetrics {
         self.field_repair_succeeded_total.load(Ordering::Relaxed)
     }
 
-    /// Read the cumulative persisted-field-verdict count.
+    /// Read the cumulative staged-field-verdict count.
     fn field_verdicts_learned_total(&self) -> u64 {
         self.field_verdicts_learned_total.load(Ordering::Relaxed)
     }
@@ -972,6 +986,18 @@ impl RouterMetrics {
     /// Read the cumulative parser-unlocalized count.
     fn parser_unlocalized_total(&self) -> u64 {
         self.parser_unlocalized_total.load(Ordering::Relaxed)
+    }
+
+    /// Count one field-eligible rejection whose located path resolved no
+    /// repair row.
+    fn incr_field_named_no_row(&self) {
+        self.field_named_no_row_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Read the cumulative located-path-with-no-repair-row count.
+    fn field_named_no_row_total(&self) -> u64 {
+        self.field_named_no_row_total.load(Ordering::Relaxed)
     }
 
     /// Bump the window-gate skip count, returning the new running total so
@@ -1749,7 +1775,8 @@ pub struct FieldRepair {
     pub repair_attempted: bool,
     /// The repaired re-dispatch reached success / a first chunk / a count.
     pub repair_succeeded: bool,
-    /// The confirmed verdict was persisted to the learned registry.
+    /// The confirmed verdict was staged: admitted into the in-memory learned
+    /// registry. The durable write is separate and can still be refused.
     pub learned: bool,
     /// The effort level a ranked rewrite replaced, a member of the effort
     /// rank; `None` for every other repair.

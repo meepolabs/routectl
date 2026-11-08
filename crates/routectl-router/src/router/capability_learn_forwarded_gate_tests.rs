@@ -66,8 +66,8 @@ impl Provider for Rejecting {
 
 /// Target A's answer: the captured anthropic forced-`tool_choice` 400. On an
 /// own-credential lane it resolves to a learnable capability AND is a
-/// field-eligible rejection no path is localized from, so it exercises both
-/// the mint and the parser-unlocalized count.
+/// field-eligible rejection whose located `tool_choice` path no repair row
+/// names, so it exercises both the mint and the named-no-row count.
 fn anthropic_forced_tool_choice_rejection() -> Arc<Rejecting> {
     let capture: Value =
         serde_json::from_str(FORCED_TOOL_CHOICE_CAPTURE).expect("valid capture fixture");
@@ -85,7 +85,7 @@ fn anthropic_forced_tool_choice_rejection() -> Arc<Rejecting> {
 /// Target B's answer: a self-identifying openai-compat 400 naming the
 /// request's `web_search` tool. Its `unsupported_parameter` code can carry a
 /// field rejection, and `web_search` is no closed-table row, so it also counts
-/// once as parser-unlocalized on every chain below.
+/// once as a located path with no repair row on every chain below.
 fn openai_web_search_rejection() -> Arc<Rejecting> {
     Arc::new(Rejecting {
         id: "pb",
@@ -229,7 +229,7 @@ async fn own_credential_target_learns_after_a_forwarded_sibling_on_a_forwarded_r
 }
 
 #[tokio::test]
-async fn forwarded_target_rejection_mints_nothing_and_counts_no_parser_blindness() {
+async fn forwarded_target_rejection_mints_nothing_and_counts_no_field_signal() {
     for surface in SURFACES {
         let router = mixed_chain_router(true);
 
@@ -240,9 +240,10 @@ async fn forwarded_target_rejection_mints_nothing_and_counts_no_parser_blindness
             vec![LANE_B.to_string()],
             "{surface:?}: only the own-credential lane holds an entry",
         );
+        let counters = router.field_repair_counters();
         assert_eq!(
-            router.field_repair_counters().parser_unlocalized,
-            1,
+            (counters.parser_unlocalized, counters.field_named_no_row),
+            (0, 1),
             "{surface:?}: only B's own-credential rejection counts; a forwarded \
              target's rejection is not parser evidence",
         );
@@ -250,11 +251,11 @@ async fn forwarded_target_rejection_mints_nothing_and_counts_no_parser_blindness
 }
 
 /// Positive control for the forwarded case: the SAME rejection on an
-/// own-credential A records an observation on A's lane and counts once as
-/// parser-unlocalized, so the forwarded assertions above cannot pass on a
-/// fixture that never reaches the learn path.
+/// own-credential A records an observation on A's lane and counts once as a
+/// located path with no repair row, so the forwarded assertions above cannot
+/// pass on a fixture that never reaches the learn path.
 #[tokio::test]
-async fn own_credential_first_target_rejection_observes_and_counts_parser_blindness() {
+async fn own_credential_first_target_rejection_observes_and_counts_named_no_row() {
     for surface in SURFACES {
         let router = mixed_chain_router(false);
 
@@ -267,10 +268,11 @@ async fn own_credential_first_target_rejection_observes_and_counts_parser_blindn
             vec![LANE_A.to_string(), LANE_B.to_string()],
             "{surface:?}: both own-credential lanes record their rejection",
         );
+        let counters = router.field_repair_counters();
         assert_eq!(
-            router.field_repair_counters().parser_unlocalized,
-            2,
-            "{surface:?}: A's unlocalized rejection counts once, beside B's",
+            (counters.parser_unlocalized, counters.field_named_no_row),
+            (0, 2),
+            "{surface:?}: A's named-no-row rejection counts once, beside B's",
         );
     }
 }

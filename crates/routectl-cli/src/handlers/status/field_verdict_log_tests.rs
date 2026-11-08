@@ -156,6 +156,7 @@ fn every_counter_field_carries_the_value_of_the_counter_it_is_named_for() {
         ),
         ("rc_field_preflight_actions_total", seeded.preflight_actions),
         ("rc_parser_unlocalized_total", seeded.parser_unlocalized),
+        ("rc_field_named_no_row_total", seeded.field_named_no_row),
         (
             "rc_field_chain_steps_committed_total",
             seeded.chain_steps_committed,
@@ -187,6 +188,7 @@ fn every_counter_field_carries_the_value_of_the_counter_it_is_named_for() {
         seeded.disproved_requests,
         seeded.preflight_actions,
         seeded.parser_unlocalized,
+        seeded.field_named_no_row,
         seeded.chain_steps_committed,
         seeded.chain_steps_dropped,
         seeded.budget_exhausted,
@@ -278,6 +280,7 @@ fn every_count_is_reported_even_at_zero() {
         "rc_field_disproved_requests_total",
         "rc_field_preflight_actions_total",
         "rc_parser_unlocalized_total",
+        "rc_field_named_no_row_total",
         "rc_field_chain_steps_committed_total",
         "rc_field_chain_steps_dropped_total",
         "rc_field_repair_budget_exhausted_total",
@@ -721,6 +724,7 @@ fn every_count_renders_as_a_bare_integer() {
         "rc_field_repair_lossy_lanes_omitted",
         "rc_field_preflight_actions_total",
         "rc_parser_unlocalized_total",
+        "rc_field_named_no_row_total",
         "rc_field_chain_steps_committed_total",
         "rc_field_chain_steps_dropped_total",
         "rc_field_repair_budget_exhausted_total",
@@ -1261,6 +1265,11 @@ fn a_change_to_any_reported_input_emits_a_line() {
             name: "parser unlocalized",
             setup: no_setup,
             change: |i| i.snapshot.counters.parser_unlocalized += 1,
+        },
+        FingerprintRow {
+            name: "field named no row",
+            setup: no_setup,
+            change: |i| i.snapshot.counters.field_named_no_row += 1,
         },
         FingerprintRow {
             name: "chain steps committed",

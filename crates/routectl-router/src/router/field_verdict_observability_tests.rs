@@ -304,6 +304,10 @@ fn field_repair_counters_starts_the_preflight_and_parser_halves_at_zero() {
         counters.parser_unlocalized, 0,
         "and has seen no rejection its parser could not localize",
     );
+    assert_eq!(
+        counters.field_named_no_row, 0,
+        "nor one naming a field it has no repair row for",
+    );
 }
 
 /// Each of the two new halves reads its OWN counter.
@@ -314,8 +318,9 @@ fn field_repair_counters_starts_the_preflight_and_parser_halves_at_zero() {
 /// the other counts rejections it could not attribute to a field at all.
 ///
 /// Mutation checks: hardcode `preflight_actions: 0` -> red on the first
-/// assertion; hardcode `parser_unlocalized: 0` -> red on the second; SWAP the
-/// two right-hand sources -> red on both.
+/// assertion; hardcode `parser_unlocalized: 0` -> red on the second; hardcode
+/// `field_named_no_row: 0` -> red on the third; SWAP any two right-hand
+/// sources -> red on both.
 #[test]
 fn field_repair_counters_reports_the_preflight_and_parser_halves_separately() {
     let router = bare_router();
@@ -325,6 +330,9 @@ fn field_repair_counters_reports_the_preflight_and_parser_halves_separately() {
     }
     for _ in 0..7 {
         router.metrics.incr_parser_unlocalized();
+    }
+    for _ in 0..9 {
+        router.metrics.incr_field_named_no_row();
     }
 
     let counters = router.field_repair_counters();
@@ -336,6 +344,10 @@ fn field_repair_counters_reports_the_preflight_and_parser_halves_separately() {
     assert_eq!(
         counters.parser_unlocalized, 7,
         "and the parser half counts rejections no field path was localized from",
+    );
+    assert_eq!(
+        counters.field_named_no_row, 9,
+        "and the named-no-row count reads its own counter",
     );
 }
 

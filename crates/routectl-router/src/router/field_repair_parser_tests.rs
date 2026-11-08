@@ -367,7 +367,8 @@ fn bedrock_canary_router() -> (Router, Arc<BedrockCanarySeat>) {
 
 /// The committed Bedrock `unknown-body-field` canary localizes a path the
 /// closed table has no row for: on every walk that can reach it, it counts once
-/// as parser-unlocalized, dispatches once, mutates nothing, and learns nothing.
+/// as a located path with no repair row (never as parser blindness),
+/// dispatches once, mutates nothing, and learns nothing.
 ///
 /// The token-count row is the one that matters most: that surface never
 /// reaches the learn path, so the count there comes from its own branch.
@@ -400,10 +401,11 @@ async fn an_unresolved_bedrock_field_rejection_counts_once_and_changes_nothing()
             }
         };
 
+        let counters = router.field_repair_counters();
         assert_eq!(
-            router.field_repair_counters().parser_unlocalized,
-            1,
-            "{walk}: the unresolved field-eligible rejection counts once",
+            (counters.parser_unlocalized, counters.field_named_no_row),
+            (0, 1),
+            "{walk}: the located path with no row counts once, as named-no-row",
         );
         let calls = seat.calls.lock();
         assert_eq!(calls.len(), 1, "{walk}: no repaired retry was dispatched");
@@ -438,7 +440,7 @@ async fn an_unresolved_bedrock_field_rejection_counts_once_and_changes_nothing()
 /// at the observer and the predicate is what declines it. The token-count row
 /// matters separately: that walk has its own observer call site.
 ///
-/// Mutation check: make `rejection_localizes_no_field` ignore the parser
+/// Mutation check: make `unresolved_field_rejection` ignore the resolver
 /// (class gate only) -> red on every row.
 #[tokio::test]
 async fn a_localized_rejection_leaves_the_parser_blind_counter_untouched() {
@@ -461,10 +463,11 @@ async fn a_localized_rejection_leaves_the_parser_blind_counter_untouched() {
             "{walk}: premise: the parser named the field, so a repaired attempt was \
              dispatched and its own rejection reached the observer",
         );
+        let counters = router.field_repair_counters();
         assert_eq!(
-            router.field_repair_counters().parser_unlocalized,
-            0,
-            "{walk}: a rejection the parser named a row from is not evidence of blindness",
+            (counters.parser_unlocalized, counters.field_named_no_row),
+            (0, 0),
+            "{walk}: a rejection the parser named a row from counts in neither",
         );
     }
 }
@@ -524,23 +527,24 @@ fn a_rejection_whose_class_cannot_name_a_field_is_not_counted_as_blind() {
     // The admitted class, as the control: without it, a predicate that refused
     // every class would satisfy the refusals below while making the counter dead.
     assert!(
-        !Router::rejection_localizes_no_field(
+        Router::unresolved_field_rejection(
             crate::router::FieldRepairTable::default(),
             &FailureClass::BadRequest,
             &named,
             ANTHROPIC_API_KIND,
             crate::router::field_repair::direct_egress(ANTHROPIC_API_KIND),
-        ),
+        )
+        .is_none(),
         "premise: a BadRequest the parser named a row from is not blindness",
     );
     assert!(
-        Router::rejection_localizes_no_field(
+        Router::unresolved_field_rejection(
             crate::router::FieldRepairTable::default(),
             &FailureClass::BadRequest,
             &unnamed,
             ANTHROPIC_API_KIND,
             crate::router::field_repair::direct_egress(ANTHROPIC_API_KIND),
-        ),
+        ) == Some(super::UnresolvedFieldRejection::Unlocated),
         "and the same class with nothing named IS blindness -- so the predicate \
          genuinely turns on the resolution for an admitted class",
     );
@@ -567,13 +571,14 @@ fn a_rejection_whose_class_cannot_name_a_field_is_not_counted_as_blind() {
         FailureClass::Unknown,
     ] {
         assert!(
-            !Router::rejection_localizes_no_field(
+            Router::unresolved_field_rejection(
                 crate::router::FieldRepairTable::default(),
                 &class,
                 &named,
                 ANTHROPIC_API_KIND,
                 crate::router::field_repair::direct_egress(ANTHROPIC_API_KIND),
-            ),
+            )
+            .is_none(),
             "{class:?} says nothing about the request envelope, so it is not evidence \
              about the parser",
         );
