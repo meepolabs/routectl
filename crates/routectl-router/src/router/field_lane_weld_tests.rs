@@ -18,7 +18,7 @@ use routectl_core::wire_check::EgressKind;
 use serde_json::{Value, json};
 
 use super::super::rejection_parser::rejected_wire_path;
-use super::super::wire_rejection::effort_and_thinking;
+use super::super::wire_rejection::{effort_and_thinking, locate};
 use super::effort::{
     ANTHROPIC_API_MANTLE_ROWS, OPENAI_COMPAT_MANTLE_ROWS, OPENAI_RESPONSES_MANTLE_ROWS,
 };
@@ -192,6 +192,8 @@ enum RepairCheck {
 /// Whether `repaired` changed the field the refusal `err` locates in `sent`
 /// the way `row` repairs it: dropped for a drop row, sent at a lower number
 /// for a ceiling row, sent at a different value for every other transform.
+/// The location is walked as the wire check walks it, so a segment naming a
+/// tagged-union member by its tag (`thinking.enabled.display`) is consumed.
 fn repair_applied(
     row: &FieldRepairRow,
     err: &Error,
@@ -205,13 +207,7 @@ fn repair_applied(
     else {
         return RepairCheck::NotApplied;
     };
-    let at = |body: &'_ Value| -> Option<Value> {
-        rejected
-            .locator
-            .segments()
-            .try_fold(body, |value, segment| value.get(segment))
-            .cloned()
-    };
+    let at = |body: &'_ Value| locate(body, rejected.locator.as_slice()).cloned();
     let (before, after) = (at(sent), at(repaired));
     if before.is_none() {
         return RepairCheck::NotSent;
@@ -739,5 +735,69 @@ fn a_ceiling_row_welds_only_a_repaired_retry_that_lowers_the_limit() {
 
         // Assert
         assert_eq!(failures, expected, "{name}");
+    }
+}
+
+/// A refusal naming a tagged-union member by its tag
+/// (`thinking.enabled.display` for `{"thinking": {"type": "enabled", ..}}`)
+/// is walked through the tag, as the wire check walks it: a repaired retry
+/// that dropped the member's field is applied, one that still sends it is
+/// not, and a request that never sent it is named. The row and refusal are
+/// the committed display capture, resolved on the direct lane, since no
+/// Mantle sub-lane admits a tagged row yet.
+///
+/// Mutation check: walk the locator with plain `Value::get` per segment in
+/// `repair_applied` -> red (the dropped row reads `NotSent`).
+#[test]
+fn a_tagged_row_is_welded_through_its_union_tag() {
+    // Arrange
+    let fixture = corpus_fixture("anthropic-api/thinking-display-enum")
+        .expect("the fixture reads")
+        .expect("the fixture is committed");
+    let (err, _) = fixture_error(&fixture).expect("the fixture is an upstream error");
+    let sent = json!({"thinking": {"type": "enabled", "budget_tokens": 2048, "display": "full"}});
+    let row = resolved_row(&err, "anthropic-api", EgressKind::AnthropicApi, &sent)
+        .expect("premise: the direct lane names the display row");
+    let located = super::super::class_observe::upstream_facts(&err)
+        .status
+        .and_then(|status| rejected_wire_path("anthropic-api", status, err.parsed_body()))
+        .expect("premise: the refusal names a wire path");
+    assert_eq!(row.path, "thinking.enabled.display", "premise: the row");
+    assert_eq!(
+        located.locator.segments().collect::<Vec<_>>(),
+        ["thinking", "enabled", "display"],
+        "premise: the locator names the member by its tag",
+    );
+    assert!(
+        sent["thinking"].get("enabled").is_none(),
+        "premise: the body spells the tag only as the `type` value",
+    );
+    let rows = [
+        (
+            "the field dropped",
+            sent.clone(),
+            json!({"thinking": {"type": "enabled", "budget_tokens": 2048}}),
+            RepairCheck::Applied,
+        ),
+        (
+            "the field still sent",
+            sent.clone(),
+            sent.clone(),
+            RepairCheck::NotApplied,
+        ),
+        (
+            "the field never sent",
+            json!({"thinking": {"type": "enabled", "budget_tokens": 2048}}),
+            json!({"thinking": {"type": "enabled", "budget_tokens": 2048}}),
+            RepairCheck::NotSent,
+        ),
+    ];
+
+    for (name, sent, repaired, expected) in rows {
+        // Act
+        let check = repair_applied(row, &err, "anthropic-api", &sent, &repaired);
+
+        // Assert
+        assert_eq!(check, expected, "{name}");
     }
 }

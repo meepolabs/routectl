@@ -672,3 +672,92 @@ async fn a_recheck_refused_by_its_lane_kind_charges_no_rpm_token() {
         "a recheck refused by its lane kind must charge NO rpm token: {before} -> {after}",
     );
 }
+
+/// The view clause of the lane-carries recheck refuses before the gate too:
+/// an `anthropic-api` identity on an `anthropic-api` entry sending on the
+/// Bedrock Mantle sub-lane passes the kind clause, but that lane's view omits
+/// the display row, so the recheck is refused and spends none of the
+/// operator's rate budget. Closed breaker, so the gate would admit and debit
+/// if it were reached first.
+/// `a_probe_through_a_closed_breaker_does_charge_its_rpm_token` is the
+/// positive control that an RPM-enabled fixture charges a dialing probe.
+///
+/// Mutation check: drop the view half of `probe_lane_carries` -> red (the
+/// recheck dials and settles instead of refusing).
+#[cfg(feature = "bedrock")]
+#[tokio::test]
+async fn a_recheck_refused_by_its_mantle_lane_view_charges_no_rpm_token() {
+    // Arrange
+    let provider = Arc::new(OkProvider {
+        count_calls: AtomicUsize::new(0),
+    });
+    let router =
+        super::probe_test_support::remote_mantle_router_with_rpm(provider.clone(), 60, Some(1));
+    let key = FieldVerdictKey::new(
+        &crate::router::probe_test_support::lane("m1"),
+        GROUNDED_PATH,
+        "anthropic-api",
+    )
+    .expect("identity");
+    let payload = ProbePayload::new(GROUNDED_PATH, "summarized".to_string(), &[], &[], false)
+        .expect("a modeled value within every bound");
+    let seat = router
+        .probe_seat_for(&key)
+        .expect("premise: the identity's lane resolves a seat");
+    let lane = router
+        .probe_entry_lane(&seat.provider_name, &seat.upstream)
+        .expect("premise: the seat's entry is an attributable lane");
+    assert_eq!(
+        lane.provider_kind, "anthropic-api",
+        "premise: the entry's kind is the identity's, so the kind clause passes"
+    );
+    assert_eq!(
+        lane.egress,
+        routectl_core::wire_check::EgressKind::AnthropicApiMantle,
+        "premise: the entry sends on the Mantle sub-lane"
+    );
+    let view_carries = |egress| {
+        router
+            .field_repair_table()
+            .for_lane("anthropic-api", Some(egress))
+            .lane_rows()
+            .any(|row| row.path == GROUNDED_PATH)
+    };
+    assert!(
+        view_carries(routectl_core::wire_check::EgressKind::AnthropicApi),
+        "premise: the direct lane's view carries the re-checked row"
+    );
+    assert!(
+        !view_carries(lane.egress),
+        "premise: the Mantle view omits the re-checked row"
+    );
+    let before = router
+        .gate_status_for_tests("m1")
+        .rpm_available
+        .expect("premise: the RPM bucket must be ENABLED, or this pins nothing");
+
+    // Act
+    let outcome = router
+        .run_free_validator_for_tests(&key, &payload, ProbeValidator::CountTokens)
+        .await;
+
+    // Assert
+    assert_eq!(
+        outcome,
+        FreeValidatorOutcome::Unavailable,
+        "the Mantle view does not carry the row, so the recheck is refused",
+    );
+    assert_eq!(
+        provider.count_calls.load(Ordering::SeqCst),
+        0,
+        "nothing dialed"
+    );
+    let after = router
+        .gate_status_for_tests("m1")
+        .rpm_available
+        .expect("bucket still enabled");
+    assert!(
+        (after - before).abs() < 0.5,
+        "a recheck refused by its lane view must charge NO rpm token: {before} -> {after}",
+    );
+}

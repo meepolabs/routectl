@@ -460,7 +460,6 @@ fn build_router_learning(
     lanes: usize,
     with_negative: bool,
 ) -> Router {
-    let mut config = Config::default();
     let mut entry = ProviderEntry::anthropic_api("literal:k");
     if let ProviderEntry::AnthropicApi {
         base_url: b,
@@ -472,6 +471,58 @@ fn build_router_learning(
         runtime.circuit_failures = circuit_failures;
         runtime.rpm_limit = rpm_limit;
     }
+    router_over_entry(entry, provider, lanes, with_negative)
+}
+
+/// A remote router whose one entry sends on the Bedrock Mantle Anthropic
+/// sub-lane, with an explicit RPM limit and breaker threshold: the entry an
+/// operator writes for Mantle (no `api_key_ref`, a bearer key, the default
+/// Anthropic base), for the tests whose subject is what a probe refused by
+/// the Mantle lane's narrower view does NOT consume.
+#[cfg(feature = "bedrock")]
+pub(super) fn remote_mantle_router_with_rpm(
+    provider: Arc<dyn Provider>,
+    rpm_limit: u32,
+    circuit_failures: Option<u32>,
+) -> Router {
+    let mut entry = ProviderEntry::anthropic_api("literal:k");
+    if let ProviderEntry::AnthropicApi {
+        api_key_ref,
+        base_url,
+        bedrock_mantle,
+        runtime,
+        ..
+    } = &mut entry
+    {
+        api_key_ref.clear();
+        *base_url = crate::config::default_anthropic_base();
+        *bedrock_mantle = Some(crate::config::BedrockMantleConfig {
+            region: "us-west-2".to_string(),
+            creds: crate::config::BedrockCredsConfig::BearerKey {
+                key_ref: crate::test_secret::file_ref("mantle-bearer-key"),
+            },
+        });
+        runtime.circuit_failures = circuit_failures;
+        runtime.rpm_limit = Some(rpm_limit);
+    }
+    assert_eq!(
+        entry.egress_kind(),
+        routectl_core::wire_check::EgressKind::AnthropicApiMantle,
+        "fixture premise: the entry sends on the Mantle sub-lane",
+    );
+    router_over_entry(entry, provider, 1, true)
+}
+
+/// A router over the single provider entry `p1`, with `lanes` models
+/// `m0..m{lanes-1}` all resolved to `provider`, `default` aliased to the
+/// first, planting the re-check negatives only when `with_negative`.
+fn router_over_entry(
+    entry: ProviderEntry,
+    provider: Arc<dyn Provider>,
+    lanes: usize,
+    with_negative: bool,
+) -> Router {
+    let mut config = Config::default();
     config.providers.insert("p1".to_string(), entry);
     // `m1` first so a single-lane fixture keeps the nickname every existing
     // test names, and `m0..` are added for the multi-lane fixture on top.

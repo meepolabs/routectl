@@ -211,6 +211,28 @@ fn named_path(
     .map(|named| named.row.path)
 }
 
+/// The committed direct Responses refusal of `minimal` recast as a refusal
+/// of `xhigh`: the same verbatim grammar, with the refused level and the
+/// listed one swapped, so it names a ranked row no Mantle allowlist admits.
+fn responses_xhigh_refusal() -> Error {
+    let fixture = super::lane_weld_tests::corpus_fixture(
+        "openai-responses/reasoning-effort-minimal-unsupported-codex",
+    )
+    .expect("the fixture reads")
+    .expect("the fixture is committed");
+    let body = fixture["body"].as_str().expect("a body");
+    let recast = body
+        .replace("'minimal'", "'<refused>'")
+        .replace("'xhigh'", "'minimal'")
+        .replace("'<refused>'", "'xhigh'");
+    assert!(
+        recast.contains("Unsupported value: 'xhigh'") && !recast.contains("'xhigh', "),
+        "premise: the recast refuses xhigh and no longer lists it",
+    );
+    let status = u16::try_from(fixture["status"].as_u64().expect("status")).expect("u16");
+    Error::upstream("p", status, recast)
+}
+
 /// One grammar per kind, one scope per egress: a refusal a direct lane
 /// resolves to a row its Mantle sibling does not admit resolves to none on
 /// that sibling, though both share the sibling's dialect.
@@ -221,6 +243,12 @@ fn named_path(
 fn a_refusal_names_its_row_on_the_direct_lane_and_none_on_its_mantle_sibling() {
     let compat = unlifted_fixture_error("openai-compat", "unsupported-parameter-temperature");
     let thinking = unlifted_fixture_error("anthropic-api", "thinking-type-disabled-unsupported");
+    let ranked = responses_xhigh_refusal();
+    let xhigh = SentEffort::Rank(EffortRank::of_token("xhigh").expect("a rank member"));
+    assert!(
+        !OPENAI_RESPONSES_MANTLE_ROWS.contains(&"output_config.effort.xhigh"),
+        "premise: the ranked row is outside the Responses Mantle allowlist",
+    );
     let cases = [
         (
             "compat sampling refusal",
@@ -239,6 +267,15 @@ fn a_refusal_names_its_row_on_the_direct_lane_and_none_on_its_mantle_sibling() {
             EgressKind::AnthropicApiMantle,
             SentEffort::Unknown,
             "thinking.type.disabled",
+        ),
+        (
+            "ranked responses refusal",
+            &ranked,
+            OPENAI_RESPONSES,
+            EgressKind::OpenaiResponses,
+            EgressKind::OpenaiResponsesMantle,
+            xhigh,
+            "output_config.effort.xhigh",
         ),
     ];
 
