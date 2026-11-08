@@ -276,7 +276,11 @@ pub(super) fn apply_installation_id(
 /// Declare the installation-id stamp against the `client_metadata` it lands
 /// on: a new key in an object the request carried, otherwise a whole new
 /// object (or a rewrite of a non-object value). Keys under `client_metadata`
-/// render masked, so the stamped member is named by the wildcard.
+/// render masked, so the stamped member is named by the wildcard: a `*`
+/// pattern segment matches a masked key, while a concrete key segment only
+/// ever matches a verbatim one, so `/client_metadata/<key>` could never match
+/// the observed path. Naming the key concretely would need a masking
+/// exemption for routectl-written keys.
 fn declare_installation_id(tap: &WireTap, client_metadata: Option<&Value>) {
     let site = EditSite::InstallationIdStamp;
     match client_metadata {

@@ -90,6 +90,10 @@ fn rejection(status: u16) -> Error {
 
 /// Resolve a rejection to whatever the thread's injection names, then repair
 /// it; `None` when the injection names no row.
+///
+/// With no injection, the parser reads the rejection as the direct Anthropic
+/// lane (`direct_egress(ANTHROPIC)`), so this covers direct egress only: a
+/// Mantle sub-lane's narrower row view is never exercised through it.
 fn apply(
     plan: &mut FieldRepairPlan<'_>,
     req: &mut ChatRequest,

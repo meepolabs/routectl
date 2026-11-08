@@ -127,14 +127,16 @@ pub(super) enum FieldSurface {
     /// The Anthropic `thinking.type` wire field, PRESENT when the type an
     /// Anthropic-shape egress would emit is exactly the held refused type.
     ///
-    /// Presence reads the COMPOSED type
-    /// (`routectl_providers::anthropic_api::emitted_thinking_type`), not the
-    /// final body: a later body pass can still strip `thinking` (a forced
-    /// tool choice, a context-management cache miss). A client
-    /// `output_config.effort` of "none" does not change the type: the egress
-    /// forwards that effort as sent beside whatever type ships. That gap is
-    /// sound for the uses this surface has. A rejection naming
-    /// `thinking.type.X` is evidence that X was on the wire, so a stripped body
+    /// Presence reads the type body assembly ships
+    /// (`routectl_providers::anthropic_api::emitted_thinking_type`), so a
+    /// forcing tool choice that strips active thinking is already
+    /// reflected. One pass is outside the read: a
+    /// context-management cache miss, known only while the body is assembled,
+    /// can still strip `thinking`, so the read may report a type the body
+    /// then omits. A client `output_config.effort` of "none" does not change
+    /// the type: the egress forwards that effort as sent beside whatever type
+    /// ships. That gap is sound for the uses this surface has. A rejection
+    /// naming `thinking.type.X` is evidence that X was on the wire, so a stripped body
     /// never draws the rejection a repair acts on. The read also stages and
     /// verifies the rewrite target, and none of the late passes can turn a
     /// rewritten type back into the refused one: they only remove thinking,
@@ -1548,11 +1550,15 @@ pub(super) fn present_rows(
 /// closed table can mint today, so an acting field verdict participates in
 /// the existing stable partition
 /// ([`super::feature_filter::filter_chain_by_features`]) the same way a
-/// catalog capability does, through the same table and the same
-/// carrier-presence check a repair itself uses -- no second detector, no
+/// catalog capability does, through the same rows and the same
+/// carrier-presence check a repair itself uses: no second detector, no
 /// duplicated carrier logic. A request grounding no closed-table surface
 /// yields an empty vector, leaving every caller's derived key list exactly
 /// as it was before this function existed.
+///
+/// The scan reads whatever view `table` is. Its production caller,
+/// [`request_feature_keys`], passes the router's unscoped table; see there
+/// for what that means for a lane.
 pub(super) fn grounded_field_feature_keys(
     table: FieldRepairTable,
     req: &ChatRequest,
@@ -1578,6 +1584,17 @@ pub(super) fn grounded_field_feature_keys(
 /// any target is chosen, while what an egress emits depends on that target:
 /// `field:max_tokens` names a limit the client sent, never one an egress
 /// fills for a client that sent none.
+///
+/// The field keys are NOT scoped by lane or provider kind: with no target
+/// chosen there is no lane view to apply, so `table` is the unscoped table
+/// and a request can carry a `field:` key for a row some lane in its chain
+/// never admits (an effort row on an openai-compat lane, say). Such a key
+/// is inert there: every live path that mints a field verdict (rejection
+/// resolution, reactive repair, pre-flight, the probe seat) reads the
+/// target's lane view ([`FieldRepairTable::for_lane`]), so a verdict reaches
+/// the registry only through a view that admits its row. The chain filter
+/// never hard-refuses a request over a field key. A consumer that needs
+/// lane-accurate keys scopes them itself.
 pub(super) fn request_feature_keys(table: FieldRepairTable, req: &ChatRequest) -> Vec<String> {
     crate::feature_keys::derive_feature_keys(
         req.tools.as_deref().unwrap_or(&[]),

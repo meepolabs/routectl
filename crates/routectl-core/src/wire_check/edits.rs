@@ -113,6 +113,11 @@ pub enum EditSite {
     /// surface.
     CacheMarkerStrip,
     /// Provider: a field the upstream's dialect does not accept removed.
+    ///
+    /// Shared by unrelated strips across providers on purpose: the label is
+    /// the `edit_site` token of the `routectl_edit_rejected` warning, an
+    /// operator-facing vocabulary, so splitting this site per transform
+    /// would change logged tokens.
     DialectFieldStrip,
     /// Provider: sampling parameters removed for a model that rejects them.
     SamplingParamsStrip,
@@ -125,6 +130,13 @@ pub enum EditSite {
     ManagedExtrasStrip,
     /// Provider: a field the upstream requires written with routectl's own
     /// value.
+    ///
+    /// Shared across providers for the same reason as
+    /// [`Self::DialectFieldStrip`]. The router also reads this site by
+    /// identity: a rejection matching one such edit that could not be undone
+    /// is still handed to the learned-repair proposers, since the upstream
+    /// may refuse routectl's value and a learned repair can supply another.
+    /// Only a required-field default belongs here.
     RequiredFieldDefault,
     /// Provider: the default reasoning summary mode added.
     ReasoningSummaryDefault,

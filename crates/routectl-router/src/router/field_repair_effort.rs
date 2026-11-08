@@ -180,10 +180,9 @@ impl Router {
     /// from it, possibly back to the level that was refused in its place.
     /// Keyed on the level that went out, whatever any repair step refused.
     ///
-    /// Only where field repair may learn on the lane at all, and only while
-    /// the target clamps no effort: a clamped wire value is not the level
-    /// the body names. A key in `removed` already ran its removal in this
-    /// settlement and is not removed again.
+    /// Only where field repair may learn on the lane at all. A key in
+    /// `removed` already ran its removal in this settlement and is not
+    /// removed again.
     pub(in crate::router) fn clear_accepted_effort(
         &self,
         target: &DispatchTarget,
