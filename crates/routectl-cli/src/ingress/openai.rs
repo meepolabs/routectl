@@ -25,12 +25,12 @@ use routectl_core::{
 use serde_json::{Map, Value};
 
 use super::normalize_client_betas;
-use super::normalize_max_completion_tokens;
 use super::{
     ErrorEnvelopeShape, IngressAdapter, IngressStreamState, ResponseEdits, SseEvent,
     StreamErrorClass, StreamRequestContext, read_alias_header,
     session_key::{first_session_header, resolve_session_key},
 };
+use super::{declare_max_completion_tokens_fold, normalize_max_completion_tokens};
 
 const DONE_SENTINEL: &str = "[DONE]";
 
@@ -116,7 +116,7 @@ impl IngressAdapter for OpenAiIngress {
         // no such field and no serde alias, so serde silently drops
         // it. Rename it to `max_tokens` here, before deserialization,
         // so the per-request token cap is never lost.
-        normalize_max_completion_tokens(&mut body);
+        let token_cap_fold = normalize_max_completion_tokens(&mut body);
         // o-series / gpt-5+ clients also send `role: "developer"` as
         // the system-voice successor. The canonical `Role` enum does
         // not include that variant so serde would 400. Rewrite it to
@@ -159,6 +159,7 @@ impl IngressAdapter for OpenAiIngress {
                 RefusalReason::Unparseable,
             )
         })?;
+        declare_max_completion_tokens_fold(&mut req, token_cap_fold);
         // An assistant turn echoed back by a client may carry its
         // reasoning_details in Anthropic block vocabulary -- notably a
         // response routectl itself served through the Anthropic ingress.

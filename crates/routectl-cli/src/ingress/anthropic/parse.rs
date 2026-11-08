@@ -13,12 +13,12 @@ use routectl_core::{
 use routectl_core::{ContentPart, MessageContent};
 
 use crate::ingress::normalize_client_betas;
-use crate::ingress::normalize_max_completion_tokens;
 use crate::ingress::read_alias_header;
 use crate::ingress::session_key::resolve_session_key;
+use crate::ingress::{declare_max_completion_tokens_fold, normalize_max_completion_tokens};
 
 pub(super) fn translate_request(headers: &HeaderMap, mut body: Value) -> Result<ChatRequest> {
-    normalize_max_completion_tokens(&mut body);
+    let token_cap_fold = normalize_max_completion_tokens(&mut body);
     let obj = body.as_object_mut().ok_or_else(|| {
         Error::Validation(
             "anthropic ingress: request body is not an object".into(),
@@ -170,6 +170,7 @@ pub(super) fn translate_request(headers: &HeaderMap, mut body: Value) -> Result<
     }
 
     declare_legacy_format_fold(&mut req, fold);
+    declare_max_completion_tokens_fold(&mut req, token_cap_fold);
 
     Ok(req)
 }

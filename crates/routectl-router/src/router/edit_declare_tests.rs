@@ -10,7 +10,8 @@ use std::sync::Arc;
 use futures::stream::{self, BoxStream, StreamExt};
 use parking_lot::Mutex;
 use routectl_core::wire_check::{
-    DeclaredEdit, EditKind, EditPatternError, EditSite, IngressDialect, IngressWire,
+    DeclaredEdit, EditKind, EditPatternError, EditSite, IngressDialect, IngressWire, LaneClass,
+    WirePath, diff,
 };
 use routectl_core::{
     ChatChunk, ChatRequest, ChatResponse, Choice, ChunkChoice, ChunkDelta, ContentPart, Error,
@@ -356,6 +357,84 @@ async fn operator_extras_declare_an_add_per_new_key_and_a_rewrite_per_changed_le
             edit("/new_knob", EditKind::Add),
         ]
     );
+}
+
+/// Operator extras under `metadata` (whose keys render masked) and under
+/// `opts` (whose keys render verbatim), each with two leaves.
+const NESTED_OPERATOR_EXTRAS: &str = "payload_extras = { metadata = { op_a = \"v\", op_b = \"v\" }, \
+     opts = { a = 1, b = { c = 2 } } }";
+
+async fn nested_extras_declared(client_extras: Option<Value>) -> Vec<(String, EditKind)> {
+    let provider = Recorder::new(Answer::Serve);
+    let router = router_with(
+        OFF,
+        |_| format!("{ANTHROPIC_API}\n{NESTED_OPERATOR_EXTRAS}"),
+        vec![provider.clone()],
+    );
+    let mut req = anthropic_request();
+    req.provider_extras = client_extras;
+
+    complete(&router, req).await;
+
+    let mut got = declared(&provider.only(), EditSite::OperatorPayloadExtras);
+    got.sort_by(|a, b| a.0.cmp(&b.0));
+    got
+}
+
+#[tokio::test]
+async fn an_absent_container_declares_its_own_add_and_one_add_per_leaf() {
+    let got = nested_extras_declared(None).await;
+
+    assert_eq!(
+        got,
+        [
+            edit("/metadata", EditKind::Add),
+            edit("/metadata/*", EditKind::Add),
+            edit("/metadata/*", EditKind::Add),
+            edit("/opts", EditKind::Add),
+            edit("/opts/a", EditKind::Add),
+            edit("/opts/b", EditKind::Add),
+            edit("/opts/b/c", EditKind::Add),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn an_existing_container_declares_only_its_differing_leaves() {
+    let client = json!({
+        "metadata": {"op_a": "v"},
+        "opts": {"a": 1, "b": {"c": 3}},
+    });
+
+    let got = nested_extras_declared(Some(client)).await;
+
+    assert_eq!(
+        got,
+        [
+            edit("/metadata/*", EditKind::Add),
+            edit("/opts/b/c", EditKind::Rewrite),
+        ]
+    );
+}
+
+/// The declarations for a container the client did not send explain the
+/// whole merged body to the wire check, which sees the container as one
+/// added value, and still name each leaf for a rejection to match.
+#[test]
+fn an_absent_container_leaves_the_wire_check_clean_and_its_leaves_matchable() {
+    let operator = json!({"metadata": {"op_a": "v", "op_b": "v"}});
+    let client = json!({"model": ALIAS});
+    let mut sent = client.clone();
+    sent["metadata"] = operator["metadata"].clone();
+
+    let edits =
+        super::operator_extras_edits(Some(IngressDialect::Anthropic), None, Some(&operator));
+    let outcome = diff(&client, &sent, LaneClass::Fidelity, &edits);
+    let leaf = WirePath::from_segments(["metadata", "op_a"]);
+    let leaf_matches = edits.iter().filter(|edit| edit.matches(&leaf)).count();
+
+    assert!(outcome.findings.is_empty(), "{:?}", outcome.findings);
+    assert_eq!(leaf_matches, 2, "one leaf declaration per operator leaf");
 }
 
 #[tokio::test]

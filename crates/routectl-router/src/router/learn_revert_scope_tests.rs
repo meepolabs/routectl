@@ -275,6 +275,47 @@ async fn reverting_one_masked_leaf_keeps_its_sibling_declared() {
     .await;
 }
 
+/// A request whose client sent no `metadata` container at all.
+fn no_container_request() -> ChatRequest {
+    request_with(IngressDialect::Anthropic, &json!({}), true)
+}
+
+/// Where the client sent no container, the operator's container is declared
+/// with each of its leaves: a rejection naming one leaf reverts that leaf
+/// alone, and its sibling stays on the retry, still declared.
+#[tokio::test]
+async fn a_leaf_under_an_operator_added_container_reverts_alone() {
+    run_rows(&[
+        Row {
+            name: "the one leaf reverted, the retry serves",
+            extras: OPERATOR_EXTRA,
+            cache: false,
+            request: no_container_request,
+            shape: faithful,
+            answer: refuse_op_key_while_carried,
+            calls: 2,
+            served: true,
+            field_repairs: 0,
+            findings: &[("routectl_added", FieldRepairOutcome::Repaired)],
+            warning: Some((ANTHROPIC_LANE, MASKED_OP_KEY, "operator_payload_extras")),
+        },
+        Row {
+            name: "op_b reverted, then its sibling op_a rejected",
+            extras: TWO_MASKED_LEAVES,
+            cache: false,
+            request: no_container_request,
+            shape: faithful,
+            answer: refuse_op_b_then_op_a,
+            calls: 2,
+            served: false,
+            field_repairs: 0,
+            findings: &[("routectl_added", FieldRepairOutcome::Unrepaired); 2],
+            warning: Some((ANTHROPIC_LANE, MASKED_OP_KEY, "operator_payload_extras")),
+        },
+    ])
+    .await;
+}
+
 /// The declared path of the closed-table test field, as a pointer pattern.
 const TEST_ROW_POINTER: &str = "/routectl_test_unsupported_field";
 

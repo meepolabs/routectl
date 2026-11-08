@@ -414,22 +414,55 @@ pub const MAX_CLIENT_BETA_FLAGS: usize = 64;
 ///   `max_completion_tokens` so it neither overwrites nor lingers as
 ///   an unknown canonical key that the forward-compat sweep skips.
 /// - Only `max_tokens`: no-op.
-pub(crate) fn normalize_max_completion_tokens(body: &mut Value) {
+///
+/// Returns what the fold did, for [`declare_max_completion_tokens_fold`].
+pub(crate) fn normalize_max_completion_tokens(body: &mut Value) -> MaxCompletionTokensFold {
     let Some(obj) = body.as_object_mut() else {
-        return;
+        return MaxCompletionTokensFold::None;
     };
-    let has_mct = obj.contains_key("max_completion_tokens");
-    if !has_mct {
-        return;
+    let Some(mct_val) = obj.remove("max_completion_tokens") else {
+        return MaxCompletionTokensFold::None;
+    };
+    if obj.contains_key("max_tokens") {
+        return MaxCompletionTokensFold::Dropped;
     }
-    let mct_val = obj.remove("max_completion_tokens");
-    if !obj.contains_key("max_tokens")
-        && let Some(v) = mct_val
-    {
-        obj.insert("max_tokens".into(), v);
+    obj.insert("max_tokens".into(), mct_val);
+    MaxCompletionTokensFold::Renamed
+}
+
+/// What folding the `max_completion_tokens` alias did to the body, as the
+/// wire check sees it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MaxCompletionTokensFold {
+    /// No `max_completion_tokens` arrived; nothing changed.
+    None,
+    /// The alias moved to `max_tokens`.
+    Renamed,
+    /// The client's own `max_tokens` won and the alias was dropped.
+    Dropped,
+}
+
+/// Declare the `max_completion_tokens` fold on the parsed request, so the
+/// wire check reads it as an edit rather than a loss.
+pub(crate) fn declare_max_completion_tokens_fold(
+    req: &mut ChatRequest,
+    fold: MaxCompletionTokensFold,
+) {
+    use routectl_core::wire_check::{DeclaredEdit, EditKind, EditSite};
+
+    let edits: &[(&'static str, EditKind)] = match fold {
+        MaxCompletionTokensFold::None => &[],
+        MaxCompletionTokensFold::Renamed => &[
+            ("/max_completion_tokens", EditKind::Relocate),
+            ("/max_tokens", EditKind::Relocate),
+        ],
+        MaxCompletionTokensFold::Dropped => &[("/max_completion_tokens", EditKind::Remove)],
+    };
+    for (path, kind) in edits {
+        if let Ok(edit) = DeclaredEdit::new(EditSite::LegacyFieldFold, *path, *kind) {
+            req.routectl_internal.declared_edits.push(edit);
+        }
     }
-    // If `max_tokens` was already present we just removed
-    // `max_completion_tokens` above; `max_tokens` stays unchanged.
 }
 
 /// Split every entry on `,`, trim each piece, and keep the first occurrence of
@@ -1059,3 +1092,7 @@ mod system_lift_fingerprint_tests;
 #[cfg(test)]
 #[path = "thinking_carrier_ingress_tests.rs"]
 mod thinking_carrier_ingress_tests;
+
+#[cfg(test)]
+#[path = "max_completion_tokens_fold_tests.rs"]
+mod max_completion_tokens_fold_tests;

@@ -69,8 +69,12 @@ pub(super) fn declare_model_rename(
 /// The edits merging `operator` payload extras over the client's swept
 /// extras makes: an Add where the client sent nothing at a leaf, a Rewrite
 /// where it sent a different value. Objects on both sides merge key by key,
-/// as the merge itself does. Canonical top-level keys are skipped: every
-/// egress withholds them from the extras merge, so they never reach the wire.
+/// as the merge itself does. An operator object the client has no container
+/// for declares an Add at the container, which the wire check sees as one
+/// added value, and an Add at each leaf beneath it, so a rejection naming one
+/// leaf is laid to that leaf alone. Canonical top-level keys are skipped:
+/// every egress withholds them from the extras merge, so they never reach
+/// the wire.
 pub(super) fn operator_extras_edits(
     wire: Option<IngressDialect>,
     client: Option<&Value>,
@@ -113,6 +117,12 @@ fn collect_extras_leaf(
         }
         (Some(existing), _) if existing == value => {}
         (Some(_), _) => out.push((path.as_str().to_owned(), EditKind::Rewrite)),
+        (None, Value::Object(operator)) => {
+            out.push((path.as_str().to_owned(), EditKind::Add));
+            for (child, child_value) in operator {
+                collect_extras_leaf(None, child, child_value, &path, out);
+            }
+        }
         (None, _) => out.push((path.as_str().to_owned(), EditKind::Add)),
     }
 }
