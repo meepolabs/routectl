@@ -390,6 +390,36 @@ impl AnthropicApiProvider {
     /// When the base URL has no host or the HTTP client cannot be built.
     #[cfg(feature = "test-utils")]
     pub fn with_host_resolved_to_for_tests(mut self, addr: std::net::SocketAddr) -> Self {
+        self.client = self.resolved_client_for_tests(addr, None);
+        self
+    }
+
+    /// [`Self::with_host_resolved_to_for_tests`], additionally trusting the
+    /// PEM root certificate `ca_pem`, so a test stub can serve an `https://`
+    /// base URL with a leaf that root signed. The built-in roots stay
+    /// trusted alongside it.
+    ///
+    /// # Panics
+    ///
+    /// When the base URL has no host, `ca_pem` is not a PEM certificate, or
+    /// the HTTP client cannot be built.
+    #[cfg(feature = "test-utils")]
+    pub fn with_host_resolved_to_and_root_ca_for_tests(
+        mut self,
+        addr: std::net::SocketAddr,
+        ca_pem: &[u8],
+    ) -> Self {
+        let root = reqwest::Certificate::from_pem(ca_pem).expect("a PEM root certificate");
+        self.client = self.resolved_client_for_tests(addr, Some(root));
+        self
+    }
+
+    #[cfg(feature = "test-utils")]
+    fn resolved_client_for_tests(
+        &self,
+        addr: std::net::SocketAddr,
+        root: Option<reqwest::Certificate>,
+    ) -> Client {
         let host = reqwest::Url::parse(&self.cfg.base_url)
             .ok()
             .and_then(|url| url.host_str().map(str::to_string))
@@ -406,10 +436,12 @@ impl AnthropicApiProvider {
         if let Some(ua) = ua {
             builder = builder.user_agent(ua);
         }
-        self.client = builder
+        if let Some(root) = root {
+            builder = builder.add_root_certificate(root);
+        }
+        builder
             .build()
-            .expect("reqwest client build failed for the test resolution");
-        self
+            .expect("reqwest client build failed for the test resolution")
     }
 
     pub(super) fn messages_url(&self) -> String {

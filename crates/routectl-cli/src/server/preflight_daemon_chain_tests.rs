@@ -21,8 +21,8 @@ mod chain {
     /// The limit the committed max_tokens capture names.
     const NAMED_LIMIT: u64 = 128_000;
 
-    /// A committed anthropic-api capture: its status and verbatim body.
-    fn captured(fixture: &str) -> ResponseTemplate {
+    /// A committed anthropic-api capture's status and verbatim body.
+    fn captured_parts(fixture: &str) -> (u16, String) {
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../routectl-router/tests/fixtures/rejections/anthropic-api")
             .join(fixture);
@@ -32,11 +32,17 @@ mod chain {
         let status = u16::try_from(fixture["status"].as_u64().expect("fixture status"))
             .expect("an HTTP status");
         let body = fixture["body"].as_str().expect("fixture body").to_string();
+        (status, body)
+    }
+
+    /// A committed anthropic-api capture as a mock response.
+    fn captured(fixture: &str) -> ResponseTemplate {
+        let (status, body) = captured_parts(fixture);
         ResponseTemplate::new(status).set_body_raw(body, "application/json")
     }
 
-    fn messages_success() -> ResponseTemplate {
-        ResponseTemplate::new(200).set_body_json(json!({
+    fn success_body() -> Value {
+        json!({
             "id": "msg_chain",
             "type": "message",
             "role": "assistant",
@@ -44,7 +50,11 @@ mod chain {
             "content": [{"type": "text", "text": "ok"}],
             "stop_reason": "end_turn",
             "usage": {"input_tokens": 3, "output_tokens": 1}
-        }))
+        })
+    }
+
+    fn messages_success() -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(success_body())
     }
 
     /// A mock upstream that refuses disabled thinking first, then a
@@ -420,5 +430,208 @@ mod chain {
             "and none is pending one"
         );
         daemon.shutdown().await;
+    }
+
+    /// The same reject, repair and serve over real https: a TLS stub holding
+    /// a leaf for the Anthropic host, signed by a throwaway local CA.
+    mod https {
+        use super::*;
+
+        use std::convert::Infallible;
+
+        use http_body_util::{BodyExt, Full};
+        use hyper::body::Incoming;
+        use hyper_util::rt::TokioIo;
+
+        const ANTHROPIC_HOST: &str = "api.anthropic.com";
+
+        /// What the stub saw: each decrypted request body in order, and how
+        /// many TLS handshakes it refused.
+        #[derive(Default)]
+        struct StubLog {
+            bodies: Mutex<Vec<Value>>,
+            handshakes_refused: AtomicUsize,
+        }
+
+        /// A TLS stub on loopback answering `/v1/messages` with the committed
+        /// max_tokens capture for the refused limit and a success otherwise.
+        /// The CA and leaf live in a tempdir owned by the stub.
+        struct TlsStub {
+            addr: std::net::SocketAddr,
+            ca_pem: Vec<u8>,
+            log: Arc<StubLog>,
+            task: tokio::task::JoinHandle<()>,
+            _certs: tempfile::TempDir,
+        }
+
+        impl Drop for TlsStub {
+            fn drop(&mut self) {
+                self.task.abort();
+            }
+        }
+
+        async fn answer(
+            request: hyper::Request<Incoming>,
+            log: Arc<StubLog>,
+        ) -> hyper::Response<Full<bytes::Bytes>> {
+            let bytes = request
+                .into_body()
+                .collect()
+                .await
+                .expect("the request body reads")
+                .to_bytes();
+            let body: Value = serde_json::from_slice(&bytes).expect("request body is JSON");
+            let refused = body["max_tokens"] == json!(SENT);
+            log.bodies.lock().push(body);
+            let (status, payload) = if refused {
+                captured_parts("max-tokens-above-model-limit-messages.json")
+            } else {
+                (200, success_body().to_string())
+            };
+            hyper::Response::builder()
+                .status(status)
+                .header("content-type", "application/json")
+                .body(Full::new(bytes::Bytes::from(payload)))
+                .expect("a stub response")
+        }
+
+        async fn serve_connection(
+            acceptor: tokio_rustls::TlsAcceptor,
+            stream: tokio::net::TcpStream,
+            log: Arc<StubLog>,
+        ) {
+            let Ok(tls) = acceptor.accept(stream).await else {
+                log.handshakes_refused.fetch_add(1, Ordering::SeqCst);
+                return;
+            };
+            let service = hyper::service::service_fn(move |request| {
+                let log = Arc::clone(&log);
+                async move { Ok::<_, Infallible>(answer(request, log).await) }
+            });
+            let _ = hyper::server::conn::http1::Builder::new()
+                .serve_connection(TokioIo::new(tls), service)
+                .await;
+        }
+
+        async fn tls_stub() -> TlsStub {
+            let certs = tempfile::tempdir().expect("cert tempdir");
+            let acceptor = crate::proxy::ca::load_or_create(certs.path(), ANTHROPIC_HOST)
+                .expect("the stub CA and leaf mint");
+            let ca_pem = std::fs::read(crate::proxy::ca::ca_cert_path(certs.path()))
+                .expect("the stub CA reads");
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind the stub");
+            let addr = listener.local_addr().expect("stub addr");
+            let log = Arc::new(StubLog::default());
+            let task_log = Arc::clone(&log);
+            let task = tokio::spawn(async move {
+                while let Ok((stream, _)) = listener.accept().await {
+                    tokio::spawn(serve_connection(
+                        acceptor.clone(),
+                        stream,
+                        Arc::clone(&task_log),
+                    ));
+                }
+            });
+            TlsStub {
+                addr,
+                ca_pem,
+                log,
+                task,
+                _certs: certs,
+            }
+        }
+
+        /// The provider's `https://` base URL: the Anthropic host on the
+        /// stub's port.
+        fn https_base(stub: &TlsStub) -> String {
+            format!("https://{ANTHROPIC_HOST}:{}", stub.addr.port())
+        }
+
+        /// A turn carrying only the limit the capture was refused for.
+        fn oversized_body() -> Value {
+            json!({
+                "model": ALIAS,
+                "max_tokens": SENT,
+                "stream": false,
+                "messages": [{"role": "user", "content": "hello"}],
+            })
+        }
+
+        fn stub_limits(stub: &TlsStub) -> Vec<Value> {
+            stub.log
+                .bodies
+                .lock()
+                .iter()
+                .map(|body| body["max_tokens"].clone())
+                .collect()
+        }
+
+        /// A refused client limit is repaired end to end over https: the
+        /// stub decrypts two bodies, the refused one as sent and the retry at
+        /// the limit the capture names, and the client gets 200.
+        ///
+        /// Mutation check: drop `add_root_certificate` from the provider's
+        /// test client builder -> red (the handshake is refused, no body
+        /// reaches the stub, the client gets an error status).
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn a_refused_limit_is_repaired_and_served_over_https() {
+            // Arrange
+            let stub = tls_stub().await;
+            let (config, dir) = daemon_config();
+            let provider = AnthropicApiProvider::new(provider_config(https_base(&stub)))
+                .with_host_resolved_to_and_root_ca_for_tests(stub.addr, &stub.ca_pem);
+            let router = router_over(&config, provider);
+            let daemon = spawn_daemon(config, dir, router).await;
+
+            // Act
+            let status = post_inference(&daemon, &oversized_body()).await;
+
+            // Assert
+            assert_eq!(status, reqwest::StatusCode::OK, "the repaired retry served");
+            assert_eq!(
+                stub_limits(&stub),
+                vec![json!(SENT), json!(NAMED_LIMIT)],
+                "two TLS-served bodies: refused as sent, then retried at the named limit",
+            );
+            assert_eq!(
+                stub.log.handshakes_refused.load(Ordering::SeqCst),
+                0,
+                "every handshake completed",
+            );
+            let counters = daemon.live_router().field_repair_counters();
+            assert_eq!(counters.repair_succeeded, 1, "the limit was repaired");
+            daemon.shutdown().await;
+        }
+
+        /// Paired control: the same stub and https base URL without the stub
+        /// CA trusted. The stub accepts the connection and the handshake
+        /// fails, so no body is decrypted and nothing is repaired, which
+        /// proves the transport above is TLS.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn without_the_stub_ca_the_request_fails_at_tls() {
+            // Arrange
+            let stub = tls_stub().await;
+            let (config, dir) = daemon_config();
+            let provider = AnthropicApiProvider::new(provider_config(https_base(&stub)))
+                .with_host_resolved_to_for_tests(stub.addr);
+            let router = router_over(&config, provider);
+            let daemon = spawn_daemon(config, dir, router).await;
+
+            // Act
+            let status = post_inference(&daemon, &oversized_body()).await;
+
+            // Assert
+            assert_ne!(status, reqwest::StatusCode::OK, "the request failed");
+            assert!(
+                stub.log.handshakes_refused.load(Ordering::SeqCst) >= 1,
+                "the stub was reached and refused the handshake",
+            );
+            assert!(stub_limits(&stub).is_empty(), "no body was decrypted");
+            let counters = daemon.live_router().field_repair_counters();
+            assert_eq!(counters.repair_attempted, 0, "nothing was repaired");
+            daemon.shutdown().await;
+        }
     }
 }
