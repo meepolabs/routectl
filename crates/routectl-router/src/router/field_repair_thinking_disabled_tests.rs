@@ -314,6 +314,277 @@ async fn a_lane_that_accepts_disabled_thinking_is_never_repaired_and_learns_noth
 }
 
 // ---------------------------------------------------------------------------
+// The canonical reasoning a shipped rewrite leaves behind
+// ---------------------------------------------------------------------------
+
+/// The body the anthropic-api egress assembles for `req`.
+fn anthropic_wire_body(req: &ChatRequest) -> serde_json::Value {
+    let egress = routectl_providers::anthropic_api::AnthropicApiProvider::new(
+        routectl_providers::anthropic_api::AnthropicApiConfig::new("thinking-seat", "k"),
+    );
+    egress
+        .normalize_request(req)
+        .expect("the egress assembles the body")
+}
+
+/// Whether capability evidence reads `req` as asking for reasoning.
+fn requests_reasoning(req: &ChatRequest) -> bool {
+    super::super::capability_observe::reasoning_requested(req.reasoning.as_ref())
+}
+
+/// A native `{type: disabled}` carrier with no canonical reasoning, the
+/// client's positive effort riding only in the forward-compat extras.
+fn disabled_carrier_effort_in_extras_only() -> ChatRequest {
+    let mut req = req_on(ALIAS);
+    req.max_tokens = Some(4096);
+    req.provider_extras = Some(json!({"output_config": {"effort": "high"}}));
+    req.routectl_internal.anthropic_thinking = native_thinking(json!({"type": "disabled"}));
+    req
+}
+
+/// A native `{type: disabled}` carrier with no canonical reasoning at all.
+fn disabled_carrier_without_reasoning() -> ChatRequest {
+    let mut req = req_on(ALIAS);
+    req.max_tokens = Some(4096);
+    req.routectl_internal.anthropic_thinking = native_thinking(json!({"type": "disabled"}));
+    req
+}
+
+/// `rewritten` with its canonical `enabled` put back to what `original` had,
+/// and a reasoning holding nothing else dropped when `original` had none.
+fn without_the_sync(original: &ChatRequest, rewritten: &ChatRequest) -> ChatRequest {
+    let mut unsynced = rewritten.clone();
+    let enabled = original.reasoning.as_ref().and_then(|r| r.enabled);
+    if let Some(reasoning) = unsynced.reasoning.as_mut() {
+        reasoning.enabled = enabled;
+    }
+    let holds_nothing = unsynced.reasoning.as_ref().is_some_and(|r| {
+        r.effort.is_none() && r.max_tokens.is_none() && r.exclude.is_none() && r.enabled.is_none()
+    });
+    if original.reasoning.is_none() && holds_nothing {
+        unsynced.reasoning = None;
+    }
+    unsynced
+}
+
+/// `(row, request, surface's refused type, rewrite target, reasoning
+/// requested after the rewrite)`.
+type ShippedSyncRow = (
+    &'static str,
+    fn() -> ChatRequest,
+    &'static str,
+    &'static str,
+    bool,
+);
+
+/// Each row's request starts with the opposite reasoning state from the one
+/// the shipped type implies, except where noted.
+const SHIPPED_SYNC_ROWS: [ShippedSyncRow; 5] = [
+    (
+        "disabled to adaptive",
+        || disabled_req(None),
+        "disabled",
+        "thinking.type.adaptive",
+        true,
+    ),
+    (
+        "disabled to adaptive with no canonical reasoning",
+        disabled_carrier_effort_in_extras_only,
+        "disabled",
+        "thinking.type.adaptive",
+        true,
+    ),
+    (
+        "disabled to between_tools beside a canonical budget",
+        || thinking_req(native_thinking(json!({"type": "disabled"}))),
+        "disabled",
+        "thinking.type.between_tools",
+        false,
+    ),
+    (
+        "disabled to between_tools with no canonical reasoning",
+        disabled_carrier_without_reasoning,
+        "disabled",
+        "thinking.type.between_tools",
+        false,
+    ),
+    (
+        "enabled to adaptive, already requested",
+        anthropic_enabled_req,
+        "enabled",
+        "thinking.type.adaptive",
+        true,
+    ),
+];
+
+/// A shipped thinking-type rewrite leaves the canonical reasoning saying what
+/// the carrier ships, and the sync changes nothing on the wire: the body with
+/// the synced reasoning is byte-identical to the body with the reasoning as
+/// the rewrite found it.
+///
+/// Mutation check: delete the `sync_canonical_reasoning` call in
+/// `write_thinking_type` -> red on "disabled to adaptive".
+#[test]
+fn a_shipped_thinking_type_rewrite_syncs_the_canonical_reasoning() {
+    for (name, build, refused, target, requested) in SHIPPED_SYNC_ROWS {
+        let surface = super::FieldSurface::AnthropicThinkingType(refused);
+        let original = build();
+        let mut rewritten = original.clone();
+
+        assert!(surface.rewrite_in(&mut rewritten, target), "{name}: ships");
+
+        let unsynced = without_the_sync(&original, &rewritten);
+        assert_eq!(
+            serde_json::to_vec(&anthropic_wire_body(&rewritten)).expect("serialize"),
+            serde_json::to_vec(&anthropic_wire_body(&unsynced)).expect("serialize"),
+            "{name}: the sync leaves the wire body byte-identical",
+        );
+        assert_eq!(requests_reasoning(&rewritten), requested, "{name}");
+        if original.reasoning.is_none() && !requested {
+            assert!(
+                rewritten.reasoning.is_none(),
+                "{name}: an inactive type creates no reasoning",
+            );
+        }
+    }
+}
+
+/// A rewrite that does not ship leaves the canonical reasoning as it was: the
+/// legacy `enabled` target has no budget to compose beside reasoning that is
+/// off, and a value naming no type writes nothing.
+///
+/// Mutation check: move the `sync_canonical_reasoning` call above the
+/// budget's early return in `write_thinking_type` -> red.
+#[test]
+fn a_thinking_type_rewrite_that_does_not_ship_leaves_the_reasoning_untouched() {
+    for (name, value) in [
+        ("enabled with no legacy budget", "thinking.type.enabled"),
+        ("a value naming no type", "thinking.type."),
+    ] {
+        let mut req = disabled_req(Some("high"));
+        let before = serde_json::to_value(&req.reasoning).expect("serialize");
+
+        super::write_thinking_type(&mut req, value);
+
+        assert_eq!(
+            serde_json::to_value(&req.reasoning).expect("serialize"),
+            before,
+            "{name}",
+        );
+        assert_eq!(
+            req.routectl_internal.anthropic_thinking,
+            native_thinking(json!({"type": "disabled"})),
+            "{name}: premise: nothing shipped",
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// A forcing tool_choice keeps disabled -> adaptive from shipping
+// ---------------------------------------------------------------------------
+
+/// [`disabled_req`] with a tool and `tool_choice`.
+fn disabled_req_with_tool_choice(tool_choice: serde_json::Value) -> ChatRequest {
+    let mut req = disabled_req(None);
+    req.tools = Some(vec![routectl_core::ToolDef::Custom(
+        routectl_core::CustomTool {
+            name: "lookup".into(),
+            description: None,
+            input_schema: json!({"type": "object"}),
+            cache_control: None,
+            defer_loading: None,
+            strict: None,
+            type_tag: None,
+        },
+    )]);
+    req.tool_choice = Some(tool_choice);
+    req
+}
+
+/// The egress strips active thinking beside a forcing `tool_choice`, so an
+/// adaptive rewrite would ship no thinking: the repair declines, the
+/// refusal reaches the client, and nothing is learned.
+///
+/// Mutation check: make `shipped_thinking` ignore the forcing tool_choice ->
+/// red (the repair ships and commits).
+#[tokio::test]
+async fn a_forced_tool_choice_declines_the_adaptive_repair_and_learns_nothing() {
+    let seat = Arc::new(ThinkingTypeSeat::refusing_types(
+        &["disabled"],
+        anthropic_disabled_rejection,
+        AfterRefusal::Serve,
+    ));
+    let router = thinking_chain(&[(ANTHROPIC_API_TOML, Arc::clone(&seat))], "");
+
+    let dispatched = router
+        .complete_with_options(
+            disabled_req_with_tool_choice(json!({"type": "any"})),
+            RouterOptions::new(),
+        )
+        .await;
+
+    let status = match dispatched.result.as_ref() {
+        Err(Error::Upstream { status, .. }) => Some(*status),
+        _ => None,
+    };
+    assert_eq!(status, Some(400), "the client gets the refusal");
+    let bodies = seat.bodies();
+    assert_eq!(bodies.len(), 1, "one upstream call, no retry");
+    assert_eq!(bodies[0]["tool_choice"]["type"], json!("any"));
+    assert!(dispatched.meta.learned_capabilities.is_empty());
+    assert!(
+        dispatched
+            .meta
+            .field_repairs
+            .iter()
+            .all(|record| !record.repair_succeeded),
+        "{:?}",
+        dispatched.meta.field_repairs,
+    );
+    assert!(
+        !router
+            .learned_capability_snapshot()
+            .iter()
+            .any(|entry| entry.feature_key == thinking_disabled_key()),
+        "no verdict is written",
+    );
+}
+
+/// Control for the row above: a `tool_choice` of `auto` forces nothing, so
+/// the same refusal is repaired and committed.
+#[tokio::test]
+async fn an_auto_tool_choice_repairs_disabled_to_adaptive_and_commits() {
+    let seat = Arc::new(ThinkingTypeSeat::refusing_types(
+        &["disabled"],
+        anthropic_disabled_rejection,
+        AfterRefusal::Serve,
+    ));
+    let router = thinking_chain(&[(ANTHROPIC_API_TOML, Arc::clone(&seat))], "");
+
+    let dispatched = router
+        .complete_with_options(
+            disabled_req_with_tool_choice(json!({"type": "auto"})),
+            RouterOptions::new(),
+        )
+        .await;
+
+    assert!(dispatched.result.is_ok(), "{:?}", dispatched.result.err());
+    let bodies = seat.bodies();
+    assert_eq!(bodies.len(), 2, "one refused attempt, one retry");
+    assert_eq!(bodies[1]["thinking"], json!({"type": "adaptive"}));
+    assert_eq!(
+        dispatched
+            .meta
+            .learned_capabilities
+            .iter()
+            .map(|event| event.capability_key.clone())
+            .collect::<Vec<_>>(),
+        vec![thinking_disabled_key()],
+        "one commit",
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Bedrock Invoke and Converse: disabled -> between_tools
 // ---------------------------------------------------------------------------
 

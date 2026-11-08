@@ -89,12 +89,15 @@ fn ok_response(model: String) -> ChatResponse {
     }
 }
 
+/// The `thinking` object a captured Anthropic client sent, carried the way
+/// the ingress carries it (`display` lifted off onto its own carrier).
 fn sent_thinking() -> ThinkingObject {
-    ThinkingObject::from_client(json!({
-        "type": "adaptive",
-        "between_tools": true,
-    }))
-    .expect("an object builds a carrier")
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
+        "../routectl-cli/tests/fixtures/driver/anthropic-api/thinking-01/ingress_request.json",
+    );
+    let text = std::fs::read_to_string(&path).expect("the captured request reads");
+    let captured: serde_json::Value = serde_json::from_str(&text).expect("the capture is JSON");
+    ThinkingObject::from_client(captured["thinking"].clone()).expect("an object builds a carrier")
 }
 
 /// Asserts `carried` is `Sent` and shares `original`'s allocation.
@@ -228,7 +231,7 @@ async fn fallback_attempt_receives_the_same_thinking_carrier() {
 
 #[tokio::test]
 async fn first_attempt_repair_does_not_reach_the_fallback_attempt() {
-    let (router, first, second) = two_entry_chain(Some("enabled"));
+    let (router, first, second) = two_entry_chain(Some("adaptive"));
     let original = sent_thinking();
     let mut req = ChatRequest {
         model: "flow".into(),
@@ -247,7 +250,7 @@ async fn first_attempt_repair_does_not_reach_the_fallback_attempt() {
     };
     assert_eq!(
         repaired.thinking_type(),
-        Some("enabled"),
+        Some("adaptive"),
         "the first entry's repair must take effect on its own copy",
     );
     let AnthropicThinking::Sent(fallback) = &second[0].routectl_internal.anthropic_thinking else {
@@ -255,7 +258,7 @@ async fn first_attempt_repair_does_not_reach_the_fallback_attempt() {
     };
     assert_eq!(
         fallback.thinking_type(),
-        Some("adaptive"),
+        Some("enabled"),
         "the fallback attempt must see the client's original type",
     );
     assert_same_carrier(
@@ -265,7 +268,7 @@ async fn first_attempt_repair_does_not_reach_the_fallback_attempt() {
     );
     assert_eq!(
         original.thinking_type(),
-        Some("adaptive"),
+        Some("enabled"),
         "the caller's carrier is untouched",
     );
 }

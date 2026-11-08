@@ -542,7 +542,7 @@ fn forces_web_search(tool_choice: Option<&Value>) -> bool {
 /// Whether extended thinking / reasoning was requested. An explicit
 /// `enabled: false` disables regardless of the other fields; otherwise a
 /// budget, a non-`none` effort, or `enabled: true` requests it.
-fn reasoning_requested(reasoning: Option<&ReasoningConfig>) -> bool {
+pub(super) fn reasoning_requested(reasoning: Option<&ReasoningConfig>) -> bool {
     let Some(reasoning) = reasoning else {
         return false;
     };

@@ -760,6 +760,20 @@ fn write_thinking_type(req: &mut ChatRequest, value: &str) {
         _ => req.routectl_internal.anthropic_thinking_display = None,
     }
     req.routectl_internal.anthropic_thinking = routectl_core::AnthropicThinking::Sent(object);
+    sync_canonical_reasoning(req, target);
+}
+
+/// Align the canonical `reasoning.enabled` with the thinking type the carrier
+/// now ships, so a reader of the canonical config (capability evidence asking
+/// whether reasoning was requested) sees the rewritten state. The egress
+/// forwards the `Sent` carrier as is and never reads `enabled` beside it.
+fn sync_canonical_reasoning(req: &mut ChatRequest, target: &str) {
+    let is_active = routectl_providers::anthropic_api::is_active_thinking_type(target);
+    if is_active {
+        req.reasoning.get_or_insert_with(Default::default).enabled = Some(true);
+    } else if let Some(reasoning) = req.reasoning.as_mut() {
+        reasoning.enabled = Some(false);
+    }
 }
 
 /// A forwarded carrier emits `display` from its own carrier only, so a
