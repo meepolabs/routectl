@@ -2267,6 +2267,73 @@ mod grounded_field_feature_keys_tests {
     }
 }
 
+mod probe_value_bound_tests {
+    use super::{ALIAS, native_thinking, req_on};
+    use crate::probe_scheduler::ProbePayload;
+    use routectl_core::ChatRequest;
+    use serde_json::json;
+
+    /// Far past any token a closed-table carrier models.
+    const OVERSIZED_LEN: usize = 64 * 1024;
+
+    /// A request whose display, thinking type and effort carriers each hold
+    /// an oversized client value.
+    fn oversized_req() -> ChatRequest {
+        let huge = "x".repeat(OVERSIZED_LEN);
+        let mut req = req_on(ALIAS);
+        req.routectl_internal.anthropic_thinking_display = Some(huge.clone());
+        req.routectl_internal.anthropic_thinking = native_thinking(json!({"type": huge}));
+        req.provider_extras = Some(json!({"output_config": {"effort": huge}}));
+        req
+    }
+
+    /// A probe payload is captured only from a row a token count validates
+    /// (`recheck_payloads`), and `ProbePayload::new` bounds its value by the
+    /// modeled display vocabulary, not by a byte ceiling. So for every
+    /// grounded row, an oversized carrier either never reaches a probe
+    /// (`value_in` is `None`, or the row is not count-validated) or is a
+    /// value the constructor accepts.
+    ///
+    /// Mutation check: set `count_tokens_validates: true` in `effort_row!`
+    /// -> red (an oversized effort becomes probe-eligible).
+    #[test]
+    fn no_grounded_row_carries_an_oversized_value_into_a_probe_payload() {
+        let req = oversized_req();
+        let mut oversized_rows = Vec::new();
+
+        for row in super::super::grounded_table() {
+            let value = row.surface.value_in(&req);
+            let accepted = value
+                .as_ref()
+                .is_some_and(|v| ProbePayload::new(row.path, v.clone(), &[], &[], false).is_some());
+            if value.as_ref().is_some_and(|v| v.len() >= OVERSIZED_LEN) {
+                assert!(
+                    !accepted,
+                    "{}: the constructor refuses an oversized value",
+                    row.path
+                );
+                oversized_rows.push(row.path);
+            }
+            assert!(
+                !row.count_tokens_validates || value.is_none() || accepted,
+                "{}: a count-validated row would capture an unbounded value",
+                row.path,
+            );
+        }
+
+        assert_eq!(
+            oversized_rows.len(),
+            10,
+            "control: the display, three thinking-type and six effort rows read \
+             the oversized carriers: {oversized_rows:?}",
+        );
+        let captured: Vec<_> =
+            super::super::recheck_payloads(crate::router::FieldRepairTable::grounded_only(), &req)
+                .collect();
+        assert!(captured.is_empty(), "{captured:?}");
+    }
+}
+
 mod forced_tool_choice_key_tests {
     use super::super::request_feature_keys;
     use routectl_core::ChatRequest;

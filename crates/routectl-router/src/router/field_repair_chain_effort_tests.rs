@@ -741,6 +741,106 @@ async fn a_refused_companion_effort_written_after_admission_is_repaired_and_lear
     );
 }
 
+/// Refuse disabled thinking, a `max_tokens` above the model limit, and from
+/// position 2 on, which is the second request, one above the lower limit;
+/// else serve.
+fn disabled_ceiling_then_lower_from_the_second_request(
+    body: &serde_json::Value,
+    position: usize,
+) -> Option<Error> {
+    if thinking_type(body) == Some("disabled") {
+        return Some(anthropic_disabled_rejection());
+    }
+    let sent = sent_max_tokens(body)?;
+    if sent > u64::from(MODEL_LIMIT) {
+        return Some(max_tokens_rejection());
+    }
+    (position >= 2 && sent > u64::from(LOWER_LIMIT)).then(lower_limit_refused)
+}
+
+/// Only a ranked row's refusal is answered past a declared edit: with a
+/// `max_tokens` ceiling resident, a disabled request is pre-flighted to the
+/// ceiling, refused for its thinking type and rewritten to adaptive, and
+/// that retry is refused for a lower ceiling. The refusal names the
+/// pre-flight's declared `max_tokens` edit on a row that is not ranked, so
+/// it is answered with `Proceed` before the moved-on settlement reads it:
+/// the pending thinking step commits nothing. The ranked counterpart through
+/// the same site is
+/// `a_preflight_written_level_refused_with_a_list_is_repaired_in_request`.
+///
+/// Mutation check: make `ranks_declared_effort` accept any named row
+/// (`is_ranked(named.row)` -> `true`) -> red (the refusal reaches the
+/// moved-on settlement, which commits the thinking step).
+#[tokio::test]
+async fn a_declared_edit_on_a_row_that_is_not_ranked_is_not_answered_as_ranked() {
+    let seat = ChainSeat::new(
+        Egress::Anthropic,
+        disabled_ceiling_then_lower_from_the_second_request,
+    );
+    let router = anthropic_router(&seat, &wire_checked(THREE_ATTEMPTS));
+    let mut teaching = effort_req("high", Some(json!({"type": "adaptive"})));
+    teaching.max_tokens = Some(SENT_MAX_TOKENS);
+    let taught = router
+        .complete_with_options(teaching, RouterOptions::new())
+        .await;
+    assert_eq!(
+        verdicts(&taught.meta),
+        vec![(
+            key(MAX_TOKENS_PATH),
+            Some(VerdictValue::Ceiling(MODEL_LIMIT))
+        )],
+        "premise: the ceiling alone is learned",
+    );
+    acknowledge(&router, &taught);
+    let before = seat.calls();
+
+    let dispatched = router
+        .complete_with_options(two_key_req(), RouterOptions::new())
+        .await;
+
+    assert!(
+        dispatched
+            .meta
+            .field_preflight
+            .iter()
+            .any(|record| record.acted && record.field_path == Some(MAX_TOKENS_PATH)),
+        "premise: the learned ceiling was applied before dispatch",
+    );
+    let sent: Vec<_> = seat.bodies()[before..]
+        .iter()
+        .map(|body| {
+            (
+                thinking_type(body).map(str::to_string),
+                sent_max_tokens(body),
+            )
+        })
+        .collect();
+    let at_ceiling = Some(u64::from(MODEL_LIMIT));
+    assert_eq!(
+        sent,
+        [
+            (Some("disabled".to_string()), at_ceiling),
+            (Some("adaptive".to_string()), at_ceiling),
+        ],
+        "premise: the type is repaired, the ceiling refused",
+    );
+    assert_eq!(
+        dispatched.meta.wire_reverts.len(),
+        1,
+        "premise: a declared edit explains the refusal",
+    );
+    assert!(dispatched.result.is_err(), "the refusal stands");
+    assert!(
+        dispatched.meta.learned_capabilities.is_empty(),
+        "{:?}",
+        verdicts(&dispatched.meta),
+    );
+    assert_eq!(
+        succeeded(&dispatched.meta),
+        vec![(THINKING_DISABLED_PATH, false, false)],
+    );
+}
+
 // -----------------------------------------------------------------------
 // An inferred effort refusal drives pre-flight only once corroborated
 // -----------------------------------------------------------------------

@@ -433,6 +433,124 @@ mod repair_chain {
         );
     }
 
+    /// The captured disabled refusal re-spelled for adaptive, naming `enabled`
+    /// as its replacement. Synthesized from the committed template; no
+    /// capture refuses adaptive on anthropic-api.
+    fn adaptive_refused_for_enabled() -> Error {
+        anthropic_rejection(
+            "\"thinking.type.adaptive\" is not supported for this model. Use \
+             \"thinking.type.enabled\" and \"output_config.effort\" to control thinking \
+             behavior.",
+        )
+    }
+
+    /// The keys of every thinking-type verdict resident on `router`, sorted.
+    fn resident_thinking_type_keys(router: &Router) -> Vec<String> {
+        let mut keys: Vec<String> = router
+            .learned_capability_snapshot()
+            .into_iter()
+            .map(|entry| entry.feature_key)
+            .filter(|feature| feature.contains("thinking.type."))
+            .collect();
+        keys.sort();
+        keys
+    }
+
+    /// A moved-on commit proves the thinking type it sent: with `adaptive ->
+    /// enabled` resident, a disabled request is refused and rewritten to
+    /// adaptive, and that retry is refused for its stop sequence. The
+    /// upstream read past adaptive, so the pending disabled step commits and
+    /// the adaptive verdict clears, though the request ends refused. A retry
+    /// refused for adaptive itself proves nothing: nothing commits and the
+    /// adaptive verdict stays.
+    ///
+    /// Mutation check: delete the `thinking_type_proven` clear in
+    /// `settle_field_moved_on` -> red on `different field` (the adaptive
+    /// verdict stays).
+    #[tokio::test]
+    async fn a_moved_on_thinking_type_commit_clears_the_verdict_of_the_type_it_sent() {
+        let rows: [(&str, Respond, bool); 2] = [
+            (
+                "different field",
+                |body, position| match thinking_type(body) {
+                    Some("adaptive") if position == 0 => Some(adaptive_refused_for_enabled()),
+                    Some("disabled") => Some(anthropic_disabled_rejection()),
+                    Some("adaptive") => Some(stop_refused()),
+                    _ => None,
+                },
+                true,
+            ),
+            (
+                "same field",
+                |body, position| match thinking_type(body) {
+                    Some("adaptive") if position == 0 => Some(adaptive_refused_for_enabled()),
+                    Some("disabled") => Some(anthropic_disabled_rejection()),
+                    Some("adaptive") => Some(adaptive_refused_for_enabled()),
+                    _ => None,
+                },
+                false,
+            ),
+        ];
+        let adaptive_key = key("thinking.type.adaptive");
+
+        for (name, respond, moved_on) in rows {
+            let seat = ChainSeat::new(Egress::Anthropic, respond);
+            let router = anthropic_router(&seat, &wire_checked(ONE_ATTEMPT));
+            let taught = router
+                .complete_with_options(anthropic_adaptive_req(32_000), RouterOptions::new())
+                .await;
+            assert!(taught.result.is_ok(), "{name}: {:?}", taught.result.err());
+            assert_eq!(
+                resident_thinking_type_keys(&router),
+                std::slice::from_ref(&adaptive_key),
+                "{name}: premise: adaptive learns enabled",
+            );
+
+            let dispatched = router
+                .complete_with_options(anthropic_req(4096, true), RouterOptions::new())
+                .await;
+
+            assert!(dispatched.result.is_err(), "{name}: premise: refused");
+            let types: Vec<_> = seat.bodies()[2..]
+                .iter()
+                .map(|body| thinking_type(body).map(str::to_string))
+                .collect();
+            assert_eq!(
+                types,
+                ["disabled", "adaptive"].map(|t| Some(t.to_string())),
+                "{name}: premise",
+            );
+            if moved_on {
+                assert_eq!(
+                    verdicts(&dispatched.meta),
+                    vec![(
+                        thinking_disabled_key(),
+                        Some(VerdictValue::Shape("thinking.type.adaptive")),
+                    )],
+                    "{name}",
+                );
+                assert_eq!(
+                    cleared_keys(&dispatched.meta),
+                    std::slice::from_ref(&adaptive_key),
+                    "{name}",
+                );
+                assert_eq!(
+                    resident_thinking_type_keys(&router),
+                    [thinking_disabled_key()],
+                    "{name}",
+                );
+            } else {
+                assert!(dispatched.meta.learned_capabilities.is_empty(), "{name}");
+                assert!(cleared_keys(&dispatched.meta).is_empty(), "{name}");
+                assert_eq!(
+                    resident_thinking_type_keys(&router),
+                    std::slice::from_ref(&adaptive_key),
+                    "{name}",
+                );
+            }
+        }
+    }
+
     /// Mutation check: read the remapped class instead of the native one in
     /// `settle_field_moved_on` -> red on `remapped` (an operator routing
     /// preference would decide what the upstream proved).
