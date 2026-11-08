@@ -119,7 +119,7 @@ fn a_restated_rewrite_verdict_carries_the_value_of_its_snapshotted_incarnation()
 
     let restated = router.with_restated_value(rewrite);
 
-    assert_eq!(restated.value, Some(VerdictValue::Shape(MEMBER)));
+    assert_eq!(restated.entry.value, Some(VerdictValue::Shape(MEMBER)));
 }
 
 /// A value recorded for another lifecycle is not this one's: a snapshot whose
@@ -138,7 +138,7 @@ fn a_restatement_never_carries_a_value_recorded_for_another_incarnation() {
 
     let restated = router.with_restated_value(rewrite);
 
-    assert_eq!(restated.value, None);
+    assert_eq!(restated.entry.value, None);
 }
 
 /// A drop row and a catalog row restate with no value even when the store
@@ -174,7 +174,7 @@ fn drop_and_catalog_rows_restate_without_a_value_even_when_one_is_planted() {
 
         let restated = router.with_restated_value(row);
 
-        assert_eq!(restated.value, None, "{capability}");
+        assert_eq!(restated.entry.value, None, "{capability}");
     }
 }
 
@@ -277,4 +277,46 @@ fn drop_and_catalog_rows_reach_the_surface_snapshot_without_a_value() {
 
         assert_eq!(row.value, None, "{capability}");
     }
+}
+
+// ---------------------------------------------------------------------------
+// The restated value lives in the row's single value slot
+// ---------------------------------------------------------------------------
+
+/// A restated field verdict carries, in its entry's value slot, exactly what
+/// the store holds at the snapshotted incarnation; a catalog row restated
+/// beside it carries none although the store holds one for its identity.
+///
+/// Mutation check: make `with_restated_value` return `recorded` unchanged ->
+/// red on the field row.
+#[test]
+fn a_restated_field_verdict_holds_the_store_value_in_its_entry_slot() {
+    let router = router_with_three_verdicts();
+    let field = recorded(
+        &router,
+        &field_key(crate::router::field_repair::TEST_REWRITE_PATH),
+    );
+    let catalog = recorded(&router, "web_search");
+    plant_value(&router, &catalog, VerdictValue::Shape(MEMBER));
+    let stored_field = router
+        .field_verdicts
+        .verdict_value(&lane_key(&field.entry.feature_key), field.incarnation);
+    let stored_catalog = router
+        .field_verdicts
+        .verdict_value(&lane_key("web_search"), catalog.incarnation);
+    assert!(
+        stored_field.is_some(),
+        "premise: the store holds the field value"
+    );
+    assert!(
+        stored_catalog.is_some(),
+        "control: the planted catalog value is readable",
+    );
+
+    let restated_field = router.with_restated_value(field);
+    let restated_catalog = router.with_restated_value(catalog);
+
+    assert_eq!(restated_field.entry.value, stored_field);
+    assert_eq!(restated_field.into_entry().value, stored_field);
+    assert_eq!(restated_catalog.entry.value, None);
 }

@@ -279,7 +279,7 @@ fn a_replayed_survivor_carries_only_the_value_its_repair_row_writes() {
         .recorded_snapshot()
         .into_iter()
         .map(|recorded| values.attach(recorded))
-        .map(|recorded| (recorded.entry.feature_key, recorded.value))
+        .map(|recorded| (recorded.entry.feature_key, recorded.entry.value))
         .collect();
 
     assert_eq!(

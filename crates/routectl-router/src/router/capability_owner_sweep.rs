@@ -19,7 +19,7 @@
 
 use super::Router;
 use crate::capability_owner::{OwnerDecision, owner_decision};
-use crate::learned_capability::{GenerationOutcome, RecordedLearnedEntry};
+use crate::learned_capability::{GenerationOutcome, LearnedRegistryEntry, RecordedLearnedEntry};
 use crate::state_key::StateKey;
 
 impl Router {
@@ -54,7 +54,13 @@ impl Router {
             self.field_verdicts
                 .verdict_value(&key, recorded.incarnation)
         });
-        RecordedLearnedEntry { value, ..recorded }
+        RecordedLearnedEntry {
+            entry: LearnedRegistryEntry {
+                value,
+                ..recorded.entry
+            },
+            ..recorded
+        }
     }
 
     fn owner_of(&self, recorded: &RecordedLearnedEntry) -> Option<(StateKey, OwnerDecision)> {

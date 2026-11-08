@@ -504,22 +504,16 @@ pub struct RecordedLearnedEntry {
     /// The incarnation of the entry this row was read from: what a value
     /// recorded for that exact lifecycle is looked up by.
     pub incarnation: u64,
-    /// The value the verdict applies, which a restatement persists beside it.
-    /// Always `None` out of the registry, which holds no values; filled only
-    /// for a field verdict whose repair row writes one.
-    pub value: Option<VerdictValue>,
 }
 
 impl RecordedLearnedEntry {
-    /// The row in the surface shape, with [`Self::value`] lifted onto it.
-    /// Carries a value only when one was attached first, as
-    /// `Router::with_restated_value` does for this row's incarnation.
+    /// The row in the surface shape. Its `value` is `None` out of the
+    /// registry, which holds no values; it carries one only when attached
+    /// first, as `Router::with_restated_value` does for this row's
+    /// incarnation.
     #[must_use]
     pub fn into_entry(self) -> LearnedRegistryEntry {
-        LearnedRegistryEntry {
-            value: self.value,
-            ..self.entry
-        }
+        self.entry
     }
 }
 
@@ -1946,7 +1940,6 @@ impl LearnedCapabilityRegistry {
             entry: Self::snapshot_row(table, key, entry),
             provider_kind: key.provider_kind.clone(),
             incarnation: entry.incarnation,
-            value: None,
         }
     }
 

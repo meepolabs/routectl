@@ -245,7 +245,7 @@ pub(crate) fn boundary_batch(
         let survivor = &recorded.entry;
         let provider_kind =
             crate::handlers::usage_capture::persisted_provider_kind(&recorded.provider_kind);
-        let value_token = recorded
+        let value_token = survivor
             .value
             .as_ref()
             .map(routectl_router::VerdictValue::encode);

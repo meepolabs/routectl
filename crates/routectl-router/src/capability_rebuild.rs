@@ -35,7 +35,9 @@ use routectl_core::capability::{
 use crate::capability_owner::owner_decision;
 use crate::config::ProviderEntry;
 use crate::field_verdict_value::{ValueSlot, VerdictValue};
-use crate::learned_capability::{LearnedCapabilityRegistry, PositiveOutcome, RecordedLearnedEntry};
+use crate::learned_capability::{
+    LearnedCapabilityRegistry, LearnedRegistryEntry, PositiveOutcome, RecordedLearnedEntry,
+};
 
 /// The replay boundary: the latest tombstone's ledger `rowid` plus the
 /// catalog/overlay revision it was stamped with. Events at or before
@@ -327,7 +329,13 @@ impl ReplayedFieldValues {
             &recorded.entry.feature_key,
             &recorded.provider_kind,
         );
-        RecordedLearnedEntry { value, ..recorded }
+        RecordedLearnedEntry {
+            entry: LearnedRegistryEntry {
+                value,
+                ..recorded.entry
+            },
+            ..recorded
+        }
     }
 
     fn identity(row: &CapabilityEventRow) -> FieldIdentity {
