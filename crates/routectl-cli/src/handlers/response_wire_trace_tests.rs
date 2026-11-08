@@ -272,7 +272,7 @@ fn invoke_chunk(event: &serde_json::Value) -> Vec<u8> {
 }
 
 /// A whole Anthropic answer as Bedrock InvokeModel streams it.
-fn invoke_stream() -> Vec<u8> {
+pub(in crate::handlers) fn invoke_stream() -> Vec<u8> {
     use serde_json::json;
     [
         json!({"type": "message_start", "message": {

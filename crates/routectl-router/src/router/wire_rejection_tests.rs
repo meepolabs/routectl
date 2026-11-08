@@ -354,6 +354,47 @@ fn refuse_client_rewrite_value(req: &ChatRequest) -> Result<()> {
     Ok(())
 }
 
+/// The display value the client sends on the `enabled` thinking member,
+/// outside the upstream's enum.
+const CLIENT_THINKING_DISPLAY: &str = "routectl-test-display";
+
+/// The tagged-union location the upstream names the display at: the
+/// member's tag stands in for a key the body does not have.
+const TAGGED_DISPLAY_PATH: &str = "thinking.enabled.display";
+
+/// A request carrying a thinking display value, so field repair has a row to
+/// act on when the upstream refuses it.
+fn display_request() -> ChatRequest {
+    let mut req = request(IngressDialect::Anthropic);
+    req.routectl_internal.anthropic_thinking_display = Some(CLIENT_THINKING_DISPLAY.into());
+    req
+}
+
+fn carries_display(req: &ChatRequest) -> bool {
+    req.routectl_internal.anthropic_thinking_display.is_some()
+}
+
+/// The thinking union on its `enabled` member, carrying `display` while the
+/// request carries one, as an egress emitting it would.
+fn with_thinking_display(req: &ChatRequest, mut client: Value) -> Value {
+    client["thinking"] = json!({"type": "enabled", "budget_tokens": 1024});
+    if carries_display(req) {
+        client["thinking"]["display"] = json!(CLIENT_THINKING_DISPLAY);
+    }
+    client
+}
+
+/// Refuse the display value by its tag-named location while it is sent.
+fn refuse_thinking_display(req: &ChatRequest) -> Result<()> {
+    if carries_display(req) {
+        return Err(rejection(
+            TAGGED_DISPLAY_PATH,
+            "Input should be 'summarized', 'omitted'",
+        ));
+    }
+    Ok(())
+}
+
 /// One outcome-table row: the request, what the egress deposits, how the
 /// upstream answers, the joined outcome and its label, and how many
 /// unrepaired WARNs fire.
@@ -421,6 +462,16 @@ async fn the_field_repair_outcome_joins_its_rejection_and_only_unrepaired_warns(
             label: "unrepaired",
             warns: 1,
         },
+        OutcomeRow {
+            name: "tagged-union member",
+            request: display_request,
+            shape: with_thinking_display,
+            answer: refuse_thinking_display,
+            path: TAGGED_DISPLAY_PATH,
+            expected: FieldRepairOutcome::RepairedLossy,
+            label: "repaired_lossy",
+            warns: 0,
+        },
     ];
     for surface in SURFACES {
         for row in &rows {
@@ -443,7 +494,7 @@ async fn the_field_repair_outcome_joins_its_rejection_and_only_unrepaired_warns(
             assert_eq!(
                 (first.0.as_str(), first.1, first.2),
                 (
-                    format!("/{}", row.path).as_str(),
+                    format!("/{}", row.path.replace('.', "/")).as_str(),
                     "routectl_added",
                     row.expected
                 ),
@@ -711,7 +762,7 @@ mod sent_effort_and_thinking {
     use super::super::read_site;
     use super::*;
     use crate::router::learn_engine::{EffortRank, RejectionSite, SentEffort, ThinkingShape};
-    use crate::router::wire_check::lend_request_record;
+    use crate::router::wire_check::{lend_request_record, parsed_egress};
 
     /// A body routectl sends, built by a real egress from `req` or, for a
     /// shape no egress emits, by hand.
@@ -1061,7 +1112,8 @@ mod sent_effort_and_thinking {
         }
         lend_request_record(req, &tap, |record| {
             let record = record.expect("premise: the request carries its client bytes");
-            read_site(Lane::of(dialect, egress), &record, None, 0)
+            let sent = parsed_egress(&record);
+            read_site(Lane::of(dialect, egress), &record, sent.as_ref(), None, 0)
         })
     }
 

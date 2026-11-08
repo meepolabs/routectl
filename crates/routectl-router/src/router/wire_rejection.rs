@@ -37,7 +37,9 @@ use super::rejection_parser::{
     CONVERSE_FIELD_BAG, FieldIdentity, REJECTION_STATUSES, RawPath, RejectedWirePath,
     rejected_wire_path,
 };
-use super::wire_check::{SampleCharge, attempt_lane, compare_request, lend_request_record};
+use super::wire_check::{
+    SampleCharge, attempt_lane, compare_parsed_request, lend_request_record, parsed_egress,
+};
 use super::{DispatchMeta, DispatchTarget, FieldRepair, Router};
 use crate::wire_check_state::FieldRepairOutcome;
 
@@ -106,8 +108,15 @@ impl Router {
         let pending = meta.wire_rejections.len();
         let site = lend_request_record(attempt_req, tap, |record| {
             let record = record?.with_rejection(err);
-            compare_request(&self.wire_check, lane, &record);
-            Some(read_site(lane, &record, rejected.as_ref(), pending))
+            let sent = parsed_egress(&record);
+            compare_parsed_request(&self.wire_check, lane, &record, sent.as_ref());
+            Some(read_site(
+                lane,
+                &record,
+                sent.as_ref(),
+                rejected.as_ref(),
+                pending,
+            ))
         });
         let Some(site) = site else {
             self.wire_check.record_incomplete(lane);
@@ -166,9 +175,11 @@ impl Router {
         // A count body is a projection that omits the effort, so its absence
         // there says nothing about the request.
         let site = lend_request_record(attempt_req, tap, |record| {
+            let record = record?;
+            let sent = parsed_egress(&record);
             Some(RejectionSite {
                 sent_effort: SentEffort::Unknown,
-                ..read_site(lane, &record?, rejected.as_ref(), 0)
+                ..read_site(lane, &record, sent.as_ref(), rejected.as_ref(), 0)
             })
         })?;
         if let Some(attribution) = EditAttribution::of(&site.matched_edit, site.provenance) {
@@ -209,28 +220,27 @@ impl Router {
 
 /// What the attempt's record says about the location `rejected` names:
 /// where it came from, whether the body that went out carries it, and the
-/// declared edits that put it there. `pending` is the rejection's position
-/// among the request's pending rejections.
+/// declared edits that put it there. `body` is the record's egress body,
+/// parsed by the caller; `None` when there is none or it is not JSON.
+/// `pending` is the rejection's position among the request's pending
+/// rejections.
 fn read_site(
     lane: Lane,
     record: &AttemptRecord<'_>,
+    body: Option<&Value>,
     rejected: Option<&RejectedWirePath>,
     pending: usize,
 ) -> RejectionSite {
     let path = exact_locator(rejected);
-    let body = record
-        .egress()
-        .and_then(|body| serde_json::from_slice::<Value>(body).ok());
     let (sent_effort, thinking) = body
-        .as_ref()
         .filter(|body| body.is_object())
         .map_or((SentEffort::Unknown, ThinkingShape::Unknown), |body| {
             effort_and_thinking(lane.egress(), body)
         });
     let sent = path.and(body);
-    let provenance = provenance_of(lane, record, path, sent.as_ref());
+    let provenance = provenance_of(lane, record, path, sent);
     let in_egress = path
-        .zip(sent.as_ref())
+        .zip(sent)
         .and_then(|(path, sent)| egress_location(lane.egress(), sent, path))
         .filter(|&carried| carried || absence_is_evidence(rejected));
     let matched_edit = match rejected {
@@ -247,7 +257,7 @@ fn read_site(
             .filter(|named| !named.wire.is_coarsened())
             .map(|named| named.locator.clone()),
         sent: path
-            .zip(sent.as_ref())
+            .zip(sent)
             .map(|(path, sent)| SentSlot::at(sent, path))
             .unwrap_or_default(),
         pending,

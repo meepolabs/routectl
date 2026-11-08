@@ -1,9 +1,15 @@
 //! Zero-detection harness: every committed driver fixture, plus the
-//! representative request shapes of each FIDELITY lane, through the real
-//! ingress and a real egress against a mock upstream, with every request
-//! checked on both legs. Any finding is either an intended routectl edit,
-//! which must be declared at the site that makes it, or a known loss listed
-//! in [`KNOWN_UNDECLARED`] by lane, leg and path with its reason.
+//! representative request shapes of each FIDELITY lane and of Bedrock
+//! Converse, through the real ingress and a real egress against a mock
+//! upstream, with every request checked on each leg its lane compares. Any
+//! finding is either an intended routectl edit, which must be declared at
+//! the site that makes it, or a known loss listed in [`KNOWN_UNDECLARED`] by
+//! lane, leg and path with its reason.
+//!
+//! Bedrock Converse is a TRANSLATION lane: its request leg is checked for
+//! client extras the Converse body does not carry, and its response leg is
+//! not compared at all, since the upstream answers in a dialect no ingress
+//! speaks. Its cases count the request leg only.
 //!
 //! The harness prints what it walked per lane and leg, and fails when it
 //! walks nothing: a green run over an empty corpus proves nothing.
@@ -15,8 +21,14 @@ use std::sync::Arc;
 use axum::body::{Bytes, to_bytes};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, header};
 use routectl_core::wire_check::Leg;
+use routectl_providers::bedrock::{
+    BedrockApiShape, BedrockConfig, BedrockCreds, BedrockProvider, auth,
+};
 use routectl_router::wire_check_state::{CheckOutcome, WireCheckSnapshot};
-use routectl_router::{AliasValue, Config, ModelEntry, ProviderEntry, RetryPolicy, Router};
+use routectl_router::{
+    AliasValue, CURRENT_CONFIG_VERSION, Config, ModelEntry, ProviderEntry, ResolvedModel,
+    RetryPolicy, Router, parse_config,
+};
 use serde_json::{Value, json};
 use wiremock::matchers::method;
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -44,6 +56,8 @@ struct KnownUndeclared {
 const ANTHROPIC: &str = "anthropic->anthropic-api";
 const CHAT: &str = "chat->openai-compat";
 const RESPONSES: &str = "responses->openai-responses";
+const BEDROCK_INVOKE: &str = "anthropic->bedrock-invoke";
+const BEDROCK_CONVERSE: &str = "anthropic->bedrock-converse";
 
 /// Findings the check correctly reports that no declaration explains.
 const KNOWN_UNDECLARED: &[KnownUndeclared] = &[
@@ -83,6 +97,20 @@ const KNOWN_UNDECLARED: &[KnownUndeclared] = &[
         path: "/output/0/id",
         reason: "real loss: the egress drops the upstream message item id, so no render can echo it",
     },
+    KnownUndeclared {
+        lane: BEDROCK_INVOKE,
+        leg: Leg::Request,
+        path: "/metadata",
+        reason: "undeclared routectl edit: the Invoke egress strips the client fingerprint \
+                 metadata block for a third-party upstream without declaring the removal",
+    },
+    KnownUndeclared {
+        lane: BEDROCK_CONVERSE,
+        leg: Leg::Request,
+        path: "/metadata",
+        reason: "undeclared routectl edit: the Converse egress keeps the client fingerprint \
+                 metadata block out of the field bag without declaring the removal",
+    },
 ];
 
 /// The client dialect a case speaks.
@@ -103,6 +131,25 @@ impl Ingress {
     }
 }
 
+/// The Bedrock API a case's provider speaks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BedrockShape {
+    Invoke,
+    Converse,
+}
+
+/// What carries a case's request upstream: a provider entry the router
+/// builds aimed at the mock, or a real Bedrock provider whose transport is
+/// aimed at the mock (a Bedrock entry derives its host from its region).
+#[derive(Clone, Copy)]
+enum Egress {
+    Entry(fn(&str) -> ProviderEntry),
+    Bedrock {
+        shape: BedrockShape,
+        model_id: &'static str,
+    },
+}
+
 /// One request through the harness: what the client sends, how the
 /// upstream answers, and the provider config the lane uses.
 struct Case {
@@ -111,8 +158,43 @@ struct Case {
     headers: HeaderMap,
     body: Value,
     upstream: ResponseTemplate,
-    provider: fn(&str) -> ProviderEntry,
+    egress: Egress,
     model: fn() -> ModelEntry,
+    /// A member the router's tap removes from the deposited egress body, so
+    /// the check sees a body that lost it; `None` for real traffic.
+    tap_drop: Option<&'static str>,
+}
+
+impl Case {
+    /// The lane the check records this case's findings on.
+    const fn lane(&self) -> &'static str {
+        match self.egress {
+            Egress::Entry(_) => self.ingress.lane(),
+            Egress::Bedrock {
+                shape: BedrockShape::Invoke,
+                ..
+            } => BEDROCK_INVOKE,
+            Egress::Bedrock {
+                shape: BedrockShape::Converse,
+                ..
+            } => BEDROCK_CONVERSE,
+        }
+    }
+
+    /// The legs the check compares on this case's lane.
+    const fn legs(&self) -> &'static [Leg] {
+        match self.egress {
+            Egress::Bedrock {
+                shape: BedrockShape::Converse,
+                ..
+            } => &[Leg::Request],
+            Egress::Entry(_)
+            | Egress::Bedrock {
+                shape: BedrockShape::Invoke,
+                ..
+            } => &[Leg::Request, Leg::Response],
+        }
+    }
 }
 
 fn json_headers() -> HeaderMap {
@@ -507,8 +589,9 @@ fn driver_cases() -> Vec<Case> {
                 } else {
                     anthropic_complete()
                 },
-                provider: anthropic_provider,
+                egress: Egress::Entry(anthropic_provider),
                 model: plain_model,
+                tap_drop: None,
             });
         }
     }
@@ -532,8 +615,9 @@ fn case(
         headers: json_headers(),
         body,
         upstream,
-        provider,
+        egress: Egress::Entry(provider),
         model: plain_model,
+        tap_drop: None,
     }
 }
 
@@ -967,26 +1051,212 @@ fn anthropic_cases() -> Vec<Case> {
 }
 
 // ---------------------------------------------------------------------------
+// Bedrock: Invoke on both legs, Converse on the request leg
+// ---------------------------------------------------------------------------
+
+fn bedrock_case(name: &str, shape: BedrockShape, body: Value, upstream: ResponseTemplate) -> Case {
+    Case {
+        egress: Egress::Bedrock {
+            shape,
+            model_id: BEDROCK_MODEL_ID,
+        },
+        ..case(name, Ingress::Anthropic, body, upstream, anthropic_provider)
+    }
+}
+
+fn invoke_stream() -> ResponseTemplate {
+    ResponseTemplate::new(200).set_body_raw(
+        super::response_wire::trace_tests::invoke_stream(),
+        "application/vnd.amazon.eventstream",
+    )
+}
+
+fn converse_complete() -> ResponseTemplate {
+    ResponseTemplate::new(200).set_body_json(json!({
+        "output": {"message": {"role": "assistant", "content": [{"text": "ok"}]}},
+        "stopReason": "end_turn",
+        "usage": {"inputTokens": 3, "outputTokens": 1, "totalTokens": 4},
+    }))
+}
+
+fn bedrock_invoke_cases() -> Vec<Case> {
+    let hi = json!([{"role": "user", "content": "hi"}]);
+    let invoke = |name, body| bedrock_case(name, BedrockShape::Invoke, body, anthropic_complete());
+    vec![
+        invoke(
+            "bedrock-invoke/plain",
+            json!({"model": ALIAS, "max_tokens": 16, "messages": hi}),
+        ),
+        Case {
+            upstream: invoke_stream(),
+            ..invoke(
+                "bedrock-invoke/stream",
+                json!({"model": ALIAS, "max_tokens": 16, "stream": true, "messages": hi}),
+            )
+        },
+        invoke(
+            "bedrock-invoke/sampling",
+            json!({"model": ALIAS, "max_tokens": 16, "temperature": 0.3,
+                   "stop_sequences": ["END"], "messages": hi}),
+        ),
+        invoke(
+            "bedrock-invoke/thinking-effort",
+            json!({"model": ALIAS, "max_tokens": 4096, "messages": hi,
+                   "thinking": {"type": "adaptive"},
+                   "output_config": {"effort": "high"}}),
+        ),
+        invoke(
+            "bedrock-invoke/top-level-cache-marker",
+            json!({"model": ALIAS, "max_tokens": 16, "messages": hi,
+                   "cache_control": {"type": "ephemeral"}}),
+        ),
+        invoke(
+            "bedrock-invoke/client-metadata",
+            json!({"model": ALIAS, "max_tokens": 16, "messages": hi,
+                   "metadata": {"user_id": "u-1"}}),
+        ),
+    ]
+}
+
+fn bedrock_converse_cases() -> Vec<Case> {
+    let hi = json!([{"role": "user", "content": "hi"}]);
+    let converse =
+        |name, body| bedrock_case(name, BedrockShape::Converse, body, converse_complete());
+    vec![
+        converse(
+            "bedrock-converse/plain",
+            json!({"model": ALIAS, "max_tokens": 16, "messages": hi}),
+        ),
+        converse(
+            "bedrock-converse/sampling",
+            json!({"model": ALIAS, "max_tokens": 16, "temperature": 0.3,
+                   "stop_sequences": ["END"], "messages": hi}),
+        ),
+        converse(
+            "bedrock-converse/thinking-effort",
+            json!({"model": ALIAS, "max_tokens": 4096, "messages": hi,
+                   "thinking": {"type": "adaptive"},
+                   "output_config": {"effort": "high"}}),
+        ),
+        converse(
+            "bedrock-converse/forward-compat-extra",
+            json!({"model": ALIAS, "max_tokens": 16, "messages": hi,
+                   "context_management": {"edits": []}}),
+        ),
+        converse(
+            "bedrock-converse/client-metadata",
+            json!({"model": ALIAS, "max_tokens": 16, "messages": hi,
+                   "metadata": {"user_id": "u-1"}}),
+        ),
+        Case {
+            egress: Egress::Bedrock {
+                shape: BedrockShape::Converse,
+                model_id: NON_CLAUDE_MODEL_ID,
+            },
+            ..converse(
+                "bedrock-converse/non-claude-output-config",
+                json!({"model": ALIAS, "max_tokens": 16, "messages": hi,
+                       "output_config": {"effort": "high"}}),
+            )
+        },
+    ]
+}
+
+// ---------------------------------------------------------------------------
 // The walk
 // ---------------------------------------------------------------------------
 
-/// Checks every request on both legs.
+/// Checks every request on each leg its lane compares.
 async fn router_for(case: &Case, base: &str) -> Router {
+    let provider = match case.egress {
+        Egress::Entry(provider) => provider,
+        Egress::Bedrock { shape, model_id } => return bedrock_router(shape, model_id, base).await,
+    };
     let mut retry = RetryPolicy::default();
     retry.max_attempts = 1;
     let mut config = Config {
-        providers: BTreeMap::from([(PROVIDER.to_string(), (case.provider)(base))]),
+        providers: BTreeMap::from([(PROVIDER.to_string(), provider(base))]),
         models: BTreeMap::from([(NICKNAME.to_string(), (case.model)())]),
         aliases: BTreeMap::from([(ALIAS.to_string(), AliasValue::Single(NICKNAME.to_string()))]),
         retry,
         ..Default::default()
     };
-    config.wire_check.first_n = u32::MAX;
-    config.wire_check.sample_one_in = std::num::NonZeroU32::MIN;
+    check_every_request(&mut config);
     let secrets: Arc<dyn routectl_auth::SecretStore> = Arc::new(routectl_auth::MemoryStore::new());
     crate::server::build_router_from_config(Arc::new(config), secrets)
         .await
         .expect("build router")
+}
+
+const BEDROCK_REGION: &str = "us-east-1";
+const BEDROCK_MODEL_ID: &str = "us.anthropic.claude-sonnet-4-5";
+/// A model id outside the Anthropic family, whose Converse bag cannot carry
+/// `output_config`.
+const NON_CLAUDE_MODEL_ID: &str = "zz.zero-detection-test";
+
+fn bedrock_key() -> String {
+    ["zero", "detection", "key"].join("-")
+}
+
+/// A router whose one target is a real Bedrock provider of `shape` serving
+/// `model_id`, its transport aimed at `origin`, checking every request.
+async fn bedrock_router(shape: BedrockShape, model_id: &str, origin: &str) -> Router {
+    let (api_shape, shape_token) = match shape {
+        BedrockShape::Invoke => (BedrockApiShape::Invoke, "invoke"),
+        BedrockShape::Converse => (BedrockApiShape::Converse, "converse"),
+    };
+    let text = format!(
+        "version = {CURRENT_CONFIG_VERSION}\n\n\
+         [providers.{PROVIDER}]\n\
+         kind = \"bedrock\"\n\
+         region = \"{BEDROCK_REGION}\"\n\
+         api_shape = \"{shape_token}\"\n\
+         creds = {{ kind = \"bearer-key\", key_ref = \"{key_ref}\" }}\n\n\
+         [models.{NICKNAME}]\n\
+         provider = \"{PROVIDER}\"\n\
+         upstream = \"{model_id}\"\n\n\
+         [aliases]\n\
+         {ALIAS} = \"{NICKNAME}\"\n\n\
+         [retry]\n\
+         max_attempts = 1\n",
+        key_ref = crate::test_secret::file_ref(&bedrock_key()),
+    );
+    let mut config = parse_config(&text).expect("valid bedrock test config");
+    check_every_request(&mut config);
+    let creds = BedrockCreds::BearerKey { key: bedrock_key() };
+    let cfg = BedrockConfig {
+        id: format!("bedrock:{PROVIDER}"),
+        region: BEDROCK_REGION.into(),
+        model_id: model_id.into(),
+        api_shape,
+        creds: creds.clone(),
+        user_agent: None,
+        header_extras: Vec::new(),
+        anthropic_beta: Vec::new(),
+        additional_model_request_fields: None,
+    };
+    let resolved = auth::resolve(&creds, BEDROCK_REGION)
+        .await
+        .expect("bearer creds resolve");
+    let provider = BedrockProvider::new(cfg, resolved)
+        .expect("canonical region")
+        .with_runtime_origin_for_tests(origin);
+    let mut router = Router::new(Arc::new(config));
+    router.install_resolved_models(BTreeMap::from([(
+        NICKNAME.to_string(),
+        Arc::new(ResolvedModel::new(
+            NICKNAME,
+            PROVIDER,
+            Arc::new(provider),
+            model_id,
+        )),
+    )]));
+    router
+}
+
+fn check_every_request(config: &mut Config) {
+    config.wire_check.first_n = u32::MAX;
+    config.wire_check.sample_one_in = std::num::NonZeroU32::MIN;
 }
 
 /// One finding the walk saw, with the case that produced it.
@@ -1033,6 +1303,10 @@ async fn walk(case: Case) -> (Case, WireCheckSnapshot) {
         .mount(&server)
         .await;
     let router = router_for(&case, &server.uri()).await;
+    let router = match case.tap_drop {
+        Some(pointer) => router.with_wire_tap_drop_for_tests(pointer),
+        None => router,
+    };
     let swap = Arc::new(arc_swap::ArcSwap::from_pointee(router));
     let state = AppState::for_test(Arc::clone(&swap));
     let body = Bytes::from(serde_json::to_vec(&case.body).expect("case body"));
@@ -1056,18 +1330,19 @@ async fn walk(case: Case) -> (Case, WireCheckSnapshot) {
         case.name,
         String::from_utf8_lossy(&bytes)
     );
-    let snapshot = settled_snapshot(&swap).await;
+    let snapshot = settled_snapshot(&swap, case.legs().len()).await;
     (case, snapshot)
 }
 
-/// The wire-check state once both legs have recorded: a stream's response
-/// leg records when its render task finishes, after the client body ends.
-async fn settled_snapshot(swap: &Arc<arc_swap::ArcSwap<Router>>) -> WireCheckSnapshot {
+/// The wire-check state once `legs` checks have recorded: a stream's
+/// response leg records when its render task finishes, after the client
+/// body ends.
+async fn settled_snapshot(swap: &Arc<arc_swap::ArcSwap<Router>>, legs: usize) -> WireCheckSnapshot {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
         let snapshot = swap.load().wire_check_snapshot();
         let checks: u64 = snapshot.checks.iter().map(|c| c.reading.count).sum();
-        if checks >= 2 || std::time::Instant::now() >= deadline {
+        if checks >= legs as u64 || std::time::Instant::now() >= deadline {
             return snapshot;
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -1081,7 +1356,8 @@ fn is_known(seen: &Seen) -> bool {
 }
 
 /// What one walk over `cases` saw: requests compared per (lane, leg), the
-/// requests that did not compare both legs, and every finding.
+/// requests that did not compare every leg their lane compares, and every
+/// finding.
 struct Walked {
     counts: BTreeMap<(&'static str, &'static str), u64>,
     incomplete: Vec<String>,
@@ -1118,9 +1394,9 @@ async fn walk_all(cases: Vec<Case>) -> Walked {
         seen: Vec::new(),
     };
     for case in cases {
-        let lane = case.ingress.lane();
+        let lane = case.lane();
         let (case, snapshot) = walk(case).await;
-        if compared_checks(&snapshot) < 2 {
+        if compared_checks(&snapshot) < case.legs().len() as u64 {
             let checks: Vec<(&str, u64)> = snapshot
                 .checks
                 .iter()
@@ -1128,7 +1404,7 @@ async fn walk_all(cases: Vec<Case>) -> Walked {
                 .collect();
             walked.incomplete.push(format!("{}: {checks:?}", case.name));
         }
-        for leg in [Leg::Request, Leg::Response] {
+        for leg in case.legs() {
             *walked.counts.entry((lane, leg.label())).or_insert(0) += 1;
         }
         walked.seen.extend(findings_of(&case.name, &snapshot));
@@ -1143,6 +1419,8 @@ async fn every_walked_request_is_clean_or_a_listed_known_loss_on_both_legs() {
         .chain(anthropic_cases())
         .chain(chat_cases())
         .chain(responses_cases())
+        .chain(bedrock_invoke_cases())
+        .chain(bedrock_converse_cases())
         .collect();
 
     let walked = Box::pin(walk_all(cases)).await;
@@ -1153,7 +1431,7 @@ async fn every_walked_request_is_clean_or_a_listed_known_loss_on_both_legs() {
     assert!(walked.total() > 0, "the harness walked nothing");
     assert!(
         walked.incomplete.is_empty(),
-        "every walked request must compare both legs: {:#?}",
+        "every walked request must compare each leg its lane compares: {:#?}",
         walked.incomplete
     );
     let unexplained = walked.unexplained();
@@ -1227,5 +1505,52 @@ async fn the_walk_surfaces_an_undeclared_difference() {
         [format!(
             "{CHAT} response /unmodelled_member missing (control/unmodelled-upstream-member)"
         )]
+    );
+}
+
+/// Positive control on each Bedrock lane: a member the deposited egress body
+/// lost, which no declaration explains, comes back as a request-leg finding
+/// on that lane, or a clean Bedrock walk above proves nothing.
+#[tokio::test]
+async fn the_walk_surfaces_an_undeclared_difference_on_each_bedrock_lane() {
+    let hi = json!([{"role": "user", "content": "hi"}]);
+    let probes = vec![
+        Case {
+            tap_drop: Some("/max_tokens"),
+            ..bedrock_case(
+                "control/invoke-lost-member",
+                BedrockShape::Invoke,
+                json!({"model": ALIAS, "max_tokens": 16, "messages": hi}),
+                anthropic_complete(),
+            )
+        },
+        Case {
+            tap_drop: Some("/additionalModelRequestFields/context_management"),
+            ..bedrock_case(
+                "control/converse-lost-extra",
+                BedrockShape::Converse,
+                json!({"model": ALIAS, "max_tokens": 16, "messages": hi,
+                       "context_management": {"edits": []}}),
+                converse_complete(),
+            )
+        },
+    ];
+
+    let walked = Box::pin(walk_all(probes)).await;
+
+    assert_eq!(
+        walked.total(),
+        3,
+        "invoke on both legs, converse on its request leg"
+    );
+    assert_eq!(
+        walked.unexplained(),
+        [
+            format!("{BEDROCK_INVOKE} request /max_tokens missing (control/invoke-lost-member)"),
+            format!(
+                "{BEDROCK_CONVERSE} request /context_management translation_unconsumed \
+                 (control/converse-lost-extra)"
+            ),
+        ]
     );
 }

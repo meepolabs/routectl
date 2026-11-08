@@ -232,10 +232,26 @@ pub(super) fn lend_request_record<R>(
 /// Diff the request leg and record the outcome. A missing or unparseable
 /// body on either side is `incomplete`, never `clean`.
 pub(super) fn compare_request(state: &WireCheckState, lane: Lane, record: &AttemptRecord<'_>) {
-    let Some(sent) = record
+    compare_parsed_request(state, lane, record, parsed_egress(record).as_ref());
+}
+
+/// The body the attempt's egress deposited, parsed; `None` when nothing was
+/// deposited or it is not JSON.
+pub(super) fn parsed_egress(record: &AttemptRecord<'_>) -> Option<Value> {
+    record
         .egress()
         .and_then(|body| serde_json::from_slice::<Value>(body).ok())
-    else {
+}
+
+/// [`compare_request`] over `sent`, the record's egress body already parsed
+/// by [`parsed_egress`].
+pub(super) fn compare_parsed_request(
+    state: &WireCheckState,
+    lane: Lane,
+    record: &AttemptRecord<'_>,
+    sent: Option<&Value>,
+) {
+    let Some(sent) = sent else {
         state.record_incomplete(lane);
         return;
     };
@@ -246,14 +262,14 @@ pub(super) fn compare_request(state: &WireCheckState, lane: Lane, record: &Attem
                 state.record_incomplete(lane);
                 return;
             };
-            diff(&received, &sent, LaneClass::Fidelity, edits)
+            diff(&received, sent, LaneClass::Fidelity, edits)
         }
         LaneClass::Translation => record
             .canonical()
             .provider_extras
             .as_ref()
             .map_or_else(DiffOutcome::default, |extras| {
-                diff(extras, &sent, LaneClass::Translation, edits)
+                diff(extras, sent, LaneClass::Translation, edits)
             }),
     };
     state.record_compared(
