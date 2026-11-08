@@ -1179,3 +1179,66 @@ api_key_ref = "literal:k"
         );
     }
 }
+
+// --- field namespace ---------------------------------------------------
+
+/// A suspected-absence observation keyed in the envelope-field namespace is
+/// refused at admission, however often it is corroborated: no ride-out, no
+/// counter, nothing resident. The paired catalog observation on the same scope
+/// acts once corroborated.
+#[test]
+fn a_field_namespace_suspect_absence_is_refused_and_a_catalog_one_is_admitted() {
+    // The observation carries a `&'static str` key, as detector output does.
+    let field_key: &'static str = String::leak(
+        crate::field_capability::field_capability_key("thinking").expect("a qualified path"),
+    );
+    // (name, capability key, acting events, resident keys)
+    let rows: [(&str, &'static str, usize, &[&str]); 2] = [
+        ("field-namespace key", field_key, 0, &[]),
+        ("catalog key (control)", WEB_SEARCH, 1, &[WEB_SEARCH]),
+    ];
+    for (name, capability_key, want_events, want_resident) in rows {
+        // Arrange
+        let router = router_with(OPENAI_P1, NoopProvider::new());
+        let target = openai_target(&router);
+        let scope = router
+            .evidence_scope(
+                &forced_search_request(),
+                &target,
+                &UntranslatedCapabilities::default(),
+            )
+            .expect("an own-credential lane with the subsystem on yields a scope");
+        let lane = scope
+            .learned_key(WEB_SEARCH)
+            .expect("the served target has a web_search lane")
+            .to_string();
+        let obs = CapabilityObservation {
+            capability_key,
+            evidence_class: SEARCH_ABSENT_FORCED,
+            direction: ObservationDirection::SuspectAbsence,
+            tier: SignalTier::Inferred,
+        };
+        let now = Instant::now();
+        let mut events = Vec::new();
+
+        // Act: two observations, since an inferred suspect acts only once
+        // corroborated.
+        router.admit_observation(&obs, &lane, &scope, &mut events, now);
+        router.admit_observation(&obs, &lane, &scope, &mut events, now);
+
+        // Assert
+        assert_eq!(events.len(), want_events, "{name}: events");
+        assert_eq!(
+            router.metrics.f3_suspect_total(),
+            want_events as u64,
+            "{name}: suspect counter"
+        );
+        let resident: Vec<String> = router
+            .learned_capabilities
+            .snapshot()
+            .into_iter()
+            .map(|e| e.feature_key)
+            .collect();
+        assert_eq!(resident, want_resident, "{name}: resident keys");
+    }
+}

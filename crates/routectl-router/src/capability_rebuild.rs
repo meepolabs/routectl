@@ -35,7 +35,7 @@ use routectl_core::capability::{
 use crate::capability_owner::owner_decision;
 use crate::config::ProviderEntry;
 use crate::field_verdict_value::{ValueSlot, VerdictValue};
-use crate::learned_capability::{LearnedCapabilityRegistry, RecordedLearnedEntry};
+use crate::learned_capability::{LearnedCapabilityRegistry, PositiveOutcome, RecordedLearnedEntry};
 
 /// The replay boundary: the latest tombstone's ledger `rowid` plus the
 /// catalog/overlay revision it was stamped with. Events at or before
@@ -496,14 +496,14 @@ fn replay_row(
             }
             // An accepted beta re-probe superseded the negative it settled; a
             // plain positive would be suppressed by the earlier `broken` row.
-            if row.evidence_class.as_deref() == Some(BETA_ACCEPTED) {
+            let outcome = if row.evidence_class.as_deref() == Some(BETA_ACCEPTED) {
                 registry.replay_accepted_beta(
                     &row.state_key,
                     &row.capability,
                     &row.provider_kind,
                     source,
                     row.observed_at,
-                );
+                )
             } else {
                 registry.observe_positive(
                     &row.state_key,
@@ -512,7 +512,15 @@ fn replay_row(
                     source,
                     row.evidence_class.as_deref(),
                     row.observed_at,
+                )
+            };
+            if outcome == PositiveOutcome::Refused {
+                tracing::debug!(
+                    event = "rebuild_skip",
+                    reason = "positive_refused",
+                    "capability rebuild skipped a positive the registry refused",
                 );
+                return;
             }
             summary.replayed_verified += 1;
             bump_probe(source, summary);

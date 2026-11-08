@@ -1774,11 +1774,9 @@ async fn wait_for_learned_negative(
 ///
 /// After the flip the disabled router is live: A is dialed again (route-away is
 /// off), AND the learned negative is STILL resident on `/status/health` --
-/// `Router::carry_over_learned_from` imported it across the reload. That import
-/// path (`LearnedCapabilityRegistry::import_entries`) resets every carried
-/// entry's `in_flight` slot to false, so a re-probe that was in flight at
-/// reload time can never latch across the swap (the reload cross-check for the
-/// unreached-admission fix).
+/// `Router::carry_over_learned_from` attaches the outgoing registry to the
+/// replacement Router, so the same resident entry spans the reload and nothing
+/// is copied.
 ///
 /// Overlay isolation is load-bearing for the carry-over assertion:
 /// `carry_over_learned_from` CLEARS the learned registry whenever the catalog
@@ -1855,13 +1853,13 @@ async fn capability_kill_switch_flips_off_and_registry_carries_over_reload() {
     );
 
     // Assert reload carry-over: the learned negative is STILL resident after
-    // the reload (imported by carry_over_learned_from, in_flight reset false).
+    // the reload (the registry is attached by carry_over_learned_from).
     assert!(
         learned_negative_keys(&base_url)
             .await
             .iter()
             .any(|k| k == M_A_LANE),
-        "the learned negative must carry over the reload (imported live)",
+        "the learned negative must carry over the reload (registry attached)",
     );
 
     // Behavior flip confirmation: with the kill switch OFF, route-away is gone

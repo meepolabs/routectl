@@ -336,7 +336,9 @@ pub enum PositiveOutcome {
     /// The negative's decay / re-probe lifecycle owns clearing -- a passive
     /// positive never clears a resident negative.
     SuppressedByNegative,
-    /// Nothing was stored, for the reason [`ObserveOutcome::Refused`] gives.
+    /// Nothing was stored: for the reason [`ObserveOutcome::Refused`] gives,
+    /// or, on a door that returns no [`GenerationOutcome`], because the key is
+    /// or normalizes into the envelope-field namespace.
     Refused,
 }
 
@@ -1197,8 +1199,7 @@ enum LearnTarget<'a> {
     /// [`GenerationOutcome::FieldNamespace`] when it is, or normalizes into, a
     /// field-namespace key.
     Screened(LearnKey<'a>),
-    /// Written as given: a minted field identity, a test plant, or a positive
-    /// (the positive doors have never screened).
+    /// Written as given: a minted field identity or a test plant.
     Unscreened(LearnKey<'a>),
 }
 
@@ -1291,6 +1292,20 @@ fn unrefusable<T>(outcome: GenerationOutcome<(T, u32)>) -> T {
         | GenerationOutcome::Exhausted
         | GenerationOutcome::FieldNamespace => {
             unreachable!("an ungated, unscreened learn write has no refusal path")
+        }
+    }
+}
+
+/// The value of an ungated, screened positive write: a field-namespace key is
+/// [`PositiveOutcome::Refused`]; no other refusal is reachable without a gate.
+fn screened_positive(outcome: GenerationOutcome<(PositiveOutcome, u32)>) -> PositiveOutcome {
+    match outcome {
+        GenerationOutcome::Applied {
+            value: (value, _), ..
+        } => value,
+        GenerationOutcome::FieldNamespace => PositiveOutcome::Refused,
+        GenerationOutcome::Stale | GenerationOutcome::Reserved | GenerationOutcome::Exhausted => {
+            unreachable!("an ungated learn write has no generation, lease or sequence refusal")
         }
     }
 }
@@ -1570,6 +1585,9 @@ impl LearnedCapabilityRegistry {
     ///
     /// Stage-two admission: pure over its arguments plus `now`, consulting
     /// only the resident registry state -- no internal clock.
+    ///
+    /// `PositiveOutcome::Refused`, with nothing stored, when the key is or
+    /// normalizes into the envelope-field namespace; see [`Self::observe`].
     pub fn observe_positive(
         &self,
         state_key: &str,
@@ -1579,7 +1597,7 @@ impl LearnedCapabilityRegistry {
         evidence_class: Option<&str>,
         now: Instant,
     ) -> PositiveOutcome {
-        let target = LearnTarget::Unscreened(LearnKey {
+        let target = LearnTarget::Screened(LearnKey {
             state_key,
             feature_key_raw,
             provider_kind,
@@ -1588,7 +1606,7 @@ impl LearnedCapabilityRegistry {
             source,
             evidence_class,
         };
-        unrefusable(self.learn(LearnGate::Ungated, target, evidence, now))
+        screened_positive(self.learn(LearnGate::Ungated, target, evidence, now))
     }
 
     /// [`Self::observe_positive`]'s mutation, operating on already-held
@@ -1986,6 +2004,11 @@ impl LearnedCapabilityRegistry {
 
     /// Bulk-load previously exported entries, honoring the global cap and the
     /// per-lane beta bound; an entry the beta bound refuses is dropped.
+    ///
+    /// Not screened against the envelope-field namespace: every caller is a
+    /// test or test-utils seam planting arbitrary registry state, including
+    /// `field:` negatives the field-verdict writer would have admitted. A
+    /// production caller must screen each entry before importing it.
     pub fn import_entries(&self, entries: Vec<ExportedEntry>) {
         let mut map = self.entries.write();
         let leased = self.purge_leases.read();
@@ -2755,7 +2778,8 @@ impl LearnedCapabilityRegistry {
     }
 
     /// Record a positive observation on behalf of `generation`, with the same
-    /// staleness rule as [`Self::observe_in_generation`].
+    /// staleness rule and the same field-namespace refusal as
+    /// [`Self::observe_in_generation`].
     pub fn observe_positive_in_generation(
         &self,
         generation: u64,
@@ -2764,7 +2788,7 @@ impl LearnedCapabilityRegistry {
         evidence_class: Option<&str>,
         now: Instant,
     ) -> GenerationOutcome<PositiveOutcome> {
-        let target = LearnTarget::Unscreened(key);
+        let target = LearnTarget::Screened(key);
         let evidence = PositiveEvidence {
             source,
             evidence_class,
@@ -2785,7 +2809,8 @@ impl LearnedCapabilityRegistry {
     ///
     /// `Recorded` when the key now holds a positive it did not hold before (a
     /// replaced negative, or no entry); `Refreshed` when a positive already
-    /// resided.
+    /// resided. [`GenerationOutcome::FieldNamespace`] when the key is or
+    /// normalizes into the envelope-field namespace.
     pub fn observe_accepted_beta_in_generation(
         &self,
         generation: u64,
@@ -2794,7 +2819,7 @@ impl LearnedCapabilityRegistry {
         provider_kind: &str,
         now: Instant,
     ) -> GenerationOutcome<PositiveOutcome> {
-        let target = LearnTarget::Unscreened(LearnKey {
+        let target = LearnTarget::Screened(LearnKey {
             state_key,
             feature_key_raw,
             provider_kind,
@@ -2810,6 +2835,9 @@ impl LearnedCapabilityRegistry {
     /// [`Self::observe_accepted_beta_in_generation`], without a generation, so a
     /// rebuilt registry ends where the live one did rather than letting the
     /// earlier negative suppress the later positive.
+    ///
+    /// `PositiveOutcome::Refused`, with nothing stored, for a field-namespace
+    /// key, as [`Self::observe_positive`].
     pub fn replay_accepted_beta(
         &self,
         state_key: &str,
@@ -2818,13 +2846,13 @@ impl LearnedCapabilityRegistry {
         source: EvidenceSource,
         now: Instant,
     ) -> PositiveOutcome {
-        let target = LearnTarget::Unscreened(LearnKey {
+        let target = LearnTarget::Screened(LearnKey {
             state_key,
             feature_key_raw,
             provider_kind,
         });
         let evidence = AcceptedBetaEvidence { source };
-        unrefusable(self.learn(LearnGate::Ungated, target, evidence, now))
+        screened_positive(self.learn(LearnGate::Ungated, target, evidence, now))
     }
 
     /// Replace a resident negative for `key` with a verified accepted-beta

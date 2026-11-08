@@ -229,21 +229,39 @@ fn the_replay_facade_shares_its_in_flight_set_across_a_rebuild() {
 /// A catalog-scoped verified-positive read through a superseded Router does not
 /// answer: it reports no positive rather than asserting catalog truth the reload
 /// replaced. The field read still answers.
+///
+/// The positive doors refuse a field key, so the field positive is planted
+/// through the import seam.
 #[test]
 fn old_router_verified_reads_are_scoped_by_key_class() {
     let (old, live) = superseded_pair();
     let now = Instant::now();
     let key = field_key("thinking.enabled.display");
-    for capability in [key.as_str(), "web_search"] {
-        live.observe_verified_capability(
-            "nick",
-            capability,
-            "anthropic-api",
-            EvidenceSource::Live,
-            Some("search_blocks"),
-            now,
-        );
-    }
+    live.observe_verified_capability(
+        "nick",
+        "web_search",
+        "anthropic-api",
+        EvidenceSource::Live,
+        Some("search_blocks"),
+        now,
+    );
+    live.learned_capabilities
+        .import_entries(vec![crate::learned_capability::ExportedEntry {
+            state_key: "nick".to_string(),
+            feature_key: key.clone(),
+            verdict: crate::learned_capability::EntryVerdict::Verified,
+            signal: SignalTier::SelfIdentifying,
+            observations: 1,
+            first_seen: now,
+            last_seen: now,
+            expires_at: now,
+            phase: FailurePhase::F3,
+            source: EvidenceSource::Live,
+            in_flight: false,
+            consecutive_failed_probes: 0,
+            evidence_class: Some("search_blocks".to_string()),
+            provider_kind: "anthropic-api".to_string(),
+        }]);
 
     assert!(
         !old.is_verified_working_or_false("nick", "web_search", "anthropic-api", now),

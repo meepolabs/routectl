@@ -94,6 +94,8 @@ impl Router {
         req: &ChatRequest,
         meta: &mut DispatchMeta,
     ) {
+        // A beta key never enters the field namespace (a flag holds neither
+        // `.` nor `:`), so the namespace refusal does not reach this call.
         let outcome = self
             .learned_capabilities
             .observe_accepted_beta_in_generation(

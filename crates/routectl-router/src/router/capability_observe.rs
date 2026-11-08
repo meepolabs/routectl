@@ -368,8 +368,9 @@ impl Router {
                         // out the negatives a rebuild must restate.
                         (value == PositiveOutcome::Recorded).then_some((generation, incarnation))
                     }
-                    // Suppressed by a negative, refused as stale, or refused
-                    // by a purge lease: no metric, no event.
+                    // Suppressed by a negative, refused as stale, refused by
+                    // a purge lease, or refused for the field namespace: no
+                    // metric, no event.
                     _ => None,
                 }
             }

@@ -1359,3 +1359,83 @@ fn a_probe_cleared_field_row_replays_while_a_probe_field_negative_is_skipped() {
         "neither the retracted negative nor the probe negative is resident: {resident:?}",
     );
 }
+
+/// A live `verified` row whose key is a field key is refused by the registry's
+/// namespace screen on both positive arms: it is not resident and does not
+/// count as replayed. The paired catalog row on the same arm replays.
+///
+/// Mutation checks: count `replayed_verified` regardless of the outcome -> red
+/// on the field rows' tally; switch either positive door back to an unscreened
+/// target -> red on that arm's field row (resident and counted).
+#[test]
+fn a_verified_field_row_is_refused_and_not_counted() {
+    let field_key =
+        crate::field_capability::field_capability_key("thinking.enabled.display").expect("path");
+    let beta_accepted = routectl_core::capability::BETA_ACCEPTED;
+    // (name, evidence class, capability, replayed_verified, resident)
+    let rows = [
+        (
+            "plain positive, field key",
+            "search_blocks",
+            field_key.as_str(),
+            0,
+            false,
+        ),
+        (
+            "plain positive, catalog key",
+            "search_blocks",
+            "web_search",
+            1,
+            true,
+        ),
+        (
+            "accepted beta, field key",
+            beta_accepted,
+            field_key.as_str(),
+            0,
+            false,
+        ),
+        (
+            "accepted beta, catalog key",
+            beta_accepted,
+            "web_search",
+            1,
+            true,
+        ),
+    ];
+    for (name, class, capability, want_verified, want_resident) in rows {
+        let base = Instant::now();
+        let reader = FakeReader {
+            tombstone: Some(ReplayTombstone::new(0, CV, OV)),
+            rows: vec![row(
+                1,
+                base,
+                "verified",
+                None,
+                "live",
+                None,
+                Some(class),
+                capability,
+            )],
+        };
+        let reg = registry();
+
+        let summary = rebuild_capabilities_into(&reader, &reg, &providers());
+
+        assert_eq!(summary.replayed_verified, want_verified, "{name}: tally");
+        assert_eq!(
+            summary.skipped_unknown, 0,
+            "{name}: the row reached the door"
+        );
+        assert_eq!(
+            summary.skipped_namespace, 0,
+            "{name}: not a pre-replay skip"
+        );
+        let resident: Vec<String> = reg.snapshot().into_iter().map(|e| e.feature_key).collect();
+        assert_eq!(
+            resident == vec![capability.to_string()],
+            want_resident,
+            "{name}: resident {resident:?}",
+        );
+    }
+}
