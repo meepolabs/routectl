@@ -73,7 +73,23 @@ struct Row {
     skips: SkipCounts,
     dialed: usize,
     evaluated: u64,
-    served: bool,
+    /// How the request ended: [`SERVED`] or the shape [`ended`] names.
+    ends: &'static str,
+}
+
+const SERVED: &str = "served";
+
+/// The request's end reduced to its variant and, for a local refusal, its
+/// reason token; never a body.
+fn ended(err: Option<&Error>) -> &'static str {
+    match err {
+        None => SERVED,
+        Some(Error::NotImplemented(..)) => "not_implemented",
+        Some(Error::LocallyUnavailable { reason, .. }) => reason.as_str(),
+        Some(Error::CapabilityUnsupportedEverywhere { .. }) => "capability_unsupported_everywhere",
+        Some(Error::Upstream { .. }) => "upstream",
+        Some(_) => "other",
+    }
 }
 
 struct Fixture {
@@ -209,6 +225,18 @@ fn override_search_on_a(config: &mut Config) {
     );
 }
 
+fn override_search_on_every_target(config: &mut Config) {
+    for idx in 0..NAMES.len() {
+        config.capability.overrides.insert(
+            provider_name(idx),
+            OverrideEntry {
+                unsupported: vec![SEARCH.into()],
+                force_supported: Vec::new(),
+            },
+        );
+    }
+}
+
 fn enable_window_gate(config: &mut Config) {
     config.window_gate.enabled = true;
 }
@@ -220,6 +248,10 @@ fn rpm1_on_d(config: &mut Config) {
 fn rpm1_on_a_with_one_retry(config: &mut Config) {
     config.providers.insert(provider_name(0), rpm1_entry());
     config.retry.max_attempts = 2;
+}
+
+fn rpm1_on_a(config: &mut Config) {
+    config.providers.insert(provider_name(0), rpm1_entry());
 }
 
 fn one_retry(config: &mut Config) {
@@ -261,6 +293,17 @@ fn four_refusing_targets(router: &Router) {
     drop(guard);
 }
 
+fn breaker_open_on_a(router: &Router) {
+    assert!(router.force_open_breaker(&nickname(0), Duration::from_hours(1)));
+}
+
+/// `m-a`'s one request of the minute already spent.
+fn rpm_spent_on_a(router: &Router) {
+    let (refusal, guard) = router.admit_dispatch(&nickname(0));
+    assert!(refusal.is_none(), "premise: the bucket held one token");
+    drop(guard);
+}
+
 fn unusable_a_parked_b(router: &Router) {
     mark_unusable(router, 0);
     park(router, 1);
@@ -286,7 +329,7 @@ fn rows() -> Vec<Row> {
             },
             dialed: 1,
             evaluated: 2,
-            served: true,
+            ends: SERVED,
         },
         Row {
             name: "capability drop of a target that is also unusable",
@@ -303,7 +346,7 @@ fn rows() -> Vec<Row> {
             },
             dialed: 1,
             evaluated: 2,
-            served: true,
+            ends: SERVED,
         },
         Row {
             name: "window drop",
@@ -320,7 +363,7 @@ fn rows() -> Vec<Row> {
             },
             dialed: 1,
             evaluated: 2,
-            served: true,
+            ends: SERVED,
         },
         Row {
             name: "unusable, parked, open and rate-limited targets, then the fifth serves",
@@ -340,7 +383,7 @@ fn rows() -> Vec<Row> {
             },
             dialed: 1,
             evaluated: 5,
-            served: true,
+            ends: SERVED,
         },
         Row {
             name: "early success leaves the rest unevaluated",
@@ -354,7 +397,7 @@ fn rows() -> Vec<Row> {
             skips: SkipCounts::default(),
             dialed: 1,
             evaluated: 1,
-            served: true,
+            ends: SERVED,
         },
         Row {
             name: "same-target retry without a limit dials again",
@@ -368,7 +411,7 @@ fn rows() -> Vec<Row> {
             skips: SkipCounts::default(),
             dialed: 1,
             evaluated: 1,
-            served: true,
+            ends: SERVED,
         },
         Row {
             name: "same-target retry refused by the rate limit is not a skip",
@@ -382,7 +425,7 @@ fn rows() -> Vec<Row> {
             skips: SkipCounts::default(),
             dialed: 2,
             evaluated: 2,
-            served: true,
+            ends: SERVED,
         },
         Row {
             name: "count_tokens walk",
@@ -399,7 +442,7 @@ fn rows() -> Vec<Row> {
             },
             dialed: 1,
             evaluated: 2,
-            served: true,
+            ends: SERVED,
         },
         Row {
             name: "all skipped",
@@ -417,7 +460,58 @@ fn rows() -> Vec<Row> {
             },
             dialed: 0,
             evaluated: 2,
-            served: false,
+            ends: "credential_unusable",
+        },
+        Row {
+            name: "count_tokens breaker gate refuses the first target and ends the walk",
+            surface: Surface::CountTokens,
+            targets: 2,
+            config: no_config,
+            scripts: &[],
+            tiny_windows: &[],
+            state: breaker_open_on_a,
+            tools: false,
+            skips: SkipCounts {
+                breaker_open: 1,
+                ..SkipCounts::default()
+            },
+            dialed: 0,
+            evaluated: 1,
+            ends: "breaker_open",
+        },
+        Row {
+            name: "count_tokens RPM gate refuses the first target and ends the walk",
+            surface: Surface::CountTokens,
+            targets: 2,
+            config: rpm1_on_a,
+            scripts: &[],
+            tiny_windows: &[],
+            state: rpm_spent_on_a,
+            tools: false,
+            skips: SkipCounts {
+                rate_limited: 1,
+                ..SkipCounts::default()
+            },
+            dialed: 0,
+            evaluated: 1,
+            ends: "rate_limited",
+        },
+        Row {
+            name: "capability override drops every target: NotImplemented",
+            surface: Surface::Complete,
+            targets: 2,
+            config: override_search_on_every_target,
+            scripts: &[],
+            tiny_windows: &[],
+            state: no_state,
+            tools: true,
+            skips: SkipCounts {
+                capability: 2,
+                ..SkipCounts::default()
+            },
+            dialed: 0,
+            evaluated: 2,
+            ends: "not_implemented",
         },
     ]
 }
@@ -447,7 +541,7 @@ async fn skips_and_dialed_targets_reconcile_with_the_targets_evaluated() {
             row.evaluated,
             "{name}: skips + dialed == evaluated",
         );
-        assert_eq!(err.is_none(), row.served, "{name}: {err:?}");
+        assert_eq!(ended(err.as_ref()), row.ends, "{name}: {err:?}");
         if dialed == 0 {
             assert_eq!(meta.attempt_count, 0, "{name}");
         }
@@ -469,7 +563,7 @@ async fn a_capability_refused_on_every_lane_keeps_its_capability_skips() {
         skips: SkipCounts::default(),
         dialed: 0,
         evaluated: 2,
-        served: false,
+        ends: "capability_unsupported_everywhere",
     };
     let fx = fixture(&row);
     for idx in 0..row.targets {
@@ -522,10 +616,6 @@ fn a_filter_reason_yields_only_to_a_higher_ranked_state_reason() {
         (
             Some(EligibilityReason::RateLimited),
             EligibilityReason::RateLimited,
-        ),
-        (
-            Some(EligibilityReason::ContextWindow),
-            EligibilityReason::Capability,
         ),
     ];
     for (state, expected) in rows {

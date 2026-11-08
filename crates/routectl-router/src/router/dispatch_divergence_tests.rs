@@ -193,15 +193,6 @@ fn phase(router: &Router, nickname: &str) -> CircuitPhase {
         .circuit
 }
 
-fn probe_slot_held(router: &Router, nickname: &str) -> bool {
-    router
-        .state
-        .get(nickname)
-        .expect("the seat has a state slot")
-        .lock()
-        .half_open_probe_in_flight()
-}
-
 fn advisor_request() -> ChatRequest {
     ChatRequest {
         tools: Some(vec![ToolDef::Other(
@@ -528,10 +519,20 @@ impl Provider for PendingProvider {
 
 const CLIENT_GIVES_UP: Duration = Duration::from_millis(50);
 
+/// `(surface, first dropped, calls after it, breaker after it, second
+/// dropped, calls after it)`.
+type DroppedProbeRow = (&'static str, bool, usize, CircuitPhase, bool, usize);
+
+/// Dispatch on `surface` until the client gives up; true when it did.
+async fn dispatch_until_dropped(router: &Router, surface: Surface) -> bool {
+    tokio::time::timeout(CLIENT_GIVES_UP, dispatch(router, surface, request()))
+        .await
+        .is_err()
+}
+
 #[tokio::test]
 async fn a_dispatch_dropped_before_content_frees_the_probe_slot_without_a_debit() {
-    // `(surface, dropped while pending, upstream calls, slot held, breaker)`.
-    let mut observed: Vec<(&'static str, bool, usize, bool, CircuitPhase)> = Vec::new();
+    let mut observed: Vec<DroppedProbeRow> = Vec::new();
     for surface in SURFACES {
         let upstream = Arc::new(PendingProvider::default());
         let router = router_over(
@@ -540,22 +541,26 @@ async fn a_dispatch_dropped_before_content_frees_the_probe_slot_without_a_debit(
         );
         assert!(router.force_open_breaker(FIRST, Duration::ZERO));
 
-        let dropped = tokio::time::timeout(CLIENT_GIVES_UP, dispatch(&router, surface, request()))
-            .await
-            .is_err();
+        let first_dropped = dispatch_until_dropped(&router, surface).await;
+        let calls_after_first = upstream.calls.load(Ordering::SeqCst);
+        let breaker_after_first = phase(&router, FIRST);
+        // Only a freed slot admits this one to the upstream; a held slot
+        // refuses it at the gate before any call.
+        let second_dropped = dispatch_until_dropped(&router, surface).await;
 
         observed.push((
             surface.label(),
-            dropped,
+            first_dropped,
+            calls_after_first,
+            breaker_after_first,
+            second_dropped,
             upstream.calls.load(Ordering::SeqCst),
-            probe_slot_held(&router, FIRST),
-            phase(&router, FIRST),
         ));
     }
 
-    let expected: Vec<_> = SURFACES
+    let expected: Vec<DroppedProbeRow> = SURFACES
         .iter()
-        .map(|s| (s.label(), true, 1, false, CircuitPhase::HalfOpenReady))
+        .map(|s| (s.label(), true, 1, CircuitPhase::HalfOpenReady, true, 2))
         .collect();
     assert_eq!(observed, expected);
 }
