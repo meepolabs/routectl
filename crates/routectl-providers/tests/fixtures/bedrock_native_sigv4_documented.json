@@ -1,0 +1,14 @@
+{
+  "note": "Documented, not recorded: the AWS common error ExpiredTokenException (HTTP 403) a Bedrock runtime request signed with expired temporary credentials answers, per https://docs.aws.amazon.com/bedrock/latest/APIReference/CommonErrors.html. The message is the documented wording; the x-amzn-errortype suffix and the __type namespace are synthetic.",
+  "responses": {
+    "expired-token-header-type": {
+      "status": 403,
+      "x-amzn-errortype": "ExpiredTokenException:urn:example:ignored-suffix",
+      "body": "{\"message\":\"The security token included in the request has expired\"}"
+    },
+    "expired-token-body-type": {
+      "status": 403,
+      "body": "{\"__type\":\"com.example.synthetic#ExpiredTokenException\",\"message\":\"The security token included in the request has expired\"}"
+    }
+  }
+}

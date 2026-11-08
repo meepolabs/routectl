@@ -5,7 +5,8 @@
 
 use super::*;
 use crate::upstream_error::reason_tests::{
-    CAPTURE_ROWS, IAM_DENY_403, NATIVE_CAPTURE, captured, headers_with_type,
+    CAPTURE_ROWS, IAM_DENY_403, NATIVE_CAPTURE, NATIVE_SIGV4_DOCUMENTED, captured,
+    headers_with_type,
 };
 use reqwest::header::HeaderMap;
 use routectl_core::ParsedErrorBody;
@@ -68,6 +69,22 @@ fn a_recorded_credential_rejection_carries_its_reason_and_detail() {
             want.as_str()
         );
         assert_eq!(err.upstream_reason(), Some(*want), "{key}");
+        assert_eq!(carried_message(&err), rendered, "{key}");
+        assert_eq!(debug_body_line(&events), rendered, "{key}");
+    }
+}
+
+#[test]
+fn a_documented_expired_token_carries_its_reason_and_detail() {
+    for key in ["expired-token-header-type", "expired-token-body-type"] {
+        let (err, events) = map(captured(NATIVE_SIGV4_DOCUMENTED, key).read());
+
+        let rendered = "bedrock access denied (ExpiredTokenException): credential-expired";
+        assert_eq!(
+            err.upstream_reason(),
+            Some(routectl_core::UpstreamReason::CredentialExpired),
+            "{key}"
+        );
         assert_eq!(carried_message(&err), rendered, "{key}");
         assert_eq!(debug_body_line(&events), rendered, "{key}");
     }

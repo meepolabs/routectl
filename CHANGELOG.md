@@ -446,6 +446,8 @@ list with more narrative.
 
 ### Changed
 
+- **A Bedrock 403 `ExpiredTokenException` is read as an expired credential.** On a Bedrock seat, a 403 whose AWS error type is `ExpiredTokenException` (from the `x-amzn-errortype` header or the body `__type`, with no error code) now carries the `credential-expired` reason, whatever its message says: the account is parked like any other expired credential, the client message ends in `credential-expired`, and the usage row records it as `extra.upstream_reason`. Any other status, a conflicting or repeated type header, a truncated body, or a non-AWS seat carries no reason. A 403 `UnrecognizedClientException` still carries no reason, since Bedrock also answers it for a region the account has not enabled.
+
 - **A learned output ceiling applies only at 4096 or above.** Pre-flight and reactive repair share one clamp gate, which lowers `max_tokens` to a learned ceiling only when that ceiling is at least 4096; a stored ceiling below 4096 is inert, the request keeps its own limit and pre-flight reports `within_ceiling`. A rejection naming a limit below 4096 reaches the client unchanged. A ceiling still only ever lowers a limit.
 
 - **A request rejected for a field another request is already learning is repaired too.** While one request holds the learning claim for a field, another request rejected for the same field repairs its own retry from the same deterministic row and is served; it holds no claim and commits no verdict, so only the claim holder learns. An acting negative still drops the row.

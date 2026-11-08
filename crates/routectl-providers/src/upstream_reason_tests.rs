@@ -11,6 +11,8 @@ pub const NATIVE_CAPTURE: &str =
     include_str!("../tests/fixtures/bedrock_native_credential_capture.json");
 pub const MANTLE_CAPTURE: &str =
     include_str!("../tests/fixtures/bedrock_mantle_credential_capture.json");
+pub const NATIVE_SIGV4_DOCUMENTED: &str =
+    include_str!("../tests/fixtures/bedrock_native_sigv4_documented.json");
 pub const IAM_DENY_403: &str =
     include_str!("../tests/fixtures/bedrock/error_403_access_denied.json");
 
@@ -277,12 +279,163 @@ fn every_table_row_cites_a_capture_that_recognizes_its_reason() {
         let fixture = match file {
             "bedrock_native_credential_capture.json" => NATIVE_CAPTURE,
             "bedrock_mantle_credential_capture.json" => MANTLE_CAPTURE,
+            "bedrock_native_sigv4_documented.json" => NATIVE_SIGV4_DOCUMENTED,
             other => panic!("row cites an uncommitted fixture {other}"),
         };
 
         let got = reason_of(captured(fixture, key).read());
 
         assert_eq!(got, Some(row.reason), "{file}#{key}");
+    }
+}
+
+/// Every documented SigV4 row: the key, where it carries the AWS type
+/// (`true` for the `x-amzn-errortype` header, `false` for the body
+/// `__type`), and the reason it is evidence of.
+const DOCUMENTED_SIGV4_ROWS: [(&str, bool, UpstreamReason); 2] = [
+    ("expired-token-header-type", true, CredentialExpired),
+    ("expired-token-body-type", false, CredentialExpired),
+];
+
+#[test]
+fn an_expired_token_typed_in_the_header_or_the_body_is_credential_expired() {
+    for (key, typed_by_header, want) in DOCUMENTED_SIGV4_ROWS {
+        let row = captured(NATIVE_SIGV4_DOCUMENTED, key);
+        assert_eq!(
+            row.headers.contains_key("x-amzn-errortype"),
+            typed_by_header,
+            "{key}: the type comes from one source only"
+        );
+        assert_eq!(row.body.contains("__type"), !typed_by_header, "{key}");
+
+        let got = reason_of(row.read());
+
+        assert_eq!(got, Some(want), "{key}");
+    }
+}
+
+#[test]
+fn the_documented_rows_cover_every_documented_response() {
+    let mut documented: Vec<String> = responses(NATIVE_SIGV4_DOCUMENTED)
+        .into_iter()
+        .map(|(key, _)| key)
+        .collect();
+    let mut rows: Vec<String> = DOCUMENTED_SIGV4_ROWS
+        .iter()
+        .map(|(key, ..)| (*key).to_string())
+        .collect();
+    documented.sort();
+    rows.sort();
+
+    assert_eq!(rows, documented);
+}
+
+#[test]
+fn an_expired_token_short_of_the_documented_row_yields_no_reason() {
+    const EXPIRED: &str = "ExpiredTokenException:urn:example:ignored-suffix";
+    const EXPIRED_MESSAGE: &str =
+        r#"{"message":"The security token included in the request has expired"}"#;
+    let mut conflicting = headers_with_type(EXPIRED);
+    conflicting.append(
+        "x-amzn-errortype",
+        "AccessDeniedException:urn:example:ignored-suffix"
+            .parse()
+            .expect("header value"),
+    );
+    let mut repeated = headers_with_type(EXPIRED);
+    repeated.append("x-amzn-errortype", EXPIRED.parse().expect("header value"));
+    let none = HeaderMap::new();
+    let cases: [(&str, u16, HeaderMap, &str); 10] = [
+        (
+            "UnrecognizedClientException with the invalid token message (also an opt-in-region answer)",
+            403,
+            headers_with_type("UnrecognizedClientException:urn:example:ignored-suffix"),
+            r#"{"message":"The security token included in the request is invalid"}"#,
+        ),
+        (
+            "UnrecognizedClientException typed in the body",
+            403,
+            none.clone(),
+            r#"{"__type":"com.example.synthetic#UnrecognizedClientException","message":"The security token included in the request is invalid"}"#,
+        ),
+        (
+            "ExpiredTokenException on a 400",
+            400,
+            headers_with_type(EXPIRED),
+            EXPIRED_MESSAGE,
+        ),
+        (
+            "ExpiredTokenException on a 401",
+            401,
+            headers_with_type(EXPIRED),
+            EXPIRED_MESSAGE,
+        ),
+        (
+            "ExpiredTokenException with a code",
+            403,
+            headers_with_type(EXPIRED),
+            r#"{"code":"ExpiredToken","message":"The security token included in the request has expired"}"#,
+        ),
+        (
+            "conflicting duplicate type header",
+            403,
+            conflicting,
+            EXPIRED_MESSAGE,
+        ),
+        (
+            "repeated identical type header",
+            403,
+            repeated,
+            EXPIRED_MESSAGE,
+        ),
+        (
+            "the expired message with no type",
+            403,
+            none.clone(),
+            EXPIRED_MESSAGE,
+        ),
+        (
+            "ExpiredTokenException in a nested error envelope",
+            403,
+            headers_with_type(EXPIRED),
+            r#"{"error":{"message":"The security token included in the request has expired"}}"#,
+        ),
+        (
+            "ExpiredTokenException as a nested error type",
+            403,
+            none,
+            r#"{"error":{"type":"ExpiredTokenException","message":"The security token included in the request has expired"}}"#,
+        ),
+    ];
+    for (name, status, headers, body) in cases {
+        let got = reason_of(
+            UpstreamErrorRead::from_parts(status, &headers, body, false).aws_backed(true),
+        );
+
+        assert_eq!(got, None, "{name}");
+    }
+}
+
+#[test]
+fn a_documented_expired_token_on_a_seat_that_is_not_aws_backed_yields_no_reason() {
+    for (key, ..) in DOCUMENTED_SIGV4_ROWS {
+        let got = reason_of(captured(NATIVE_SIGV4_DOCUMENTED, key).read_on_seat(false));
+
+        assert_eq!(got, None, "{key}");
+    }
+}
+
+#[test]
+fn a_documented_expired_token_truncated_at_the_cap_is_not_evidence() {
+    for (key, ..) in DOCUMENTED_SIGV4_ROWS {
+        let row = captured(NATIVE_SIGV4_DOCUMENTED, key);
+
+        let got = reason_of(
+            UpstreamErrorRead::from_parts(row.status, &row.headers, row.body, true)
+                .aws_backed(true),
+        );
+
+        assert_eq!(got, None, "{key}");
     }
 }
 

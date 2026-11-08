@@ -110,6 +110,11 @@ enum CredentialVocabulary {
     /// `__type` or the `x-amzn-errortype` header), no code, the message at
     /// the flat body's top-level `Message` / `message`.
     BedrockNative,
+    /// Bedrock runtime under the AWS common error `ExpiredTokenException`:
+    /// 403, that type (body `__type` or the `x-amzn-errortype` header), no
+    /// code, the message read from the flat body as [`Self::BedrockNative`]
+    /// reads it.
+    BedrockExpiredToken,
     /// Mantle OpenAI Chat Completions and Responses: 401, code
     /// `invalid_api_key`, type `permission_denied_error` or absent, the
     /// message at `error.message`.
@@ -125,10 +130,13 @@ enum Phrase {
     Exact(&'static str),
     /// The fixed head of a message whose tail varies per response.
     Prefix(&'static str),
+    /// Any message: the vocabulary's status and type are the evidence.
+    Any,
 }
 
-/// One recognized credential rejection and the committed capture that
-/// records it: a fixture under `tests/fixtures/` and its response key.
+/// One recognized credential rejection and the committed fixture that
+/// records it (a capture, or the vendor's documented shape): a fixture
+/// under `tests/fixtures/` and its response key.
 struct ReasonRow {
     vocabulary: CredentialVocabulary,
     phrase: Phrase,
@@ -150,13 +158,15 @@ struct ReasonRow {
 
 const NATIVE_CAPTURE: &str = "bedrock_native_credential_capture.json";
 const MANTLE_CAPTURE: &str = "bedrock_mantle_credential_capture.json";
+const NATIVE_SIGV4_DOCUMENTED: &str = "bedrock_native_sigv4_documented.json";
 
 /// The closed table. A row is exact evidence: its vocabulary's status and
 /// tokens AND its phrase. "The security token included in the request is
-/// invalid" is deliberately absent: Bedrock also answers it for a region
+/// invalid" is deliberately absent, and so is its type
+/// `UnrecognizedClientException`: Bedrock also answers both for a region
 /// the account has not opted into.
-const REASON_TABLE: [ReasonRow; 8] = {
-    use CredentialVocabulary::{BedrockNative, MantleAnthropic, MantleOpenAi};
+const REASON_TABLE: [ReasonRow; 9] = {
+    use CredentialVocabulary::{BedrockExpiredToken, BedrockNative, MantleAnthropic, MantleOpenAi};
     use UpstreamReason::{CredentialExpired, CredentialInvalid};
     const SECURITY_TOKEN_EXPIRED: Phrase =
         Phrase::Exact("The security token included in the request is expired");
@@ -175,6 +185,14 @@ const REASON_TABLE: [ReasonRow; 8] = {
             phrase: Phrase::Exact("Authentication failed: Please make sure your API Key is valid."),
             reason: CredentialInvalid,
             evidence: (NATIVE_CAPTURE, "invalid-invoke"),
+        },
+        // The type alone: the expired-token wording differs between AWS
+        // endpoints ("is expired", "has expired").
+        ReasonRow {
+            vocabulary: BedrockExpiredToken,
+            phrase: Phrase::Any,
+            reason: CredentialExpired,
+            evidence: (NATIVE_SIGV4_DOCUMENTED, "expired-token-header-type"),
         },
         ReasonRow {
             vocabulary: MantleOpenAi,
@@ -247,6 +265,11 @@ fn vocabulary_matches(
                 && upstream_type == Some("AccessDeniedException")
                 && upstream_code.is_none()
         }
+        CredentialVocabulary::BedrockExpiredToken => {
+            status == 403
+                && upstream_type == Some("ExpiredTokenException")
+                && upstream_code.is_none()
+        }
         CredentialVocabulary::MantleOpenAi => {
             status == 401
                 && upstream_code == Some("invalid_api_key")
@@ -265,7 +288,7 @@ fn vocabulary_matches(
 /// ambiguous.
 fn vocabulary_message(vocabulary: CredentialVocabulary, parsed: &ParsedErrorBody) -> Option<&str> {
     match vocabulary {
-        CredentialVocabulary::BedrockNative => {
+        CredentialVocabulary::BedrockNative | CredentialVocabulary::BedrockExpiredToken => {
             if parsed.is_error_envelope() {
                 return None;
             }
@@ -287,6 +310,7 @@ fn phrase_matches(phrase: Phrase, message: &str) -> bool {
     match phrase {
         Phrase::Exact(text) => message == text,
         Phrase::Prefix(head) => message.starts_with(head) && message.len() > head.len(),
+        Phrase::Any => true,
     }
 }
 
