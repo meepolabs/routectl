@@ -875,25 +875,29 @@ mod converse_ceiling {
             let seat = ConverseSeat::naming(Seat::CapsThenServes, FLOOR - 1);
             let router = converse_router(&[&seat]);
 
-            let (meta, served, status) = if stream {
-                let (meta, served) = dispatch(&router, true, client_req(CLIENT_MAX_TOKENS)).await;
-                (meta, served, None)
+            let (meta, refusal) = if stream {
+                let opened = router
+                    .stream_with_options(client_req(CLIENT_MAX_TOKENS), RouterOptions::new())
+                    .await;
+                (opened.meta, opened.result.err())
             } else {
                 let done = router
                     .complete_with_options(client_req(CLIENT_MAX_TOKENS), RouterOptions::new())
                     .await;
-                let status = done
-                    .result
-                    .as_ref()
-                    .err()
-                    .and_then(|err| crate::router::class_observe::upstream_facts(err).status);
-                (done.meta, done.result.is_ok(), status)
+                (done.meta, done.result.err())
             };
 
-            assert!(!served, "stream={stream}: the refusal reaches the client");
-            if !stream {
-                assert_eq!(status, Some(400), "the client gets the upstream's 400");
-            }
+            let refusal = refusal.expect("the refusal reaches the client");
+            assert_eq!(
+                upstream_status_and_body(&refusal),
+                upstream_status_and_body(&seat.rejection()),
+                "stream={stream}: the client gets the seat's 400 and its body unchanged",
+            );
+            assert_eq!(
+                upstream_status_and_body(&refusal).map(|(status, _)| status),
+                Some(400),
+                "stream={stream}",
+            );
             assert_eq!(
                 seat.sent_limits(),
                 vec![json!(CLIENT_MAX_TOKENS)],
@@ -909,6 +913,14 @@ mod converse_ceiling {
             assert_eq!(router.field_repair_counters().verdicts_learned, 0);
             assert_eq!(router.field_verdicts().snapshot_len(), 0, "stream={stream}");
             assert!(router.learned_capability_snapshot().is_empty());
+        }
+    }
+
+    /// The status and body of an upstream error, `None` for any other error.
+    fn upstream_status_and_body(err: &Error) -> Option<(u16, String)> {
+        match err {
+            Error::Upstream { status, body, .. } => Some((*status, body.clone())),
+            _ => None,
         }
     }
 

@@ -471,16 +471,13 @@ fn ledger_capability_rows(path: &std::path::Path) -> Vec<(i64, String, String)> 
 }
 
 /// A catalog-independent survivor that CARRIES an evidence class must keep it
-/// through the restatement, or the next boot drops the verdict entirely.
+/// through the restatement, byte for byte.
 ///
-/// The cold rebuild requires a recognized evidence class for `verified` and
-/// `suspect` rows and skips any row missing one (fail-closed: it will not mint
-/// a positive on unattributable evidence). So a restatement that omits the
-/// class does not merely lose forensic detail -- the row is skipped on the
-/// next boot and the verdict is gone, which is the exact eviction this whole
-/// change exists to prevent. Only the `broken` shape carries no class, so
-/// handling only that shape would leave the two evidence-bearing verdicts
-/// silently lossy.
+/// Only field-namespace keys are catalog-independent, and a field-namespace key
+/// is only ever stored as a negative, so the survivor here is a `broken` row
+/// that carries a class. The restated row is the one every later boot reads
+/// past the new boundary, so it must carry the class verbatim; the row
+/// assertion below pins that.
 #[tokio::test]
 async fn an_evidence_bearing_survivor_keeps_its_class_through_reload_and_restart() {
     let mut config = owning_config();
@@ -493,21 +490,15 @@ async fn an_evidence_bearing_survivor_keeps_its_class_through_reload_and_restart
         config.usage.enabled,
     );
 
-    // Arrange: a pre-reload session whose wire-shape verdict is a VERIFIED
-    // positive -- the shape that requires an evidence class on replay.
+    // Arrange: a pre-reload session whose wire-shape verdict carries an
+    // evidence class.
     let now = ledger_reader::epoch_ms_now();
     let catalog = i64::from(Router::new(config.clone()).catalog_version());
-    let mut verified = broken(now - 4_000, &field_key(), 1, catalog);
-    verified.verdict = "verified".to_string();
-    verified.phase = "f3".to_string();
-    verified.tier = String::new();
-    verified.evidence_class = Some("thinking_blocks".to_string());
+    let mut classed = broken(now - 4_000, &field_key(), 1, catalog);
+    classed.evidence_class = Some(SURVIVOR_CLASS.to_string());
     let committed = commit_off_runtime(
         &usage,
-        vec![
-            CapabilityEvent::tombstone(now - 5_000, catalog, 1),
-            verified,
-        ],
+        vec![CapabilityEvent::tombstone(now - 5_000, catalog, 1), classed],
         1,
     );
     assert_eq!(
@@ -521,7 +512,7 @@ async fn an_evidence_bearing_survivor_keeps_its_class_through_reload_and_restart
     assert_eq!(
         resident_keys(&before),
         vec![field_key()],
-        "the verified wire-shape entry must be resident before the reload",
+        "the classed wire-shape entry must be resident before the reload",
     );
 
     // Act: revision-changing reload, then a restart.
@@ -540,13 +531,21 @@ async fn an_evidence_bearing_survivor_keeps_its_class_through_reload_and_restart
     );
     let restarted = restart_from_ledger(&config, 2, &usage);
 
-    // Assert: still resident. A restatement that dropped the class would be
-    // skipped by the rebuild's fail-closed evidence check and this would be
-    // empty.
+    // Assert: the survivor is still resident after the restart, with its class.
     assert_eq!(
         resident_keys(&restarted),
         vec![field_key()],
         "an evidence-bearing survivor must replay after the restart",
+    );
+    let resident_class = restarted
+        .learned_capability_snapshot()
+        .into_iter()
+        .find(|entry| entry.feature_key == field_key())
+        .and_then(|entry| entry.evidence_class);
+    assert_eq!(
+        resident_class.as_deref(),
+        Some(SURVIVOR_CLASS),
+        "the restarted entry must carry the survivor's class",
     );
 
     // And the persisted restatement carries the class verbatim.
@@ -559,11 +558,70 @@ async fn an_evidence_bearing_survivor_keeps_its_class_through_reload_and_restart
         .iter()
         .find(|row| row.capability == field_key())
         .expect("the survivor was restated past the new boundary");
-    assert_eq!(restated.verdict, "verified");
+    assert_eq!(restated.verdict, "broken");
     assert_eq!(
         restated.evidence_class.as_deref(),
-        Some("thinking_blocks"),
+        Some(SURVIVOR_CLASS),
         "the evidence class must survive the restatement byte for byte",
+    );
+
+    drop(usage);
+    drain_usage_writer_strict(writer).await;
+}
+
+/// A recognized evidence class the classed survivor carries.
+const SURVIVOR_CLASS: &str = routectl_core::capability::SCHEMA_MISMATCH;
+
+/// A `verified` ledger row on a field-namespace key is never resident after a
+/// cold rebuild: no positive is stored under a field key on any path, the
+/// replay door included. The same row on a catalog key is the control that
+/// proves the fixture replays positives at all.
+#[tokio::test]
+async fn a_verified_row_on_a_field_key_is_not_resident_after_a_cold_rebuild() {
+    let mut config = owning_config();
+    let _dir = isolate_usage_db(&mut config);
+    let config = Arc::new(config);
+    let (usage, writer) = UsageWriter::start(
+        config.usage.db_path.clone(),
+        CHANNEL_CAPACITY,
+        0,
+        config.usage.enabled,
+    );
+
+    // Arrange: one `verified` row on the field key and the same row on the
+    // catalog key the live thinking detector emits, behind a current boundary.
+    let now = ledger_reader::epoch_ms_now();
+    let catalog = i64::from(Router::new(config.clone()).catalog_version());
+    let verified = |capability: &str| {
+        let mut row = broken(now - 4_000, capability, 1, catalog);
+        row.verdict = "verified".to_string();
+        row.phase = "f3".to_string();
+        row.tier = String::new();
+        row.evidence_class = Some(routectl_core::capability::THINKING_BLOCKS.to_string());
+        row
+    };
+    let committed = commit_off_runtime(
+        &usage,
+        vec![
+            CapabilityEvent::tombstone(now - 5_000, catalog, 1),
+            verified(&field_key()),
+            verified(routectl_core::capability::THINKING),
+        ],
+        1,
+    );
+    assert_eq!(
+        committed,
+        routectl_usage::BatchCommit::Committed { rows: 3 }
+    );
+
+    // Act: the cold rebuild a boot runs.
+    let booted = restart_from_ledger(&config, 1, &usage);
+
+    // Assert: only the catalog-key positive came back.
+    assert_eq!(
+        resident_keys(&booted),
+        vec![routectl_core::capability::THINKING.to_string()],
+        "a positive on a field key must not be stored by the replay",
     );
 
     drop(usage);
