@@ -205,6 +205,9 @@ fn precedence_rows() -> Vec<Row> {
               ..Row::new("seed withholds", BETA) },
         Row { seed: Some(SeedCell::Cleared), layer: Some(Layer::Seed), action: ACTION_ALLOW,
               ..Row::new("cleared seed sends", BETA) },
+        Row { seed: Some(SeedCell::Cleared), prior: Some(false), layer: Some(Layer::Seed),
+              action: ACTION_ALLOW,
+              ..Row::new("cleared seed sends over a false prior on a feature key", FEATURE) },
         Row { prior: Some(false),
               ..Row::new("beta key has no prior tier", BETA) },
         // --- learned > prior ---
@@ -540,10 +543,22 @@ fn learned_input_from_a_snapshot_entry_applies_the_dispatch_rules() {
     }
 }
 
+/// Every tier, strongest first, written out independently of `PRECEDENCE`
+/// so a reordering of that list is caught rather than mirrored.
+const CANONICAL_ORDER: [Layer; 6] = [
+    Layer::Pin,
+    Layer::Representability,
+    Layer::Override,
+    Layer::Learned,
+    Layer::Seed,
+    Layer::Prior,
+];
+
+/// Mutation check: swap two entries of `PRECEDENCE` -> red.
 #[test]
-fn layer_order_is_the_position_in_the_precedence_list() {
-    for (i, a) in PRECEDENCE.iter().enumerate() {
-        for (j, b) in PRECEDENCE.iter().enumerate() {
+fn layer_order_is_the_canonical_strongest_first_order() {
+    for (i, a) in CANONICAL_ORDER.iter().enumerate() {
+        for (j, b) in CANONICAL_ORDER.iter().enumerate() {
             assert_eq!(a.cmp(b), i.cmp(&j), "{a:?} vs {b:?}");
             assert_eq!(a < b, i < j, "{a:?} < {b:?}");
         }
@@ -552,17 +567,7 @@ fn layer_order_is_the_position_in_the_precedence_list() {
 
 #[test]
 fn layer_tokens_match_the_doctor_vocabulary_plus_pin_and_representability() {
-    let tokens: Vec<&str> = [
-        Layer::Pin,
-        Layer::Representability,
-        Layer::Override,
-        Layer::Learned,
-        Layer::Seed,
-        Layer::Prior,
-    ]
-    .iter()
-    .map(|layer| layer.as_str())
-    .collect();
+    let tokens: Vec<&str> = CANONICAL_ORDER.iter().map(|layer| layer.as_str()).collect();
     assert_eq!(
         tokens,
         [
