@@ -40,8 +40,8 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use super::{
-    MARKER_TOKEN, anchors_code, comment_text, is_test_file, normalize, parse_file, parse_verdict,
-    reject_forbidden_content,
+    MARKER_TOKEN, anchors_code, comment_block_below, comment_text, continuation, is_test_file,
+    normalize, parse_file, parse_verdict, reject_forbidden_content,
 };
 
 /// The token that opens every seed marker.
@@ -166,26 +166,6 @@ fn reason_end(lines: &[&str], block: &Range<usize>, marker_line: usize) -> usize
         .unwrap_or(block.end)
 }
 
-fn seed_continuation(lines: &[&str], marker_line: usize, end: usize) -> String {
-    lines[marker_line + 1..end]
-        .iter()
-        .filter_map(|line| comment_text(line))
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-/// The contiguous comment below the marker, blank comment lines included, up
-/// to the next marker: what the forbidden-content scan reads.
-fn seed_block_below(lines: &[&str], marker_line: usize) -> String {
-    let run_end = comment_run_bounds(lines, marker_line).map_or(marker_line + 1, |run| run.end);
-    lines[marker_line + 1..run_end]
-        .iter()
-        .filter_map(|line| comment_text(line))
-        .take_while(|text| !is_marker_line(text))
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
 /// Refuse a seed line sitting below a prose drop marker in the same block,
 /// where that marker's reason would absorb it. A counted drop marker keeps no
 /// reason, and a seed line above stacks independently.
@@ -266,7 +246,10 @@ fn parse_seed_marker(
         .map(|(_, rest)| rest.trim())
         .unwrap_or_default();
     reject_forbidden_content(
-        &format!("{body} {}", seed_block_below(lines, index)),
+        &format!(
+            "{body} {}",
+            comment_block_below(lines, index, is_marker_line)
+        ),
         &where_,
     )?;
     let Some((before_dashes, reason)) = body.split_once("--") else {
@@ -291,7 +274,7 @@ fn parse_seed_marker(
     refuse_trailing_prose(lines, end, &where_)?;
     let reason = normalize(&format!(
         "{reason} {}",
-        seed_continuation(lines, index, end)
+        continuation(lines, index, is_marker_line)
     ));
     if reason.is_empty() {
         return Err(format!("{where_} has an empty reason"));
@@ -554,7 +537,7 @@ pub fn compare_to_table(
 /// Whether an attribute line is a `#[cfg(...)]` whose predicate holds a bare
 /// `test` atom and no `not`. String literals are blanked first, so
 /// `feature = "test-utils"` names no atom.
-fn is_test_cfg(line: &str) -> bool {
+pub fn is_test_cfg(line: &str) -> bool {
     let Some(predicate) = line
         .strip_prefix("#[cfg(")
         .and_then(|rest| rest.strip_suffix(")]"))

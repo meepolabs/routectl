@@ -80,8 +80,8 @@ use std::collections::{BTreeMap, BTreeSet};
 mod marker;
 use marker::{
     LANES, MARKER_TOKEN, Marker, SURFACE_FILES, SURFACES, Verdict, census, census_over, expect,
-    holds_line_number, holds_task_id, is_test_file, parse_file, parse_stub, read_source, src_root,
-    surface_files,
+    holds_line_number, holds_task_id, is_test_file, parse_file, parse_stub, read_source, seed,
+    src_root, surface_files,
 };
 
 /// Marker population per production FILE, content-pinned. Per-file rather than
@@ -888,6 +888,9 @@ fn every_cfg_test_path_sidecar_is_on_the_exclusion_list() {
     //     #[path = "messages_tests.rs"]
     //     mod sidecar_tests;
     // so the gating is what identifies test code, independent of the filename.
+    // The gate may be any cfg whose predicate holds a bare `test` atom, such as
+    // `#[cfg(all(test, feature = "bedrock"))]`, read by the seed census's
+    // detector so both censuses agree on what test code is.
     // (An earlier version of this test scanned for an INNER `#![cfg(test)]`
     // attribute, which appears in zero files repo-wide -- a green test proving
     // nothing.)
@@ -896,11 +899,12 @@ fn every_cfg_test_path_sidecar_is_on_the_exclusion_list() {
     // source -- a single-file surface's siblings are not swept -- so only a
     // sidecar the sweep reads owes an entry.
     let swept = expect(surface_files());
+    let mut gated_sidecars = 0usize;
     for file in &swept {
         let source = expect(read_source(file));
         let lines: Vec<&str> = source.lines().collect();
         for (index, line) in lines.iter().enumerate() {
-            if line.trim() != "#[cfg(test)]" {
+            if !seed::is_test_cfg(line.trim()) {
                 continue;
             }
             let Some(next) = lines.get(index + 1) else {
@@ -917,6 +921,7 @@ fn every_cfg_test_path_sidecar_is_on_the_exclusion_list() {
             if !swept.contains(&relative) {
                 continue;
             }
+            gated_sidecars += 1;
             assert!(
                 EXPECTED_TEST_FILES.contains(&relative.as_str()),
                 "{file} gates {sidecar} behind cfg(test), so it is test code, but it is not on \
@@ -925,6 +930,11 @@ fn every_cfg_test_path_sidecar_is_on_the_exclusion_list() {
             );
         }
     }
+    assert!(
+        gated_sidecars > 0,
+        "no swept file gates a #[path] sidecar behind a test cfg; the detector or the sweep \
+         has gone blind, and every check above passed by having nothing to read"
+    );
 }
 
 #[test]

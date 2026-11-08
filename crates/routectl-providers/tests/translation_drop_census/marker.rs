@@ -209,16 +209,21 @@ fn comment_text(line: &str) -> Option<&str> {
     Some(rest.trim_start_matches('/').trim())
 }
 
+fn is_drop_marker_line(text: &str) -> bool {
+    text.contains(MARKER_TOKEN)
+}
+
 /// The reason continues onto the comment lines directly below the marker: a
 /// one-line marker is the grammar, but a long reason wraps, and reading only
-/// the first line would call a wrapped reason truncated or empty.
-fn continuation(lines: &[&str], marker_line: usize) -> String {
+/// the first line would call a wrapped reason truncated or empty. It ends at a
+/// blank comment line, a non-comment line, or a line `is_marker` claims.
+fn continuation(lines: &[&str], marker_line: usize, is_marker: impl Fn(&str) -> bool) -> String {
     let mut parts = Vec::new();
     for line in lines.iter().skip(marker_line + 1) {
         let Some(text) = comment_text(line) else {
             break;
         };
-        if text.is_empty() || text.contains(MARKER_TOKEN) {
+        if text.is_empty() || is_marker(text) {
             break;
         }
         parts.push(text.to_string());
@@ -230,14 +235,19 @@ fn continuation(lines: &[&str], marker_line: usize) -> String {
 /// included. [`continuation`] stops at the first blank comment line because
 /// that is where the reason ends -- but a planning id placed below such a line
 /// would then evade every content refusal, so the threat-surface scan reads
-/// this instead of the reason.
-fn comment_block_below(lines: &[&str], marker_line: usize) -> String {
+/// this instead of the reason. It ends at a non-comment line or a line
+/// `is_marker` claims.
+fn comment_block_below(
+    lines: &[&str],
+    marker_line: usize,
+    is_marker: impl Fn(&str) -> bool,
+) -> String {
     let mut parts = Vec::new();
     for line in lines.iter().skip(marker_line + 1) {
         let Some(text) = comment_text(line) else {
             break;
         };
-        if text.contains(MARKER_TOKEN) {
+        if is_marker(text) {
             break;
         }
         parts.push(text.to_string());
@@ -456,7 +466,7 @@ fn parse_marker(
     if body.is_empty() {
         return Err(format!("{where_} declares no verdict"));
     }
-    let continued = continuation(lines, index);
+    let continued = continuation(lines, index, is_drop_marker_line);
 
     let fields: Vec<&str> = body.split_whitespace().collect();
     let verdict = parse_verdict(fields[0], &where_)?;
@@ -472,7 +482,10 @@ fn parse_marker(
         // the rot checks would have silently narrowed a threat-surface rule --
         // and the repo's own scanner misses a one-digit id, so for that shape
         // this census is the only gate. Scan the whole adjacent block.
-        if holds_task_id(&format!("{body} {}", comment_block_below(lines, index))) {
+        if holds_task_id(&format!(
+            "{body} {}",
+            comment_block_below(lines, index, is_drop_marker_line)
+        )) {
             return Err(format!(
                 "{where_} carries a planning id; it is meaningless to a reader of this repo \
                  and pins internal planning structure into the code"
@@ -484,7 +497,7 @@ fn parse_marker(
     // of the marker and is scanned with it.
     reject_forbidden_content(&format!("{body} {continued}"), &where_)?;
     // The reason stops at a blank `//` line; the threat-surface scan does not.
-    if holds_task_id(&comment_block_below(lines, index)) {
+    if holds_task_id(&comment_block_below(lines, index, is_drop_marker_line)) {
         return Err(format!(
             "{where_} carries a planning id below its reason; it is meaningless to a reader of \
              this repo and pins internal planning structure into the code"
