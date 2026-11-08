@@ -13,7 +13,10 @@
 //!   explains it, and the same seat or the next target would draw the same
 //!   rejection;
 //! - such a rejection is still counted as one the field parser did not
-//!   localize, so the parser's blindness ratio keeps its denominator.
+//!   localize, so the parser's blindness ratio keeps its denominator. That
+//!   denominator covers only lanes that learn: a rejection on a target that
+//!   dispatches on a forwarded credential, or with learning switched off,
+//!   is not counted, as on the field learner's own path.
 
 use std::collections::HashSet;
 
@@ -77,7 +80,10 @@ pub(super) fn is_transcript_rejection(err: &Error, defect: Option<ToolPairingDef
 impl Router {
     /// Count a rejection laid to the transcript once per request per target
     /// as one the field parser did not localize. An operator remap does not
-    /// exempt it: the remap says how the status routes, not what it was.
+    /// exempt it: the remap says how the status routes, not what it was. The
+    /// other gates of [`Router::field_rejection_provider_kind`] still apply,
+    /// so a forwarded-credential target, learning switched off, or an
+    /// unknown provider kind counts nothing.
     pub(super) fn observe_transcript_rejection(
         &self,
         err: &Error,

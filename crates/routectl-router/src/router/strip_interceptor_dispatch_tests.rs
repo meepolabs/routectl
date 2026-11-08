@@ -111,9 +111,16 @@ fn advisor_request() -> ChatRequest {
 }
 
 fn acting_advisor_negative(state_key: &str) -> crate::learned_capability::ExportedEntry {
+    acting_advisor_negative_of_kind("anthropic-api", state_key)
+}
+
+fn acting_advisor_negative_of_kind(
+    provider_kind: &str,
+    state_key: &str,
+) -> crate::learned_capability::ExportedEntry {
     let base = Instant::now();
     crate::learned_capability::ExportedEntry {
-        provider_kind: "anthropic-api".into(),
+        provider_kind: provider_kind.into(),
         state_key: state_key.into(),
         feature_key: "advisor".into(),
         verdict: crate::learned_capability::EntryVerdict::Negative,
@@ -578,16 +585,23 @@ async fn count_tokens_clean_passthrough_emits_no_class_event() {
 
 include!("learned_strip_declare_tests.rs");
 
-/// A chain whose first target (`p0`) has an acting advisor negative and
-/// whose second (`p1`) has none, under `strict_translation`, each served
-/// by its own capturing provider.
+/// The lane of the strict chain's first target, an openai-compat entry
+/// fed by the Anthropic ingress.
+const STRICT_CHAIN_FIRST_LANE: &str = "anthropic->openai-compat";
+
+/// A chain whose first target (`p0`, openai-compat) has an acting advisor
+/// negative and whose second (`p1`, anthropic-api) has none, under
+/// `strict_translation`, each served by its own capturing provider. The two
+/// targets sit on different lanes, so a refusal's lane names its target.
 fn strict_chain_router(
     first: Arc<ParkingMutex<Vec<ChatRequest>>>,
     second: Arc<ParkingMutex<Vec<ChatRequest>>>,
 ) -> Router {
     let toml = "version = 3\n[server]\nstrict_translation = true\n\
                 [capability]\nenabled = true\n\
-                [providers.p0]\nkind = \"anthropic-api\"\n\
+                [providers.p0]\nkind = \"openai-compat\"\n\
+                base_url = \"https://compat.example.test/v1\"\n\
+                api_key_ref = \"literal:k\"\n\
                 [providers.p1]\nkind = \"anthropic-api\"\n\
                 [aliases]\nchain = [\"m0\", \"m1\"]\n";
     let config: Config = toml::from_str(toml).expect("config parses");
@@ -610,7 +624,10 @@ fn strict_chain_router(
     router.install_resolved_models(models);
     router
         .learned_capabilities
-        .import_entries(vec![acting_advisor_negative("p0#u-0")]);
+        .import_entries(vec![acting_advisor_negative_of_kind(
+            "openai-compat",
+            "p0#u-0",
+        )]);
     router
 }
 
@@ -699,7 +716,7 @@ async fn a_strict_refusal_on_the_first_target_walks_to_the_next_target() {
         );
         assert_eq!(
             local_refusals(&router),
-            [("anthropic->anthropic-api", "strict-translation", 1)],
+            [(STRICT_CHAIN_FIRST_LANE, "strict-translation", 1)],
             "{surface:?}: one strict refusal on the first target's lane",
         );
     }
@@ -731,7 +748,7 @@ async fn a_strict_refusal_with_fallbacks_disabled_is_returned() {
         assert!(second.lock().is_empty(), "{surface:?}: no fallback hop");
         assert_eq!(
             local_refusals(&router),
-            [("anthropic->anthropic-api", "strict-translation", 1)],
+            [(STRICT_CHAIN_FIRST_LANE, "strict-translation", 1)],
             "{surface:?}",
         );
     }

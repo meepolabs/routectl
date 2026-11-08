@@ -49,6 +49,9 @@ impl Provider for FailingProvider {
     async fn complete(&self, _: ChatRequest) -> Result<ChatResponse> {
         Err((self.error)())
     }
+    async fn count_tokens(&self, _: ChatRequest) -> Result<TokenCount> {
+        Err((self.error)())
+    }
     async fn stream(&self, _: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
         Err((self.error)())
     }
@@ -289,10 +292,10 @@ async fn an_egress_refusal_counts_once_for_its_lane_and_an_upstream_400_does_not
     ];
 
     for (name, error, expected) in cases {
-        for surface in SURFACES {
+        for surface in ALL_SURFACES {
             let router = failing_router(error);
 
-            dispatch_err(&router, surface, anthropic_request()).await;
+            dispatch_err(&router, surface, anthropic_request_on(surface)).await;
 
             assert_eq!(refusals(&router), expected, "{name} on {surface:?}");
         }
@@ -397,11 +400,17 @@ async fn an_egress_refusal_without_an_ingress_body_has_no_lane_and_is_not_counte
 }
 
 /// An acting learned negative for the advisor tool on `provider`'s
-/// `upstream` seat.
+/// `upstream` seat of an anthropic-api entry.
 fn acting_advisor_negative(provider: &str, upstream: &str) -> ExportedEntry {
+    acting_advisor_negative_of_kind("anthropic-api", provider, upstream)
+}
+
+/// An acting learned negative for the advisor tool on `provider`'s
+/// `upstream` seat, written under provider kind `kind`.
+fn acting_advisor_negative_of_kind(kind: &str, provider: &str, upstream: &str) -> ExportedEntry {
     let base = Instant::now();
     ExportedEntry {
-        provider_kind: "anthropic-api".into(),
+        provider_kind: kind.into(),
         state_key: format!("{provider}#{upstream}"),
         feature_key: "advisor".into(),
         verdict: EntryVerdict::Negative,
@@ -488,11 +497,61 @@ async fn a_tool_pairing_refusal_on_gemini_carries_its_reason_and_counts_once() {
 
 const SECOND_NICKNAME: &str = "m2";
 const SECOND_PROVIDER: &str = "p2";
-const SECOND_UPSTREAM: &str = "upstream2";
+/// An Anthropic-family Bedrock model id, so a Bedrock second target can
+/// serve a token count.
+const SECOND_UPSTREAM: &str = "anthropic.upstream2";
+
+/// The chain's second target: a Bedrock InvokeModel entry, so its lane
+/// differs from the first target's while it still serves every surface,
+/// token counts included. A build without that egress falls back to
+/// anthropic-api, and both targets then share one lane.
+#[cfg(feature = "bedrock")]
+fn second_entry() -> ProviderEntry {
+    use crate::config::{BedrockApiShapeConfig, BedrockCredsConfig, ProviderRuntimePolicy};
+    ProviderEntry::Bedrock {
+        region: "us-east-1".into(),
+        api_shape: BedrockApiShapeConfig::Invoke,
+        creds: BedrockCredsConfig::DefaultChain,
+        user_agent: None,
+        header_extras: BTreeMap::new(),
+        payload_extras: None,
+        anthropic_beta: vec![],
+        cache_capability: None,
+        auto_emit_top_level_breakpoint: None,
+        auto_emit_per_block_breakpoints: None,
+        reduction_enabled: None,
+        runtime: ProviderRuntimePolicy::default(),
+    }
+}
+
+#[cfg(not(feature = "bedrock"))]
+fn second_entry() -> ProviderEntry {
+    ProviderEntry::anthropic_api("literal:k")
+}
+
+#[cfg(feature = "bedrock")]
+const SECOND_LANE: &str = "anthropic->bedrock-invoke";
+#[cfg(not(feature = "bedrock"))]
+const SECOND_LANE: &str = ANTHROPIC_LANE;
+
+/// An acting advisor negative on the chain's second target.
+fn second_target_advisor_negative() -> ExportedEntry {
+    acting_advisor_negative_of_kind(second_entry().kind_str(), SECOND_PROVIDER, SECOND_UPSTREAM)
+}
+
+/// The keys one `reason` refusal on each chain target leaves: one per
+/// lane, merged into a count of two when both targets share a lane.
+fn one_refusal_per_target(reason: &'static str) -> Vec<(&'static str, &'static str, u64)> {
+    if ANTHROPIC_LANE == SECOND_LANE {
+        vec![(ANTHROPIC_LANE, reason, 2)]
+    } else {
+        vec![(ANTHROPIC_LANE, reason, 1), (SECOND_LANE, reason, 1)]
+    }
+}
 
 /// A router whose alias chains the anthropic-api model served by `first`
-/// (configured as `first_entry`) ahead of an own-credential anthropic-api
-/// model served by `second`, with no retries.
+/// (configured as `first_entry`) ahead of an own-credential
+/// [`second_entry`] model served by `second`, with no retries.
 fn chain_router(
     first_entry: ProviderEntry,
     first: Arc<dyn Provider>,
@@ -501,10 +560,9 @@ fn chain_router(
     let mut config = Config::default();
     config.retry.max_attempts = 1;
     config.providers.insert(PROVIDER.into(), first_entry);
-    config.providers.insert(
-        SECOND_PROVIDER.into(),
-        ProviderEntry::anthropic_api("literal:k"),
-    );
+    config
+        .providers
+        .insert(SECOND_PROVIDER.into(), second_entry());
     config.aliases.insert(
         ALIAS.into(),
         AliasValue::Chain(vec![NICKNAME.into(), SECOND_NICKNAME.into()]),
@@ -650,7 +708,7 @@ async fn a_rolled_back_strip_that_exhausts_the_chain_counts_once_per_target() {
         );
         router.learned_capabilities.import_entries(vec![
             acting_advisor_negative(PROVIDER, UPSTREAM),
-            acting_advisor_negative(SECOND_PROVIDER, SECOND_UPSTREAM),
+            second_target_advisor_negative(),
         ]);
 
         dispatch_err(&router, surface, forcing_advisor_request_on(surface)).await;
@@ -661,8 +719,11 @@ async fn a_rolled_back_strip_that_exhausts_the_chain_counts_once_per_target() {
     let expected: Vec<SurfaceRow> = ALL_SURFACES
         .iter()
         .map(|&s| {
-            let keys = vec![(ANTHROPIC_LANE, "unrepresentable", 2)];
-            (surface_label(s), keys, 0)
+            (
+                surface_label(s),
+                one_refusal_per_target("unrepresentable"),
+                0,
+            )
         })
         .collect();
     assert_eq!(observed, expected);
@@ -694,6 +755,33 @@ async fn a_provider_raised_refusal_on_the_first_target_counts_once_when_the_seco
         })
         .collect();
     assert_eq!(observed, expected);
+}
+
+#[tokio::test]
+async fn a_provider_raised_refusal_on_a_token_count_counts_once_and_does_not_walk() {
+    let second = Arc::new(AnsweringProvider::default());
+    let router = chain_router(
+        ProviderEntry::anthropic_api("literal:k"),
+        Arc::new(FailingProvider {
+            error: egress_local_refusal,
+        }),
+        second.clone(),
+    );
+
+    let err = dispatch_err(
+        &router,
+        Surface::CountTokens,
+        anthropic_request_on(Surface::CountTokens),
+    )
+    .await;
+
+    assert_eq!(
+        err.refusal_reason(),
+        Some(RefusalReason::CloakRelocation),
+        "{err:?}"
+    );
+    assert_eq!(refusals(&router), [(ANTHROPIC_LANE, "cloak-relocation", 1)]);
+    assert_eq!(second.calls(), 0, "the refusal ends the count");
 }
 
 /// `req` with a fresh observation slot attached, and the creator's clone of
@@ -745,12 +833,12 @@ async fn each_counted_local_refusal_also_counts_on_the_request_slot() {
         );
         router.learned_capabilities.import_entries(vec![
             acting_advisor_negative(PROVIDER, UPSTREAM),
-            acting_advisor_negative(SECOND_PROVIDER, SECOND_UPSTREAM),
+            second_target_advisor_negative(),
         ]);
         router
     }
-    fn plain(_: Surface) -> ChatRequest {
-        anthropic_request()
+    fn plain(surface: Surface) -> ChatRequest {
+        anthropic_request_on(surface)
     }
     fn advisor(surface: Surface) -> ChatRequest {
         ChatRequest {
@@ -766,7 +854,7 @@ async fn each_counted_local_refusal_also_counts_on_the_request_slot() {
             ..Default::default()
         }
     }
-    let cases: [Case; 9] = [
+    let cases: [Case; 10] = [
         (
             "provider-raised",
             Surface::Complete,
@@ -777,6 +865,13 @@ async fn each_counted_local_refusal_also_counts_on_the_request_slot() {
         (
             "provider-raised",
             Surface::Stream,
+            provider_raised,
+            plain,
+            1,
+        ),
+        (
+            "provider-raised",
+            Surface::CountTokens,
             provider_raised,
             plain,
             1,
