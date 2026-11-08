@@ -104,7 +104,8 @@ license.
   `serde_json::Value` bodies into content-free `Finding`s (`WirePath` +
   `PathClass`); FIDELITY order-aware array alignment with declared-edit
   suppression and Relocate pairing, TRANSLATION top-level unconsumed
-  extras; depth 64 / 200k-node budget sets `DiffOutcome.truncated`
+  extras (a key carried in the Converse field bag, `CONVERSE_FIELD_BAG`,
+  counts as consumed); depth 64 / 200k-node budget sets `DiffOutcome.truncated`
 - `src/wire_check/carriage.rs` -- `IngressWire`, clone-shared per-attempt
   `WireTap` with per-direction slots (request `deposit` / `declare` drained by
   `take_request`; response `deposit_response` / `push_response_frame` /
@@ -791,7 +792,10 @@ license.
   `/v1/models` GET
 - `src/anthropic_api/client.rs` -- `AnthropicApiConfig`, `AuthKind`,
   `AnthropicApiProvider` (`build_headers`, `cloak_body`, `is_cloak_lane`),
-  `BetaDecision`: provider construction, auth and header composition
+  `BetaDecision`: provider construction, auth and header composition;
+  `with_host_resolved_to_for_tests` / `with_host_resolved_to_and_root_ca_for_tests`
+  (behind `test-utils`) pin the host to a stub, the latter trusting an extra
+  PEM root
 - `src/anthropic_api/context_management.rs` -- LRU+TTL thinking-block store
   for context-management beta emulation; exports `ThinkingCache`,
   `ThinkingCacheKey`, `ThinkingCacheEntry`, `CONTEXT_MANAGEMENT_BETA` (also
@@ -2893,7 +2897,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `FieldSurface::AnthropicThinkingType`; the `temperature`, `top_p`,
   `presence_penalty` and `frequency_penalty` Drops over
   `FieldSurface::SamplingParam` (one canonical request field each); and the
-  `max_tokens` Ceiling over `FieldSurface::MaxTokens`, present when the client
+  `max_tokens` Ceiling over `FieldSurface::MaxTokens` (never written below
+  `MIN_LEARNED_OUTPUT_CEILING`), present when the client
   sent a limit or the egress fills one (`routectl_internal.fills_max_tokens`,
   emitting the value `anthropic_api::resolve_max_tokens` resolves);
   `FieldRepairRow { path, surface, transform, class,
@@ -3407,7 +3412,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   the `CountTokens` surface), a pending revert, replay, field and canary, and
   returns the attempt's `Option<EvidenceScope>` (`None` on the count surface) (the
   carry settlements live in `learn_settle.rs`, the beta sink in
-  `learn_beta_repair.rs`). `admit_carries` takes the caller's
+  `learn_beta_repair.rs`); `settle_failure` settles a pending revert on a
+  failed attempt auth recovery did not retry. `admit_carries` takes the caller's
   `FieldSettlementMode`. On the `CountTokens` surface (derived once in `new`)
   `observe_generic` never mints: it only feeds
   `observe_unlocalized_field_rejection` (or the transcript counter).
@@ -3611,7 +3617,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   charge, never compared), and
   `Router::check_request_wire` (when the tap `is_admitted`, FIDELITY lanes diff
   the ingress JSON against the deposit, TRANSLATION lanes diff canonical
-  `provider_extras`; no deposit records `incomplete`). Reads only; never
+  `provider_extras`; no deposit records `incomplete`; `parsed_egress` /
+  `compare_parsed_request` let a failed attempt parse the egress once for
+  both the compare and the rejection-site read). Reads only; never
   changes the response or fails the attempt
 - `src/router/wire_rejection.rs` -- `Router::settle_failed_attempt`,
   `PendingWireRejection`, `emit_wire_rejections`, `read_count_rejection_site`:
@@ -3679,12 +3687,12 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   shared canary registry (`outstanding_unconfirmed` /`disproved_requests`, see
   `src/field_canary.rs`), plus `preflight_actions` (requests a pre-flight
   rewrite modified, counted per adopted row at the one adoption site in
-  `field_preflight::adopt_row`) and `parser_unlocalized` (the
-  am-I-flying-blind count, bumped once per request per target through
-  `capability_learn::count_parser_unlocalized`, by
-  `observe_field_parser_blindness` (via the shared
-  `Router::rejection_localizes_no_field` predicate) and by
-  `transcript_defect::Router::observe_transcript_rejection`), plus the
+  `field_preflight::adopt_row`), `parser_unlocalized` and
+  `field_named_no_row` (the two halves of an unresolved field rejection,
+  split by `Router::unresolved_field_rejection`, called from
+  `capability_learn::observe_field_parser_blindness`; a transcript-defect
+  rejection also counts in `parser_unlocalized`; meanings on the
+  `RouterMetrics` fields in `src/router/mod.rs`), plus the
   repair-chain and budget-exhaustion counters. Both alarm halves are
   reported together deliberately: the outstanding count is exposure that MIGHT
   later be disproved and the lifetime total is exposure that WAS, so either
@@ -4017,7 +4025,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   through learned levels (two hops, a lapsed hop, two verdicts naming each
   other, one declaration at the effort pointer)
 - `src/router/field_repair_parser_tests.rs` -- `include!`d fragment of
-  `field_repair_tests.rs`: the parser-unlocalized counter and its class gate
+  `field_repair_tests.rs`: the `parser_unlocalized` / `field_named_no_row`
+  counters and their class gate
+- `src/router/field_repair_sibling_tests.rs` -- child module of
+  `field_repair`: a settling request whose field identity a sibling holds
+  repairs its own attempt but commits nothing
 - `src/router/field_repair_responses_param_tests.rs` -- `include!`d fragment
   of `field_repair_tests.rs`: parameter refusals on openai-responses (a
   `temperature` refusal names no row; a refusal naming an operator payload
@@ -4207,7 +4219,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   dropped field verdict's canary state; same rule as boot replay via
   `capability_owner::owner_decision`. Run by `carry_over_learned_from` on a
   config-only reload, and by the boundary commit arm on a revision-changing
-  one. `with_restated_value` fills a `RecordedLearnedEntry`'s `value` with the
+  one. `with_restated_value` fills the recorded row's `LearnedRegistryEntry.value` with the
   field verdict's value at the snapshotted incarnation, only for a row whose
   repair row writes one (every catalog key and every drop restates with none)
 - `src/router/capability_purge.rs` -- operator-initiated purge of ONE
@@ -4568,11 +4580,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   the display read (only each lane's current-kind version; a row recorded under
   the empty kind is never returned), `owned_recorded_snapshot` the same rows
   with kind and incarnation so a value can be attached per lifecycle;
-  `recorded_snapshot` / `RecordedLearnedEntry` carry the kind, the entry's
-  `incarnation`, and a `value` slot (always `None` out of the registry, which
-  holds no values) for the owner sweep and the boundary restatement;
-  `RecordedLearnedEntry::into_entry` lifts that value onto the surface row's
-  `LearnedRegistryEntry.value`; `generation` / `advance_generation` /
+  `recorded_snapshot` / `RecordedLearnedEntry` carry the kind and the entry's
+  `incarnation` for the owner sweep and the boundary restatement;
+  `RecordedLearnedEntry::into_entry` returns the surface row
+  (`LearnedRegistryEntry`, whose `value` is the one value slot); `generation` / `advance_generation` /
   `commit_boundary_transition` (promotes the pending generation, or advances,
   plus the catalog-scoped prune under one acquisition), the `*_in_generation`
   entry points returning `GenerationOutcome::{Applied{value,generation}, Stale}`
@@ -4592,11 +4603,12 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   typed shim onto ONE private writer, `learn`, taking the public `LearnKey
   { state_key, feature_key_raw, provider_kind }` (root re-export), the
   evidence (public `NegativeEvidence { tier, phase, source, evidence_class }`
-  or a private positive kind), a gate and a screen choice; for a screened
-  target (the generic negative doors) it runs the field-namespace check before
-  any lock (a key in that namespace is refused as
-  `GenerationOutcome::FieldNamespace`, reserving nothing), while positive
-  observations and minted field-verdict identities pass unscreened; then the generation
+  or a private positive kind), a gate and a screen choice; a screened
+  target (the negative and positive doors) runs the field-namespace check
+  before any lock (refused as `GenerationOutcome::FieldNamespace`, reserving
+  nothing; `screened_positive` maps it to `PositiveOutcome::Refused` on the
+  ungated positive doors), while minted field-verdict identities and test
+  plants pass unscreened; then the generation
   check, lease refusal, mutation, seed-clear lift and count capture in one
   `guarded_keyed` section. Every mutating operation
   also has an `_in` inner variant (`observe_in`, `observe_positive_in`,
@@ -4766,9 +4778,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   whose capability-key normalization would REWRITE the minted key (the Stage 1
   exclusion, enforced without changing the shared normalizer).
   `FieldVerdictRegistry::admit_provisional(key, target_base_url, generation,
-  now) -> Option<FieldRepairGuard>` is the single-flight repair claim, refusing
-  on a local target, a resident acting verdict, or an unresolved sibling repair;
-  it reads the decay state through `negative_state_in_generation`, so the
+  now) -> FieldAdmission` (`Admitted(FieldRepairGuard)` / `Contended` /
+  `Refused`; variants documented on the enum) is the single-flight repair
+  claim; it reads the decay state through `negative_state_in_generation`, so the
   generation is validated atomically with the state the claim rests on, and the
   guard carries the EFFECTIVE generation that read returned.
   `rebuilt_on(learned)` rebuilds the facade onto a (possibly new) shared
@@ -7270,7 +7282,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   counter -- the metrics totals, BOTH halves of the wrong-repair alarm
   (`rc_field_outstanding_unconfirmed_total`, current, and
   `rc_field_disproved_requests_total`, lifetime-monotonic),
-  `rc_field_preflight_actions_total`, `rc_parser_unlocalized_total`, and the
+  `rc_field_preflight_actions_total`, `rc_parser_unlocalized_total`,
+  `rc_field_named_no_row_total`, and the
   repair-chain and budget-exhaustion totals --
   `rc_acting_field_verdicts{,_total}`, the per-verdict
   `rc_field_verdict_rows{,_total,_omitted}`, the per-lane
@@ -7717,7 +7730,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   opening input-token count + resolved model), `read_alias_header`
   (`x-routectl-alias` override); `lift_system_messages` -> `LiftedSystem`
   (system turns with no non-text part leave `messages`; the lifted indices
-  are returned for edit declaration); `normalize_max_completion_tokens`;
+  are returned for edit declaration); `normalize_max_completion_tokens` ->
+  `MaxCompletionTokensFold`, declared as wire-check edits by
+  `declare_max_completion_tokens_fold`;
   `normalize_client_betas` /
   `MAX_CLIENT_BETA_FLAGS` -- the shared client beta normalizer every body- or
   header-sourced beta goes through on the Anthropic and OpenAI ingresses:
