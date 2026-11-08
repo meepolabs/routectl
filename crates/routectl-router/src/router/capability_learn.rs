@@ -1395,7 +1395,7 @@ impl Router {
     /// -- most caller-shaped 4xxs are not field rejections at all -- so a WARN
     /// per occurrence would be noise an operator learns to ignore, and the
     /// signal is the ratio against the localized counts rather than any single
-    /// line. The status/doctor surface reports that ratio.
+    /// line. The status surface reports the counters the ratio is derived from.
     ///
     /// Only the count leaves this function: no state key, no provider, no
     /// upstream text, so nothing about a rejection's content can reach a log
