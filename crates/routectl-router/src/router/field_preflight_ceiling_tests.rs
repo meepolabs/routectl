@@ -94,11 +94,29 @@ fn plant_row_eligible(
 /// Mutation check: make `FieldSurface::clamp_lowers` answer `true` for any
 /// nonzero ceiling (dropping `ceiling < emitted`) -> red on the "below" and
 /// "equal" rows, which would ship the stored ceiling, raising the client's
-/// limit.
+/// limit. Compare the ceiling with `0 <` in place of the floor -> red on the
+/// "stored one below the floor" row.
 #[test]
 fn a_stored_ceiling_clamps_only_a_client_limit_above_it() {
+    use super::super::field_repair::MIN_LEARNED_OUTPUT_CEILING as FLOOR;
     let stored = Some(crate::VerdictValue::Ceiling(STORED_CEILING));
     let rows = [
+        (
+            "stored one below the floor",
+            64_000,
+            Some(Some(crate::VerdictValue::Ceiling(FLOOR - 1))),
+            false,
+            super::FIELD_PREFLIGHT_WITHIN_CEILING,
+            64_000,
+        ),
+        (
+            "stored at the floor",
+            64_000,
+            Some(Some(crate::VerdictValue::Ceiling(FLOOR))),
+            true,
+            super::FIELD_PREFLIGHT_ACTION_CEILING,
+            FLOOR,
+        ),
         (
             "below the ceiling",
             4096,
@@ -265,8 +283,8 @@ fn a_stored_drop_and_a_stored_ceiling_compose_onto_one_planned_request() {
     assert_eq!(router.field_repair_counters().preflight_actions, 2);
 }
 
-/// The two ceiling tokens are spelled as the operator docs say, and the docs
-/// list both.
+/// The two ceiling tokens are spelled as the operator docs say, the docs
+/// list both, and the docs name the floor a stored ceiling must reach.
 #[test]
 fn the_ceiling_tokens_are_documented_with_their_spelling() {
     const LOGGING_DOC: &str = include_str!("../../../../docs/LOGGING.md");
@@ -285,4 +303,9 @@ fn the_ceiling_tokens_are_documented_with_their_spelling() {
             "LOGGING.md must carry a reason row for `{spelled}`",
         );
     }
+    let floor = super::super::field_repair::MIN_LEARNED_OUTPUT_CEILING;
+    assert!(
+        LOGGING_DOC.contains(&format!("the stored ceiling is below {floor}, ")),
+        "the `within_ceiling` row names the floor the clamp enforces",
+    );
 }

@@ -25,7 +25,7 @@ const TEMPERATURE: &str = "temperature";
 const TOP_P: &str = "top_p";
 const MAX_TOKENS: &str = "max_tokens";
 const ANTHROPIC: &str = "anthropic-api";
-const CLIENT_MAX_TOKENS: u32 = 4096;
+const CLIENT_MAX_TOKENS: u32 = 16_384;
 
 fn router() -> Router {
     remote_router_without_negative(Arc::new(OkProvider {
@@ -172,16 +172,16 @@ fn a_second_rejection_naming_a_pending_field_repairs_nothing() {
         let mut plan = plan(&router, &req, mode);
         let mut budget = RepairBudget::per_request();
         assert_eq!(
-            apply_ceiling(&mut plan, &mut req, &mut budget, 2048),
+            apply_ceiling(&mut plan, &mut req, &mut budget, 8192),
             Some(400),
             "{name}: premise",
         );
-        assert_eq!(req.max_tokens, Some(2048), "{name}: premise");
+        assert_eq!(req.max_tokens, Some(8192), "{name}: premise");
         let body = serde_json::to_value(&req).expect("serializable");
         let remaining = budget.remaining();
 
         // The field is still present and a lower ceiling would still lower it.
-        let second = apply_ceiling(&mut plan, &mut req, &mut budget, 1024);
+        let second = apply_ceiling(&mut plan, &mut req, &mut budget, 4096);
 
         assert_eq!(second, None, "{name}");
         assert_eq!(
@@ -252,7 +252,7 @@ fn commit_pending_commits_each_step_with_its_own_tier_value_and_status() {
         assert!(apply(&mut plan, &mut req, &mut budget, 422).is_some());
     }
     router.note_field_repair(&mut meta, target.repair_target(), &mut plan);
-    assert!(apply_ceiling(&mut plan, &mut req, &mut budget, 2048).is_some());
+    assert!(apply_ceiling(&mut plan, &mut req, &mut budget, 8192).is_some());
     router.note_field_repair(&mut meta, target.repair_target(), &mut plan);
 
     let settled = plan.commit_pending(&[], Instant::now());
@@ -279,7 +279,7 @@ fn commit_pending_commits_each_step_with_its_own_tier_value_and_status() {
     assert_eq!(events[1].capability_key, key(MAX_TOKENS));
     assert_eq!(events[1].signal_tier, SignalTier::SelfIdentifying);
     assert_eq!(events[1].upstream_status, 400);
-    assert_eq!(events[1].value, Some(crate::VerdictValue::Ceiling(2048)));
+    assert_eq!(events[1].value, Some(crate::VerdictValue::Ceiling(8192)));
 }
 
 #[test]
@@ -765,16 +765,16 @@ fn a_committed_field_is_never_repaired_again_and_the_plan_stays_applied() {
     let mut plan = plan(&router, &req, FieldSettlementMode::NonSettling);
     let mut budget = RepairBudget::per_request();
     assert!(!plan.has_applied(), "premise: nothing applied yet");
-    let first = apply_ceiling(&mut plan, &mut req, &mut budget, 2048);
+    let first = apply_ceiling(&mut plan, &mut req, &mut budget, 8192);
     assert!(first.is_some(), "premise");
     let committed = plan.commit_pending(&[], Instant::now());
     assert_eq!(committed.len(), 1, "premise");
     let remaining = budget.remaining();
 
-    let again = apply_ceiling(&mut plan, &mut req, &mut budget, 1024);
+    let again = apply_ceiling(&mut plan, &mut req, &mut budget, 4096);
 
     assert_eq!(again, None);
-    assert_eq!(req.max_tokens, Some(2048), "the committed value stands");
+    assert_eq!(req.max_tokens, Some(8192), "the committed value stands");
     assert_eq!(budget.remaining(), remaining, "no draw");
     assert!(!plan.has_pending());
     assert!(plan.has_applied(), "a drained plan still applied a repair");

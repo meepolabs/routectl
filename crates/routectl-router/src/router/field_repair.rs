@@ -576,10 +576,11 @@ impl FieldSurface {
     }
 
     /// Lower this surface's token limit on `req` to `ceiling`, returning
-    /// whether it changed. Only a nonzero ceiling strictly below the value the
-    /// request emits is applied: a ceiling at or above it names a limit the
-    /// request already meets, so the retry would repeat the rejection, and a
-    /// clamp never raises a value.
+    /// whether it changed. Only a ceiling at or above
+    /// [`MIN_LEARNED_OUTPUT_CEILING`] and strictly below the value the request
+    /// emits is applied: a ceiling at or above the emitted value names a limit
+    /// the request already meets, so the retry would repeat the rejection, and a clamp
+    /// never raises a value.
     ///
     /// The value is written where the emitted one came from: the client's
     /// `max_tokens` when it sent one, otherwise the ceiling slot the egress
@@ -609,7 +610,9 @@ impl FieldSurface {
             _ => false,
         };
         match emitted_max_tokens(req) {
-            Some(emitted) => clampable && 0 < ceiling && ceiling < emitted,
+            Some(emitted) => {
+                clampable && MIN_LEARNED_OUTPUT_CEILING <= ceiling && ceiling < emitted
+            }
             None => false,
         }
     }
@@ -621,6 +624,14 @@ impl FieldSurface {
         matches!(self, Self::MaxTokens) && req.max_tokens.is_none()
     }
 }
+
+/// The lowest token ceiling a clamp writes. A rejection naming a smaller
+/// limit, or a stored verdict holding one, lowers nothing: the request keeps
+/// its own limit and the upstream's answer stands. A limit at or below 1024
+/// would leave no room for an Anthropic thinking budget, which must be at
+/// least 1024 and below `max_tokens`, so one learned from untrusted error text
+/// would break every thinking request on the lane until it decays.
+pub(in crate::router) const MIN_LEARNED_OUTPUT_CEILING: u32 = 4096;
 
 /// The `max_tokens` the request's egress sends: the client's value; else,
 /// on an egress that fills it, the value the provider resolves; else none.

@@ -3,8 +3,9 @@
 //! record (`tests/fixtures/mantle_capture.json`) holds an entry whose committed
 //! fixture the existing grammar on that egress resolves to that row, through
 //! the same class gate a live rejection passes, and whose one repaired retry
-//! succeeded with the refused field dropped for a drop row, or sent at a
-//! different value for every other transform.
+//! succeeded with the refused field dropped for a drop row, sent at a lower
+//! number for a ceiling row, or sent at a different value for every other
+//! transform.
 //! The census runs the other way too: every record entry names a row its
 //! egress admits.
 
@@ -67,20 +68,25 @@ enum WeldError {
     /// refusal names, so the record contradicts its own capture.
     RefusedFieldNotSent { key: String },
     /// A record entry whose repaired body does not drop the refused field
-    /// (a drop row) or send it at a different value (every other transform).
+    /// (a drop row), send it at a lower number (a ceiling row), or send it at
+    /// a different value (every other transform).
     RepairNotApplied { key: String },
 }
 
 impl WeldError {
-    /// This failure with any free-text reason blanked, so planted rows match
-    /// on the cause and key alone.
-    fn keyed(self) -> Self {
-        match self {
-            Self::UnreadableFixture { key, .. } => Self::UnreadableFixture {
-                key,
-                reason: String::new(),
-            },
-            other => other,
+    /// Whether this failure is the `expected` one. An unreadable fixture's
+    /// `reason` is free text, so there the expected reason is a fragment that
+    /// names its cause and must appear in it.
+    fn is_planted(&self, expected: &Self) -> bool {
+        match (self, expected) {
+            (
+                Self::UnreadableFixture { key, reason },
+                Self::UnreadableFixture {
+                    key: expected_key,
+                    reason: fragment,
+                },
+            ) => key == expected_key && !fragment.is_empty() && reason.contains(fragment.as_str()),
+            _ => self == expected,
         }
     }
 }
@@ -173,8 +179,8 @@ fn resolved_row(
 /// `sent`.
 #[derive(Debug, PartialEq, Eq)]
 enum RepairCheck {
-    /// Dropped for a drop row; sent at a different value for every other
-    /// transform.
+    /// Dropped for a drop row; sent at a lower number for a ceiling row;
+    /// sent at a different value for every other transform.
     Applied,
     /// The refused request did not send the field its refusal names.
     NotSent,
@@ -184,8 +190,8 @@ enum RepairCheck {
 }
 
 /// Whether `repaired` changed the field the refusal `err` locates in `sent`
-/// the way `row` repairs it: dropped for a drop row, sent at a different
-/// value for every other transform.
+/// the way `row` repairs it: dropped for a drop row, sent at a lower number
+/// for a ceiling row, sent at a different value for every other transform.
 fn repair_applied(
     row: &FieldRepairRow,
     err: &Error,
@@ -212,14 +218,27 @@ fn repair_applied(
     }
     let applied = match row.transform {
         FieldTransform::Drop => after.is_none(),
-        FieldTransform::Rewrite { .. }
-        | FieldTransform::Ceiling
-        | FieldTransform::RankedRewrite { .. } => after.is_some() && after != before,
+        FieldTransform::Ceiling => lowers_limit(before.as_ref(), after.as_ref()),
+        FieldTransform::Rewrite { .. } | FieldTransform::RankedRewrite { .. } => {
+            after.is_some() && after != before
+        }
     };
     if applied {
         RepairCheck::Applied
     } else {
         RepairCheck::NotApplied
+    }
+}
+
+/// Whether a repaired token limit is a number strictly below the refused one:
+/// a ceiling repair only ever lowers a limit.
+fn lowers_limit(before: Option<&Value>, after: Option<&Value>) -> bool {
+    match (
+        before.and_then(Value::as_u64),
+        after.and_then(Value::as_u64),
+    ) {
+        (Some(before), Some(after)) => after < before,
+        _ => false,
     }
 }
 
@@ -478,7 +497,7 @@ fn a_planted_admission_without_its_evidence_is_named_by_its_cause() {
             from_unparsable,
             WeldError::UnreadableFixture {
                 key: TOP_P.into(),
-                reason: String::new(),
+                reason: "expected ident at line 1".into(),
             },
         ),
         (
@@ -488,7 +507,7 @@ fn a_planted_admission_without_its_evidence_is_named_by_its_cause() {
             from_a_directory,
             WeldError::UnreadableFixture {
                 key: TOP_P.into(),
-                reason: String::new(),
+                reason: "Is a directory".into(),
             },
         ),
         (
@@ -498,7 +517,7 @@ fn a_planted_admission_without_its_evidence_is_named_by_its_cause() {
             without_message,
             WeldError::UnreadableFixture {
                 key: TOP_P.into(),
-                reason: String::new(),
+                reason: "no error.message".into(),
             },
         ),
         (
@@ -667,12 +686,58 @@ fn a_planted_admission_without_its_evidence_is_named_by_its_cause() {
         let (failures, _) = weld(allowlists, &record, fixture);
 
         // Assert
-        for failure in &failures {
-            if let WeldError::UnreadableFixture { reason, .. } = failure {
-                assert!(!reason.is_empty(), "{name}: an unreadable fixture says why");
-            }
-        }
-        let keyed: Vec<WeldError> = failures.into_iter().map(WeldError::keyed).collect();
-        assert_eq!(keyed, vec![expected], "{name}");
+        assert!(
+            matches!(failures.as_slice(), [only] if only.is_planted(&expected)),
+            "{name}: expected only {expected:?}, got {failures:?}",
+        );
+    }
+}
+
+/// The committed ceiling entry with its repaired limit replaced by `limit`.
+fn ceiling_repaired_at(limit: Value) -> Value {
+    planted_record(&[(
+        CEILING,
+        edited_entry(CEILING, |entry| {
+            entry["repaired_request_shape"]["max_tokens"] = limit;
+        }),
+    )])
+}
+
+/// A ceiling row's repaired retry is evidence only when it sent a number
+/// strictly below the refused one. A retry that raised the limit, or sent it
+/// as anything but a number, is named, and a lowered one is the paired
+/// control that welds.
+///
+/// Mutation check: weld a ceiling row on `after != before` as the other
+/// rewrites do -> red on the raising and non-numeric rows.
+#[test]
+fn a_ceiling_row_welds_only_a_repaired_retry_that_lowers_the_limit() {
+    // Arrange
+    let anthropic_ceiling: [(EgressKind, &[&str]); 1] =
+        [(EgressKind::AnthropicApiMantle, &["max_tokens"])];
+    let refused = committed_entry(CEILING)["request_shape"]["max_tokens"]
+        .as_u64()
+        .expect("premise: the refused limit is a number");
+    let not_applied = || {
+        vec![WeldError::RepairNotApplied {
+            key: CEILING.into(),
+        }]
+    };
+    let rows = [
+        ("a lowered limit", json!(64_000), Vec::new()),
+        ("a raised limit", json!(refused + 1), not_applied()),
+        ("a limit sent as a string", json!("64000"), not_applied()),
+    ];
+
+    for (name, repaired, expected) in rows {
+        // Act
+        let (failures, _) = weld(
+            &anthropic_ceiling,
+            &ceiling_repaired_at(repaired),
+            corpus_fixture,
+        );
+
+        // Assert
+        assert_eq!(failures, expected, "{name}");
     }
 }

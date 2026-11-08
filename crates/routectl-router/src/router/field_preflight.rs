@@ -207,8 +207,9 @@ pub(super) const FIELD_PREFLIGHT_NO_STORED_VALUE: &str = "no_stored_value";
 pub(super) const FIELD_PREFLIGHT_VALUE_ALREADY_SENT: &str = "value_already_sent";
 
 /// Reason token: the verdict is authorized and stores a token ceiling, but the
-/// request's limit is already at or below it. A stored ceiling only ever lowers
-/// a limit, so there is nothing to clamp.
+/// request's limit is already at or below it, or the stored ceiling is below
+/// the lowest one a clamp writes. A stored ceiling only ever lowers a limit, so
+/// there is nothing to clamp.
 pub(super) const FIELD_PREFLIGHT_WITHIN_CEILING: &str = "within_ceiling";
 
 /// Reason token: this request is the re-verification canary. The verdict was

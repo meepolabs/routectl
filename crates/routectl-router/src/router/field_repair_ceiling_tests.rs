@@ -4,8 +4,11 @@
 // about the repair reads the body an upstream would receive.
 // An `include!`d FRAGMENT of `field_repair_tests.rs`.
 
+/// Mutation check: compare the ceiling with `0 <` in place of the floor in
+/// `FieldSurface::clamp_lowers` -> red on the rows one below the floor.
 #[test]
 fn a_max_tokens_clamp_lowers_only_a_value_above_the_ceiling() {
+    use super::MIN_LEARNED_OUTPUT_CEILING;
     let surface = super::FieldSurface::MaxTokens;
     // (name, client value, egress fills, ceiling slot, clamp to, present,
     //  changed, client after, slot after)
@@ -54,6 +57,39 @@ fn a_max_tokens_clamp_lowers_only_a_value_above_the_ceiling() {
             false,
             Some(64_000),
             0,
+        ),
+        (
+            "one below the floor",
+            Some(64_000),
+            false,
+            0,
+            MIN_LEARNED_OUTPUT_CEILING - 1,
+            true,
+            false,
+            Some(64_000),
+            0,
+        ),
+        (
+            "at the floor",
+            Some(64_000),
+            false,
+            0,
+            MIN_LEARNED_OUTPUT_CEILING,
+            true,
+            true,
+            Some(MIN_LEARNED_OUTPUT_CEILING),
+            0,
+        ),
+        (
+            "fill, one below the floor",
+            None,
+            true,
+            64_000,
+            MIN_LEARNED_OUTPUT_CEILING - 1,
+            true,
+            false,
+            None,
+            64_000,
         ),
         (
             "fill above",
@@ -437,11 +473,18 @@ mod converse_ceiling {
     struct ConverseSeat {
         cfg: BedrockConfig,
         seat: Seat,
+        /// The limit the seat's refusal names and enforces.
+        limit: u32,
         bodies: Mutex<Vec<serde_json::Value>>,
     }
 
     impl ConverseSeat {
         fn new(seat: Seat) -> Arc<Self> {
+            Self::naming(seat, NAMED_LIMIT)
+        }
+
+        /// A seat whose refusal names, and whose model enforces, `limit`.
+        fn naming(seat: Seat, limit: u32) -> Arc<Self> {
             Arc::new(Self {
                 cfg: BedrockConfig {
                     id: "bedrock:p0".into(),
@@ -457,8 +500,17 @@ mod converse_ceiling {
                     additional_model_request_fields: None,
                 },
                 seat,
+                limit,
                 bodies: Mutex::new(Vec::new()),
             })
+        }
+
+        fn rejection(&self) -> Error {
+            if self.limit == NAMED_LIMIT {
+                ceiling_rejection()
+            } else {
+                ceiling_rejection_naming(self.limit)
+            }
         }
 
         fn bodies(&self) -> Vec<serde_json::Value> {
@@ -472,7 +524,7 @@ mod converse_ceiling {
                 .collect()
         }
 
-        /// Assemble and record the body; `true` when it is above the limit.
+        /// Assemble and record the body; `true` when it is above the seat's limit.
         fn record(&self, req: &ChatRequest) -> Result<bool> {
             let body = routectl_providers::bedrock::converse::normalize_request(&self.cfg, req)?;
             if let Some(tap) = req.routectl_internal.wire_tap.as_ref() {
@@ -480,7 +532,7 @@ mod converse_ceiling {
             }
             let above = body["inferenceConfig"]["maxTokens"]
                 .as_u64()
-                .is_some_and(|sent| sent > u64::from(NAMED_LIMIT));
+                .is_some_and(|sent| sent > u64::from(self.limit));
             self.bodies.lock().push(body);
             Ok(above)
         }
@@ -488,13 +540,13 @@ mod converse_ceiling {
         fn answer(&self, req: &ChatRequest) -> Result<()> {
             let above = self.record(req)?;
             match self.seat {
-                Seat::AlwaysRefuses => Err(ceiling_rejection()),
+                Seat::AlwaysRefuses => Err(self.rejection()),
                 Seat::CapsThenServes
                 | Seat::CapsThenUnavailable
                 | Seat::CapsThenStreamsThenRefuses
                     if above =>
                 {
-                    Err(ceiling_rejection())
+                    Err(self.rejection())
                 }
                 Seat::CapsThenUnavailable => Err(Error::upstream(
                     "converse-seat",
@@ -748,21 +800,57 @@ mod converse_ceiling {
     }
 
     /// The positive control is the same harness at a limit above the named
-    /// one, which repairs and draws exactly one repair.
+    /// one, which repairs and draws exactly one repair. A named limit one
+    /// below the floor is refused the same way, with no draw; one at the
+    /// floor repairs.
     #[test]
     fn a_ceiling_at_or_above_the_sent_limit_draws_no_budget() {
-        let seat = ConverseSeat::new(Seat::AlwaysRefuses);
-        let router = converse_router(&[&seat]);
+        use super::super::MIN_LEARNED_OUTPUT_CEILING as FLOOR;
         let full = usize::from(REPAIRS_PER_REQUEST);
+        let at_named = ceiling_rejection();
+        let below_floor = ceiling_rejection_naming(FLOOR - 1);
+        let at_floor = ceiling_rejection_naming(FLOOR);
         let rows = [
-            ("equal", NAMED_LIMIT, false, NAMED_LIMIT, full),
-            ("below", NAMED_LIMIT - 1, false, NAMED_LIMIT - 1, full),
-            ("above", CLIENT_MAX_TOKENS, true, NAMED_LIMIT, full - 1),
+            ("equal", NAMED_LIMIT, &at_named, false, NAMED_LIMIT, full),
+            (
+                "below",
+                NAMED_LIMIT - 1,
+                &at_named,
+                false,
+                NAMED_LIMIT - 1,
+                full,
+            ),
+            (
+                "above",
+                CLIENT_MAX_TOKENS,
+                &at_named,
+                true,
+                NAMED_LIMIT,
+                full - 1,
+            ),
+            (
+                "one below the floor",
+                CLIENT_MAX_TOKENS,
+                &below_floor,
+                false,
+                CLIENT_MAX_TOKENS,
+                full,
+            ),
+            (
+                "at the floor",
+                CLIENT_MAX_TOKENS,
+                &at_floor,
+                true,
+                FLOOR,
+                full - 1,
+            ),
         ];
 
-        for (name, sent, repaired, after, left) in rows {
-            let applied =
-                apply_on_first_target(&router, &client_req(sent), &ceiling_rejection(), "bedrock");
+        for (name, sent, rejection, repaired, after, left) in rows {
+            let seat = ConverseSeat::new(Seat::AlwaysRefuses);
+            let router = converse_router(&[&seat]);
+
+            let applied = apply_on_first_target(&router, &client_req(sent), rejection, "bedrock");
 
             assert_eq!(
                 (applied.0, applied.1.max_tokens, applied.2),
@@ -770,6 +858,80 @@ mod converse_ceiling {
                 "{name}",
             );
         }
+    }
+
+    /// A rejection naming a limit one below the floor gets no retry: the
+    /// client receives the upstream's 400 as it was, no repair is drawn, and
+    /// nothing is learned. The same seat naming the floor itself is the paired
+    /// control: one retry at the floor, served, and one commit.
+    ///
+    /// Mutation check: compare the ceiling with `0 <` in place of the floor in
+    /// `FieldSurface::clamp_lowers` -> red (the sub-floor limit is retried and
+    /// learned).
+    #[tokio::test]
+    async fn a_rejection_naming_a_ceiling_below_the_floor_leaves_the_400_unchanged() {
+        use super::super::MIN_LEARNED_OUTPUT_CEILING as FLOOR;
+        for stream in [false, true] {
+            let seat = ConverseSeat::naming(Seat::CapsThenServes, FLOOR - 1);
+            let router = converse_router(&[&seat]);
+
+            let (meta, served, status) = if stream {
+                let (meta, served) = dispatch(&router, true, client_req(CLIENT_MAX_TOKENS)).await;
+                (meta, served, None)
+            } else {
+                let done = router
+                    .complete_with_options(client_req(CLIENT_MAX_TOKENS), RouterOptions::new())
+                    .await;
+                let status = done
+                    .result
+                    .as_ref()
+                    .err()
+                    .and_then(|err| crate::router::class_observe::upstream_facts(err).status);
+                (done.meta, done.result.is_ok(), status)
+            };
+
+            assert!(!served, "stream={stream}: the refusal reaches the client");
+            if !stream {
+                assert_eq!(status, Some(400), "the client gets the upstream's 400");
+            }
+            assert_eq!(
+                seat.sent_limits(),
+                vec![json!(CLIENT_MAX_TOKENS)],
+                "stream={stream}: one upstream call at the client's limit, no retry",
+            );
+            assert!(meta.field_repairs.is_empty(), "stream={stream}");
+            assert!(meta.learned_capabilities.is_empty(), "stream={stream}");
+            assert_eq!(
+                router.field_repair_counters().repair_attempted,
+                0,
+                "stream={stream}: no repair drawn",
+            );
+            assert_eq!(router.field_repair_counters().verdicts_learned, 0);
+            assert_eq!(router.field_verdicts().snapshot_len(), 0, "stream={stream}");
+            assert!(router.learned_capability_snapshot().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_rejection_naming_the_floor_is_repaired_and_committed() {
+        use super::super::MIN_LEARNED_OUTPUT_CEILING as FLOOR;
+        let seat = ConverseSeat::naming(Seat::CapsThenServes, FLOOR);
+        let router = converse_router(&[&seat]);
+
+        let (meta, served) = dispatch(&router, false, client_req(CLIENT_MAX_TOKENS)).await;
+
+        assert!(served, "the clamped retry serves");
+        assert_eq!(
+            seat.sent_limits(),
+            vec![json!(CLIENT_MAX_TOKENS), json!(FLOOR)],
+            "one refused attempt, one retry at the floor",
+        );
+        assert_eq!(router.field_repair_counters().repair_attempted, 1);
+        assert_eq!(meta.learned_capabilities.len(), 1, "one commit");
+        assert_eq!(
+            meta.learned_capabilities[0].value,
+            Some(crate::VerdictValue::Ceiling(FLOOR)),
+        );
     }
 
     #[tokio::test]
