@@ -308,6 +308,7 @@ fn a_field_verdict_learned_under_one_nickname_applies_to_another_on_the_lane() {
             router.registry_generation(),
             now,
         )
+        .admitted()
         .expect("an unknown identity admits one repair");
     let learned = guard.commit(
         SignalTier::SelfIdentifying,

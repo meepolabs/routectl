@@ -128,17 +128,19 @@ pub(super) struct FieldRepairCandidate<'a> {
     /// `Some` exactly when `guard` was claimed at admission, and kept after
     /// the guard is released so a later step can claim it again.
     key: Option<FieldVerdictKey>,
-    /// `Some` only for a SETTLING walk. `None` is the non-settling plan: it
-    /// repairs for the answer its caller returns and can settle nothing, so it
-    /// holds no single-flight claim (leaving it available to a sibling request
-    /// that CAN settle) and consults no resident verdict. Both settlements are
-    /// no-ops on it -- the type carries the capability rather than every
-    /// settlement site re-checking a mode flag.
+    /// `Some` only for a row this request's SETTLING walk claimed. `None` is a
+    /// row it repairs for the answer its caller returns and can settle
+    /// nothing on: every row of a non-settling plan, which holds no
+    /// single-flight claim and consults no resident verdict, and a row whose
+    /// claim a sibling request held at admission, which the sibling alone
+    /// settles. Both settlements are no-ops on it -- the type carries the
+    /// capability rather than every settlement site re-checking a mode flag.
     guard: Option<FieldRepairGuard<'a>>,
 }
 
 impl<'a> FieldRepairCandidate<'a> {
-    /// A row a non-settling walk repairs for its answer alone.
+    /// A row repaired for this request's answer alone: every row of a
+    /// non-settling walk, and a row whose claim a sibling request holds.
     pub(super) const fn unsettled(row: FieldRepairRow) -> Self {
         Self {
             row,
@@ -325,6 +327,17 @@ impl<'a> FieldRepairPlan<'a> {
     pub(in crate::router) fn candidate_paths(&self) -> Vec<&'static str> {
         self.candidates
             .iter()
+            .map(|candidate| candidate.row.path)
+            .collect()
+    }
+
+    /// The path of every candidate holding this request's single-flight
+    /// claim, in table order: the rows this plan may settle.
+    #[cfg(test)]
+    pub(in crate::router) fn claimed_paths(&self) -> Vec<&'static str> {
+        self.candidates
+            .iter()
+            .filter(|candidate| candidate.guard.is_some())
             .map(|candidate| candidate.row.path)
             .collect()
     }

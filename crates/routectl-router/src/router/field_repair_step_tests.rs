@@ -194,10 +194,16 @@ fn a_second_rejection_naming_a_pending_field_repairs_nothing() {
     }
 }
 
-/// Mutation check: make `claim` return `Claim::Kept` unconditionally -> red
-/// (the field is dropped while a sibling holds its claim).
+/// A row the first repair released, then claimed by a sibling request, is
+/// still repaired when it is refused: the step draws once and drops the
+/// field, but holds no claim, so it commits nothing and the sibling keeps
+/// the claim.
+///
+/// Mutation checks: answer `None` for `FieldAdmission::Contended` in `claim`
+/// -> red (the refusal repairs nothing); admit a held slot in
+/// `admit_provisional` -> red (the step claims and commits).
 #[test]
-fn a_released_row_is_claimed_again_and_a_sibling_claim_refuses_the_step() {
+fn a_released_row_a_sibling_claims_is_repaired_without_committing() {
     let router = router();
     let mut req = three_field_req();
     let mut plan = plan(&router, &req, FieldSettlementMode::Settling);
@@ -205,27 +211,63 @@ fn a_released_row_is_claimed_again_and_a_sibling_claim_refuses_the_step() {
     assert!(apply_field(&mut plan, &mut req, &mut budget, TEMPERATURE).is_some());
     // The first repair released top_p's guard, so a sibling claims it.
     let sibling = plan_or_none(&router, &top_p_req());
+    let sibling_claims_top_p = |sibling: &Option<FieldRepairPlan<'_>>| {
+        sibling
+            .as_ref()
+            .is_some_and(|plan| plan.claimed_paths() == vec![TOP_P])
+    };
     assert!(
-        sibling.is_some(),
+        sibling_claims_top_p(&sibling),
         "premise: the released slot admits a sibling"
     );
-    let body = serde_json::to_value(&req).expect("serializable");
     let remaining = budget.remaining();
 
-    let refused = apply_field(&mut plan, &mut req, &mut budget, TOP_P);
+    let repaired = apply_field(&mut plan, &mut req, &mut budget, TOP_P);
 
-    assert_eq!(refused, None, "the sibling holds the claim");
-    assert_eq!(serde_json::to_value(&req).expect("serializable"), body);
-    assert_eq!(budget.remaining(), remaining, "no draw");
-    assert_eq!(plan.pending_paths(), vec![TEMPERATURE]);
+    assert_eq!(repaired, Some(400), "the contended row is still repaired");
+    assert_eq!(req.top_p, None, "the field is dropped");
+    assert_eq!(budget.remaining(), remaining - 1, "one draw");
+    assert_eq!(plan.pending_paths(), vec![TEMPERATURE, TOP_P]);
+    assert_eq!(plan.pending_mintable(), vec![true, false]);
+    let learned: Vec<_> = plan
+        .commit_pending(&[], Instant::now())
+        .into_iter()
+        .map(|step| step.learned.map(|event| event.capability_key))
+        .collect();
+    let key = |path| crate::field_capability::field_capability_key(path).expect("a key");
+    assert_eq!(learned, vec![Some(key(TEMPERATURE)), None]);
+    assert!(
+        sibling_claims_top_p(&sibling),
+        "the sibling still holds top_p's claim"
+    );
+    assert!(
+        !plan_or_none(&router, &top_p_req())
+            .is_some_and(|plan| plan.claimed_paths().contains(&TOP_P)),
+        "so a further sibling is refused it",
+    );
+}
 
-    drop(sibling);
+/// A row the first repair released, with no sibling claiming it, is claimed
+/// again by the step that repairs it, so that step holds the claim.
+///
+/// Mutation check: make `claim` return `Claim::Kept` unconditionally -> red
+/// (the step holds no claim, so a sibling is granted it).
+#[test]
+fn a_released_row_is_claimed_again_by_the_step_that_repairs_it() {
+    let router = router();
+    let mut req = three_field_req();
+    let mut plan = plan(&router, &req, FieldSettlementMode::Settling);
+    let mut budget = RepairBudget::per_request();
+    assert!(apply_field(&mut plan, &mut req, &mut budget, TEMPERATURE).is_some());
+
     let reclaimed = apply_field(&mut plan, &mut req, &mut budget, TOP_P);
 
     assert!(reclaimed.is_some(), "the freed slot is claimed again");
     assert_eq!(req.top_p, None);
+    assert_eq!(plan.pending_mintable(), vec![true, true]);
     assert!(
-        plan_or_none(&router, &top_p_req()).is_none(),
+        !plan_or_none(&router, &top_p_req())
+            .is_some_and(|plan| plan.claimed_paths().contains(&TOP_P)),
         "and the step now holds that claim, so a sibling is refused",
     );
 }
@@ -377,11 +419,13 @@ fn apply_level(
     )
 }
 
-/// Whether a sibling request at `level` is admitted that level's row.
-fn sibling_admits(router: &Router, level: &str) -> bool {
+/// Whether a sibling request at `level` is granted that level's claim. A
+/// sibling refused the claim may still carry the row guardless, so the
+/// question is asked of the claimed rows, not of every candidate.
+fn sibling_claims(router: &Router, level: &str) -> bool {
     let path = effort_path(level);
     plan_or_none(router, &effort_req(level))
-        .is_some_and(|sibling| sibling.candidate_paths().contains(&path.as_str()))
+        .is_some_and(|sibling| sibling.claimed_paths().contains(&path.as_str()))
 }
 
 /// A refusal of the level a ranked repair wrote adds a step on that level's
@@ -413,7 +457,7 @@ fn each_refused_level_adds_its_own_step_and_commits_the_level_that_went_out() {
     assert_eq!(plan.pending_paths(), vec![max.as_str(), xhigh.as_str()]);
     for level in ["max", "xhigh"] {
         assert!(
-            !sibling_admits(&router, level),
+            !sibling_claims(&router, level),
             "{level}: its step holds the claim",
         );
     }
@@ -552,11 +596,11 @@ fn a_sibling_holding_the_replacement_levels_claim_repairs_without_learning() {
     let key = |path: &str| crate::field_capability::field_capability_key(path).expect("a key");
     assert_eq!(learned, vec![Some(key(&max)), None]);
     assert!(
-        !sibling_admits(&router, "xhigh"),
+        !sibling_claims(&router, "xhigh"),
         "the sibling still holds xhigh's claim",
     );
     drop(sibling);
-    assert!(sibling_admits(&router, "xhigh"), "and releases it itself");
+    assert!(sibling_claims(&router, "xhigh"), "and releases it itself");
 }
 
 /// A replacement level on which a learned verdict already acts is repaired
@@ -625,14 +669,28 @@ fn an_acting_verdict_on_the_replacement_level_repairs_without_learning() {
     assert!(acting(), "the acting verdict stands");
 }
 
-/// The first ranked step keeps the single-step rule: with no pending step on
-/// the effort field, a sibling holding the refused level's claim leaves the
-/// refusal unrepaired, with no edit and no draw.
+/// The first ranked step on a level a sibling request claims is repaired
+/// like any contended row: the refusal draws once and writes a listed level,
+/// but the step holds no claim, so it commits nothing and the sibling keeps
+/// the level's claim.
+///
+/// Mutation checks: answer `None` for `FieldAdmission::Contended` in `claim`
+/// -> red (the refusal repairs nothing); admit a held slot in
+/// `admit_provisional` -> red (the step claims and commits).
 #[test]
-fn a_sibling_holding_the_first_refused_levels_claim_refuses_the_step() {
+fn a_first_refused_level_a_sibling_claims_is_repaired_without_committing() {
     let router = router();
     let sibling = plan_or_none(&router, &effort_req("max"));
-    assert!(sibling.is_some(), "premise: the sibling claims max");
+    let max = effort_path("max");
+    let sibling_claims_max = |sibling: &Option<FieldRepairPlan<'_>>| {
+        sibling
+            .as_ref()
+            .is_some_and(|plan| plan.claimed_paths().contains(&max.as_str()))
+    };
+    assert!(
+        sibling_claims_max(&sibling),
+        "premise: the sibling claims max"
+    );
     let mut req = ChatRequest {
         temperature: Some(0.5),
         ..effort_req("max")
@@ -641,7 +699,7 @@ fn a_sibling_holding_the_first_refused_levels_claim_refuses_the_step() {
     let mut budget = RepairBudget::per_request();
     let first = ("max", ["high", "xhigh"].as_slice());
 
-    let refused = apply_level(
+    let repaired = apply_level(
         &mut plan,
         &mut req,
         &mut budget,
@@ -649,10 +707,24 @@ fn a_sibling_holding_the_first_refused_levels_claim_refuses_the_step() {
         ThinkingShape::Adaptive,
     );
 
-    assert_eq!(refused, None);
-    assert_eq!(sent_level(&req), Some("max"), "no edit");
-    assert_eq!(budget.spent(), 0, "no draw");
-    assert!(plan.pending_paths().is_empty());
+    assert_eq!(repaired, Some(400));
+    assert_eq!(sent_level(&req), Some("xhigh"), "a listed level is written");
+    assert_eq!(budget.spent(), 1, "one draw");
+    assert_eq!(plan.pending_paths(), vec![max.as_str()]);
+    let learned: Vec<_> = plan
+        .commit_pending(&[], Instant::now())
+        .into_iter()
+        .map(|step| step.learned.is_some())
+        .collect();
+    assert_eq!(learned, vec![false], "nothing is committed");
+    assert!(
+        sibling_claims_max(&sibling),
+        "the sibling still holds max's claim"
+    );
+    assert!(
+        !sibling_claims(&router, "max"),
+        "so a further sibling is refused it"
+    );
 }
 
 /// A committed effort is never repaired again on the target, whatever level

@@ -10,7 +10,7 @@ use std::time::Instant;
 use routectl_core::wire_check::EditSite;
 use routectl_core::{ChatRequest, Error};
 
-use crate::field_verdict::FieldRepairGuard;
+use crate::field_verdict::{FieldAdmission, FieldRepairGuard};
 
 use super::super::super::DispatchMeta;
 use super::super::super::edit_declare::declare_field_edit;
@@ -33,10 +33,11 @@ pub(super) enum Claim<'a> {
     /// A fresh claim for a row an earlier step released, or one admitted
     /// after the plan's admission.
     Reclaimed(FieldRepairGuard<'a>),
-    /// No claim: a ranked replacement level whose claim a sibling request
-    /// holds, or on which a verdict acts. The refusal fully determines the
-    /// edit, so the step still repairs the attempt, but it holds no guard,
-    /// so it commits nothing and releases no slot it never took.
+    /// No claim: a row whose claim a sibling request holds, or a ranked
+    /// replacement level on which a verdict acts. The refusal fully
+    /// determines the edit, so the step still repairs the attempt, but it
+    /// holds no guard, so it commits nothing and releases no slot it never
+    /// took.
     Unheld,
 }
 
@@ -55,10 +56,11 @@ impl<'a> FieldRepairPlan<'a> {
     /// The guard a step on candidate `idx` settles through, read before the
     /// mutation. A row the first repair released, or one admitted after the
     /// plan's admission, is claimed through the admission's own inputs.
-    /// When a sibling request holds the row's claim, or a verdict now acts on
-    /// it, a ranked replacement of a level a pending step on the same field
-    /// wrote is [`Claim::Unheld`]; every other such row is `None`, so the
-    /// rejection stays terminal.
+    /// When a sibling request holds the row's claim, the step is
+    /// [`Claim::Unheld`]. When a verdict now acts on it, or the admission is
+    /// otherwise refused, a ranked replacement of a level a pending step on
+    /// the same field wrote is [`Claim::Unheld`]; every other such row is
+    /// `None`, so the rejection stays terminal.
     pub(super) fn claim(&self, idx: usize) -> Option<Claim<'a>> {
         let candidate = &self.candidates[idx];
         if candidate.guard.is_some() {
@@ -67,16 +69,16 @@ impl<'a> FieldRepairPlan<'a> {
         let (Some(admission), Some(key)) = (self.reclaim.as_ref(), candidate.key.as_ref()) else {
             return Some(Claim::Kept);
         };
-        admission
-            .registry
-            .admit_provisional(
-                key,
-                &admission.base_url,
-                admission.generation,
-                Instant::now(),
-            )
-            .map(Claim::Reclaimed)
-            .or_else(|| self.replaces_pending_level(idx).then_some(Claim::Unheld))
+        match admission.registry.admit_provisional(
+            key,
+            &admission.base_url,
+            admission.generation,
+            Instant::now(),
+        ) {
+            FieldAdmission::Admitted(guard) => Some(Claim::Reclaimed(guard)),
+            FieldAdmission::Contended => Some(Claim::Unheld),
+            FieldAdmission::Refused => self.replaces_pending_level(idx).then_some(Claim::Unheld),
+        }
     }
 
     /// Whether candidate `idx` is a ranked row whose field a pending step

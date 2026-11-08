@@ -92,7 +92,9 @@ async fn a_replacement_level_a_sibling_holds_is_repaired_and_commits_nothing() {
         std::time::Instant::now(),
     );
     assert!(
-        !holds_high(&after),
+        !after
+            .as_ref()
+            .is_some_and(|plan| plan.claimed_paths().contains(&HIGH_PATH)),
         "a second sibling is still refused high's claim"
     );
 }

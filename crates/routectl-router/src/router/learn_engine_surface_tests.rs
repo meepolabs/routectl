@@ -427,8 +427,11 @@ fn admit_carries_honors_non_settling_mode() {
         "the non-settling admission held no slot, so a settling one claims it"
     );
     assert!(
-        sibling.field_plan.is_none(),
-        "the settling admission holds the slot against its sibling"
+        sibling
+            .field_plan
+            .as_ref()
+            .is_some_and(|plan| plan.claimed_paths().is_empty()),
+        "the settling admission holds the slot against its sibling, whose plan holds no guard"
     );
 }
 

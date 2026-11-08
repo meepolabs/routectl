@@ -41,7 +41,7 @@ use routectl_core::Error;
 use routectl_core::failure_class::FailureClass;
 use routectl_core::{ChatRequest, sanitize_for_log};
 
-use crate::field_verdict::FieldVerdictKey;
+use crate::field_verdict::{FieldAdmission, FieldVerdictKey};
 use crate::field_verdict_value::ValueSlot;
 use crate::state_key::StateKey;
 
@@ -1813,22 +1813,28 @@ impl Router {
             .filter_map(|row| {
                 // A NON-SETTLING walk admits the row guardless: it repairs for
                 // the answer it returns and can persist nothing, so it claims
-                // no single-flight slot (leaving it to a sibling that can
-                // settle), reads no resident verdict, and is structurally
-                // unable to mint or clear -- the guard it would need does not
-                // exist on its candidate.
+                // no single-flight slot (any settling request may take it),
+                // reads no resident verdict, and is structurally unable to
+                // mint or clear -- the guard it would need does not exist on
+                // its candidate.
                 if mode == FieldSettlementMode::NonSettling {
                     return Some(FieldRepairCandidate::unsettled(row));
                 }
                 let key =
                     FieldVerdictKey::new(target.learned_lane.as_ref()?, row.path, provider_kind)?;
-                let guard = self.field_verdicts().admit_provisional(
-                    &key,
-                    &lane.base_url,
-                    generation,
-                    now,
-                )?;
-                Some(FieldRepairCandidate::admitted(row, key, guard))
+                match self
+                    .field_verdicts()
+                    .admit_provisional(&key, &lane.base_url, generation, now)
+                {
+                    FieldAdmission::Admitted(guard) => {
+                        Some(FieldRepairCandidate::admitted(row, key, guard))
+                    }
+                    // A sibling holds the slot and no verdict acts: repair this
+                    // attempt from the same deterministic derivation, guardless,
+                    // so only the holder commits the identity's verdict.
+                    FieldAdmission::Contended => Some(FieldRepairCandidate::unsettled(row)),
+                    FieldAdmission::Refused => None,
+                }
             })
             .collect();
         if candidates.is_empty() {
@@ -2177,6 +2183,10 @@ pub(in crate::router) mod provisional {
 #[cfg(test)]
 #[path = "field_repair_tests.rs"]
 mod field_repair_tests;
+
+#[cfg(test)]
+#[path = "field_repair_sibling_tests.rs"]
+mod sibling_tests;
 
 #[cfg(test)]
 #[path = "field_attribution_tests.rs"]

@@ -99,6 +99,7 @@ fn two_distinct_field_paths_are_distinct_entries() {
     // Act -- learn the display field only.
     let _ = reg
         .admit_provisional(&display, REMOTE_BASE, 1, t0)
+        .admitted()
         .expect("an unknown pair admits one repair")
         .commit(SignalTier::SelfIdentifying, None, 400, vec![], t0)
         .expect("a live commit emits its row");
@@ -129,6 +130,7 @@ fn the_same_field_on_two_targets_is_two_distinct_entries() {
     // Act
     let _ = reg
         .admit_provisional(&here, REMOTE_BASE, 1, t0)
+        .admitted()
         .expect("unknown pair admits")
         .commit(SignalTier::SelfIdentifying, None, 400, vec![], t0)
         .expect("a live commit emits its row");
@@ -170,6 +172,7 @@ fn the_identity_carries_the_provider_kind_the_key_was_normalized_under() {
     // Act
     let _ = reg
         .admit_provisional(&anthropic, REMOTE_BASE, 1, t0)
+        .admitted()
         .expect("unknown pair admits")
         .commit(SignalTier::SelfIdentifying, None, 400, vec![], t0)
         .expect("a live commit emits its row");
@@ -236,6 +239,7 @@ fn the_rejection_alone_persists_nothing_before_the_repair_succeeds() {
     // Act
     let guard = reg
         .admit_provisional(&k, REMOTE_BASE, 1, t0)
+        .admitted()
         .expect("unknown pair admits");
 
     // Assert -- nothing resident, nothing acting, no row emitted yet.
@@ -252,6 +256,7 @@ fn a_successful_repaired_retry_commits_the_field_negative() {
     let k = key("t");
     let guard = reg
         .admit_provisional(&k, REMOTE_BASE, 1, t0)
+        .admitted()
         .expect("unknown pair admits");
 
     // Act -- the repaired retry came back 2xx, so the rejection is confirmed.
@@ -281,6 +286,7 @@ fn commit_emits_its_own_captured_count_despite_a_sibling_observation_during_the_
     let k = key("t");
     let guard = reg
         .admit_provisional(&k, REMOTE_BASE, 1, t0)
+        .admitted()
         .expect("unknown pair admits");
     let sibling_reg = Arc::clone(&reg);
     let sibling_key = k.clone();
@@ -330,12 +336,14 @@ fn a_failed_repair_leaves_resident_state_unchanged() {
     let k = key("t");
     let _ = reg
         .admit_provisional(&k, REMOTE_BASE, 1, t0)
+        .admitted()
         .expect("unknown pair admits")
         .commit(SignalTier::SelfIdentifying, None, 400, vec![], t0)
         .expect("a live commit emits its row");
     let lapsed = t0 + DECAY + Duration::from_secs(1);
     let guard = reg
         .admit_provisional(&k, REMOTE_BASE, 1, lapsed)
+        .admitted()
         .expect("a lapsed entry admits one re-verification");
 
     // Act -- the repair itself failed, so nothing was proven either way.
@@ -344,7 +352,11 @@ fn a_failed_repair_leaves_resident_state_unchanged() {
     // Assert -- neither refreshed nor cleared: the entry survives on its
     // ORIGINAL window and the next request re-verifies.
     assert!(reg.is_negative_acting(&k, t0 + DECAY / 2));
-    assert!(reg.admit_provisional(&k, REMOTE_BASE, 1, lapsed).is_some());
+    assert!(
+        reg.admit_provisional(&k, REMOTE_BASE, 1, lapsed)
+            .admitted()
+            .is_some()
+    );
 }
 
 #[test]
@@ -355,6 +367,7 @@ fn an_unrelated_error_learns_nothing_on_an_unknown_pair() {
     let k = key("t");
     let guard = reg
         .admit_provisional(&k, REMOTE_BASE, 1, t0)
+        .admitted()
         .expect("unknown pair admits");
 
     // Act -- a timeout, a 5xx, a disconnect: not evidence about the field.
@@ -363,7 +376,11 @@ fn an_unrelated_error_learns_nothing_on_an_unknown_pair() {
     // Assert
     assert!(!reg.is_negative_acting(&k, t0));
     assert_eq!(reg.snapshot_len(), 0);
-    assert!(reg.admit_provisional(&k, REMOTE_BASE, 1, t0).is_some());
+    assert!(
+        reg.admit_provisional(&k, REMOTE_BASE, 1, t0)
+            .admitted()
+            .is_some()
+    );
 }
 
 #[test]
@@ -376,13 +393,18 @@ fn dropping_an_unsettled_guard_releases_its_slot_and_learns_nothing() {
     // Act
     drop(
         reg.admit_provisional(&k, REMOTE_BASE, 1, t0)
+            .admitted()
             .expect("unknown pair admits"),
     );
 
     // Assert -- no learning by omission, and the slot is free again.
     assert!(!reg.is_negative_acting(&k, t0));
     assert_eq!(reg.snapshot_len(), 0);
-    assert!(reg.admit_provisional(&k, REMOTE_BASE, 1, t0).is_some());
+    assert!(
+        reg.admit_provisional(&k, REMOTE_BASE, 1, t0)
+            .admitted()
+            .is_some()
+    );
 }
 
 #[test]
@@ -395,6 +417,7 @@ fn a_successful_retry_clears_a_resident_field_negative() {
     let lapsed = t0 + DECAY + Duration::from_secs(1);
     let guard = reg
         .admit_provisional(&k, REMOTE_BASE, 1, lapsed)
+        .admitted()
         .expect("a lapsed entry admits one re-verification");
 
     // Act -- upstream now accepts the field.
@@ -418,6 +441,7 @@ fn clearing_a_pair_that_had_no_resident_entry_emits_nothing() {
     let k = key("t");
     let guard = reg
         .admit_provisional(&k, REMOTE_BASE, 1, t0)
+        .admitted()
         .expect("unknown pair admits");
 
     // Act
@@ -451,7 +475,7 @@ fn two_racing_callers_yield_exactly_one_holder() {
             let barrier = Arc::clone(&barrier);
             let k = k.clone();
             thread::spawn(move || {
-                let guard = reg.admit_provisional(&k, REMOTE_BASE, 1, t0);
+                let guard = reg.admit_provisional(&k, REMOTE_BASE, 1, t0).admitted();
                 if guard.is_some() {
                     holders.fetch_add(1, Ordering::SeqCst);
                 }
@@ -478,16 +502,25 @@ fn a_concurrent_caller_is_refused_while_the_repair_is_unresolved() {
     let k = key("t");
     let guard = reg
         .admit_provisional(&k, REMOTE_BASE, 1, t0)
+        .admitted()
         .expect("unknown pair admits");
 
     // Act / Assert -- no negative is resident yet, and the second caller is
     // still refused rather than mounting its own repair.
     assert!(!reg.is_negative_acting(&k, t0));
-    assert!(reg.admit_provisional(&k, REMOTE_BASE, 1, t0).is_none());
+    assert!(
+        reg.admit_provisional(&k, REMOTE_BASE, 1, t0)
+            .admitted()
+            .is_none()
+    );
 
     // Once the repair settles the slot reopens.
     guard.release();
-    assert!(reg.admit_provisional(&k, REMOTE_BASE, 1, t0).is_some());
+    assert!(
+        reg.admit_provisional(&k, REMOTE_BASE, 1, t0)
+            .admitted()
+            .is_some()
+    );
 }
 
 #[test]
@@ -500,7 +533,11 @@ fn a_resident_acting_negative_refuses_admission() {
 
     // Act / Assert
     assert!(reg.is_negative_acting(&k, t0));
-    assert!(reg.admit_provisional(&k, REMOTE_BASE, 1, t0).is_none());
+    assert!(
+        reg.admit_provisional(&k, REMOTE_BASE, 1, t0)
+            .admitted()
+            .is_none()
+    );
 }
 
 // --- loopback suppression ---
@@ -513,7 +550,7 @@ fn a_loopback_anthropic_target_cannot_mint_a_field_verdict() {
     let k = key("local-hop");
 
     // Act
-    let admitted = reg.admit_provisional(&k, LOOPBACK_BASE, 1, t0);
+    let admitted = reg.admit_provisional(&k, LOOPBACK_BASE, 1, t0).admitted();
 
     // Assert -- refused at admission, which is the only mint path, so no
     // rejection reaching this target can ever persist a verdict.
@@ -533,6 +570,7 @@ fn the_default_anthropic_target_can_mint_a_field_verdict() {
     // Act
     let event = reg
         .admit_provisional(&k, REMOTE_BASE, 1, t0)
+        .admitted()
         .expect("the public Anthropic endpoint may mint")
         .commit(SignalTier::SelfIdentifying, None, 400, vec![], t0)
         .expect("a live commit emits its row");
@@ -553,7 +591,9 @@ fn a_non_loopback_custom_base_is_not_suppressed() {
     let k = key("mirror");
 
     // Act
-    let admitted = reg.admit_provisional(&k, "https://anthropic.upstream.example/v1", 1, t0);
+    let admitted = reg
+        .admit_provisional(&k, "https://anthropic.upstream.example/v1", 1, t0)
+        .admitted();
 
     // Assert
     assert!(admitted.is_some());
@@ -574,11 +614,15 @@ fn suppression_follows_the_base_url_and_not_the_configured_kind() {
             .expect("accepted");
 
         assert!(
-            reg.admit_provisional(&k, LOOPBACK_BASE, 1, t0).is_none(),
+            reg.admit_provisional(&k, LOOPBACK_BASE, 1, t0)
+                .admitted()
+                .is_none(),
             "a loopback target must not mint on kind {kind}"
         );
         assert!(
-            reg.admit_provisional(&k, REMOTE_BASE, 1, t0).is_some(),
+            reg.admit_provisional(&k, REMOTE_BASE, 1, t0)
+                .admitted()
+                .is_some(),
             "a remote target must mint on kind {kind}"
         );
     }
@@ -909,7 +953,7 @@ fn a_local_destination_is_refused_at_admission_not_only_by_the_predicate() {
         let k = key("local-hop");
 
         assert!(
-            reg.admit_provisional(&k, base, 1, t0).is_none(),
+            reg.admit_provisional(&k, base, 1, t0).admitted().is_none(),
             "a local destination must be refused at admission: {base}"
         );
         assert_eq!(
@@ -943,7 +987,7 @@ fn a_local_destination_is_refused_at_admission_not_only_by_the_predicate() {
         let k = key("mirror");
 
         assert!(
-            reg.admit_provisional(&k, base, 1, t0).is_some(),
+            reg.admit_provisional(&k, base, 1, t0).admitted().is_some(),
             "a remote target must be admitted: {base}"
         );
     }
@@ -1054,6 +1098,7 @@ fn a_bedrock_target_acquires_a_field_guard_for_a_dotted_path() {
             1,
             t0
         )
+        .admitted()
         .is_some()
     );
 }
@@ -1507,6 +1552,7 @@ fn the_committed_row_reuses_the_existing_event_shape() {
     let k = key("prod-target");
     let guard = reg
         .admit_provisional(&k, REMOTE_BASE, 1, t0)
+        .admitted()
         .expect("unknown pair admits");
 
     // Act
@@ -1551,6 +1597,7 @@ fn a_bare_commit_leaves_the_canary_confirmation_count_at_zero() {
     let k = key("t");
     let guard = reg
         .admit_provisional(&k, REMOTE_BASE, 1, t0)
+        .admitted()
         .expect("unknown pair admits");
 
     let event = guard
@@ -1576,12 +1623,14 @@ fn a_repeated_confirmed_rejection_refreshes_the_same_row() {
     let k = key("t");
     let _ = reg
         .admit_provisional(&k, REMOTE_BASE, 1, t0)
+        .admitted()
         .expect("unknown pair admits")
         .commit(SignalTier::SelfIdentifying, None, 400, vec![], t0)
         .expect("a live commit emits its row");
     let lapsed = t0 + DECAY + Duration::from_secs(1);
     let guard = reg
         .admit_provisional(&k, REMOTE_BASE, 1, lapsed)
+        .admitted()
         .expect("a lapsed entry admits one re-verification");
 
     // Act
@@ -1613,6 +1662,7 @@ fn a_field_verdict_commit_from_a_superseded_generation_still_persists() {
     let t0 = Instant::now();
     let guard = reg
         .admit_provisional(&k, REMOTE_BASE, 1, t0)
+        .admitted()
         .expect("admitted");
 
     // The reload lands between admission and settlement.
@@ -1637,11 +1687,13 @@ fn a_field_verdict_clear_from_a_superseded_generation_still_clears() {
     let t0 = Instant::now();
     let guard = reg
         .admit_provisional(&k, REMOTE_BASE, 1, t0)
+        .admitted()
         .expect("admitted");
     let _ = guard.commit(SignalTier::SelfIdentifying, None, 400, vec![], t0);
     let t_lapsed = t0 + DECAY + Duration::from_secs(1);
     let guard = reg
         .admit_provisional(&k, REMOTE_BASE, 1, t_lapsed)
+        .admitted()
         .expect("a lapsed pair admits");
 
     reg.learned().advance_generation();
@@ -1666,6 +1718,7 @@ fn the_event_generation_comes_from_the_applied_outcome() {
     let t0 = Instant::now();
     let guard = reg
         .admit_provisional(&k, REMOTE_BASE, 1, t0)
+        .admitted()
         .expect("admitted");
 
     let event = guard
@@ -1693,7 +1746,9 @@ fn a_stale_generation_at_admission_still_admits_a_field_key() {
     let stale = reg.learned().generation();
     reg.learned().advance_generation();
 
-    let admitted = reg.admit_provisional(&k, REMOTE_BASE, stale, Instant::now());
+    let admitted = reg
+        .admit_provisional(&k, REMOTE_BASE, stale, Instant::now())
+        .admitted();
 
     assert!(
         admitted.is_some(),
@@ -1711,6 +1766,7 @@ fn the_slot_is_released_on_commit_from_any_generation() {
     let t0 = Instant::now();
     let guard = reg
         .admit_provisional(&k, REMOTE_BASE, 1, t0)
+        .admitted()
         .expect("admitted");
     reg.learned().advance_generation();
 
@@ -1723,6 +1779,7 @@ fn the_slot_is_released_on_commit_from_any_generation() {
     let t_lapsed = t0 + DECAY + Duration::from_secs(1);
     assert!(
         reg.admit_provisional(&k, REMOTE_BASE, reg.learned().generation(), t_lapsed)
+            .admitted()
             .is_some(),
         "the slot must be released after a commit from any generation",
     );
@@ -1756,6 +1813,7 @@ fn a_commit_during_a_pending_boundary_stamps_the_pending_generation() {
     let t0 = Instant::now();
     let guard = reg
         .admit_provisional(&k, REMOTE_BASE, 1, t0)
+        .admitted()
         .expect("admitted before the boundary");
 
     // The boundary is admitted but not yet committed.
@@ -1804,11 +1862,13 @@ fn a_clear_during_a_pending_boundary_stamps_the_pending_generation() {
     // Plant the verdict, then lapse it so a repair can be admitted again.
     let guard = reg
         .admit_provisional(&k, REMOTE_BASE, 1, t0)
+        .admitted()
         .expect("admitted");
     let _ = guard.commit(SignalTier::SelfIdentifying, None, 400, vec![], t0);
     let t_lapsed = t0 + DECAY + Duration::from_secs(1);
     let guard = reg
         .admit_provisional(&k, REMOTE_BASE, 1, t_lapsed)
+        .admitted()
         .expect("a lapsed identity admits");
 
     let receipt = admit_pending_boundary(reg.learned());
@@ -1864,6 +1924,7 @@ fn a_settlement_after_a_rolled_back_boundary_stamps_the_generation_in_force() {
 
     let guard = reg
         .admit_provisional(&k, REMOTE_BASE, 1, t0)
+        .admitted()
         .expect("admitted while the boundary is pending");
 
     // The boundary is discarded: `pending` now names no committed generation.
@@ -1898,6 +1959,7 @@ fn a_clear_after_a_rolled_back_boundary_stamps_the_generation_in_force() {
     // Plant the verdict, then lapse it so a repair can be admitted again.
     let seed = reg
         .admit_provisional(&k, REMOTE_BASE, 1, t0)
+        .admitted()
         .expect("admitted");
     let _ = seed.commit(SignalTier::SelfIdentifying, None, 400, vec![], t0);
     let t_lapsed = t0 + DECAY + Duration::from_secs(1);
@@ -1910,6 +1972,7 @@ fn a_clear_after_a_rolled_back_boundary_stamps_the_generation_in_force() {
 
     let guard = reg
         .admit_provisional(&k, REMOTE_BASE, 1, t_lapsed)
+        .admitted()
         .expect("a lapsed identity admits while pending");
 
     let _ = reg.learned().rollback_pending_generation(&receipt);
@@ -1944,6 +2007,7 @@ fn an_old_guard_blocks_the_replacement_facades_admission() {
 
     let guard = reg
         .admit_provisional(&k, REMOTE_BASE, 1, t0)
+        .admitted()
         .expect("the first admission succeeds");
 
     // The reload: a replacement facade on the same shared registry.
@@ -1957,6 +2021,7 @@ fn an_old_guard_blocks_the_replacement_facades_admission() {
     assert!(
         replacement
             .admit_provisional(&k, REMOTE_BASE, 1, t0)
+            .admitted()
             .is_none(),
         "an outstanding repair must block the replacement facade's admission",
     );
@@ -1967,6 +2032,7 @@ fn an_old_guard_blocks_the_replacement_facades_admission() {
     assert!(
         replacement
             .admit_provisional(&k, REMOTE_BASE, 1, t_lapsed)
+            .admitted()
             .is_some(),
         "the old guard's settlement must be visible to the replacement",
     );
@@ -1982,11 +2048,13 @@ fn an_old_guards_release_is_visible_to_the_replacement_facade() {
 
     let guard = reg
         .admit_provisional(&k, REMOTE_BASE, 1, t0)
+        .admitted()
         .expect("admitted");
     let replacement = reg.rebuilt_on(Arc::clone(reg.learned_arc()));
     assert!(
         replacement
             .admit_provisional(&k, REMOTE_BASE, 1, t0)
+            .admitted()
             .is_none(),
         "held while the old guard lives",
     );
@@ -1996,6 +2064,7 @@ fn an_old_guards_release_is_visible_to_the_replacement_facade() {
     assert!(
         replacement
             .admit_provisional(&k, REMOTE_BASE, 1, t0)
+            .admitted()
             .is_some(),
         "the release must free the identity for the replacement facade",
     );
@@ -2039,14 +2108,20 @@ fn the_two_facades_never_hold_the_same_identity_twice() {
 
     let _held = reg
         .admit_provisional(&k, REMOTE_BASE, 1, t0)
+        .admitted()
         .expect("admitted");
     let replacement = reg.rebuilt_on(Arc::clone(reg.learned_arc()));
 
     // Neither facade may admit again while the identity is held.
-    assert!(reg.admit_provisional(&k, REMOTE_BASE, 1, t0).is_none());
+    assert!(
+        reg.admit_provisional(&k, REMOTE_BASE, 1, t0)
+            .admitted()
+            .is_none()
+    );
     assert!(
         replacement
             .admit_provisional(&k, REMOTE_BASE, 1, t0)
+            .admitted()
             .is_none(),
         "no duplicate holder across the rebuild",
     );
@@ -2070,6 +2145,7 @@ fn a_purge_lease_blocks_a_concurrent_commit_and_leaves_the_entry_untouched() {
 
     // A prior successful repair leaves a resident row for the purge to capture.
     reg.admit_provisional(&k, REMOTE_BASE, 1, t0)
+        .admitted()
         .expect("admitted")
         .commit(SignalTier::SelfIdentifying, None, 400, vec![], t0)
         .expect("a live commit emits its row");
@@ -2085,6 +2161,7 @@ fn a_purge_lease_blocks_a_concurrent_commit_and_leaves_the_entry_untouched() {
     // must already be held when the purge reserves the key.
     let guard = reg
         .admit_provisional(&k, REMOTE_BASE, reg.learned().generation(), t_lapsed)
+        .admitted()
         .expect("the resident verdict has lapsed, so a fresh repair may admit");
 
     let lease = match reg.learned().prepare_purge(
@@ -2121,6 +2198,7 @@ fn a_purge_lease_blocks_a_concurrent_commit_and_leaves_the_entry_untouched() {
     // release the slot latches forever and this assertion goes RED.
     assert!(
         reg.admit_provisional(&k, REMOTE_BASE, reg.learned().generation(), t_lapsed)
+            .admitted()
             .is_some(),
         "the same lapsed identity must admit again once the purge lease is \
          released",
@@ -2137,12 +2215,14 @@ fn a_purge_lease_blocks_a_concurrent_clear_and_leaves_the_entry_resident() {
     let t_lapsed = t0 + DECAY + Duration::from_secs(1);
 
     reg.admit_provisional(&k, REMOTE_BASE, 1, t0)
+        .admitted()
         .expect("admitted")
         .commit(SignalTier::SelfIdentifying, None, 400, vec![], t0)
         .expect("a live commit emits its row");
 
     let guard = reg
         .admit_provisional(&k, REMOTE_BASE, reg.learned().generation(), t_lapsed)
+        .admitted()
         .expect("the resident verdict has lapsed, so a fresh repair may admit");
 
     let lease = match reg.learned().prepare_purge(
@@ -2185,6 +2265,7 @@ fn a_purge_lease_blocks_a_concurrent_clear_and_leaves_the_entry_resident() {
     // release the slot latches forever and this assertion goes RED.
     assert!(
         reg.admit_provisional(&k, REMOTE_BASE, reg.learned().generation(), t_lapsed)
+            .admitted()
             .is_some(),
         "the same lapsed identity must admit again once the purge lease is \
          released",
@@ -2709,6 +2790,7 @@ fn commit_valued(
     t: Instant,
 ) -> CapabilityLearnEvent {
     reg.admit_provisional(k, REMOTE_BASE, 1, t)
+        .admitted()
         .expect("a lapsed or absent verdict admits one repair")
         .commit(SignalTier::SelfIdentifying, value, 400, vec![], t)
         .expect("a live commit emits its row")

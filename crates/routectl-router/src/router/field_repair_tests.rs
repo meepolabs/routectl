@@ -49,7 +49,7 @@ use crate::router::RouterOptions;
 /// The qualified dotted path the captured rejection envelope named. The one
 /// grounded row in the closed repair table, so it is what a repair can act
 /// on; the fixture injects it as the provisional resolution.
-const REJECTED_PATH: &str = "thinking.enabled.display";
+pub(super) const REJECTED_PATH: &str = "thinking.enabled.display";
 
 /// The field capability key the grounded path mints.
 ///
@@ -60,7 +60,7 @@ const REJECTED_PATH: &str = "thinking.enabled.display";
 /// literally in `REJECTED_PATH`, so what these tests pin is that the
 /// qualified path survives into the key byte for byte; the prefix's own bytes
 /// are pinned independently by the namespace owner's tests.
-fn rejected_key() -> String {
+pub(super) fn rejected_key() -> String {
     crate::field_capability::field_capability_key(REJECTED_PATH)
         .expect("the grounded path is a well-formed qualified path")
 }
@@ -73,7 +73,7 @@ const DISPLAY_REJECTION_FIXTURE: &str =
 /// the live parser is driven by the bytes the upstream actually sent. Under an
 /// injection the injection decides the resolution; without one the parser
 /// names the display row and a refused value.
-fn field_reject_body() -> &'static str {
+pub(super) fn field_reject_body() -> &'static str {
     static BODY: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
         let fixture: serde_json::Value =
             serde_json::from_str(DISPLAY_REJECTION_FIXTURE).expect("the fixture is JSON");
@@ -96,7 +96,7 @@ const CHAIN_TARGETS: usize = 7;
 /// The alias every fixture dispatches through. Deliberately NOT a model
 /// name: an alias whose own name is also a chain member re-resolves through
 /// itself and the walk dies on recursion depth before any repair can fire.
-const ALIAS: &str = "field-repair-alias";
+pub(super) const ALIAS: &str = "field-repair-alias";
 
 /// What one mock seat observed. `dispatched` keeps each attempt's request so
 /// an assertion reads the BYTES that went upstream rather than inferring the
@@ -142,7 +142,7 @@ impl Observed {
 /// Whether a request still emits the rejected wire field through EITHER
 /// canonical carrier. Both are checked because clearing only one leaves the
 /// egress emitting the field from the other -- the drop's whole contract.
-fn carries_field(req: &ChatRequest) -> bool {
+pub(super) fn carries_field(req: &ChatRequest) -> bool {
     req.routectl_internal.anthropic_thinking_display.is_some()
         || req.reasoning.as_ref().is_some_and(|r| r.exclude.is_some())
 }
@@ -290,7 +290,7 @@ fn content_chunk() -> ChatChunk {
     }
 }
 
-fn success_response() -> ChatResponse {
+pub(super) fn success_response() -> ChatResponse {
     ChatResponse {
         choices: vec![Choice {
             index: 0,
@@ -317,7 +317,7 @@ fn success_response() -> ChatResponse {
 /// field WITHOUT disabling the feature. The native carrier names between_tools
 /// thinking, which no row rewrites, so the display row is the only grounded row
 /// it carries.
-fn req_on(alias: &str) -> ChatRequest {
+pub(super) fn req_on(alias: &str) -> ChatRequest {
     let mut req = ChatRequest {
         model: alias.into(),
         messages: vec![Message {
@@ -353,7 +353,7 @@ fn req_on(alias: &str) -> ChatRequest {
 /// independent. `base_url` is left at the default Anthropic base: the
 /// suppression predicate keys on it, and a loopback base refuses every mint
 /// (its own test below, not the default).
-fn chain_config(alias: &str, seats: usize) -> Config {
+pub(super) fn chain_config(alias: &str, seats: usize) -> Config {
     let mut toml_text = String::new();
     let mut chain: Vec<String> = Vec::with_capacity(seats);
     for idx in 0..seats {
@@ -461,7 +461,7 @@ fn plant_lapsed_verdict(router: &Router, state_key: &str) {
 /// through the registry's own snapshot rather than through the lifecycle -- so
 /// "mutated resident state" is a fact about the STORE, not about one key's
 /// acting status.
-fn verdict_resident(router: &Router, state_key: &str) -> bool {
+pub(super) fn verdict_resident(router: &Router, state_key: &str) -> bool {
     router
         .learned_capability_snapshot()
         .into_iter()

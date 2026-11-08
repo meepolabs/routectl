@@ -2737,6 +2737,7 @@ fn carry_over_learned_from_rebuilds_the_field_verdict_facade_sharing_in_flight()
             before.registry_generation(),
             t0,
         )
+        .admitted()
         .expect("the first admission on the outgoing facade succeeds");
 
     after.carry_over_learned_from(&before);
@@ -2762,6 +2763,7 @@ fn carry_over_learned_from_rebuilds_the_field_verdict_facade_sharing_in_flight()
                 after.registry_generation(),
                 t0,
             )
+            .admitted()
             .is_none(),
         "an outstanding guard on the OLD facade must block the REPLACEMENT's \
          admission for the same identity",
@@ -2785,6 +2787,7 @@ fn carry_over_learned_from_rebuilds_the_field_verdict_facade_sharing_in_flight()
                 after.registry_generation(),
                 t_lapsed,
             )
+            .admitted()
             .is_some(),
         "once the old guard settles, the replacement facade admits the same \
          identity",

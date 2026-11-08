@@ -910,10 +910,13 @@ impl FieldVerdictRegistry {
     /// Claim the single-flight repair slot for `key` on a target reached at
     /// `target_base_url`.
     ///
-    /// `Some(guard)` means THIS request may repair and settle the identity.
-    /// `None` means it may not: the target is loopback and can never mint, an
-    /// acting verdict is already resident, or another request holds the slot
-    /// with its repair unresolved.
+    /// [`FieldAdmission::Admitted`] means THIS request may repair and settle
+    /// the identity. [`FieldAdmission::Contended`] means another request holds
+    /// the slot with its repair unresolved and no verdict acts: this request may
+    /// still repair its own attempt, but settles nothing.
+    /// [`FieldAdmission::Refused`] means it may not act on the identity at all:
+    /// the target is loopback and can never mint, an acting verdict is already
+    /// resident, or this generation may not read the key.
     ///
     /// A lapsed verdict is admissible: exactly one caller gets the guard and
     /// re-verifies the field against live upstream behavior.
@@ -923,34 +926,36 @@ impl FieldVerdictRegistry {
         target_base_url: &str,
         generation: u64,
         now: Instant,
-    ) -> Option<FieldRepairGuard<'_>> {
+    ) -> FieldAdmission<'_> {
         // Checked before the slot is claimed: a suppressed target must not
         // even hold a slot, or it would refuse a sibling request that could
         // legitimately mint.
         if loopback_target_suppresses_minting(target_base_url) {
-            return None;
+            return FieldAdmission::Refused;
         }
         // The claim is taken under the in-flight lock together with the decay
         // read, so two callers racing an unknown identity cannot both observe
         // "absent" and both repair.
         let mut in_flight = self.in_flight.lock();
-        if in_flight.contains(key) {
-            return None;
-        }
         // Validated atomically with the decay read: a superseded Router must
         // not decide to strip on state belonging to the replacement generation.
-        let (state, admitted_generation) = self.learned.negative_state_in_generation(
+        let Some((state, admitted_generation)) = self.learned.negative_state_in_generation(
             generation,
             key.registry_key(),
             &key.capability_key,
             &key.provider_kind,
             now,
-        )?;
+        ) else {
+            return FieldAdmission::Refused;
+        };
         match state {
-            NegativeState::Acting => None,
+            NegativeState::Acting => FieldAdmission::Refused,
+            NegativeState::Absent | NegativeState::Lapsed if in_flight.contains(key) => {
+                FieldAdmission::Contended
+            }
             NegativeState::Absent | NegativeState::Lapsed => {
                 in_flight.insert(key.clone());
-                Some(FieldRepairGuard {
+                FieldAdmission::Admitted(FieldRepairGuard {
                     registry: self,
                     key: key.clone(),
                     settled: false,
@@ -1111,6 +1116,36 @@ impl FieldVerdictRegistry {
             "{reason}"
         );
         None
+    }
+}
+
+/// The outcome of [`FieldVerdictRegistry::admit_provisional`], decided under
+/// the in-flight lock together with the decay read.
+///
+/// Production matches every variant: `Contended` and `Refused` demand
+/// different actions, and collapsing them is the defect the split prevents.
+#[derive(Debug)]
+pub enum FieldAdmission<'a> {
+    /// This request holds the slot: it may repair and settle the identity.
+    Admitted(FieldRepairGuard<'a>),
+    /// Another request holds the slot and no verdict acts. This request may
+    /// repair its own attempt from the same rejection, but commits nothing.
+    Contended,
+    /// This request may not act on the identity: a loopback target, an acting
+    /// verdict, or a generation that may not read the key.
+    Refused,
+}
+
+/// Test-only conveniences; production matches every variant explicitly.
+#[cfg(test)]
+#[allow(clippy::elidable_lifetime_names)]
+impl<'a> FieldAdmission<'a> {
+    /// The guard when admitted, or `None` for any other outcome.
+    pub(crate) fn admitted(self) -> Option<FieldRepairGuard<'a>> {
+        match self {
+            Self::Admitted(guard) => Some(guard),
+            Self::Contended | Self::Refused => None,
+        }
     }
 }
 
