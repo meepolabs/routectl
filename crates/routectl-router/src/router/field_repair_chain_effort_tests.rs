@@ -740,3 +740,120 @@ async fn a_refused_companion_effort_written_after_admission_is_repaired_and_lear
         vec![(THINKING_DISABLED_PATH, true, true), (LOW_PATH, true, true)],
     );
 }
+
+// -----------------------------------------------------------------------
+// An inferred effort refusal drives pre-flight only once corroborated
+// -----------------------------------------------------------------------
+
+/// The durable acknowledgment of every verdict `meta` learned, as the daemon
+/// would attempt it after the ledger write.
+fn acknowledgments(router: &Router, meta: &crate::router::DispatchMeta) -> Vec<bool> {
+    meta.learned_capabilities
+        .iter()
+        .map(|event| {
+            router.acknowledge_durable_field_confirmation(
+                &event.state_key,
+                &event.capability_key,
+                &event.provider_kind,
+                event.persistence_generation,
+                event.incarnation,
+                event.observations,
+            )
+        })
+        .collect()
+}
+
+/// The pre-flight decision a request recorded on the `xhigh` row.
+fn xhigh_preflight(meta: &crate::router::DispatchMeta) -> &crate::router::FieldPreflight {
+    meta.field_preflight
+        .iter()
+        .find(|record| record.field_path == Some(XHIGH_PATH))
+        .expect("a pre-flight decision on the xhigh row")
+}
+
+/// An effort refusal attributed at the INFERRED tier learns a pending verdict
+/// that pre-flight does not act on: its acknowledgment is refused, and the
+/// next request is planned `not_eligible`, sent at the refused level, and
+/// repaired again. That second repaired success corroborates the verdict, its
+/// acknowledgment lands, and the third request goes out at the learned level
+/// with no refusal first.
+///
+/// Mutation check: make `signal_acts` answer true for any tier -> red (the
+/// first acknowledgment lands and the second request is rewritten).
+#[tokio::test]
+async fn an_inferred_effort_verdict_drives_preflight_only_after_a_second_observation() {
+    use crate::router::learn_engine::EffortRank;
+    let listed = ["high", "low", "medium"]
+        .iter()
+        .map(|level| EffortRank::of_token(level).expect("a rank member").bit())
+        .fold(0, |mask, bit| mask | bit);
+    let _injection = provisional::inject_value_with_tier(
+        XHIGH_PATH,
+        crate::router::rejection_parser::RejectionValue::Levels(listed),
+        routectl_core::capability::SignalTier::Inferred,
+    );
+    let seat = ChainSeat::new(Egress::Anthropic, refuse_xhigh);
+    let router = anthropic_router(&seat, &wire_checked(ONE_ATTEMPT));
+    let adaptive = || effort_req("xhigh", Some(json!({"type": "adaptive"})));
+
+    let first = router
+        .complete_with_options(adaptive(), RouterOptions::new())
+        .await;
+    assert!(first.result.is_ok(), "{:?}", first.result.as_ref().err());
+    let observed: Vec<_> = first
+        .meta
+        .learned_capabilities
+        .iter()
+        .map(|event| (event.signal_tier, event.observations))
+        .collect();
+    assert_eq!(
+        observed,
+        vec![(routectl_core::capability::SignalTier::Inferred, 1)],
+        "premise: one pending inferred observation",
+    );
+    assert_eq!(
+        acknowledgments(&router, &first.meta),
+        vec![false],
+        "a pending verdict backs no pre-flight confirmation",
+    );
+
+    let second = router
+        .complete_with_options(adaptive(), RouterOptions::new())
+        .await;
+    assert!(second.result.is_ok(), "{:?}", second.result.as_ref().err());
+    let decision = xhigh_preflight(&second.meta);
+    assert!(!decision.acted, "{decision:?}");
+    assert_eq!(
+        decision.reason,
+        crate::router::field_preflight::FIELD_PREFLIGHT_NOT_ELIGIBLE
+    );
+    let bodies = seat.bodies();
+    assert_eq!(
+        bodies[2..].iter().map(sent_effort).collect::<Vec<_>>(),
+        vec![Some("xhigh"), Some("high")],
+        "the second request is sent as the client asked and repaired again",
+    );
+    let observed: Vec<_> = second
+        .meta
+        .learned_capabilities
+        .iter()
+        .map(|event| event.observations)
+        .collect();
+    assert_eq!(observed, vec![2], "the second repair corroborates");
+    assert_eq!(acknowledgments(&router, &second.meta), vec![true]);
+
+    let third = router
+        .complete_with_options(adaptive(), RouterOptions::new())
+        .await;
+    assert!(third.result.is_ok(), "{:?}", third.result.as_ref().err());
+    let decision = xhigh_preflight(&third.meta);
+    assert!(decision.acted, "{decision:?}");
+    assert_eq!(
+        (decision.chosen_level, decision.direction),
+        (Some("high"), Some("lower")),
+    );
+    let bodies = seat.bodies();
+    assert_eq!(bodies.len(), 5, "the third request is sent once");
+    assert_eq!(sent_effort(&bodies[4]), Some("high"));
+    assert!(third.meta.field_repairs.is_empty(), "no refusal, no repair");
+}

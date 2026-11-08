@@ -4324,6 +4324,8 @@ fn the_warn_headline_takes_the_worst_and_breaks_ties_on_planning_order() {
             // longer produces.
             transform_class: Some(class.as_str()),
             reason: FIELD_PREFLIGHT_ACTION_DROP,
+            chosen_level: None,
+            direction: None,
             // The headline SELECTOR keys on impact rank and planning order only,
             // so this fixture carries no authorization: threading one in would
             // suggest the tie rule consults it.

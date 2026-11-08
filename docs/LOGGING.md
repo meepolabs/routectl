@@ -639,7 +639,12 @@ information:
 A decision is per CLOSED-TABLE ROW per target, not per target: one request can
 carry rows of two transform classes at once and each clears its own gates, so a
 per-target record would report only one of two facts. A fallback chain
-therefore emits one DEBUG per row per target it planned.
+therefore emits one DEBUG per row per target it planned. An effort rewrite
+adds decisions of its own: having written a learned level, the planner decides
+that level's row next and keeps going while each written level's verdict acts,
+so one carried effort row can produce several decisions, the last of them the
+refusal that ended the chain (`not_eligible`, or `value_already_sent` when the
+stored level is one the request already emitted).
 
 | Field | Meaning |
 |---|---|
@@ -650,13 +655,15 @@ therefore emits one DEBUG per row per target it planned.
 | `field_path` | The closed-table qualified dotted path the decision considered, or `none` when the request carried no grounded field or on the whole-target `unattributable_target` record (an attributable entry whose kind or egress no longer matches the target) |
 | `transform_class` | `envelope` or `prefix_impacting` -- what decided which gates the decision had to clear. `none` only for a decision that considered no row |
 | `reason` | Closed-set token naming why the decision acted or fell open (below) |
+| `chosen_level` | On an acting effort rewrite: the level it wrote, a member of the effort rank (`minimal`, `low`, `medium`, `high`, `xhigh`, `max`), the same tokens as the repair WARN's field of that name. `none` on every other decision. The level it replaced is the last segment of `field_path` |
+| `direction` | On an acting effort rewrite: `lower` or `higher`, where `chosen_level` sits relative to the replaced level, the same tokens as the repair WARN's field of that name. `higher` means the served request may cost more than the one the client sent. `none` on every other decision |
 | `provenance_phase` | Detection phase of the acting verdict the decision rested on (`f1` / `f2` / `f3`), or `none` for a decision no authorization permitted |
 | `provenance_source` | Evidence source of that verdict (`live` / `probe`), or `none` |
 | `confirmations` | Acknowledged confirmation cycles backing the verdict at authorization time. `0` for a decision no authorization permitted -- honest rather than a sentinel, since zero confirmations is exactly what authorized it |
 | `canary` | Where that identity's re-verification stood when the decision was authorized (`counting` / `due` / `in_flight`), or `none` |
 | `canary_last_outcome` | The last settled canary outcome for that incarnation (`confirmed` / `regressed` / `inconclusive`), or `none` when none has settled |
 | `decisions_acted` | WARN only: how many decisions rewrote something |
-| `decisions_planned` | WARN only: how many decisions were recorded for the request |
+| `decisions_planned` | WARN only: how many decisions were recorded for the request, including the refusal that ended each effort chain, so it can exceed the number of rows the request carried |
 
 The five PROVENANCE fields answer "on what evidence?", and they are populated
 from the exact authorization snapshot that permitted the action -- never re-read
@@ -691,7 +698,14 @@ The WARN NAMES one acting decision, chosen by two rules in order:
 
 Naming one decision never narrows the counts. `decisions_acted` and
 `decisions_planned` always describe every decision recorded for the request, so
-the headline choice hides nothing.
+the headline choice hides nothing. `decisions_planned` counts the refusal that
+ended an effort chain too, though it acted on nothing.
+
+Every effort row is `envelope`, so on an effort chain (`xhigh` written to
+`high`, then `high` to `medium`) the WARN names the FIRST hop and its
+`chosen_level` is that hop's level (`high`). The level that went out is the
+`chosen_level` of the last DEBUG line with `acted=true` for that `state_key`
+(`medium`).
 
 The `reason` vocabulary is closed. Each token is a different operator
 situation, and they are deliberately not collapsed -- which gate is holding is
@@ -707,7 +721,7 @@ the whole information content of a fail-open:
 | `unattributable_target` | A rejection from this target could not be attributed to a routectl-owned seat. Reported for each carried field when the target authenticates with a forwarded client credential, or its entry is gone, is on a provider kind outside the admitted set (`anthropic-api`, `bedrock`, `openai-compat`, `openai-responses`), has no classifiable egress base URL, or names a local hop. Reported once for the whole target, with no `field_path`, when the entry is attributable but its kind or egress no longer matches the target's: a reload re-kinded it, or repointed it between a Mantle sub-lane and its direct sibling in either direction. A Mantle entry whose region names no endpoint reports this per carried row its own Mantle view admits, and `no_grounded_field` when the request carries none; config validation rejects such a region at load |
 | `masked_by_override` | An operator `force_supported` override masks this field's capability cell for this target. The operator has said to send the field; the learned verdict is NOT deleted |
 | `no_identity` | No identity could be minted for the field on this target |
-| `not_eligible` | No settled, acknowledged, acting verdict -- covers absent, lapsed, canary-suspended, zero acknowledged confirmations, and a verdict whose state moved under the eligibility read |
+| `not_eligible` | No settled, acknowledged, acting verdict -- covers absent, lapsed, canary-suspended, zero acknowledged confirmations, a pending inferred verdict (one observation, see below), and a verdict whose state moved under the eligibility read |
 | `below_quorum` | The verdict IS eligible, but its acknowledged confirmation count is below the quorum this transform class requires. A prefix-impacting rewrite needs two confirmed cycles; one is not enough |
 | `no_target_opt_in` | A prefix-impacting transform whose quorum is satisfied but whose target is not named in `[fidelity] prefix_impact_opt_in`. A content rewrite stays dormant until the operator opts the target in |
 | `ambiguous_mutation` | The transform was authorized but removed nothing, or reported success while its field was still present. Fails open to a byte-equivalent original |
@@ -716,6 +730,23 @@ the whole information content of a fail-open:
 | `within_ceiling` | The verdict is authorized and stores a token ceiling, but the request's limit is already at or below it, or the stored ceiling is below 4096, the lowest a clamp writes (such a ceiling is inert: the request keeps its own limit). Nothing to clamp: a ceiling only ever lowers a limit |
 | `canary_restored` | This request is the re-verification canary: the tested field was RESTORED rather than dropped, and the upstream's answer re-verifies or disproves the verdict. Never reported for a verdict on a field a free token count re-checks (on a lane that has such a count): that verdict's only recovery is the re-check, so its repair keeps applying instead |
 | `capability_writer_unhealthy` | Durable capability-event persistence cannot currently be guaranteed, so learned pre-flight is suspended for EVERY verdict. Not a verdict gate: it says nothing about whether the verdict is right, only that a wrong one could not be durably retracted (the clear, the purge, and the confirmation are all capability-event writes). Held while ANY of three monotonic failure counters is nonzero -- a store fault, a capability write the channel refused as full, or one it refused as closed -- so a SINGLE failure holds it for the life of the process, including one that happened at boot before the gate was wired. Ordinary usage-record drops are excluded: telemetry falling behind says nothing about capability persistence. Reactive forward-and-repair is unaffected and still serves every request -- see the status token of the same name |
+
+**Inferred-tier verdicts.** The pre-flight gates never read a verdict's
+attribution tier (`signal_tier` on the `field_verdict_commit` line): a verdict
+learned from an INFERRED attribution drives pre-flight exactly as a
+self-identifying one does, once it acts. What differs is when it starts acting.
+A self-identifying verdict acts on its first repaired success. An inferred one
+persists PENDING on its first and acts only when a repaired success on a later
+request corroborates it within `inferred_window_hours` of the first; a
+corroboration arriving later restarts it as a fresh pending observation, and
+two rejections inside one request count once. While pending, its durable
+confirmation acknowledgment is refused, so pre-flight reports `not_eligible`
+and the request goes out as the client sent it, to be repaired reactively
+again. The effort rows' only inferred source that names a level to move to is
+the Bedrock serde refusal (``unknown variant `<x>`, expected one of ...``): an
+inferred effort verdict from it rewrites before dispatch only once the
+second request's repaired success has corroborated it and that commit's
+durable write has been acknowledged.
 
 Content-free by construction, at BOTH tiers. Every field is a closed-set
 token, a code-authored path literal, a `sanitize_for_log`-sanitized state key,

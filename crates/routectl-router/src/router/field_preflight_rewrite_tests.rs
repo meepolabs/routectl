@@ -167,6 +167,11 @@ fn a_rewrite_verdict_restored_from_the_ledger_is_applied_with_its_value() {
         assert!(decision.acted, "the restored rewrite verdict is applied");
         assert_eq!(decision.reason, super::FIELD_PREFLIGHT_ACTION_REWRITE);
         assert_eq!(
+            (decision.chosen_level, decision.direction),
+            (None, None),
+            "a rewrite outside the effort rank carries no rank tokens",
+        );
+        assert_eq!(
             planned.chat_template_kwargs,
             Some(json!({ super::super::field_repair::TEST_REWRITE_KWARG: member })),
             "the field is rewritten to the stored member, not dropped",

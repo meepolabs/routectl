@@ -380,3 +380,162 @@ fn a_chained_effort_preflight_declares_the_effort_pointer_once() {
         json!("medium")
     );
 }
+
+/// An acting ranked rewrite records the level it wrote and which way it moved
+/// it, in the repair record's rank tokens; the chain's non-acting terminating
+/// hop records neither.
+///
+/// Mutation check: record `chosen_level: None` in `adopt_row` -> red.
+#[test]
+fn an_acting_ranked_preflight_records_the_chosen_level_and_direction() {
+    struct Row {
+        name: &'static str,
+        verdicts: &'static [(&'static str, &'static str)],
+        sent: &'static str,
+        decisions: &'static [RankedDecision],
+    }
+    let rows = [
+        Row {
+            name: "lower",
+            verdicts: &[("xhigh", "high")],
+            sent: "xhigh",
+            decisions: &[
+                (
+                    "output_config.effort.xhigh",
+                    true,
+                    Some("high"),
+                    Some("lower"),
+                ),
+                ("output_config.effort.high", false, None, None),
+            ],
+        },
+        Row {
+            name: "higher",
+            verdicts: &[("low", "high")],
+            sent: "low",
+            decisions: &[
+                (
+                    "output_config.effort.low",
+                    true,
+                    Some("high"),
+                    Some("higher"),
+                ),
+                ("output_config.effort.high", false, None, None),
+            ],
+        },
+    ];
+
+    for row in rows {
+        let router = router_with_effort_verdicts(row.verdicts);
+        let req = effort_req(row.sent, Some(json!({"type": "adaptive"})));
+
+        let (_planned, records) = plan_all(&router, &req, "m0");
+
+        let decisions: Vec<_> = records
+            .iter()
+            .filter_map(|record| {
+                let path = record.field_path?;
+                path.starts_with("output_config.effort.").then_some((
+                    path,
+                    record.acted,
+                    record.chosen_level,
+                    record.direction,
+                ))
+            })
+            .collect();
+        assert_eq!(decisions, row.decisions, "{}", row.name);
+    }
+}
+
+/// `(field_path, acted, chosen_level, direction)` of one effort decision.
+type RankedDecision = (
+    &'static str,
+    bool,
+    Option<&'static str>,
+    Option<&'static str>,
+);
+
+/// Both tiers render the rank fields: an acting ranked decision's DEBUG line
+/// and the request WARN carry its tokens, and a non-acting decision's DEBUG
+/// line renders the explicit `none` rather than omitting them.
+///
+/// Mutation check: drop `chosen_level` from the WARN in
+/// `emit_field_preflight` -> red.
+#[test]
+fn the_preflight_lines_render_the_ranked_rewrite_tokens() {
+    let router = router_with_effort_verdict();
+    let req = effort_req("xhigh", Some(json!({"type": "adaptive"})));
+    let (_planned, records) = plan_all(&router, &req, "m0");
+    let recorded = records.len();
+    let mut meta = super::super::DispatchMeta::for_alias(ALIAS);
+    meta.field_preflight = records;
+
+    let events = routectl_testkit::capture_events(|| {
+        super::emit_field_preflight(&meta);
+    });
+
+    let debug_for = |path: &str| {
+        events
+            .iter()
+            .find(|e| e.level == tracing::Level::DEBUG && e.field("field_path") == Some(path))
+            .unwrap_or_else(|| panic!("a DEBUG line for {path}: {events:?}"))
+    };
+    let acting = debug_for("output_config.effort.xhigh");
+    assert_eq!(acting.field("acted"), Some("true"), "premise");
+    assert_eq!(acting.field("chosen_level"), Some("high"));
+    assert_eq!(acting.field("direction"), Some("lower"));
+    let refused = debug_for("output_config.effort.high");
+    assert_eq!(refused.field("acted"), Some("false"), "premise");
+    assert_eq!(refused.field("chosen_level"), Some("none"));
+    assert_eq!(refused.field("direction"), Some("none"));
+    let warn = events
+        .iter()
+        .find(|e| {
+            e.level == tracing::Level::WARN && e.message == super::FIELD_PREFLIGHT_WARN_MESSAGE
+        })
+        .expect("one acting decision is one WARN");
+    assert_eq!(warn.field("chosen_level"), Some("high"));
+    assert_eq!(warn.field("direction"), Some("lower"));
+    assert_eq!(
+        warn.field("decisions_planned"),
+        Some(recorded.to_string().as_str()),
+        "every recorded decision is counted, the refusing hop that ended the \
+         chain included",
+    );
+}
+
+/// On a chain the WARN names the FIRST acting hop (every effort row is one
+/// class), so its `chosen_level` is that hop's level; the level that went out
+/// is the last acting hop's, read off the DEBUG lines.
+#[test]
+fn the_preflight_warn_names_the_first_hop_of_an_effort_chain() {
+    let router = router_with_effort_verdicts(&[("xhigh", "high"), ("high", "medium")]);
+    let req = effort_req("xhigh", Some(json!({"type": "adaptive"})));
+    let (planned, records) = plan_all(&router, &req, "m0");
+    assert_eq!(
+        messages_body(&planned)["output_config"]["effort"],
+        json!("medium"),
+        "premise: two hops"
+    );
+    let mut meta = super::super::DispatchMeta::for_alias(ALIAS);
+    meta.field_preflight = records;
+
+    let events = routectl_testkit::capture_events(|| {
+        super::emit_field_preflight(&meta);
+    });
+
+    let warn = events
+        .iter()
+        .find(|e| {
+            e.level == tracing::Level::WARN && e.message == super::FIELD_PREFLIGHT_WARN_MESSAGE
+        })
+        .expect("one WARN");
+    assert_eq!(warn.field("field_path"), Some("output_config.effort.xhigh"));
+    assert_eq!(warn.field("chosen_level"), Some("high"));
+    let last_acting = events
+        .iter()
+        .filter(|e| e.level == tracing::Level::DEBUG && e.field("acted") == Some("true"))
+        .filter_map(|e| e.field("chosen_level"))
+        .next_back();
+    assert_eq!(last_acting, Some("medium"));
+}

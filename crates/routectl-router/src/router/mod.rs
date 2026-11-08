@@ -1663,6 +1663,15 @@ pub struct FieldPreflight {
     pub transform_class: Option<&'static str>,
     /// Closed-set token naming why the planner acted or fell open.
     pub reason: &'static str,
+    /// The effort level an acting ranked rewrite wrote, a member of the effort
+    /// rank (the same tokens as [`FieldRepair::chosen_level`]); `None` for
+    /// every other decision. The level it replaced is the last segment of
+    /// [`Self::field_path`].
+    pub chosen_level: Option<&'static str>,
+    /// Which way an acting ranked rewrite moved the level (`lower` or
+    /// `higher`, the same tokens as [`FieldRepair::direction`]); `None` for
+    /// every other decision.
+    pub direction: Option<&'static str>,
     /// The AUTHORIZATION facts the action rested on, present only on a decision
     /// whose authorization actually permitted something -- an acting rewrite or
     /// the canary that one authorized.

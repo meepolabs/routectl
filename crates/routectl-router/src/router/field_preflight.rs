@@ -99,7 +99,7 @@ use super::class_observe::DispatchSurface;
 use super::edit_declare::{declare_field_edit, fidelity_dialect};
 use super::field_repair::{
     AttributableLane, FieldRepairRow, FieldRepairTable, FieldSurface, FieldTransform,
-    TransformClass, field_repair_admits_kind, is_ranked, present_rows,
+    TransformClass, field_repair_admits_kind, is_ranked, present_rows, ranked_pick,
 };
 use super::rejection_parser::{NamedRejection, RejectionKind};
 use super::repair_budget::RepairBudget;
@@ -756,6 +756,10 @@ impl Router {
         // request, because a request carrying two classes rewrites two surfaces
         // and exposes two identities.
         self.metrics.incr_field_preflight_action();
+        let pick = match edit {
+            PreflightEdit::Rewrite(value) => ranked_pick(&row, value),
+            PreflightEdit::Drop | PreflightEdit::Ceiling(_) => None,
+        };
         Ok(RowDecision {
             record: FieldPreflight {
                 acted: true,
@@ -763,6 +767,8 @@ impl Router {
                 field_path: Some(row.path),
                 transform_class: Some(row.class.as_str()),
                 reason: edit.action_token(),
+                chosen_level: pick.map(|pick| pick.chosen),
+                direction: pick.map(|pick| pick.direction.token()),
                 // The EXACT authorization this rewrite rested on, carried rather
                 // than re-read: the identity's state can move after the gates
                 // clear, and a record assembled from a later read would report a
@@ -1195,6 +1201,8 @@ fn unchanged_record(
         field_path,
         transform_class: class.map(TransformClass::as_str),
         reason,
+        chosen_level: None,
+        direction: None,
         authorization: None,
     }
 }
@@ -1277,6 +1285,8 @@ pub(super) fn plan_transform_for_tests(
                 field_path: Some(path),
                 transform_class: class,
                 reason: FIELD_PREFLIGHT_ACTION_DROP,
+                chosen_level: None,
+                direction: None,
                 // This driver starts AFTER every admission check, so it holds no
                 // authorization to report -- it exercises the transform, not the
                 // gates that authorize one.
@@ -1291,6 +1301,8 @@ pub(super) fn plan_transform_for_tests(
                 field_path: Some(path),
                 transform_class: class,
                 reason: FIELD_PREFLIGHT_AMBIGUOUS_MUTATION,
+                chosen_level: None,
+                direction: None,
                 authorization: None,
             },
         ),
@@ -1368,6 +1380,8 @@ pub(super) fn emit_field_preflight(meta: &super::DispatchMeta) {
                 field_path = record.field_path.unwrap_or(FIELD_PATH_NONE),
                 transform_class = record.transform_class.unwrap_or(TRANSFORM_CLASS_NONE),
                 reason = record.reason,
+                chosen_level = record.chosen_level.unwrap_or(RANK_NONE),
+                direction = record.direction.unwrap_or(RANK_NONE),
                 provenance_phase = provenance.phase,
                 provenance_source = provenance.source,
                 confirmations = provenance.confirmations,
@@ -1384,6 +1398,8 @@ pub(super) fn emit_field_preflight(meta: &super::DispatchMeta) {
                 field_path = record.field_path.unwrap_or(FIELD_PATH_NONE),
                 transform_class = record.transform_class.unwrap_or(TRANSFORM_CLASS_NONE),
                 reason = record.reason,
+                chosen_level = record.chosen_level.unwrap_or(RANK_NONE),
+                direction = record.direction.unwrap_or(RANK_NONE),
                 provenance_phase = provenance.phase,
                 provenance_source = provenance.source,
                 confirmations = provenance.confirmations,
@@ -1422,12 +1438,16 @@ pub(super) fn emit_field_preflight(meta: &super::DispatchMeta) {
         state_key = %sanitize_for_log(&headline.state_key),
         field_path = headline.field_path.unwrap_or(FIELD_PATH_NONE),
         transform_class = headline.transform_class.unwrap_or(TRANSFORM_CLASS_NONE),
+        chosen_level = headline.chosen_level.unwrap_or(RANK_NONE),
+        direction = headline.direction.unwrap_or(RANK_NONE),
         provenance_phase = provenance.phase,
         provenance_source = provenance.source,
         confirmations = provenance.confirmations,
         canary = provenance.canary,
         canary_last_outcome = provenance.canary_last_outcome,
         decisions_acted = acted.len(),
+        // Every recorded decision, so an effort chain's terminating hop (the
+        // refusal that ended it) counts here although it acted on nothing.
         decisions_planned = meta.field_preflight.len(),
         "{FIELD_PREFLIGHT_WARN_MESSAGE}",
     );
@@ -1493,6 +1513,10 @@ const FIELD_PATH_NONE: &str = "none";
 /// Rendered `transform_class` for a decision that considered no row, and so
 /// has no class. Mirrors [`FIELD_PATH_NONE`].
 const TRANSFORM_CLASS_NONE: &str = "none";
+
+/// Rendered `chosen_level` and `direction` for a decision that was not an
+/// acting ranked rewrite. Mirrors [`FIELD_PATH_NONE`].
+const RANK_NONE: &str = "none";
 
 /// Message of the single request-level pre-flight WARN. Stable and greppable,
 /// and named so a test can assert on it without restating the string.

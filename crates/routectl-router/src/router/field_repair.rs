@@ -1711,6 +1711,7 @@ use effort::RowScope;
 mod field_repair_step;
 
 pub(super) use effort::is_ranked;
+pub(super) use effort::ranked_pick;
 #[cfg(test)]
 use field_repair_step::FieldEdit;
 pub(super) use field_repair_step::FieldRepairPlan;
@@ -2156,12 +2157,16 @@ pub(in crate::router) mod provisional {
     /// returned guard drops. The value is injected as given, whatever the
     /// row's transform: what a mismatched pairing does is the repair's call.
     pub(in crate::router) fn inject_value(path: &str, value: RejectionValue) -> Injection {
-        inject_resolution(
-            path,
-            SignalTier::SelfIdentifying,
-            RejectionKind::InvalidValue,
-            Some(value),
-        )
+        inject_value_with_tier(path, value, SignalTier::SelfIdentifying)
+    }
+
+    /// [`inject_value`], with the attribution tier the resolution carries.
+    pub(in crate::router) fn inject_value_with_tier(
+        path: &str,
+        value: RejectionValue,
+        tier: SignalTier,
+    ) -> Injection {
+        inject_resolution(path, tier, RejectionKind::InvalidValue, Some(value))
     }
 
     fn inject_resolution(
