@@ -500,7 +500,7 @@ async fn an_opened_debit_does_not_suppress_the_complete_retry() {
     assert_eq!(
         first.field("breaker_effect"),
         Some("opened"),
-        "a one-failure threshold must open the breaker on the first 500"
+        "with a one-failure threshold the first 500 moves the closed breaker to open"
     );
     assert_eq!(
         first.field("same_provider_retry"),

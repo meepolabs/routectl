@@ -958,6 +958,37 @@ fn retune_to_disabled_closes_a_lapsed_circuit_on_failed_probe() {
 }
 
 #[test]
+fn a_disabled_breaker_closes_a_forced_park_on_a_failed_probe() {
+    // Arrange: built disabled, then parked open by a reset hint.
+    let mut s = ProviderState::from_gate(gate(0, 1_000, None));
+    let t0 = Instant::now();
+    s.force_open(t0, Duration::from_secs(1));
+    assert!(matches!(
+        s.try_dispatch(t0),
+        GateDecision::CircuitOpen { .. }
+    ));
+
+    // Act: the lapsed window admits one probe, and it fails.
+    let t2 = t0 + Duration::from_secs(2);
+    let probe = s.admit_under_park(t2, AdmissionKind::ClientDispatch, None);
+    let debit = s.record_failure_debit(t2, LastOutcome::Http5xx, probe.epoch);
+
+    // Assert: the probe owned the slot, nothing tripped or opened, and the
+    // circuit stops gating: two admissions with no settle between them pass.
+    assert!(probe.claimed_half_open);
+    assert_eq!(
+        debit,
+        FailureDebit {
+            tripped: false,
+            opened: false
+        }
+    );
+    assert_eq!(s.gate_status(t2).circuit, CircuitPhase::Closed);
+    assert_eq!(s.try_dispatch(t2), GateDecision::Allow);
+    assert_eq!(s.try_dispatch(t2), GateDecision::Allow);
+}
+
+#[test]
 fn retune_to_disabled_keeps_a_live_window_until_it_lapses() {
     // Arrange: a 10 s window opened before the breaker was turned off.
     let mut s = ProviderState::from_gate(gate(1, 10_000, None));

@@ -290,10 +290,10 @@ impl Router {
     }
 
     /// Debit one breaker failure for `state_key` from an attempt admitted
-    /// under breaker `epoch`, returning whether this debit tripped (or
-    /// re-tripped) the breaker on this call. Logs the transition when the
-    /// debit opened a closed or half-open circuit. A no-op once `epoch` is
-    /// stale.
+    /// under breaker `epoch`, returning whether this debit moved a closed or
+    /// half-open circuit to open, and logging that transition. A further
+    /// debit on a circuit that is already open returns `false`. A no-op once
+    /// `epoch` is stale.
     pub(super) fn record_failure_opened(
         &self,
         state_key: &str,
@@ -309,7 +309,7 @@ impl Router {
         if debit.opened {
             breaker_transition::log_opened(state_key);
         }
-        debit.tripped
+        debit.opened
     }
 
     /// Park the provider's breaker open for `cooldown`, bypassing the

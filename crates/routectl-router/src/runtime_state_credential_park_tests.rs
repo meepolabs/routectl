@@ -158,6 +158,41 @@ fn a_failed_retest_without_a_reason_trips_a_configured_breaker() {
 }
 
 #[test]
+fn a_failed_retest_under_a_disabled_breaker_leaves_the_park_gating() {
+    // Arrange: a lapsed park over a disabled breaker, its re-test claimed
+    // while a sibling is refused.
+    let mut s = state_with_breaker(Some(0));
+    let t0 = Instant::now();
+    let lapsed = t0 + CREDENTIAL_PARK_BACKSTOP;
+    let retest = client(&mut s, lapsed, parked_at(t0));
+    let sibling = client(&mut s, lapsed, parked_at(t0));
+    assert!(
+        retest.claimed_half_open,
+        "premise: the re-test owns the slot"
+    );
+    assert_eq!(sibling.decision, parked_refusal(t0));
+
+    // Act: the re-test fails without a reason, so the park is not renewed.
+    let debit = s.record_failure_debit(lapsed, LastOutcome::Http5xx, retest.epoch);
+    let next = client(&mut s, lapsed, parked_at(t0));
+    let next_sibling = client(&mut s, lapsed, parked_at(t0));
+
+    // Assert: no breaker opens, and the still-lapsed park admits exactly
+    // one more re-test while refusing its sibling as credential-parked.
+    assert_eq!(
+        debit,
+        FailureDebit {
+            tripped: false,
+            opened: false
+        }
+    );
+    assert_eq!(next.decision, GateDecision::Allow);
+    assert!(next.claimed_half_open, "the next caller is the new re-test");
+    assert_eq!(next_sibling.decision, parked_refusal(t0));
+    assert!(!next_sibling.claimed_half_open);
+}
+
+#[test]
 fn gate_status_reports_the_park_reason_and_time_left() {
     // Arrange
     let s = state_with_breaker(Some(0));

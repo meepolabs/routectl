@@ -9,11 +9,12 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use parking_lot::Mutex;
-use routectl_core::failure_class::LastOutcome;
+use routectl_core::failure_class::{FailureClass, LastOutcome};
 use routectl_core::{ChatChunk, ChatRequest, ChatResponse, Error, Provider, Result};
 use routectl_testkit::{CapturedEvent, with_capture};
 
 use super::super::Router;
+use super::super::outcome_rule::BreakerOutcome;
 use super::{BREAKER_CLOSED, BREAKER_OPENED, BREAKER_PARKED};
 use crate::config::{Config, ProviderEntry, ProviderRuntimePolicy, RetryPolicy};
 use crate::resolved::ResolvedModel;
@@ -191,45 +192,49 @@ enum Step {
 }
 
 #[tokio::test]
-async fn only_a_debit_that_moves_the_circuit_to_open_logs_opened() {
+async fn only_a_debit_that_moves_the_circuit_to_open_reports_and_logs_opened() {
     // A zero cooldown makes an open circuit half-open-ready at once; a
-    // minute keeps it open for the whole row.
-    let rows: [(&str, u64, &[Step], usize); 3] = [
+    // minute keeps it open for the whole row. Each row lists the
+    // `breaker_effect` label of every debit in order.
+    let rows: [(&str, u64, &[Step], &[&str]); 3] = [
         (
             "debits past the threshold on an open circuit",
             60_000,
             &[Step::Debit, Step::Debit, Step::Debit, Step::Debit],
-            1,
+            &["none", "opened", "none", "none"],
         ),
         (
             "failed half-open probe re-trips",
             0,
             &[Step::Debit, Step::Debit, Step::ClaimProbe, Step::Debit],
-            2,
+            &["none", "opened", "opened"],
         ),
         (
             "debit on a lapsed open circuit without a probe claim",
             0,
             &[Step::Debit, Step::Debit, Step::Debit],
-            1,
+            &["none", "opened", "none"],
         ),
     ];
-    for (label, cooldown_ms, steps, want) in rows {
+    for (label, cooldown_ms, steps, want_effects) in rows {
         // Arrange
         let router = router(MODEL, &[], 2, cooldown_ms);
 
         // Act
-        let (tripped, events) = with_capture(async {
-            let mut tripped = Vec::new();
+        let (effects, events) = with_capture(async {
+            let mut effects = Vec::new();
             for step in steps {
                 match step {
                     Step::Debit => {
                         let epoch = router.breaker_epoch_for_tests(MODEL);
-                        tripped.push(router.record_failure_opened(
+                        let (opened, effect) = router.apply_breaker_outcome(
                             MODEL,
-                            LastOutcome::Http5xx,
+                            BreakerOutcome::Debit,
+                            &FailureClass::ServerError,
                             epoch,
-                        ));
+                        );
+                        assert_eq!(opened, effect == "opened", "{label}: {effect}");
+                        effects.push(effect);
                     }
                     Step::ClaimProbe => {
                         let (refusal, mut guard) = router.admit_dispatch(MODEL);
@@ -238,13 +243,15 @@ async fn only_a_debit_that_moves_the_circuit_to_open_logs_opened() {
                     }
                 }
             }
-            tripped
+            effects
         })
         .await;
 
         // Assert
+        assert_eq!(effects, want_effects, "{label}");
         let got = transitions(events);
-        assert_eq!(got.len(), want, "{label}: {got:?} (tripped {tripped:?})");
+        let want_lines = want_effects.iter().filter(|e| **e == "opened").count();
+        assert_eq!(got.len(), want_lines, "{label}: {got:?}");
         for event in &got {
             assert_transition(event, BREAKER_OPENED, label);
         }
