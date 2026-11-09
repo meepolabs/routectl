@@ -190,8 +190,8 @@ version = 5           # config schema version; see "Config schema version"
 [window_gate]         # proactive context-window gate switch
                       # (enabled). Optional; default off.
 
-[calibration]         # learned per-lane token-estimate correction kill
-                      # switch (enabled). Optional; default on.
+[calibration]         # accepted for existing configs (enabled); has no
+                      # effect. The learned correction always applies.
 
 [seat_quota]          # quota-aware seat placement kill switch
                       # (enabled). Optional; default on.
@@ -666,7 +666,7 @@ semantics in the [field-assignment table](#field-assignment-table).
 | `head_keep_messages`           | `[trim]` global                 | usize, default 2; see `[trim]`                                                                    |
 | `keep_recent_messages`         | `[trim]` global                 | usize, default 6; see `[trim]`                                                                    |
 | `enabled`                      | `[window_gate]` global          | bool, default false; master switch for the proactive context-window gate (see `[window_gate]`)    |
-| `enabled`                      | `[calibration]` global          | bool, default true; kill switch for the learned per-lane estimate correction (see `[calibration]`)|
+| `enabled`                      | `[calibration]` global          | bool, default true; accepted and has no effect: the correction always applies (see `[calibration]`)|
 | `enabled`                      | `[seat_quota]` global           | bool, default true; kill switch for quota-aware seat placement (see `[seat_quota]`)               |
 | `enabled`                      | `[capability]` global           | bool, default true; master switch for the learned-capability subsystem (see `[capability]`)       |
 | `decay_hours`                  | `[capability]` global           | u64, default 48; hours a learned negative acts before a re-probe (see `[capability]`)             |
@@ -1991,14 +1991,31 @@ the outcome in `apply_breaker_outcome`
 ## Proactive context-window gate (`[window_gate]`)
 
 Before dispatch, routectl estimates the request's token size and skips
-fallback-chain targets whose catalog context window clearly cannot hold
-it, so an oversized request avoids a doomed round trip on a small-window
+fallback-chain targets whose catalog context window cannot hold it, so an oversized request avoids a doomed round trip on a small-window
 entry. This runs after the capability pre-filter, as the second chain
 filter pass.
 
+A target is skipped when
+
+```text
+estimate + output reserve + 1024 > context window
+```
+
+The context window is the target's catalog `max_context_tokens`, after any
+catalog overlay cell (see `routectl catalog`). It is total context, so the
+upstream sets the output limit aside before any input fits; the output
+reserve accounts for that. It is the request's own `max_tokens` when the
+client sent one, otherwise the target's output ceiling (the catalog
+`max_output_tokens` or `[models.X] max_output_tokens`, the same value
+routectl sends upstream when the client sets none), otherwise 0. The 1024
+tokens are a fixed headroom, not a fraction of the window, so a 1M-window
+target is not held to a smaller effective size than a 200k one: on a 1M
+window with a 64000-token reserve, a request estimated at up to 934976
+tokens is kept.
+
 It is a best-effort filter, not a guarantee. A skip requires a
-CONFIRMED catalog window and a non-final target, and the estimate is
-deliberately margined, so several cases still dispatch: a target whose
+CONFIRMED catalog window and a non-final target, so several cases still
+dispatch: a target whose
 window is unconfirmed, a chain of one, a chain whose every target
 overflows, and any request the estimate undercounts. Each of those falls
 through to the reactive path below.
@@ -2047,10 +2064,8 @@ retaining `context-window` fallback while disabling `bad-request`
 fallback does not, on its own, guarantee an oversized request falls
 over.
 
-**One field deliberately.** The gate's safety margin against estimator
-error (a request is skipped only once the estimate passes a fixed
-fraction of the target's window) is a baked constant, not an operator
-knob. A margin tuned per deployment turns a routing decision into a
+**One field deliberately.** The gate's 1024-token headroom is a baked
+constant, not an operator knob. A margin tuned per deployment turns a routing decision into a
 support surface, and both error directions are already survivable: an
 underestimate misses a skip and costs one round trip, while an
 overestimate is a re-route among confirmed windows rather than a denial.
@@ -2071,8 +2086,9 @@ instead of leaving the gate quietly at its default.
 
 Whether the gate is acting is observable in the log: a throttled
 `window_gate_skip` WARN (at most one line per minute per process) names
-the first skipped target with the estimate, the figure the decision
-actually used, the target's catalog window, and the running skip total.
+the first skipped target with the estimate, the corrected figure the
+decision actually used, the output reserve, the target's catalog window,
+and the running skip total.
 Routectl-internal identifiers and catalog figures only -- never anything
 from the request body.
 
@@ -2108,24 +2124,21 @@ the gate is more willing to skip a small-window target; below 1.0 it
 means the estimator over-counts, so the gate is more willing to admit a
 target it would otherwise have skipped.
 
-The optional `[calibration]` block is the **global** kill switch. A
-missing block keeps the default: the correction enabled.
+The correction always applies. The optional `[calibration]` block and its
+`enabled` key are still accepted so existing configs keep loading, but
+the key has **no effect**: `enabled = false` does not turn the correction
+off.
 
 ```toml
 [calibration]
-# Master switch for applying the learned per-lane correction. Default true.
+# Accepted for existing configs; no effect.
 enabled = true
 ```
 
-- **`enabled`** (bool, default true) -- the master switch. When `false`
-  the context-window gate compares the raw, uncorrected estimate exactly
-  as it did before the correction existed: no lane is looked up and no
-  correction is applied.
-
-**Default on is safe because a cold lane corrects nothing.** A lane
+**Always on is safe because a cold lane corrects nothing.** A lane
 produces no correction until it has accumulated real evidence, so a
-fresh install behaves exactly as it would with the switch off. Every
-refusal collapses to the same uncorrected path: an unseen lane, a lane
+fresh install gates on the raw estimate. Every refusal collapses to the
+same uncorrected path: an unseen lane, a lane
 with too few recent samples, one whose samples are all too old, one
 whose distinct callers are too few, and one whose reduced ratio landed
 outside the sane band. That last case is **refused, not clamped** -- a
@@ -2133,27 +2146,20 @@ ratio that extreme is evidence a lane is mis-keyed or fed garbage, not
 evidence of a genuinely extreme correction, and clamping it to the bound
 would let a mis-keyed lane still move a routing decision.
 
-**Off still collects.** Turning the switch off stops the correction from
-being APPLIED and nothing else. The gate keeps gating on the uncorrected
-estimate (the switch does not disable the gate -- that is
-[`[window_gate]`](#proactive-context-window-gate-window_gate)), routectl
-keeps recording evidence into the per-lane store and keeps persisting
-the estimate/actual pairs to the usage ledger, and the evidence already
-collected is retained. Switching back on therefore applies on the next
-request rather than after a re-learn period. The reverse pairing matters
-too: with `[window_gate] enabled = false` the correction is never
-consulted at all, because the gate returns the chain before it computes
-any estimate -- so turning the gate off already turns the correction off.
+**The gate switch is the operator surface.** With `[window_gate]
+enabled = false` (the default) the correction is never consulted for
+routing, because the gate returns the chain before it computes any
+estimate. routectl keeps recording evidence into the per-lane store and
+persisting the estimate/actual pairs to the usage ledger either way.
 
-**One field deliberately.** The reduction's sample floors (a minimum
-count of recent samples and a minimum count of distinct callers before a
-lane may produce a correction), the age bound past which a sample stops
-counting, and the sane band a reduced ratio must land inside are all
-**baked constants, not operator knobs**. A band tuned per deployment
-turns a routing decision into a support surface, and the fallback in
-every direction is the uncorrected estimate rather than a denial. The
-switch above is the whole operator surface; if a lane's correction
-misbehaves, the answer is off, not retuned.
+**No tuning knobs.** The reduction's sample floors (a minimum count of
+recent samples and a minimum count of distinct callers before a lane may
+produce a correction), the age bound past which a sample stops counting,
+and the sane band a reduced ratio must land inside are all **baked
+constants, not operator knobs**. A band tuned per deployment turns a
+routing decision into a support surface, and the fallback in every
+direction is the uncorrected estimate rather than a denial. If the gate
+misbehaves, the answer is `[window_gate] enabled = false`.
 
 Two properties of the reduction are worth knowing even though neither is
 configurable. It groups samples by caller and takes a median of the
@@ -2166,22 +2172,15 @@ lane store from the usage ledger at startup (bounded to samples young
 enough to still count), while a hot reload carries the live in-memory
 store across instead of re-reading history.
 
-**Hot-reloadable.** `[calibration]` is classified alongside the other
-hot-reloadable sections
-(`crates/routectl-cli/src/config_classify.rs`): the flag is read per
-chain resolution, so a live config swap -- an editor save the daemon's
-file watcher picks up, or a `routectl config set calibration.enabled
-false` -- applies to the next request with no restart and no
-confirmation prompt. The lane store is preserved across that swap. A
+**Across a reload.** The lane store is preserved across a live config
+swap. A
 lane is dropped when no own-credential model of its provider kind sends
 its upstream under the new config: pointing a nickname at a different
 upstream reads that upstream's own (possibly cold) lane, and the old
 upstream's lane goes once nothing serves it. The startup warm applies the
 same rule to ledger rows, whatever nickname recorded them.
 
-An unknown key inside the block fails config load rather than being
-silently ignored, so a typo is reported by `routectl config check`
-instead of leaving the correction quietly at its default.
+An unknown key inside the `[calibration]` block still fails config load.
 
 Whether a correction is moving a decision is observable in the gate's
 own throttled `window_gate_skip` WARN, which reports both the raw

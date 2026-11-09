@@ -1,18 +1,20 @@
-//! Tests for the proactive context-window gate: the margin predicate, the
-//! three never-skip-the-last layers, the unknown-window keep, the kill
+//! Tests for the proactive context-window gate: the reserve-aware skip rule,
+//! the three never-skip-the-last layers, the unknown-window keep, the kill
 //! switch, and the bounded skip WARN.
 //!
 //! Every window in these tests is derived from the fixture request's own
-//! estimate, so the assertions pin the RATIO rather than a byte count the
+//! estimate, so the assertions pin the rule rather than a byte count the
 //! estimator could drift under.
 
 use super::*;
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use routectl_core::{ChatChunk, ChatResponse, Message, MessageContent, Provider, Result, Role};
 
 use crate::catalog::{CatalogRow, EffectiveRow, Source};
+use crate::catalog_overlay::{CatalogOverlay, OverlayCell, OverlaySource};
 use crate::config::Config;
 use crate::resolved::ResolvedModel;
 use crate::router::chain::into_one_dispatch_target;
@@ -51,9 +53,8 @@ fn router(gate_enabled: bool) -> Router {
     router_with(gate_enabled, true)
 }
 
-/// A router with both switches set explicitly. The calibration switch is
-/// separate from the gate's own: turning the correction off must leave the
-/// static gate fully intact.
+/// A router with both switches set explicitly. `[calibration] enabled` is
+/// accepted and has no effect, which the calibration rows below pin.
 fn router_with(gate_enabled: bool, calibration_enabled: bool) -> Router {
     let body = format!(
         "version = 3\n\
@@ -96,19 +97,18 @@ fn estimated_tokens(req: &ChatRequest) -> u64 {
     crate::context_trim::estimate_total_tokens(req)
 }
 
-/// A window the estimate CLEARLY exceeds: half the estimate, so the
-/// estimate is well past 3/4 of it.
+/// A window the estimate CLEARLY exceeds: half the estimate.
 fn clearly_too_small(req: &ChatRequest) -> u32 {
     u32::try_from(estimated_tokens(req) / 2).expect("fixture estimate fits u32")
 }
 
-/// A window just large enough that the estimate sits INSIDE the safety
-/// margin: `estimate <= window * 3 / 4`, by the narrowest slack that
-/// survives integer truncation. The safety fixture -- a gate that skips
-/// this target has lost its margin.
+/// The smallest window that still holds the estimate plus the headroom,
+/// with no output reserve (the fixture request sets no `max_tokens` and the
+/// fixture targets carry no ceiling). A gate that skips this target has
+/// lost its headroom rule.
 fn just_inside_margin(req: &ChatRequest) -> u32 {
     let estimate = estimated_tokens(req);
-    u32::try_from(estimate * 4 / 3 + 4).expect("fixture estimate fits u32")
+    u32::try_from(estimate + HEADROOM_TOKENS).expect("fixture estimate fits u32")
 }
 
 /// A window no plausible margin makes too small: eight times the estimate.
@@ -353,11 +353,76 @@ fn repeated_oversized_requests_warn_once_while_the_counter_tracks_every_skip() {
 }
 
 #[test]
-fn the_margin_predicate_skips_only_past_three_quarters_of_the_window() {
-    assert!(!exceeds_window_margin(0, 1_000));
-    assert!(!exceeds_window_margin(750, 1_000));
-    assert!(exceeds_window_margin(751, 1_000));
-    assert!(exceeds_window_margin(1_000, 1_000));
+fn the_skip_rule_counts_estimate_reserve_and_headroom_against_the_window() {
+    let rows: [(&str, u64, u64, u64, bool); 6] = [
+        (
+            "8k window, no reserve, exactly full",
+            7_168,
+            0,
+            8_192,
+            false,
+        ),
+        ("8k window, no reserve, one over", 7_169, 0, 8_192, true),
+        (
+            "8k window, reserve fills it exactly",
+            3_072,
+            4_096,
+            8_192,
+            false,
+        ),
+        ("8k window, reserve one over", 3_073, 4_096, 8_192, true),
+        (
+            "an estimate at u64::MAX saturates to a skip",
+            u64::MAX,
+            0,
+            8_192,
+            true,
+        ),
+        (
+            "a reserve at u64::MAX saturates to a skip",
+            0,
+            u64::MAX,
+            8_192,
+            true,
+        ),
+    ];
+
+    for (name, estimate, reserve, window, expected) in rows {
+        assert_eq!(
+            exceeds_window(estimate, reserve, window),
+            expected,
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn the_output_reserve_prefers_the_request_then_the_target_ceiling_then_zero() {
+    let rows: [(&str, Option<u32>, u32, u64); 4] = [
+        (
+            "request max_tokens beats the target ceiling",
+            Some(1_000),
+            64_000,
+            1_000,
+        ),
+        ("request max_tokens alone", Some(1_000), 0, 1_000),
+        (
+            "target ceiling when the request sets none",
+            None,
+            64_000,
+            64_000,
+        ),
+        ("both absent reserves nothing", None, 0, 0),
+    ];
+
+    for (name, max_tokens, ceiling, expected) in rows {
+        let mut req = oversized_request();
+        req.max_tokens = max_tokens;
+        let mut target = target_with_window("t", 200_000);
+        target.max_output_tokens = ceiling;
+
+        assert_eq!(output_reserve(&req, &target), expected, "{name}");
+    }
 }
 
 #[test]
@@ -410,16 +475,12 @@ fn feed_lane(router: &Router, upstream: Option<&str>, estimated: u64, actual: u6
     }
 }
 
-/// A window the CORRECTED estimate clearly exceeds while the RAW estimate
-/// sits inside the margin. The one fixture that separates a corrected gate
-/// from the static one: `raw <= w*3/4 < raw*factor`.
+/// A window the CORRECTED estimate exceeds while the RAW estimate fits it.
+/// The one fixture that separates a corrected gate from the static one:
+/// `raw + headroom <= w < raw * factor + headroom`, which holds for any
+/// factor above one since `w` is the smallest window the raw estimate fits.
 fn only_the_corrected_estimate_overflows(req: &ChatRequest) -> u32 {
-    let raw = estimated_tokens(req);
-    // `just_inside_margin` is the largest window the raw estimate still fits;
-    // the corrected estimate is `factor` times larger, so it overflows it as
-    // long as the factor exceeds the 4/3 slack the margin allows.
     just_inside_margin(req)
-        .min(u32::try_from(raw * UNDER_COUNT_PERMILLE / 1_000 * 4 / 3).expect("fits u32"))
 }
 
 /// The gate's verdict on a two-target chain whose FIRST target sits exactly
@@ -547,10 +608,9 @@ fn a_lane_whose_ratio_is_out_of_range_behaves_exactly_as_the_static_gate() {
 }
 
 #[test]
-fn the_calibration_kill_switch_behaves_exactly_as_the_static_gate() {
-    // A lane with evidence that WOULD correct, and the switch off. Proves the
-    // switch stops the correction without touching the gate itself, and that
-    // the evidence is retained rather than discarded.
+fn calibration_enabled_false_still_applies_a_learned_factor() {
+    // The key parses and is ignored: a lane with evidence that corrects moves
+    // the gate exactly as it does with the key absent.
     let router = router_with(true, false);
     let req = oversized_request();
     let raw = estimated_tokens(&req);
@@ -561,13 +621,33 @@ fn the_calibration_kill_switch_behaves_exactly_as_the_static_gate() {
         raw * UNDER_COUNT_PERMILLE / 1_000,
     );
 
+    let (kept, skips) = verdict_on_boundary_chain(&router, &req);
+
+    assert_eq!(kept, vec!["roomy".to_string()]);
+    assert_eq!(skips, 1);
+}
+
+#[test]
+fn a_lane_with_too_few_callers_behaves_exactly_as_the_static_gate() {
+    // Enough fresh samples at the correcting ratio, from only two callers:
+    // the distinct-caller floor refuses the factor.
+    let router = router(true);
+    let req = oversized_request();
+    let raw = estimated_tokens(&req);
+    for i in 0..9 {
+        router.record_calibration_sample(
+            Some(LANE_KIND),
+            Some("boundary"),
+            Some(&format!("caller-{}", i % 2)),
+            raw,
+            raw * UNDER_COUNT_PERMILLE / 1_000,
+            SystemTime::now(),
+        );
+    }
+
     assert_eq!(
         verdict_on_boundary_chain(&router, &req),
         static_gate_verdict()
-    );
-    assert!(
-        !router.calibration_store.is_empty(),
-        "switching the correction off must not discard collected evidence",
     );
 }
 
@@ -674,8 +754,9 @@ fn an_over_counting_lane_admits_a_target_the_static_gate_would_skip() {
     let raw = estimated_tokens(&req);
     // Half the estimate, i.e. a 500-permille factor.
     feed_lane(&router, Some("halved"), raw, raw / 2);
-    // A window the RAW estimate overflows (raw > w*3/4) while the halved one
-    // fits it (raw/2 <= w*3/4): the window equal to the raw estimate.
+    // A window the RAW estimate overflows (raw + headroom > w) while the
+    // halved one fits it (raw/2 + headroom <= w, as raw is far above twice
+    // the headroom): the window equal to the raw estimate.
     let window = u32::try_from(raw).expect("fixture estimate fits u32");
 
     // A target on that window with no lane of its own IS skipped, which is
@@ -744,4 +825,192 @@ fn the_skip_warn_reports_both_the_raw_and_the_corrected_figure() {
         !rendered.contains(REQUEST_BODY_MARKER),
         "no request content may reach the log line; got {rendered}",
     );
+}
+
+// ---------------------------------------------------------------------------
+// Reserve-aware boundary on real window sizes, set through the catalog
+// overlay the daemon stamps resolved models with.
+// ---------------------------------------------------------------------------
+
+/// The output ceiling Anthropic-shape lanes commonly carry.
+const CEILING_64K: u32 = 64_000;
+
+/// A request whose estimate is exactly `tokens`. Built by measuring the
+/// serialized overhead of an empty message and padding with ASCII, which
+/// serializes byte for byte, so the size is exact rather than approximate.
+fn request_with_estimate(tokens: u64, max_tokens: Option<u32>) -> ChatRequest {
+    let with_text = |text: String| ChatRequest {
+        model: "alias".into(),
+        max_tokens,
+        messages: vec![Message {
+            refusal: None,
+            role: Role::User,
+            content: MessageContent::Text(text),
+            reasoning: None,
+            reasoning_details: vec![],
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        }]
+        .into(),
+        ..Default::default()
+    };
+    let overhead = serde_json::to_string(&with_text(String::new()))
+        .expect("request serializes")
+        .len();
+    let wanted = usize::try_from(tokens * 4).expect("fixture size fits usize");
+    let req = with_text("x".repeat(wanted - overhead));
+    assert_eq!(estimated_tokens(&req), tokens, "fixture estimate is exact");
+    req
+}
+
+/// A target named `nickname` whose context window and output ceiling come
+/// from a catalog overlay cell, resolved the way the daemon resolves them.
+fn overlay_target(nickname: &str, window: u32, ceiling: Option<u32>) -> DispatchTarget {
+    let config: Config = toml::from_str(&format!(
+        "version = 3\n\
+         [providers.p]\n\
+         kind = \"openai-compat\"\n\
+         base_url = \"https://x\"\n\
+         api_key_ref = \"literal:k\"\n\
+         [models.{nickname}]\n\
+         provider = \"p\"\n\
+         upstream = \"{nickname}\"\n"
+    ))
+    .expect("config parses");
+    let mut overlay = CatalogOverlay::default();
+    overlay.cells.insert(
+        format!("openai-compat:{nickname}"),
+        Some(OverlayCell {
+            source: OverlaySource::User,
+            verified_at: "2026-01-01".to_string(),
+            wm: None,
+            rm: None,
+            ttl_seconds: None,
+            min_prefix_tokens: None,
+            max_context_tokens: Some(window),
+            max_output_tokens: ceiling,
+            input_cost_per_token: None,
+            output_cost_per_token: None,
+            capabilities: None,
+        }),
+    );
+    let provider: Arc<dyn Provider> = Arc::new(StubProvider);
+    let model = ResolvedModel::new(nickname, "p", provider, nickname);
+    let mut models = crate::factory::apply_catalog_overlay(
+        BTreeMap::from([(nickname.to_string(), Arc::new(model))]),
+        &config,
+        &overlay,
+    );
+    let model = models.remove(nickname).expect("model stamped");
+    assert_eq!(model.context_window_tokens(), Some(window));
+    into_one_dispatch_target(model)
+}
+
+struct BoundaryRow {
+    name: &'static str,
+    window: u32,
+    ceiling: Option<u32>,
+    max_tokens: Option<u32>,
+    input_tokens: u64,
+    kept: bool,
+}
+
+#[test]
+fn the_gate_keeps_a_target_exactly_at_input_plus_reserve_plus_headroom() {
+    const W200K: u32 = 200_000;
+    const W1M: u32 = 1_000_000;
+    let at = |window: u32, reserve: u32| u64::from(window - reserve) - HEADROOM_TOKENS;
+    let rows = [
+        BoundaryRow {
+            name: "200k, target ceiling reserve, exactly full",
+            window: W200K,
+            ceiling: Some(CEILING_64K),
+            max_tokens: None,
+            input_tokens: at(W200K, CEILING_64K),
+            kept: true,
+        },
+        BoundaryRow {
+            name: "200k, target ceiling reserve, one over",
+            window: W200K,
+            ceiling: Some(CEILING_64K),
+            max_tokens: None,
+            input_tokens: at(W200K, CEILING_64K) + 1,
+            kept: false,
+        },
+        BoundaryRow {
+            name: "1M, target ceiling reserve, exactly full",
+            window: W1M,
+            ceiling: Some(CEILING_64K),
+            max_tokens: None,
+            input_tokens: at(W1M, CEILING_64K),
+            kept: true,
+        },
+        BoundaryRow {
+            name: "1M, target ceiling reserve, one over",
+            window: W1M,
+            ceiling: Some(CEILING_64K),
+            max_tokens: None,
+            input_tokens: at(W1M, CEILING_64K) + 1,
+            kept: false,
+        },
+        BoundaryRow {
+            name: "1M, 900k input with a 64k reserve fits",
+            window: W1M,
+            ceiling: Some(CEILING_64K),
+            max_tokens: None,
+            input_tokens: 900_000,
+            kept: true,
+        },
+        BoundaryRow {
+            name: "200k, request max_tokens beats a larger target ceiling, exactly full",
+            window: W200K,
+            ceiling: Some(128_000),
+            max_tokens: Some(CEILING_64K),
+            input_tokens: at(W200K, CEILING_64K),
+            kept: true,
+        },
+        BoundaryRow {
+            name: "200k, request max_tokens beats a larger target ceiling, one over",
+            window: W200K,
+            ceiling: Some(128_000),
+            max_tokens: Some(CEILING_64K),
+            input_tokens: at(W200K, CEILING_64K) + 1,
+            kept: false,
+        },
+        BoundaryRow {
+            name: "200k, no max_tokens and no ceiling reserves nothing, exactly full",
+            window: W200K,
+            ceiling: None,
+            max_tokens: None,
+            input_tokens: at(W200K, 0),
+            kept: true,
+        },
+        BoundaryRow {
+            name: "200k, no max_tokens and no ceiling reserves nothing, one over",
+            window: W200K,
+            ceiling: None,
+            max_tokens: None,
+            input_tokens: at(W200K, 0) + 1,
+            kept: false,
+        },
+    ];
+
+    for row in rows {
+        let router = router(true);
+        let req = request_with_estimate(row.input_tokens, row.max_tokens);
+        let chain = vec![
+            overlay_target("windowed", row.window, row.ceiling),
+            target_without_window("unconfirmed"),
+        ];
+
+        let kept = router.filter_chain_by_window(chain, &req);
+
+        let expected = if row.kept {
+            vec!["windowed", "unconfirmed"]
+        } else {
+            vec!["unconfirmed"]
+        };
+        assert_eq!(nicknames(&kept), expected, "{}", row.name);
+    }
 }

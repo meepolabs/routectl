@@ -175,12 +175,9 @@ pub struct Config {
     #[serde(default)]
     pub window_gate: WindowGateConfig,
 
-    /// Operator-facing `[calibration]` block. Kill switch for the learned
-    /// per-lane correction of the router's token estimate. A missing block
-    /// leaves the correction enabled; setting `enabled = false` makes the
-    /// context-window gate read the uncorrected estimate exactly as it did
-    /// before the correction existed, while retaining the evidence already
-    /// collected. Hot-reloadable -- the flag is read per chain resolution.
+    /// Operator-facing `[calibration]` block. Accepted so existing configs
+    /// keep loading; it has no effect. The learned per-lane correction of
+    /// the router's token estimate always applies.
     #[serde(default)]
     pub calibration: CalibrationConfig,
 

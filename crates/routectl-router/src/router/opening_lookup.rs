@@ -102,9 +102,9 @@ impl Router {
     /// correction. `upstream` is the wire id, [`OpeningLane::upstream_model`]
     /// for an opening lookup.
     ///
-    /// The same lookup and the same `[calibration]` kill switch the window
-    /// gate applies: disabled, cold, thin, stale and out-of-band all answer
-    /// `None`. The corrected value is returned only; it is never recorded.
+    /// The same lookup the window gate applies: cold, thin, stale and
+    /// out-of-band all answer `None`. The corrected value is returned only;
+    /// it is never recorded.
     #[must_use]
     pub fn calibrated_estimate(
         &self,
@@ -116,18 +116,17 @@ impl Router {
             .map(|factor| factor.apply(raw_tokens))
     }
 
-    /// The learned correction for one lane, behind the `[calibration]` kill
-    /// switch. The one factor lookup both the window gate and
-    /// [`Self::calibrated_estimate`] go through.
+    /// The learned correction for one lane. The one factor lookup both the
+    /// window gate and [`Self::calibrated_estimate`] go through.
+    ///
+    /// `[calibration] enabled` is not read: the correction always applies,
+    /// and the key is accepted only so existing configs keep loading.
     pub(super) fn lane_calibration_factor(
         &self,
         provider_kind: &str,
         upstream: &str,
         now: SystemTime,
     ) -> Option<Factor> {
-        if !self.config.calibration.enabled {
-            return None;
-        }
         let key = LaneKey {
             provider_kind: provider_kind.to_string(),
             upstream: upstream.to_string(),

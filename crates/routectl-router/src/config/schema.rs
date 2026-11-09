@@ -344,31 +344,19 @@ impl Default for WindowGateConfig {
     }
 }
 
-/// Operator-facing `[calibration]` config block. Kill switch for the
-/// learned per-lane correction of the router's token estimate. A missing
-/// `[calibration]` table deserializes to `CalibrationConfig::default()`
-/// (enabled), so an existing config needs no migration.
+/// Operator-facing `[calibration]` config block. Accepted so existing
+/// configs keep loading; it has no effect.
 ///
-/// Default ON is safe because a lane produces no correction until it has
-/// accumulated real evidence: a fresh install behaves exactly as it would
-/// with the switch off, and every refusal path (thin evidence, stale
-/// evidence, an out-of-band reduced ratio) falls back to the uncorrected
-/// estimate.
-///
-/// Off stops the correction from being APPLIED and nothing else. The static
-/// context-window gate keeps gating on the uncorrected estimate, and the
-/// collected evidence is retained, so switching back on is instant rather
-/// than a re-learn.
-///
-/// One field deliberately, following `WindowGateConfig`: the reduction's
-/// sample floors and sane band are baked constants, not operator knobs,
-/// because a per-deployment band turns a routing decision into a support
-/// surface.
+/// The learned per-lane correction of the router's token estimate always
+/// applies. A lane produces no correction until it has accumulated real
+/// evidence, and every refusal path (thin evidence, stale evidence, an
+/// out-of-band reduced ratio) falls back to the uncorrected estimate, so
+/// there is nothing for a switch to protect.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct CalibrationConfig {
-    /// Master switch for applying the learned correction. Default on.
+    /// No effect. Parsed and kept only so a config that sets it still loads.
     #[serde(default = "default_true")]
     pub enabled: bool,
 }
@@ -397,10 +385,10 @@ impl Default for CalibrationConfig {
 /// the same chooser with no quota placement compiled in: no quota state is
 /// read, no cap orders a pick, no quota placement diagnostic is emitted, and
 /// the dispatchability filter, the breaker health preference, the RPM headroom
-/// ranking and the anti-herd tiebreak all decide exactly as before. Following
-/// `CalibrationConfig`, off does NOT stop collecting or aging readings, so
-/// switching back on is instant rather than a re-observe. Universal affinity
-/// is unaffected in both positions: every pin is preserved and a one-time
+/// ranking and the anti-herd tiebreak all decide exactly as before. Off does
+/// NOT stop collecting or aging readings, so switching back on is instant
+/// rather than a re-observe. Universal affinity is unaffected in both
+/// positions: every pin is preserved and a one-time
 /// migration off an unhealthy seat still happens, because a wrong placement
 /// algorithm must never cost the warm-cache benefit pinning exists for.
 ///

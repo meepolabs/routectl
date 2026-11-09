@@ -21,35 +21,20 @@ use crate::calibration::Factor;
 
 use super::{DispatchTarget, Router};
 
-/// Numerator of the safety margin the estimate must exceed before a target
-/// is skipped.
-const WINDOW_MARGIN_NUMERATOR: u64 = 3;
-
-/// Denominator of the safety margin. Together with the numerator: skip only
-/// past 3/4 of the window.
+/// Fixed slack, in tokens, added on top of the estimate and the output
+/// reserve before a target counts as too small.
 ///
-/// An INTEGER ratio, deliberately: a routing decision must not hinge on a
-/// float comparison.
-///
-/// Lowering the ratio is what guards the estimator's DEFLATE direction: a
-/// byte-length estimate deflates by roughly 1.3-1.5x on high-entropy prose,
-/// and 3/4 covers a deflate factor up to 4/3. The 1.5x tail is deliberately
-/// left to the reactive backstop. Both error directions are survivable, and
-/// they cost differently: an underestimate MISSES a skip, costing one doomed
-/// round trip before the request falls onward; an overestimate makes a FALSE
-/// skip, which among confirmed windows is a re-route rather than a denial,
-/// because one estimate is compared against every window, so every surviving
-/// confirmed-window target is strictly larger and therefore also fits.
-///
-/// 3/4 is not slack. The catalog window is TOTAL context, while the output
-/// reserve on Anthropic-shape lanes (up to 64k by default) is subtracted from
-/// it before any input fits, so the effective INPUT ceiling is lower than the
-/// window -- on a 200k-class lane it lands near 0.68 of it, under the
-/// fraction at which this margin skips.
+/// Absolute rather than a fraction of the window, deliberately: a fractional
+/// margin sized for a 200k window reserves hundreds of thousands of tokens on
+/// a 1M window and skips targets that hold the request comfortably. 1024 is
+/// small enough not to decide a skip on its own even on an 8k window. The
+/// estimator's remaining error is left to the reactive `context-window`
+/// backstop, where a miss costs one round trip before the request falls
+/// onward.
 ///
 /// Not an operator knob: a margin tuned per deployment turns a routing
 /// decision into a support surface.
-const WINDOW_MARGIN_DENOMINATOR: u64 = 4;
+const HEADROOM_TOKENS: u64 = 1_024;
 
 /// Minimum seconds between two skip WARNs in one process. A broken or
 /// hostile client sending repeated oversized input must not turn correct
@@ -57,15 +42,30 @@ const WINDOW_MARGIN_DENOMINATOR: u64 = 4;
 /// regardless.
 const SKIP_WARN_INTERVAL_SECS: u64 = 60;
 
-/// Whether `estimate` clears the safety margin of `window` -- that is,
-/// whether this target is CLEARLY too small for the request.
+/// Whether a target with `window` tokens of total context is too small for
+/// `estimate` input tokens plus `reserve` output tokens plus
+/// [`HEADROOM_TOKENS`].
 ///
-/// The one decision site for the margin, with one caller. A later per-lane
-/// correction changes this signature and nothing else.
-const fn exceeds_window_margin(estimate: u64, window: u64) -> bool {
-    // `window` is promoted from a `u32` catalog field, so the product with
-    // the numerator cannot overflow `u64`.
-    estimate > window * WINDOW_MARGIN_NUMERATOR / WINDOW_MARGIN_DENOMINATOR
+/// The one decision site for the margin. Integer arithmetic throughout, so a
+/// routing decision never hinges on a float comparison; saturating, so a
+/// corrected estimate near `u64::MAX` reads as too large rather than wrapping.
+const fn exceeds_window(estimate: u64, reserve: u64, window: u64) -> bool {
+    estimate
+        .saturating_add(reserve)
+        .saturating_add(HEADROOM_TOKENS)
+        > window
+}
+
+/// The output tokens the target's context window must leave room for: the
+/// request's own `max_tokens`, else the target's resolved output ceiling
+/// (the value request shaping sends when the client sets none), else `0`
+/// when neither is known.
+///
+/// The catalog window is TOTAL context, so the upstream reserves the output
+/// limit from it before any input fits.
+fn output_reserve(req: &ChatRequest, target: &DispatchTarget) -> u64 {
+    req.max_tokens
+        .map_or(u64::from(target.max_output_tokens), u64::from)
 }
 
 /// Epoch-second stamp of the last emitted skip WARN.
@@ -120,15 +120,16 @@ struct SkipReport {
     nickname: String,
     window: u64,
     corrected_tokens: u64,
+    reserve_tokens: u64,
 }
 
 impl Router {
     /// The learned per-lane correction to apply to this target's estimate,
     /// or `None` to compare the raw estimate exactly as the static gate does.
     ///
-    /// Every refusal collapses here: the kill switch, a target that forms no
-    /// lane (no provider kind), an unseen lane, one with too little or too
-    /// old evidence, and one whose reduced ratio fell outside the sane band.
+    /// Every refusal collapses here: a target that forms no lane (no
+    /// provider kind), an unseen lane, one with too little or too old
+    /// evidence, and one whose reduced ratio fell outside the sane band.
     /// One `None`, so there is one fallback path.
     ///
     /// The lane's model dimension is the wire upstream through
@@ -149,8 +150,8 @@ impl Router {
         self.lane_calibration_factor(target.provider_kind?, upstream, now)
     }
 
-    /// Skip chain targets whose context window clearly cannot hold the
-    /// estimated request, keyed on the shipped safety margin.
+    /// Skip chain targets whose context window cannot hold the estimated
+    /// request plus its output reserve plus [`HEADROOM_TOKENS`].
     ///
     /// Never returns an empty chain and never returns an error: a chain of
     /// one is returned untouched before any estimate is computed, a target
@@ -212,7 +213,8 @@ impl Router {
                 .calibration_factor(target, &req.model, now)
                 .map_or(estimated_tokens, |factor| factor.apply(estimated_tokens));
             let window = u64::from(window);
-            if !exceeds_window_margin(corrected_tokens, window) {
+            let reserve_tokens = output_reserve(req, target);
+            if !exceeds_window(corrected_tokens, reserve_tokens, window) {
                 continue;
             }
             overflowing[idx] = true;
@@ -222,6 +224,7 @@ impl Router {
                     nickname: target.nickname.clone().unwrap_or_default(),
                     window,
                     corrected_tokens,
+                    reserve_tokens,
                 });
             }
         }
@@ -259,6 +262,7 @@ impl Router {
                 model = %routectl_core::sanitize_for_log(&report.nickname),
                 estimated_tokens,
                 corrected_tokens = report.corrected_tokens,
+                reserve_tokens = report.reserve_tokens,
                 window_tokens = report.window,
                 skips_total,
                 "target context window cannot hold the estimated request; \

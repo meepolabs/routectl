@@ -404,15 +404,14 @@ fn a_stale_lane_has_no_calibrated_estimate() {
 }
 
 #[test]
-fn the_calibration_kill_switch_disables_the_estimate_and_keeps_the_evidence() {
+fn calibration_enabled_false_still_corrects_the_estimate() {
     let router = install_standalone(standalone_config(false));
     feed_lane(&router, OPENAI_KIND, "glm-4.6", SystemTime::now());
 
     assert_eq!(
         router.calibrated_estimate(OPENAI_KIND, "glm-4.6", 10_000),
-        None
+        Some(20_000)
     );
-    assert_eq!(retained_samples(&router), 9);
 }
 
 #[test]
