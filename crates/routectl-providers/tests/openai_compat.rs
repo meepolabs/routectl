@@ -664,6 +664,91 @@ async fn raw_think_tag_stream_cut_flushes_pending_before_the_error() {
     assert_ends_with_one_missing_terminal(&items);
 }
 
+/// A loopback upstream that answers one request with a 200 SSE head whose
+/// `Content-Length` promises more than `partial_body`, writes the body, then
+/// closes: the client sees the event, then a transport error on the body.
+async fn upstream_cut_after(partial_body: &'static str) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback");
+    let base = format!("http://{}", listener.local_addr().expect("local addr"));
+    tokio::spawn(async move {
+        let Ok((mut socket, _)) = listener.accept().await else {
+            return;
+        };
+        let mut request = Vec::new();
+        let mut buf = [0_u8; 4096];
+        while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+            match socket.read(&mut buf).await {
+                Ok(0) | Err(_) => return,
+                Ok(n) => request.extend_from_slice(&buf[..n]),
+            }
+        }
+        let head = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\r\n",
+            partial_body.len() + 4096
+        );
+        let _ = socket.write_all(head.as_bytes()).await;
+        let _ = socket.write_all(partial_body.as_bytes()).await;
+        let _ = socket.flush().await;
+        drop(socket);
+    });
+    base
+}
+
+/// RawThinkTag bytes held back as a possible `</think>` prefix reach the
+/// client before the transport error that cuts the stream mid-reasoning.
+#[tokio::test]
+async fn transport_error_flushes_held_think_bytes_first() {
+    // Arrange: "abc" is reasoning; the trailing "</th" is held as a
+    // possible closing tag when the connection drops.
+    let base = upstream_cut_after(
+        "data: {\"id\":\"t1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"<think>abc</th\"},\"finish_reason\":null}]}\n\n",
+    )
+    .await;
+    let provider = make_provider(&base, ReasoningDialect::RawThinkTag);
+
+    // Act
+    let items: Vec<_> = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        provider
+            .stream(user_request("m"))
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await
+    })
+    .await
+    .expect("the cut stream settles within the bound");
+
+    // Assert
+    assert_eq!(items.len(), 3, "items: {items:?}");
+    let delta = |i: usize| {
+        items[i]
+            .as_ref()
+            .ok()
+            .and_then(|c| c.choices.first())
+            .map(|choice| choice.delta.clone())
+    };
+    assert_eq!(
+        delta(0).and_then(|d| d.reasoning).as_deref(),
+        Some("abc"),
+        "the reasoning chunk comes first"
+    );
+    assert_eq!(
+        delta(1).and_then(|d| d.content).as_deref(),
+        Some("</th"),
+        "the held bytes come before the error"
+    );
+    match &items[2] {
+        Err(routectl_core::Error::Streaming(msg)) => {
+            assert!(msg.contains("SSE error"), "transport error, got {msg:?}");
+        }
+        other => panic!("expected the transport error last, got {other:?}"),
+    }
+}
+
 /// Pin: for `n > 1` the streaming stop-sequence heuristic must track
 /// per-choice content, not one shared buffer. Choice 0 streams `fooEND`
 /// (ends with the configured stop -> matches); choice 1 streams `bar`

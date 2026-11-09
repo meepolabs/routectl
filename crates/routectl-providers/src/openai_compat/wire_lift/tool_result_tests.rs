@@ -80,6 +80,39 @@ fn multiple_tool_results_split_into_multiple_messages() {
     assert_eq!(msgs[1]["tool_call_id"], "t2");
 }
 
+/// A user chunk split out around a tool_result is a plain user message: it
+/// keeps the template's `role` and `name` and its own content, never the
+/// template's other keys. Both chunks (before and after the result) are
+/// checked.
+#[test]
+fn split_user_chunks_copy_only_role_and_name() {
+    // Arrange
+    let messages = json!([
+        {"role": "user", "name": "alice", "tool_call_id": "stray",
+         "reasoning_details": [{"type": "reasoning.text", "text": "x"}],
+         "refusal": "no",
+         "content": [
+            {"type": "text", "text": "before"},
+            {"type": "tool_result", "tool_use_id": "t1", "content": "r"},
+            {"type": "text", "text": "after"}
+        ]}
+    ]);
+
+    // Act
+    let obj = run(messages);
+
+    // Assert
+    let msgs = obj["messages"].as_array().unwrap();
+    assert_eq!(roles(&obj), ["user", "tool", "user"]);
+    for (index, text) in [(0, "before"), (2, "after")] {
+        assert_eq!(
+            msgs[index],
+            json!({"role": "user", "name": "alice", "content": text}),
+            "chunk {index}"
+        );
+    }
+}
+
 #[test]
 fn mixed_text_and_tool_result_splits_into_user_then_tool() {
     // Arrange

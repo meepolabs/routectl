@@ -627,6 +627,9 @@ impl Provider for OpenAiCompatProvider {
                 let event = match event_result {
                     Ok(e) => e,
                     Err(e) => {
+                        if let Some(flushed) = take_think_flush(dialect, &mut think_acc) {
+                            yield Ok(flushed);
+                        }
                         yield Err(Error::Streaming(format!(
                             "provider `{provider_id}`: SSE error: {e}"
                         )));
@@ -844,8 +847,9 @@ const fn mantle_auth_mode(creds: &crate::bedrock::auth::ResolvedCreds) -> &'stat
 
 /// Drain the RawThinkTag accumulator's held-back bytes (a possible
 /// `<think>` prefix) as a visible content chunk. The bytes belong to
-/// events already accepted, so an end of stream (`[DONE]`, EOF, or an
-/// unusable event) emits them before anything that follows.
+/// events already accepted, so an end of stream (`[DONE]`, EOF, a
+/// transport error, or an unusable event) emits them before anything that
+/// follows.
 fn take_think_flush(dialect: ReasoningDialect, acc: &mut ThinkTagAccumulator) -> Option<ChatChunk> {
     if dialect != ReasoningDialect::RawThinkTag {
         return None;

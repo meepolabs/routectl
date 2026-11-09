@@ -11,7 +11,7 @@
 
 use serde_json::Value;
 
-use routectl_core::{ChatResponse, Error, Message, MessageContent, Result, Usage};
+use routectl_core::{ChatResponse, Error, Message, MessageContent, Result, UpstreamMeta, Usage};
 
 use super::dialect::ReasoningDialect;
 
@@ -69,6 +69,7 @@ pub fn normalize(id: &str, raw: Value, dialect: ReasoningDialect) -> Result<Chat
     } else {
         Vec::new()
     };
+    carry_system_fingerprint(&mut resp);
     let dropped_envelope_keys = strip_envelope_extras(&mut resp.extras);
 
     // Surface a single DEBUG line per normalize call when at least one
@@ -147,6 +148,25 @@ pub(crate) fn lift_and_strip_usage_extras(usage: &mut Usage) -> Vec<&'static str
 /// `context_management`, `container`, ...) and any unknown forward-
 /// compat keys stay intact. Returns the list of keys actually
 /// removed so `normalize` can audit-log the strip.
+/// Lift a non-empty upstream `system_fingerprint` out of `extras` onto the
+/// transport-internal meta, where an OpenAI-shape ingress reads it, before
+/// the envelope strip removes the key from canonical.
+fn carry_system_fingerprint(resp: &mut ChatResponse) {
+    let Some(fp) = resp
+        .extras
+        .get("system_fingerprint")
+        .and_then(Value::as_str)
+        .filter(|fp| !fp.is_empty())
+    else {
+        return;
+    };
+    let carrier = UpstreamMeta::from_system_fingerprint(fp.to_string());
+    resp.upstream_meta = Some(match resp.upstream_meta.take() {
+        Some(meta) => meta.merge(carrier),
+        None => carrier,
+    });
+}
+
 fn strip_envelope_extras(extras: &mut serde_json::Map<String, Value>) -> Vec<&'static str> {
     let mut dropped: Vec<&'static str> = Vec::new();
     for k in OPENAI_COMPAT_ENVELOPE_KEYS {
@@ -521,6 +541,34 @@ mod tests {
         );
         assert!(!resp.extras.contains_key("system_fingerprint"));
         assert!(!resp.extras.contains_key("cost"));
+    }
+
+    /// The stripped upstream `system_fingerprint` rides the transport-internal
+    /// meta so an OpenAI-shape ingress can echo it; an absent, null or empty
+    /// value leaves the meta empty.
+    #[test]
+    fn system_fingerprint_moves_onto_upstream_meta() {
+        let rows: [(&str, Value, Option<&str>); 4] = [
+            ("string", json!("fp_x"), Some("fp_x")),
+            ("null", Value::Null, None),
+            ("empty", json!(""), None),
+            ("non-string", json!(7), None),
+        ];
+        for (name, fp, expected) in rows {
+            let mut raw = fake_response("hi");
+            raw["system_fingerprint"] = fp;
+
+            let resp = normalize("test", raw, ReasoningDialect::OpenAi).unwrap();
+
+            assert_eq!(
+                resp.upstream_meta
+                    .as_ref()
+                    .and_then(UpstreamMeta::system_fingerprint),
+                expected,
+                "{name}"
+            );
+            assert!(!resp.extras.contains_key("system_fingerprint"), "{name}");
+        }
     }
 
     /// `service_tier` is an Anthropic-spec response field shipped on

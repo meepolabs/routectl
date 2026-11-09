@@ -371,8 +371,13 @@ fn render_openai_response_value(resp: ChatResponse, edits: &mut ResponseEdits) -
     // the Anthropic ingress renders through its own module and keeps the
     // raw stop_reason claude-code depends on.
     let resp = normalize_finish_reason_in_response(resp, edits);
+    let upstream_fingerprint = resp
+        .upstream_meta
+        .as_ref()
+        .and_then(|meta| meta.system_fingerprint().map(str::to_string));
     let mut value = serde_json::to_value(&resp)
         .map_err(|e| Error::Internal(format!("openai ingress: serialize response: {e}")))?;
+    echo_upstream_system_fingerprint(&mut value, upstream_fingerprint);
     // Surface Anthropic/Bedrock cache-read counts under the standard
     // OpenAI `usage.prompt_tokens_details.cached_tokens` field so an
     // OpenAI-shape cost tracker sees them. Canonical emits them only
@@ -441,11 +446,21 @@ fn ensure_created(obj: &mut Map<String, Value>) {
     }
 }
 
+/// Put the upstream `system_fingerprint` the egress carried on the
+/// transport-internal meta back on the serialized body. It is the
+/// upstream's own value, so the envelope stamp that follows sees it as
+/// already present and declares nothing for it.
+fn echo_upstream_system_fingerprint(value: &mut Value, fingerprint: Option<String>) {
+    if let (Some(obj), Some(fp)) = (value.as_object_mut(), fingerprint) {
+        obj.entry("system_fingerprint").or_insert(Value::from(fp));
+    }
+}
+
 /// Stamp the OpenAI Chat-Completions envelope onto a serialized
 /// `ChatResponse` body: `object:"chat.completion"`, a non-empty `id`, a
-/// non-zero `created`, and a `system_fingerprint` (mirrored from the
-/// upstream value when it rode through `extras`, else explicit `null` so
-/// the key a strict SDK reads is always present).
+/// non-zero `created`, and a `system_fingerprint` (kept when the upstream
+/// value is already on the body, else explicit `null` so the key a strict
+/// SDK reads is always present).
 fn apply_openai_response_envelope(value: &mut Value, edits: &mut ResponseEdits) {
     let Some(obj) = value.as_object_mut() else {
         return;
@@ -478,7 +493,11 @@ const RESPONSE_ENVELOPE_MEMBERS: [(&str, &str); 4] = [
 /// The members the streaming envelope stamp writes on every chunk. `object`,
 /// `id` and `created` replace whatever the upstream sent there;
 /// `system_fingerprint` echoes the upstream value when one was carried.
-const STREAM_ENVELOPE_PATHS: [&str; 4] = ["/object", "/id", "/created", "/system_fingerprint"];
+const STREAM_ENVELOPE_PATHS: [&str; 4] = ["/object", "/id", "/created", STREAM_FINGERPRINT_PATH];
+
+/// The stream envelope member that echoes a held upstream value: it is an
+/// added member only while no upstream value is held.
+const STREAM_FINGERPRINT_PATH: &str = "/system_fingerprint";
 
 /// Stamp the OpenAI streaming envelope onto a serialized `ChatChunk` body:
 /// `object:"chat.completion.chunk"`, a stream-stable `id`, a stream-stable
@@ -497,8 +516,11 @@ fn apply_openai_chunk_envelope(
     let Some(obj) = value.as_object_mut() else {
         return;
     };
+    let holds_upstream_fingerprint = state.system_fingerprint.is_some();
     for path in STREAM_ENVELOPE_PATHS {
-        edits.declare(EditSite::StreamEnvelopeStamp, path, EditKind::Add);
+        if !(holds_upstream_fingerprint && path == STREAM_FINGERPRINT_PATH) {
+            edits.declare(EditSite::StreamEnvelopeStamp, path, EditKind::Add);
+        }
         edits.declare(EditSite::StreamEnvelopeStamp, path, EditKind::Rewrite);
     }
     obj.insert("object".into(), Value::from("chat.completion.chunk"));
@@ -2000,6 +2022,131 @@ mod tests {
 
         // Assert
         assert_eq!(v["system_fingerprint"], "fp_abc123");
+    }
+
+    fn declares(edits: &ResponseEdits, site: EditSite, path: &str, kind: EditKind) -> bool {
+        edits
+            .as_slice()
+            .iter()
+            .any(|e| e.site() == site && e.path() == path && e.kind() == kind)
+    }
+
+    /// The complete render echoes the upstream `system_fingerprint` the
+    /// egress carried on the meta and declares no envelope Add for it;
+    /// without one the stamped `null` is declared as an Add.
+    #[test]
+    fn complete_render_echoes_upstream_system_fingerprint_from_carrier() {
+        let rows: [(&str, Option<UpstreamMeta>, Value, bool); 2] = [
+            (
+                "upstream value held",
+                Some(UpstreamMeta::from_system_fingerprint("fp_x".into())),
+                json!("fp_x"),
+                false,
+            ),
+            ("no upstream value", None, Value::Null, true),
+        ];
+        for (name, meta, expected, declares_add) in rows {
+            // Arrange
+            let resp = ChatResponse {
+                id: "chatcmpl-1".into(),
+                model: "gpt-4o".into(),
+                created: 1_700_000_000,
+                choices: vec![],
+                usage: None,
+                routectl_provider: None,
+                extras: Default::default(),
+                upstream_meta: meta,
+            };
+            let mut edits = ResponseEdits::recording();
+
+            // Act
+            let v = render_openai_response_value(resp, &mut edits).unwrap();
+
+            // Assert
+            assert_eq!(v["system_fingerprint"], expected, "{name}");
+            assert_eq!(
+                declares(
+                    &edits,
+                    EditSite::ResponseEnvelopeStamp,
+                    "/system_fingerprint",
+                    EditKind::Add
+                ),
+                declares_add,
+                "{name}: {:?}",
+                edits.as_slice()
+            );
+            assert!(
+                declares(
+                    &edits,
+                    EditSite::ResponseEnvelopeStamp,
+                    "/object",
+                    EditKind::Add
+                ),
+                "{name}: positive control, the object stamp is declared"
+            );
+        }
+    }
+
+    /// The stream declares the `/system_fingerprint` Add only while no
+    /// upstream value is held; the Rewrite and the other members stay
+    /// declared either way.
+    #[test]
+    fn stream_declares_fingerprint_add_only_when_none_held() {
+        let rows: [(&str, Option<UpstreamMeta>, bool); 2] = [
+            (
+                "upstream value held",
+                Some(UpstreamMeta::from_system_fingerprint("fp_x".into())),
+                false,
+            ),
+            ("no upstream value", None, true),
+        ];
+        for (name, meta, declares_add) in rows {
+            // Arrange
+            let mut state = OpenAiIngress.new_stream_state(&StreamRequestContext::default());
+            let mut first = ResponseEdits::recording();
+            let mut later = ResponseEdits::recording();
+
+            // Act
+            OpenAiIngress
+                .render_chunk_declared(stream_chunk(None, meta), state.as_mut(), &mut first)
+                .unwrap();
+            OpenAiIngress
+                .render_chunk_declared(stream_chunk(None, None), state.as_mut(), &mut later)
+                .unwrap();
+
+            // Assert
+            for (chunk, edits) in [("first", &first), ("later", &later)] {
+                assert_eq!(
+                    declares(
+                        edits,
+                        EditSite::StreamEnvelopeStamp,
+                        "/system_fingerprint",
+                        EditKind::Add
+                    ),
+                    declares_add,
+                    "{name}, {chunk} chunk: {:?}",
+                    edits.as_slice()
+                );
+                assert!(
+                    declares(
+                        edits,
+                        EditSite::StreamEnvelopeStamp,
+                        "/system_fingerprint",
+                        EditKind::Rewrite
+                    ),
+                    "{name}, {chunk} chunk"
+                );
+                assert!(
+                    declares(
+                        edits,
+                        EditSite::StreamEnvelopeStamp,
+                        "/object",
+                        EditKind::Add
+                    ),
+                    "{name}, {chunk} chunk: positive control"
+                );
+            }
+        }
     }
 
     /// A rendered streaming chunk must carry

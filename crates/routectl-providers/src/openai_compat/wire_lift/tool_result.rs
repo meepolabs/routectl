@@ -204,6 +204,9 @@ fn rewrite_message(msg: Value, ctx: &mut RewriteCtx<'_>, out: &mut Vec<Value>) -
     Ok(())
 }
 
+/// The keys a split user chunk copies from the user message it came from.
+const USER_CHUNK_TEMPLATE_KEYS: &[&str] = &["role", "name"];
+
 fn flush_user_chunk(template: &Value, pending: &mut Vec<Value>, out: &mut Vec<Value>) {
     if pending.is_empty() {
         return;
@@ -217,14 +220,15 @@ fn flush_user_chunk(template: &Value, pending: &mut Vec<Value>, out: &mut Vec<Va
     };
     let mut new_msg = Map::new();
     if let Some(orig) = template.as_object() {
-        for (k, v) in orig {
-            // TRANSLATION-DROP: structural -- the template's own content key is
-            // skipped only because the freshly-built chunk content replaces it two
-            // lines below; every other key is copied through.
-            if k == "content" {
-                continue;
+        for k in USER_CHUNK_TEMPLATE_KEYS {
+            // TRANSLATION-DROP: structural -- a split chunk is a plain user
+            // message: it keeps the template's `role` and optional `name`, and
+            // its content is the freshly-built chunk below; keys that belong to
+            // the original whole message (its content, tool or assistant fields)
+            // are not repeated on each chunk.
+            if let Some(v) = orig.get(*k) {
+                new_msg.insert((*k).to_string(), v.clone());
             }
-            new_msg.insert(k.clone(), v.clone());
         }
     }
     new_msg.insert("content".into(), content);
