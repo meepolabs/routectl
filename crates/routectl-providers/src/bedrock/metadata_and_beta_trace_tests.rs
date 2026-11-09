@@ -1,11 +1,12 @@
-//! Both Bedrock seams withhold the client's `metadata` block and ship the
-//! operator's own value in its place, and each traces the `anthropic_beta`
-//! set it ships once per request.
+//! Every Bedrock surface (Invoke, Converse, and the mantle Anthropic lane)
+//! withholds the client's `metadata` block and ships the operator's own
+//! value in its place, and each Bedrock seam traces the `anthropic_beta` set
+//! it ships once per request.
 
 use std::sync::Arc;
 
-use routectl_core::ChatRequest;
 use routectl_core::wire_check::{EditKind, EditSite, Leg, WireTap};
+use routectl_core::{ChatRequest, RequestProvenance};
 use serde_json::{Value, json};
 
 use super::{BedrockApiShape, BedrockConfig, BedrockCreds};
@@ -225,6 +226,262 @@ fn a_withheld_client_metadata_is_declared_removed_on_both_seams() {
                 .map(|p| (EditKind::Remove, (*p).to_string()))
                 .collect();
             assert_eq!(edits, want, "{shape:?} / {name}");
+        }
+    }
+}
+
+/// A surface whose body leaves for AWS.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Surface {
+    Invoke,
+    Converse,
+    MantleAnthropic,
+}
+
+const SURFACES: [Surface; 3] = [Surface::Invoke, Surface::Converse, Surface::MantleAnthropic];
+
+/// The body `surface` ships, with `config` as the Bedrock provider's
+/// `additional_model_request_fields` (the mantle lane has no such field).
+fn normalize_on(surface: Surface, config: Option<&Value>, req: &ChatRequest) -> Value {
+    let shape = match surface {
+        Surface::Invoke => BedrockApiShape::Invoke,
+        Surface::Converse => BedrockApiShape::Converse,
+        Surface::MantleAnthropic => {
+            return crate::anthropic_api::request::normalize(
+                "bedrock-mantle",
+                req,
+                false,
+                None,
+                false,
+                true,
+                true,
+            )
+            .expect("assembles");
+        }
+    };
+    let mut cfg = cfg(shape);
+    cfg.additional_model_request_fields = config.cloned();
+    normalize(&cfg, req)
+}
+
+fn shipped_metadata_on(surface: Surface, body: &Value) -> Option<Value> {
+    match surface {
+        Surface::Invoke | Surface::MantleAnthropic => body.get("metadata").cloned(),
+        Surface::Converse => shipped_metadata(BedrockApiShape::Converse, body),
+    }
+}
+
+/// An Anthropic-ingress request as an attempt reaches the egress: `merged`
+/// is the attempt's `provider_extras` after every dispatch-time merge, strip
+/// and revert, and `operator` the operator layer the router recorded.
+fn attempt(merged: Value, operator: Option<Value>) -> ChatRequest {
+    let mut req = request();
+    req.provider_extras = Some(merged);
+    req.routectl_internal.operator_payload_extras = operator.map(Arc::new);
+    req.routectl_internal.provenance = RequestProvenance::AnthropicIngress;
+    req
+}
+
+/// Every client-supplied value below carries this marker.
+const CLIENT_MARK: &str = "u-client";
+
+struct MetadataRow {
+    name: &'static str,
+    merged: Value,
+    payload: Option<Value>,
+    config: Option<Value>,
+    want: Option<Value>,
+    /// True when the mantle lane ships nothing instead of `want`: `want`
+    /// comes from `additional_model_request_fields`, which it lacks.
+    want_none_on_mantle: bool,
+}
+
+fn metadata_rows() -> Vec<MetadataRow> {
+    let row = |name, merged, payload, want| MetadataRow {
+        name,
+        merged,
+        payload,
+        config: None,
+        want,
+        want_none_on_mantle: false,
+    };
+    vec![
+        row(
+            "client member beside an operator member",
+            json!({"metadata": {"user_id": "u-client-1", "trace": "op-trace"}}),
+            Some(json!({"metadata": {"trace": "op-trace"}})),
+            Some(json!({"trace": "op-trace"})),
+        ),
+        row(
+            "client object alone",
+            json!({"metadata": {"user_id": "u-client-1", "account_uuid": "u-client-2"}}),
+            None,
+            None,
+        ),
+        row(
+            "operator scalar over a client object",
+            json!({"metadata": "op-tag"}),
+            Some(json!({"metadata": "op-tag"})),
+            Some(json!("op-tag")),
+        ),
+        row(
+            "operator scalar, the slot holds the client's object",
+            json!({"metadata": {"user_id": "u-client-1"}}),
+            Some(json!({"metadata": "op-tag"})),
+            None,
+        ),
+        row(
+            "nested members: only the operator's nested member ships",
+            json!({"metadata": {
+                "user_id": "u-client-1",
+                "tags": {"user": "u-client-3", "env": "prod"}
+            }}),
+            Some(json!({"metadata": {"tags": {"env": "prod"}}})),
+            Some(json!({"tags": {"env": "prod"}})),
+        ),
+        row(
+            "operator empty object",
+            json!({"metadata": {"user_id": "u-client-1"}}),
+            Some(json!({"metadata": {}})),
+            Some(json!({})),
+        ),
+        row(
+            "revert of the only operator member",
+            json!({"metadata": {"user_id": "u-client-1"}}),
+            Some(json!({"metadata": {"trace": "op-trace"}})),
+            None,
+        ),
+        row(
+            "revert of one of two operator members",
+            json!({"metadata": {"user_id": "u-client-1", "trace": "op-trace"}}),
+            Some(json!({"metadata": {"trace": "op-trace", "team": "op-team"}})),
+            Some(json!({"trace": "op-trace"})),
+        ),
+        row(
+            "revert restored the client's value of an operator member",
+            json!({"metadata": {"team": "u-client-team", "trace": "op-trace"}}),
+            Some(json!({"metadata": {"trace": "op-trace", "team": "op-team"}})),
+            Some(json!({"trace": "op-trace"})),
+        ),
+        row(
+            "merged extras lack the key: nothing from payload_extras",
+            json!({}),
+            Some(json!({"metadata": {"trace": "op-trace"}})),
+            None,
+        ),
+        MetadataRow {
+            name: "merged extras lack the key: the config value still ships",
+            merged: json!({}),
+            payload: Some(json!({"metadata": {"trace": "op-trace"}})),
+            config: Some(json!({"metadata": {"trace": "config-trace"}})),
+            want: Some(json!({"trace": "config-trace"})),
+            want_none_on_mantle: true,
+        },
+        MetadataRow {
+            name: "every operator payload member reverted: the config value ships",
+            merged: json!({"metadata": {"user_id": "u-client-1"}}),
+            payload: Some(json!({"metadata": {"trace": "op-trace"}})),
+            config: Some(json!({"metadata": {"trace": "config-trace"}})),
+            want: Some(json!({"trace": "config-trace"})),
+            want_none_on_mantle: true,
+        },
+    ]
+}
+
+#[test]
+fn only_operator_metadata_the_attempt_still_carries_reaches_any_bedrock_surface() {
+    let mut failures = Vec::new();
+    for surface in SURFACES {
+        for row in metadata_rows() {
+            let req = attempt(row.merged.clone(), row.payload.clone());
+
+            let body = normalize_on(surface, row.config.as_ref(), &req);
+
+            let want = if surface == Surface::MantleAnthropic && row.want_none_on_mantle {
+                None
+            } else {
+                row.want.clone()
+            };
+            let got = shipped_metadata_on(surface, &body);
+            let serialized = body.to_string();
+            if got != want {
+                failures.push(format!("{surface:?} / {}: shipped {got:?}", row.name));
+            }
+            if serialized.contains(CLIENT_MARK) || serialized.contains("user_id") {
+                failures.push(format!(
+                    "{surface:?} / {}: client member in {serialized}",
+                    row.name
+                ));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+/// Positive control for the mantle absence pin: the same assembly off the
+/// mantle lane forwards the client's block, so the fixture does reach the
+/// body when nothing withholds it.
+#[test]
+fn the_first_party_anthropic_lane_still_carries_the_client_metadata_fixture() {
+    let req = attempt(json!({"metadata": {"user_id": "u-client-1"}}), None);
+
+    let body = crate::anthropic_api::request::normalize("p", &req, false, None, false, true, false)
+        .expect("assembles");
+
+    assert_eq!(body["metadata"], json!({"user_id": "u-client-1"}), "{body}");
+}
+
+fn metadata_strip_edits_on(surface: Surface, mut req: ChatRequest) -> Vec<(EditKind, String)> {
+    let tap = WireTap::default();
+    req.routectl_internal.wire_tap = Some(tap.clone());
+    normalize_on(surface, None, &req);
+    tap.take_request()
+        .edits(Leg::Request)
+        .iter()
+        .filter(|e| {
+            e.site() == EditSite::ClientFingerprintStrip && e.path().starts_with("/metadata")
+        })
+        .map(|e| (e.kind(), e.path().to_string()))
+        .collect()
+}
+
+#[test]
+fn each_withheld_client_member_is_declared_at_its_depth_on_every_surface() {
+    let rows: [(&str, Value, Option<Value>, &[&str]); 4] = [
+        (
+            "client only: the whole block",
+            json!({"metadata": {"user_id": "u-client-1"}}),
+            None,
+            &["/metadata"],
+        ),
+        (
+            "nested client member beside the operator's nested member",
+            json!({"metadata": {"tags": {"user": "u-client-3", "env": "prod"}}}),
+            Some(json!({"metadata": {"tags": {"env": "prod"}}})),
+            &["/metadata/*/*"],
+        ),
+        (
+            "top-level and nested client members",
+            json!({"metadata": {"user_id": "u-client-1", "tags": {"user": "u-client-3", "env": "prod"}}}),
+            Some(json!({"metadata": {"tags": {"env": "prod"}}})),
+            &["/metadata/*", "/metadata/*/*"],
+        ),
+        (
+            "the operator's own value: nothing",
+            json!({"metadata": {"trace": "op-trace"}}),
+            Some(json!({"metadata": {"trace": "op-trace"}})),
+            &[],
+        ),
+    ];
+    for surface in SURFACES {
+        for (name, merged, operator, want) in &rows {
+            let edits = metadata_strip_edits_on(surface, attempt(merged.clone(), operator.clone()));
+
+            let want: Vec<(EditKind, String)> = want
+                .iter()
+                .map(|p| (EditKind::Remove, (*p).to_string()))
+                .collect();
+            assert_eq!(edits, want, "{surface:?} / {name}");
         }
     }
 }

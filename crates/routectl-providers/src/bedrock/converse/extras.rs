@@ -286,9 +286,9 @@ fn insert_provider_extras(
         // TRANSLATION-DROP: policy-action class=client_fingerprint_stripped test=client_fingerprint_strip_bumps_the_policy_action_counter_once
         if k == crate::bedrock::CLIENT_FINGERPRINT_METADATA_KEY {
             let operator = crate::bedrock::operator_metadata(cfg, req);
-            if crate::bedrock::client_metadata_differs(req, operator) {
+            if crate::bedrock::client_metadata_differs(req, operator.as_ref()) {
                 fingerprint.record();
-                crate::bedrock::declare_client_metadata_strip(req, operator);
+                crate::bedrock::declare_client_metadata_strip(req, operator.as_ref());
                 tracing::debug!(
                     provider = %cfg.id,
                     "stripped client metadata fingerprint from Converse \
@@ -296,7 +296,7 @@ fn insert_provider_extras(
                 );
             }
             if let Some(v) = operator {
-                bag.insert(k.clone(), v.clone());
+                bag.insert(k.clone(), v);
             }
             continue;
         }

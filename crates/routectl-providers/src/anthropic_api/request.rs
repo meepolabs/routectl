@@ -1239,10 +1239,34 @@ pub(crate) fn normalize(
     if mantle_lane {
         withhold_mantle_credential_fields(id, &mut body, req);
         #[cfg(feature = "bedrock")]
+        withhold_mantle_client_metadata(&mut body, req);
+        #[cfg(feature = "bedrock")]
         refuse_unforwardable_mantle_media(id, &body)?;
     }
     deferred.warn(id);
     Ok(body)
+}
+
+/// Replace the `metadata` of a Bedrock Mantle body with the operator's own
+/// `payload_extras` value, by the same rule as the Bedrock Invoke and
+/// Converse seams: the client's block (Claude Code's `user_id`,
+/// `account_uuid`) never reaches AWS. This lane has no
+/// `additional_model_request_fields`, so `payload_extras` is the only
+/// operator source.
+#[cfg(feature = "bedrock")]
+fn withhold_mantle_client_metadata(body: &mut Value, req: &ChatRequest) {
+    let key = crate::bedrock::CLIENT_FINGERPRINT_METADATA_KEY;
+    let Some(obj) = body.as_object_mut() else {
+        return;
+    };
+    let operator = crate::bedrock::operator_payload_metadata(req);
+    obj.remove(key);
+    if crate::bedrock::client_metadata_differs(req, operator.as_ref()) {
+        crate::bedrock::declare_client_metadata_strip(req, operator.as_ref());
+    }
+    if let Some(v) = operator {
+        obj.insert(key.to_string(), v);
+    }
 }
 
 /// Refuse a Bedrock Mantle body whose `system` or `messages` carries a media

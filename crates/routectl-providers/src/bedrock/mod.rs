@@ -73,35 +73,65 @@ pub(crate) mod frame;
 pub mod invoke;
 pub mod signing;
 
-/// The client-fingerprint body key both Bedrock seams strip. Anthropic's
+/// The client-fingerprint body key every Bedrock surface strips. Anthropic's
 /// `metadata` block carries client identity (`user_id`, `account_uuid`)
 /// that must not reach AWS -- a third-party upstream. Shared by the
-/// Invoke seam (`invoke::normalize_request`) and the Converse seam
-/// (`converse::extras::insert_provider_extras`) so the two cannot drift
-/// on the key name. Stripped only on the CLIENT path; an operator that
-/// deliberately sets `metadata` keeps it (see [`operator_metadata`]).
+/// Invoke seam (`invoke::normalize_request`), the Converse seam
+/// (`converse::extras::insert_provider_extras`) and the mantle Anthropic
+/// lane (`anthropic_api::request::normalize`) so they cannot drift on the
+/// key name. Stripped only on the CLIENT path; an operator that
+/// deliberately sets `metadata` keeps it (see [`operator_metadata`] and
+/// [`operator_payload_metadata`]).
 pub(crate) const CLIENT_FINGERPRINT_METADATA_KEY: &str = "metadata";
 
-/// The operator's own `metadata` for a Bedrock body: the operator
-/// `payload_extras` value the dispatch layer recorded, else the provider's
+/// The operator's own `metadata` for a Bedrock Invoke or Converse body:
+/// [`operator_payload_metadata`], else the provider's
 /// `additional_model_request_fields` value. Never the merged
 /// `provider_extras` value, which can carry the client's block deep-merged
 /// under the operator's.
-pub(crate) fn operator_metadata<'a>(
-    cfg: &'a BedrockConfig,
-    req: &'a ChatRequest,
-) -> Option<&'a Value> {
-    let key = CLIENT_FINGERPRINT_METADATA_KEY;
-    // Consulted only while the merged extras still carry the key, so a
-    // dispatch-time strip of it is never undone here.
-    merged_metadata(req)
-        .and(req.routectl_internal.operator_payload_extras.as_deref())
-        .and_then(|extras| extras.get(key))
-        .or_else(|| {
-            cfg.additional_model_request_fields
-                .as_ref()
-                .and_then(|fields| fields.get(key))
-        })
+pub(crate) fn operator_metadata(cfg: &BedrockConfig, req: &ChatRequest) -> Option<Value> {
+    operator_payload_metadata(req).or_else(|| {
+        cfg.additional_model_request_fields
+            .as_ref()
+            .and_then(|fields| fields.get(CLIENT_FINGERPRINT_METADATA_KEY))
+            .cloned()
+    })
+}
+
+/// The operator `payload_extras` `metadata` the dispatch layer recorded,
+/// cut down to what the attempt's merged `provider_extras` still carries:
+/// an object keeps only the operator members (at any depth) the merged
+/// value still holds unchanged, and any other value ships only when the
+/// merged value equals it. A dispatch-time revert or strip of an operator
+/// member is therefore never undone here, and no client member is read.
+pub(crate) fn operator_payload_metadata(req: &ChatRequest) -> Option<Value> {
+    let operator = req
+        .routectl_internal
+        .operator_payload_extras
+        .as_deref()?
+        .get(CLIENT_FINGERPRINT_METADATA_KEY)?;
+    retained_operator_value(operator, merged_metadata(req)?)
+}
+
+/// `operator` restricted to what `merged` still carries. An operator object
+/// whose every member is gone yields nothing; an operator that configured
+/// an empty object keeps it.
+fn retained_operator_value(operator: &Value, merged: &Value) -> Option<Value> {
+    match (operator, merged) {
+        (Value::Object(operator), Value::Object(_)) if operator.is_empty() => {
+            Some(Value::Object(serde_json::Map::new()))
+        }
+        (Value::Object(operator), Value::Object(merged)) => {
+            let kept: serde_json::Map<String, Value> = operator
+                .iter()
+                .filter_map(|(key, value)| {
+                    retained_operator_value(value, merged.get(key)?).map(|v| (key.clone(), v))
+                })
+                .collect();
+            (!kept.is_empty()).then_some(Value::Object(kept))
+        }
+        _ => (operator == merged).then(|| operator.clone()),
+    }
 }
 
 /// Whether withholding the request's `metadata` in favour of `operator`
@@ -112,28 +142,51 @@ pub(crate) fn client_metadata_differs(req: &ChatRequest, operator: Option<&Value
 }
 
 /// Declare the client `metadata` a seam withheld before shipping `operator`
-/// in its place. With nothing restored the whole block is gone; with the
-/// operator's object restored, only the client's members outside it are.
-/// A changed member or a changed shape is the dispatch layer's Rewrite.
+/// in its place. With nothing restored the whole block is gone; with an
+/// operator object restored, each merged member outside it is, at its own
+/// depth (every key under `metadata` renders masked). A changed member or a
+/// changed shape is the dispatch layer's Rewrite.
 pub(crate) fn declare_client_metadata_strip(req: &ChatRequest, operator: Option<&Value>) {
     let Some(merged) = merged_metadata(req) else {
         return;
     };
-    let path = match (merged, operator) {
-        (_, None) => "/metadata",
-        (Value::Object(client), Some(Value::Object(operator)))
-            if client.keys().any(|k| !operator.contains_key(k)) =>
-        {
-            "/metadata/*"
+    let mut paths = std::collections::BTreeSet::new();
+    match operator {
+        None => {
+            paths.insert("/metadata".to_string());
         }
-        _ => return,
+        Some(operator) => collect_withheld_members(merged, operator, "/metadata", &mut paths),
+    }
+    for path in paths {
+        crate::anthropic_api::wire_edits::declare(
+            crate::anthropic_api::wire_edits::tap_of(req),
+            routectl_core::wire_check::EditSite::ClientFingerprintStrip,
+            path,
+            routectl_core::wire_check::EditKind::Remove,
+        );
+    }
+}
+
+/// The masked pointer of each `merged` member, under `parent`, that
+/// `shipped` lacks. Descends only where both sides hold an object.
+fn collect_withheld_members(
+    merged: &Value,
+    shipped: &Value,
+    parent: &str,
+    out: &mut std::collections::BTreeSet<String>,
+) {
+    let (Value::Object(merged), Value::Object(shipped)) = (merged, shipped) else {
+        return;
     };
-    crate::anthropic_api::wire_edits::declare(
-        crate::anthropic_api::wire_edits::tap_of(req),
-        routectl_core::wire_check::EditSite::ClientFingerprintStrip,
-        path,
-        routectl_core::wire_check::EditKind::Remove,
-    );
+    let path = format!("{parent}/{}", routectl_core::wire_check::WILDCARD_SEGMENT);
+    for (key, value) in merged {
+        match shipped.get(key) {
+            None => {
+                out.insert(path.clone());
+            }
+            Some(kept) => collect_withheld_members(value, kept, &path, out),
+        }
+    }
 }
 
 fn merged_metadata(req: &ChatRequest) -> Option<&Value> {

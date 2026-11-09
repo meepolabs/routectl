@@ -421,11 +421,11 @@ fn strip_client_metadata(
     let key = super::CLIENT_FINGERPRINT_METADATA_KEY;
     let operator = super::operator_metadata(cfg, req);
     obj.remove(key);
-    if super::client_metadata_differs(req, operator) {
-        super::declare_client_metadata_strip(req, operator);
+    if super::client_metadata_differs(req, operator.as_ref()) {
+        super::declare_client_metadata_strip(req, operator.as_ref());
     }
     if let Some(v) = operator {
-        obj.insert(key.to_string(), v.clone());
+        obj.insert(key.to_string(), v);
     }
 }
 

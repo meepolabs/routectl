@@ -988,9 +988,13 @@ it is the same canonical set plus the bag keys `thinking` and
 `toolConfig` and `additionalModelResponseFieldPaths`.
 
 The client's `metadata` block (its `user_id` / `account_uuid`) never
-reaches AWS on either shape. The operator's own `metadata` is sent in
-its place: the provider or model `payload_extras` value, else the
-`additional_model_request_fields` value. On Converse a request whose
+reaches AWS on Bedrock Invoke, Bedrock Converse, or the
+[Bedrock mantle Anthropic lane](#providersxbedrock_mantle----bedrock-mantle-anthropic-lane).
+The operator's own `metadata` is sent in its place: the provider or
+model `payload_extras` value, else (Invoke and Converse only) the
+`additional_model_request_fields` value. Of the `payload_extras` value,
+only what the request still carries when it is sent ships: a member a
+retry removed or reverted stays out. On Converse a request whose
 client `metadata` differs from that operator value counts once as the
 `client_fingerprint_stripped` policy action.
 
@@ -1286,6 +1290,11 @@ does not refresh them, so they are unsuitable for a long-running daemon.
 `bedrock_mantle` requires the `bedrock` build feature. If the key is
 present in TOML but the binary was built without `bedrock`, config load
 fails with a clean feature-gated-field error.
+
+The client's `metadata` block never reaches AWS on this lane; the
+operator's own `payload_extras` `metadata`, if any, is sent in its place
+(see [Bedrock body fields](#bedrock-body-fields) for the rule shared with
+Invoke and Converse).
 
 Field repair on this lane acts only on the rows a refusal captured on
 Mantle grounds: the `max_tokens` ceiling. Its thinking and effort rows are
