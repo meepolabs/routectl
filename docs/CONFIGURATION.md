@@ -667,7 +667,7 @@ semantics in the [field-assignment table](#field-assignment-table).
 | `keep_recent_messages`         | `[trim]` global                 | usize, default 6; see `[trim]`                                                                    |
 | `enabled`                      | `[window_gate]` global          | bool, default false; master switch for the proactive context-window gate (see `[window_gate]`)    |
 | `enabled`                      | `[calibration]` global          | bool, default true; accepted and has no effect: the correction always applies (see `[calibration]`)|
-| `enabled`                      | `[seat_quota]` global           | bool, default true; kill switch for quota-aware seat placement (see `[seat_quota]`)               |
+| `enabled`                      | `[seat_quota]` global           | bool, default true; accepted and has no effect: quota-aware placement always applies (see `[seat_quota]`)|
 | `enabled`                      | `[capability]` global           | bool, default true; master switch for the learned-capability subsystem (see `[capability]`)       |
 | `decay_hours`                  | `[capability]` global           | u64, default 48; hours a learned negative acts before a re-probe (see `[capability]`)             |
 | `inferred_window_hours`        | `[capability]` global           | u64, default 1; window a pending inferred signal waits for confirmation (see `[capability]`)      |
@@ -2202,9 +2202,8 @@ falling through to the anti-herd rotation.
 
 `sticky-least-loaded` is the only strategy this applies to. A pool left on
 the `fill-first` default, or set to `round-robin`, places exactly as it
-always has -- neither reads a seat's budget, and the switch below changes
-nothing for them. `fill-first` in particular is unchanged *deliberately*:
-draining one seat is what that setting asks for. Adopting quota-aware
+always has -- neither reads a seat's budget. `fill-first` in particular is
+unchanged *deliberately*: draining one seat is what that setting asks for. Adopting quota-aware
 placement is therefore an explicit
 `seat_selection = "sticky-least-loaded"` on the pool.
 
@@ -2242,48 +2241,32 @@ Ties inside the chosen group still fall to the existing deterministic
 anti-herd rotation, so a burst of new conversations spreads rather than
 herding onto the emptiest seat.
 
-The optional `[seat_quota]` block is the **global** kill switch. A
-missing block keeps the default: placement enabled.
+Placement always applies. The optional `[seat_quota]` block and its
+`enabled` key are still accepted so existing configs keep loading, but the
+key has **no effect**: `enabled = false` does not turn placement off.
 
 ```toml
 [seat_quota]
-# Master switch for quota-aware seat placement. Default true.
+# Accepted for existing configs; no effect.
 enabled = true
 ```
 
-- **`enabled`** (bool, default true) -- the master switch. When `false`,
-  an unpinned conversation's birth seat resolves exactly as it did before
-  quota placement existed: no quota state is read, no budget orders the
-  pick, no quota placement log line is emitted, and the health preference,
-  the rate-limit eligibility filter, the RPM ranking and the anti-herd
-  rotation all decide as before. Conversation pins are preserved and a
-  one-time migration off an unhealthy seat still happens -- the switch
-  gates WHICH seat a birth picks, never whether conversations pin.
+**Always on is safe because thin evidence places nothing.** A seat
+produces no reading until a real upstream response carries one, so a
+fresh process places exactly as it did before quota placement existed,
+and every case above that falls back (no fresh reading, a lapsed one, an
+uncurated provider, a partially observed pool) resolves through the
+unchanged capacity ranking. Conversation pins and the one-time migration
+off an unhealthy seat are never affected. A pool that should not place
+by budget at all stays on `fill-first` or `round-robin`.
 
-**Off still observes.** Turning placement off stops readings from being
-APPLIED and nothing else: routectl keeps collecting and aging them, so
-turning it back on takes effect on the next birth pick rather than after
-a re-observe period. This follows the same shape as the learned-estimate
-correction's switch.
+**No tuning knobs.** The per-provider budget thresholds, the long-window
+guard and the freshness bounds are constants grounded in captured
+upstream evidence, not operator knobs: a threshold tuned per deployment
+turns a routing decision into a support surface, and the fallback in
+every direction is the pre-quota chooser rather than a denial.
 
-**One field deliberately.** The per-provider budget thresholds, the
-long-window guard and the freshness bounds are constants grounded in
-captured upstream evidence, not operator knobs: a threshold tuned per
-deployment turns a routing decision into a support surface, and the
-fallback in every direction is the pre-quota chooser rather than a denial.
-The switch above is the whole operator surface.
-
-**Hot-reloadable.** `[seat_quota]` is classified alongside the other
-hot-reloadable sections
-(`crates/routectl-cli/src/config_classify.rs`): the flag is read per
-birth pick, so a live config swap -- an editor save the daemon's file
-watcher picks up, or a `routectl config set seat_quota.enabled false` --
-applies to the next new conversation with no restart and no confirmation
-prompt.
-
-An unknown key inside the block fails config load rather than being
-silently ignored, so a typo is reported by `routectl config check`
-instead of leaving placement quietly at its default.
+An unknown key inside the `[seat_quota]` block still fails config load.
 
 Whether placement is acting is observable in the log: a throttled line
 (at most one per five minutes per process) names the model and which arm

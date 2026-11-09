@@ -92,9 +92,8 @@ pub enum SeatQuota {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuotaDecision {
     /// Quota was not consulted: no tiers were supplied at all, because the
-    /// switch is off, the provider curates no FAST window, or the pool is
-    /// degenerate. Emits nothing -- an off switch must be silent, or the
-    /// diagnostics alone would tell an operator the feature is still running.
+    /// provider curates no FAST window or the pool is degenerate. Emits
+    /// nothing, since quota had no say in the pick.
     Dormant,
     /// Restricted the pick to fresh-known seats below their cap.
     BelowCapTier,

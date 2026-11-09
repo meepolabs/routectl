@@ -481,8 +481,8 @@ impl StickyPins {
 /// group leads the walk; every remaining eligible seat follows in the fixed
 /// order, so the existing fall-through behavior is preserved rather than
 /// replaced. When the partition declines -- all readings unknown, a mix of
-/// capped-known and unknown, the switch off -- this returns `None` and the
-/// caller keeps the unchanged fill-first walk.
+/// capped-known and unknown, an uncurated provider -- this returns `None` and
+/// the caller keeps the unchanged fill-first walk.
 pub fn keyless_quota_order(
     seat_count: usize,
     snapshots: &[CapacitySnapshot],
@@ -583,8 +583,8 @@ pub enum SelectionOutcome {
 /// `candidates` are indices into `snapshots`.
 ///
 /// `quota` is index-aligned with `snapshots` and EMPTY whenever quota
-/// contributes nothing -- the kill switch off, a provider curating no short
-/// window, a migration pick. An empty slice makes
+/// contributes nothing -- a provider curating no short window, a migration
+/// pick. An empty slice makes
 /// [`restrict_by_quota`](crate::quota::placement::restrict_by_quota) answer
 /// `None`, so the RPM headroom ranking below runs exactly as it did before
 /// quota existed. `decision` records which arm ran, for the caller's counters.

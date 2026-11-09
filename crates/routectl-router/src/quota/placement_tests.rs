@@ -363,8 +363,7 @@ fn all_unknown_falls_through_cap_dormant() {
 
 #[test]
 fn no_tiers_at_all_is_dormant() {
-    // What the kill switch OFF produces, and what an uncurated provider
-    // produces. Distinguished from the fall-through arms because a dormant
+    // What an uncurated provider produces. Distinguished from the fall-through arms because a dormant
     // pick is not an event: it must emit nothing.
     let (restricted, decision) = restrict(&[]);
 

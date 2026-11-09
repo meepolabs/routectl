@@ -64,24 +64,16 @@ impl Router {
     /// The per-seat subscription-quota tiers for a birth pick over this pool,
     /// or an EMPTY vec when quota must contribute nothing.
     ///
-    /// Empty is the whole of what the kill switch does on the placement side:
-    /// off, this returns before any store read, and the pure selector then
-    /// ranks on RPM headroom exactly as it did before quota existed -- no cap
-    /// consulted, no quota state touched, no diagnostic emitted. The feed and
-    /// the store keep running either way, so re-enabling is instant rather
-    /// than a re-observe.
-    ///
-    /// Also empty for a provider that curates no short recovering window,
-    /// which is how an uncurated egress stays dormant by construction.
+    /// Empty for a provider that curates no short recovering window, which is
+    /// how an uncurated egress stays dormant by construction: the pure
+    /// selector then ranks on RPM headroom with no cap consulted and no
+    /// diagnostic emitted. `[seat_quota] enabled` is not read here.
     ///
     /// The provider kind is read off each SEAT's own `[providers]` entry
     /// rather than the model's `provider` value: a pool-backed model's
     /// `provider` names the pool, so resolving the kind from it would miss and
     /// leave every pool permanently uncurated (silently dormant quota).
     fn quota_tiers_for_birth(&self, seats: &[crate::seat_pool::SeatTarget]) -> Vec<SeatQuota> {
-        if !self.config.seat_quota.enabled {
-            return Vec::new();
-        }
         let provider_kind = seats.first().and_then(|seat| {
             self.config
                 .providers
@@ -108,9 +100,9 @@ impl Router {
     /// that ran, and the only figures are counters.
     fn record_quota_placement(&self, decision: QuotaDecision, nickname: &str) {
         let totals = match decision {
-            // Off, or nothing to decide on. A dormant pick is not an event:
-            // counting it would make the switch observable in the very
-            // diagnostics its OFF position must leave silent.
+            // Nothing to decide on (an uncurated provider). A dormant pick is
+            // not an event: counting it would bury the real arms under every
+            // pick of a pool quota can never place.
             QuotaDecision::Dormant => return,
             _ => self.metrics.incr_quota_placement(decision),
         };
@@ -197,11 +189,10 @@ impl Router {
     /// key.
     ///
     /// Subscription-quota tiers are gathered for the BIRTH candidate set only
-    /// (the pure selector ignores them on every other path), and only while
-    /// the kill switch is on. A healthy pin therefore never reads quota state
-    /// at all, so no soft cap can move a warm session. The quota partition
-    /// changes WHICH seat a birth picks, never whether or how the pin is
-    /// written.
+    /// (the pure selector ignores them on every other path). A healthy pin
+    /// therefore never reads quota state at all, so no soft cap can move a
+    /// warm session. The quota partition changes WHICH seat a birth picks,
+    /// never whether or how the pin is written.
     pub(super) fn sticky_seat_order(
         &self,
         seats: &[crate::seat_pool::SeatTarget],

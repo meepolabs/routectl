@@ -181,14 +181,9 @@ pub struct Config {
     #[serde(default)]
     pub calibration: CalibrationConfig,
 
-    /// Operator-facing `[seat_quota]` block. Kill switch for
-    /// subscription-quota-aware seat placement. A missing block leaves quota
-    /// placement enabled; setting `enabled = false` makes an unpinned
-    /// conversation's birth seat resolve exactly as it did before quota
-    /// placement existed, while still collecting and aging readings so
-    /// switching back on is instant. Affinity pins and the one-time migration
-    /// off an unhealthy seat are unaffected in either position.
-    /// Hot-reloadable -- the flag is read per birth pick.
+    /// Operator-facing `[seat_quota]` block. Accepted so existing configs
+    /// keep loading; it has no effect. Quota-aware birth placement under
+    /// `sticky-least-loaded` always applies.
     #[serde(default)]
     pub seat_quota: SeatQuotaConfig,
 

@@ -1813,11 +1813,11 @@
     },
     "SeatQuotaConfig": {
       "additionalProperties": false,
-      "description": "Operator-facing `[seat_quota]` config block. Kill switch for\nsubscription-quota-aware seat placement, which orders a NEW conversation's\nbirth seat by each credential account's remaining short-window budget. A\nmissing `[seat_quota]` table deserializes to `SeatQuotaConfig::default()`\n(enabled), so an existing config needs no migration.\n\nDefault ON is safe for the same reason the learned correction's is: a seat\nproduces no reading until a real upstream response carries one, so a fresh\nprocess places exactly as it would with the switch off, and every refusal\npath (no reading, an expired one, a reading the trust rules declined, a\nprovider with no curated short window) falls back to the pre-quota chooser.\n\nOff means the birth chooser for an unpinned session is byte-identical to\nthe same chooser with no quota placement compiled in: no quota state is\nread, no cap orders a pick, no quota placement diagnostic is emitted, and\nthe dispatchability filter, the breaker health preference, the RPM headroom\nranking and the anti-herd tiebreak all decide exactly as before. Off does\nNOT stop collecting or aging readings, so switching back on is instant\nrather than a re-observe. Universal affinity is unaffected in both\npositions: every pin is preserved and a one-time\nmigration off an unhealthy seat still happens, because a wrong placement\nalgorithm must never cost the warm-cache benefit pinning exists for.\n\nOne field deliberately, following `WindowGateConfig` and\n`CalibrationConfig`: the per-provider caps, the long-window guard and the\nfreshness bounds are curated constants grounded in captured upstream\nevidence, not operator knobs, because a cap tuned per deployment turns a\nrouting decision into a support surface.\n`#[non_exhaustive]` leaves room for a later knob without breaking\ncallers; `#[serde(deny_unknown_fields)]` rejects a typo'd key at\nconfig-load time instead of silently ignoring it.",
+      "description": "Operator-facing `[seat_quota]` config block. Accepted so existing\nconfigs keep loading; it has no effect.\n\nSubscription-quota-aware seat placement, which orders a NEW conversation's\nbirth seat on a `sticky-least-loaded` pool by each credential account's\nremaining short-window budget, always applies. A seat produces no reading\nuntil a real upstream response carries one, and every refusal path (no\nreading, an expired one, a reading the trust rules declined, a provider\nwith no curated short window) falls back to the pre-quota chooser, so\nthere is nothing for a switch to protect. Affinity pins and the one-time\nmigration off an unhealthy seat are unaffected.",
       "properties": {
         "enabled": {
           "default": true,
-          "description": "Master switch for quota-aware birth placement. Default on.",
+          "description": "No effect. Parsed and kept only so a config that sets it still loads.",
           "type": "boolean"
         }
       },
@@ -1838,7 +1838,7 @@
         },
         {
           "const": "sticky-least-loaded",
-          "description": "Pin each conversation to one seat for prompt-cache affinity, and\nbalance NEW conversations across seats by load. The contract: a\nconversation's first request picks the least-loaded healthy seat at\nbirth; every subsequent request for that conversation routes back to\nthe same seat so its warm prompt cache is preserved (avoiding a cold\nmiss on every turn). If a pinned home goes unhealthy the conversation\nmigrates once to a healthy sibling and stays there (no flapping back).\nThe selection is a best-effort reorder of the walk: the per-seat\ndispatch gate and the fill-first fallback walk stay authoritative, so\na stale or wrong pin only costs locality, never correctness.\n\nThe ONLY variant subscription-quota-aware placement applies to: a birth\n(and a keyless request, which mints no pin) ranks candidates by\nremaining short-window budget when `[seat_quota]` is on and the evidence\nsuffices.",
+          "description": "Pin each conversation to one seat for prompt-cache affinity, and\nbalance NEW conversations across seats by load. The contract: a\nconversation's first request picks the least-loaded healthy seat at\nbirth; every subsequent request for that conversation routes back to\nthe same seat so its warm prompt cache is preserved (avoiding a cold\nmiss on every turn). If a pinned home goes unhealthy the conversation\nmigrates once to a healthy sibling and stays there (no flapping back).\nThe selection is a best-effort reorder of the walk: the per-seat\ndispatch gate and the fill-first fallback walk stay authoritative, so\na stale or wrong pin only costs locality, never correctness.\n\nThe ONLY variant subscription-quota-aware placement applies to: a birth\n(and a keyless request, which mints no pin) ranks candidates by\nremaining short-window budget when the evidence suffices.",
           "type": "string"
         }
       ]
@@ -2152,7 +2152,7 @@
       "default": {
         "enabled": true
       },
-      "description": "Operator-facing `[seat_quota]` block. Kill switch for\nsubscription-quota-aware seat placement. A missing block leaves quota\nplacement enabled; setting `enabled = false` makes an unpinned\nconversation's birth seat resolve exactly as it did before quota\nplacement existed, while still collecting and aging readings so\nswitching back on is instant. Affinity pins and the one-time migration\noff an unhealthy seat are unaffected in either position.\nHot-reloadable -- the flag is read per birth pick."
+      "description": "Operator-facing `[seat_quota]` block. Accepted so existing configs\nkeep loading; it has no effect. Quota-aware birth placement under\n`sticky-least-loaded` always applies."
     },
     "server": {
       "$ref": "#/$defs/ServerConfig",
