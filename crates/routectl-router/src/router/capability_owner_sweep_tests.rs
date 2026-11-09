@@ -342,6 +342,46 @@ fn the_owner_sweep_resets_a_dropped_field_verdict_canary() {
     );
 }
 
+/// The sweep resets canary state only for a field-namespace key: a dropped
+/// non-field entry leaves untouched any canary state that shares its
+/// `(lane, capability, kind)` identity.
+#[test]
+fn the_owner_sweep_leaves_canary_state_alone_for_a_non_field_key() {
+    // Arrange: a non-field negative, plus canary state under the same identity
+    // (only constructible directly, since the canary constructor rejects a
+    // non-field path).
+    let before = router(ALPHA_COMPAT);
+    let target = target(&before, "nick", "alpha");
+    learn_on(&before, &target, COMPAT);
+    let canary_key = crate::field_verdict::FieldVerdictKey::from_capability_key(
+        crate::state_key::StateKey::parse(LANE).expect("a lane"),
+        "web_search".to_string(),
+        COMPAT.to_string(),
+    );
+    before
+        .field_verdicts
+        .canaries()
+        .seed_from_rebuild(&canary_key, 1, 1, true);
+
+    // Act
+    let mut reloaded = router(ALPHA_ANTHROPIC);
+    reloaded.carry_over_learned_from(&before);
+
+    // Assert
+    assert!(
+        resident_lanes(&reloaded).is_empty(),
+        "premise: the entry was swept"
+    );
+    assert!(
+        reloaded
+            .field_verdicts
+            .canaries()
+            .snapshot(&canary_key)
+            .is_some(),
+        "a non-field sweep must not reset canary state",
+    );
+}
+
 #[test]
 fn an_old_router_write_after_a_kind_flip_does_not_act_on_the_new_router() {
     let before = router(ALPHA_COMPAT);

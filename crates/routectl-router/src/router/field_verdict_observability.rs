@@ -10,7 +10,7 @@ use parking_lot::Mutex;
 use routectl_core::{EvidenceSource, FailurePhase, Verdict, sanitize_for_log};
 use serde::Serialize;
 
-use crate::field_capability::capability_key_is_catalog_scoped;
+use crate::field_capability::capability_key_is_field_verdict;
 use crate::learned_capability::LearnedRegistryEntry;
 use crate::state_key::StateKey;
 
@@ -359,7 +359,7 @@ pub struct ActingFieldVerdict {
 pub fn acting_field_verdicts(entries: &[LearnedRegistryEntry]) -> Vec<ActingFieldVerdict> {
     entries
         .iter()
-        .filter(|entry| !capability_key_is_catalog_scoped(&entry.feature_key))
+        .filter(|entry| capability_key_is_field_verdict(&entry.feature_key))
         .filter_map(|entry| match entry.verdict {
             Verdict::LearnedBroken(FailurePhase::F3) if entry.source == EvidenceSource::Live => {
                 None

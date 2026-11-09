@@ -1,6 +1,6 @@
 //! Tests for the generation barrier as the Router applies it: a superseded
-//! Router must not repopulate or route on catalog-scoped state, while its
-//! wire-shape observations still reach the live shared registry.
+//! Router's observations, reads and settlements reach the live shared
+//! registry for every key class, since no key is catalog-scoped.
 
 use super::*;
 use crate::config::Config;
@@ -92,11 +92,10 @@ fn an_old_router_field_observation_reaches_the_live_registry() {
     );
 }
 
-/// A catalog-scoped observation through the old Router after the swap is inert:
-/// nothing resident, and the caller is told Stale so it emits no ledger event
-/// and bumps no metric.
+/// A non-field observation through the old Router after the swap reaches the
+/// live registry, exactly as a field observation does.
 #[test]
-fn an_old_router_catalog_scoped_observation_is_inert() {
+fn an_old_router_non_field_observation_reaches_the_live_registry() {
     let (old, live) = superseded_pair();
 
     let outcome = old.observe_learned_capability(
@@ -114,22 +113,19 @@ fn an_old_router_catalog_scoped_observation_is_inert() {
         Instant::now(),
     );
 
-    assert_eq!(
-        outcome,
-        crate::learned_capability::GenerationOutcome::Stale,
-        "a stale catalog-scoped observation must be refused",
-    );
     assert!(
-        live.learned_capability_snapshot().is_empty(),
-        "it must leave nothing resident to repopulate the pruned state",
+        matches!(
+            outcome,
+            crate::learned_capability::GenerationOutcome::Applied { .. }
+        ),
+        "got {outcome:?}",
     );
+    assert_eq!(live.learned_capabilities.snapshot().len(), 1);
 }
 
-/// A catalog-scoped READ through the old Router does not answer, so a
-/// superseded Router cannot route on catalog truth the reload replaced. The
-/// field read still answers.
+/// A READ through the old Router answers for both key classes.
 #[test]
-fn old_router_reads_are_scoped_by_key_class() {
+fn old_router_reads_answer_for_every_key_class() {
     let (old, live) = superseded_pair();
     let now = Instant::now();
     let key = field_key("thinking.enabled.display");
@@ -157,10 +153,10 @@ fn old_router_reads_are_scoped_by_key_class() {
         now,
     );
 
-    assert_eq!(
-        old.acting_negative_for_generation("nick#upstream", "web_search", "anthropic-api", now),
-        None,
-        "a stale catalog-scoped read must not answer",
+    assert!(
+        old.acting_negative_for_generation("nick#upstream", "web_search", "anthropic-api", now)
+            .is_some(),
+        "a stale non-field read answers",
     );
     assert!(
         old.acting_negative_for_generation("nick#upstream", &key, "anthropic-api", now)
@@ -169,11 +165,10 @@ fn old_router_reads_are_scoped_by_key_class() {
     );
 }
 
-/// A probe settlement (the keyed clear) through the old Router on a
-/// catalog-scoped key is a no-op AND reports Stale, so no cleared event rides
-/// out to the ledger.
+/// A probe settlement (the keyed clear) through the old Router on a non-field
+/// key applies to the live entry.
 #[test]
-fn an_old_router_probe_settlement_on_a_scoped_key_is_inert() {
+fn an_old_router_probe_settlement_on_a_non_field_key_applies() {
     let (old, live) = superseded_pair();
     let now = Instant::now();
     live.observe_learned_capability(
@@ -193,16 +188,14 @@ fn an_old_router_probe_settlement_on_a_scoped_key_is_inert() {
 
     let settled = old.clear_learned_capability("nick", "web_search", "anthropic-api");
 
-    assert_eq!(
-        settled,
-        crate::learned_capability::GenerationOutcome::Stale,
-        "a stale settlement must report Stale so nothing is emitted",
+    assert!(
+        matches!(
+            settled,
+            crate::learned_capability::GenerationOutcome::Applied { value: true, .. }
+        ),
+        "got {settled:?}",
     );
-    assert_eq!(
-        live.learned_capabilities.snapshot().len(),
-        1,
-        "and must not clear the live entry",
-    );
+    assert!(live.learned_capabilities.snapshot().is_empty());
 }
 
 /// The replay facade shares its in-flight set across a rebuild.
@@ -226,14 +219,13 @@ fn the_replay_facade_shares_its_in_flight_set_across_a_rebuild() {
     );
 }
 
-/// A catalog-scoped verified-positive read through a superseded Router does not
-/// answer: it reports no positive rather than asserting catalog truth the reload
-/// replaced. The field read still answers.
+/// A verified-positive read through a superseded Router answers for both key
+/// classes.
 ///
 /// The positive doors refuse a field key, so the field positive is planted
 /// through the import seam.
 #[test]
-fn old_router_verified_reads_are_scoped_by_key_class() {
+fn old_router_verified_reads_answer_for_every_key_class() {
     let (old, live) = superseded_pair();
     let now = Instant::now();
     let key = field_key("thinking.enabled.display");
@@ -264,8 +256,8 @@ fn old_router_verified_reads_are_scoped_by_key_class() {
         }]);
 
     assert!(
-        !old.is_verified_working_or_false("nick", "web_search", "anthropic-api", now),
-        "a stale catalog-scoped positive read must not answer",
+        old.is_verified_working_or_false("nick", "web_search", "anthropic-api", now),
+        "a stale non-field positive read answers",
     );
     assert!(
         old.is_verified_working_or_false("nick", &key, "anthropic-api", now),

@@ -396,24 +396,19 @@ async fn without_a_lift_a_restart_still_withholds_the_seeded_beta() {
     assert_eq!(withheld, vec![SEEDED_FLAG.to_string()]);
 }
 
-/// A seed lift is a catalog-scoped fact: a boot under a different overlay
-/// revision drops its row on replay and the seed withholds the flag again.
+/// A seed lift survives a boot under a different overlay: the capability
+/// revision stamps are frozen, so the overlay revision no longer reaches the
+/// replay boundary.
 #[tokio::test]
 #[serial_test::serial]
-async fn a_seed_lift_lapses_when_the_overlay_revision_changes() {
-    // Arrange -- the lift is durable at the revision it was made under.
+async fn a_seed_lift_survives_an_overlay_revision_change() {
+    // Arrange -- the lift is durable.
     let (config, _dir) = fixture_config();
     first_seed_session(&config, true).await;
-    assert!(
-        withheld_after_restart(&config, 0, SEEDED_FLAG)
-            .await
-            .is_empty(),
-        "premise: the lift survives a same-revision restart",
-    );
 
     // Act
     let withheld = withheld_after_restart(&config, BUMPED_REVISION, SEEDED_FLAG).await;
 
     // Assert
-    assert_eq!(withheld, vec![SEEDED_FLAG.to_string()]);
+    assert!(withheld.is_empty(), "withheld: {withheld:?}");
 }

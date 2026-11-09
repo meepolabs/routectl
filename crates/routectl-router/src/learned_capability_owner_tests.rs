@@ -364,3 +364,34 @@ fn new_kind_row(reg: &LearnedCapabilityRegistry, capability: &str) -> LearnedReg
         .expect("the new kind's entry is resident")
         .entry
 }
+
+/// The field-only projections hold exactly the field-namespace keys: a
+/// non-field negative resident beside a field one appears in neither the
+/// cold-rebuild seed snapshot nor the status acting-incarnation projection.
+/// One row per projection, so each site's namespace test is pinned alone.
+#[test]
+fn the_field_projections_exclude_a_non_field_key() {
+    let reg = registry();
+    let field = field_key();
+    plant_negative(&reg, &field, NEW);
+    plant_negative(&reg, "web_search", NEW);
+
+    let seeded: Vec<String> = reg
+        .field_seed_snapshot()
+        .into_iter()
+        .map(|entry| entry.capability_key)
+        .collect();
+    let acting: Vec<String> = reg
+        .field_acting_incarnations(Instant::now(), |_| NEW)
+        .into_keys()
+        .map(|(_, capability)| capability)
+        .collect();
+
+    let cases = [
+        ("field seed snapshot", seeded),
+        ("acting incarnations", acting),
+    ];
+    for (name, keys) in cases {
+        assert_eq!(keys, vec![field.clone()], "{name}");
+    }
+}

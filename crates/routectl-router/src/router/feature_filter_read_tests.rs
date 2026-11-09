@@ -157,7 +157,7 @@ fn a_lapsed_negative_admits_once_under_the_generation_its_read_saw() {
 }
 
 #[test]
-fn a_superseded_router_acts_on_no_learned_verdict() {
+fn a_superseded_router_acts_on_the_live_learned_verdicts() {
     // Arrange -- every shape resident.
     let (old, live) = superseded_pair_with(Arc::new(base_config("")));
     let old_target = fixture_target(&old, "nick");
@@ -165,20 +165,17 @@ fn a_superseded_router_acts_on_no_learned_verdict() {
     let features = seed_shapes(&live, "nick", true);
 
     // Act
-    let stale = filter(&old, &old_target, &features);
+    let superseded = filter(&old, &old_target, &features);
     let current = filter(&live, &live_target, &features);
 
-    // Assert -- the stale Router sees no verdict: no strip, no admission, no
-    // route-away.
-    assert_eq!(stale.0, None, "a stale read routes nothing away");
-    assert!(stale.1.is_empty(), "a stale read claims no re-probe slot");
-    assert!(stale.2.is_empty(), "a stale read strips nothing");
-    // Positive control -- the live Router reads the same entries.
+    // Assert -- no key is catalog-scoped, so the superseded Router reads the
+    // same verdict the live one does.
     assert_eq!(
         current.0,
         Some(("web_search".to_string(), FilterSource::Learned))
     );
-    assert_eq!(current.1.len(), 1);
+    assert_eq!(superseded.0, current.0);
+    assert_eq!(superseded.2, current.2);
 }
 
 /// The lapsed entry seeded for `feature` on `nickname`'s lane, read after

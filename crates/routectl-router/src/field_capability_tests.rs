@@ -506,57 +506,72 @@ fn an_over_length_path_or_a_key_passed_back_as_a_path_is_rejected() {
     assert_eq!(field_capability_key(FIELD_CAPABILITY_PREFIX), None);
 }
 
-// --- catalog scope ---
+// --- namespace and catalog scope ---
 
-/// Wire-shape facts are catalog-independent, so the predicate is false for
-/// the whole namespace -- not only for the one grounded path.
+/// The field-verdict predicate is a namespace test: true for every key the
+/// constructor mints, false for every key outside the namespace -- a known
+/// catalog capability, a composite replay key, an unrecognized namespace, a
+/// key that merely embeds the prefix after a segment, and the empty key.
 #[test]
-fn every_field_key_is_not_catalog_scoped() {
+fn the_field_verdict_predicate_holds_exactly_inside_the_namespace() {
     for path in ["thinking", GROUNDED_PATH, "tools.0.input_schema"] {
         let key = field_capability_key(path).expect("accepted");
-
         assert!(
-            !capability_key_is_catalog_scoped(&key),
-            "a field key must not be catalog scoped: {key}"
+            capability_key_is_field_verdict(&key),
+            "a minted key is a field verdict: {key}"
+        );
+    }
+    let embedded = format!(
+        "toolConfig.{}",
+        field_capability_key("x").expect("accepted")
+    );
+    let outside = routectl_core::capability::WELL_KNOWN_CAPABILITY_KEYS
+        .iter()
+        .copied()
+        .chain([
+            "reasoning_replay:codex",
+            "some_future_namespace:thinking.display",
+            embedded.as_str(),
+            "",
+        ]);
+    for key in outside {
+        assert!(
+            !capability_key_is_field_verdict(key),
+            "a key outside the namespace is not a field verdict: {key:?}"
         );
     }
 }
 
-/// The default is catalog-scoped: every known catalog key, the existing
-/// composite replay key, and an unknown key from a namespace this build does
-/// not recognize all stay scoped. The unknown-key control is what makes the
-/// default a default rather than a closed list.
+/// No key is catalog-scoped: the revision stamps are frozen, so the boundary
+/// paths carry every class. One row per class, so the field namespace, a
+/// catalog capability and an unrecognized namespace each pin the answer.
 #[test]
-fn known_and_unknown_non_field_keys_are_catalog_scoped() {
-    for key in routectl_core::capability::WELL_KNOWN_CAPABILITY_KEYS {
-        assert!(
-            capability_key_is_catalog_scoped(key),
-            "a known catalog capability key must be catalog scoped: {key}"
-        );
-    }
-    for key in [
-        "reasoning_replay:codex",
-        "some_future_namespace:thinking.display",
-        "",
-    ] {
-        assert!(
-            capability_key_is_catalog_scoped(key),
-            "an unrecognized key must default to catalog scoped: {key:?}"
-        );
+fn no_key_is_catalog_scoped() {
+    let field = field_capability_key(GROUNDED_PATH).expect("accepted");
+    let cases = [
+        ("field key", field.as_str()),
+        ("known catalog capability", "web_search"),
+        ("composite replay key", "reasoning_replay:codex"),
+        (
+            "unrecognized namespace",
+            "some_future_namespace:thinking.display",
+        ),
+        ("empty key", ""),
+    ];
+    for (name, key) in cases {
+        assert!(!capability_key_is_catalog_scoped(key), "{name}: {key:?}");
     }
 }
 
-/// The predicate answers a namespace question, never a validity one: a key
-/// persisted by an earlier build keeps its scope regardless of whether
-/// today's grammar would still mint its path.
+/// The namespace predicate answers a namespace question, never a validity
+/// one: a key persisted by an earlier build stays a field verdict regardless
+/// of whether today's grammar would still mint its path.
 #[test]
-fn scope_is_decided_by_namespace_not_by_path_validity() {
+fn the_namespace_is_decided_by_prefix_not_by_path_validity() {
     let malformed_but_in_namespace = format!("{FIELD_CAPABILITY_PREFIX}.thinking..display.");
 
     assert!(field_capability_key(".thinking..display.").is_none());
-    assert!(!capability_key_is_catalog_scoped(
-        &malformed_but_in_namespace
-    ));
+    assert!(capability_key_is_field_verdict(&malformed_but_in_namespace));
 }
 
 // --- Stage 1 lane boundary ---

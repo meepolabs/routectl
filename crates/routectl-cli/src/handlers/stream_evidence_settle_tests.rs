@@ -335,10 +335,6 @@ fn replacement(previous: &Router, provider: &Arc<dyn Provider>, reload: Reload) 
         }
         Reload::CatalogBoundary => {
             let mut next = router_over(OPENAI_P1, provider);
-            next.install_catalog_overlay(Arc::new(routectl_router::CatalogOverlay {
-                revision: previous.overlay_revision() + 1,
-                ..routectl_router::CatalogOverlay::default()
-            }));
             next.carry_over_learned_from(previous);
             let registry = next.learned_registry();
             let before = registry.generation();
@@ -571,7 +567,8 @@ fn rows() -> Vec<Row> {
         },
         Row {
             client: Client::ReloadAfterFirst(Reload::CatalogBoundary),
-            ..Row::new("reload across a catalog boundary mid-stream (stale)")
+            observations: 1,
+            ..Row::new("reload across a generation boundary mid-stream")
         },
         Row {
             client: Client::HangUpAtEos,

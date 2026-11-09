@@ -1956,7 +1956,7 @@ impl LearnedCapabilityRegistry {
             .read()
             .iter()
             .filter(|(key, _)| {
-                !crate::field_capability::capability_key_is_catalog_scoped(&key.feature_key)
+                crate::field_capability::capability_key_is_field_verdict(&key.feature_key)
             })
             .map(|(key, entry)| FieldSeedEntry {
                 state_key: key.state_key.clone(),
@@ -3690,7 +3690,7 @@ impl LearnedCapabilityRegistry {
         entries
             .iter()
             .filter(|(key, _)| {
-                !crate::field_capability::capability_key_is_catalog_scoped(&key.feature_key)
+                crate::field_capability::capability_key_is_field_verdict(&key.feature_key)
             })
             // A key a purge has captured is refused, exactly as the per-key
             // primitive refuses it: acting on one would act on state the purge

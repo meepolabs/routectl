@@ -675,8 +675,8 @@ fn a_config_only_reload_keeps_a_cleared_seed() {
     let target = target_on(&before, "bed");
     mark_seed_cleared(&before, &target, "fx-seed-only");
     let mut after = router(&capability(true));
-    assert_eq!(after.catalog_version, before.catalog_version);
-    assert_eq!(after.overlay_revision, before.overlay_revision);
+    assert_eq!(after.catalog_version(), before.catalog_version());
+    assert_eq!(after.overlay_revision(), before.overlay_revision());
 
     // Act
     after.carry_over_learned_from(&before);

@@ -1198,8 +1198,8 @@ fn carry_over_learned_from_carries_when_catalog_and_overlay_unchanged() {
         Instant::now(),
     );
     let mut after = Router::new(config);
-    assert_eq!(after.catalog_version, before.catalog_version);
-    assert_eq!(after.overlay_revision, before.overlay_revision);
+    assert_eq!(after.catalog_version(), before.catalog_version());
+    assert_eq!(after.overlay_revision(), before.overlay_revision());
 
     // Act
     after.carry_over_learned_from(&before);
@@ -1253,8 +1253,8 @@ fn carry_over_learned_from_clears_in_flight_slot() {
     // Act: config-only reload -- same catalog version and overlay
     // revision, so the entry rides across.
     let mut after = Router::new(config);
-    assert_eq!(after.catalog_version, before.catalog_version);
-    assert_eq!(after.overlay_revision, before.overlay_revision);
+    assert_eq!(after.catalog_version(), before.catalog_version());
+    assert_eq!(after.overlay_revision(), before.overlay_revision());
     after.carry_over_learned_from(&before);
 
     // Assert: the entry rode across with its non-in-flight fields intact.
@@ -1358,8 +1358,8 @@ fn carry_over_expires_learned_entries_whose_override_cell_changed() {
     )
     .expect("config parses");
     let mut after = Router::new(Arc::new(after_cfg));
-    assert_eq!(after.catalog_version, before.catalog_version);
-    assert_eq!(after.overlay_revision, before.overlay_revision);
+    assert_eq!(after.catalog_version(), before.catalog_version());
+    assert_eq!(after.overlay_revision(), before.overlay_revision());
 
     // Act
     after.carry_over_learned_from(&before);
@@ -1468,246 +1468,12 @@ fn carry_over_preserves_learned_entries_across_an_essential_flip() {
     );
 }
 
-#[test]
-fn carry_over_learned_from_clears_and_warns_on_catalog_bump() {
+/// Observe one self-identifying negative for each of `capabilities` on lane
+/// `nick` of an `anthropic-api` entry, through the any-key test seam.
+fn observe_negatives_on(router: &Router, capabilities: &[&str], at: std::time::Instant) {
     use routectl_core::capability::{FailurePhase, SignalTier};
-    use std::time::Instant;
-
-    // Arrange
-    let config = Arc::new(Config::default());
-    let before = Router::new(config.clone());
-    before.learned_capabilities.observe(
-        crate::learned_capability::LearnKey {
-            state_key: "nick",
-            feature_key_raw: "web_search",
-            provider_kind: "openai-compat",
-        },
-        crate::learned_capability::NegativeEvidence {
-            tier: SignalTier::SelfIdentifying,
-            phase: FailurePhase::F1,
-            source: EvidenceSource::Live,
-            evidence_class: None,
-        },
-        Instant::now(),
-    );
-    let mut after = Router::new(config);
-    // Simulate a baked-catalog version bump across the rebuild.
-    after.catalog_version = before.catalog_version + 1;
-
-    // Act
-    let events = routectl_testkit::capture_events(|| {
-        after.carry_over_learned_from(&before);
-    });
-
-    // Assert: one WARN names the catalog trigger and the invalidation counter
-    // bumped. The registry is NOT emptied here: eviction of the catalog-scoped
-    // entries belongs to the replay-boundary transition, which runs only once
-    // the boundary batch is durable -- a failed boundary must leave the store
-    // exactly as it was.
-    assert_eq!(after.learned_capabilities.snapshot().len(), 1);
-    assert_eq!(after.metrics.invalidations_total(), 1);
-    let warn = events
-        .iter()
-        .find(|e| e.level == tracing::Level::WARN)
-        .expect("catalog bump must emit a WARN");
-    assert_eq!(warn.field("event"), Some("invalidation"));
-    assert_eq!(warn.field("catalog_changed"), Some("true"));
-    assert_eq!(warn.field("overlay_changed"), Some("false"));
-    let prev_cat = before.catalog_version.to_string();
-    let cur_cat = after.catalog_version.to_string();
-    assert_eq!(
-        warn.field("previous_catalog_version"),
-        Some(prev_cat.as_str())
-    );
-    assert_eq!(warn.field("catalog_version"), Some(cur_cat.as_str()));
-    assert_eq!(warn.field("previous_overlay_revision"), Some("0"));
-    assert_eq!(warn.field("overlay_revision"), Some("0"));
-}
-
-#[test]
-fn carry_over_learned_from_clears_and_warns_on_overlay_revision_change() {
-    use routectl_core::capability::{FailurePhase, SignalTier};
-    use std::time::Instant;
-
-    // Arrange: the outgoing Router was built against overlay revision 3.
-    let config = Arc::new(Config::default());
-    let mut before = Router::new(config.clone());
-    before.install_catalog_overlay(overlay_at_revision(3));
-    before.learned_capabilities.observe(
-        crate::learned_capability::LearnKey {
-            state_key: "nick",
-            feature_key_raw: "web_search",
-            provider_kind: "openai-compat",
-        },
-        crate::learned_capability::NegativeEvidence {
-            tier: SignalTier::SelfIdentifying,
-            phase: FailurePhase::F1,
-            source: EvidenceSource::Live,
-            evidence_class: None,
-        },
-        Instant::now(),
-    );
-    // The rebuild picked up a newer overlay revision.
-    let mut after = Router::new(config);
-    after.install_catalog_overlay(overlay_at_revision(4));
-
-    // Act
-    let events = routectl_testkit::capture_events(|| {
-        after.carry_over_learned_from(&before);
-    });
-
-    // Assert: overlay change invalidates -- one WARN naming the overlay
-    // trigger and the counter bumped. As above, the catalog-scoped eviction
-    // itself is the boundary transition's job, not this call's.
-    assert_eq!(after.learned_capabilities.snapshot().len(), 1);
-    assert_eq!(after.metrics.invalidations_total(), 1);
-    let warn = events
-        .iter()
-        .find(|e| e.level == tracing::Level::WARN)
-        .expect("overlay revision change must emit a WARN");
-    assert_eq!(warn.field("event"), Some("invalidation"));
-    assert_eq!(warn.field("overlay_changed"), Some("true"));
-    assert_eq!(warn.field("catalog_changed"), Some("false"));
-    let prev_cat = before.catalog_version.to_string();
-    let cur_cat = after.catalog_version.to_string();
-    assert_eq!(
-        warn.field("previous_catalog_version"),
-        Some(prev_cat.as_str())
-    );
-    assert_eq!(warn.field("catalog_version"), Some(cur_cat.as_str()));
-    assert_eq!(warn.field("previous_overlay_revision"), Some("3"));
-    assert_eq!(warn.field("overlay_revision"), Some("4"));
-}
-
-/// The in-memory invalidation layer: a catalog change discards the
-/// catalog-scoped half of the registry and carries the envelope-field half.
-///
-/// Mixed batch on purpose. A test carrying only a field entry would pass
-/// against an unconditional carry-over, and a test clearing only a
-/// catalog-scoped entry would pass against the unconditional clear this
-/// replaces; both classes must sit in ONE registry for the assertion to
-/// discriminate. The warning and the invalidation counter are asserted
-/// alongside, because the clear did not stop happening -- it narrowed.
-#[test]
-fn carry_over_learned_from_keeps_field_entries_and_clears_catalog_scoped_on_catalog_bump() {
-    use routectl_core::capability::{FailurePhase, SignalTier};
-    use std::time::Instant;
-
-    // Arrange: one wire-shape negative and one catalog-scoped negative on
-    // the same outgoing registry, under the same target and provider kind.
-    let field_key = crate::field_capability::field_capability_key("thinking.enabled.display")
-        .expect("a qualified dotted path mints a key");
-    let config = Arc::new(Config::default());
-    let before = Router::new(config.clone());
-    for capability in [field_key.as_str(), "web_search"] {
-        before.learned_capabilities.observe_any_key_for_tests(
-            crate::learned_capability::LearnKey {
-                state_key: "nick",
-                feature_key_raw: capability,
-                provider_kind: "anthropic-api",
-            },
-            crate::learned_capability::NegativeEvidence {
-                tier: SignalTier::SelfIdentifying,
-                phase: FailurePhase::F1,
-                source: EvidenceSource::Live,
-                evidence_class: None,
-            },
-            Instant::now(),
-        );
-    }
-    assert_eq!(
-        before.learned_capabilities.snapshot().len(),
-        2,
-        "both classes must be resident before the reload",
-    );
-    let mut after = Router::new(config);
-    after.catalog_version = before.catalog_version + 1;
-
-    // Act
-    let events = routectl_testkit::capture_events(|| {
-        after.carry_over_learned_from(&before);
-    });
-
-    // Assert: the attach itself evicts nothing -- a failed boundary must be
-    // able to leave the shared store untouched.
-    assert_eq!(
-        after.learned_capabilities.snapshot().len(),
-        2,
-        "the attach preserves both classes until the boundary commits",
-    );
-
-    // The boundary transition is what discriminates: advance the generation and
-    // prune, exactly as the reload coordinator does after its batch is durable.
-    after.learned_capabilities.advance_generation();
-    assert_eq!(after.learned_capabilities.prune_catalog_scoped(), 1);
-    let carried: Vec<String> = after
-        .learned_capabilities
-        .snapshot()
-        .into_iter()
-        .map(|entry| entry.feature_key)
-        .collect();
-    assert_eq!(
-        carried,
-        vec![field_key],
-        "only the envelope-field entry survives a catalog change",
-    );
-
-    // Assert: the existing invalidation signal still fires for the change.
-    assert_eq!(after.metrics.invalidations_total(), 1);
-    let warn = events
-        .iter()
-        .find(|e| e.level == tracing::Level::WARN)
-        .expect("catalog bump must still emit a WARN");
-    assert_eq!(warn.field("event"), Some("invalidation"));
-    assert_eq!(warn.field("catalog_changed"), Some("true"));
-}
-
-/// The composed durability path: a wire-shape verdict must be resident
-/// after a hot reload that changed the catalog AND after the cold replay a
-/// restart runs against a tombstone stamped with the new revision.
-///
-/// Fixing one layer alone is worse than fixing neither -- the verdict would
-/// survive every reload and vanish at the next restart -- so the guarantee
-/// is only observable end to end, which is what this exercises.
-#[test]
-fn field_entry_survives_a_catalog_change_across_reload_and_cold_replay() {
-    use crate::capability_rebuild::{CapabilityEventRow, CapabilityLedgerReader, ReplayTombstone};
-    use routectl_core::capability::{FailurePhase, SignalTier};
-    use std::time::Instant;
-
-    /// A ledger holding one pre-change wire-shape row and one pre-change
-    /// catalog-scoped row, read against a boundary stamped post-change.
-    struct MixedLedger {
-        tombstone: ReplayTombstone,
-        rows: Vec<CapabilityEventRow>,
-    }
-
-    impl CapabilityLedgerReader for MixedLedger {
-        fn tombstone(&self) -> Option<ReplayTombstone> {
-            Some(self.tombstone)
-        }
-
-        fn read_events(&self) -> Vec<CapabilityEventRow> {
-            self.rows.clone()
-        }
-    }
-
-    let field_key = crate::field_capability::field_capability_key("thinking.enabled.display")
-        .expect("a qualified dotted path mints a key");
-    let at = Instant::now();
-
-    // Arrange + Act, phase one: the hot reload, with the catalog bumped. The
-    // replayed rows' lane names the `anthropic` entry, so the config must own
-    // it under the recorded kind for the restart to replay them.
-    let mut config = Config::default();
-    config.providers.insert(
-        "anthropic".to_string(),
-        ProviderEntry::anthropic_api(crate::test_secret::file_ref("k")),
-    );
-    let config = Arc::new(config);
-    let before = Router::new(config.clone());
-    for capability in [field_key.as_str(), "web_search"] {
-        before.learned_capabilities.observe_any_key_for_tests(
+    for capability in capabilities {
+        router.learned_capabilities.observe_any_key_for_tests(
             crate::learned_capability::LearnKey {
                 state_key: "nick",
                 feature_key_raw: capability,
@@ -1722,25 +1488,114 @@ fn field_entry_survives_a_catalog_change_across_reload_and_cold_replay() {
             at,
         );
     }
-    let mut reloaded = Router::new(config.clone());
-    reloaded.catalog_version = before.catalog_version + 1;
-    reloaded.carry_over_learned_from(&before);
-    // The boundary transition performs the eviction (the attach preserves both
-    // classes so a failed boundary can leave the store untouched).
-    reloaded.learned_capabilities.advance_generation();
-    reloaded.learned_capabilities.prune_catalog_scoped();
-    assert_eq!(
-        reloaded.learned_capabilities.snapshot().len(),
-        1,
-        "after the boundary, exactly the wire-shape entry is resident",
-    );
+}
 
-    // Act, phase two: the restart. A fresh process starts with an empty
-    // registry and replays the persisted slice; the tombstone this boot
-    // matched carries the POST-change revision, while both persisted rows
-    // were stamped pre-change.
-    let restarted = Router::new(config);
-    let boundary_catalog = before.catalog_version + 1;
+fn resident_feature_keys(router: &Router) -> Vec<String> {
+    let mut keys: Vec<String> = router
+        .learned_capabilities
+        .snapshot()
+        .into_iter()
+        .map(|entry| entry.feature_key)
+        .collect();
+    keys.sort();
+    keys
+}
+
+/// The capability revision stamps are frozen, so a reload that installs an
+/// overlay at another revision is a config-only reload: no invalidation, no
+/// warning, and every learned entry rides across.
+#[test]
+fn an_overlay_revision_change_across_reload_neither_invalidates_nor_warns() {
+    // Arrange
+    let config = Arc::new(Config::default());
+    let mut before = Router::new(config.clone());
+    before.install_catalog_overlay(overlay_at_revision(3));
+    observe_negatives_on(&before, &["web_search"], std::time::Instant::now());
+    let mut after = Router::new(config);
+    after.install_catalog_overlay(overlay_at_revision(4));
+
+    // Act
+    let events = routectl_testkit::capture_events(|| {
+        after.carry_over_learned_from(&before);
+    });
+
+    // Assert
+    assert_eq!(after.overlay_revision(), crate::FROZEN_OVERLAY_REVISION);
+    assert_eq!(after.catalog_version(), crate::FROZEN_CATALOG_VERSION);
+    assert_eq!(
+        resident_feature_keys(&after),
+        vec!["web_search".to_string()]
+    );
+    assert_eq!(after.metrics.invalidations_total(), 0);
+    assert!(
+        !events
+            .iter()
+            .any(|e| e.field("event") == Some("invalidation")),
+        "a frozen stamp never reports an invalidation",
+    );
+}
+
+/// The boundary prune evicts nothing: no learned key is catalog-scoped, so a
+/// field verdict and a former catalog-scoped verdict sharing one registry both
+/// survive the generation advance.
+#[test]
+fn the_boundary_prune_keeps_field_and_non_field_entries() {
+    // Arrange
+    let field_key = crate::field_capability::field_capability_key("thinking.enabled.display")
+        .expect("a qualified dotted path mints a key");
+    let router = Router::new(Arc::new(Config::default()));
+    observe_negatives_on(
+        &router,
+        &[field_key.as_str(), "web_search"],
+        std::time::Instant::now(),
+    );
+    assert_eq!(resident_feature_keys(&router).len(), 2);
+
+    // Act
+    router.learned_capabilities.advance_generation();
+    let pruned = router.learned_capabilities.prune_catalog_scoped();
+
+    // Assert
+    assert_eq!(pruned, 0);
+    let mut expected = vec![field_key, "web_search".to_string()];
+    expected.sort();
+    assert_eq!(resident_feature_keys(&router), expected);
+}
+
+/// A restart replaying rows stamped under an earlier catalog / overlay
+/// revision, against a boundary stamped with the frozen one, keeps both a
+/// field verdict and a former catalog-scoped verdict: nothing is skipped for
+/// its revision.
+#[test]
+fn a_replay_across_a_stale_revision_keeps_every_verdict() {
+    use crate::capability_rebuild::{CapabilityEventRow, CapabilityLedgerReader, ReplayTombstone};
+
+    struct StaleLedger(Vec<CapabilityEventRow>);
+
+    impl CapabilityLedgerReader for StaleLedger {
+        fn tombstone(&self) -> Option<ReplayTombstone> {
+            Some(ReplayTombstone::new(
+                0,
+                crate::FROZEN_CATALOG_VERSION,
+                crate::FROZEN_OVERLAY_REVISION,
+            ))
+        }
+
+        fn read_events(&self) -> Vec<CapabilityEventRow> {
+            self.0.clone()
+        }
+    }
+
+    // Arrange
+    let field_key = crate::field_capability::field_capability_key("thinking.enabled.display")
+        .expect("a qualified dotted path mints a key");
+    let mut config = Config::default();
+    config.providers.insert(
+        "anthropic".to_string(),
+        ProviderEntry::anthropic_api(crate::test_secret::file_ref("k")),
+    );
+    let restarted = Router::new(Arc::new(config));
+    let at = std::time::Instant::now();
     let row = |rowid: i64, capability: &str| {
         CapabilityEventRow::new(
             rowid,
@@ -1753,30 +1608,28 @@ fn field_entry_survives_a_catalog_change_across_reload_and_cold_replay() {
             capability.to_string(),
             "anthropic#nick-upstream".to_string(),
             "anthropic-api".to_string(),
-            before.catalog_version,
-            0,
+            crate::FROZEN_CATALOG_VERSION + 1,
+            7,
         )
         .with_vocab_version(Some(crate::capability_vocab::CURRENT_VOCAB_VERSION))
     };
-    let summary = restarted.rebuild_learned_from_ledger(&MixedLedger {
-        tombstone: ReplayTombstone::new(0, boundary_catalog, 0),
-        rows: vec![row(1, &field_key), row(2, "web_search")],
-    });
 
-    // Assert: the wire-shape verdict is resident after BOTH transitions,
-    // and the catalog-scoped row was evicted by the revision guard.
-    let resident: Vec<String> = restarted
+    // Act
+    let summary = restarted
+        .rebuild_learned_from_ledger(&StaleLedger(vec![row(1, &field_key), row(2, "web_search")]));
+
+    // Assert
+    let mut resident: Vec<String> = restarted
         .learned_capability_snapshot()
         .into_iter()
         .map(|entry| entry.feature_key)
         .collect();
-    assert_eq!(
-        resident,
-        vec![field_key],
-        "the wire-shape verdict survives the reload and the restart",
-    );
-    assert_eq!(summary.replayed_negative, 1);
-    assert_eq!(summary.skipped_revision, 1);
+    resident.sort();
+    let mut expected = vec![field_key, "web_search".to_string()];
+    expected.sort();
+    assert_eq!(resident, expected);
+    assert_eq!(summary.replayed_negative, 2);
+    assert_eq!(summary.skipped_revision, 0);
 }
 
 /// A cold rebuild must reseed the field canary registry from the resident

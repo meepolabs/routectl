@@ -38,7 +38,7 @@ use std::time::Instant;
 use routectl_core::{EvidenceSource, FailurePhase, sanitize_for_log};
 
 use crate::field_canary::{CanaryOutcome, CanaryStateSnapshot};
-use crate::field_capability::capability_key_is_catalog_scoped;
+use crate::field_capability::capability_key_is_field_verdict;
 use crate::field_verdict::FieldVerdictKey;
 use crate::learned_capability::LearnedRegistryEntry;
 
@@ -381,7 +381,7 @@ impl Router {
         // not), so an entry whose key does not parse has no lane and no row.
         learned
             .into_iter()
-            .filter(|entry| !capability_key_is_catalog_scoped(&entry.feature_key))
+            .filter(|entry| capability_key_is_field_verdict(&entry.feature_key))
             .filter_map(|entry| {
                 let lane = crate::state_key::StateKey::parse(&entry.state_key)?;
                 Some(self.status_row_for(entry, lane, &acting))

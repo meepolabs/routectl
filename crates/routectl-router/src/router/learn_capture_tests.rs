@@ -2617,41 +2617,20 @@ async fn bedrock_drift_body_bumps_only_the_unmatched_counter() {
     assert_eq!(router.metrics.learned_negatives_f1_total(), 0);
 }
 
-/// A same-capability re-rejection whose admission went STALE leaves every
-/// downstream consequence unchanged, driven through the production settlement
-/// path the caller switches on.
+/// A same-capability re-rejection whose admission straddles a generation change
+/// is booked like any other, driven through the production settlement path the
+/// caller switches on: no key is catalog-scoped, so the settlement reports
+/// Applied, books the probe failure, and refreshes the backoff.
 ///
-/// The retired boolean returned `true` for a stale settlement too, so the caller
-/// bumped the probe-failure metric, recorded the cross-lane F1Seen marker, and
-/// inserted the request-local dedupe key -- three observable effects of a
-/// settlement that recorded nothing, booked against a catalog revision the daemon
-/// had already left.
-///
-/// # Why this stages the guard instead of driving a full dispatch
-///
-/// Two full-dispatch shapes were tried and both are unusable, measured rather
-/// than assumed:
-///
-/// - Advancing the generation BEFORE the request makes the feature filter refuse
-///   the admission outright, so no probe is attempted
-///   (`probe_attempts_total() == 0`) and every assertion holds vacuously.
-/// - Advancing it from the guarded-read pause hook DEADLOCKS: the hook runs while
-///   the generation read guard is held and `advance_generation` wants the write
-///   lock, so the suite hangs rather than failing.
-///
-/// The interleaving is therefore staged directly -- a guard armed at the
-/// admitting generation, the reload, then the production
-/// `settle_same_capability`. `advance_generation` alone rather than the full
-/// boundary transition, so the entry is not pruned and "unchanged" stays
-/// observable.
+/// The guard is staged rather than driven through a full dispatch: advancing the
+/// generation from inside the guarded-read pause hook deadlocks, because the hook
+/// runs while the generation read guard is held.
 #[tokio::test]
-async fn a_stale_same_capability_probe_settlement_books_nothing() {
+async fn a_same_capability_probe_settlement_across_a_generation_change_is_booked() {
     // Arrange: an expired negative and a guard holding its re-probe admission.
-    let router = router_with(OPENAI_P1, self_identifying_provider());
-    seed_expired_negative(&router, M1_LANE, "web_search");
+    let router = router_with(ANTHROPIC_P1, self_identifying_provider());
+    seed_expired_phase_negative(&router, "web_search", FailurePhase::F1);
     let before = router.learned_capabilities.snapshot()[0].expires_at;
-    let observations_before = router.learned_capabilities.snapshot()[0].observations;
-    let failures_before = router.metrics.probe_failures_total();
     let mut guard = armed_guard_for(&router, "web_search");
 
     // The reload lands between the admission and the rejection.
@@ -2660,28 +2639,14 @@ async fn a_stale_same_capability_probe_settlement_books_nothing() {
     // Act: the production settlement path.
     let settled = guard.settle_same_capability(M1_LANE, "web_search", "anthropic-api");
 
-    // Assert: reported as stale, which is what makes the caller skip its whole
-    // consequence block.
+    // Assert
     assert_eq!(
         settled,
-        super::super::runtime_gate::SameCapabilitySettlement::Stale,
-        "the settlement must report Stale, not the retired `true`",
-    );
-    assert_eq!(
-        router.metrics.probe_failures_total(),
-        failures_before,
-        "a stale settlement books no probe failure -- none was recorded",
+        super::super::runtime_gate::SameCapabilitySettlement::Applied,
     );
     let snap = router.learned_capabilities.snapshot();
     assert_eq!(snap.len(), 1, "the entry is still resident");
-    assert_eq!(
-        snap[0].observations, observations_before,
-        "a stale settlement must not bump the observation count",
-    );
-    assert_eq!(
-        snap[0].expires_at, before,
-        "nor refresh the backoff it did not book",
-    );
+    assert!(snap[0].expires_at > before, "the backoff is refreshed");
 }
 
 /// A minimal openai-responses provider config (capability subsystem left at

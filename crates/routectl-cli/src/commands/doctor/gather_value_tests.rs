@@ -50,12 +50,7 @@ fn broken(capability: &str, token: &str) -> CapabilityEvent {
 
 fn replayed_entries(events: &[CapabilityEvent]) -> Vec<LearnedRegistryEntry> {
     let (_dir, path) = seeded_ledger(events);
-    match gather_capability_matrix(
-        &config(&path),
-        false,
-        0,
-        routectl_router::BetaSeedScope::EMPTY,
-    ) {
+    match gather_capability_matrix(&config(&path), false, routectl_router::BetaSeedScope::EMPTY) {
         CapabilityMatrixSource::Available { entries, .. } => entries,
         _ => panic!("the replay left entries resident"),
     }

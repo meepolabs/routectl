@@ -736,13 +736,13 @@ pub(super) async fn handle_config_reload(
     new_router.carry_over_pool_state_from(&previous_router);
     new_router.carry_over_learned_from(&previous_router);
 
-    // A reload that advanced the catalog version or overlay revision moves the
-    // replay boundary. Read both revisions before the swap (this coordinator is
-    // the sole writer, so the loaded Arc is the router being replaced).
-    let overlay_revision_changed =
-        previous_router.overlay_revision() != new_router.overlay_revision();
+    // A reload that advanced the capability revision stamps moves the replay
+    // boundary. Read both stamps before the swap (this coordinator is the sole
+    // writer, so the loaded Arc is the router being replaced).
     let revision_changed = previous_router.catalog_version() != new_router.catalog_version()
-        || overlay_revision_changed;
+        || previous_router.overlay_revision() != new_router.overlay_revision();
+    let overlay_revision_changed =
+        previous_router.catalog_overlay().revision != new_overlay.revision;
 
     // Moving the boundary makes every row before the new tombstone invisible
     // to every later boot, so the surviving catalog-independent verdicts must

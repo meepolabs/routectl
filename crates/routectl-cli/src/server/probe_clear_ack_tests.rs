@@ -233,18 +233,15 @@ async fn a_committed_clear_is_durable_and_lands_one_probe_cleared_row() {
     drain_usage_writer_strict(writer).await;
 }
 
-/// The row is stamped with the revision pair of the router PUBLISHED when the
-/// clear is submitted, not the one live when the acknowledgement was built.
-///
-/// Mutation check: capture the revision pair at install time -> red.
+/// The row is stamped with the frozen revision pair, whatever overlay the
+/// published router installed.
 #[tokio::test]
-async fn the_clear_is_stamped_with_the_published_router_revision() {
+async fn the_clear_is_stamped_with_the_frozen_revision() {
     let (_dir, path, usage, writer) = live_usage_writer().await;
     let swap = Arc::new(ArcSwap::from_pointee(lane_router()));
     let ack = ack_over(&usage, &swap);
     let mut replacement = lane_router();
     replacement.install_catalog_overlay(crate::server::test_support::overlay_at_revision(9));
-    let expected_catalog = i64::from(replacement.catalog_version());
     swap.store(Arc::new(replacement));
 
     assert!(
@@ -257,10 +254,9 @@ async fn the_clear_is_stamped_with_the_published_router_revision() {
         vec![(
             "cleared".to_string(),
             "probe".to_string(),
-            expected_catalog,
-            9
+            i64::from(routectl_router::FROZEN_CATALOG_VERSION),
+            i64::try_from(routectl_router::FROZEN_OVERLAY_REVISION).expect("fits"),
         )],
-        "stamped with the replacement's overlay revision",
     );
     drop((ack, swap, usage));
     drain_usage_writer_strict(writer).await;

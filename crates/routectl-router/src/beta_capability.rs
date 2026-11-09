@@ -15,10 +15,9 @@
 //! [`beta_override_key`]), and the only ways to read one are
 //! [`beta_flag_of`] and [`capability_key_is_beta`].
 //!
-//! Beta keys are catalog-scoped facts: they sit outside the envelope-field
-//! namespace, so `field_capability::capability_key_is_catalog_scoped` keeps
-//! its default and the invalidation paths discard them on a catalog revision
-//! change like any other catalog capability.
+//! Beta keys sit outside the envelope-field namespace:
+//! `field_capability::capability_key_is_field_verdict` is false for them, so
+//! no field-verdict surface reports or resets one.
 
 use std::collections::{BTreeMap, BTreeSet};
 

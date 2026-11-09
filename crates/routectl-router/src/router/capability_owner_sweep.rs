@@ -136,7 +136,7 @@ impl Router {
         if !matches!(outcome, GenerationOutcome::Applied { value: true, .. }) {
             return false;
         }
-        if !crate::field_capability::capability_key_is_catalog_scoped(&entry.feature_key) {
+        if crate::field_capability::capability_key_is_field_verdict(&entry.feature_key) {
             let key = crate::field_verdict::FieldVerdictKey::from_capability_key(
                 lane.clone(),
                 entry.feature_key.clone(),

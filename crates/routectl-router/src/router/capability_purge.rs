@@ -264,7 +264,7 @@ impl Router {
     pub fn finalize_learned_capability_purge(&self, reserved: Box<ReservedPurge>) -> bool {
         let removed = self.learned_capabilities.finalize_purge(reserved.lease);
         if removed
-            && !crate::field_capability::capability_key_is_catalog_scoped(&reserved.capability_key)
+            && crate::field_capability::capability_key_is_field_verdict(&reserved.capability_key)
         {
             let key = crate::field_verdict::FieldVerdictKey::from_capability_key(
                 reserved.lane.clone(),

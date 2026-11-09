@@ -191,7 +191,7 @@ fn a_replayed_seed_clear_renders_a_cleared_seed_cell() {
     let mut config = seed_config();
     config.usage.db_path = path;
 
-    let source = gather_capability_matrix(&config, false, 0, seed_scope(SEED));
+    let source = gather_capability_matrix(&config, false, seed_scope(SEED));
     let panel = panel_with(config, source, seed_scope(SEED));
 
     let cleared = cell(&panel, BEDROCK_LANE, &beta(SEEDED));

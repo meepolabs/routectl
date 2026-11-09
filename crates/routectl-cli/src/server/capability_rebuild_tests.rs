@@ -306,9 +306,9 @@ async fn matching_tombstone_replays_post_boundary_negative() {
 }
 
 #[tokio::test]
-async fn matching_tombstone_skips_a_stale_revision_straggler() {
+async fn matching_tombstone_replays_a_stale_revision_straggler() {
     // Arrange: two post-boundary negatives -- one at this boot's revision, one
-    // stamped a stale catalog version (an old-router straggler).
+    // stamped a stale catalog version (an earlier build's straggler).
     let tmp = TempDir::new().expect("tempdir");
     let router = default_router(&tmp).await;
     let cat = i64::from(router.catalog_version());
@@ -317,30 +317,23 @@ async fn matching_tombstone_skips_a_stale_revision_straggler() {
     let ledger = tmp.path().join("usage.db");
     let db = open(&ledger).expect("open ledger");
     seed_tombstone(db.conn(), 100, cat, overlay);
-    seed_event(
-        db.conn(),
-        200,
-        "gpt-nick#lane-current",
-        "cap-current",
-        "broken",
-        "f1",
-        "live",
-        "self-identifying",
-        cat,
-        overlay,
-    );
-    seed_event(
-        db.conn(),
-        300,
-        "gpt-nick#lane-stale",
-        "cap-stale",
-        "broken",
-        "f1",
-        "live",
-        "self-identifying",
-        cat + 1,
-        overlay,
-    );
+    for (ts, lane, stamped) in [
+        (200, "gpt-nick#lane-current", cat),
+        (300, "gpt-nick#lane-stale", cat + 1),
+    ] {
+        seed_event(
+            db.conn(),
+            ts,
+            lane,
+            "web_search",
+            "broken",
+            "f1",
+            "live",
+            "self-identifying",
+            stamped,
+            overlay,
+        );
+    }
     drop(db);
 
     let scratch = tmp.path().join("scratch.db");
@@ -349,78 +342,28 @@ async fn matching_tombstone_skips_a_stale_revision_straggler() {
     // Act
     warm_off_runtime(&ledger, &router, &handle);
 
-    // Assert: the current-revision negative replays; the stale straggler does not.
-    let snapshot = router.learned_capability_snapshot();
-    assert!(
-        snapshot
-            .iter()
-            .any(|e| e.state_key == "gpt-nick#lane-current"),
-        "the current-revision negative replays"
-    );
-    assert!(
-        !snapshot
-            .iter()
-            .any(|e| e.state_key == "gpt-nick#lane-stale"),
-        "a stale-revision straggler is skipped by the per-row filter"
-    );
-
-    drop(handle);
-    drain_usage_writer_strict(writer).await;
-}
-
-#[tokio::test]
-async fn revision_mismatch_drops_a_stale_catalog_scoped_verdict_behind_a_fresh_tombstone() {
-    // Arrange: a ledger whose tombstone + negative were stamped at overlay 0,
-    // but this boot runs at a different overlay revision.
-    let tmp = TempDir::new().expect("tempdir");
-    let mut router = default_router(&tmp).await;
-    router.install_catalog_overlay(crate::server::test_support::overlay_at_revision(99));
-    let cat = i64::from(router.catalog_version());
-
-    let ledger = tmp.path().join("usage.db");
-    let db = open(&ledger).expect("open ledger");
-    seed_tombstone(db.conn(), 100, cat, 0);
-    seed_event(
-        db.conn(),
-        200,
-        "gpt-nick#upstream",
-        "web_search",
-        "broken",
-        "f1",
-        "live",
-        "self-identifying",
-        cat,
-        0,
-    );
-    drop(db);
-
-    // The fresh tombstone must reach a writer at the SAME ledger path.
-    let (handle, writer) = writer_at(&ledger);
-
-    // Act
-    warm_off_runtime(&ledger, &router, &handle);
-
-    // Assert: nothing replayed (fail closed on the revision mismatch).
-    assert!(
-        router.learned_capability_snapshot().is_empty(),
-        "a catalog-scoped verdict of the stale revision does not survive"
-    );
-
-    drop(handle);
-    drain_usage_writer_strict(writer).await;
-
-    // A second, fresh tombstone was written at this boot's revision.
+    // Assert: both negatives replay; no revision evicts a verdict.
+    let mut lanes: Vec<String> = router
+        .learned_capability_snapshot()
+        .into_iter()
+        .map(|e| e.state_key)
+        .collect();
+    lanes.sort();
     assert_eq!(
-        tombstone_count(&ledger),
-        2,
-        "the boot seam adds a fresh tombstone on a revision mismatch"
+        lanes,
+        vec![
+            "gpt-nick#lane-current".to_string(),
+            "gpt-nick#lane-stale".to_string()
+        ]
     );
-    let db = open(&ledger).expect("reopen ledger");
-    let boundary = latest_tombstone(db.conn())
-        .expect("read tombstone")
-        .expect("a boot tombstone exists");
-    assert_eq!(boundary.overlay_revision, Some(99));
+
+    drop(handle);
+    drain_usage_writer_strict(writer).await;
 }
+
+/// The tombstone and stamp shape a ledger written by the previous build
+/// carries: the frozen catalog version and a live overlay revision of 7.
+const PREVIOUS_BUILD_OVERLAY: i64 = 7;
 
 /// The wire-shape capability key these tests plant.
 ///
@@ -431,11 +374,12 @@ fn field_key() -> String {
     format!("{}{}thinking.enabled.display", "fie", "ld:")
 }
 
-/// Seed a stale-revision session: a tombstone at overlay 0 followed by one
-/// wire-shape and one catalog-scoped negative at that same revision.
+/// Seed a ledger the previous build wrote: a tombstone stamped
+/// `(catalog, PREVIOUS_BUILD_OVERLAY)`, then one wire-shape and one former
+/// catalog-scoped negative at that same revision.
 fn seed_stale_session(ledger: &Path, cat: i64) {
     let db = open(ledger).expect("open ledger");
-    seed_tombstone(db.conn(), 100, cat, 0);
+    seed_tombstone(db.conn(), 100, cat, PREVIOUS_BUILD_OVERLAY);
     for (ts, capability) in [(200, field_key()), (300, "web_search".to_string())] {
         seed_event(
             db.conn(),
@@ -447,7 +391,7 @@ fn seed_stale_session(ledger: &Path, cat: i64) {
             "live",
             "self-identifying",
             cat,
-            0,
+            PREVIOUS_BUILD_OVERLAY,
         );
     }
 }
@@ -479,59 +423,80 @@ fn ledger_rows(path: &Path) -> Vec<(String, String, i64)> {
         .expect("rows")
 }
 
-/// A router at overlay revision 99, the revision the stale session is not.
-async fn bumped_router(tmp: &TempDir) -> Router {
-    let mut router = default_router(tmp).await;
-    router.install_catalog_overlay(crate::server::test_support::overlay_at_revision(99));
-    router
-}
-
-/// A boot across a revision bump keeps the wire-shape verdict and evicts the
-/// catalog-scoped one -- in memory now, AND durably, so a second boot at the
-/// new revision (a matching tombstone this time) still has it.
+/// The first boot after the upgrade, over a ledger the previous build wrote:
+/// the stale tombstone routes the warm through the restatement, BOTH verdicts
+/// come back resident, and both are restated past a fresh tombstone stamped
+/// the frozen revision, so the next boot (a matching tombstone this time)
+/// still has them. Nothing is skipped for its revision.
 #[tokio::test]
-async fn revision_bump_boot_restates_a_wire_shape_verdict_and_drops_a_catalog_scoped_one() {
+async fn the_first_boot_over_a_previous_build_ledger_evicts_no_verdict() {
     // Arrange
     let tmp = TempDir::new().expect("tempdir");
-    let router = bumped_router(&tmp).await;
+    let router = default_router(&tmp).await;
     let cat = i64::from(router.catalog_version());
+    assert_eq!(cat, 4, "premise: the frozen catalog version");
+    assert_eq!(
+        router.overlay_revision(),
+        0,
+        "premise: the frozen overlay revision"
+    );
     let ledger = tmp.path().join("usage.db");
     seed_stale_session(&ledger, cat);
+    assert!(
+        matches!(
+            classify_boundary(&ledger, router.catalog_version(), router.overlay_revision()),
+            BoundaryOutcome::RevisionMismatch { .. }
+        ),
+        "premise: the previous build's tombstone is stale against this boot"
+    );
     let (handle, writer) = writer_at(&ledger);
 
-    // Act: the first boot after the bump.
-    warm_off_runtime(&ledger, &router, &handle);
+    // Act: the first boot after the upgrade.
+    let (report, _) = warm_reporting_off_runtime(&ledger, &router, &handle);
 
-    // Assert: only the wire-shape verdict is resident.
-    assert_eq!(
-        resident_keys(&router),
-        vec![field_key()],
-        "the wire-shape verdict survives the bump and the catalog-scoped one does not"
-    );
+    // Assert: both verdicts are resident, through the restatement path.
+    let mut expected = vec![field_key(), "web_search".to_string()];
+    expected.sort();
+    assert_eq!(report.outcome, WarmOutcome::Restated);
+    let summary = report.summary.expect("summary");
+    assert_eq!(summary.skipped_revision, 0);
+    assert_eq!(summary.replayed_negative, 2);
+    assert_eq!(resident_keys(&router), expected);
 
-    // Act: a second boot at the bumped revision.
-    let restarted = bumped_router(&tmp).await;
-    warm_off_runtime(&ledger, &restarted, &handle);
+    // Act: the next boot, now over a matching tombstone.
+    let restarted = default_router(&tmp).await;
+    let (second, _) = warm_reporting_off_runtime(&ledger, &restarted, &handle);
     drop(handle);
     drain_usage_writer_strict(writer).await;
 
-    // Assert: the restatement is durable past a fresh boundary, and the
-    // catalog-scoped verdict was never restated.
-    assert_eq!(
-        resident_keys(&restarted),
-        vec![field_key()],
-        "the wire-shape verdict survives the restart after the bump"
-    );
+    // Assert: the restatement is durable past a fresh (4, 0) tombstone.
+    assert_eq!(second.outcome, WarmOutcome::Replayed);
+    assert_eq!(resident_keys(&restarted), expected);
     let rows = ledger_rows(&ledger);
     let fresh = rows
         .iter()
         .rposition(|(verdict, _, _)| verdict == "tombstone")
         .expect("a tombstone exists");
-    assert_eq!(rows[fresh].2, 99, "the newest tombstone is this boot's");
     assert_eq!(
-        rows[fresh + 1..].to_vec(),
-        vec![("broken".to_string(), field_key(), 99)],
-        "exactly the wire-shape verdict is restated past the fresh tombstone"
+        rows[fresh].2, 0,
+        "the newest tombstone is stamped the frozen revision"
+    );
+    let db = open(&ledger).expect("reopen ledger");
+    let boundary = latest_tombstone(db.conn())
+        .expect("read tombstone")
+        .expect("a boot tombstone exists");
+    assert_eq!(boundary.catalog_version, Some(4));
+    assert_eq!(boundary.overlay_revision, Some(0));
+    let mut restated: Vec<(String, String, i64)> = rows[fresh + 1..].to_vec();
+    restated.sort();
+    let mut want: Vec<(String, String, i64)> = expected
+        .iter()
+        .map(|key| ("broken".to_string(), key.clone(), 0))
+        .collect();
+    want.sort();
+    assert_eq!(
+        restated, want,
+        "both verdicts are restated past the fresh tombstone"
     );
 }
 
@@ -544,7 +509,7 @@ async fn revision_bump_boot_boundary_failure_commits_nothing_and_installs_nothin
     // Arrange: the restatement row is rejected by a trigger, so the writer
     // reaches the batch and its transaction fails part-way through.
     let tmp = TempDir::new().expect("tempdir");
-    let router = bumped_router(&tmp).await;
+    let router = default_router(&tmp).await;
     let cat = i64::from(router.catalog_version());
     let ledger = tmp.path().join("usage.db");
     seed_stale_session(&ledger, cat);
@@ -608,7 +573,7 @@ async fn revision_bump_boot_with_an_unreadable_slice_commits_nothing_and_install
     // Arrange: a stale session carrying a wire-shape survivor, then a row the
     // slice read cannot decode.
     let tmp = TempDir::new().expect("tempdir");
-    let router = bumped_router(&tmp).await;
+    let router = default_router(&tmp).await;
     let cat = i64::from(router.catalog_version());
     let ledger = tmp.path().join("usage.db");
     seed_stale_session(&ledger, cat);
@@ -803,7 +768,7 @@ const SEED_UPSTREAM: &str = "anthropic.claude-test-v1:0";
 const SEED_LANE: &str = "aws#anthropic.claude-test-v1:0";
 const FIXTURE_SEED: &[&str] = &["fx-current", "fx-stale"];
 
-/// A bedrock router at overlay revision 99 under [`FIXTURE_SEED`], with one
+/// A bedrock router under [`FIXTURE_SEED`], with one
 /// model `m` on lane [`SEED_LANE`] whose provider records the withheld set.
 fn seeded_bedrock_router() -> (Router, Arc<BetaRecorder>) {
     let config: Config = toml::from_str(
@@ -817,7 +782,6 @@ fn seeded_bedrock_router() -> (Router, Arc<BetaRecorder>) {
     .expect("fixture config parses");
     let mut router = Router::new(Arc::new(config));
     router.set_beta_seed_for_tests(FIXTURE_SEED);
-    router.install_catalog_overlay(crate::server::test_support::overlay_at_revision(99));
     let provider = Arc::new(BetaRecorder {
         withheld: parking_lot::Mutex::new(Vec::new()),
     });
@@ -863,33 +827,35 @@ async fn withheld_after_boot(ledger: &Path, handle: &UsageHandle) -> Vec<String>
     seen.remove(0)
 }
 
-/// A seed clear stamped with the boot's revision is restated past the fresh
-/// boundary, so the restart after it decides the same; a clear stamped with
-/// the superseded revision lapses on both boots.
+/// Seed clears stamped under any revision survive the first boot over a
+/// previous build's ledger and the restart after it.
 #[tokio::test]
-async fn a_seed_clear_decides_the_same_across_a_revision_bump_boot_and_the_next_one() {
-    // Arrange -- a stale tombstone, a clear at the superseded revision and a
-    // clear at the revision this daemon now boots at.
+async fn a_seed_clear_decides_the_same_across_an_upgrade_boot_and_the_next_one() {
+    // Arrange -- the previous build's stale tombstone and two clears at
+    // different overlay revisions.
     let tmp = TempDir::new().expect("tempdir");
     let ledger = tmp.path().join("usage.db");
     let cat = i64::from(seeded_bedrock_router().0.catalog_version());
     {
         let db = open(&ledger).expect("open ledger");
-        seed_tombstone(db.conn(), 100, cat, 0);
+        seed_tombstone(db.conn(), 100, cat, PREVIOUS_BUILD_OVERLAY);
         seed_cleared_beta(db.conn(), 200, "fx-stale", cat, 0);
-        seed_cleared_beta(db.conn(), 300, "fx-current", cat, 99);
+        seed_cleared_beta(db.conn(), 300, "fx-current", cat, PREVIOUS_BUILD_OVERLAY);
     }
     let (handle, writer) = writer_at(&ledger);
 
-    // Act -- restart 1 crosses the revision change; restart 2 does not.
+    // Act -- restart 1 crosses the stale tombstone; restart 2 does not.
     let first = withheld_after_boot(&ledger, &handle).await;
     let second = withheld_after_boot(&ledger, &handle).await;
     drop(handle);
     drain_usage_writer_strict(writer).await;
 
-    // Assert
-    assert_eq!(first, vec!["fx-stale".to_string()]);
-    assert_eq!(second, first, "the restart after the bump decides the same");
+    // Assert -- both seed clears hold, so nothing is withheld.
+    assert_eq!(first, Vec::<String>::new());
+    assert_eq!(
+        second, first,
+        "the restart after the upgrade decides the same"
+    );
 }
 
 /// Insert one capability observation with no vocabulary stamp, the shape a
@@ -1027,7 +993,7 @@ fn assert_report_matches_rebuild_log(
 #[tokio::test]
 async fn warm_report_on_a_matching_tombstone_is_replayed_with_the_logged_tally() {
     // Arrange: a matching tombstone, one current-revision negative and one
-    // stale-revision straggler, so the tally carries a replay AND a skip.
+    // stale-revision straggler; both replay.
     let tmp = TempDir::new().expect("tempdir");
     let router = default_router(&tmp).await;
     let cat = i64::from(router.catalog_version());
@@ -1062,8 +1028,8 @@ async fn warm_report_on_a_matching_tombstone_is_replayed_with_the_logged_tally()
     assert_eq!(report.outcome.as_str(), "replayed");
     assert_eq!(report.loaded_rows, 2);
     let summary = report.summary.expect("summary");
-    assert_eq!(summary.replayed_negative, 1);
-    assert_eq!(summary.skipped_revision, 1);
+    assert_eq!(summary.replayed_negative, 2);
+    assert_eq!(summary.skipped_revision, 0);
     assert_report_matches_rebuild_log(&report, &events);
 }
 
@@ -1071,7 +1037,7 @@ async fn warm_report_on_a_matching_tombstone_is_replayed_with_the_logged_tally()
 async fn warm_report_on_a_committed_restatement_is_restated_with_the_logged_tally() {
     // Arrange
     let tmp = TempDir::new().expect("tempdir");
-    let router = bumped_router(&tmp).await;
+    let router = default_router(&tmp).await;
     let ledger = tmp.path().join("usage.db");
     seed_stale_session(&ledger, i64::from(router.catalog_version()));
     let (handle, writer) = writer_at(&ledger);
@@ -1085,7 +1051,7 @@ async fn warm_report_on_a_committed_restatement_is_restated_with_the_logged_tall
     assert_eq!(report.outcome, WarmOutcome::Restated);
     assert_eq!(report.outcome.as_str(), "restated");
     assert_eq!(report.loaded_rows, 2);
-    assert_eq!(report.summary.expect("summary").replayed_negative, 1);
+    assert_eq!(report.summary.expect("summary").replayed_negative, 2);
     assert_report_matches_rebuild_log(&report, &events);
 }
 
@@ -1093,7 +1059,7 @@ async fn warm_report_on_a_committed_restatement_is_restated_with_the_logged_tall
 async fn warm_report_is_restate_failed_when_the_boundary_batch_is_rejected() {
     // Arrange: a trigger rejects the restatement row inside the batch.
     let tmp = TempDir::new().expect("tempdir");
-    let router = bumped_router(&tmp).await;
+    let router = default_router(&tmp).await;
     let ledger = tmp.path().join("usage.db");
     seed_stale_session(&ledger, i64::from(router.catalog_version()));
     open(&ledger)
@@ -1123,7 +1089,7 @@ async fn warm_report_is_restate_failed_when_the_boundary_batch_is_rejected() {
 async fn warm_report_is_restate_failed_when_the_stale_slice_is_unreadable() {
     // Arrange
     let tmp = TempDir::new().expect("tempdir");
-    let router = bumped_router(&tmp).await;
+    let router = default_router(&tmp).await;
     let ledger = tmp.path().join("usage.db");
     seed_stale_session(&ledger, i64::from(router.catalog_version()));
     poison_slice(&ledger);

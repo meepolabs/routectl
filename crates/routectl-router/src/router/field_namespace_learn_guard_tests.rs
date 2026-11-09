@@ -410,16 +410,15 @@ fn the_public_learn_entry_refuses_a_key_bedrock_stores_in_the_field_namespace() 
     assert!(!router.field_verdicts().is_negative_acting(&verdict, now));
 }
 
-/// The namespace refusal runs before the generation barrier: a key Bedrock
-/// stores in the field namespace, submitted through a superseded Router, is
-/// reported as FieldNamespace rather than Stale, and records nothing. Its raw
-/// spelling is catalog-scoped, so the barrier alone would call it Stale; an
-/// ordinary catalog key through the same Router is the staleness control.
+/// The namespace refusal applies on the generation-gated path too: a key
+/// Bedrock stores in the field namespace, submitted through a superseded
+/// Router, is reported as FieldNamespace and records nothing, while an
+/// ordinary key through the same Router is admitted.
 ///
 /// Mutation check: make the registry's `learn` screen only on the ungated
-/// path -> red (Stale instead of FieldNamespace).
+/// path -> red (Applied instead of FieldNamespace).
 #[test]
-fn a_stale_learned_submission_in_the_field_namespace_is_refused_before_the_barrier() {
+fn a_superseded_learned_submission_in_the_field_namespace_is_refused() {
     let (old, live) =
         super::generation_barrier_tests::superseded_pair_with(Arc::new(Config::default()));
     let lane_key = format!("p0#{WIRE}");
@@ -445,14 +444,22 @@ fn a_stale_learned_submission_in_the_field_namespace_is_refused_before_the_barri
     let control = observe("web_search");
     let refused = observe(&format!("toolConfig.{segment}"));
 
-    assert_eq!(
-        control,
-        crate::learned_capability::GenerationOutcome::Stale,
-        "the old Router's generation is superseded",
+    assert!(
+        matches!(
+            control,
+            crate::learned_capability::GenerationOutcome::Applied { .. }
+        ),
+        "an ordinary key through the superseded Router is admitted, got {control:?}",
     );
     assert_eq!(
         refused,
         crate::learned_capability::GenerationOutcome::FieldNamespace
     );
-    assert!(live.learned_capability_snapshot().is_empty());
+    let resident: Vec<String> = live
+        .learned_capabilities
+        .snapshot()
+        .into_iter()
+        .map(|e| e.feature_key)
+        .collect();
+    assert_eq!(resident, vec!["web_search".to_string()]);
 }

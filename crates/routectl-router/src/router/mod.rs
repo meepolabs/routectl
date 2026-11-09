@@ -462,20 +462,10 @@ pub struct Router {
     /// (operator pin, override, learned verdict) decides the flag. Always
     /// [`crate::beta_seed::BEDROCK_BETA_SEED`] outside tests.
     beta_seed: &'static [&'static str],
-    /// Baked catalog table version this Router was built against
-    /// (`catalog_baked::CATALOG_VERSION`). Compared old-vs-new in
-    /// `carry_over_learned_from`: a bump invalidates the learned registry.
-    catalog_version: u32,
-    /// Catalog-overlay revision this Router was built against. Zero until
-    /// `install_catalog_overlay` records the revision the resolved-model
-    /// table was stamped with. Compared old-vs-new in
-    /// `carry_over_learned_from`: a change invalidates the learned registry.
-    overlay_revision: u64,
     /// The catalog overlay this Router's resolved-model table was merged
     /// against -- the generation the daemon ACCEPTED at the last successful
     /// boot or reload. Empty (revision 0) until `install_catalog_overlay`
-    /// records one, which is the only writer of it and of
-    /// `overlay_revision`, so the two can never diverge.
+    /// records one, which is its only writer.
     ///
     /// Retained (rather than re-read from disk by each reader) so a caller
     /// asking "what catalog truth is IN EFFECT" gets the accepted
@@ -2263,8 +2253,6 @@ impl Router {
             override_registry,
             beta_seed: crate::beta_seed::BEDROCK_BETA_SEED,
             pool_reports: Vec::new(),
-            catalog_version: crate::catalog_baked::CATALOG_VERSION,
-            overlay_revision: 0,
             catalog_overlay: Arc::default(),
             metrics: Arc::new(RouterMetrics::default()),
             wire_check: Arc::default(),
@@ -2833,39 +2821,36 @@ impl Router {
     }
 
     /// Install the catalog overlay this Router's resolved-model table was
-    /// merged against, stamping its revision at the same time. Called by the
-    /// CLI builder immediately after the resolved models are merged with the
-    /// overlay, so `carry_over_learned_from` can detect a revision change
-    /// across a hot-reload and invalidate the learned registry, and so a
-    /// reader asking what catalog truth is in effect reads the ACCEPTED
-    /// generation out of memory instead of re-reading the file.
+    /// merged against. Called by the CLI builder immediately after the
+    /// resolved models are merged with the overlay, so a reader asking what
+    /// catalog truth is in effect reads the ACCEPTED generation out of memory
+    /// instead of re-reading the file.
     ///
-    /// The single writer of both the overlay and its revision, so the two
-    /// cannot drift. Build paths that apply no overlay leave the empty
-    /// default (revision zero) in place, which preserves the existing
-    /// carry-over semantics: two revision-zero Routers compare equal, so a
-    /// config-only reload between them still carries learned state across.
+    /// The overlay's revision does not reach the capability revision stamps:
+    /// those are frozen (see [`Router::overlay_revision`]).
     pub fn install_catalog_overlay(
         &mut self,
         overlay: Arc<crate::catalog_overlay::CatalogOverlay>,
     ) {
-        self.overlay_revision = overlay.revision;
         self.catalog_overlay = overlay;
     }
 
-    /// Baked catalog table version this Router was built against. Read at
-    /// the boot warm-rebuild seam to stamp a fresh capability-event
-    /// tombstone with the current revision, and by the unified drain to
-    /// stamp each persisted event.
+    /// The catalog version capability events and tombstones are stamped with:
+    /// always [`crate::FROZEN_CATALOG_VERSION`]. Read at the boot warm-rebuild
+    /// seam to stamp a fresh capability-event tombstone, and by the unified
+    /// drain to stamp each persisted event.
+    #[allow(clippy::unused_self)]
     pub const fn catalog_version(&self) -> u32 {
-        self.catalog_version
+        crate::capability_rebuild::FROZEN_CATALOG_VERSION
     }
 
-    /// Catalog-overlay revision this Router was built against (zero until
-    /// `install_catalog_overlay` records it). Read alongside
-    /// [`Router::catalog_version`] at the same boundary.
+    /// The overlay revision capability events and tombstones are stamped with:
+    /// always [`crate::FROZEN_OVERLAY_REVISION`], whatever overlay is
+    /// installed. Read alongside [`Router::catalog_version`] at the same
+    /// boundary.
+    #[allow(clippy::unused_self)]
     pub const fn overlay_revision(&self) -> u64 {
-        self.overlay_revision
+        crate::capability_rebuild::FROZEN_OVERLAY_REVISION
     }
 
     /// The catalog overlay generation this Router was built against -- the
@@ -2989,8 +2974,8 @@ impl Router {
     /// reads. Named here rather than split into a second public call, which
     /// would widen the surface for a sequence no caller may vary.
     pub fn carry_over_learned_from(&mut self, previous: &Self) {
-        let catalog_changed = self.catalog_version != previous.catalog_version;
-        let overlay_changed = self.overlay_revision != previous.overlay_revision;
+        let catalog_changed = self.catalog_version() != previous.catalog_version();
+        let overlay_changed = self.overlay_revision() != previous.overlay_revision();
 
         // ATTACH to the outgoing registry rather than importing into this
         // Router's own. One store spans generations, so a request still in
@@ -3050,10 +3035,10 @@ impl Router {
                 event = "invalidation",
                 catalog_changed,
                 overlay_changed,
-                previous_catalog_version = previous.catalog_version,
-                catalog_version = self.catalog_version,
-                previous_overlay_revision = previous.overlay_revision,
-                overlay_revision = self.overlay_revision,
+                previous_catalog_version = previous.catalog_version(),
+                catalog_version = self.catalog_version(),
+                previous_overlay_revision = previous.overlay_revision(),
+                overlay_revision = self.overlay_revision(),
                 "catalog/overlay changed across reload; catalog-scoped learned capabilities \
                  are evicted at the replay boundary",
             );

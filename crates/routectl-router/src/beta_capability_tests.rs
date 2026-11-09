@@ -222,10 +222,10 @@ fn the_normalizer_leaves_a_beta_key_unchanged() {
 }
 
 #[test]
-fn beta_keys_are_catalog_scoped_and_not_field_verdicts() {
+fn beta_keys_are_neither_catalog_scoped_nor_field_verdicts() {
     let key = dated_key();
 
-    assert!(capability_key_is_catalog_scoped(&key));
+    assert!(!capability_key_is_catalog_scoped(&key));
     assert!(!capability_key_is_field_verdict(&key));
 }
 

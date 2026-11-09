@@ -19877,6 +19877,8 @@ pub const routectl_router::CURRENT_CONFIG_VERSION: u32
 pub const routectl_router::CURRENT_VOCAB_VERSION: i64
 pub const routectl_router::FORCED_SUPPORTED: &str
 pub const routectl_router::FORCED_UNSUPPORTED: &str
+pub const routectl_router::FROZEN_CATALOG_VERSION: u32
+pub const routectl_router::FROZEN_OVERLAY_REVISION: u64
 pub const routectl_router::K_SESSION_CAPACITY: usize
 pub const routectl_router::MAX_POOL_MEMBERS: usize
 pub const routectl_router::RECHECK_BACKSTOP: core::time::Duration

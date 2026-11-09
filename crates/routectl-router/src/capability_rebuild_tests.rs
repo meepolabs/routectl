@@ -130,57 +130,42 @@ fn should_replay_skips_rows_at_or_before_the_tombstone() {
     assert_eq!(should_replay(&after, &tombstone), ReplayDecision::Replay);
 }
 
+/// No key is catalog-scoped, so a post-tombstone row replays whatever
+/// revision it was stamped with: a field key, a former catalog capability, a
+/// beta key and an unrecognized namespace each carry across a catalog or an
+/// overlay difference. One row per key class, so a predicate that still
+/// scoped any one class fails on that row.
 #[test]
-fn should_replay_skips_post_tombstone_stragglers_of_a_different_revision() {
-    let base = Instant::now();
-    let tombstone = ReplayTombstone::new(5, CV, OV);
-
-    let mut stale_catalog = broken(6, base, "x");
-    stale_catalog.catalog_version = CV + 1;
-    let mut stale_overlay = broken(7, base, "x");
-    stale_overlay.overlay_revision = OV + 1;
-
-    // Post-tombstone rows do NOT unconditionally replay: a straggler stamped
-    // with a different revision is skipped.
-    assert_eq!(
-        should_replay(&stale_catalog, &tombstone),
-        ReplayDecision::SkipRevision
-    );
-    assert_eq!(
-        should_replay(&stale_overlay, &tombstone),
-        ReplayDecision::SkipRevision
-    );
-}
-
-/// The cold-replay layer: the revision comparison applies only to
-/// catalog-scoped keys, so a wire-shape row stamped with a superseded
-/// revision still replays.
-///
-/// Mixed batch on purpose: the two rows differ only in their capability
-/// key, so an unconditional revision guard skips both and an unconditional
-/// bypass replays both. Only the predicate separates them.
-#[test]
-fn should_replay_bypasses_the_revision_guard_for_field_keys_only() {
+fn should_replay_carries_every_key_class_across_a_revision_difference() {
     let base = Instant::now();
     let tombstone = ReplayTombstone::new(5, CV, OV);
     let field_key = crate::field_capability::field_capability_key("thinking.enabled.display")
         .expect("a qualified dotted path mints a key");
+    let beta = beta_key("zz-flag-a");
+    let cases = [
+        ("field key", field_key.as_str()),
+        ("former catalog capability", "web_search"),
+        ("beta key", beta.as_str()),
+        ("unrecognized namespace", "some_future_namespace:x"),
+    ];
 
-    let mut stale_field = broken(6, base, &field_key);
-    stale_field.catalog_version = CV + 1;
-    let mut stale_catalog_scoped = broken(7, base, "web_search");
-    stale_catalog_scoped.catalog_version = CV + 1;
+    for (name, capability) in cases {
+        let mut stale_catalog = broken(6, base, capability);
+        stale_catalog.catalog_version = CV + 1;
+        let mut stale_overlay = broken(7, base, capability);
+        stale_overlay.overlay_revision = OV + 1;
 
-    assert_eq!(
-        should_replay(&stale_field, &tombstone),
-        ReplayDecision::Replay,
-        "a wire-shape fact does not depend on the catalog revision",
-    );
-    assert_eq!(
-        should_replay(&stale_catalog_scoped, &tombstone),
-        ReplayDecision::SkipRevision,
-        "a catalog-scoped fact under a superseded revision is still evicted",
-    );
+        assert_eq!(
+            should_replay(&stale_catalog, &tombstone),
+            ReplayDecision::Replay,
+            "{name}: a catalog version difference evicts nothing",
+        );
+        assert_eq!(
+            should_replay(&stale_overlay, &tombstone),
+            ReplayDecision::Replay,
+            "{name}: an overlay revision difference evicts nothing",
+        );
+    }
 }
 
 /// The rowid boundary is unconditional: it applies to a wire-shape key
@@ -212,19 +197,18 @@ fn should_replay_applies_the_rowid_boundary_to_field_keys() {
     assert_eq!(should_replay(&after, &tombstone), ReplayDecision::Replay);
 }
 
-/// The revision skip is counted, and separately from the rowid and
-/// unrecognized-token skips -- without that an operator cannot tell "no
-/// wire-shape verdicts existed" from "every one of them was evicted".
+/// A rebuild over stale-revision rows counts no revision skip, and keeps the
+/// rowid-boundary and unrecognized-token skips apart: every stale row replays.
 #[test]
-fn rebuild_counts_revision_skips_apart_from_boundary_and_unknown_skips() {
+fn rebuild_replays_stale_revision_rows_and_counts_no_revision_skip() {
     let base = Instant::now();
     let field_key = crate::field_capability::field_capability_key("thinking.enabled.display")
         .expect("a qualified dotted path mints a key");
 
-    let mut stale_catalog_scoped = broken(2, base, "web_search");
-    stale_catalog_scoped.catalog_version = CV + 1;
-    let mut stale_overlay_scoped = broken(3, base, "computer_use");
-    stale_overlay_scoped.overlay_revision = OV + 1;
+    let mut stale_catalog = broken(2, base, "web_search");
+    stale_catalog.catalog_version = CV + 1;
+    let mut stale_overlay = broken(3, base, "computer_use");
+    stale_overlay.overlay_revision = OV + 1;
     let mut stale_field = broken(4, base, &field_key);
     stale_field.catalog_version = CV + 1;
 
@@ -233,8 +217,8 @@ fn rebuild_counts_revision_skips_apart_from_boundary_and_unknown_skips() {
         rows: vec![
             // At the boundary: a rowid skip, not a revision skip.
             broken(1, base, "prompt_caching"),
-            stale_catalog_scoped,
-            stale_overlay_scoped,
+            stale_catalog,
+            stale_overlay,
             stale_field,
             // Post-boundary, current revision, unrecognized verdict token.
             row(5, base, "nonsense", None, "live", None, None, "thinking"),
@@ -244,24 +228,27 @@ fn rebuild_counts_revision_skips_apart_from_boundary_and_unknown_skips() {
 
     let summary = rebuild_capabilities_into(&reader, &reg, &providers());
 
-    assert_eq!(
-        summary.skipped_revision, 2,
-        "both catalog-scoped stragglers are counted, the field one is not",
-    );
+    assert_eq!(summary.skipped_revision, 0);
     assert_eq!(summary.skipped_unknown, 1);
     assert_eq!(
-        summary.replayed_negative, 1,
-        "only the revision-stale wire-shape row replayed",
+        summary.replayed_negative, 3,
+        "every stale-revision row replayed"
     );
-    assert!(matches!(
-        reg.acting_negative_for(
-            LANE,
-            &field_key,
-            "openai-compat",
-            base + Duration::from_secs(1)
-        ),
-        RoutingDecision::RouteAway { .. },
-    ));
+    let at = base + Duration::from_secs(1);
+    for capability in ["web_search", "computer_use", field_key.as_str()] {
+        assert!(
+            matches!(
+                reg.acting_negative_for(LANE, capability, "openai-compat", at),
+                RoutingDecision::RouteAway { .. }
+            ),
+            "{capability} is acting after the rebuild",
+        );
+    }
+    assert_eq!(
+        reg.acting_negative_for(LANE, "prompt_caching", "openai-compat", at),
+        RoutingDecision::Allow,
+        "the row at the boundary did not replay",
+    );
 }
 
 #[test]
@@ -1063,7 +1050,7 @@ fn replayed_beta_clear_and_negative_resolve_by_rowid() {
 }
 
 #[test]
-fn a_cleared_beta_row_from_another_revision_marks_nothing() {
+fn a_cleared_beta_row_from_another_revision_still_marks_the_seed() {
     let base = Instant::now();
     let beta = beta_key("zz-flag-a");
     let mut stale = cleared(1, base, &beta);
@@ -1076,8 +1063,8 @@ fn a_cleared_beta_row_from_another_revision_marks_nothing() {
 
     let summary = rebuild_capabilities_into(&reader, &reg, &providers());
 
-    assert_eq!(summary.skipped_revision, 1);
-    assert!(!seed_cleared(&reg, &beta));
+    assert_eq!(summary.skipped_revision, 0);
+    assert!(seed_cleared(&reg, &beta));
 }
 
 /// One malformed row per skip reason the rebuild recognizes, paired with the

@@ -2078,15 +2078,9 @@ async fn repeated_busy_refusals_exhaust_the_bound_and_report_it_distinguishably(
 
 /// Advance the fixture's SHARED registry to a new generation, via a real
 /// boundary commit against a throwaway router attached to the same registry
-/// the fixture's own router reads.
-///
-/// Returns the throwaway router, already stamped with the generation it just
-/// established -- the shape `carry_over_learned_from` plus
-/// `set_pending_registry_generation` produce at a real reload's publication.
-/// The fixture's own `ArcSwap` is left untouched: whether the caller ever
-/// swaps this router in is the one thing that distinguishes the two tests
-/// below.
-fn advance_shared_generation(fixture: &Fixture) -> Arc<Router> {
+/// the fixture's own router reads. The fixture's own `ArcSwap` is left
+/// untouched, so its published router is cached at the superseded generation.
+fn advance_shared_generation(fixture: &Fixture) {
     let previous = fixture.router.load_full();
     let mut next = Router::new(Arc::new(config_with_model()));
     next.carry_over_learned_from(&previous);
@@ -2096,135 +2090,29 @@ fn advance_shared_generation(fixture: &Fixture) -> Arc<Router> {
         crate::server::capability_boundary::admit_capability_boundary(&fixture.usage, &next)
             .expect("a live writer admits the boundary batch");
     admitted.commit_for_tests();
-
-    let active_generation = next.learned_registry().generation();
-    next.set_pending_registry_generation(active_generation);
-    next
 }
 
-/// A FIRST stale reservation -- one made through a Router the shared registry
-/// has genuinely moved past -- is retried against a freshly published Router
-/// and succeeds.
-///
-/// Reproduces the actual production mechanism: a boundary commit prunes every
-/// catalog-scoped entry as part of the SAME transition that advances the
-/// generation, so a stale purge can only find its target resident again if
-/// live traffic re-learns it under the new generation before the retry runs --
-/// exactly the ordinary case of an operator purge racing a reload while
-/// traffic keeps flowing.
+/// A purge through a router cached at a superseded generation succeeds on its
+/// first attempt: no key is catalog-scoped, so the generation change neither
+/// prunes the entry nor refuses the reservation.
 #[tokio::test]
-async fn a_stale_first_attempt_retries_against_a_freshly_published_router_and_succeeds() {
+async fn a_purge_through_a_superseded_router_succeeds_first_time() {
     let fixture = Fixture::new();
     fixture.plant_negative(LANE, WEB_SEARCH);
-
-    // Moves the shared registry's active generation away from the one the
-    // fixture's still-published router is cached at, and -- as a real
-    // boundary commit always does -- prunes the catalog-scoped entry along
-    // with it.
-    let fresh_router = advance_shared_generation(&fixture);
+    advance_shared_generation(&fixture);
     assert!(
-        !fixture.resident(LANE, WEB_SEARCH),
-        "premise: a boundary commit prunes catalog-scoped entries, or the retry below \\
-         would succeed for the wrong reason",
-    );
-
-    // Live traffic on the newly published router re-learns the same key under
-    // the new generation, before the purge's retry runs.
-    let reader = PlantedLedger::negative(&fresh_router, LANE, WEB_SEARCH);
-    let summary = fresh_router.rebuild_learned_from_ledger(&reader);
-    assert_eq!(
-        summary.replayed_negative, 1,
-        "premise: the entry must actually come back resident on the fresh router, or the \\
-         retry below has nothing to purge",
-    );
-
-    let observed_stale = matches!(
-        fixture
-            .router
-            .load()
-            .reserve_learned_capability_purge(&lane(), WEB_SEARCH),
-        routectl_router::router::PurgeOutcome::Stale
-    );
-    assert!(
-        observed_stale,
-        "premise: a Router cached at a superseded generation must see Stale, or this test \\
-         is not exercising the retry at all",
-    );
-
-    // The spawned request runs on the CURRENT-THREAD test runtime, which never
-    // preempts a task on its own -- so the one `yield_now` below is what lets
-    // the spawned task's own first-attempt yield (added for exactly this
-    // reason) hand control back before the swap below runs.
-    let handle = tokio::spawn(fixture.call(loopback_peer(), &body_for(LANE, WEB_SEARCH)));
-    tokio::task::yield_now().await;
-
-    fixture.router.store(fresh_router);
-
-    let (status, body) = handle.await.expect("the spawned purge request completes");
-
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "the bounded retry must reach the freshly published Router: refusing a purge for a \\
-         reload the operator cannot observe would make the command unreliable for no reason; \\
-         body {body}",
-    );
-    assert_eq!(body["purged"].as_bool(), Some(true));
-    assert_eq!(
-        fixture.persisted_cleared_rows(),
-        1,
-        "and exactly ONE clear is durable across the retry -- a retried reservation must not \\
-         clear twice",
-    );
-}
-
-/// REPEATED staleness exhausts the bound and answers 409.
-///
-/// Unlike the busy case, no boundary ever settles here: the shared registry's
-/// generation moves on a router the fixture never publishes, so every
-/// reservation attempt -- including the retry -- addresses the same
-/// superseded generation and refuses the same way.
-#[tokio::test]
-async fn repeated_staleness_exhausts_the_bound_and_reports_it_distinguishably() {
-    let fixture = Fixture::new();
-    fixture.plant_negative(LANE, WEB_SEARCH);
-    // Advances the shared registry past the fixture's own published router,
-    // which is never swapped for the fresh one -- so both attempts read the
-    // same superseded generation.
-    let _fresh_router = advance_shared_generation(&fixture);
-
-    let observed_stale = matches!(
-        fixture
-            .router
-            .load()
-            .reserve_learned_capability_purge(&lane(), WEB_SEARCH),
-        routectl_router::router::PurgeOutcome::Stale
-    );
-    assert!(
-        observed_stale,
-        "premise: the fixture's published router must see Stale, or this test is not \\
-         exercising the staleness bound at all",
+        fixture.resident(LANE, WEB_SEARCH),
+        "the boundary commit prunes nothing",
     );
 
     let (status, body) = fixture
         .call(loopback_peer(), &body_for(LANE, WEB_SEARCH))
         .await;
 
-    assert_eq!(
-        status,
-        StatusCode::CONFLICT,
-        "exhausted retries must report a conflict, never a success",
-    );
-    assert_eq!(
-        body["error"]["code"].as_str(),
-        Some(PURGE_STALE),
-        "and must name the refusal distinguishably from a busy or absent key",
-    );
-    assert_eq!(
-        body["purged"].as_bool(),
-        None,
-        "a refusal carries no purge verdict at all",
-    );
+    assert_eq!(status, StatusCode::OK, "body {body}");
+    assert_eq!(body["purged"].as_bool(), Some(true));
+    assert!(!fixture.resident(LANE, WEB_SEARCH));
+    assert_eq!(fixture.persisted_cleared_rows(), 1);
 }
 
 // ---------------------------------------------------------------------------

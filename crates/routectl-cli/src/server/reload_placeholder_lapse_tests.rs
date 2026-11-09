@@ -23,27 +23,11 @@ fn unusable_cause(router: &Router, state_key: &str) -> Option<UnusableCause> {
         .map(|mark| mark.cause)
 }
 
-/// An overlay revision bump, so the next config reload must cross the replay
-/// boundary.
-fn write_revised_overlay(dir: &Path) {
-    let overlay_dir = dir.join("routectl");
-    std::fs::create_dir_all(&overlay_dir).unwrap();
-    std::fs::write(
-        overlay_dir.join("catalog_overlay.json"),
-        r#"{"schema_version":1,"revision":1,"cells":{"anthropic-api:claude-opus-4-8*":
-               {"source":"user","verified_at":"2026-07-01","wm":9.5}}}"#,
-    )
-    .unwrap();
-}
-
 /// How the operator's SIGHUP ends.
 #[derive(Clone, Copy, Debug)]
 enum Sighup {
     /// The config half commits and the credentials half follows.
     Commits,
-    /// The config half is refused at its replay boundary (an overlay bump
-    /// over a closed usage channel), after carry-over.
-    RefusedAtBoundary,
 }
 
 /// The config reload rig: a config file, the secrets over one credentials
@@ -125,7 +109,7 @@ impl Rig {
 
     /// A SIGHUP with config.toml unchanged: a config reload, then, when it
     /// committed, a credentials reload.
-    async fn sighup(&self, dir: &Path, sighup: Sighup) -> Result<(), ReloadFailure> {
+    async fn sighup(&self, sighup: Sighup) -> Result<(), ReloadFailure> {
         let outcome = match sighup {
             Sighup::Commits => {
                 let (usage, writer) = build_usage_writer(&self.config);
@@ -133,11 +117,6 @@ impl Rig {
                 drop(usage);
                 drain_usage_writer_strict(writer).await;
                 outcome
-            }
-            Sighup::RefusedAtBoundary => {
-                write_revised_overlay(dir);
-                self.reload_config(&routectl_usage::handle_with_closed_channel())
-                    .await
             }
         };
         if outcome.is_ok() {
@@ -213,14 +192,7 @@ fn oauth_pool_config_text() -> String {
 #[tokio::test]
 #[serial_test::serial]
 async fn a_sighup_after_a_failed_credentials_rebuild_readmits_the_seat_it_builds() {
-    let rows: [LapseRow; 2] = [
-        (Sighup::Commits, Ok(()), (None, true)),
-        (
-            Sighup::RefusedAtBoundary,
-            Err(ReloadFailure::BoundaryNotAdmitted),
-            (Some(UnusableCause::NotLoggedIn), false),
-        ),
-    ];
+    let rows: [LapseRow; 1] = [(Sighup::Commits, Ok(()), (None, true))];
     for (sighup, expected, expected_a) in rows {
         // Arrange
         let dir = tempfile::tempdir().unwrap();
@@ -255,7 +227,7 @@ async fn a_sighup_after_a_failed_credentials_rebuild_readmits_the_seat_it_builds
         let _key = ScopedEnv::set(KEY_ENV, "test-key");
 
         // Act
-        let outcome = rig.sighup(dir.path(), sighup).await;
+        let outcome = rig.sighup(sighup).await;
 
         // Assert
         assert_eq!(outcome, expected, "{sighup:?}");
@@ -302,14 +274,7 @@ fn pool_only_config_text() -> String {
 #[tokio::test]
 #[serial_test::serial]
 async fn a_sighup_after_a_failed_boot_refresh_readmits_the_seat_it_builds() {
-    let rows: [LapseRow; 2] = [
-        (Sighup::Commits, Ok(()), (None, true)),
-        (
-            Sighup::RefusedAtBoundary,
-            Err(ReloadFailure::BoundaryNotAdmitted),
-            (Some(UnusableCause::Unreadable), false),
-        ),
-    ];
+    let rows: [LapseRow; 1] = [(Sighup::Commits, Ok(()), (None, true))];
     for (sighup, expected, expected_a) in rows {
         // Arrange
         let dir = tempfile::tempdir().unwrap();
@@ -337,7 +302,7 @@ async fn a_sighup_after_a_failed_boot_refresh_readmits_the_seat_it_builds() {
         rig.oauth.set_cooldown_clock_for_tests(now + 3600);
 
         // Act
-        let outcome = rig.sighup(dir.path(), sighup).await;
+        let outcome = rig.sighup(sighup).await;
 
         // Assert
         assert_eq!(outcome, expected, "{sighup:?}");

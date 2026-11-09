@@ -387,7 +387,7 @@ async fn a_config_side_reload_lifts_only_the_parks_of_entries_it_changed() {
         );
         if matches!(reload, ConfigSideReload::OverlayOnly) {
             assert_eq!(
-                rig.swap.load().overlay_revision(),
+                rig.swap.load().catalog_overlay().revision,
                 1,
                 "{reload:?}: premise, the overlay revision moved"
             );
@@ -425,32 +425,6 @@ async fn a_config_reload_adding_a_model_on_a_parked_oauth_seat_leaves_it_refused
     assert_eq!(rig.parks(&["claude-a", "claude-a2"]), [PARKED, PARKED]);
     drop(usage);
     drain_usage_writer_strict(writer).await;
-}
-
-/// The failure lands AFTER the runtime state was carried onto the candidate
-/// router, which shares the live router's park map: lifting at carry-over
-/// time would already have lifted the live parks. The reload edits the
-/// `compat` entry, whose park a committed reload lifts, and bumps the overlay
-/// revision, so it must cross the replay boundary that refuses it.
-#[tokio::test]
-#[serial_test::serial]
-async fn a_config_reload_rejected_after_carry_over_keeps_every_park() {
-    // Arrange: a closed usage channel refuses the replay boundary.
-    let dir = tempfile::tempdir().unwrap();
-    let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
-    let _key = ScopedEnv::set(KEY_ENV, "test-key");
-    let rig = Rig::new(dir.path()).await;
-    let usage = routectl_usage::handle_with_closed_channel();
-    rig.park_every_account();
-    std::fs::write(&rig.cfg_path, edited_entry_text("compat")).unwrap();
-    write_overlay_revision(dir.path());
-
-    // Act
-    let outcome = rig.reload_config(&usage).await;
-
-    // Assert
-    assert_eq!(outcome.err(), Some(ReloadFailure::BoundaryNotAdmitted));
-    assert_eq!(rig.parks(&MODELS), [PARKED, PARKED, PARKED]);
 }
 
 fn typed_rejection() -> routectl_core::Error {

@@ -31,7 +31,9 @@ use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use routectl_router::{CATALOG_VERSION, CURRENT_CONFIG_VERSION, CURRENT_VOCAB_VERSION};
+use routectl_router::{
+    CURRENT_CONFIG_VERSION, CURRENT_VOCAB_VERSION, FROZEN_CATALOG_VERSION, FROZEN_OVERLAY_REVISION,
+};
 use serde_json::Value;
 
 /// The real `routectl` binary under test, resolved by cargo for this crate.
@@ -54,8 +56,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 /// Each one is skipped by every replay that reads it.
 const UNMAPPABLE_ROWS: usize = 4;
 
-/// Overlay revision the fixture stamps on the overlay, the tombstone and the
-/// rows, so the boot warm finds a matching boundary and replays the slice.
+/// Overlay revision the fixture stamps on the overlay.
 const OVERLAY_REVISION: i64 = 3;
 
 /// The overlay cell carrying the soft defect.
@@ -388,12 +389,13 @@ fn write_overlay(dir: &Path) -> PathBuf {
     path
 }
 
-/// A ledger whose newest tombstone matches this boot's catalog version and the
-/// overlay's revision, followed by rows in an unknown vocabulary version.
+/// A ledger whose newest tombstone carries the frozen revision stamps this boot
+/// matches, followed by rows in an unknown vocabulary version.
 fn seed_ledger(dir: &Path) -> PathBuf {
     let path = dir.join("usage.db");
     let db = routectl_usage::open(&path).expect("create + migrate usage db");
-    let catalog = i64::from(CATALOG_VERSION);
+    let catalog = i64::from(FROZEN_CATALOG_VERSION);
+    let overlay_revision = i64::try_from(FROZEN_OVERLAY_REVISION).expect("fits");
     let ts = i64::try_from(
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -407,7 +409,7 @@ fn seed_ledger(dir: &Path) -> PathBuf {
     insert(&routectl_usage::CapabilityEvent::tombstone(
         ts,
         catalog,
-        OVERLAY_REVISION,
+        overlay_revision,
     ));
     for _ in 0..UNMAPPABLE_ROWS {
         insert(&routectl_usage::CapabilityEvent {
@@ -421,7 +423,7 @@ fn seed_ledger(dir: &Path) -> PathBuf {
             evidence_class: None,
             upstream_token: None,
             catalog_version: catalog,
-            overlay_revision: OVERLAY_REVISION,
+            overlay_revision,
             provider_kind: Some("openai-compat".to_string()),
             vocab_version: Some(CURRENT_VOCAB_VERSION + 1),
         });

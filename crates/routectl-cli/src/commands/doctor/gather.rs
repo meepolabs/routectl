@@ -11,10 +11,10 @@ use routectl_auth::{SecretRef, SecretScheme, default_secret_dir};
 use routectl_core::ProbeOutcome;
 use routectl_router::{
     BetaSeedScope, CATALOG_VERSION, CapabilityEventRow, CapabilityRebuildSummary, CatalogOverlay,
-    Config, EffectiveRow, LearnedCapabilityRegistry, MatrixReplaySummary, PricingSource,
-    ProviderEntry, ReplayTombstone, Source, StateKey, TuningRow, catalog_import_state_default_path,
-    derive_effective_view, effective_pricing, load_last_import, rebuild_capabilities_with_values,
-    today_epoch_day,
+    Config, EffectiveRow, FROZEN_CATALOG_VERSION, FROZEN_OVERLAY_REVISION,
+    LearnedCapabilityRegistry, MatrixReplaySummary, PricingSource, ProviderEntry, ReplayTombstone,
+    Source, StateKey, TuningRow, catalog_import_state_default_path, derive_effective_view,
+    effective_pricing, load_last_import, rebuild_capabilities_with_values, today_epoch_day,
 };
 
 use crate::commands::doctor_panels::compute_would_trim_panel;
@@ -251,19 +251,9 @@ pub(super) fn disk_layers(config_path: &Path) -> GatheredLayers {
             .map(|e| redact_config_load_error(e))
     });
 
-    // The learned matrix needs this run's revision to match the ledger's
-    // replay boundary. The baked catalog version is fixed; the overlay
-    // revision comes from the same read-only overlay load the pricing rows use
-    // (defaulting to zero when the overlay could not be read -- a foreign
-    // boundary then classifies as unavailable, never a silent empty).
-    let overlay_revision = overlay_layer
-        .as_ref()
-        .ok()
-        .map_or(0, routectl_router::overlay_revision);
     let capability_matrix = gather_capability_matrix(
         &config,
         config_parse_error.is_some(),
-        overlay_revision,
         routectl_router::shipped_beta_seed_scope(),
     );
 
@@ -393,8 +383,8 @@ fn equivalence_basis(
 /// A config that would not parse yields `Unavailable("config_unavailable")`:
 /// the usage db path and the revision knobs cannot be trusted, so an
 /// empty-from-default read would misreport. Otherwise the replay boundary is
-/// resolved against this run's baked catalog version + overlay revision; on a
-/// match the post-boundary slice is read through the typed
+/// resolved against the frozen revision stamps the daemon writes; on a match
+/// the post-boundary slice is read through the typed
 /// [`LedgerCapabilityReader::try_read_events`], so a slice that cannot be
 /// read is `Unavailable` with its path-free failure class rather than an
 /// empty registry. A slice that was read replays into a bare, config-sized
@@ -404,14 +394,17 @@ fn equivalence_basis(
 pub(super) fn gather_capability_matrix(
     config: &Config,
     config_parse_failed: bool,
-    overlay_revision: u64,
     beta_seed: BetaSeedScope,
 ) -> CapabilityMatrixSource {
     if config_parse_failed {
         return CapabilityMatrixSource::Unavailable("config_unavailable");
     }
 
-    match classify_boundary(&config.usage.db_path, CATALOG_VERSION, overlay_revision) {
+    match classify_boundary(
+        &config.usage.db_path,
+        FROZEN_CATALOG_VERSION,
+        FROZEN_OVERLAY_REVISION,
+    ) {
         BoundaryOutcome::Replay(tombstone) => {
             let reader = LedgerCapabilityReader::new(config.usage.db_path.clone(), tombstone);
             match reader.try_read_events() {

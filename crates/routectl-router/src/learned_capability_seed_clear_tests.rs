@@ -164,7 +164,7 @@ fn markers_sit_outside_the_lane_cap_and_are_never_its_victim() {
 }
 
 #[test]
-fn a_revision_boundary_prunes_markers() {
+fn a_revision_boundary_keeps_markers() {
     // Arrange
     let reg = registry();
     let _ = reg.replay_cleared(LANE, &beta("fx-a"), KIND);
@@ -181,7 +181,7 @@ fn a_revision_boundary_prunes_markers() {
 
     // Assert
     assert!(matches!(settled, BoundarySettlement::Applied { .. }));
-    assert!(!marked(&reg, &beta("fx-a")));
+    assert!(marked(&reg, &beta("fx-a")));
 }
 
 #[test]

@@ -163,6 +163,13 @@ fn seeded_router_with_both_classes(
     router
 }
 
+/// The two keys [`seeded_router_with_both_classes`] plants, sorted.
+fn both_keys() -> Vec<String> {
+    let mut keys = vec![field_key(), "web_search".to_string()];
+    keys.sort();
+    keys
+}
+
 /// The resident capability keys of a router, sorted.
 fn resident_keys(router: &Router) -> Vec<String> {
     let mut keys: Vec<String> = router
@@ -183,17 +190,16 @@ fn restart_from_ledger(config: &Arc<Config>, revision: u64, usage: &UsageHandle)
     router
 }
 
-/// THE end-to-end catalog-survival guarantee, across a reload AND two
-/// consecutive restarts, against a real ledger.
+/// THE end-to-end survival guarantee, across a boundary AND two consecutive
+/// restarts, against a real ledger.
 ///
-/// A pre-reload wire-shape negative must still be resident after a
-/// revision-changing reload, after the restart that follows it, and after a
-/// second restart -- while its catalog-scoped sibling is gone from the first
-/// restart onward. Deleting the survivor restatement from the boundary batch
-/// reds this test: the post-reload tombstone would then hide the survivor's
-/// original row from every later read.
+/// Both pre-boundary negatives -- the wire-shape one and the former
+/// catalog-scoped one -- must still be resident after a committed boundary,
+/// after the restart that follows it, and after a second restart. Deleting the
+/// survivor restatement from the boundary batch reds this test: the new
+/// tombstone would then hide the original rows from every later read.
 #[tokio::test]
-async fn a_wire_shape_verdict_survives_a_revision_reload_and_two_restarts() {
+async fn every_verdict_survives_a_boundary_and_two_restarts() {
     // Arrange: a real ledger and writer.
     let mut config = owning_config();
     let _dir = isolate_usage_db(&mut config);
@@ -208,9 +214,9 @@ async fn a_wire_shape_verdict_survives_a_revision_reload_and_two_restarts() {
     // A pre-reload session learned both classes at revision 1.
     let before = seeded_router_with_both_classes(&config, 1, &usage);
 
-    // Act, phase one: the revision-changing reload. The replacement router
-    // carries the catalog-independent half, and the boundary batch persists
-    // the new tombstone plus the survivor restatements atomically.
+    // Act, phase one: the boundary. The replacement router carries every
+    // entry, and the boundary batch persists the new tombstone plus the
+    // survivor restatements atomically.
     let mut reloaded = Router::new(config.clone());
     reloaded.install_catalog_overlay(overlay_at_revision(2));
     reloaded.carry_over_learned_from(&before);
@@ -220,24 +226,20 @@ async fn a_wire_shape_verdict_survives_a_revision_reload_and_two_restarts() {
     assert!(
         matches!(
             outcome,
-            BoundaryOutcomeReport::Committed { survivors: 1, .. }
+            BoundaryOutcomeReport::Committed { survivors: 2, .. }
         ),
-        "the boundary batch must commit one survivor, got {outcome:?}",
+        "the boundary batch must restate both entries, got {outcome:?}",
     );
-    assert_eq!(
-        resident_keys(&reloaded),
-        vec![field_key()],
-        "the reload itself keeps only the catalog-independent entry",
-    );
+    assert_eq!(resident_keys(&reloaded), both_keys());
 
     // Act, phase two: the first restart, warming from the ledger.
     let restarted = restart_from_ledger(&config, 2, &usage);
 
-    // Assert: the wire-shape verdict came back; the catalog-scoped one did not.
+    // Assert: both verdicts came back.
     assert_eq!(
         resident_keys(&restarted),
-        vec![field_key()],
-        "the wire-shape verdict must survive the restart, and only it",
+        both_keys(),
+        "both verdicts must survive the restart",
     );
 
     // Act, phase three: a SECOND consecutive restart. The first restart wrote
@@ -248,8 +250,8 @@ async fn a_wire_shape_verdict_survives_a_revision_reload_and_two_restarts() {
     // Assert: still resident -- the guarantee does not decay per boot.
     assert_eq!(
         resident_keys(&restarted_again),
-        vec![field_key()],
-        "the verdict must survive a second consecutive restart",
+        both_keys(),
+        "both verdicts must survive a second consecutive restart",
     );
 
     // Drop the handle's sender BEFORE shutdown: `shutdown` waits for the
@@ -691,25 +693,25 @@ async fn a_stale_boundary_boot_makes_its_own_boundary_durable_while_capture_is_d
     );
     assert_eq!(seeded, routectl_usage::BatchCommit::Committed { rows: 1 });
 
-    // Act, phase one: boot at revision 2. The boundary is stale, so the warm
-    // fails closed and must write its own -- durably, despite capture being off.
+    // Act, phase one: boot. The boundary is stale against the frozen stamp,
+    // so the warm restates past its own -- durably, despite capture being off.
     let booted = restart_from_ledger(&config, 2, &usage);
     assert!(
         resident_keys(&booted).is_empty(),
-        "a stale boundary replays nothing",
+        "the stale boundary carried no rows to restate",
     );
     let boundary = latest_tombstone_revision(&config.usage.db_path);
     assert_eq!(
         boundary,
-        Some((catalog, 2)),
-        "the boot must have appended its OWN revision-2 boundary",
+        Some((catalog, 0)),
+        "the boot must have appended its OWN boundary at the frozen stamp",
     );
 
     // Act, phase two: a same-revision reload enables capture. It moves no
     // boundary (the revision did not change), so the boot's tombstone above is
     // the one this session's verdicts must land after.
     usage.set_enabled(true);
-    let verdict = broken(now - 1_000, &field_key(), 2, catalog);
+    let verdict = broken(now - 1_000, &field_key(), 0, catalog);
     let persisted = commit_off_runtime(&usage, vec![verdict], 1);
     assert_eq!(
         persisted,
@@ -999,16 +1001,16 @@ async fn a_delayed_pre_boundary_event_is_dropped_while_a_post_admission_field_ev
         .iter()
         .rposition(|(_, verdict, _)| verdict == "tombstone")
         .expect("the boundary tombstone");
-    let after: Vec<&str> = rows[last_tombstone + 1..]
+    let after: Vec<(i64, &str)> = rows[last_tombstone + 1..]
         .iter()
-        .map(|(_, _, capability)| capability.as_str())
+        .map(|(ts, _, capability)| (*ts, capability.as_str()))
         .collect();
     assert!(
-        after.contains(&field_key().as_str()),
+        after.contains(&(now, field_key().as_str())),
         "the post-admission field event must land after the boundary: {after:?}",
     );
     assert!(
-        !after.contains(&"web_search"),
+        !after.contains(&(now, "web_search")),
         "a pre-boundary straggler must not land after the boundary: {after:?}",
     );
 }
@@ -1099,119 +1101,6 @@ fn the_production_startup_site_dispatches_the_warm_off_the_runtime() {
     assert!(
         window.contains("spawn_blocking"),
         "the startup warm must be dispatched off the runtime; window was:\n{window}",
-    );
-}
-
-/// A failed boundary leaves the tuning byte-for-byte unchanged.
-///
-/// The previous Router stays live when a boundary fails, so it must keep the
-/// settings it was serving under. Applying the reload's tuning at carry-over
-/// time would leave the live Router running under a reload that never took
-/// effect.
-#[tokio::test]
-async fn a_failed_boundary_leaves_the_shared_tuning_unchanged() {
-    let mut config = owning_config();
-    let _dir = isolate_usage_db(&mut config);
-    let config = Arc::new(config);
-    let (usage, writer) = UsageWriter::start(
-        config.usage.db_path.clone(),
-        CHANNEL_CAPACITY,
-        0,
-        config.usage.enabled,
-    );
-
-    let before = seeded_router_with_both_classes(&config, 1, &usage);
-    let decay_before = before.learned_registry().decay();
-    let window_before = before.learned_registry().inferred_window();
-    let cap_before = before.learned_registry().max_entries();
-
-    // Arm a write failure, then reload with DIFFERENT capability tuning.
-    {
-        let db = routectl_usage::open(&config.usage.db_path).expect("open");
-        db.conn()
-            .execute_batch(
-                "CREATE TRIGGER reject_tombstone BEFORE INSERT ON capability_events \
-                 WHEN NEW.verdict = 'tombstone' \
-                 BEGIN SELECT RAISE(ABORT, 'forced failure'); END",
-            )
-            .expect("install trigger");
-    }
-    let mut capability = config.capability.clone();
-    capability.decay_hours = 1;
-    capability.inferred_window_hours = 1;
-    let retuned = Arc::new(Config {
-        capability,
-        usage: config.usage.clone(),
-        ..owning_config()
-    });
-    let mut reloaded = Router::new(retuned);
-    reloaded.install_catalog_overlay(overlay_at_revision(2));
-    reloaded.carry_over_learned_from(&before);
-    let reloaded = Arc::new(reloaded);
-
-    let outcome = commit_capability_boundary(&usage, &reloaded).await;
-
-    assert!(
-        matches!(outcome, BoundaryOutcomeReport::Failed(_)),
-        "got {outcome:?}",
-    );
-    assert_eq!(
-        before.learned_registry().decay(),
-        decay_before,
-        "a failed boundary must not retune the shared decay",
-    );
-    // The pending generation must be rolled back, not left installed. Left
-    // behind, every later event would be stamped with a generation no boundary
-    // ever committed -- and the next boundary would compute its pending value
-    // from a stale base.
-    assert_eq!(
-        before.learned_registry().effective_persistence_generation(),
-        before.learned_registry().generation(),
-        "a failed boundary must roll back its pending generation",
-    );
-    assert_eq!(before.learned_registry().inferred_window(), window_before);
-    assert_eq!(before.learned_registry().max_entries(), cap_before);
-
-    drop(usage);
-    drain_usage_writer_strict(writer).await;
-}
-
-/// A refused ADMISSION likewise leaves tuning untouched, and rolls back nothing
-/// because nothing was installed.
-#[tokio::test]
-async fn a_refused_admission_leaves_the_shared_tuning_unchanged() {
-    let mut config = owning_config();
-    let _dir = isolate_usage_db(&mut config);
-    let config = Arc::new(config);
-    let before = Router::new(config.clone());
-    let decay_before = before.learned_registry().decay();
-
-    let mut capability = config.capability.clone();
-    capability.decay_hours = 1;
-    capability.inferred_window_hours = 1;
-    let retuned = Arc::new(Config {
-        capability,
-        usage: config.usage.clone(),
-        ..owning_config()
-    });
-    let mut reloaded = Router::new(retuned);
-    reloaded.install_catalog_overlay(overlay_at_revision(2));
-    reloaded.carry_over_learned_from(&before);
-    let reloaded = Arc::new(reloaded);
-
-    let refused =
-        admit_capability_boundary(&routectl_usage::handle_with_closed_channel(), &reloaded);
-
-    assert!(refused.is_err());
-    assert_eq!(
-        before.learned_registry().decay(),
-        decay_before,
-        "a refused admission must not retune",
-    );
-    assert_eq!(
-        before.learned_registry().effective_persistence_generation(),
-        before.learned_registry().generation(),
-        "no pending generation may be left installed",
     );
 }
 
@@ -1894,13 +1783,13 @@ async fn a_purge_that_holds_the_lease_refuses_a_racing_boundary_then_both_commit
     assert!(
         matches!(
             outcome,
-            BoundaryOutcomeReport::Committed { survivors: 0, .. }
+            BoundaryOutcomeReport::Committed { survivors: 1, .. }
         ),
         "the retried boundary must commit once the lease clears, got {outcome:?}",
     );
     assert_eq!(
         resident_keys(&reloaded),
-        Vec::<String>::new(),
+        vec!["web_search".to_string()],
         "the purged key must stay absent through the boundary that follows it",
     );
 
@@ -1930,13 +1819,13 @@ async fn a_purge_that_holds_the_lease_refuses_a_racing_boundary_then_both_commit
     let restarted = restart_from_ledger(&config, 2, &usage);
     assert_eq!(
         resident_keys(&restarted),
-        Vec::<String>::new(),
+        vec!["web_search".to_string()],
         "the purge must survive the first restart",
     );
     let restarted_again = restart_from_ledger(&config, 2, &usage);
     assert_eq!(
         resident_keys(&restarted_again),
-        Vec::<String>::new(),
+        vec!["web_search".to_string()],
         "and survive a second consecutive restart",
     );
 
@@ -1984,14 +1873,14 @@ async fn a_purge_attempted_while_a_boundary_is_unsettled_is_refused_then_retried
     assert!(
         matches!(
             outcome,
-            BoundaryOutcomeReport::Committed { survivors: 1, .. }
+            BoundaryOutcomeReport::Committed { survivors: 2, .. }
         ),
         "the boundary must commit once nothing refuses it, got {outcome:?}",
     );
     assert_eq!(
         resident_keys(&reloaded),
-        vec![field_key()],
-        "the wire-shape entry must be restated past the boundary",
+        both_keys(),
+        "both entries must be restated past the boundary",
     );
 
     // The retried purge now succeeds, against the router the boundary
@@ -2022,7 +1911,7 @@ async fn a_purge_attempted_while_a_boundary_is_unsettled_is_refused_then_retried
     );
     assert_eq!(
         resident_keys(&reloaded),
-        Vec::<String>::new(),
+        vec!["web_search".to_string()],
         "the purge must remove the entry once its settlement is durable",
     );
 
@@ -2050,13 +1939,13 @@ async fn a_purge_attempted_while_a_boundary_is_unsettled_is_refused_then_retried
     let restarted = restart_from_ledger(&config, 2, &usage);
     assert_eq!(
         resident_keys(&restarted),
-        Vec::<String>::new(),
+        vec!["web_search".to_string()],
         "the purge must survive the first restart",
     );
     let restarted_again = restart_from_ledger(&config, 2, &usage);
     assert_eq!(
         resident_keys(&restarted_again),
-        Vec::<String>::new(),
+        vec!["web_search".to_string()],
         "and survive a second consecutive restart",
     );
 
@@ -2169,85 +2058,6 @@ async fn an_old_kind_write_between_carry_over_and_cut_is_not_restated_as_the_new
         vec![("keep#upstream".to_string(), kept)],
         "the old kind's write must not replay as owned by the new kind: {delayed}",
     );
-
-    drop(usage);
-    drain_usage_writer_strict(writer).await;
-}
-
-/// The owner sweep waits for the boundary. A kind flip with a revision move
-/// whose boundary fails leaves the previous router live, and every entry it
-/// owns must still be resident.
-#[tokio::test]
-async fn a_failed_kind_flip_boundary_leaves_the_previous_routers_entries_intact() {
-    let mut base = owning_config();
-    let _dir = isolate_usage_db(&mut base);
-    let config = Arc::new(base);
-    let flipped = Arc::new(kind_flipped_config(&config));
-    let (usage, writer) = UsageWriter::start(
-        config.usage.db_path.clone(),
-        CHANNEL_CAPACITY,
-        0,
-        config.usage.enabled,
-    );
-    let before = seeded_router_with_both_classes(&config, 1, &usage);
-    let resident_before = resident_lanes(&before);
-
-    let mut reloaded = Router::new(flipped);
-    reloaded.install_catalog_overlay(overlay_at_revision(2));
-    reloaded.carry_over_learned_from(&before);
-    let reloaded = Arc::new(reloaded);
-    let outcome =
-        commit_capability_boundary(&routectl_usage::handle_with_closed_channel(), &reloaded).await;
-
-    assert!(
-        matches!(outcome, BoundaryOutcomeReport::Failed(_)),
-        "got {outcome:?}"
-    );
-    assert_eq!(
-        resident_lanes(&before),
-        resident_before,
-        "a failed boundary removes nothing the previous router owns",
-    );
-
-    drop(usage);
-    drain_usage_writer_strict(writer).await;
-}
-
-/// The other half of deferring the sweep: once the boundary commits, the
-/// entries the replacement config does not own are gone.
-#[tokio::test]
-async fn a_committed_kind_flip_boundary_sweeps_the_unowned_entries() {
-    let mut base = owning_config();
-    let _dir = isolate_usage_db(&mut base);
-    let config = Arc::new(base);
-    let flipped = Arc::new(kind_flipped_config(&config));
-    let (usage, writer) = UsageWriter::start(
-        config.usage.db_path.clone(),
-        CHANNEL_CAPACITY,
-        0,
-        config.usage.enabled,
-    );
-    let before = seeded_router_with_both_classes(&config, 1, &usage);
-
-    let mut reloaded = Router::new(flipped);
-    reloaded.install_catalog_overlay(overlay_at_revision(2));
-    reloaded.carry_over_learned_from(&before);
-    assert_eq!(
-        resident_lanes(&reloaded).len(),
-        2,
-        "premise: nothing is swept before the boundary settles",
-    );
-    let reloaded = Arc::new(reloaded);
-    let outcome = commit_capability_boundary(&usage, &reloaded).await;
-
-    assert!(
-        matches!(
-            outcome,
-            BoundaryOutcomeReport::Committed { survivors: 0, .. }
-        ),
-        "got {outcome:?}",
-    );
-    assert_eq!(resident_lanes(&reloaded), Vec::new());
 
     drop(usage);
     drain_usage_writer_strict(writer).await;

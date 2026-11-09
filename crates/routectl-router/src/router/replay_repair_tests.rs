@@ -557,9 +557,9 @@ async fn dispatch_one_repair(router: &Router) -> super::super::Dispatched {
 }
 
 #[tokio::test]
-async fn stale_generation_commit_settles_repair_without_learning() {
+async fn a_repair_committed_across_a_generation_change_is_learned() {
     // Arrange -- the generation advances while the stripped repair is in
-    // flight, so its commit is refused as stale.
+    // flight.
     let provider = Arc::new(ReloadDuringRepairProvider {
         inner: ReplayMockProvider::new(),
         registry: std::sync::OnceLock::new(),
@@ -574,8 +574,8 @@ async fn stale_generation_commit_settles_repair_without_learning() {
     // Act
     let dispatched = dispatch_one_repair(&router).await;
 
-    // Assert -- the repair served, but nothing was persisted, so the record
-    // must not claim a learned negative.
+    // Assert -- the commit is not refused: the negative persists and the
+    // record reports it learned.
     assert!(dispatched.result.is_ok(), "the stripped repair served");
     assert_eq!(
         provider.inner.calls.load(Ordering::SeqCst),
@@ -587,18 +587,15 @@ async fn stale_generation_commit_settles_repair_without_learning() {
         generation_before + 1,
         "premise: the generation advanced between admission and settlement",
     );
-    assert!(
-        router.learned_capability_snapshot().is_empty(),
-        "premise: the stale commit persisted nothing",
-    );
-    assert!(dispatched.meta.learned_capabilities.is_empty());
+    assert_eq!(router.learned_capability_snapshot().len(), 1);
+    assert_eq!(dispatched.meta.learned_capabilities.len(), 1);
     let records: Vec<_> = dispatched
         .meta
         .replay_degradations
         .iter()
         .map(|record| (record.repair_succeeded, record.learned))
         .collect();
-    assert_eq!(records, vec![(true, false)]);
+    assert_eq!(records, vec![(true, true)]);
 }
 
 #[tokio::test]
@@ -610,8 +607,8 @@ async fn live_generation_commit_settles_repair_as_learned() {
     // Act
     let dispatched = dispatch_one_repair(&router).await;
 
-    // Assert -- the positive control: the same repair with no reload in
-    // between persists the negative and reports it learned.
+    // Assert -- with no reload in between, the repair persists the negative
+    // and reports it learned.
     assert!(dispatched.result.is_ok(), "the stripped repair served");
     assert!(
         !router.learned_capability_snapshot().is_empty(),

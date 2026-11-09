@@ -109,8 +109,9 @@ pub use capability_precedence::{
     resolve_open, resolve_operator,
 };
 pub use capability_rebuild::{
-    CapabilityEventRow, CapabilityLedgerReader, CapabilityRebuildSummary, ReplayTombstone,
-    ReplayedFieldValues, rebuild_capabilities_into, rebuild_capabilities_with_values,
+    CapabilityEventRow, CapabilityLedgerReader, CapabilityRebuildSummary, FROZEN_CATALOG_VERSION,
+    FROZEN_OVERLAY_REVISION, ReplayTombstone, ReplayedFieldValues, rebuild_capabilities_into,
+    rebuild_capabilities_with_values,
 };
 pub use capability_vocab::CURRENT_VOCAB_VERSION;
 pub use catalog::{

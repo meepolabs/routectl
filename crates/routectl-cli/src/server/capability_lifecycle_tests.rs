@@ -504,19 +504,19 @@ async fn learned_negative_survives_restart_and_acts_without_a_fresh_attempt() {
     assert_eq!(acting_decision(entry, now), ActingDecision::RouteAway);
 }
 
-// --- Scenario 3: bump revision, restart, negative gone, re-learn ---------
+// --- Scenario 3: overlay revision change, restart, negative kept ---------
 
 #[tokio::test]
-async fn bumped_revision_across_restart_drops_negative_then_relearns_at_new_revision() {
-    // Arrange: a tombstone + negative learned under overlay revision 0.
+async fn an_overlay_revision_change_across_restart_keeps_the_negative() {
+    // Arrange: a tombstone + negative learned under the frozen stamps.
     let tmp = TempDir::new().expect("tempdir");
     let ts = now_ms();
     let ledger = tmp.path().join("usage.db");
 
     let seed_router = default_router(&tmp).await;
-    let cat = i64::from(seed_router.catalog_version());
+    let (cat, overlay) = revision_of(&seed_router);
     let (handle, writer) = writer_at(&ledger);
-    handle.try_send_capability_event_in_generation(CapabilityEvent::tombstone(ts, cat, 0), 1);
+    handle.try_send_capability_event_in_generation(CapabilityEvent::tombstone(ts, cat, overlay), 1);
     handle.try_send_capability_event_in_generation(
         broken(
             ts,
@@ -524,60 +524,23 @@ async fn bumped_revision_across_restart_drops_negative_then_relearns_at_new_revi
             WEB_SEARCH,
             "self-identifying",
             cat,
-            0,
+            overlay,
         ),
         1,
     );
     drop(handle);
     drain_usage_writer_strict(writer).await;
 
-    // Act 1: restart at a bumped overlay revision. The ledger's tombstone
-    // revision no longer matches, so warm fails closed to empty and writes a
-    // fresh boot tombstone at the new revision (into the same ledger).
+    // Act: restart under a router that installed an overlay at revision 7.
     let mut bumped = default_router(&tmp).await;
     bumped.install_catalog_overlay(crate::server::test_support::overlay_at_revision(7));
-    let (h2, w2) = writer_at(&ledger);
-    warm_off_runtime(&ledger, &bumped, &h2);
-    drop(h2);
-    drain_usage_writer_strict(w2).await;
-
-    // Assert 1: the pre-bump negative is gone (fail-closed to empty).
-    assert!(
-        bumped.learned_capability_snapshot().is_empty(),
-        "a revision bump drops every pre-bump negative",
-    );
-
-    // Act 2: fresh traffic under the new revision learns a new negative, which
-    // sits after the fresh boot tombstone. A later restart at the new revision
-    // replays it -- re-learning against the new catalog's priors.
-    let (h3, w3) = writer_at(&ledger);
-    h3.try_send_capability_event_in_generation(
-        broken(
-            now_ms(),
-            "gpt-nick#claude-nick",
-            COMPUTER_USE,
-            "self-identifying",
-            cat,
-            7,
-        ),
-        1,
-    );
-    drop(h3);
-    drain_usage_writer_strict(w3).await;
-
-    let mut relearned = default_router(&tmp).await;
-    relearned.install_catalog_overlay(crate::server::test_support::overlay_at_revision(7));
     let scratch = tmp.path().join("scratch.db");
-    let snap = warm_and_snapshot(&ledger, &relearned, &scratch).await;
+    let snap = warm_and_snapshot(&ledger, &bumped, &scratch).await;
 
-    // Assert 2: the new-revision negative replays; the pre-bump one stays gone.
+    // Assert: the overlay revision does not reach the replay boundary.
     assert!(
-        find(&snap, "gpt-nick#claude-nick", COMPUTER_USE).is_some(),
-        "a negative learned under the new revision replays across restart",
-    );
-    assert!(
-        find(&snap, "gpt-nick#upstream", WEB_SEARCH).is_none(),
-        "the pre-bump negative never crosses the new boundary",
+        find(&snap, "gpt-nick#upstream", WEB_SEARCH).is_some(),
+        "the negative replays across an overlay revision change",
     );
 }
 

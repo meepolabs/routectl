@@ -1030,15 +1030,11 @@ fn a_verified_only_policy_still_admits_a_verified_positive() {
 }
 
 #[test]
-fn a_scope_taken_before_a_reload_admits_nothing() {
+fn a_scope_taken_before_a_reload_still_admits() {
     // (name, scope taken on the superseded router, events expected)
     let rows = [
-        (
-            "scope taken on the live router (positive control)",
-            false,
-            1,
-        ),
-        ("scope taken on the superseded router", true, 0),
+        ("scope taken on the live router", false, 1),
+        ("scope taken on the superseded router", true, 1),
     ];
     for (name, scope_on_old, want) in rows {
         // Arrange: two Routers sharing one registry across a boundary.

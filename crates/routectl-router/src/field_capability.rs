@@ -1,5 +1,5 @@
 //! The envelope-field capability namespace: one prefix, one bounded
-//! constructor, one catalog-scope predicate.
+//! constructor, one namespace predicate.
 //!
 //! An upstream that rejects a request by naming a WIRE FIELD PATH
 //! (`thinking.enabled.display`) states a fact about the request envelope
@@ -17,7 +17,7 @@
 //!   the prefix literal anywhere else could drift from this one and
 //!   re-partition history, so the prefix is private to this module: the
 //!   only way to obtain a key is [`field_capability_key`], and the only
-//!   way to test one is [`capability_key_is_catalog_scoped`]. A sibling
+//!   way to test one is [`capability_key_is_field_verdict`]. A sibling
 //!   module cannot assemble a key by hand.
 //! - **The path is qualified, and preserved byte for byte.** The key
 //!   carries the full dotted path the upstream named, never its leaf
@@ -26,12 +26,11 @@
 //!   un-minted -- it would become two different facts sharing one row of
 //!   history.
 //!
-//! [`capability_key_is_catalog_scoped`] is the read-side counterpart. A
-//! catalog-scoped fact is only meaningful under the catalog revision that
-//! was live when it was observed, so the invalidation paths discard it on
-//! a revision change. A wire-shape fact is independent of the catalog and
-//! must survive that change, so the two classes are distinguished by one
-//! predicate rather than by each call site re-deciding.
+//! [`capability_key_is_field_verdict`] is the read-side counterpart: the
+//! namespace test every surface that reports or resets field verdicts
+//! applies. [`capability_key_is_catalog_scoped`] is a separate question,
+//! asked only by the revision and generation boundary paths, and its
+//! answer is now `false` for every key.
 
 use routectl_core::capability::normalize_capability_key;
 
@@ -96,45 +95,36 @@ fn is_qualified_field_path(path: &str) -> bool {
 ///
 /// Private: no caller outside this module needs the path, and every one
 /// that has the prefix could hand-assemble a key. The two callers here are
-/// the grammar's already-a-key rule and the catalog-scope predicate.
+/// the grammar's already-a-key rule and the field-verdict predicate.
 fn field_capability_path(key: &str) -> Option<&str> {
     key.strip_prefix(FIELD_CAPABILITY_PREFIX)
 }
 
-/// True when `key` names a fact whose truth is scoped to the live catalog
-/// revision, and which the invalidation paths must therefore discard when
+/// True when `key` names a fact whose truth is scoped to a catalog revision,
+/// which the revision and generation boundary paths would then discard when
 /// that revision changes.
 ///
-/// Defaults to `true`: every known catalog capability key and every key
-/// from a namespace this build does not recognize is treated as
-/// catalog-scoped, so a new producer inherits the conservative behavior
-/// rather than accidental permanence. Only the field namespace is carved
-/// out, because a wire-shape fact does not depend on the catalog at all.
-///
-/// This is a namespace test, not a validity test: it answers only whether
-/// the key sits inside the field namespace, and never re-checks the
-/// grammar of a key already persisted.
-pub fn capability_key_is_catalog_scoped(key: &str) -> bool {
-    field_capability_path(key).is_none()
+/// `false` for every key. The revision stamps are frozen constants, and no
+/// learned verdict depends on catalog data, so a ledger written under any
+/// earlier revision carries every verdict forward. Asked only by the boundary
+/// paths; a caller asking whether a key is a field verdict uses
+/// [`capability_key_is_field_verdict`], which is not this predicate's
+/// complement.
+pub const fn capability_key_is_catalog_scoped(_key: &str) -> bool {
+    false
 }
 
 /// True when `key` names an envelope-field wire-shape fact.
 ///
-/// The exact complement of `capability_key_is_catalog_scoped`, published under
-/// its own name because the two answer different questions and a caller inverting
-/// the other one would be stating the wrong one. That predicate asks "must a
-/// catalog-revision change discard this?"; this one asks "is this a field verdict?"
-/// -- which is what the daemon's event-drain needs in order to route a field
-/// verdict's row through the ACKNOWLEDGED write path (its pre-flight eligibility
-/// depends on the row being durable) while every other capability row stays best
-/// effort.
+/// The test every surface that reports, seeds or resets field verdicts
+/// applies, and what the daemon's event-drain needs in order to route a field
+/// verdict's row through the ACKNOWLEDGED write path (its pre-flight
+/// eligibility depends on the row being durable) while every other capability
+/// row stays best effort.
 ///
-/// Both read the same private prefix through the same private accessor, so the
-/// namespace still has exactly one spelling.
-///
-/// Like its sibling, this is a NAMESPACE test rather than a validity test: it
-/// answers only whether the key sits inside the field namespace, and never
-/// re-checks the grammar of a key already persisted.
+/// This is a NAMESPACE test rather than a validity test: it answers only
+/// whether the key sits inside the field namespace, and never re-checks the
+/// grammar of a key already persisted.
 pub fn capability_key_is_field_verdict(key: &str) -> bool {
     field_capability_path(key).is_some()
 }

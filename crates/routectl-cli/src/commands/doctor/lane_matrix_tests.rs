@@ -555,7 +555,6 @@ fn a_bedrock_leaf_row_on_a_lane_now_of_another_kind_is_skipped_as_owner() {
         let source = gather_capability_matrix(
             &ledger_config(&path),
             false,
-            0,
             routectl_router::BetaSeedScope::EMPTY,
         );
         build_capability_matrix_panel(&context(ledger_config(&path), source))
@@ -701,7 +700,6 @@ fn a_failed_slice_read_renders_unavailable_while_a_clean_empty_slice_renders_emp
     let clean_source = gather_capability_matrix(
         &ledger_config(&clean),
         false,
-        0,
         routectl_router::BetaSeedScope::EMPTY,
     );
     let clean_panel = build_capability_matrix_panel(&context(ledger_config(&clean), clean_source));
@@ -725,7 +723,6 @@ fn a_failed_slice_read_renders_unavailable_while_a_clean_empty_slice_renders_emp
     let source = gather_capability_matrix(
         &ledger_config(&poisoned),
         false,
-        0,
         routectl_router::BetaSeedScope::EMPTY,
     );
     let panel = build_capability_matrix_panel(&context(ledger_config(&poisoned), source));
@@ -762,7 +759,6 @@ fn the_replay_tally_counts_replayed_and_each_skip_reason() {
     let source = gather_capability_matrix(
         &ledger_config(&path),
         false,
-        0,
         routectl_router::BetaSeedScope::EMPTY,
     );
     let panel = build_capability_matrix_panel(&context(ledger_config(&path), source));
@@ -790,7 +786,6 @@ fn a_ledger_replay_panel_is_tagged_ledger_replay_and_carries_no_warm() {
     let source = gather_capability_matrix(
         &ledger_config(&path),
         false,
-        0,
         routectl_router::BetaSeedScope::EMPTY,
     );
 

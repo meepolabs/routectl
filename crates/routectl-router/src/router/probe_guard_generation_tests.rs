@@ -1,12 +1,9 @@
 //! A probe guard settles against the generation it was ADMITTED under.
 //!
 //! A re-probe is admitted, the request dispatches, and the settlement lands
-//! later. A reload can complete in between. The settlement then describes a
-//! probe issued against a catalog revision the daemon has left, so applying it
-//! would clear or back off an entry the live generation still believes -- and
-//! emit a cleared event whose row a later boot would replay. Each guard
-//! therefore captures its generation at admission and settles through the
-//! generation-aware API.
+//! later. A reload can complete in between. No key is catalog-scoped, so the
+//! settlement still applies to the live entry: a reload between admission and
+//! settlement changes nothing the probe proved.
 
 use super::runtime_gate::{
     LearnedProbeGuard, ProbeAdmission, ProbeAdmissionSet, SameCapabilitySettlement,
@@ -20,22 +17,13 @@ use std::time::{Duration, Instant};
 
 const PROVIDER: &str = "openai-compat";
 
-/// The capability key the guard fixtures probe.
-///
-/// Catalog-SCOPED on purpose: that is the class the barrier refuses from a stale
-/// generation. A wire-shape key is always admitted by design, so it could not
-/// discriminate a refusal from an acceptance.
+/// The capability key the guard fixtures probe: a non-field key.
 fn probe_key() -> String {
     "web_search".to_string()
 }
 
-/// Advance the generation WITHOUT pruning.
-///
-/// The full boundary transition also evicts the catalog-scoped entries, which
-/// would remove the very entry these tests inspect -- so "still resident" could
-/// not tell a refused settlement from a pruned one. Advancing alone reproduces
-/// the staleness the guard must detect while leaving the entry observable.
-fn advance_without_pruning(reg: &LearnedCapabilityRegistry) {
+/// A reload landing between admission and settlement.
+fn advance_generation(reg: &LearnedCapabilityRegistry) {
     reg.advance_generation();
 }
 
@@ -92,11 +80,10 @@ fn resident(reg: &LearnedCapabilityRegistry) -> bool {
     !reg.snapshot().is_empty()
 }
 
-/// A SUCCESS settlement arriving after a reload must clear nothing and emit no
-/// cleared event -- the probe proved something about a catalog revision the
-/// daemon has left.
+/// A SUCCESS settlement arriving after a reload clears the live entry and emits
+/// its cleared event.
 #[test]
-fn a_stale_success_settlement_clears_nothing_and_emits_nothing() {
+fn a_success_settlement_across_a_reload_clears_and_emits() {
     let (reg, _t) = registry_with_claimed_probe();
     let admitted_generation = reg.generation();
     let mut guard = LearnedProbeGuard::armed(
@@ -105,24 +92,16 @@ fn a_stale_success_settlement_clears_nothing_and_emits_nothing() {
         "complete",
     );
 
-    // The reload lands between admission and settlement.
-    advance_without_pruning(&reg);
+    advance_generation(&reg);
 
     let cleared = guard.settle_success();
 
-    assert!(
-        cleared.is_empty(),
-        "a stale settlement must emit no cleared event",
-    );
-    assert!(
-        resident(&reg),
-        "a stale success must not clear the live entry",
-    );
+    assert_eq!(cleared.len(), 1, "the settlement emits one cleared event");
+    assert!(!resident(&reg), "and clears the entry");
 }
 
-/// The positive control: with NO reload in between, the same settlement clears
-/// the entry and emits its event. Without this the test above would pass against
-/// a guard that never settles anything.
+/// With NO reload in between, the same settlement clears the entry and emits
+/// its event.
 #[test]
 fn a_live_success_settlement_clears_and_emits() {
     let (reg, _t) = registry_with_claimed_probe();
@@ -138,10 +117,10 @@ fn a_live_success_settlement_clears_and_emits() {
     assert!(!resident(&reg), "and clears the entry");
 }
 
-/// A same-capability REJECTION settlement arriving after a reload must not
-/// refresh the entry's backoff.
+/// A same-capability REJECTION settlement arriving after a reload refreshes the
+/// entry's backoff.
 #[test]
-fn a_stale_rejection_settlement_does_not_refresh_backoff() {
+fn a_rejection_settlement_across_a_reload_refreshes_backoff() {
     let (reg, _t) = registry_with_claimed_probe();
     let admitted_generation = reg.generation();
     let mut guard = LearnedProbeGuard::armed(
@@ -151,22 +130,17 @@ fn a_stale_rejection_settlement_does_not_refresh_backoff() {
     );
     let expires_before = reg.snapshot()[0].expires_at;
 
-    advance_without_pruning(&reg);
+    advance_generation(&reg);
     let matched = guard.settle_same_capability("nick", &probe_key(), PROVIDER);
 
-    assert_eq!(
-        matched,
-        SameCapabilitySettlement::Stale,
-        "the guard recognized its admission and refused it as stale",
-    );
-    assert_eq!(
-        reg.snapshot()[0].expires_at,
-        expires_before,
-        "a stale rejection must not extend the entry's backoff",
+    assert_eq!(matched, SameCapabilitySettlement::Applied);
+    assert!(
+        reg.snapshot()[0].expires_at > expires_before,
+        "the rejection refreshes the backoff",
     );
 }
 
-/// Positive control for the rejection arm.
+/// The rejection arm with no reload in between.
 #[test]
 fn a_live_rejection_settlement_refreshes_backoff() {
     let (reg, _t) = registry_with_claimed_probe();
@@ -186,10 +160,10 @@ fn a_live_rejection_settlement_refreshes_backoff() {
     );
 }
 
-/// A guard DROPPED after a reload records no transient error: the in-flight slot
-/// belongs to a generation that no longer exists.
+/// A guard DROPPED after a reload releases the in-flight slot and records no
+/// observation: a drop is an OtherError, which only frees the slot.
 #[test]
-fn a_stale_drop_records_no_transient_error() {
+fn a_drop_across_a_reload_frees_the_slot_and_records_no_observation() {
     let (reg, t_probe) = registry_with_claimed_probe();
     let admitted_generation = reg.generation();
     {
@@ -198,33 +172,27 @@ fn a_stale_drop_records_no_transient_error() {
             vec![admission_at(admitted_generation)],
             "complete",
         );
-        advance_without_pruning(&reg);
+        advance_generation(&reg);
     }
 
-    // A recorded OtherError bumps the consecutive-failed-probe counter, which
-    // lengthens the next backoff. A stale drop must leave it alone.
-    let entry = &reg.snapshot()[0];
+    assert_eq!(reg.snapshot()[0].observations, 1);
     assert_eq!(
-        entry.observations, 1,
-        "a stale drop must not record an outcome against the live entry",
-    );
-    // And the entry is still available to re-probe on the live generation.
-    assert!(matches!(
         reg.acting_negative_for(
             "nick",
             "web_search",
             PROVIDER,
             t_probe + Duration::from_secs(1)
         ),
-        RoutingDecision::ProbeAdmitted | RoutingDecision::RouteAway { .. },
-    ));
+        RoutingDecision::ProbeAdmitted,
+        "the drop released the in-flight slot",
+    );
 }
 
-/// An UNREACHED admission whose set drops after a reload likewise records
-/// nothing.
+/// An UNREACHED admission whose set drops after a reload likewise frees the
+/// slot and records no observation.
 #[test]
-fn a_stale_unreached_admission_set_drop_records_nothing() {
-    let (reg, _t) = registry_with_claimed_probe();
+fn an_unreached_admission_set_drop_across_a_reload_frees_the_slot() {
+    let (reg, t_probe) = registry_with_claimed_probe();
     let admitted_generation = reg.generation();
     {
         let _set = ProbeAdmissionSet::new(
@@ -232,25 +200,31 @@ fn a_stale_unreached_admission_set_drop_records_nothing() {
             vec![admission_at(admitted_generation)],
             "complete",
         );
-        advance_without_pruning(&reg);
+        advance_generation(&reg);
     }
 
+    assert_eq!(reg.snapshot()[0].observations, 1);
     assert_eq!(
-        reg.snapshot()[0].observations,
-        1,
-        "a stale unreached settlement must record nothing",
+        reg.acting_negative_for(
+            "nick",
+            "web_search",
+            PROVIDER,
+            t_probe + Duration::from_secs(1)
+        ),
+        RoutingDecision::ProbeAdmitted,
+        "the drop released the in-flight slot",
     );
 }
 
-/// The count_tokens walk settles its own probe, and must apply the same rule.
+/// The count_tokens walk settles its own probe through the generation-aware API,
+/// and a reload in between does not refuse it.
 #[test]
-fn a_stale_count_tokens_settlement_is_inert() {
+fn a_count_tokens_settlement_across_a_reload_applies() {
     let (reg, t_probe) = registry_with_claimed_probe();
     let admitted_generation = reg.generation();
 
-    advance_without_pruning(&reg);
+    advance_generation(&reg);
 
-    // The count_tokens site settles directly through the generation-aware API.
     let settled = reg.record_probe_outcome_in_generation(
         admitted_generation,
         "nick",
@@ -260,25 +234,20 @@ fn a_stale_count_tokens_settlement_is_inert() {
         t_probe,
     );
 
-    assert_eq!(
-        settled,
-        crate::learned_capability::GenerationOutcome::Stale,
-        "a stale count_tokens settlement must be refused",
+    assert!(
+        matches!(
+            settled,
+            crate::learned_capability::GenerationOutcome::Applied { .. }
+        ),
+        "got {settled:?}",
     );
-    assert!(resident(&reg), "and must not clear the live entry");
+    assert!(!resident(&reg), "the success clears the live entry");
 }
 
-/// A STALE same-capability settlement leaves every downstream consequence
-/// unchanged, while still releasing its admission.
-///
-/// The retired boolean returned `true` for both applied and stale, so the
-/// production caller bumped the probe-failure metric, recorded the cross-lane
-/// F1Seen marker, and inserted the request-local dedupe key -- three observable
-/// effects of a settlement that recorded nothing. The admission is released in
-/// both cases (the slot is request-local; leaking it latches the pair forever),
-/// which is precisely why release cannot stand in for "something happened".
+/// A same-capability settlement across a reload reports Applied and releases its
+/// admission, so a second settlement finds nothing held.
 #[test]
-fn a_stale_same_capability_settlement_reports_stale_and_records_nothing() {
+fn a_same_capability_settlement_across_a_reload_applies_and_releases() {
     let (reg, _t) = registry_with_claimed_probe();
     let admitted_generation = reg.generation();
     let mut guard = LearnedProbeGuard::armed(
@@ -286,33 +255,20 @@ fn a_stale_same_capability_settlement_reports_stale_and_records_nothing() {
         vec![admission_at(admitted_generation)],
         "complete",
     );
-    let expires_before = reg.snapshot()[0].expires_at;
 
-    advance_without_pruning(&reg);
+    advance_generation(&reg);
     let settled = guard.settle_same_capability("nick", &probe_key(), PROVIDER);
 
-    assert_eq!(
-        settled,
-        SameCapabilitySettlement::Stale,
-        "a stale settlement must be reported distinctly from an applied one",
-    );
-    assert_eq!(
-        reg.snapshot()[0].expires_at,
-        expires_before,
-        "and must not refresh the backoff it did not book",
-    );
-    // The admission WAS released: a second settlement finds nothing held, which
-    // is how the slot avoids latching.
+    assert_eq!(settled, SameCapabilitySettlement::Applied);
     assert_eq!(
         guard.settle_same_capability("nick", &probe_key(), PROVIDER),
         SameCapabilitySettlement::NoMatch,
-        "the stale settlement must still have released its admission",
+        "the settlement released its admission",
     );
 }
 
-/// The live positive control: an applied settlement reports `Applied` and
-/// refreshes the backoff, so the test above cannot pass against a guard that
-/// settles nothing at all.
+/// With no reload in between, an applied settlement reports `Applied` and
+/// refreshes the backoff.
 #[test]
 fn a_live_same_capability_settlement_reports_applied() {
     let (reg, _t) = registry_with_claimed_probe();

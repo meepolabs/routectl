@@ -32,16 +32,11 @@ fn generation_starts_at_one_and_advances_monotonically() {
     assert_eq!(reg.advance_generation(), 3);
 }
 
-/// A catalog-scoped observation from a STALE generation is inert: nothing
-/// resident, and the caller is told it was rejected so it emits no ledger
-/// event and bumps no metric.
-///
-/// This is what stops an old Router Arc from repopulating the catalog-scoped
-/// state the boundary just pruned. Without it the shared Arc would let a
-/// request still in flight on the pre-swap Router re-learn a negative the
-/// revision change was meant to discard.
+/// An observation of a non-field key from a SUPERSEDED generation is admitted
+/// into the live registry, exactly as a field observation is: no key is
+/// catalog-scoped, so a generation change refuses nothing.
 #[test]
-fn a_stale_generation_catalog_scoped_observation_is_rejected_and_inert() {
+fn a_stale_generation_non_field_observation_is_admitted() {
     let reg = registry();
     let stale = reg.generation();
     reg.advance_generation();
@@ -62,11 +57,11 @@ fn a_stale_generation_catalog_scoped_observation_is_rejected_and_inert() {
         Instant::now(),
     );
 
-    assert_eq!(outcome, GenerationOutcome::Stale);
     assert!(
-        reg.is_empty(),
-        "a stale catalog-scoped observation must leave nothing resident",
+        matches!(outcome, GenerationOutcome::Applied { .. }),
+        "a superseded generation's observation is admitted, got {outcome:?}",
     );
+    assert_eq!(reg.snapshot().len(), 1);
 }
 
 /// A catalog-INDEPENDENT observation from a stale generation is ACCEPTED
@@ -111,15 +106,13 @@ fn a_stale_generation_field_observation_is_accepted_into_the_live_registry() {
     assert_eq!(resident, vec![key]);
 }
 
-/// A catalog-scoped READ from a stale generation reports stale rather than
-/// answering, so a pre-swap Router cannot route on catalog truth the reload
-/// replaced. A field read still answers.
+/// A READ from a superseded generation answers for every key class: a field
+/// key and a non-field key both report their resident verdict.
 #[test]
-fn stale_generation_reads_are_scoped_by_key_class() {
+fn stale_generation_reads_answer_for_every_key_class() {
     let reg = registry();
     let now = Instant::now();
     let key = field_key("thinking.enabled.display");
-    // Learn both classes at the current generation.
     for capability in [key.as_str(), "web_search"] {
         reg.observe_any_key_for_tests(
             crate::learned_capability::LearnKey {
@@ -139,27 +132,21 @@ fn stale_generation_reads_are_scoped_by_key_class() {
     let stale = reg.generation();
     reg.advance_generation();
 
-    // A catalog-scoped read from the stale generation must not answer.
-    assert_eq!(
-        reg.acting_negative_in_generation(stale, "nick", "web_search", "anthropic-api", now)
-            .map(|(d, _)| d),
-        None,
-        "a stale catalog-scoped read must report stale, never a verdict",
-    );
-    // The field read still answers, because its truth is catalog-independent.
-    assert!(
-        matches!(
-            reg.acting_negative_in_generation(stale, "nick", &key, "anthropic-api", now),
-            Some((RoutingDecision::RouteAway { .. }, _))
-        ),
-        "a stale field read must still answer",
-    );
+    for capability in ["web_search", key.as_str()] {
+        assert!(
+            matches!(
+                reg.acting_negative_in_generation(stale, "nick", capability, "anthropic-api", now),
+                Some((RoutingDecision::RouteAway { .. }, _))
+            ),
+            "a stale read answers for {capability}",
+        );
+    }
 }
 
-/// Pruning at the boundary drops the catalog-scoped entries and keeps the
-/// catalog-independent ones, in one pass under the registry's own lock.
+/// The boundary prune removes nothing: every resident entry, field or not,
+/// survives it.
 #[test]
-fn pruning_catalog_scoped_entries_keeps_the_field_entries() {
+fn the_boundary_prune_keeps_every_entry() {
     let reg = registry();
     let now = Instant::now();
     let key = field_key("thinking.enabled.display");
@@ -182,20 +169,14 @@ fn pruning_catalog_scoped_entries_keeps_the_field_entries() {
 
     let pruned = reg.prune_catalog_scoped();
 
-    assert_eq!(pruned, 2, "both catalog-scoped entries are dropped");
-    let resident: Vec<String> = reg
-        .snapshot()
-        .into_iter()
-        .map(|entry| entry.feature_key)
-        .collect();
-    assert_eq!(resident, vec![key]);
+    assert_eq!(pruned, 0);
+    assert_eq!(reg.snapshot().len(), 3);
 }
 
-/// A probe settlement from a stale generation on a catalog-scoped key is a
-/// no-op: it must neither clear a resident entry nor produce a cleared event
-/// for the ledger.
+/// A probe settlement from a superseded generation on a non-field key applies:
+/// the keyed removal clears the resident entry.
 #[test]
-fn a_stale_generation_probe_settlement_on_a_scoped_key_is_a_no_op() {
+fn a_stale_generation_probe_settlement_on_a_non_field_key_applies() {
     let reg = registry();
     let now = Instant::now();
     reg.observe(
@@ -217,12 +198,11 @@ fn a_stale_generation_probe_settlement_on_a_scoped_key_is_a_no_op() {
 
     let removed = reg.remove_keyed_in_generation(stale, "nick", "web_search", "anthropic-api");
 
-    assert_eq!(removed, GenerationOutcome::Stale);
-    assert_eq!(
-        reg.snapshot().len(),
-        1,
-        "a stale settlement must not remove the resident entry",
+    assert!(
+        matches!(removed, GenerationOutcome::Applied { value: true, .. }),
+        "got {removed:?}",
     );
+    assert!(reg.snapshot().is_empty());
 }
 
 /// The shared registry retunes its hot-reloadable capability settings in
@@ -359,15 +339,18 @@ fn the_boundary_cut_excludes_observations_between_snapshot_and_submit() {
         resident_at_submit, None,
         "the cut must still hold the registry guard when it submits",
     );
-    assert_eq!(survivors, vec![field_key("thinking.enabled.display")]);
-    // The sibling's write landed only after the cut completed.
+    // The sibling may have written before the cut took the guard, so the
+    // survivors hold the field entry and at most that write.
+    assert!(survivors.contains(&field_key("thinking.enabled.display")));
+    assert!(survivors.len() <= resident_before + 1);
     assert_eq!(reg.snapshot().len(), resident_before + 1);
 }
 
-/// The cut returns the catalog-independent survivors only -- the set a
-/// restatement batch must carry.
+/// The cut returns every resident entry, field or not: the set a restatement
+/// batch must carry so the next boot, reading past the fresh tombstone, still
+/// has each verdict.
 #[test]
-fn the_boundary_cut_snapshots_only_catalog_independent_entries() {
+fn the_boundary_cut_snapshots_every_resident_entry() {
     let reg = registry();
     let now = Instant::now();
     let key = field_key("thinking.enabled.display");
@@ -390,10 +373,12 @@ fn the_boundary_cut_snapshots_only_catalog_independent_entries() {
 
     let cut = reg.with_boundary_cut(
         |survivors, _pending| {
-            survivors
+            let mut keys: Vec<String> = survivors
                 .iter()
                 .map(|e| e.entry.feature_key.clone())
-                .collect::<Vec<_>>()
+                .collect();
+            keys.sort();
+            keys
         },
         |_| false,
     );
@@ -402,7 +387,9 @@ fn the_boundary_cut_snapshots_only_catalog_independent_entries() {
         _ => panic!("expected Rejected"),
     };
 
-    assert_eq!(keys, vec![key]);
+    let mut expected = vec![key, "web_search".to_string()];
+    expected.sort();
+    assert_eq!(keys, expected);
 }
 
 // ---- atomicity of generation validation ------------------------------------
@@ -439,7 +426,6 @@ impl PausedBoundary {
                 // that regardless and could not distinguish a released guard
                 // from a held one.
                 reg.advance_generation();
-                reg.prune_catalog_scoped();
             });
             // Long enough that an UNBLOCKED sibling finishes inside the pause --
             // which is exactly what a check-then-lock shape would allow.
@@ -471,31 +457,20 @@ impl PausedBoundary {
     fn generation_at_operation(&self) -> Option<u64> {
         *self.observed.lock().expect("observed slot")
     }
-
-    /// Whether any catalog-scoped entry is resident.
-    fn holds_catalog_scoped(&self) -> bool {
-        self.reg
-            .snapshot()
-            .into_iter()
-            .any(|e| crate::field_capability::capability_key_is_catalog_scoped(&e.feature_key))
-    }
 }
 
 /// Generation validation must be ATOMIC with the entries operation it guards.
 ///
 /// A check-then-lock shape has a window: the operation reads the generation,
 /// finds it current, releases, and only then takes the entries lock -- so a
-/// boundary transition landing in between lets a catalog-scoped write through
-/// AFTER the generation advanced and the prune ran, repopulating exactly what
-/// the boundary evicted.
+/// boundary transition landing in between runs before the operation it was
+/// meant to follow.
 ///
 /// The window is made deterministic rather than raced for. The invariant
-/// asserted is the one that discriminates: once the operation and the boundary
-/// have both completed, NO catalog-scoped entry may be resident. Under the
-/// atomic shape the write lands first and the prune then removes it; under
-/// check-then-lock the prune runs first and the write survives it. Asserting on
-/// the generation counter instead would not discriminate, because the boundary
-/// legitimately lands right after an atomic operation releases.
+/// asserted is the generation observed from INSIDE the guarded operation:
+/// under the atomic shape it equals the one validated against, because the
+/// guard is still held; under check-then-lock the sibling has already
+/// advanced it.
 #[test]
 fn a_stale_observe_cannot_slip_through_a_pause_after_validation() {
     let armed = PausedBoundary::arm();
@@ -523,10 +498,6 @@ fn a_stale_observe_cannot_slip_through_a_pause_after_validation() {
         Some(generation_at_call),
         "the operation must run under the generation it validated against",
     );
-    assert!(
-        !armed.holds_catalog_scoped(),
-        "a catalog-scoped entry must not survive the boundary that pruned it",
-    );
 }
 
 /// Same atomicity requirement for the positive-admission path.
@@ -552,10 +523,6 @@ fn a_stale_positive_cannot_slip_through_a_pause_after_validation() {
         armed.generation_at_operation(),
         Some(generation_at_call),
         "the operation must run under the generation it validated against",
-    );
-    assert!(
-        !armed.holds_catalog_scoped(),
-        "a catalog-scoped positive must not survive the boundary that pruned it",
     );
 }
 
@@ -598,7 +565,6 @@ fn a_stale_removal_cannot_slip_through_a_pause_after_validation() {
         matches!(removed, GenerationOutcome::Applied { value: true, .. }),
         "the removal must act on the state it validated against",
     );
-    assert!(!armed.holds_catalog_scoped());
     assert_eq!(
         armed.generation_at_operation(),
         Some(generation_at_call),
@@ -723,10 +689,6 @@ fn a_stale_probe_settlement_cannot_slip_through_a_pause_after_validation() {
     assert!(
         matches!(settled, GenerationOutcome::Applied { value: (), .. }),
         "the settlement must apply against the state it validated",
-    );
-    assert!(
-        !armed.holds_catalog_scoped(),
-        "a successful settlement clears the entry; the boundary finds nothing",
     );
     assert_eq!(
         armed.generation_at_operation(),
@@ -1134,8 +1096,8 @@ fn a_stale_receipt_cannot_settle_a_later_boundary() {
         panic!("A must be admitted");
     };
     let _ = reg.commit_boundary_transition(&a);
-    // B is admitted and unsettled; the catalog-scoped entry is re-seeded so a
-    // wrongful prune would be visible.
+    // B is admitted and unsettled; the entry is re-seeded so a wrongful
+    // removal would be visible.
     reg.observe(
         crate::learned_capability::LearnKey {
             state_key: "nick",
@@ -1173,7 +1135,7 @@ fn a_stale_receipt_cannot_settle_a_later_boundary() {
         reg.commit_boundary_transition(&b),
         BoundarySettlement::Applied {
             generation: b.generation,
-            pruned: 1
+            pruned: 0
         },
         "B's own receipt still settles it",
     );
@@ -1355,7 +1317,7 @@ fn a_rolled_back_receipt_cannot_settle_a_later_boundary_at_the_same_generation()
         reg.commit_boundary_transition(&b),
         BoundarySettlement::Applied {
             generation: b.generation,
-            pruned: 1,
+            pruned: 0,
         },
     );
     assert_eq!(reg.generation(), b.generation);

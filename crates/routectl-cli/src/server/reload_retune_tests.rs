@@ -105,29 +105,7 @@ impl Rig {
     }
 }
 
-#[tokio::test]
-#[serial_test::serial]
-async fn a_config_reload_rejected_at_the_boundary_leaves_the_live_gates_untuned() {
-    // Arrange: a closed usage channel refuses the replay boundary.
-    let dir = tempfile::tempdir().unwrap();
-    let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
-    let _key = ScopedEnv::set(KEY_ENV, "test-key");
-    let rig = Rig::new(dir.path()).await;
-    let usage = routectl_usage::handle_with_closed_channel();
-    let before = rig.swap.load_full();
-    assert_eq!(published_rpm_available(&rig.swap), Some(100.0));
-
-    // Act
-    let outcome = rig.reload_to_tighter_gates(dir.path(), &usage).await;
-
-    // Assert: the old router is still published, on its own bucket capacity.
-    assert_eq!(outcome.err(), Some(ReloadFailure::BoundaryNotAdmitted));
-    assert!(Arc::ptr_eq(&before, &rig.swap.load_full()));
-    assert_eq!(published_rpm_available(&rig.swap), Some(100.0));
-}
-
-/// Positive control for the rejection test: the same fixture, with a boundary
-/// that commits, does surface the retune on the published router.
+/// A committed reload surfaces the retune on the published router.
 #[tokio::test]
 #[serial_test::serial]
 async fn a_config_reload_committed_at_the_boundary_retunes_the_carried_gates() {

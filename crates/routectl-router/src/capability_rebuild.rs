@@ -39,6 +39,20 @@ use crate::learned_capability::{
     LearnedCapabilityRegistry, LearnedRegistryEntry, PositiveOutcome, RecordedLearnedEntry,
 };
 
+/// The catalog version every capability event and tombstone is stamped with.
+///
+/// Frozen at the last value the baked catalog shipped, so a ledger written by
+/// an earlier build keeps a matching stamp. The revision stamp no longer
+/// tracks any catalog data; the persisted column stays for compatibility.
+pub const FROZEN_CATALOG_VERSION: u32 = 4;
+
+/// The overlay revision every capability event and tombstone is stamped with.
+///
+/// Zero, the stamp a build without an overlay always wrote. A ledger whose
+/// newest tombstone carries another overlay revision is restated past a fresh
+/// boundary at this one on the next boot, evicting nothing.
+pub const FROZEN_OVERLAY_REVISION: u64 = 0;
+
 /// The replay boundary: the latest tombstone's ledger `rowid` plus the
 /// catalog/overlay revision it was stamped with. Events at or before
 /// `rowid` predate the boundary; events carrying a different revision are

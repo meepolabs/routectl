@@ -2716,8 +2716,7 @@ mod capability_matrix {
         let tmp = TempDir::new().expect("tempdir");
         let config = config_at(&tmp.path().join("usage.db"));
 
-        let source =
-            gather_capability_matrix(&config, true, 0, routectl_router::BetaSeedScope::EMPTY);
+        let source = gather_capability_matrix(&config, true, routectl_router::BetaSeedScope::EMPTY);
         assert!(
             matches!(
                 source,
@@ -2735,7 +2734,7 @@ mod capability_matrix {
         let config = config_at(&tmp.path().join("absent.db"));
 
         let source =
-            gather_capability_matrix(&config, false, 0, routectl_router::BetaSeedScope::EMPTY);
+            gather_capability_matrix(&config, false, routectl_router::BetaSeedScope::EMPTY);
         assert!(
             matches!(source, CapabilityMatrixSource::Unavailable("no_data")),
             "an absent ledger is unavailable, never a silent empty"
@@ -2750,7 +2749,7 @@ mod capability_matrix {
         let config = config_at(&ledger);
 
         let CapabilityMatrixSource::Unavailable(code) =
-            gather_capability_matrix(&config, false, 0, routectl_router::BetaSeedScope::EMPTY)
+            gather_capability_matrix(&config, false, routectl_router::BetaSeedScope::EMPTY)
         else {
             panic!("an unreadable ledger must be unavailable");
         };
@@ -2771,7 +2770,7 @@ mod capability_matrix {
         let config = config_at(&ledger);
 
         let source =
-            gather_capability_matrix(&config, false, 0, routectl_router::BetaSeedScope::EMPTY);
+            gather_capability_matrix(&config, false, routectl_router::BetaSeedScope::EMPTY);
         assert!(
             matches!(
                 source,
@@ -2787,7 +2786,6 @@ mod capability_matrix {
         let cold = gather_capability_matrix(
             &config_at(&tmp.path().join("absent.db")),
             false,
-            0,
             routectl_router::BetaSeedScope::EMPTY,
         );
         assert!(
@@ -2809,7 +2807,7 @@ mod capability_matrix {
 
         assert!(
             matches!(
-                gather_capability_matrix(&config, false, 0, routectl_router::BetaSeedScope::EMPTY),
+                gather_capability_matrix(&config, false, routectl_router::BetaSeedScope::EMPTY),
                 CapabilityMatrixSource::Empty { .. }
             ),
             "a readable, matched, zero-row ledger is honest-empty"
@@ -2821,14 +2819,16 @@ mod capability_matrix {
         let tmp = TempDir::new().expect("tempdir");
         let ledger = tmp.path().join("usage.db");
         let db = open(&ledger).expect("open ledger");
-        // Tombstone stamped a different overlay revision than this run's.
-        seed_tombstone(db.conn(), 100, i64::from(CATALOG_VERSION), 0);
+        // Tombstone stamped an overlay revision other than the frozen one, as a
+        // ledger written by an earlier build can be until the daemon's next
+        // boot restates past it.
+        seed_tombstone(db.conn(), 100, i64::from(CATALOG_VERSION), 7);
         drop(db);
         let config = config_at(&ledger);
 
         assert!(
             matches!(
-                gather_capability_matrix(&config, false, 99, routectl_router::BetaSeedScope::EMPTY),
+                gather_capability_matrix(&config, false, routectl_router::BetaSeedScope::EMPTY),
                 CapabilityMatrixSource::Unavailable("revision_mismatch")
             ),
             "a foreign-revision tombstone is unavailable, not empty"
@@ -2861,7 +2861,7 @@ mod capability_matrix {
             now,
             now_ms,
             ..
-        } = gather_capability_matrix(&config, false, 0, routectl_router::BetaSeedScope::EMPTY)
+        } = gather_capability_matrix(&config, false, routectl_router::BetaSeedScope::EMPTY)
         else {
             panic!("a matching tombstone with a post-boundary row must be Available");
         };
@@ -2904,7 +2904,6 @@ mod capability_matrix {
         let _ = gather_capability_matrix(
             &config_at(&ledger),
             false,
-            0,
             routectl_router::BetaSeedScope::EMPTY,
         );
 
@@ -4008,7 +4007,7 @@ mod seeded_matrix_surfaces {
 
         // Act 1: the real read-only gather replays the seeded ledger.
         let source =
-            gather_capability_matrix(&config, false, 0, routectl_router::BetaSeedScope::EMPTY);
+            gather_capability_matrix(&config, false, routectl_router::BetaSeedScope::EMPTY);
         assert!(
             matches!(source, CapabilityMatrixSource::Available { .. }),
             "a matched tombstone with post-boundary rows must be Available"

@@ -291,15 +291,10 @@ fn preparing_a_purge_for_an_absent_key_reports_absent() {
     assert!(resident(&reg, "nick", "web_search"));
 }
 
-/// A STALE generation is refused distinguishably, and refusing is not the same
-/// answer as absent.
-///
-/// A purge arriving through a superseded Router would mutate a registry the
-/// published Router no longer reads, so reporting it as a clean removal would
-/// tell the operator something happened that did not. Reporting it as ABSENT
-/// would be just as wrong -- it claims the entry is gone.
+/// A purge through a superseded generation is reserved like a current one: no
+/// key is catalog-scoped, so the generation change refuses nothing.
 #[test]
-fn a_stale_generation_purge_is_refused_distinguishably() {
+fn a_stale_generation_purge_is_reserved() {
     // Arrange
     let reg = registry();
     plant(&reg, "nick", "web_search");
@@ -311,13 +306,8 @@ fn a_stale_generation_purge_is_refused_distinguishably() {
 
     // Assert
     assert!(
-        matches!(prepared, PurgePreparation::Stale),
-        "a stale-generation purge must be refused as Stale, never as Absent or \
-         as a clean removal, got {prepared:?}"
-    );
-    assert!(
-        resident(&reg, "nick", "web_search"),
-        "a refused purge must change nothing"
+        matches!(prepared, PurgePreparation::Reserved(_)),
+        "got {prepared:?}"
     );
 }
 

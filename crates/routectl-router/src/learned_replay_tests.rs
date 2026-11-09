@@ -386,14 +386,11 @@ fn the_key_is_the_target_lane_and_the_artifact_scheme_only() {
 
 // ---- generation barrier ------------------------------------------------------
 
-/// A replay carry settles against the generation it was ADMITTED under.
-///
-/// `reasoning_replay:<scheme>` is catalog-SCOPED, so a settlement arriving after
-/// a reload must persist nothing and emit no row: the negative would be
-/// attributed to a catalog revision the daemon has left, and its ledger row
-/// would be replayed by a later boot.
+/// A replay carry admitted before a generation change still settles: no key is
+/// catalog-scoped, so the commit persists its negative and emits its learn
+/// event against the live registry.
 #[test]
-fn a_stale_replay_commit_persists_nothing_and_emits_nothing() {
+fn a_replay_commit_across_a_generation_change_persists_and_emits() {
     let reg = registry();
     let t0 = Instant::now();
     let key = key("lane-a");
@@ -402,18 +399,15 @@ fn a_stale_replay_commit_persists_nothing_and_emits_nothing() {
         .admit_provisional(&key, admitted_generation, t0)
         .admitted()
         .expect("unknown pair admits");
-
-    // The reload lands between the carry and its settlement. Advance only: a
-    // full transition would also prune the entry, so "nothing persisted" could
-    // not distinguish a refusal from a prune.
     reg.learned().advance_generation();
 
     let emitted = guard.commit(400, vec![], t0);
 
-    assert!(emitted.is_none(), "a stale commit must emit no learn event");
-    assert!(
-        reg.learned().snapshot().is_empty(),
-        "and must persist no negative",
+    assert!(emitted.is_some(), "the commit emits its learn event");
+    assert_eq!(
+        reg.learned().snapshot().len(),
+        1,
+        "and persists the negative"
     );
 }
 
@@ -773,9 +767,10 @@ fn an_exhausted_replay_clear_emits_its_own_debug_event() {
     );
 }
 
-/// A stale CLEAR removes nothing and emits no cleared event.
+/// A replay CLEAR admitted before a generation change still settles: it
+/// removes the lapsed negative and emits its cleared event.
 #[test]
-fn a_stale_replay_clear_removes_nothing_and_emits_nothing() {
+fn a_replay_clear_across_a_generation_change_removes_and_emits() {
     let reg = registry();
     let t0 = Instant::now();
     let key = key("lane-a");
@@ -795,24 +790,20 @@ fn a_stale_replay_clear_removes_nothing_and_emits_nothing() {
     reg.learned().advance_generation();
     let cleared = guard.clear();
 
+    assert!(cleared.is_some(), "the clear emits its cleared event");
     assert!(
-        cleared.is_none(),
-        "a stale clear must emit no cleared event",
-    );
-    assert_eq!(
-        reg.learned().snapshot().len(),
-        1,
-        "and must leave the negative resident",
+        reg.learned().snapshot().is_empty(),
+        "and removes the negative"
     );
 }
 
-/// A stale settlement still RELEASES the in-flight slot.
+/// A settlement across a generation change RELEASES the in-flight slot.
 ///
 /// The slot is request-local coordination, not persisted state. Leaking it would
-/// latch the pair forever: every later request would strip while nothing could
-/// ever settle the claim.
+/// latch the pair forever: every later request would see it carried while
+/// nothing could ever settle the claim.
 #[test]
-fn a_stale_settlement_still_releases_the_in_flight_slot() {
+fn a_settlement_across_a_generation_change_releases_the_in_flight_slot() {
     let reg = registry();
     let t0 = Instant::now();
     let key = key("lane-a");
@@ -823,14 +814,14 @@ fn a_stale_settlement_still_releases_the_in_flight_slot() {
         .expect("unknown pair admits");
     reg.learned().advance_generation();
 
-    let _ = guard.commit(400, vec![], t0);
+    let _ = guard.clear();
 
     // The slot is free, so the pair can be carried again on the live generation.
     assert!(
         reg.admit_provisional(&key, reg.learned().generation(), t0)
             .admitted()
             .is_some(),
-        "a stale settlement must not leave the carry slot latched",
+        "a settlement must not leave the carry slot latched",
     );
 }
 
@@ -878,29 +869,20 @@ fn an_old_guard_releases_the_replacement_facades_claim() {
     );
 }
 
-/// A superseded Router's admission reports STALE, distinctly from Acting.
-///
-/// The distinction is load-bearing: `Acting` makes the caller STRIP, and a
-/// stale Router stripping means it acted on the replacement generation's state
-/// -- a routing decision it has no standing to make. `Stale` makes it carry
-/// nothing and leave the request as the client sent it.
+/// A superseded Router's admission is answered like a live one's: no key is
+/// catalog-scoped, so the generation change refuses nothing.
 #[test]
-fn a_superseded_router_admission_reports_stale_not_acting() {
+fn a_superseded_router_admission_is_admitted() {
     let reg = registry();
     let t0 = Instant::now();
     let key = key("lane-a");
     let stale_generation = reg.learned().generation();
-    // The reload lands; advance only, so the entry (if any) is not pruned and
-    // cannot be confused with the refusal.
     reg.learned().advance_generation();
 
     let admission = reg.admit_provisional(&key, stale_generation, t0);
 
-    assert!(
-        admission.is_stale(),
-        "a superseded admission must be Stale, never Acting -- Acting would \
-         make the caller strip on state it may not read",
-    );
+    assert!(!admission.is_stale());
+    assert!(admission.admitted().is_some(), "an unknown pair admits");
 }
 
 /// The positive control: a LIVE admission on an unknown pair is admitted.
