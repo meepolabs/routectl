@@ -103,16 +103,6 @@ pub(super) fn render_messages_response(resp: ChatResponse, edits: &mut ResponseE
     // from upstream. Typed fields above win on key conflict. The
     // drop-list belongs here -- routectl owns the egress wire policy.
     for (k, v) in &resp.extras {
-        // `stop_details` is a Bedrock-only Anthropic-API extension
-        // not in the public Anthropic Messages baseline.
-        if k == "stop_details" {
-            edits.declare(
-                EditSite::AnthropicResponseExtrasStrip,
-                "/stop_details",
-                EditKind::Remove,
-            );
-            continue;
-        }
         // Reserved transport-internal carrier name; must never reach a
         // client even if an upstream coincidentally uses the same key.
         if k == "upstream_meta" {

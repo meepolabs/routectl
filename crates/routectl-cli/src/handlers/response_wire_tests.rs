@@ -1251,13 +1251,6 @@ async fn each_declared_anthropic_exception_explains_only_its_own_change() {
             false,
         ),
         (
-            "stop_details withheld",
-            ResponseTemplate::new(200).set_body_json(
-                Dialect::Anthropic.complete_body(Some(("stop_details", json!({"type": "x"})))),
-            ),
-            false,
-        ),
-        (
             "upstream_meta withheld",
             ResponseTemplate::new(200).set_body_json(
                 Dialect::Anthropic.complete_body(Some(("upstream_meta", json!({"k": 1})))),

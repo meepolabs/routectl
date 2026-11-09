@@ -59,20 +59,12 @@ const BEDROCK_INVOKE: &str = "anthropic->bedrock-invoke";
 const BEDROCK_CONVERSE: &str = "anthropic->bedrock-converse";
 
 /// Findings the check correctly reports that no declaration explains.
-const KNOWN_UNDECLARED: &[KnownUndeclared] = &[
-    KnownUndeclared {
-        lane: ANTHROPIC,
-        leg: Leg::Response,
-        path: "/usage/server_tool_use",
-        reason: "real loss: the closing message_delta render drops server_tool_use",
-    },
-    KnownUndeclared {
-        lane: ANTHROPIC,
-        leg: Leg::Response,
-        path: "/usage/output_tokens_details",
-        reason: "real loss: the closing message_delta render drops output_tokens_details",
-    },
-];
+const KNOWN_UNDECLARED: &[KnownUndeclared] = &[KnownUndeclared {
+    lane: ANTHROPIC,
+    leg: Leg::Response,
+    path: "/usage/output_tokens_details",
+    reason: "real loss: the closing message_delta render drops output_tokens_details",
+}];
 
 /// The client dialect a case speaks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

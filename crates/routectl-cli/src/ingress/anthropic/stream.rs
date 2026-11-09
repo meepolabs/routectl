@@ -595,6 +595,9 @@ pub(super) fn emit_message_delta(
             u.cache_read_input_tokens,
             u.cache_creation.as_ref(),
         );
+        if let Some(server_tool_use) = &u.server_tool_use {
+            wire_usage.insert("server_tool_use".into(), server_tool_use.clone());
+        }
         // Guard: only attach `usage` to the payload when the map carries
         // at least one key. Both `input_tokens` and `output_tokens` are
         // always present above, so this is defensive -- it prevents a

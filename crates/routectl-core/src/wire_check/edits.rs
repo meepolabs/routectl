@@ -164,8 +164,8 @@ pub enum EditSite {
     ResponseModelRelabel,
     /// Response: the serving provider's name added to a complete body.
     ProviderAttributionAdd,
-    /// Response: the Anthropic `stop_details` and `upstream_meta` top-level
-    /// members withheld from the client.
+    /// Response: the reserved `upstream_meta` top-level member withheld from
+    /// an Anthropic client.
     AnthropicResponseExtrasStrip,
     /// Response: missing token counts filled on the closing Anthropic
     /// `message_delta` usage.

@@ -897,6 +897,61 @@ fn render_response_drops_reserved_upstream_meta_key_from_extras() {
     );
 }
 
+/// An upstream `stop_details` (the refusal category object on the
+/// Anthropic Messages wire) reaches the client verbatim, and the render
+/// declares no edit for it.
+#[test]
+fn stop_details_extra_reaches_the_client_undeclared() {
+    use routectl_core::{Message, MessageContent, Role, Usage, schema::Choice};
+    let stop_details = json!({
+        "type": "refusal",
+        "category": "cyber",
+        "explanation": "blocked under the usage policy"
+    });
+    let mut extras = serde_json::Map::new();
+    extras.insert("stop_details".into(), stop_details.clone());
+    let resp = ChatResponse {
+        id: "msg_refused".into(),
+        model: "claude-opus-4-7".into(),
+        created: 0,
+        choices: vec![Choice {
+            logprobs: None,
+            index: 0,
+            message: Message {
+                refusal: None,
+                role: Role::Assistant,
+                content: MessageContent::Text("no".into()),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            finish_reason: Some("content_filter".into()),
+            matched_stop_sequence: None,
+        }],
+        usage: Some(Usage {
+            prompt_tokens: 5,
+            completion_tokens: 2,
+            total_tokens: 7,
+            ..Default::default()
+        }),
+        routectl_provider: None,
+        extras,
+        upstream_meta: None,
+    };
+    let mut edits = ResponseEdits::recording();
+
+    let v = render_messages_response(resp, &mut edits);
+
+    assert_eq!(v["stop_details"], stop_details);
+    assert!(
+        edits.as_slice().iter().all(|e| e.path() != "/stop_details"),
+        "forwarding stop_details must declare no edit, got: {:?}",
+        edits.as_slice()
+    );
+}
+
 /// Build a canonical response carrying exactly one `Encrypted`
 /// reasoning detail, so the flatten-to-`redacted_thinking` path can be
 /// exercised with an arbitrary `(format, id, blob)`.

@@ -515,8 +515,8 @@ pub struct AnthropicResponse {
     /// spec fields like `context_management` (from the
     /// `context-management-2025-06-27` beta) and Bedrock-specific
     /// extensions, so the egress can round-trip them verbatim.
-    /// Drop-list of egress-time strips (e.g. `stop_details` on the
-    /// Bedrock-only path) lives in the Anthropic ingress's
+    /// Drop-list of egress-time strips (e.g. the reserved
+    /// `upstream_meta` name) lives in the Anthropic ingress's
     /// `render_messages_response`, NOT here -- this struct is the
     /// deserialization seam, not the policy seam.
     #[serde(flatten)]

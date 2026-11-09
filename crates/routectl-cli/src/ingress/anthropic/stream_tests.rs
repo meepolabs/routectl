@@ -1556,6 +1556,42 @@ fn message_delta_all_none_usage_emits_input_tokens_not_empty_object() {
     );
 }
 
+/// The closing `message_delta` carries the upstream's server-tool counts
+/// verbatim, and has no `server_tool_use` key when the upstream sent none.
+#[test]
+fn message_delta_renders_server_tool_use() {
+    use routectl_core::UsageDelta;
+    let counts = json!({"web_search_requests": 2, "web_fetch_requests": 1});
+    let rows = [
+        ("present", Some(counts.clone()), Some(&counts)),
+        ("absent", None, None),
+    ];
+    for (name, server_tool_use, expected) in rows {
+        let usage = UsageDelta {
+            prompt_tokens: Some(3),
+            completion_tokens: Some(1),
+            server_tool_use,
+            ..Default::default()
+        };
+        let mut events = Vec::new();
+
+        emit_message_delta(
+            Some("stop"),
+            None,
+            Some(&usage),
+            &mut events,
+            &mut ResponseEdits::default(),
+        );
+
+        let payload: Value = serde_json::from_str(&events[0].data).unwrap();
+        assert_eq!(
+            payload["usage"].get("server_tool_use"),
+            expected,
+            "{name}: {payload}"
+        );
+    }
+}
+
 /// Finding #4 (bug): `message_start` must use the request's resolved model
 /// when upstream stream chunks carry no model string. `AnthropicStreamState`
 /// carries a `req_model` field seeded from the `StreamRequestContext` at
