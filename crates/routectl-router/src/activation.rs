@@ -331,9 +331,10 @@ pub fn diff(prev: &ActivationState, next: &ActivationState) -> ActivationDelta {
 }
 
 /// Config provider entries the alias table reaches whose `oauth://`
-/// credential is unresolved in `state`, in config-key order. An entry with
-/// no `oauth://` ref, or whose OAuth id `state` does not record, is never
-/// listed. Config-only beyond `state`; no secret resolution, no network.
+/// credential is unresolved in `state`, in config-key order. A pool-backed
+/// model reaches every member of its pool. An entry with no `oauth://` ref,
+/// or whose OAuth id `state` does not record, is never listed. Config-only
+/// beyond `state`; no secret resolution, no network.
 #[must_use]
 pub fn unresolved_alias_referenced_entries<'a>(
     state: &ActivationState,
@@ -342,7 +343,7 @@ pub fn unresolved_alias_referenced_entries<'a>(
     let reached_providers: BTreeSet<&str> = reachable_model_nicknames(config)
         .iter()
         .filter_map(|nick| config.models.get(nick))
-        .map(|model| model.provider.as_str())
+        .flat_map(|model| provider_entries_of(config, model.provider.as_str()))
         .collect();
     config
         .providers
@@ -357,6 +358,15 @@ pub fn unresolved_alias_referenced_entries<'a>(
         })
         .map(|(key, _)| key.as_str())
         .collect()
+}
+
+/// The `[providers]` entries a model's `provider` value names: a pool's
+/// members when it names a `[pools]` block, else the value itself.
+fn provider_entries_of<'a>(config: &'a Config, provider: &'a str) -> Vec<&'a str> {
+    config.pools.get(provider).map_or_else(
+        || vec![provider],
+        |pool| pool.members.iter().map(String::as_str).collect(),
+    )
 }
 
 /// True iff some configured provider references `oauth://<oauth_id>` (bare
@@ -861,6 +871,44 @@ mod tests {
         assert_eq!(
             unresolved_alias_referenced_entries(&state, &cfg),
             vec!["a-seat", "b-seat"]
+        );
+    }
+
+    #[test]
+    fn unresolved_entries_expand_a_pool_backed_model_to_its_members() {
+        // Arrange: alias `fast` reaches model `pooled` on pool `the-pool`,
+        // whose two members are logged-out anthropic seats.
+        let mut cfg = Config::default();
+        for key in ["seat-b", "seat-a"] {
+            cfg.providers.insert(
+                key.to_string(),
+                ProviderEntry::anthropic_api(format!("oauth://anthropic#{key}")),
+            );
+        }
+        cfg.pools.insert(
+            "the-pool".to_string(),
+            crate::config::PoolEntry::new(vec!["seat-a".into(), "seat-b".into()]),
+        );
+        cfg.models.insert(
+            "pooled".to_string(),
+            ModelEntry::new("the-pool", "claude-sonnet-4-5"),
+        );
+        cfg.aliases
+            .insert("fast".to_string(), AliasValue::Single("pooled".to_string()));
+        let state = state_with(vec![(
+            "anthropic",
+            entry(
+                "anthropic-api",
+                ActivationStatus::Unresolved {
+                    reason: UnresolvedReason::OauthMissing,
+                },
+            ),
+        )]);
+
+        // Act / Assert
+        assert_eq!(
+            unresolved_alias_referenced_entries(&state, &cfg),
+            vec!["seat-a", "seat-b"]
         );
     }
 

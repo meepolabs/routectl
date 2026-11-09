@@ -538,6 +538,49 @@ async fn startup_warns_once_naming_unresolved_alias_referenced_entries() {
 }
 
 #[tokio::test]
+async fn startup_warns_once_naming_the_logged_out_members_of_an_alias_reached_pool() {
+    use routectl_router::{AliasValue, ModelEntry, PoolEntry, ProviderEntry};
+    // Arrange: no anthropic login; alias `fast` reaches model `pooled` on a
+    // pool of two seats.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("credentials.json");
+    seed_missing(&path);
+    let mut cfg = Config::default();
+    for key in ["seat-a", "seat-b"] {
+        cfg.providers.insert(
+            key.to_string(),
+            ProviderEntry::anthropic_api(format!("oauth://anthropic#{key}")),
+        );
+    }
+    cfg.pools.insert(
+        "the-pool".to_string(),
+        PoolEntry::new(vec!["seat-a".into(), "seat-b".into()]),
+    );
+    cfg.models.insert(
+        "pooled".to_string(),
+        ModelEntry::new("the-pool", "claude-sonnet-4-5"),
+    );
+    cfg.aliases
+        .insert("fast".to_string(), AliasValue::Single("pooled".to_string()));
+    let swap = Arc::new(ArcSwap::from_pointee(ActivationState::default()));
+
+    // Act
+    let ((), events) = with_capture(apply_activation(
+        &oauth_at(&path).await,
+        &cfg,
+        &swap,
+        ActivationTrigger::Startup,
+    ))
+    .await;
+
+    // Assert
+    let warns = unresolved_at_boot_warns(&events);
+    assert_eq!(warns.len(), 1, "one summary per boot, got {warns:?}");
+    assert_eq!(warns[0].field("count"), Some("2"));
+    assert_eq!(warns[0].field("entries"), Some(r#"["seat-a", "seat-b"]"#));
+}
+
+#[tokio::test]
 async fn startup_warn_names_at_most_the_cap_and_counts_the_rest() {
     // Arrange: three more unresolved referenced entries than the cap.
     let dir = tempfile::tempdir().unwrap();

@@ -317,8 +317,8 @@ const fn default_trim_keep_recent_messages() -> usize {
 /// Off must be byte-identical to no gate at all: no estimate computed, no
 /// chain reordering, no diagnostics movement.
 ///
-/// One field deliberately: the gate's safety margin against estimator
-/// error is a baked constant, not an operator knob, because a margin
+/// One field deliberately: the gate's 1024-token headroom is a baked
+/// constant, not an operator knob, because a margin
 /// tuned per deployment turns a routing decision into a support surface.
 /// `#[non_exhaustive]` leaves room for a later knob without breaking
 /// callers; `#[serde(deny_unknown_fields)]` rejects a typo'd key at
@@ -2005,6 +2005,9 @@ impl ProviderEntry {
     ///   default the factory dials; on a `bedrock_mantle` block, the
     ///   OpenAI-vocabulary Mantle base derived from its region; `None` for a
     ///   bare `bedrock-mantle` marker, which the factory refuses to build;
+    /// - `gemini`: the configured `base_url`, except a `cloud-code` entry
+    ///   left at the api-key public default, which the factory leaves on the
+    ///   constructor's cloud-code default (the daily Cloud Code host);
     /// - every other kind: `None`. Their egress is not classified here, so a
     ///   caller keying a decision on it fails closed.
     ///
@@ -2057,6 +2060,16 @@ impl ProviderEntry {
                     .ok()
                     .map(std::borrow::Cow::Owned)
             }
+            #[cfg(feature = "gemini")]
+            Self::Gemini {
+                base_url,
+                auth_mode: GeminiAuthMode::CloudCode,
+                ..
+            } if *base_url == default_gemini_base() => Some(std::borrow::Cow::Borrowed(
+                routectl_providers::gemini::DAILY_BASE_URL,
+            )),
+            #[cfg(feature = "gemini")]
+            Self::Gemini { base_url, .. } => Some(std::borrow::Cow::Borrowed(base_url)),
             #[allow(unreachable_patterns)]
             _ => None,
         }

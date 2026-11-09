@@ -344,8 +344,8 @@ async fn stream_propagates_mid_stream_error_no_fallback() {
 
 /// Before forward-compat handling, an Anthropic SSE stream containing
 /// an unknown `content_block` type (e.g. `server_tool_use`) crashed
-/// deserialization with `Error::Streaming`; the router's
-/// `should_fallback` returned true and the chain walked across
+/// deserialization with `Error::Streaming`; the failure decision
+/// walked the chain across
 /// providers, multiplying upstream calls for a local forward-compat
 /// bug (production logs showed 11+ retries / 3 minutes). With the
 /// catchall + sink-drain plus opaque-event replay in place,

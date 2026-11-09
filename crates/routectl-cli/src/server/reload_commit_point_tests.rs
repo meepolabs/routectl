@@ -1,8 +1,9 @@
 //! A reload writes to the live account map only at its commit point. The
 //! candidate router shares that map from carry-over on, so a reload rejected
 //! after carry-over must leave it as the live router had it: no placeholder
-//! mark from the candidate's build, no park lifted, and a park an in-flight
-//! attempt writes while the reload waits on its replay boundary kept. A
+//! mark from the candidate's build, no entry park lifted, and a park an
+//! in-flight attempt writes while the reload waits on its replay boundary
+//! kept. A
 //! credentials reload whose rebuild fails likewise keeps every park and
 //! placeholder mark.
 
@@ -16,8 +17,9 @@ const MEMBER_A: &str = "claude#seat_a";
 const MEMBER_B: &str = "claude#seat_b";
 
 /// Pool `the-pool` of OAuth seats `anthropic#a` and `anthropic#b` behind
-/// model `claude`.
-fn pool_config_text() -> String {
+/// model `claude`, and model `glm` on entry `compat` with an env credential.
+/// `compat_rpm` adds an `rpm_limit` to that entry, so a reload can change it.
+fn pool_config_text(compat_rpm: Option<u32>) -> String {
     let mut text = format!(
         "version = {CURRENT_CONFIG_VERSION}\n\
          [server]\nhost = \"127.0.0.1\"\nport = 0\n\n"
@@ -28,12 +30,23 @@ fn pool_config_text() -> String {
              api_key_ref = \"oauth://anthropic#{seat}\"\nauth_kind = \"oauth-bearer\"\n\n"
         ));
     }
+    text.push_str(&format!(
+        "[providers.compat]\nkind = \"openai-compat\"\nbase_url = \"http://127.0.0.1:1/v1\"\n\
+         api_key_ref = \"env://{KEY_A}\"\n"
+    ));
+    if let Some(rpm) = compat_rpm {
+        text.push_str(&format!("rpm_limit = {rpm}\n"));
+    }
     text.push_str(
-        "[pools.the-pool]\nmembers = [\"seat_a\", \"seat_b\"]\n\n\
-         [models.claude]\nprovider = \"the-pool\"\nupstream = \"claude-sonnet-4-6\"\n",
+        "\n[pools.the-pool]\nmembers = [\"seat_a\", \"seat_b\"]\n\n\
+         [models.claude]\nprovider = \"the-pool\"\nupstream = \"claude-sonnet-4-6\"\n\n\
+         [models.glm]\nprovider = \"compat\"\nupstream = \"glm-4.6\"\n",
     );
     text
 }
+
+/// The entry-account model of [`pool_config_text`].
+const ENTRY_MODEL: &str = "glm";
 
 /// An overlay revision bump, so the reload must cross the replay boundary.
 fn write_revised_overlay(dir: &Path) {
@@ -90,14 +103,14 @@ impl ConfigRig {
             &[("anthropic#a", "tok-a"), ("anthropic#b", "tok-b")],
         );
         let cfg_path = dir.join("config.toml");
-        std::fs::write(&cfg_path, pool_config_text()).unwrap();
+        std::fs::write(&cfg_path, pool_config_text(None)).unwrap();
         let composite = CompositeStore::open_at(&creds)
             .await
             .expect("open composite store at temp creds path");
         let oauth = composite.oauth_store().expect("oauth arm present");
         let secrets: Arc<dyn SecretStore> = Arc::new(composite);
         let mut config =
-            routectl_router::parse_config(&pool_config_text()).expect("fixture parses");
+            routectl_router::parse_config(&pool_config_text(None)).expect("fixture parses");
         let usage_dir = isolate_usage_db(&mut config);
         let config = Arc::new(config);
         let router =
@@ -128,12 +141,15 @@ impl ConfigRig {
             .expect("the store rereads the file");
     }
 
-    /// Bump the overlay revision, then reload.
+    /// Edit the `compat` entry and bump the overlay revision, then reload:
+    /// the reload must cross the replay boundary, and on commit it lifts the
+    /// `compat` account's park.
     async fn reload(
         &self,
         dir: &Path,
         usage: &routectl_usage::UsageHandle,
     ) -> Result<Option<(Arc<Config>, Arc<CatalogOverlay>)>, ReloadFailure> {
+        std::fs::write(&self.cfg_path, pool_config_text(Some(7))).unwrap();
         write_revised_overlay(dir);
         Box::pin(handle_config_reload(
             Some(&self.cfg_path),
@@ -154,6 +170,7 @@ async fn a_config_reload_refused_at_the_boundary_marks_no_new_placeholder() {
     // Arrange: a closed usage channel refuses the boundary after carry-over.
     let dir = tempfile::tempdir().unwrap();
     let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
+    let _key = ScopedEnv::set(KEY_A, "key-a");
     let rig = ConfigRig::new(dir.path()).await;
     let before = rig.swap.load_full();
     rig.log_out_seat_b().await;
@@ -181,20 +198,24 @@ enum Boundary {
 }
 
 /// One barrier row: the boundary's fate, the reload's verdict, and what the
-/// published router reports for seats a and b afterwards.
+/// published router reports for seats a and b and the `compat` entry
+/// account afterwards.
 type BarrierRow = (
     Boundary,
     Result<(), ReloadFailure>,
     (Option<UpstreamReason>, Option<UnusableCause>),
     (Option<UpstreamReason>, Option<UnusableCause>),
+    Option<UpstreamReason>,
 );
 
 /// Holds the reload at its replay boundary: the batch arriving on the
 /// writer channel proves carry-over and admission are done and publication
 /// is not. At that point an attempt admitted before the reload is rejected,
 /// parking seat a on the live map, and the batch is then committed or lost.
-/// A config reload never lifts an OAuth seat, so the park stands either way;
-/// the committed row is the positive control for seat b's placeholder mark.
+/// A config reload never lifts an OAuth seat, so the park stands either way.
+/// The `compat` entry account is parked before the reload, which edits that
+/// entry: only a committed reload lifts it. The committed row is the positive
+/// control for that lift and for seat b's placeholder mark.
 #[tokio::test]
 #[serial_test::serial]
 async fn a_park_written_while_a_reload_waits_on_its_boundary_survives_a_rejection() {
@@ -204,20 +225,28 @@ async fn a_park_written_while_a_reload_waits_on_its_boundary_survives_a_rejectio
             Err(ReloadFailure::BoundaryNotDurable),
             (Some(UpstreamReason::CredentialInvalid), None),
             (None, None),
+            Some(UpstreamReason::CredentialExpired),
         ),
         (
             Boundary::Commits,
             Ok(()),
             (Some(UpstreamReason::CredentialInvalid), None),
             (None, Some(UnusableCause::NotLoggedIn)),
+            None,
         ),
     ];
-    for (boundary, expected, expected_a, expected_b) in rows {
+    for (boundary, expected, expected_a, expected_b, expected_compat) in rows {
         // Arrange
         let dir = tempfile::tempdir().unwrap();
         let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
+        let _key = ScopedEnv::set(KEY_A, "key-a");
         let rig = ConfigRig::new(dir.path()).await;
         let live = rig.swap.load_full();
+        assert!(live.park_credential_for_tests(
+            ENTRY_MODEL,
+            UpstreamReason::CredentialExpired,
+            Instant::now() + Duration::from_hours(1),
+        ));
         let generation = live
             .admit_for_credential_tests(MEMBER_A)
             .expect("a healthy seat admits");
@@ -278,6 +307,11 @@ async fn a_park_written_while_a_reload_waits_on_its_boundary_survives_a_rejectio
             account_state(&published, MEMBER_B),
             expected_b,
             "{boundary:?}"
+        );
+        assert_eq!(
+            account_state(&published, ENTRY_MODEL).0,
+            expected_compat,
+            "{boundary:?}: only a committed reload lifts the edited entry's park"
         );
         drop((usage, writer_tx));
         drain_usage_writer_strict(writer).await;

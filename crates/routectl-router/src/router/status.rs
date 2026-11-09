@@ -65,10 +65,17 @@ impl Router {
     /// through a rebuild, never through an in-place lift.
     #[must_use]
     pub fn is_placeholder_account(&self, account: &str) -> bool {
+        self.placeholder_accounts().any(|held| held == account)
+    }
+
+    /// The credential account of every pool member this Router kept as a
+    /// placeholder seat, in pool-report order. A forwarded placeholder has no
+    /// account and is not listed.
+    pub fn placeholder_accounts(&self) -> impl Iterator<Item = &str> {
         self.pool_reports
             .iter()
             .flat_map(|report| &report.placeholders)
-            .any(|placeholder| placeholder.account.as_deref() == Some(account))
+            .filter_map(|placeholder| placeholder.account.as_deref())
     }
 
     /// Non-mutating gate health for the state slot keyed by `state_key`.

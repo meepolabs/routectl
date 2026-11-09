@@ -223,7 +223,7 @@ fn probe_req() -> ChatRequest {
 }
 
 #[tokio::test]
-async fn probe_fast_fail_does_not_permanently_lock_breaker() {
+async fn a_probe_that_fails_fast_releases_its_half_open_slot() {
     let calls = Arc::new(AtomicUsize::new(0));
     let router = build_router(calls.clone());
 

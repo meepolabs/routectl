@@ -499,6 +499,18 @@ impl Router {
         self.lift_credential_parks(accounts)
     }
 
+    /// Reset every account the outgoing Router held as a placeholder seat
+    /// that this Router built. Called at a reload's commit point
+    /// ([`Self::commit_carried_state`]); the accounts were recorded at
+    /// carry-over.
+    pub(super) fn reset_readmitted_placeholder_accounts(&self) {
+        self.lift_credential_parks(
+            self.carried_placeholder_accounts
+                .iter()
+                .filter(|account| !self.is_placeholder_account(account)),
+        );
+    }
+
     /// [`Self::lift_entry_credential_parks`] for a reload whose config drops
     /// `entry` from this Router's own. Test seam standing in for a config
     /// reload that changed that entry.

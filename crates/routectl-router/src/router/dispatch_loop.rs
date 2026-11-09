@@ -906,6 +906,10 @@ impl Router {
                             continue;
                         }
 
+                        // Read from the body, so before the body-free swap.
+                        let native_capability_typed = target
+                            .provider_kind
+                            .is_some_and(|kind| names_requested_capability(kind, &e, &native_cf));
                         if let Some(body_free) =
                             replay_rejection_body_free(&e, &cf.class, provider_name)
                         {
@@ -916,9 +920,6 @@ impl Router {
                         // sleep floor both read it. `None` for every
                         // non-rate-limit error.
                         let reset_hint = rate_limit_reset_hint(&e, &policy);
-                        let native_capability_typed = target
-                            .provider_kind
-                            .is_some_and(|kind| names_requested_capability(kind, &e, &native_cf));
                         let disposition = decide(
                             &Failure {
                                 err: &e,

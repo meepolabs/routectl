@@ -429,24 +429,21 @@ async fn a_config_reload_adding_a_model_on_a_parked_oauth_seat_leaves_it_refused
 
 /// The failure lands AFTER the runtime state was carried onto the candidate
 /// router, which shares the live router's park map: lifting at carry-over
-/// time would already have lifted the live parks.
+/// time would already have lifted the live parks. The reload edits the
+/// `compat` entry, whose park a committed reload lifts, and bumps the overlay
+/// revision, so it must cross the replay boundary that refuses it.
 #[tokio::test]
 #[serial_test::serial]
 async fn a_config_reload_rejected_after_carry_over_keeps_every_park() {
-    // Arrange: a closed usage channel refuses the replay boundary that the
-    // overlay revision change below requires.
+    // Arrange: a closed usage channel refuses the replay boundary.
     let dir = tempfile::tempdir().unwrap();
     let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
     let _key = ScopedEnv::set(KEY_ENV, "test-key");
     let rig = Rig::new(dir.path()).await;
     let usage = routectl_usage::handle_with_closed_channel();
     rig.park_every_account();
-    std::fs::write(
-        dir.path().join("routectl").join("catalog_overlay.json"),
-        r#"{"schema_version":1,"revision":1,"cells":{"anthropic-api:claude-opus-4-8*":
-               {"source":"user","verified_at":"2026-07-01","wm":9.5}}}"#,
-    )
-    .unwrap();
+    std::fs::write(&rig.cfg_path, edited_entry_text("compat")).unwrap();
+    write_overlay_revision(dir.path());
 
     // Act
     let outcome = rig.reload_config(&usage).await;

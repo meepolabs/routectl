@@ -520,6 +520,36 @@ fn the_scrub_removes_the_body_and_preserves_the_status_type_and_code() {
 }
 
 #[test]
+fn the_body_free_replay_rebuild_keeps_the_request_id_reason_and_scope_row() {
+    // Arrange: a classified replay rejection carrying every extra.
+    let rejection = Error::upstream_full("p", 400, REPLAY_REJECT_BODY, None, None, None)
+        .with_upstream_request_id(Some("req-1".to_string()))
+        .with_upstream_reason(Some(routectl_core::UpstreamReason::CredentialInvalid))
+        .with_scope_row(Some(routectl_core::ScopeRow::AnthropicBareRateLimit));
+    let class = classify_with_attempt(
+        &rejection,
+        Some("openai-responses"),
+        ReplayAttempt::with_gray_artifacts(1),
+    )
+    .class;
+
+    // Act
+    let scrubbed = super::replay_repair::replay_rejection_body_free(&rejection, &class, "p")
+        .expect("a classified replay rejection must rebuild body-free");
+
+    // Assert
+    assert_eq!(scrubbed.upstream_request_id(), Some("req-1"));
+    assert_eq!(
+        scrubbed.upstream_reason(),
+        Some(routectl_core::UpstreamReason::CredentialInvalid)
+    );
+    assert_eq!(
+        scrubbed.scope_row(),
+        Some(routectl_core::ScopeRow::AnthropicBareRateLimit)
+    );
+}
+
+#[test]
 fn the_replay_lift_and_count_tokens_capable_kinds_are_disjoint_today() {
     // The premise the test above rests on, asserted rather than assumed: a
     // provider kind the token-count walk admits cannot reach the classifier's

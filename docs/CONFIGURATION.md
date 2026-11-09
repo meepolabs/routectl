@@ -193,8 +193,8 @@ version = 5           # config schema version; see "Config schema version"
 [calibration]         # accepted for existing configs (enabled); has no
                       # effect. The learned correction always applies.
 
-[seat_quota]          # quota-aware seat placement kill switch
-                      # (enabled). Optional; default on.
+[seat_quota]          # accepted for existing configs (enabled); has no
+                      # effect. Quota-aware placement always applies.
 
 [log]                 # operator-configurable runtime log knobs
                       # (trace_headers, trace_body_bytes,
@@ -1667,8 +1667,8 @@ consecutive failed attempts open it for 60s, after which one request
 re-tests the seat. Only rate-limit, server-error, overload, timeout and
 network-error failures count, and every retry is its own attempt, so a
 request that spends its `max_attempts - 1` retries on one seat can
-debit it several times. Set `circuit_failures = 0` on a provider or pool to turn the
-breaker off there.
+debit it several times. Set `circuit_failures = 0` on a provider or pool
+to turn the breaker off there.
 
 A hot reload applies changed `circuit_failures`, `circuit_cooldown_ms`
 and `rpm_limit` values (on a provider or a pool) to the running gates
@@ -1746,9 +1746,9 @@ jitter_ms                     = 50
 request_timeout_ms            = 300000        # 5 min per attempt
 stream_first_byte_timeout_ms  = 90000         # 90s -- thinking models stall
 probe_max_tokens              = 1             # keep availability probes in their pool
-# Per-class retry caps (each narrows max_attempts for that class only):
+# Per-class retry caps (a class leaf replaces max_attempts for its class):
 # [retry.classes.rate-limited]
-# retry = 1                                   # rate-limits usually clear in one retry
+# retry = 2                                   # one same-target retry per request
 # To pin a class terminal (never fall back), set a per-class overlay:
 # [retry.classes.bad-request]
 # fallback = false
@@ -2037,7 +2037,8 @@ the outcome in `apply_breaker_outcome`
 ## Proactive context-window gate (`[window_gate]`)
 
 Before dispatch, routectl estimates the request's token size and skips
-fallback-chain targets whose catalog context window cannot hold it, so an oversized request avoids a doomed round trip on a small-window
+fallback-chain targets whose catalog context window cannot hold it, so
+an oversized request avoids a doomed round trip on a small-window
 entry. This runs after the capability pre-filter, as the second chain
 filter pass.
 
@@ -2052,8 +2053,10 @@ catalog overlay cell (see `routectl catalog`). It is total context, so the
 upstream sets the output limit aside before any input fits; the output
 reserve accounts for that. It is the request's own `max_tokens` when the
 client sent one, otherwise the target's output ceiling (the catalog
-`max_output_tokens` or `[models.X] max_output_tokens`, the same value
-routectl sends upstream when the client sets none), otherwise 0. The 1024
+`max_output_tokens`, the same value routectl sends upstream when the
+client sets none), otherwise 0. With no known ceiling the reserve is 0
+even where the egress fills its own 64000-token baseline; the reactive
+backstop below covers that gap. The 1024
 tokens are a fixed headroom, not a fraction of the window, so a 1M-window
 target is not held to a smaller effective size than a 200k one: on a 1M
 window with a 64000-token reserve, a request estimated at up to 934976
@@ -2111,12 +2114,12 @@ fallback does not, on its own, guarantee an oversized request falls
 over.
 
 **One field deliberately.** The gate's 1024-token headroom is a baked
-constant, not an operator knob. A margin tuned per deployment turns a routing decision into a
-support surface, and both error directions are already survivable: an
-underestimate misses a skip and costs one round trip, while an
-overestimate is a re-route among confirmed windows rather than a denial.
-The switch above is the whole operator surface; if the gate misbehaves,
-the answer is off, not retuned.
+constant, not an operator knob. A margin tuned per deployment turns a
+routing decision into a support surface, and both error directions are
+already survivable: an underestimate misses a skip and costs one round
+trip, while an overestimate is a re-route among confirmed windows rather
+than a denial. The switch above is the whole operator surface; if the
+gate misbehaves, the answer is off, not retuned.
 
 **Hot-reloadable.** `[window_gate]` is classified alongside the other
 hot-reloadable sections

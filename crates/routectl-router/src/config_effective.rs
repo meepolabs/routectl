@@ -20,6 +20,8 @@
 //! are in-memory runtime state on a live router, not config, so they are out
 //! of scope for this pure view.
 
+use std::borrow::Cow;
+
 use routectl_auth::SecretScheme;
 use routectl_core::failure_class::FailureClass;
 use routectl_providers::anthropic_api::AuthKind;
@@ -325,40 +327,18 @@ const fn auth_token(entry: &ProviderEntry) -> Option<&'static str> {
 /// The configured `base_url` for an entry, or `None` for a variant whose
 /// endpoint is derived at factory time rather than carried in config. A
 /// cloud-code Gemini entry with no pin reports its effective cloud-code host.
-fn configured_base_url(entry: &ProviderEntry) -> Option<&str> {
+fn configured_base_url(entry: &ProviderEntry) -> Option<Cow<'_, str>> {
     match entry {
         ProviderEntry::OpenaiCompat { base_url, .. }
-        | ProviderEntry::AnthropicApi { base_url, .. } => Some(base_url),
+        | ProviderEntry::AnthropicApi { base_url, .. } => Some(Cow::Borrowed(base_url)),
         #[cfg(feature = "openai-responses")]
-        ProviderEntry::OpenaiResponses { base_url, .. } => base_url.as_deref(),
+        ProviderEntry::OpenaiResponses { base_url, .. } => base_url.as_deref().map(Cow::Borrowed),
         #[cfg(feature = "gemini")]
-        ProviderEntry::Gemini { .. } => gemini_effective_base_url(entry),
+        ProviderEntry::Gemini { .. } => entry.classifiable_egress_base_url(),
         // Bedrock carries no base_url at all: the factory derives the host
         // from `region`.
         #[cfg(feature = "bedrock")]
         ProviderEntry::Bedrock { .. } => None,
-    }
-}
-
-/// The base URL a `gemini` entry dials, `None` for any other kind.
-///
-/// A cloud-code entry that never set `base_url` carries the api-key public
-/// default, which is not a host it ever talks to: the factory leaves the
-/// constructor's cloud-code default in place, so that effective host is the
-/// answer. An explicit pin (production, enterprise mirror, staging) is
-/// answered verbatim.
-#[cfg(feature = "gemini")]
-pub fn gemini_effective_base_url(entry: &ProviderEntry) -> Option<&str> {
-    match entry {
-        ProviderEntry::Gemini {
-            base_url,
-            auth_mode: GeminiAuthMode::CloudCode,
-            ..
-        } if *base_url == crate::config::default_gemini_base() => {
-            Some(routectl_providers::gemini::DAILY_BASE_URL)
-        }
-        ProviderEntry::Gemini { base_url, .. } => Some(base_url),
-        _ => None,
     }
 }
 
@@ -367,7 +347,7 @@ fn provider_cell(id: &str, entry: &ProviderEntry) -> ProviderCell {
     ProviderCell {
         id: id.to_string(),
         kind: entry.kind_str().to_string(),
-        endpoint_origin: configured_base_url(entry).and_then(endpoint_origin),
+        endpoint_origin: configured_base_url(entry).and_then(|base| endpoint_origin(&base)),
         credential_ref_scheme: credential_ref_scheme(entry.api_key_ref()),
         auth_token: auth_token(entry).map(str::to_string),
         rpm_limit: entry.runtime().rpm_limit,

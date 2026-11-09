@@ -895,6 +895,47 @@ fn classifiable_egress_base_url_answers_openai_responses_lanes() {
     }
 }
 
+/// A `gemini` entry egresses to its configured `base_url`, except a
+/// `cloud-code` entry left at the api-key public default, which dials the
+/// daily Cloud Code host. Literals, so a drifted default is caught here.
+#[cfg(feature = "gemini")]
+#[test]
+fn classifiable_egress_base_url_answers_gemini_lanes() {
+    let rows: [(&str, &str, &str); 4] = [
+        (
+            "api-key with base_url unset egresses to the public default",
+            "",
+            "https://generativelanguage.googleapis.com/v1beta",
+        ),
+        (
+            "cloud-code with base_url unset egresses to the daily host",
+            "auth_mode = \"cloud-code\"\n",
+            "https://daily-cloudcode-pa.googleapis.com",
+        ),
+        (
+            "cloud-code pinned to production egresses there",
+            "auth_mode = \"cloud-code\"\nbase_url = \"https://cloudcode-pa.googleapis.com\"\n",
+            "https://cloudcode-pa.googleapis.com",
+        ),
+        (
+            "api-key pinned to a mirror egresses there",
+            "base_url = \"https://gemini.example.com/v1beta\"\n",
+            "https://gemini.example.com/v1beta",
+        ),
+    ];
+    for (name, extra, expected) in rows {
+        let cfg: Config = toml::from_str(&format!(
+            "[providers.g]\nkind = \"gemini\"\napi_key_ref = \"oauth://antigravity\"\n{extra}"
+        ))
+        .expect("parse gemini entry");
+        assert_eq!(
+            cfg.providers["g"].classifiable_egress_base_url().as_deref(),
+            Some(expected),
+            "{name}",
+        );
+    }
+}
+
 #[test]
 fn cache_capability_anthropic_custom_base_fails_closed() {
     let toml_text = r#"

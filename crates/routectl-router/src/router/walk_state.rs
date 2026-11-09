@@ -13,7 +13,6 @@
 //! endpoint exclusion is held), a `[models]` entry, a chain run, or one
 //! target's runtime-state key.
 
-use std::borrow::Cow;
 use std::fmt;
 use std::sync::Arc;
 
@@ -53,29 +52,19 @@ impl fmt::Debug for EndpointKey {
 /// The endpoint key for provider entry `provider_name` (`entry` is its
 /// `[providers]` row, `None` when the name resolves to none).
 ///
-/// Reads the entry's effective egress base ([`egress_base_url`]); when it
-/// answers none, or the URL fails the origin guard or has no known port,
-/// falls back to `provider:<name>`, the narrowest key, which no other entry
-/// shares.
+/// Reads the entry's effective egress base
+/// ([`ProviderEntry::classifiable_egress_base_url`], which answers a
+/// forwarded entry's own base too); when it answers none, or the URL fails
+/// the origin guard or has no known port, falls back to `provider:<name>`,
+/// the narrowest key, which no other entry shares.
 pub(super) fn endpoint_key(provider_name: &str, entry: Option<&ProviderEntry>) -> EndpointKey {
     entry
-        .and_then(egress_base_url)
+        .and_then(ProviderEntry::classifiable_egress_base_url)
         .and_then(|base| normalized_origin(&base))
         .map_or_else(
             || EndpointKey(format!("provider:{provider_name}")),
             EndpointKey,
         )
-}
-
-/// The base URL `entry` dials: [`ProviderEntry::classifiable_egress_base_url`]
-/// (which answers a forwarded entry's own base too), else the Gemini base the
-/// factory leaves in place, the same one the effective-config view reports.
-fn egress_base_url(entry: &ProviderEntry) -> Option<Cow<'_, str>> {
-    let classified = entry.classifiable_egress_base_url();
-    #[cfg(feature = "gemini")]
-    let classified = classified
-        .or_else(|| crate::config_effective::gemini_effective_base_url(entry).map(Cow::Borrowed));
-    classified
 }
 
 /// `scheme://host:port` for `base_url`. The origin comes from
@@ -215,7 +204,9 @@ pub(super) enum Exclusion {
     Target(String),
 }
 
-/// The scope an [`Exclusion`] covers, as tallied by [`RequestWalk`].
+/// The scope an [`Exclusion`] covers, as tallied by [`RequestWalk`]. This is
+/// the exclusion kind (it includes the probe fence), not the core
+/// `routectl_core::FailureScope`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ExclusionScope {
     Endpoint,

@@ -413,9 +413,10 @@ fn is_portable(format: Option<&str>, lane: ReplayScheme) -> bool {
 /// untouched -- no clone on the common path). The upstream body of a
 /// replay rejection is a rejection envelope that can echo a reasoning
 /// artifact fragment, and the generic retry/fallback logs below
-/// debug-render the `Error`. The rebuilt `Upstream` keeps the status and
-/// the already-structured classifier tokens every downstream consumer
-/// reads, dropping ONLY the body.
+/// debug-render the `Error`. The rebuilt `Upstream` keeps the status, the
+/// already-structured classifier tokens, the upstream request id, the typed
+/// reason and the scope row every downstream consumer reads, dropping ONLY
+/// the body and its parse.
 pub(super) fn replay_rejection_body_free(
     err: &Error,
     class: &FailureClass,
@@ -425,14 +426,19 @@ pub(super) fn replay_rejection_body_free(
         return None;
     }
     let facts = upstream_facts(err);
-    Some(Error::upstream_full(
-        provider,
-        facts.status.unwrap_or(0),
-        "",
-        None,
-        facts.upstream_type.map(str::to_string),
-        facts.upstream_code.map(str::to_string),
-    ))
+    Some(
+        Error::upstream_full(
+            provider,
+            facts.status.unwrap_or(0),
+            "",
+            None,
+            facts.upstream_type.map(str::to_string),
+            facts.upstream_code.map(str::to_string),
+        )
+        .with_upstream_request_id(err.upstream_request_id().map(str::to_string))
+        .with_upstream_reason(err.upstream_reason())
+        .with_scope_row(err.scope_row()),
+    )
 }
 
 #[cfg(test)]

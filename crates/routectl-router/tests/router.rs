@@ -73,8 +73,8 @@ enum Behavior {
     /// `content_block` types preserved verbatim) interleaved with a
     /// normal text chunk. Before forward-compat handling, a
     /// `server_tool_use` block crashed SSE deserialization with
-    /// `Error::Streaming` and the router's `should_fallback`
-    /// returned true, walking the chain across providers for a
+    /// `Error::Streaming` and the failure decision walked the
+    /// chain across providers for a
     /// local forward-compat bug. This behavior pins the contract
     /// that opaque-event chunks pass through cleanly without
     /// triggering chain-walk.

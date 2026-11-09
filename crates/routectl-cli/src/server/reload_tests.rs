@@ -3040,3 +3040,6 @@ mod placeholder_readmit;
 
 #[path = "reload_member_refusal_tests.rs"]
 mod member_refusal;
+
+#[path = "reload_placeholder_lapse_tests.rs"]
+mod placeholder_lapse;

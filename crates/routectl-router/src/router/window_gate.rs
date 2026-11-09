@@ -1,9 +1,9 @@
 //! Proactive context-window gate: the second chain filter pass.
 //!
 //! Runs after the capability pre-filter and skips a chain target whose
-//! context window clearly cannot hold the estimated request, so an
-//! oversized request never spends a doomed knock on a small-window
-//! fallback. The reactive `context-window` failure class remains the
+//! context window cannot hold the estimated request plus its output reserve
+//! and fixed headroom, so an oversized request never spends a doomed knock
+//! on a small-window fallback. The reactive `context-window` failure class remains the
 //! backstop for whatever the estimate lets through.
 //!
 //! Contract difference from `feature_filter`: this pass has NO empty-chain

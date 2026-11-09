@@ -398,12 +398,18 @@ fn the_skip_rule_counts_estimate_reserve_and_headroom_against_the_window() {
 
 #[test]
 fn the_output_reserve_prefers_the_request_then_the_target_ceiling_then_zero() {
-    let rows: [(&str, Option<u32>, u32, u64); 4] = [
+    let rows: [(&str, Option<u32>, u32, u64); 5] = [
         (
             "request max_tokens beats the target ceiling",
             Some(1_000),
             64_000,
             1_000,
+        ),
+        (
+            "request max_tokens above the target ceiling still wins",
+            Some(128_000),
+            64_000,
+            128_000,
         ),
         ("request max_tokens alone", Some(1_000), 0, 1_000),
         (
@@ -976,6 +982,22 @@ fn the_gate_keeps_a_target_exactly_at_input_plus_reserve_plus_headroom() {
             ceiling: Some(128_000),
             max_tokens: Some(CEILING_64K),
             input_tokens: at(W200K, CEILING_64K) + 1,
+            kept: false,
+        },
+        BoundaryRow {
+            name: "200k, request max_tokens above the target ceiling wins, exactly full",
+            window: W200K,
+            ceiling: Some(CEILING_64K),
+            max_tokens: Some(128_000),
+            input_tokens: at(W200K, 128_000),
+            kept: true,
+        },
+        BoundaryRow {
+            name: "200k, request max_tokens above the target ceiling wins, one over",
+            window: W200K,
+            ceiling: Some(CEILING_64K),
+            max_tokens: Some(128_000),
+            input_tokens: at(W200K, 128_000) + 1,
             kept: false,
         },
         BoundaryRow {

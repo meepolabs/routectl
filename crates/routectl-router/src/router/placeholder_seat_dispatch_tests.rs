@@ -335,6 +335,34 @@ fn a_seat_built_before_a_reload_and_a_placeholder_after_it_is_marked_on_the_shar
 }
 
 #[test]
+fn a_seat_a_placeholder_before_a_reload_and_built_after_it_is_readmitted_at_commit() {
+    // Arrange: the outgoing router holds seat-a as a placeholder; the
+    // candidate built it.
+    let before = pool(&["seat-a"]);
+    let mut after = pool(&[]);
+
+    // Act
+    after.router.carry_over_runtime_state_from(&before.router);
+    let at_carry_over = unusable_since(&before.router, "seat-a").map(|(cause, _)| cause);
+    after.router.commit_carried_state();
+
+    // Assert
+    assert_eq!(
+        at_carry_over,
+        Some(UnusableCause::NotLoggedIn),
+        "carry-over leaves the live mark in place"
+    );
+    assert_eq!(unusable_since(&after.router, "seat-a"), None);
+    assert!(
+        after
+            .router
+            .admit_for_credential_tests("pooled#seat-a")
+            .is_some(),
+        "the built seat admits once the reload commits"
+    );
+}
+
+#[test]
 fn committing_a_reload_twice_keeps_the_placeholder_mark_and_its_since() {
     // Arrange
     let before = pool(&[]);

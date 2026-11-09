@@ -6488,7 +6488,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   graceful-shutdown joins. Unit tests live in the `#[path]`-included sibling
   sidecars `activation_tests.rs` (activation-recompute + audit-event tests,
   run on the current-thread runtime for the capture subscriber),
-  `reload_retune_tests.rs`, `reload_commit_point_tests.rs` and
+  `reload_retune_tests.rs`, `reload_commit_point_tests.rs`,
+  `reload_placeholder_lapse_tests.rs` (a reload that builds a seat the live
+  router held as a placeholder readmits it at commit) and
   `reload_tests.rs` (reload-pipeline +
   coordinator tests, incl. the structural
   guards that BOTH carry-over blocks carry the per-seat quota readings and the
