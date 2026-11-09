@@ -31,12 +31,7 @@ fn seats() -> Config {
 }
 
 fn seat_a(cfg: &Config) -> WalkTarget<'_> {
-    WalkTarget {
-        provider_name: "seat-a",
-        entry: cfg.providers.get("seat-a"),
-        upstream: "opus",
-        pool: "pool-a",
-    }
+    WalkTarget::fixture("seat-a", cfg.providers.get("seat-a"), "opus", 0)
 }
 
 fn feature_unsupported() -> FailureClass {
@@ -46,7 +41,23 @@ fn feature_unsupported() -> FailureClass {
 }
 
 fn failure<'a>(err: &'a Error, class: &'a FailureClass, target: WalkTarget<'a>) -> Failure<'a> {
-    Failure::of(err, class, target, DispatchSurface::Complete, false, false)
+    Failure {
+        err,
+        native_class: class,
+        class,
+        is_probe: false,
+        surface: DispatchSurface::Complete,
+        deadline_fired: false,
+        disable_fallbacks: false,
+        target,
+    }
+}
+
+fn probe<'a>(err: &'a Error, class: &'a FailureClass, target: WalkTarget<'a>) -> Failure<'a> {
+    Failure {
+        is_probe: true,
+        ..failure(err, class, target)
+    }
 }
 
 fn decide_fresh(failure: &Failure<'_>, policy: &RetryPolicy) -> Disposition {
@@ -68,11 +79,7 @@ fn excludes(disposition: &Disposition, target: &WalkTarget<'_>) -> Excludes {
     match disposition.exclusions.as_slice() {
         [] => Excludes::Nothing,
         [Exclusion::Endpoint(key)] if *key == target.endpoint_key() => Excludes::Endpoint,
-        [Exclusion::Model { endpoint, upstream }]
-            if *endpoint == target.endpoint_key() && upstream == target.upstream =>
-        {
-            Excludes::Model
-        }
+        [Exclusion::Model(model)] if model == target.model() => Excludes::Model,
         other => panic!("unexpected exclusions {other:?}"),
     }
 }
@@ -231,79 +238,96 @@ fn a_recognized_row_is_carried_on_the_disposition() {
     );
 }
 
-/// The probe overlay, for every failure kind: no same-target retry, no
-/// debit, and every target outside the probe's pool excluded, on top of
-/// whatever the scope itself excludes.
+/// The probe overlay, for every failure kind: no same-target retry and
+/// every target outside the probe's chain run excluded, on top of whatever
+/// the scope itself excludes. The debit is the shared rule's: only a native
+/// 429 or 529 spares the breaker; a probe's 5xx or network failure debits
+/// like any other request's, and a request-rejecting 400 debits nothing.
 #[test]
-fn a_probe_never_retries_never_debits_and_stays_in_its_pool() {
+fn a_probe_never_retries_stays_in_its_run_and_takes_the_shared_debit() {
+    use BreakerOutcome::{Debit, None as Untouched};
     let cfg = seats();
     let target = seat_a(&cfg);
     let policy = RetryPolicy::default();
-    let rows: Vec<(&str, Error, FailureClass)> = vec![
+    let rows: Vec<(&str, Error, FailureClass, BreakerOutcome)> = vec![
         (
             "429",
             Error::upstream("p", 429, "x"),
             FailureClass::RateLimited,
+            Untouched,
         ),
         (
             "529",
             Error::upstream("p", 529, "x"),
             FailureClass::Overloaded,
+            Untouched,
         ),
         (
-            "500",
+            "500 debits",
             Error::upstream("p", 500, "x"),
             FailureClass::ServerError,
+            Debit,
         ),
         (
-            "503 overloaded",
+            "503 overloaded debits",
             Error::upstream("p", 503, "x"),
             FailureClass::Overloaded,
+            Debit,
         ),
         (
-            "network",
+            "network (status 0) debits",
             Error::upstream("p", 0, ""),
             FailureClass::NetworkError,
+            Debit,
         ),
         (
             "400 generic",
             Error::upstream("p", 400, "x"),
             FailureClass::BadRequest,
+            Untouched,
         ),
         (
             "400 feature",
             Error::upstream("p", 400, "x"),
             feature_unsupported(),
+            Untouched,
         ),
         (
             "recognized bare 429",
             bare_rate_limit(),
             FailureClass::RateLimited,
+            Untouched,
         ),
         (
             "credential reason",
             Error::upstream("p", 401, "x")
                 .with_upstream_reason(Some(UpstreamReason::CredentialExpired)),
             FailureClass::Auth,
+            Untouched,
         ),
         (
-            "large reset hint",
+            "429 with a large reset hint",
             Error::upstream_with_retry_after("p", 429, "x", Some(Duration::from_hours(1))),
             FailureClass::RateLimited,
+            Untouched,
         ),
     ];
-    for (name, err, class) in rows {
-        let probe = Failure::of(&err, &class, target, DispatchSurface::Complete, true, false);
+    for (name, err, class, breaker) in rows {
         let hint = rate_limit_reset_hint(&err, &policy);
 
-        let disposition = decide(&probe, &policy, hint, &RequestWalk::new());
+        let disposition = decide(
+            &probe(&err, &class, target),
+            &policy,
+            hint,
+            &RequestWalk::new(),
+        );
 
         assert_eq!(disposition.same_target, SameProvider::No, "{name}");
-        assert_eq!(disposition.breaker, BreakerOutcome::None, "{name}");
+        assert_eq!(disposition.breaker, breaker, "{name}");
         assert!(
             disposition
                 .exclusions
-                .contains(&Exclusion::OutsidePool("pool-a".into())),
+                .contains(&Exclusion::OutsideRun(target.run())),
             "{name}: {:?}",
             disposition.exclusions
         );
@@ -441,60 +465,83 @@ fn retry_classes_only_narrow_the_scope_rule() {
     }
 }
 
+/// The baked Unknown-class policy ends the request.
 #[test]
-fn an_unknown_class_is_terminal_and_an_unknown_provider_walks() {
+fn an_unknown_class_is_terminal() {
     let cfg = seats();
-    let target = seat_a(&cfg);
-    let policy = RetryPolicy::default();
-    let unknown_status = Error::upstream("p", 302, "x");
-    let unknown_provider = Error::UnknownProvider("ghost".into());
-    let rows = [
-        ("unknown class", &unknown_status, Next::Terminal),
-        ("unknown provider", &unknown_provider, Next::Walk),
-    ];
-    for (name, err, next) in rows {
-        let disposition = decide_fresh(&failure(err, &FailureClass::Unknown, target), &policy);
+    let err = Error::upstream("p", 302, "x");
 
-        assert_eq!(disposition.next, next, "{name}");
-        assert_eq!(disposition.same_target, SameProvider::No, "{name}");
-    }
+    let disposition = decide_fresh(
+        &failure(&err, &FailureClass::Unknown, seat_a(&cfg)),
+        &RetryPolicy::default(),
+    );
+
+    assert_eq!(disposition.next, Next::Terminal);
+    assert_eq!(disposition.same_target, SameProvider::No);
 }
 
-/// Only a completion retries the same target; a committed stream also
-/// never moves to another target. The uncommitted stream row is the
-/// control that a stream failure still walks.
+/// Only a completion retries the same target. A health error walks on
+/// the message surfaces; a count walks on one only when the attempt's own
+/// deadline fired, and otherwise ends the request.
 #[test]
-fn surfaces_never_retry_and_a_committed_stream_never_falls_back() {
+fn surfaces_retry_and_walk_by_their_own_rules() {
     let cfg = seats();
-    let err = Error::upstream("p", 500, "x");
-    let class = FailureClass::ServerError;
+    let server = Error::upstream("p", 500, "x");
+    let network = Error::upstream("p", 0, "timed out");
     let policy = RetryPolicy::default();
     let rows = [
         (
-            "complete",
+            "complete 500",
             DispatchSurface::Complete,
+            &server,
+            FailureClass::ServerError,
             false,
             true,
             Next::Walk,
         ),
-        ("stream", DispatchSurface::Stream, false, false, Next::Walk),
         (
-            "count_tokens",
-            DispatchSurface::CountTokens,
-            false,
-            false,
-            Next::Walk,
-        ),
-        (
-            "committed stream",
+            "stream 500",
             DispatchSurface::Stream,
-            true,
+            &server,
+            FailureClass::ServerError,
+            false,
+            false,
+            Next::Walk,
+        ),
+        (
+            "count_tokens 500",
+            DispatchSurface::CountTokens,
+            &server,
+            FailureClass::ServerError,
+            false,
             false,
             Next::Terminal,
         ),
+        (
+            "count_tokens network",
+            DispatchSurface::CountTokens,
+            &network,
+            FailureClass::NetworkError,
+            false,
+            false,
+            Next::Terminal,
+        ),
+        (
+            "count_tokens deadline fired",
+            DispatchSurface::CountTokens,
+            &network,
+            FailureClass::Timeout,
+            true,
+            false,
+            Next::Walk,
+        ),
     ];
-    for (name, surface, committed, retries, next) in rows {
-        let failure = Failure::of(&err, &class, seat_a(&cfg), surface, false, committed);
+    for (name, surface, err, class, deadline_fired, retries, next) in rows {
+        let failure = Failure {
+            surface,
+            deadline_fired,
+            ..failure(err, &class, seat_a(&cfg))
+        };
 
         let disposition = decide(&failure, &policy, None, &RequestWalk::new());
 
@@ -505,6 +552,103 @@ fn surfaces_never_retry_and_a_committed_stream_never_falls_back() {
         );
         assert_eq!(disposition.next, next, "{name}");
     }
+}
+
+/// With fallbacks disabled the first failure ends the request: no
+/// same-target retry and no walk, even for a failure that would do both.
+#[test]
+fn disabled_fallbacks_end_the_request_at_the_first_failure() {
+    let cfg = seats();
+    let err = Error::upstream("p", 500, "x");
+    let class = FailureClass::ServerError;
+    let policy = RetryPolicy::default();
+    let rows = [
+        ("fallbacks enabled", false, true, Next::Walk),
+        ("fallbacks disabled", true, false, Next::Terminal),
+    ];
+    for (name, disable_fallbacks, retries, next) in rows {
+        let failure = Failure {
+            disable_fallbacks,
+            ..failure(&err, &class, seat_a(&cfg))
+        };
+
+        let disposition = decide(&failure, &policy, None, &RequestWalk::new());
+
+        assert_eq!(
+            matches!(disposition.same_target, SameProvider::Retry { .. }),
+            retries,
+            "{name}"
+        );
+        assert_eq!(disposition.next, next, "{name}");
+    }
+}
+
+/// The scope reads the class the classifier gave, not the operator's
+/// remap: a generic 400 remapped to feature-unsupported stays endpoint
+/// scope, and a native feature-unsupported 400 remapped to bad-request
+/// stays model scope.
+#[test]
+fn the_scope_reads_the_native_class_before_any_remap() {
+    use Excludes::{Endpoint, Model};
+    let cfg = seats();
+    let target = seat_a(&cfg);
+    let err = Error::upstream("p", 400, "x");
+    let feature = feature_unsupported();
+    let rows = [
+        (
+            "generic 400 remapped to feature-unsupported",
+            FailureClass::BadRequest,
+            feature.clone(),
+            FailureScope::Endpoint,
+            Endpoint,
+        ),
+        (
+            "feature 400 remapped to bad-request",
+            feature.clone(),
+            FailureClass::BadRequest,
+            FailureScope::Model,
+            Model,
+        ),
+    ];
+    for (name, native, remapped, scope, exclusion) in rows {
+        let failure = Failure {
+            native_class: &native,
+            ..failure(&err, &remapped, target)
+        };
+
+        let disposition = decide_fresh(&failure, &RetryPolicy::default());
+
+        assert_eq!(disposition.scope, scope, "{name}");
+        assert_eq!(excludes(&disposition, &target), exclusion, "{name}");
+    }
+}
+
+/// A model-scoped failure excludes the `[models]` entry, not the upstream
+/// id: a second entry sending the same upstream to the same origin (a
+/// larger-window variant gated by a beta header) stays reachable.
+#[test]
+fn a_context_window_400_leaves_another_entry_with_the_same_upstream_admitted() {
+    let cfg = seats();
+    let failed = seat_a(&cfg);
+    let same_entry_sibling = WalkTarget::fixture("seat-b", cfg.providers.get("seat-b"), "opus", 0);
+    let wide_window = WalkTarget::fixture("seat-a", cfg.providers.get("seat-a"), "opus-1m", 2);
+    let err = Error::upstream("p", 400, "prompt is too long");
+    let class = FailureClass::ContextWindow;
+    let mut walk = RequestWalk::new();
+
+    let disposition = decide_fresh(&failure(&err, &class, failed), &RetryPolicy::default());
+    for exclusion in disposition.exclusions {
+        walk.exclude(exclusion);
+    }
+
+    assert!(
+        !walk.admits(&same_entry_sibling),
+        "the failed entry's seats are excluded"
+    );
+    assert!(
+        walk.admits(&wide_window),
+        "the larger-window entry stays admitted"
+    );
 }
 
 /// The debit keys on the native status: a native 400/422 never debits
@@ -561,16 +705,8 @@ fn a_native_400_never_debits_whatever_its_remapped_class() {
 fn a_recognized_bare_429_debits_once_and_is_not_retried() {
     let cfg = seats();
     let target = seat_a(&cfg);
-    let sibling = WalkTarget {
-        provider_name: "seat-b",
-        entry: cfg.providers.get("seat-b"),
-        ..target
-    };
-    let other_origin = WalkTarget {
-        provider_name: "gateway",
-        entry: cfg.providers.get("gateway"),
-        ..target
-    };
+    let sibling = WalkTarget::fixture("seat-b", cfg.providers.get("seat-b"), "opus", 0);
+    let other_origin = WalkTarget::fixture("gateway", cfg.providers.get("gateway"), "opus", 0);
     let err = bare_rate_limit();
     let class = FailureClass::RateLimited;
     let mut walk = RequestWalk::new();

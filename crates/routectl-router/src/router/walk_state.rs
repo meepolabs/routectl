@@ -19,17 +19,21 @@
     )
 )]
 
+use std::borrow::Cow;
 use std::fmt;
+use std::sync::Arc;
 
 use routectl_core::ScopeRow;
 
-use crate::config::ProviderEntry;
+use super::DispatchTarget;
+use crate::config::{Config, ProviderEntry};
 
 /// The identity of an upstream endpoint: a normalized origin
-/// (`scheme://host:port`, host lowercased, port explicit or the scheme
-/// default), or `provider:<name>` when the provider entry names no URL the
-/// router can classify.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// (`scheme://host:port`, host lowercased with any trailing dot folded, port
+/// explicit or the scheme default), or `provider:<name>` when the provider
+/// entry names no URL the router can classify. Never carries userinfo, a
+/// path or a query, so printing it prints nothing beyond the origin.
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub(super) struct EndpointKey(String);
 
 impl EndpointKey {
@@ -44,20 +48,22 @@ impl fmt::Display for EndpointKey {
     }
 }
 
+impl fmt::Debug for EndpointKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// The endpoint key for provider entry `provider_name` (`entry` is its
 /// `[providers]` row, `None` when the name resolves to none).
 ///
-/// Reads [`ProviderEntry::classifiable_egress_base_url`], else
-/// [`ProviderEntry::forwarded_base_url`]; when neither answers, or the URL
-/// has no host or no known port, falls back to `provider:<name>`, the
-/// narrowest key, which no other entry shares.
+/// Reads the entry's effective egress base ([`egress_base_url`]); when it
+/// answers none, or the URL fails the origin guard or has no known port,
+/// falls back to `provider:<name>`, the narrowest key, which no other entry
+/// shares.
 pub(super) fn endpoint_key(provider_name: &str, entry: Option<&ProviderEntry>) -> EndpointKey {
     entry
-        .and_then(|entry| {
-            entry
-                .classifiable_egress_base_url()
-                .or_else(|| entry.forwarded_base_url().map(std::borrow::Cow::Borrowed))
-        })
+        .and_then(egress_base_url)
         .and_then(|base| normalized_origin(&base))
         .map_or_else(
             || EndpointKey(format!("provider:{provider_name}")),
@@ -65,33 +71,111 @@ pub(super) fn endpoint_key(provider_name: &str, entry: Option<&ProviderEntry>) -
         )
 }
 
+/// The base URL `entry` dials: [`ProviderEntry::classifiable_egress_base_url`]
+/// (which answers a forwarded entry's own base too), else the Gemini base the
+/// factory leaves in place, the same one the effective-config view reports.
+fn egress_base_url(entry: &ProviderEntry) -> Option<Cow<'_, str>> {
+    let classified = entry.classifiable_egress_base_url();
+    #[cfg(feature = "gemini")]
+    let classified = classified
+        .or_else(|| crate::config_effective::gemini_effective_base_url(entry).map(Cow::Borrowed));
+    classified
+}
+
+/// `scheme://host:port` for `base_url`. The origin comes from
+/// [`crate::config_effective::endpoint_origin`], whose guard withholds any
+/// URL whose written authority could put credential bytes in the host slot,
+/// so the key never carries userinfo.
 fn normalized_origin(base_url: &str) -> Option<String> {
-    let url = url::Url::parse(base_url.trim()).ok()?;
-    let host = url.host_str()?.to_ascii_lowercase();
+    let origin = crate::config_effective::endpoint_origin(base_url)?;
+    let url = url::Url::parse(&origin).ok()?;
+    let host = url.host_str()?.trim_end_matches('.').to_ascii_lowercase();
+    if host.is_empty() {
+        return None;
+    }
     let port = url.port_or_known_default()?;
     Some(format!("{}://{host}:{port}", url.scheme()))
 }
 
 /// What the walk needs to know about one chain target to decide whether an
-/// exclusion covers it.
+/// exclusion covers it. Built only by [`WalkTarget::at`], so the provider
+/// entry, the `[models]` entry and the chain run always describe one target.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct WalkTarget<'a> {
     /// The target's `[providers]` key.
-    pub(super) provider_name: &'a str,
+    provider_name: &'a str,
     /// That key's provider entry, when it resolves.
-    pub(super) entry: Option<&'a ProviderEntry>,
-    /// The wire model id the target sends.
-    pub(super) upstream: &'a str,
+    entry: Option<&'a ProviderEntry>,
     /// The `[models]` entry the target dispatches to; every seat of one pool
     /// shares it.
-    pub(super) pool: &'a str,
+    model: &'a str,
+    /// The chain index where the contiguous run of targets dispatching to
+    /// this target's `[models]` entry starts.
+    run: usize,
 }
 
-impl WalkTarget<'_> {
+impl<'a> WalkTarget<'a> {
+    /// The walk view of `chain[index]`, its provider entry read from
+    /// `config`; `None` when `index` is past the chain.
+    pub(super) fn at(
+        chain: &'a [DispatchTarget],
+        index: usize,
+        config: &'a Config,
+    ) -> Option<Self> {
+        let target = chain.get(index)?;
+        Some(Self {
+            provider_name: &target.provider_name,
+            entry: config.providers.get(&target.provider_name),
+            model: &target.model.nickname,
+            run: run_start(chain, index, target),
+        })
+    }
+
+    #[cfg(test)]
+    pub(super) const fn fixture(
+        provider_name: &'a str,
+        entry: Option<&'a ProviderEntry>,
+        model: &'a str,
+        run: usize,
+    ) -> Self {
+        Self {
+            provider_name,
+            entry,
+            model,
+            run,
+        }
+    }
+
     pub(super) fn endpoint_key(&self) -> EndpointKey {
         endpoint_key(self.provider_name, self.entry)
     }
+
+    pub(super) const fn model(&self) -> &'a str {
+        self.model
+    }
+
+    pub(super) const fn run(&self) -> ChainRun {
+        ChainRun(self.run)
+    }
 }
+
+/// The first index of the contiguous run of chain entries before `target`
+/// (at `index`) that dispatch to the same resolved `[models]` entry.
+fn run_start(chain: &[DispatchTarget], index: usize, target: &DispatchTarget) -> usize {
+    let earlier_in_run = chain
+        .get(..index)
+        .unwrap_or_default()
+        .iter()
+        .rev()
+        .take_while(|other| Arc::ptr_eq(&other.model, &target.model))
+        .count();
+    index - earlier_in_run
+}
+
+/// One contiguous run of chain targets sharing a `[models]` entry, named by
+/// the chain index it starts at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ChainRun(usize);
 
 /// One request-scoped exclusion: the scope it covers and the key that
 /// identifies the covered targets.
@@ -99,14 +183,13 @@ impl WalkTarget<'_> {
 pub(super) enum Exclusion {
     /// Every target served by this endpoint.
     Endpoint(EndpointKey),
-    /// Every target sending `upstream` to `endpoint`.
-    Model {
-        endpoint: EndpointKey,
-        upstream: String,
-    },
-    /// Every target outside this pool: an availability probe stays in the
-    /// pool it started in.
-    OutsidePool(String),
+    /// Every target dispatching to this `[models]` entry. Another entry
+    /// sending the same upstream id (a larger-window variant, say) stays
+    /// admitted.
+    Model(String),
+    /// Every target outside this chain run: an availability probe stays in
+    /// the run of seats it started in.
+    OutsideRun(ChainRun),
 }
 
 /// The scope an [`Exclusion`] covers, as tallied by [`RequestWalk`].
@@ -121,19 +204,16 @@ impl Exclusion {
     pub(super) const fn scope(&self) -> ExclusionScope {
         match self {
             Self::Endpoint(_) => ExclusionScope::Endpoint,
-            Self::Model { .. } => ExclusionScope::Model,
-            Self::OutsidePool(_) => ExclusionScope::ProbePool,
+            Self::Model(_) => ExclusionScope::Model,
+            Self::OutsideRun(_) => ExclusionScope::ProbePool,
         }
     }
 
     fn covers(&self, target: &WalkTarget<'_>, endpoint: &mut LazyEndpoint) -> bool {
         match self {
             Self::Endpoint(key) => endpoint.get(target) == key,
-            Self::Model {
-                endpoint: key,
-                upstream,
-            } => target.upstream == upstream && endpoint.get(target) == key,
-            Self::OutsidePool(pool) => target.pool != pool,
+            Self::Model(model) => target.model == model,
+            Self::OutsideRun(run) => target.run() != *run,
         }
     }
 }
@@ -218,7 +298,7 @@ impl RequestWalk {
 
     /// Whether `target` may be dialed. An excluded target is tallied under
     /// the scope of the first exclusion covering it. Derives the target's
-    /// endpoint key only when an endpoint or model exclusion is held.
+    /// endpoint key only when an endpoint exclusion is held.
     pub(super) fn admits(&mut self, target: &WalkTarget<'_>) -> bool {
         let mut endpoint = LazyEndpoint::default();
         let covering = self

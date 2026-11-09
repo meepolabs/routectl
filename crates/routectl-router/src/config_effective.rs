@@ -182,9 +182,10 @@ pub struct ProviderCell {
 /// Trusting `host_str()` to be the operator's intended host is the leak, so a
 /// remainder carrying an unconsumed `@` is withheld whole.
 ///
-/// Two crate-internal consumers depend on this being the ONLY base_url
-/// projection: the effective-config view here, and
-/// [`crate::config::ProviderEntry::redact_secrets`] via `redact_base_url`. Its
+/// Three crate-internal consumers depend on this being the ONLY base_url
+/// projection: the effective-config view here,
+/// [`crate::config::ProviderEntry::redact_secrets`] via `redact_base_url`, and
+/// the dispatch walk's endpoint key. Its
 /// fail-safe `None` is the contract, not an inconvenience -- it must never be
 /// softened into a raw-string or best-effort fallback for a caller that would
 /// rather always have something to print.
@@ -330,12 +331,25 @@ fn configured_base_url(entry: &ProviderEntry) -> Option<&str> {
         | ProviderEntry::AnthropicApi { base_url, .. } => Some(base_url),
         #[cfg(feature = "openai-responses")]
         ProviderEntry::OpenaiResponses { base_url, .. } => base_url.as_deref(),
-        // A cloud-code entry that never set `base_url` carries the api-key
-        // public default, which is not a host it ever talks to: the factory
-        // leaves the constructor's cloud-code default in place. Report that
-        // effective host rather than a value the lane cannot use. An explicit
-        // pin (production, enterprise mirror, staging) is reported verbatim.
         #[cfg(feature = "gemini")]
+        ProviderEntry::Gemini { .. } => gemini_effective_base_url(entry),
+        // Bedrock carries no base_url at all: the factory derives the host
+        // from `region`.
+        #[cfg(feature = "bedrock")]
+        ProviderEntry::Bedrock { .. } => None,
+    }
+}
+
+/// The base URL a `gemini` entry dials, `None` for any other kind.
+///
+/// A cloud-code entry that never set `base_url` carries the api-key public
+/// default, which is not a host it ever talks to: the factory leaves the
+/// constructor's cloud-code default in place, so that effective host is the
+/// answer. An explicit pin (production, enterprise mirror, staging) is
+/// answered verbatim.
+#[cfg(feature = "gemini")]
+pub fn gemini_effective_base_url(entry: &ProviderEntry) -> Option<&str> {
+    match entry {
         ProviderEntry::Gemini {
             base_url,
             auth_mode: GeminiAuthMode::CloudCode,
@@ -343,12 +357,8 @@ fn configured_base_url(entry: &ProviderEntry) -> Option<&str> {
         } if *base_url == crate::config::default_gemini_base() => {
             Some(routectl_providers::gemini::DAILY_BASE_URL)
         }
-        #[cfg(feature = "gemini")]
         ProviderEntry::Gemini { base_url, .. } => Some(base_url),
-        // Bedrock carries no base_url at all: the factory derives the host
-        // from `region`.
-        #[cfg(feature = "bedrock")]
-        ProviderEntry::Bedrock { .. } => None,
+        _ => None,
     }
 }
 

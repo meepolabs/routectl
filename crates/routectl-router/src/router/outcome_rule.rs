@@ -276,50 +276,30 @@ pub(super) fn should_fallback(
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Failure<'a> {
     pub(super) err: &'a Error,
-    /// The class after the target's operator status remap.
+    /// The class the classifier gave, before the target's operator remap.
+    /// The scope reads it, so a remap never changes how far a failure
+    /// reaches.
+    pub(super) native_class: &'a FailureClass,
+    /// The class after the target's operator remap. The retry cap and the
+    /// fallback switch read it.
     pub(super) class: &'a FailureClass,
-    /// The status the upstream answered with ([`native_status`]).
-    pub(super) native_status: Option<u16>,
-    /// The recognized upstream pattern the provider attached, if any.
-    pub(super) scope_row: Option<ScopeRow>,
     /// The request is an availability probe (`max_tokens` at or under
     /// `probe_max_tokens`).
     pub(super) is_probe: bool,
     pub(super) surface: DispatchSurface,
-    /// Content already reached the client, so the response cannot move.
-    pub(super) stream_committed: bool,
+    /// The attempt ended because its own deadline expired, which walks on
+    /// every surface.
+    pub(super) deadline_fired: bool,
+    /// The caller asked for no fallback: the first failure ends the request.
+    pub(super) disable_fallbacks: bool,
     /// The target that failed.
     pub(super) target: WalkTarget<'a>,
 }
 
-impl<'a> Failure<'a> {
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the dispatch walk adopts the decision in a follow-up change"
-        )
-    )]
-    /// A failure of `err` on `target`, reading the native status and the
-    /// recognized pattern from `err` itself.
-    pub(super) fn of(
-        err: &'a Error,
-        class: &'a FailureClass,
-        target: WalkTarget<'a>,
-        surface: DispatchSurface,
-        is_probe: bool,
-        stream_committed: bool,
-    ) -> Self {
-        Self {
-            err,
-            class,
-            native_status: native_status(err),
-            scope_row: err.scope_row(),
-            is_probe,
-            surface,
-            stream_committed,
-            target,
-        }
+impl Failure<'_> {
+    /// The recognized upstream pattern the provider attached, if any.
+    fn scope_row(&self) -> Option<ScopeRow> {
+        self.err.scope_row()
     }
 }
 
@@ -354,13 +334,18 @@ pub(super) struct Disposition {
 ///
 /// The scope comes from, in order: a recognized pattern; a typed credential
 /// reason (account scope, which the credential park already enforces); a
-/// native 400/422 (model scope for an unsupported feature or an exceeded
-/// context window, endpoint scope for any other); otherwise the failed
-/// target alone, retryable per its class. Only a retryable target-scoped
-/// failure may retry the same target. `[retry.classes]` only narrows: its
-/// retry cap bounds the request-wide retry count and `fallback = false`
-/// ends the walk, but neither lifts an exclusion. A probe never retries,
-/// never debits and never leaves its pool, whatever the failure.
+/// native 400/422 (model scope when the native class is an unsupported
+/// feature or an exceeded context window, endpoint scope for any other);
+/// otherwise the failed target alone, retryable per its class. Only a
+/// retryable target-scoped failure may retry the same target, and only on a
+/// completion. `[retry.classes]` only narrows: its retry cap bounds the
+/// request-wide retry count and `fallback = false` ends the walk, but
+/// neither lifts an exclusion. A probe never retries and never leaves the
+/// chain run of its `[models]` entry, whatever the failure; it takes the
+/// shared debit rule ([`breaker_outcome`]), which spares only its native 429
+/// or 529. `disable_fallbacks` ends the request at the first failure.
+/// Outside a completion or stream, only an attempt whose deadline fired
+/// walks on.
 #[cfg_attr(
     not(test),
     expect(
@@ -375,11 +360,7 @@ pub(super) fn decide(
     walk: &RequestWalk,
 ) -> Disposition {
     let (scope, retryable) = scope_of(failure);
-    let breaker = if failure.is_probe {
-        BreakerOutcome::None
-    } else {
-        breaker_outcome(failure.err, failure.class, reset_hint, false)
-    };
+    let breaker = breaker_outcome(failure.err, failure.class, reset_hint, failure.is_probe);
     let same_target = if retryable && scope == FailureScope::Target {
         retry_same_target(failure, policy, breaker, reset_hint, walk)
     } else {
@@ -390,7 +371,7 @@ pub(super) fn decide(
         breaker,
         same_target,
         exclusions: exclusions_for(failure, scope),
-        recognized: failure.scope_row,
+        recognized: failure.scope_row(),
         next: next_step(failure, policy),
     }
 }
@@ -410,7 +391,7 @@ const fn known_scope(scope: FailureScope) -> Option<FailureScope> {
 
 /// The scope of `failure` and whether retrying within it can succeed.
 fn scope_of(failure: &Failure<'_>) -> (FailureScope, bool) {
-    if let Some(row) = failure.scope_row {
+    if let Some(row) = failure.scope_row() {
         return known_scope(row.scope()).map_or((FailureScope::Target, false), |scope| {
             (scope, row.retryable())
         });
@@ -418,8 +399,8 @@ fn scope_of(failure: &Failure<'_>) -> (FailureScope, bool) {
     if failure.err.upstream_reason().is_some() {
         return (FailureScope::Account, false);
     }
-    if is_request_rejection(failure.native_status) {
-        return match failure.class {
+    if is_request_rejection(native_status(failure.err)) {
+        return match failure.native_class {
             FailureClass::FeatureUnsupported { .. } | FailureClass::ContextWindow => {
                 (FailureScope::Model, false)
             }
@@ -443,7 +424,7 @@ fn retry_same_target(
     let within_cap = walk.retries_used().saturating_add(1) < retry_cap_for(failure.class, policy);
     if !surface_retries
         || failure.is_probe
-        || failure.stream_committed
+        || failure.disable_fallbacks
         || matches!(breaker, BreakerOutcome::Park(_))
         || !within_cap
     {
@@ -454,35 +435,28 @@ fn retry_same_target(
     }
 }
 
-/// The exclusions `scope` sets, plus the probe's pool fence. The endpoint
-/// key is derived here, only for a scope that needs one.
+/// The exclusions `scope` sets, plus the probe's chain-run fence. The
+/// endpoint key is derived here, only for a scope that needs one.
 fn exclusions_for(failure: &Failure<'_>, scope: FailureScope) -> Vec<Exclusion> {
     let target = &failure.target;
     let mut exclusions = Vec::new();
     match scope {
         FailureScope::Endpoint => exclusions.push(Exclusion::Endpoint(target.endpoint_key())),
-        FailureScope::Model => exclusions.push(Exclusion::Model {
-            endpoint: target.endpoint_key(),
-            upstream: target.upstream.to_owned(),
-        }),
+        FailureScope::Model => exclusions.push(Exclusion::Model(target.model().to_owned())),
         FailureScope::Target | FailureScope::Account => {}
         // Unreachable: `scope_of` already folded an unknown scope to target.
         _ => {}
     }
     if failure.is_probe {
-        exclusions.push(Exclusion::OutsidePool(target.pool.to_owned()));
+        exclusions.push(Exclusion::OutsideRun(target.run()));
     }
     exclusions
 }
 
 fn next_step(failure: &Failure<'_>, policy: &RetryPolicy) -> Next {
-    if failure.stream_committed {
-        return Next::Terminal;
-    }
-    if matches!(failure.err, Error::UnknownProvider(_)) {
-        return Next::Walk;
-    }
-    if policy.resolved_class(failure.class).1 {
+    let fallback = policy.resolved_class(failure.class).1;
+    let surface_walks = failure.deadline_fired || failure.surface.health_error_walks();
+    if fallback && surface_walks && !failure.disable_fallbacks {
         Next::Walk
     } else {
         Next::Terminal
