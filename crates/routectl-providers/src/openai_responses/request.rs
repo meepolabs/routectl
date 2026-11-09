@@ -47,6 +47,7 @@ pub fn translate(cfg: &OpenAiResponsesConfig, req: &ChatRequest) -> Result<Respo
     record_translation_lane_seen(super::LANE);
     count_unmodeled_thinking_type(req);
     log_dropped_cache_control(req);
+    count_withheld_sampling_params(req);
     // The canonical sampling knobs have no Responses-API home and are gated
     // out of the provider_extras merge as canonical keys; log once at DEBUG
     // (an expected transform).
@@ -220,8 +221,9 @@ fn declare_instructions(
 /// Declare the fields this egress writes or withholds by lane, whatever the
 /// request carried: `store` is always sent with routectl's value (the
 /// ingress never forwards the client's), `parallel_tool_calls` is always
-/// sent `true` (the extras allowlist does not forward the client's), and the
-/// ChatGPT-OAuth lane never sends `max_output_tokens`.
+/// sent `true` (the extras allowlist does not forward the client's), the
+/// ChatGPT-OAuth lane never sends `max_output_tokens`, and no lane sends the
+/// client's `temperature` or `top_p`.
 fn declare_lane_gates(tap: &WireTap, auth_kind: AuthKind, req: &ChatRequest) {
     let extras = req.provider_extras.as_ref().and_then(|v| v.as_object());
     let extra = |key: &str| extras.and_then(|o| o.get(key));
@@ -235,6 +237,11 @@ fn declare_lane_gates(tap: &WireTap, auth_kind: AuthKind, req: &ChatRequest) {
     };
     if let Some(kind) = parallel_kind {
         crate::wire_declare::declare(tap, site, "/parallel_tool_calls", kind);
+    }
+    for (path, carried) in sampling_params(req) {
+        if carried {
+            crate::wire_declare::declare(tap, EditSite::DialectFieldStrip, path, EditKind::Remove);
+        }
     }
     if auth_kind.is_codex_lane() && req.max_tokens.is_some() {
         crate::wire_declare::declare(
@@ -362,6 +369,26 @@ fn dropped_cache_surfaces(req: &ChatRequest) -> Vec<&'static str> {
 fn count_unmodeled_thinking_type(req: &ChatRequest) {
     if crate::translation_drop_metrics::carries_unmodeled_thinking_type(req) {
         record_translation_drop(super::LANE, "thinking_type_unrepresentable");
+    }
+}
+
+/// The client sampling parameters this egress withholds, by wire path, with
+/// whether the request carries each.
+const fn sampling_params(req: &ChatRequest) -> [(&'static str, bool); 2] {
+    [
+        ("/temperature", req.temperature.is_some()),
+        ("/top_p", req.top_p.is_some()),
+    ]
+}
+
+/// Count, once per request, the client `temperature` / `top_p` this egress
+/// leaves off the wire. `ResponsesRequest` carries neither field on any auth
+/// surface: the ChatGPT-OAuth backend refuses fields codex never sends, and
+/// nothing records that the API-key or Mantle surfaces accept them.
+/// TRANSLATION-DROP: lane=openai-responses class=sampling_param_unsupported test=sampling_params_withheld_count_once_and_declare_each_path
+fn count_withheld_sampling_params(req: &ChatRequest) {
+    if sampling_params(req).iter().any(|(_, carried)| *carried) {
+        record_translation_drop(super::LANE, "sampling_param_unsupported");
     }
 }
 

@@ -956,3 +956,104 @@ fn an_unmodeled_thinking_type_counts_one_openai_responses_drop() {
         assert_eq!(after - before, expected, "{row}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// sampling_param_unsupported
+// ---------------------------------------------------------------------------
+
+/// Translate `req` under a wire tap, returning the emitted wire value and
+/// every `DialectFieldStrip` Remove the translation declared, by path.
+fn translate_declaring_strips(
+    cfg: &OpenAiResponsesConfig,
+    req: &ChatRequest,
+) -> (Value, Vec<String>) {
+    use routectl_core::wire_check::{EditKind, EditSite, Leg, WireTap};
+    let mut req = req.clone();
+    let tap = WireTap::default();
+    req.routectl_internal.wire_tap = Some(tap.clone());
+    let wire = translate_to_json(cfg, &req);
+    let removes = tap
+        .take_request()
+        .edits(Leg::Request)
+        .iter()
+        .filter(|e| e.site() == EditSite::DialectFieldStrip && e.kind() == EditKind::Remove)
+        .map(|e| e.path().to_string())
+        .collect();
+    (wire, removes)
+}
+
+#[test]
+fn sampling_params_withheld_count_once_and_declare_each_path() {
+    let surfaces = [
+        ("api-key", cfg_api_key()),
+        ("chatgpt-oauth", cfg()),
+        ("bedrock-mantle", cfg_bedrock_mantle()),
+    ];
+    type Shape = (
+        &'static str,
+        Option<f64>,
+        Option<f64>,
+        &'static [&'static str],
+    );
+    let shapes: [Shape; 3] = [
+        ("temperature only", Some(0.3), None, &["/temperature"]),
+        ("top_p only", None, Some(0.9), &["/top_p"]),
+        ("both", Some(0.3), Some(0.9), &["/temperature", "/top_p"]),
+    ];
+    for (surface, cfg) in &surfaces {
+        for (shape, temperature, top_p, expected_removes) in shapes {
+            // Arrange
+            let row = format!("{surface} / {shape}");
+            let mut req = req_with(vec![user_text("hi")]);
+            req.temperature = temperature;
+            req.top_p = top_p;
+            let before = responses_drop_count("sampling_param_unsupported");
+
+            // Act
+            let (wire, removes) = translate_declaring_strips(cfg, &req);
+            let after = responses_drop_count("sampling_param_unsupported");
+
+            // Assert
+            let body = wire.as_object().expect("the wire body is an object");
+            assert!(!body.contains_key("temperature"), "{row}: {wire}");
+            assert!(!body.contains_key("top_p"), "{row}: {wire}");
+            assert_eq!(
+                wire["input"][0]["content"],
+                json!([{"type": "input_text", "text": "hi"}]),
+                "{row}: the turn ships"
+            );
+            assert_eq!(after - before, 1, "{row}: one drop per request");
+            let sampling_removes: Vec<&str> = removes
+                .iter()
+                .map(String::as_str)
+                .filter(|p| matches!(*p, "/temperature" | "/top_p"))
+                .collect();
+            assert_eq!(sampling_removes, expected_removes, "{row}");
+        }
+    }
+}
+
+#[test]
+fn a_request_without_sampling_params_withholds_and_declares_nothing() {
+    for (surface, cfg) in [
+        ("api-key", cfg_api_key()),
+        ("chatgpt-oauth", cfg()),
+        ("bedrock-mantle", cfg_bedrock_mantle()),
+    ] {
+        // Arrange
+        let req = req_with(vec![user_text("hi")]);
+
+        // Act
+        let (_, removes) = crate::translation_drop_metrics::assert_lane_ran_uncounted(
+            "openai-responses",
+            "sampling_param_unsupported",
+            || translate_declaring_strips(&cfg, &req),
+        );
+
+        // Assert
+        assert!(
+            !removes.iter().any(|p| p == "/temperature" || p == "/top_p"),
+            "{surface}: {removes:?}"
+        );
+    }
+}

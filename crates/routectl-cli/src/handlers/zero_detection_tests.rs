@@ -55,7 +55,6 @@ struct KnownUndeclared {
 
 const ANTHROPIC: &str = "anthropic->anthropic-api";
 const CHAT: &str = "chat->openai-compat";
-const RESPONSES: &str = "responses->openai-responses";
 const BEDROCK_INVOKE: &str = "anthropic->bedrock-invoke";
 const BEDROCK_CONVERSE: &str = "anthropic->bedrock-converse";
 
@@ -72,18 +71,6 @@ const KNOWN_UNDECLARED: &[KnownUndeclared] = &[
         leg: Leg::Response,
         path: "/usage/output_tokens_details",
         reason: "real loss: the closing message_delta render drops output_tokens_details",
-    },
-    KnownUndeclared {
-        lane: RESPONSES,
-        leg: Leg::Request,
-        path: "/temperature",
-        reason: "real loss: the Responses egress has no temperature field and drops it",
-    },
-    KnownUndeclared {
-        lane: RESPONSES,
-        leg: Leg::Request,
-        path: "/top_p",
-        reason: "real loss: the Responses egress has no top_p field and drops it",
     },
     KnownUndeclared {
         lane: BEDROCK_INVOKE,
