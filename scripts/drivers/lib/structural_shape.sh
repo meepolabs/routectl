@@ -132,8 +132,10 @@ assert_structural_replica() {
 # `assert_structural_replica`: the ingress line against the pattern `$2`,
 # any other direction against shape alone. A line counts only when it is
 # the log_safe event itself, so a request body that merely QUOTES one is
-# not mistaken for it. A trace with no ingress line FAILS, since there
-# would be nothing for the pattern to have checked.
+# not mistaken for it. Lines are read with ANSI styling removed, so a
+# canned trace may be written styled, as the daemon writes it. A trace with
+# no ingress line FAILS, since there would be nothing for the pattern to
+# have checked.
 # Returns the number of failures, so a caller adds `$?` to its tally.
 #
 #   $1  label prefix   $2  ingress pattern, or `-`
@@ -142,6 +144,7 @@ assert_trace_replicas() {
     local label="$1" pattern="$2" verifier="$3" emitter_src="$4"
     local line direction failed=0 ingress_seen=0
     while IFS= read -r line; do
+        line="$(printf '%s' "$line" | sed 's/\x1b\[[0-9;]*m//g')"
         case "$line" in
             *"log_safe: structural summary direction=\""*) ;;
             *) continue ;;

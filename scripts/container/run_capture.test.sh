@@ -453,7 +453,7 @@ SH
 canned_trace() {
     local id="019eab77-0000-4000-8000-0000000000e1"
     local span="request{method=POST path=/v1/messages request_id=$id}"
-    local target="routectl_core::log_safe:"
+    local target=$'\x1b[2mroutectl_core::log_safe\x1b[0m\x1b[2m:\x1b[0m'
     local fields='model=claude-sonnet-4-5 max_tokens=64 thinking_shape=disabled output_config_effort= tool_choice_shape= cache_control_count=0 messages_len=2 tools_len=0 anthropic_beta= provider_extras_keys= stream=false'
     local structural="kind=\"ingress\" id=\"anthropic\" $fields"
     local structural_out="kind=\"anthropic\" id=\"anthropic-api:anthropic\" $fields"

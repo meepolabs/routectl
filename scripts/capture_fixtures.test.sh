@@ -40,12 +40,27 @@ mapfile -t KNOWN_INGRESS_KINDS < <(
         "$INGRESS_KINDS" | sed -n 's/^ *"\([^"]*\)" *$/\1/p'
 )
 CLIENT_VERSION="$HERE/drivers/lib/client_version.py"
+CELL_EVIDENCE="$HERE/drivers/lib/cell_evidence.py"
 
 # shellcheck source=scripts/drivers/lib/structural_shape.sh
 . "$HERE/drivers/lib/structural_shape.sh"
 EMITTER_SRC="$(structural_emitter_source "$HERE/..")"
 
 fails=0
+
+# An event target as the daemon's formatter draws it with styling on: the
+# dimmed target and the dimmed `:`. The rig selects trace lines only on the
+# log_safe target in this form, so every canned trace below writes it; the
+# plain spelling appears only where a test plants it as field text.
+styled_target() {
+    printf '\033[2m%s\033[0m\033[2m:\033[0m' "$1"
+}
+LOG_SAFE_S="$(styled_target routectl_core::log_safe)"
+
+# ANSI styling removed, for assertions that read a canned trace as text.
+strip_styling() {
+    sed 's/\x1b\[[0-9;]*m//g'
+}
 
 # One synthetic trace covering a NON-STREAM request: ingress body,
 # outgoing body (carrying provider_kind + the model/alias spans),
@@ -67,7 +82,7 @@ fails=0
 trace_non_stream() {
     local id="$1" kind="$2" ingress="${3:-anthropic}"
     local span="request{method=POST path=/v1/messages request_id=$id}"
-    local target="routectl_core::log_safe:"
+    local target="$LOG_SAFE_S"
     cat <<TRACE
 2026-08-25T10:00:00.000000Z TRACE $span:messages{ingress="$ingress"}: $target ingress request body ingress="$ingress" body={"model":"claude-sonnet-4-5"} redact_prompts_enabled=false
 2026-08-25T10:00:00.100000Z TRACE $span:complete_with_options{alias=my-alias}:complete{provider=$kind:p model=claude-sonnet-4-5}: $target outgoing request body provider_kind="$kind" provider=p body={"model":"claude-sonnet-4-5"} redact_prompts_enabled=false
@@ -92,7 +107,7 @@ TRACE
 trace_stream() {
     local id="$1" kind="$2"
     local span="request{method=POST path=/v1/messages request_id=$id}"
-    local target="routectl_core::log_safe:"
+    local target="$LOG_SAFE_S"
     cat <<TRACE
 2026-08-25T11:00:00.000000Z TRACE $span:messages{ingress="anthropic"}: $target ingress request body ingress="anthropic" body={"model":"claude-sonnet-4-5","stream":true} redact_prompts_enabled=false
 2026-08-25T11:00:00.100000Z TRACE $span:complete_with_options{alias=my-alias}:stream{provider=$kind:p model=claude-sonnet-4-5}: $target outgoing request body provider_kind="$kind" provider=p body={"model":"claude-sonnet-4-5","stream":true} redact_prompts_enabled=false
@@ -105,7 +120,7 @@ TRACE
 
 # One REAL structural-summary line for one direction, in the layout
 # log_safe.rs emits: the event message is `structural summary` right after
-# the `routectl_core::log_safe: ` target, and `direction=` is a field of
+# the styled `routectl_core::log_safe` target, and `direction=` is a field of
 # the same line. `$3` is the sub-second part of the timestamp so a caller
 # can order the two directions.
 #
@@ -129,8 +144,8 @@ structural_line() {
         kind="ingress"
         source="anthropic"
     fi
-    printf '%s TRACE %s: routectl_core::log_safe: structural summary direction="%s" kind="%s" id="%s" model=claude-sonnet-4-5 max_tokens=64 thinking_shape=disabled output_config_effort= tool_choice_shape= cache_control_count=0 messages_len=2 tools_len=0 anthropic_beta= provider_extras_keys= stream=false\n' \
-        "2026-08-25T10:00:00.${frac}Z" "$span" "$direction" "$kind" "$source"
+    printf '%s TRACE %s: %s structural summary direction="%s" kind="%s" id="%s" model=claude-sonnet-4-5 max_tokens=64 thinking_shape=disabled output_config_effort= tool_choice_shape= cache_control_count=0 messages_len=2 tools_len=0 anthropic_beta= provider_extras_keys= stream=false\n' \
+        "2026-08-25T10:00:00.${frac}Z" "$span" "$LOG_SAFE_S" "$direction" "$kind" "$source"
 }
 
 # A non-stream trace carrying BOTH request-side structural summaries --
@@ -155,7 +170,7 @@ trace_driver() {
 trace_stream_traced() {
     local id="$1" kind="$2"
     local span="request{method=POST path=/v1/messages request_id=$id}"
-    local target="routectl_core::log_safe:"
+    local target="$LOG_SAFE_S"
     trace_stream "$id" "$kind"
     cat <<TRACE
 2026-08-25T11:00:00.300000Z TRACE $span:messages{ingress="anthropic"}: $target upstream success body provider_kind="$kind" provider="anthropic-api:p" body={"id":"msg_s","type":"message","content":[{"type":"text","text":"ok"}]} redact_prompts_enabled=false
@@ -182,7 +197,7 @@ trace_driver_stream() {
 trace_driver_tools() {
     local id="$1"
     local span="request{method=POST path=/v1/messages request_id=$id}"
-    local target="routectl_core::log_safe:"
+    local target="$LOG_SAFE_S"
     local body='{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"list the files"},{"role":"assistant","content":[{"type":"tool_use","id":"toolu_01","name":"Bash","input":{"command":"ls"}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_01","content":"notes.txt"}]}]}'
     printf '2026-08-25T10:00:00.000000Z TRACE %s:messages{ingress="anthropic"}: %s ingress request body ingress="anthropic" body=%s redact_prompts_enabled=false\n' \
         "$span" "$target" "$body"
@@ -233,8 +248,9 @@ capability_observe_line() {
     local id="$1" config_kind="${2:-anthropic-api}" key="${3:-prompt_caching}"
     local frac="${4:-250000}"
     local span="request{method=POST path=/v1/messages request_id=$id}"
-    printf '%s WARN %s:messages{ingress="anthropic"}:complete_with_options{alias=my-alias}: routectl_router::router::capability_observe: response-evidence capability observation acted event="observe" state_key=synthetic-state capability_key="%s" provider_kind="%s" evidence_class="cache_hit" direction="verified" signal_tier="self-identifying" source="live"\n' \
-        "2026-08-25T10:00:00.${frac}Z" "$span" "$key" "$config_kind"
+    printf '%s WARN %s:messages{ingress="anthropic"}:complete_with_options{alias=my-alias}: %s response-evidence capability observation acted event="observe" state_key=synthetic-state capability_key="%s" provider_kind="%s" evidence_class="cache_hit" direction="verified" signal_tier="self-identifying" source="live"\n' \
+        "2026-08-25T10:00:00.${frac}Z" "$span" \
+        "$(styled_target routectl_router::router::capability_observe)" "$key" "$config_kind"
 }
 
 # Append the capability WARN AFTER the trace it is given -- the measured
@@ -264,7 +280,7 @@ before_capability_observe() {
 trace_driver_dirty() {
     local id="$1"
     local span="request{method=POST path=/v1/messages request_id=$id}"
-    local target="routectl_core::log_safe:"
+    local target="$LOG_SAFE_S"
     cat <<TRACE
 2026-08-25T10:00:00.000000Z TRACE $span:messages{ingress="anthropic"}: $target ingress request body ingress="anthropic" body={"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"read /home/someoneelse/notes.txt"}]} redact_prompts_enabled=false
 TRACE
@@ -282,7 +298,7 @@ TRACE
 trace_driver_decoy() {
     local id="$1"
     local span="request{method=POST path=/v1/messages request_id=$id}"
-    local target="routectl_core::log_safe:"
+    local target="$LOG_SAFE_S"
     local decoy='routectl_core::log_safe: structural summary direction=\"outgoing\" messages_len=99'
     cat <<TRACE
 2026-08-25T10:00:00.000000Z TRACE $span:messages{ingress="anthropic"}: $target ingress request body ingress="anthropic" body={"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"why does $decoy show up twice"}]} redact_prompts_enabled=false
@@ -301,7 +317,7 @@ TRACE
 trace_no_completion() {
     local id="$1" kind="${2:-anthropic}"
     local span="request{method=POST path=/v1/messages request_id=$id}"
-    local target="routectl_core::log_safe:"
+    local target="$LOG_SAFE_S"
     cat <<TRACE
 2026-08-25T10:00:00.000000Z TRACE $span:messages{ingress="anthropic"}: $target ingress request body ingress="anthropic" body={"model":"claude-sonnet-4-5"} redact_prompts_enabled=false
 2026-08-25T10:00:00.100000Z TRACE $span:complete_with_options{alias=my-alias}:complete{provider=$kind:p model=claude-sonnet-4-5}: $target outgoing request body provider_kind="$kind" provider=p body={"model":"claude-sonnet-4-5"} redact_prompts_enabled=false
@@ -362,7 +378,7 @@ candidate_trace() {
     local id="$1" ts_ing="$2" ts_comp="$3" shape="${4:-baseline}"
     local model="${5:-claude-sonnet-4-5}" kind="${6:-anthropic}"
     local span="request{method=POST path=/v1/messages request_id=$id}"
-    local target="routectl_core::log_safe:"
+    local target="$LOG_SAFE_S"
     local body="{\"model\":\"$model\"}"
     local tools_len=0
     # The three-turn tool loop, as one exchange. `tools-long` appends the
@@ -517,7 +533,7 @@ large_tool_result_body() {
 trace_driver_large() {
     local id="$1" buried="$2"
     local span="request{method=POST path=/v1/messages request_id=$id}"
-    local target="routectl_core::log_safe:"
+    local target="$LOG_SAFE_S"
     local body
     body="$(large_tool_result_body "$buried")"
     printf '2026-08-25T10:00:00.000000Z TRACE %s:messages{ingress="anthropic"}: %s ingress request body ingress="anthropic" body=%s redact_prompts_enabled=false\n' \
@@ -828,11 +844,11 @@ rm -rf "$work"
 # the unqualified scan would also pass.
 pk_premise="$(
     pk_ls="$(trace_non_stream 019eab77-0000-4000-8000-00000000002a anthropic |
-        grep -c 'routectl_core::log_safe:.*provider_kind="anthropic"')"
+        strip_styling | grep -c 'routectl_core::log_safe:.*provider_kind="anthropic"')"
     pk_warn="$(capability_observe_line 019eab77-0000-4000-8000-00000000002a |
-        grep -c 'routectl_router::router::capability_observe:.*provider_kind="anthropic-api"')"
+        strip_styling | grep -c 'routectl_router::router::capability_observe:.*provider_kind="anthropic-api"')"
     pk_warn_ls="$(capability_observe_line 019eab77-0000-4000-8000-00000000002a |
-        grep -c 'routectl_core::log_safe:')"
+        strip_styling | grep -c 'routectl_core::log_safe:')"
     printf '%s %s %s\n' "$pk_ls" "$pk_warn" "$pk_warn_ls"
 )"
 check "the two emitters really carry two spellings of one field name" "4 1 0" \
@@ -937,7 +953,7 @@ rm -rf "$work"
 # the WARN. Without it "no candidate" would pass on a trace that lost the
 # field everywhere, which says nothing about the anchor.
 check "the filter leg's trace carries the field ONLY on the capability WARN" "0 2" \
-    "$(printf '%s\n' "$pk_warn_only" |
+    "$(printf '%s\n' "$pk_warn_only" | strip_styling |
         awk '/routectl_core::log_safe:.*provider_kind=/ {ls++}
              /capability_observe:.*provider_kind=/ {w++}
              END {printf "%d %d\n", ls+0, w+0}')"
@@ -959,9 +975,6 @@ pk_msgs_rig="$(sed -n '/^PROVIDER_KIND_MESSAGES="/,/"$/p' "$RIG" |
     sed -e 's/^PROVIDER_KIND_MESSAGES="//' -e 's/"$//' | sort | tr '\n' '|')"
 check "the rig declares a non-empty provider-vocabulary message set" "1" \
     "$([ -n "$pk_msgs_rig" ] && echo 1 || echo 0)"
-pk_target_rig="$(sed -n 's/^PROVIDER_KIND_TARGET="\(.*\)"$/\1/p' "$RIG")"
-check "the rig's provider-vocabulary target is the log_safe module target" \
-    "routectl_core::log_safe: " "$pk_target_rig"
 log_safe_src="$HERE/../crates/routectl-core/src/log_safe.rs"
 if [ -f "$log_safe_src" ]; then
     # Every tracing macro invocation in log_safe.rs that passes a
@@ -1004,8 +1017,42 @@ PY
 else
     echo "PASS: no crates tree in this checkout; the emitter-set weld is not asserted"
 fi
-unset pk_msgs_rig pk_target_rig log_safe_src
+unset pk_msgs_rig log_safe_src
 
+
+# --- the rig's styled anchor is the per-cell evidence extractor's -----
+#
+# The rig and scripts/drivers/lib/cell_evidence.py both select log_safe
+# events on the styled target, in two languages and with no shared parser.
+# The rig's literal is read out of its source, its escapes expanded the way
+# bash expands them, and matched against the extractor's own pattern: it
+# must be one whole match of STYLED_TARGET whose captured target is
+# LOG_SAFE_TARGET, so the two cannot drift apart.
+anchor_weld() {
+    python3 -I - "$1" "$CELL_EVIDENCE" <<'PY'
+import importlib.util
+import sys
+
+spec = importlib.util.spec_from_file_location("cell_evidence", sys.argv[2])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+m = mod.STYLED_TARGET.fullmatch(sys.argv[1])
+print("weld" if m and m.group(1) == mod.LOG_SAFE_TARGET else "drift")
+PY
+}
+rig_anchor_literal() {
+    local quoted
+    quoted="$(sed -n "s/^LOG_SAFE_STYLED_TARGET=\\\$'\(.*\)'\$/\1/p" "$1")"
+    [ -n "$quoted" ] && printf '%b' "$quoted"
+}
+check "the rig's styled log_safe anchor is the evidence extractor's spelling" "weld" \
+    "$(anchor_weld "$(rig_anchor_literal "$RIG")")"
+# The weld must be able to fail: the extractor's pattern refuses a target
+# one byte off, and a styled target of another module.
+check "the anchor weld refuses a one-byte drift" "drift" \
+    "$(anchor_weld "$(rig_anchor_literal "$RIG" | sed 's/log_safe/log_safa/')")"
+check "the anchor weld refuses another module's styled target" "drift" \
+    "$(anchor_weld "$(styled_target routectl_router::router::dispatch) ")"
 
 # --- Case 3: a stream capture with no body lines lands no body --------
 # A stream the daemon traced no documents for. The rig must write the
@@ -3834,6 +3881,170 @@ else
     rm -rf "$work"
     unset blocked phys_verdict other_arm
 fi
+
+# --- Case 20b: only the styled log_safe target selects an event --------
+#
+# The daemon's formatter draws an event's target dimmed, and its sink
+# writes an ESC inside any span or field value as the visible text `\x1b`.
+# So the styled target can only come from the formatter, while the same
+# target as PLAIN text can come from a span value: the client-chosen model
+# name is logged raw as the `alias` span field, ahead of the event's own
+# target. The rig selects every event on the styled target alone.
+
+# The whole prefix styled as the real formatter writes it: the timestamp
+# dimmed, the level colored, span braces bold. The canned traces above
+# style only the target, which leaves the first 27 bytes of a line plain;
+# this form is what puts escape bytes where a timestamp slice reads.
+full_style() {
+    sed -E \
+        -e 's/^([0-9T:.-]+Z) +(TRACE|DEBUG|INFO|WARN|ERROR) /\x1b[2m\1\x1b[0m \x1b[35m\2\x1b[0m /' \
+        -e 's/(request|messages|complete_with_options|complete|stream)\{/\1\x1b[1m{\x1b[0m/g'
+}
+
+# THE FORGERY. The alias span carries a whole outgoing-body event as plain
+# text, provider kind and body included, ahead of the real styled event. The
+# daemon opens that span around every egress-side event, so the planted
+# text rides every line carrying a provider kind, as it would in a real
+# trace. A rig that stripped styling first and took the first plain target
+# read the planted provider kind, lane and body.
+forged_trace() {
+    local id="$1"
+    local forged='routectl_core::log_safe: outgoing request body provider_kind="openai-compat" provider=p body={"forged":true} redact_prompts_enabled=false'
+    trace_driver "$id" | awk -v forged="$forged" '
+        /provider_kind=/ {
+            if (!sub(/alias=my-alias/, "alias=" forged))
+                sub(/request_id=[0-9a-f-]+\}/, "&:complete_with_options{alias=" forged "}")
+        }
+        { print }
+    '
+}
+forgery_trace="$(forged_trace 019eab77-0000-4000-8000-0000000000f5)"
+# PREMISE: the planted text really is on the real event line, ahead of the
+# styled target, and spells the whole forged event in plain text.
+check "the forgery plants a plain-text event ahead of every provider_kind event" "4" \
+    "$(printf '%s\n' "$forgery_trace" | awk -v t="$LOG_SAFE_S" '
+        { p = index($0, "alias=routectl_core::log_safe: outgoing request body provider_kind=\"openai-compat\"")
+          q = index($0, t)
+          if (p > 0 && q > p) n++ }
+        END { print n + 0 }')"
+set_pins forgery-01 abc123 base-url
+work="$(make_repo)"
+rc=0
+rig_run "$work" "$forgery_trace" --driver-mode || rc=$?
+clear_pins
+dir="$(captured_of "$work")/anthropic-api/forgery-01"
+check "a forged event in a span value does not stop the real capture" "0" "$rc"
+check "the forged span value does not set provider_kind" "anthropic" \
+    "$([ -f "$dir/meta.json" ] && meta_get "$dir/meta.json" provider_kind)"
+check "the forged span value does not set the lane" "anthropic-api" \
+    "$([ -f "$dir/meta.json" ] && meta_get "$dir/meta.json" lane)"
+check "the outgoing body is the real event's, not the forged one" \
+    '{"model":"claude-sonnet-4-5"}' "$(cat "$dir/outgoing_request.json" 2>/dev/null)"
+rm -rf "$work"
+
+# UNSTYLED-ONLY: a daemon run with NO_COLOR set writes every target as
+# plain text, which a span value can forge. Such a log lands nothing, and
+# the rig says why rather than reporting a quiet window.
+unstyled_trace="$(trace_driver 019eab77-0000-4000-8000-0000000000f6 | strip_styling)"
+check "the unstyled trace really carries no escape byte" "0" \
+    "$(printf '%s\n' "$unstyled_trace" | grep -c $'\x1b')"
+work="$(make_repo)"
+rc=0
+rig_run_split "$work" "$unstyled_trace" || rc=$?
+check "an unstyled-only trace in live-box mode exits 0" "0" "$rc"
+check "an unstyled-only trace creates no fixture dir" "0" \
+    "$(find "$(captured_of "$work")" -mindepth 1 -maxdepth 1 -type d ! -name '.*' | wc -l | tr -d ' ')"
+check_log "the rig says no styled events were found" \
+    "no styled log_safe events found" "$work/rig.err"
+check_log "and points at NO_COLOR" "NO_COLOR unset" "$work/rig.err"
+rm -rf "$work"
+set_pins unstyled-01 abc123 base-url
+work="$(make_repo)"
+rc=0
+rig_run_split "$work" "$unstyled_trace" --driver-mode || rc=$?
+clear_pins
+check "an unstyled-only trace in driver mode takes the no-candidate exit" "3" "$rc"
+check "and lands no fixture" "no" \
+    "$([ -d "$(captured_of "$work")/anthropic-api/unstyled-01" ] && echo yes || echo no)"
+check_log "driver mode names the cause too" "no styled log_safe events found" "$work/rig.err"
+rm -rf "$work"
+# PAIRED CONTROL: the same trace, styled, lands, so the two legs above
+# are about styling and not about the trace.
+set_pins unstyled-01 abc123 base-url
+work="$(make_repo)"
+rc=0
+rig_run_split "$work" "$(trace_driver 019eab77-0000-4000-8000-0000000000f6)" --driver-mode || rc=$?
+clear_pins
+check "the same trace with styling lands" "0 yes" \
+    "$rc $([ -d "$(captured_of "$work")/anthropic-api/unstyled-01" ] && echo yes || echo no)"
+if grep -q "no styled log_safe events" "$work/rig.err"; then
+    echo "FAIL: a styled trace was reported as unstyled"
+    fails=$((fails + 1))
+else
+    echo "PASS: a styled trace is not reported as unstyled"
+fi
+rm -rf "$work"
+
+# FULLY STYLED PREFIX: the timestamp the fixture records and the order the
+# candidates are taken in are read from the prefix with its styling
+# removed, never from the raw line's first bytes. The ordering trace is the
+# contradicting-order one: ingress order A then B, completion order B then A.
+styled_swap_trace="$(
+    candidate_trace "$SEL_ID_A" "$SEL_TS_ING_A" "$SEL_TS_COMP_B" baseline
+    candidate_trace "$SEL_ID_B" "$SEL_TS_ING_B" "$SEL_TS_COMP_A" baseline
+)"
+styled_swap_trace="$(printf '%s\n' "$styled_swap_trace" | full_style)"
+check "the fully styled trace opens every line with an escape byte" "0" \
+    "$(printf '%s\n' "$styled_swap_trace" | grep -vc $'^\x1b\\[2m2026-')"
+work="$(make_repo)"
+rc=0
+rig_run "$work" "$styled_swap_trace" || rc=$?
+captured="$(captured_of "$work")"
+check "a fully styled trace lands both candidates" "0 yes yes" \
+    "$rc $([ -d "$captured/$SEL_ID_A" ] && echo yes || echo no) $([ -d "$captured/$SEL_ID_B" ] && echo yes || echo no)"
+check "captured_at_ts is the plain completion timestamp" "$SEL_TS_COMP_B" \
+    "$([ -f "$captured/$SEL_ID_A/meta.json" ] && meta_get "$captured/$SEL_ID_A/meta.json" captured_at_ts)"
+check "candidates are taken in ingress order under a styled prefix" \
+    "$SEL_ID_A $SEL_ID_B " \
+    "$(python3 -c 'import json,sys
+print("".join(json.loads(l)["request_id"] + " " for l in open(sys.argv[1]) if l.strip()))' \
+        "$captured/manifest.jsonl" 2>/dev/null)"
+check "structural.txt carries no styling" "0" \
+    "$(grep -c $'\x1b' "$captured/$SEL_ID_A/structural.txt" 2>/dev/null)"
+rm -rf "$work"
+
+# QUOTED COMPLETION MARKERS: an ingress body quoting `stream summary` and
+# `upstream success body` is body text of another event. A non-stream
+# request whose body quotes both stays non-stream, and a request that never
+# completed is not made complete by its body quoting the markers.
+quote='a stream summary direction=\"upstream\" finish_reason=\"stop\" then upstream success body provider_kind=\"anthropic\"'
+quoting_trace() {
+    sed "s|ingress request body ingress=\"anthropic\" body={\"model\":\"claude-sonnet-4-5\"}|ingress request body ingress=\"anthropic\" body={\"model\":\"claude-sonnet-4-5\",\"messages\":[{\"role\":\"user\",\"content\":\"$quote\"}]}|"
+}
+quoted_trace="$(trace_driver 019eab77-0000-4000-8000-0000000000f7 | quoting_trace)"
+check "the quoting trace's ingress body really carries both markers" "1" \
+    "$(printf '%s\n' "$quoted_trace" | grep 'ingress request body' |
+        grep -F 'stream summary direction=' | grep -cF 'upstream success body')"
+work="$(run_rig "$quoted_trace")"
+meta="$(captured_of "$work")/019eab77-0000-4000-8000-0000000000f7/meta.json"
+check "a body quoting stream summary does not set stream=true" "False" \
+    "$([ -f "$meta" ] && meta_get "$meta" stream)"
+check "and writes no stream.txt line" "0" \
+    "$(cat "$(dirname "$meta")/stream.txt" 2>/dev/null | wc -l | tr -d ' ')"
+rm -rf "$work"
+work="$(make_repo)"
+rc=0
+rig_run "$work" "$(trace_no_completion 019eab77-0000-4000-8000-0000000000f8 | quoting_trace)" || rc=$?
+check "a body quoting the completion markers does not complete a request" "0 no" \
+    "$rc $([ -d "$(captured_of "$work")/019eab77-0000-4000-8000-0000000000f8" ] && echo yes || echo no)"
+rm -rf "$work"
+# PAIRED CONTROL: a real stream summary event still marks the stream.
+work="$(run_rig "$(trace_driver_stream 019eab77-0000-4000-8000-0000000000f9)")"
+meta="$(captured_of "$work")/019eab77-0000-4000-8000-0000000000f9/meta.json"
+check "a real stream summary event sets stream=true" "True" \
+    "$([ -f "$meta" ] && meta_get "$meta" stream)"
+rm -rf "$work"
+unset forgery_trace unstyled_trace styled_swap_trace quoted_trace quote captured
 
 # --- Case 21: --help still renders the header ------------------------
 # The usage extraction is sentinel-delimited; a line-count range silently

@@ -12,6 +12,11 @@
 # meta.json records both `ingress_kind` and `provider_kind` so a
 # downstream consumer can dispatch on either.
 #
+# The log must come from a daemon running with ANSI styling on (NO_COLOR
+# unset): a trace line is read only when its event target is the styled
+# `routectl_core::log_safe` target, the one spelling no logged value can
+# forge. A log with no styled target lands nothing and says so on stderr.
+#
 # meta.json carries NO file-presence flags: which optional files a
 # fixture directory holds is read from the directory listing by the
 # replay loader. The tmp-then-rename promotion below already makes a
@@ -493,19 +498,30 @@ json_escape() {
   printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
 }
 
-# The tracing target and the message set that OWN the provider vocabulary
-# normalize_lane maps. REPLICAS of the log_safe.rs module path and of the
-# four call sites that pass a `provider_kind` field: `trace_outgoing_body`,
-# `trace_upstream_success_body`, and the two header traces (HDR_MSG_OUTGOING
-# / HDR_MSG_UPSTREAM). Replicas because the rig runs in throwaway trees
-# carrying scripts/ and no crates/; the self-test welds each spelling to the
-# Rust source where that tree exists.
+# The log_safe event target exactly as the daemon's formatter draws it with
+# styling on: the dimmed target, then a dimmed `:` and a space. The log sink
+# writes any ESC inside span or event field text as the visible text `\x1b`,
+# so only the formatter can produce this byte sequence; the same target as
+# plain text can come from a span value (the client-chosen model name is
+# logged raw as the `alias` span field). Every trace line is therefore
+# selected on this literal and nothing else, and a log written with
+# NO_COLOR set selects nothing. A REPLICA of the spelling
+# scripts/drivers/lib/cell_evidence.py matches (`STYLED_TARGET` with
+# `LOG_SAFE_TARGET`); the self-test welds the two.
+LOG_SAFE_STYLED_TARGET=$'\x1b[2mroutectl_core::log_safe\x1b[0m\x1b[2m:\x1b[0m '
+LOG_SAFE_TARGET_TEXT="$(printf '%s' "$LOG_SAFE_STYLED_TARGET" | sed 's/\x1b\[[0-9;]*m//g')"
+
+# The message set that OWNS the provider vocabulary normalize_lane maps.
+# REPLICAS of the four log_safe call sites that pass a `provider_kind`
+# field: `trace_outgoing_body`, `trace_upstream_success_body`, and the two
+# header traces (HDR_MSG_OUTGOING / HDR_MSG_UPSTREAM). Replicas because the
+# rig runs in throwaway trees carrying scripts/ and no crates/; the
+# self-test welds each spelling to the Rust source where that tree exists.
 #
 # `upstream error body` is deliberately ABSENT: it is a DEBUG line on the
 # failure path, and a request whose upstream errored has no completion
 # marker, so it is never a candidate. Adding it would widen the anchor to a
 # line no in-scope request emits.
-PROVIDER_KIND_TARGET="routectl_core::log_safe: "
 PROVIDER_KIND_MESSAGES="outgoing request body
 upstream success body
 outgoing request headers
@@ -886,9 +902,6 @@ if [ ! -r "$LOG" ]; then
   exit 1
 fi
 
-# Sed pattern that strips ANSI color escapes.
-strip_ansi() { sed -E 's/\x1b\[[0-9;]*m//g'; }
-
 # Resume from the last captured timestamp (lexicographic compare works
 # on ISO-8601 with fixed-width timestamps).
 since="1970-01-01T00:00:00Z"
@@ -897,9 +910,43 @@ if [ "$FORCE" = 0 ] && [ -r "$MARKER" ]; then
   [ -z "$since" ] && since="1970-01-01T00:00:00Z"
 fi
 
-stripped="$(mktemp)"
-trap 'rm -f "$stripped"' EXIT
-strip_ansi < "$LOG" > "$stripped"
+# THE ONE SELECTION. Every reader below consumes this file and nothing
+# else: one record per trace line whose event target is the STYLED
+# log_safe target, written as `<prefix>TAB<event>`. The prefix is what the
+# formatter wrote before the target (timestamp, level, spans) and the event
+# is the message and its fields after it; ANSI styling is stripped from
+# both halves only after the line was selected. A raw TAB cannot occur in
+# either half before the split (the sink escapes it inside field text and
+# the formatter writes none), so the first TAB of a record is the boundary.
+# The FIRST styled target on the line is the event's own: span names are
+# drawn bold and the timestamp's dimmed run is followed by the level, so
+# nothing earlier on a line can spell it.
+select_events() {
+  STYLED_TARGET="$LOG_SAFE_STYLED_TARGET" awk '
+    BEGIN { target = ENVIRON["STYLED_TARGET"] }
+    {
+      p = index($0, target)
+      if (p == 0) next
+      pre = substr($0, 1, p - 1)
+      ev = substr($0, p + length(target))
+      gsub(/\033\[[0-9;]*m/, "", pre)
+      gsub(/\033\[[0-9;]*m/, "", ev)
+      print pre "\t" ev
+    }
+  ' "$LOG"
+}
+
+events="$(mktemp)"
+trap 'rm -f "$events"' EXIT
+select_events > "$events"
+
+# A non-empty log with no styled log_safe event is a daemon run with
+# styling off. Nothing in it can be told apart from a span value spelling
+# a whole event, so it lands nothing; saying why here is the only place a
+# reader learns that the zero below is not a quiet window.
+if [ -s "$LOG" ] && [ ! -s "$events" ]; then
+  echo "capture_fixtures: no styled log_safe events found in $LOG; the daemon must run with ANSI styling on (NO_COLOR unset), since only the styled target cannot be forged by a span value" >&2
+fi
 
 # Collect request_ids that have a completion marker after `since` and
 # whose trace also carries an `ingress request body` and a
@@ -943,60 +990,58 @@ strip_ansi < "$LOG" > "$stripped"
 # ordering key is never empty for a row this prints.
 in_scope_ids() {
   awk -v since="$since" \
-      -v pk_target="$PROVIDER_KIND_TARGET" \
       -v pk_messages="$PROVIDER_KIND_MESSAGES" '
     BEGIN {
       pk_msg_n = split(pk_messages, pk_msg, "\n")
     }
-    /ingress request body ingress="[^"]+"/ {
-      if (match($0, /request_id=[0-9a-f-]+/)) {
-        id = substr($0, RSTART+11, RLENGTH-11)
-        ingress_seen[id] = 1
-        # FIRST occurrence only: a retried or re-logged body line must not
-        # move a request later in the order.
-        if (!(id in ingress_ts)) {
-          ingress_ts[id] = substr($0, 1, 27)
-        }
-        if (match($0, /ingress="[^"]+"/)) {
-          ingress_kind[id] = substr($0, RSTART+9, RLENGTH-10)
-        }
+    # Every record is one selected log_safe event: `pre` is the stripped
+    # text before the styled target (timestamp, level, spans) and `ev` the
+    # message and fields after it. The request id is read from the span
+    # prefix only, and every message test is a prefix test on `ev`, so a
+    # body or a span value quoting a message selects nothing.
+    {
+      t = index($0, "\t")
+      if (t == 0) next
+      pre = substr($0, 1, t - 1)
+      ev = substr($0, t + 1)
+      if (!match(pre, /request_id=[0-9a-f-]+/)) next
+      id = substr(pre, RSTART+11, RLENGTH-11)
+      ts = substr(pre, 1, 27)  # ISO-8601, microsecond precision
+    }
+    # The ingress token is the first field of the event, right after the
+    # message, never the like-named field of the enclosing span.
+    substr(ev, 1, 21) == "ingress request body " && match(substr(ev, 22), /^ingress="[^"]+"/) {
+      ingress_seen[id] = 1
+      ingress_kind[id] = substr(ev, 22 + 9, RLENGTH - 10)
+      # FIRST occurrence only: a retried or re-logged body line must not
+      # move a request later in the order.
+      if (!(id in ingress_ts)) {
+        ingress_ts[id] = ts
       }
     }
-    /provider_kind="[^"]+"/ {
-      # THE EMITTER ANCHOR. Only lines whose message -- at the position
-      # right after the FIRST log_safe target -- is one of the
+    {
+      # THE EMITTER ANCHOR. Only events whose message is one of the
       # provider-vocabulary messages may set this. A capability
       # observation carries the same field name in the config-entry
-      # vocabulary and is skipped here, and a body that quotes one of
-      # these lines sits past the first target occurrence so it can never
-      # select either.
-      p = index($0, pk_target)
-      if (p > 0 && match($0, /request_id=[0-9a-f-]+/)) {
-        id = substr($0, RSTART+11, RLENGTH-11)
-        rest = substr($0, p + length(pk_target))
-        for (i = 1; i <= pk_msg_n; i++) {
-          if (substr(rest, 1, length(pk_msg[i])) != pk_msg[i]) continue
-          # First occurrence WITHIN the matched message: the field region
-          # precedes body=, so a body copy of the field cannot be read.
-          if (match(rest, /provider_kind="[^"]+"/)) {
-            provider_kind[id] = substr(rest, RSTART+15, RLENGTH-16)
-          }
-          break
+      # vocabulary under another target and was never selected; the first
+      # occurrence within the matched message is the field, because the
+      # field region precedes body=.
+      for (i = 1; i <= pk_msg_n; i++) {
+        if (substr(ev, 1, length(pk_msg[i])) != pk_msg[i]) continue
+        if (match(ev, /provider_kind="[^"]+"/)) {
+          provider_kind[id] = substr(ev, RSTART+15, RLENGTH-16)
         }
+        break
       }
     }
-    /upstream success body|stream summary/ {
-      if (match($0, /request_id=[0-9a-f-]+/)) {
-        id = substr($0, RSTART+11, RLENGTH-11)
-        ts = substr($0, 1, 27)  # ISO-8601 with millisecond precision
-        # `>=` (not `>`) so two requests completing in the same
-        # millisecond are not dropped on the next run. The
-        # `[ -d "$OUT/$id" ] && continue` check downstream
-        # prevents re-capturing the request whose ts matches the
-        # marker.
-        if (ts >= since) {
-          completed[id] = ts
-        }
+    substr(ev, 1, 21) == "upstream success body" || substr(ev, 1, 14) == "stream summary" {
+      # `>=` (not `>`) so two requests completing in the same
+      # millisecond are not dropped on the next run. The
+      # `[ -d "$OUT/$id" ] && continue` check downstream
+      # prevents re-capturing the request whose ts matches the
+      # marker.
+      if (ts >= since) {
+        completed[id] = ts
       }
     }
     END {
@@ -1016,7 +1061,7 @@ in_scope_ids() {
         }
       }
     }
-  ' "$stripped" | sort -k1,1 | cut -f2-
+  ' "$events" | sort -k1,1 | cut -f2-
 }
 
 # Atomically move a staged directory onto its landing path. The single
@@ -1095,24 +1140,57 @@ write_fixture() {
   # to an absolute path at the filesystem root.
   tmp="$(mktemp -d "$OUT/.tmp.$id.XXXXXX")" || return 1
 
-  # Pull every line for this request.
+  # Every selected event of this request (`<prefix>TAB<event>` records,
+  # see select_events), keyed exactly as in_scope_ids keys them: the FIRST
+  # `request_id=` of the span prefix, the root request span's own field. So
+  # neither a body nor an inner span value naming the id contributes a
+  # record.
   local lines
-  lines="$(grep -F "request_id=$id" "$stripped" || true)"
+  lines="$(awk -v id="$id" '
+    {
+      t = index($0, "\t")
+      if (!match(substr($0, 1, t - 1), /request_id=[0-9a-f-]+/)) next
+      if (substr($0, RSTART + 11, RLENGTH - 11) != id) next
+      print
+    }
+  ' "$events")"
   if [ -z "$lines" ]; then
     rm -rf "$tmp"
     return 0
   fi
 
-  # meta.json: high-level fields.
-  local alias model
-  alias="$(echo "$lines" | grep -oE '_with_options\{alias=[a-z0-9_-]+' | head -1 | sed 's/.*alias=//')"
-  model="$(echo "$lines" | grep -oE '(complete|stream)\{provider=[^ ]+ model=[a-zA-Z0-9._:/-]+' | head -1 | sed 's/.*model=//')"
+  # This request's events whose message starts with `$1`. `$2`, when
+  # non-empty, must also occur in the fields after the message. `$3` picks
+  # the output: `line` (default) the first match as a trace line without
+  # styling (prefix, target, event), the form fixture text files carry;
+  # `lines` every match in that form; `event` the first match's message
+  # and fields only, so a field read off it can never come from a span.
+  request_events() {
+    printf '%s\n' "$lines" | awk -v needle="$1" -v field="${2:-}" \
+                                  -v out="${3:-line}" -v target="$LOG_SAFE_TARGET_TEXT" '
+      {
+        t = index($0, "\t")
+        ev = substr($0, t + 1)
+        if (substr(ev, 1, length(needle)) != needle) next
+        if (field != "" && index(substr(ev, length(needle) + 1), field) == 0) next
+        print (out == "event" ? ev : substr($0, 1, t - 1) target ev)
+        if (out != "lines") exit
+      }
+    '
+  }
+
+  # meta.json: high-level fields. Alias and model are span fields, read
+  # from the span prefix of this request's selected events only.
+  local spans alias model
+  spans="$(printf '%s\n' "$lines" | cut -f1)"
+  alias="$(echo "$spans" | grep -oE '_with_options\{alias=[a-z0-9_-]+' | head -1 | sed 's/.*alias=//')"
+  model="$(echo "$spans" | grep -oE '(complete|stream)\{provider=[^ ]+ model=[a-zA-Z0-9._:/-]+' | head -1 | sed 's/.*model=//')"
   local stream_flag finish input_tokens output_tokens total_tokens
   stream_flag="false"
-  if echo "$lines" | grep -q 'stream summary'; then
+  if [ -n "$(request_events 'stream summary')" ]; then
     stream_flag="true"
     local ss
-    ss="$(echo "$lines" | grep 'stream summary direction="upstream"' | head -1)"
+    ss="$(request_events 'stream summary' 'direction="upstream"' event)"
     finish="$(echo "$ss" | grep -oE 'finish_reason="[^"]+"' | cut -d= -f2 | tr -d '"' || echo unknown)"
     input_tokens="$(echo "$ss" | grep -oE 'prompt_tokens=[0-9]+' | cut -d= -f2 || echo 0)"
     output_tokens="$(echo "$ss" | grep -oE 'completion_tokens=[0-9]+' | cut -d= -f2 || echo 0)"
@@ -1121,31 +1199,24 @@ write_fixture() {
 
   # Body extraction. The tracing line layout is
   #
-  #   TS LEVEL spans: routectl_core::log_safe: <message> <fields...> body=<JSON> redact_prompts_enabled=<bool>
+  #   TS LEVEL spans: <styled log_safe target> <message> <fields...> body=<JSON> redact_prompts_enabled=<bool>
   #
-  # We ANCHOR on the structural message position: find the first
-  # `routectl_core::log_safe: ` (the tracing target, emitted exactly once
-  # per line) and require the message immediately after it to START with
-  # the needle. This is what keeps capture correct even when the request
-  # BODY itself contains the needle text or a quoted routectl log line
-  # (e.g. a coding session about routectl's own logging): content copies
-  # live after `body=`, past the first target occurrence, so they can
-  # never select the wrong line. Within the matched message we take the
-  # FIRST `body=` (the real field -- the message text and the fields
-  # before it carry no `body=`) to end-of-line, then strip the trailing
+  # We ANCHOR on the event boundary select_events found: the message right
+  # after the styled target must START with the needle. This is what keeps
+  # capture correct even when the request BODY itself contains the needle
+  # text or a quoted routectl log line (e.g. a coding session about
+  # routectl's own logging): content copies live after `body=`, and a span
+  # value spelling the target sits before the styled one, so neither can
+  # select the wrong line. Within the matched message we take the FIRST
+  # `body=` (the real field -- the message text and the fields before it
+  # carry no `body=`) to end-of-line, then strip the trailing
   # `redact_prompts_enabled=<bool>` field.
   extract_body() {
-    local needle="$1"
-    echo "$lines" | awk -v needle="$needle" -v target="routectl_core::log_safe: " '
+    request_events "$1" '' event | awk '
       {
-        p = index($0, target)
-        if (p == 0) next
-        mstart = p + length(target)
-        if (substr($0, mstart, length(needle)) != needle) next
-        rest = substr($0, mstart)
-        i = index(rest, "body=")
+        i = index($0, "body=")
         if (i == 0) next
-        val = substr(rest, i + 5)
+        val = substr($0, i + 5)
         sub(/ redact_prompts_enabled=(true|false)$/, "", val)
         print val
         exit
@@ -1158,22 +1229,16 @@ write_fixture() {
   # four canonical needles are the HDR_MSG_* consts there, and `headers`
   # is the LAST field on the line. Same structural anchoring as
   # extract_body -- match the needle only at the message position right
-  # after the first `routectl_core::log_safe: `, so a header needle never
-  # selects a body line (or a body-content copy of the needle) -- then
-  # take everything after the first `headers=` to end-of-line (only a
-  # trailing space to strip; header lines carry no `redact_prompts_enabled`).
+  # after the styled target, so a header needle never selects a body line
+  # (or a body-content copy of the needle) -- then take everything after
+  # the first `headers=` to end-of-line (only a trailing space to strip;
+  # header lines carry no `redact_prompts_enabled`).
   extract_headers() {
-    local needle="$1"
-    echo "$lines" | awk -v needle="$needle" -v target="routectl_core::log_safe: " '
+    request_events "$1" '' event | awk '
       {
-        p = index($0, target)
-        if (p == 0) next
-        mstart = p + length(target)
-        if (substr($0, mstart, length(needle)) != needle) next
-        rest = substr($0, mstart)
-        i = index(rest, "headers=")
+        i = index($0, "headers=")
         if (i == 0) next
-        val = substr(rest, i + 8)
+        val = substr($0, i + 8)
         sub(/[[:space:]]+$/, "", val)
         print val
         exit
@@ -1228,8 +1293,8 @@ write_fixture() {
   # Structural summary lines, ONE PER REQUEST-SIDE DIRECTION.
   #
   # Anchored the same way as extract_body: the needle must sit at the
-  # message position right after the first `routectl_core::log_safe: `,
-  # and the direction is matched in the FIELDS of that same line (the
+  # message position right after the styled target, and the direction is
+  # matched in the FIELDS of that same event (the
   # `direction=` precedent is the stream-summary selection below). An
   # unanchored `grep 'structural summary' | head -2` selected an ingress
   # request BODY line whose JSON content happened to carry the phrase and
@@ -1239,21 +1304,7 @@ write_fixture() {
   # makes content copies unselectable, and picking each direction
   # explicitly makes the selection independent of line order and count.
   extract_structural() {
-    local direction="$1"
-    echo "$lines" | awk -v direction="$direction" \
-                        -v needle="structural summary" \
-                        -v target="routectl_core::log_safe: " '
-      {
-        p = index($0, target)
-        if (p == 0) next
-        mstart = p + length(target)
-        if (substr($0, mstart, length(needle)) != needle) next
-        rest = substr($0, mstart + length(needle))
-        if (index(rest, "direction=\"" direction "\"") == 0) next
-        print
-        exit
-      }
-    '
+    request_events 'structural summary' "direction=\"$1\""
   }
 
   local s_ing s_out missing
@@ -1285,7 +1336,7 @@ write_fixture() {
   } > "$tmp/structural.txt"
 
   # Stream summary lines (two: upstream + egress direction).
-  echo "$lines" | grep 'stream summary' > "$tmp/stream.txt" || true
+  request_events 'stream summary' '' lines > "$tmp/stream.txt"
 
   # meta.json -- emit by hand to avoid jq dependency. ONE schema: every
   # key here is a key the replay loader's FixtureMeta reads, apart from

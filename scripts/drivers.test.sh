@@ -1413,7 +1413,7 @@ done
 canned_trace() {
     local id="019eab77-0000-4000-8000-0000000000e2"
     local span="request{method=POST path=/v1/messages request_id=$id}"
-    local target="routectl_core::log_safe:"
+    local target=$'\x1b[2mroutectl_core::log_safe\x1b[0m\x1b[2m:\x1b[0m'
     local fields='model=claude-sonnet-4-5 max_tokens=64 thinking_shape=disabled output_config_effort= tool_choice_shape= cache_control_count=0 messages_len=2 tools_len=0 anthropic_beta= provider_extras_keys= stream=false'
     local structural="kind=\"ingress\" id=\"anthropic\" $fields"
     local structural_out="kind=\"anthropic\" id=\"anthropic-api:anthropic\" $fields"
@@ -1453,7 +1453,7 @@ canned_trace_tools() {
 canned_trace_openai_responses_tools() {
     local id="019eab77-0000-4000-8000-0000000000f3"
     local span="request{method=POST path=/v1/responses request_id=$id}"
-    local target="routectl_core::log_safe:"
+    local target=$'\x1b[2mroutectl_core::log_safe\x1b[0m\x1b[2m:\x1b[0m'
     local body='{"model":"gpt-5","input":[{"role":"user","content":"list the files"},{"type":"function_call","call_id":"call_01","name":"Bash","arguments":"{\"command\":\"ls\"}"},{"type":"function_call_output","call_id":"call_01","output":"notes.txt"}]}'
     local fields='model=gpt-5 max_tokens=64 thinking_shape= output_config_effort= tool_choice_shape= cache_control_count=0 messages_len=3 tools_len=16 anthropic_beta= provider_extras_keys= stream=false'
     local structural="kind=\"ingress\" id=\"openai-responses\" $fields"
@@ -1480,7 +1480,7 @@ TRACE
 canned_trace_openai_chat_tools() {
     local id="019eab77-0000-4000-8000-0000000000f4"
     local span="request{method=POST path=/v1/chat/completions request_id=$id}"
-    local target="routectl_core::log_safe:"
+    local target=$'\x1b[2mroutectl_core::log_safe\x1b[0m\x1b[2m:\x1b[0m'
     local body='{"model":"gpt-4o","messages":[{"role":"user","content":"list the files"},{"role":"assistant","tool_calls":[{"id":"call_01","type":"function","function":{"name":"Bash","arguments":"{\"command\":\"ls\"}"}}]},{"role":"tool","tool_call_id":"call_01","content":"notes.txt"}]}'
     local fields='model=gpt-4o max_tokens=64 thinking_shape= output_config_effort= tool_choice_shape= cache_control_count=0 messages_len=3 tools_len=16 anthropic_beta= provider_extras_keys= stream=false'
     local structural="kind=\"ingress\" id=\"openai\" $fields"

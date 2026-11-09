@@ -613,6 +613,18 @@ day-to-day capture flow.
    the driver runner's capture sink, and the driven daemon is not a service
    unit, so nothing truncates or journals it.
 
+   **The sink must be styled: run the daemon with `NO_COLOR` unset.** The
+   rig selects a trace line only on the `routectl_core::log_safe` target as
+   the formatter draws it with styling on (dimmed target, dimmed `:`). The
+   log sink writes an ESC inside any span or field value as the visible
+   text `\x1b`, so no logged value can spell that styled target, while the
+   same target as plain text can come from a span value (the client-chosen
+   model name is logged raw as the `alias` span field). Styling is removed
+   only from a line already selected, and timestamps come from its
+   unstyled prefix. A log written with `NO_COLOR` set has no styled target
+   at all: the rig lands nothing from it and says so on stderr. The driver
+   runner boots its daemon with `NO_COLOR` unset for the same reason.
+
 4. **Run the capture script:**
 
    ```
