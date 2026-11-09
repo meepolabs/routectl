@@ -57,6 +57,7 @@ overlays merge, what's reserved.
   ([kill switch + recovery](#kill-switch-reduction-enabled-is-the-live-off-switch))
 - [Steady-state advisory trim (`[trim]`)](#steady-state-advisory-trim-trim)
 - [Pricing registry](#pricing-registry-registrypatternpricing)
+- [Refreshing the price table (`routectl prices refresh`)](#refreshing-the-price-table-routectl-prices-refresh)
 - [Catalog: prompt-cache economics](#catalog-prompt-cache-economics-routectl-catalog)
   ([retired `[cache_pricing]`](#retired-cache_pricing))
 - [Learned capability tempo (`[capability]`)](#learned-capability-tempo-capability)
@@ -3222,6 +3223,63 @@ The optional `provider` scope lets the same upstream id served by two
 different providers be priced differently -- give each a distinct key
 (the table is keyed by pattern string) and set `provider` on the scoped
 one.
+
+## Refreshing the price table (`routectl prices refresh`)
+
+`routectl prices refresh` downloads the models.dev price list
+(`https://models.dev/api.json`), converts and validates it, and replaces
+`prices.json` in the config folder (`$XDG_CONFIG_HOME/routectl`, else
+`~/.config/routectl`). It is the only network call routectl makes for
+prices, and nothing runs it automatically: the daemon only reads the file.
+
+```sh
+routectl prices refresh                        # default source
+routectl prices refresh --from ./api.json      # a local copy
+routectl prices refresh --from https://mirror.example/api.json
+```
+
+- The fetch is a plain GET on its own HTTP client: no credentials, no
+  cookies, no redirects (a 3xx is an error naming the target without its
+  userinfo, query or fragment), 5 s to connect and 15 s in total. The
+  usual `HTTPS_PROXY` / `ALL_PROXY` / `NO_PROXY` variables apply.
+- A source over 32 MiB is refused, whether a URL or a file.
+- A source that is not valid JSON, or holds no usable price, exits
+  non-zero and leaves the previous `prices.json` exactly as it was. A good
+  one is written to a temp file beside it, flushed, and renamed into place.
+- The command prints the model and provider counts and the table date.
+  The fetched URL is logged at INFO without userinfo, query or fragment.
+
+To keep prices current, schedule the command yourself. A daily cron entry:
+
+```cron
+17 4 * * * /usr/local/bin/routectl prices refresh
+```
+
+Or a systemd user timer (`~/.config/systemd/user/routectl-prices.service`
+and `routectl-prices.timer`, then `systemctl --user enable --now
+routectl-prices.timer`):
+
+```ini
+# routectl-prices.service
+[Unit]
+Description=Refresh the routectl price table
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/routectl prices refresh
+
+# routectl-prices.timer
+[Unit]
+Description=Refresh the routectl price table daily
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
 
 ## Catalog: prompt-cache economics (`routectl catalog`)
 

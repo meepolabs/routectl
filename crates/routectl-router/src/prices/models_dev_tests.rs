@@ -194,3 +194,17 @@ fn a_real_models_dev_slice_converts_and_selects_as_designed() {
         "a loopback listener never selects lmstudio"
     );
 }
+
+#[test]
+fn counts_report_listed_providers_and_kept_model_rows() {
+    let source = json!({
+        "a": { "models": { "m1": { "cost": { "input": 1 } }, "m2": { "cost": { "input": 2 } } } },
+        "b": { "models": { "m1": { "cost": { "input": 1 } }, "nocost": { "name": "x" } } },
+        "c": { "models": {} },
+    });
+
+    let table = convert(&source).expect("converts");
+
+    assert_eq!(table.provider_count(), 3);
+    assert_eq!(table.model_count(), 3);
+}

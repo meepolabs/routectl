@@ -8726,6 +8726,15 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
     serve-pickup note `catalog import` does. `verify_at`/`set_at` are
     re-exported `pub(crate)` (test-only) so `commands::catalog_import` reuses
     the writer cores in its own tests.
+- `src/commands/prices.rs` -- `routectl prices refresh [--from <url|file>]`:
+  the only network path for prices. Its own reqwest client (no default
+  headers, no cookie store, redirects off with a 3xx rendering only the
+  stripped Location, 5 s connect / 15 s total, userinfo removed from the URL)
+  or a bounded file read (metadata length plus `take(limit + 1)`), both capped
+  at `prices::MAX_INPUT_BYTES`; converts through `prices::from_models_dev`,
+  then writes `<config_dir>/prices.json` by same-directory temp, fsync,
+  rename, dir fsync. Logs the URL without userinfo, query or fragment; output
+  is counts and the table date. Tests in `prices_tests.rs`
 - `src/commands/catalog_import.rs` -- `routectl catalog import`: the opt-in,
   never-at-startup overlay refresh from the litellm + models.dev sources. This
   is the CLI fetch boundary (`reqwest`, ~10s timeout, one retry, no-redirect

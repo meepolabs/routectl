@@ -106,6 +106,16 @@ impl PriceTable {
         self.generated_at
     }
 
+    /// How many providers the table lists.
+    pub const fn provider_count(&self) -> usize {
+        self.providers.len()
+    }
+
+    /// How many model rows the table holds across every provider.
+    pub fn model_count(&self) -> usize {
+        self.providers.iter().map(|p| p.models.len()).sum()
+    }
+
     /// Prices for `upstream` served through `provider` (a `[providers]` key
     /// or a `[pools]` key) under `config`, selected as the module docs
     /// describe. `None` when no provider is selected or the selected provider

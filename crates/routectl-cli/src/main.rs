@@ -287,6 +287,11 @@ enum Cmd {
         #[command(subcommand)]
         action: CatalogCmd,
     },
+    /// Usage-cost price tables.
+    Prices {
+        #[command(subcommand)]
+        action: PricesCmd,
+    },
     /// Print MITM front-proxy env vars, or force a CA rotation.
     /// Requires a `[mitm]` config block.
     Rc {
@@ -563,6 +568,21 @@ enum CatalogCmd {
         /// Write the export to this file instead of stdout.
         #[arg(long)]
         out: Option<PathBuf>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum PricesCmd {
+    /// Download the models.dev price list (or read one from a file),
+    /// convert and validate it, and atomically replace `prices.json` in the
+    /// config folder. The only network call for prices; nothing runs it
+    /// automatically. A source that fails validation leaves the previous
+    /// file as it was and exits non-zero.
+    Refresh {
+        /// An http(s) URL or a file path holding a models.dev `api.json`
+        /// document. Defaults to `https://models.dev/api.json`.
+        #[arg(long)]
+        from: Option<String>,
     },
 }
 
@@ -987,6 +1007,15 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         },
+        Cmd::Prices {
+            action: PricesCmd::Refresh { from },
+        } => match commands::prices::run(from.as_deref()).await {
+            Ok(summary) => println!("{summary}"),
+            Err(e) => {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        },
         Cmd::Rc { action } => {
             let config = load_config(cli.config.as_deref())?;
             let result = match action {
@@ -1184,6 +1213,27 @@ mod tests {
                 action: CatalogCmd::List
             }
         ));
+    }
+
+    #[test]
+    fn prices_refresh_parses_with_and_without_a_source() {
+        let rows: [(&[&str], Option<&str>); 2] = [
+            (&["routectl", "prices", "refresh"], None),
+            (
+                &["routectl", "prices", "refresh", "--from", "api.json"],
+                Some("api.json"),
+            ),
+        ];
+        for (argv, expected) in rows {
+            let cli = Cli::parse_from(argv);
+            let Cmd::Prices {
+                action: PricesCmd::Refresh { from },
+            } = cli.cmd
+            else {
+                panic!("{argv:?} did not parse to prices refresh");
+            };
+            assert_eq!(from.as_deref(), expected, "{argv:?}");
+        }
     }
 
     /// Positive control for `removed_commands_are_rejected`: the `provider`

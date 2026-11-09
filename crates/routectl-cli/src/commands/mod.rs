@@ -1,5 +1,5 @@
 //! CLI subcommand implementations: test, config, login, logout, refresh,
-//! whoami, seat, usage, usage_downgrade, prompt_size, catalog, catalog_import, rc.
+//! whoami, seat, usage, usage_downgrade, prompt_size, catalog, catalog_import, prices, rc.
 //!
 //! `serve` is in `crate::server`. Each module here exposes one entry function
 //! called from `main.rs`'s clap match arms.
@@ -22,6 +22,7 @@ mod login_surface_availability;
 pub mod logout;
 pub mod opening_accuracy;
 pub mod parse_error_redaction;
+pub mod prices;
 pub(crate) mod pricing;
 pub mod probe;
 pub mod prompt_size;
