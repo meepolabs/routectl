@@ -63,8 +63,20 @@ pub struct ResponsesRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) service_tier: Option<String>,
 
+    /// The client's or operator's key when either set one, else the hex
+    /// SHA-256 of the inbound session key (see `extras.rs`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) prompt_cache_key: Option<String>,
+
+    /// Forwarded verbatim from `provider_extras`, only for a request the
+    /// Responses ingress produced and only on the auth surfaces that accept
+    /// it; the gate lives in `extras.rs`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) prompt_cache_options: Option<Value>,
+
+    /// Forwarded under the same gate as `prompt_cache_options`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) prompt_cache_retention: Option<Value>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) text: Option<TextControls>,

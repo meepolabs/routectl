@@ -230,8 +230,9 @@ Wire-shape notes for the chatgpt-oauth surface:
 - **store flag**: `store:false` sent by default on the chatgpt-oauth
   surface (codex parity).
 - **prompt_cache_key**: forwarded from `provider_extras["prompt_cache_key"]`
-  if present; omitted otherwise. The endpoint auto-assigns a cache key
-  when the field is absent.
+  if present; otherwise the lowercase hex SHA-256 of the inbound session
+  key when the request carried one; omitted otherwise. The endpoint
+  auto-assigns a cache key when the field is absent.
 - **encrypted_content (reasoning replay)**: sent on prior-turn reasoning
   items when `encrypted_content` is non-empty. An item carrying a summary
   and no signature is accepted when it names no `id` (with or without an

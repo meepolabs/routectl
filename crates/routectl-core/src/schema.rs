@@ -213,9 +213,10 @@ pub struct ChatRequest {
 /// other variant -- including any added later -- forwards only the
 /// operator's `RoutectlInternal::operator_payload_extras`. A new variant
 /// that should forward client extras somewhere needs its own arm there.
-/// The OpenAI Responses egress is the exception: it ignores provenance and
-/// forwards a fixed allowlist of six keys from the merged extras whatever
-/// their source.
+/// The OpenAI Responses egress is the exception: it forwards a fixed
+/// allowlist of keys from the merged extras whatever their source, except
+/// the two prompt-cache fields, which it forwards only for the Responses
+/// ingress.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum RequestProvenance {

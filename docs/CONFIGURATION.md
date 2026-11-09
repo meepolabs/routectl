@@ -731,7 +731,7 @@ vocabulary:
 |---|---|
 | `anthropic-api` (Mantle's Anthropic lane included), Bedrock Invoke, the Bedrock Converse bag | the Anthropic Messages ingress |
 | `openai-compat` (Mantle's OpenAI-compatible lane included) | the OpenAI Chat Completions ingress |
-| `openai-responses` | its own fixed allowlist of keys, whatever the ingress |
+| `openai-responses` | its own fixed allowlist of keys, whatever the ingress; `prompt_cache_options` and `prompt_cache_retention` only from the Responses ingress |
 | `gemini` | no ingress: only the operator layer |
 
 A library caller that builds its own `ChatRequest` keeps forwarding its

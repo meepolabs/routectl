@@ -13,10 +13,20 @@
 //!   Responses reasoning surface has no budget knob; an explicit effort
 //!   still wins.
 //!
-//! provider_extras allowlist (6 keys): `prompt_cache_key`,
-//! `service_tier`, `text`, `include`, `store`, `client_metadata`.
+//! provider_extras allowlist (8 keys): `prompt_cache_key`,
+//! `prompt_cache_options`, `prompt_cache_retention`, `service_tier`,
+//! `text`, `include`, `store`, `client_metadata`.
 //! Anything else stays unforwarded -- matches the discipline in
 //! `routectl-core::is_canonical_request_key`.
+//!
+//! Prompt caching: `prompt_cache_options` and `prompt_cache_retention`
+//! forward only for a request the Responses ingress produced, and only on
+//! the auth surfaces that accept them (see [`PromptCacheField`]); a
+//! withheld one is counted once per request through
+//! [`PromptCacheWithheldTally`]. When neither the client nor the operator
+//! set `prompt_cache_key`, the egress sends the hex SHA-256 of the inbound
+//! session key: OpenAI refuses keys over 64 characters, and the raw client
+//! session id stays off another vendor's wire.
 //!
 //! ChatGPT-OAuth lock: `store` is always written to `false` when the
 //! provider authenticates via `AuthKind::ChatgptOauth`, regardless of
@@ -30,10 +40,13 @@
 //! `x-codex-installation-id`, matching where codex carries it on the
 //! streaming `/responses` call. Operator-supplied values win.
 
+use std::fmt::Write as _;
+
 use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
 
 use routectl_core::wire_check::{EditKind, EditSite, WireTap};
-use routectl_core::{ChatRequest, ReasoningConfig};
+use routectl_core::{ChatRequest, ReasoningConfig, RequestProvenance};
 
 use super::AuthKind;
 use super::types::{ResponsesReasoning, ResponsesRequest, TextControls};
@@ -158,15 +171,19 @@ fn responses_reasoning_overlay(req: &ChatRequest) -> Option<Map<String, Value>> 
 }
 
 /// Layer canonical `req.provider_extras` into the Responses request.
-/// Only the 6 allowed keys are honored; everything else is left
+/// Only the 8 allowed keys are honored; everything else is left
 /// unforwarded so an operator-supplied long-tail field doesn't slip
 /// through unaudited. The `store` flag is special-cased: for
 /// `ChatgptOauth`, it stays hardcoded to `false` regardless of any
-/// `provider_extras["store"]` value.
+/// `provider_extras["store"]` value. The two prompt-cache fields pass the
+/// gate in [`apply_prompt_cache_field`], which records each one it
+/// withholds in `withheld`.
 pub(super) fn merge_provider_extras(
     request: &mut ResponsesRequest,
     req: &ChatRequest,
     auth_kind: AuthKind,
+    tap: Option<&WireTap>,
+    withheld: &mut PromptCacheWithheldTally,
 ) {
     let Some(extras) = req.provider_extras.as_ref().and_then(|v| v.as_object()) else {
         return;
@@ -178,6 +195,14 @@ pub(super) fn merge_provider_extras(
                 if let Some(s) = v.as_str() {
                     request.prompt_cache_key = Some(s.to_string());
                 }
+            }
+            "prompt_cache_options" => {
+                let field = PromptCacheField::Options;
+                apply_prompt_cache_field(request, req, auth_kind, field, v, tap, withheld);
+            }
+            "prompt_cache_retention" => {
+                let field = PromptCacheField::Retention;
+                apply_prompt_cache_field(request, req, auth_kind, field, v, tap, withheld);
             }
             "service_tier" => {
                 if let Some(s) = v.as_str() {
@@ -218,6 +243,140 @@ pub(super) fn merge_provider_extras(
             _ => {}
         }
     }
+}
+
+/// A top-level Responses prompt-cache field the egress forwards per auth
+/// surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PromptCacheField {
+    Options,
+    Retention,
+}
+
+impl PromptCacheField {
+    /// The wire pointer of the field.
+    const fn path(self) -> &'static str {
+        match self {
+            Self::Options => "/prompt_cache_options",
+            Self::Retention => "/prompt_cache_retention",
+        }
+    }
+
+    /// Whether `auth_kind` accepts the field. The ChatGPT-OAuth backend
+    /// refuses fields its codex client never sends, and codex sends
+    /// `prompt_cache_options` but not `prompt_cache_retention`. Nothing
+    /// records that the Mantle surface accepts either.
+    const fn forwards_on(self, auth_kind: AuthKind) -> bool {
+        let mantle = matches!(auth_kind, AuthKind::BedrockMantle);
+        match self {
+            Self::Options => !mantle,
+            Self::Retention => !mantle && !auth_kind.is_codex_lane(),
+        }
+    }
+}
+
+/// Per-request record that the egress withheld at least one client
+/// prompt-cache field. One tally per request shared by every withhold site
+/// (top-level fields and per-block markers alike), so a request withholding
+/// several counts once. Flush it outside every fallible step of the
+/// request's assembly, or on the error path too, so a withhold followed by a
+/// failure still counts.
+#[must_use = "a prompt-cache withhold tally counts nothing until it is flushed"]
+#[derive(Debug, Default)]
+pub(super) struct PromptCacheWithheldTally {
+    withheld: bool,
+}
+
+impl PromptCacheWithheldTally {
+    /// Note one more withheld prompt-cache field. Idempotent.
+    pub(super) const fn record(&mut self) {
+        self.withheld = true;
+    }
+
+    /// Count the request's withhold, if any, once.
+    /// TRANSLATION-DROP: lane=openai-responses class=prompt_cache_field_withheld test=withheld_cache_fields_count_once_per_request
+    pub(super) fn flush(&self) {
+        if self.withheld {
+            record_translation_drop(super::LANE, "prompt_cache_field_withheld");
+        }
+    }
+}
+
+/// Forward one prompt-cache field when the Responses ingress produced the
+/// request and the auth surface accepts it. A Responses-ingress value the
+/// surface refuses is withheld, recorded in `withheld` and declared as an
+/// auth-surface Remove. A request from any other ingress spelled the field
+/// for another dialect, so it stays unforwarded like any unlisted key.
+fn apply_prompt_cache_field(
+    request: &mut ResponsesRequest,
+    req: &ChatRequest,
+    auth_kind: AuthKind,
+    field: PromptCacheField,
+    value: &Value,
+    tap: Option<&WireTap>,
+    withheld: &mut PromptCacheWithheldTally,
+) {
+    if req.routectl_internal.provenance != RequestProvenance::ResponsesIngress {
+        return;
+    }
+    if !field.forwards_on(auth_kind) {
+        withheld.record();
+        if let Some(tap) = tap {
+            declare(
+                tap,
+                EditSite::AuthSurfaceGate,
+                field.path(),
+                EditKind::Remove,
+            );
+        }
+        return;
+    }
+    let slot = match field {
+        PromptCacheField::Options => &mut request.prompt_cache_options,
+        PromptCacheField::Retention => &mut request.prompt_cache_retention,
+    };
+    *slot = Some(value.clone());
+}
+
+/// When neither the client nor the operator set `prompt_cache_key`, key
+/// the upstream prompt cache on the lowercase hex SHA-256 of the inbound
+/// session key (always 64 characters, whatever the session key's length).
+/// Must run AFTER `merge_provider_extras` so their key wins.
+pub(super) fn apply_session_cache_key(
+    request: &mut ResponsesRequest,
+    req: &ChatRequest,
+    tap: Option<&WireTap>,
+) {
+    if request.prompt_cache_key.is_some() {
+        return;
+    }
+    let Some(session) = req.routectl_internal.inbound_session_key.as_deref() else {
+        return;
+    };
+    if let Some(tap) = tap {
+        let carried = req
+            .provider_extras
+            .as_ref()
+            .and_then(|v| v.get("prompt_cache_key"))
+            .is_some();
+        let kind = if carried {
+            EditKind::Rewrite
+        } else {
+            EditKind::Add
+        };
+        declare(tap, EditSite::CachePlacement, "/prompt_cache_key", kind);
+    }
+    request.prompt_cache_key = Some(sha256_hex(session));
+}
+
+fn sha256_hex(input: &str) -> String {
+    let digest = Sha256::digest(input.as_bytes());
+    let mut out = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        // Writing into a String cannot fail.
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
 }
 
 /// Body key codex carries the per-installation id under, inside the

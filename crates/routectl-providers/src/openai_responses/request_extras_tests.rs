@@ -627,3 +627,277 @@ fn explicit_operator_include_is_respected_not_overwritten() {
     // the encrypted-reasoning carrier).
     assert_eq!(v["include"], json!(["message.output_text.logprobs"]));
 }
+
+// ---------------------------------------------------------------------------
+// prompt_cache_options / prompt_cache_retention / prompt_cache_key
+// ---------------------------------------------------------------------------
+
+type DeclaredRequestEdit = (
+    routectl_core::wire_check::EditSite,
+    String,
+    routectl_core::wire_check::EditKind,
+);
+
+/// Translate `req` under a wire tap, returning the emitted wire value and
+/// every request-leg edit the translation declared.
+fn translate_declaring(
+    cfg: &OpenAiResponsesConfig,
+    req: &ChatRequest,
+) -> (Value, Vec<DeclaredRequestEdit>) {
+    use routectl_core::wire_check::{Leg, WireTap};
+    let mut req = req.clone();
+    let tap = WireTap::default();
+    req.routectl_internal.wire_tap = Some(tap.clone());
+    let wire = translate_to_json(cfg, &req);
+    let edits = tap
+        .take_request()
+        .edits(Leg::Request)
+        .iter()
+        .map(|e| (e.site(), e.path().to_string(), e.kind()))
+        .collect();
+    (wire, edits)
+}
+
+fn cache_options_value() -> Value {
+    json!({"mode": "explicit", "ttl": "30m"})
+}
+
+/// A request carrying both prompt-cache fields as the Responses ingress
+/// sweeps them, under `provenance`.
+fn req_with_cache_fields(provenance: routectl_core::RequestProvenance) -> ChatRequest {
+    let mut req = req_with(vec![user_text("hi")]);
+    req.provider_extras = Some(json!({
+        "prompt_cache_options": cache_options_value(),
+        "prompt_cache_retention": "24h",
+    }));
+    req.routectl_internal.provenance = provenance;
+    req
+}
+
+fn prompt_cache_surfaces() -> [(&'static str, OpenAiResponsesConfig); 3] {
+    [
+        ("api-key", cfg_api_key()),
+        ("chatgpt-oauth", cfg()),
+        ("bedrock-mantle", cfg_bedrock_mantle()),
+    ]
+}
+
+#[test]
+fn cache_fields_forward_per_surface() {
+    use routectl_core::RequestProvenance;
+    use routectl_core::wire_check::{EditKind, EditSite};
+    // (surface, forwards options, forwards retention) for Responses ingress.
+    let surface_rules = [
+        ("api-key", true, true),
+        ("chatgpt-oauth", true, false),
+        ("bedrock-mantle", false, false),
+    ];
+    let provenances = [
+        ("responses", RequestProvenance::ResponsesIngress),
+        ("library", RequestProvenance::Library),
+        ("chat", RequestProvenance::OpenaiIngress),
+        ("anthropic", RequestProvenance::AnthropicIngress),
+    ];
+    let fields = [
+        ("prompt_cache_options", cache_options_value()),
+        ("prompt_cache_retention", json!("24h")),
+    ];
+    for ((surface, cfg), (rule_surface, options_ok, retention_ok)) in
+        prompt_cache_surfaces().into_iter().zip(surface_rules)
+    {
+        assert_eq!(surface, rule_surface);
+        for (provenance_name, provenance) in provenances {
+            // Arrange
+            let req = req_with_cache_fields(provenance);
+            let is_responses = provenance == RequestProvenance::ResponsesIngress;
+
+            // Act
+            let (wire, edits) = translate_declaring(&cfg, &req);
+
+            // Assert
+            for ((field, value), surface_ok) in fields.iter().zip([options_ok, retention_ok]) {
+                let row = format!("{surface} / {provenance_name} / {field}");
+                let forwards = is_responses && surface_ok;
+                if forwards {
+                    assert_eq!(&wire[*field], value, "{row}: {wire}");
+                } else {
+                    assert!(wire.get(*field).is_none(), "{row}: {wire}");
+                }
+                let gate = (
+                    EditSite::AuthSurfaceGate,
+                    format!("/{field}"),
+                    EditKind::Remove,
+                );
+                assert_eq!(
+                    edits.contains(&gate),
+                    is_responses && !surface_ok,
+                    "{row}: the withhold is declared exactly when the surface gates it: {edits:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn withheld_cache_fields_count_once_per_request() {
+    use routectl_core::RequestProvenance;
+    let withheld_rows = [
+        (
+            "chatgpt-oauth retention only",
+            cfg(),
+            json!({"prompt_cache_retention": "24h"}),
+        ),
+        (
+            "chatgpt-oauth both",
+            cfg(),
+            json!({"prompt_cache_options": cache_options_value(), "prompt_cache_retention": "24h"}),
+        ),
+        (
+            "bedrock-mantle both",
+            cfg_bedrock_mantle(),
+            json!({"prompt_cache_options": cache_options_value(), "prompt_cache_retention": "24h"}),
+        ),
+    ];
+    for (row, cfg, extras) in withheld_rows {
+        // Arrange
+        let mut req = req_with(vec![user_text("hi")]);
+        req.provider_extras = Some(extras);
+        req.routectl_internal.provenance = RequestProvenance::ResponsesIngress;
+        let before = responses_drop_count("prompt_cache_field_withheld");
+
+        // Act
+        let _ = translate_to_json(&cfg, &req);
+
+        // Assert
+        let after = responses_drop_count("prompt_cache_field_withheld");
+        assert_eq!(after - before, 1, "{row}: one drop per request");
+    }
+
+    let forwarded_rows = [
+        ("api-key both", cfg_api_key()),
+        ("chatgpt-oauth options only", cfg()),
+    ];
+    for (row, cfg) in forwarded_rows {
+        let mut req = req_with_cache_fields(RequestProvenance::ResponsesIngress);
+        if row.ends_with("options only") {
+            req.provider_extras = Some(json!({"prompt_cache_options": cache_options_value()}));
+        }
+        let wire = crate::translation_drop_metrics::assert_lane_ran_uncounted(
+            "openai-responses",
+            "prompt_cache_field_withheld",
+            || translate_to_json(&cfg, &req),
+        );
+        assert_eq!(wire["prompt_cache_options"], cache_options_value(), "{row}");
+    }
+}
+
+#[test]
+fn prompt_cache_key_falls_back_to_hashed_session_key() {
+    use routectl_core::wire_check::{EditKind, EditSite};
+    const SESSION: &str = "codex-session-7f3e";
+    // printf '%s' codex-session-7f3e | sha256sum
+    const SESSION_SHA256: &str = "ad367646d8e3c2f215ee1396873c3992be45b0a036aa495163318406205e90a2";
+    // printf 's%.0s' $(seq 256) | sha256sum
+    const LONG_SESSION_SHA256: &str =
+        "5dbb9529738ae602f76a348645d43c4ad1489c11b54f14ab8b983b735c101b23";
+    let long_session = "s".repeat(256);
+
+    struct Row<'a> {
+        name: &'static str,
+        client_key: Option<&'static str>,
+        operator_key: Option<&'static str>,
+        session: Option<&'a str>,
+        expected: Option<&'a str>,
+    }
+    let rows = [
+        Row {
+            name: "client key wins",
+            client_key: Some("client-key"),
+            operator_key: None,
+            session: Some(SESSION),
+            expected: Some("client-key"),
+        },
+        Row {
+            name: "operator payload_extras key wins",
+            client_key: None,
+            operator_key: Some("operator-key"),
+            session: Some(SESSION),
+            expected: Some("operator-key"),
+        },
+        Row {
+            name: "session only",
+            client_key: None,
+            operator_key: None,
+            session: Some(SESSION),
+            expected: Some(SESSION_SHA256),
+        },
+        Row {
+            name: "neither",
+            client_key: None,
+            operator_key: None,
+            session: None,
+            expected: None,
+        },
+        Row {
+            name: "a 256-byte session key",
+            client_key: None,
+            operator_key: None,
+            session: Some(&long_session),
+            expected: Some(LONG_SESSION_SHA256),
+        },
+    ];
+    for (surface, cfg) in prompt_cache_surfaces() {
+        for row in &rows {
+            // Arrange
+            let label = format!("{surface} / {}", row.name);
+            let mut req = req_with(vec![user_text("hi")]);
+            req.routectl_internal.provenance = routectl_core::RequestProvenance::ResponsesIngress;
+            req.routectl_internal.inbound_session_key = row.session.map(str::to_string);
+            let mut extras = serde_json::Map::new();
+            if let Some(key) = row.client_key {
+                extras.insert("prompt_cache_key".into(), json!(key));
+            }
+            if let Some(key) = row.operator_key {
+                // The router merges the operator layer into provider_extras
+                // and keeps a copy of that layer alone.
+                extras.insert("prompt_cache_key".into(), json!(key));
+                req.routectl_internal.operator_payload_extras =
+                    Some(std::sync::Arc::new(json!({"prompt_cache_key": key})));
+            }
+            if !extras.is_empty() {
+                req.provider_extras = Some(Value::Object(extras));
+            }
+
+            // Act
+            let (wire, edits) = translate_declaring(&cfg, &req);
+
+            // Assert
+            let key = wire.get("prompt_cache_key").and_then(Value::as_str);
+            let hashed =
+                row.client_key.is_none() && row.operator_key.is_none() && row.session.is_some();
+            if hashed {
+                let key = key.unwrap_or_else(|| panic!("{label}: no key: {wire}"));
+                assert_eq!(key.len(), 64, "{label}");
+                assert!(
+                    key.bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+                    "{label}: lowercase hex: {key}"
+                );
+                assert_eq!(Some(key), row.expected, "{label}");
+                let session = row.session.expect("hashed rows carry a session");
+                assert!(
+                    !wire.to_string().contains(session),
+                    "{label}: the raw session key reached the body"
+                );
+            } else {
+                assert_eq!(key, row.expected, "{label}: {wire}");
+            }
+            let declared = (
+                EditSite::CachePlacement,
+                "/prompt_cache_key".to_string(),
+                EditKind::Add,
+            );
+            assert_eq!(edits.contains(&declared), hashed, "{label}: {edits:?}");
+        }
+    }
+}

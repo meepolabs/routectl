@@ -5,7 +5,7 @@
 //! assemble the final `ResponsesRequest`. Each sub-module owns one
 //! field family: `system.rs` -> `instructions`, `messages.rs` ->
 //! `input`, `tools.rs` -> `tools`/`tool_choice`, `extras.rs` ->
-//! `reasoning` + the 5-key provider_extras allowlist.
+//! `reasoning` + the 8-key provider_extras allowlist.
 //!
 //! `store` defaults to `false` here; the `extras` module flips it for
 //! non-ChatgptOauth auth_kinds when the operator opts in via
@@ -55,6 +55,7 @@ pub fn translate(cfg: &OpenAiResponsesConfig, req: &ChatRequest) -> Result<Respo
 
     let tap = crate::wire_declare::tap(req);
     let mut fingerprint = ClientFingerprintStripTally::default();
+    let mut cache_withheld = extras::PromptCacheWithheldTally::default();
     let instructions = translate_system(req, &mut fingerprint);
     declare_instructions(tap, instructions.is_some(), &fingerprint);
     record_developer_turn_withhold(&req.messages, &mut fingerprint);
@@ -82,6 +83,8 @@ pub fn translate(cfg: &OpenAiResponsesConfig, req: &ChatRequest) -> Result<Respo
         include: Vec::new(),
         service_tier: None,
         prompt_cache_key: None,
+        prompt_cache_options: None,
+        prompt_cache_retention: None,
         text: None,
         client_metadata: None,
         // Codex's `ResponsesApiRequest` has no `max_output_tokens` member,
@@ -104,7 +107,10 @@ pub fn translate(cfg: &OpenAiResponsesConfig, req: &ChatRequest) -> Result<Respo
         declare_lane_gates(tap, cfg.auth_kind, req);
     }
     extras::apply_reasoning(&mut request, req, tap);
-    extras::merge_provider_extras(&mut request, req, cfg.auth_kind);
+    extras::merge_provider_extras(&mut request, req, cfg.auth_kind, tap, &mut cache_withheld);
+    cache_withheld.flush();
+    // Runs after merge_provider_extras so a client or operator key wins.
+    extras::apply_session_cache_key(&mut request, req, tap);
     // Runs after merge_provider_extras so the stamp lands on the merged
     // object; the resolved id wins over any request-carried value.
     extras::apply_installation_id(
