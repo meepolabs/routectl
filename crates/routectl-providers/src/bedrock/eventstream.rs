@@ -584,12 +584,16 @@ mod tests {
         }
     }
 
+    /// The bare `Error` message an Anthropic OAuth 429 carries is no scope
+    /// row inside a stream: the row is evidence only on a non-success
+    /// response.
     #[test]
-    fn anthropic_rate_limit_error_in_stream_surfaces_as_429() {
-        let inner = r#"{"type":"error","error":{"type":"rate_limit_error","message":"too fast"}}"#;
+    fn anthropic_rate_limit_error_in_stream_surfaces_as_429_without_scope_row() {
+        let inner = r#"{"type":"error","error":{"type":"rate_limit_error","message":"Error"}}"#;
         let b64 = base64::engine::general_purpose::STANDARD.encode(inner.as_bytes());
         let payload = format!(r#"{{"bytes":"{b64}"}}"#);
         let err = handle("chunk", &payload).unwrap_err();
+        assert_eq!(err.scope_row(), None);
         match err {
             Error::Upstream { status, .. } => assert_eq!(status, 429),
             other => panic!("expected Upstream, got {other:?}"),

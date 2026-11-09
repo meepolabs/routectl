@@ -157,3 +157,22 @@ fn anthropic_role_chunk_emitted_once() {
         "a repeated message_start must not emit a second role chunk"
     );
 }
+
+/// An in-band `rate_limit_error` event carrying the bare `Error` message is
+/// a mid-stream failure, never a recognized scope row: the row is evidence
+/// only on a non-success response.
+#[test]
+fn in_stream_bare_rate_limit_event_carries_no_scope_row() {
+    let mut state = SseState::default();
+    let payload = r#"{"type":"error","error":{"type":"rate_limit_error","message":"Error"}}"#;
+
+    let err = state
+        .parse_event("test-anthropic", payload)
+        .expect_err("error event must surface as Err");
+
+    assert!(
+        matches!(err, Error::Upstream { status: 429, .. }),
+        "premise: the event surfaces as an upstream 429, got {err:?}"
+    );
+    assert_eq!(err.scope_row(), None);
+}

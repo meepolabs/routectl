@@ -2130,7 +2130,7 @@ async fn read_anthropic_error_carries_raw_envelope_for_structured_400() {
                     blocks in the latest assistant message cannot be modified.\"}}";
     let resp = reqwest_response(400, raw);
 
-    let (msg, err) = read_anthropic_error("anthropic_oauth_prod", resp, false).await;
+    let (msg, err) = read_anthropic_error("anthropic_oauth_prod", resp, false, None).await;
 
     // The returned `msg` stays the clean extracted message for logging.
     assert!(
@@ -2173,7 +2173,7 @@ async fn read_anthropic_error_sanitizes_non_json_body() {
         "<html><body>upstream-host gateway timeout</body></html>",
     );
 
-    let (_msg, err) = read_anthropic_error("anthropic_oauth_prod", resp, false).await;
+    let (_msg, err) = read_anthropic_error("anthropic_oauth_prod", resp, false, None).await;
 
     match err {
         Error::Upstream { status, body, .. } => {
@@ -2201,7 +2201,7 @@ async fn read_anthropic_error_lifts_aws_signature_token_from_403() {
     let raw = r#"{"__type":"com.amazonaws.bedrock#SignatureDoesNotMatch","message":"The request signature we calculated does not match."}"#;
     let resp = reqwest_response(403, raw);
 
-    let (msg, err) = read_anthropic_error("mantle_prod", resp, true).await;
+    let (msg, err) = read_anthropic_error("mantle_prod", resp, true, None).await;
 
     assert_eq!(
         msg, "bedrock access denied (SignatureDoesNotMatch)",
@@ -2241,7 +2241,7 @@ async fn read_anthropic_error_lifts_aws_throttling_code_from_429() {
     let raw = r#"{"code":"ThrottlingException","Message":"Too many requests"}"#;
     let resp = reqwest_response(429, raw);
 
-    let (msg, err) = read_anthropic_error("mantle_prod", resp, true).await;
+    let (msg, err) = read_anthropic_error("mantle_prod", resp, true, None).await;
 
     assert!(msg.contains("Too many requests"), "extracted msg: {msg:?}");
     match err {
@@ -2268,7 +2268,7 @@ async fn read_anthropic_error_prefers_anthropic_shape_over_aws() {
     let raw = r#"{"type":"error","error":{"type":"overloaded_error","message":"busy"},"__type":"com.amazonaws.bedrock#ThrottlingException"}"#;
     let resp = reqwest_response(529, raw);
 
-    let (_msg, err) = read_anthropic_error("mantle_prod", resp, true).await;
+    let (_msg, err) = read_anthropic_error("mantle_prod", resp, true, None).await;
 
     match err {
         Error::Upstream {
@@ -2299,7 +2299,7 @@ async fn read_anthropic_error_never_panics_on_malformed_bodies() {
     ];
     for (idx, body) in cases.into_iter().enumerate() {
         let resp = reqwest_response(400, body);
-        let (_msg, err) = read_anthropic_error("mantle_prod", resp, true).await;
+        let (_msg, err) = read_anthropic_error("mantle_prod", resp, true, None).await;
         match err {
             Error::Upstream {
                 status,

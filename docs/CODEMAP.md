@@ -682,6 +682,11 @@ license.
   `recognize_upstream_reason` (the credential `UpstreamReason` table), and
   `lift_nested_error_tokens` / `lift_nested_status_tokens` for the in-band
   and SSE error readers
+- `src/upstream_scope.rs` -- the closed `ScopeRow` table read by
+  `UpstreamErrorRead::into_error_with_tokens`: `ScopeLane` (set by the
+  anthropic-api lane on its own OAuth bearer credential only), the
+  presence-only `Retry-After` / `anthropic-ratelimit-*` header facts, and a
+  strict envelope parse that rejects unknown and repeated keys
 - `src/upstream_request_id.rs` -- `parse_upstream_request_id(&HeaderMap)`:
   lifts the upstream provider's correlation id (first of `x-request-id` /
   `x-oai-request-id` / `cf-ray`) off an error response so the ingress can

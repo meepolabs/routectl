@@ -1,0 +1,10 @@
+{
+  "note": "Anthropic Messages 429 answered to an own-credential OAuth bearer seat, derived from recorded field values: status 429, error.type rate_limit_error, error.message the literal Error, and no retry-after, retry-after-ms or anthropic-ratelimit-* response header on any recorded occurrence. The recordings kept those fields, not the raw body bytes, so the body is set in the documented error envelope (https://platform.claude.com/docs/en/api/errors) with the request id replaced. headers lists every response header the recognizer reads; an empty list is the recorded absence.",
+  "responses": {
+    "oauth-bare-429": {
+      "status": 429,
+      "headers": [],
+      "body": "{\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"Error\"},\"request_id\":\"req_REDACTED\"}"
+    }
+  }
+}

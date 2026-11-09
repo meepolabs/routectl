@@ -217,6 +217,10 @@ pub(crate) mod upstream_request_id;
 ))]
 pub(crate) mod upstream_error;
 
+// Scope rows are recognized only on the Anthropic OAuth lane.
+#[cfg(feature = "anthropic-api")]
+pub(crate) mod upstream_scope;
+
 #[cfg(all(
     test,
     feature = "bedrock",

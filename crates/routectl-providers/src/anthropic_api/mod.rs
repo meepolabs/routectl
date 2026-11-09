@@ -25,6 +25,7 @@ use routectl_core::{
 };
 
 use crate::upstream_error::{CarriedBody, UpstreamErrorRead};
+use crate::upstream_scope::ScopeLane;
 
 mod client;
 mod cloak;
@@ -309,7 +310,13 @@ impl Provider for AnthropicApiProvider {
         // grepping `body_excerpt=...` get a consistent shape across
         // providers.
         if status >= 400 {
-            let (msg, err) = read_anthropic_error(&self.cfg.id, resp, self.is_mantle()).await;
+            let (msg, err) = read_anthropic_error(
+                &self.cfg.id,
+                resp,
+                self.is_mantle(),
+                self.scope_lane(forwarded_leg),
+            )
+            .await;
             // Extend the auth-only WARN to all 4xx/5xx so an operator
             // never has to guess WHY a request failed. Sanitize before
             // tracing: the upstream may return untrusted control bytes
@@ -524,7 +531,13 @@ impl Provider for AnthropicApiProvider {
             // `complete()` -- see comment there. Helper extracted at
             // `read_anthropic_error`. Sanitize the excerpt for the
             // same reason as `complete()`.
-            let (msg, err) = read_anthropic_error(&self.cfg.id, resp, self.is_mantle()).await;
+            let (msg, err) = read_anthropic_error(
+                &self.cfg.id,
+                resp,
+                self.is_mantle(),
+                self.scope_lane(forwarded_leg),
+            )
+            .await;
             let safe_excerpt = sanitize_for_log(&msg);
             crate::upstream_log::warn_upstream_failure(
                 &self.cfg.id,
@@ -807,7 +820,13 @@ impl Provider for AnthropicApiProvider {
             // `complete()` -- a non-JSON 502/503 from a misconfigured
             // proxy must not collapse to an opaque serde error.
             // Helper extracted at `read_anthropic_error`.
-            let (msg, err) = read_anthropic_error(&self.cfg.id, resp, self.is_mantle()).await;
+            let (msg, err) = read_anthropic_error(
+                &self.cfg.id,
+                resp,
+                self.is_mantle(),
+                self.scope_lane(self.forwarded_leg(&req)),
+            )
+            .await;
             // Sanitize before tracing: the upstream may return
             // untrusted control bytes (CRLF, control chars, very
             // long lines) and `body_excerpt = %msg` would otherwise
@@ -961,11 +980,29 @@ async fn read_anthropic_error(
     provider_id: &str,
     resp: reqwest::Response,
     aws_backed: bool,
+    scope_lane: Option<ScopeLane>,
 ) -> (String, Error) {
     let read = UpstreamErrorRead::read(provider_id, resp)
         .await
-        .aws_backed(aws_backed);
+        .aws_backed(aws_backed)
+        .scope_lane(scope_lane);
     anthropic_error_from_read(provider_id, read)
+}
+
+impl AnthropicApiProvider {
+    /// The scope lane a response on this request was answered on: the
+    /// provider's own OAuth bearer credential, off the Mantle endpoint and
+    /// off the forwarded client-bearer leg. `None` on every other lane.
+    const fn scope_lane(&self, forwarded_leg: bool) -> Option<ScopeLane> {
+        if matches!(self.cfg.auth_kind, AuthKind::OauthBearer)
+            && !self.is_mantle()
+            && !forwarded_leg
+        {
+            Some(ScopeLane::AnthropicOAuth)
+        } else {
+            None
+        }
+    }
 }
 
 /// Build the `(message, Error::Upstream)` pair from an error response
@@ -1163,3 +1200,7 @@ mod wire_tap_tests;
 #[cfg(test)]
 #[path = "mod_build_error_tests.rs"]
 mod build_error_tests;
+
+#[cfg(test)]
+#[path = "mod_scope_lane_tests.rs"]
+mod scope_lane_tests;

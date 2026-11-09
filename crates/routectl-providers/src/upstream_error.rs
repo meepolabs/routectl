@@ -35,6 +35,10 @@ use serde_json::Value;
     feature = "openai-responses"
 ))]
 use crate::aws_error::{AccessDeniedDetail, ErrorTypeHeaderLift};
+#[cfg(feature = "anthropic-api")]
+use crate::upstream_scope::{ScopeEvidence, ScopeHeaderFacts, ScopeLane};
+#[cfg(feature = "anthropic-api")]
+use routectl_core::ScopeRow;
 
 /// The nested `/error/code`, stringified because the wire admits both a
 /// string code (`"context_length_exceeded"`) and a numeric one.
@@ -363,6 +367,10 @@ pub struct UpstreamErrorRead {
         feature = "openai-responses"
     ))]
     header_type: ErrorTypeHeaderLift,
+    #[cfg(feature = "anthropic-api")]
+    scope_lane: Option<ScopeLane>,
+    #[cfg(feature = "anthropic-api")]
+    scope_headers: ScopeHeaderFacts,
 }
 
 impl UpstreamErrorRead {
@@ -432,7 +440,32 @@ impl UpstreamErrorRead {
                 feature = "openai-responses"
             ))]
             header_type: crate::aws_error::classify_aws_error_type_header(headers),
+            #[cfg(feature = "anthropic-api")]
+            scope_lane: None,
+            #[cfg(feature = "anthropic-api")]
+            scope_headers: ScopeHeaderFacts::from_headers(headers),
         }
+    }
+
+    /// Name the lane that answered, so the scope rows that are evidence
+    /// only there can match ([`crate::upstream_scope`]). Without a lane no
+    /// row matches and the failure stays target-scoped.
+    #[cfg(feature = "anthropic-api")]
+    #[must_use]
+    pub const fn scope_lane(mut self, lane: Option<ScopeLane>) -> Self {
+        self.scope_lane = lane;
+        self
+    }
+
+    #[cfg(feature = "anthropic-api")]
+    fn scope_row(&self) -> Option<ScopeRow> {
+        crate::upstream_scope::recognize_scope_row(&ScopeEvidence {
+            lane: self.scope_lane,
+            status: self.status,
+            hit_cap: self.hit_cap,
+            headers: self.scope_headers,
+            body: &self.body,
+        })
     }
 
     /// Mark whether the seat that answered is AWS-backed (a Bedrock
@@ -710,6 +743,10 @@ impl UpstreamErrorRead {
         (upstream_type, upstream_code): (Option<String>, Option<String>),
     ) -> Error {
         let reason = self.reason_for((upstream_type.as_deref(), upstream_code.as_deref()));
+        #[cfg(feature = "anthropic-api")]
+        let scope_row = self.scope_row();
+        #[cfg(not(feature = "anthropic-api"))]
+        let scope_row = None;
         let body = match carried {
             CarriedBody::Original => self.body,
             CarriedBody::Replacement(text) => UpstreamBody::new(text),
@@ -731,6 +768,7 @@ impl UpstreamErrorRead {
         )
         .with_upstream_request_id(self.request_id)
         .with_upstream_reason(reason)
+        .with_scope_row(scope_row)
     }
 }
 
