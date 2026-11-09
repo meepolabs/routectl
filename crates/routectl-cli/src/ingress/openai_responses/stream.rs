@@ -51,14 +51,15 @@ use uuid::Uuid;
 
 use routectl_core::{
     ChatChunk, ChatResponse, ChunkDelta, Message, MessageContent, ReasoningDetail,
-    ReasoningDetailKind, Result, Role, Usage, UsageDelta, is_responses_family, schema::Choice,
+    ReasoningDetailKind, ResponsesEnvelope, Result, Role, UpstreamMeta, Usage, UsageDelta,
+    is_responses_family, schema::Choice,
 };
 
 use crate::ingress::{IngressStreamState, ResponseEdits, SseEvent, StreamErrorClass};
 
 use super::render::{
-    declare_message_item_status, declare_status_rebuild, function_call_item, output_text_block,
-    render_responses_response, status_from_finish_reason,
+    declare_message_item_status, declare_status_rebuild, function_call_item, message_item,
+    output_text_block, render_responses_response, status_from_finish_reason,
 };
 use super::{OpenOutputItem, ResponsesStreamState, ToolCallBuffer};
 
@@ -145,13 +146,26 @@ pub(super) fn render_chunk_declared(
 
 /// Cache the response id / model / created_at from the first chunk that
 /// carries them. All are tolerated as missing on the wire (canonical
-/// chunks may omit id/model; canonical has no `created` on a chunk).
+/// chunks may omit id/model; canonical has no `created` on a chunk, so
+/// `created_at` comes only from an upstream Responses envelope). A chunk
+/// carrying an upstream message item id marks the item its text belongs to.
 fn capture_identity(chunk: &ChatChunk, state: &mut ResponsesStreamState) {
     if !chunk.id.is_empty() && state.response_id.is_none() {
         state.response_id = Some(chunk.id.clone());
     }
     if !chunk.model.is_empty() && state.response_model.is_none() {
         state.response_model = Some(chunk.model.clone());
+    }
+    let Some(meta) = chunk.upstream_meta.as_ref() else {
+        return;
+    };
+    if let Some(created_at) = meta.responses_created_at()
+        && !state.started
+    {
+        state.created_at = created_at;
+    }
+    if let Some(id) = meta.responses_message_item_id() {
+        state.message_item_id = Some(id.to_string());
     }
 }
 
@@ -202,7 +216,7 @@ fn emit_text_delta(
     edits: &mut ResponseEdits,
 ) {
     let output_index = ensure_text_item(state, events, edits);
-    state.text_accumulator.push_str(text);
+    accumulate_message_text(state, text);
     state.current_text.push_str(text);
     push_event(
         state,
@@ -216,23 +230,48 @@ fn emit_text_delta(
     );
 }
 
-/// Open a `message` item (+ its `output_text` content part) if one is
-/// not already open, closing any superseded item first. Returns the
-/// message item's `output_index`.
+/// Append `text` to the completed-body accumulator of the upstream
+/// message item it belongs to, opening an entry the first time an item
+/// is seen.
+fn accumulate_message_text(state: &mut ResponsesStreamState, text: &str) {
+    let id = state.message_item_id.as_ref();
+    match state
+        .message_texts
+        .iter_mut()
+        .find(|(item_id, _)| item_id.as_ref() == id)
+    {
+        Some((_, acc)) => acc.push_str(text),
+        None => state.message_texts.push((id.cloned(), text.to_string())),
+    }
+}
+
+/// Open a `message` item (+ its `output_text` content part) unless one for
+/// the current upstream message item is already open, closing any
+/// superseded item first. Returns the message item's `output_index`.
 fn ensure_text_item(
     state: &mut ResponsesStreamState,
     events: &mut Vec<SseEvent>,
     edits: &mut ResponseEdits,
 ) -> u64 {
-    if let Some(OpenOutputItem::Text { output_index }) = state.open {
-        return output_index;
+    if let Some(OpenOutputItem::Text {
+        output_index,
+        item_id,
+    }) = &state.open
+        && *item_id == state.message_item_id
+    {
+        return *output_index;
     }
     close_open_item(state, events);
     let output_index = alloc_output_index(state);
     if let Ok(index) = usize::try_from(output_index) {
         declare_message_item_status(index, edits);
     }
-    state.open = Some(OpenOutputItem::Text { output_index });
+    let item_id = state.message_item_id.clone();
+    let added = message_item(item_id.as_deref(), "in_progress", Vec::new());
+    state.open = Some(OpenOutputItem::Text {
+        output_index,
+        item_id,
+    });
     state.current_text.clear();
     push_event(
         state,
@@ -240,12 +279,7 @@ fn ensure_text_item(
         "response.output_item.added",
         json!({
             "output_index": output_index,
-            "item": {
-                "type": "message",
-                "role": "assistant",
-                "status": "in_progress",
-                "content": [],
-            },
+            "item": added,
         }),
     );
     push_event(
@@ -480,7 +514,10 @@ fn tool_call_value(buf: &ToolCallBuffer) -> Value {
 
 fn close_open_item(state: &mut ResponsesStreamState, events: &mut Vec<SseEvent>) {
     match state.open.take() {
-        Some(OpenOutputItem::Text { output_index }) => {
+        Some(OpenOutputItem::Text {
+            output_index,
+            item_id,
+        }) => {
             let text = std::mem::take(&mut state.current_text);
             push_event(
                 state,
@@ -508,12 +545,11 @@ fn close_open_item(state: &mut ResponsesStreamState, events: &mut Vec<SseEvent>)
                 "response.output_item.done",
                 json!({
                     "output_index": output_index,
-                    "item": {
-                        "type": "message",
-                        "role": "assistant",
-                        "status": "completed",
-                        "content": [output_text_block(&text)],
-                    },
+                    "item": message_item(
+                        item_id.as_deref(),
+                        "completed",
+                        vec![output_text_block(&text)],
+                    ),
                 }),
             );
         }
@@ -648,15 +684,27 @@ pub(super) fn render_eos_internal(state: &mut ResponsesStreamState) -> Vec<SseEv
 
 /// Build the `output[]` for the completed body from the accumulated
 /// canonical message, via the non-stream renderer so the body
-/// matches the non-stream render byte-for-byte.
+/// matches the non-stream render byte-for-byte. Text that belonged to a
+/// second or later upstream message item follows as one message item
+/// each, in first-seen order, after the first item.
 fn completed_output(state: &ResponsesStreamState) -> Vec<Value> {
     let resp = accumulated_response(state);
     let rendered = render_responses_response(resp).unwrap_or_else(|_| json!({"output": []}));
-    rendered
+    let mut output = rendered
         .get("output")
         .and_then(Value::as_array)
         .cloned()
-        .unwrap_or_default()
+        .unwrap_or_default();
+    let later_items =
+        state.message_texts.iter().skip(1).map(|(id, text)| {
+            message_item(id.as_deref(), "completed", vec![output_text_block(text)])
+        });
+    let after_first_message = output
+        .iter()
+        .position(|item| item.get("type").and_then(Value::as_str) == Some("message"))
+        .map_or(output.len(), |index| index + 1);
+    output.splice(after_first_message..after_first_message, later_items);
+    output
 }
 
 /// Reconstruct a canonical `ChatResponse` from the accumulated stream so
@@ -664,10 +712,10 @@ fn completed_output(state: &ResponsesStreamState) -> Vec<Value> {
 /// `message.tool_calls`; text becomes the message content; reasoning
 /// details ride on the message.
 fn accumulated_response(state: &ResponsesStreamState) -> ChatResponse {
-    let content = if state.text_accumulator.is_empty() {
-        MessageContent::Null
-    } else {
-        MessageContent::Text(state.text_accumulator.clone())
+    let first_message = state.message_texts.first();
+    let content = match first_message {
+        Some((_, text)) if !text.is_empty() => MessageContent::Text(text.clone()),
+        _ => MessageContent::Null,
     };
     let tool_calls: Vec<Value> = state
         .tool_buffers
@@ -699,7 +747,9 @@ fn accumulated_response(state: &ResponsesStreamState) -> ChatResponse {
         usage: None,
         routectl_provider: None,
         extras: Default::default(),
-        upstream_meta: None,
+        upstream_meta: first_message.and_then(|(id, _)| id.clone()).map(|id| {
+            UpstreamMeta::from_responses_envelope(ResponsesEnvelope::of_message_item_id(id))
+        }),
     }
 }
 

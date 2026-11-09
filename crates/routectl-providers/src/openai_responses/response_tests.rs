@@ -558,3 +558,59 @@ fn garbage_returns_none() {
     assert!(codex_reset_hint(&usage_limit_no_fields).is_none());
     assert!(codex_reset_hint(&not_an_object).is_none());
 }
+
+#[test]
+fn translate_carries_the_first_message_item_id() {
+    // Arrange: a reasoning item first, then two message items.
+    let body = json!({
+        "id": "resp_01",
+        "status": "completed",
+        "model": "gpt-5-codex",
+        "output": [
+            {"type": "reasoning", "id": "rs_1", "summary": []},
+            {"type": "message", "id": "msg_first", "role": "assistant",
+             "content": [{"type": "output_text", "text": "a"}]},
+            {"type": "message", "id": "msg_second", "role": "assistant",
+             "content": [{"type": "output_text", "text": "b"}]}
+        ]
+    });
+
+    // Act
+    let resp = parse(body);
+
+    // Assert
+    let meta = resp.upstream_meta.expect("envelope carried");
+    assert_eq!(meta.responses_message_item_id(), Some("msg_first"));
+    assert_eq!(meta.responses_created_at(), None);
+}
+
+#[test]
+fn translate_carries_no_envelope_without_a_message_item_id() {
+    let rows = [
+        (
+            "message without id",
+            json!([{"type": "message", "role": "assistant",
+                    "content": [{"type": "output_text", "text": "a"}]}]),
+        ),
+        (
+            "message with empty id",
+            json!([{"type": "message", "id": "", "role": "assistant",
+                    "content": [{"type": "output_text", "text": "a"}]}]),
+        ),
+        (
+            "function call only",
+            json!([{"type": "function_call", "id": "fc_1", "call_id": "call_1",
+                    "name": "f", "arguments": "{}"}]),
+        ),
+    ];
+    for (name, output) in rows {
+        // Arrange
+        let body = json!({"id": "resp_01", "status": "completed", "model": "m", "output": output});
+
+        // Act
+        let resp = parse(body);
+
+        // Assert
+        assert!(resp.upstream_meta.is_none(), "{name}");
+    }
+}

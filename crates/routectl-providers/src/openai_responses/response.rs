@@ -28,7 +28,8 @@ use uuid::Uuid;
 
 use routectl_core::{
     ChatResponse, Choice, ContentPart, Error, KnownContentPart, Message, MessageContent,
-    ReasoningDetail, ReasoningDetailKind, Result, Role, Usage, sanitize_for_log,
+    ReasoningDetail, ReasoningDetailKind, ResponsesEnvelope, Result, Role, UpstreamMeta, Usage,
+    sanitize_for_log,
 };
 
 use super::response_types::{
@@ -87,6 +88,10 @@ pub fn translate(
         body.created_at
     };
 
+    let upstream_meta = first_message_item_id(&body.output).map(|item_id| {
+        UpstreamMeta::from_responses_envelope(ResponsesEnvelope::of_message_item_id(item_id))
+    });
+
     Ok(ChatResponse {
         id,
         model: body.model,
@@ -101,7 +106,17 @@ pub fn translate(
         usage,
         routectl_provider: None,
         extras: Default::default(),
-        upstream_meta: None,
+        upstream_meta,
+    })
+}
+
+/// The id of the first `message` output item, when the upstream sent a
+/// non-empty one. The render emits a single message item, so the first
+/// one's id is the one it echoes.
+fn first_message_item_id(output: &[ResponseOutputItem]) -> Option<String> {
+    output.iter().find_map(|item| match item {
+        ResponseOutputItem::Message { id, .. } if !id.is_empty() => Some(id.clone()),
+        _ => None,
     })
 }
 

@@ -793,7 +793,7 @@ async fn complete_populates_upstream_meta_from_codex_headers() {
 }
 
 #[tokio::test]
-async fn complete_upstream_meta_is_none_without_codex_headers() {
+async fn complete_carries_no_codex_quota_without_codex_headers() {
     // Arrange
     let server = MockServer::start().await;
     let completed_body = serde_json::json!({
@@ -827,11 +827,62 @@ async fn complete_upstream_meta_is_none_without_codex_headers() {
     // Act
     let resp = provider.complete(base_req()).await.expect("complete");
 
-    // Assert
+    // Assert: the carrier holds only the message item envelope.
+    let meta = resp.upstream_meta.expect("message item envelope carried");
     assert!(
-        resp.upstream_meta.is_none(),
-        "no x-codex- family means no upstream_meta carrier"
+        !meta.has_quota_family(),
+        "no x-codex- family means no quota family on the carrier"
     );
+    assert_eq!(
+        meta,
+        routectl_core::UpstreamMeta::from_responses_envelope(
+            routectl_core::ResponsesEnvelope::of_message_item_id("msg_1".into())
+        )
+    );
+}
+
+#[tokio::test]
+async fn complete_keeps_codex_quota_beside_responses_envelope() {
+    // Arrange
+    let server = MockServer::start().await;
+    let completed_body = serde_json::json!({
+        "id": "resp_q3",
+        "object": "response",
+        "status": "completed",
+        "model": "gpt-5-codex",
+        "output": [{
+            "type": "message",
+            "id": "msg_q3",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "pong"}]
+        }],
+        "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+    });
+    let event_body = format!(
+        "data: {{\"type\":\"response.completed\",\"response\":{}}}\n\n",
+        serde_json::to_string(&completed_body).unwrap()
+    );
+    Mock::given(method("POST"))
+        .and(path("/responses"))
+        .respond_with(with_codex_quota_headers(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(event_body),
+        ))
+        .mount(&server)
+        .await;
+    let provider = make_provider(&server.uri());
+
+    // Act
+    let resp = provider.complete(base_req()).await.expect("complete");
+
+    // Assert
+    let meta = resp.upstream_meta.expect("upstream_meta carried");
+    assert_eq!(
+        meta.codex.as_ref().and_then(|q| q.active_limit.as_deref()),
+        Some("premium")
+    );
+    assert_eq!(meta.responses_message_item_id(), Some("msg_q3"));
 }
 
 #[tokio::test]

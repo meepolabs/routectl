@@ -68,6 +68,11 @@ pub(super) fn render_responses_response_declared(
     resp: ChatResponse,
     edits: &mut ResponseEdits,
 ) -> Result<Value> {
+    let message_item_id = resp
+        .upstream_meta
+        .as_ref()
+        .and_then(|meta| meta.responses_message_item_id())
+        .map(str::to_string);
     let mut body = Map::new();
     body.insert("object".into(), Value::String("response".into()));
     body.insert("id".into(), Value::String(resp.id));
@@ -85,7 +90,7 @@ pub(super) fn render_responses_response_declared(
     }
 
     let output = first
-        .map(|c| build_output(&c.message, edits))
+        .map(|c| build_output(&c.message, message_item_id.as_deref(), edits))
         .unwrap_or_default();
     body.insert("output".into(), Value::Array(output));
 
@@ -159,13 +164,20 @@ pub(super) fn declare_status_rebuild(finish_reason: Option<&str>, edits: &mut Re
 /// Build the `output[]` array from a canonical assistant `Message`.
 /// Arrival order mirrors the egress walk: reasoning items first, then a
 /// message item (text + refusal + forward-compat blocks), then one
-/// function_call item per tool_call.
-fn build_output(msg: &Message, edits: &mut ResponseEdits) -> Vec<Value> {
+/// function_call item per tool_call. The message item carries
+/// `message_item_id` when the upstream supplied one.
+fn build_output(
+    msg: &Message,
+    message_item_id: Option<&str>,
+    edits: &mut ResponseEdits,
+) -> Vec<Value> {
     let mut output: Vec<Value> = Vec::new();
 
     output.extend(build_reasoning_items(&msg.reasoning_details));
 
-    if let Some(message_item) = build_message_item(&msg.content, msg.refusal.as_deref()) {
+    if let Some(message_item) =
+        build_message_item(&msg.content, msg.refusal.as_deref(), message_item_id)
+    {
         declare_message_item_status(output.len(), edits);
         output.push(message_item);
     }
@@ -196,7 +208,11 @@ pub(super) fn declare_message_item_status(output_index: usize, edits: &mut Respo
 /// message item). Plain text becomes an `output_text` block; a
 /// `refusal` Other or the canonical `msg.refusal` string become a
 /// `refusal` block; any other Other is re-emitted verbatim.
-fn build_message_item(content: &MessageContent, refusal: Option<&str>) -> Option<Value> {
+fn build_message_item(
+    content: &MessageContent,
+    refusal: Option<&str>,
+    id: Option<&str>,
+) -> Option<Value> {
     let mut blocks = build_content_blocks(content);
     if let Some(r) = refusal {
         blocks.push(json!({"type": "refusal", "refusal": r}));
@@ -204,12 +220,21 @@ fn build_message_item(content: &MessageContent, refusal: Option<&str>) -> Option
     if blocks.is_empty() {
         return None;
     }
-    Some(json!({
-        "type": "message",
-        "role": "assistant",
-        "status": "completed",
-        "content": blocks,
-    }))
+    Some(message_item(id, "completed", blocks))
+}
+
+/// A `message` output item with the given lifecycle `status` and content
+/// blocks. `id` is emitted only when the upstream supplied one.
+pub(super) fn message_item(id: Option<&str>, status: &str, content: Vec<Value>) -> Value {
+    let mut obj = Map::new();
+    obj.insert("type".into(), Value::String("message".into()));
+    if let Some(id) = id {
+        obj.insert("id".into(), Value::String(id.to_string()));
+    }
+    obj.insert("role".into(), Value::String("assistant".into()));
+    obj.insert("status".into(), Value::String(status.into()));
+    obj.insert("content".into(), Value::Array(content));
+    Value::Object(obj)
 }
 
 fn build_content_blocks(content: &MessageContent) -> Vec<Value> {

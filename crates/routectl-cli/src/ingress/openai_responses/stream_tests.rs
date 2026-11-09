@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 
 use routectl_core::{
     BEDROCK_MANTLE, CODEX_OAUTH, ChatChunk, ChunkChoice, ChunkDelta, OPENAI_APIKEY,
-    OPENAI_RESPONSES_V1, ReasoningDetail, ReasoningDetailKind,
+    OPENAI_RESPONSES_V1, ReasoningDetail, ReasoningDetailKind, ResponsesEnvelope, UpstreamMeta,
 };
 
 use super::*;
@@ -1277,4 +1277,132 @@ fn reasoning_indices_count_streamed_native_details_only() {
         .map(|d| d["summary_index"].as_u64().unwrap())
         .collect();
     assert_eq!(summary_indices, vec![0, 1]);
+}
+
+// ---------------------------------------------------------------------------
+// Upstream envelope: created_at and message item ids
+// ---------------------------------------------------------------------------
+
+fn with_envelope(mut chunk: ChatChunk, envelope: ResponsesEnvelope) -> ChatChunk {
+    chunk.upstream_meta = Some(UpstreamMeta::from_responses_envelope(envelope));
+    chunk
+}
+
+fn item_text_chunk(id: Option<&str>, text: &str) -> ChatChunk {
+    match id {
+        Some(id) => with_envelope(
+            text_chunk(text),
+            ResponsesEnvelope::of_message_item_id(id.into()),
+        ),
+        None => text_chunk(text),
+    }
+}
+
+fn opening_chunk(created_at: i64) -> ChatChunk {
+    let mut chunk = text_chunk("");
+    chunk.choices[0].delta.content = None;
+    chunk.choices[0].delta.role = Some(routectl_core::Role::Assistant);
+    with_envelope(chunk, ResponsesEnvelope::of_created_at(created_at))
+}
+
+fn events_named(events: &[SseEvent], name: &str) -> Vec<Value> {
+    events
+        .iter()
+        .filter(|e| e.event.as_deref() == Some(name))
+        .map(|e| serde_json::from_str::<Value>(&e.data).expect("json"))
+        .collect()
+}
+
+#[test]
+fn stream_echoes_upstream_created_at() {
+    // Arrange
+    let mut state = fresh();
+
+    // Act
+    let mut events = render(&mut state, opening_chunk(1_700_000_123));
+    events.extend(render(&mut state, text_chunk("hi")));
+    events.extend(render(&mut state, finish_chunk("stop", None)));
+    events.extend(render_eos_internal(&mut state));
+
+    // Assert
+    for name in [
+        "response.created",
+        "response.in_progress",
+        "response.completed",
+    ] {
+        assert_eq!(
+            data_of(&events, name)["response"]["created_at"],
+            1_700_000_123,
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn stream_interleaved_message_items_keep_their_own_ids() {
+    // Arrange
+    let mut state = fresh();
+
+    // Act: item A opens, item B interrupts, A continues without an id
+    // (the egress stamps only an item switch), then B again.
+    let mut events = render(&mut state, item_text_chunk(Some("msg_a"), "a1"));
+    events.extend(render(&mut state, item_text_chunk(None, "a2")));
+    events.extend(render(&mut state, item_text_chunk(Some("msg_b"), "b1")));
+    events.extend(render(&mut state, finish_chunk("stop", None)));
+    events.extend(render_eos_internal(&mut state));
+
+    // Assert
+    let added: Vec<Value> = events_named(&events, "response.output_item.added")
+        .into_iter()
+        .map(|e| e["item"]["id"].clone())
+        .collect();
+    assert_eq!(added, [json!("msg_a"), json!("msg_b")]);
+    let done: Vec<(Value, Value)> = events_named(&events, "response.output_item.done")
+        .into_iter()
+        .map(|e| {
+            (
+                e["item"]["id"].clone(),
+                e["item"]["content"][0]["text"].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        done,
+        [
+            (json!("msg_a"), json!("a1a2")),
+            (json!("msg_b"), json!("b1"))
+        ]
+    );
+    let completed = data_of(&events, "response.completed")["response"]["output"].clone();
+    let completed: Vec<(Value, Value)> = completed
+        .as_array()
+        .expect("output array")
+        .iter()
+        .map(|item| (item["id"].clone(), item["content"][0]["text"].clone()))
+        .collect();
+    assert_eq!(
+        completed,
+        [
+            (json!("msg_a"), json!("a1a2")),
+            (json!("msg_b"), json!("b1"))
+        ]
+    );
+}
+
+#[test]
+fn stream_without_an_envelope_keeps_zero_created_at_and_no_item_id() {
+    // Arrange
+    let mut state = fresh();
+
+    // Act
+    let mut events = render(&mut state, text_chunk("hi"));
+    events.extend(render(&mut state, finish_chunk("stop", None)));
+    events.extend(render_eos_internal(&mut state));
+
+    // Assert
+    let completed = data_of(&events, "response.completed")["response"].clone();
+    assert_eq!(completed["created_at"], 0);
+    assert!(completed["output"][0].get("id").is_none());
+    let added = data_of(&events, "response.output_item.added");
+    assert!(added["item"].get("id").is_none());
 }

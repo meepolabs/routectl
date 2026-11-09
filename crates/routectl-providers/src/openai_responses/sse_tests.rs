@@ -1097,3 +1097,95 @@ fn a_completed_response_usage_is_an_explicit_final_report() {
         Some(routectl_core::UsageInputSource::ExplicitFinal)
     );
 }
+
+fn message_added(output_index: u32, id: &str) -> serde_json::Value {
+    json!({
+        "type": "response.output_item.added",
+        "output_index": output_index,
+        "item": {"type": "message", "id": id, "role": "assistant", "content": []}
+    })
+}
+
+fn text_delta(output_index: u32, delta: &str) -> serde_json::Value {
+    json!({"type": "response.output_text.delta", "output_index": output_index, "delta": delta})
+}
+
+fn carried_item_id(chunks: &[ChatChunk]) -> Option<&str> {
+    let [chunk] = chunks else {
+        panic!("expected one chunk, got {}", chunks.len());
+    };
+    chunk
+        .upstream_meta
+        .as_ref()
+        .and_then(UpstreamMeta::responses_message_item_id)
+}
+
+#[test]
+fn response_created_chunk_carries_the_upstream_created_at() {
+    let rows = [
+        (
+            "created_at present",
+            json!({"id": "r", "model": "m", "created_at": 1_700_000_123}),
+            Some(1_700_000_123),
+        ),
+        ("created_at absent", json!({"id": "r", "model": "m"}), None),
+    ];
+    for (name, response, expected) in rows {
+        // Arrange
+        let mut state = ResponsesStreamState::default();
+
+        // Act
+        let chunks = drive(
+            &mut state,
+            json!({"type": "response.created", "response": response}),
+        );
+
+        // Assert
+        let carried = chunks[0]
+            .upstream_meta
+            .as_ref()
+            .and_then(UpstreamMeta::responses_created_at);
+        assert_eq!(carried, expected, "{name}");
+    }
+}
+
+#[test]
+fn interleaved_message_items_each_carry_their_own_id_on_their_opening_text() {
+    // Arrange
+    let mut state = ResponsesStreamState::default();
+    let _ = drive(
+        &mut state,
+        json!({"type": "response.created", "response": {"id": "r", "model": "m"}}),
+    );
+    let _ = drive(&mut state, message_added(0, "msg_a"));
+    let _ = drive(&mut state, message_added(1, "msg_b"));
+
+    // Act
+    let a1 = drive(&mut state, text_delta(0, "a1"));
+    let a2 = drive(&mut state, text_delta(0, "a2"));
+    let b1 = drive(&mut state, text_delta(1, "b1"));
+    let a3 = drive(&mut state, text_delta(0, "a3"));
+
+    // Assert
+    assert_eq!(carried_item_id(&a1), Some("msg_a"));
+    assert_eq!(carried_item_id(&a2), None, "same item continues");
+    assert_eq!(carried_item_id(&b1), Some("msg_b"));
+    assert_eq!(
+        carried_item_id(&a3),
+        Some("msg_a"),
+        "back to the first item"
+    );
+}
+
+#[test]
+fn a_message_item_without_an_id_carries_no_envelope() {
+    // Arrange
+    let mut state = ResponsesStreamState::default();
+    let _ = drive(&mut state, message_added(0, ""));
+
+    // Act
+    let chunks = drive(&mut state, text_delta(0, "x"));
+
+    // Assert
+    assert!(chunks[0].upstream_meta.is_none());
+}

@@ -86,18 +86,6 @@ const KNOWN_UNDECLARED: &[KnownUndeclared] = &[
         reason: "real loss: the Responses egress has no top_p field and drops it",
     },
     KnownUndeclared {
-        lane: RESPONSES,
-        leg: Leg::Response,
-        path: "/created_at",
-        reason: "real loss: the stream render has no upstream created_at to echo",
-    },
-    KnownUndeclared {
-        lane: RESPONSES,
-        leg: Leg::Response,
-        path: "/output/0/id",
-        reason: "real loss: the egress drops the upstream message item id, so no render can echo it",
-    },
-    KnownUndeclared {
         lane: BEDROCK_INVOKE,
         leg: Leg::Request,
         path: "/metadata",
@@ -463,9 +451,13 @@ fn anthropic_stream_with_usage_detail() -> ResponseTemplate {
     ))
 }
 
-fn responses_document(created_at: i64) -> Value {
+/// A real upstream always stamps `created_at`; the complete path mints one
+/// for a zero, so a zero fixture would compare a minted value.
+const RESPONSES_CREATED_AT: i64 = 1_700_000_000;
+
+fn responses_document() -> Value {
     json!({
-        "id": "resp_1", "object": "response", "created_at": created_at,
+        "id": "resp_1", "object": "response", "created_at": RESPONSES_CREATED_AT,
         "status": "completed", "model": UPSTREAM,
         "output": [{"type": "message", "id": "m1", "role": "assistant", "status": "completed",
                     "content": [{"type": "output_text", "text": "ok", "annotations": []}]}],
@@ -474,8 +466,8 @@ fn responses_document(created_at: i64) -> Value {
 }
 
 /// The Responses egress reads every answer as a stream.
-fn responses_stream(created_at: i64) -> ResponseTemplate {
-    let done = responses_document(created_at);
+fn responses_stream() -> ResponseTemplate {
+    let done = responses_document();
     let mut created = done.clone();
     created["status"] = json!("in_progress");
     created["output"] = json!([]);
@@ -761,7 +753,7 @@ fn chat_cases() -> Vec<Case> {
                 {"type": "message", "role": "system", "content": [{"type": "input_image", "image_url": "https://example.com/a.png"}]},
                 {"type": "message", "role": "system", "content": "a"},
                 {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}]}),
-            responses_stream(0),
+            responses_stream(),
             responses_provider,
         ),
         case(
@@ -772,7 +764,7 @@ fn chat_cases() -> Vec<Case> {
                 {"type": "message", "role": "system", "content": [{"type": "input_image", "image_url": "https://example.com/a.png"}]},
                 {"type": "message", "role": "system", "content": "b"},
                 {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}]}),
-            responses_stream(0),
+            responses_stream(),
             responses_provider,
         ),
         case(
@@ -864,14 +856,14 @@ fn responses_cases() -> Vec<Case> {
             "responses/plain",
             Ingress::Responses,
             json!({"model": ALIAS, "input": input}),
-            responses_stream(0),
+            responses_stream(),
             responses_provider,
         ),
         case(
             "responses/stream",
             Ingress::Responses,
             json!({"model": ALIAS, "stream": true, "input": input}),
-            responses_stream(0),
+            responses_stream(),
             responses_provider,
         ),
         case(
@@ -879,14 +871,14 @@ fn responses_cases() -> Vec<Case> {
             Ingress::Responses,
             json!({"model": ALIAS, "temperature": 0.3, "top_p": 0.9,
                    "max_output_tokens": 32, "input": input}),
-            responses_stream(0),
+            responses_stream(),
             responses_provider,
         ),
         case(
             "responses/instructions",
             Ingress::Responses,
             json!({"model": ALIAS, "instructions": "be brief", "input": input}),
-            responses_stream(0),
+            responses_stream(),
             responses_provider,
         ),
         case(
@@ -897,7 +889,7 @@ fn responses_cases() -> Vec<Case> {
                               "parameters": {"type": "object",
                                              "properties": {"q": {"type": "string"}}}}],
                    "tool_choice": {"type": "function", "name": "search"}}),
-            responses_stream(0),
+            responses_stream(),
             responses_provider,
         ),
         case(
@@ -907,7 +899,7 @@ fn responses_cases() -> Vec<Case> {
                 {"type": "message", "role": "system", "content": "be brief"},
                 {"type": "message", "role": "user",
                  "content": [{"type": "input_text", "text": "hi"}]}]}),
-            responses_stream(0),
+            responses_stream(),
             responses_provider,
         ),
         case(
@@ -919,7 +911,7 @@ fn responses_cases() -> Vec<Case> {
                 {"type": "message", "role": "developer", "content": "now be brief"},
                 {"type": "message", "role": "user",
                  "content": [{"type": "input_text", "text": "again"}]}]}),
-            responses_stream(0),
+            responses_stream(),
             responses_provider,
         ),
         case(
@@ -929,7 +921,7 @@ fn responses_cases() -> Vec<Case> {
                 {"type": "message", "role": "user",
                  "content": [{"type": "input_text", "text": "hi"}]},
                 {"type": "message", "role": "system", "content": "be kind"}]}),
-            responses_stream(0),
+            responses_stream(),
             responses_provider,
         ),
         case(
@@ -941,7 +933,7 @@ fn responses_cases() -> Vec<Case> {
                     {"type": "input_image", "image_url": "https://example.com/a.png"}]},
                 {"type": "message", "role": "user",
                  "content": [{"type": "input_text", "text": "hi"}]}]}),
-            responses_stream(0),
+            responses_stream(),
             responses_provider,
         ),
         case(
@@ -953,7 +945,7 @@ fn responses_cases() -> Vec<Case> {
                     {"type": "input_image", "image_url": "https://example.com/a.png"}]},
                 {"type": "message", "role": "user",
                  "content": [{"type": "input_text", "text": "hi"}]}]}),
-            responses_stream(0),
+            responses_stream(),
             responses_provider,
         ),
         case(
@@ -965,14 +957,7 @@ fn responses_cases() -> Vec<Case> {
                 {"type": "message", "role": "system", "content": "be brief"},
                 {"type": "message", "role": "user",
                  "content": [{"type": "input_text", "text": "hi"}]}]}),
-            responses_stream(0),
-            responses_provider,
-        ),
-        case(
-            "responses/upstream-created-at",
-            Ingress::Responses,
-            json!({"model": ALIAS, "stream": true, "input": input}),
-            responses_stream(1_700_000_000),
+            responses_stream(),
             responses_provider,
         ),
     ]

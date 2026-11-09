@@ -102,10 +102,10 @@ pub struct ResponsesStreamState {
     response_id: Option<String>,
     /// Model label echoed on `response.created` / `response.completed`.
     response_model: Option<String>,
-    /// `created_at` echoed on the response object. Captured as 0 when
-    /// the canonical chunk carries no timestamp (canonical chunks do
-    /// not model `created`), matching the non-stream renderer's handling
-    /// of a zero `ChatResponse.created`.
+    /// `created_at` echoed on the response object: the upstream Responses
+    /// `created_at` carried on a chunk's `upstream_meta`, else 0 (canonical
+    /// chunks do not model `created`), matching the non-stream renderer's
+    /// handling of a zero `ChatResponse.created`.
     created_at: i64,
     /// Buffered `finish_reason` from a terminal chunk, flushed into the
     /// `response.completed` status at EOS (mirrors the anthropic
@@ -114,11 +114,15 @@ pub struct ResponsesStreamState {
     /// Accumulated usage from the terminal/usage chunk, rendered into
     /// the `response.completed` body.
     pending_usage: Option<routectl_core::UsageDelta>,
-    /// Accumulated assistant text, replayed into the `response.completed`
-    /// body so it matches the non-stream render byte-for-byte. Cumulative
-    /// across the whole stream (the non-stream render concatenates all
-    /// assistant text into one message).
-    text_accumulator: String,
+    /// Accumulated assistant text per upstream message item id, in
+    /// first-seen order, replayed into the `response.completed` body as one
+    /// message item each. A stream whose chunks carry no id accumulates
+    /// into one `None` entry, which renders exactly like the non-stream
+    /// render's single message item.
+    message_texts: Vec<(Option<String>, String)>,
+    /// The upstream message item id the latest text chunk belonged to. A
+    /// text chunk carrying no id continues this item.
+    message_item_id: Option<String>,
     /// Text streamed into the CURRENT open message item, reset each time
     /// a new message item opens. Drives the per-item `output_text.done`
     /// body so a superseded item closes with only its own text.
@@ -136,7 +140,11 @@ enum OpenOutputItem {
     /// message-level `output_index` and the `content_index` of its
     /// single text part are tracked so deltas and the closing
     /// `output_text.done` / `content_part.done` carry the right indices.
-    Text { output_index: u64 },
+    /// `item_id` is the upstream message item id the item echoes.
+    Text {
+        output_index: u64,
+        item_id: Option<String>,
+    },
     /// A `reasoning` item streaming summary / text deltas. `detail_id`
     /// groups emitted details (matching the non-stream renderer's
     /// id-grouping); the

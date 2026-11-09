@@ -134,7 +134,7 @@ fn responses_stream() -> String {
         (
             "response.output_item.added",
             json!({"type": "response.output_item.added", "output_index": 0,
-                   "item": {"type": "message", "role": "assistant",
+                   "item": {"type": "message", "id": "m1", "role": "assistant",
                             "status": "completed", "content": []}}),
         ),
         (

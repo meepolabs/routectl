@@ -10,8 +10,8 @@ use serde_json::{Value, json};
 
 use routectl_core::{
     BEDROCK_MANTLE, CODEX_OAUTH, ChatResponse, ContentPart, KnownContentPart, Message,
-    MessageContent, OPENAI_APIKEY, OPENAI_RESPONSES_V1, ReasoningDetail, ReasoningDetailKind, Role,
-    Usage, schema::Choice,
+    MessageContent, OPENAI_APIKEY, OPENAI_RESPONSES_V1, ReasoningDetail, ReasoningDetailKind,
+    ResponsesEnvelope, Role, UpstreamMeta, Usage, schema::Choice,
 };
 
 use super::render_responses_response;
@@ -848,4 +848,44 @@ fn no_usage_omits_usage_object() {
 
     // Assert
     assert!(v.get("usage").is_none());
+}
+
+// ---------------------------------------------------------------------------
+// Upstream message item id
+// ---------------------------------------------------------------------------
+
+#[test]
+fn complete_render_echoes_upstream_message_item_id() {
+    // Arrange: a reasoning item precedes the message item, so the message
+    // item is output[1].
+    let mut message = assistant_message(MessageContent::Text("answer".into()));
+    message.reasoning_details = vec![responses_detail(
+        ReasoningDetailKind::Summary,
+        "rs_1",
+        json!({"text": "t"}),
+    )];
+    let mut resp = response_with(message, Some("stop"));
+    resp.upstream_meta = Some(UpstreamMeta::from_responses_envelope(
+        ResponsesEnvelope::of_message_item_id("msg_up_1".into()),
+    ));
+
+    // Act
+    let v = render_responses_response(resp).unwrap();
+
+    // Assert
+    assert_eq!(v["output"][1]["type"], "message");
+    assert_eq!(v["output"][1]["id"], "msg_up_1");
+}
+
+#[test]
+fn complete_render_without_an_envelope_emits_no_message_item_id() {
+    // Arrange + Act
+    let v = render(
+        assistant_message(MessageContent::Text("answer".into())),
+        Some("stop"),
+    );
+
+    // Assert
+    assert_eq!(v["output"][0]["type"], "message");
+    assert!(v["output"][0].get("id").is_none());
 }

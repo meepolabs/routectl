@@ -172,7 +172,7 @@ impl Dialect {
                 if let (Some((key, value)), Some(object)) = (extra, done.as_object_mut()) {
                     object.insert(key.to_string(), value);
                 }
-                let item = json!({"type": "message", "role": "assistant",
+                let item = json!({"type": "message", "id": "m1", "role": "assistant",
                                   "status": "completed", "content": []});
                 let mut created = responses_body();
                 created["status"] = json!("in_progress");

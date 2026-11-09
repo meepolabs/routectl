@@ -115,7 +115,7 @@ pub use tool_pairing::{ToolPairingDefect, ToolPairingError, validate_tool_pairin
 pub use translation_report::{TranslationKey, TranslationReason, TranslationReport};
 pub use upstream_meta::{
     AnthropicUnifiedQuota, CodexQuota, OpenAiChatEnvelope, OpeningUsage, OpeningUsageOrigin,
-    UpstreamMeta, UsageInputSource,
+    ResponsesEnvelope, UpstreamMeta, UsageInputSource,
 };
 pub use upstream_reason::UpstreamReason;
 pub use upstream_scrub::{names_aws_principal, scrub_upstream_text};

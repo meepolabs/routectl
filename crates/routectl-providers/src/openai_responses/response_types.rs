@@ -100,8 +100,7 @@ pub struct IncompleteDetails {
 #[derive(Debug)]
 pub enum ResponseOutputItem {
     Message {
-        /// Type-checks `id` as a string on a `message` item.
-        #[allow(dead_code)]
+        /// The upstream message item id, echoed by a Responses ingress.
         id: String,
         /// Type-checks `role` as a string. Read by this module's tests
         /// but not by the translator, so the lib target sees it dead.

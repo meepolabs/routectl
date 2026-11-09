@@ -5,7 +5,9 @@
 //! Codex's `x-codex-*`), on an Anthropic-shape stream the input side of
 //! usage the upstream reported in its first event (`OpeningUsage`), and on
 //! an OpenAI Chat Completions stream the envelope metadata the canonical
-//! chunk has no slot for (`OpenAiChatEnvelope`).
+//! chunk has no slot for (`OpenAiChatEnvelope`), and on an OpenAI Responses
+//! response the envelope values a Responses ingress echoes
+//! (`ResponsesEnvelope`).
 //! Skip-serialized (see the `#[serde(skip)]` fields on `ChatResponse` /
 //! `ChatChunk`); never on the wire.
 //!
@@ -76,6 +78,10 @@ pub struct UpstreamMeta {
     /// stream chunk, for an OpenAI-shape ingress to echo. `None` when the
     /// chunk carried none. Not a quota family.
     pub openai_chat: Option<OpenAiChatEnvelope>,
+    /// OpenAI Responses envelope values the upstream sent that canonical has
+    /// no slot for, for a Responses ingress to echo. `None` when the
+    /// response or chunk carried none. Not a quota family.
+    pub openai_responses: Option<ResponsesEnvelope>,
 }
 
 impl UpstreamMeta {
@@ -90,6 +96,7 @@ impl UpstreamMeta {
             usage_input_source: None,
             usage_from_vendor_endpoint: None,
             openai_chat: None,
+            openai_responses: None,
         }
     }
 
@@ -102,6 +109,7 @@ impl UpstreamMeta {
             usage_input_source: None,
             usage_from_vendor_endpoint: None,
             openai_chat: None,
+            openai_responses: None,
         }
     }
 
@@ -114,6 +122,7 @@ impl UpstreamMeta {
             usage_input_source: None,
             usage_from_vendor_endpoint: None,
             openai_chat: None,
+            openai_responses: None,
         }
     }
 
@@ -126,6 +135,7 @@ impl UpstreamMeta {
             usage_input_source: Some(source),
             usage_from_vendor_endpoint: None,
             openai_chat: None,
+            openai_responses: None,
         }
     }
 
@@ -141,6 +151,21 @@ impl UpstreamMeta {
             openai_chat: Some(OpenAiChatEnvelope {
                 system_fingerprint: Some(fingerprint),
             }),
+            openai_responses: None,
+        }
+    }
+
+    /// Construct an `UpstreamMeta` carrying only an OpenAI Responses
+    /// envelope.
+    pub const fn from_responses_envelope(envelope: ResponsesEnvelope) -> Self {
+        Self {
+            anthropic_unified: None,
+            codex: None,
+            opening_usage: None,
+            usage_input_source: None,
+            usage_from_vendor_endpoint: None,
+            openai_chat: None,
+            openai_responses: Some(envelope),
         }
     }
 
@@ -156,6 +181,20 @@ impl UpstreamMeta {
         self.openai_chat
             .as_ref()
             .and_then(|envelope| envelope.system_fingerprint.as_deref())
+    }
+
+    /// The upstream OpenAI Responses `message` output item id, if carried.
+    pub fn responses_message_item_id(&self) -> Option<&str> {
+        self.openai_responses
+            .as_ref()
+            .and_then(|envelope| envelope.message_item_id.as_deref())
+    }
+
+    /// The upstream OpenAI Responses `created_at`, if carried.
+    pub fn responses_created_at(&self) -> Option<i64> {
+        self.openai_responses
+            .as_ref()
+            .and_then(|envelope| envelope.created_at)
     }
 
     /// True when this carrier holds a provider quota family. Opening usage
@@ -180,6 +219,10 @@ impl UpstreamMeta {
                 .usage_from_vendor_endpoint
                 .or(other.usage_from_vendor_endpoint),
             openai_chat: match (self.openai_chat, other.openai_chat) {
+                (Some(mine), Some(theirs)) => Some(mine.merge(theirs)),
+                (mine, theirs) => mine.or(theirs),
+            },
+            openai_responses: match (self.openai_responses, other.openai_responses) {
                 (Some(mine), Some(theirs)) => Some(mine.merge(theirs)),
                 (mine, theirs) => mine.or(theirs),
             },
@@ -410,6 +453,49 @@ impl OpenAiChatEnvelope {
     }
 }
 
+/// OpenAI Responses envelope values an upstream sent that the canonical
+/// response has no slot for. OpenAI-native field names only.
+/// `#[non_exhaustive]` so further envelope fields ship without breaking
+/// downstream library consumers.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub struct ResponsesEnvelope {
+    /// The raw `id` of the `message` output item this response or chunk
+    /// belongs to. On a stream it rides only on the first text chunk of
+    /// each message item, so items that interleave keep their own ids.
+    pub message_item_id: Option<String>,
+    /// The raw `created_at` of the response, in epoch seconds.
+    pub created_at: Option<i64>,
+}
+
+impl ResponsesEnvelope {
+    /// An envelope carrying only a `message` output item id.
+    pub const fn of_message_item_id(id: String) -> Self {
+        Self {
+            message_item_id: Some(id),
+            created_at: None,
+        }
+    }
+
+    /// An envelope carrying only the response `created_at`.
+    pub const fn of_created_at(created_at: i64) -> Self {
+        Self {
+            message_item_id: None,
+            created_at: Some(created_at),
+        }
+    }
+
+    /// Combine two envelopes that describe the same response. Each field is
+    /// taken from `self` when present there, otherwise from `other`.
+    #[must_use]
+    pub fn merge(self, other: Self) -> Self {
+        Self {
+            message_item_id: self.message_item_id.or(other.message_item_id),
+            created_at: self.created_at.or(other.created_at),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -594,6 +680,85 @@ mod tests {
 
         // Assert
         assert_eq!(merged.system_fingerprint(), Some("fp_x"));
+    }
+
+    fn responses_envelope(id: Option<&str>, created_at: Option<i64>) -> ResponsesEnvelope {
+        ResponsesEnvelope {
+            message_item_id: id.map(str::to_string),
+            created_at,
+        }
+    }
+
+    #[test]
+    fn responses_envelope_merge_takes_each_field_from_self_then_other() {
+        let rows = [
+            (
+                "both set",
+                responses_envelope(Some("msg_a"), Some(1)),
+                responses_envelope(Some("msg_b"), Some(2)),
+                responses_envelope(Some("msg_a"), Some(1)),
+            ),
+            (
+                "self only",
+                responses_envelope(Some("msg_a"), Some(1)),
+                ResponsesEnvelope::default(),
+                responses_envelope(Some("msg_a"), Some(1)),
+            ),
+            (
+                "other only",
+                ResponsesEnvelope::default(),
+                responses_envelope(Some("msg_b"), Some(2)),
+                responses_envelope(Some("msg_b"), Some(2)),
+            ),
+            (
+                "one field each",
+                ResponsesEnvelope::of_message_item_id("msg_a".into()),
+                ResponsesEnvelope::of_created_at(7),
+                responses_envelope(Some("msg_a"), Some(7)),
+            ),
+        ];
+        for (name, mine, theirs, expected) in rows {
+            // Act
+            let merged = mine.merge(theirs);
+
+            // Assert
+            assert_eq!(merged, expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_responses_envelope_survives_a_merge_with_a_quota_carrier_from_either_side() {
+        // Arrange
+        let envelope =
+            UpstreamMeta::from_responses_envelope(responses_envelope(Some("msg_1"), Some(9)));
+        let codex = UpstreamMeta::from_codex(CodexQuota::default());
+
+        // Act
+        let merged = codex.clone().merge(envelope.clone());
+        let reversed = envelope.merge(codex.clone());
+
+        // Assert
+        assert_eq!(merged, reversed);
+        assert_eq!(merged.codex, codex.codex);
+        assert_eq!(merged.responses_message_item_id(), Some("msg_1"));
+        assert_eq!(merged.responses_created_at(), Some(9));
+    }
+
+    #[test]
+    fn meta_merge_combines_two_responses_envelopes_field_by_field() {
+        // Arrange
+        let created = UpstreamMeta::from_responses_envelope(ResponsesEnvelope::of_created_at(9));
+        let item = UpstreamMeta::from_responses_envelope(ResponsesEnvelope::of_message_item_id(
+            "msg_1".into(),
+        ));
+
+        // Act
+        let merged = created.merge(item);
+
+        // Assert
+        assert_eq!(merged.responses_message_item_id(), Some("msg_1"));
+        assert_eq!(merged.responses_created_at(), Some(9));
+        assert!(!merged.has_quota_family());
     }
 
     #[test]

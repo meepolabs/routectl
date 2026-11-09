@@ -30,8 +30,8 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use routectl_core::{
-    ChatChunk, Error, ReasoningDetail, ReasoningDetailKind, Result, Role, UpstreamMeta,
-    UsageInputSource,
+    ChatChunk, Error, ReasoningDetail, ReasoningDetailKind, ResponsesEnvelope, Result, Role,
+    UpstreamMeta, UsageInputSource,
     schema::{ChunkChoice, ChunkDelta, UsageDelta},
 };
 
@@ -56,10 +56,7 @@ use super::{AuthKind, lane_format_tag};
 #[derive(Debug, Clone)]
 enum BlockState {
     /// Assistant message item streaming text deltas.
-    Text {
-        #[allow(dead_code)]
-        item_id: String,
-    },
+    Text { item_id: String },
     /// Reasoning item. Accumulates summary + content text for forward-
     /// compat tracing; the actual chunks are emitted as the deltas
     /// arrive. `encrypted_content` is captured at item.added (if
@@ -122,6 +119,10 @@ pub struct ResponsesStreamState {
     pub(crate) model: String,
     /// Per-output-item state. Keyed on `output_index`.
     blocks: HashMap<u32, BlockState>,
+    /// `output_index` of the message item the latest text chunk belonged
+    /// to. A text chunk for a different item carries that item's id, so
+    /// interleaved message items never borrow each other's id.
+    last_text_index: Option<u32>,
     /// Dense counter for OpenAI-shape `tool_calls[].index`.
     next_call_index: u32,
     /// Dense counter for `reasoning_details[].index`.
@@ -218,6 +219,11 @@ impl ResponsesStreamState {
         if self.created_emitted {
             return Vec::new();
         }
+        let created_at = event
+            .response
+            .as_ref()
+            .and_then(|resp| resp.get("created_at"))
+            .and_then(Value::as_i64);
         self.created_emitted = true;
         // Opening role chunk: an OpenAI-Chat stream opens with a single
         // `delta.role="assistant"` chunk before any content delta. Emitted
@@ -237,7 +243,9 @@ impl ResponsesStreamState {
             }],
             usage: None,
             opaque_events: Vec::new(),
-            upstream_meta: None,
+            upstream_meta: created_at.map(|created_at| {
+                UpstreamMeta::from_responses_envelope(ResponsesEnvelope::of_created_at(created_at))
+            }),
         }]
     }
 
@@ -375,24 +383,35 @@ impl ResponsesStreamState {
             );
             return Vec::new();
         };
-        let Some(state) = self.blocks.get(&output_index) else {
-            tracing::debug!(
-                provider = provider_id,
-                output_index,
-                "openai-responses: output_text.delta for unknown block; ignoring"
-            );
-            return Vec::new();
+        let switches_item = self.last_text_index != Some(output_index);
+        let opening_item_id = match self.blocks.get(&output_index) {
+            Some(BlockState::Text { item_id }) => {
+                (switches_item && !item_id.is_empty()).then(|| item_id.clone())
+            }
+            Some(state) => {
+                tracing::debug!(
+                    provider = provider_id,
+                    output_index,
+                    block = state.tag(),
+                    "openai-responses: output_text.delta for non-Text block; ignoring"
+                );
+                return Vec::new();
+            }
+            None => {
+                tracing::debug!(
+                    provider = provider_id,
+                    output_index,
+                    "openai-responses: output_text.delta for unknown block; ignoring"
+                );
+                return Vec::new();
+            }
         };
-        if !matches!(state, BlockState::Text { .. }) {
-            tracing::debug!(
-                provider = provider_id,
-                output_index,
-                block = state.tag(),
-                "openai-responses: output_text.delta for non-Text block; ignoring"
-            );
-            return Vec::new();
-        }
-        vec![self.text_chunk(delta.to_string())]
+        self.last_text_index = Some(output_index);
+        let mut chunk = self.text_chunk(delta.to_string());
+        chunk.upstream_meta = opening_item_id.map(|id| {
+            UpstreamMeta::from_responses_envelope(ResponsesEnvelope::of_message_item_id(id))
+        });
+        vec![chunk]
     }
 
     fn handle_reasoning_summary_delta(&mut self, event: &ResponsesStreamEvent) -> Vec<ChatChunk> {

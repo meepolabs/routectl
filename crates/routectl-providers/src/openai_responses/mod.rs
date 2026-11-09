@@ -413,7 +413,10 @@ impl Provider for OpenAiResponsesProvider {
 
         let mut chat_resp = self.normalize_response(raw_body)?;
         chat_resp.routectl_provider = Some(self.cfg.id.clone());
-        chat_resp.upstream_meta = upstream_meta;
+        chat_resp.upstream_meta = match (upstream_meta, chat_resp.upstream_meta.take()) {
+            (Some(head), Some(body)) => Some(head.merge(body)),
+            (head, body) => head.or(body),
+        };
         Ok(chat_resp)
     }
 
