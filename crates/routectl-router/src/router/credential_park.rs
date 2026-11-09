@@ -23,7 +23,7 @@ use super::Router;
 use super::runtime_gate::ProbeSlotGuard;
 use crate::config::Config;
 use crate::runtime_state::{
-    AccountCredential, AccountReset, MarkOutcome, RefreshSettlement, SuccessSettlement,
+    AccountCredential, AccountReset, MarkOutcome, RefreshSettlement, SuccessSettlement, Unusable,
     UnusableCause,
 };
 
@@ -32,6 +32,15 @@ use crate::runtime_state::{
 /// so an account that leaves the config keeps its (inert) record until the
 /// process restarts; the keyspace is bounded by the accounts ever configured.
 pub(super) type CredentialAccounts = BTreeMap<String, AccountCredential>;
+
+/// An account the outgoing Router held as a placeholder seat, and the
+/// generation and unusable mark its record held at carry-over.
+#[derive(Debug, Clone)]
+pub(super) struct CarriedPlaceholder {
+    account: String,
+    generation: u64,
+    unusable: Option<Unusable>,
+}
 
 /// The `gate_kind` a credential-parked refusal is logged under.
 pub(super) const CREDENTIAL_PARKED_GATE_KIND: &str = "credential_parked";
@@ -499,16 +508,51 @@ impl Router {
         self.lift_credential_parks(accounts)
     }
 
+    /// Each account this Router holds as a placeholder seat, with the
+    /// generation and unusable mark its record holds now, each read under the
+    /// account lock. An account with no record is skipped: a reset would skip
+    /// it too.
+    pub(super) fn carry_placeholder_records(&self) -> Vec<CarriedPlaceholder> {
+        let records = self.credential_accounts.lock();
+        self.placeholder_accounts()
+            .filter_map(|account| {
+                records.get(account).map(|record| CarriedPlaceholder {
+                    account: account.to_string(),
+                    generation: record.generation(),
+                    unusable: record.unusable(),
+                })
+            })
+            .collect()
+    }
+
     /// Reset every account the outgoing Router held as a placeholder seat
-    /// that this Router built. Called at a reload's commit point
-    /// ([`Self::commit_carried_state`]); the accounts were recorded at
-    /// carry-over.
+    /// that this Router built a seat for and holds no placeholder on, while
+    /// its record still holds the generation and mark recorded at carry-over.
+    /// Called at a reload's commit point ([`Self::commit_carried_state`]). An
+    /// account whose seat the reload removed is not reset, and neither is one
+    /// marked or reset since the carry-over: that is newer evidence than the
+    /// build.
     pub(super) fn reset_readmitted_placeholder_accounts(&self) {
-        self.lift_credential_parks(
+        let resets: Vec<AccountReset> = {
+            let mut records = self.credential_accounts.lock();
             self.carried_placeholder_accounts
                 .iter()
-                .filter(|account| !self.is_placeholder_account(account)),
-        );
+                .filter(|carried| {
+                    self.has_built_seat_on_account(&carried.account)
+                        && !self.is_placeholder_account(&carried.account)
+                })
+                .filter_map(|carried| {
+                    records
+                        .get_mut(&carried.account)?
+                        .reset_if_unchanged(carried.generation, carried.unusable)
+                        .map(|outcome| AccountReset {
+                            account: carried.account.clone(),
+                            outcome,
+                        })
+                })
+                .collect()
+        };
+        self.log_recovered_resets(&resets);
     }
 
     /// [`Self::lift_entry_credential_parks`] for a reload whose config drops

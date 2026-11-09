@@ -1700,7 +1700,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   else `default_responses_base(auth_kind)`; a `bedrock_mantle` block on any of
   the three Mantle lanes: the Mantle base its region derives,
   `mantle_anthropic_base` or `mantle_openai_base`; a bare `bedrock-mantle`
-  auth-kind marker, a region that fails admission, or any other kind: `None`),
+  auth-kind marker or a region that fails admission: `None`; `gemini`: the
+  configured base URL, or the daily Cloud Code host for a `cloud-code` entry
+  left at the api-key default base URL; any other kind: `None`),
   read by the field stages' attributability decision; `cache_capability()`
   fails closed for anthropic-api on a non-default base URL, plus
   `auto_emit_top_level_breakpoint()` and the per-block front-marker trio

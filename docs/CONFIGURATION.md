@@ -1777,7 +1777,8 @@ probe).
 Most deployments need nothing here: the baked class matrix below IS
 the policy, and `max_attempts` (default 3) is the one knob it reads.
 `max_attempts = N` allows at most N - 1 same-target retries per client
-request, counted across the whole fallback walk: a retry spent on the
+request, unless a `[retry.classes]` retry leaf sets another cap for that
+class, counted across the whole fallback walk: a retry spent on the
 first chain entry is not available to a later one, so a single-entry
 chain retries N - 1 times and a longer chain never more. A repair
 resend (the router undoing or rewriting a field the upstream refused)
@@ -2053,10 +2054,10 @@ catalog overlay cell (see `routectl catalog`). It is total context, so the
 upstream sets the output limit aside before any input fits; the output
 reserve accounts for that. It is the request's own `max_tokens` when the
 client sent one, otherwise the target's output ceiling (the catalog
-`max_output_tokens`, the same value routectl sends upstream when the
+`max_output_tokens`, the value Anthropic-shape egresses send when the
 client sets none), otherwise 0. With no known ceiling the reserve is 0
 even where the egress fills its own 64000-token baseline; the reactive
-backstop below covers that gap. The 1024
+path below is the backstop for that gap, within its limits. The 1024
 tokens are a fixed headroom, not a fraction of the window, so a 1M-window
 target is not held to a smaller effective size than a 200k one: on a 1M
 window with a 64000-token reserve, a request estimated at up to 934976
@@ -5517,20 +5518,20 @@ to choose between and every strategy behaves identically:
   (the `x-claude-code-session-id` header Claude Code sends, or body
   `metadata.session_id`). A request without one mints no pin, since there
   is nothing to pin under; it still places by remaining subscription
-  budget when `[seat_quota]` is on and the evidence is complete enough to
-  act on, because the only thing that outranks quota fairness is
-  protecting a warm prompt cache and a keyless request has none. "Complete
+  budget when the evidence is complete enough to act on, because the only
+  thing that outranks quota fairness is protecting a warm prompt cache
+  and a keyless request has none. "Complete
   enough" is the same bar the keyed pick uses: at least one eligible seat
   fresh and below its threshold, or every eligible seat fresh-known and
   over it. Mixed evidence -- some seats observed and over threshold, the
   rest unobserved -- falls back to `fill-first`, as do a pool with no
-  readings at all and the switch off. The per-request seat decision is not
+  readings at all. The per-request seat decision is not
   persisted, and only partially logged: a DEBUG line marks a birth pick
   and an overflow repin, while a sticky stay, a pick deferred for lack of
   a healthy seat, and the keyless fall-through emit no selection line of
   their own. Note
   an incomplete-evidence fallback is separately visible in the throttled
-  quota-placement diagnostic when `[seat_quota]` is on. The usage ledger's
+  quota-placement diagnostic. The usage ledger's
   `selection_decision` column is write-stopped (retained in the schema,
   NULL for every row written by this version onward).
 

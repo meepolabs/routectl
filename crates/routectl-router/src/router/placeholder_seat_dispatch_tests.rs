@@ -45,6 +45,11 @@ struct Pool {
 }
 
 fn pool(placeholders: &[&str]) -> Pool {
+    pool_of(&MEMBERS, placeholders)
+}
+
+/// [`pool`] over the seats named in `members` alone.
+fn pool_of(members: &[&str], placeholders: &[&str]) -> Pool {
     let built = ScriptedProvider::new("built", &[Step::Ok]);
     let mut config = Config {
         retry: RetryPolicy {
@@ -55,20 +60,20 @@ fn pool(placeholders: &[&str]) -> Pool {
         },
         ..Config::default()
     };
-    for member in MEMBERS {
+    for member in members {
         config.providers.insert(
-            member.into(),
+            (*member).into(),
             ProviderEntry::anthropic_api(format!("oauth://anthropic#{member}")),
         );
     }
     config.pools.insert(
         "the-pool".into(),
-        PoolEntry::new(MEMBERS.iter().map(|m| (*m).to_string()).collect()),
+        PoolEntry::new(members.iter().map(|m| (*m).to_string()).collect()),
     );
     config
         .aliases
         .insert("alias".into(), AliasValue::Single("pooled".into()));
-    let seats: Arc<[SeatTarget]> = MEMBERS
+    let seats: Arc<[SeatTarget]> = members
         .iter()
         .map(|member| {
             if placeholders.contains(member) {
@@ -93,8 +98,8 @@ fn pool(placeholders: &[&str]) -> Pool {
     let report = PoolReport {
         pool: "the-pool".into(),
         models: vec!["pooled".into()],
-        configured_members: MEMBERS.len(),
-        usable_members: MEMBERS.len() - placeholders.len(),
+        configured_members: members.len(),
+        usable_members: members.len() - placeholders.len(),
         placeholders: placeholders
             .iter()
             .map(|member| PoolPlaceholder {
@@ -393,4 +398,54 @@ fn an_unchanged_placeholder_keeps_its_mark_and_since_across_a_carry_over() {
 
     // Assert
     assert_eq!(unusable_since(&after.router, "seat-a"), Some(first));
+}
+
+/// A mark placed between the carry-over and the commit is newer evidence
+/// than the build: the commit keeps it, both when the candidate built the
+/// seat and when the reload removed the seat altogether.
+#[test]
+fn a_mark_placed_after_the_carry_over_survives_the_commit() {
+    // (case, members the candidate holds)
+    let rows: [(&str, &[&str]); 2] = [
+        ("seat built by the candidate", &["seat-a", "seat-b"]),
+        ("seat removed by the reload", &["seat-b"]),
+    ];
+    for (case, members) in rows {
+        // Arrange: the outgoing router holds seat-a as a placeholder.
+        let before = pool(&["seat-a"]);
+        let mut after = pool_of(members, &[]);
+        after.router.carry_over_runtime_state_from(&before.router);
+        let account = account_of("seat-a");
+        let generation = before.router.acquire_credential_generation(&account);
+        before
+            .router
+            .mark_credential_unusable(&account, UnusableCause::Revoked, Some(generation));
+
+        // Act
+        after.router.commit_carried_state();
+
+        // Assert
+        assert_eq!(
+            unusable_since(&after.router, "seat-a").map(|(cause, _)| cause),
+            Some(UnusableCause::Revoked),
+            "{case}"
+        );
+    }
+}
+
+#[test]
+fn a_placeholder_whose_seat_the_reload_removed_keeps_its_build_mark() {
+    // Arrange
+    let before = pool(&["seat-a"]);
+    let mut after = pool_of(&["seat-b"], &[]);
+    after.router.carry_over_runtime_state_from(&before.router);
+
+    // Act
+    after.router.commit_carried_state();
+
+    // Assert
+    assert_eq!(
+        unusable_since(&after.router, "seat-a").map(|(cause, _)| cause),
+        Some(UnusableCause::NotLoggedIn)
+    );
 }

@@ -906,7 +906,8 @@ impl Router {
                             continue;
                         }
 
-                        // Read from the body, so before the body-free swap.
+                        // Defensive ordering: read from the body, so before the
+                        // body-free swap.
                         let native_capability_typed = target
                             .provider_kind
                             .is_some_and(|kind| names_requested_capability(kind, &e, &native_cf));

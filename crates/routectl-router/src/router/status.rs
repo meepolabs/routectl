@@ -78,6 +78,17 @@ impl Router {
             .filter_map(|placeholder| placeholder.account.as_deref())
     }
 
+    /// Whether any pooled model of this Router holds a built (not
+    /// placeholder) seat whose credential account is `account`.
+    #[must_use]
+    pub(super) fn has_built_seat_on_account(&self, account: &str) -> bool {
+        self.resolved_models
+            .values()
+            .filter_map(|model| model.seats.as_deref())
+            .flatten()
+            .any(|seat| !seat.is_placeholder() && seat.account() == Some(account))
+    }
+
     /// Non-mutating gate health for the state slot keyed by `state_key`.
     /// Fails safe when no slot exists: reports a circuit-Open,
     /// not-dispatchable gate rather than panicking, so a status view of a
