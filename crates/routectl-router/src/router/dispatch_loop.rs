@@ -45,7 +45,7 @@ use super::field_repair::{FieldSettlementMode, emit_field_repair};
 use super::learn_engine::{AttemptLearning, FailureDecision, Rejection, RejectionSite};
 use super::local_refusal::RefusalOrigin;
 use super::outcome_rule::{
-    SameProvider, breaker_outcome, class_debits, probe_fast_fail, rate_limit_reset_hint,
+    BreakerOutcome, SameProvider, breaker_outcome, probe_fast_fail, rate_limit_reset_hint,
     same_provider_retry, should_fallback,
 };
 use super::overlays::apply_layered_overlays;
@@ -941,15 +941,15 @@ impl Router {
                             }
                             return Err(e);
                         }
-                        // The breaker DEBIT keys off the failure CLASS, not
+                        // The breaker DEBIT is the shared rule's outcome, not
                         // the chain-hop decision: a seat looks unhealthy when
                         // it emits a transient-health failure (429 / 5xx /
                         // status-0 / overload), independent of whether the
-                        // operator routes past that status. A non-debiting
-                        // class (4xx caller error, capability, auth) that
-                        // still falls back releases its slot without a debit
-                        // in the fallback branch below.
-                        let debits = class_debits(&cf.class);
+                        // operator routes past that status, and never on a
+                        // native 400/422. An outcome that records nothing
+                        // and still falls back releases its slot without a
+                        // debit in the fallback branch below.
+                        let debits = outcome != BreakerOutcome::None;
                         let (_opened, breaker_effect) = self.apply_breaker_outcome(
                             state_key,
                             outcome,

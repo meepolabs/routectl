@@ -419,6 +419,7 @@ fn no_production_code_calls_the_ungated_registry_api() {
         ("router/class_observe.rs", include_str!("class_observe.rs")),
         ("router/outcome_rule.rs", include_str!("outcome_rule.rs")),
         ("router/replay_repair.rs", include_str!("replay_repair.rs")),
+        ("router/walk_state.rs", include_str!("walk_state.rs")),
         ("learned_replay.rs", include_str!("../learned_replay.rs")),
         ("field_verdict.rs", include_str!("../field_verdict.rs")),
     ];

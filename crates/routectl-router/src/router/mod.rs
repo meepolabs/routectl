@@ -76,6 +76,7 @@ mod sticky;
 mod stream_commit;
 mod stream_evidence;
 mod transcript_defect;
+mod walk_state;
 mod window_gate;
 mod wire_check;
 mod wire_rejection;

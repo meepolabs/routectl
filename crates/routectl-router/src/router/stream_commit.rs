@@ -32,7 +32,8 @@ use super::precontent::{is_empty_reasoning_only, precontent_summary};
 /// (`breaker_outcome`), on the class after the target's `class_overrides`
 /// remap: a debiting (health) class takes the threshold-gated debit, a
 /// non-debiting class (auth, bad request, content policy, context window,
-/// unsupported feature, ...) records nothing, and a non-probe frame whose
+/// unsupported feature, ...) records nothing, a native 400/422 records
+/// nothing whatever class it is remapped to, and a non-probe frame whose
 /// Retry-After, clamped to `max_honored_retry_after`, exceeds the in-loop
 /// cap parks the breaker for that long. A probe stream (`is_probe`) keeps
 /// the probe exceptions: its 429/529 leaves the breaker untouched and it

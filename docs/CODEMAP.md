@@ -4442,6 +4442,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   stream and count_tokens (forwarded, Gemini refuses and the walk moves on, an
   upstream 400 / 422 neither walks, repairs nor learns unless it names an edit
   routectl declared, which is undone and the same target retried once)
+- `src/router/walk_state.rs` -- request-scoped walk state (`RequestWalk`:
+  same-target retries spent, exclusions, the recognized scope row, skips per
+  scope) and `endpoint_key`, the one endpoint-identity derivation (normalized
+  origin of the provider entry's egress or forwarded base, else
+  `provider:<name>`); tests in `walk_state_tests.rs`
 - `src/router/window_gate.rs` -- proactive context-window gate, the SECOND
   chain filter pass (called from `chain::dispatch_chain_for_request`
   immediately after `filter_chain_by_features`, so the ordering makes "last
