@@ -1878,10 +1878,13 @@ impl DispatchMeta {
         }
     }
 
-    /// Record the target currently being dispatched as the served /
-    /// terminal target. Called on each chain entry the loop actually
-    /// dispatches to, so on the all-failed path the LAST dispatched
-    /// target is the terminal one.
+    /// Record the target currently being evaluated as the served /
+    /// terminal target. Called on each chain entry the loop evaluates,
+    /// before any pre-egress refusal (a placeholder seat, a missing
+    /// forwarded bearer, an egress or strip refusal), so on the all-failed
+    /// path the LAST evaluated target is the terminal one even when no
+    /// upstream call was made. Upstream calls are counted separately, in
+    /// `attempt_count`.
     ///
     /// `requested_model` is the client's requested model (`req.model`,
     /// read BEFORE any rewrite) -- the value a forwarded target actually
@@ -2818,8 +2821,9 @@ impl Router {
     /// THE one calibration-lane admission predicate: both the boot rebuild and
     /// the hot-reload carry-over go through it, so a lane the one path refuses
     /// cannot be the lane the other admits. A forwarded-credential entry never
-    /// serves a lane here: its wire id is whatever a client requested, so its
-    /// lanes record live but neither warm nor survive a reload. An entry
+    /// serves a lane here: its wire id is whatever a client requested, and a
+    /// dispatch on a forwarded credential records no calibration sample at
+    /// all, so there is no forwarded lane to warm or carry over. An entry
     /// missing from `[providers]` forms no lane at dispatch either.
     fn knows_lane(&self, provider_kind: &str, upstream: &str) -> bool {
         self.resolved_models
@@ -3173,27 +3177,10 @@ impl Router {
             .record_k_sample(session_key, provider_kind, model, cache_read, ts);
     }
 
-    /// Record one live token-estimate observation into the per-lane
-    /// calibration store. Called best-effort from the ingress capture path
-    /// AFTER the served target and the response's own prompt total are known.
-    ///
-    /// A lane requires BOTH halves of its key: the served provider kind and
-    /// the wire upstream the request was sent with (`DispatchMeta::
-    /// served_upstream`, the value the usage ledger persists, so the warm
-    /// rebuild reproduces the same key). A dispatch missing either forms no
-    /// lane and the call is a no-op.
-    ///
-    /// `session_key` names the CALLER the observation came from and is used
-    /// only to derive an opaque cohort tag, so that no single high-volume
-    /// caller defines a lane's correction. It is a reduction dimension only,
-    /// never part of the lane key, and it is hashed before it is stored: the
-    /// store outlives the request and must hold nothing that identifies one.
-    /// Every keyless request shares one cohort, so a lane fed only keyless
-    /// traffic never reaches the distinct-cohort floor and stays uncorrected.
-    ///
-    /// A single mutex lock plus a small push; it must never fail, panic, or
-    /// meaningfully slow the request, so it returns nothing and swallows the
-    /// no-lane case silently.
+    /// Record one calibration sample into this Router's live store, exactly
+    /// as [`LiveSampleSink::record_calibration_sample`] does. A test seam:
+    /// production records through [`Router::live_samples`].
+    #[cfg(any(test, feature = "test-utils"))]
     pub fn record_calibration_sample(
         &self,
         provider_kind: Option<&str>,
@@ -3405,8 +3392,7 @@ impl Router {
 
 /// Where a request's live K and calibration samples go: the two stores a
 /// Router shares with its hot-reload successors, without the Router.
-/// Records exactly as [`Router::record_k_sample`] and
-/// [`Router::record_calibration_sample`] do.
+/// Records exactly as [`Router::record_k_sample`] does for K samples.
 #[derive(Clone)]
 pub struct LiveSampleSink {
     k: Arc<crate::k_estimator::KSessionStore>,
@@ -3441,7 +3427,27 @@ impl LiveSampleSink {
         );
     }
 
-    /// See [`Router::record_calibration_sample`].
+    /// Record one live token-estimate observation into the per-lane
+    /// calibration store. Called best-effort from the ingress capture path
+    /// AFTER the served target and the response's own prompt total are known.
+    ///
+    /// A lane requires BOTH halves of its key: the served provider kind and
+    /// the wire upstream the request was sent with (`DispatchMeta::
+    /// served_upstream`, the value the usage ledger persists, so the warm
+    /// rebuild reproduces the same key). A dispatch missing either forms no
+    /// lane and the call is a no-op.
+    ///
+    /// `session_key` names the CALLER the observation came from and is used
+    /// only to derive an opaque cohort tag, so that no single high-volume
+    /// caller defines a lane's correction. It is a reduction dimension only,
+    /// never part of the lane key, and it is hashed before it is stored: the
+    /// store outlives the request and must hold nothing that identifies one.
+    /// Every keyless request shares one cohort, so a lane fed only keyless
+    /// traffic never reaches the distinct-cohort floor and stays uncorrected.
+    ///
+    /// A single mutex lock plus a small push; it must never fail, panic, or
+    /// meaningfully slow the request, so it returns nothing and swallows the
+    /// no-lane case silently.
     pub fn record_calibration_sample(
         &self,
         provider_kind: Option<&str>,

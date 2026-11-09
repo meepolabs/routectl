@@ -847,17 +847,19 @@ impl ProviderState {
         Some(Duration::from_millis(wait_ms as u64))
     }
 
-    /// Read the gate's capacity WITHOUT mutating it. Takes `&self`, so the
-    /// borrow checker forbids touching the token bucket or the half-open
-    /// probe slot; it must never call `try_dispatch` or `refill_tokens`.
-    /// Projects the lazily-refilled bucket level at `now` and classifies
-    /// the breaker phase, mirroring what `try_dispatch` would observe.
-    pub fn capacity_snapshot(&self, now: Instant) -> CapacitySnapshot {
+    /// [`Self::capacity_snapshot_under`] for an account with no park and no
+    /// unusable mark.
+    #[cfg(test)]
+    pub(crate) fn capacity_snapshot(&self, now: Instant) -> CapacitySnapshot {
         self.capacity_snapshot_under(now, None, None)
     }
 
-    /// [`Self::capacity_snapshot`] for a model whose account carries `park`
-    /// and `unusable`.
+    /// Read the gate's capacity WITHOUT mutating it, for a model whose
+    /// account carries `park` and `unusable`. Takes `&self`, so the borrow
+    /// checker forbids touching the token bucket or the half-open probe
+    /// slot; it must never call `try_dispatch` or `refill_tokens`.
+    /// Projects the lazily-refilled bucket level at `now` and classifies
+    /// the breaker phase, mirroring what `try_dispatch` would observe.
     pub(crate) fn capacity_snapshot_under(
         &self,
         now: Instant,
@@ -895,19 +897,21 @@ impl ProviderState {
         }
     }
 
-    /// Read the gate's health for a status view WITHOUT mutating it. Takes
-    /// `&self`, so the borrow checker forbids touching the token bucket or
-    /// the half-open probe slot; it must never call `try_dispatch` or
-    /// `refill_tokens`. Mirrors `capacity_snapshot` (same projected bucket
-    /// level, same circuit-phase classification) and additionally surfaces
-    /// the half-open-probe-in-flight bool explicitly, rather than folding it
-    /// into `CircuitPhase::Open` the way the phase classification does.
-    pub fn gate_status(&self, now: Instant) -> ProviderGateStatus {
+    /// [`Self::gate_status_under`] for an account with no park and no
+    /// unusable mark.
+    #[cfg(test)]
+    pub(crate) fn gate_status(&self, now: Instant) -> ProviderGateStatus {
         self.gate_status_under(now, None, None)
     }
 
-    /// [`Self::gate_status`] for a model whose account carries `park` and
-    /// `unusable`.
+    /// Read the gate's health for a status view WITHOUT mutating it, for a
+    /// model whose account carries `park` and `unusable`. Takes `&self`, so
+    /// the borrow checker forbids touching the token bucket or the half-open
+    /// probe slot; it must never call `try_dispatch` or `refill_tokens`.
+    /// Mirrors [`Self::capacity_snapshot_under`] (same projected bucket
+    /// level, same circuit-phase classification) and additionally surfaces
+    /// the half-open-probe-in-flight bool explicitly, rather than folding it
+    /// into `CircuitPhase::Open` the way the phase classification does.
     pub(crate) fn gate_status_under(
         &self,
         now: Instant,
