@@ -901,3 +901,272 @@ fn prompt_cache_key_falls_back_to_hashed_session_key() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// request.rs -- per-block prompt_cache_breakpoint placement
+// ---------------------------------------------------------------------------
+
+fn breakpoint_value() -> Value {
+    json!({"mode": "explicit"})
+}
+
+/// Ordinals 0 (`alpha`), 1 (`beta`) and 2 (`gamma`): the assistant turn
+/// between them counts none, so `gamma` is `input[2].content[1]`.
+fn breakpoint_conversation() -> Vec<Message> {
+    vec![
+        user_text("alpha"),
+        assistant_text("reply"),
+        user_parts(vec![text_part("beta"), text_part("gamma")]),
+    ]
+}
+
+fn recorded_breakpoint(
+    ordinal: Option<usize>,
+    text: &str,
+    client_pointer: &str,
+) -> routectl_core::ResponsesCacheBreakpoint {
+    routectl_core::ResponsesCacheBreakpoint {
+        ordinal,
+        text_digest: super::extras::breakpoint_text_digest(text),
+        value: breakpoint_value(),
+        client_pointer: client_pointer.into(),
+    }
+}
+
+fn req_with_breakpoints(
+    messages: Vec<Message>,
+    breakpoints: Vec<routectl_core::ResponsesCacheBreakpoint>,
+) -> ChatRequest {
+    let mut req = req_with(messages);
+    req.routectl_internal.provenance = routectl_core::RequestProvenance::ResponsesIngress;
+    req.routectl_internal.responses_cache_breakpoints = breakpoints;
+    req
+}
+
+/// Every `(input index, content index)` whose block carries a breakpoint.
+fn breakpoint_sites(wire: &Value) -> Vec<(usize, usize)> {
+    let mut sites = Vec::new();
+    for (item_index, item) in wire["input"].as_array().expect("input").iter().enumerate() {
+        let Some(blocks) = item.get("content").and_then(Value::as_array) else {
+            continue;
+        };
+        for (block_index, block) in blocks.iter().enumerate() {
+            if block.get("prompt_cache_breakpoint").is_some() {
+                sites.push((item_index, block_index));
+            }
+        }
+    }
+    sites
+}
+
+#[test]
+fn breakpoint_reattaches_on_ordinal_and_digest_match() {
+    // Arrange
+    let req = req_with_breakpoints(
+        breakpoint_conversation(),
+        vec![recorded_breakpoint(Some(2), "gamma", "/input/2/content/1")],
+    );
+
+    // Act
+    let wire = crate::translation_drop_metrics::assert_lane_ran_uncounted(
+        "openai-responses",
+        "prompt_cache_field_withheld",
+        || translate_to_json(&cfg_api_key(), &req),
+    );
+
+    // Assert
+    assert_eq!(wire["input"][2]["content"][1]["text"], "gamma", "{wire}");
+    assert_eq!(
+        wire["input"][2]["content"][1]["prompt_cache_breakpoint"],
+        breakpoint_value(),
+        "{wire}"
+    );
+    assert_eq!(
+        breakpoint_sites(&wire),
+        vec![(2, 1)],
+        "only block 2 is marked"
+    );
+}
+
+#[test]
+fn breakpoints_on_text_only_content_and_after_a_tool_turn_reattach() {
+    // Arrange: a flat-text user turn counts one ordinal and a tool turn
+    // counts none, mirroring the ingress ordinal rule.
+    let messages = vec![
+        user_text("alpha"),
+        tool_message("call_1", "tool says"),
+        user_text("beta"),
+    ];
+    let req = req_with_breakpoints(
+        messages,
+        vec![
+            recorded_breakpoint(Some(0), "alpha", "/input/0/content/0"),
+            recorded_breakpoint(Some(1), "beta", "/input/2/content/0"),
+        ],
+    );
+
+    // Act
+    let wire = translate_to_json(&cfg_api_key(), &req);
+
+    // Assert
+    assert_eq!(breakpoint_sites(&wire), vec![(0, 0), (2, 0)], "{wire}");
+}
+
+#[test]
+fn unplaced_breakpoints_count_once_and_declare() {
+    use routectl_core::wire_check::{EditKind, EditSite};
+    struct Row {
+        name: &'static str,
+        cfg: OpenAiResponsesConfig,
+        breakpoints: Vec<routectl_core::ResponsesCacheBreakpoint>,
+        site: EditSite,
+    }
+    let rows = [
+        Row {
+            name: "text rewritten (digest mismatch)",
+            cfg: cfg_api_key(),
+            breakpoints: vec![recorded_breakpoint(Some(2), "GAMMA", "/input/2/content/1")],
+            site: EditSite::DialectFieldStrip,
+        },
+        Row {
+            name: "ordinal shifted",
+            cfg: cfg_api_key(),
+            breakpoints: vec![recorded_breakpoint(Some(1), "gamma", "/input/2/content/1")],
+            site: EditSite::DialectFieldStrip,
+        },
+        Row {
+            name: "lifted (None)",
+            cfg: cfg_api_key(),
+            breakpoints: vec![
+                recorded_breakpoint(None, "rules", "/input/0/content/0"),
+                recorded_breakpoint(None, "more rules", "/input/1/content/0"),
+            ],
+            site: EditSite::DialectFieldStrip,
+        },
+        Row {
+            name: "chatgpt-oauth surface",
+            cfg: cfg(),
+            breakpoints: vec![
+                recorded_breakpoint(Some(0), "alpha", "/input/0/content/0"),
+                recorded_breakpoint(Some(2), "gamma", "/input/2/content/1"),
+            ],
+            site: EditSite::AuthSurfaceGate,
+        },
+        Row {
+            name: "bedrock-mantle surface",
+            cfg: cfg_bedrock_mantle(),
+            breakpoints: vec![recorded_breakpoint(Some(2), "gamma", "/input/2/content/1")],
+            site: EditSite::AuthSurfaceGate,
+        },
+    ];
+    for row in rows {
+        // Arrange
+        let req = req_with_breakpoints(breakpoint_conversation(), row.breakpoints.clone());
+        let before = responses_drop_count("prompt_cache_field_withheld");
+
+        // Act
+        let (wire, edits) = translate_declaring(&row.cfg, &req);
+
+        // Assert
+        let after = responses_drop_count("prompt_cache_field_withheld");
+        assert_eq!(after - before, 1, "{}: one drop per request", row.name);
+        assert!(
+            breakpoint_sites(&wire).is_empty(),
+            "{}: no block is marked: {wire}",
+            row.name
+        );
+        let removes: Vec<_> = edits
+            .iter()
+            .filter(|(_, path, _)| path.ends_with("/prompt_cache_breakpoint"))
+            .cloned()
+            .collect();
+        let expected: Vec<_> = row
+            .breakpoints
+            .iter()
+            .map(|b| {
+                (
+                    row.site,
+                    format!("{}/prompt_cache_breakpoint", b.client_pointer),
+                    EditKind::Remove,
+                )
+            })
+            .collect();
+        assert_eq!(removes, expected, "{}: one Remove per entry", row.name);
+    }
+}
+
+#[test]
+fn breakpoints_from_another_ingress_are_ignored() {
+    // Arrange: only the Responses ingress records breakpoints; a sidecar on
+    // any other provenance is not acted on.
+    let mut req = req_with_breakpoints(
+        breakpoint_conversation(),
+        vec![recorded_breakpoint(Some(2), "gamma", "/input/2/content/1")],
+    );
+    req.routectl_internal.provenance = routectl_core::RequestProvenance::Library;
+
+    // Act
+    let wire = crate::translation_drop_metrics::assert_lane_ran_uncounted(
+        "openai-responses",
+        "prompt_cache_field_withheld",
+        || translate_to_json(&cfg_api_key(), &req),
+    );
+
+    // Assert
+    assert!(breakpoint_sites(&wire).is_empty(), "{wire}");
+}
+
+#[test]
+fn top_level_and_per_block_withholds_share_one_count() {
+    // Arrange: chatgpt-oauth withholds both the retention field and the
+    // breakpoint.
+    let mut req = req_with_breakpoints(
+        breakpoint_conversation(),
+        vec![recorded_breakpoint(Some(2), "gamma", "/input/2/content/1")],
+    );
+    req.provider_extras = Some(json!({"prompt_cache_retention": "24h"}));
+    let before = responses_drop_count("prompt_cache_field_withheld");
+
+    // Act
+    let (wire, edits) = translate_declaring(&cfg(), &req);
+
+    // Assert
+    let after = responses_drop_count("prompt_cache_field_withheld");
+    assert_eq!(after - before, 1, "one drop for the whole request");
+    assert!(wire.get("prompt_cache_retention").is_none(), "{wire}");
+    assert!(breakpoint_sites(&wire).is_empty(), "{wire}");
+    assert_eq!(
+        edits
+            .iter()
+            .filter(|(_, _, kind)| *kind == routectl_core::wire_check::EditKind::Remove)
+            .filter(|(_, path, _)| path.contains("prompt_cache"))
+            .count(),
+        2,
+        "both withholds are declared: {edits:?}"
+    );
+}
+
+#[test]
+fn a_breakpoint_withhold_counts_when_translation_then_fails() {
+    // Arrange: an image_url that is not an object fails the input build.
+    let mut messages = breakpoint_conversation();
+    messages.push(user_parts(vec![ContentPart::Known(
+        KnownContentPart::ImageUrl {
+            image_url: json!("not-an-object"),
+            cache_control: None,
+        },
+    )]));
+    let req = req_with_breakpoints(
+        messages,
+        vec![recorded_breakpoint(Some(2), "gamma", "/input/2/content/1")],
+    );
+    let before = responses_drop_count("prompt_cache_field_withheld");
+
+    // Act
+    let err = translate_err(&cfg_api_key(), &req);
+
+    // Assert
+    let after = responses_drop_count("prompt_cache_field_withheld");
+    assert!(err.contains("image_url"), "unexpected error: {err}");
+    assert_eq!(after - before, 1, "the withhold counts despite the failure");
+}

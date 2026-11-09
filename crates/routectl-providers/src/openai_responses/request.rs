@@ -15,8 +15,8 @@
 use routectl_core::cache_control::{BreakpointPosition, CacheBreakpointSource};
 use routectl_core::wire_check::{EditKind, EditSite, WireTap};
 use routectl_core::{
-    ChatRequest, ContentPart, KnownContentPart, MessageContent, ResponsesPassthroughItem, Result,
-    Role,
+    ChatRequest, ContentPart, KnownContentPart, MessageContent, RequestProvenance,
+    ResponsesCacheBreakpoint, ResponsesPassthroughItem, Result, Role,
 };
 use serde_json::Value;
 
@@ -25,7 +25,7 @@ use super::messages::{
 };
 use super::system::{flush_fingerprint_tally, record_developer_turn_withhold, translate_system};
 use super::tools::{translate_tool_choice, translate_tools};
-use super::types::{ResponseInput, ResponsesRequest};
+use super::types::{ResponseInput, ResponseInputItem, ResponsesContentItem, ResponsesRequest};
 use super::{AuthKind, OpenAiResponsesConfig, extras};
 use crate::translation_drop_metrics::{
     ClientFingerprintStripTally, record_translation_drop, record_translation_lane_seen,
@@ -60,11 +60,19 @@ pub fn translate(cfg: &OpenAiResponsesConfig, req: &ChatRequest) -> Result<Respo
     declare_instructions(tap, instructions.is_some(), &fingerprint);
     record_developer_turn_withhold(&req.messages, &mut fingerprint);
     let instructions = instructions.unwrap_or_default();
-    let input = build_input_with_passthrough(&cfg.id, cfg.auth_kind, req, tap);
+    let input = build_input_with_passthrough(&cfg.id, cfg.auth_kind, req, tap, &mut cache_withheld);
     // Flushed before the input build's `?`, so a request that withheld the
     // fingerprint and then failed translation still counts.
     flush_fingerprint_tally(&fingerprint);
-    let input = input?;
+    // The prompt-cache tally is shared with the top-level fields merged
+    // below, so it flushes once: here only when the input build failed.
+    let input = match input {
+        Ok(input) => input,
+        Err(e) => {
+            cache_withheld.flush();
+            return Err(e);
+        }
+    };
     let tools = translate_tools(req);
     let tool_choice = translate_tool_choice(req.tool_choice.as_ref());
 
@@ -152,9 +160,21 @@ fn build_input_with_passthrough(
     auth_kind: AuthKind,
     req: &ChatRequest,
     tap: Option<&WireTap>,
+    cache_withheld: &mut extras::PromptCacheWithheldTally,
 ) -> Result<Vec<ResponseInput>> {
     let provenance = req.routectl_internal.provenance;
-    let items = build_input(id, auth_kind, provenance, &req.messages, tap)?;
+    let mut items = build_input(id, auth_kind, provenance, &req.messages, tap);
+    if provenance == RequestProvenance::ResponsesIngress {
+        place_cache_breakpoints(
+            id,
+            auth_kind,
+            &req.routectl_internal.responses_cache_breakpoints,
+            items.as_deref_mut().ok(),
+            tap,
+            cache_withheld,
+        );
+    }
+    let items = items?;
     let modeled: Vec<ResponseInput> = items.into_iter().map(ResponseInput::Item).collect();
     let passthrough = &req.routectl_internal.responses_input_passthrough;
     let merged = merge_passthrough(modeled, passthrough);
@@ -162,6 +182,105 @@ fn build_input_with_passthrough(
         declare_passthrough_relocations(tap, &merged, passthrough);
     }
     Ok(merged)
+}
+
+/// Put each client `prompt_cache_breakpoint` back on the `input_text` block
+/// it came from. Only the api-key surface takes one; the ChatGPT-OAuth and
+/// Mantle surfaces have no recorded acceptance of the field.
+///
+/// A block is identified by its position in the `input_text` stream the
+/// ingress counted (every `input_text` of a non-assistant message item, in
+/// order) and by the digest of its text: both must match, so a breakpoint
+/// never lands on a block whose text changed between ingress and egress.
+/// Every breakpoint left unplaced (refused by the surface, lifted into
+/// `instructions`, moved, rewritten, or `items` absent because the input
+/// build failed) is recorded in `cache_withheld` and declared as a Remove
+/// at the client's block: an auth-surface gate on a surface that takes
+/// none, a dialect strip where the block it named is gone.
+/// TRANSLATION-DROP: lane=openai-responses class=prompt_cache_field_withheld test=unplaced_breakpoints_count_once_and_declare
+fn place_cache_breakpoints(
+    id: &str,
+    auth_kind: AuthKind,
+    breakpoints: &[ResponsesCacheBreakpoint],
+    items: Option<&mut [ResponseInputItem]>,
+    tap: Option<&WireTap>,
+    cache_withheld: &mut extras::PromptCacheWithheldTally,
+) {
+    if breakpoints.is_empty() {
+        return;
+    }
+    let mut placed = vec![false; breakpoints.len()];
+    if let (AuthKind::ApiKey, Some(items)) = (auth_kind, items) {
+        attach_matching_breakpoints(breakpoints, items, &mut placed);
+    }
+    let unplaced: Vec<&ResponsesCacheBreakpoint> = breakpoints
+        .iter()
+        .zip(&placed)
+        .filter(|(_, placed)| !**placed)
+        .map(|(breakpoint, _)| breakpoint)
+        .collect();
+    if unplaced.is_empty() {
+        return;
+    }
+    cache_withheld.record();
+    tracing::debug!(
+        provider = id,
+        unplaced = unplaced.len(),
+        "dropping prompt_cache_breakpoint values the Responses egress could not place"
+    );
+    if let Some(tap) = tap {
+        let site = if auth_kind == AuthKind::ApiKey {
+            EditSite::DialectFieldStrip
+        } else {
+            EditSite::AuthSurfaceGate
+        };
+        for breakpoint in unplaced {
+            crate::wire_declare::declare(
+                tap,
+                site,
+                format!("{}/prompt_cache_breakpoint", breakpoint.client_pointer),
+                EditKind::Remove,
+            );
+        }
+    }
+}
+
+/// Walk the `input_text` stream in the order the ingress counted it and set
+/// each breakpoint whose ordinal and text digest both match, marking it in
+/// `placed`.
+fn attach_matching_breakpoints(
+    breakpoints: &[ResponsesCacheBreakpoint],
+    items: &mut [ResponseInputItem],
+    placed: &mut [bool],
+) {
+    let mut ordinal = 0usize;
+    for item in items {
+        // An assistant turn emits `output_text` and a tool turn a
+        // `function_call_output`, so neither adds to the stream, as at ingress.
+        let ResponseInputItem::Message { content, .. } = item else {
+            continue;
+        };
+        for block in content {
+            let ResponsesContentItem::InputText {
+                text,
+                prompt_cache_breakpoint,
+            } = block
+            else {
+                continue;
+            };
+            for (index, breakpoint) in breakpoints.iter().enumerate() {
+                let matches = !placed[index]
+                    && breakpoint.ordinal == Some(ordinal)
+                    && breakpoint.text_digest == extras::breakpoint_text_digest(text);
+                if matches {
+                    *prompt_cache_breakpoint = Some(breakpoint.value.clone());
+                    placed[index] = true;
+                    break;
+                }
+            }
+            ordinal += 1;
+        }
+    }
 }
 
 /// Declare a Relocate for each spliced passthrough item that left at a

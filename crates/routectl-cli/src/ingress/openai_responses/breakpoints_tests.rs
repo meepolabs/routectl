@@ -205,3 +205,77 @@ fn breakpoint_capture_leaves_canonical_content_unchanged() {
         "the canonical request is byte-identical with and without breakpoints",
     );
 }
+
+fn api_key_egress(req: &ChatRequest) -> Value {
+    use routectl_core::Provider;
+    use routectl_providers::openai_responses::{
+        AuthKind, OpenAiResponsesConfig, OpenAiResponsesProvider,
+    };
+
+    // The provider loads its cookie jar on construction: point it at a
+    // scratch file so the test never reads the operator's config directory.
+    let scratch = tempfile::tempdir().expect("cookie tempdir");
+    let _cookie_file =
+        routectl_testkit::ScopedEnv::set("ROUTECTL_COOKIE_FILE", scratch.path().join("jar.json"));
+    let mut cfg = OpenAiResponsesConfig::new("openai-responses:test", "literal:test");
+    cfg.auth_kind = AuthKind::ApiKey;
+    OpenAiResponsesProvider::new(cfg)
+        .normalize_request(req)
+        .expect("responses egress normalize")
+}
+
+/// The text of every egress block carrying a breakpoint, in order.
+fn marked_texts(wire: &Value) -> Vec<String> {
+    wire["input"]
+        .as_array()
+        .expect("egress input")
+        .iter()
+        .filter_map(|item| item.get("content").and_then(Value::as_array))
+        .flatten()
+        .filter(|block| block.get("prompt_cache_breakpoint") == Some(&breakpoint()))
+        .filter_map(|block| block["text"].as_str().map(str::to_string))
+        .collect()
+}
+
+#[test]
+#[serial_test::serial]
+fn breakpoints_round_trip_through_the_responses_egress_onto_their_blocks() {
+    // Arrange: every block the ingress gives an ordinal is marked, among
+    // blocks that take none (a lifted developer turn, an assistant turn, a
+    // tool output, an image), so the egress walk must count exactly as the
+    // ingress did for each one to land.
+    let body = json!({
+        "model": "gpt-5.6",
+        "input": [
+            message("developer", vec![text_block("input_text", "rules", false)]),
+            message("user", vec![
+                text_block("input_text", "first", true),
+                json!({ "type": "input_image", "image_url": "https://example.com/a.png" }),
+                text_block("input_text", "second", false),
+            ]),
+            message("assistant", vec![text_block("output_text", "calling", false)]),
+            { "type": "function_call", "call_id": "call_1", "name": "run", "arguments": "{}" },
+            { "type": "function_call_output", "call_id": "call_1",
+              "output": [text_block("input_text", "done", false)] },
+            message("system", vec![
+                text_block("input_text", "look here", true),
+                json!({ "type": "input_image", "image_url": "https://example.com/b.png" }),
+            ]),
+            message("user", vec![
+                text_block("input_text", "third", false),
+                text_block("input_text", "fourth", true),
+            ]),
+        ]
+    });
+
+    // Act
+    let req = parse(body);
+    let wire = api_key_egress(&req);
+
+    // Assert
+    assert_eq!(
+        marked_texts(&wire),
+        ["first", "look here", "fourth"],
+        "each breakpoint lands on the block it was sent on: {wire}"
+    );
+}

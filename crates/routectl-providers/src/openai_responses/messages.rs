@@ -933,7 +933,10 @@ fn build_user_content(
 ) -> Result<Vec<ResponsesContentItem>> {
     match content {
         MessageContent::Text(t) if t.is_empty() => Ok(Vec::new()),
-        MessageContent::Text(t) => Ok(vec![ResponsesContentItem::InputText { text: t.clone() }]),
+        MessageContent::Text(t) => Ok(vec![ResponsesContentItem::InputText {
+            text: t.clone(),
+            prompt_cache_breakpoint: None,
+        }]),
         MessageContent::Null => Ok(Vec::new()),
         MessageContent::Parts(parts) => {
             let mut out: Vec<ResponsesContentItem> = Vec::with_capacity(parts.len());
@@ -941,7 +944,10 @@ fn build_user_content(
                 match p {
                     ContentPart::Known(KnownContentPart::Text { text, .. }) => {
                         if !text.is_empty() {
-                            out.push(ResponsesContentItem::InputText { text: text.clone() });
+                            out.push(ResponsesContentItem::InputText {
+                                text: text.clone(),
+                                prompt_cache_breakpoint: None,
+                            });
                         }
                     }
                     ContentPart::Known(KnownContentPart::Image { source, .. }) => {

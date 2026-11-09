@@ -226,6 +226,10 @@ pub enum FunctionCallOutputContentItem {
 pub enum ResponsesContentItem {
     InputText {
         text: String,
+        /// The client's per-block cache breakpoint, put back by the
+        /// breakpoint placement; absent on every other block.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        prompt_cache_breakpoint: Option<Value>,
     },
     OutputText {
         text: String,
@@ -376,6 +380,7 @@ mod tests {
             role: "user".to_string(),
             content: vec![ResponsesContentItem::InputText {
                 text: "hi".to_string(),
+                prompt_cache_breakpoint: None,
             }],
         };
 
