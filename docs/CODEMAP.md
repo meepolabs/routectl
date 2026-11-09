@@ -168,8 +168,8 @@ license.
   the closed recognizer `ScopeRow` (`anthropic-bare-rate-limit`), each row
   with `const fn scope()` / `retryable()`; carried on `Error::Upstream` via
   `with_scope_row` / `scope_row()`, a separate axis from `UpstreamReason`.
-  `as_str` / exact `from_token`; additive only; an absent row means target
-  scope
+  `as_str` / exact `from_token`; both re-exported at the crate root; additive
+  only; an absent row means target scope
 - `src/eligibility.rs` -- closed `EligibilityReason` (`credential_unusable`,
   `account_parked`, `breaker_open`, `rate_limited`, `capability`,
   `context_window`): why a target was locally ineligible, carried on
@@ -436,9 +436,10 @@ license.
   `size_of::<Error>() <= 128`, the `Result` success-slot size) and the
   `upstream_with_retry_after` / `with_upstream_request_id` ctors, plus
   `with_upstream_reason` / `upstream_reason()` for the typed
-  `UpstreamReason` (the request id, parse and reason share the boxed
-  `UpstreamExtras`, unallocated when all three are absent, and each
-  `with_*` rebuild keeps the other two); `Debug` is
+  `UpstreamReason` and `with_scope_row` / `scope_row()` for the recognized
+  `ScopeRow` (the request id, parse, reason and scope row share the boxed
+  `UpstreamExtras`, unallocated when all four are absent, and each
+  `with_*` rebuild keeps the other three); `Debug` is
   hand-written (not derived)
   so `Error::Upstream`'s `body` renders as a bounded `body_excerpt` (capped at
   `MAX_LOG_BODY_EXCERPT` chars) + `body_len` marker -- every `?e` log sink is
@@ -687,6 +688,9 @@ license.
   anthropic-api lane on its own OAuth bearer credential only), the
   presence-only `Retry-After` / `anthropic-ratelimit-*` header facts, and a
   strict envelope parse that rejects unknown and repeated keys
+- `src/upstream_scope_tests.rs` -- `#[path]` sidecar: the recorded bare 429
+  recognized through the shared upstream read on the Anthropic OAuth lane,
+  plus the table clauses no wire row isolates
 - `src/upstream_request_id.rs` -- `parse_upstream_request_id(&HeaderMap)`:
   lifts the upstream provider's correlation id (first of `x-request-id` /
   `x-oai-request-id` / `cf-ray`) off an error response so the ingress can
@@ -968,6 +972,11 @@ license.
   corpus (expanding folds, shorter-word fallback, window-edge matches)
 - `src/anthropic_api/mod_cloak_refusal_tests.rs` -- a relocation refusal halts
   complete, stream, and count_tokens before token resolution
+- `src/anthropic_api/mod_scope_lane_tests.rs` -- the scope lane reaches the
+  recognizer only from the provider's own OAuth bearer: the recorded bare 429
+  (`tests/fixtures/anthropic_api/bare_429_capture.json`) is recognized on
+  complete, stream and count_tokens there, every other lane or near-miss
+  response stays target scope
 - `src/anthropic_api/cloak/billing.rs` -- strips the Claude Code
   billing/attribution system block unconditionally (`strip_billing_block`)
 - `src/anthropic_api/cloak/identity.rs` -- transactional non-CC client system
@@ -994,7 +1003,10 @@ license.
 
 ### openai_compat
 
-- `src/openai_compat/mod.rs` -- `OpenAiCompatProvider` impl; owns
+- `src/openai_compat/mod.rs` -- `OpenAiCompatProvider` impl; reads the
+  first-party bearer from `OpenAiCompatConfig::auth` (a `TokenSource`) once per
+  upstream request and forwards `on_auth_failure` to it (`new` wraps a static
+  key in a `StaticToken`, `new_with_auth` takes any source); owns
   `ThinkTagAccumulator` for cross-chunk `<think>` state (`take_think_flush`);
   stream tail via `classify_stream_tail` and `missing_terminal`;
   `map_openai_compat_upstream_error` builds the client error from an
@@ -1732,14 +1744,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `WindowGateConfig` (global `[window_gate]`: `enabled`, default false; a
   missing block is off) is the hot-reloadable switch for the proactive
   context-window gate;
-  `CalibrationConfig` (global `[calibration]`: `enabled`, default true) is the
-  hot-reloadable kill switch for APPLYING the learned per-lane token-estimate
-  correction (off leaves the static window gate intact and retains collected
-  evidence); `SeatQuotaConfig` (global `[seat_quota]`: `enabled`, default true)
-  is the hot-reloadable kill switch for quota-aware birth placement (off is
-  byte-identical to the pre-quota birth chooser for an unpinned session, and
-  following `CalibrationConfig` it retains and keeps aging the collected
-  readings); `FidelityConfig` (global `[fidelity]`: `prefix_impact_opt_in:
+  `CalibrationConfig` (global `[calibration]`) and `SeatQuotaConfig` (global
+  `[seat_quota]`) each keep an `enabled` field that is parsed only so an
+  existing config still loads and has no effect: the learned per-lane
+  token-estimate correction and quota-aware birth placement always apply;
+  `FidelityConfig` (global `[fidelity]`: `prefix_impact_opt_in:
   Vec<String>` reusing the `[capability.overrides]` two-tier target-spec
   grammar) is fully defaulted (empty list), so a missing block changes
   nothing. `prefix_impact_opt_in` is an ACTIVE dispatch gate: the pre-flight
@@ -1917,7 +1926,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `x-goog-api-key` source, the `CloudCode` mode requires an `oauth://` ref,
   resolves the bearer, and wires an `OAuthStoreProjectCache` into
   `GeminiConfig::new_cloud_code`, forwarding `cloud_project_id` with an empty
-  string normalized to unset); provider-or-pool resolution -- a
+  string normalized to unset; the openai-compat arm resolves its
+  `api_key_ref` through `resolve_token_source`, so `oauth://<provider>` yields
+  a refreshing `ManagedToken` read per request and env / file / literal refs a
+  `StaticToken` resolved once); provider-or-pool resolution -- a
   `[models.X] provider` naming a `[pools]` block compiles through
   `compile_pool` into one seat per member (built from that member's own
   `api_key_ref`, credential probed first so a logged-out member is kept as an
@@ -2604,9 +2616,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   the prefix-rewrite detector's per-request classification (0 stable / 1
   rewritten / 2 reseeded, `None` for a first-seen session or a request with no
   session key) -- and `served_seat` --
-  the credential identity of the target that ACTUALLY served, copied by
-  `mark_target` from `DispatchTarget.seat` and left `None` on the
-  forwarded-credential path -- and the per-marker auto-cache decisions
+  the credential identity of the target that ACTUALLY served (on an
+  all-failed walk, the last target evaluated, even one refused before
+  egress), copied by `mark_target` from `DispatchTarget.seat` and left `None`
+  on the forwarded-credential path -- and the per-marker auto-cache decisions
   `cache_front_decision` / `cache_terminal_decision` beside the legacy
   aggregate `cache_strategy`, which now carries the TERMINAL marker's
   token). Construction + hot-reload lifecycle: `new`,
@@ -2688,17 +2701,17 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   calibration store, supplying the lane predicate that drops a remapped or
   removed upstream), `register`, `record_k_sample`, `live_samples` (a
   `LiveSampleSink`: the two live sample stores, shared with hot-reload
-  successors, without the Router),
-  `record_calibration_sample` (the live per-lane token-estimate evidence write;
-  requires BOTH a served provider kind and the served wire upstream
-  (`DispatchMeta::served_upstream`) or it forms no lane, and hashes the
-  session key into an opaque reduction cohort),
+  successors, without the Router; its `record_calibration_sample` is the live
+  per-lane token-estimate evidence write, which requires BOTH a served
+  provider kind and the served wire upstream (`DispatchMeta::served_upstream`)
+  or forms no lane, and hashes the session key into an opaque reduction
+  cohort; `Router::record_calibration_sample` is a test-only seam onto it),
   `calibration_lanes` (lane IDENTITIES only, never samples -- the observability
   read surface over the otherwise-private store), `knows_lane` (the ONE
   lane-admission predicate, shared by the boot rebuild and the reload carry:
   some resolved own-credential target of that provider kind sends that
-  upstream; a lane only a forwarded target reads is neither warmed nor
-  kept, and forwarded dispatches write no evidence),
+  upstream; a forwarded-credential dispatch records no calibration sample,
+  so there is no forwarded lane to warm or keep),
   `admit_quota_seats` (declares the config's OAuth account keys to the quota
   store at install time, which is what bounds that store's keyspace),
   `resolve_nickname`, `has_forwarded_provider`, `override_registry`. Also owns
@@ -2723,8 +2736,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   terminal park), the skip tally (`tally_gate_skip`: a gate refusal on a
   target not yet attempted, and every placeholder seat, count one skip under
   its `EligibilityReason`), the learner repair
-  branch, classify and remap, breaker outcome, credential park, the one
-  `same_provider_retry` call, fallback, the last error and `DispatchMeta`
+  branch, classify and remap, the one `outcome_rule::decide` call (its
+  `Disposition` settles the breaker, then `after_breaker` and `record_on` the
+  request's `walk_state::RequestWalk`), credential park, the per-target
+  `RequestWalk::admits` check (an excluded target is passed over before it is
+  marked or gated), fallback, the last error and `DispatchMeta`
   advancement. The per-attempt deadline is `tokio::time::timeout` around
   `invoke`; expiry is the typed `DeadlineFired`, rendered by the adapter's
   `Deadline` as a status-0 upstream error. `CommitCtx` carries what a
@@ -2745,8 +2761,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   walk's shared shaping and retry helpers: `apply_context_reduction` (+
   `reduction_strategy_token`), the forwarded-credential guards
   (`missing_forwarded_bearer_error`, `forwarded_terminal_status`,
-  `log_forwarded_auth_terminal`), `add_jitter`/`mul_duration` and
-  `next_is_sibling_seat`; `dispatch` and `count_tokens` import them from
+  `log_forwarded_auth_terminal`) and `add_jitter`/`mul_duration`;
+  `dispatch` and `count_tokens` import them from
   here, and the loop imports nothing from `dispatch`
 - `src/router/dispatch.rs` -- the two message surfaces of the dispatch walk
   and the per-attempt helpers the walk calls back into. Public API:
@@ -2763,11 +2779,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   stream-open, is the fallback boundary), and a commit that relabels and wraps
   the stream in `stream_commit::wrap_with_breaker_accounting`. The walk
   itself (chain resolution via `chain::dispatch_chain_for_request`, the
-  `transcript_defect::record_transcript_defect` pairing record, per-target
-  retries per `RetryPolicy` with `dispatch_loop::add_jitter`/`mul_duration`
-  backoff, the park/debit decision from `outcome_rule::breaker_outcome`
-  applied through `apply_breaker_outcome`, the completion-only same-provider
-  retry where a small honored reset becomes the next sleep's floor and a
+  `transcript_defect::record_transcript_defect` pairing record, same-target
+  retries bounded request-wide per `RetryPolicy` with
+  `dispatch_loop::add_jitter`/`mul_duration` backoff, the park/debit decision
+  from `outcome_rule::decide` applied through `apply_breaker_outcome`, the
+  completion-only same-target retry where a small honored reset becomes the next sleep's floor and a
   larger one parks the provider via the breaker instead) lives in
   `dispatch_loop`. `policy_for` resolves the retry policy; each adapter's
   `deadline` reads the target's stamped `ResolvedTuning`. Failure-class
@@ -2775,9 +2791,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `routectl_core::failure_class::classify` through every error arm:
   `class_observe::apply_remap(native, status, overrides)` (status via
   `upstream_status_for_remap`) applies the target's `class_overrides` keeping
-  the native `matched_by`, then `outcome_rule::should_fallback` (with
-  `outcome_rule::probe_fast_fail_status`) decides the chain hop
-  and `outcome_rule` the breaker and same-provider retry outcome. Class-decision
+  the native `matched_by`, then `outcome_rule::decide` returns the breaker
+  outcome, same-target retry, request-scoped exclusions and chain hop in one
+  `Disposition`. Class-decision
   observability: `emit_class_observability` emits one `emit_class_decision`
   event per arm (with `ClassDecisionObs` / `DispatchSurface` / `UpstreamFacts`
   / `upstream_facts`, safe structured dimensions only) plus a
@@ -3596,8 +3612,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   requested model as wire id, mixed-credential pools answer `None`), and
   `Router::calibrated_estimate(provider_kind, upstream, raw)` (the raw
   estimate times the `(provider_kind, upstream)` lane's factor, never
-  recorded). Owns `lane_calibration_factor`, the one factor lookup +
-  `[calibration]` kill switch the window gate also calls, and `wire_upstream`,
+  recorded). Owns `lane_calibration_factor`, the one factor lookup the
+  window gate also calls, and `wire_upstream`,
   the ONE wire-id derivation (the client's requested model on a
   forwarded-credential target, else the configured upstream) shared by
   `DispatchMeta.served_upstream`, the window gate's lane lookup and
@@ -4355,8 +4371,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `lift_credential_parks(accounts)` resets the named accounts (lifts the park,
   clears the unusable mark, advances the generation) returning one
   `AccountReset` each, `lift_oauth_credential_parks` restricts that to OAuth
-  seat accounts (credentials reload) and `lift_entry_credential_parks` resets
-  every `[providers]` entry account (config reload); `log_gate_refusal` logs a
+  seat accounts (credentials reload) and `lift_entry_credential_parks(previous,
+  next)` resets only the `[providers]` entry accounts whose entry was added,
+  removed or changed across a config reload, skipping an account this Router
+  holds as a placeholder seat; `log_gate_refusal` logs a
   park or unusable refusal at DEBUG and every other gate kind at WARN;
   `parked_seat_error` / `unusable_seat_error` build the
   `Error::LocallyUnavailable` refusal (`account_parked` with the remaining
@@ -4367,27 +4385,36 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   walks past a parked or unusable seat (`CREDENTIAL_PARKED_GATE_KIND`,
   `CREDENTIAL_UNUSABLE_GATE_KIND`) on every surface and ends a token count on
   a breaker or RPM refusal (`DispatchSurface::gate_refusal_walks`)
+- `src/router/credential_park_slotless_tests.rs` -- `#[path]` sidecar: the
+  account gate refuses a live park or unusable mark even for a state key with
+  no model slot, and a slotless admission carries the account's credential
+  generation so a reset fences its settlement
 - `src/router/seat_transitions.rs` -- the seat-transition log lines: one WARN
   `seat_unusable` when a credential account becomes unusable (or its cause
   changes) and one INFO `seat_recovered` when a reset or a successful refresh
   clears the mark, each naming the pool and member with the pool's live
   eligible / configured counts; logged at the mark / reset API only
-- `src/router/outcome_rule.rs` -- the failure-outcome rule:
+- `src/router/outcome_rule.rs` -- the failure-outcome rule, built around
+  `decide(&Failure, policy, reset_hint, &RequestWalk) -> Disposition` (scope,
+  `BreakerOutcome`, `SameProvider { No, Retry { sleep_floor } }`, the
+  request-scoped `Exclusion`s, the recognized `ScopeRow`, `Next { Walk,
+  Terminal }`; `Disposition::after_breaker` drops a retry once the seat's
+  breaker reads open, `record_on` writes the retry, exclusions and row onto the
+  walk). The scope comes from a recognized `ScopeRow`, else a typed credential
+  reason (account), else a native 400/422 (model when it names a model limit,
+  else endpoint), else the target; only a retryable target-scoped failure on
+  a completion retries the same target, under the request-wide class cap;
+  `[retry.classes]` only narrows; a probe never retries, is fenced to its
+  chain run and never dials the failed seat again. Also owns
   `INLOOP_RETRY_AFTER_CAP`, `rate_limit_reset_hint` (clamps an
   `Error::Upstream.retry_after` to the configured ceiling; a zero hint is
-  `None`), `retry_cap_for`, `should_retry_same_provider`, and the
-  class-decoupled `class_debits` set (`pub` and re-exported at the crate root,
-  so the `/status/config` panel reports each class's `debits_breaker` from
-  this ONE definition); `probe_fast_fail(err, is_probe)` (a probe's 429/529,
-  keyed on status: no retry, no cross-target fallback, no breaker outcome);
-  `breaker_outcome(err, class, reset_hint, is_probe) -> BreakerOutcome {
-  None, Debit, Park }` (`None` for a probe fast-fail on every surface,
-  including a stream's post-content error frame; park
-  only a non-probe hint above the cap) and `same_provider_retry(surface, ..) -> SameProvider { No, Retry {
-  sleep_floor } }` (streams and token counts never retry the same provider; a
-  completion retries under the hard cap and the class predicate unless the
-  attempt parked); `should_fallback` (the chain-hop predicate: probe fast-fail
-  and transcript rejections stay, an unknown provider always walks)
+  `None`), `retry_cap_for`, `breaker_outcome(err, class, reset_hint,
+  is_probe) -> BreakerOutcome { None, Debit, Park }` (a native 400/422 never
+  debits, a probe's native 429/529 leaves the breaker alone, park only a
+  non-probe hint above the cap), and the class-decoupled `class_debits` set
+  (`pub` and re-exported at the crate root, so the `/status/config` panel
+  reports each class's `debits_breaker` from this ONE definition); tests in
+  `outcome_rule_tests.rs` and `outcome_rule_decide_tests.rs`
 - `src/router/breaker_transition.rs` -- the INFO transition lines
   `breaker_opened` / `breaker_parked` / `breaker_closed` (event token and
   sanitized `state_key`, plus `cooldown_ms` on a park), emitted by `runtime_gate`, `credential_park`
@@ -4411,7 +4438,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   RAII guards (`ProbeSlotGuard::release`/`owns_slot` free only an owned
   slot; `ProbeSlotGuard::settle` picks release or disarm from the applied
   `BreakerOutcome`; Drop-settles the probe slot on every outcome incl. cancellation), and
-  `emit_probe_settlement`/`is_probe_request`/`log_probe_fast_fail`
+  `emit_probe_settlement`/`is_probe_request`
 - `src/router/state_slots.rs` -- runtime-state slot ownership: `SlotOwner`,
   `claim_state_slot`, `state_slot_refusal`; the per-slot tuning stamp
   (`stamp_tuning` / `tuning_for`) every dispatch deadline reads
@@ -4419,11 +4446,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `sticky_seat_order` (resolve session pin -> gather non-mutating per-seat
   `capacity_snapshot_for` reads -> gather subscription-quota tiers for a BIRTH
   only -> `seat_pool::sticky_least_loaded_order`),
-  `gather_capacity_snapshots`, `quota_tiers_for_birth` (returns EMPTY under the
-  `[seat_quota]` kill switch and for a provider curating no FAST window, which
-  is the whole of what OFF does on the placement side -- no store read, no cap,
-  no diagnostic), `record_quota_placement` (per-arm counters plus one
-  throttled line, silent on the dormant arm so OFF leaves no trace), and
+  `gather_capacity_snapshots`, `quota_tiers_for_birth` (returns EMPTY for a
+  provider curating no FAST window -- no cap, no diagnostic; `[seat_quota]
+  enabled` is not read), `record_quota_placement` (per-arm counters plus one
+  throttled line, silent on the dormant arm), and
   `apply_sticky_outcome` (applies the pin write the outcome implies; quota
   changes which seat a birth picks, never the pin write)
 - `src/router/transcript_defect.rs` -- a tool pairing defect as a per-request
@@ -4435,21 +4461,32 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   upstream request-fault rejection on a defective transcript, any status in
   `rejection_parser::REJECTION_STATUSES` (400, 422), read before any lift or
   remap:
-  `should_fallback` stops the walk, no same-seat retry, `AttemptLearning`
-  consults no learner on any of the three walks), and
+  `AttemptLearning` consults no learner on any of the three walks; like any
+  400/422 it is never retried and `outcome_rule::decide` excludes its scope,
+  so the walk reaches only another endpoint or model), and
   `Router::observe_transcript_rejection` (counts it once per target as
   parser-unlocalized)
 - `src/router/transcript_defect_dispatch_tests.rs` -- child module of
   `learn_engine_location_tests.rs`: a mispaired transcript on complete,
   stream and count_tokens (forwarded, Gemini refuses and the walk moves on, an
-  upstream 400 / 422 neither walks, repairs nor learns unless it names an edit
-  routectl declared, which is undone and the same target retried once)
+  upstream 400 / 422 is neither repaired nor learned from unless it names an
+  edit routectl declared, which is undone and the same target retried once;
+  otherwise it excludes its endpoint and the walk reaches only another origin)
 - `src/router/walk_state.rs` -- request-scoped walk state (`RequestWalk`:
   same-target retries spent, exclusions, the recognized scope row, skips per
   scope) and `endpoint_key`, the one endpoint-identity derivation (normalized
   origin of the provider entry's egress or forwarded base, else
   `provider:<name>`) and `RequestWalk::log_summary`, the INFO `walk summary`
   line; tests in `walk_state_tests.rs` and `walk_summary_tests.rs`
+- `src/router/failure_scope_walk_tests.rs` -- `#[path]` sidecar of
+  `dispatch_loop.rs`: how far one failure reaches across a whole request on a
+  pool -> passthrough -> pool chain over two origins (upstream calls and
+  breaker failures counted per seat), the request-wide same-target retry
+  budget, what an all-excluded walk returns, and that an excluded target takes
+  no RPM token, half-open slot or skip tally
+- `src/router/probe_detection_tests.rs` -- `#[path]` sidecar of
+  `runtime_gate.rs`: which requests are availability probes and that the
+  detection reaches the failure decision
 - `src/router/window_gate.rs` -- proactive context-window gate, the SECOND
   chain filter pass (called from `chain::dispatch_chain_for_request`
   immediately after `filter_chain_by_features`, so the ordering makes "last
@@ -4462,12 +4499,13 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `opening_lookup`'s shared `lane_calibration_factor`; the
   corrected figure is a LOCAL here and deliberately not a shared helper the
   trim / advisory estimate call sites could adopt, and an uncorrected lane
-  compares the raw estimate byte-identically), keyed on the
-  `exceeds_window_margin` integer-ratio predicate
-  (`WINDOW_MARGIN_NUMERATOR`/`_DENOMINATOR`, shipped at 3/4 -- low enough to
-  cover an estimator deflate up to 4/3, and below the effective input ceiling
-  the output reserve leaves (~0.68 of a 200k-class window), deliberately not
-  an operator knob). Under the `[window_gate]` kill switch, whose OFF path
+  compares the raw estimate byte-identically), keyed on the integer
+  `exceeds_window(estimate, reserve, window)` predicate: skip when the
+  estimate plus the output reserve (`output_reserve`: the request's
+  `max_tokens`, else the target's resolved output ceiling, else 0) plus the
+  fixed `HEADROOM_TOKENS` (1024, absolute rather than a window fraction,
+  deliberately not an operator knob) exceeds the total window. Under the
+  `[window_gate]` kill switch, whose OFF path
   returns before any estimate exists. Never empties the chain and has NO
   empty-chain error path (the deliberate contract difference from
   `feature_filter`): a chain of one, an unconfirmed / `Disabled` / `Missing`
@@ -4484,7 +4522,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `force_open_in_epoch`, `release_probe_slot_in_epoch`) applies only under the
   epoch its admission carried; `force_open` parks the breaker for
   an explicit reset hint, bypassing the consecutive-failure threshold;
-  `capacity_snapshot(&self, now)` is a non-mutating read (`CapacitySnapshot` =
+  `capacity_snapshot_under(&self, now, park, unusable)` is the non-mutating
+  read (`capacity_snapshot` and `gate_status` survive as test-only shorthands
+  with no park or mark; `CapacitySnapshot` =
   projected RPM headroom + `CircuitPhase` {Closed, Open, HalfOpenReady} +
   `is_dispatchable`) for least-loaded seat selection -- it shares the leak
   arithmetic with `refill_tokens` (via `projected_tokens`) so the two cannot
@@ -6326,6 +6366,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   lane refused (a graceful restart on the same ledger restores the
   negatives) sends the request to that lane, and count_tokens is never
   refused; declared from `server/mod.rs`
+- `src/server/failure_scope_daemon_tests.rs` -- assembled-daemon failure
+  scope: real HTTP into the Anthropic ingress, a router built from a config
+  file, and anthropic-api egresses dialing two mock origins on a pool ->
+  passthrough -> pool chain, each call attributed to its seat by bearer;
+  declared from `server/mod.rs`
 - `src/server/observation_reconcile_daemon_tests.rs` -- assembled-daemon
   reconciliation of the five per-request observation counts: live counter,
   row column and ledger totals agree; declared from `server/mod.rs`
@@ -6471,8 +6516,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   a credentials reload lifts only the OAuth seat parks whose stored record
   `reload_from_disk` reports changed (`lift_oauth_credential_parks`, so a
   routine self-refresh lifts nothing), and an accepted config reload lifts
-  only `[providers]` entry account parks (`lift_entry_credential_parks`),
-  past the commit point; `log_lifted_parks` logs the lifted parks and cleared
+  only the parks of `[providers]` entries it changed
+  (`lift_entry_credential_parks`); every lift, the carried-slot retune and the
+  placeholder marks (`Router::commit_carried_state`) reach the live router
+  only at the commit point, so a reload that fails or is abandoned leaves the
+  live credential state untouched; `log_lifted_parks` logs the lifted parks and cleared
   unusable marks from the `AccountReset`s; a changed record for a placeholder
   seat's account (`is_placeholder_account`) forces the seat-set rebuild, since
   a lift alone cannot readmit an unbuilt seat. Bounded interval drivers ride
