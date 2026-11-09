@@ -32,11 +32,7 @@ use super::response_types::{
     ConverseCacheDetail, ConverseResponse, ConverseResponseContentBlock, ConverseUsage,
 };
 use super::tools::HISTORY_COMPAT_TOOL_NAME;
-
-/// Format tag mirroring the Anthropic-API egress so multi-turn callers
-/// echoing reasoning_details back don't see a different format string
-/// when the same model is fronted by Converse instead of Invoke.
-const ANTHROPIC_FORMAT: &str = "anthropic-claude-v1";
+use crate::skipped_format::ANTHROPIC_FORMAT;
 
 /// Translate a raw Converse response body into the canonical
 /// `ChatResponse`.

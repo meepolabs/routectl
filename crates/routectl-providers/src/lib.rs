@@ -63,9 +63,14 @@ pub(crate) mod bounded_diagnostics;
 #[cfg(feature = "openai-compat")]
 pub(crate) mod model_profile;
 
-// The reasoning-format vocabulary and its log rendering, shared by the two
-// egresses that report skipped foreign-dialect reasoning details by tag.
-#[cfg(any(feature = "anthropic-api", feature = "openai-responses"))]
+// The reasoning-format vocabulary, shared by every lane that tags Anthropic
+// reasoning details, and its log rendering, used by the two egresses that
+// report skipped foreign-dialect reasoning details by tag.
+#[cfg(any(
+    feature = "anthropic-api",
+    feature = "openai-compat",
+    feature = "openai-responses"
+))]
 pub(crate) mod skipped_format;
 
 // Shared leak-guard: log once per request at DEBUG naming which of the canonical

@@ -984,6 +984,54 @@ fn tool_use_with_deltas_emits_nothing_at_block_stop() {
     assert!(stopped.is_empty(), "stopped: {stopped:?}");
 }
 
+/// An empty toolUse fragment carries no arguments: a call whose only delta
+/// is empty still closes with "{}" exactly once, and one that streamed real
+/// arguments gets neither a forwarded "" nor a trailing "{}".
+#[test]
+fn empty_tool_use_delta_closes_with_one_empty_object() {
+    let rows: [(&str, &[&str], &[&str]); 2] = [
+        ("empty_delta_only", &[""], &["{}"]),
+        (
+            "args_then_empty_delta",
+            &[r#"{"a":1}"#, ""],
+            &[r#"{"a":1}"#],
+        ),
+    ];
+    for (name, inputs, expected) in rows {
+        // Arrange
+        let mut state = ConverseStreamState::default();
+        let mut chunks = run(
+            "contentBlockStart",
+            r#"{"contentBlockIndex":0,
+                "start":{"toolUse":{"toolUseId":"tu_e","name":"now"}}}"#,
+            &mut state,
+        );
+
+        // Act
+        for input in inputs {
+            let payload = serde_json::json!({
+                "contentBlockIndex": 0,
+                "delta": {"toolUse": {"input": input}},
+            })
+            .to_string();
+            chunks.extend(run("contentBlockDelta", &payload, &mut state));
+        }
+        chunks.extend(run(
+            "contentBlockStop",
+            r#"{"contentBlockIndex":0}"#,
+            &mut state,
+        ));
+
+        // Assert
+        let arguments: Vec<String> = chunks
+            .iter()
+            .flat_map(|c| c.choices[0].delta.tool_calls.iter().flatten())
+            .map(|tc| tc["function"]["arguments"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(arguments, *expected, "row {name}: chunks {chunks:?}");
+    }
+}
+
 /// Across a full stream, a delta-less tool block followed by a streamed
 /// one surfaces each call exactly once, in block order.
 #[tokio::test]

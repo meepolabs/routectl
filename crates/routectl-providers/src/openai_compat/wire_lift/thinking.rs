@@ -41,7 +41,7 @@ use serde_json::{Map, Value};
 
 use routectl_core::{ChatRequest, Result};
 
-const ANTHROPIC_FORMAT: &str = "anthropic-claude-v1";
+use crate::skipped_format::ANTHROPIC_FORMAT;
 
 pub fn lift(
     _id: &str,

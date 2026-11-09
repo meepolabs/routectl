@@ -48,12 +48,8 @@ use super::response_types::{
 };
 use super::tools::HISTORY_COMPAT_TOOL_NAME;
 use crate::anthropic_api::response::map_stop_reason;
+use crate::skipped_format::ANTHROPIC_FORMAT;
 use crate::stream_completion::StreamCompletion;
-
-/// Format tag matching the Anthropic-API egress so chained downstreams
-/// see consistent reasoning_details across the Bedrock-Invoke and
-/// Bedrock-Converse paths.
-const ANTHROPIC_FORMAT: &str = "anthropic-claude-v1";
 
 /// Per-content-block streaming state.
 #[derive(Debug, Clone)]
@@ -460,6 +456,12 @@ fn handle_block_delta(
         StreamDelta::ToolUse { tool_use } => {
             let block = state.blocks.get_mut(&ev.content_block_index);
             let (id, name, call_index) = match block {
+                // An empty fragment carries no arguments: forwarding it
+                // would leave a zero-argument call with "" instead of the
+                // "{}" that `contentBlockStop` emits for an unemitted call.
+                Some(BlockState::ToolUse { .. }) if tool_use.input.is_empty() => {
+                    return vec![];
+                }
                 Some(BlockState::ToolUse {
                     id,
                     name,
