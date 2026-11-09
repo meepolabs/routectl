@@ -73,15 +73,29 @@ def recorded_doc(name: str) -> dict:
 
 
 def usage_text() -> str:
+    """A /status/usage body in the daemon's current shape; its key sets are
+    welded to the daemon's DTOs in test_report."""
     totals = {
         "requests": 1, "ok": 1, "errors": 0, "input_tokens": 3, "output_tokens": 1,
         "reasoning_tokens": 0, "cache_read_billed": 0, "server_tool_calls": 0,
-        "errors_by_class": {}, "client_disconnect_total": 0, "cache_read_present": 0,
+        "errors_by_class": {}, "client_disconnect_total": 0, "cancelled_total": 0, "cache_read_present": 0,
+    }
+    observation = {
+        "from_ms": 0, "to_ms": 1, "wire_losses": 0, "translation_drops": 0, "local_refusals": 0,
+        "field_repairs": 0, "missing_terminals": 0, "gap_rows": 0, "gap_dropped": 0, "complete": True,
+    }
+    would_trim = {
+        "candidate_requests": 0, "would_trim_tokens": 0, "verdict_met": 0, "verdict_unmet": 0,
+        "verdict_cold": 0, "verdict_unpriced": 0,
+    }
+    data = {
+        "window": "all", "from_ms": 0, "to_ms": 1, "totals": totals, "groups": [], "quota": [],
+        "would_trim": would_trim, "observation": observation,
     }
     return json.dumps({
         "schema_version": evidence.USAGE_SCHEMA_VERSION,
         "as_of": "2026-10-12T17:52:46Z",
-        "data": {"window": "all", "totals": totals},
+        "data": data,
         "unavailable": None,
     })
 

@@ -33,8 +33,10 @@ Order, first that applies:
                                                    INCOMPLETE(snapshot-shape)
   9. Any loss row or finding, unrepaired rejection, local refusal,
      nonzero rc_parser_unlocalized_total, nonzero
-     rc_field_verdicts_learned_total, or any learned_negatives row (the
-     daemon is fresh per cell, so every row was minted by this cell)
+     rc_field_verdicts_learned_total, or any learned_negatives row whose
+     verdict is not `verified` (the daemon is fresh per cell, so every
+     row was minted by this cell; a verified positive is not a defect,
+     and a verdict token this module does not know counts)
                                                    FINDING
  10. The driver exited nonzero or never ran        FAILED(driver)
  11. No clean check with a positive count, or a check that did not
@@ -104,6 +106,8 @@ _PATH_SEGMENT_RE = re.compile(
 COUNT_MAX = 2**32
 PARSER_UNLOCALIZED = "rc_parser_unlocalized_total"
 VERDICTS_LEARNED = "rc_field_verdicts_learned_total"
+# The learned_negatives verdict token of a VerifiedWorking positive.
+VERDICT_VERIFIED = "verified"
 # An EXITED cell carries in its detail the stop the runner made (EXITED(9))
 # or the run cap it was the one to record (run-size). Keys are
 # ledger.STOP_DETAILS.
@@ -212,6 +216,7 @@ class _Rows:
     loss_counts: Tuple[Tuple[Tuple[str, str], int], ...]
     local_refusals: int
     checks: Tuple[Tuple[str, int], ...]
+    # learned_negatives rows whose verdict is not VERDICT_VERIFIED.
     learned: int
 
 
@@ -226,9 +231,7 @@ def _rows(ev: CellEvidence) -> _Rows:
     wc = ev.wire_check
     findings = [_loss_finding(r) for r in _list(wc, "loss_findings")]
     findings += [_rejection(r) for r in _list(wc, "unrepaired_rejections")]
-    learned = _list(ev.health, "learned_negatives")
-    for row in learned:
-        _str_field(row, "verdict")
+    verdicts = [_str_field(row, "verdict") for row in _list(ev.health, "learned_negatives")]
     loss_counts: Dict[Tuple[str, str], int] = {}
     for row in _list(wc, "loss"):
         key = (_str_field(row, "lane"), _str_field(row, "path_class"))
@@ -241,7 +244,7 @@ def _rows(ev: CellEvidence) -> _Rows:
         loss_counts=tuple(sorted(loss_counts.items())),
         local_refusals=sum(_count_field(r, "count") for r in _list(wc, "local_refusals")),
         checks=tuple((_str_field(r, "outcome"), _count_field(r, "count")) for r in _list(wc, "checks")),
-        learned=len(learned),
+        learned=sum(1 for verdict in verdicts if verdict != VERDICT_VERIFIED),
     )
 
 

@@ -61,9 +61,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 import report_cells as rc  # noqa: E402
+from test_evidence import _rust_struct_fields  # noqa: E402
 from report_cells import CellPlan, plant  # noqa: E402
 
 import classify  # noqa: E402
+import evidence  # noqa: E402
 import matrix  # noqa: E402
 import legs  # noqa: E402
 import mdtext  # noqa: E402
@@ -445,6 +447,32 @@ class FindingTests(RunCase):
 
         self.assertEqual(self.one(plant("clean-control", health=rc.edited_health("clean-control", learned))).outcome,
                          Outcome.FINDING)
+
+    def learned_rows(self, *verdicts: str) -> str:
+        def learned(data: dict) -> None:
+            data["learned_negatives"] = [dict(LEARNED_ROW, verdict=v) for v in verdicts]
+
+        return rc.edited_health("clean-control", learned)
+
+    def test_a_verified_only_learned_table_passes(self) -> None:
+        result = self.one(plant("clean-control", health=self.learned_rows("verified", "verified")))
+
+        self.assertEqual(result.outcome, Outcome.PASS)
+
+    def test_an_unknown_learned_verdict_is_a_finding(self) -> None:
+        result = self.one(plant("clean-control", health=self.learned_rows("suspect")))
+
+        self.assertEqual(result.outcome, Outcome.FINDING)
+
+    def test_mixed_learned_rows_count_only_the_non_verified(self) -> None:
+        plan = plant("clean-control", health=self.learned_rows("verified", "broken"))
+
+        result = self.one(plan)
+        read = evidence.read_cell(os.path.join(self.run_dir, "cells", plan.cell_id))
+
+        assert isinstance(read, evidence.CellEvidence), read
+        self.assertEqual(classify._rows(read).learned, 1)
+        self.assertEqual(result.outcome, Outcome.FINDING)
 
     def test_a_nonzero_parser_unlocalized_counter_is_a_finding(self) -> None:
         self.assertEqual(self.one(plant("clean-control", unlocalized=2)).outcome, Outcome.FINDING)
@@ -1190,6 +1218,19 @@ class WeldTests(unittest.TestCase):
         assert body is not None, "struct LearnedNegative not found"
         fields = re.findall(r"^\s+([a-z_]+):", body.group(1), re.MULTILINE)
         self.assertEqual(sorted(LEARNED_ROW), sorted(fields))
+
+    def test_the_usage_fixture_has_the_daemon_fields(self) -> None:
+        data = json.loads(rc.usage_text())["data"]
+        cases = [
+            ("UsagePanel", sorted(data), "usage.rs"),
+            ("UsageTotals", sorted(data["totals"]), "usage.rs"),
+            ("UsageWouldTrim", sorted(data["would_trim"]), "usage.rs"),
+            ("WindowObservation", sorted(data["observation"]), "usage_health.rs"),
+        ]
+        for struct, keys, source in cases:
+            with self.subTest(struct):
+                fields = _rust_struct_fields(os.path.join(os.path.dirname(STATUS_HEALTH), source), struct)
+                self.assertEqual(keys, sorted(fields))
 
     def test_path_classes_match_the_daemon(self) -> None:
         self.assertEqual(list(classify.PATH_CLASSES), _rust_labels(os.path.join(CORE_WIRE_CHECK, "edits.rs"), "PathClass"))
