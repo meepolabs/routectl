@@ -78,15 +78,17 @@ impl Router {
             .filter_map(|placeholder| placeholder.account.as_deref())
     }
 
-    /// Whether any pooled model of this Router holds a built (not
-    /// placeholder) seat whose credential account is `account`.
+    /// Whether any dispatch target of this Router, a pool seat or a direct
+    /// model, dispatches on `account`. Read from the targets admission and
+    /// status use. A placeholder seat is a target too: callers that need a
+    /// built one also check [`Self::is_placeholder_account`].
     #[must_use]
-    pub(super) fn has_built_seat_on_account(&self, account: &str) -> bool {
-        self.resolved_models
-            .values()
-            .filter_map(|model| model.seats.as_deref())
-            .flatten()
-            .any(|seat| !seat.is_placeholder() && seat.account() == Some(account))
+    pub(super) fn has_built_target_on_account(&self, account: &str) -> bool {
+        self.resolved_models.values().any(|model| {
+            self.projection_targets(model)
+                .iter()
+                .any(|target| target.account.as_deref() == Some(account))
+        })
     }
 
     /// Non-mutating gate health for the state slot keyed by `state_key`.

@@ -18,7 +18,7 @@ pub enum FailureScope {
     Account,
     /// Every target served by the same upstream endpoint.
     Endpoint,
-    /// Every target serving the same upstream model.
+    /// Every target dispatching to the same `[models]` entry.
     Model,
 }
 

@@ -197,11 +197,11 @@ pub struct Router {
     /// until `commit_carried_state` runs at publication.
     carried_state_keys: Vec<String>,
     /// The accounts the outgoing Router held as placeholder seats, with the
-    /// generation and mark each held, recorded by
-    /// `carry_over_runtime_state_from`. Their build marks live on the shared
-    /// account map; `commit_carried_state` resets each one this Router built
-    /// a seat for, unless its record changed since.
-    carried_placeholder_accounts: Vec<credential_park::CarriedPlaceholder>,
+    /// mark each held, recorded by `carry_over_runtime_state_from`. Their
+    /// build marks live on the shared account map; `commit_carried_state`
+    /// takes the list and resets each account this Router builds a target
+    /// on, unless it was marked again since.
+    carried_placeholder_accounts: Mutex<Vec<credential_park::CarriedPlaceholder>>,
     /// Every credential account's park and generation (see
     /// `credential_park`). One map for the router rather than a field per
     /// `state` slot, so a park observed through one model refuses every model
@@ -2255,7 +2255,7 @@ impl Router {
             slot_owners,
             tuning,
             carried_state_keys: Vec::new(),
-            carried_placeholder_accounts: Vec::new(),
+            carried_placeholder_accounts: Mutex::new(Vec::new()),
             credential_accounts: Arc::default(),
             resolved_models: BTreeMap::new(),
             alias_glob_index,
@@ -2500,7 +2500,7 @@ impl Router {
     /// avoid resetting gates that took time to build up across reloads.
     pub fn carry_over_runtime_state_from(&mut self, previous: &Self) {
         self.credential_accounts = Arc::clone(&previous.credential_accounts);
-        self.carried_placeholder_accounts = previous.carry_placeholder_records();
+        *self.carried_placeholder_accounts.get_mut() = previous.carry_placeholder_records();
         self.carry_over_state_slots_from(previous);
     }
 
@@ -2524,16 +2524,18 @@ impl Router {
     /// it shares with the outgoing Router: retune every slot carried by
     /// [`Self::carry_over_runtime_state_from`] to this Router's resolved
     /// tuning for its key, reset each account the outgoing Router held as a
-    /// placeholder seat and this Router built a seat for (lifting its build
-    /// mark, one `seat_recovered` INFO each) while its generation and mark
-    /// are still the ones carried over, and mark each placeholder seat's account
-    /// unusable with its build cause, logging one `seat_unusable` WARN per
-    /// account that was not already unusable for that cause.
+    /// placeholder seat and this Router builds a target on, a pool seat or a
+    /// direct model (lifting its build mark, one `seat_recovered` INFO each)
+    /// while its mark is still the one carried over, and mark each
+    /// placeholder seat's account unusable with its build cause, logging one
+    /// `seat_unusable` WARN per account that was not already unusable for
+    /// that cause.
     ///
     /// A mark placed between the carry-over and the commit (a refresh that
     /// found the credential revoked or expired) is newer evidence than the
-    /// build and survives the commit. Otherwise the reset keys on the build
-    /// alone, not on what the reload changed: a
+    /// build and survives the commit; a refresh that succeeded and left the
+    /// mark alone does not block the reset. Otherwise the reset keys on the
+    /// build alone, not on what the reload changed: a
     /// seat whose credential became readable with its `[providers]` entry and
     /// stored record unchanged (a secret file created, an env var set, a
     /// record a failed rebuild already loaded) is built here and has no other
@@ -2552,8 +2554,8 @@ impl Router {
     /// once every failure and abandonment path has returned. Idempotent on
     /// the marks and the tuning: a second call retunes to the same values
     /// and re-marks with the same cause, which keeps the mark's `since` and
-    /// logs nothing. So is the reset: the first call moved each readmitted
-    /// account off its carried generation, so a second call resets nothing.
+    /// logs nothing. So is the reset: the first call takes the carried
+    /// accounts, so a second call resets nothing.
     pub fn commit_carried_state(&self) {
         for key in &self.carried_state_keys {
             if let (Some(state), Some(tuning)) = (self.state.get(key), self.tuning.get(key)) {

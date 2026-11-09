@@ -227,16 +227,17 @@ impl AccountCredential {
         outcome
     }
 
-    /// [`Self::reset`] only while the record still holds `generation` and
-    /// `unusable`, the values observed when the reset was decided. A mark
-    /// placed or replaced since is newer evidence and is kept, even when it
-    /// left the generation where it was. `None` when nothing was reset.
-    pub(crate) fn reset_if_unchanged(
+    /// [`Self::reset`] only while the record still holds `unusable`, the mark
+    /// observed when the reset was decided. A mark placed, replaced or
+    /// re-placed since carries a different `since` and is kept as newer
+    /// evidence; a generation that moved without touching the mark (a
+    /// successful refresh) does not block the reset. `None` when nothing was
+    /// reset.
+    pub(crate) fn reset_if_mark_unchanged(
         &mut self,
-        generation: u64,
         unusable: Option<Unusable>,
     ) -> Option<ResetOutcome> {
-        (self.generation == generation && self.unusable == unusable).then(|| self.reset())
+        (self.unusable == unusable).then(|| self.reset())
     }
 }
 

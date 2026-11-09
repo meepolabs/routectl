@@ -1777,9 +1777,10 @@ probe).
 Most deployments need nothing here: the baked class matrix below IS
 the policy, and `max_attempts` (default 3) is the one knob it reads.
 `max_attempts = N` allows at most N - 1 same-target retries per client
-request, unless a `[retry.classes]` retry leaf sets another cap for that
-class, counted across the whole fallback walk: a retry spent on the
-first chain entry is not available to a later one, so a single-entry
+request, unless a `[retry.classes]` retry leaf or a deprecated
+`retry_on_*` cap sets another cap for that class, counted across the
+whole fallback walk: a retry spent on the first chain entry is not
+available to a later one, so a single-entry
 chain retries N - 1 times and a longer chain never more. A repair
 resend (the router undoing or rewriting a field the upstream refused)
 and the one 401 refresh-and-retry per target have their own allowances

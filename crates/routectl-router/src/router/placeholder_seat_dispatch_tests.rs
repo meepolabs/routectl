@@ -449,3 +449,99 @@ fn a_placeholder_whose_seat_the_reload_removed_keeps_its_build_mark() {
         Some(UnusableCause::NotLoggedIn)
     );
 }
+
+/// A refresh that succeeded between the carry-over and the commit moved the
+/// account's generation but left its build mark alone: the commit still
+/// readmits the seat the candidate built.
+#[test]
+fn a_refresh_between_the_carry_over_and_the_commit_does_not_block_the_readmit() {
+    // Arrange
+    let before = pool(&["seat-a"]);
+    let mut after = pool(&[]);
+    after.router.carry_over_runtime_state_from(&before.router);
+    let account = account_of("seat-a");
+    let generation = before.router.acquire_credential_generation(&account);
+    before
+        .router
+        .credential_refreshed_in_generation(&account, generation);
+
+    // Act
+    after.router.commit_carried_state();
+
+    // Assert
+    assert_eq!(unusable_since(&after.router, "seat-a"), None);
+    assert!(
+        after
+            .router
+            .admit_for_credential_tests("pooled#seat-a")
+            .is_some(),
+        "the built seat admits once the reload commits"
+    );
+}
+
+/// The first commit takes the carried accounts, so a second one starts no
+/// further credential generation, whatever mark was carried.
+#[test]
+fn a_second_commit_resets_no_carried_account() {
+    // (case, whether the account is unmarked at carry-over)
+    let rows = [
+        ("carried mark present", false),
+        ("carried mark absent", true),
+    ];
+    for (case, unmarked) in rows {
+        // Arrange
+        let before = pool(&["seat-a"]);
+        if unmarked {
+            assert!(before.router.reset_credential_for_tests("pooled#seat-a"));
+        }
+        let mut after = pool(&[]);
+        after.router.carry_over_runtime_state_from(&before.router);
+        after.router.commit_carried_state();
+        let first = after.router.account_record(Some(&account_of("seat-a")));
+
+        // Act
+        after.router.commit_carried_state();
+
+        // Assert
+        let second = after.router.account_record(Some(&account_of("seat-a")));
+        assert_eq!(
+            second.map(|record| (record.generation(), record.unusable())),
+            first.map(|record| (record.generation(), record.unusable())),
+            "{case}"
+        );
+    }
+}
+
+/// A candidate that builds the outgoing router's placeholder account as a
+/// direct model, not a pool seat, readmits it at the commit.
+#[test]
+fn a_placeholder_built_as_a_direct_model_is_readmitted_at_commit() {
+    // Arrange
+    let before = pool(&["seat-a"]);
+    let built = ScriptedProvider::new("built", &[Step::Ok]);
+    let mut config = Config::default();
+    config.providers.insert(
+        "seat-a".into(),
+        ProviderEntry::anthropic_api("oauth://anthropic#seat-a"),
+    );
+    let model = ResolvedModel::new(
+        "direct",
+        "seat-a",
+        Arc::clone(&built) as Arc<dyn Provider>,
+        "claude-x",
+    )
+    .with_auth_secret_ref(oauth_ref("seat-a"));
+    let mut after = Router::new(Arc::new(config));
+    after.install_resolved_models(BTreeMap::from([("direct".to_string(), Arc::new(model))]));
+    after.carry_over_runtime_state_from(&before.router);
+
+    // Act
+    after.commit_carried_state();
+
+    // Assert
+    assert_eq!(unusable_since(&after, "seat-a"), None);
+    assert!(
+        after.admit_for_credential_tests("direct").is_some(),
+        "the direct model admits once the reload commits"
+    );
+}
