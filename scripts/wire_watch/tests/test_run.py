@@ -9,6 +9,7 @@ environment. Keys are fake values in throwaway key directories.
 
 import fnmatch
 import json
+import math
 import os
 import signal
 import stat
@@ -1030,6 +1031,14 @@ class LaunchShapeTests(RunTestCase):
                 self.assertIn("--expected-ingress", r["rest"])
         self.assertNotEqual(records[cells[0]]["name"], records[cells[1]]["name"])
         self.assertEqual(stat.S_IMODE(os.stat(os.path.join(self.rig.report, "cells")).st_mode), 0o700)
+
+    def test_the_cell_bound_is_cell_timeout_plus_kill_grace_plus_margin(self) -> None:
+        cell = ids_matching(SEAT_PAIRING)[0]
+
+        self.rig.run([cell], "--cell-timeout", "60", "--kill-grace", "2.5")
+
+        own = self.rig.records("start")[cell]["own"]
+        self.assertEqual(own.get("--max-seconds"), str(math.ceil(60 + 2.5 + 180)))
 
     def test_runner_output_goes_to_a_private_log_beside_the_scratch(self) -> None:
         cell = ids_matching(SEAT_PAIRING)[0]

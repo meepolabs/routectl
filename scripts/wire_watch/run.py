@@ -51,7 +51,10 @@ created 0700 here and passed as run_capture.sh's --scratch (the runner's
 stdout and stderr go to cells/<id>.runner.log, 0600, beside it); evidence is
 read from that HOST path only, never from a path the container named. The
 container is named routectl-cell-<run-id>-<n>, n the cell's index in
-run.json. A cell with a key file has its key re-checked and read through
+run.json. Each cell also carries its own wall-clock bound: run_capture.sh
+gets --max-seconds ceil(--cell-timeout + --kill-grace + 180), enforced by
+`timeout` as the container's PID 1, so a cell ends even if this script is
+SIGKILLed, while this script's own TIMEOUT stop always fires first. A cell with a key file has its key re-checked and read through
 matrix.open_key_file at launch and exported to the child as
 ROUTECTL_DRIVER_<PROVIDER>_API_KEY; the child's environment is built from
 an allowlist, so no other credential reaches it. The key is never placed
@@ -154,6 +157,9 @@ DEFAULT_RUN_CAP_BYTES = 8 * 1024 * 1024 * 1024
 DEFAULT_KILL_GRACE_S = 10.0
 DEFAULT_POLL_S = 0.2
 DEFAULT_SIZE_POLL_S = 2.0
+# Added to cell timeout + kill grace for the in-container bound, so this
+# script's own stop and its `docker rm -f` land well before it.
+CELL_BOUND_MARGIN_S = 180
 
 RUN_JSON = "run.json"
 RUN_LOCK = "run.lock"
@@ -277,7 +283,11 @@ def child_env(base: Dict[str, str], seat: Optional[str], key: Optional[Tuple[str
 
 
 def capture_argv(opts: Options, spec: CellSpec, name: str, scratch: str) -> List[str]:
-    argv = [opts.run_capture, "--scratch", scratch, "--image", opts.image, "--name", name]
+    max_seconds = math.ceil(opts.cell_timeout + opts.kill_grace + CELL_BOUND_MARGIN_S)
+    argv = [
+        opts.run_capture, "--scratch", scratch, "--image", opts.image, "--name", name,
+        "--max-seconds", str(max_seconds),
+    ]
     for provider in spec.providers:
         argv += ["--provider", provider]
     if opts.aws is not None and AWS_PROFILE_PROVIDER in spec.providers:

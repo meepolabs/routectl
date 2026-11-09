@@ -15,6 +15,7 @@
 # Usage:
 #   run_capture.sh --scratch <host-dir> [--image <tag>] \
 #                  [--name <container-name>] [--provider <name>]... \
+#                  [--max-seconds <n>] [--tmp-size <size>] \
 #                  [--aws-profile <name> --aws-config <file> \
 #                   --aws-credential-file <file>] \
 #                  -- <capture_driver.sh args...>
@@ -36,7 +37,7 @@
 #               under the operator's home without anyone choosing it.
 #               Must be OUTSIDE this repo, because the repo is mounted
 #               read-only and a landing path inside it could not be
-#               written. It is the ONLY writable mount.
+#               written. It is the ONLY writable host mount.
 #   --image     Image tag to run. Default `routectl-capture:default`,
 #               which is what scripts/container/build.sh writes with no
 #               --version. Never a bare `:latest`.
@@ -50,6 +51,22 @@
 #               PREFIX after the exact id and name lookups, so a hex-only
 #               name could resolve to some other container. Omitted, docker
 #               picks a name and nothing else changes.
+#   --max-seconds
+#               Wall-clock bound on the whole cell, in seconds: a positive
+#               integer, default 3600. The container's command is
+#               `timeout --kill-after=120s <n> bash capture_driver.sh ...`,
+#               so the runner gets SIGTERM at <n> seconds and SIGKILL 120
+#               seconds later. The 120 seconds cover the runner's own
+#               cleanup (daemon stop, then the evidence write). timeout is
+#               PID 1, so the bound holds even when whatever launched this
+#               script has died. A caller that runs its own timeout sets
+#               this above it, so its own stop fires first.
+#   --tmp-size  Size cap of the in-cell /tmp tmpfs, default 1g: digits
+#               (no leading zero) and one of k, m or g, nothing else, so
+#               no mount option can ride along. A ceiling, not a
+#               reservation. The runner's whole workspace (trace, client
+#               HOME, work dir) lives under /tmp, so this caps a run's
+#               bulk writes.
 #   --provider  A provider whose upstream credential this run needs.
 #               Repeatable; default `anthropic`. Named from routectl's own
 #               provider vocabulary (`anthropic`, `openai`, `gemini`,
@@ -70,6 +87,12 @@
 #   this repo          -> /workspace                    READ-ONLY
 #   the host binary    -> /usr/local/lib/routectl/bin   READ-ONLY
 #   --scratch          -> /scratch                      writable
+#   (no host path)     -> /tmp     tmpfs, capped at --tmp-size, writable,
+#                                  exec (the drivers run scripts they
+#                                  write under the run workspace)
+#   the image's own root filesystem is READ-ONLY (`--read-only`): with
+#   /scratch and /tmp the only writable paths, nothing a driven client
+#   writes elsewhere (its HOME, /var/tmp) can grow outside the caps.
 #   per --provider     -> ROUTECTL_DRIVER_<PROVIDER>_API_KEY (by NAME)
 #                         plus ROUTECTL_DRIVER_<PROVIDER>_ACCOUNT_ID for a
 #                         provider whose egress requires an account id
@@ -78,8 +101,8 @@
 #     the credential_process file    -> /etc/routectl-aws/credential  READ-ONLY
 #
 # A forwarded credential is stripped from the driven client's own
-# environment by capture_driver.sh, but the runner (PID 1) and the daemon
-# share the client's uid, so /proc/<pid>/environ inside the cell still
+# environment by capture_driver.sh, but PID 1 (timeout), the runner and the
+# daemon share the client's uid, so /proc/<pid>/environ inside the cell still
 # holds it. That residual is accepted; see capture_driver.sh "Drive".
 #
 # THE READ-ONLY REPO IS LOAD-BEARING, not tidiness. A driven agent runs
@@ -206,7 +229,18 @@
 # because it sat after the driver separator.
 #
 # Exit codes 0 and 2-9 are the runner's, propagated verbatim. 2 doubles as
-# this script's own usage error, which is the same class of fault.
+# this script's own usage error, which is the same class of fault; a bad
+# --max-seconds or --tmp-size is one, refused before docker is consulted.
+#
+# Two more come from the wall-clock bound (--max-seconds), as the image's
+# `timeout` (uutils coreutils) reports them:
+#
+#   124  the bound fired and the runner exited within the 120 s grace
+#   137  the runner was still alive 120 s after the bound and was killed
+#
+# uutils `timeout` also exits 9 when the runner itself dies of SIGKILL,
+# which reads the same as the runner's own 9 (a daemon that survived
+# SIGKILL). The two are not told apart here.
 #
 # THE AWS PROFILE. The bedrock lane configs authenticate with
 # `creds = { kind = "profile", name = "routectl-cell" }`: a fixed
@@ -275,6 +309,11 @@ CELL_AWS_PROFILE="routectl-cell"
 AWS_PROFILE_LIB="$HERE/aws_profile.py"
 
 DEFAULT_IMAGE="routectl-capture:default"
+DEFAULT_MAX_SECONDS=3600
+DEFAULT_TMP_SIZE="1g"
+# Covers the runner's cleanup trap after the bound's SIGTERM: a daemon
+# stop of up to 60 s and the evidence write after it.
+KILL_AFTER_SECONDS=120
 
 # The provider vocabulary, and the ONLY place a credential variable name is
 # spelled. Three tables rather than one because they answer three different
@@ -361,6 +400,23 @@ valid_cell_name() {
     esac
 }
 
+# Explicit digit lists rather than [0-9]: a bracket range is collated per
+# locale.
+valid_positive_int() {
+    case "$1" in
+        ""|0*|*[!0123456789]*) return 1 ;;
+    esac
+}
+
+# Digits then exactly one of k, m, g. The value is spliced into docker's
+# comma-separated tmpfs option string, so anything looser would let a
+# caller add mount options.
+valid_tmp_size() {
+    local digits="${1%[kmg]}"
+    [ "$digits" != "$1" ] || return 1
+    valid_positive_int "$digits"
+}
+
 usage() {
     sed -n '2,/^# --- END USAGE ---$/p' "${BASH_SOURCE[0]}" | sed '$d' | sed 's/^# \{0,1\}//' >&2
 }
@@ -374,6 +430,8 @@ SCRATCH=""
 IMAGE="$DEFAULT_IMAGE"
 PROVIDERS=""
 CELL_NAME=""
+MAX_SECONDS="$DEFAULT_MAX_SECONDS"
+TMP_SIZE="$DEFAULT_TMP_SIZE"
 AWS_PROFILE_NAME=""
 AWS_CONFIG_SRC=""
 AWS_CREDENTIAL_SRC=""
@@ -400,6 +458,20 @@ while [ $# -gt 0 ]; do
             valid_cell_name "$2" ||
                 die "refusing --name '$2': a cell name is ${CELL_NAME_PREFIX} followed by 1-${CELL_NAME_SUFFIX_MAX} of [a-z0-9_.-], starting with [a-z0-9]. the fixed prefix keeps it from reading as a container id prefix, which docker kill or docker rm -f would resolve to another container." 2
             CELL_NAME="$2"
+            shift 2
+            ;;
+        --max-seconds)
+            [ $# -ge 2 ] && [ -n "$2" ] || die "--max-seconds needs a non-empty value" 2
+            valid_positive_int "$2" ||
+                die "refusing --max-seconds '$2': it is a whole number of seconds, 1 or more" 2
+            MAX_SECONDS="$2"
+            shift 2
+            ;;
+        --tmp-size)
+            [ $# -ge 2 ] && [ -n "$2" ] || die "--tmp-size needs a non-empty value" 2
+            valid_tmp_size "$2" ||
+                die "refusing --tmp-size '$2': it is digits followed by k, m or g (e.g. 512m), nothing else" 2
+            TMP_SIZE="$2"
             shift 2
             ;;
         --provider)
@@ -444,7 +516,7 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-[ -n "$SCRATCH" ] || die "--scratch is required (it is the only writable mount, so it is never guessed)" 2
+[ -n "$SCRATCH" ] || die "--scratch is required (it is the only writable host mount, so it is never guessed)" 2
 [ $# -ge 1 ] || die "no capture_driver.sh arguments given (pass them after \`--\`)" 2
 
 PROVIDERS="${PROVIDERS:-$DEFAULT_PROVIDERS}"
@@ -779,9 +851,19 @@ done
 NAME_FLAGS=()
 [ -z "$CELL_NAME" ] || NAME_FLAGS=(--name "$CELL_NAME")
 
+# `--read-only` with a capped, exec tmpfs on /tmp: the runner's workspace
+# (mktemp -d, no TMPDIR in the image) lands there, and the drivers exec
+# scripts they write into it. Docker's tmpfs default is noexec.
+#
+# `timeout` is the container's PID 1, so the wall-clock bound needs no
+# host process to enforce it, and it signals the runner's whole process
+# group.
+
 docker run \
     --rm \
     ${NAME_FLAGS[@]+"${NAME_FLAGS[@]}"} \
+    --read-only \
+    --tmpfs "/tmp:rw,exec,nosuid,nodev,size=$TMP_SIZE" \
     --user "$(id -u):$(id -g)" \
     --network bridge \
     --workdir "$CELL_REPO" \
@@ -793,6 +875,7 @@ docker run \
     -e "ROUTECTL_BIN=$CELL_BIN" \
     -e "ROUTECTL_DRIVER_OUT_ROOT=$CELL_SCRATCH" \
     "$IMAGE" \
+    timeout "--kill-after=${KILL_AFTER_SECONDS}s" "$MAX_SECONDS" \
     bash "$CELL_REPO/scripts/capture_driver.sh" \
     --out "$CELL_SCRATCH" \
     --out-root "$CELL_SCRATCH" \

@@ -37,6 +37,10 @@
 # the container legs:
 #   docker absent      -> the container legs SKIP BY NAME; refusals run.
 #   image not built    -> same; build it with scripts/container/build.sh.
+#
+# The container legs run against `routectl-capture:default`, or against
+# the tag in ROUTECTL_CAPTURE_TEST_IMAGE (an image built with --version
+# carries a versioned tag instead).
 #   python3 absent     -> FAILS. Without it there is no stub seat and no
 #                         stub listener, so a skip would hide the whole
 #                         accept half.
@@ -53,7 +57,7 @@ WRAPPER="$HERE/run_capture.sh"
 # shellcheck source=scripts/drivers/lib/structural_shape.sh
 . "$REPO_ROOT/scripts/drivers/lib/structural_shape.sh"
 
-IMAGE="routectl-capture:default"
+IMAGE="${ROUTECTL_CAPTURE_TEST_IMAGE:-routectl-capture:default}"
 
 # Scratch parent on REAL disk outside the repo. Outside because the
 # wrapper refuses an in-repo scratch root -- which is one of the rules
@@ -398,7 +402,39 @@ report_credential() {
     else
         printf 'bin_dir_write=refused\n'
     fi
+    # The image's own paths a client would write to. Both are writable to
+    # this uid on a writable root, so `refused` here is the read-only root.
+    if printf 'x\n' 2>/dev/null >/home/ubuntu/probe; then
+        printf 'image_home_write=SUCCEEDED\n'
+    else
+        printf 'image_home_write=refused\n'
+    fi
+    if printf 'x\n' 2>/dev/null >/var/tmp/probe; then
+        printf 'var_tmp_write=SUCCEEDED\n'
+    else
+        printf 'var_tmp_write=refused\n'
+    fi
+    printf 'root_mode=%s\n' \
+        "$(awk '$2 == "/" { split($4, o, ","); m = o[1] } END { print m }' /proc/mounts)"
+    printf 'tmp_mount=%s\n' \
+        "$(awk '$2 == "/tmp" { split($4, o, ","); sz = ""; for (i in o) if (o[i] ~ /^size=/) sz = o[i]; m = $3 " " sz } END { print m }' /proc/mounts)"
+    printf 'run_dir=%s\n' "${ROUTECTL_DRIVER_RUN:-}"
+    # What a driver that types into a pty does: write a script into the
+    # run workspace, mark it executable, exec it.
+    run_script="${ROUTECTL_DRIVER_RUN:-/nonexistent}/exec-probe.sh"
+    if printf '#!/usr/bin/env bash\necho exec-ok\n' 2>/dev/null >"$run_script" &&
+        chmod +x "$run_script" 2>/dev/null &&
+        [ "$("$run_script" 2>/dev/null)" = exec-ok ]; then
+        printf 'run_dir_exec=ok\n'
+    else
+        printf 'run_dir_exec=FAILED\n'
+    fi
 } >"$out"
+# `sleepy` outlives any short --max-seconds: the wall-clock bound, not
+# the driver, has to end the cell.
+if [ "$(cat "$assets/mode" 2>/dev/null)" = sleepy ]; then
+    sleep 60
+fi
 exit 0
 SH
     chmod +x "$1"
@@ -477,7 +513,8 @@ new_scratch() {
 }
 
 # Run the wrapper with a valid seat and a valid stub binary. Output goes
-# to <scratch>.log; the exit code is returned.
+# to <scratch>.log; the exit code is returned. The image under test is
+# passed first, so a leg's own later --image replaces it.
 #
 # Usage: wrapper_run <scratch-root> [wrapper args...]
 wrapper_run() {
@@ -488,7 +525,7 @@ wrapper_run() {
         cd "$REPO_ROOT" || exit 2
         ROUTECTL_BIN="$root/stub-routectl" \
         ROUTECTL_CAPTURE_CELL_SEAT="$SEAT" \
-            bash "$WRAPPER" "$@"
+            bash "$WRAPPER" --image "$IMAGE" "$@"
     ) >"$root.log" 2>&1 || rc=$?
     return "$rc"
 }
@@ -522,7 +559,7 @@ provider_run() {
             "ROUTECTL_BIN=$root/stub-routectl" \
             "ROUTECTL_CAPTURE_CELL_SEAT=${LEG_SEAT:-$SEAT}" \
             "${env_pairs[@]}" \
-            bash "$WRAPPER" "$@"
+            bash "$WRAPPER" --image "$IMAGE" "$@"
     ) >"$root.log" 2>&1 || rc=$?
     return "$rc"
 }
@@ -1110,6 +1147,72 @@ check "a run without --name passes no --name to docker" "0" \
     "$(grep -cx -- '--name' "$NO_NAME_ROOT.argv" || true)"
 
 # ---------------------------------------------------------------------
+# Part 5b2: the cell's bounds, against the recorded docker argv
+# ---------------------------------------------------------------------
+#
+# A read-only root, a capped exec /tmp, and `timeout` as the container's
+# command. The argv check pins the exact spelling; the container legs
+# below pin what each one does.
+
+# Whether <root>.argv holds the words given, consecutively.
+argv_has_run() {
+    local root="$1"
+    shift
+    awk -v want="$(printf '%s\n' "$@")" '
+        BEGIN { n = split(want, w, "\n"); if (w[n] == "") n-- }
+        { line[NR] = $0 }
+        END {
+            for (i = 1; i + n - 1 <= NR; i++) {
+                ok = 1
+                for (j = 1; j <= n; j++) if (line[i + j - 1] != w[j]) { ok = 0; break }
+                if (ok) exit 0
+            }
+            exit 1
+        }' "$root.argv" 2>/dev/null && echo yes || echo no
+}
+
+BOUNDS_ROOT="$(new_scratch)"
+rc=0
+fake_docker_run "$BOUNDS_ROOT" -- --scratch "$BOUNDS_ROOT/land" -- \
+    --lane anthropic-api --case plain-turn-01 --expected-ingress anthropic \
+    -- "/scratch/$ASSETS_REL/driver.sh" || rc=$?
+check "a run with default bounds reaches docker run" "0" "$rc"
+check "the default run makes the root filesystem read-only" "yes" \
+    "$(argv_has_run "$BOUNDS_ROOT" --read-only)"
+check "the default run mounts an exec 1g tmpfs on /tmp" "yes" \
+    "$(argv_has_pair "$BOUNDS_ROOT" --tmpfs /tmp:rw,exec,nosuid,nodev,size=1g)"
+check "the default run's command is timeout 3600 around the runner" "yes" \
+    "$(argv_has_run "$BOUNDS_ROOT" timeout --kill-after=120s 3600 bash /workspace/scripts/capture_driver.sh)"
+
+BOUNDS_ROOT="$(new_scratch)"
+rc=0
+fake_docker_run "$BOUNDS_ROOT" -- --scratch "$BOUNDS_ROOT/land" \
+    --max-seconds 5 --tmp-size 64m -- \
+    --lane anthropic-api --case plain-turn-01 --expected-ingress anthropic \
+    -- "/scratch/$ASSETS_REL/driver.sh" || rc=$?
+check "a run with explicit bounds reaches docker run" "0" "$rc"
+check "--tmp-size 64m reaches the /tmp tmpfs options" "yes" \
+    "$(argv_has_pair "$BOUNDS_ROOT" --tmpfs /tmp:rw,exec,nosuid,nodev,size=64m)"
+check "--max-seconds 5 reaches the timeout command" "yes" \
+    "$(argv_has_run "$BOUNDS_ROOT" timeout --kill-after=120s 5 bash /workspace/scripts/capture_driver.sh)"
+
+# Each bad value is a usage error decided before docker is consulted.
+bound_refusal() {
+    local label="$1" flag="$2" value="$3" root rc=0
+    root="$(new_scratch)"
+    fake_docker_run "$root" -- --scratch "$root/land" "$flag" "$value" -- \
+        --lane anthropic-api --case plain-turn-01 --expected-ingress anthropic \
+        -- "/scratch/$ASSETS_REL/driver.sh" || rc=$?
+    check "$flag refuses $label with exit 2" "2" "$rc"
+    check "$flag refusal of $label reached no docker run" "no" \
+        "$([ -e "$root.argv" ] && echo yes || echo no)"
+    check_refusal "$flag refusal of $label names the flag" "refusing $flag" "$root.log"
+}
+bound_refusal "zero" --max-seconds 0
+bound_refusal "a non-number" --max-seconds x
+bound_refusal "an extra mount option" --tmp-size 1g,suid
+
+# ---------------------------------------------------------------------
 # Part 5c: ollama is an env-passthrough provider; bedrock is an AWS profile
 # ---------------------------------------------------------------------
 #
@@ -1239,6 +1342,21 @@ run_container_legs() {
     check "the runner's landing root is the scratch mount" "/scratch" \
         "$(probe_get "$land" out_root)"
 
+    # --- the bounds --------------------------------------------------
+    # Paired with the scratch-write control above: a root that refuses
+    # these writes while /scratch still accepts one is read-only, not
+    # broken.
+    check "the root filesystem is mounted read-only" "ro" \
+        "$(probe_get "$land" root_mode)"
+    check "a write to the image's own HOME is refused" "refused" \
+        "$(probe_get "$land" image_home_write)"
+    check "a write to /var/tmp is refused" "refused" \
+        "$(probe_get "$land" var_tmp_write)"
+    check "the runner's workspace is under the /tmp tmpfs" "yes" \
+        "$(case "$(probe_get "$land" run_dir)" in /tmp/?*) echo yes ;; *) echo no ;; esac)"
+    check "a script written into the run workspace can be exec'd" "ok" \
+        "$(probe_get "$land" run_dir_exec)"
+
     # The tracked file the driver tried to write must be BYTE-UNCHANGED
     # on the host. The in-container refusal above is the mechanism; this
     # is the consequence, and it is the one that matters.
@@ -1341,6 +1459,36 @@ run_container_legs() {
         fail "the bedrock leg's driver never ran inside the container (log: $root.log)"
     fi
 
+    # --- the /tmp cap is the requested size -------------------------
+    root="$(new_scratch healthy)"
+    rc=0
+    wrapper_run "$root" --scratch "$root/land" --tmp-size 64m -- \
+        --lane anthropic-api --case plain-turn-01 --expected-ingress anthropic --timeout 20 \
+        -- "/scratch/$ASSETS_REL/driver.sh" || rc=$?
+    check "a run with --tmp-size 64m exits 0" "0" "$rc"
+    check "/tmp is a tmpfs of the requested 64m" "tmpfs size=65536k" \
+        "$(probe_get "$root/land" tmp_mount 2>/dev/null)"
+
+    # --- the wall-clock bound ends a driver that does not ------------
+    # The driver sleeps 60 s; the bound is 5 s. The cell must end on the
+    # bound (124) well inside the driver's own sleep, and `--rm` must
+    # still remove the container.
+    local bound_name="routectl-cell-selftest-bound-$$-$RANDOM"
+    local started elapsed
+    root="$(new_scratch sleepy)"
+    rc=0
+    started="$(date +%s)"
+    wrapper_run "$root" --scratch "$root/land" --name "$bound_name" --max-seconds 5 -- \
+        --lane anthropic-api --case plain-turn-01 --expected-ingress anthropic --timeout 20 \
+        -- "/scratch/$ASSETS_REL/driver.sh" || rc=$?
+    elapsed=$(( $(date +%s) - started ))
+    check "a driver outliving --max-seconds 5 ends the wrapper with 124" "124" "$rc"
+    check "the bound ended the cell in under 60 s" "yes" \
+        "$([ "$elapsed" -lt 60 ] && echo yes || echo "no (${elapsed}s)")"
+    check "no container named for the bounded cell is left" "" \
+        "$(docker ps -aq --filter "name=^${bound_name}\$" 2>/dev/null)"
+    docker rm -f "$bound_name" >/dev/null 2>&1 || true
+
     # --- exit codes propagate VERBATIM -------------------------------
     # The runner distinguishes nine outcomes (0 and 2-9) and callers act on
     # the number. A wrapper that collapsed them to 1 would make the whole
@@ -1384,7 +1532,7 @@ if ! command -v docker >/dev/null 2>&1; then
     skip "  refusals above ran, but nothing verified that a well-formed"
     skip "  invocation reaches capture_driver.sh, that the repo mount is"
     skip "  read-only, that no seat file exists in the container, or that the"
-    skip "  runner's exit codes propagate."
+    skip "  runner's exit codes propagate, or that the cell's bounds hold."
 elif ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
     skip "the container legs -- $IMAGE is not built locally, so no capture was"
     skip "  run inside it. Build it with scripts/container/build.sh. The"
