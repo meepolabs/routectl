@@ -64,9 +64,9 @@ pub const fn egress_fills_max_tokens(egress: EgressKind) -> bool {
 /// bedrock-invoke; bedrock-invoke delegates body construction to this
 /// module's `normalize`) as the wire `max_tokens`, and by the legacy
 /// thinking window on those egresses and on bedrock-converse, which
-/// calls `build_thinking` itself. Converse, like openai-compat and
-/// openai-responses, still forwards `req.max_tokens` cleanly when None
-/// per the good-translator principle.
+/// calls `build_thinking` itself. Converse sends it as `maxTokens` only
+/// beside that legacy window; otherwise it, like openai-compat and
+/// openai-responses, forwards an absent `req.max_tokens` as absent.
 #[must_use]
 pub const fn resolve_max_tokens(req: &ChatRequest) -> u32 {
     if let Some(v) = req.max_tokens {

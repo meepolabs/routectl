@@ -586,7 +586,7 @@ fn insert_operator_extras(
 }
 
 /// The Converse half of the anthropic-api egress's forced-tool rule
-/// (`crate::anthropic_api`'s `strip_thinking_when_tool_choice_forces_use`):
+/// (`crate::anthropic_api::extras::shipped_thinking`):
 /// AWS forwards the bag verbatim to Claude, which 400s on active thinking
 /// beside a forcing tool choice. When the post-translation `toolChoice` is
 /// `Any` or `Tool` and the bag's `thinking.type` is `enabled` or `adaptive`,

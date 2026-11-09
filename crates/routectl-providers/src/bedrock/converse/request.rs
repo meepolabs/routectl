@@ -42,9 +42,11 @@
 use serde_json::Value;
 
 use routectl_core::cache_control;
+use routectl_core::wire_check::{EditKind, EditSite};
 use routectl_core::{ChatRequest, Result};
 
 use crate::anthropic_api::request::clamp_sampling_for_thinking;
+use crate::anthropic_api::resolve_max_tokens;
 
 use super::super::BedrockConfig;
 use super::extras::build_additional_fields;
@@ -184,7 +186,7 @@ fn build_inference_config(
     let (temperature, top_p) =
         clamp_sampling_for_thinking(thinking_type, req.temperature, req.top_p);
     let cfg_inference = InferenceConfig {
-        max_tokens: req.max_tokens,
+        max_tokens: sent_max_tokens(req, thinking_type),
         temperature,
         top_p,
         stop_sequences: req.stop.clone(),
@@ -194,6 +196,28 @@ fn build_inference_config(
         || cfg_inference.top_p.is_some()
         || cfg_inference.stop_sequences.is_some();
     if any_set { Some(cfg_inference) } else { None }
+}
+
+/// The `maxTokens` Converse sends: the caller's value, else the resolved
+/// ceiling when the shipped thinking is the legacy `enabled` shape. That
+/// shape's budget was sized below the resolved ceiling, and Claude requires
+/// `max_tokens` above the budget, which the upstream's own default need not
+/// be. Adaptive thinking sizes no budget and a stripped thinking ships none,
+/// so both forward an omitted limit.
+///
+/// The pointer is relative to the Anthropic body, like the bag's thinking
+/// declarations: a Converse rejection names `max_tokens` at the root.
+fn sent_max_tokens(req: &ChatRequest, thinking_type: Option<&str>) -> Option<u32> {
+    if req.max_tokens.is_some() || thinking_type != Some("enabled") {
+        return req.max_tokens;
+    }
+    crate::anthropic_api::wire_edits::declare(
+        crate::anthropic_api::wire_edits::tap_of(req),
+        EditSite::RequiredFieldDefault,
+        "/max_tokens",
+        EditKind::Add,
+    );
+    Some(resolve_max_tokens(req))
 }
 
 // ---------------------------------------------------------------------------

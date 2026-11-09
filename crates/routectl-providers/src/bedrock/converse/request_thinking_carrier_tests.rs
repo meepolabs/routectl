@@ -8,7 +8,7 @@
 //! anthropic-api egress's own test builder.
 
 use routectl_core::wire_check::{EditSite, Leg, WireTap};
-use routectl_core::{CustomTool, ToolDef};
+use routectl_core::{AnthropicThinking, ChatRequest, CustomTool, ReasoningConfig, ToolDef};
 use serde_json::{Value, json};
 
 use super::super::normalize_request;
@@ -256,6 +256,123 @@ fn forced_tool_use_strips_active_thinking_once_and_restores_the_caller_sampling(
     }
 }
 
+const LEARNED_CEILING: u32 = 8192;
+
+/// A request with no `max_tokens` under a router ceiling of
+/// [`LEARNED_CEILING`], its legacy thinking translated from canonical
+/// reasoning so the budget is sized from that ceiling.
+fn legacy_thinking_without_max_tokens() -> ChatRequest {
+    let mut req = ingress_request(None, None, 0);
+    req.max_tokens = None;
+    req.routectl_internal.anthropic_thinking = AnthropicThinking::NotCaptured;
+    req.routectl_internal.max_output_tokens = LEARNED_CEILING;
+    req.reasoning = Some(ReasoningConfig {
+        enabled: Some(true),
+        ..Default::default()
+    });
+    req
+}
+
+/// `(row, request, thinking type shipped, maxTokens sent, declared edits)`.
+type CeilingRow = (
+    &'static str,
+    ChatRequest,
+    Option<&'static str>,
+    Option<u64>,
+    Vec<(EditSite, String)>,
+);
+
+/// Legacy thinking sized from the resolved ceiling ships that ceiling as
+/// `maxTokens`, declared as routectl's own value; any other shape forwards
+/// the caller's limit, absent or not, and declares no `maxTokens` edit.
+#[test]
+fn legacy_thinking_without_max_tokens_sends_the_resolved_ceiling() {
+    let adaptive = {
+        let mut req = ingress_request(Some(json!({"type": "adaptive"})), Some("high"), 0);
+        req.max_tokens = None;
+        req.routectl_internal.max_output_tokens = LEARNED_CEILING;
+        req
+    };
+    let rows: Vec<CeilingRow> = vec![
+        (
+            "legacy thinking under the ceiling",
+            legacy_thinking_without_max_tokens(),
+            Some("enabled"),
+            Some(u64::from(LEARNED_CEILING)),
+            vec![(EditSite::RequiredFieldDefault, "/max_tokens".into())],
+        ),
+        (
+            "adaptive thinking",
+            adaptive,
+            Some("adaptive"),
+            None,
+            Vec::new(),
+        ),
+        (
+            "caller max_tokens",
+            ChatRequest {
+                max_tokens: Some(2048),
+                ..legacy_thinking_without_max_tokens()
+            },
+            Some("enabled"),
+            Some(2048),
+            Vec::new(),
+        ),
+        (
+            "forced tool use strips the thinking",
+            forcing_tool_use(legacy_thinking_without_max_tokens()),
+            None,
+            None,
+            vec![(EditSite::ThinkingStripForcedToolUse, "/thinking".into())],
+        ),
+    ];
+    for (row, req, expected_thinking, expected, expected_edits) in rows {
+        // Act
+        let (body, edits) = declared(
+            req,
+            &[
+                EditSite::RequiredFieldDefault,
+                EditSite::ThinkingStripForcedToolUse,
+            ],
+        );
+
+        // Assert
+        let sent = body
+            .pointer("/inferenceConfig/maxTokens")
+            .and_then(Value::as_u64);
+        assert_eq!(sent, expected, "{row}: {body}");
+        assert_eq!(edits, expected_edits, "{row}");
+        let thinking_type = bag(&body).pointer("/thinking/type").and_then(Value::as_str);
+        assert_eq!(thinking_type, expected_thinking, "{row}: {body}");
+        if thinking_type == Some("enabled") {
+            let budget = bag(&body)["thinking"]["budget_tokens"]
+                .as_u64()
+                .expect("legacy thinking carries a budget");
+            let window = sent.expect("a legacy budget ships beside maxTokens");
+            assert!(budget < window, "{row}: budget {budget} vs {window}");
+        }
+    }
+}
+
+/// With no thinking in the bag a forced tool choice has nothing to strip:
+/// the tool choice ships and the egress declares no edit at all.
+#[test]
+fn forced_tool_choice_without_thinking_declares_nothing() {
+    // Arrange
+    let req = forcing_tool_use(ingress_request(None, None, 64_000));
+
+    // Act
+    let (body, edits) = declared_all(req);
+
+    // Assert
+    assert!(bag(&body).get("thinking").is_none(), "{body}");
+    assert!(
+        body["toolConfig"].get("toolChoice").is_some(),
+        "the forced choice ships: {body}"
+    );
+    assert!(edits.is_empty(), "{edits:?}");
+}
+
 /// Inactive and unknown thinking types spend no reasoning budget, so they
 /// ride beside a forced tool choice with the client's effort and sampling,
 /// and nothing is declared.
@@ -326,6 +443,15 @@ fn declared(
     req: routectl_core::ChatRequest,
     sites: &[EditSite],
 ) -> (Value, Vec<(EditSite, String)>) {
+    let (body, edits) = declared_all(req);
+    let edits = edits
+        .into_iter()
+        .filter(|(site, _)| sites.contains(site))
+        .collect();
+    (body, edits)
+}
+
+fn declared_all(req: routectl_core::ChatRequest) -> (Value, Vec<(EditSite, String)>) {
     let mut req = req;
     let tap = WireTap::admitted();
     req.routectl_internal.wire_tap = Some(tap.clone());
@@ -334,7 +460,6 @@ fn declared(
         .take_request()
         .edits(Leg::Request)
         .iter()
-        .filter(|edit| sites.contains(&edit.site()))
         .map(|edit| (edit.site(), edit.path().to_string()))
         .collect();
     (body, edits)
