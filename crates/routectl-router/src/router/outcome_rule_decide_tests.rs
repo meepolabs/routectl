@@ -24,6 +24,11 @@ api_key_ref = "env://B"
 kind = "openai-compat"
 api_key_ref = "env://C"
 base_url = "https://gateway.example.com/v1"
+
+[providers.userinfo]
+kind = "openai-compat"
+api_key_ref = "env://C"
+base_url = "https://user:sk-live-FAKE@gateway.example.com/v1"
 "#;
 
 fn seats() -> Config {
@@ -135,14 +140,6 @@ fn each_scope_source_sets_its_scope_retry_and_exclusion() {
             Endpoint,
         ),
         (
-            "native 400 remapped to a retryable class",
-            Error::upstream("p", 400, "x"),
-            FailureClass::ServerError,
-            FailureScope::Endpoint,
-            false,
-            Endpoint,
-        ),
-        (
             "500",
             Error::upstream("p", 500, "x"),
             FailureClass::ServerError,
@@ -238,9 +235,9 @@ fn a_recognized_row_is_carried_on_the_disposition() {
     );
 }
 
-/// The probe overlay, for every failure kind: no same-target retry and
-/// every target outside the probe's chain run excluded, on top of whatever
-/// the scope itself excludes. The debit is the shared rule's: only a native
+/// The probe overlay, for every failure kind: no same-target retry, and the
+/// failed seat and every target outside the probe's chain run excluded, on
+/// top of whatever the scope itself excludes. The debit is the shared rule's: only a native
 /// 429 or 529 spares the breaker; a probe's 5xx or network failure debits
 /// like any other request's, and a request-rejecting 400 debits nothing.
 #[test]
@@ -324,13 +321,13 @@ fn a_probe_never_retries_stays_in_its_run_and_takes_the_shared_debit() {
 
         assert_eq!(disposition.same_target, SameProvider::No, "{name}");
         assert_eq!(disposition.breaker, breaker, "{name}");
-        assert!(
-            disposition
-                .exclusions
-                .contains(&Exclusion::OutsideRun(target.run())),
-            "{name}: {:?}",
-            disposition.exclusions
-        );
+        for fence in Exclusion::probe_fence(&target) {
+            assert!(
+                disposition.exclusions.contains(&fence),
+                "{name}: {fence:?} in {:?}",
+                disposition.exclusions
+            );
+        }
     }
 }
 
@@ -465,6 +462,40 @@ fn retry_classes_only_narrow_the_scope_rule() {
     }
 }
 
+/// An unknown provider reaching the decision is classified Unknown and,
+/// like any Unknown-class failure, ends the request without a retry.
+#[test]
+fn an_unknown_provider_error_is_terminal() {
+    let cfg = seats();
+    let err = Error::UnknownProvider("absent".into());
+    let class = routectl_core::failure_class::classify(&err, None).class;
+
+    let disposition = decide_fresh(
+        &failure(&err, &class, seat_a(&cfg)),
+        &RetryPolicy::default(),
+    );
+
+    assert_eq!(class, FailureClass::Unknown);
+    assert_eq!(disposition.scope, FailureScope::Target);
+    assert_eq!(disposition.same_target, SameProvider::No);
+    assert_eq!(disposition.next, Next::Terminal);
+}
+
+/// A failure's Debug prints its target's provider name, `[models]` entry and
+/// run, never the credential bytes the provider entry's base URL carries.
+#[test]
+fn a_failure_debug_never_prints_base_url_credentials() {
+    let cfg = seats();
+    let target = WalkTarget::fixture("userinfo", cfg.providers.get("userinfo"), "opus", 0);
+    let err = Error::upstream("p", 500, "x");
+    let class = FailureClass::ServerError;
+
+    let printed = format!("{:?}", failure(&err, &class, target));
+
+    assert!(!printed.contains("sk-live-FAKE"), "{printed}");
+    assert!(printed.contains("userinfo"), "{printed}");
+}
+
 /// The baked Unknown-class policy ends the request.
 #[test]
 fn an_unknown_class_is_terminal() {
@@ -584,9 +615,9 @@ fn disabled_fallbacks_end_the_request_at_the_first_failure() {
 }
 
 /// The scope reads the class the classifier gave, not the operator's
-/// remap: a generic 400 remapped to feature-unsupported stays endpoint
-/// scope, and a native feature-unsupported 400 remapped to bad-request
-/// stays model scope.
+/// remap: a generic 400 remapped to feature-unsupported or to a retryable
+/// class stays endpoint scope and is not retried, and a native
+/// feature-unsupported 400 remapped to bad-request stays model scope.
 #[test]
 fn the_scope_reads_the_native_class_before_any_remap() {
     use Excludes::{Endpoint, Model};
@@ -599,6 +630,13 @@ fn the_scope_reads_the_native_class_before_any_remap() {
             "generic 400 remapped to feature-unsupported",
             FailureClass::BadRequest,
             feature.clone(),
+            FailureScope::Endpoint,
+            Endpoint,
+        ),
+        (
+            "generic 400 remapped to server-error",
+            FailureClass::BadRequest,
+            FailureClass::ServerError,
             FailureScope::Endpoint,
             Endpoint,
         ),
@@ -619,6 +657,7 @@ fn the_scope_reads_the_native_class_before_any_remap() {
         let disposition = decide_fresh(&failure, &RetryPolicy::default());
 
         assert_eq!(disposition.scope, scope, "{name}");
+        assert_eq!(disposition.same_target, SameProvider::No, "{name}");
         assert_eq!(excludes(&disposition, &target), exclusion, "{name}");
     }
 }

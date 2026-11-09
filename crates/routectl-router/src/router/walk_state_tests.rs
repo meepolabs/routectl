@@ -1,5 +1,7 @@
 //! The endpoint-key derivation and the request walk's exclusion admission.
 
+use std::collections::BTreeMap;
+
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -8,11 +10,11 @@ use routectl_core::{ChatChunk, ChatRequest, ChatResponse, Error, Provider, Resul
 use serde_json::{Value, json};
 
 use super::*;
-use crate::config::Config;
-#[cfg(feature = "bedrock")]
-use crate::config::ProviderEntry;
+use crate::config::{AliasValue, Config, PoolEntry, ProviderEntry};
 use crate::resolved::ResolvedModel;
+use crate::router::Router;
 use crate::router::chain::into_one_dispatch_target;
+use crate::seat_pool::SeatTarget;
 
 fn entries(toml_text: &str) -> Config {
     toml::from_str(toml_text).expect("fixture config parses")
@@ -62,8 +64,17 @@ base_url = "http://localhost:11434/v1"
 
 [providers.forwarded]
 kind = "anthropic-api"
-base_url = "https://Gateway.Example.com"
+base_url = "https://API.anthropic.com/v1"
 credential_source = "forwarded"
+
+[providers.direct-oauth]
+kind = "anthropic-api"
+api_key_ref = "oauth://anthropic"
+
+[providers.other-host]
+kind = "openai-compat"
+api_key_ref = "env://A"
+base_url = "https://gateway.example.com/v1"
 
 [providers.unparseable]
 kind = "openai-compat"
@@ -129,7 +140,7 @@ fn endpoint_keys_fold_spelling_and_keep_origins_apart() {
             "local-11434",
             false,
         ),
-        ("a different host differs", "lower", "forwarded", false),
+        ("a different host differs", "lower", "other-host", false),
         ("a trailing dot folded", "lower", "trailing-dot", true),
         ("IPv6 spellings folded", "v6", "v6-spelled", true),
         (
@@ -150,7 +161,7 @@ fn endpoint_key_is_the_normalized_origin() {
     let rows = [
         ("upper", "https://api.anthropic.com:443"),
         ("plain-http", "http://localhost:80"),
-        ("forwarded", "https://gateway.example.com:443"),
+        ("forwarded", "https://api.anthropic.com:443"),
         ("trailing-dot", "https://api.anthropic.com:443"),
         ("v6", "http://[::1]:8080"),
         ("userinfo", "https://gateway.example.com:443"),
@@ -160,15 +171,17 @@ fn endpoint_key_is_the_normalized_origin() {
     }
 }
 
-/// A forwarded entry's key is its own forwarded base, never the Anthropic
-/// default every other anthropic-api entry may share.
+/// A forwarded entry dials its own base, which validation pins to the
+/// Anthropic API host, so it shares the endpoint of a direct OAuth entry on
+/// that host: one origin is one endpoint, whatever credential reaches it.
 #[test]
-fn a_forwarded_target_keys_on_its_forwarded_base() {
+fn a_forwarded_target_shares_the_endpoint_of_a_direct_entry_on_its_host() {
     let cfg = entries(DIRECT_PAIR);
     let entry = cfg.providers.get("forwarded").expect("forwarded entry");
     assert!(entry.forwarded_base_url().is_some(), "premise: forwarded");
 
-    assert_eq!(key_of(&cfg, "forwarded"), "https://gateway.example.com:443");
+    assert_eq!(key_of(&cfg, "forwarded"), key_of(&cfg, "direct-oauth"));
+    assert_eq!(key_of(&cfg, "forwarded"), "https://api.anthropic.com:443");
 }
 
 #[test]
@@ -384,7 +397,16 @@ fn each_exclusion_skips_only_its_scope() {
             Exclusion::OutsideRun(seat_a.run()),
             [true, false, false],
             ExcludedBy {
-                probe_pool: 2,
+                probe_run: 2,
+                ..ExcludedBy::default()
+            },
+        ),
+        (
+            "target",
+            Exclusion::Target(seat_b_same_model.state_key().to_owned()),
+            [false, true, true],
+            ExcludedBy {
+                target: 1,
                 ..ExcludedBy::default()
             },
         ),
@@ -487,10 +509,10 @@ fn a_walk_target_reads_its_fields_off_one_chain_target() {
     assert!(WalkTarget::at(&chain, 2, &cfg).is_none());
 }
 
-/// A probe's fence is the contiguous run of its `[models]` entry: in a
-/// chain `[opus, opus, sonnet, opus]` a probe that failed on the first opus
-/// target may reach the second, never sonnet, and never the later opus
-/// run, though it names the same entry.
+/// A probe's fence is the contiguous run of its `[models]` entry less the
+/// target that failed: in a chain `[opus, opus, sonnet, opus]` of one seat, a
+/// probe that failed on the first opus target reaches neither the second
+/// (the same seat again), nor sonnet, nor the later opus run.
 #[test]
 fn a_probe_fence_covers_only_the_contiguous_run_of_its_entry() {
     let cfg = entries(POOL);
@@ -503,16 +525,175 @@ fn a_probe_fence_covers_only_the_contiguous_run_of_its_entry() {
     ];
     let failed = WalkTarget::at(&chain, 0, &cfg).expect("in range");
     let mut walk = RequestWalk::new();
-    walk.exclude(Exclusion::OutsideRun(failed.run()));
+    for exclusion in Exclusion::probe_fence(&failed) {
+        walk.exclude(exclusion);
+    }
 
     let admitted: Vec<bool> = (1..chain.len())
         .map(|i| walk.admits(&WalkTarget::at(&chain, i, &cfg).expect("in range")))
         .collect();
 
-    assert_eq!(admitted, [true, false, false]);
+    assert_eq!(admitted, [false, false, false]);
+    assert_eq!(
+        WalkTarget::at(&chain, 1, &cfg).map(|t| t.run()),
+        Some(failed.run()),
+        "premise: the second opus target is in the failed target's run"
+    );
     assert_eq!(
         WalkTarget::at(&chain, 3, &cfg).map(|t| t.model()),
         Some("opus"),
         "premise: the later run names the same entry"
     );
+}
+
+const SEAT_MEMBERS: [&str; 2] = ["seat-a", "seat-b"];
+
+/// A router whose `opus` entry is served by a two-seat pool and whose
+/// `sonnet` entry by one provider, with the aliases the probe-fence rows
+/// expand.
+fn pooled_router() -> Router {
+    let mut config = Config::default();
+    for member in SEAT_MEMBERS {
+        config.providers.insert(
+            member.into(),
+            ProviderEntry::anthropic_api(format!("oauth://{member}")),
+        );
+    }
+    config
+        .providers
+        .insert("gateway".into(), ProviderEntry::anthropic_api("literal:k"));
+    config.pools.insert(
+        "the-pool".into(),
+        PoolEntry::new(SEAT_MEMBERS.iter().map(|m| (*m).to_owned()).collect()),
+    );
+    for (alias, chain) in [
+        ("repeated", vec!["opus", "opus"]),
+        ("fast", vec!["opus"]),
+        ("nested", vec!["fast", "opus"]),
+        ("split", vec!["opus", "sonnet", "opus"]),
+    ] {
+        config.aliases.insert(
+            alias.into(),
+            AliasValue::Chain(chain.into_iter().map(str::to_owned).collect()),
+        );
+    }
+    let seats: Vec<SeatTarget> = SEAT_MEMBERS
+        .iter()
+        .map(|member| {
+            SeatTarget::new(
+                (*member).to_owned(),
+                Arc::new(Undialed),
+                Some(routectl_auth::SecretRef::OAuth {
+                    provider: (*member).to_owned(),
+                    label: None,
+                }),
+                false,
+            )
+        })
+        .collect();
+    let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
+    models.insert(
+        "opus".into(),
+        Arc::new(
+            ResolvedModel::new("opus", "the-pool", Arc::new(Undialed), "claude-opus")
+                .with_seats(Arc::from(seats)),
+        ),
+    );
+    models.insert("sonnet".into(), resolved("sonnet", "gateway"));
+    let mut router = Router::new(Arc::new(config));
+    router.install_resolved_models(models);
+    router
+}
+
+/// Whether the walk admits each target after the first, once a probe
+/// failed on the first and its fence is held.
+fn admitted_after_a_probe_fails_on_the_head(chain: &[DispatchTarget], cfg: &Config) -> Vec<bool> {
+    let failed = WalkTarget::at(chain, 0, cfg).expect("in range");
+    let mut walk = RequestWalk::new();
+    for exclusion in Exclusion::probe_fence(&failed) {
+        walk.exclude(exclusion);
+    }
+    (1..chain.len())
+        .map(|i| walk.admits(&WalkTarget::at(chain, i, cfg).expect("in range")))
+        .collect()
+}
+
+/// A chain that names one pooled entry twice in a row puts each seat in one
+/// run twice: a repeated nickname, a nested alias, or an entry between the
+/// two dropped before the walk (a feature or window filter). A probe that
+/// failed on seat A never dials seat A again; seat B, a sibling in the
+/// same run, stays admitted.
+#[test]
+fn a_probe_never_dials_its_failed_seat_again_when_the_run_repeats_it() {
+    let router = pooled_router();
+    let cfg = &router.config;
+    let rows = [
+        ("repeated nickname", "repeated"),
+        ("nested alias", "nested"),
+        ("dropped middle entry", "split"),
+    ];
+    for (name, alias) in rows {
+        let mut chain = router.dispatch_chain(alias, None).expect("chain resolves");
+        chain.retain(|target| target.state_key != "sonnet");
+        let keys: Vec<&str> = chain.iter().map(|t| t.state_key.as_str()).collect();
+        assert_eq!(
+            keys,
+            ["opus#seat-a", "opus#seat-b", "opus#seat-a", "opus#seat-b"],
+            "premise, {name}: both seats twice"
+        );
+        assert!(
+            (1..chain.len()).all(|i| WalkTarget::at(&chain, i, cfg).map(|t| t.run())
+                == WalkTarget::at(&chain, 0, cfg).map(|t| t.run())),
+            "premise, {name}: one chain run"
+        );
+
+        let admitted = admitted_after_a_probe_fails_on_the_head(&chain, cfg);
+
+        assert_eq!(admitted, [true, false, true], "{name}");
+    }
+}
+
+/// The dropped-middle row's control: with the middle entry kept, the later
+/// opus seats are a second run, fenced off by the run alone.
+#[test]
+fn a_kept_middle_entry_splits_the_repeated_entry_into_two_runs() {
+    let router = pooled_router();
+    let chain = router
+        .dispatch_chain("split", None)
+        .expect("chain resolves");
+    let keys: Vec<&str> = chain.iter().map(|t| t.state_key.as_str()).collect();
+    assert_eq!(
+        keys,
+        [
+            "opus#seat-a",
+            "opus#seat-b",
+            "sonnet",
+            "opus#seat-a",
+            "opus#seat-b"
+        ],
+        "premise"
+    );
+
+    let admitted = admitted_after_a_probe_fails_on_the_head(&chain, &router.config);
+
+    assert_eq!(admitted, [true, false, false, false]);
+}
+
+/// A walk target prints its provider name, `[models]` entry and run, never
+/// the provider entry, whose own Debug carries the base URL's userinfo.
+#[test]
+fn a_walk_target_debug_never_prints_base_url_credentials() {
+    let cfg = entries(DIRECT_PAIR);
+    let entry = cfg.providers.get("userinfo");
+    assert!(
+        format!("{entry:?}").contains("sk-live-FAKE"),
+        "premise: the provider entry's own Debug prints the credential"
+    );
+
+    let printed = format!("{:?}", target(&cfg, "userinfo", "opus", 3));
+
+    assert!(!printed.contains("sk-live-FAKE"), "{printed}");
+    for field in ["userinfo", "opus", "3"] {
+        assert!(printed.contains(field), "{field} in {printed}");
+    }
 }

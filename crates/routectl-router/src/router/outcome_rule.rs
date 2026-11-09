@@ -340,12 +340,12 @@ pub(super) struct Disposition {
 /// retryable target-scoped failure may retry the same target, and only on a
 /// completion. `[retry.classes]` only narrows: its retry cap bounds the
 /// request-wide retry count and `fallback = false` ends the walk, but
-/// neither lifts an exclusion. A probe never retries and never leaves the
-/// chain run of its `[models]` entry, whatever the failure; it takes the
-/// shared debit rule ([`breaker_outcome`]), which spares only its native 429
-/// or 529. `disable_fallbacks` ends the request at the first failure.
-/// Outside a completion or stream, only an attempt whose deadline fired
-/// walks on.
+/// neither lifts an exclusion. A probe never retries, never leaves the chain
+/// run of its `[models]` entry, and never dials the failed seat again under a
+/// later chain entry, whatever the failure; it takes the shared debit rule
+/// ([`breaker_outcome`]), which spares only its native 429 or 529.
+/// `disable_fallbacks` ends the request at the first failure. Outside a
+/// completion or stream, only an attempt whose deadline fired walks on.
 #[cfg_attr(
     not(test),
     expect(
@@ -435,8 +435,9 @@ fn retry_same_target(
     }
 }
 
-/// The exclusions `scope` sets, plus the probe's chain-run fence. The
-/// endpoint key is derived here, only for a scope that needs one.
+/// The exclusions `scope` sets, plus a probe's fence
+/// ([`Exclusion::probe_fence`]). The endpoint key is derived here, only for
+/// a scope that needs one.
 fn exclusions_for(failure: &Failure<'_>, scope: FailureScope) -> Vec<Exclusion> {
     let target = &failure.target;
     let mut exclusions = Vec::new();
@@ -448,11 +449,13 @@ fn exclusions_for(failure: &Failure<'_>, scope: FailureScope) -> Vec<Exclusion> 
         _ => {}
     }
     if failure.is_probe {
-        exclusions.push(Exclusion::OutsideRun(target.run()));
+        exclusions.extend(Exclusion::probe_fence(target));
     }
     exclusions
 }
 
+/// Whether the walk moves on. An [`Error::UnknownProvider`] entry is walked
+/// past by the dispatch walk before it dials, not decided here.
 fn next_step(failure: &Failure<'_>, policy: &RetryPolicy) -> Next {
     let fallback = policy.resolved_class(failure.class).1;
     let surface_walks = failure.deadline_fired || failure.surface.health_error_walks();

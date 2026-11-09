@@ -8,9 +8,10 @@
 //! produced them. Exclusions last only for the request; cross-request memory
 //! stays with the breaker, the credential park and the capability filter.
 //!
-//! An exclusion keys on an endpoint identity derived by [`endpoint_key`], the
-//! one derivation every reader uses. It is computed lazily: a request that
-//! holds no exclusion never derives a key.
+//! An exclusion keys on one of four identities: an endpoint (derived by
+//! [`endpoint_key`], the one derivation every reader uses, and only when an
+//! endpoint exclusion is held), a `[models]` entry, a chain run, or one
+//! target's runtime-state key.
 #![cfg_attr(
     not(test),
     expect(
@@ -100,10 +101,13 @@ fn normalized_origin(base_url: &str) -> Option<String> {
 /// What the walk needs to know about one chain target to decide whether an
 /// exclusion covers it. Built only by [`WalkTarget::at`], so the provider
 /// entry, the `[models]` entry and the chain run always describe one target.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub(super) struct WalkTarget<'a> {
     /// The target's `[providers]` key.
     provider_name: &'a str,
+    /// The target's runtime-state key: one per (`[models]` entry, seat), so
+    /// two chain entries naming the same seat of the same entry share it.
+    state_key: &'a str,
     /// That key's provider entry, when it resolves.
     entry: Option<&'a ProviderEntry>,
     /// The `[models]` entry the target dispatches to; every seat of one pool
@@ -125,12 +129,15 @@ impl<'a> WalkTarget<'a> {
         let target = chain.get(index)?;
         Some(Self {
             provider_name: &target.provider_name,
+            state_key: &target.state_key,
             entry: config.providers.get(&target.provider_name),
             model: &target.model.nickname,
             run: run_start(chain, index, target),
         })
     }
 
+    /// A walk target whose state key is `model` itself, the key of a
+    /// target that is not a pool seat.
     #[cfg(test)]
     pub(super) const fn fixture(
         provider_name: &'a str,
@@ -140,6 +147,7 @@ impl<'a> WalkTarget<'a> {
     ) -> Self {
         Self {
             provider_name,
+            state_key: model,
             entry,
             model,
             run,
@@ -156,6 +164,23 @@ impl<'a> WalkTarget<'a> {
 
     pub(super) const fn run(&self) -> ChainRun {
         ChainRun(self.run)
+    }
+
+    pub(super) const fn state_key(&self) -> &'a str {
+        self.state_key
+    }
+}
+
+/// Prints the provider name, the `[models]` entry and the chain run only:
+/// the provider entry's own Debug prints its base URL verbatim, userinfo
+/// included.
+impl fmt::Debug for WalkTarget<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WalkTarget")
+            .field("provider_name", &self.provider_name)
+            .field("model", &self.model)
+            .field("run", &self.run)
+            .finish_non_exhaustive()
     }
 }
 
@@ -190,6 +215,9 @@ pub(super) enum Exclusion {
     /// Every target outside this chain run: an availability probe stays in
     /// the run of seats it started in.
     OutsideRun(ChainRun),
+    /// Every chain entry with this runtime-state key: the one seat that
+    /// failed, wherever the chain names it again.
+    Target(String),
 }
 
 /// The scope an [`Exclusion`] covers, as tallied by [`RequestWalk`].
@@ -197,7 +225,8 @@ pub(super) enum Exclusion {
 pub(super) enum ExclusionScope {
     Endpoint,
     Model,
-    ProbePool,
+    ProbeRun,
+    Target,
 }
 
 impl Exclusion {
@@ -205,8 +234,21 @@ impl Exclusion {
         match self {
             Self::Endpoint(_) => ExclusionScope::Endpoint,
             Self::Model(_) => ExclusionScope::Model,
-            Self::OutsideRun(_) => ExclusionScope::ProbePool,
+            Self::OutsideRun(_) => ExclusionScope::ProbeRun,
+            Self::Target(_) => ExclusionScope::Target,
         }
+    }
+
+    /// The fence a failed availability probe on `target` sets: the target
+    /// itself, under every chain entry naming it, and every target outside
+    /// its chain run. The run alone would admit the same seat again when the
+    /// chain names it twice in a row (a repeated nickname, a nested alias,
+    /// or an entry between them dropped before the walk).
+    pub(super) fn probe_fence(target: &WalkTarget<'_>) -> [Self; 2] {
+        [
+            Self::Target(target.state_key().to_owned()),
+            Self::OutsideRun(target.run()),
+        ]
     }
 
     fn covers(&self, target: &WalkTarget<'_>, endpoint: &mut LazyEndpoint) -> bool {
@@ -214,6 +256,7 @@ impl Exclusion {
             Self::Endpoint(key) => endpoint.get(target) == key,
             Self::Model(model) => target.model == model,
             Self::OutsideRun(run) => target.run() != *run,
+            Self::Target(state_key) => target.state_key == state_key,
         }
     }
 }
@@ -232,7 +275,8 @@ impl LazyEndpoint {
 pub(super) struct ExcludedBy {
     pub(super) endpoint: u32,
     pub(super) model: u32,
-    pub(super) probe_pool: u32,
+    pub(super) probe_run: u32,
+    pub(super) target: u32,
 }
 
 impl ExcludedBy {
@@ -240,7 +284,8 @@ impl ExcludedBy {
         let slot = match scope {
             ExclusionScope::Endpoint => &mut self.endpoint,
             ExclusionScope::Model => &mut self.model,
-            ExclusionScope::ProbePool => &mut self.probe_pool,
+            ExclusionScope::ProbeRun => &mut self.probe_run,
+            ExclusionScope::Target => &mut self.target,
         };
         *slot = slot.saturating_add(1);
     }
