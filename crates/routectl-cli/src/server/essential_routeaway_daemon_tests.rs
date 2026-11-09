@@ -39,6 +39,11 @@ const ALIAS: &str = "route";
 const ALIAS_B_FIRST: &str = "route-b-first";
 const PROVIDER: &str = "p";
 const REGION: &str = "us-east-1";
+/// Lane b's provider entry, in another region: a rejection no learner turns
+/// into a typed capability excludes its whole endpoint for the rest of the
+/// request, so two lanes on one regional endpoint would stop at the first.
+const PROVIDER_B: &str = "q";
+const REGION_B: &str = "us-west-2";
 /// Synthetic Anthropic-family ids: count_tokens admits the seats, and no
 /// baked catalog prior matches them.
 const LANE_A_ID: &str = "anthropic.lane-a";
@@ -92,7 +97,7 @@ fn bearer_key() -> String {
     ["essential", "routeaway", "test", "key"].join("-")
 }
 
-/// Two Bedrock lanes (`a`, `b`) on one provider entry, chained under
+/// Two Bedrock lanes (`a`, `b`), each on its own provider entry, chained under
 /// [`ALIAS`] and, reversed, [`ALIAS_B_FIRST`]; `capability` is appended
 /// verbatim.
 fn two_lane_config(capability: &str) -> Config {
@@ -103,11 +108,16 @@ fn two_lane_config(capability: &str) -> Config {
          region = \"{REGION}\"\n\
          api_shape = \"invoke\"\n\
          creds = {{ kind = \"bearer-key\", key_ref = \"{key_ref}\" }}\n\n\
+         [providers.{PROVIDER_B}]\n\
+         kind = \"bedrock\"\n\
+         region = \"{REGION_B}\"\n\
+         api_shape = \"invoke\"\n\
+         creds = {{ kind = \"bearer-key\", key_ref = \"{key_ref}\" }}\n\n\
          [models.a]\n\
          provider = \"{PROVIDER}\"\n\
          upstream = \"{LANE_A_ID}\"\n\n\
          [models.b]\n\
-         provider = \"{PROVIDER}\"\n\
+         provider = \"{PROVIDER_B}\"\n\
          upstream = \"{LANE_B_ID}\"\n\n\
          [aliases]\n\
          {ALIAS} = [\"a\", \"b\"]\n\
@@ -120,11 +130,21 @@ fn two_lane_config(capability: &str) -> Config {
     parse_config(&text).expect("valid two-lane bedrock config")
 }
 
+/// `(provider entry, region)` of the lane serving `model_id`.
+fn lane_provider(model_id: &str) -> (&'static str, &'static str) {
+    if model_id == LANE_B_ID {
+        (PROVIDER_B, REGION_B)
+    } else {
+        (PROVIDER, REGION)
+    }
+}
+
 async fn bedrock_model(nickname: &str, model_id: &str, origin: &str) -> Arc<ResolvedModel> {
+    let (provider_name, region) = lane_provider(model_id);
     let creds = BedrockCreds::BearerKey { key: bearer_key() };
     let cfg = BedrockConfig {
-        id: format!("bedrock:{PROVIDER}"),
-        region: REGION.into(),
+        id: format!("bedrock:{provider_name}"),
+        region: region.into(),
         model_id: model_id.into(),
         api_shape: BedrockApiShape::Invoke,
         creds: creds.clone(),
@@ -133,7 +153,7 @@ async fn bedrock_model(nickname: &str, model_id: &str, origin: &str) -> Arc<Reso
         anthropic_beta: Vec::new(),
         additional_model_request_fields: None,
     };
-    let resolved = auth::resolve(&creds, REGION)
+    let resolved = auth::resolve(&creds, region)
         .await
         .expect("bearer creds resolve");
     let provider = BedrockProvider::new(cfg, resolved)
@@ -141,7 +161,7 @@ async fn bedrock_model(nickname: &str, model_id: &str, origin: &str) -> Arc<Reso
         .with_runtime_origin_for_tests(origin);
     Arc::new(ResolvedModel::new(
         nickname,
-        PROVIDER,
+        provider_name,
         Arc::new(provider),
         model_id,
     ))
@@ -423,7 +443,7 @@ async fn invoke_bodies(server: &MockServer) -> Vec<Value> {
 }
 
 fn lane_key(model_id: &str) -> String {
-    format!("{PROVIDER}#{model_id}")
+    format!("{}#{model_id}", lane_provider(model_id).0)
 }
 
 fn base_request() -> Value {
@@ -661,7 +681,7 @@ async fn force_supported_added_after_every_lane_refused_sends_the_request_to_tha
     assert_eq!(chain.learned_rows().await, learned);
     let chain = chain
         .restart(
-            "[capability.overrides.\"p:b\"]\n\
+            "[capability.overrides.\"q:b\"]\n\
              force_supported = [\"forced_tool_choice\"]\n",
         )
         .await;

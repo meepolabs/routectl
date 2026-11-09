@@ -105,6 +105,11 @@ kind = "bedrock"
 region = "us-east-1"
 creds = { kind = "default-chain" }
 
+[providers.p2]
+kind = "bedrock"
+region = "us-west-2"
+creds = { kind = "default-chain" }
+
 [aliases]
 "search-alias" = ["m1", "m2"]
 "#;
@@ -190,7 +195,7 @@ creds = { kind = "default-chain" }
                     spec.nickname.to_string(),
                     Arc::new(ResolvedModel::new(
                         spec.nickname,
-                        "p1",
+                        provider_for(spec.wire),
                         Arc::new(provider),
                         spec.wire,
                     )),
@@ -267,8 +272,15 @@ creds = { kind = "default-chain" }
         }
     }
 
+    /// The provider entry a lane rides: wire-b on its own region, since a
+    /// rejection no learner turns into a typed capability excludes its whole
+    /// endpoint for the rest of the request.
+    fn provider_for(wire: &str) -> &'static str {
+        if wire == WIRE_B { "p2" } else { "p1" }
+    }
+
     fn lane_key(wire: &str) -> String {
-        format!("p1#{wire}")
+        format!("{}#{wire}", provider_for(wire))
     }
 
     #[tokio::test]

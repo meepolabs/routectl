@@ -176,21 +176,22 @@ async fn a_pure_append_turn_stamps_stable() {
 
 #[tokio::test]
 async fn the_detector_observes_once_per_client_request_not_once_per_attempt() {
-    // Arrange: two entries, two attempts each -- four dispatch passes per
-    // client request. An observation inside the chain loop would advance the
+    // Arrange: two entries and one same-target retry per request -- three
+    // dispatch passes per client request (the first entry, its retry, the
+    // second entry). An observation inside the chain loop would advance the
     // epoch on every pass.
     let router = router_over(&["m1", "m2"], 2);
     let (baseline, _) = Box::pin(complete_once(&router, keyed_req(&["a", "b", "c"]))).await;
-    assert_eq!(baseline.attempt_count, 4, "the whole chain must be walked");
+    assert_eq!(baseline.attempt_count, 3, "the whole chain must be walked");
 
-    // Act: one rewriting request across the same four-pass walk.
+    // Act: one rewriting request across the same three-pass walk.
     let (meta, events) = Box::pin(complete_once(&router, keyed_req(&["A", "b", "c"]))).await;
 
     // Assert: exactly one rewrite was observed for the request, so the epoch
     // advanced by one and the next identical turn reads Stable against the
     // reseeded baseline.
     assert_eq!(meta.prefix_epoch_event, Some(1));
-    assert_eq!(meta.attempt_count, 4);
+    assert_eq!(meta.attempt_count, 3);
     assert_eq!(
         rewrite_warns(&events).len(),
         1,

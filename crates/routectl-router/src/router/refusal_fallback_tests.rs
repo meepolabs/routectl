@@ -14,7 +14,9 @@ use routectl_core::{
 };
 use serde_json::{Value, json};
 
-use super::super::outcome_rule::should_retry_same_provider;
+use super::super::class_observe::DispatchSurface;
+use super::super::outcome_rule::{Failure, SameProvider, decide};
+use super::super::walk_state::{RequestWalk, WalkTarget};
 use crate::class_policy::{ClassPolicy, ConfigFailureClass};
 use crate::config::{AliasValue, Config, ProviderEntry, RetryPolicy};
 use crate::resolved::ResolvedModel;
@@ -193,7 +195,7 @@ async fn a_provider_refusal_on_stream_walks_to_the_next_target_without_a_retry()
 }
 
 #[test]
-fn a_refusal_ignores_a_raised_bad_request_retry_cap_and_an_upstream_400_does_not() {
+fn a_refusal_ignores_a_raised_bad_request_retry_cap_and_a_target_scoped_4xx_does_not() {
     let policy = RetryPolicy {
         classes: bad_request_overlay(),
         ..RetryPolicy::default()
@@ -215,16 +217,28 @@ fn a_refusal_ignores_a_raised_bad_request_retry_cap_and_an_upstream_400_does_not
             false,
         ),
         (
-            "upstream 400 control",
-            Error::upstream(REFUSING, 400, "rejected"),
+            "upstream 409 control",
+            Error::upstream(REFUSING, 409, "conflict"),
             true,
         ),
     ];
 
     for (case, err, want) in &rows {
-        let retried =
-            should_retry_same_provider(err, &FailureClass::BadRequest, &policy, 0, false, false);
+        let class = FailureClass::BadRequest;
+        let failure = Failure {
+            err,
+            native_class: &class,
+            class: &class,
+            is_probe: false,
+            surface: DispatchSurface::Complete,
+            deadline_fired: false,
+            disable_fallbacks: false,
+            target: WalkTarget::fixture(REFUSING, None, "m-refusing", 0),
+        };
 
+        let disposition = decide(&failure, &policy, None, &RequestWalk::new());
+
+        let retried = matches!(disposition.same_target, SameProvider::Retry { .. });
         assert_eq!(retried, *want, "{case}");
     }
 }

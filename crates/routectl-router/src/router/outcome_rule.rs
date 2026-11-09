@@ -1,8 +1,9 @@
-//! The failure-outcome rule shared by the dispatch surfaces: what a failed
-//! attempt does to the seat's breaker (`breaker_outcome`) and whether the
-//! same provider is retried (`same_provider_retry`). Pure decisions only;
-//! the Router applies a `BreakerOutcome` in `runtime_gate`, and probe-slot
-//! settlement stays at each call site.
+//! The failure-outcome rule shared by the dispatch surfaces: [`decide`] maps
+//! one failed attempt to everything it does (the breaker outcome, a
+//! same-target retry, the request-scoped exclusions, and whether the walk
+//! continues). Pure decisions only; the dispatch walk applies a
+//! [`Disposition`], the Router applies a `BreakerOutcome` in `runtime_gate`,
+//! and probe-slot settlement stays at each call site.
 
 use std::time::Duration;
 
@@ -34,22 +35,23 @@ pub(super) enum BreakerOutcome {
 
 /// The breaker outcome for `err`, classified as `class`, carrying
 /// `reset_hint`. A native 400 or 422 never debits, whatever class an
-/// operator remap gives it: the request, not the seat, caused it. A probe
-/// fast-fail ([`probe_fast_fail`]) leaves the
-/// breaker alone whatever its class: a probe's 429/529 is a transient
-/// upstream condition, not a provider fault. Otherwise a non-debiting
-/// class leaves the breaker alone, and a debiting class parks the seat
-/// only when a non-probe attempt carries a reset LARGER than
-/// [`INLOOP_RETRY_AFTER_CAP`]; a smaller (or absent) reset, and every
-/// other probe failure, takes the threshold-gated debit instead.
+/// operator remap gives it: the request, not the seat, caused it. A probe's
+/// native 429 or 529 leaves the breaker alone whatever its class: a quota
+/// check hitting a rate limit or an overload is a transient upstream
+/// condition, not a provider fault. Otherwise a non-debiting class leaves the
+/// breaker alone, and a debiting class parks the seat only when a non-probe
+/// attempt carries a reset LARGER than [`INLOOP_RETRY_AFTER_CAP`]; a smaller
+/// (or absent) reset, and every other probe failure, takes the
+/// threshold-gated debit instead.
 pub(super) fn breaker_outcome(
     err: &Error,
     class: &FailureClass,
     reset_hint: Option<Duration>,
     is_probe: bool,
 ) -> BreakerOutcome {
-    if is_request_rejection(native_status(err))
-        || probe_fast_fail(err, is_probe).is_some()
+    let native = native_status(err);
+    if is_request_rejection(native)
+        || (is_probe && matches!(native, Some(429 | 529)))
         || !class_debits(class)
     {
         return BreakerOutcome::None;
@@ -75,39 +77,7 @@ const fn is_request_rejection(native: Option<u16>) -> bool {
     matches!(native, Some(400 | 422))
 }
 
-/// The upstream status of a probe-fast-fail-eligible error, or `None`
-/// when `err` is not one. 429 is a rate-limit; 529 is Anthropic's
-/// overload status. Both surface as `Error::Upstream { status, .. }`
-/// (the anthropic-api egress forwards the raw upstream status). A probe
-/// that hits one of these skips retry+fallback: on the all-Anthropic
-/// chain every hop shares the same limit, so walking it is futile and
-/// the probe's output is unread. A generic 5xx or a capability 4xx
-/// (e.g. Bedrock's `max_tokens=1` 400) returns `None` here so it keeps
-/// walking the chain -- a healthy sibling provider can still answer.
-pub(super) const fn probe_fast_fail_status(err: &Error) -> Option<u16> {
-    match err {
-        Error::Upstream {
-            status: s @ (429 | 529),
-            ..
-        } => Some(*s),
-        _ => None,
-    }
-}
-
-/// The upstream status when a probe attempt failed with a
-/// rate-limit/overload ([`probe_fast_fail_status`]), else `None`. Keyed on
-/// the upstream status, not the failure class, so an operator class remap
-/// cannot change it. Such a probe neither retries, falls back across
-/// distinct targets, nor debits the breaker.
-pub(super) const fn probe_fast_fail(err: &Error, is_probe: bool) -> Option<u16> {
-    if is_probe {
-        probe_fast_fail_status(err)
-    } else {
-        None
-    }
-}
-
-/// Whether a failed attempt retries the same provider.
+/// Whether a failed attempt retries the same target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum SameProvider {
     No,
@@ -116,47 +86,6 @@ pub(super) enum SameProvider {
     Retry {
         sleep_floor: Option<Duration>,
     },
-}
-
-/// The same-provider retry decision for one failed attempt on `surface`.
-///
-/// Streams and token counts never retry the same provider. A completion
-/// retries while the per-class predicate ([`should_retry_same_provider`])
-/// allows it and the attempt did not park the breaker (the re-gate would be a guaranteed
-/// CircuitOpen). A debit that opened the breaker does not suppress the
-/// retry. A non-probe reset within [`INLOOP_RETRY_AFTER_CAP`] becomes the
-/// retry's sleep floor.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn same_provider_retry(
-    surface: DispatchSurface,
-    err: &Error,
-    class: &FailureClass,
-    policy: &RetryPolicy,
-    attempts_made: u32,
-    is_probe: bool,
-    transcript_rejection: bool,
-    outcome: BreakerOutcome,
-    hint: Option<Duration>,
-) -> SameProvider {
-    match surface {
-        DispatchSurface::Stream | DispatchSurface::CountTokens => SameProvider::No,
-        DispatchSurface::Complete => {
-            let retries = should_retry_same_provider(
-                err,
-                class,
-                policy,
-                attempts_made,
-                is_probe,
-                transcript_rejection,
-            ) && !matches!(outcome, BreakerOutcome::Park(_));
-            if !retries {
-                return SameProvider::No;
-            }
-            SameProvider::Retry {
-                sleep_floor: hint.filter(|h| !is_probe && *h <= INLOOP_RETRY_AFTER_CAP),
-            }
-        }
-    }
 }
 
 /// The honored rate-limit reset for `err`, clamped to the configured
@@ -188,11 +117,11 @@ pub(super) fn reset_hint_clamped_to(err: &Error, ceiling: Duration) -> Option<Du
 }
 
 /// The same-provider retry cap for `class` under `policy` -- the value the
-/// retry branch compares `attempts_made` against. Delegates to
+/// request-wide retry count is compared against. Delegates to
 /// [`RetryPolicy::resolved_class`], which layers any operator per-class
 /// `[retry.classes]` override on top of the baked class default. Shared by
-/// [`should_retry_same_provider`] and the class-decision observability so
-/// the logged cap never drifts from the cap actually enforced.
+/// [`decide`] and the class-decision observability so the logged cap never
+/// drifts from the cap actually enforced.
 pub(super) fn retry_cap_for(class: &FailureClass, policy: &RetryPolicy) -> u32 {
     policy.resolved_class(class).0
 }
@@ -215,60 +144,6 @@ pub const fn class_debits(class: &FailureClass) -> bool {
             | FailureClass::NetworkError
             | FailureClass::Overloaded
     )
-}
-
-pub(super) fn should_retry_same_provider(
-    err: &Error,
-    class: &FailureClass,
-    policy: &RetryPolicy,
-    attempts_made: u32,
-    is_probe: bool,
-    transcript_rejection: bool,
-) -> bool {
-    // Probe fast-fail mirrors `should_fallback`: a probe must not burn
-    // retry attempts against a rate-limited/overloaded provider (429 /
-    // 529). All other error classes fall through to the cap below.
-    if probe_fast_fail(err, is_probe).is_some() {
-        return false;
-    }
-    // A refusal is decided by the request's shape alone, so the same seat
-    // refuses it again whatever an operator's per-class retry cap says.
-    // So is a rejection laid to the request's defective transcript, which
-    // the seat is sent again unchanged.
-    if transcript_rejection || err.refusal_reason().is_some() {
-        return false;
-    }
-    let cap = retry_cap_for(class, policy);
-    attempts_made < cap
-}
-
-pub(super) fn should_fallback(
-    err: &Error,
-    class: &FailureClass,
-    policy: &RetryPolicy,
-    is_probe: bool,
-    transcript_rejection: bool,
-) -> bool {
-    // Availability-probe fast-fail: a probe (max_tokens <=
-    // probe_max_tokens) that hits a rate-limit (429) or overload (529)
-    // does not fall back. Every OTHER error class -- generic 5xx,
-    // network/status-0, Streaming, and every 4xx including the
-    // Bedrock-style max_tokens=1 400 -- falls through to the normal
-    // predicate below, so real fallback is untouched.
-    if probe_fast_fail(err, is_probe).is_some() {
-        return false;
-    }
-    // An unknown provider id in the chain is a config-shaped fault the
-    // caller routes past: always fallbackable, independent of class.
-    if let Error::UnknownProvider(_) = err {
-        return true;
-    }
-    // The request's own transcript explains the rejection, and the next
-    // target is sent the same transcript.
-    if transcript_rejection {
-        return false;
-    }
-    policy.resolved_class(class).1
 }
 
 /// One failed upstream attempt, as the decision reads it. Built after auth
@@ -329,6 +204,23 @@ pub(super) struct Disposition {
     pub(super) next: Next,
 }
 
+impl Disposition {
+    /// Record on the request's walk what this disposition spends and
+    /// excludes: a same-target retry, the exclusions, and the recognized
+    /// pattern.
+    pub(super) fn record_on(&self, walk: &mut RequestWalk) {
+        if matches!(self.same_target, SameProvider::Retry { .. }) {
+            walk.spend_retry();
+        }
+        for exclusion in &self.exclusions {
+            walk.exclude(exclusion.clone());
+        }
+        if let Some(row) = self.recognized {
+            walk.recognize(row);
+        }
+    }
+}
+
 /// Decide what `failure` does: the breaker outcome, a same-target retry,
 /// the request-scoped exclusions, and whether the walk continues.
 ///
@@ -346,13 +238,6 @@ pub(super) struct Disposition {
 /// ([`breaker_outcome`]), which spares only its native 429 or 529.
 /// `disable_fallbacks` ends the request at the first failure. Outside a
 /// completion or stream, only an attempt whose deadline fired walks on.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the dispatch walk adopts the decision in a follow-up change"
-    )
-)]
 pub(super) fn decide(
     failure: &Failure<'_>,
     policy: &RetryPolicy,
@@ -437,14 +322,17 @@ fn retry_same_target(
 
 /// The exclusions `scope` sets, plus a probe's fence
 /// ([`Exclusion::probe_fence`]). The endpoint key is derived here, only for
-/// a scope that needs one.
+/// a scope that needs one. A target-scoped failure excludes the failed seat
+/// under every later chain entry naming it; a same-target retry is decided
+/// before the walk reads exclusions, so it is unaffected.
 fn exclusions_for(failure: &Failure<'_>, scope: FailureScope) -> Vec<Exclusion> {
     let target = &failure.target;
     let mut exclusions = Vec::new();
     match scope {
         FailureScope::Endpoint => exclusions.push(Exclusion::Endpoint(target.endpoint_key())),
         FailureScope::Model => exclusions.push(Exclusion::Model(target.model().to_owned())),
-        FailureScope::Target | FailureScope::Account => {}
+        FailureScope::Target => exclusions.push(Exclusion::Target(target.state_key().to_owned())),
+        FailureScope::Account => {}
         // Unreachable: `scope_of` already folded an unknown scope to target.
         _ => {}
     }

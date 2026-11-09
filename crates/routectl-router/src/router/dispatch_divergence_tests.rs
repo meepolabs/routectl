@@ -291,13 +291,26 @@ async fn a_strict_strip_refusal_walks_on_the_message_surfaces_and_is_terminal_on
     assert_eq!(observed, expected);
 }
 
+/// An unknown-provider error an attempt itself returns is classified
+/// Unknown, which the baked class policy ends; only a chain entry with no
+/// provider at all is walked past, before any attempt.
 #[tokio::test]
-async fn an_unknown_provider_walks_on_the_message_surfaces_and_is_terminal_on_count() {
+async fn an_unknown_provider_error_from_an_attempt_ends_the_request_on_every_surface() {
     let observed = walk_rows(unknown_provider, Some(1)).await;
 
     let expected: Vec<HealthRow> = vec![
-        ("complete", Ended::Served, 1, CircuitPhase::Closed),
-        ("stream", Ended::Served, 1, CircuitPhase::Closed),
+        (
+            "complete",
+            failed("unknown provider"),
+            0,
+            CircuitPhase::Closed,
+        ),
+        (
+            "stream",
+            failed("unknown provider"),
+            0,
+            CircuitPhase::Closed,
+        ),
         (
             "count_tokens",
             failed("unknown provider"),
@@ -597,8 +610,10 @@ fn computer_tool_request() -> ChatRequest {
 /// `(surface, upstream calls, attempts, fallback hops, learn events, observations)`.
 type RepeatRow = (&'static str, usize, u32, u32, usize, Option<u32>);
 
+/// The seat's rejection excludes it for the rest of the request, so the
+/// second chain entry naming it is passed over without a dial.
 #[tokio::test]
-async fn a_chain_naming_one_seat_twice_visits_it_twice_and_learns_its_rejection_once() {
+async fn a_chain_naming_one_seat_twice_visits_it_once_and_learns_its_rejection_once() {
     let mut observed: Vec<RepeatRow> = Vec::new();
     for surface in [Surface::Complete, Surface::Stream] {
         let only = answering_with(refuses_the_computer_tool);
@@ -643,8 +658,8 @@ async fn a_chain_naming_one_seat_twice_visits_it_twice_and_learns_its_rejection_
     }
 
     let expected: Vec<RepeatRow> = vec![
-        ("complete", 2, 2, 1, 1, Some(1)),
-        ("stream", 2, 2, 1, 1, Some(1)),
+        ("complete", 1, 1, 0, 1, Some(1)),
+        ("stream", 1, 1, 0, 1, Some(1)),
     ];
     assert_eq!(observed, expected);
 }

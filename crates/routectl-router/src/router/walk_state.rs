@@ -12,13 +12,6 @@
 //! [`endpoint_key`], the one derivation every reader uses, and only when an
 //! endpoint exclusion is held), a `[models]` entry, a chain run, or one
 //! target's runtime-state key.
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the dispatch walk adopts the request walk in a follow-up change"
-    )
-)]
 
 use std::borrow::Cow;
 use std::fmt;
@@ -38,6 +31,7 @@ use crate::config::{Config, ProviderEntry};
 pub(super) struct EndpointKey(String);
 
 impl EndpointKey {
+    #[cfg(test)]
     pub(super) fn as_str(&self) -> &str {
         &self.0
     }
@@ -311,14 +305,17 @@ impl RequestWalk {
     }
 
     /// The most recent recognized upstream pattern, if any failure carried one.
+    #[cfg_attr(not(test), expect(dead_code, reason = "read by the walk summary"))]
     pub(super) const fn recognized(&self) -> Option<ScopeRow> {
         self.recognized
     }
 
+    #[cfg_attr(not(test), expect(dead_code, reason = "read by the walk summary"))]
     pub(super) const fn excluded_by(&self) -> ExcludedBy {
         self.excluded_by
     }
 
+    #[cfg_attr(not(test), expect(dead_code, reason = "read by the walk summary"))]
     pub(super) fn exclusions(&self) -> &[Exclusion] {
         &self.exclusions
     }

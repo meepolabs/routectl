@@ -147,7 +147,7 @@ impl DispatchSurface {
 /// Both mean "this seat cannot count", NOT "this seat is unhealthy". The
 /// count_tokens walk treats them as capability signals: release the
 /// probe slot without debiting the breaker and advance to the next
-/// capable seat. It must NEVER reach `should_fallback` / `record_failure`
+/// capable seat. It must NEVER reach `outcome_rule::decide` / `record_failure`
 /// -- a capability signal recorded as health would trip the per-seat
 /// breaker that completions gate on. Scoped to the count_tokens path
 /// ONLY: on the completion path a wire 501 is a genuine upstream fault

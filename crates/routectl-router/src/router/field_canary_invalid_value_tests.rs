@@ -442,8 +442,9 @@ fn a_canary_lossy_repair_and_a_fallback_repair_each_keep_their_record() {
     );
     assert_eq!(
         observed[0].carried_per_attempt(),
-        vec![true, false],
-        "premise: the canary carried the display field, then its repaired retry went out",
+        vec![true, false, false],
+        "premise: the canary carried the display field, then its repaired retry went out, \
+         and its 503 took the request's one same-target retry",
     );
     assert_eq!(
         observed[1]

@@ -1666,8 +1666,8 @@ on for every provider and pool seat: with nothing configured, 5
 consecutive failed attempts open it for 60s, after which one request
 re-tests the seat. Only rate-limit, server-error, overload, timeout and
 network-error failures count, and every retry is its own attempt, so a
-single request retried up to `max_attempts` can debit a seat several
-times. Set `circuit_failures = 0` on a provider or pool to turn the
+request that spends its `max_attempts - 1` retries on one seat can
+debit it several times. Set `circuit_failures = 0` on a provider or pool to turn the
 breaker off there.
 
 A hot reload applies changed `circuit_failures`, `circuit_cooldown_ms`
@@ -1745,8 +1745,8 @@ backoff_multiplier            = 2.0
 jitter_ms                     = 50
 request_timeout_ms            = 300000        # 5 min per attempt
 stream_first_byte_timeout_ms  = 90000         # 90s -- thinking models stall
-probe_max_tokens              = 1             # fast-fail availability probes
-# Per-class retry caps (each overrides max_attempts for that class only):
+probe_max_tokens              = 1             # keep availability probes in their pool
+# Per-class retry caps (each narrows max_attempts for that class only):
 # [retry.classes.rate-limited]
 # retry = 1                                   # rate-limits usually clear in one retry
 # To pin a class terminal (never fall back), set a per-class overlay:
@@ -1754,32 +1754,62 @@ probe_max_tokens              = 1             # fast-fail availability probes
 # fallback = false
 ```
 
-`probe_max_tokens` (default `1`) fast-fails availability probes. A
-request whose `max_tokens` is at or below this value is treated as a
-probe -- Claude Code sends `max_tokens=1` quota/health checks to
-`/v1/messages`. On a rate-limit or overload (429/529) a probe is not
-retried on the same seat and does not fall back to a distinct chain
-target: every hop of an all-Anthropic chain shares the same limit, so
-walking it is futile and the probe's tiny output is never read. A
-completion or stream probe may still move to a sibling seat of the same
-pool when the next chain entry is one (a rate-limited seat does not
-mean the pool is out of quota); otherwise it returns the status
-immediately. A `count_tokens` probe returns it at once. That 429/529 is
-never counted against the seat's circuit breaker, on completions,
-streams (before or after first content) and `count_tokens` alike: the
-probe frees any half-open slot it held and takes no failure debit or
-park. Set `probe_max_tokens = 0` to
-disable (no request is ever treated as a probe). Real requests
-(`max_tokens` above the threshold), generic 5xx, network errors, and
-every 4xx (including a capability-rejection 400, which a sibling
-provider may accept) keep the normal retry+fallback behavior.
+`probe_max_tokens` (default `1`) marks availability probes. A request
+whose `max_tokens` is at or below this value is treated as a probe --
+Claude Code sends `max_tokens=1` quota/health checks to `/v1/messages`,
+and their tiny output is never read. Whatever the failure, a probe is
+never retried on the same seat and never leaves the contiguous run of
+chain entries for its `[models]` entry: it may move to another seat of
+the same pool (a rate-limited seat does not mean the pool is out of
+quota), and it never dials the failed seat again, even when the chain
+names that pool a second time. Once the run is spent it returns the
+last upstream error. A probe's native 429 or 529 is never counted
+against the seat's circuit breaker, on completions, streams (before or
+after first content) and `count_tokens` alike: the probe frees any
+half-open slot it held and takes no failure debit or park. Every other
+probe failure (a 5xx, a network error, a timeout) debits the seat like
+any request's, so a broken seat is not hidden behind quota checks. Set
+`probe_max_tokens = 0` to disable (no request is ever treated as a
+probe).
 
 ### Per-class retry and fallback policy (`[retry.classes]`)
 
 Most deployments need nothing here: the baked class matrix below IS
 the policy, and `max_attempts` (default 3) is the one knob it reads.
-`max_attempts` caps the attempts on each provider-chain entry; when a
-request falls back, the next target starts with a fresh count.
+`max_attempts = N` allows at most N - 1 same-target retries per client
+request, counted across the whole fallback walk: a retry spent on the
+first chain entry is not available to a later one, so a single-entry
+chain retries N - 1 times and a longer chain never more. A repair
+resend (the router undoing or rewriting a field the upstream refused)
+and the one 401 refresh-and-retry per target have their own allowances
+and do not spend this count.
+
+Which failures may be retried at all, and how far one reaches, is the
+failure's scope, decided before any class leaf is read. A failure the
+upstream returned for the request itself excludes every remaining
+chain target it would hit the same way, for the rest of that request:
+
+- A native 400 or 422 the classifier types as an unsupported feature
+  or an exceeded context window excludes its `[models]` entry: the
+  walk can still reach another entry, even on the same origin with the
+  same upstream id (a larger-window variant, say).
+- Any other native 400 or 422 excludes its endpoint (the provider's
+  normalized origin): pool siblings and every other entry on that
+  origin are skipped, and the walk reaches only another origin.
+- A 429 the provider recognizes as a request-caused refusal rather
+  than a rate limit (an Anthropic OAuth `rate_limit_error` whose
+  message is the bare `Error`, with no `Retry-After` and no
+  `anthropic-ratelimit-*` header) excludes its endpoint and debits its
+  seat once.
+- Everything else (5xx, an unrecognized 429, 529, a network error, a
+  timeout) is the failed seat's alone: it may be retried within the
+  request-wide count, and the walk does not dial that seat again.
+
+None of these is retried on the same target except the last, and a
+4xx never debits the breaker whatever class a remap gives it. A
+request whose targets were all excluded returns the last upstream
+error it received.
+
 To tune one class, set its `retry` (or `fallback`) leaf under
 `[retry.classes.<class>]`; this is the retry surface. A
 `[providers.X.class_overrides]` remap (next section) is an escape hatch
@@ -1819,14 +1849,19 @@ breaker, before content and after it alike; the load warns about any
 remap of a health status for exactly this reason.
 
 Every class above defaults to `fallback = true`.
-`[retry.classes.<class>]` overrides one or both leaves, sparsely:
+`[retry.classes.<class>]` overrides one or both leaves, sparsely. The
+leaves only narrow what the scope rule allows: a `retry` cap is compared
+with the request-wide retry count, and `fallback = false` ends the
+request at that class's failure. Neither re-enables a same-target retry
+the scope rule forbids, nor admits a target a failure excluded, so a
+raised `retry` on `bad-request` resends nothing.
 
 ```toml
 [retry.classes.server-error]
-retry = 3    # same-provider retries in place of max_attempts
+retry = 3    # a class cap of 3 allows 2 same-target retries per request
 
 [retry.classes.overloaded]
-retry = 0    # stop retrying same-provider; fall over to the next chain entry immediately
+retry = 0    # stop retrying same-target; fall over to the next chain entry immediately
 ```
 
 The two leaves resolve independently; `ClassPolicy`'s leaves are
@@ -1917,10 +1952,12 @@ the upstream is actually unhealthy.
 
 #### Precedence
 
-Class policy (`resolved_class`, including any `[retry.classes]` overlay
-and any `class_overrides` remap) governs the retry/fallback decision
-for every status. The probe fast-fail and the `UnknownProvider`
-always-fallback short-circuits are the only checks ahead of it. (The
+One failure decision governs retry and fallback for every status, in
+this order: the failure's scope (above) and the probe rule set what the
+request may still do; class policy (`resolved_class`, including any
+`[retry.classes]` overlay and any `class_overrides` remap) then only
+narrows it. A chain entry with no provider at all is walked past before
+any attempt, independent of class. (The
 raw-status `retry_allowlist` / `retry_denylist` escape hatch that
 formerly took precedence per code was retired in config schema v3 --
 pin a class terminal with `[retry.classes.<class>].fallback = false`

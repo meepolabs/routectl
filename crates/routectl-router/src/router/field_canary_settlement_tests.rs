@@ -109,12 +109,15 @@ fn req_on(alias: &str) -> ChatRequest {
 
 // --- routers and targets -----------------------------------------------
 
+/// Each seat on its own origin: a rejection no repair takes excludes its
+/// endpoint for the rest of the request.
 fn chain_config(seats: usize) -> Config {
     let mut toml_text = String::new();
     let mut chain: Vec<String> = Vec::with_capacity(seats);
     for idx in 0..seats {
         toml_text.push_str(&format!(
-            "\n[providers.p{idx}]\nkind = \"{ANTHROPIC}\"\napi_key_ref = \"literal:k\"\n"
+            "\n[providers.p{idx}]\nkind = \"{ANTHROPIC}\"\napi_key_ref = \"literal:k\"\n\
+             base_url = \"https://seat{idx}.example.test\"\n"
         ));
         chain.push(format!("m{idx}"));
     }
@@ -921,8 +924,9 @@ async fn a_failed_repaired_retry_settles_the_canary_inconclusive() {
     assert!(dispatched.result.is_err());
     assert_eq!(
         seen.carried_per_attempt(),
-        vec![true, false],
-        "premise: the retry did run, and then failed for its own reason",
+        vec![true, false, false],
+        "premise: the repaired retry ran and failed for its own reason, and that 503 \
+         took the request's one same-target retry, which a repair does not spend",
     );
     let snap = canary_snapshot(&router, "m0").expect("resident");
     assert_eq!(

@@ -106,7 +106,7 @@ impl Provider for ScriptedProvider {
     }
 }
 
-fn ok_response() -> ChatResponse {
+pub(super) fn ok_response() -> ChatResponse {
     ChatResponse {
         choices: vec![Choice {
             logprobs: None,
@@ -128,7 +128,7 @@ fn ok_response() -> ChatResponse {
     }
 }
 
-fn content_chunk() -> ChatChunk {
+pub(super) fn content_chunk() -> ChatChunk {
     ChatChunk {
         choices: vec![ChunkChoice {
             index: 0,

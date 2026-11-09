@@ -8,10 +8,11 @@
 //!   looks up each result's call by id and cannot emit a valid body without
 //!   the pair;
 //! - an upstream request-fault rejection (400 or 422) on a defective
-//!   transcript, however it classifies or remaps, is not retried, does not
-//!   walk the chain, and teaches no learner: routectl's own validator already
-//!   explains it, and the same seat or the next target would draw the same
-//!   rejection;
+//!   transcript, however it classifies or remaps, teaches no learner:
+//!   routectl's own validator already explains it. Like any 400 or 422 it
+//!   is never retried and excludes the targets the failure decision scopes
+//!   it to, so the walk reaches only another endpoint (or another model,
+//!   for a typed capability rejection);
 //! - such a rejection is still counted as one the field parser did not
 //!   localize, so the parser's blindness ratio keeps its denominator. That
 //!   denominator covers only lanes that learn: a rejection on a target that
@@ -67,10 +68,10 @@ pub(super) fn egress_pairing_refusal(
 
 /// Whether `err` is an upstream request-fault rejection (a status in
 /// [`REJECTION_STATUSES`], the list the field learner reads) answering a
-/// request whose transcript carries `defect`. Such a rejection is laid to the transcript: it is not
-/// retried, does not walk the chain, and no learner reads it. Decided on the
-/// status alone, before any classifier lift or operator remap, because
-/// neither changes what the upstream was sent. A local refusal is never one:
+/// request whose transcript carries `defect`. Such a rejection is laid to the
+/// transcript, so no learner reads it. Decided on the status alone, before
+/// any classifier lift or operator remap, because neither changes what the
+/// upstream was sent. A local refusal is never one:
 /// it says nothing about what the upstream rejected.
 pub(super) fn is_transcript_rejection(err: &Error, defect: Option<ToolPairingDefect>) -> bool {
     defect.is_some()

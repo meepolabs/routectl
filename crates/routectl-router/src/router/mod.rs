@@ -3479,9 +3479,7 @@ use dispatch::would_trim_k_floor_for_meta;
 #[cfg(test)]
 use futures::stream::StreamExt;
 #[cfg(test)]
-use outcome_rule::should_fallback;
-#[cfg(test)]
-use outcome_rule::{retry_cap_for, should_retry_same_provider};
+use outcome_rule::retry_cap_for;
 #[cfg(test)]
 use routectl_core::failure_class::classify;
 #[cfg(test)]

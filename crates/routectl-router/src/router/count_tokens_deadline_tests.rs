@@ -331,8 +331,11 @@ async fn an_expired_count_carries_the_same_error_text_as_an_expired_completion()
     assert_eq!(body(counted.as_ref().err()), Some(expected));
 }
 
+/// A timed-out seat is excluded for the rest of the request: the second
+/// chain entry naming it is passed over, and the count ends with the
+/// timeout.
 #[tokio::test(start_paused = true)]
-async fn a_count_chain_naming_one_seat_twice_revisits_it_after_a_timeout() {
+async fn a_count_chain_naming_one_seat_twice_does_not_revisit_it_after_a_timeout() {
     let only = SeatProvider::new(Behaviour::HangsOnce);
     let router = router_over(&[(FIRST, only.clone())], &[FIRST, FIRST], Some(0));
 
@@ -343,14 +346,18 @@ async fn a_count_chain_naming_one_seat_twice_revisits_it_after_a_timeout() {
     .await
     .expect("the attempt deadline ends the hanging first visit");
 
-    assert!(counted.result.is_ok(), "{:?}", counted.result);
+    assert!(
+        matches!(counted.result, Err(Error::Upstream { status: 0, .. })),
+        "{:?}",
+        counted.result
+    );
     assert_eq!(
         (
             only.calls(),
             counted.meta.attempt_count,
             counted.meta.fallback_count
         ),
-        (2, 2, 1),
+        (1, 1, 0),
     );
     assert_ne!(phase(&router, FIRST), CircuitPhase::Open);
 }

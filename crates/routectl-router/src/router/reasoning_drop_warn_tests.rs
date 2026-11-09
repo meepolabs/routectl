@@ -161,11 +161,13 @@ fn only_the_responses_kind_preserves_the_dialect() {
 
 #[tokio::test]
 async fn same_provider_retries_and_fallback_hops_warn_exactly_once() {
-    // Arrange: two non-Responses entries, two attempts each -- four
-    // dispatch-point passes over a request carrying the dialect.
+    // Arrange: two non-Responses entries under `max_attempts = 3`: the
+    // request's two same-target retries both go to the first entry, then
+    // the walk hops -- four dispatch-point passes over a request carrying
+    // the dialect.
     let router = router_over(
         vec![("m1", "p1", compat_entry()), ("m2", "p2", compat_entry())],
-        2,
+        3,
     );
 
     // Act
@@ -174,10 +176,13 @@ async fn same_provider_retries_and_fallback_hops_warn_exactly_once() {
     ))
     .await;
 
-    // Assert: the whole chain was walked with a retry on each entry, and
+    // Assert: the whole chain was walked after same-target retries, and
     // the WARN fired exactly once across all four attempts.
     result.expect_err("every entry fails");
-    assert_eq!(meta.attempt_count, 4, "two attempts on each of two entries");
+    assert_eq!(
+        meta.attempt_count, 4,
+        "three attempts on the first entry, one on the second"
+    );
     assert_eq!(meta.fallback_count, 1, "one fallback hop");
     let warns = drop_warns(&events);
     assert_eq!(

@@ -76,6 +76,7 @@ fn bare_rate_limit() -> Error {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Excludes {
     Nothing,
+    Target,
     Endpoint,
     Model,
 }
@@ -83,6 +84,7 @@ enum Excludes {
 fn excludes(disposition: &Disposition, target: &WalkTarget<'_>) -> Excludes {
     match disposition.exclusions.as_slice() {
         [] => Excludes::Nothing,
+        [Exclusion::Target(key)] if key == target.state_key() => Excludes::Target,
         [Exclusion::Endpoint(key)] if *key == target.endpoint_key() => Excludes::Endpoint,
         [Exclusion::Model(model)] if model == target.model() => Excludes::Model,
         other => panic!("unexpected exclusions {other:?}"),
@@ -91,10 +93,12 @@ fn excludes(disposition: &Disposition, target: &WalkTarget<'_>) -> Excludes {
 
 /// Every scope source, one row each. A row's retry column is the verdict on
 /// a fresh walk under the default policy, so a retryable target-scoped row
-/// retries and every wider or non-retryable row does not.
+/// retries and every wider or non-retryable row does not. A target-scoped
+/// failure excludes the failed seat from the rest of the walk; the account
+/// scope leaves that to the credential park.
 #[test]
 fn each_scope_source_sets_its_scope_retry_and_exclusion() {
-    use Excludes::{Endpoint, Model, Nothing};
+    use Excludes::{Endpoint, Model, Nothing, Target};
     let cfg = seats();
     let target = seat_a(&cfg);
     let policy = RetryPolicy::default();
@@ -145,7 +149,7 @@ fn each_scope_source_sets_its_scope_retry_and_exclusion() {
             FailureClass::ServerError,
             FailureScope::Target,
             true,
-            Nothing,
+            Target,
         ),
         (
             "529",
@@ -153,7 +157,7 @@ fn each_scope_source_sets_its_scope_retry_and_exclusion() {
             FailureClass::Overloaded,
             FailureScope::Target,
             true,
-            Nothing,
+            Target,
         ),
         (
             "network (status 0)",
@@ -161,7 +165,7 @@ fn each_scope_source_sets_its_scope_retry_and_exclusion() {
             FailureClass::NetworkError,
             FailureScope::Target,
             true,
-            Nothing,
+            Target,
         ),
         (
             "unrecognized 429",
@@ -169,7 +173,7 @@ fn each_scope_source_sets_its_scope_retry_and_exclusion() {
             FailureClass::RateLimited,
             FailureScope::Target,
             true,
-            Nothing,
+            Target,
         ),
         (
             "typed credential reason",
@@ -186,7 +190,7 @@ fn each_scope_source_sets_its_scope_retry_and_exclusion() {
             FailureClass::BadRequest,
             FailureScope::Target,
             false,
-            Nothing,
+            Target,
         ),
     ];
     for (name, err, class, scope, retries, exclusion) in rows {
@@ -332,7 +336,8 @@ fn a_probe_never_retries_stays_in_its_run_and_takes_the_shared_debit() {
 }
 
 /// The paired control for the probe rows: the same 500 off a non-probe
-/// request retries, debits and sets no pool fence.
+/// request retries, debits and sets no pool fence; it excludes only the
+/// failed seat.
 #[test]
 fn a_non_probe_500_retries_debits_and_sets_no_pool_fence() {
     let cfg = seats();
@@ -349,7 +354,10 @@ fn a_non_probe_500_retries_debits_and_sets_no_pool_fence() {
         SameProvider::Retry { .. }
     ));
     assert_eq!(disposition.breaker, BreakerOutcome::Debit);
-    assert!(disposition.exclusions.is_empty());
+    assert_eq!(
+        disposition.exclusions,
+        vec![Exclusion::Target(seat_a(&cfg).state_key().to_owned())]
+    );
 }
 
 fn with_class(
@@ -425,7 +433,7 @@ fn retry_classes_only_narrow_the_scope_rule() {
             FailureClass::RateLimited,
             with_class(ConfigFailureClass::RateLimited, Some(0), None),
             0,
-            (false, Next::Walk, Excludes::Nothing),
+            (false, Next::Walk, Excludes::Target),
         ),
         (
             "cap 3 with 1 retry spent retries once more",
@@ -433,7 +441,7 @@ fn retry_classes_only_narrow_the_scope_rule() {
             FailureClass::ServerError,
             with_class(ConfigFailureClass::ServerError, Some(3), None),
             1,
-            (true, Next::Walk, Excludes::Nothing),
+            (true, Next::Walk, Excludes::Target),
         ),
         (
             "cap 3 with 2 retries spent on earlier targets stops",
@@ -441,7 +449,7 @@ fn retry_classes_only_narrow_the_scope_rule() {
             FailureClass::ServerError,
             with_class(ConfigFailureClass::ServerError, Some(3), None),
             2,
-            (false, Next::Walk, Excludes::Nothing),
+            (false, Next::Walk, Excludes::Target),
         ),
     ];
     for (name, err, class, policy, spent, (retries, next, exclusion)) in rows {

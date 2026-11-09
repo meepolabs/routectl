@@ -2,8 +2,9 @@
 //! lifecycle: chain resolution and probe admissions, the per-target guards
 //! and request shaping, the gate, the attempt loop with its per-attempt
 //! deadline, auth refresh, the learner's repair branch, classification and
-//! remap, breaker outcome, credential park, the same-provider retry decision,
-//! fallback, the last error, and `DispatchMeta` advancement. A
+//! remap, then one failure decision ([`decide`]) applied as given (breaker
+//! outcome, same-target retry, request-scoped exclusions, walk or end),
+//! credential park, the last error, and `DispatchMeta` advancement. A
 //! [`SurfaceAdapter`] supplies what differs in type between surfaces: the
 //! provider call, what a committed attempt becomes, the exhaustion error, and
 //! the typed hooks at the walk's seams (re-probe settlement, field settlement
@@ -45,19 +46,17 @@ use super::field_repair::{FieldSettlementMode, emit_field_repair};
 use super::learn_engine::{AttemptLearning, FailureDecision, Rejection, RejectionSite};
 use super::local_refusal::RefusalOrigin;
 use super::outcome_rule::{
-    BreakerOutcome, SameProvider, breaker_outcome, probe_fast_fail, rate_limit_reset_hint,
-    same_provider_retry, should_fallback,
+    BreakerOutcome, Failure, Next, SameProvider, decide, rate_limit_reset_hint,
 };
 use super::overlays::apply_layered_overlays;
 use super::probe_payload_capture::ProbeFieldCapture;
 use super::repair_budget::RepairBudget;
 use super::replay_repair::{emit_replay_degradation, replay_rejection_body_free};
-use super::runtime_gate::{
-    LearnedProbeGuard, ProbeAdmission, ProbeAdmissionSet, is_probe_request, log_probe_fast_fail,
-};
+use super::runtime_gate::{LearnedProbeGuard, ProbeAdmission, ProbeAdmissionSet, is_probe_request};
 use super::transcript_defect::{
     egress_pairing_refusal, is_transcript_rejection, record_transcript_defect,
 };
+use super::walk_state::{RequestWalk, WalkTarget};
 use super::wire_check::SampleCharge;
 use super::{DispatchMeta, DispatchTarget, Router, RouterOptions};
 
@@ -118,7 +117,7 @@ pub(super) struct CommitCtx<'w, 'm> {
 /// How the walk treats a failed attempt before its common error handling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ErrorDisposition {
-    /// Learner repair, breaker outcome, retry, fallback: the common path.
+    /// Learner repair, then the failure decision: the common path.
     Common,
     /// The target cannot serve this surface after all: free its probe slot
     /// without a breaker debit, record no last error, and walk on.
@@ -297,6 +296,7 @@ impl Router {
         opts: RouterOptions,
         meta: &mut DispatchMeta,
         repair_budget: &mut RepairBudget,
+        walk: &mut RequestWalk,
     ) -> Result<A::Output> {
         let pairing = record_transcript_defect(&mut req);
         let (chain, probe_admissions) = self.dispatch_chain_for_request(&req, A::SURFACE)?;
@@ -327,10 +327,9 @@ impl Router {
         let chain_len = chain.len();
         let policy = self.policy_for(&req.model);
         // Availability-probe detection, computed ONCE: `max_tokens` is
-        // stable across the chain (overlays never touch it). Claude
-        // Code sends max_tokens=1 probes whose output is unread; on a
-        // 429/529 these fast-fail instead of spraying retry+fallback
-        // across the all-Anthropic chain. See `should_fallback`.
+        // stable across the chain (overlays never touch it). A probe's
+        // output is unread, so the failure decision keeps it in its own
+        // run of seats and never retries it. See `decide`.
         let is_probe = is_probe_request(&req, &policy);
         if let Some(observation) = req.routectl_internal.observation.as_ref() {
             observation.set_probe(is_probe);
@@ -373,7 +372,8 @@ impl Router {
         // SUM across every target the fallback walk reaches. Never declared
         // inside the loop -- a per-target budget lets an N-target chain pay N
         // repairs for one logical request. Every surface adapter draws from
-        // this one request-scoped `repair_budget`.
+        // this one request-scoped `repair_budget`. `walk` is its sibling for
+        // the same-target retries and the exclusions earlier failures set.
 
         'chain: for (chain_idx, target) in chain.iter().enumerate() {
             let provider_name = target.provider_name.as_str();
@@ -383,6 +383,14 @@ impl Router {
                 continue;
             }
             any_admitted = true;
+            let walk_target = WalkTarget::at(&chain, chain_idx, &self.config)
+                .expect("the walk index lies inside the chain it enumerates");
+            // An excluded target is passed over before it is marked or gated:
+            // it takes no RPM token, no half-open slot and no skip tally, and
+            // the walk keeps the genuine upstream error that excluded it.
+            if !walk.admits(&walk_target) {
+                continue;
+            }
             // Learned re-probe settle guard for THIS target, scoped to the
             // whole chain-iteration (persists across same-provider retries,
             // drops -> OtherError on any exit). Inert unless the filter
@@ -894,71 +902,38 @@ impl Router {
                         {
                             e = body_free;
                         }
-                        let do_fallback =
-                            should_fallback(&e, &cf.class, &policy, is_probe, transcript_rejection);
                         // The honored upstream reset for THIS error (clamped
-                        // to the ceiling), computed once for both the park
-                        // decision below and the in-loop sleep bump in the
-                        // retry branch. `None` for every non-rate-limit error.
+                        // to the ceiling): the park decision and the in-loop
+                        // sleep floor both read it. `None` for every
+                        // non-rate-limit error.
                         let reset_hint = rate_limit_reset_hint(&e, &policy);
-                        let outcome = breaker_outcome(&e, &cf.class, reset_hint, is_probe);
-                        // Probe fast-fail: a probe (max_tokens <=
-                        // probe_max_tokens) that hit a rate-limit/overload
-                        // (429/529) returns the status immediately via an
-                        // explicit early return -- no retry, no fallback.
-                        // The shared rule gives it no breaker debit, so it
-                        // only frees the half-open slot it may have claimed
-                        // at the gate.
-                        if let Some(status) = probe_fast_fail(&e, is_probe) {
-                            log_probe_fast_fail(
-                                provider_name,
-                                target.nickname.as_deref().unwrap_or(""),
-                                status,
-                                req.max_tokens,
-                            );
-                            self.apply_breaker_outcome(
-                                state_key,
-                                outcome,
-                                &cf.class,
-                                probe_guard.breaker_epoch(),
-                            );
-                            probe_guard.settle(outcome);
-                            // A probe fast-fails ACROSS distinct chain targets
-                            // (walking an all-Anthropic chain is futile -- every
-                            // hop shares the limit), but a rate-limited SEAT does
-                            // not mean the pooled model is out of quota: hop to
-                            // the next sibling seat of the SAME pool when one
-                            // exists (and fallbacks are enabled). Carry the
-                            // genuine 429/529 as last_err so a later local gate
-                            // refusal cannot mask it; fast-fail once the
-                            // pool's seats are exhausted.
-                            if !opts.disable_fallbacks
-                                && A::SURFACE.health_error_walks()
-                                && next_is_sibling_seat(&chain, chain_idx, target)
-                            {
-                                last_err = Some(e);
-                                continue 'chain;
-                            }
-                            return Err(e);
-                        }
-                        // The breaker DEBIT is the shared rule's outcome, not
-                        // the chain-hop decision: a seat looks unhealthy when
-                        // it emits a transient-health failure (429 / 5xx /
-                        // status-0 / overload), independent of whether the
-                        // operator routes past that status, and never on a
-                        // native 400/422. An outcome that records nothing
-                        // and still falls back releases its slot without a
-                        // debit in the fallback branch below.
-                        let debits = outcome != BreakerOutcome::None;
+                        let disposition = decide(
+                            &Failure {
+                                err: &e,
+                                native_class: &original_class,
+                                class: &cf.class,
+                                is_probe,
+                                surface: A::SURFACE,
+                                deadline_fired,
+                                disable_fallbacks: opts.disable_fallbacks,
+                                target: walk_target,
+                            },
+                            &policy,
+                            reset_hint,
+                            walk,
+                        );
+                        disposition.record_on(walk);
+                        let debits = disposition.breaker != BreakerOutcome::None;
                         let (_opened, breaker_effect) = self.apply_breaker_outcome(
                             state_key,
-                            outcome,
+                            disposition.breaker,
                             &cf.class,
                             probe_guard.breaker_epoch(),
                         );
-                        if debits {
-                            probe_guard.disarm();
-                        }
+                        // A debit or park settled any half-open slot the
+                        // attempt held; an outcome that records nothing frees
+                        // it here, before any retry, walk or terminal exit.
+                        probe_guard.settle(disposition.breaker);
                         // Outside the debit gate: a credential rejection
                         // classifies Auth, which never debits.
                         self.park_credential_on_rejection(
@@ -976,7 +951,7 @@ impl Router {
                                 remapped,
                                 remap_status,
                                 target,
-                                fallback: do_fallback,
+                                fallback: disposition.next == Next::Walk,
                                 policy: &policy,
                                 debit: debits,
                                 is_probe,
@@ -994,114 +969,31 @@ impl Router {
                             &mut learn_dedupe,
                             meta,
                         );
-                        if opts.disable_fallbacks {
-                            // Terminal error exit: free any half-open probe
-                            // slot this attempt claimed. A no-op when a
-                            // debiting class already routed through the
-                            // breaker debit (which clears the slot).
-                            probe_guard.release();
-                            return Err(e);
-                        }
-                        let retry = same_provider_retry(
+                        log_retry_decision(
+                            target,
                             A::SURFACE,
-                            &e,
-                            &cf.class,
-                            &policy,
                             attempts_made,
-                            is_probe,
-                            transcript_rejection,
-                            outcome,
+                            &e,
                             reset_hint,
-                        );
-                        let can_retry_here = matches!(retry, SameProvider::Retry { .. });
-                        let facts = upstream_facts(&e);
-                        tracing::debug!(
-                            provider = provider_name,
-                            state_key = %sanitize_for_log(state_key),
-                            surface = A::SURFACE.as_str(),
-                            attempt = attempts_made,
-                            status = ?facts.status,
-                            upstream_type = ?facts.upstream_type,
-                            retry_after_ms = ?reset_hint.map(|d| d.as_millis()),
                             breaker_effect,
-                            same_provider_retry = can_retry_here,
-                            preserved_upstream_error = facts.status.is_some(),
-                            "retry decision",
+                            disposition.same_target,
                         );
-                        if can_retry_here {
-                            tracing::debug!(
-                                provider = provider_name,
-                                model = %routectl_core::sanitize_for_log(target.nickname.as_deref().unwrap_or("")),
-                                attempt = attempts_made,
-                                error = ?e,
-                                "retrying same provider",
-                            );
+                        if let SameProvider::Retry { sleep_floor } = disposition.same_target {
                             // Keep the genuine upstream error as the running
-                            // last_err before re-probing. If the re-gate then
-                            // refuses (CircuitOpen / RPM), the `last_err.is_none()`
-                            // guard above leaves this real error in place rather
-                            // than overwriting it with the local gate refusal,
-                            // so the client sees the true failure.
+                            // last_err before re-gating, so a gate refusal on
+                            // the retry cannot replace it.
                             last_err = Some(e);
-                            // Honor a SMALL non-probe upstream reset as the
-                            // next in-loop sleep: bump `backoff` so the
-                            // loop-top sleep waits at least the reset before
-                            // re-probing the SAME provider.
-                            if let SameProvider::Retry {
-                                sleep_floor: Some(h),
-                            } = retry
-                            {
-                                backoff = backoff.max(h);
+                            if let Some(floor) = sleep_floor {
+                                backoff = backoff.max(floor);
                             }
-                            // Free the half-open probe slot this attempt
-                            // claimed before re-probing: the in-loop re-gate
-                            // re-runs `try_dispatch`, which would otherwise see
-                            // this caller's still-held slot as
-                            // `half_open_in_flight` and return CircuitOpen,
-                            // locking the breaker open forever (mirrors the
-                            // auth-retry Ok path).
-                            probe_guard.release();
                             continue;
                         }
-                        // Done with this provider. Decide fallback vs propagate.
-                        // An expired deadline walks on every surface: keyed on
-                        // the walk's own deadline, never on the status-0 class
-                        // it shares with a refused connection.
-                        if do_fallback && (deadline_fired || A::SURFACE.health_error_walks()) {
-                            let has_next = chain_idx + 1 < chain_len;
-                            if has_next {
-                                tracing::warn!(
-                                    provider = provider_name,
-                                    model = %routectl_core::sanitize_for_log(target.nickname.as_deref().unwrap_or("")),
-                                    state_key = %sanitize_for_log(state_key),
-                                    error = ?e,
-                                    "fallback to next",
-                                );
-                            } else {
-                                tracing::warn!(
-                                    provider = provider_name,
-                                    model = %routectl_core::sanitize_for_log(target.nickname.as_deref().unwrap_or("")),
-                                    state_key = %sanitize_for_log(state_key),
-                                    error = ?e,
-                                    "chain exhausted; no fallback target available; request will fail",
-                                );
-                            }
-                            // A fallbackable error whose class did NOT debit
-                            // the breaker leaves the half-open probe slot
-                            // armed; release it without a debit before the hop
-                            // so every settle path frees the slot exactly once.
-                            // A debiting class already settled + disarmed above.
-                            if !debits {
-                                probe_guard.release();
-                            }
-                            last_err = Some(e);
-                            continue 'chain;
+                        if disposition.next == Next::Terminal {
+                            return Err(e);
                         }
-                        // Terminal non-fallbackable error. Free any half-open
-                        // probe slot this attempt claimed so the breaker is
-                        // not left locked open.
-                        probe_guard.release();
-                        return Err(e);
+                        log_walk_on(target, chain_idx + 1 < chain_len, &e);
+                        last_err = Some(e);
+                        continue 'chain;
                     }
                 }
             }
@@ -1335,9 +1227,8 @@ pub(super) const fn reduction_strategy_token(
 /// the existing one-shot auth-refresh + fallback behavior unchanged.
 /// Same-request TRANSPORT retries (5xx / network / status-0, which
 /// reuse the same token) are NOT in this set, so they fall through to
-/// the normal predicates untouched. Pattern-mirrors
-/// `probe_fast_fail_status`: a pure decision helper; the caller owns
-/// the `return` that short-circuits.
+/// the normal predicates untouched. A pure decision helper; the caller
+/// owns the `return` that short-circuits.
 pub(super) const fn forwarded_terminal_status(err: &Error) -> Option<u16> {
     match err {
         Error::Upstream {
@@ -1353,8 +1244,7 @@ pub(super) const fn forwarded_terminal_status(err: &Error) -> Option<u16> {
 /// dimensions ONLY: the upstream `status`, a fixed `credential_source`
 /// token, and a boolean derived from whether an inbound session key was
 /// captured -- NEVER the forwarded token itself, in a field or the
-/// message. Mirrors `log_probe_fast_fail`: log-only, the caller owns the
-/// short-circuiting `return`.
+/// message. Log-only: the caller owns the short-circuiting `return`.
 pub(super) fn log_forwarded_auth_terminal(status: u16, has_client_session_id: bool) {
     tracing::warn!(
         status,
@@ -1404,6 +1294,62 @@ pub(super) fn missing_forwarded_bearer_error(
     ))
 }
 
+/// DEBUG-log the failure decision for one failed attempt, and the same-target
+/// retry it takes, if any.
+fn log_retry_decision(
+    target: &DispatchTarget,
+    surface: DispatchSurface,
+    attempt: u32,
+    err: &Error,
+    reset_hint: Option<Duration>,
+    breaker_effect: &'static str,
+    same_target: SameProvider,
+) {
+    let retries = matches!(same_target, SameProvider::Retry { .. });
+    let facts = upstream_facts(err);
+    tracing::debug!(
+        provider = target.provider_name.as_str(),
+        state_key = %sanitize_for_log(&target.state_key),
+        surface = surface.as_str(),
+        attempt,
+        status = ?facts.status,
+        upstream_type = ?facts.upstream_type,
+        retry_after_ms = ?reset_hint.map(|d| d.as_millis()),
+        breaker_effect,
+        same_provider_retry = retries,
+        preserved_upstream_error = facts.status.is_some(),
+        "retry decision",
+    );
+    if retries {
+        tracing::debug!(
+            provider = target.provider_name.as_str(),
+            model = %sanitize_for_log(target.nickname.as_deref().unwrap_or("")),
+            attempt,
+            error = ?err,
+            "retrying same provider",
+        );
+    }
+}
+
+/// WARN that the walk leaves `target` after `err`, naming whether a later
+/// chain entry remains.
+fn log_walk_on(target: &DispatchTarget, has_next: bool, err: &Error) {
+    let model = sanitize_for_log(target.nickname.as_deref().unwrap_or(""));
+    let state_key = sanitize_for_log(&target.state_key);
+    let provider = target.provider_name.as_str();
+    if has_next {
+        tracing::warn!(provider, model = %model, state_key = %state_key, error = ?err, "fallback to next");
+    } else {
+        tracing::warn!(
+            provider,
+            model = %model,
+            state_key = %state_key,
+            error = ?err,
+            "chain exhausted; no fallback target available; request will fail",
+        );
+    }
+}
+
 /// Count a target the gate refused before any attempt as one skip under the
 /// refusal's reason.
 fn tally_gate_skip(observation: Option<&RequestObservation>, refusal: &Error) {
@@ -1430,22 +1376,10 @@ pub(super) fn mul_duration(d: Duration, factor: f64) -> Duration {
     Duration::from_nanos(nanos.min(u64::MAX as f64) as u64)
 }
 
-/// Whether the chain entry AFTER `chain_idx` is another seat of the SAME
-/// pooled model as `target` -- i.e. a sibling seat a probe may fail over to
-/// before fast-failing. All seats of one pool share the model `Arc`
-/// (`dispatch_target_for_seat` clones the same `Arc<ResolvedModel>`), while
-/// distinct chain entries carry distinct model Arcs, so pointer identity is
-/// the exact same-pool discriminant.
-pub(super) fn next_is_sibling_seat(
-    chain: &[DispatchTarget],
-    chain_idx: usize,
-    target: &DispatchTarget,
-) -> bool {
-    chain
-        .get(chain_idx + 1)
-        .is_some_and(|next| std::sync::Arc::ptr_eq(&next.model, &target.model))
-}
-
 #[cfg(test)]
 #[path = "skip_tally_tests.rs"]
 mod skip_tally_tests;
+
+#[cfg(test)]
+#[path = "failure_scope_walk_tests.rs"]
+mod failure_scope_walk_tests;

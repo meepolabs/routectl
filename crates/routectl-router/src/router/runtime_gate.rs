@@ -883,37 +883,17 @@ fn emit_probe_settlement(
 /// True when `req` is an availability/quota probe: its `max_tokens`
 /// is set and at or below the configured `probe_max_tokens` threshold.
 /// Claude Code sends `max_tokens=1` probes to `/v1/messages` whose tiny
-/// output is never read; on a rate-limit/overload the router fast-fails
-/// them instead of walking the fallback chain (see `should_fallback`).
+/// output is never read; the failure decision never retries one and keeps
+/// it in its own run of seats (see `outcome_rule::decide`).
 /// `probe_max_tokens = 0` disables detection (no request is a probe);
 /// a request with no `max_tokens` is never a probe.
 pub(super) fn is_probe_request(req: &ChatRequest, policy: &RetryPolicy) -> bool {
     policy.probe_max_tokens > 0 && req.max_tokens.is_some_and(|m| m <= policy.probe_max_tokens)
 }
 
-/// DEBUG-log a probe fast-fail decision, identically from both dispatch
-/// loops. Log-only by design: the caller owns the `return Err(..)` that
-/// actually short-circuits (a free fn cannot early-return its caller).
-/// `max_tokens` is the request value that tripped probe classification,
-/// surfaced so an operator can see which value matched the threshold.
-pub(super) fn log_probe_fast_fail(
-    provider: &str,
-    model: &str,
-    status: u16,
-    max_tokens: Option<u32>,
-) {
-    tracing::debug!(
-        provider,
-        model,
-        status,
-        max_tokens = ?max_tokens,
-        "probe request (max_tokens<=probe_max_tokens): not retrying/falling back on rate-limit",
-    );
-}
-
 #[cfg(test)]
-#[path = "probe_fast_fail_tests.rs"]
-mod probe_fast_fail_tests;
+#[path = "probe_detection_tests.rs"]
+mod probe_detection_tests;
 
 #[cfg(test)]
 #[path = "probe_seat_failover_tests.rs"]

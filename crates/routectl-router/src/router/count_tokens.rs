@@ -65,6 +65,7 @@ use super::field_repair::FieldSettlementMode;
 use super::learn_engine::RejectionSite;
 use super::repair_budget::RepairBudget;
 use super::runtime_gate::ProbeAdmission;
+use super::walk_state::RequestWalk;
 use super::wire_check::SampleCharge;
 use super::{CountedTokens, DispatchMeta, DispatchTarget, Router, RouterOptions};
 
@@ -425,6 +426,7 @@ impl Router {
         // be the per-seat reset the shared ceiling exists to remove; holding
         // it here reads its spend once on every exit of the walk.
         let mut repair_budget = RepairBudget::per_request();
+        let mut walk = RequestWalk::new();
         let observation = req.routectl_internal.observation.clone();
         let result = Box::pin(self.run_walk(
             CountAdapter { mode },
@@ -432,6 +434,7 @@ impl Router {
             RouterOptions::default(),
             &mut meta,
             &mut repair_budget,
+            &mut walk,
         ))
         .await;
         self.finish_dispatch(&meta, &repair_budget, observation.as_ref());

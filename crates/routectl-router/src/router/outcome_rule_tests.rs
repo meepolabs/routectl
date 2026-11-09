@@ -18,6 +18,7 @@ use crate::class_policy::ConfigFailureClass;
 use crate::config::{AliasValue, Config, ProviderEntry, ProviderRuntimePolicy, RetryPolicy};
 use crate::resolved::ResolvedModel;
 use crate::router::Router;
+use crate::router::walk_state::{RequestWalk, WalkTarget};
 
 const CAP: Duration = INLOOP_RETRY_AFTER_CAP;
 const JUST_OVER_CAP: Duration = CAP.saturating_add(Duration::from_millis(1));
@@ -274,11 +275,9 @@ struct RetryRow {
     name: &'static str,
     surface: DispatchSurface,
     err: Error,
-    attempts_made: u32,
+    /// Same-target retries the request already spent on earlier targets.
+    retries_spent: u32,
     is_probe: bool,
-    transcript_rejection: bool,
-    outcome: BreakerOutcome,
-    hint: Option<Duration>,
     expected: SameProvider,
 }
 
@@ -286,16 +285,17 @@ fn rate_limited(retry_after: Option<Duration>) -> Error {
     Error::upstream_with_retry_after("p", 429, "rate limited", retry_after)
 }
 
+fn unavailable(retry_after: Duration) -> Error {
+    Error::upstream_with_retry_after("p", 503, "unavailable", Some(retry_after))
+}
+
 fn retry_rows() -> Vec<RetryRow> {
     let base = |name: &'static str, surface: DispatchSurface| RetryRow {
         name,
         surface,
         err: Error::upstream("p", 500, "server error"),
-        attempts_made: 0,
+        retries_spent: 0,
         is_probe: false,
-        transcript_rejection: false,
-        outcome: BreakerOutcome::Debit,
-        hint: None,
         expected: SameProvider::Retry { sleep_floor: None },
     };
     vec![
@@ -309,16 +309,22 @@ fn retry_rows() -> Vec<RetryRow> {
         },
         base("complete retryable 500 retries", DispatchSurface::Complete),
         RetryRow {
-            attempts_made: 2,
+            retries_spent: 1,
             expected: SameProvider::No,
             ..base("complete at the hard cap", DispatchSurface::Complete)
         },
         RetryRow {
-            outcome: BreakerOutcome::Park(LARGE),
             err: rate_limited(Some(LARGE)),
-            hint: Some(LARGE),
             expected: SameProvider::No,
             ..base("complete parked", DispatchSurface::Complete)
+        },
+        RetryRow {
+            err: rate_limited(Some(JUST_OVER_CAP)),
+            expected: SameProvider::No,
+            ..base(
+                "complete hint just over the cap parks",
+                DispatchSurface::Complete,
+            )
         },
         RetryRow {
             err: Error::upstream("p", 429, "rate limited"),
@@ -333,62 +339,31 @@ fn retry_rows() -> Vec<RetryRow> {
             ..base("complete probe 529", DispatchSurface::Complete)
         },
         RetryRow {
-            transcript_rejection: true,
+            err: unavailable(Duration::from_secs(1)),
+            is_probe: true,
             expected: SameProvider::No,
-            ..base("complete transcript rejection", DispatchSurface::Complete)
+            ..base("complete probe 503 small hint", DispatchSurface::Complete)
         },
         RetryRow {
             err: Error::Validation("refused".into(), RefusalReason::ForwardedBearerMissing),
-            outcome: BreakerOutcome::None,
             expected: SameProvider::No,
             ..base("complete refusal reason", DispatchSurface::Complete)
         },
         RetryRow {
             err: rate_limited(Some(CAP)),
-            hint: Some(CAP),
             expected: SameProvider::Retry {
                 sleep_floor: Some(CAP),
             },
             ..base("complete non-probe hint == cap", DispatchSurface::Complete)
         },
         RetryRow {
-            err: Error::upstream_with_retry_after(
-                "p",
-                503,
-                "unavailable",
-                Some(Duration::from_secs(1)),
-            ),
-            hint: Some(Duration::from_secs(1)),
-            is_probe: true,
-            expected: SameProvider::Retry { sleep_floor: None },
-            ..base("complete probe 503 small hint", DispatchSurface::Complete)
-        },
-        RetryRow {
-            err: rate_limited(Some(JUST_OVER_CAP)),
-            hint: Some(JUST_OVER_CAP),
-            outcome: BreakerOutcome::Debit,
-            expected: SameProvider::Retry { sleep_floor: None },
-            ..base(
-                "complete hint over cap without a park",
-                DispatchSurface::Complete,
-            )
-        },
-        RetryRow {
-            hint: Some(Duration::from_secs(2)),
-            err: Error::upstream_with_retry_after(
-                "p",
-                503,
-                "unavailable",
-                Some(Duration::from_secs(2)),
-            ),
-            outcome: BreakerOutcome::Debit,
+            err: unavailable(Duration::from_secs(2)),
             expected: SameProvider::Retry {
                 sleep_floor: Some(Duration::from_secs(2)),
             },
             ..base("complete small 503 hint", DispatchSurface::Complete)
         },
         RetryRow {
-            hint: Some(LARGE),
             err: rate_limited(Some(LARGE)),
             expected: SameProvider::No,
             ..base("stream large hint", DispatchSurface::Stream)
@@ -397,7 +372,7 @@ fn retry_rows() -> Vec<RetryRow> {
 }
 
 #[test]
-fn same_provider_retry_table() {
+fn same_target_retry_table() {
     let policy = RetryPolicy {
         max_attempts: 2,
         ..RetryPolicy::default()
@@ -405,18 +380,29 @@ fn same_provider_retry_table() {
     assert_eq!(policy.hard_retry_cap(), 2, "the hard-cap row assumes 2");
     for row in retry_rows() {
         let class = classify(&row.err, None).class;
-        let got = same_provider_retry(
-            row.surface,
-            &row.err,
-            &class,
+        let mut walk = RequestWalk::new();
+        for _ in 0..row.retries_spent {
+            walk.spend_retry();
+        }
+        let failure = Failure {
+            err: &row.err,
+            native_class: &class,
+            class: &class,
+            is_probe: row.is_probe,
+            surface: row.surface,
+            deadline_fired: false,
+            disable_fallbacks: false,
+            target: WalkTarget::fixture("p", None, "m", 0),
+        };
+
+        let got = decide(
+            &failure,
             &policy,
-            row.attempts_made,
-            row.is_probe,
-            row.transcript_rejection,
-            row.outcome,
-            row.hint,
+            rate_limit_reset_hint(&row.err, &policy),
+            &walk,
         );
-        assert_eq!(got, row.expected, "row: {}", row.name);
+
+        assert_eq!(got.same_target, row.expected, "row: {}", row.name);
     }
 }
 

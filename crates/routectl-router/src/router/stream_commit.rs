@@ -317,7 +317,7 @@ pub(super) async fn try_stream_with_first_content(
                     // Buffer overflow before any content: a
                     // pre-content failure. Discard the buffer (nothing
                     // reached the client) and fall over. Fallbackable
-                    // per `should_fallback`; the breaker records it.
+                    // per `outcome_rule::decide`; the breaker records it.
                     let summary = precontent_summary(buffered.iter().chain([&chunk]));
                     return Err(Error::Streaming(format!(
                         "{provider_name} emitted more than {MAX_PRECONTENT_CHUNKS} \

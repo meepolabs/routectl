@@ -350,21 +350,24 @@ pub(super) fn req_on(alias: &str) -> ChatRequest {
 /// Config text for an N-leg `anthropic-api` chain -- the lane this stage
 /// acts on AND the lane the token-count walk admits -- each leg on its own
 /// provider entry so per-seat gates, breakers and verdict keys are
-/// independent. `base_url` is left at the default Anthropic base: the
-/// suppression predicate keys on it, and a loopback base refuses every mint
-/// (its own test below, not the default).
+/// independent. Each leg also has its own non-loopback origin: a rejection
+/// no repair takes excludes its whole endpoint for the rest of the request,
+/// so legs sharing one origin would end the walk at the first. A loopback
+/// base refuses every mint (its own test below, not the default).
 pub(super) fn chain_config(alias: &str, seats: usize) -> Config {
     let mut toml_text = String::new();
     let mut chain: Vec<String> = Vec::with_capacity(seats);
     for idx in 0..seats {
         toml_text.push_str(&format!(
-            "\n[providers.p{idx}]\nkind = \"anthropic-api\"\napi_key_ref = \"literal:k\"\n"
+            "\n[providers.p{idx}]\nkind = \"anthropic-api\"\napi_key_ref = \"literal:k\"\n\
+             base_url = \"https://seat{idx}.example.test\"\n"
         ));
         chain.push(format!("m{idx}"));
     }
     let mut config: Config = toml::from_str(&toml_text).expect("valid test toml");
-    // Pinned so the attempt counts these tests assert do not follow the shipped default.
-    config.retry.max_attempts = 2;
+    // Pinned so the attempt counts these tests assert do not follow the shipped default:
+    // no same-target retry of a transient failure, so every extra attempt is a repair.
+    config.retry.max_attempts = 1;
     config
         .aliases
         .insert(alias.to_string(), AliasValue::Chain(chain));

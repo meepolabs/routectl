@@ -321,11 +321,10 @@ async fn eligible_self_identifying_captures_on_the_stream_arm_too() {
 }
 
 #[tokio::test]
-async fn same_request_retry_dedupes_to_one_observation() {
-    // Arrange: a non-remapping operator overlay raises the
-    // feature-unsupported same-provider retry cap so the ONE request
-    // hits the error arm more than once against the SAME (state_key,
-    // feature). Per-request dedupe must still count exactly one.
+async fn a_raised_retry_cap_never_resends_a_learned_rejection() {
+    // Arrange: an operator overlay raises the feature-unsupported retry
+    // cap. A native 400 is scoped past its own target, so the cap only
+    // narrows and the request records one observation from one dispatch.
     let toml = r#"
 [retry]
 max_attempts = 3
@@ -347,20 +346,15 @@ api_key_ref = "literal:k"
     ))
     .await;
 
-    // Assert: the same provider WAS retried (two dispatches), so the
-    // error arm ran twice -- yet only one observation, one WARN, and
-    // one meta event survived the dedupe.
+    // Assert
     assert!(dispatched.result.is_err());
     assert_eq!(
         provider.calls.load(Ordering::SeqCst),
-        2,
-        "the raised retry cap must drive a same-provider retry",
+        1,
+        "a raised retry cap does not resend a request-rejecting 400",
     );
     assert_eq!(dispatched.meta.learned_capabilities.len(), 1);
-    assert_eq!(
-        dispatched.meta.learned_capabilities[0].observations, 1,
-        "a same-request retry must not manufacture a second observation",
-    );
+    assert_eq!(dispatched.meta.learned_capabilities[0].observations, 1);
     assert_eq!(learn_warns(&events).len(), 1);
 }
 

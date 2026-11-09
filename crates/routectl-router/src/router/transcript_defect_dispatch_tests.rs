@@ -1,10 +1,12 @@
 //! A transcript whose tool calls and results are not correctly paired is
 //! forwarded unchanged on both dispatch surfaces and to the token count.
 //! Only a Gemini target refuses it, locally, and the walk moves on. An
-//! upstream 400 or 422 answering such a transcript neither walks the chain,
-//! nor is repaired, nor teaches any learner, unless it names an edit routectl
-//! itself declared, which is undone and the same target retried once; a
-//! transient failure routes as it does for any request.
+//! upstream 400 or 422 answering such a transcript is neither repaired nor
+//! learned from, unless it names an edit routectl itself declared, which is
+//! undone and the same target retried once. Otherwise it routes as any 400
+//! or 422 does: never retried, and excluding its endpoint, so the walk
+//! reaches only a target on another origin; a transient failure routes as it
+//! does for any request.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -625,9 +627,9 @@ fn rejection_rows() -> Vec<RejectionRow> {
         answer: refuse_web_search,
         carry: carry_web_search,
         defective: Observed {
-            served: false,
+            served: true,
             first_calls: 1,
-            second_calls: 0,
+            second_calls: 1,
             field_repairs: 0,
             learned: vec![],
             unlocalized: Some(1),
@@ -657,10 +659,12 @@ fn rejection_rows() -> Vec<RejectionRow> {
             unlocalized: Some(1),
             drift_signals: 0,
         },
+        // The scope reads the native 400, not the remap, so the second
+        // target on the same origin is excluded on either transcript.
         paired: Observed {
-            served: true,
+            served: false,
             first_calls: 1,
-            second_calls: 1,
+            second_calls: 0,
             field_repairs: 0,
             learned: vec![],
             unlocalized: None,
@@ -702,9 +706,9 @@ fn rejection_rows() -> Vec<RejectionRow> {
             answer: bedrock_forced_tool_choice_rejection,
             carry: carry_forced_tool_choice,
             defective: Observed {
-                served: false,
+                served: true,
                 first_calls: 1,
-                second_calls: 0,
+                second_calls: 1,
                 field_repairs: 0,
                 learned: vec![],
                 unlocalized: Some(1),
@@ -730,8 +734,10 @@ fn refuse_plainly_unprocessable(_: &ChatRequest) -> Result<()> {
 }
 
 /// A plain 400 and a plain 422 on each lane that forwards an empty tool id
-/// rather than refusing it: on a paired transcript the walk moves to the
-/// next target, on a defective one it ends on the first.
+/// rather than refusing it. Each lane is on another origin than the second
+/// target, so on either transcript the walk moves to it; only the paired
+/// transcript's rejection could teach a learner, and none of these names a
+/// field.
 fn lane_rejection_rows() -> Vec<RejectionRow> {
     let mut lanes = vec![(
         [
@@ -771,9 +777,9 @@ fn lane_rejection_rows() -> Vec<RejectionRow> {
                     answer,
                     carry: carry_nothing,
                     defective: Observed {
-                        served: false,
+                        served: true,
                         first_calls: 1,
-                        second_calls: 0,
+                        second_calls: 1,
                         field_repairs: 0,
                         learned: vec![],
                         unlocalized: Some(1),
@@ -794,7 +800,7 @@ fn lane_rejection_rows() -> Vec<RejectionRow> {
 }
 
 #[tokio::test]
-async fn an_upstream_bad_request_on_a_defective_transcript_ends_the_walk_unlearned() {
+async fn an_upstream_bad_request_on_a_defective_transcript_is_scoped_and_unlearned() {
     for surface in SURFACES {
         for row in rejection_rows() {
             run_rejection_row(&row, surface).await;
@@ -1080,13 +1086,14 @@ async fn a_transient_failure_on_a_defective_transcript_routes_as_for_any_request
     }
 }
 
+/// `[retry.classes]` only narrows: a raised bad-request cap resends no 400,
+/// on either transcript, and the endpoint the 400 excludes covers the second
+/// target on the same origin.
 #[tokio::test]
-async fn a_raised_bad_request_retry_cap_does_not_resend_a_defective_transcript() {
-    // `retry = 2` is the smallest cap that resends: the first failure has
-    // already spent one attempt against it.
+async fn a_raised_bad_request_retry_cap_resends_no_400_on_either_transcript() {
     const RAISED_RETRY: &str = "[retry.classes.bad-request]\nretry = 2\n";
     for (transcript, messages, first_calls, second_calls) in
-        [("defective", defective(), 1, 0), ("paired", paired(), 2, 1)]
+        [("defective", defective(), 1, 0), ("paired", paired(), 1, 0)]
     {
         let first = ScriptedProvider::new(None, refuse_plainly);
         let second = ScriptedProvider::new(None, answers);

@@ -1,4 +1,6 @@
 use super::local_refusal::RefusalOrigin;
+use super::outcome_rule::{Disposition, Failure, Next, SameProvider, decide};
+use super::walk_state::{RequestWalk, WalkTarget};
 use super::*;
 use crate::config::{ProviderEntry, RetryPolicy};
 use routectl_core::capability::EvidenceSource;
@@ -37,6 +39,34 @@ fn build_router_with_provider_timeouts(
 /// A target no install stamped (its model was never installed) takes the
 /// resolver's answer for its provider and its model's first-content
 /// override: the provider tier beats `[retry]`, the model beats both.
+/// The failure decision for `err` (classified `class`) on a fresh complete
+/// walk, off a target with no provider entry.
+fn decided(err: &Error, class: &FailureClass, policy: &RetryPolicy) -> Disposition {
+    let target = WalkTarget::fixture("p", None, "m", 0);
+    let failure = Failure {
+        err,
+        native_class: class,
+        class,
+        is_probe: false,
+        surface: DispatchSurface::Complete,
+        deadline_fired: false,
+        disable_fallbacks: false,
+        target,
+    };
+    decide(&failure, policy, None, &RequestWalk::new())
+}
+
+fn walks(err: &Error, class: &FailureClass, policy: &RetryPolicy) -> bool {
+    decided(err, class, policy).next == Next::Walk
+}
+
+fn retries(err: &Error, class: &FailureClass, policy: &RetryPolicy) -> bool {
+    matches!(
+        decided(err, class, policy).same_target,
+        SameProvider::Retry { .. }
+    )
+}
+
 #[test]
 fn a_slotless_target_resolves_its_tuning_from_its_provider_and_model() {
     // Arrange
@@ -89,17 +119,14 @@ stream_first_byte_timeout_ms = 90000
 }
 
 #[test]
-fn should_fallback_status_zero_is_always_true() {
+fn a_status_zero_network_error_walks_on() {
     // status 0 == network error (DNS, TCP, TLS, request body,
-    // request timeout). `should_fallback` returns true for the
-    // network-error class default; the predicate governs HTTP-status
-    // outcomes (>= 400) via per-class policy, and a status-0 network
-    // error resolves through the NetworkError class, which falls back
-    // by default.
+    // request timeout). It resolves through the NetworkError class,
+    // which falls back by default.
     let err = Error::upstream("p", 0, "tcp connect refused");
     let class = classify(&err, None).class;
     let policy = RetryPolicy::default();
-    assert!(should_fallback(&err, &class, &policy, false, false));
+    assert!(walks(&err, &class, &policy));
 }
 
 // --- Per-class operator overrides route through `resolved_class` ---
@@ -136,41 +163,15 @@ fn retry_override_on_one_class_leaves_the_sibling_5xx_class_untouched() {
 
     // Act + Assert: the overridden class caps to 0 and cannot retry.
     assert_eq!(retry_cap_for(&overloaded_class, &policy), 0);
-    assert!(!should_retry_same_provider(
-        &overloaded_err,
-        &overloaded_class,
-        &policy,
-        0,
-        false,
-        false,
-    ));
+    assert!(!retries(&overloaded_err, &overloaded_class, &policy));
     // The un-overridden sibling class in the same baked 5xx family
     // keeps its own retry_on_5xx cap.
     assert_eq!(retry_cap_for(&server_class, &policy), 3);
-    assert!(should_retry_same_provider(
-        &server_err,
-        &server_class,
-        &policy,
-        0,
-        false,
-        false,
-    ));
+    assert!(retries(&server_err, &server_class, &policy));
     // Fallback is untouched for both -- only the retry leaf was
     // overridden.
-    assert!(should_fallback(
-        &overloaded_err,
-        &overloaded_class,
-        &policy,
-        false,
-        false
-    ));
-    assert!(should_fallback(
-        &server_err,
-        &server_class,
-        &policy,
-        false,
-        false
-    ));
+    assert!(walks(&overloaded_err, &overloaded_class, &policy));
+    assert!(walks(&server_err, &server_class, &policy));
 }
 
 #[test]
@@ -317,51 +318,9 @@ fn fallback_override_on_bad_request_leaves_auth_untouched() {
     let auth_class = classify(&auth_err, None).class;
 
     // Act + Assert: a plain 400 stops falling back...
-    assert!(!should_fallback(
-        &bad_request_err,
-        &bad_request_class,
-        &policy,
-        false,
-        false
-    ));
+    assert!(!walks(&bad_request_err, &bad_request_class, &policy));
     // ...but a 401 (different class, no overlay entry) still does.
-    assert!(should_fallback(
-        &auth_err,
-        &auth_class,
-        &policy,
-        false,
-        false
-    ));
-}
-
-#[test]
-fn unknown_provider_falls_back_regardless_of_class_or_override() {
-    // Regression: `Error::UnknownProvider` short-circuits to true
-    // BEFORE the class match, independent of both the class passed in
-    // (classify() never sees an UnknownProvider, so this pins the
-    // caller can pass any class here) and any per-class override that
-    // would otherwise deny fallback for that class.
-    use crate::class_policy::{ClassPolicy, ConfigFailureClass};
-    let err = Error::UnknownProvider("missing-provider".to_string());
-    let mut classes = std::collections::BTreeMap::new();
-    classes.insert(
-        ConfigFailureClass::BadRequest,
-        ClassPolicy {
-            retry: None,
-            fallback: Some(false),
-        },
-    );
-    let policy = RetryPolicy {
-        classes,
-        ..RetryPolicy::default()
-    };
-    assert!(should_fallback(
-        &err,
-        &FailureClass::BadRequest,
-        &policy,
-        false,
-        false
-    ));
+    assert!(walks(&auth_err, &auth_class, &policy));
 }
 
 #[test]
