@@ -244,6 +244,216 @@ fn truncate_on_char_boundary(s: &str, max: usize) -> String {
     s[..end].to_string()
 }
 
+/// Outcome of one decode attempt over the buffered bytes.
+enum DecodeStep {
+    /// A complete, CRC-valid frame; its bytes are already drained.
+    Frame(Message),
+    /// The buffer holds no complete frame; read more bytes.
+    NeedMore,
+    /// Stream-fatal: the stream yields this error and ends.
+    Fatal(Error),
+}
+
+/// Bytes received but not yet decoded, plus the decoder's own staged
+/// prelude state.
+struct FrameBuffer {
+    buffer: BytesMut,
+    decoder: MessageFrameDecoder,
+    // Tracks whether smithy has already consumed the 12-byte prelude
+    // into its internal buffer but has not yet returned Complete. The
+    // advertised-length DoS guard reads `buffer[0..4]` as the next
+    // frame's `total_length` -- but that's only valid when no prelude
+    // has been previously consumed. Once smithy has the prelude
+    // buffered (after an Incomplete return), `buffer[0..4]` is the
+    // START OF THE HEADERS section, not a length, and the cap check
+    // would spuriously fire on header bytes that look like a giant
+    // little-endian integer. Set to true when we drain the prelude on
+    // Incomplete; cleared back to false when smithy returns Complete
+    // (which internally calls `self.reset()` so its `prelude_read`
+    // flag goes back to false).
+    smithy_has_prelude_buffered: bool,
+}
+
+impl FrameBuffer {
+    fn new() -> Self {
+        Self {
+            buffer: BytesMut::new(),
+            decoder: MessageFrameDecoder::new(),
+            smithy_has_prelude_buffered: false,
+        }
+    }
+
+    fn extend(&mut self, bytes: &[u8]) {
+        self.buffer.extend_from_slice(bytes);
+    }
+
+    /// The next frame's advertised `total_length`, readable only while no
+    /// prelude is staged inside the decoder (otherwise `buffer[0..4]` is
+    /// header bytes, not a length).
+    fn advertised_len(&self) -> Option<usize> {
+        if self.smithy_has_prelude_buffered || self.buffer.len() < 4 {
+            return None;
+        }
+        let b = &self.buffer;
+        Some(u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as usize)
+    }
+
+    /// Attempt to decode one frame from the buffer. The advertised-length
+    /// DoS guard runs before EVERY attempt, not once per upstream chunk:
+    /// otherwise a buffer holding [small valid frame][giant malicious
+    /// frame] would consume the small one and decode the giant one
+    /// without checking its advertised total_length.
+    fn try_decode(&mut self, provider_id: &str, label: FrameLabel) -> DecodeStep {
+        if let Some(advertised) = self.advertised_len()
+            && advertised > MAX_FRAME_BYTES
+        {
+            return DecodeStep::Fatal(Error::Streaming(label.cap_exceeded(advertised)));
+        }
+        let mut cursor = std::io::Cursor::new(self.buffer.as_ref());
+        match self.decoder.decode_frame(&mut cursor) {
+            Ok(DecodedFrame::Complete(message)) => {
+                let Ok(consumed) = usize::try_from(cursor.position()) else {
+                    return DecodeStep::Fatal(Error::Streaming(
+                        label.consumed_overflow().to_string(),
+                    ));
+                };
+                let _ = self.buffer.split_to(consumed);
+                // smithy.decode_frame internally calls `self.reset()` on a
+                // successful Complete, clearing its `prelude_read` flag.
+                // Mirror that here so the cap check re-engages for the next
+                // frame's prelude.
+                self.smithy_has_prelude_buffered = false;
+                DecodeStep::Frame(message)
+            }
+            Ok(DecodedFrame::Incomplete) => {
+                // Drain whatever bytes smithy consumed before returning
+                // Incomplete.
+                //
+                // `MessageFrameDecoder::decode_frame` reads the 12-byte
+                // prelude into its internal state on first call and sets
+                // `prelude_read = true`. It returns Incomplete because the
+                // rest of the frame hasn't arrived. Without this drain, the
+                // next attempt creates a fresh cursor at offset 0 -- but the
+                // prelude bytes are still there. On re-entry smithy skips
+                // re-reading the prelude (because `prelude_read=true`) and
+                // reads the next bytes from cursor offset 0 as the headers
+                // section -- which is actually still the prelude. The
+                // big-endian `total_length` field gets interpreted as header
+                // tag/value pairs, fails UTF-8 validation, and surfaces as
+                // `InvalidUtf8String` on a frame whose payload is perfectly
+                // valid.
+                //
+                // Symptom in the wild: any Bedrock streaming response that
+                // arrives in multiple HTTP body chunks hits a mid-stream
+                // UTF-8 error. Mirror smithy's prelude consumption back to
+                // our `BytesMut` so the next attempt's fresh cursor starts
+                // past the consumed prelude bytes.
+                let consumed = cursor.position() as usize;
+                if consumed > 0 {
+                    let _ = self.buffer.split_to(consumed);
+                    // smithy still has the prelude buffered internally: the
+                    // cap check must skip until smithy returns Complete (and
+                    // resets).
+                    self.smithy_has_prelude_buffered = true;
+                }
+                DecodeStep::NeedMore
+            }
+            Err(e) => {
+                let advertised = self.advertised_len().unwrap_or(0);
+                log_decode_error(provider_id, label, &self.buffer, advertised, &e);
+                DecodeStep::Fatal(Error::Streaming(label.decode_failed(&e)))
+            }
+        }
+    }
+
+    /// The truncation error for an upstream close, or `None` when the close
+    /// is clean.
+    ///
+    /// Buffered bytes and a prelude staged inside smithy are both
+    /// mid-frame truncations. Without the staged-prelude half, an upstream
+    /// that closes after sending exactly 12 bytes (a prelude with no body)
+    /// would report success: `buffer` is empty (the prelude was drained
+    /// after the Incomplete return) but smithy still has an incomplete
+    /// frame staged, and the router's circuit breaker would record a
+    /// "successful" probe for an unhealthy upstream.
+    fn eof_error(&self, label: FrameLabel) -> Option<Error> {
+        if !self.buffer.is_empty() {
+            Some(Error::Streaming(label.eof_buffered(self.buffer.len())))
+        } else if self.smithy_has_prelude_buffered {
+            Some(Error::Streaming(label.eof_prelude().to_string()))
+        } else {
+            None
+        }
+    }
+}
+
+/// Log a frame decode failure.
+///
+/// Log hygiene: the 12-byte prelude (always non-content: total_length,
+/// headers_length, prelude_crc) is safe to emit at WARN for
+/// diagnosability. The variable-length payload may carry model output and
+/// must NOT go to a third-party log SaaS at WARN; it is gated at TRACE
+/// instead.
+fn log_decode_error(
+    provider_id: &str,
+    label: FrameLabel,
+    buffer: &[u8],
+    advertised: usize,
+    err: &impl std::fmt::Display,
+) {
+    let prelude_len = 12_usize.min(buffer.len());
+    tracing::warn!(
+        provider = %provider_id,
+        err = %err,
+        frame_len = advertised,
+        prelude_hex = %hex_bytes(&buffer[..prelude_len]),
+        "{}",
+        label.warn_decode_failed()
+    );
+    if tracing::enabled!(tracing::Level::TRACE) {
+        let dump_len = advertised.min(256).min(buffer.len());
+        tracing::trace!(
+            provider = %provider_id,
+            frame_len = advertised,
+            hex = %hex_bytes(&buffer[..dump_len]),
+            "{}",
+            label.trace_dump()
+        );
+    }
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The stream's final items once upstream stops producing bytes: the
+/// read error, a truncation error, or -- only at a clean close -- the
+/// handler's `on_eof` output. A clean close lets the handler flush any
+/// state it held across frames (e.g. a captured stop_reason awaiting a
+/// metadata frame that never arrived).
+fn end_of_input_items<H: FrameHandler>(
+    read_error: Option<reqwest::Error>,
+    frames: &FrameBuffer,
+    handler: &mut H,
+    provider_id: &str,
+    label: FrameLabel,
+) -> Vec<Result<ChatChunk>> {
+    if let Some(e) = read_error {
+        return vec![Err(Error::Streaming(label.upstream_read(e)))];
+    }
+    if let Some(truncated) = frames.eof_error(label) {
+        return vec![Err(truncated)];
+    }
+    match handler.on_eof(provider_id) {
+        Ok(chunks) => chunks.into_iter().map(Ok).collect(),
+        Err(e) => vec![Err(e)],
+    }
+}
+
 /// Drive an AWS-eventstream byte stream through a per-provider handler,
 /// emitting `ChatChunk`s. Partial frames buffer internally until enough
 /// bytes arrive; the advertised-length DoS guard, prelude-tracking, and
@@ -265,199 +475,43 @@ where
     H: FrameHandler + Send + 'static,
 {
     let stream = async_stream::stream! {
-        let mut buffer = BytesMut::new();
-        let mut decoder = MessageFrameDecoder::new();
-        // Tracks whether smithy has already consumed the 12-byte prelude
-        // into its internal buffer but has not yet returned Complete. The
-        // advertised-length DoS guard reads `buffer[0..4]` as the next
-        // frame's `total_length` -- but that's only valid when no prelude
-        // has been previously consumed. Once smithy has the prelude
-        // buffered (after an Incomplete return), `buffer[0..4]` is the
-        // START OF THE HEADERS section, not a length, and the cap check
-        // would spuriously fire on header bytes that look like a giant
-        // little-endian integer. Set to true when we drain the prelude on
-        // Incomplete; cleared back to false when smithy returns Complete
-        // (which internally calls `self.reset()` so its `prelude_read`
-        // flag goes back to false).
-        let mut smithy_has_prelude_buffered = false;
-
+        let mut frames = FrameBuffer::new();
         let mut byte_stream = Box::pin(byte_stream);
         loop {
-            // Try to decode any complete frames already in buffer. The
-            // advertised-length DoS guard runs at the TOP of this inner
-            // loop so it fires before EVERY decode attempt, not just once
-            // per outer-loop tick. Otherwise a buffer holding [small valid
-            // frame][giant malicious frame] would consume the small one
-            // and decode the giant one without checking its advertised
-            // total_length.
+            // Decode every complete frame already buffered.
             loop {
-                if !smithy_has_prelude_buffered && buffer.len() >= 4 {
-                    let advertised = u32::from_be_bytes([
-                        buffer[0], buffer[1], buffer[2], buffer[3],
-                    ]) as usize;
-                    if advertised > MAX_FRAME_BYTES {
-                        yield Err(Error::Streaming(label.cap_exceeded(advertised)));
-                        return;
-                    }
-                }
-                let mut cursor = std::io::Cursor::new(buffer.as_ref());
-                match decoder.decode_frame(&mut cursor) {
-                    Ok(DecodedFrame::Complete(message)) => {
-                        let consumed = usize::try_from(cursor.position()).map_err(|_| {
-                            Error::Streaming(label.consumed_overflow().to_string())
-                        })?;
-                        let _ = buffer.split_to(consumed);
-                        // smithy.decode_frame internally calls
-                        // `self.reset()` on a successful Complete, clearing
-                        // its `prelude_read` flag. Mirror that here so the
-                        // cap check above re-engages for the next frame's
-                        // prelude.
-                        smithy_has_prelude_buffered = false;
-
-                        match handler.on_frame(&provider_id, message) {
-                            Ok(chunks) => {
-                                for c in chunks {
-                                    yield Ok(c);
-                                }
-                            }
-                            Err(e) => {
-                                yield Err(e);
-                                return;
+                match frames.try_decode(&provider_id, label) {
+                    DecodeStep::Frame(message) => match handler.on_frame(&provider_id, message) {
+                        Ok(chunks) => {
+                            for c in chunks {
+                                yield Ok(c);
                             }
                         }
-                    }
-                    Ok(DecodedFrame::Incomplete) => {
-                        // Drain whatever bytes smithy consumed before
-                        // returning Incomplete.
-                        //
-                        // `MessageFrameDecoder::decode_frame` reads the
-                        // 12-byte prelude into its internal state on first
-                        // call and sets `prelude_read = true`. It returns
-                        // Incomplete because the rest of the frame hasn't
-                        // arrived. Without this drain, the next iteration
-                        // creates a fresh cursor at offset 0 -- but the
-                        // prelude bytes are still there. On re-entry smithy
-                        // skips re-reading the prelude (because
-                        // `prelude_read=true`) and reads the next bytes
-                        // from cursor offset 0 as the headers section --
-                        // which is actually still the prelude. The
-                        // big-endian `total_length` field gets interpreted
-                        // as header tag/value pairs, fails UTF-8
-                        // validation, and surfaces as `InvalidUtf8String`
-                        // on a frame whose payload is perfectly valid.
-                        //
-                        // Symptom in the wild: any Bedrock streaming
-                        // response that arrives in multiple HTTP body
-                        // chunks hits a mid-stream UTF-8 error. Mirror
-                        // smithy's prelude consumption back to our
-                        // `BytesMut` so the next iteration's fresh cursor
-                        // starts past the consumed prelude bytes.
-                        let consumed = cursor.position() as usize;
-                        if consumed > 0 {
-                            let _ = buffer.split_to(consumed);
-                            // Track that smithy still has the prelude
-                            // buffered internally -- the cap check at the
-                            // top of the loop must skip until smithy
-                            // returns Complete (and resets).
-                            smithy_has_prelude_buffered = true;
+                        Err(e) => {
+                            yield Err(e);
+                            return;
                         }
-                        break;
-                    }
-                    Err(e) => {
-                        // Log hygiene: the 12-byte prelude (always
-                        // non-content: total_length, headers_length,
-                        // prelude_crc) is safe to emit at WARN for
-                        // diagnosability. The variable-length payload may
-                        // carry model output and must NOT go to a
-                        // third-party log SaaS at WARN; it is gated at TRACE
-                        // instead.
-                        //
-                        // Once smithy holds the prelude internally,
-                        // `buffer[0..4]` is header bytes, not a length.
-                        let advertised = if !smithy_has_prelude_buffered && buffer.len() >= 4 {
-                            u32::from_be_bytes([
-                                buffer[0], buffer[1], buffer[2], buffer[3],
-                            ]) as usize
-                        } else {
-                            0
-                        };
-                        let prelude_len = 12_usize.min(buffer.len());
-                        let prelude_hex: String = buffer[..prelude_len]
-                            .iter()
-                            .map(|b| format!("{b:02x}"))
-                            .collect::<Vec<_>>()
-                            .join(" ");
-                        tracing::warn!(
-                            provider = %provider_id,
-                            err = %e,
-                            frame_len = advertised,
-                            prelude_hex = %prelude_hex,
-                            "{}",
-                            label.warn_decode_failed()
-                        );
-                        if tracing::enabled!(tracing::Level::TRACE) {
-                            let dump_len = advertised.min(256).min(buffer.len());
-                            let hex: String = buffer[..dump_len]
-                                .iter()
-                                .map(|b| format!("{b:02x}"))
-                                .collect::<Vec<_>>()
-                                .join(" ");
-                            tracing::trace!(
-                                provider = %provider_id,
-                                frame_len = advertised,
-                                hex = %hex,
-                                "{}",
-                                label.trace_dump()
-                            );
-                        }
-                        yield Err(Error::Streaming(label.decode_failed(&e)));
+                    },
+                    DecodeStep::NeedMore => break,
+                    DecodeStep::Fatal(e) => {
+                        yield Err(e);
                         return;
                     }
                 }
             }
 
-            // Need more bytes; pull next chunk from upstream.
-            match byte_stream.next().await {
-                Some(Ok(bytes)) => buffer.extend_from_slice(&bytes),
-                Some(Err(e)) => {
-                    yield Err(Error::Streaming(label.upstream_read(e)));
-                    return;
+            let read_error = match byte_stream.next().await {
+                Some(Ok(bytes)) => {
+                    frames.extend(&bytes);
+                    continue;
                 }
-                None => {
-                    // Upstream closed. If we still have buffered bytes --
-                    // OR if smithy has a partial frame's prelude buffered
-                    // internally -- the stream was truncated mid-frame.
-                    // Both must surface as errors, not clean EOF.
-                    //
-                    // Without the `smithy_has_prelude_buffered` half of
-                    // this check, an upstream that closes after sending
-                    // exactly 12 bytes (a prelude with no body) would
-                    // report success: our `buffer` is empty (we drained the
-                    // 12 prelude bytes after the Incomplete return) but
-                    // smithy still has an incomplete frame staged. The
-                    // router's circuit breaker would record a "successful"
-                    // probe for an unhealthy upstream.
-                    if !buffer.is_empty() {
-                        yield Err(Error::Streaming(label.eof_buffered(buffer.len())));
-                    } else if smithy_has_prelude_buffered {
-                        yield Err(Error::Streaming(label.eof_prelude().to_string()));
-                    } else {
-                        // Graceful EOF -- let the handler flush any state
-                        // it held across frames (e.g. a captured
-                        // stop_reason awaiting a metadata frame that never
-                        // arrived).
-                        match handler.on_eof(&provider_id) {
-                            Ok(chunks) => {
-                                for c in chunks {
-                                    yield Ok(c);
-                                }
-                            }
-                            Err(e) => yield Err(e),
-                        }
-                    }
-                    return;
-                }
+                Some(Err(e)) => Some(e),
+                None => None,
+            };
+            for item in end_of_input_items(read_error, &frames, &mut handler, &provider_id, label) {
+                yield item;
             }
+            return;
         }
     };
 
@@ -886,6 +940,268 @@ mod tests {
                 seen.is_empty(),
                 "row {row}: frame reached handler: {seen:?}"
             );
+        }
+    }
+
+    /// Records every frame and each `on_eof` call, yields one chunk per
+    /// frame, and fails on the frame whose event-type is `fail_on`.
+    struct ExitProbe {
+        fail_on: Option<&'static str>,
+        seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        eof_calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl FrameHandler for ExitProbe {
+        fn on_frame(&mut self, provider_id: &str, message: Message) -> Result<Vec<ChatChunk>> {
+            let et = header_str(&message, ":event-type")
+                .unwrap_or("")
+                .to_string();
+            self.seen.lock().expect("seen lock").push(et.clone());
+            if self.fail_on == Some(et.as_str()) {
+                return Err(Error::upstream(provider_id, 0, "handler refused frame"));
+            }
+            Ok(vec![ChatChunk::default()])
+        }
+
+        fn on_eof(&mut self, _provider_id: &str) -> Result<Vec<ChatChunk>> {
+            self.eof_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(Vec::new())
+        }
+    }
+
+    struct ExitOutcome {
+        items: Vec<Result<ChatChunk>>,
+        seen: Vec<String>,
+        eof_calls: usize,
+    }
+
+    type Wire = Vec<std::result::Result<Bytes, reqwest::Error>>;
+
+    async fn run_exit_probe(wire: Wire, fail_on: Option<&'static str>) -> ExitOutcome {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let eof_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let handler = ExitProbe {
+            fail_on,
+            seen: seen.clone(),
+            eof_calls: eof_calls.clone(),
+        };
+        let items: Vec<_> = decode_frames(
+            "test".to_string(),
+            futures::stream::iter(wire),
+            handler,
+            FrameLabel::Invoke,
+        )
+        .collect()
+        .await;
+        let seen = seen.lock().expect("seen lock").clone();
+        ExitOutcome {
+            items,
+            seen,
+            eof_calls: eof_calls.load(std::sync::atomic::Ordering::SeqCst),
+        }
+    }
+
+    /// A real `reqwest::Error` built without any network I/O: an
+    /// unparseable URL fails at request build.
+    fn transport_error() -> reqwest::Error {
+        reqwest::Client::new()
+            .get("not a url")
+            .build()
+            .expect_err("an unparseable URL must not build a request")
+    }
+
+    /// Four bytes advertising one byte over the frame cap, padded past the
+    /// 4-byte length read.
+    fn oversized_prelude() -> Vec<u8> {
+        let mut bytes = (MAX_FRAME_BYTES as u32 + 1).to_be_bytes().to_vec();
+        bytes.extend_from_slice(&[0u8; 8]);
+        bytes
+    }
+
+    fn ok_chunks(chunks: Vec<Vec<u8>>) -> Wire {
+        chunks.into_iter().map(|c| Ok(Bytes::from(c))).collect()
+    }
+
+    fn assert_frame_chunk_then_streaming_error(
+        row: &str,
+        items: &[Result<ChatChunk>],
+        message_fragment: &str,
+    ) {
+        assert_eq!(items.len(), 2, "row {row}: items {items:?}");
+        assert!(items[0].is_ok(), "row {row}: first frame chunk: {items:?}");
+        match &items[1] {
+            Err(Error::Streaming(msg)) => {
+                assert!(msg.contains(message_fragment), "row {row}: got {msg}");
+            }
+            other => panic!("row {row}: expected Streaming error last, got {other:?}"),
+        }
+    }
+
+    /// An oversized frame after an intact one ends the stream with the cap
+    /// error after the first frame's chunk, whether the oversized prelude
+    /// shares the intact frame's body chunk or arrives in a later one.
+    #[tokio::test]
+    async fn oversized_second_frame_ends_stream() {
+        let first = encode("messageStart", r#"{"role":"assistant"}"#);
+        let mut same_chunk = first.clone();
+        same_chunk.extend_from_slice(&oversized_prelude());
+        let after = encode("messageStop", r#"{"stopReason":"end_turn"}"#);
+        let cases = [
+            ("same_chunk", ok_chunks(vec![same_chunk, after.clone()])),
+            (
+                "next_chunk",
+                ok_chunks(vec![first.clone(), oversized_prelude(), after.clone()]),
+            ),
+        ];
+        for (row, wire) in cases {
+            let out = run_exit_probe(wire, None).await;
+
+            assert_frame_chunk_then_streaming_error(row, &out.items, "exceeds cap");
+            assert_eq!(out.seen, vec!["messageStart".to_string()], "row {row}");
+        }
+    }
+
+    /// EOF inside the prelude, right after the prelude, and inside the body
+    /// each end the stream with exactly one truncation error after the
+    /// chunks of every intact frame before it.
+    #[tokio::test]
+    async fn truncated_prelude_and_truncated_body_each_end_with_one_error() {
+        let intact = encode("messageStart", r#"{"role":"assistant"}"#);
+        let cut = encode("messageStop", r#"{"stopReason":"end_turn"}"#);
+        assert!(cut.len() > 13, "frame must have a body past its prelude");
+        let cases = [
+            (
+                "partial_prelude",
+                cut[..7].to_vec(),
+                "7 buffered bytes left at EOF",
+            ),
+            (
+                "prelude_only",
+                cut[..12].to_vec(),
+                "prelude consumed but frame body never arrived",
+            ),
+            (
+                "partial_body",
+                cut[..cut.len() - 1].to_vec(),
+                "buffered bytes left at EOF",
+            ),
+        ];
+        for (row, tail, fragment) in cases {
+            let out = run_exit_probe(ok_chunks(vec![intact.clone(), tail]), None).await;
+
+            assert_frame_chunk_then_streaming_error(row, &out.items, fragment);
+            assert_eq!(out.seen, vec!["messageStart".to_string()], "row {row}");
+        }
+    }
+
+    /// A transport error ends the stream with the upstream-read error; a
+    /// frame queued behind it is never read.
+    #[tokio::test]
+    async fn transport_error_is_terminal() {
+        let wire: Wire = vec![
+            Ok(Bytes::from(encode(
+                "messageStart",
+                r#"{"role":"assistant"}"#,
+            ))),
+            Err(transport_error()),
+            Ok(Bytes::from(encode(
+                "messageStop",
+                r#"{"stopReason":"end_turn"}"#,
+            ))),
+        ];
+
+        let out = run_exit_probe(wire, None).await;
+
+        assert_frame_chunk_then_streaming_error(
+            "transport",
+            &out.items,
+            "bedrock upstream byte read failed",
+        );
+        assert_eq!(out.seen, vec!["messageStart".to_string()]);
+    }
+
+    /// A handler error is yielded unchanged as the stream's last item; no
+    /// later frame reaches the handler, even one already buffered.
+    #[tokio::test]
+    async fn handler_failure_is_terminal() {
+        let mut combined = encode("messageStart", r#"{"role":"assistant"}"#);
+        combined.extend_from_slice(&encode("contentBlockDelta", "{}"));
+        combined.extend_from_slice(&encode("messageStop", r#"{"stopReason":"end_turn"}"#));
+
+        let out = run_exit_probe(ok_chunks(vec![combined]), Some("contentBlockDelta")).await;
+
+        assert_eq!(out.items.len(), 2, "items: {:?}", out.items);
+        assert!(out.items[0].is_ok(), "first frame chunk: {:?}", out.items);
+        match &out.items[1] {
+            Err(Error::Upstream { status, body, .. }) => {
+                assert_eq!(*status, 0);
+                assert_eq!(body, "handler refused frame");
+            }
+            other => panic!("expected the handler error last, got {other:?}"),
+        }
+        assert_eq!(
+            out.seen,
+            vec!["messageStart".to_string(), "contentBlockDelta".to_string()]
+        );
+    }
+
+    /// `on_eof` runs once at a clean close and never on any error exit.
+    #[tokio::test]
+    async fn on_eof_runs_exactly_once_per_exit() {
+        let intact = encode("messageStart", r#"{"role":"assistant"}"#);
+        let cut = encode("messageStop", r#"{"stopReason":"end_turn"}"#);
+        let bad_crc = encode_with_bad_crc("contentBlockDelta", "{}");
+        let cases: Vec<(&str, Wire, Option<&'static str>, usize)> = vec![
+            ("clean_eof", ok_chunks(vec![intact.clone()]), None, 1),
+            ("empty_stream", ok_chunks(Vec::new()), None, 1),
+            (
+                "partial_prelude",
+                ok_chunks(vec![intact.clone(), cut[..7].to_vec()]),
+                None,
+                0,
+            ),
+            (
+                "prelude_only",
+                ok_chunks(vec![intact.clone(), cut[..12].to_vec()]),
+                None,
+                0,
+            ),
+            (
+                "partial_body",
+                ok_chunks(vec![intact.clone(), cut[..cut.len() - 1].to_vec()]),
+                None,
+                0,
+            ),
+            (
+                "oversized",
+                ok_chunks(vec![intact.clone(), oversized_prelude()]),
+                None,
+                0,
+            ),
+            (
+                "decode_error",
+                ok_chunks(vec![intact.clone(), bad_crc]),
+                None,
+                0,
+            ),
+            (
+                "transport_error",
+                vec![Ok(Bytes::from(intact.clone())), Err(transport_error())],
+                None,
+                0,
+            ),
+            (
+                "handler_failure",
+                ok_chunks(vec![intact.clone()]),
+                Some("messageStart"),
+                0,
+            ),
+        ];
+        for (row, wire, fail_on, expected) in cases {
+            let out = run_exit_probe(wire, fail_on).await;
+
+            assert_eq!(out.eof_calls, expected, "row {row}: items {:?}", out.items);
         }
     }
 }
