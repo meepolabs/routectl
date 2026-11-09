@@ -72,6 +72,15 @@ fn wire_and_strip_delta(req: &ChatRequest) -> (Value, u64) {
     (body, after - before)
 }
 
+/// The wire body for `req`, asserting the lane ran and withheld nothing.
+fn wire_without_strip(req: &ChatRequest) -> Value {
+    crate::translation_drop_metrics::assert_lane_ran_uncounted(
+        LANE,
+        "client_fingerprint_stripped",
+        || wire_body(req),
+    )
+}
+
 /// Single-source pin for the `Role::System` message strip site: the fingerprint
 /// rides ONLY a system-role message, beside a clean top-level system, so the
 /// canonical-system site is live but withholds nothing.
@@ -361,14 +370,13 @@ fn clean_system_content_on_both_sources_is_kept_and_not_counted() {
     };
 
     // Act
-    let (body, delta) = wire_and_strip_delta(&req);
+    let body = wire_without_strip(&req);
 
     // Assert
     assert_eq!(
         system_instruction_texts(&body),
         vec!["message prompt".to_string(), "canonical prompt".to_string()],
     );
-    assert_eq!(delta, 0, "nothing was withheld, so nothing is counted");
 }
 
 /// The predicate is leading-position only: a prompt that merely MENTIONS the
@@ -385,14 +393,13 @@ fn a_mid_text_mention_of_the_header_name_is_not_withheld() {
     };
 
     // Act
-    let (body, delta) = wire_and_strip_delta(&req);
+    let body = wire_without_strip(&req);
 
     // Assert
     assert_eq!(
         system_instruction_texts(&body),
         vec![mention.to_string(), mention.to_string()],
     );
-    assert_eq!(delta, 0);
 }
 
 /// Each withhold site reports itself once at DEBUG, without echoing the withheld text.
@@ -480,6 +487,16 @@ fn provider_body_and_strip_delta(req: &ChatRequest) -> (Value, u64) {
     (body, after - before)
 }
 
+/// The full provider body for `req`, asserting the lane ran and withheld
+/// nothing.
+fn provider_body_without_strip(req: &ChatRequest) -> Value {
+    crate::translation_drop_metrics::assert_lane_ran_uncounted(
+        LANE,
+        "client_fingerprint_stripped",
+        || provider_body("gemini:test", req).expect("provider body builds"),
+    )
+}
+
 /// Single-source pin for the metadata strip site: no system content at all,
 /// so neither system site can set the tally.
 #[test]
@@ -533,11 +550,10 @@ fn operator_only_metadata_reaches_the_wire_and_is_not_counted() {
     ));
 
     // Act
-    let (body, delta) = provider_body_and_strip_delta(&req);
+    let body = provider_body_without_strip(&req);
 
     // Assert
     assert_eq!(body["metadata"], json!({"trace": "operator-set"}));
-    assert_eq!(delta, 0, "nothing client-sourced was withheld");
 }
 
 #[test]

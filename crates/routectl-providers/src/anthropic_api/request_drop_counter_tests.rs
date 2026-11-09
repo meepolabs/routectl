@@ -679,6 +679,22 @@ fn assemble_on_lane(
     (body, after - before, strips)
 }
 
+/// [`assemble_on_lane`] for a request that must enter the lane and withhold
+/// no credential-bearing field.
+fn assemble_uncounted_on_lane(
+    req: &ChatRequest,
+    mantle_lane: bool,
+) -> (serde_json::Value, Vec<(EditKind, String)>) {
+    crate::translation_drop_metrics::assert_lane_ran_uncounted(
+        super::LANE,
+        "credential_bearing_field_withheld",
+        || {
+            let (body, _, strips) = assemble_on_lane(req, mantle_lane);
+            (body, strips)
+        },
+    )
+}
+
 /// Two servers, each with a connector credential, are one withheld field:
 /// the count is per request, and the declaration names the field once.
 #[test]
@@ -705,14 +721,13 @@ fn the_non_mantle_lane_forwards_mcp_servers_and_counts_nothing() {
     let req = with_mcp_servers();
 
     // Act
-    let (body, delta, strips) = assemble_on_lane(&req, false);
+    let (body, strips) = assemble_uncounted_on_lane(&req, false);
 
     // Assert
     assert_eq!(
         body["mcp_servers"],
         req.provider_extras.as_ref().unwrap()["mcp_servers"]
     );
-    assert_eq!(delta, 0);
     assert!(strips.is_empty(), "{strips:?}");
 }
 
@@ -721,21 +736,21 @@ fn the_non_mantle_lane_forwards_mcp_servers_and_counts_nothing() {
 /// untouched.
 #[test]
 fn mantle_requests_without_client_mcp_servers_count_nothing() {
+    // Arrange
     let mut probe = with_mcp_servers();
     probe.routectl_internal.background_probe = true;
-    let rows = [
-        ("no mcp_servers", base_req(), 0),
-        ("background probe", probe, 1),
-    ];
-    for (row, req, expected_strips) in rows {
-        // Act
-        let (body, delta, strips) = assemble_on_lane(&req, true);
 
-        // Assert
-        assert!(body.get("mcp_servers").is_none(), "row {row}: {body}");
-        assert_eq!(delta, 0, "row {row}");
-        assert_eq!(strips.len(), expected_strips, "row {row}: {strips:?}");
-    }
+    // Act
+    let (plain_body, plain_strips) = assemble_uncounted_on_lane(&base_req(), true);
+    let (probe_body, probe_delta, probe_strips) = assemble_on_lane(&probe, true);
+
+    // Assert
+    assert!(plain_body.get("mcp_servers").is_none(), "{plain_body}");
+    assert!(plain_strips.is_empty(), "{plain_strips:?}");
+    assert!(probe_body.get("mcp_servers").is_none(), "{probe_body}");
+    // Raw zero: a background probe never bumps lane_seen, so it has no control.
+    assert_eq!(probe_delta, 0);
+    assert_eq!(probe_strips.len(), 1, "{probe_strips:?}");
 }
 
 /// An operator `payload_extras` value is withheld on Mantle too: a Chat

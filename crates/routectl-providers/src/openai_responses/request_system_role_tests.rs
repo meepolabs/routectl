@@ -58,6 +58,15 @@ fn wire_with_strip_delta(req: &ChatRequest) -> (Value, u64) {
     (v, after - before)
 }
 
+/// The wire for `req`, asserting the lane ran and withheld nothing.
+fn wire_without_strip(req: &ChatRequest) -> Value {
+    crate::translation_drop_metrics::assert_lane_ran_uncounted(
+        crate::openai_responses::LANE,
+        "client_fingerprint_stripped",
+        || translate_to_json(&cfg(), req),
+    )
+}
+
 /// A direct library caller putting its system prompt in the messages array
 /// must not lose it: with no top-level `system`, the Role::System text is the
 /// whole `instructions` string.
@@ -67,11 +76,10 @@ fn a_system_role_message_reaches_instructions_when_no_top_level_system_exists() 
     let req = req_with(vec![system_text("be helpful"), user_text("hi")]);
 
     // Act
-    let (v, delta) = wire_with_strip_delta(&req);
+    let v = wire_without_strip(&req);
 
     // Assert
     assert_eq!(v["instructions"], json!("be helpful"));
-    assert_eq!(delta, 0, "nothing was withheld");
     let rendered = v["input"].to_string();
     assert!(
         !rendered.contains("be helpful"),
@@ -96,14 +104,13 @@ fn top_level_system_precedes_system_role_messages_in_message_order() {
     ]));
 
     // Act
-    let (v, delta) = wire_with_strip_delta(&req);
+    let v = wire_without_strip(&req);
 
     // Assert
     assert_eq!(
         v["instructions"],
         json!("canonical one\n\ncanonical two\n\nmessage one\n\nmessage two a\nmessage two b"),
     );
-    assert_eq!(delta, 0);
 }
 
 /// Positive control on `req.system`: with no Role::System messages, the
@@ -115,11 +122,10 @@ fn a_top_level_system_alone_is_unchanged() {
     req.system = Some(SystemContent::Text("only canonical".into()));
 
     // Act
-    let (v, delta) = wire_with_strip_delta(&req);
+    let v = wire_without_strip(&req);
 
     // Assert
     assert_eq!(v["instructions"], json!("only canonical"));
-    assert_eq!(delta, 0);
 }
 
 /// A blank top-level system never suppresses legitimate message-system text.

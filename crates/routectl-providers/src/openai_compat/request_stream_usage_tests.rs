@@ -22,6 +22,16 @@ fn forced_body_and_delta(req: &ChatRequest, config_extras: Option<&Value>) -> (V
     (body, compat_policy_count(OVERRIDDEN_CLASS) - before)
 }
 
+/// The forced streaming body for `req`, asserting the lane ran and counted
+/// no override.
+fn forced_body_uncounted(req: &ChatRequest, config_extras: Option<&Value>) -> Value {
+    crate::translation_drop_metrics::assert_lane_ran_uncounted(
+        super::super::LANE,
+        OVERRIDDEN_CLASS,
+        || forced_body_and_delta(req, config_extras).0,
+    )
+}
+
 fn chat_ingress_req(extras: Value) -> ChatRequest {
     let mut req = simple_req("m");
     req.routectl_internal.provenance = RequestProvenance::OpenaiIngress;
@@ -46,23 +56,21 @@ fn a_client_include_usage_false_is_forced_true_declared_and_counted_once() {
 fn a_client_stream_options_without_the_flag_gains_it_uncounted() {
     let req = chat_ingress_req(json!({"stream_options": {"other": 1}}));
 
-    let (body, delta) = forced_body_and_delta(&req, None);
+    let body = forced_body_uncounted(&req, None);
 
     assert_eq!(
         body["stream_options"],
         json!({"include_usage": true, "other": 1})
     );
-    assert_eq!(delta, 0);
 }
 
 #[test]
 fn a_body_without_stream_options_gains_the_object_uncounted() {
     let req = simple_req("m");
 
-    let (body, delta) = forced_body_and_delta(&req, None);
+    let body = forced_body_uncounted(&req, None);
 
     assert_eq!(body["stream_options"], json!({"include_usage": true}));
-    assert_eq!(delta, 0);
 }
 
 #[test]
@@ -83,10 +91,9 @@ fn the_operator_include_usage_false_wins_over_the_force() {
     let mut req = chat_ingress_req(operator.clone());
     req.routectl_internal.operator_payload_extras = Some(std::sync::Arc::new(operator));
 
-    let (body, delta) = forced_body_and_delta(&req, None);
+    let body = forced_body_uncounted(&req, None);
 
     assert_eq!(body["stream_options"], json!({"include_usage": false}));
-    assert_eq!(delta, 0);
 }
 
 #[test]
@@ -94,10 +101,9 @@ fn the_config_payload_extras_include_usage_false_wins_over_the_force() {
     let config = json!({"stream_options": {"include_usage": false}});
     let req = simple_req("m");
 
-    let (body, delta) = forced_body_and_delta(&req, Some(&config));
+    let body = forced_body_uncounted(&req, Some(&config));
 
     assert_eq!(body["stream_options"], json!({"include_usage": false}));
-    assert_eq!(delta, 0);
 }
 
 #[test]

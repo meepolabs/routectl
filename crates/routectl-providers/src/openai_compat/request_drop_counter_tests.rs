@@ -43,6 +43,18 @@ fn wire_and_delta(
     )
 }
 
+/// The rendered lenient wire body, asserting the lane ran and counted
+/// nothing under `class`.
+fn wire_uncounted(
+    req: &ChatRequest,
+    payload_extras: Option<&serde_json::Value>,
+    class: &'static str,
+) -> String {
+    crate::translation_drop_metrics::assert_lane_ran_uncounted(super::super::LANE, class, || {
+        wire_and_delta(req, payload_extras, || 0).0
+    })
+}
+
 fn user_parts_message(parts: Vec<ContentPart>) -> Message {
     Message {
         refusal: None,
@@ -330,13 +342,10 @@ fn a_chat_ingress_metadata_object_forwards_to_the_openai_compat_wire() {
     let req = with_provenance(req, RequestProvenance::OpenaiIngress);
 
     // Act
-    let (rendered, delta) = wire_and_delta(&req, None, || {
-        compat_policy_count("client_fingerprint_stripped")
-    });
+    let rendered = wire_uncounted(&req, None, "client_fingerprint_stripped");
 
     // Assert
     assert!(rendered.contains("zz-chat-meta"), "{rendered}");
-    assert_eq!(delta, 0);
 }
 
 #[test]
@@ -357,7 +366,7 @@ fn foreign_dialect_extras_are_absent_from_the_openai_compat_wire_and_counted_onc
 
     // Act
     let (foreign_wire, foreign_delta) = wire_and_delta(&foreign, None, count);
-    let (control_wire, control_delta) = wire_and_delta(&same_dialect, None, count);
+    let control_wire = wire_uncounted(&same_dialect, None, "foreign_dialect_extra");
 
     // Assert
     assert!(
@@ -371,7 +380,6 @@ fn foreign_dialect_extras_are_absent_from_the_openai_compat_wire_and_counted_onc
     assert_eq!(foreign_delta, 1);
     assert!(control_wire.contains("zz-cm-tell"), "{control_wire}");
     assert!(control_wire.contains("zz-container-tell"), "{control_wire}");
-    assert_eq!(control_delta, 0);
 }
 
 fn credential_withhold_count() -> u64 {
@@ -467,12 +475,10 @@ fn a_chat_ingress_service_tier_still_forwards_to_the_openai_compat_wire() {
     let req = with_provenance(req, RequestProvenance::OpenaiIngress);
 
     // Act
-    let (rendered, delta) =
-        wire_and_delta(&req, None, || compat_drop_count("foreign_dialect_extra"));
+    let rendered = wire_uncounted(&req, None, "foreign_dialect_extra");
 
     // Assert
     assert!(rendered.contains("\"service_tier\":\"flex\""), "{rendered}");
-    assert_eq!(delta, 0);
 }
 
 #[test]
@@ -485,13 +491,11 @@ fn a_library_caller_forwards_its_extras_to_the_openai_compat_wire_unchanged() {
     }));
 
     // Act
-    let (rendered, delta) =
-        wire_and_delta(&req, None, || compat_drop_count("foreign_dialect_extra"));
+    let rendered = wire_uncounted(&req, None, "foreign_dialect_extra");
 
     // Assert
     assert!(rendered.contains("zz-lib-edit"), "{rendered}");
     assert!(rendered.contains("\"top_k\":40"), "{rendered}");
-    assert_eq!(delta, 0);
 }
 
 #[test]
@@ -586,6 +590,7 @@ fn an_unmodeled_thinking_type_counts_one_openai_compat_drop() {
     for (row, carrier, expected) in crate::translation_drop_metrics::thinking_carrier_rows() {
         // Arrange
         let mut req = simple_req("m");
+        req.reasoning = Some(ReasoningConfig::default());
         req.routectl_internal.anthropic_thinking = carrier;
 
         // Act

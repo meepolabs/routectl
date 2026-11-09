@@ -86,6 +86,16 @@ fn wire_and_strip_delta(req: &ChatRequest) -> (serde_json::Value, String, u64) {
     (body, rendered, after - before)
 }
 
+/// The lenient wire body for `req`, asserting the lane ran and withheld
+/// nothing.
+fn wire_without_strip(req: &ChatRequest) -> serde_json::Value {
+    crate::translation_drop_metrics::assert_lane_ran_uncounted(
+        super::super::LANE,
+        "client_fingerprint_stripped",
+        || lenient_normalize(req),
+    )
+}
+
 /// `(role, content)` of every wire message, in wire order.
 fn roles_and_contents(body: &serde_json::Value) -> Vec<(String, serde_json::Value)> {
     body["messages"]
@@ -314,7 +324,7 @@ fn distinct_system_role_messages_survive_beside_a_top_level_system_in_caller_ord
     );
 
     // Act
-    let (body, _, delta) = wire_and_strip_delta(&req);
+    let body = wire_without_strip(&req);
 
     // Assert
     assert_eq!(
@@ -327,7 +337,6 @@ fn distinct_system_role_messages_survive_beside_a_top_level_system_in_caller_ord
             ("user".to_string(), json!("again")),
         ]
     );
-    assert_eq!(delta, 0, "nothing was withheld, so nothing is counted");
 }
 
 #[test]
@@ -362,11 +371,10 @@ fn a_mid_string_billing_prefix_in_a_system_role_message_is_kept_and_not_counted(
     );
 
     // Act
-    let (body, _, delta) = wire_and_strip_delta(&req);
+    let body = wire_without_strip(&req);
 
     // Assert
     assert_eq!(body["messages"][0]["content"], json!(text));
-    assert_eq!(delta, 0);
 }
 
 // ---------------------------------------------------------------------------

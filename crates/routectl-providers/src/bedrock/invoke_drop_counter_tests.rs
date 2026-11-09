@@ -282,6 +282,20 @@ fn merge_operator_extras_observed(
     (body, warned, after - before)
 }
 
+/// The Invoke body after merging `extras` as the operator's
+/// `additional_model_request_fields` and its managed-key WARNs, asserting the
+/// lane ran and counted no conflict.
+fn merge_operator_extras_uncounted(extras: serde_json::Value) -> (serde_json::Value, Vec<String>) {
+    crate::translation_drop_metrics::assert_lane_ran_uncounted(
+        LANE,
+        OPERATOR_CONFLICT_CLASS,
+        || {
+            let (body, warned, _) = merge_operator_extras_observed(extras);
+            (body, warned)
+        },
+    )
+}
+
 /// SINGLE-SOURCE pin for this lane's operator refusal, one row per managed
 /// key: `anthropic_version` keeps the value Bedrock requires, and
 /// `response_format` (absent from the old closed Invoke set) never reaches the
@@ -336,12 +350,11 @@ fn two_refused_operator_keys_count_one_policy_action() {
 #[test]
 fn an_unmanaged_operator_extra_lands_on_the_invoke_body_uncounted() {
     // Act
-    let (body, warned, delta) = merge_operator_extras_observed(json!({"top_k": 40}));
+    let (body, warned) = merge_operator_extras_uncounted(json!({"top_k": 40}));
 
     // Assert
     assert_eq!(body["top_k"], 40, "{body}");
     assert!(warned.is_empty(), "{warned:?}");
-    assert_eq!(delta, 0);
 }
 
 fn system_turn_with_image(text: &str) -> Message {

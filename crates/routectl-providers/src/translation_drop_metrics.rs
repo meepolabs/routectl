@@ -121,6 +121,11 @@
 //! Prefer a delta (read before, act, read after) over an absolute value.
 //! Counters accumulate across the whole test binary, so an absolute
 //! expectation is wrong the moment a second test touches the key.
+//!
+//! A ZERO delta proves nothing on its own: it also holds when the act never
+//! reached the lane at all. A unit test asserting that a class did not count
+//! goes through the `cfg(test)` `assert_lane_ran_uncounted`, which also
+//! requires the lane's `lane_seen` denominator to move by exactly one.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -501,6 +506,48 @@ fn with_registry_mut<T>(f: impl FnOnce(&mut Registry) -> T) -> T {
             std::cell::RefCell::new(Registry::default());
     }
     REGISTRY.with_borrow_mut(f)
+}
+
+/// Run `act` and hand back its result, asserting that it entered `lane`
+/// exactly once (the `lane_seen` delta is 1) and moved neither the drop nor
+/// the policy-action counter for `(lane, class)`. The `lane_seen` half is the
+/// positive control: without it, an act that never reached the lane reads as
+/// a correct zero.
+#[cfg(test)]
+#[track_caller]
+pub(crate) fn assert_lane_ran_uncounted<T>(
+    lane: &'static str,
+    class: &'static str,
+    act: impl FnOnce() -> T,
+) -> T {
+    let read = || {
+        with_registry_mut(|reg| {
+            (
+                reg.lane_seen.get(lane).copied().unwrap_or(0),
+                reg.drops.get(&(lane, class)).copied().unwrap_or(0),
+                reg.policy_actions.get(&(lane, class)).copied().unwrap_or(0),
+            )
+        })
+    };
+    let (seen_before, drops_before, actions_before) = read();
+    let out = act();
+    let (seen_after, drops_after, actions_after) = read();
+    assert_eq!(
+        seen_after - seen_before,
+        1,
+        "lane {lane}: the act must enter the lane exactly once"
+    );
+    assert_eq!(
+        drops_after - drops_before,
+        0,
+        "lane {lane}: drop class {class} counted"
+    );
+    assert_eq!(
+        actions_after - actions_before,
+        0,
+        "lane {lane}: policy class {class} counted"
+    );
+    out
 }
 
 #[cfg(test)]

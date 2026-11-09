@@ -106,6 +106,14 @@ fn wire_and_delta(egress: &Egress, req: &ChatRequest) -> (Value, u64) {
     (wire, drop_count(egress.lane) - before)
 }
 
+/// The wire value, asserting the egress ran its lane and counted no
+/// `foreign_dialect_extra`.
+fn wire_uncounted(egress: &Egress, req: &ChatRequest) -> Value {
+    crate::translation_drop_metrics::assert_lane_ran_uncounted(egress.lane, CLASS, || {
+        (egress.wire)(req)
+    })
+}
+
 #[test]
 fn foreign_dialect_extras_are_absent_from_every_anthropic_shape_egress_and_counted_once() {
     // Arrange -- the OpenAI-dialect fields a wire watch saw reach Claude, each
@@ -152,11 +160,10 @@ fn an_anthropic_ingress_context_management_still_forwards_to_every_anthropic_sha
 
     for egress in egresses() {
         // Act
-        let (wire, delta) = wire_and_delta(&egress, &req);
+        let wire = wire_uncounted(&egress, &req);
 
         // Assert
         assert_eq!(wire["context_management"], edits, "{}: {wire}", egress.lane);
-        assert_eq!(delta, 0, "{}", egress.lane);
     }
 }
 
@@ -167,11 +174,10 @@ fn a_library_caller_forwards_its_extras_to_every_anthropic_shape_egress_unchange
 
     for egress in egresses() {
         // Act
-        let (wire, delta) = wire_and_delta(&egress, &req);
+        let wire = wire_uncounted(&egress, &req);
 
         // Assert
         assert_eq!(wire["store"], "zz-lib-store", "{}: {wire}", egress.lane);
-        assert_eq!(delta, 0, "{}", egress.lane);
     }
 }
 
@@ -212,7 +218,7 @@ fn a_chat_client_parallel_tool_calls_still_folds_into_the_anthropic_tool_choice(
     let egress = &egresses()[0];
 
     // Act
-    let (wire, delta) = wire_and_delta(egress, &req);
+    let wire = wire_uncounted(egress, &req);
 
     // Assert
     assert_eq!(
@@ -220,7 +226,6 @@ fn a_chat_client_parallel_tool_calls_still_folds_into_the_anthropic_tool_choice(
         "{wire}"
     );
     assert!(wire.get("parallel_tool_calls").is_none(), "{wire}");
-    assert_eq!(delta, 0);
 }
 
 #[test]
@@ -251,11 +256,10 @@ fn an_operator_payload_extra_alone_is_never_counted_foreign() {
 
     for egress in egresses() {
         // Act
-        let (wire, delta) = wire_and_delta(&egress, &req);
+        let wire = wire_uncounted(&egress, &req);
 
         // Assert
         assert_eq!(wire["top_k"], 40, "{}: {wire}", egress.lane);
-        assert_eq!(delta, 0, "{}", egress.lane);
     }
 }
 
@@ -282,7 +286,7 @@ fn a_foreign_client_output_config_format_is_dropped_and_counted_on_every_anthrop
         // Act
         let (wire, delta) = wire_and_delta(&egress, &foreign);
         let conflicts = policy_count(egress.lane, "provider_extra_managed_key_conflict");
-        let (control, control_delta) = wire_and_delta(&egress, &same_dialect);
+        let control = wire_uncounted(&egress, &same_dialect);
 
         // Assert -- counted once, foreign only, never also a managed-key conflict.
         assert!(
@@ -297,7 +301,6 @@ fn a_foreign_client_output_config_format_is_dropped_and_counted_on_every_anthrop
             "{}: {control}",
             egress.lane
         );
-        assert_eq!(control_delta, 0, "{}", egress.lane);
     }
 }
 
