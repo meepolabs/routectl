@@ -14,7 +14,7 @@
 //! Sub-modules:
 //! - [`loader`] -- on-disk fixture format + `load_fixture` /
 //!   `discover_fixtures` (flat, live-box) / `discover_driver_fixtures`
-//!   (`<root>/<lane>/<case_id>`).
+//!   (`<root>/<lane>/<case_id>__<driver>__<config_variant>`).
 //! - [`plant`] -- the one writer of a synthetic corpus in a tempdir,
 //!   shared by every test that needs one to walk.
 //! - [`conservation`] -- captured-ingress vs captured-outgoing

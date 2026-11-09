@@ -93,7 +93,7 @@ fn ok_response(model: String) -> ChatResponse {
 /// the ingress carries it (`display` lifted off onto its own carrier).
 fn sent_thinking() -> ThinkingObject {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
-        "../routectl-cli/tests/fixtures/driver/anthropic-api/thinking-01/ingress_request.json",
+        "../routectl-cli/tests/fixtures/driver/anthropic-api/thinking-01__claude-code-print__anthropic-api/ingress_request.json",
     );
     let text = std::fs::read_to_string(&path).expect("the captured request reads");
     let captured: serde_json::Value = serde_json::from_str(&text).expect("the capture is JSON");

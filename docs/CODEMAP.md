@@ -9378,13 +9378,20 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   comment (`is_valid_rev_line` / `is_commit_sha`; a tag, short or uppercase
   sha is rejected)
 - `tests/cross_mode_pair.rs` -- pins the committed cross-mode fixture pair
-  (`driver/anthropic-api/plain-turn-01` and its `-fp` twin): asserts each
+  (`driver/anthropic-api/plain-turn-01__claude-code__anthropic-api` and its
+  `plain-turn-01-fp__claude-code__anthropic-api.front-proxy` twin): asserts each
   half's `meta.client.connection_mode`, the MITM seam header and
   `authorization` present on the front-proxy half and absent on the base-url
   half, an equal in-band `role:"system"` turn count (a client-release fact;
   one tolerated release gap), and equal `lane` / `ingress_kind` /
   `wire_pattern`; fails by name when either half is absent, and runs the same
   predicate over planted pairs with one clause flipped as the paired controls
+- `tests/driver_corpus_key.rs` -- weld over the committed driver corpus:
+  every `driver/<lane>/<leaf>` directory equals the key its own `meta.json`
+  composes (`<lane>/<case_id>__<client.driver>__<config_variant>`, each a
+  landing-key token), no two directories compose one key, and the walk
+  covers at least the seven committed cases and exactly the loader's driver
+  walk; synthetic entries with one clause broken are the paired controls
 - `tests/wire_pattern_weld.rs` -- cross-language weld over the wire-pattern
   vocabulary: parses `WIRE_PATTERNS` from `scripts/drivers/lib/validate_case.py`
   and the predicate table from `scripts/drivers/lib/verify_pattern.py` as text

@@ -3023,6 +3023,8 @@ mod tests {
                 case_id: "synthetic".to_string(),
                 config_sha: String::new(),
                 wire_pattern: String::new(),
+                config_variant: String::new(),
+                client_config_sha: String::new(),
                 client: FixtureClient::default(),
                 stream: false,
                 model: None,

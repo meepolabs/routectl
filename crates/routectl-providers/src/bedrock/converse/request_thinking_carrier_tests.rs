@@ -83,7 +83,10 @@ fn the_client_thinking_object_reaches_the_bag_as_sent() {
 #[test]
 fn the_plain_turn_capture_keeps_its_effort_beside_disabled_thinking() {
     // Arrange
-    let ingress = driver_fixture("plain-turn-01", "ingress_request.json");
+    let ingress = driver_fixture(
+        "plain-turn-01__claude-code__anthropic-api",
+        "ingress_request.json",
+    );
     let effort = ingress
         .pointer("/output_config/effort")
         .and_then(Value::as_str);

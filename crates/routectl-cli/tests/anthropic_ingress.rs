@@ -1360,7 +1360,8 @@ async fn plain_turn_capture_ships_disabled_thinking_beside_its_effort() {
         .mount(&upstream)
         .await;
     let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/driver/anthropic-api/plain-turn-01/ingress_request.json");
+        .join("tests/fixtures/driver/anthropic-api")
+        .join("plain-turn-01__claude-code__anthropic-api/ingress_request.json");
     let mut body: Value =
         serde_json::from_str(&std::fs::read_to_string(fixture).expect("fixture reads"))
             .expect("fixture parses");

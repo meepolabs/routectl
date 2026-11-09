@@ -117,7 +117,10 @@ fn driver_fixture(case: &str, file: &str) -> Value {
 /// forwarding path.
 #[test]
 fn committed_driver_captures_reach_the_wire_byte_identical() {
-    for case in ["thinking-01", "plain-turn-01"] {
+    for case in [
+        "thinking-01__claude-code-print__anthropic-api",
+        "plain-turn-01__claude-code__anthropic-api",
+    ] {
         // Arrange
         let ingress = driver_fixture(case, "ingress_request.json");
         let outgoing = driver_fixture(case, "outgoing_request.json");

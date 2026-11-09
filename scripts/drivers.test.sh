@@ -823,7 +823,16 @@ denies "large-context refuses an oversized body that is not valid UTF-8" \
 lc_prompt="$(python3 "$VALIDATOR" --turns "$CASES/large-context-01.json" | head -1)"
 lc_dir="$pat/large-context-01-shape"
 mkdir -p "$lc_dir"
-python3 - "$ROOT/crates/routectl-cli/tests/fixtures/driver/anthropic-api/plain-turn-01" \
+lc_corpus="$ROOT/crates/routectl-cli/tests/fixtures/driver"
+lc_baseline="$lc_corpus/anthropic-api/plain-turn-01__claude-code__anthropic-api"
+# The stand-in body below is for a scripts-only tree. A checkout carrying
+# the corpus but not this fixture has lost or renamed it, and must fail
+# here rather than quietly measure the stand-in.
+if [ -d "$lc_corpus" ]; then
+    check "the committed baseline body is present for the large-context floor control" "1" \
+        "$([ -f "$lc_baseline/ingress_request.json" ] && echo 1 || echo 0)"
+fi
+python3 - "$lc_baseline" \
          "$lc_dir/ingress_request.json" "$lc_prompt" <<'PY'
 import json, os, sys
 source = os.path.join(sys.argv[1], "ingress_request.json")

@@ -8,8 +8,11 @@
   "case_id": "plain-turn-01",
   "config_sha": "6fe5140505d1cfd22e472c565c450728a4da41d7d6b1e0bdc807e7bf27505d61",
   "wire_pattern": "baseline",
+  "config_variant": "anthropic-api",
+  "client_config_sha": "",
   "client": {
     "name": "claude-cli",
+    "driver": "claude-code",
     "version": "2.1.304",
     "binary_version": "2.1.304 (Claude Code)",
     "connection_mode": "base-url"

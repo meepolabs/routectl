@@ -106,7 +106,10 @@ fn driver_fixture(case: &str, file: &str) -> Value {
 
 #[test]
 fn known_thinking_types_match_the_committed_driver_captures_on_every_lane() {
-    for case in ["thinking-01", "plain-turn-01"] {
+    for case in [
+        "thinking-01__claude-code-print__anthropic-api",
+        "plain-turn-01__claude-code__anthropic-api",
+    ] {
         // Arrange
         let ingress = driver_fixture(case, "ingress_request.json");
         let outgoing = driver_fixture(case, "outgoing_request.json");

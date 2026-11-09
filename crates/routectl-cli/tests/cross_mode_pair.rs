@@ -50,11 +50,12 @@ use common::replay::{
 /// Lane both halves of the pair were captured on.
 const PAIR_LANE: &str = "anthropic-api";
 
-/// The base-url half of the committed pair.
-const BASE_URL_CASE: &str = "plain-turn-01";
+/// Landing directory of the base-url half of the committed pair:
+/// `<case_id>__<driver>__<config_variant>`.
+const BASE_URL_LEAF: &str = "plain-turn-01__claude-code__anthropic-api";
 
-/// The front-proxy half of the committed pair.
-const FRONT_PROXY_CASE: &str = "plain-turn-01-fp";
+/// Landing directory of the front-proxy half of the committed pair.
+const FRONT_PROXY_LEAF: &str = "plain-turn-01-fp__claude-code__anthropic-api.front-proxy";
 
 /// `meta.client.connection_mode` each half must claim.
 const BASE_URL_MODE: &str = "base-url";
@@ -190,8 +191,16 @@ fn cross_mode_violations(base: &Fixture, front_proxy: &Fixture) -> Vec<String> {
 }
 
 /// Directory of one committed half.
-fn committed_case(case_id: &str) -> PathBuf {
-    driver_root().join(PAIR_LANE).join(case_id)
+fn committed_case(leaf: &str) -> PathBuf {
+    driver_root().join(PAIR_LANE).join(leaf)
+}
+
+/// The `case_id` and `config_variant` a landing leaf was composed from.
+fn leaf_parts(leaf: &str) -> (&str, &str) {
+    let mut tokens = leaf.split("__");
+    let case_id = tokens.next().expect("a leaf has a case token");
+    let config_variant = tokens.nth(1).expect("a leaf has a config-variant token");
+    (case_id, config_variant)
 }
 
 /// Load a committed half, panicking BY NAME when it is absent. Both halves
@@ -209,8 +218,8 @@ fn load_committed(dir: &Path) -> Fixture {
 
 #[test]
 fn the_committed_pair_differs_only_in_connection_mode() {
-    let base = load_committed(&committed_case(BASE_URL_CASE));
-    let front_proxy = load_committed(&committed_case(FRONT_PROXY_CASE));
+    let base = load_committed(&committed_case(BASE_URL_LEAF));
+    let front_proxy = load_committed(&committed_case(FRONT_PROXY_LEAF));
 
     let violations = cross_mode_violations(&base, &front_proxy);
 
@@ -228,7 +237,7 @@ fn the_committed_pair_differs_only_in_connection_mode() {
 fn an_absent_committed_half_fails_rather_than_skips() {
     let tmp = tempfile::tempdir().expect("a tempdir with no fixture in it");
 
-    load_committed(&tmp.path().join(PAIR_LANE).join(FRONT_PROXY_CASE));
+    load_committed(&tmp.path().join(PAIR_LANE).join(FRONT_PROXY_LEAF));
 }
 
 // ---- paired controls: each clause, flipped, over a planted pair ----
@@ -240,11 +249,13 @@ fn an_absent_committed_half_fails_rather_than_skips() {
 // agreement with the predicate would otherwise make every control pass for
 // the wrong reason.
 
-/// `meta.json` for one planted half.
-fn planted_meta(case_id: &str, mode: &str) -> Value {
+/// `meta.json` for one planted half, keyed as its committed twin is.
+fn planted_meta(leaf: &str, mode: &str) -> Value {
+    let (case_id, config_variant) = leaf_parts(leaf);
     let mut meta = current_meta();
     meta["lane"] = json!(PAIR_LANE);
     meta["case_id"] = json!(case_id);
+    meta["config_variant"] = json!(config_variant);
     meta["client"]["connection_mode"] = json!(mode);
     meta
 }
@@ -283,7 +294,7 @@ fn front_proxy_headers() -> Vec<(&'static str, &'static str)> {
 
 /// One planted half's inputs, so a control can alter exactly one of them.
 struct PlantedHalf {
-    case_id: &'static str,
+    leaf: &'static str,
     meta: Value,
     headers: Vec<(&'static str, &'static str)>,
     body: Value,
@@ -292,8 +303,8 @@ struct PlantedHalf {
 impl PlantedHalf {
     fn base_url() -> Self {
         Self {
-            case_id: BASE_URL_CASE,
-            meta: planted_meta(BASE_URL_CASE, BASE_URL_MODE),
+            leaf: BASE_URL_LEAF,
+            meta: planted_meta(BASE_URL_LEAF, BASE_URL_MODE),
             headers: base_url_headers(),
             body: planted_body(0),
         }
@@ -301,8 +312,8 @@ impl PlantedHalf {
 
     fn front_proxy() -> Self {
         Self {
-            case_id: FRONT_PROXY_CASE,
-            meta: planted_meta(FRONT_PROXY_CASE, FRONT_PROXY_MODE),
+            leaf: FRONT_PROXY_LEAF,
+            meta: planted_meta(FRONT_PROXY_LEAF, FRONT_PROXY_MODE),
             headers: front_proxy_headers(),
             body: planted_body(0),
         }
@@ -316,7 +327,7 @@ fn violations_over(base: &PlantedHalf, front_proxy: &PlantedHalf) -> Vec<String>
         let dir = plant_driver_case_with_ingress(
             tmp.path(),
             PAIR_LANE,
-            half.case_id,
+            half.leaf,
             &half.meta,
             &half.headers,
             &half.body,

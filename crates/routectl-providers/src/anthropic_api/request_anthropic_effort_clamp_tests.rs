@@ -181,7 +181,8 @@ mod forwarded_effort {
 
     fn plain_turn_capture() -> Value {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../routectl-cli/tests/fixtures/driver/anthropic-api/plain-turn-01")
+            .join("../routectl-cli/tests/fixtures/driver/anthropic-api")
+            .join("plain-turn-01__claude-code__anthropic-api")
             .join("ingress_request.json");
         serde_json::from_str(&std::fs::read_to_string(path).expect("fixture reads"))
             .expect("fixture parses")

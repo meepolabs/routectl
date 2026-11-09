@@ -3665,15 +3665,22 @@ check "live-box mode still captures every completed request" "2" \
     "$(find "$(captured_of "$work")" -mindepth 1 -maxdepth 1 -type d ! -name '.tmp.*' | wc -l | tr -d ' ')"
 rm -rf "$work"
 
-# CONTROL 9: the committed `plain-turn-01` -- ONE candidate, one claim --
+# CONTROL 9: the committed `plain-turn-01` baseline -- ONE candidate, one claim --
 # is byte-unaffected. The selector changed which BODY fills a landing
 # directory when several candidates exist; with one candidate there is
 # nothing to select, and the committed fixture must still adjudicate PASS
 # against its own recorded claim.
 #
-# Guarded on the fixture's presence: this suite also runs from a
-# scripts-only tree.
-committed_fixture="$HERE/../crates/routectl-cli/tests/fixtures/driver/anthropic-api/plain-turn-01"
+# Guarded on the driver corpus ROOT's presence, not the fixture's: this
+# suite also runs from a scripts-only tree, but a checkout that carries the
+# corpus and not this fixture has lost or renamed it, and must fail here
+# rather than skip the control.
+committed_corpus="$HERE/../crates/routectl-cli/tests/fixtures/driver"
+committed_fixture="$committed_corpus/anthropic-api/plain-turn-01__claude-code__anthropic-api"
+if [ -d "$committed_corpus" ]; then
+    check "the committed baseline fixture is present under the driver corpus" "1" \
+        "$([ -d "$committed_fixture" ] && echo 1 || echo 0)"
+fi
 if [ -d "$committed_fixture" ]; then
     committed_pattern="$(meta_get "$committed_fixture/meta.json" wire_pattern)"
     check "the committed fixture records a claim to adjudicate" "1" \
@@ -3703,7 +3710,7 @@ if [ -d "$committed_fixture" ]; then
 else
     echo "PASS: no committed driver fixture in this checkout; control 9 is not asserted"
 fi
-unset committed_fixture
+unset committed_fixture committed_corpus
 
 # --- Case 20: --out confinement, both directions ---------------------
 # The confinement lives in scripts/drivers/lib/confine.sh, sourced by the

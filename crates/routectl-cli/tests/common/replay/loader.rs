@@ -119,6 +119,14 @@ const fn default_schema_version() -> u32 {
 pub struct FixtureClient {
     #[serde(default)]
     pub name: String,
+    /// Driver script that ran the client, by its basename under
+    /// `scripts/drivers/` (`claude-code`, `claude-code-print`). Separate
+    /// from the user-agent-derived [`FixtureClient::name`] because two
+    /// drivers can run one binary under one user-agent. The second token of
+    /// a driver fixture's landing directory name; empty on a live-box
+    /// capture and on any fixture predating the key.
+    #[serde(default)]
+    pub driver: String,
     /// Version the client SELF-REPORTED on the wire, parsed by the
     /// capture rig out of the ingress `user-agent`. Client-controlled,
     /// which is why [`FixtureClient::binary_version`] exists beside it.
@@ -154,8 +162,9 @@ pub struct FixtureClient {
 ///
 /// BACKWARD COMPATIBILITY, decided deliberately: the loader TOLERATES a
 /// fixture captured before this schema settled. The fields added here
-/// (`lane`, `case_id`, `client`, `config_sha`, `wire_pattern`, and
-/// `schema_version` itself) are additive, so `#[serde(default)]` lets the
+/// (`lane`, `case_id`, `client`, `config_sha`, `wire_pattern`,
+/// `config_variant`, `client_config_sha`, and `schema_version` itself)
+/// are additive, so `#[serde(default)]` lets the
 /// existing
 /// per-contributor corpus keep loading -- which is the point, since a
 /// clean break would zero out the only wire evidence anyone has on disk
@@ -220,6 +229,19 @@ pub struct FixtureMeta {
     /// fixture predating the key.
     #[serde(default)]
     pub wire_pattern: String,
+    /// Stem of the committed lane config a driver run booted
+    /// (`scripts/drivers/config/<stem>.toml`), which fixes egress, api
+    /// shape and connection mode. The third token of a driver fixture's
+    /// landing directory name; empty on a live-box capture and on any
+    /// fixture predating the key.
+    #[serde(default)]
+    pub config_variant: String,
+    /// sha256 of the committed driver script `scripts/drivers/<driver>.sh`
+    /// (the script only, not `lib/`). Empty on a live-box capture, when no
+    /// committed script carried the recorded name, and on any fixture
+    /// captured before the rig recorded it.
+    #[serde(default)]
+    pub client_config_sha: String,
     #[serde(default)]
     pub client: FixtureClient,
     pub stream: bool,
@@ -391,7 +413,7 @@ fn load_all(dirs: Vec<PathBuf>) -> LoadedCorpus {
 /// Loading, skipping, and reporting follow [`load_all`]; filesystem-level
 /// errors reading `canon_root` itself propagate as `Err`.
 ///
-/// The driver corpus is keyed `<lane>/<case_id>` and needs
+/// The driver corpus is keyed `<lane>/<leaf>` and needs
 /// [`discover_driver_fixtures`] instead. The depth belongs to the ROOT,
 /// not to the caller, which is why it is a second function rather than a
 /// parameter every live-box call site would have to pass correctly.
@@ -400,8 +422,9 @@ pub fn discover_fixtures(canon_root: &Path) -> Result<LoadedCorpus, ReplayError>
 }
 
 /// Walk the DRIVER corpus root, whose fixtures land two levels deep at
-/// `<root>/<lane>/<case_id>`. Only the case directories are offered to
-/// the loader; a lane directory is never itself a fixture.
+/// `<root>/<lane>/<case_id>__<driver>__<config_variant>`. Only the case
+/// directories are offered to the loader; a lane directory is never itself
+/// a fixture.
 ///
 /// A lane directory holding no case directory contributes nothing --
 /// there is no fixture there to load and no fixture there to skip, and
@@ -795,6 +818,63 @@ mod tests {
         assert_eq!(f.meta.client.version, "2.1.167");
     }
 
+    /// The three tokens a driver fixture's landing directory is keyed on
+    /// beyond its lane and case, plus the driver-script hash, survive the
+    /// load verbatim as the rig writes them.
+    #[test]
+    fn loader_round_trips_the_landing_key_fields_and_the_driver_script_hash() {
+        let tmp = tempdir().unwrap();
+        let dir = tmp.path().join("scenario");
+        fs::create_dir(&dir).unwrap();
+        let mut meta = current_meta();
+        meta["config_variant"] = json!("anthropic-api.front-proxy");
+        meta["client_config_sha"] = json!("0123abcd");
+        meta["client"]["driver"] = json!("claude-code-print");
+        write_required_files(&dir, &meta);
+
+        let f = load_fixture(&dir).unwrap();
+
+        assert_eq!(f.meta.config_variant, "anthropic-api.front-proxy");
+        assert_eq!(f.meta.client_config_sha, "0123abcd");
+        assert_eq!(f.meta.client.driver, "claude-code-print");
+    }
+
+    /// Paired negative for the round-trip above: all three keys are
+    /// ADDITIVE, so a fixture written before them loads with each value
+    /// empty rather than refused.
+    #[test]
+    fn loader_accepts_a_fixture_with_no_landing_key_fields() {
+        let tmp = tempdir().unwrap();
+        let dir = tmp.path().join("scenario");
+        fs::create_dir(&dir).unwrap();
+        let mut meta = current_meta();
+        let top = meta.as_object_mut().unwrap();
+        for key in ["config_variant", "client_config_sha"] {
+            assert!(
+                top.remove(key).is_some(),
+                "the planted meta must CARRY `{key}` for its removal to be the \
+                 condition under test",
+            );
+        }
+        assert!(
+            meta["client"]
+                .as_object_mut()
+                .unwrap()
+                .remove("driver")
+                .is_some(),
+            "the planted meta must CARRY client.driver for its removal to be \
+             the condition under test",
+        );
+        write_required_files(&dir, &meta);
+
+        let f = load_fixture(&dir).unwrap();
+
+        assert_eq!(f.meta.config_variant, "");
+        assert_eq!(f.meta.client_config_sha, "");
+        assert_eq!(f.meta.client.driver, "");
+        assert_eq!(f.meta.client.name, "claude-code");
+    }
+
     #[test]
     fn loader_accepts_upstream_and_egress_response_bodies_with_headers() {
         let tmp = tempdir().unwrap();
@@ -1100,7 +1180,10 @@ mod tests {
         assert_eq!(f.meta.case_id, "");
         assert_eq!(f.meta.config_sha, "");
         assert_eq!(f.meta.wire_pattern, "");
+        assert_eq!(f.meta.config_variant, "");
+        assert_eq!(f.meta.client_config_sha, "");
         assert_eq!(f.meta.client.name, "");
+        assert_eq!(f.meta.client.driver, "");
         assert_eq!(f.upstream_response_headers.len(), 1);
     }
 
@@ -1440,7 +1523,7 @@ mod tests {
 
     // ---- the two roots' walk depths, asserted separately ----
     //
-    // The driver corpus lands at `<root>/<lane>/<case_id>` and the
+    // The driver corpus lands at `<root>/<lane>/<leaf>` and the
     // live-box corpus is flat and request-id-keyed. The pairs below pin
     // BOTH directions on BOTH walkers: a depth fix that "works" by
     // walking everything everywhere would let a live-box fixture be

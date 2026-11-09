@@ -8,8 +8,11 @@
   "case_id": "plain-turn-01-fp",
   "config_sha": "3ea82b7462ea82cb3b847eb49d9248b646556e9cb67d4e4682a1bc784d4b6cc7",
   "wire_pattern": "baseline",
+  "config_variant": "anthropic-api.front-proxy",
+  "client_config_sha": "",
   "client": {
     "name": "claude-cli",
+    "driver": "claude-code",
     "version": "2.1.306",
     "binary_version": "2.1.306 (Claude Code)",
     "connection_mode": "front-proxy"

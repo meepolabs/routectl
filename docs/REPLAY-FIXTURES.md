@@ -167,7 +167,12 @@ egress, api shape and connection mode, and it is what keeps
 refuses anything else with exit 2 before it reads the trace. No hash is
 part of the key: a hash in the path would land a rerun under an edited
 config as a sibling instead of replacing it, and both hashes are in
-`meta.json`.
+`meta.json`. No model is part of the key either: the committed corpus holds
+one model per key, the model is recorded in `meta.json`, a recapture with
+another model replaces the fixture, and model sweeps stay in their per-cell
+output roots. `tests/driver_corpus_key.rs` asserts every committed case
+directory is the key its own `meta.json` composes and that no two compose
+the same key.
 
 `<out>` is the gitignored SCRATCH root by default
 (`.routectl-driver-scratch/` at the repo root; `scripts/capture_driver.sh
@@ -570,7 +575,7 @@ Fields:
 
   ```
   python3 scripts/drivers/lib/verify_pattern.py \
-    crates/routectl-cli/tests/fixtures/driver/anthropic-api/plain-turn-01 baseline
+    crates/routectl-cli/tests/fixtures/driver/anthropic-api/plain-turn-01__claude-code__anthropic-api baseline
   ```
 
   What the LOADER does with the value is unchanged: it stores the string

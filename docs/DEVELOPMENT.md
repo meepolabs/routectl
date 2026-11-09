@@ -844,7 +844,9 @@ What each run then does, in order:
    not proof. A daemon that never comes up aborts the run (exit 3) after
    printing the tail of the trace.
 4. Runs the driver command with cwd in the throwaway repo and the base
-   URL plus all four fixture pins exported. `--help` lists the exact
+   URL plus the five driver-facing fixture pins exported (case id, config
+   sha, connection mode, wire pattern, expected ingress; the rig-only pins
+   are set after the driver exits). `--help` lists the exact
    variable names -- that block is the contract a driver script codes
    against.
 5. After the driver exits, whatever its status, saves the daemon's
@@ -1038,17 +1040,15 @@ points at, no alias glob shadowing a nickname, a doc citation per id, and
 each Bedrock lane naming only its key's region. Add or drop a candidate in
 the lane config AND models.tsv together.
 
-**The variant is a FILENAME ONLY.** Deliberately absent, and looking for any
-of them is the wrong move:
+**The variant is the config stem, recorded twice and nowhere else.** It is
+the third token of the landing leaf (`<case-id>__<driver>__<lane config
+stem>`, under the lane the TRACE reports), so both twins land under
+`anthropic-api/` and are told apart by that token; and it is
+`meta.config_variant`. `config_sha` still identifies the exact config bytes
+that booted. Deliberately absent:
 
-- **No path segment.** A fixture lands under the lane the TRACE reports
-  (derived from `provider_kind`), so both twins land under
-  `anthropic-api/` and are distinguished by `case_id`. A variant segment
-  would be a fixture-format break.
-- **No `variant` field in `meta.json`.** `config_sha` already identifies
-  the exact config bytes that booted; a second record naming the variant
-  could only drift from it.
-- **No `--variant` flag and no second sha.** A wire-affecting
+- **No `--variant` flag and no second lane-config sha**
+  (`client_config_sha` hashes the driver script, not the lane config). A wire-affecting
   per-deployment value lives INSIDE the hashed file, where the one hash
   already covers it.
 
@@ -1192,7 +1192,7 @@ scratch run never suppresses a later corpus recapture of the same case.
 
 ```
 bash scripts/promote_fixture.sh \
-  --from .routectl-driver-scratch/anthropic-api/plain-turn-01 \
+  --from .routectl-driver-scratch/anthropic-api/plain-turn-01__claude-code__anthropic-api \
   --scratch-root .routectl-driver-scratch \
   --expected-ingress anthropic
 ```
@@ -1264,7 +1264,7 @@ with the failing clause on stderr:
 
 ```
 python3 scripts/drivers/lib/verify_pattern.py \
-  crates/routectl-cli/tests/fixtures/driver/anthropic-api/plain-turn-01 baseline
+  crates/routectl-cli/tests/fixtures/driver/anthropic-api/plain-turn-01__claude-code__anthropic-api baseline
 ```
 
 Every predicate keys on the INGRESS side only -- the case controls what the
@@ -1382,7 +1382,8 @@ scripts/capture_driver.sh --lane anthropic-api --case tools-multiturn-01 \
   --expected-ingress anthropic -- scripts/drivers/claude-code-print.sh
 ```
 
-That lands `.routectl-driver-scratch/anthropic-api/tools-multiturn-01/` --
+That lands
+`.routectl-driver-scratch/anthropic-api/tools-multiturn-01__claude-code-print__anthropic-api/` --
 scratch, not the corpus; promote it with `scripts/promote_fixture.sh` once
 you have reviewed it. Add `--keep` to retain the run workspace, which holds
 the trace, the client's own output, and `client.txt` (the version the driver

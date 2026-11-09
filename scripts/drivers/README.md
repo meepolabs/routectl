@@ -39,8 +39,13 @@ as `meta.client_config_sha` (the script only, not `lib/`; empty, with a
 warning, when no committed script has that name). `hermes-anthropic.sh` and `pi-anthropic.sh` delegate to
 `external-agent-cli.sh` and name themselves through
 `ROUTECTL_DRIVER_AGENT_NAME`; run directly, that driver records
-`external-agent-cli`. A name that is not a lowercase hyphenated token
-(`^[a-z0-9]+(-[a-z0-9]+)*$`) is refused with exit 2 before the client runs.
+`external-agent-cli`. Two checks govern the name. Every recorded name is a
+landing-key token, so the rig refuses one that does not match
+`^[a-z0-9]+([.-][a-z0-9]+)*$` with exit 2 before it reads the trace; the
+driver has already run by then, so that refusal costs the run. On top of
+that, `external-agent-cli.sh` checks `ROUTECTL_DRIVER_AGENT_NAME` against
+the stricter hyphen-only form `^[a-z0-9]+(-[a-z0-9]+)*$` (no `.`) and
+refuses with exit 2 before the client runs.
 
 The three hermes files share [lib/hermes.sh](lib/hermes.sh): it points
 `HERMES_HOME` inside the run workspace, clears every inherited variable

@@ -59,7 +59,7 @@ struct LoadedRoot {
 }
 
 /// The two roots' walks differ in DEPTH: the live-box corpus is flat and
-/// request-id-keyed, the driver corpus is `<lane>/<case_id>`.
+/// request-id-keyed, the driver corpus is `<lane>/<leaf>`, two levels.
 #[derive(Clone, Copy)]
 enum Walk {
     LiveBox,

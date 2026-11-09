@@ -32,8 +32,11 @@ pub fn current_meta() -> Value {
         "case_id": "smoke",
         "config_sha": "abc123",
         "wire_pattern": "baseline",
+        "config_variant": "anthropic-api",
+        "client_config_sha": "def456",
         "client": {
             "name": "claude-code",
+            "driver": "claude-code",
             "version": "2.1.167",
             "binary_version": "2.1.167 (Claude Code)",
             "connection_mode": "base-url",
@@ -80,7 +83,8 @@ pub fn plant_fixture(dir: &Path) {
     write_required_files(dir, &current_meta());
 }
 
-/// Plant a loadable driver-corpus case at `<root>/<lane>/<case_id>` and
+/// Plant a loadable driver-corpus case at `<root>/<lane>/<case_id>` (the
+/// leaf is the bare case id; the walk does not read the name) and
 /// return its path. `lane` is an egress lane token; both `meta.lane` and
 /// `meta.provider_kind` are stamped from it, the latter in the fixture
 /// spelling, so the case resolves through
@@ -104,7 +108,7 @@ pub fn plant_driver_case(root: &Path, lane: &str, case_id: &str) -> PathBuf {
 
 /// Plant a driver-corpus case whose INGRESS half is caller-supplied:
 /// the whole `meta.json`, the ingress header pairs, and the ingress body.
-/// Returns the case path.
+/// The case lands at `<root>/<lane>/<leaf>`; returns that path.
 ///
 /// The outgoing half stays the minimal one [`write_required_files`]
 /// writes, because a consumer of this variant is comparing captured
@@ -113,12 +117,12 @@ pub fn plant_driver_case(root: &Path, lane: &str, case_id: &str) -> PathBuf {
 pub fn plant_driver_case_with_ingress(
     root: &Path,
     lane: &str,
-    case_id: &str,
+    leaf: &str,
     meta: &Value,
     ingress_headers: &[(&str, &str)],
     ingress_body: &Value,
 ) -> PathBuf {
-    let dir = root.join(lane).join(case_id);
+    let dir = root.join(lane).join(leaf);
     fs::create_dir_all(&dir).unwrap();
     write_required_files(&dir, meta);
     let pairs: Vec<Value> = ingress_headers
