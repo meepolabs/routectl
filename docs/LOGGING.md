@@ -1438,6 +1438,7 @@ and never touches the network.
 | INFO | A provider became activated | `provider`, `kind`, `trigger`, `transition=activated`, `referenced_by_aliases` | `activation inventory` |
 | INFO | A provider became unresolved (lost its credential) | `provider`, `kind`, `trigger`, `transition=deactivated`, `reason`, `referenced_by_aliases` | `activation inventory` |
 | WARN | No OAuth credential store to probe (no HOME/XDG) | `trigger` | `activation inventory: no OAuth credential store available to probe` |
+| WARN | At boot only: alias-reached provider entries whose `oauth://` credential is unresolved (never activated, so no transition reports them) | `trigger=startup`, `count`, `entries`, `omitted` | `activation inventory: alias-referenced provider entries have no usable credential` |
 
 Nothing is emitted when a recompute changes nothing (a routine token
 refresh that keeps every provider activated is silent). Field vocabulary:
@@ -1450,10 +1451,19 @@ refresh that keeps every provider activated is silent). Field vocabulary:
 | `transition` | `activated` or `deactivated`. |
 | `reason` | Deactivation reason code (deactivated only): `oauth_missing`, `oauth_expired`, `oauth_store_unavailable`, `not_cataloged`, or `unknown`. |
 | `referenced_by_aliases` | `true` when a configured provider consumes this credential AND is reachable via the alias table; `false` for a bare login with no matching config. |
+| `count` | Boot summary only: how many alias-reached provider entries have an unresolved credential. |
+| `entries` | Boot summary only: the first 8 of those `[providers.X]` keys in config order, sanitized. |
+| `omitted` | Boot summary only: `count` minus the number of keys `entries` names. |
 
 These fields carry only display-safe discriminants -- never a token, a
 filesystem path, or an env value. The initially-activated set at boot
 surfaces as `transition=activated` events with `trigger=startup`.
+
+The boot summary fires once per process, never on a reload. An entry it
+names cannot serve its alias chains until its credential resolves: log
+its seat in (`routectl login <provider> --label <label>`, or `routectl
+login <provider>` for the default seat), which then reports a
+`transition=activated` event.
 
 ```bash
 # Watch activation transitions (login / logout / expiry) live.
@@ -2393,7 +2403,7 @@ Repeat behavior is noted where the line is latched, sampled, or aggregated
 | WARN / ERROR | `routectl_cli::server::file_watch` | `watch target has no parent directory`, `failed to install fs watch on parent directory`, `watched file was removed`, `reload coordinator channel closed` (WARN); `fs watcher backend error` (ERROR) | Hot reload for that file is off or degraded: raise inotify limits or reload with SIGHUP. A removed file should be restored (in-memory state is kept). A closed coordinator outside shutdown means the reload pipeline is dead: restart. |
 | WARN | `routectl_cli::server` | `WARNING: routectl bound to {host}, exposing your local LLM credentials` | The listener is reachable beyond loopback: bind to loopback unless public exposure is intended and token-protected. |
 | ERROR | `routectl_cli::server::{purge_settlement,serve}` | `capability purge settlements did not finish before the shutdown deadline`, `a capability purge settlement did not complete ...`, `a capability purge settlement could not be accounted for` | The registry and ledger may disagree for a purged key; the daemon stops on purpose in the terminal cases. Check usage DB health, restart, and re-check the purged keys. |
-| WARN | `routectl_cli::server::reload` | `file-watch init failed`, `failed to install SIGHUP handler`, `activation inventory: no OAuth credential store available to probe`, `credentials reload failed`, `credentials seat-set changed but router rebuild failed`, `config reload failed: ...`, `config reload swapped routing state, but the listed fields require a daemon restart ...` | A reload path is off or a reload was rejected and the previous state kept. Fix the named config or credentials (`routectl doctor` shows why the file is refused; the last rejected reload is shown on `/status/doctor` and the dashboard), set HOME/XDG for OAuth providers, restart for `restart_required` fields, and file a bug for a panicked loader. |
+| WARN | `routectl_cli::server::reload` | `file-watch init failed`, `failed to install SIGHUP handler`, `activation inventory: no OAuth credential store available to probe`, `activation inventory: alias-referenced provider entries have no usable credential`, `credentials reload failed`, `credentials seat-set changed but router rebuild failed`, `config reload failed: ...`, `config reload swapped routing state, but the listed fields require a daemon restart ...` | A reload path is off or a reload was rejected and the previous state kept. Fix the named config or credentials (`routectl doctor` shows why the file is refused; the last rejected reload is shown on `/status/doctor` and the dashboard), set HOME/XDG for OAuth providers, restart for `restart_required` fields, and file a bug for a panicked loader. |
 | WARN | `routectl_cli::server::reload_shutdown` | `reload task join failed during shutdown`, `reload task did not stop within deadline` | A reload task panicked or hung at shutdown: file a bug with the preceding lines; check the usage DB if it recurs. |
 | ERROR | `routectl_cli::server::seat_driver` | `seat driver stopped before shutdown; managed logins are no longer refreshed in the background`; field `exit` | The background refresh loop ended while the daemon kept serving. Seats still refresh on demand when a request uses them; restart the daemon to restore background refresh, and file a bug with the preceding lines. |
 | WARN | `routectl_cli::server::router_build` | `class policy warning`, `codex identity warning`, `per-block breakpoint warning`, `cloud-code host warning`, `cloud-code model warning` (once per build) | A config advisory: adjust or remove the named knob, or accept it. |

@@ -7,7 +7,7 @@ use arc_swap::ArcSwap;
 use routectl_auth::{LocalProbe, SecretStore};
 use routectl_router::{
     ActivationDelta, ActivationState, CatalogOverlay, Config, Router, compute_activation,
-    diff_activation,
+    diff_activation, unresolved_alias_referenced_entries,
 };
 use routectl_usage::UsageHandle;
 use tokio::sync::{mpsc, watch};
@@ -239,6 +239,11 @@ struct ReloadContext {
 /// inventory"`); documented in `docs/LOGGING.md`.
 const ACTIVATION_EVENT_MSG: &str = "activation inventory";
 
+/// Most provider entry ids the boot-time unresolved summary names; the rest
+/// are counted in its `omitted` field so one line stays bounded however
+/// many entries a config declares.
+const MAX_LOGGED_UNRESOLVED_ENTRIES: usize = 8;
+
 /// What caused an activation recompute. Surfaced verbatim as the `trigger`
 /// field on every activation audit event; the string vocabulary is a
 /// stable contract (see `docs/LOGGING.md`). The `ConfigChange` /
@@ -301,7 +306,33 @@ pub(super) async fn apply_activation(
     let prev = activation_swap.load_full();
     let delta = diff_activation(&prev, &next);
     emit_activation_delta(&delta, trigger, oauth_store.is_none());
+    if matches!(trigger, ActivationTrigger::Startup) {
+        warn_unresolved_at_startup(&unresolved_alias_referenced_entries(&next, config));
+    }
     activation_swap.store(Arc::new(next));
+}
+
+/// One WARN naming the alias-referenced provider entries whose credential is
+/// unresolved at boot. The transition diff never reports these (they were
+/// never activated), so without this line a fallback onto such an entry
+/// stays silent. Names at most [`MAX_LOGGED_UNRESOLVED_ENTRIES`] sanitized
+/// entry ids; nothing when `entries` is empty.
+fn warn_unresolved_at_startup(entries: &[&str]) {
+    if entries.is_empty() {
+        return;
+    }
+    let named: Vec<String> = entries
+        .iter()
+        .take(MAX_LOGGED_UNRESOLVED_ENTRIES)
+        .map(|id| routectl_core::sanitize_for_log(id))
+        .collect();
+    tracing::warn!(
+        trigger = ActivationTrigger::Startup.as_str(),
+        count = entries.len(),
+        entries = ?named,
+        omitted = entries.len() - named.len(),
+        "{ACTIVATION_EVENT_MSG}: alias-referenced provider entries have no usable credential",
+    );
 }
 
 /// Map an [`ActivationDelta`] to tracing events -- the ONLY point where

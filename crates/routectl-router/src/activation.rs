@@ -330,6 +330,35 @@ pub fn diff(prev: &ActivationState, next: &ActivationState) -> ActivationDelta {
     }
 }
 
+/// Config provider entries the alias table reaches whose `oauth://`
+/// credential is unresolved in `state`, in config-key order. An entry with
+/// no `oauth://` ref, or whose OAuth id `state` does not record, is never
+/// listed. Config-only beyond `state`; no secret resolution, no network.
+#[must_use]
+pub fn unresolved_alias_referenced_entries<'a>(
+    state: &ActivationState,
+    config: &'a Config,
+) -> Vec<&'a str> {
+    let reached_providers: BTreeSet<&str> = reachable_model_nicknames(config)
+        .iter()
+        .filter_map(|nick| config.models.get(nick))
+        .map(|model| model.provider.as_str())
+        .collect();
+    config
+        .providers
+        .iter()
+        .filter(|(key, _)| reached_providers.contains(key.as_str()))
+        .filter(|(_, entry)| {
+            entry
+                .api_key_ref()
+                .and_then(oauth_id_from_api_key_ref)
+                .and_then(|oauth_id| state.get(oauth_id))
+                .is_some_and(|recorded| !recorded.status.is_activated())
+        })
+        .map(|(key, _)| key.as_str())
+        .collect()
+}
+
 /// True iff some configured provider references `oauth://<oauth_id>` (bare
 /// or seat-labeled) AND that provider is reachable via the alias table
 /// (alias -> nickname -> model -> provider). Config-only; no secret
@@ -789,6 +818,50 @@ mod tests {
         #[cfg(feature = "gemini")]
         expected.push("antigravity");
         assert_eq!(gated_through, expected);
+    }
+
+    #[test]
+    fn unresolved_entries_lists_only_alias_reached_oauth_entries_in_key_order() {
+        let mut cfg = Config::default();
+        for (key, key_ref) in [
+            ("b-seat", "oauth://anthropic#b"),
+            ("a-seat", "oauth://anthropic#a"),
+            ("env-entry", "env://ANTHROPIC_KEY"),
+            ("live-seat", "oauth://xai"),
+            ("unreached", "oauth://anthropic#c"),
+        ] {
+            cfg.providers
+                .insert(key.to_string(), ProviderEntry::anthropic_api(key_ref));
+            cfg.models.insert(
+                format!("{key}-m"),
+                ModelEntry::new(key, "claude-sonnet-4-5"),
+            );
+        }
+        cfg.aliases.insert(
+            "default".to_string(),
+            AliasValue::Chain(
+                ["b-seat-m", "a-seat-m", "env-entry-m", "live-seat-m"]
+                    .map(String::from)
+                    .to_vec(),
+            ),
+        );
+        let state = state_with(vec![
+            (
+                "anthropic",
+                entry(
+                    "anthropic-api",
+                    ActivationStatus::Unresolved {
+                        reason: UnresolvedReason::OauthMissing,
+                    },
+                ),
+            ),
+            ("xai", entry("openai-compat", ActivationStatus::Activated)),
+        ]);
+
+        assert_eq!(
+            unresolved_alias_referenced_entries(&state, &cfg),
+            vec!["a-seat", "b-seat"]
+        );
     }
 
     #[test]

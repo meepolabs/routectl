@@ -459,3 +459,223 @@ async fn failed_config_reload_keeps_previous_activation() {
         "a failed config reload must leave the activation state untouched",
     );
 }
+
+/// Message of the boot-time unresolved-entry summary WARN.
+const UNRESOLVED_AT_BOOT_MSG: &str =
+    "activation inventory: alias-referenced provider entries have no usable credential";
+
+/// A config whose `referenced` provider entries each consume a seat of
+/// `oauth://anthropic` and are reached by an alias, plus one `unreferenced`
+/// entry on the same credential that no alias reaches.
+fn config_with_anthropic_entries(referenced: &[&str]) -> Config {
+    use routectl_router::{AliasValue, ModelEntry, ProviderEntry};
+    let mut cfg = Config::default();
+    let mut chain = Vec::new();
+    for key in referenced {
+        cfg.providers.insert(
+            (*key).to_string(),
+            ProviderEntry::anthropic_api(format!("oauth://anthropic#{key}")),
+        );
+        let nickname = format!("{key}-model");
+        cfg.models
+            .insert(nickname.clone(), ModelEntry::new(*key, "claude-sonnet-4-5"));
+        chain.push(nickname);
+    }
+    cfg.providers.insert(
+        "unreferenced".to_string(),
+        ProviderEntry::anthropic_api("oauth://anthropic#unreferenced"),
+    );
+    cfg.models.insert(
+        "unreferenced-model".to_string(),
+        ModelEntry::new("unreferenced", "claude-sonnet-4-5"),
+    );
+    cfg.aliases
+        .insert("default".to_string(), AliasValue::Chain(chain));
+    cfg
+}
+
+fn unresolved_at_boot_warns(
+    events: &[routectl_testkit::CapturedEvent],
+) -> Vec<&routectl_testkit::CapturedEvent> {
+    events
+        .iter()
+        .filter(|e| e.message == UNRESOLVED_AT_BOOT_MSG)
+        .collect()
+}
+
+#[tokio::test]
+async fn startup_warns_once_naming_unresolved_alias_referenced_entries() {
+    // Arrange: no anthropic login, two alias-reached entries on it.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("credentials.json");
+    seed_missing(&path);
+    let cfg = config_with_anthropic_entries(&["fallback-a", "fallback-b"]);
+    let swap = Arc::new(ArcSwap::from_pointee(ActivationState::default()));
+
+    // Act
+    let ((), events) = with_capture(apply_activation(
+        &oauth_at(&path).await,
+        &cfg,
+        &swap,
+        ActivationTrigger::Startup,
+    ))
+    .await;
+
+    // Assert: one WARN, both referenced entries named, the unreferenced
+    // entry absent.
+    let warns = unresolved_at_boot_warns(&events);
+    assert_eq!(warns.len(), 1, "one summary per boot, got {warns:?}");
+    let warn = warns[0];
+    assert_eq!(warn.level, tracing::Level::WARN);
+    assert_eq!(warn.target, "routectl_cli::server::reload");
+    assert_eq!(warn.field("trigger"), Some("startup"));
+    assert_eq!(warn.field("count"), Some("2"));
+    assert_eq!(
+        warn.field("entries"),
+        Some(r#"["fallback-a", "fallback-b"]"#)
+    );
+    assert_eq!(warn.field("omitted"), Some("0"));
+}
+
+#[tokio::test]
+async fn startup_warn_names_at_most_the_cap_and_counts_the_rest() {
+    // Arrange: three more unresolved referenced entries than the cap.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("credentials.json");
+    seed_missing(&path);
+    let keys: Vec<String> = (0..MAX_LOGGED_UNRESOLVED_ENTRIES + 3)
+        .map(|i| format!("entry-{i:02}"))
+        .collect();
+    let key_refs: Vec<&str> = keys.iter().map(String::as_str).collect();
+    let cfg = config_with_anthropic_entries(&key_refs);
+    let swap = Arc::new(ArcSwap::from_pointee(ActivationState::default()));
+
+    // Act
+    let ((), events) = with_capture(apply_activation(
+        &oauth_at(&path).await,
+        &cfg,
+        &swap,
+        ActivationTrigger::Startup,
+    ))
+    .await;
+
+    // Assert: exactly the first `cap` ids in config order, plus the count.
+    let warns = unresolved_at_boot_warns(&events);
+    assert_eq!(warns.len(), 1, "one summary per boot, got {warns:?}");
+    let expected_named = format!("{:?}", &keys[..MAX_LOGGED_UNRESOLVED_ENTRIES]);
+    assert_eq!(warns[0].field("entries"), Some(expected_named.as_str()));
+    assert_eq!(
+        warns[0].field("count"),
+        Some((MAX_LOGGED_UNRESOLVED_ENTRIES + 3).to_string().as_str())
+    );
+    assert_eq!(warns[0].field("omitted"), Some("3"));
+}
+
+#[tokio::test]
+async fn startup_warn_sanitizes_entry_ids() {
+    // Arrange: an operator-chosen entry key carrying an ANSI escape.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("credentials.json");
+    seed_missing(&path);
+    let cfg = config_with_anthropic_entries(&["evil\u{1b}[31mkey"]);
+    let swap = Arc::new(ArcSwap::from_pointee(ActivationState::default()));
+
+    // Act
+    let ((), events) = with_capture(apply_activation(
+        &oauth_at(&path).await,
+        &cfg,
+        &swap,
+        ActivationTrigger::Startup,
+    ))
+    .await;
+
+    // Assert: the id is rendered through the log sanitizer.
+    let warns = unresolved_at_boot_warns(&events);
+    assert_eq!(warns.len(), 1, "got {warns:?}");
+    let expected = format!(
+        "{:?}",
+        [routectl_core::sanitize_for_log("evil\u{1b}[31mkey")]
+    );
+    assert_eq!(warns[0].field("entries"), Some(expected.as_str()));
+    assert!(!warns[0].field("entries").unwrap().contains('\u{1b}'));
+}
+
+#[tokio::test]
+async fn startup_emits_no_unresolved_warn_when_referenced_entries_resolve() {
+    // Arrange: anthropic logged in; the referenced entries resolve.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("credentials.json");
+    seed_present(&path, "anthropic", now_unix() + 3600);
+    let cfg = config_with_anthropic_entries(&["fallback-a"]);
+    let swap = Arc::new(ArcSwap::from_pointee(ActivationState::default()));
+
+    // Act
+    let ((), events) = with_capture(apply_activation(
+        &oauth_at(&path).await,
+        &cfg,
+        &swap,
+        ActivationTrigger::Startup,
+    ))
+    .await;
+
+    // Assert
+    let warns = unresolved_at_boot_warns(&events);
+    assert!(
+        warns.is_empty(),
+        "no summary when all resolve, got {warns:?}"
+    );
+}
+
+#[tokio::test]
+async fn startup_emits_no_unresolved_warn_for_unreferenced_entries_only() {
+    // Arrange: no login; the only oauth entry is unreached by any alias.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("credentials.json");
+    seed_missing(&path);
+    let cfg = config_with_anthropic_entries(&[]);
+    let swap = Arc::new(ArcSwap::from_pointee(ActivationState::default()));
+
+    // Act
+    let ((), events) = with_capture(apply_activation(
+        &oauth_at(&path).await,
+        &cfg,
+        &swap,
+        ActivationTrigger::Startup,
+    ))
+    .await;
+
+    // Assert
+    let warns = unresolved_at_boot_warns(&events);
+    assert!(
+        warns.is_empty(),
+        "unreferenced entries never warn, got {warns:?}"
+    );
+}
+
+#[tokio::test]
+async fn reload_recompute_emits_no_unresolved_warn() {
+    // Arrange: boot with an unresolved referenced entry.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("credentials.json");
+    seed_missing(&path);
+    let cfg = config_with_anthropic_entries(&["fallback-a"]);
+    let swap = Arc::new(ArcSwap::from_pointee(ActivationState::default()));
+    let oauth = oauth_at(&path).await;
+    apply_activation(&oauth, &cfg, &swap, ActivationTrigger::Startup).await;
+
+    // Act: the reload recomputes keep the entry unresolved.
+    let (((), ()), events) = with_capture(async {
+        (
+            apply_activation(&oauth, &cfg, &swap, ActivationTrigger::ConfigChange).await,
+            apply_activation(&oauth, &cfg, &swap, ActivationTrigger::CredentialsChange).await,
+        )
+    })
+    .await;
+
+    // Assert
+    let warns = unresolved_at_boot_warns(&events);
+    assert!(
+        warns.is_empty(),
+        "reloads never repeat the boot summary, got {warns:?}"
+    );
+}

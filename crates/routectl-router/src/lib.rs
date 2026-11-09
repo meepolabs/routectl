@@ -83,7 +83,7 @@ pub mod wire_check_state;
 pub use activation::{
     ActivatedChange, ActivationDelta, ActivationEntry, ActivationState, ActivationStatus,
     DeactivatedChange, UnresolvedReason, compute_activation, diff as diff_activation,
-    provider_kind_for_oauth_id,
+    provider_kind_for_oauth_id, unresolved_alias_referenced_entries,
 };
 #[cfg(any(test, feature = "test-utils"))]
 pub use beta_capability::beta_capability_key;
