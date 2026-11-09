@@ -2040,8 +2040,9 @@ releases.
 The other two variants evict a resident entry to admit the new one:
 `registry_cap` when the registry is at capacity, evicting its oldest entry,
 and `beta_lane_cap` when a new beta-flag key arrives on a full lane, evicting
-that lane's youngest beta-flag entry (latest first seen) and nothing else, so
-a burst of new flags churns among itself. The lane bound is checked first. A
+that lane's beta-flag entry with the fewest observations (the latest first
+seen among equals) and nothing else, so a burst of new flags churns among
+itself. The lane bound is checked first. A
 safety valve, not a routine cache policy.
 
 | Field | Type | Meaning |
@@ -2060,7 +2061,7 @@ WARN routectl_router::learned_capability event=evict reason=registry_cap
 WARN routectl_router::learned_capability event=evict reason=beta_lane_cap
   state_key=anthropic#claude-sonnet-4-5 capability_key=beta:zz-flag-0
   max_beta_entries_per_lane=32
-  "learned-capability lane at its beta-flag cap; evicted the lane's youngest beta entry"
+  "learned-capability lane at its beta-flag cap; evicted the lane's least-observed beta entry"
 ```
 
 ### `route_away` (DEBUG / WARN)

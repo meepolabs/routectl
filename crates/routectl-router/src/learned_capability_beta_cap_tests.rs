@@ -1,6 +1,7 @@
 //! Tests for the per-lane beta-flag bound: a lane spraying beta flags replaces
-//! its own youngest beta entry (latest `first_seen`) instead of evicting
-//! anything else, so established entries outlive a burst of new flags.
+//! its beta entry with the fewest observations (the youngest `first_seen`
+//! among equals) instead of evicting anything else, so established entries
+//! outlive a burst of new flags.
 
 use super::*;
 use crate::beta_capability::beta_capability_key;
@@ -167,6 +168,52 @@ fn an_established_negative_survives_a_burst_of_new_flags_and_keeps_acting() {
         .negative_state_in_generation(reg.generation(), LANE, &established, KIND, base + secs(100))
         .map(|(state, _)| state);
     assert_eq!(state, Some(NegativeState::Acting));
+}
+
+#[test]
+fn beta_lane_eviction_spares_established_entries() {
+    // Arrange -- a full lane of single-observation betas, all older than one
+    // entry that has been observed three times.
+    let reg = registry();
+    let base = Instant::now();
+    let established = beta_capability_key("zz-established").expect("well-formed flag");
+    fill_betas(&reg, LANE, KIND, MAX_BETA_ENTRIES_PER_LANE - 1, base);
+    for n in 0..3 {
+        learn(&reg, LANE, KIND, &established, base + secs(50 + n));
+    }
+    let observations = reg
+        .export_entries()
+        .into_iter()
+        .find(|e| e.feature_key == established)
+        .map(|e| e.observations);
+    assert_eq!(observations, Some(3), "the fixture's established entry");
+    assert_eq!(beta_count(&reg, LANE, KIND), MAX_BETA_ENTRIES_PER_LANE);
+    let youngest_single = beta(MAX_BETA_ENTRIES_PER_LANE - 2);
+    let newcomer = beta(MAX_BETA_ENTRIES_PER_LANE);
+
+    // Act
+    let events = routectl_testkit::capture_events(|| {
+        learn(&reg, LANE, KIND, &newcomer, base + secs(100));
+    });
+
+    // Assert
+    let keys = resident(&reg, LANE, KIND);
+    assert_eq!(keys.len(), MAX_BETA_ENTRIES_PER_LANE);
+    assert!(
+        keys.contains(&established),
+        "the established entry survives"
+    );
+    assert!(
+        !keys.contains(&youngest_single),
+        "the youngest single-observation entry is the victim"
+    );
+    assert!(keys.contains(&beta(0)));
+    assert!(keys.contains(&newcomer));
+    let warn = events
+        .iter()
+        .find(|e| e.level == tracing::Level::WARN && e.field("event") == Some("evict"))
+        .expect("the lane eviction must emit an evict WARN");
+    assert_eq!(warn.field("capability_key"), Some(youngest_single.as_str()));
 }
 
 #[test]

@@ -180,6 +180,13 @@ fn malformed_flags_are_rejected() {
 }
 
 #[test]
+fn empty_flag_key_reads_back_as_empty_flag() {
+    assert_eq!(beta_capability_key(""), None);
+    assert_eq!(beta_flag_of(BETA_CAPABILITY_PREFIX), Some(""));
+    assert!(capability_key_is_beta(BETA_CAPABILITY_PREFIX));
+}
+
+#[test]
 fn a_key_round_trips_to_its_flag() {
     let key = dated_key();
 
