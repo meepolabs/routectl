@@ -44,7 +44,10 @@ license.
   (`AnthropicThinking`, `ThinkingObject`), and the
   `RoutectlInternal` carrier (resolved per-model knobs plus the
   transport-internal capture fields, never serialized to the wire -- see the
-  struct's own docs for the field-by-field contract)
+  struct's own docs for the field-by-field contract), incl.
+  `responses_cache_breakpoints`: the `ResponsesCacheBreakpoint` records
+  (text-block ordinal, text digest, verbatim value, client pointer) the
+  Responses ingress takes off client content blocks
 - `src/beta_assembly_report.rs` -- `BetaAssemblyReport`: clone-shared
   per-attempt slot where an anthropic-vocabulary egress records the
   `BetaAssembly` it computed at header / bag assembly (the beta floor it never
@@ -141,7 +144,9 @@ license.
   `anthropic-ratelimit-unified-*` quota/overage family, raw strings + `extras`
   forward-compat + `is_overage()`) and `CodexQuota` (the `x-codex-*` family:
   `active_limit`, `primary_used_percent`, `primary_reset_at` + `extras`),
-  `OpenAiChatEnvelope` (`openai_chat`), plus
+  `OpenAiChatEnvelope` (`openai_chat`), `ResponsesEnvelope`
+  (`openai_responses`: the upstream `message` item id and `created_at` a
+  Responses ingress echoes, field-wise `merge`), plus
   `OpeningUsage` (an Anthropic-shape stream's first-event input + disjoint
   cache fields, exact, with `OpeningUsageOrigin` wire label, `observed_at` and
   `from_vendor_endpoint` (first-party host or InvokeModel vs any compatible
@@ -352,8 +357,9 @@ license.
 - `src/parsed_error_body.rs` -- `ParsedErrorBody`: the single capped parse
   of an upstream error body carried on `Error::Upstream` (read via
   `Error::parsed_body`), plus its envelope / `error.*` accessors and
-  `upstream_message_or_excerpt`; `UpstreamBody::new` is the only producer,
-  pairing the text with the parse of exactly that text
+  `upstream_message_or_excerpt`; `UpstreamBody` pairs the text with the parse
+  of exactly that text, built by `new` (parses it) or `from_parse` (keeps a
+  parse the caller already made, under the same cap and shape rule)
 - `src/test_utils.rs` -- single source of truth for the cross-crate
   contract-test fixture builders (`scenarios::*`, `user_msg`,
   `get_weather_tool`); gated behind `#[cfg(any(test, feature =
@@ -567,7 +573,9 @@ license.
   `render_skipped_format`, the one renderer both the Anthropic and the
   OpenAI Responses egresses use for a skipped detail's format tag: a known
   tag echoes, an unrecognized one becomes `<unrecognized>` under
-  `ROUTECTL_LOG_REDACT_PROMPTS`; gated on `anthropic-api` / `openai-responses`
+  `ROUTECTL_LOG_REDACT_PROMPTS`; the module compiles under `anthropic-api` /
+  `openai-compat` / `openai-responses` (the constant is read by every lane that
+  stamps it), the renderer only under `anthropic-api` / `openai-responses`
 - `src/model_profile.rs` -- `uses_modern_chat_shape`, the OpenAI chat-lane
   shape rule (sampling params dropped, `max_tokens` sent as
   `max_completion_tokens`); read only by the openai and deepseek dialects
@@ -750,7 +758,9 @@ license.
   `carries_unmodeled_thinking_type` (the cross-dialect
   `thinking_type_unrepresentable` predicate); under `cfg(test)` the registry
   is per-thread, so this crate's unit tests assert counters without serial
-  guards (integration tests share the process-global one)
+  guards (integration tests share the process-global one), and
+  `assert_lane_ran_uncounted` asserts a class stayed at zero only alongside a
+  `lane_seen` delta of exactly one
 - `src/translation_drop_observation_tests.rs` -- cross-lane guard: every
   lane's request entry counts a client request once however often it is
   normalized when it carries an observation slot, once per call otherwise
@@ -842,7 +852,8 @@ license.
   `translate_tool`, `translate_system`, `lift_legacy_system_stripped`,
   `build_output_config`, `is_active_thinking_type` and (cfg `bedrock`)
   `compose_thinking`, `client_sent_output_config_effort` for the Bedrock
-  egress;
+  egress; on the Bedrock Mantle lane withholds the client `metadata` and
+  ships the operator `payload_extras` value in its place;
   also owns
   `drop_unrepresentable_output_format_keys`, the assembled-body scrub of the
   `output_config.format` keys Anthropic rejects (`name`, `strict`) -- that
@@ -1007,10 +1018,12 @@ license.
   first-party bearer from `OpenAiCompatConfig::auth` (a `TokenSource`) once per
   upstream request and forwards `on_auth_failure` to it (`new` wraps a static
   key in a `StaticToken`, `new_with_auth` takes any source); owns
-  `ThinkTagAccumulator` for cross-chunk `<think>` state (`take_think_flush`);
-  stream tail via `classify_stream_tail` and `missing_terminal`;
+  `ThinkTagAccumulator` for cross-chunk `<think>` state (`take_think_flush`
+  emits held bytes before `[DONE]`, EOF, a transport error or an unusable
+  event); stream tail via `classify_stream_tail` and `missing_terminal`;
   `map_openai_compat_upstream_error` builds the client error from an
-  `upstream_error::UpstreamErrorRead` (tokens, gated `Retry-After`, request
+  `upstream_error::UpstreamErrorRead` over the body's one capped parse
+  (`UpstreamBody::from_parse`; tokens, gated `Retry-After`, request
   id) and routes a non-envelope (flat AWS mantle) 403 through the
   `aws_error` scrub; the optional `OpenAiCompatConfig::mantle` selects the
   Bedrock mantle lane (SigV4/bearer-signed body bytes via `mantle::sign`, no
@@ -1028,6 +1041,8 @@ license.
   field drops (cache_control, anthropic_beta, metadata)
 - `src/openai_compat/response.rs` -- response normalization; lifts
   `reasoning_content` into `reasoning_details`, strips OpenAI envelope keys
+  after moving a non-empty upstream `system_fingerprint` onto `upstream_meta`
+  (`carry_system_fingerprint`) for an OpenAI-shape ingress to echo
 - `src/openai_compat/sse.rs` -- stateless per-chunk parsing +
   `ThinkTagAccumulator` for the `<think>` cross-chunk path +
   `StreamedToolCallIds` (per-stream synthesis of missing tool-call ids) +
@@ -1160,7 +1175,9 @@ license.
   lane's single `record_translation_lane_seen` site (bumped before the first
   fallible step, so a rejected request still counts toward the drop rate) and
   counts the `cache_control_unsupported` and `thinking_type_unrepresentable`
-  drops once per request
+  drops once per request; `place_cache_breakpoints` puts each recorded client
+  `prompt_cache_breakpoint` back on the `input_text` block whose ordinal and
+  text digest both match, counting any left unplaced once per request
 - `src/openai_responses/system.rs` -- canonical `system` and `Role::System`
   message text -> Responses `instructions` string
 - `src/openai_responses/request_system_role_tests.rs` -- `include!`d into
@@ -1185,17 +1202,31 @@ license.
   `function_call` and `function_call_output` sites) through `tool_id` so one
   logical id keeps one wire id and a tool result still correlates; content
   parts are forwarded, refused (`unrepresentable`, no wire slot can hold the
-  value) or dropped with a WARN, per the module doc. A
+  value) or dropped with a WARN, per the module doc. An unmodeled content
+  part follows `UnknownParts`: from the Responses ingress it is forwarded
+  verbatim on ApiKey / ChatGPT-OAuth (less a `prompt_cache_breakpoint` the
+  surface refuses); on Bedrock Mantle an `input_file` is rebuilt as a modeled
+  file part and every other unmodeled part drops; from any other ingress it
+  drops. A
   `ResponsesDropTally` flushed once per request from `build_input` (on the Err
   arm too) counts each deliberate drop class it made
   (`image_source_kind_unrepresentable`, `reasoning_detail_kind_unsupported`,
   `reasoning_format_foreign`, `reasoning_scheme_incompatible`,
-  `reasoning_text_unsigned`, `tool_result_part_unsupported`) exactly once,
-  never once per dropped block
+  `reasoning_text_unsigned`, `tool_result_part_unsupported`,
+  `content_part_unrepresentable`) exactly once, never once per dropped block;
+  a withheld forwarded breakpoint goes to the shared prompt-cache tally
 - `src/openai_responses/tools.rs` -- canonical tools -> flat Responses tool
   shape (`translate_tools`) and `tool_choice` mapping
-- `src/openai_responses/extras.rs` -- reasoning translation + 6-key
+- `src/openai_responses/extras.rs` -- reasoning translation + 8-key
   provider_extras allowlist; ChatgptOauth + BedrockMantle `store=false` lock.
+  `PromptCacheField` is the per-auth-surface table for the prompt-cache
+  fields (`prompt_cache_options`, `prompt_cache_retention`, per-block
+  breakpoints, the derived session key): the two top-level fields forward
+  only for Responses-ingress requests on a surface that takes them, a
+  withheld one counted once per request via `PromptCacheWithheldTally`;
+  `apply_session_cache_key` sends the hex SHA-256 of the inbound session key
+  as `prompt_cache_key` when nobody set one; `breakpoint_text_digest` is the
+  digest both breakpoint sides compare.
   `apply_reasoning` sets `effort` from the canonical value, defaults `summary`
   to `"auto"` only when the caller set none, and overlays the Responses-dialect
   remainder (`summary`/`context`/`mode`/future) carried in
@@ -1207,12 +1238,17 @@ license.
   which a non-object value is replaced by)
 - `src/openai_responses/response.rs` -- Responses response -> canonical
   (output walk, finish_reason from status, usage); stamps
-  `lane_format_tag(auth_kind)` on every emitted reasoning detail
+  `lane_format_tag(auth_kind)` on every emitted reasoning detail; carries the
+  first non-empty `message` item id on `upstream_meta` as a
+  `ResponsesEnvelope`
 - `src/openai_responses/sse.rs` -- Responses SSE state machine keyed on
   `output_index` (Text/Reasoning/ToolUse blocks); carries the lane on
   `ResponsesStreamState::new` so streamed reasoning details bear the same
   lane tag the non-streaming path emits; the completed-response chunk stamps
-  `usage_input_source = ExplicitFinal` beside its usage. `is_terminal_event`
+  `usage_input_source = ExplicitFinal` beside its usage; a `ResponsesEnvelope`
+  on `upstream_meta` carries the response `created_at` on the created chunk
+  and a message item's id on the first text chunk of each item (tracked by
+  `last_text_index`, so interleaved items keep their own ids). `is_terminal_event`
   (completed / incomplete / failed / cancelled) is the lane's
   `StreamCompletion` predicate for both `complete()` and `stream()`
 - `src/openai_responses/quota_headers.rs` -- tolerant parser for the
@@ -1285,7 +1321,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   routectl-owned key (prose suffix only for a non-JSON body) so the
   client-facing extractors still parse it, rebuilding the `Upstream` error with
   status/retry_after/classifier/request-id preserved; other classes pass
-  through unchanged and no request is ever reissued
+  through unchanged and no request is ever reissued; `map_onboarding_error`
+  maps a `loadCodeAssist` / `onboardUser` failure from one capped
+  `UpstreamErrorRead` parse, lifting `error.status` / `error.code` and
+  redacting the body over that same parse
 - `src/gemini/auth.rs` -- `apply` injects the `x-goog-api-key` header (no
   `Authorization`) for the api-key mode; key resolved per request so a managed
   token source can rotate
@@ -1331,6 +1370,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   CountTokens wrapper carries (the serialized InvokeModel body, or the
   `converse` member), via `count_tokens_body`, as `complete` and `stream`
   deposit theirs;
+  owns the client-`metadata` withhold shared by every Bedrock surface
+  (`CLIENT_FINGERPRINT_METADATA_KEY`, `operator_metadata` /
+  `operator_payload_metadata` for the operator's own value,
+  `client_metadata_differs`, `declare_client_metadata_strip`);
   `with_runtime_origin_for_tests` (behind `test-utils`) points a real
   provider at a mock origin
 - `src/bedrock/auth.rs` -- AWS credential resolution (`Bearer` short-circuit,
@@ -1347,7 +1390,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   invariants, the `MAX_FRAME_BYTES` 8 MB DoS cap, fail-closed decode errors,
   the WARN/TRACE log-hygiene split (prelude-only at WARN, full payload hex at
   TRACE) and the fallible `FrameHandler::on_eof`; both the InvokeModel-stream
-  and ConverseStream decoders delegate to `decode_frames`. Also owns `frame_type` (protocol frame classification from
+  and ConverseStream decoders delegate to `decode_frames`, which drives a
+  `FrameBuffer` (buffered bytes + staged-prelude tracking, one `DecodeStep`
+  per attempt) and `end_of_input_items` for the close. Also owns `frame_type` (protocol frame classification from
   `:message-type` / `:event-type` / `:exception-type`) and `exception_error`
   (builds the in-stream error, status from
   `aws_error::aws_stream_exception_status`), shared by both lanes
@@ -1360,7 +1405,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `merge_floor_and_client_betas`: InvokeModel body assembly and response
   mapping
 - `src/bedrock/betas.rs` -- `withhold_betas`, `union_and_deposit_betas`:
-  `anthropic_beta` handling shared by the Invoke body and the Converse bag
+  `anthropic_beta` handling shared by the Invoke body and the Converse bag;
+  one TRACE per normalized attempt names the shipped set
 - `src/bedrock/count_tokens.rs` -- CountTokens lane body assembly: the
   `invokeModel` union member (invoke body verbatim, base64) and the
   `converse` member (four-key allowlist), and the `inputTokens` response
@@ -1389,7 +1435,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   request counts exactly one policy action however many sites stripped; runs
   `anthropic_api::output_schema::inject_additional_properties_false` once on
   the FINAL `additionalModelRequestFields` bag (after every filter), its bound
-  errors failing the request before any send
+  errors failing the request before any send; `sent_max_tokens` sends the
+  resolved ceiling as `maxTokens` when the caller set none and the shipped
+  thinking is the legacy `enabled` shape
 - `src/bedrock/converse/request_tests_output_schema.rs` -- `#[path]` test
   module of `request.rs`: whole-`normalize_request` pins for the
   `additionalProperties: false` repair on the shipped
@@ -1415,7 +1463,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   drops non-custom (Anthropic builtin) tools with a counted verdict
 - `src/bedrock/converse/extras.rs` -- `build_additional_fields`
   (`insert_thinking`, `insert_anthropic_beta`, `insert_client_output_format`):
-  assembles the Converse `additionalModelRequestFields` bag
+  assembles the Converse `additionalModelRequestFields` bag; the client
+  `metadata` is replaced by the operator's own value
 - `src/bedrock/converse/response.rs` -- Converse response body -> canonical
   (content walk, stopReason map, cacheDetails -> cache_creation)
 - `src/bedrock/converse/eventstream.rs` -- ConverseStream binary-frame
@@ -3467,7 +3516,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `src/router/learn_engine_dispatch_tests.rs`
 - `src/router/learn_settle.rs` -- child module of `learn_engine.rs`: how
   `AttemptLearning` settles each carry on success. Replay: a stripped repair
-  commits the negative, an outright carried success clears it; on the
+  commits the negative and reports `learned` only when the commit stored a
+  row, an outright carried success clears it; on the
   `CountTokens` surface the plan is dropped (slots released, nothing
   committed or cleared) and the degradation reports `repair_succeeded`
   without `learned`. Field: a repaired success commits, an unrepaired one
@@ -4777,8 +4827,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `snapshot`/`export`/`import`/`clear` surface and seed the registry; a
   1024-entry cap evicts the oldest `last_seen` first, after a per-(lane, kind)
   beta-flag bound (`MAX_BETA_ENTRIES_PER_LANE` = 32) that evicts only that
-  lane's youngest unleased beta entry (latest `first_seen`, so a burst of new
-  flags churns among itself), on every insert path; when every beta entry on
+  lane's unleased beta entry with the fewest `observations` (the latest
+  `first_seen` among equals, so a burst of new single-observation flags
+  churns among itself), on every insert path; when every beta entry on
   the full lane is leased, the new key is refused instead
   (`ObserveOutcome::Refused` / `PositiveOutcome::Refused`, WARN
   `reason=beta_lane_cap_leased`) so nothing exceeds the bound or reaches the
@@ -7854,8 +7905,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   rather than a silent drop), lifts function tools, strips
   internal `matched_stop_sequence` on render, and stamps the OpenAI
   envelope on render (`object`, `system_fingerprint` mirrored from the
-  upstream value carried on `UpstreamMeta` and held across the stream, else
-  `null`, `created` on chunks; synthesizes `chatcmpl-<uuid>` id + unix
+  upstream value carried on `UpstreamMeta` on a complete response and held
+  across the stream, else `null` and declared as a stamp, `created` on chunks; synthesizes `chatcmpl-<uuid>` id + unix
   `created` when the upstream omitted them, stream-stable across chunks).
   Captures the inbound
   per-conversation key into `routectl_internal.inbound_session_key` via
@@ -7911,18 +7962,23 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   of the openai-responses egress
 - `src/ingress/openai_responses/parse.rs` -- Responses body -> canonical
   `ChatRequest`: `input[]` items, `instructions`, tools incl. `additional_tools`
-  merge, reasoning, and the forward-compat `provider_extras` sweep
+  merge, reasoning, and the forward-compat `provider_extras` sweep; an
+  unrecognized input role is kept as `Role::Other`; hands the input to
+  `breakpoints.rs` for breakpoint capture
 - `src/ingress/openai_responses/breakpoints.rs` -- records per-block
   `prompt_cache_breakpoint` values as `ResponsesCacheBreakpoint` entries
   (post-lift text-block ordinal, text digest, value, client pointer) without
   touching canonical content
 - `src/ingress/openai_responses/render.rs` -- canonical `ChatResponse` ->
   Responses response body (`object:"response"`, `status`, `output[]` of
-  message / function_call / reasoning items)
+  message / function_call / reasoning items); `message_item` echoes the
+  upstream message item id from `upstream_meta` when one was carried
 - `src/ingress/openai_responses/stream.rs` -- canonical `ChatChunk` ->
   Responses event-named SSE state machine (`response.created` ...
   `response.completed`, or `response.failed` on an error finish_reason) with
-  monotonic `sequence_number`
+  monotonic `sequence_number`; echoes the upstream `created_at` (until the
+  stream has started) and opens a separate message item, with its own text
+  accumulator, for each upstream message item id
 
 ### proxy
 
