@@ -2675,8 +2675,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   the loss the barrier exists to prevent),
   `apply_capability_tuning` and `commit_carried_state` (both called at
   publication; the latter retunes the runtime-state slots
-  `carry_over_runtime_state_from` recorded as carried and marks the
-  placeholder accounts on the shared account map), `learned_registry` and
+  `carry_over_runtime_state_from` recorded as carried, resets each account
+  the outgoing router held as a placeholder and this one builds a target on
+  (a pool seat or a direct model), fenced on the mark carried at carry-over,
+  and marks the placeholder accounts on the shared account map),
+  `learned_registry` and
   `provider_kind_for_state_key` (THE single owner of
   state_key -> provider-kind resolution, shared by restatement and the operator
   purge surface so the two cannot compute different registry keys; resolves
@@ -6539,8 +6542,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   sidecars `activation_tests.rs` (activation-recompute + audit-event tests,
   run on the current-thread runtime for the capture subscriber),
   `reload_retune_tests.rs`, `reload_commit_point_tests.rs`,
-  `reload_placeholder_lapse_tests.rs` (a reload that builds a seat the live
-  router held as a placeholder readmits it at commit) and
+  `reload_placeholder_lapse_tests.rs` (a reload that builds a target on an
+  account the live router held as a placeholder readmits it at commit) and
   `reload_tests.rs` (reload-pipeline +
   coordinator tests, incl. the structural
   guards that BOTH carry-over blocks carry the per-seat quota readings and the
