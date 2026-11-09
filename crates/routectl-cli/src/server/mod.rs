@@ -240,3 +240,7 @@ mod placeholder_seat_daemon_tests;
 #[cfg(test)]
 #[path = "observation_lifecycle_daemon_tests.rs"]
 mod observation_lifecycle_daemon_tests;
+
+#[cfg(test)]
+#[path = "failure_scope_daemon_tests.rs"]
+mod failure_scope_daemon_tests;
