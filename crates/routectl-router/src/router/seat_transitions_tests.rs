@@ -527,6 +527,7 @@ fn a_reload_logs_only_the_placeholders_that_are_new_on_the_live_map() {
         let events = capture_events(|| {
             let mut next = router(after);
             next.carry_over_runtime_state_from(&live);
+            next.commit_carried_state();
         });
 
         // Assert
@@ -534,4 +535,31 @@ fn a_reload_logs_only_the_placeholders_that_are_new_on_the_live_map() {
         let expected: Vec<_> = expected.iter().map(|m| Some(*m)).collect();
         assert_eq!(members, expected, "{case}: {events:?}");
     }
+}
+
+/// The carry-over writes nothing to the shared account map, so it logs
+/// nothing; the commit logs each new placeholder once, and a second commit
+/// of the same router logs nothing more.
+#[test]
+fn a_reload_logs_a_new_placeholder_once_at_its_commit_and_never_at_carry_over() {
+    // Arrange
+    let live = router(&[]);
+    let mut next = router(&["seat-b"]);
+
+    // Act
+    let carried = capture_events(|| next.carry_over_runtime_state_from(&live));
+    let committed = capture_events(|| next.commit_carried_state());
+    let recommitted = capture_events(|| next.commit_carried_state());
+
+    // Assert
+    assert!(lines(&carried).is_empty(), "{carried:?}");
+    assert_eq!(
+        lines(&committed)
+            .iter()
+            .map(|line| (line.1, line.2, line.3))
+            .collect::<Vec<_>>(),
+        [(Some("seat_unusable"), Some("seat-b"), Some("not_logged_in"))],
+        "{committed:?}"
+    );
+    assert!(lines(&recommitted).is_empty(), "{recommitted:?}");
 }

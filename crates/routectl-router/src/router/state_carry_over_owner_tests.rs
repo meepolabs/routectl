@@ -191,7 +191,7 @@ fn reload_retunes_carried_slot() {
 
     // Act
     new.carry_over_runtime_state_from(&old);
-    new.apply_carried_retune();
+    new.commit_carried_state();
 
     // Assert: the carried slot runs on the new threshold with its counter.
     assert!(Arc::ptr_eq(&new.state["m"], &old_slot));
@@ -221,7 +221,7 @@ fn reload_to_zero_turns_off_the_default_breaker_and_keeps_the_count() {
 
     // Act
     new.carry_over_runtime_state_from(&old);
-    new.apply_carried_retune();
+    new.commit_carried_state();
 
     // Assert: six more failures, past the default threshold, never open it,
     // and the carried count keeps the two from before the reload.
@@ -257,7 +257,7 @@ fn carry_over_leaves_the_carried_slot_on_the_outgoing_tuning_until_the_retune() 
     let opened_before_retune = old_slot
         .lock()
         .record_failure(t0, routectl_core::failure_class::LastOutcome::Http5xx);
-    new.apply_carried_retune();
+    new.commit_carried_state();
     let opened_after_retune = old_slot
         .lock()
         .record_failure(t0, routectl_core::failure_class::LastOutcome::Http5xx);

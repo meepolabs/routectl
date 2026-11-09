@@ -194,7 +194,7 @@ pub struct Router {
     tuning: BTreeMap<String, Arc<crate::config::ResolvedTuning>>,
     /// The `state` keys whose slot `carry_over_runtime_state_from` took from
     /// the outgoing Router, still on that Router's breaker and RPM settings
-    /// until `apply_carried_retune` runs at publication.
+    /// until `commit_carried_state` runs at publication.
     carried_state_keys: Vec<String>,
     /// Every credential account's park and generation (see
     /// `credential_park`). One map for the router rather than a field per
@@ -2461,7 +2461,7 @@ impl Router {
     /// here: both routers share the carried `Arc`, and the outgoing one stays
     /// published (with the config, stamps and diagnostics that describe those
     /// settings) if the reload then fails or is abandoned. The keys are
-    /// recorded so [`Self::apply_carried_retune`], called at the publication
+    /// recorded so [`Self::commit_carried_state`], called at the publication
     /// commit point, moves them to this Router's resolved tuning.
     ///
     /// A key whose owner changed across the rebuild (a direct model moved to
@@ -2473,8 +2473,9 @@ impl Router {
     ///
     /// The credential-account map is shared whole, not per key: an account's
     /// park outlives any one model slot, so a model newly added on a parked
-    /// account starts refused. This Router's placeholder marks were applied
-    /// to its own map at install, so they are re-applied to the shared one.
+    /// account starts refused. The shared map is the live one, so nothing is
+    /// written to it here: this Router's placeholder marks reach it only at
+    /// [`Self::commit_carried_state`].
     ///
     /// Called by the hot-reload coordinator in routectl-cli immediately
     /// after building a replacement Router and before swapping it in, to
@@ -2482,7 +2483,6 @@ impl Router {
     pub fn carry_over_runtime_state_from(&mut self, previous: &Self) {
         self.credential_accounts = Arc::clone(&previous.credential_accounts);
         self.carry_over_state_slots_from(previous);
-        self.mark_placeholder_accounts();
     }
 
     fn carry_over_state_slots_from(&mut self, previous: &Self) {
@@ -2501,25 +2501,33 @@ impl Router {
         }
     }
 
-    /// Retune every slot carried by [`Self::carry_over_runtime_state_from`]
-    /// to this Router's resolved tuning for its key, so a reload that changes
-    /// `circuit_failures`, `circuit_cooldown_ms` or `rpm_limit` applies to the
-    /// carried counters, phase and bucket at once. The slot is shared with
-    /// the outgoing Router, so a request still in flight there settles under
-    /// the new values too.
+    /// Apply this Router's carried state to the live gates and account map
+    /// it shares with the outgoing Router: retune every slot carried by
+    /// [`Self::carry_over_runtime_state_from`] to this Router's resolved
+    /// tuning for its key, and mark each placeholder seat's account unusable
+    /// with its build cause, logging one `seat_unusable` WARN per account
+    /// that was not already unusable for that cause.
     ///
-    /// Separate from the carry-over because the retune reaches the outgoing
-    /// Router's live gates: a reload that can still fail or be abandoned
-    /// after carry-over must leave them on the settings that Router reports.
-    /// Call it at the commit point, immediately before publication, once
-    /// every failure and abandonment path has returned. Running it again is
-    /// harmless.
-    pub fn apply_carried_retune(&self) {
+    /// The retune makes a reload that changes `circuit_failures`,
+    /// `circuit_cooldown_ms` or `rpm_limit` apply to the carried counters,
+    /// phase and bucket at once; a request still in flight on the outgoing
+    /// Router settles under the new values too.
+    ///
+    /// Separate from the carry-over because both writes reach the outgoing
+    /// Router's live state: a reload that can still fail or be abandoned
+    /// after carry-over must leave its gates on the settings that Router
+    /// reports and its account map without the candidate's placeholder
+    /// marks. Call it at the commit point, immediately before publication,
+    /// once every failure and abandonment path has returned. Idempotent: a
+    /// second call retunes to the same values and re-marks with the same
+    /// cause, which keeps the mark's `since` and logs nothing.
+    pub fn commit_carried_state(&self) {
         for key in &self.carried_state_keys {
             if let (Some(state), Some(tuning)) = (self.state.get(key), self.tuning.get(key)) {
                 state.lock().retune(tuning.gate());
             }
         }
+        self.mark_placeholder_accounts();
     }
 
     /// Carry the previous Router's `StickyLeastLoaded` session->seat pins
@@ -3338,9 +3346,9 @@ impl Router {
     /// cause here, on this Router's own account map, without a transition
     /// log: this map is the candidate's own until it is published, and a
     /// rejected reload's candidate never serves. The marks that reach the
-    /// live map log there: [`Self::carry_over_runtime_state_from`] re-applies
-    /// them to the shared map, and a first boot announces them with
-    /// [`Self::log_placeholder_seats`].
+    /// live map log there: [`Self::commit_carried_state`] re-applies them to
+    /// the shared map at a reload's commit point, and a first boot announces
+    /// them with [`Self::log_placeholder_seats`].
     pub fn install_pool_reports(&mut self, reports: Vec<crate::pool_build::PoolReport>) {
         self.pool_reports = reports;
         for (account, cause) in self.placeholder_marks() {

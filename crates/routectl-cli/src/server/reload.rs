@@ -486,30 +486,33 @@ pub(super) async fn handle_credentials_reload(
         "credentials reloaded from disk",
     );
 
-    // The live router already dials with the reloaded tokens (the OAuth store
-    // is shared), so a seat whose stored credential changed gets a fresh
-    // attempt now, before the seat-set gate below can return early on a
-    // token-only change. A seat-set rebuild carries the lifted state onward.
-    // A seat this process refreshed itself reads as unchanged, so a routine
-    // token refresh lifts nothing.
-    let live = router_swap.load_full();
-    log_lifted_parks(
-        &live.lift_oauth_credential_parks(&changed_seats),
-        "credentials",
-    );
-    // A placeholder seat was never built, so the lift alone cannot readmit
-    // it: a changed record for one forces the rebuild below even when the
-    // key set is unchanged (a dead record re-logged under the same seat).
+    // Gate the Router rebuild on a real seat-set change or a changed
+    // placeholder seat. A token-value-only refresh of built seats (same keys)
+    // must not rebuild, or every routine auto-refresh would needlessly re-run
+    // the startup validators and re-expand the pool. A placeholder seat was
+    // never built, so a lift alone cannot readmit it: a changed record for one
+    // forces the rebuild even when the key set is unchanged (a dead record
+    // re-logged under the same seat).
+    let after = store.credential_keys().await;
     let readmits_placeholder = changed_seats
         .iter()
-        .any(|seat| live.is_placeholder_account(seat));
-    drop(live);
+        .any(|seat| router_swap.load().is_placeholder_account(seat));
+    let rebuilds = before != after || readmits_placeholder;
 
-    // Recompute activation on EVERY successful credentials reload, before the
-    // seat-gated router-rebuild early return below: activation tracks token
-    // PRESENCE (expired -> present is a real transition), not the seat-key set,
-    // so a token-value-only refresh that skips the rebuild must still recompute.
-    // Runs after `reload_from_disk` so the probe observes the post-reload cache.
+    // Without a rebuild the reload commits here: the live router already
+    // dials with the reloaded tokens (the OAuth store is shared), so a seat
+    // whose stored record changed gets a fresh attempt now. A seat this
+    // process refreshed itself reads as unchanged, so a routine token refresh
+    // lifts nothing.
+    if !rebuilds {
+        lift_changed_seat_parks(router_swap, &changed_seats);
+    }
+
+    // Recompute activation on EVERY successful credentials reload, rebuild or
+    // not: activation tracks token PRESENCE (expired -> present is a real
+    // transition), not the seat-key set, so a token-value-only refresh that
+    // skips the rebuild must still recompute. Runs after `reload_from_disk`
+    // so the probe observes the post-reload cache.
     apply_activation(
         oauth_store,
         current_config,
@@ -518,24 +521,38 @@ pub(super) async fn handle_credentials_reload(
     )
     .await;
 
-    // Gate the Router rebuild on a real seat-set change or a changed
-    // placeholder seat. A token-value-only refresh of built seats (same keys)
-    // must not rebuild, or every routine auto-refresh would needlessly re-run
-    // the startup validators and re-expand the pool.
-    let after = store.credential_keys().await;
-    if before == after && !readmits_placeholder {
-        return;
+    // A rebuild that fails publishes nothing and lifts nothing: the live
+    // router keeps every park and placeholder mark it had.
+    if rebuilds
+        && rebuild_router_for_seat_change(
+            current_config,
+            current_overlay,
+            secrets,
+            router_swap,
+            &before,
+            &after,
+        )
+        .await
+    {
+        lift_changed_seat_parks(router_swap, &changed_seats);
     }
+}
 
-    rebuild_router_for_seat_change(
-        current_config,
-        current_overlay,
-        secrets,
-        router_swap,
-        &before,
-        &after,
-    )
-    .await;
+/// Lift the parks of the OAuth seats a credentials reload changed, on the
+/// router published at that reload's commit point, sparing every seat that
+/// router holds as a placeholder: its unusable mark is the build's own
+/// evidence about the record just read.
+fn lift_changed_seat_parks(
+    router_swap: &Arc<ArcSwap<Router>>,
+    changed_seats: &std::collections::BTreeSet<String>,
+) {
+    let published = router_swap.load_full();
+    let resets = published.lift_oauth_credential_parks(
+        changed_seats
+            .iter()
+            .filter(|seat| !published.is_placeholder_account(seat)),
+    );
+    log_lifted_parks(&resets, "credentials");
 }
 
 /// Log the parks a reload of `source` lifted, if any. The lift itself also
@@ -564,7 +581,7 @@ fn log_lifted_parks(resets: &[routectl_router::runtime_state::AccountReset], sou
 /// models and RETAINS it on the replacement Router, so a credentials-only
 /// reload can neither un-apply nor un-report the operator's overlay. Split
 /// out of `handle_credentials_reload` to keep that function under the size
-/// ceiling.
+/// ceiling. Returns whether the rebuilt router was published.
 async fn rebuild_router_for_seat_change(
     current_config: &Arc<Config>,
     current_overlay: &Arc<CatalogOverlay>,
@@ -572,7 +589,7 @@ async fn rebuild_router_for_seat_change(
     router_swap: &Arc<ArcSwap<Router>>,
     before: &std::collections::BTreeSet<String>,
     after: &std::collections::BTreeSet<String>,
-) {
+) -> bool {
     let mut new_router = match build_router_from_config_with_overlay(
         current_config.clone(),
         current_overlay,
@@ -586,7 +603,7 @@ async fn rebuild_router_for_seat_change(
                 error = %e,
                 "credentials seat-set changed but router rebuild failed; keeping previous router",
             );
-            return;
+            return false;
         }
     };
 
@@ -606,14 +623,16 @@ async fn rebuild_router_for_seat_change(
     new_router.carry_over_learned_from(&router_swap.load_full());
     // Stamps then stores, in that order -- see `publish_router`. This is the
     // commit point: every failure and abandonment path above has returned, so
-    // the carried gates move to the new tuning here and not at carry-over.
-    new_router.apply_carried_retune();
+    // the carried gates move to the new tuning and the new placeholder marks
+    // reach the shared account map here and not at carry-over.
+    new_router.commit_carried_state();
     publish_router(router_swap, Arc::new(new_router));
     tracing::info!(
         seats_before = before.len(),
         seats_after = after.len(),
         "credentials seat set changed; router rebuilt and swapped",
     );
+    true
 }
 
 /// Handle a `ReloadRequest::Config` or `ReloadRequest::CatalogOverlay`:
@@ -738,11 +757,12 @@ pub(super) async fn handle_config_reload(
         }
         // Past every failure and abandonment return, so this is the commit
         // point for the boundary-rebuilt router: only now may the carried
-        // gates, still shared with the live router, move to the new tuning.
-        boundary_router.apply_carried_retune();
+        // gates and the account map, still shared with the live router, take
+        // the new tuning and placeholder marks.
+        boundary_router.commit_carried_state();
         publish_router(router_swap, boundary_router);
     } else {
-        new_router.apply_carried_retune();
+        new_router.commit_carried_state();
         publish_router(router_swap, Arc::new(new_router));
     }
     // Only past the commit point: the candidate shares the live router's park

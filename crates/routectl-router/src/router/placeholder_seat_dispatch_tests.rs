@@ -2,7 +2,8 @@
 //! build) is never dialed: on every surface it records itself as the last
 //! target, counts no attempt, and folds a `credential_unusable` refusal with
 //! no known wait into the chain's error. Its account is marked unusable at
-//! install and again after a reload shares the outgoing account map.
+//! install on the router's own map, and on the account map a reload shares
+//! with the outgoing router only when that reload commits.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -314,16 +315,40 @@ fn a_seat_built_before_a_reload_and_a_placeholder_after_it_is_marked_on_the_shar
 
     // Act
     after.router.carry_over_runtime_state_from(&before.router);
+    let at_carry_over = unusable_since(&before.router, "seat-a");
+    after.router.commit_carried_state();
 
-    // Assert: the shared map, as both routers see it, now carries the mark.
-    assert_eq!(
-        unusable_since(&after.router, "seat-a").map(|(cause, _)| cause),
-        Some(UnusableCause::NotLoggedIn)
-    );
+    // Assert: the shared map, as both routers see it, carries the mark only
+    // once the reload commits.
     assert!(Arc::ptr_eq(
         &after.router.credential_accounts,
         &before.router.credential_accounts
     ));
+    assert_eq!(
+        at_carry_over, None,
+        "carry-over leaves the live map unmarked"
+    );
+    assert_eq!(
+        unusable_since(&before.router, "seat-a").map(|(cause, _)| cause),
+        Some(UnusableCause::NotLoggedIn)
+    );
+}
+
+#[test]
+fn committing_a_reload_twice_keeps_the_placeholder_mark_and_its_since() {
+    // Arrange
+    let before = pool(&[]);
+    let mut after = pool(&["seat-a"]);
+    after.router.carry_over_runtime_state_from(&before.router);
+    after.router.commit_carried_state();
+    let first = unusable_since(&before.router, "seat-a").expect("marked at commit");
+    std::thread::sleep(Duration::from_millis(5));
+
+    // Act
+    after.router.commit_carried_state();
+
+    // Assert
+    assert_eq!(unusable_since(&before.router, "seat-a"), Some(first));
 }
 
 #[test]
@@ -336,6 +361,7 @@ fn an_unchanged_placeholder_keeps_its_mark_and_since_across_a_carry_over() {
 
     // Act
     after.router.carry_over_runtime_state_from(&before.router);
+    after.router.commit_carried_state();
 
     // Assert
     assert_eq!(unusable_since(&after.router, "seat-a"), Some(first));

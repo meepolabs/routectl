@@ -3032,6 +3032,9 @@ mod credential_park;
 #[path = "reload_retune_tests.rs"]
 mod retune;
 
+#[path = "reload_commit_point_tests.rs"]
+mod commit_point;
+
 #[path = "reload_placeholder_readmit_tests.rs"]
 mod placeholder_readmit;
 

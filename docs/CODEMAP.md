@@ -2658,9 +2658,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   itself refuses any ride-along EVENT stamped generation 0: loud via
   `debug_assert`, fail-closed in release, because per-event silent discards are
   the loss the barrier exists to prevent),
-  `apply_capability_tuning` and `apply_carried_retune` (both called at
+  `apply_capability_tuning` and `commit_carried_state` (both called at
   publication; the latter retunes the runtime-state slots
-  `carry_over_runtime_state_from` recorded as carried), `learned_registry` and
+  `carry_over_runtime_state_from` recorded as carried and marks the
+  placeholder accounts on the shared account map), `learned_registry` and
   `provider_kind_for_state_key` (THE single owner of
   state_key -> provider-kind resolution, shared by restatement and the operator
   purge surface so the two cannot compute different registry keys; resolves
@@ -6485,7 +6486,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   graceful-shutdown joins. Unit tests live in the `#[path]`-included sibling
   sidecars `activation_tests.rs` (activation-recompute + audit-event tests,
   run on the current-thread runtime for the capture subscriber),
-  `reload_retune_tests.rs` and `reload_tests.rs` (reload-pipeline +
+  `reload_retune_tests.rs`, `reload_commit_point_tests.rs` and
+  `reload_tests.rs` (reload-pipeline +
   coordinator tests, incl. the structural
   guards that BOTH carry-over blocks carry the per-seat quota readings and the
   per-session prefix-epoch baselines -- a one-site-only carry silently empties
