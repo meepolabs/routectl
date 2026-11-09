@@ -54,7 +54,8 @@ container is named routectl-cell-<run-id>-<n>, n the cell's index in
 run.json. Each cell also carries its own wall-clock bound: run_capture.sh
 gets --max-seconds ceil(--cell-timeout + --kill-grace + 180), enforced by
 `timeout` as the container's PID 1, so a cell ends even if this script is
-SIGKILLed, while this script's own TIMEOUT stop always fires first. A cell with a key file has its key re-checked and read through
+SIGKILLed, while this script's own TIMEOUT stop always fires first.
+A cell with a key file has its key re-checked and read through
 matrix.open_key_file at launch and exported to the child as
 ROUTECTL_DRIVER_<PROVIDER>_API_KEY; the child's environment is built from
 an allowlist, so no other credential reaches it. The key is never placed

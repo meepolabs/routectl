@@ -9082,7 +9082,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `tests/common/replay/loader.rs` -- on-disk fixture format (`FixtureMeta`,
   `Fixture`, `ReplayError`), `load_fixture`, and the two corpus walks:
   `discover_fixtures` (flat live-box root) / `discover_driver_fixtures`
-  (`<root>/<lane>/<case_id>`)
+  (`<root>/<lane>/<case_id>__<driver>__<config_variant>`)
 - `tests/common/replay/plant.rs` -- the one writer of a synthetic fixture
   corpus in a tempdir (`plant_fixture`, `plant_driver_case`,
   `plant_unloadable_driver_case`, `current_meta`, `write_required_files`)

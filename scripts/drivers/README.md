@@ -119,9 +119,12 @@ profiles" -- read it before writing the first profile.
 A driver never names a lane: the runner resolves
 `config/<lane>.toml` and copies it into the run's config root. A second
 DEPLOYMENT SHAPE of the same provider is a `<lane>.<variant>` filename
-(`anthropic-api.front-proxy.toml` beside `anthropic-api.toml`) and nothing
-more -- no path segment, no `meta.json` field, no flag. A wire-affecting
-per-deployment value lives INSIDE the file, where `config_sha` covers it.
+(`anthropic-api.front-proxy.toml` beside `anthropic-api.toml`), selected by
+`--lane` and no other flag. Its stem is the third token of the landing
+directory's name (`<lane>/<case>__<driver>__<config stem>`) and is recorded
+as `meta.config_variant`; `config_sha` identifies its exact bytes. A
+wire-affecting per-deployment value lives INSIDE the file, where
+`config_sha` covers it.
 
 Every lane config sets `[wire_check] sample_one_in = 1`, so the daemon a
 driven run boots checks every attempt rather than a production sample.

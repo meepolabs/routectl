@@ -152,6 +152,12 @@ stderr go to `<report-dir>/cells/<cell-id>.runner.log`, mode 0600, beside
 the scratch rather than in it, and never to the terminal), a container named
 `routectl-cell-<run-id>-<n>`, and the driver command
 `env ROUTECTL_DRIVER_REQUEST_MODEL=<model> /workspace/scripts/drivers/<driver>`.
+A landed fixture sits at
+`cells/<cell-id>/<lane>/<case_id>__<driver>__<config_variant>/`. Each cell
+also gets its own wall-clock bound: `run_capture.sh --max-seconds` set to
+`ceil(--cell-timeout + --kill-grace + 180)`, enforced by `timeout` as the
+container's PID 1, so the cell ends even if `run.py` is killed, while
+`run.py`'s own `--cell-timeout` stop always fires first.
 A cell with a key file has the key re-checked and read at launch and
 exported to that one child as `ROUTECTL_DRIVER_<PROVIDER>_API_KEY`; the
 child's environment is otherwise an allowlist (PATH, HOME, XDG and docker

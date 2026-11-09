@@ -1159,11 +1159,13 @@ which is what makes it eligible for review and for gating in the first
 place. Check `git status` after a promotion: the corpus is committed, so a
 promoted fixture shows up as an addition staged for review.
 
-The runner keys a landing on `(lane, case_id)`, so a rerun of a case
-replaces that case's fixture wholesale. With the corpus as the default,
-every exploratory rerun would therefore overwrite a reviewed fixture in
-place. The scratch default is what buys you a free rerun: capture, look at
-it, capture again, and nothing tracked has moved.
+The runner keys a landing on `(lane, case_id, driver, config_variant)`
+(`<out>/<lane>/<case_id>__<driver>__<config_variant>/`), so a rerun of a
+case with the same driver and lane config replaces that fixture
+wholesale. With the corpus as the default, every exploratory rerun would
+therefore overwrite a reviewed fixture in place. The scratch default is
+what buys you a free rerun: capture, look at it, capture again, and
+nothing tracked has moved.
 
 Two flags govern the destination:
 
@@ -1531,13 +1533,29 @@ anything else is exit 2. The fixed prefix keeps a name from reading as a
 hex container-id prefix, which `docker rm -f` would otherwise resolve to
 another container.
 
+Two flags bound a cell:
+
+- `--max-seconds <n>` -- wall-clock bound on the whole cell, a positive
+  integer, default 3600. The container's PID 1 is
+  `timeout --kill-after=120s <n>` around the runner: SIGTERM at `<n>`
+  seconds, SIGKILL 120 seconds later. The wrapper exits 124 when the bound
+  fired and the runner stopped within the grace, 137 when the kill-after
+  fired. Being PID 1, the bound holds even if whatever launched the wrapper
+  has died; a caller with its own timeout sets this above it.
+- `--tmp-size <size>` -- cap on the in-cell `/tmp` tmpfs, default `1g`
+  (digits, then `k`, `m` or `g`). The runner's whole workspace (trace,
+  client HOME, work dir) lives under `/tmp`, so this caps a run's bulk
+  writes. A bad value for either flag is exit 2, before docker runs.
+
 What crosses the boundary, and nothing else:
 
 | Host side | In-container | Mode |
 |---|---|---|
 | this repo | `/workspace` | READ-ONLY |
 | the host routectl binary | `/usr/local/lib/routectl/bin/routectl` | READ-ONLY |
-| `--scratch <dir>` | `/scratch` | writable, the only one |
+| `--scratch <dir>` | `/scratch` | writable; the only host-visible output (landed fixtures and `.cell-evidence/`) |
+| (no host path) | `/tmp` | tmpfs, capped at `--tmp-size`, writable and exec; discarded with the container |
+| (the image itself) | `/` and everything else | READ-ONLY (`--read-only`) |
 | one credential per `--provider` except `bedrock` | `ROUTECTL_DRIVER_<PROVIDER>_API_KEY` | forwarded BY NAME |
 | `--provider bedrock` only: a generated one-profile AWS config | `/etc/routectl-aws/config` | READ-ONLY |
 | `--provider bedrock` only: that profile's credential_process file | `/etc/routectl-aws/credential` | READ-ONLY |

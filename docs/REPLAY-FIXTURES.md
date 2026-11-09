@@ -444,9 +444,10 @@ Fields:
 - `client_config_sha` -- sha256 of the committed driver script
   `scripts/drivers/<client.driver>.sh`, the script only and not `lib/`, so
   a rerun under an edited driver does not read as client drift. Written
-  from `ROUTECTL_FIXTURE_CLIENT_CONFIG_SHA`; empty in live-box mode, and
+  from `ROUTECTL_FIXTURE_CLIENT_CONFIG_SHA`; empty in live-box mode,
   empty (with a runner warning) when no committed script carries the
-  recorded name.
+  recorded name, and empty in fixtures captured before the field existed,
+  which today is every fixture in the committed driver corpus.
 - `wire_pattern` -- the wire shape the driven case CLAIMS to cover, a
   string in the closed `WIRE_PATTERNS` vocabulary enforced by
   `scripts/drivers/lib/validate_case.py` (`baseline`,
