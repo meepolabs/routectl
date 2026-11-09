@@ -79,8 +79,68 @@ pub mod signing;
 /// Invoke seam (`invoke::normalize_request`) and the Converse seam
 /// (`converse::extras::insert_provider_extras`) so the two cannot drift
 /// on the key name. Stripped only on the CLIENT path; an operator that
-/// deliberately sets `metadata` via provider config keeps it.
+/// deliberately sets `metadata` keeps it (see [`operator_metadata`]).
 pub(crate) const CLIENT_FINGERPRINT_METADATA_KEY: &str = "metadata";
+
+/// The operator's own `metadata` for a Bedrock body: the operator
+/// `payload_extras` value the dispatch layer recorded, else the provider's
+/// `additional_model_request_fields` value. Never the merged
+/// `provider_extras` value, which can carry the client's block deep-merged
+/// under the operator's.
+pub(crate) fn operator_metadata<'a>(
+    cfg: &'a BedrockConfig,
+    req: &'a ChatRequest,
+) -> Option<&'a Value> {
+    let key = CLIENT_FINGERPRINT_METADATA_KEY;
+    // Consulted only while the merged extras still carry the key, so a
+    // dispatch-time strip of it is never undone here.
+    merged_metadata(req)
+        .and(req.routectl_internal.operator_payload_extras.as_deref())
+        .and_then(|extras| extras.get(key))
+        .or_else(|| {
+            cfg.additional_model_request_fields
+                .as_ref()
+                .and_then(|fields| fields.get(key))
+        })
+}
+
+/// Whether withholding the request's `metadata` in favour of `operator`
+/// removes anything the client contributed: the merged value exists and is
+/// not exactly the operator's.
+pub(crate) fn client_metadata_differs(req: &ChatRequest, operator: Option<&Value>) -> bool {
+    merged_metadata(req).is_some_and(|merged| Some(merged) != operator)
+}
+
+/// Declare the client `metadata` a seam withheld before shipping `operator`
+/// in its place. With nothing restored the whole block is gone; with the
+/// operator's object restored, only the client's members outside it are.
+/// A changed member or a changed shape is the dispatch layer's Rewrite.
+pub(crate) fn declare_client_metadata_strip(req: &ChatRequest, operator: Option<&Value>) {
+    let Some(merged) = merged_metadata(req) else {
+        return;
+    };
+    let path = match (merged, operator) {
+        (_, None) => "/metadata",
+        (Value::Object(client), Some(Value::Object(operator)))
+            if client.keys().any(|k| !operator.contains_key(k)) =>
+        {
+            "/metadata/*"
+        }
+        _ => return,
+    };
+    crate::anthropic_api::wire_edits::declare(
+        crate::anthropic_api::wire_edits::tap_of(req),
+        routectl_core::wire_check::EditSite::ClientFingerprintStrip,
+        path,
+        routectl_core::wire_check::EditKind::Remove,
+    );
+}
+
+fn merged_metadata(req: &ChatRequest) -> Option<&Value> {
+    req.provider_extras
+        .as_ref()
+        .and_then(|extras| extras.get(CLIENT_FINGERPRINT_METADATA_KEY))
+}
 
 /// How routectl talks to Bedrock for a given provider entry.
 ///
@@ -1019,6 +1079,10 @@ fn log_bedrock_upstream_error(
 #[cfg(test)]
 #[path = "redirect_tests.rs"]
 mod redirect_tests;
+
+#[cfg(test)]
+#[path = "metadata_and_beta_trace_tests.rs"]
+mod metadata_and_beta_trace_tests;
 
 // Each send site deposits exactly the bytes the upstream received.
 #[cfg(test)]

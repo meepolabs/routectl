@@ -158,12 +158,10 @@ pub fn normalize_request(cfg: &BedrockConfig, req: &ChatRequest) -> Result<Value
     // from the inbound request via the Anthropic ingress forward-compat
     // sweep (provider_extras -> body, merged inside the shared
     // normalizer above). Bedrock is always a third-party upstream, so
-    // the CLIENT-path strip is unconditional. An operator who
-    // deliberately set `metadata` via `additional_model_request_fields`
-    // keeps it -- that is the operator's choice, not a client
-    // fingerprint. Shared key with the Converse seam via
-    // `super::CLIENT_FINGERPRINT_METADATA_KEY`.
-    strip_client_metadata(obj, cfg.additional_model_request_fields.as_ref());
+    // the CLIENT-path strip is unconditional. The operator's own
+    // `metadata` (`payload_extras`, else `additional_model_request_fields`)
+    // is restored: that is the operator's choice, not a client fingerprint.
+    strip_client_metadata(cfg, req, obj);
 
     // AWS Bedrock InvokeModel REJECTS a top-level `cache_control` body
     // field with HTTP 400 ("Extra inputs are not permitted") -- proven by
@@ -411,24 +409,23 @@ fn strip_billing_system_field(id: &str, obj: &mut serde_json::Map<String, Value>
 }
 
 /// Drop the client-fingerprint `metadata` block from the assembled
-/// Bedrock-Invoke body. The block (carrying `user_id` / `account_uuid`)
-/// rides in via the Anthropic ingress forward-compat sweep, so it is
-/// always client-derived. An operator who deliberately set `metadata`
-/// via `additional_model_request_fields` keeps it -- that config value
-/// is restored after the strip. Shares the key name with the Converse
-/// seam via `super::CLIENT_FINGERPRINT_METADATA_KEY`.
+/// Bedrock-Invoke body and restore the operator's own value
+/// (`super::operator_metadata`). The removal is declared on the wire tap
+/// but not counted: this lane's fingerprint surfaces do not share one
+/// per-request tally yet.
 fn strip_client_metadata(
+    cfg: &BedrockConfig,
+    req: &ChatRequest,
     obj: &mut serde_json::Map<String, Value>,
-    operator_extras: Option<&Value>,
 ) {
     let key = super::CLIENT_FINGERPRINT_METADATA_KEY;
-    let operator_metadata = operator_extras
-        .and_then(|v| v.as_object())
-        .and_then(|o| o.get(key))
-        .cloned();
+    let operator = super::operator_metadata(cfg, req);
     obj.remove(key);
-    if let Some(v) = operator_metadata {
-        obj.insert(key.to_string(), v);
+    if super::client_metadata_differs(req, operator) {
+        super::declare_client_metadata_strip(req, operator);
+    }
+    if let Some(v) = operator {
+        obj.insert(key.to_string(), v.clone());
     }
 }
 

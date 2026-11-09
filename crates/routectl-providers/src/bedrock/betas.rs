@@ -72,11 +72,33 @@ pub(super) fn union_and_deposit_betas(
 ) {
     let implied = union_body_implied(shape, fields);
     let shipped = fields.get("anthropic_beta").and_then(Value::as_array);
+    trace_final_betas(&cfg.id, shape, shipped);
     crate::beta_withhold::deposit_beta_assembly(
         req,
         operator_floor(cfg, req),
         implied.into_iter().map(str::to_string).collect(),
         |flag| shipped.is_some_and(|arr| arr.iter().any(|b| b.as_str() == Some(flag))),
+    );
+}
+
+/// One TRACE per request naming the `anthropic_beta` set the carrier ships.
+/// Flags are client-supplied strings, so each is sanitized; a non-string
+/// entry is named by its absence of text, never by its value.
+fn trace_final_betas(provider_id: &str, shape: BedrockApiShape, shipped: Option<&Vec<Value>>) {
+    if !tracing::enabled!(tracing::Level::TRACE) {
+        return;
+    }
+    let flags: Vec<&str> = shipped
+        .into_iter()
+        .flatten()
+        .map(|flag| flag.as_str().unwrap_or("?"))
+        .collect();
+    tracing::trace!(
+        provider = %provider_id,
+        api_shape = shape.provider_kind_str(),
+        count = flags.len(),
+        flags = %sanitize_for_log(&flags.join(",")),
+        "bedrock final anthropic_beta set"
     );
 }
 

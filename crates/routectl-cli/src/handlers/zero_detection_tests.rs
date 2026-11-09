@@ -72,20 +72,6 @@ const KNOWN_UNDECLARED: &[KnownUndeclared] = &[
         path: "/usage/output_tokens_details",
         reason: "real loss: the closing message_delta render drops output_tokens_details",
     },
-    KnownUndeclared {
-        lane: BEDROCK_INVOKE,
-        leg: Leg::Request,
-        path: "/metadata",
-        reason: "undeclared routectl edit: the Invoke egress strips the client fingerprint \
-                 metadata block for a third-party upstream without declaring the removal",
-    },
-    KnownUndeclared {
-        lane: BEDROCK_CONVERSE,
-        leg: Leg::Request,
-        path: "/metadata",
-        reason: "undeclared routectl edit: the Converse egress keeps the client fingerprint \
-                 metadata block out of the field bag without declaring the removal",
-    },
 ];
 
 /// The client dialect a case speaks.

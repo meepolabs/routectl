@@ -987,6 +987,13 @@ it is the same canonical set plus the bag keys `thinking` and
 `output_config` and the Converse body fields `inferenceConfig`,
 `toolConfig` and `additionalModelResponseFieldPaths`.
 
+The client's `metadata` block (its `user_id` / `account_uuid`) never
+reaches AWS on either shape. The operator's own `metadata` is sent in
+its place: the provider or model `payload_extras` value, else the
+`additional_model_request_fields` value. On Converse a request whose
+client `metadata` differs from that operator value counts once as the
+`client_fingerprint_stripped` policy action.
+
 A field the account's
 Bedrock schema has not caught up with is answered with a 400 naming it
 (`Extra inputs are not permitted`); route requests that carry it

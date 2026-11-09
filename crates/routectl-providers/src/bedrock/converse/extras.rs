@@ -61,12 +61,12 @@ pub(super) fn build_additional_fields(
     // (`insert_operator_extras`), and `insert_operator_extras` uses
     // `entry().or_insert_with()` (first-writer-wins). Together these give
     // the intentional client-wins-over-operator precedence -- a client
-    // `metadata` is skipped, and operator config fills only keys nothing
-    // earlier set. INVARIANT: no insertion step added before
-    // `insert_operator_extras` may write an operator-configurable key
-    // (e.g. `metadata`, `top_k`), or the operator's config value would be
-    // silently shadowed. Do not reorder these calls or relax the
-    // `or_insert_with` semantics.
+    // `metadata` is replaced by the operator's own value, and operator
+    // config fills only keys nothing earlier set. INVARIANT: no insertion
+    // step added before `insert_operator_extras` may write an
+    // operator-configurable key (e.g. `top_k`) from any source but the
+    // operator's own value, or that value would be silently shadowed. Do
+    // not reorder these calls or relax the `or_insert_with` semantics.
     let mut foreign = ForeignDialectExtraTally::default();
     insert_thinking(req, &mut bag);
     // After `insert_thinking`, which writes `output_config` wholesale, and
@@ -271,27 +271,33 @@ fn insert_provider_extras(
             );
             continue;
         }
-        // Skip the Anthropic `metadata` block on the CLIENT path. It
-        // carries the client fingerprint (`user_id`, `account_uuid`)
-        // and Bedrock is always a third-party upstream. Operator-set
-        // metadata flows through `insert_operator_extras` (not gated
-        // here) -- that is the operator's deliberate choice. Shared key
-        // with the Invoke seam via
-        // `crate::bedrock::CLIENT_FINGERPRINT_METADATA_KEY`.
+        // Withhold the client's `metadata` block: it carries the client
+        // fingerprint (`user_id`, `account_uuid`) and Bedrock is always a
+        // third-party upstream. The operator's own value takes its slot;
+        // `insert_operator_extras` cannot shadow it (first writer wins), and
+        // the helper already prefers `payload_extras` over the config bag.
         // The drop is deliberate and NOT representability-driven: the wire
         // would carry the block fine, and routectl declines to send it.
         //
         // One of THREE surfaces of this lane that withhold the same
         // fingerprint; they share the request's tally so a client sending it
-        // on more than one still counts as one policy action.
+        // on more than one still counts as one policy action. Counted only
+        // when the client contributed something the operator's value lacks.
         // TRANSLATION-DROP: policy-action class=client_fingerprint_stripped test=client_fingerprint_strip_bumps_the_policy_action_counter_once
         if k == crate::bedrock::CLIENT_FINGERPRINT_METADATA_KEY {
-            fingerprint.record();
-            tracing::debug!(
-                provider = %cfg.id,
-                "stripped client metadata fingerprint from Converse \
-                 additionalModelRequestFields (third-party upstream)"
-            );
+            let operator = crate::bedrock::operator_metadata(cfg, req);
+            if crate::bedrock::client_metadata_differs(req, operator) {
+                fingerprint.record();
+                crate::bedrock::declare_client_metadata_strip(req, operator);
+                tracing::debug!(
+                    provider = %cfg.id,
+                    "stripped client metadata fingerprint from Converse \
+                     additionalModelRequestFields (third-party upstream)"
+                );
+            }
+            if let Some(v) = operator {
+                bag.insert(k.clone(), v.clone());
+            }
             continue;
         }
         // Operator extras (insert_operator_extras) run AFTER this and
