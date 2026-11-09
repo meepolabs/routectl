@@ -437,7 +437,13 @@ impl Router {
             &mut walk,
         ))
         .await;
-        self.finish_dispatch(&meta, &repair_budget, observation.as_ref());
+        self.finish_dispatch(
+            &meta,
+            &repair_budget,
+            &walk,
+            DispatchSurface::CountTokens,
+            observation.as_ref(),
+        );
         CountedTokens { meta, result }
     }
 }

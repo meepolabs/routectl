@@ -267,12 +267,18 @@ impl Router {
     /// A token count queues no wire rejection on `meta` (see
     /// [`Router::read_count_rejection_site`]), so reporting them is a no-op
     /// there.
-    pub(crate) fn finish_dispatch(
+    ///
+    /// `walk` is the request's walk state on `surface`; its summary line is
+    /// logged here, once, when the walk took a detour.
+    pub(super) fn finish_dispatch(
         &self,
         meta: &DispatchMeta,
         repair_budget: &RepairBudget,
+        walk: &RequestWalk,
+        surface: DispatchSurface,
         observation: Option<&RequestObservation>,
     ) {
+        walk.log_summary(surface, meta.attempt_count);
         let spent = repair_budget.spent();
         self.metrics.record_repairs_per_request(spent);
         if let Some(observation) = observation {
@@ -434,9 +440,6 @@ impl Router {
                 }
                 continue;
             };
-            if !A::SURFACE.dedupes_learning_per_request() {
-                learn_dedupe.clear();
-            }
             // This entry is being dispatched: record it as the terminal
             // target (overwritten by a later entry on fallback) and count
             // the hop. `chain_idx` is the index into the resolved chain;

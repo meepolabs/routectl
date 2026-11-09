@@ -2734,11 +2734,12 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `const fn` rows on `class_observe::DispatchSurface`
   (`strict_reject_walks`, `unknown_provider_walks`, `health_error_walks`,
   `sleeps_between_attempts`, `records_success_on_commit`, `shapes_message`,
-  `dedupes_learning_per_request`, `holds_recovered_errors`,
+  `holds_recovered_errors`,
   `gate_refusal_walks`, plus the `gate_blocked_message` text).
-  `Router::finish_dispatch` (`pub(crate)`) is the single finish point every
+  `Router::finish_dispatch` is the single finish point every
   public entry point calls once after `run_walk` returns on any exit: it
-  records repairs-per-request and emits the replay degradations, field
+  logs the walk summary, records repairs-per-request and emits the replay
+  degradations, field
   repairs, wire rejections and field pre-flight decisions held on the meta (a
   stream's request itself ends later, in the cli's stream drive). Also owns the
   walk's shared shaping and retry helpers: `apply_context_reduction` (+
@@ -4447,7 +4448,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   same-target retries spent, exclusions, the recognized scope row, skips per
   scope) and `endpoint_key`, the one endpoint-identity derivation (normalized
   origin of the provider entry's egress or forwarded base, else
-  `provider:<name>`); tests in `walk_state_tests.rs`
+  `provider:<name>`) and `RequestWalk::log_summary`, the INFO `walk summary`
+  line; tests in `walk_state_tests.rs` and `walk_summary_tests.rs`
 - `src/router/window_gate.rs` -- proactive context-window gate, the SECOND
   chain filter pass (called from `chain::dispatch_chain_for_request`
   immediately after `filter_chain_by_features`, so the ordering makes "last

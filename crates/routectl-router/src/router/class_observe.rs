@@ -95,15 +95,6 @@ impl DispatchSurface {
         }
     }
 
-    /// Whether a learned-capability observation is deduped once per request
-    /// across every target, or once per target.
-    pub(super) const fn dedupes_learning_per_request(self) -> bool {
-        match self {
-            Self::Complete | Self::Stream => true,
-            Self::CountTokens => false,
-        }
-    }
-
     /// Whether an error the walk recovered from or routed past (an auth
     /// refresh, a learner repair, a strip route-away) is held as the walk's
     /// last error. A count's exhaustion names why no seat counted instead.

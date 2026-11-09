@@ -102,7 +102,9 @@ The default `info` log is meant to be read, so the levels follow one rule set:
    carrying its outcome, served target, attempts, timing, tokens and
    per-request counts. What happened on the way (a capability demotion, a
    cloak decision, a content-filter finish, an opaque SSE block) logs at
-   DEBUG; a failure an operator can act on stays WARN or ERROR.
+   DEBUG; a failure an operator can act on stays WARN or ERROR. A request
+   whose walk retried or skipped targets adds one
+   [`walk summary`](#walk-summary-info-line) line with the counts.
 
 What an operator now needs a debug filter (or a counter) to see is listed in
 [Visibility moved to DEBUG](#visibility-moved-to-debug).
@@ -1601,8 +1603,22 @@ walk, so its per-attempt lines carry the same text on every surface; the
 |---|---|---|---|---|
 | DEBUG | `routectl_router::router::dispatch_loop` | `upstream 401; refreshing auth and retrying once` | `provider`, `model`, `attempt` | Every surface, once per target, on the first upstream 401 of a non-forwarded target (a stream only before content). |
 | DEBUG | `routectl_router::router::dispatch_loop` | `retry decision` | `provider`, `state_key`, `surface`, `attempt`, `status`, `upstream_type`, `retry_after_ms`, `breaker_effect`, `same_provider_retry`, `preserved_upstream_error` | Every surface, once per failed attempt that reaches the fallback decision. `breaker_effect` is `opened` when this attempt's failure debit moved a closed or half-open circuit to open, `parked` when an upstream reset hint parked the circuit open, and `none` otherwise, including a further debit on a circuit that is already open and a failure that does not debit. |
-| DEBUG | `routectl_router::router::dispatch_loop` | `retrying same provider` | `provider`, `model`, `attempt`, `error` | Completions only: streams and token counts never retry the same provider. |
+| DEBUG | `routectl_router::router::dispatch_loop` | `retrying same provider` | `provider`, `model`, `attempt`, `error` | Completions only: streams and token counts never retry the same provider. `[retry] max_attempts = N` allows at most N - 1 of these per client request, shared across every target the walk reaches, so a later target retries only with what an earlier one left. |
 | DEBUG | `routectl_router::router::credential_park` | `gate blocked`, `count_tokens gate blocked` | `provider`, `model`, `gate_kind`, `error` | Every surface, when the refusing gate is a credential park (`gate_kind = credential_parked`); other gate refusals are WARN. |
+
+## Walk summary INFO line
+
+A request whose walk retried a target, passed over a target an earlier
+failure excluded, or recognized an upstream failure pattern logs one INFO
+line when the walk ends (a stream's at its commit or exhaustion), on every
+surface. A walk with none of these logs nothing, so a first-try success
+stays at the one [`request finished`](#request-finished-info) line. Every
+field is a count or a closed token: never the upstream body or a hash of it,
+a header, an account id, or an endpoint.
+
+| Level | Target | Message | Fields | When |
+|---|---|---|---|---|
+| INFO | `routectl_router::router::walk_state` | `walk summary` | `surface`, `attempts`, `retries`, `excluded_endpoint`, `excluded_model`, `excluded_target`, `excluded_probe_run`, `recognizer` | Once per request whose walk took one of the detours above. `surface` is `complete`, `stream` or `count_tokens`; `attempts` is the upstream calls the walk made; `retries` is the same-target retries it spent. Each `excluded_*` counts the targets the walk skipped because an exclusion covered them, under the scope of the first covering exclusion: `endpoint` (a failure scoped to the upstream origin, such as a generic 400), `model` (an unsupported feature or exceeded window on that `[models]` entry), `target` (the seat that failed, named again later in the chain) and `probe_run` (targets outside the run of seats an availability probe started in). `recognizer` is the token of the most recent recognized upstream pattern (`anthropic-bare-rate-limit`), or `none`. |
 
 ## Circuit-breaker transition INFO lines
 

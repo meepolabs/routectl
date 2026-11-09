@@ -20,6 +20,7 @@ use std::sync::Arc;
 use routectl_core::ScopeRow;
 
 use super::DispatchTarget;
+use super::class_observe::DispatchSurface;
 use crate::config::{Config, ProviderEntry};
 
 /// The identity of an upstream endpoint: a normalized origin
@@ -305,19 +306,47 @@ impl RequestWalk {
     }
 
     /// The most recent recognized upstream pattern, if any failure carried one.
-    #[cfg_attr(not(test), expect(dead_code, reason = "read by the walk summary"))]
     pub(super) const fn recognized(&self) -> Option<ScopeRow> {
         self.recognized
     }
 
-    #[cfg_attr(not(test), expect(dead_code, reason = "read by the walk summary"))]
     pub(super) const fn excluded_by(&self) -> ExcludedBy {
         self.excluded_by
     }
 
-    #[cfg_attr(not(test), expect(dead_code, reason = "read by the walk summary"))]
+    #[cfg(test)]
     pub(super) fn exclusions(&self) -> &[Exclusion] {
         &self.exclusions
+    }
+
+    /// Whether the walk retried a target, passed over one an exclusion
+    /// covered, or recognized an upstream pattern.
+    fn took_detours(&self) -> bool {
+        self.retries_used > 0
+            || self.excluded_by != ExcludedBy::default()
+            || self.recognized.is_some()
+    }
+
+    /// Log the walk's one summary line, when it took a detour. Counts and
+    /// closed tokens only: `attempts` is the upstream calls the walk made,
+    /// and nothing from a request, a response, a credential or an endpoint
+    /// reaches a field.
+    pub(super) fn log_summary(&self, surface: DispatchSurface, attempts: u32) {
+        if !self.took_detours() {
+            return;
+        }
+        let excluded = self.excluded_by();
+        tracing::info!(
+            surface = surface.as_str(),
+            attempts,
+            retries = self.retries_used(),
+            excluded_endpoint = excluded.endpoint,
+            excluded_model = excluded.model,
+            excluded_target = excluded.target,
+            excluded_probe_run = excluded.probe_run,
+            recognizer = self.recognized().map_or("none", ScopeRow::as_str),
+            "walk summary",
+        );
     }
 
     /// Record a same-target retry the walk is about to make.
@@ -361,3 +390,7 @@ impl RequestWalk {
 #[cfg(test)]
 #[path = "walk_state_tests.rs"]
 mod walk_state_tests;
+
+#[cfg(test)]
+#[path = "walk_summary_tests.rs"]
+mod walk_summary_tests;

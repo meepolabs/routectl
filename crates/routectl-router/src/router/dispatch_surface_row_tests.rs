@@ -86,18 +86,6 @@ fn only_the_message_surfaces_shape_an_attempt_as_a_message() {
 }
 
 #[test]
-fn only_the_message_surfaces_dedupe_learning_across_the_whole_request() {
-    assert_eq!(
-        row(DispatchSurface::dedupes_learning_per_request),
-        [
-            ("complete", true),
-            ("stream", true),
-            ("count_tokens", false)
-        ],
-    );
-}
-
-#[test]
 fn only_the_message_surfaces_hold_a_recovered_error_as_the_last_error() {
     assert_eq!(
         row(DispatchSurface::holds_recovered_errors),

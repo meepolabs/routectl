@@ -401,7 +401,13 @@ impl Router {
             &mut walk,
         ))
         .await;
-        self.finish_dispatch(&meta, &repair_budget, observation.as_ref());
+        self.finish_dispatch(
+            &meta,
+            &repair_budget,
+            &walk,
+            DispatchSurface::Complete,
+            observation.as_ref(),
+        );
         Dispatched { meta, result }
     }
 
@@ -441,7 +447,13 @@ impl Router {
             &mut walk,
         ))
         .await;
-        self.finish_dispatch(&meta, &repair_budget, observation.as_ref());
+        self.finish_dispatch(
+            &meta,
+            &repair_budget,
+            &walk,
+            DispatchSurface::Stream,
+            observation.as_ref(),
+        );
         DispatchedStream { meta, result }
     }
 
