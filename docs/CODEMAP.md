@@ -358,8 +358,9 @@ license.
   of an upstream error body carried on `Error::Upstream` (read via
   `Error::parsed_body`), plus its envelope / `error.*` accessors and
   `upstream_message_or_excerpt`; `UpstreamBody` pairs the text with the parse
-  of exactly that text, built by `new` (parses it) or `from_parse` (keeps a
-  parse the caller already made, under the same cap and shape rule)
+  of exactly that text, built by `new` (parses it), `from_parse` (keeps a
+  parse the caller already made, under the same cap and shape rule) or
+  `error_envelope` (a synthesized `{"error":{"message":..}}` with its parse)
 - `src/test_utils.rs` -- single source of truth for the cross-crate
   contract-test fixture builders (`scenarios::*`, `user_msg`,
   `get_weather_tool`); gated behind `#[cfg(any(test, feature =
@@ -690,7 +691,8 @@ license.
   `x-amzn-errortype` lift, and `tokens()`. Also `map_success_body`,
   `recognize_upstream_reason` (the credential `UpstreamReason` table), and
   `lift_nested_error_tokens` / `lift_nested_status_tokens` for the in-band
-  and SSE error readers
+  and SSE error readers; `from_parts` parses a raw body, `from_body` takes an
+  `UpstreamBody` that already carries its parse
 - `src/upstream_scope.rs` -- the closed `ScopeRow` table read by
   `UpstreamErrorRead::into_error_with_tokens`: `ScopeLane` (set by the
   anthropic-api lane on its own OAuth bearer credential only), the
@@ -1021,10 +1023,11 @@ license.
   `ThinkTagAccumulator` for cross-chunk `<think>` state (`take_think_flush`
   emits held bytes before `[DONE]`, EOF, a transport error or an unusable
   event); stream tail via `classify_stream_tail` and `missing_terminal`;
-  `map_openai_compat_upstream_error` builds the client error from an
-  `upstream_error::UpstreamErrorRead` over the body's one capped parse
-  (`UpstreamBody::from_parse`; tokens, gated `Retry-After`, request
-  id) and routes a non-envelope (flat AWS mantle) 403 through the
+  the 2xx inline-error check (`detect_inline_error_2xx`) reuses the
+  success body's parse through `UpstreamBody::from_parse` instead of
+  parsing again; `map_openai_compat_upstream_error` builds the client
+  error from an `upstream_error::UpstreamErrorRead` (tokens, gated
+  `Retry-After`, request id) and routes a non-envelope (flat AWS mantle) 403 through the
   `aws_error` scrub; the optional `OpenAiCompatConfig::mantle` selects the
   Bedrock mantle lane (SigV4/bearer-signed body bytes via `mantle::sign`, no
   first-party Bearer, no-redirect client, `mantle::probe` credential check;
@@ -1151,7 +1154,10 @@ license.
 - `src/openai_responses/types.rs` -- request wire types: `ResponsesRequest`,
   `ResponseInput` wrapper (`Item(ResponseInputItem)` | untagged
   `Passthrough(Value)` re-emitting preserved unknown input kinds),
-  `ResponseInputItem` union, `ResponsesTool` flat shape
+  `ResponseInputItem` union, `ResponsesTool` flat shape;
+  `ResponsesContentItem::Verbatim` (untagged, an unmodeled content part
+  forwarded as written) and the prompt-cache fields `prompt_cache_options` /
+  `prompt_cache_retention` / per-block `prompt_cache_breakpoint`
 - `src/openai_responses/response_types.rs` -- response + SSE event wire types
   (`ResponsesResponse`, output-item union, stream events)
 - `src/openai_responses/auth.rs` -- `apply` injects only the auth pair per
@@ -1225,7 +1231,8 @@ license.
   only for Responses-ingress requests on a surface that takes them, a
   withheld one counted once per request via `PromptCacheWithheldTally`;
   `apply_session_cache_key` sends the hex SHA-256 of the inbound session key
-  as `prompt_cache_key` when nobody set one; `breakpoint_text_digest` is the
+  as `prompt_cache_key` when neither client nor operator set one, on ApiKey
+  and ChatGPT-OAuth only (never Bedrock Mantle), whatever the ingress; `breakpoint_text_digest` is the
   digest both breakpoint sides compare.
   `apply_reasoning` sets `effort` from the canonical value, defaults `summary`
   to `"auto"` only when the caller set none, and overlays the Responses-dialect
@@ -1247,8 +1254,9 @@ license.
   lane tag the non-streaming path emits; the completed-response chunk stamps
   `usage_input_source = ExplicitFinal` beside its usage; a `ResponsesEnvelope`
   on `upstream_meta` carries the response `created_at` on the created chunk
-  and a message item's id on the first text chunk of each item (tracked by
-  `last_text_index`, so interleaved items keep their own ids). `is_terminal_event`
+  and a message item's non-empty id on each text chunk that switches to a
+  different item than the previous text chunk (tracked by `last_text_index`,
+  so interleaved items keep their own ids). `is_terminal_event`
   (completed / incomplete / failed / cancelled) is the lane's
   `StreamCompletion` predicate for both `complete()` and `stream()`
 - `src/openai_responses/quota_headers.rs` -- tolerant parser for the
@@ -1370,7 +1378,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   CountTokens wrapper carries (the serialized InvokeModel body, or the
   `converse` member), via `count_tokens_body`, as `complete` and `stream`
   deposit theirs;
-  owns the client-`metadata` withhold shared by every Bedrock surface
+  owns the client-`metadata` withhold shared by the Invoke, Converse and
+  mantle Anthropic surfaces
   (`CLIENT_FINGERPRINT_METADATA_KEY`, `operator_metadata` /
   `operator_payload_metadata` for the operator's own value,
   `client_metadata_differs`, `declare_client_metadata_strip`);
@@ -7906,7 +7915,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   internal `matched_stop_sequence` on render, and stamps the OpenAI
   envelope on render (`object`, `system_fingerprint` mirrored from the
   upstream value carried on `UpstreamMeta` on a complete response and held
-  across the stream, else `null` and declared as a stamp, `created` on chunks; synthesizes `chatcmpl-<uuid>` id + unix
+  across the stream, else `null` and declared as a stamp,
+  `created` on chunks; synthesizes `chatcmpl-<uuid>` id + unix
   `created` when the upstream omitted them, stream-stable across chunks).
   Captures the inbound
   per-conversation key into `routectl_internal.inbound_session_key` via
