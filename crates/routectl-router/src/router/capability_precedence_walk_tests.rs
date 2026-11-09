@@ -3,7 +3,7 @@
 //! `Resolution` the seam gives for inputs gathered independently here.
 
 use super::capability_precedence_matrix_tests::{
-    KIND, base_config, lane_of, seed_learned, seed_verified, target_with_priors,
+    KIND, base_config, fixture_target, lane_of, seed_learned, seed_verified,
 };
 use super::feature_filter_read_tests::seed_lapsed;
 use super::*;
@@ -30,12 +30,7 @@ enum Seed {
 /// The seam's resolution of `(target, key)`, from inputs gathered here on
 /// the test side (the walk under test gathers its own), with the learned
 /// cell read off a snapshot taken before the walk.
-fn expected_resolution(
-    router: &Router,
-    target: &DispatchTarget,
-    key: &str,
-    prior: Option<bool>,
-) -> Resolution {
+fn expected_resolution(router: &Router, target: &DispatchTarget, key: &str) -> Resolution {
     let config = &router.config;
     let pinned = operator_pins_capability(config, "p", &target.model.header_extras, key);
     let verdict =
@@ -51,7 +46,7 @@ fn expected_resolution(
         .and_then(|entry| LearnedInput::from_entry(entry, now));
     match resolve_operator(pinned, verdict, ctx) {
         Stage::Decided(decided) => decided,
-        Stage::Open(cell) => resolve_open(learned, None, prior, cell),
+        Stage::Open(cell) => resolve_open(learned, None, cell),
     }
 }
 
@@ -59,8 +54,8 @@ fn expected_resolution(
 fn the_dispatch_walk_acts_on_the_seam_resolution_for_every_tier() {
     const PIN: &str = "[providers.p.header_extras]\n\
                        \"anthropic-beta\" = \"context-management-2025-06-27\"\n";
-    // Each row: (name, extra config, kill switch on, key, prior, seed, the
-    // tier expected to decide). The walk runs `[nick, clean]`, so the
+    // Each row: (name, extra config, kill switch on, key, seed, the tier
+    // expected to decide). The walk runs `[nick, clean]`, so the
     // fixture's place in the result reads the routing axis; an override is
     // scoped to `nick` alone so the sibling stays clean.
     let rows = [
@@ -70,17 +65,15 @@ fn the_dispatch_walk_acts_on_the_seam_resolution_for_every_tier() {
              [capability.overrides.\"p:nick\"]\nunsupported = [\"web_search\"]\n",
             true,
             "web_search",
-            None,
             Seed::Verified,
             Some(Layer::Override),
         ),
         (
-            "force_supported masks a learned negative and a prior",
+            "force_supported masks a learned negative",
             "[models.nick]\nprovider = \"p\"\nupstream = \"nick\"\n\
              [capability.overrides.\"p:nick\"]\nforce_supported = [\"web_search\"]\n",
             true,
             "web_search",
-            Some(false),
             Seed::Acting(FailurePhase::F2),
             Some(Layer::Override),
         ),
@@ -89,7 +82,6 @@ fn the_dispatch_walk_acts_on_the_seam_resolution_for_every_tier() {
             "",
             true,
             "advisor",
-            None,
             Seed::Acting(FailurePhase::F1),
             Some(Layer::Learned),
         ),
@@ -98,7 +90,6 @@ fn the_dispatch_walk_acts_on_the_seam_resolution_for_every_tier() {
             "",
             true,
             "web_search",
-            Some(false),
             Seed::Acting(FailurePhase::F2),
             Some(Layer::Learned),
         ),
@@ -107,7 +98,6 @@ fn the_dispatch_walk_acts_on_the_seam_resolution_for_every_tier() {
             PIN,
             true,
             "context_management",
-            None,
             Seed::Acting(FailurePhase::F1),
             Some(Layer::Learned),
         ),
@@ -116,62 +106,56 @@ fn the_dispatch_walk_acts_on_the_seam_resolution_for_every_tier() {
             "",
             true,
             "context_management",
-            None,
             Seed::Lapsed,
             Some(Layer::Learned),
         ),
         (
-            "verified positive masks a prior",
+            "verified positive keeps",
             "",
             true,
             "web_search",
-            Some(false),
             Seed::Verified,
             Some(Layer::Learned),
         ),
         (
-            "prior false tails",
+            "live F3 negative is advisory; no tier decides",
             "",
             true,
             "web_search",
-            Some(false),
-            Seed::Nothing,
-            Some(Layer::Prior),
-        ),
-        (
-            "live F3 negative is advisory; the prior decides",
-            "",
-            true,
-            "web_search",
-            Some(false),
             Seed::Acting(FailurePhase::F3),
-            Some(Layer::Prior),
+            None,
         ),
         (
-            "kill switch off ignores learned and prior",
+            "no tier has an opinion",
+            "",
+            true,
+            "web_search",
+            Seed::Nothing,
+            None,
+        ),
+        (
+            "kill switch off ignores learned",
             "",
             false,
             "web_search",
-            Some(false),
             Seed::Acting(FailurePhase::F2),
             None,
         ),
     ];
-    for (name, extra, enabled, key, prior, seed, expected_layer) in rows {
+    for (name, extra, enabled, key, seed, expected_layer) in rows {
         // Arrange
         let mut config = base_config(extra);
         config.capability.enabled = enabled;
         let router = Router::new(Arc::new(config));
-        let priors: Vec<(&str, bool)> = prior.map(|p| (key, p)).into_iter().collect();
-        let target = target_with_priors(&router, "nick", &priors);
-        let clean = target_with_priors(&router, "clean", &[]);
+        let target = fixture_target(&router, "nick");
+        let clean = fixture_target(&router, "clean");
         match seed {
             Seed::Nothing => {}
             Seed::Acting(phase) => seed_learned(&router, "nick", key, phase),
             Seed::Lapsed => seed_lapsed(&router, "nick", key),
             Seed::Verified => seed_verified(&router, "nick", key),
         }
-        let expected = expected_resolution(&router, &target, key, prior);
+        let expected = expected_resolution(&router, &target, key);
         assert_eq!(expected.layer(), expected_layer, "{name}: the row's tier");
 
         // Act

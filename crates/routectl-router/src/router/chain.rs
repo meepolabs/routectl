@@ -10,9 +10,7 @@ use crate::config::AliasValue;
 use crate::resolved::ResolvedModel;
 
 use super::class_observe::DispatchSurface;
-use super::{
-    ALIAS_MAX_RECURSION_DEPTH, DispatchTarget, ProbeAdmission, Router, catalog_capabilities,
-};
+use super::{ALIAS_MAX_RECURSION_DEPTH, DispatchTarget, ProbeAdmission, Router};
 
 impl Router {
     /// v0.6.0 alias-table lookup. Precedence: exact match -> longest
@@ -598,7 +596,6 @@ pub(super) const fn empty_pool_error() -> Error {
 /// shape the dispatch loop walks. Hoisted out of `dispatch_chain`
 /// so the three resolution branches share one builder.
 pub(super) fn into_one_dispatch_target(m: Arc<ResolvedModel>) -> DispatchTarget {
-    let capabilities = catalog_capabilities(&m.effective_row);
     DispatchTarget {
         provider_name: m.provider_name.clone(),
         provider_kind: None,
@@ -622,7 +619,6 @@ pub(super) fn into_one_dispatch_target(m: Arc<ResolvedModel>) -> DispatchTarget 
         visible_routectl_provider: m.visible_routectl_provider,
         model: m,
         class_overrides: BTreeMap::new(),
-        capabilities,
     }
 }
 
@@ -660,7 +656,6 @@ pub(super) fn dispatch_target_for_seat(
     seat: &crate::seat_pool::SeatTarget,
     provider_kind: Option<&'static str>,
 ) -> DispatchTarget {
-    let capabilities = catalog_capabilities(&m.effective_row);
     DispatchTarget {
         provider_name: seat.provider_name.clone(),
         provider_kind,
@@ -685,6 +680,5 @@ pub(super) fn dispatch_target_for_seat(
         visible_routectl_provider: m.visible_routectl_provider,
         model: m.clone(),
         class_overrides: BTreeMap::new(),
-        capabilities,
     }
 }

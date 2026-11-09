@@ -29,9 +29,9 @@ use crate::server::ledger_reader::{
 
 use super::served::{GatherSources, GatheredLayers, served_layers};
 use super::{
-    CapabilityConfig, CapabilityInputs, CapabilityMatrixSource, DoctorContext, EquivalenceBasis,
-    FreshnessInputs, KnobRow, LEGACY_FOLDER_NAME_CAP, LegacyFolder, MatrixOrigin,
-    OutputCeilingSource, PricingRow, PricingRowSource, PriorCell,
+    CapabilityInputs, CapabilityMatrixSource, DoctorContext, EquivalenceBasis, FreshnessInputs,
+    KnobRow, LEGACY_FOLDER_NAME_CAP, LegacyFolder, MatrixOrigin, OutputCeilingSource, PricingRow,
+    PricingRowSource,
 };
 
 /// The network doctor gather: the no-network context PLUS one upstream
@@ -118,7 +118,9 @@ pub async fn gather_context_no_network(
         .as_ref()
         .map(routectl_router::overlay_soft_defects)
         .unwrap_or_default();
-    let capability = build_capability_inputs(&config, config_parse_error, overlay);
+    let capability = CapabilityInputs {
+        panel_unavailable: config_parse_error,
+    };
 
     let (probes, seats, auth_store_error) = gather_auth().await;
     let secret_checks = gather_secret_checks(&config, &probes);
@@ -251,7 +253,7 @@ pub(super) fn disk_layers(config_path: &Path) -> GatheredLayers {
 
     // The learned matrix needs this run's revision to match the ledger's
     // replay boundary. The baked catalog version is fixed; the overlay
-    // revision comes from the same read-only overlay load the priors use
+    // revision comes from the same read-only overlay load the pricing rows use
     // (defaulting to zero when the overlay could not be read -- a foreign
     // boundary then classifies as unavailable, never a silent empty).
     let overlay_revision = overlay_layer
@@ -496,33 +498,6 @@ pub(super) const fn replay_summary(
     }
 }
 
-/// Build the capability section's per-layer inputs. A config parse error
-/// (already redacted) yields the "panel unavailable" state -- NOT an
-/// empty-from-default-config view. Otherwise the prior cells come from the
-/// overlay (empty when the overlay could not be read -- priors are then
-/// absent, while the matrix's learned and override cells still render).
-pub(super) fn build_capability_inputs(
-    config: &Config,
-    config_parse_error: Option<String>,
-    overlay: Option<CatalogOverlay>,
-) -> CapabilityInputs {
-    if let Some(err) = config_parse_error {
-        return CapabilityInputs {
-            config: None,
-            panel_unavailable: Some(err),
-        };
-    }
-
-    let priors = overlay
-        .map(|overlay| derive_prior_cells(config, &overlay))
-        .unwrap_or_default();
-
-    CapabilityInputs {
-        config: Some(CapabilityConfig { priors }),
-        panel_unavailable: None,
-    }
-}
-
 /// The resolved tuning table, through the same [`derive_effective_view`] path
 /// `config show --effective` renders.
 pub(super) fn derive_tuning_rows(config: &Config) -> Vec<TuningRow> {
@@ -531,41 +506,8 @@ pub(super) fn derive_tuning_rows(config: &Config) -> Vec<TuningRow> {
     derive_effective_view(config, &CatalogOverlay::default()).tuning
 }
 
-/// Derive the catalog/overlay capability prior cells: one per `[models.X]`
-/// entry whose resolved catalog row is `Present` AND carries capability
-/// data, retaining its `verified_at` stamp. A `Missing` / `Disabled` cell or
-/// a row with no capability keys yields NO prior -- the conservative
-/// "unknown" baseline, never a fabricated row. Staleness is NOT filtered
-/// here: the matrix panel flags a stale prior against the operator staleness
-/// hint (via [`routectl_router::is_stale_days`]), so a stale-but-present
-/// stamp is surfaced honestly rather than silently dropped.
-pub(super) fn derive_prior_cells(config: &Config, overlay: &CatalogOverlay) -> Vec<PriorCell> {
-    derive_effective_view(config, overlay)
-        .models
-        .into_iter()
-        .filter_map(|cell| {
-            let EffectiveRow::Present {
-                row, verified_at, ..
-            } = cell.row
-            else {
-                return None;
-            };
-            if row.capabilities.is_empty() {
-                return None;
-            }
-            let capabilities = row.capabilities.into_iter().collect();
-            Some(PriorCell {
-                nickname: cell.nickname,
-                verified_at,
-                capabilities,
-            })
-        })
-        .collect()
-}
-
 /// The freshest `verified_at` among the effective view's OVERLAY-sourced
-/// cells (import / user, never baked). Reuses the same
-/// [`derive_effective_view`] path the prior cells walk. Baked cells are
+/// cells (import / user, never baked), through [`derive_effective_view`]. Baked cells are
 /// excluded on purpose: their stamp is the table-wide snapshot date already
 /// shown in the baked row, so counting them would mask "running on baked
 /// defaults" as a fresh overlay. `YYYY-MM-DD` stamps are zero-padded, so the

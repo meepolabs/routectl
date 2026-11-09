@@ -59,7 +59,6 @@ const fn inputs(ctx: CellContext) -> DisplayInputs {
         override_verdict: None,
         learned: None,
         seed: None,
-        prior: None,
         ctx,
     }
 }
@@ -67,8 +66,6 @@ const fn inputs(ctx: CellContext) -> DisplayInputs {
 const BROKEN_TOKEN: &str = Verdict::LearnedBroken(FailurePhase::F1).as_str();
 const VERIFIED_TOKEN: &str = Verdict::VerifiedWorking.as_str();
 const CLEARED_TOKEN: &str = Verdict::Cleared.as_str();
-const ASSUMED_FALSE: &str = Verdict::Assumed(false).as_str();
-const ASSUMED_TRUE: &str = Verdict::Assumed(true).as_str();
 const UNKNOWN: &str = Verdict::Unknown.as_str();
 
 type Projection = (
@@ -106,18 +103,18 @@ fn each_tier_projects_its_verdict_source_and_layer() {
         ("a route-away override withholds a beta flag",
          DisplayInputs { override_verdict: ROUTE_AWAY, ..inputs(BETA) },
          (FORCED_UNSUPPORTED, Some(false), Some(SOURCE_OVERRIDE), Some(Layer::Override), ACTION_WITHHOLD)),
-        ("force_supported masks a negative and a false prior",
-         DisplayInputs { override_verdict: FORCE, learned: LIVE_F1, prior: Some(false), ..inputs(FEATURE) },
+        ("force_supported masks a negative",
+         DisplayInputs { override_verdict: FORCE, learned: LIVE_F1, ..inputs(FEATURE) },
          (FORCED_SUPPORTED, Some(true), Some(SOURCE_OVERRIDE), Some(Layer::Override), ACTION_ALLOW)),
         ("force_supported sends over the seed",
          DisplayInputs { override_verdict: FORCE, seed: WITHHOLD, ..inputs(BETA) },
          (FORCED_SUPPORTED, Some(true), Some(SOURCE_OVERRIDE), Some(Layer::Override), ACTION_ALLOW)),
         // --- learned ---
-        ("an F1 negative outranks a false prior",
-         DisplayInputs { learned: LIVE_F1, prior: Some(false), ..inputs(FEATURE) },
+        ("a non-droppable F1 negative routes away",
+         DisplayInputs { learned: LIVE_F1, ..inputs(FEATURE) },
          (BROKEN_TOKEN, Some(false), Some(SOURCE_LIVE), Some(Layer::Learned), ACTION_ROUTE_AWAY)),
-        ("an F2 negative outranks a true prior and never strips",
-         DisplayInputs { learned: LIVE_F2, prior: Some(true), ..inputs(DROPPABLE) },
+        ("an F2 negative never strips",
+         DisplayInputs { learned: LIVE_F2, ..inputs(DROPPABLE) },
          (BROKEN_TOKEN, Some(false), Some(SOURCE_LIVE), Some(Layer::Learned), ACTION_ROUTE_AWAY)),
         ("a droppable F1 negative strips",
          DisplayInputs { learned: LIVE_F1, ..inputs(DROPPABLE) },
@@ -125,14 +122,14 @@ fn each_tier_projects_its_verdict_source_and_layer() {
         ("a probe negative is tagged probe",
          DisplayInputs { learned: PROBE_F1, ..inputs(FEATURE) },
          (BROKEN_TOKEN, Some(false), Some(SOURCE_PROBE), Some(Layer::Learned), ACTION_ROUTE_AWAY)),
-        ("a verified positive masks a false prior",
-         DisplayInputs { learned: VERIFIED, prior: Some(false), ..inputs(FEATURE) },
+        ("a verified positive allows",
+         DisplayInputs { learned: VERIFIED, ..inputs(FEATURE) },
          (VERIFIED_TOKEN, Some(true), Some(SOURCE_LIVE), Some(Layer::Learned), ACTION_ALLOW)),
         ("a probe positive is tagged probe",
          DisplayInputs { learned: VERIFIED_PROBE, ..inputs(FEATURE) },
          (VERIFIED_TOKEN, Some(true), Some(SOURCE_PROBE), Some(Layer::Learned), ACTION_ALLOW)),
         ("a lapsed negative re-probes",
-         DisplayInputs { learned: LAPSED, prior: Some(false), ..inputs(DROPPABLE) },
+         DisplayInputs { learned: LAPSED, ..inputs(DROPPABLE) },
          (BROKEN_TOKEN, Some(false), Some(SOURCE_LIVE), Some(Layer::Learned), ACTION_REPROBE)),
         ("a learned beta negative withholds over a cleared seed",
          DisplayInputs { learned: LIVE_F1, seed: CLEARED, ..inputs(BETA) },
@@ -141,9 +138,9 @@ fn each_tier_projects_its_verdict_source_and_layer() {
          DisplayInputs { learned: VERIFIED, seed: WITHHOLD, ..inputs(BETA) },
          (VERIFIED_TOKEN, Some(true), Some(SOURCE_LIVE), Some(Layer::Learned), ACTION_ALLOW)),
         // --- a shown learned signal with no opinion ---
-        ("an advisory live F3 negative is shown while the prior decides",
-         DisplayInputs { learned: LIVE_F3, prior: Some(false), ..inputs(FEATURE) },
-         (BROKEN_TOKEN, Some(false), Some(SOURCE_LIVE), Some(Layer::Learned), ACTION_ROUTE_AWAY)),
+        ("an advisory live F3 negative is shown with no action",
+         DisplayInputs { learned: LIVE_F3, ..inputs(FEATURE) },
+         (BROKEN_TOKEN, Some(false), Some(SOURCE_LIVE), Some(Layer::Learned), ACTION_NONE)),
         ("an uncorroborated negative is shown while the seed decides",
          DisplayInputs { learned: UNCORROBORATED, seed: WITHHOLD, ..inputs(BETA) },
          (BROKEN_TOKEN, Some(false), Some(SOURCE_LIVE), Some(Layer::Learned), ACTION_WITHHOLD)),
@@ -151,28 +148,15 @@ fn each_tier_projects_its_verdict_source_and_layer() {
          DisplayInputs { learned: LIVE_F1, ..inputs(FEATURE_OFF) },
          (BROKEN_TOKEN, Some(false), Some(SOURCE_LIVE), Some(Layer::Learned), ACTION_NONE)),
         // --- seed ---
-        ("the seed withholds over a true prior",
-         DisplayInputs { seed: WITHHOLD, prior: Some(true), ..inputs(BETA) },
+        ("the seed withholds",
+         DisplayInputs { seed: WITHHOLD, ..inputs(BETA) },
          (BROKEN_TOKEN, Some(false), Some(SOURCE_SEED), Some(Layer::Seed), ACTION_WITHHOLD)),
-        ("a cleared seed sends over a false prior",
-         DisplayInputs { seed: CLEARED, prior: Some(false), ..inputs(BETA) },
+        ("a cleared seed sends",
+         DisplayInputs { seed: CLEARED, ..inputs(BETA) },
          (CLEARED_TOKEN, Some(true), Some(SOURCE_SEED), Some(Layer::Seed), ACTION_ALLOW)),
         ("the seed withholds with the kill switch off",
          DisplayInputs { seed: WITHHOLD, learned: VERIFIED, ..inputs(BETA_OFF) },
          (VERIFIED_TOKEN, Some(true), Some(SOURCE_LIVE), Some(Layer::Learned), ACTION_WITHHOLD)),
-        // --- prior ---
-        ("a false prior routes away",
-         DisplayInputs { prior: Some(false), ..inputs(FEATURE) },
-         (ASSUMED_FALSE, Some(false), Some(SOURCE_PRIOR), Some(Layer::Prior), ACTION_ROUTE_AWAY)),
-        ("a true prior takes no action",
-         DisplayInputs { prior: Some(true), ..inputs(FEATURE) },
-         (ASSUMED_TRUE, Some(true), Some(SOURCE_PRIOR), Some(Layer::Prior), ACTION_NONE)),
-        ("the kill switch off shows a prior that takes no action",
-         DisplayInputs { prior: Some(false), ..inputs(FEATURE_OFF) },
-         (ASSUMED_FALSE, Some(false), Some(SOURCE_PRIOR), Some(Layer::Prior), ACTION_NONE)),
-        ("a prior on a beta key is shown with no action",
-         DisplayInputs { prior: Some(false), ..inputs(BETA) },
-         (ASSUMED_FALSE, Some(false), Some(SOURCE_PRIOR), Some(Layer::Prior), ACTION_NONE)),
         // --- no signal ---
         ("no signal is unknown", inputs(FEATURE),
          (UNKNOWN, None, None, None, ACTION_NONE)),

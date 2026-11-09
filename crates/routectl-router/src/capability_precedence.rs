@@ -2,7 +2,7 @@
 //!
 //! Every surface that decides or shows what happens to a capability on a
 //! target resolves it here, in the settled order
-//! `pin > representability > override > learned > seed > prior` held once in
+//! `pin > representability > override > learned > seed` held once in
 //! [`PRECEDENCE`]: the dispatch stages and the display mode both walk that
 //! list, so no caller orders the tiers itself. The resolution is pure: it reads already-gathered inputs and never claims a
 //! probe slot, flips `in_flight`, or touches a metric.
@@ -14,7 +14,7 @@
 //!    override registry) and the representability check between them. It
 //!    returns [`Stage::Decided`] when they settle both axes, else
 //!    [`Stage::Open`] carrying an [`OpenCell`].
-//! 2. [`resolve_open`] applies the learned, seed and prior tiers to an
+//! 2. [`resolve_open`] applies the learned and seed tiers to an
 //!    [`OpenCell`]. Only the caller holding an `OpenCell` can reach it, so the
 //!    lower tiers can never be resolved without the operator pass.
 //!
@@ -52,7 +52,7 @@ pub use display::{DisplayInputs, resolve_display};
 /// Action token: an operator route-away override hard-drops the target.
 pub const ACTION_DROP: &str = "drop";
 /// Action token: the target is demoted to the tail of its chain (an acting
-/// learned negative, or a catalog `prior=false`).
+/// learned negative).
 pub const ACTION_ROUTE_AWAY: &str = "route_away";
 /// Action token: the capability is stripped from the request in place.
 pub const ACTION_STRIP: &str = "strip";
@@ -117,8 +117,6 @@ pub enum Layer {
     Learned,
     /// The shipped beta seed.
     Seed,
-    /// A catalog capability prior.
-    Prior,
 }
 
 impl Layer {
@@ -130,7 +128,6 @@ impl Layer {
             Self::Override => "override",
             Self::Learned => "learned",
             Self::Seed => "seed",
-            Self::Prior => "prior",
         }
     }
 
@@ -165,13 +162,12 @@ impl PartialOrd for Layer {
 }
 
 /// The tiers, strongest first: the one ordering every resolution walks.
-const PRECEDENCE: [Layer; 6] = [
+const PRECEDENCE: [Layer; 5] = [
     Layer::Pin,
     Layer::Representability,
     Layer::Override,
     Layer::Learned,
     Layer::Seed,
-    Layer::Prior,
 ];
 
 /// The staged dispatch path applies every operator tier before any other, so
@@ -304,8 +300,8 @@ const fn is_advisory(learned: LearnedInput) -> bool {
 /// the capability key and the lane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CellContext {
-    /// The `[capability] enabled` kill switch. Off, the learned and prior
-    /// tiers have no opinion; the operator tiers, representability and the
+    /// The `[capability] enabled` kill switch. Off, the learned tier has no
+    /// opinion; the operator tiers, representability and the
     /// seed still act.
     capability_enabled: bool,
     /// Whether the capability is a beta-flag key. A beta key acts on the wire
@@ -487,9 +483,9 @@ impl Resolution {
             (Routing::Keep, Wire::Strip) => ACTION_STRIP,
             (Routing::Keep, Wire::Withhold) => ACTION_WITHHOLD,
             (Routing::Keep, Wire::Send) if self.reprobe() => ACTION_REPROBE,
-            (Routing::Keep, Wire::Send) => match (self.layer, self.supported) {
-                (Some(Layer::Prior), _) | (_, None | Some(false)) => ACTION_NONE,
-                (_, Some(true)) => ACTION_ALLOW,
+            (Routing::Keep, Wire::Send) => match self.supported {
+                None | Some(false) => ACTION_NONE,
+                Some(true) => ACTION_ALLOW,
             },
         }
     }
@@ -561,7 +557,6 @@ pub const fn resolve_operator(
         override_verdict,
         learned: None,
         seed: None,
-        prior: None,
         ctx,
     };
     match first_opinion(inputs, true) {
@@ -570,11 +565,10 @@ pub const fn resolve_operator(
     }
 }
 
-/// Apply the learned, seed and prior tiers to a cell the operator left open.
+/// Apply the learned and seed tiers to a cell the operator left open.
 pub const fn resolve_open(
     learned: Option<LearnedInput>,
     seed: Option<SeedCell>,
-    prior: Option<bool>,
     cell: OpenCell,
 ) -> Resolution {
     let inputs = DisplayInputs {
@@ -582,7 +576,6 @@ pub const fn resolve_open(
         override_verdict: None,
         learned,
         seed,
-        prior,
         ctx: cell.ctx,
     };
     match first_opinion(inputs, false) {
@@ -619,7 +612,6 @@ const fn opinion(layer: Layer, inputs: DisplayInputs) -> Option<Resolution> {
         Layer::Override => override_opinion(inputs.pinned, inputs.override_verdict, inputs.ctx),
         Layer::Learned => learned_opinion(inputs.learned, cell),
         Layer::Seed => seed_opinion(inputs.seed, cell),
-        Layer::Prior => prior_opinion(inputs.prior, cell),
     }
 }
 
@@ -723,31 +715,6 @@ const fn seed_opinion(seed: Option<SeedCell>, cell: OpenCell) -> Option<Resoluti
             Wire::Send,
             Routing::Keep,
             Layer::Seed,
-            Some(true),
-            cell.pinned,
-        )),
-    }
-}
-
-/// A catalog prior speaks for feature keys only: the dispatch beta path has
-/// no prior tier, so a prior on a beta key has no opinion.
-const fn prior_opinion(prior: Option<bool>, cell: OpenCell) -> Option<Resolution> {
-    if !cell.ctx.capability_enabled || cell.ctx.beta_flag {
-        return None;
-    }
-    match prior {
-        None => None,
-        Some(false) => Some(Resolution::new(
-            Wire::Send,
-            Routing::Tail,
-            Layer::Prior,
-            Some(false),
-            cell.pinned,
-        )),
-        Some(true) => Some(Resolution::new(
-            Wire::Send,
-            Routing::Keep,
-            Layer::Prior,
             Some(true),
             cell.pinned,
         )),

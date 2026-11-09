@@ -164,7 +164,7 @@ impl Router {
             Stage::Decided(decided) => decided,
             Stage::Open(cell) => {
                 let learned = self.learned_beta_input(target, &key, cell, claim, admissions, now);
-                resolve_open(learned, self.seed_cell(target, &key), None, cell)
+                resolve_open(learned, self.seed_cell(target, &key), cell)
             }
         };
         BetaVerdict::from_wire(resolution.wire())

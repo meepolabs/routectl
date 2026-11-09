@@ -235,18 +235,21 @@ impl EvidenceSource {
 /// The derived read-model verdict for a capability against a target.
 ///
 /// This is a DERIVED view: only the negative verdicts persist in the
-/// ledger; `Assumed` and `Unknown` are computed at read time. The
+/// ledger; `Unknown` is computed at read time and `Assumed` only reads back
+/// from older rows. The
 /// `as_str` tokens are a versioned, internal ledger contract shared with
 /// any warm-rebuild replayer. `Assumed(bool)` maps to `"assumed"`
-/// regardless of the bool -- the bool is the prior's truthiness, not part
+/// regardless of the bool -- the bool is the assumption's polarity, not part
 /// of the token; the phase inside `LearnedBroken` is likewise carried in a
 /// sibling ledger field, not encoded in the verdict token. Reconstruct a
 /// persisted verdict through `from_parts`, which reads those sibling
 /// columns; it is open-set-tolerant so an unrecognized token never panics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
-    /// No learned evidence yet; the bool carries the catalog prior's
-    /// truthiness.
+    /// A support assumption with no learned evidence behind it; the bool
+    /// carries its polarity. Nothing mints it any more: it is kept so ledger
+    /// rows carrying the `assumed` token still read back through
+    /// `from_parts`.
     Assumed(bool),
     /// Confirmed working by positive detection.
     VerifiedWorking,

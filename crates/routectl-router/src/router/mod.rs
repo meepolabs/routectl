@@ -89,7 +89,6 @@ pub use capability_purge::{PurgeOutcome, ReservedPurge, ReservedSeedLift};
 use dispatch::k_query_key;
 #[cfg(test)]
 use feature_filter::FilterSource;
-use feature_filter::catalog_capabilities;
 pub use fidelity_status::{
     CanaryPosture, FidelitySnapshot, FieldVerdictStatus, PreflightBlockedReason,
 };
@@ -2107,16 +2106,6 @@ struct DispatchTarget {
     /// native `matched_by`. Empty (the default, and the value every
     /// constructor starts with) leaves native classification untouched.
     class_overrides: BTreeMap<u16, FailureClass>,
-    /// Catalog capability priors for this target, merged (baked + overlay)
-    /// and copied off `ResolvedModel::effective_row` at chain expansion. An
-    /// absent key means NO PRIOR (distinct from `Some(false)`, an asserted
-    /// absence). Empty when the resolved cell is `Disabled` / `Missing` or
-    /// carries no capability data. The third precedence baseline
-    /// (override -> learned -> prior); read via
-    /// [`DispatchTarget::capability_prior`] in the feature filter's prior
-    /// pass, where a `Some(false)` prior for an otherwise-open feature
-    /// soft-tails the target.
-    capabilities: BTreeMap<String, bool>,
 }
 
 impl DispatchTarget {
@@ -2124,16 +2113,6 @@ impl DispatchTarget {
     /// provider, kept because its credential could not be read at build.
     pub(crate) fn is_placeholder_seat(&self) -> bool {
         self.provider.is_none() && self.model.seats.is_some()
-    }
-
-    /// The catalog capability prior for `feature`: `Some(true)` /
-    /// `Some(false)` when the resolved cell asserts support / absence, or
-    /// `None` when the cell carries no prior for the key. The lowest-
-    /// precedence baseline in the override -> learned -> prior chain,
-    /// consumed by the feature filter's prior pass: a `Some(false)` prior
-    /// for a feature the learned pass left open soft-tails the target.
-    fn capability_prior(&self, feature: &str) -> Option<bool> {
-        self.capabilities.get(feature).copied()
     }
 
     /// The learned-registry key this target's fact about `feature` lives

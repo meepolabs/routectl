@@ -206,41 +206,30 @@ fn each_cell_names_the_tier_its_winner_beat() {
 
 #[test]
 fn nicknames_that_disagree_only_on_the_beaten_tier_keep_one_verdict() {
-    // Arrange: two nicknames on one lane both force-support the feature; only
-    // `claude` has a false prior beneath the override.
-    let config = bedrock_config(
-        "[models.claude2]\n\
-         provider = \"bed\"\n\
-         upstream = \"anthropic.claude-test-v1:0\"\n\
-         [capability.overrides.bed]\n\
-         force_supported = [\"web_search\"]\n",
-    );
-    let mut ctx = context(config, available(Vec::new(), Instant::now(), 0));
-    let mut priors = ctx
-        .capability
-        .config
-        .take()
-        .map(|c| c.priors)
-        .unwrap_or_default();
-    priors.push(PriorCell {
-        nickname: "claude".to_string(),
-        verified_at: "2026-01-01".to_string(),
-        capabilities: vec![(FEATURE.to_string(), false)],
-    });
-    ctx.capability.config = Some(CapabilityConfig { priors });
+    // Arrange: two nicknames on the Converse lane, whose wire cannot carry the
+    // flag; only `nova` has an override beneath that withhold.
+    let key = beta(CLIENT_FLAG);
+    let config = bedrock_config(&format!(
+        "[models.nova2]\n\
+         provider = \"cv\"\n\
+         upstream = \"us.amazon.nova-2-lite-v1:0\"\n\
+         [capability.overrides.\"cv:nova\"]\n\
+         force_supported = [\"{key}\"]\n"
+    ));
+    let ctx = context(config, available(Vec::new(), Instant::now(), 0));
 
     // Act
     let panel = build_capability_matrix_panel(&ctx);
 
     // Assert
-    let forced = cell(&panel, BEDROCK_LANE, FEATURE);
-    assert_eq!(forced.verdict, "forced_supported");
-    assert_eq!(forced.action, "allow");
-    assert_eq!(forced.layer, Some("override"));
-    assert_eq!(forced.overrode_layer, None, "the nicknames disagree");
+    let withheld = cell(&panel, CONVERSE_LANE, &key);
+    assert_eq!(withheld.verdict, "unrepresentable");
+    assert_eq!(withheld.action, "withhold");
+    assert_eq!(withheld.layer, Some("representability"));
+    assert_eq!(withheld.overrode_layer, None, "the nicknames disagree");
     assert!(
-        forced.nickname_actions.is_empty(),
+        withheld.nickname_actions.is_empty(),
         "an agreeing verdict and action list no nicknames: {:?}",
-        forced.nickname_actions
+        withheld.nickname_actions
     );
 }

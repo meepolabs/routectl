@@ -779,7 +779,6 @@ fn status_rows(entries: &[LearnedRegistryEntry]) -> Vec<Value> {
             seed_clears: &[],
         },
         beta_seed: routectl_router::BetaSeedScope::EMPTY,
-        prior: &|_, _| None,
     })
     .into_iter()
     .map(|row| serde_json::to_value(map_learned(row, now, 10_000)).expect("row serializes"))

@@ -105,7 +105,7 @@ pub(crate) fn render_would_trim_panel(panel: &WouldTrimPanel) -> String {
 /// `provider_entry#upstream` key -- the exact string `capability purge`
 /// accepts -- followed by its provider kind and the nicknames that map to
 /// it. Empty and Unavailable render a distinct honest state line and still
-/// show any config-derived (prior / override) cells. A lane the loaded config
+/// show any config-derived (seed / override) cells. A lane the loaded config
 /// no longer maps is marked `(unrouted)`.
 pub(crate) fn render_capability_matrix_panel(panel: &CapabilityMatrixPanel) -> String {
     let mut out = String::new();
@@ -226,14 +226,14 @@ fn matrix_state_line(availability: &MatrixAvailability, source: MatrixSource) ->
             "learned registry resident; live/probe cells are current".to_string()
         }
         (MatrixAvailability::Empty, _) => {
-            "learned registry empty (no learned rows); prior/seed/override cells only".to_string()
+            "learned registry empty (no learned rows); seed/override cells only".to_string()
         }
         (MatrixAvailability::Unavailable { code }, MatrixSource::LedgerReplay) => {
-            format!("learned registry unavailable ({code}); prior/seed/override cells only")
+            format!("learned registry unavailable ({code}); seed/override cells only")
         }
-        (MatrixAvailability::Unavailable { code }, MatrixSource::Resident) => format!(
-            "learned registry unavailable ({code}) (boot warm); prior/seed/override cells only"
-        ),
+        (MatrixAvailability::Unavailable { code }, MatrixSource::Resident) => {
+            format!("learned registry unavailable ({code}) (boot warm); seed/override cells only")
+        }
     }
 }
 
@@ -750,13 +750,13 @@ mod tests {
                 &unavailable,
                 MatrixSource::Resident,
                 "learned registry unavailable (unreadable) (boot warm); \
-                 prior/seed/override cells only",
+                 seed/override cells only",
             ),
             (
                 "replay_unavailable",
                 &unavailable,
                 MatrixSource::LedgerReplay,
-                "learned registry unavailable (unreadable); prior/seed/override cells only",
+                "learned registry unavailable (unreadable); seed/override cells only",
             ),
         ];
 

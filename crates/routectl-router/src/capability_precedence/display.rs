@@ -12,8 +12,8 @@ use super::{
     CellContext, Layer, LearnedInput, PRECEDENCE, Resolution, SeedCell, no_opinion, opinion,
 };
 use crate::capability_display::{
-    FORCED_SUPPORTED, FORCED_UNSUPPORTED, SOURCE_LIVE, SOURCE_OVERRIDE, SOURCE_PIN, SOURCE_PRIOR,
-    SOURCE_PROBE, SOURCE_REPRESENTABILITY, SOURCE_SEED, VERDICT_UNREPRESENTABLE,
+    FORCED_SUPPORTED, FORCED_UNSUPPORTED, SOURCE_LIVE, SOURCE_OVERRIDE, SOURCE_PIN, SOURCE_PROBE,
+    SOURCE_REPRESENTABILITY, SOURCE_SEED, VERDICT_UNREPRESENTABLE,
 };
 use crate::override_registry::OverrideVerdict;
 
@@ -31,8 +31,6 @@ pub struct DisplayInputs {
     pub learned: Option<LearnedInput>,
     /// The shipped beta seed's state on the cell.
     pub seed: Option<SeedCell>,
-    /// The catalog prior for the cell.
-    pub prior: Option<bool>,
     /// The cell's context ([`CellContext::new`] or [`CellContext::for_lane`]).
     pub ctx: CellContext,
 }
@@ -97,8 +95,8 @@ impl Resolution {
     /// signal on the cell, whether or not it acts. It differs from
     /// [`Self::layer`] where a signal is present but has no opinion: an
     /// advisory live F3 negative, an uncorroborated inferred one, or any
-    /// learned or prior signal with the kill switch off all show `learned`
-    /// (or `prior`) while the action comes from the tier that decided.
+    /// learned signal with the kill switch off all show `learned` while the
+    /// action comes from the tier that decided.
     /// Filled by the display mode only; `None` on the dispatch path and for a
     /// cell with no signal.
     pub const fn display_layer(&self) -> Option<Layer> {
@@ -109,7 +107,7 @@ impl Resolution {
     }
 
     /// The display verdict token of [`Self::display_layer`]'s signal: the
-    /// core verdict vocabulary for a learned, seed or prior signal, the
+    /// core verdict vocabulary for a learned or seed signal, the
     /// panel-only override tokens (`forced_supported` / `forced_unsupported`),
     /// `forced_supported` for a pin and `unrepresentable` for a flag the lane
     /// cannot carry; `unknown` with no signal.
@@ -130,7 +128,7 @@ impl Resolution {
     }
 
     /// The source tag of [`Self::display_layer`]'s signal: `pin`,
-    /// `representability`, `override`, `live`, `probe`, `seed` or `prior`;
+    /// `representability`, `override`, `live`, `probe` or `seed`;
     /// `None` with no signal.
     pub const fn display_source(&self) -> Option<&'static str> {
         match self.shown {
@@ -141,7 +139,7 @@ impl Resolution {
 }
 
 /// The signal `layer` holds on the cell, whether or not it acts: a resident
-/// learned entry and a prior are shown with the kill switch off, and an
+/// learned entry is shown with the kill switch off, and an
 /// advisory or uncorroborated learned negative is shown like an acting one.
 const fn shown_signal(layer: Layer, inputs: DisplayInputs) -> Option<Shown> {
     let ctx = inputs.ctx;
@@ -181,15 +179,6 @@ const fn shown_signal(layer: Layer, inputs: DisplayInputs) -> Option<Shown> {
                 Verdict::Cleared.as_str(),
                 true,
                 SOURCE_SEED,
-            )),
-            None => None,
-        },
-        Layer::Prior => match inputs.prior {
-            Some(supported) => Some(shown(
-                Layer::Prior,
-                Verdict::Assumed(supported).as_str(),
-                supported,
-                SOURCE_PRIOR,
             )),
             None => None,
         },

@@ -98,12 +98,11 @@ pub enum MatrixAvailability {
 /// `forced_unsupported` tokens for an override or an operator wire pin,
 /// `unrepresentable` for a beta flag the lane cannot carry, or `mixed` when
 /// the nicknames on the lane resolve different verdicts); `supported` carries
-/// the polarity the token alone omits for a prior `assumed` cell (`None` for
-/// an `unknown` or `mixed` cell); `source` is the shown layer's evidence tag
-/// (`pin` / `representability` / `override` / `live` / `probe` / `seed` /
-/// `prior`) and `layer` the layer itself (`pin` / `representability` /
-/// `override` / `learned` / `seed` / `prior`), both `None` for `unknown` or
-/// `mixed`. The shown layer is the strongest one holding a signal, so a
+/// the shown signal's polarity (`None` for an `unknown` or `mixed` cell);
+/// `source` is the shown layer's evidence tag (`pin` / `representability` /
+/// `override` / `live` / `probe` / `seed`) and `layer` the layer itself
+/// (`pin` / `representability` / `override` / `learned` / `seed`), both
+/// `None` for `unknown` or `mixed`. The shown layer is the strongest one holding a signal, so a
 /// learned signal that does not act (an advisory or uncorroborated negative,
 /// or any learned signal with the kill switch off) still shows `learned`.
 /// `overrode_layer` is the next tier below the deciding one that had an
@@ -118,12 +117,12 @@ pub enum MatrixAvailability {
 ///
 /// The timestamps are epoch milliseconds and describe the resident learned
 /// entry, so they are present only when one exists -- including when an
-/// override or prior wins the cell, since the learned entry still exists
+/// override wins the cell, since the learned entry still exists
 /// underneath. `expires_at_ms` is a negative's decay deadline and is `None`
 /// for a positive, which never decays. `value` is the learned verdict's
 /// encoded value, read off the same entry. `age_ms` is the shown learned
 /// cell's age since last seen; `stale` flags a verified cell older than the
-/// operator staleness hint or a prior stamp past the same threshold.
+/// operator staleness hint.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MatrixCell {
     /// The display verdict token.

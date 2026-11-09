@@ -6,7 +6,7 @@
 //! purge` and `provider probe`. This module builds the lane rows from the
 //! config and resolves a cell through the router's precedence seam in display
 //! mode, so every such surface reads the same tiers dispatch applies: the operator wire pin, the lane's representability,
-//! overrides, the learned registry, the shipped beta seed, and catalog priors.
+//! overrides, the learned registry, and the shipped beta seed.
 //!
 //! A cell resolves once per nickname on the lane, because an override or a
 //! model `header_extras` pin can be nickname-scoped. The cell's lane-wide view
@@ -124,13 +124,11 @@ pub struct LearnedSnapshot<'a> {
 }
 
 /// Everything a cell resolves against beyond its lane and capability.
-/// `prior` answers a nickname's catalog prior for a capability.
 pub struct CellSources<'a> {
     pub config: &'a Config,
     pub overrides: &'a OverrideRegistry,
     pub learned: LearnedSnapshot<'a>,
     pub beta_seed: BetaSeedScope,
-    pub prior: &'a dyn Fn(&str, &str) -> Option<bool>,
 }
 
 /// One nickname's resolution of a cell, or the lane's own for a lane no
@@ -212,7 +210,7 @@ impl LaneCell<'_> {
 }
 
 /// Resolve `capability` on the lane through the seam's display mode, once per
-/// nickname through its own override, prior and `header_extras` pin. A lane
+/// nickname through its own override and `header_extras` pin. A lane
 /// no model maps resolves once, against the bare provider-entry override and
 /// floor (neither exists when the entry is not configured).
 pub fn resolve_cell<'a>(
@@ -324,7 +322,6 @@ fn resolve_nickname(
         ),
         learned: lane.learned,
         seed: lane.seed,
-        prior: (sources.prior)(model.nickname, capability),
         ctx: lane.ctx,
     })
 }
@@ -347,7 +344,6 @@ fn resolve_unmapped(
         }),
         learned: lane.learned,
         seed: lane.seed,
-        prior: None,
         ctx: lane.ctx,
     })
 }

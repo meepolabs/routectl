@@ -321,7 +321,7 @@
     if (a.state === 'empty') { return 'learned registry empty - nothing learned yet'; }
     if (a.state === 'unavailable') {
       return 'learned registry unavailable (' + (a.code || 'unknown') + ')' +
-        (resident ? ' (boot warm)' : '') + ' - prior, seed and override cells only';
+        (resident ? ' (boot warm)' : '') + ' - seed and override cells only';
     }
     return 'learned registry state unknown';
   }

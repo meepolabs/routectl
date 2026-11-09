@@ -1708,7 +1708,7 @@ and `outcome` / `signal_tier` / `event` tokens below are a stable
 contract; new fields may be added between releases.
 
 **Not the stable API.** `routectl doctor --json` surfaces the capability
-panel (catalog priors and operator overrides read by a fresh process;
+panel (operator overrides read by a fresh process;
 the learned registry is runtime-only and NOT visible to doctor) for
 human triage, but its shape is NOT a stability guarantee and may
 change between releases. Build tooling against the event contract
@@ -2088,7 +2088,7 @@ de-prioritizes a target. The LEVEL distinguishes the two outcomes:
 | `event` | string | Always `route_away`. |
 | `state_key` | string | The demoted target's session/target key. |
 | `capability_key` | string | The normalized capability token that routed the target away. |
-| `source` | string | Where the negative came from: `learned`, `prior` (catalog), or `override`. |
+| `source` | string | Where the negative came from: `learned` or `override`. |
 
 ```
 DEBUG routectl_router::router::feature_filter event=route_away state_key=front

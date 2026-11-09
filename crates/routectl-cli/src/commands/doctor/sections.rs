@@ -684,18 +684,16 @@ fn seat_provider(seat_key: &str) -> &str {
 }
 
 /// Capability section: the config-derived findings NOT absorbed by the
-/// capability matrix panel. The operator override cells, the catalog priors,
-/// and the runtime-only learned line are now structured cells on the matrix
-/// panel; only the config-unavailable degradation line remains a finding
-/// here, so a config that loads yields no findings. The section NEVER emits
+/// capability matrix panel. The operator override cells and the runtime-only
+/// learned line are structured cells on the matrix panel; only the
+/// config-unavailable degradation line remains a finding here, so a config
+/// that loads yields no findings. The section NEVER emits
 /// a `Fail`, so it can never flip the doctor exit code.
 pub(super) fn section_capability(ctx: &DoctorContext) -> Vec<Finding> {
-    if ctx.capability.config.is_some() {
-        return Vec::new();
+    match ctx.capability.panel_unavailable.as_deref() {
+        None => Vec::new(),
+        Some(redacted) => vec![capability_unavailable(redacted)],
     }
-    vec![capability_unavailable(
-        ctx.capability.panel_unavailable.as_deref(),
-    )]
 }
 
 /// The panel-unavailable finding: the config layer could not be parsed. The
@@ -703,12 +701,11 @@ pub(super) fn section_capability(ctx: &DoctorContext) -> Vec<Finding> {
 /// shared parse-error redactor at gather time) -- never raw loader text.
 /// `Warn`, so it degrades honestly without flipping the exit code (the
 /// version section owns the config-load `Fail`).
-fn capability_unavailable(redacted: Option<&str>) -> Finding {
-    let detail = match redacted {
-        Some(err) if !err.trim().is_empty() => {
-            format!("capability panel unavailable: {err}")
-        }
-        _ => "capability panel unavailable: the config could not be loaded".to_string(),
+fn capability_unavailable(redacted: &str) -> Finding {
+    let detail = if redacted.trim().is_empty() {
+        "capability panel unavailable: the config could not be loaded".to_string()
+    } else {
+        format!("capability panel unavailable: {redacted}")
     };
     Finding {
         section: "capability",

@@ -58,7 +58,8 @@ use crate::commands::usage::{WindowBounds, WindowFlag, window_bounds};
 /// panel gained `ledger_health` and today's `observation` block. At 24 the
 /// embedded report gained its `tuning` section. At 25 the embedded report's
 /// `auth` section gained one finding per unusable seat. At 26 the embedded
-/// report's `knobs` rows name `model-config` or `default`.
+/// report's `knobs` rows name `model-config` or `default`. At 27 the
+/// capability matrix carries no `prior` layer or `assumed` verdict.
 pub const DOCTOR_SCHEMA_VERSION: u32 = SCHEMA_VERSION;
 
 /// The no-network doctor report plus the circuit-derived reachability summary,

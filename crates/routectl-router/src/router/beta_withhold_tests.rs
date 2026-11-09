@@ -1211,7 +1211,6 @@ fn displayed_resolution(
         ),
         learned,
         seed,
-        prior: None,
         ctx: CellContext::for_lane(config, &target.provider_name, &target.upstream, &key),
     })
 }

@@ -10,8 +10,8 @@
 //!   the advisory negative never demotes it.
 //! - C: a fresh self-identifying negative replaces a resident
 //!   VerifiedWorking positive (the settled recency rule).
-//! - D: a resident VerifiedWorking positive masks a `Some(false)` catalog
-//!   prior, lifting its target above a prior-demoted sibling.
+//! - D: a resident VerifiedWorking positive keeps its target at the head
+//!   while a sibling with an acting negative demotes behind it.
 //! - E: length-truncated, refused, and content-filtered successes each
 //!   produce no verdict end to end.
 //! - F: identical observation sequences plus identical `now` values
@@ -30,13 +30,12 @@ use routectl_core::{Choice, Message, MessageContent, Role, ToolDef, Usage};
 use serde_json::{Value, json};
 
 use crate::capability_detect::ObservationDirection;
-use crate::catalog::{CatalogRow, EffectiveRow, Source};
 use crate::config::Config;
 use crate::learned_capability::{LearnedRegistryEntry, ObserveOutcome, RoutingDecision};
 use crate::resolved::ResolvedModel;
 
-/// The stable provider-kind these scenarios key observations, priors, and
-/// routing on. Matches the `[providers.p1]` kind in [`router`].
+/// The stable provider-kind these scenarios key observations and routing
+/// on. Matches the `[providers.p1]` kind in [`router`].
 const KIND: &str = "openai-compat";
 
 // --- provider stubs ----------------------------------------------------
@@ -128,23 +127,12 @@ fn router_with_provider(provider: Arc<dyn Provider>) -> Router {
     router
 }
 
-/// A dispatch target on provider `p1` with `state_key = nickname`, carrying
-/// the given catalog capability priors on its baked effective row.
+/// A dispatch target on provider `p1` with `state_key = nickname`.
 /// `expand_chain_to_targets` fills the provider kind from config, so the
-/// learned and prior passes both run.
-fn target(router: &Router, nickname: &str, priors: &[(&str, bool)]) -> DispatchTarget {
-    let mut row = CatalogRow::sentinel();
-    for (key, value) in priors {
-        row.capabilities.insert((*key).to_string(), *value);
-    }
+/// learned pass runs.
+fn target(router: &Router, nickname: &str) -> DispatchTarget {
     let provider: Arc<dyn Provider> = Arc::new(StubProvider);
-    let model = ResolvedModel::new(nickname, "p1", provider, nickname).with_effective_row(
-        EffectiveRow::Present {
-            row,
-            source: Source::Baked,
-            verified_at: "seed".to_string(),
-        },
-    );
+    let model = ResolvedModel::new(nickname, "p1", provider, nickname);
     router
         .expand_chain_to_targets(vec![Arc::new(model)], None)
         .pop()
@@ -291,7 +279,7 @@ fn scenario_b_forced_search_absent_acts_f3_yet_routing_stays_allow() {
     // Arrange: a forced-search request whose clean response carries no search
     // evidence, observed on target m1.
     let router = router();
-    let t = target(&router, "m1", &[]);
+    let t = target(&router, "m1");
     let req = forced_search_request();
     let resp = clean_response(assistant_text("no search happened"), None);
     let now = Instant::now();
@@ -344,7 +332,7 @@ fn scenario_b_forced_search_absent_acts_f3_yet_routing_stays_allow() {
     // And it never demotes: in a two-target chain m1 keeps its head slot.
     let out = router
         .filter_chain_by_features(
-            vec![target(&router, "m1", &[]), target(&router, "m2", &[])],
+            vec![target(&router, "m1"), target(&router, "m2")],
             &[WEB_SEARCH.to_string()],
             "alias",
             DispatchSurface::Complete,
@@ -364,7 +352,7 @@ fn scenario_b_forced_search_absent_acts_f3_yet_routing_stays_allow() {
 fn scenario_c_self_identifying_negative_replaces_resident_verified() {
     // Arrange: a resident VerifiedWorking positive on m1 for structured output.
     let router = router();
-    let t = target(&router, "m1", &[]);
+    let t = target(&router, "m1");
     let now = Instant::now();
     let mut meta = DispatchMeta::for_alias("m1");
     router.observe_capabilities(
@@ -405,14 +393,14 @@ fn scenario_c_self_identifying_negative_replaces_resident_verified() {
     assert_eq!(snap[0].signal_tier, SignalTier::SelfIdentifying);
 }
 
-// --- Scenario D: verified masks a catalog prior ------------------------
+// --- Scenario D: verified keeps its place over a demoted sibling ---------
 
 #[test]
-fn scenario_d_verified_positive_masks_catalog_prior() {
-    // Arrange: a resident VerifiedWorking positive on m1 for web search, plus
-    // a `Some(false)` catalog prior for that same capability.
+fn scenario_d_verified_positive_keeps_its_target_ahead_of_a_demoted_sibling() {
+    // Arrange: a resident VerifiedWorking positive on m1 for web search, and
+    // an acting self-identifying negative for it on m2.
     let router = router();
-    let seed = target(&router, "m1", &[("web_search", false)]);
+    let seed = target(&router, "m1");
     let usage = Usage {
         server_tool_use: Some(json!({"web_search_requests": 1})),
         ..Default::default()
@@ -430,15 +418,25 @@ fn scenario_d_verified_positive_masks_catalog_prior() {
         router.learned_capabilities.snapshot()[0].verdict,
         Verdict::VerifiedWorking,
     );
+    router.learned_capabilities.observe(
+        crate::learned_capability::LearnKey {
+            state_key: "p1#m2",
+            feature_key_raw: WEB_SEARCH,
+            provider_kind: KIND,
+        },
+        crate::learned_capability::NegativeEvidence {
+            tier: SignalTier::SelfIdentifying,
+            phase: FailurePhase::F2,
+            source: EvidenceSource::Live,
+            evidence_class: None,
+        },
+        Instant::now(),
+    );
 
-    // Act: filter a chain whose UNVERIFIED prior-false lane m2 precedes the
-    // verified-and-prior-false lane m1.
+    // Act: filter a chain whose negative lane m2 precedes the verified lane m1.
     let out = router
         .filter_chain_by_features(
-            vec![
-                target(&router, "m2", &[("web_search", false)]),
-                target(&router, "m1", &[("web_search", false)]),
-            ],
+            vec![target(&router, "m2"), target(&router, "m1")],
             &[WEB_SEARCH.to_string()],
             "alias",
             DispatchSurface::Complete,
@@ -446,13 +444,12 @@ fn scenario_d_verified_positive_masks_catalog_prior() {
         )
         .expect("the chain survives");
 
-    // Assert: m1's verified positive masks its prior, so m1 keeps its
-    // supported head slot while m2 (prior-false, unverified) demotes to the
-    // prior tail -- the head/tail split proves the mask took effect.
+    // Assert: m1 keeps its supported head slot while m2 demotes to the
+    // learned tail.
     assert_eq!(
         state_keys(&out),
         vec!["m1", "m2"],
-        "a resident verified positive masks m1's prior, lifting it above the prior-demoted m2",
+        "the verified m1 leads; the negative m2 demotes behind it",
     );
 }
 
@@ -463,7 +460,7 @@ fn scenario_e_degraded_successes_produce_no_verdict() {
     // Arrange: three degraded shapes that WOULD verify on a clean stop --
     // length-truncated, refused, and content-filtered -- on a strict request.
     let router = router();
-    let t = target(&router, "m1", &[]);
+    let t = target(&router, "m1");
     let req = structured_output_request(&["name"]);
     let now = Instant::now();
     let degraded = [
@@ -504,7 +501,7 @@ fn scenario_f_identical_observations_and_now_yield_identical_registry() {
     // independent registries with ONE shared `now`.
     let now = Instant::now();
     let drive = |router: &Router| {
-        let t = target(router, "m1", &[]);
+        let t = target(router, "m1");
         router.observe_capabilities(
             &structured_output_request(&["name"]),
             &clean_response(assistant_text(r#"{"name":"ok"}"#), None),

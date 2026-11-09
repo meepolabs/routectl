@@ -117,7 +117,7 @@ impl StatusRouterView {
     /// Every resident learned-capability entry for the health panel, each with
     /// its cell resolved at `now` through the shared lane-cell helper, the
     /// way the doctor matrix resolves it: same config, overrides, seed-clear
-    /// markers and shipped beta seed, but no catalog priors.
+    /// markers and shipped beta seed.
     pub fn learned_capabilities(&self, now: (Instant, i64)) -> Vec<ResolvedEntry> {
         let entries = self.router.learned_capability_snapshot();
         let seed_clears = self.router.learned_seed_clear_snapshot();
@@ -130,7 +130,6 @@ impl StatusRouterView {
                 seed_clears: &seed_clears,
             },
             beta_seed: shipped_beta_seed_scope(),
-            prior: &|_, _| None,
         })
     }
 

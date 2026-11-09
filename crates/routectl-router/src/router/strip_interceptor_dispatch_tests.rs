@@ -5,6 +5,8 @@
 //! provider are the stripped bytes -- identically across all three
 //! paths.
 use super::*;
+use std::collections::BTreeMap;
+
 use crate::config::Config;
 use crate::resolved::ResolvedModel;
 use crate::router::RouterOptions;

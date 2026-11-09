@@ -4889,10 +4889,10 @@ Two structured panels render after the sections:
   the loaded config no longer maps is marked `(unrouted)`. Every cell merges
   the signal layers -- an operator `anthropic_beta` / `anthropic-beta`
   wire pin, whether the lane can carry the flag at all, operator overrides,
-  the learned ledger-replay registry, the shipped beta seed, and catalog
-  priors -- through the same precedence resolution dispatch uses, so the
-  panel cannot drift from dispatch; each cell carries its shown layer
-  (`pin` / `representability` / `override` / `learned` / `seed` / `prior`)
+  the learned ledger-replay registry, and the shipped beta seed -- through
+  the same precedence resolution dispatch uses, so the panel cannot drift
+  from dispatch; each cell carries its shown layer
+  (`pin` / `representability` / `override` / `learned` / `seed`)
   and evidence source, `overrode_layer` (the next layer below the deciding
   one that had an opinion, or null), the routing action dispatch takes
   (`drop` / `route_away` / `strip` / `withhold` / `reprobe` / `allow` /
@@ -4934,11 +4934,7 @@ Two structured panels render after the sections:
   negative lapses into a re-verification under the runtime rule, its decay
   deadline or, for a negative only the free token-count re-check can
   clear, that deadline plus a 48-hour backstop; null for a `verified`
-  positive; and `value`, the same token the matrix cell carries. The matrix's `expires_at_ms` stays the raw decay deadline. The
-  health rows consult no catalog priors, so where a learned verdict has no
-  opinion (an inferred negative awaiting corroboration, an advisory live
-  F3 negative) or beat a prior, the matrix can show a `prior` layer the
-  health row lacks.
+  positive; and `value`, the same token the matrix cell carries. The matrix's `expires_at_ms` stays the raw decay deadline.
   Each `/status/health` target row also carries `account`, the credential
   account its park and unusable mark cover (`<provider>[#<label>]` for an
   `oauth://` seat, `#<entry>` for any other own credential, null for a

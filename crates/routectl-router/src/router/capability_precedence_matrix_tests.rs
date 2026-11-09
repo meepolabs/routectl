@@ -1,9 +1,10 @@
 //! Consolidated within-target capability precedence matrix. One AAA test
 //! per rule of the settled chain
 //! `override hard-drop > force_supported mask > learned (F1/F2) >
-//! verified-working > prior > unknown`, plus the never-empty two-pass
+//! verified-working > unknown`, plus the never-empty two-pass
 //! invariants, the F2-never-strips guard, the same-chain-F1 F2 suppression,
-//! and demoted-target strip-key survival. Sibling sidecars pin adjacent
+//! and the catalog-data equivalence of the dispatch chain. Sibling sidecars
+//! pin adjacent
 //! slices; `capability_precedence_walk_tests` asserts the walk acts on the
 //! precedence seam's resolution tier by tier.
 
@@ -22,7 +23,6 @@ use super::super::capability_learn::{
     LearnDedupeKey, f2_class_is_deterministic, f2_evidence_is_mintable,
 };
 use super::super::{DispatchMeta, LearnedProbeGuard};
-use crate::catalog::{CatalogRow, EffectiveRow, Source};
 use crate::config::Config;
 use crate::resolved::ResolvedModel;
 
@@ -78,26 +78,11 @@ pub(super) fn base_config(extra: &str) -> Config {
     toml::from_str(&body).expect("config parses")
 }
 
-/// A dispatch target on provider `p` carrying the given catalog capability
-/// priors on its baked effective row. `expand_chain_to_targets` fills the
-/// provider kind from config, so the prior + learned passes both run.
-pub(super) fn target_with_priors(
-    router: &Router,
-    nickname: &str,
-    priors: &[(&str, bool)],
-) -> DispatchTarget {
-    let mut row = CatalogRow::sentinel();
-    for (key, value) in priors {
-        row.capabilities.insert((*key).to_string(), *value);
-    }
+/// A dispatch target on provider `p`. `expand_chain_to_targets` fills the
+/// provider kind from config, so the learned pass runs.
+pub(super) fn fixture_target(router: &Router, nickname: &str) -> DispatchTarget {
     let provider: Arc<dyn Provider> = Arc::new(StubProvider);
-    let model = ResolvedModel::new(nickname, "p", provider, nickname).with_effective_row(
-        EffectiveRow::Present {
-            row,
-            source: Source::Baked,
-            verified_at: "seed".to_string(),
-        },
-    );
+    let model = ResolvedModel::new(nickname, "p", provider, nickname);
     router
         .expand_chain_to_targets(vec![Arc::new(model)], None)
         .pop()
@@ -160,7 +145,7 @@ fn override_route_away_beats_acting_learned_negative() {
         "[capability.overrides.p]\n\
          unsupported = [\"web_search\"]\n",
     );
-    let target = target_with_priors(&router, "nick", &[]);
+    let target = fixture_target(&router, "nick");
     seed_learned(&router, "nick", "web_search", FailurePhase::F1);
 
     // Act
@@ -183,17 +168,17 @@ fn override_route_away_beats_acting_learned_negative() {
     assert!(admissions.is_empty(), "a hard-drop admits no probe");
 }
 
-// --- force_supported masks learned AND prior ---
+// --- force_supported masks learned ---
 
 #[test]
-fn force_supported_masks_both_learned_negative_and_catalog_prior() {
-    // Arrange -- `web_search` carries BOTH an acting learned negative and a
-    // `Some(false)` catalog prior, with a force_supported mask over it.
+fn force_supported_masks_an_acting_learned_negative() {
+    // Arrange -- `web_search` carries an acting learned negative, with a
+    // force_supported mask over it.
     let router = base_router(
         "[capability.overrides.p]\n\
          force_supported = [\"web_search\"]\n",
     );
-    let target = target_with_priors(&router, "nick", &[("web_search", false)]);
+    let target = fixture_target(&router, "nick");
     seed_learned(&router, "nick", "web_search", FailurePhase::F1);
 
     // Act
@@ -206,12 +191,8 @@ fn force_supported_masks_both_learned_negative_and_catalog_prior() {
         &mut strip_keys,
     );
 
-    // Assert -- the mask short-circuits the learned pass and is skipped again
-    // by the prior pass, so neither signal survives.
-    assert_eq!(
-        verdict, None,
-        "force_supported masks both the learned negative and the catalog prior",
-    );
+    // Assert -- the mask short-circuits the learned pass.
+    assert_eq!(verdict, None, "force_supported masks the learned negative");
     assert!(
         admissions.is_empty(),
         "a masked cell never claims a re-probe slot",
@@ -219,14 +200,14 @@ fn force_supported_masks_both_learned_negative_and_catalog_prior() {
     assert!(strip_keys.is_empty());
 }
 
-// --- learned (F1 and F2) > prior ---
+// --- learned (F1 and F2) route away ---
 
 #[test]
-fn learned_f1_negative_outranks_catalog_prior() {
-    // Arrange -- an acting F1 learned negative and a `Some(false)` prior both
-    // name the essential `web_search`.
+fn learned_f1_negative_on_a_non_droppable_routes_away() {
+    // Arrange -- an acting F1 learned negative names the non-droppable
+    // `web_search`.
     let router = base_router("");
-    let target = target_with_priors(&router, "nick", &[("web_search", false)]);
+    let target = fixture_target(&router, "nick");
     seed_learned(&router, "nick", "web_search", FailurePhase::F1);
 
     // Act
@@ -240,7 +221,7 @@ fn learned_f1_negative_outranks_catalog_prior() {
     );
 
     // Assert -- the learned pass claims the feature and routes it away with the
-    // `learned` label; the weaker prior never re-decides it.
+    // `learned` label.
     assert_eq!(
         verdict,
         Some(("web_search".to_string(), FilterSource::Learned)),
@@ -248,11 +229,10 @@ fn learned_f1_negative_outranks_catalog_prior() {
 }
 
 #[test]
-fn learned_f2_negative_outranks_catalog_prior() {
-    // Arrange -- an acting F2 learned negative and a `Some(false)` prior both
-    // name the essential `web_search`.
+fn learned_f2_negative_routes_away() {
+    // Arrange -- an acting F2 learned negative names `web_search`.
     let router = base_router("");
-    let target = target_with_priors(&router, "nick", &[("web_search", false)]);
+    let target = fixture_target(&router, "nick");
     seed_learned(&router, "nick", "web_search", FailurePhase::F2);
 
     // Act
@@ -266,7 +246,7 @@ fn learned_f2_negative_outranks_catalog_prior() {
     );
 
     // Assert -- an F2 negative routes away (never strips) with the `learned`
-    // label, still outranking the catalog prior.
+    // label.
     assert_eq!(
         verdict,
         Some(("web_search".to_string(), FilterSource::Learned)),
@@ -274,13 +254,13 @@ fn learned_f2_negative_outranks_catalog_prior() {
     assert!(strip_keys.is_empty(), "an F2 negative never strips");
 }
 
-// --- prior=false soft-tails; prior=true allows; None permissive ---
+// --- no signal is permissive ---
 
 #[test]
-fn prior_false_alone_soft_tails_with_prior_label() {
-    // Arrange -- only a `Some(false)` prior, no learned negative.
+fn no_signal_is_permissive_noop() {
+    // Arrange -- no override and no learned entry for the queried feature.
     let router = base_router("");
-    let target = target_with_priors(&router, "nick", &[("web_search", false)]);
+    let target = fixture_target(&router, "nick");
 
     // Act
     let mut admissions = Vec::new();
@@ -292,92 +272,8 @@ fn prior_false_alone_soft_tails_with_prior_label() {
         &mut strip_keys,
     );
 
-    // Assert -- the prior soft-tails the target with the `prior` label and
-    // never contributes a strip key.
-    assert_eq!(
-        verdict,
-        Some(("web_search".to_string(), FilterSource::Prior))
-    );
-    assert!(
-        strip_keys.is_empty(),
-        "a prior never contributes a strip key"
-    );
-}
-
-#[test]
-fn prior_true_is_permissive_noop() {
-    // Arrange -- a `Some(true)` prior asserting support.
-    let router = base_router("");
-    let target = target_with_priors(&router, "nick", &[("web_search", true)]);
-
-    // Act
-    let mut admissions = Vec::new();
-    let mut strip_keys = Vec::new();
-    let verdict = router.unsupported_feature_for_target(
-        &target,
-        &["web_search".to_string()],
-        &mut admissions,
-        &mut strip_keys,
-    );
-
-    // Assert -- a supporting prior is a no-op.
+    // Assert -- with no signal the feature stays open.
     assert_eq!(verdict, None);
-}
-
-#[test]
-fn absent_prior_is_permissive_noop() {
-    // Arrange -- no prior for the queried feature (absent key = NO PRIOR,
-    // distinct from `Some(false)`).
-    let router = base_router("");
-    let target = target_with_priors(&router, "nick", &[]);
-
-    // Act
-    let mut admissions = Vec::new();
-    let mut strip_keys = Vec::new();
-    let verdict = router.unsupported_feature_for_target(
-        &target,
-        &["web_search".to_string()],
-        &mut admissions,
-        &mut strip_keys,
-    );
-
-    // Assert -- an absent prior leaves the feature open.
-    assert_eq!(verdict, None);
-}
-
-// --- verified-working > prior ---
-
-#[test]
-fn verified_working_masks_catalog_prior() {
-    // Arrange -- `web_search` carries a `Some(false)` catalog prior, but a
-    // resident VerifiedWorking positive confirms it works. The positive
-    // outranks the stale catalog demotion.
-    let router = base_router("");
-    let target = target_with_priors(&router, "nick", &[("web_search", false)]);
-    seed_verified(&router, "nick", "web_search");
-
-    // Act
-    let mut admissions = Vec::new();
-    let mut strip_keys = Vec::new();
-    let verdict = router.unsupported_feature_for_target(
-        &target,
-        &["web_search".to_string()],
-        &mut admissions,
-        &mut strip_keys,
-    );
-
-    // Assert -- the verified positive masks the prior, so the feature stays
-    // open: no route-away, no strip, no probe. (The prior-false-alone case
-    // soft-tails; here the positive suppresses that demotion.)
-    assert_eq!(
-        verdict, None,
-        "a resident VerifiedWorking positive masks a Some(false) catalog prior",
-    );
-    assert!(
-        admissions.is_empty(),
-        "a verified positive claims no re-probe slot"
-    );
-    assert!(strip_keys.is_empty());
 }
 
 // --- override hard-drop > verified-working ---
@@ -390,7 +286,7 @@ fn override_route_away_beats_resident_verified_working() {
         "[capability.overrides.p]\n\
          unsupported = [\"web_search\"]\n",
     );
-    let target = target_with_priors(&router, "nick", &[]);
+    let target = fixture_target(&router, "nick");
     seed_verified(&router, "nick", "web_search");
 
     // Act
@@ -416,11 +312,10 @@ fn override_route_away_beats_resident_verified_working() {
 // --- verified-working > unknown (permissive) ---
 
 #[test]
-fn verified_working_with_no_prior_is_permissive_noop() {
-    // Arrange -- a resident VerifiedWorking positive on a feature with NO
-    // catalog prior (absent key = unknown, distinct from `Some(false)`).
+fn verified_working_is_permissive_noop() {
+    // Arrange -- a resident VerifiedWorking positive on the feature.
     let router = base_router("");
-    let target = target_with_priors(&router, "nick", &[]);
+    let target = fixture_target(&router, "nick");
     seed_verified(&router, "nick", "web_search");
 
     // Act
@@ -433,8 +328,7 @@ fn verified_working_with_no_prior_is_permissive_noop() {
         &mut strip_keys,
     );
 
-    // Assert -- a verified positive over an unknown prior leaves the feature
-    // open and itself contributes no routing signal, strip key, or probe slot.
+    // Assert -- a verified positive leaves the feature open and itself contributes no routing signal, strip key, or probe slot.
     assert_eq!(verdict, None);
     assert!(
         admissions.is_empty(),
@@ -447,11 +341,14 @@ fn verified_working_with_no_prior_is_permissive_noop() {
 
 #[test]
 fn all_lanes_demoted_leaves_a_non_empty_chain() {
-    // Arrange -- every lane carries a `Some(false)` prior for the requested
-    // feature, so all demote to the tail.
+    // Arrange -- every lane carries an acting learned negative for the
+    // requested feature, so all demote to the tail. The token-count surface
+    // keeps the soft tail where an inference surface would refuse outright.
     let router = base_router("");
-    let a = target_with_priors(&router, "a", &[("web_search", false)]);
-    let b = target_with_priors(&router, "b", &[("web_search", false)]);
+    let a = fixture_target(&router, "a");
+    let b = fixture_target(&router, "b");
+    seed_learned(&router, "a", "web_search", FailurePhase::F2);
+    seed_learned(&router, "b", "web_search", FailurePhase::F2);
 
     // Act
     let out = router
@@ -459,7 +356,7 @@ fn all_lanes_demoted_leaves_a_non_empty_chain() {
             vec![a, b],
             &["web_search".to_string()],
             "alias",
-            DispatchSurface::Complete,
+            DispatchSurface::CountTokens,
             &mut Vec::new(),
         )
         .expect("a fully demoted chain still survives via the tail");
@@ -473,7 +370,7 @@ fn all_lanes_demoted_leaves_a_non_empty_chain() {
 #[test]
 fn one_hard_drop_with_rest_demoted_leaves_a_non_empty_chain() {
     // Arrange -- one lane is hard-dropped by a model-scoped `unsupported`
-    // override; the other is soft-demoted by a `Some(false)` prior.
+    // override; the other is soft-demoted by an acting learned negative.
     let router = base_router(
         "[models.dropme]\n\
          provider = \"p\"\n\
@@ -481,8 +378,9 @@ fn one_hard_drop_with_rest_demoted_leaves_a_non_empty_chain() {
          [capability.overrides.\"p:dropme\"]\n\
          unsupported = [\"web_search\"]\n",
     );
-    let hard = target_with_priors(&router, "dropme", &[]);
-    let soft = target_with_priors(&router, "keep", &[("web_search", false)]);
+    let hard = fixture_target(&router, "dropme");
+    let soft = fixture_target(&router, "keep");
+    seed_learned(&router, "keep", "web_search", FailurePhase::F2);
 
     // Act
     let out = router
@@ -495,7 +393,7 @@ fn one_hard_drop_with_rest_demoted_leaves_a_non_empty_chain() {
         )
         .expect("the demoted survivor keeps the chain non-empty");
 
-    // Assert -- the override hard-drop is removed; the prior-demoted lane
+    // Assert -- the override hard-drop is removed; the learned-demoted lane
     // survives in the tail.
     let order: Vec<&str> = out.iter().map(|t| t.state_key.as_str()).collect();
     assert_eq!(order, vec!["keep"]);
@@ -508,7 +406,7 @@ fn f2_negative_on_droppable_capability_routes_away_and_strips_nothing() {
     // Arrange -- `advisor` is a droppable tool-shape strip, but its acting
     // negative was detected in F2 (a feature-naming fault, not a wire token).
     let router = base_router("");
-    let target = target_with_priors(&router, "nick", &[]);
+    let target = fixture_target(&router, "nick");
     seed_learned(&router, "nick", "advisor", FailurePhase::F2);
 
     // Act
@@ -553,7 +451,7 @@ fn same_chain_f1_suppresses_a_later_f2_candidate() {
     // Arrange (mint-pipeline half) -- an F1 negative for `web_search` was
     // already observed earlier in this attempt chain (F1Seen resident).
     let router = base_router("");
-    let target = target_with_priors(&router, "nick", &[]);
+    let target = fixture_target(&router, "nick");
     let mut dedupe = HashSet::new();
     dedupe.insert(LearnDedupeKey::F1Seen {
         feature_key: "web_search".to_string(),
@@ -603,38 +501,4 @@ fn same_chain_f1_suppresses_a_later_f2_candidate() {
         .collect();
     assert_eq!(suppressions.len(), 1);
     assert_eq!(suppressions[0].field("capability_key"), Some("web_search"));
-}
-
-// --- demoted-target strip-key survival ---
-
-#[test]
-fn prior_demoted_target_keeps_learned_f1_strip_keys() {
-    // Arrange -- `advisor` carries an acting F1 strip negative (a droppable
-    // wire token) while `web_search` carries a `Some(false)` prior with no
-    // learned evidence, so the prior pass demotes the whole target.
-    let router = base_router("");
-    let target = target_with_priors(&router, "nick", &[("web_search", false)]);
-    seed_learned(&router, "nick", "advisor", FailurePhase::F1);
-
-    // Act
-    let out = router
-        .filter_chain_by_features(
-            vec![target],
-            &["advisor".to_string(), "web_search".to_string()],
-            "alias",
-            DispatchSurface::Complete,
-            &mut Vec::new(),
-        )
-        .expect("the prior-demoted lane survives in the tail");
-
-    // Assert -- the lane is demoted for the prior yet still carries the F1
-    // strip key, so a demoted lane that gets attempted strips its known token.
-    assert_eq!(out.len(), 1);
-    assert_eq!(out[0].state_key, "nick");
-    let strip: Vec<&str> = out[0]
-        .strip_capabilities
-        .iter()
-        .map(String::as_str)
-        .collect();
-    assert_eq!(strip, vec!["advisor"]);
 }

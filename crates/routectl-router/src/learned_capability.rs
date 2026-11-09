@@ -1766,10 +1766,7 @@ impl LearnedCapabilityRegistry {
     }
 
     /// Whether a resident acting VerifiedWorking positive owns this key.
-    /// The filter's prior pass consults it: a verified positive masks a
-    /// catalog `prior=false` demotion (precedence: override > learned >
-    /// verified-working > catalog prior > unknown). A positive never decays,
-    /// so `now` is unused; it is kept for query-surface symmetry with the
+    /// A positive never decays, so `now` is unused; it is kept for query-surface symmetry with the
     /// rest of the registry.
     pub fn is_verified_working(
         &self,

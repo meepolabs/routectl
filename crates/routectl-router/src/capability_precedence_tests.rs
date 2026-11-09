@@ -82,7 +82,6 @@ struct Row {
     override_verdict: Option<OverrideVerdict>,
     learned: Option<LearnedInput>,
     seed: Option<SeedCell>,
-    prior: Option<bool>,
     ctx: CellContext,
     operator: Operator,
     wire: Wire,
@@ -99,7 +98,6 @@ impl Row {
             override_verdict: None,
             learned: None,
             seed: None,
-            prior: None,
             ctx,
             operator: Operator::OpenRead,
             wire: Wire::Send,
@@ -122,10 +120,7 @@ fn staged(row: &Row) -> (Operator, Resolution) {
             } else {
                 Operator::OpenSkip
             };
-            (
-                operator,
-                resolve_open(row.learned, row.seed, row.prior, cell),
-            )
+            (operator, resolve_open(row.learned, row.seed, cell))
         }
     }
 }
@@ -159,9 +154,6 @@ fn precedence_rows() -> Vec<Row> {
         Row { pinned: true, learned: LAPSED,
               layer: Some(Layer::Learned), action: ACTION_REPROBE,
               ..Row::new("pinned feature with a lapsed negative stays open to the read", DROPPABLE) },
-        Row { pinned: true, prior: Some(false), routing: Routing::Tail,
-              layer: Some(Layer::Prior), action: ACTION_ROUTE_AWAY,
-              ..Row::new("pinned feature with a false prior tails", FEATURE) },
         Row { pinned: true,
               ..Row::new("pinned feature with no other opinion stays open", FEATURE) },
         // --- pin > representability > override ---
@@ -183,9 +175,9 @@ fn precedence_rows() -> Vec<Row> {
         Row { override_verdict: ROUTE_AWAY, operator: Operator::Decided,
               wire: Wire::Withhold, layer: Some(Layer::Override), action: ACTION_WITHHOLD,
               ..Row::new("route-away override withholds a beta flag", BETA) },
-        Row { override_verdict: FORCE, learned: self_id(F2), prior: Some(false),
+        Row { override_verdict: FORCE, learned: self_id(F2),
               operator: Operator::Decided, layer: Some(Layer::Override), action: ACTION_ALLOW,
-              ..Row::new("force-supported masks a negative and a false prior", FEATURE) },
+              ..Row::new("force-supported masks a negative", FEATURE) },
         Row { override_verdict: ROUTE_AWAY, operator: Operator::Decided,
               routing: Routing::Drop, layer: Some(Layer::Override), action: ACTION_DROP,
               ..Row::new("route-away override acts with the kill switch off", FEATURE_OFF) },
@@ -199,50 +191,38 @@ fn precedence_rows() -> Vec<Row> {
         Row { learned: LAPSED, seed: Some(SeedCell::Withhold),
               layer: Some(Layer::Learned), action: ACTION_REPROBE,
               ..Row::new("lapsed beta negative re-probes over the seed", BETA) },
-        // --- seed > prior ---
-        Row { seed: Some(SeedCell::Withhold), prior: Some(true), wire: Wire::Withhold,
+        // --- seed ---
+        Row { seed: Some(SeedCell::Withhold), wire: Wire::Withhold,
               layer: Some(Layer::Seed), action: ACTION_WITHHOLD,
               ..Row::new("seed withholds", BETA) },
         Row { seed: Some(SeedCell::Cleared), layer: Some(Layer::Seed), action: ACTION_ALLOW,
               ..Row::new("cleared seed sends", BETA) },
-        Row { seed: Some(SeedCell::Cleared), prior: Some(false), layer: Some(Layer::Seed),
-              action: ACTION_ALLOW,
-              ..Row::new("cleared seed sends over a false prior on a feature key", FEATURE) },
-        Row { prior: Some(false),
-              ..Row::new("beta key has no prior tier", BETA) },
-        // --- learned > prior ---
-        Row { learned: self_id(F2), prior: Some(true), routing: Routing::Tail,
+        Row { seed: Some(SeedCell::Cleared), layer: Some(Layer::Seed), action: ACTION_ALLOW,
+              ..Row::new("cleared seed sends on a feature key", FEATURE) },
+        // --- learned ---
+        Row { learned: self_id(F2), routing: Routing::Tail,
               layer: Some(Layer::Learned), action: ACTION_ROUTE_AWAY,
-              ..Row::new("F2 negative routes away over a true prior", DROPPABLE) },
+              ..Row::new("F2 negative on a droppable routes away", DROPPABLE) },
         Row { learned: self_id(F1), wire: Wire::Strip, layer: Some(Layer::Learned),
               action: ACTION_STRIP,
               ..Row::new("droppable F1 negative strips in place", DROPPABLE) },
         Row { learned: self_id(F1), routing: Routing::Tail, layer: Some(Layer::Learned),
               action: ACTION_ROUTE_AWAY,
               ..Row::new("non-droppable F1 negative routes away", FEATURE) },
-        Row { learned: VERIFIED, prior: Some(false),
+        Row { learned: VERIFIED,
               layer: Some(Layer::Learned), action: ACTION_ALLOW,
-              ..Row::new("verified positive sends and keeps over a false prior", FEATURE) },
-        Row { learned: LAPSED, prior: Some(false),
+              ..Row::new("verified positive sends and keeps", FEATURE) },
+        Row { learned: LAPSED,
               layer: Some(Layer::Learned), action: ACTION_REPROBE,
               ..Row::new("lapsed negative keeps the target and re-probes", DROPPABLE) },
-        Row { learned: Some(acting(F3, SignalTier::SelfIdentifying, EvidenceSource::Live)),
-              prior: Some(false), routing: Routing::Tail, layer: Some(Layer::Prior),
-              action: ACTION_ROUTE_AWAY,
-              ..Row::new("live F3 negative has no opinion; the prior decides", FEATURE) },
         Row { learned: Some(acting(F3, SignalTier::SelfIdentifying, EvidenceSource::Live)),
               ..Row::new("live F3 negative alone has no opinion", FEATURE) },
         Row { learned: Some(acting(F3, SignalTier::SelfIdentifying, EvidenceSource::Probe)),
               routing: Routing::Tail, layer: Some(Layer::Learned), action: ACTION_ROUTE_AWAY,
               ..Row::new("probe F3 negative routes away", DROPPABLE) },
-        Row { prior: Some(false), routing: Routing::Tail, layer: Some(Layer::Prior),
-              action: ACTION_ROUTE_AWAY,
-              ..Row::new("false prior tails", FEATURE) },
-        Row { prior: Some(true), layer: Some(Layer::Prior),
-              ..Row::new("true prior keeps with no action", FEATURE) },
-        // --- kill switch off: learned and prior silent, seed still acts ---
-        Row { learned: self_id(F2), prior: Some(false), operator: Operator::OpenSkip,
-              ..Row::new("kill switch off silences learned and prior", FEATURE_OFF) },
+        // --- kill switch off: learned silent, seed still acts ---
+        Row { learned: self_id(F2), operator: Operator::OpenSkip,
+              ..Row::new("kill switch off silences learned", FEATURE_OFF) },
         Row { learned: self_id(F1), seed: Some(SeedCell::Withhold), operator: Operator::OpenSkip,
               wire: Wire::Withhold, layer: Some(Layer::Seed), action: ACTION_WITHHOLD,
               ..Row::new("kill switch off leaves the seed acting", BETA_OFF) },
@@ -251,7 +231,7 @@ fn precedence_rows() -> Vec<Row> {
 }
 
 #[test]
-fn staged_resolution_applies_pin_override_learned_seed_prior_in_order() {
+fn staged_resolution_applies_pin_override_learned_seed_in_order() {
     for row in precedence_rows() {
         let (operator, resolution) = staged(&row);
 
@@ -286,7 +266,6 @@ fn display_mode_picks_the_same_winner_as_the_staged_resolution() {
             override_verdict: row.override_verdict,
             learned: row.learned,
             seed: row.seed,
-            prior: row.prior,
             ctx: row.ctx,
         });
 
@@ -332,19 +311,16 @@ fn display_mode_names_the_next_tier_with_an_opinion() {
         ("learned over the seed",
          DisplayInputs { learned: VERIFIED, seed: Some(SeedCell::Withhold), ..inputs(BETA) },
          Some(Layer::Learned), Some(Layer::Seed)),
-        ("learned over a prior of either polarity",
-         DisplayInputs { learned: self_id(F1), prior: Some(true), ..inputs(FEATURE) },
-         Some(Layer::Learned), Some(Layer::Prior)),
         ("a live F3 negative is skipped as an opinion",
          DisplayInputs { override_verdict: FORCE,
                          learned: Some(acting(F3, SignalTier::SelfIdentifying, EvidenceSource::Live)),
-                         prior: Some(false), ..inputs(FEATURE) },
-         Some(Layer::Override), Some(Layer::Prior)),
+                         seed: Some(SeedCell::Withhold), ..inputs(BETA) },
+         Some(Layer::Override), Some(Layer::Seed)),
         ("a pin on a feature key is not an opinion",
          DisplayInputs { pinned: true, learned: self_id(F1), ..inputs(FEATURE) },
          Some(Layer::Learned), None),
         ("kill switch off silences the learned tier as an opinion",
-         DisplayInputs { override_verdict: ROUTE_AWAY, learned: self_id(F1), prior: Some(false), ..inputs(FEATURE_OFF) },
+         DisplayInputs { override_verdict: ROUTE_AWAY, learned: self_id(F1), ..inputs(FEATURE_OFF) },
          Some(Layer::Override), None),
         ("the winner is the only opinion",
          DisplayInputs { seed: Some(SeedCell::Cleared), ..inputs(BETA) },
@@ -365,7 +341,6 @@ const fn inputs(ctx: CellContext) -> DisplayInputs {
         override_verdict: None,
         learned: None,
         seed: None,
-        prior: None,
         ctx,
     }
 }
@@ -399,8 +374,6 @@ fn hard_exclusion_counts_only_an_acting_self_identifying_route_away() {
          DisplayInputs { learned: self_id(F2), ..inputs(FEATURE_OFF) }, false),
         ("a beta-key withhold does not count",
          DisplayInputs { learned: self_id(F2), ..inputs(BETA) }, false),
-        ("a false prior does not count",
-         DisplayInputs { prior: Some(false), ..inputs(FEATURE) }, false),
         ("a verified positive does not count",
          DisplayInputs { learned: VERIFIED, ..inputs(FEATURE) }, false),
     ];
@@ -545,13 +518,12 @@ fn learned_input_from_a_snapshot_entry_applies_the_dispatch_rules() {
 
 /// Every tier, strongest first, written out independently of `PRECEDENCE`
 /// so a reordering of that list is caught rather than mirrored.
-const CANONICAL_ORDER: [Layer; 6] = [
+const CANONICAL_ORDER: [Layer; 5] = [
     Layer::Pin,
     Layer::Representability,
     Layer::Override,
     Layer::Learned,
     Layer::Seed,
-    Layer::Prior,
 ];
 
 /// Mutation check: swap two entries of `PRECEDENCE` -> red.
@@ -570,14 +542,7 @@ fn layer_tokens_match_the_doctor_vocabulary_plus_pin_and_representability() {
     let tokens: Vec<&str> = CANONICAL_ORDER.iter().map(|layer| layer.as_str()).collect();
     assert_eq!(
         tokens,
-        [
-            "pin",
-            "representability",
-            "override",
-            "learned",
-            "seed",
-            "prior"
-        ]
+        ["pin", "representability", "override", "learned", "seed"]
     );
 }
 

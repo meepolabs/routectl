@@ -9622,7 +9622,6 @@ pub enum routectl_router::Layer
 pub routectl_router::Layer::Learned
 pub routectl_router::Layer::Override
 pub routectl_router::Layer::Pin
-pub routectl_router::Layer::Prior
 pub routectl_router::Layer::Representability
 pub routectl_router::Layer::Seed
 impl routectl_router::Layer
@@ -13752,7 +13751,6 @@ pub routectl_router::DisplayInputs::ctx: routectl_router::CellContext
 pub routectl_router::DisplayInputs::learned: core::option::Option<routectl_router::LearnedInput>
 pub routectl_router::DisplayInputs::override_verdict: core::option::Option<routectl_router::OverrideVerdict>
 pub routectl_router::DisplayInputs::pinned: bool
-pub routectl_router::DisplayInputs::prior: core::option::Option<bool>
 pub routectl_router::DisplayInputs::seed: core::option::Option<routectl_router::SeedCell>
 impl core::clone::Clone for routectl_router::DisplayInputs
 pub fn routectl_router::DisplayInputs::clone(&self) -> routectl_router::DisplayInputs
@@ -19838,7 +19836,6 @@ pub const routectl_router::RECHECK_BACKSTOP: core::time::Duration
 pub const routectl_router::SOURCE_LIVE: &str
 pub const routectl_router::SOURCE_OVERRIDE: &str
 pub const routectl_router::SOURCE_PIN: &str
-pub const routectl_router::SOURCE_PRIOR: &str
 pub const routectl_router::SOURCE_PROBE: &str
 pub const routectl_router::SOURCE_REPRESENTABILITY: &str
 pub const routectl_router::SOURCE_SEED: &str
@@ -19941,7 +19938,7 @@ pub fn routectl_router::refuses_beta_bag_key(core::option::Option<routectl_core:
 pub const fn routectl_router::resolve_display(routectl_router::DisplayInputs) -> routectl_router::Resolution
 pub fn routectl_router::resolve_effective_row(&str, &str, core::option::Option<&str>, &alloc::collections::btree::map::BTreeMap<alloc::string::String, routectl_router::catalog::CachePricingOverride>, &routectl_router::CatalogOverlay) -> routectl_router::catalog::EffectiveRow
 pub fn routectl_router::resolve_model_provider<'a>(&'a routectl_router::config::Config, &str) -> core::option::Option<routectl_router::ModelProviderTarget<'a>>
-pub const fn routectl_router::resolve_open(core::option::Option<routectl_router::LearnedInput>, core::option::Option<routectl_router::SeedCell>, core::option::Option<bool>, routectl_router::OpenCell) -> routectl_router::Resolution
+pub const fn routectl_router::resolve_open(core::option::Option<routectl_router::LearnedInput>, core::option::Option<routectl_router::SeedCell>, routectl_router::OpenCell) -> routectl_router::Resolution
 pub const fn routectl_router::resolve_operator(bool, core::option::Option<routectl_router::OverrideVerdict>, routectl_router::CellContext) -> routectl_router::Stage
 pub fn routectl_router::resolve_requested_capability(&str, &routectl_core::error::Error, &routectl_core::failure_class::ClassifiedFailure) -> core::option::Option<(alloc::string::String, routectl_core::capability::SignalTier, routectl_core::capability::FailurePhase)>
 pub fn routectl_router::resolve_tuning(&routectl_router::config::Config, core::option::Option<&str>, core::option::Option<u64>) -> routectl_router::config::tuning::ResolvedTuning

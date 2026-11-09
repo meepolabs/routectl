@@ -1527,36 +1527,6 @@ fn expired_learned_negative_admits_one_probe_through_filter() {
     );
 }
 
-#[test]
-fn dispatch_target_carries_catalog_capability_prior() {
-    use crate::catalog::{CatalogRow, EffectiveRow, Source};
-
-    let router = Router::new(learned_provider_config());
-    let mut row = CatalogRow::sentinel();
-    row.capabilities.insert("web_search".to_string(), false);
-    let p: Arc<dyn Provider> = Arc::new(CountedProvider {
-        id: "test-prov".into(),
-        calls: AtomicUsize::new(0),
-    });
-    let model = ResolvedModel::new("only", "test-prov", p, "claude-x").with_effective_row(
-        EffectiveRow::Present {
-            row,
-            source: Source::Baked,
-            verified_at: "2026-01-01".to_string(),
-        },
-    );
-
-    let target = router
-        .expand_chain_to_targets(vec![Arc::new(model)], None)
-        .pop()
-        .expect("one target");
-
-    // Present key returns the prior; an absent key is NO PRIOR (None),
-    // distinct from Some(false). No filter consumes it yet.
-    assert_eq!(target.capability_prior("web_search"), Some(false));
-    assert_eq!(target.capability_prior("computer_use"), None);
-}
-
 // ---- context_window_for: the /v1/models discovery read ----
 //
 // The window the discovery payload reports and the window the proactive

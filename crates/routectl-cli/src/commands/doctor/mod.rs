@@ -234,7 +234,14 @@ pub(crate) use self::served::{
 /// (the configured value) or `default` (the egress baseline); the catalog
 /// source, its `routectl catalog set` pointer, and the section-unavailable
 /// line for an unreadable catalog overlay are gone.
-pub(crate) const SCHEMA_VERSION: u32 = 26;
+///
+/// v26 -> v27: catalog capability data no longer feeds the capability
+/// matrix. No cell carries layer or source `prior` or verdict `assumed`; a
+/// cell the catalog alone used to fill is `unknown`, and the `stale` flag
+/// marks only a verified learned cell past the staleness hint. The panel's
+/// state line names `seed/override cells` where it named
+/// `prior/seed/override cells`.
+pub(crate) const SCHEMA_VERSION: u32 = 27;
 
 /// A section-producer: pure mapping of the read-only [`DoctorContext`] to a
 /// section's findings.
@@ -335,9 +342,7 @@ pub(crate) struct DoctorContext {
     would_trim: Option<WouldTrimPanel>,
     now_unix: u64,
     binary_version: &'static str,
-    /// The capability section's read-only inputs, resolved per-layer so the
-    /// section producer stays a pure mapping. The config layer and the
-    /// catalog overlay degrade independently (see [`CapabilityInputs`]).
+    /// The capability section's read-only input (see [`CapabilityInputs`]).
     capability: CapabilityInputs,
     /// The learned-capability matrix source: a read-only one-shot ledger
     /// replay for this run's revision, availability classified as a
@@ -525,42 +530,15 @@ enum EquivalenceBasis {
     Unresolved,
 }
 
-/// Per-layer inputs the capability section maps to findings. The config
-/// layer (override rows + legacy keys + prior cells) and the catalog overlay
-/// (the prior cells' source) are gathered independently, so an unreadable
-/// overlay degrades the priors alone while the config-derived override rows
-/// still render.
+/// The capability section's input: whether the config parsed. The section
+/// renders a single redacted "panel unavailable" line when it did not,
+/// rather than a misleading empty-from-default-config view.
 struct CapabilityInputs {
-    /// `Some` when the config parsed: the config-derived capability view.
-    /// `None` when the config could not be parsed -- the section then renders
-    /// a single redacted "panel unavailable" line (keyed on this flag) rather
-    /// than a misleading empty-from-default-config view.
-    config: Option<CapabilityConfig>,
-    /// The already-redacted config load error, set only when `config` is
-    /// `None`. Redacted at gather time through the shared parse-error
+    /// The already-redacted config load error, set only when the config could
+    /// not be parsed. Redacted at gather time through the shared parse-error
     /// redactor (see
     /// [`crate::commands::parse_error_redaction::redact_config_load_error`]).
     panel_unavailable: Option<String>,
-}
-
-/// The config-derived capability view: everything the section and the
-/// matrix panel draw from the parsed config.
-struct CapabilityConfig {
-    /// The catalog/overlay capability prior cells, one per configured model
-    /// whose resolved catalog row carries capability data. Empty when the
-    /// overlay could not be read -- priors are then absent, while the
-    /// learned and override matrix cells still render.
-    priors: Vec<PriorCell>,
-}
-
-/// One catalog/overlay capability prior cell: a `[models.X]` entry whose
-/// resolved catalog row carries capability data, with its verification
-/// stamp so the matrix panel can flag a prior stale past the operator
-/// staleness hint.
-struct PriorCell {
-    nickname: String,
-    verified_at: String,
-    capabilities: Vec<(String, bool)>,
 }
 
 /// Where the capability matrix's learned layer came from.

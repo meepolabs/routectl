@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use chrono::Local;
 use routectl_auth::{OAuthError, OAuthStore};
 use routectl_providers::anthropic_api::AuthKind;
 use routectl_router::{
@@ -13,9 +12,9 @@ use routectl_testkit::ScopedEnv;
 use crate::commands::parse_error_redaction::redact_config_load_error;
 
 use super::gather::{
-    build_capability_inputs, derive_knob_rows, derive_pricing_rows, derive_prior_cells,
-    derive_tuning_rows, gather_capability_matrix, gather_context, gather_context_no_network,
-    gather_orphan_seats, gather_orphan_secrets, gather_secret_checks, sanitize_store_open_error,
+    derive_knob_rows, derive_pricing_rows, derive_tuning_rows, gather_capability_matrix,
+    gather_context, gather_context_no_network, gather_orphan_seats, gather_orphan_secrets,
+    gather_secret_checks, sanitize_store_open_error,
 };
 use super::matrix::build_capability_matrix_panel;
 use super::sections::{
@@ -54,7 +53,9 @@ pub(super) fn ctx(
     probes: Vec<(&'static str, LocalProbe)>,
     seats: Vec<(String, TokenRecord)>,
 ) -> DoctorContext {
-    let capability = build_capability_inputs(&config, None, Some(CatalogOverlay::default()));
+    let capability = CapabilityInputs {
+        panel_unavailable: None,
+    };
     let pricing = Some(derive_pricing_rows(&config, &CatalogOverlay::default()));
     let knobs = derive_knob_rows(&config);
     let tuning = derive_tuning_rows(&config);
@@ -456,7 +457,7 @@ async fn one_credential_state_agrees_across_report_surfaces() {
 #[test]
 fn capability_section_drops_absorbed_findings_on_default_config() {
     // On a default config the capability SECTION contributes nothing: the
-    // override / prior / learned lines are now structured cells on the
+    // override / learned lines are now structured cells on the
     // matrix panel, and there is no legacy key to nudge.
     let context = ctx(
         Config::default(),
@@ -532,108 +533,16 @@ fn override_cells_land_on_the_matrix_panel_with_source_tags() {
 }
 
 #[test]
-fn prior_cells_render_when_overlay_provides_them() {
-    let config: Config = toml::from_str(
-        "version = 3\n\
-         [providers.anthropic]\n\
-         kind = \"anthropic-api\"\n\
-         api_key_ref = \"env://ANTHROPIC_API_KEY\"\n\
-         [models.opus]\n\
-         provider = \"anthropic\"\n\
-         upstream = \"claude-opus-4-8\"\n",
-    )
-    .expect("config parses");
-    // An overlay cell that supplies capability data for the model's
-    // (provider_kind, upstream) selector. `verified_at` is stamped TODAY
-    // (via the live clock) so the cell is never stale-suppressed
-    // regardless of when the suite runs.
-    let today = Local::now().format("%Y-%m-%d").to_string();
-    let overlay: CatalogOverlay = serde_json::from_value(serde_json::json!({
-        "schema_version": 1,
-        "revision": 1,
-        "cells": {
-            "anthropic-api:claude-opus-4-8": {
-                "source": "user",
-                "verified_at": today,
-                "capabilities": { "web_search": true }
-            }
-        }
-    }))
-    .expect("valid overlay");
-
-    let inputs = build_capability_inputs(&config, None, Some(overlay));
-    let cells = &inputs.config.expect("config present").priors;
-    assert_eq!(cells.len(), 1);
-    assert_eq!(cells[0].nickname, "opus");
-    assert_eq!(cells[0].verified_at, today);
-    // The overlay-supplied capability is present and true (baked keys the
-    // overlay does not mention merge through unchanged).
-    assert!(
-        cells[0]
-            .capabilities
-            .contains(&("web_search".to_string(), true)),
-        "web_search prior missing: {:?}",
-        cells[0].capabilities
-    );
-}
-
-#[test]
-fn stale_catalog_cell_still_yields_a_prior_for_the_panel() {
-    // Staleness is no longer filtered at derivation: a stale overlay cell
-    // now yields a prior cell carrying its old `verified_at`, and the matrix
-    // panel flags it stale against the operator hint. The prior is surfaced
-    // honestly rather than silently dropped.
-    let config: Config = toml::from_str(
-        "version = 3\n\
-         [providers.anthropic]\n\
-         kind = \"anthropic-api\"\n\
-         api_key_ref = \"env://ANTHROPIC_API_KEY\"\n\
-         [models.opus]\n\
-         provider = \"anthropic\"\n\
-         upstream = \"claude-opus-4-8\"\n",
-    )
-    .expect("config parses");
-    let overlay: CatalogOverlay = serde_json::from_value(serde_json::json!({
-        "schema_version": 1,
-        "revision": 1,
-        "cells": {
-            "anthropic-api:claude-opus-4-8": {
-                "source": "user",
-                "verified_at": "2000-01-01",
-                "capabilities": { "web_search": true }
-            }
-        }
-    }))
-    .expect("valid overlay");
-    let cells = derive_prior_cells(&config, &overlay);
-    assert_eq!(cells.len(), 1, "stale cell must still yield a prior");
-    assert_eq!(cells[0].verified_at, "2000-01-01");
-}
-
-#[test]
-fn absent_catalog_cell_yields_no_prior_and_no_crash() {
-    // A model whose provider is unknown resolves to an empty
-    // provider_kind that matches no baked cell -> Missing -> no prior.
-    let config: Config = toml::from_str(
-        "version = 3\n\
-         [models.ghost]\n\
-         provider = \"nope\"\n\
-         upstream = \"whatever\"\n",
-    )
-    .expect("config parses");
-    let cells = derive_prior_cells(&config, &CatalogOverlay::default());
-    assert!(cells.is_empty(), "absent cell must yield no prior");
-}
-
-#[test]
 fn config_load_error_routes_through_redactor_to_unavailable() {
     // A TOML parse error whose diagnostic inlines a `literal:` secret in
-    // the source-line preview. build_capability_inputs receives the
+    // the source-line preview. The capability inputs receive the
     // ALREADY-redacted string (redact_config_load_error), mirroring the
     // gather path; assert the secret never reaches the finding.
     let raw = "config parse error in `/home/x/config.toml`: TOML parse error at line 2, column 1\n  |\n2 | api_key_ref = \"literal:sk-super-secret\"\n  | ^\ninvalid type: string, expected integer\n";
     let redacted = redact_config_load_error(raw);
-    let inputs = build_capability_inputs(&Config::default(), Some(redacted), None);
+    let inputs = CapabilityInputs {
+        panel_unavailable: Some(redacted),
+    };
     let context = DoctorContext {
         capability: inputs,
         ..ctx(Config::default(), Some("x"), Vec::new(), Vec::new())
@@ -650,36 +559,6 @@ fn config_load_error_routes_through_redactor_to_unavailable() {
     );
     // Never flips the exit code.
     assert_eq!(overall_exit(&findings), 0);
-}
-
-#[test]
-fn overlay_unavailable_leaves_priors_absent_and_still_builds_the_panel() {
-    // overlay = None simulates an unreadable overlay: priors are absent
-    // (empty), but the config parsed, so the capability section still emits
-    // no absorbed findings and the matrix panel still builds (learned +
-    // override cells unaffected).
-    let inputs = build_capability_inputs(&config_with_overrides(), None, None);
-    assert!(
-        inputs
-            .config
-            .as_ref()
-            .expect("config present")
-            .priors
-            .is_empty(),
-        "an unreadable overlay leaves priors absent"
-    );
-    let context = DoctorContext {
-        capability: inputs,
-        ..ctx(config_with_overrides(), Some("x"), Vec::new(), Vec::new())
-    };
-    let findings = section_capability(&context);
-    assert!(
-        !findings.iter().any(|f| f.name == "catalog priors"),
-        "the priors-unavailable finding is superseded by the panel"
-    );
-    assert_eq!(overall_exit(&findings), 0);
-    // The panel builds regardless of overlay availability.
-    let _ = build_capability_matrix_panel(&context);
 }
 
 #[test]
@@ -707,8 +586,8 @@ fn capability_section_emits_no_finding_for_a_loaded_config() {
 }
 
 #[test]
-fn schema_version_is_twenty_six() {
-    assert_eq!(SCHEMA_VERSION, 26);
+fn schema_version_is_twenty_seven() {
+    assert_eq!(SCHEMA_VERSION, 27);
 
     let context = ctx(
         config_with_overrides(),
@@ -717,7 +596,7 @@ fn schema_version_is_twenty_six() {
         Vec::new(),
     );
     let report = build_report(&context);
-    assert_eq!(report.schema_version, 26);
+    assert_eq!(report.schema_version, 27);
 
     // JSON mode carries the structured capability matrix panel; the
     // superseded override / prior / learned finding text is gone.
@@ -2544,11 +2423,9 @@ fn rendered_report_leaks_neither_a_config_secret_nor_a_store_path() {
         would_trim: None,
         now_unix: 1_000,
         binary_version: "test",
-        capability: build_capability_inputs(
-            &Config::default(),
-            Some(redact_config_load_error(&raw_load_error)),
-            None,
-        ),
+        capability: CapabilityInputs {
+            panel_unavailable: Some(redact_config_load_error(&raw_load_error)),
+        },
         capability_matrix: CapabilityMatrixSource::Unavailable("config_unavailable"),
         matrix_origin: MatrixOrigin::LedgerReplay,
         beta_seed: routectl_router::BetaSeedScope::EMPTY,
@@ -2724,7 +2601,7 @@ fn build_report_no_network_matches_network_minus_probe() {
     let network = build_report(&context);
     let no_net = build_report_no_network(&context);
 
-    assert_eq!(no_net.schema_version, 26);
+    assert_eq!(no_net.schema_version, 27);
     assert!(
         no_net.findings.iter().all(|f| f.section != "probe"),
         "no-network report must have no probe rows"
@@ -3716,7 +3593,7 @@ mod matrix_panel {
         }
     }
 
-    fn matrix_ctx(source: CapabilityMatrixSource, priors: Vec<PriorCell>) -> DoctorContext {
+    fn matrix_ctx(source: CapabilityMatrixSource) -> DoctorContext {
         let base = ctx(
             matrix_config(),
             Some(&current_version_stamp()),
@@ -3725,10 +3602,6 @@ mod matrix_panel {
         );
         DoctorContext {
             capability_matrix: source,
-            capability: CapabilityInputs {
-                config: Some(CapabilityConfig { priors }),
-                panel_unavailable: None,
-            },
             ..base
         }
     }
@@ -3773,21 +3646,13 @@ mod matrix_panel {
                 now,
             ),
         ];
-        let priors = vec![PriorCell {
-            nickname: "laneA".to_string(),
-            verified_at: "2026-07-10".to_string(),
-            capabilities: vec![("structured_output".to_string(), false)],
-        }];
-        let ctx = matrix_ctx(
-            CapabilityMatrixSource::Available {
-                entries,
-                now,
-                now_ms: 0,
-                replay: Some(MatrixReplaySummary::default()),
-                seed_clears: Vec::new(),
-            },
-            priors,
-        );
+        let ctx = matrix_ctx(CapabilityMatrixSource::Available {
+            entries,
+            now,
+            now_ms: 0,
+            replay: Some(MatrixReplaySummary::default()),
+            seed_clears: Vec::new(),
+        });
 
         let panel = build_capability_matrix_panel(&ctx);
         assert_eq!(panel.availability, MatrixAvailability::Available);
@@ -3813,13 +3678,6 @@ mod matrix_panel {
         assert_eq!(broken.verdict, "broken");
         assert_eq!(broken.source, Some("probe"));
         assert_eq!(broken.supported, Some(false));
-
-        // Prior cell (assumed unsupported).
-        let prior = find_cell(&panel, LANE_A, "structured_output");
-        assert_eq!(prior.verdict, "assumed");
-        assert_eq!(prior.source, Some("prior"));
-        assert_eq!(prior.supported, Some(false));
-        assert_eq!(prior.age_ms, None);
 
         // Other-column cell on laneB.
         let other = find_cell(&panel, LANE_B, "custom_tool");
@@ -3851,16 +3709,13 @@ mod matrix_panel {
                 )
             })
             .collect();
-        let ctx = matrix_ctx(
-            CapabilityMatrixSource::Available {
-                entries,
-                now,
-                now_ms,
-                replay: Some(MatrixReplaySummary::default()),
-                seed_clears: Vec::new(),
-            },
-            Vec::new(),
-        );
+        let ctx = matrix_ctx(CapabilityMatrixSource::Available {
+            entries,
+            now,
+            now_ms,
+            replay: Some(MatrixReplaySummary::default()),
+            seed_clears: Vec::new(),
+        });
 
         let panel = build_capability_matrix_panel(&ctx);
         let json = serde_json::to_value(&panel).expect("panel serializes");
@@ -3919,18 +3774,14 @@ mod matrix_panel {
 
     #[test]
     fn availability_empty_and_unavailable_render_distinctly() {
-        let empty = build_capability_matrix_panel(&matrix_ctx(
-            CapabilityMatrixSource::Empty {
-                replay: Some(MatrixReplaySummary::default()),
-                seed_clears: Vec::new(),
-            },
-            Vec::new(),
-        ));
+        let empty = build_capability_matrix_panel(&matrix_ctx(CapabilityMatrixSource::Empty {
+            replay: Some(MatrixReplaySummary::default()),
+            seed_clears: Vec::new(),
+        }));
         assert_eq!(empty.availability, MatrixAvailability::Empty);
 
         let unavailable = build_capability_matrix_panel(&matrix_ctx(
             CapabilityMatrixSource::Unavailable("revision_mismatch"),
-            Vec::new(),
         ));
         assert_eq!(
             unavailable.availability,
@@ -3947,7 +3798,7 @@ mod matrix_panel {
     // built from seconds; the suboptimal-units lint's suggestion does not
     // compile here.
     #[allow(clippy::duration_suboptimal_units)]
-    fn stale_flags_fire_for_verified_and_prior_cells() {
+    fn stale_flags_fire_for_verified_cells() {
         // now is 30 days past the seeded cell's last_seen; the hint is 14
         // days, so the verified cell is stale.
         let base = Instant::now();
@@ -3959,23 +3810,13 @@ mod matrix_panel {
             EvidenceSource::Live,
             base,
         )];
-        // A prior stamped in 2000 is far past the hint against the fixed
-        // 2026-07-11 "today".
-        let priors = vec![PriorCell {
-            nickname: "laneA".to_string(),
-            verified_at: "2000-01-01".to_string(),
-            capabilities: vec![("structured_output".to_string(), true)],
-        }];
-        let ctx = matrix_ctx(
-            CapabilityMatrixSource::Available {
-                entries,
-                now,
-                now_ms: 0,
-                replay: Some(MatrixReplaySummary::default()),
-                seed_clears: Vec::new(),
-            },
-            priors,
-        );
+        let ctx = matrix_ctx(CapabilityMatrixSource::Available {
+            entries,
+            now,
+            now_ms: 0,
+            replay: Some(MatrixReplaySummary::default()),
+            seed_clears: Vec::new(),
+        });
 
         let panel = build_capability_matrix_panel(&ctx);
         assert!(
@@ -3983,8 +3824,8 @@ mod matrix_panel {
             "a verified cell older than the hint is stale"
         );
         assert!(
-            find_cell(&panel, LANE_A, "structured_output").stale,
-            "a prior stamp past the hint is stale"
+            !find_cell(&panel, LANE_A, "structured_output").stale,
+            "a cell with no learned entry is never stale"
         );
     }
 
@@ -3998,16 +3839,13 @@ mod matrix_panel {
             EvidenceSource::Live,
             now,
         )];
-        let ctx = matrix_ctx(
-            CapabilityMatrixSource::Available {
-                entries,
-                now,
-                now_ms: 0,
-                replay: Some(MatrixReplaySummary::default()),
-                seed_clears: Vec::new(),
-            },
-            Vec::new(),
-        );
+        let ctx = matrix_ctx(CapabilityMatrixSource::Available {
+            entries,
+            now,
+            now_ms: 0,
+            replay: Some(MatrixReplaySummary::default()),
+            seed_clears: Vec::new(),
+        });
 
         let panel = build_capability_matrix_panel(&ctx);
         let ghost = panel
@@ -4020,7 +3858,7 @@ mod matrix_panel {
 }
 
 /// Cross-surface: a real seeded usage ledger, gathered through the read-only
-/// matrix path, resolves against the parsed config's overrides and priors and
+/// matrix path, resolves against the parsed config's overrides and
 /// renders coherently on BOTH the human battery and the `--json` panel. Where
 /// the sibling `matrix_panel` mod injects a synthetic source and asserts
 /// struct fields, this pins the whole seam -- seed -> gather -> build ->
@@ -4176,21 +4014,8 @@ mod seeded_matrix_surfaces {
             "a matched tombstone with post-boundary rows must be Available"
         );
 
-        // A fresh catalog prior for laneB, so the fifth verdict (assumed via
-        // the prior layer) is present alongside the learned/override cells.
-        let today = Local::now().format("%Y-%m-%d").to_string();
         let context = DoctorContext {
             capability_matrix: source,
-            capability: CapabilityInputs {
-                config: Some(CapabilityConfig {
-                    priors: vec![PriorCell {
-                        nickname: "laneB".to_string(),
-                        verified_at: today,
-                        capabilities: vec![("structured_output".to_string(), false)],
-                    }],
-                }),
-                panel_unavailable: None,
-            },
             ..ctx(
                 config,
                 Some(&current_version_stamp()),
@@ -4205,7 +4030,7 @@ mod seeded_matrix_surfaces {
         let json = serde_json::to_value(&report).expect("report serializes");
 
         // Assert (human): the replayed state line plus the compact
-        // `verdict[source]` tokens for every learned / override / prior cell.
+        // `verdict[source]` tokens for every learned / override cell.
         assert!(
             human.contains("capability matrix:") && human.contains("learned registry replayed"),
             "human render must carry the replayed matrix state line: {human}"
@@ -4214,7 +4039,6 @@ mod seeded_matrix_surfaces {
             "verified[live]",
             "broken[probe]",
             "forced_supported[override]",
-            "assumed[prior]",
         ] {
             assert!(
                 human.contains(token),
@@ -4252,15 +4076,6 @@ mod seeded_matrix_surfaces {
         assert!(
             overridden["age_ms"].is_null(),
             "an override cell carries no learned age: {overridden}"
-        );
-
-        let prior = json_cell(panel, LANE_B, "structured_output");
-        assert_eq!(prior["verdict"], Value::from("assumed"));
-        assert_eq!(prior["source"], Value::from("prior"));
-        assert_eq!(prior["supported"], Value::from(false));
-        assert!(
-            prior["age_ms"].is_null(),
-            "a prior cell has no age: {prior}"
         );
 
         let unknown = json_cell(panel, LANE_B, "web_search");

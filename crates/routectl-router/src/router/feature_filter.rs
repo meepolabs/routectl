@@ -1,6 +1,5 @@
 //! Capability pre-filter + strip-interceptor application.
 
-use std::collections::BTreeMap;
 use std::ops::ControlFlow;
 use std::time::Instant;
 
@@ -9,11 +8,10 @@ use routectl_core::failure_class::MatchedBy;
 use routectl_core::{ChatRequest, Error, Result, sanitize_for_log};
 
 use crate::capability_precedence::{
-    CellContext, Layer, LearnedInput, OpenCell, Resolution, Routing, Stage, Wire, resolve_open,
+    CellContext, LearnedInput, OpenCell, Resolution, Routing, Stage, Wire, resolve_open,
     resolve_operator,
 };
 use crate::capability_strip::{Outcome, RequestInterceptor, StripContext, StripInterceptor};
-use crate::catalog::EffectiveRow;
 use crate::learned_capability::{BetaLaneReading, ProbeClaim};
 
 use super::class_observe::{DispatchSurface, UpstreamFacts, matched_by_label};
@@ -28,7 +26,7 @@ type FeatureKey = String;
 /// What flagged a feature as unsupported for a target. The feature
 /// filter's decision site returns this so the skip log can name the
 /// source, and so the filter loop can tell a hard override drop from a
-/// soft learned or prior de-prioritization.
+/// soft learned de-prioritization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum FilterSource {
     /// Matched a route-away `[capability.overrides.<spec>].unsupported`
@@ -38,24 +36,17 @@ pub(super) enum FilterSource {
     /// registry. A soft signal: the target is de-prioritized to the tail,
     /// never hard-dropped.
     Learned,
-    /// Matched a `Some(false)` catalog capability prior for a feature the
-    /// learned pass did not already decide. The weakest signal: a static
-    /// catalog assertion of absence, de-prioritized to the tail (ahead of
-    /// the learned tail), never hard-dropped and never contributing a
-    /// strip key.
-    Prior,
 }
 
 impl FilterSource {
     /// Stable lowercase token for the skip-log `source` field. The
-    /// `"learned"`, `"override"`, and `"prior"` tokens are a CONTRACT
+    /// `"learned"` and `"override"` tokens are a CONTRACT
     /// consumed by downstream features (action dispatch, doctor labels, the
     /// future status endpoint).
     pub(super) const fn as_str(self) -> &'static str {
         match self {
             Self::Override => "override",
             Self::Learned => "learned",
-            Self::Prior => "prior",
         }
     }
 }
@@ -82,8 +73,8 @@ impl Router {
     /// Filter the resolved chain by request features. An entry whose
     /// provider- or model-scoped `[capability.overrides]` `unsupported`
     /// list intersects the request feature set is dropped with a DEBUG
-    /// log (tagging the matching source); learned and catalog-prior
-    /// negatives demote the entry to a tail instead.
+    /// log (tagging the matching source); a learned negative demotes the
+    /// entry to a tail instead.
     ///
     /// No-ops when `features` is empty (no built-in tool in the
     /// request -> nothing to filter against). Returns
@@ -110,14 +101,10 @@ impl Router {
         }
         self.refuse_if_excluded_everywhere(&chain, features, alias, surface)?;
         // SOFT-DROP: an override `unsupported` match hard-drops the
-        // target; a learned or catalog-prior match moves it to a
-        // de-prioritized tail. The result is
-        // [supported...] ++ [prior tail] ++ [learned tail]: a catalog
-        // prior is weaker evidence than a learned negative, so
-        // prior-demoted targets sort ahead of learned-demoted ones;
-        // original chain order is preserved within each bucket.
+        // target; a learned match moves it to a de-prioritized tail. The
+        // result is [supported...] ++ [learned tail]; original chain order
+        // is preserved within each bucket.
         let mut supported: Vec<DispatchTarget> = Vec::with_capacity(chain.len());
-        let mut prior_tail: Vec<DispatchTarget> = Vec::new();
         let mut learned_tail: Vec<DispatchTarget> = Vec::new();
         let mut route_aways: Vec<(String, String, FilterSource)> = Vec::new();
         for mut target in chain {
@@ -146,17 +133,6 @@ impl Router {
                     route_aways.push((target.state_key.clone(), feature, FilterSource::Learned));
                     learned_tail.push(target);
                 }
-                Some((feature, FilterSource::Prior)) => {
-                    // Prior demotion: the catalog asserts this feature absent.
-                    // F1 strip keys the learned pass already resolved SURVIVE
-                    // so a demoted lane that still gets attempted strips its
-                    // known tokens (the prior itself never adds a strip key).
-                    if !strip_keys.is_empty() {
-                        target.strip_capabilities = std::sync::Arc::from(strip_keys);
-                    }
-                    route_aways.push((target.state_key.clone(), feature, FilterSource::Prior));
-                    prior_tail.push(target);
-                }
                 Some((feature, source)) => {
                     tracing::debug!(
                         provider = %routectl_core::sanitize_for_log(&target.provider_name),
@@ -172,7 +148,7 @@ impl Router {
         }
         // NotImplemented fires ONLY when override `unsupported` entries
         // hard-dropped every entry (nothing survived, not even the de-prioritized tail).
-        if supported.is_empty() && prior_tail.is_empty() && learned_tail.is_empty() {
+        if supported.is_empty() && learned_tail.is_empty() {
             let feature_list = features.join(", ");
             tracing::warn!(
                 alias = %sanitize_for_log(alias),
@@ -185,8 +161,8 @@ impl Router {
                 format!("no provider in chain supports features: {feature_list}"),
             ));
         }
-        // Route-away observability: each tail demotion (learned or catalog
-        // prior) emits one route_away event tagged with its source. DEBUG
+        // Route-away observability: each tail demotion emits one route_away
+        // event tagged with its source. DEBUG
         // while a supported alternative remains; WARN when the chain
         // survives ONLY via the de-prioritized tail (the route-away floor).
         // Capability TOKEN + state_key only -- never a request body.
@@ -214,8 +190,6 @@ impl Router {
                 );
             }
         }
-        // Prior-demoted targets sort ahead of learned-demoted ones.
-        supported.extend(prior_tail);
         supported.extend(learned_tail);
         Ok(supported)
     }
@@ -241,8 +215,7 @@ impl Router {
     ///
     /// Mapping: a learned tail demotes the whole target with `strip_keys`
     /// left empty (a target is never half-stripped); otherwise every
-    /// strip-in-place feature lands in `strip_keys` (sorted, normalized), and
-    /// they survive a catalog-prior tail.
+    /// strip-in-place feature lands in `strip_keys` (sorted, normalized).
     fn unsupported_feature_for_target(
         &self,
         target: &DispatchTarget,
@@ -259,12 +232,7 @@ impl Router {
             .into_iter()
             .map(|(feature, ctx, cell)| {
                 let learned = self.learned_input_for(target, feature, ctx, cell, admissions, now);
-                // A target with no provider kind consults no capability truth,
-                // the catalog prior included.
-                let prior = target
-                    .provider_kind
-                    .and_then(|_| target.capability_prior(feature));
-                (feature, resolve_open(learned, None, prior, cell))
+                (feature, resolve_open(learned, None, cell))
             })
             .collect();
         map_resolutions(&resolved, target.provider_kind, strip_keys)
@@ -382,10 +350,7 @@ impl Router {
             return false;
         };
         let learned = self.peeked_learned_input(target, feature, cell, now);
-        let prior = target
-            .provider_kind
-            .and_then(|_| target.capability_prior(feature));
-        resolve_open(learned, None, prior, cell).hard_exclusion_eligible()
+        resolve_open(learned, None, cell).hard_exclusion_eligible()
     }
 
     /// The learned read for one open feature that never claims a re-probe
@@ -585,20 +550,17 @@ const fn probe_bypasses_a_strip(ctx: CellContext, cell: OpenCell) -> bool {
     !ctx.beta_flag() && ctx.droppable() && !cell.pinned()
 }
 
-/// Map each open feature's [`Resolution`] onto the filter's outputs. A
-/// learned tail outranks a prior tail whatever the feature order, and the
-/// first feature in request order names the tail within a tier.
+/// Map each open feature's [`Resolution`] onto the filter's outputs. Only
+/// the learned tier demotes an open cell, so the first tail feature in
+/// request order names the demotion.
 fn map_resolutions(
     resolved: &[(&FeatureKey, Resolution)],
     provider_kind: Option<&'static str>,
     strip_keys: &mut Vec<String>,
 ) -> Option<(FeatureKey, FilterSource)> {
-    let tail = resolved
+    if let Some((feature, _)) = resolved
         .iter()
-        .filter(|(_, resolution)| resolution.routing() == Routing::Tail)
-        .min_by_key(|(_, resolution)| resolution.layer());
-    if let Some((feature, resolution)) = tail
-        && resolution.layer() == Some(Layer::Learned)
+        .find(|(_, resolution)| resolution.routing() == Routing::Tail)
     {
         return Some(((*feature).clone(), FilterSource::Learned));
     }
@@ -612,17 +574,7 @@ fn map_resolutions(
         strip.dedup();
         *strip_keys = strip;
     }
-    tail.map(|(feature, _)| ((*feature).clone(), FilterSource::Prior))
-}
-
-/// The merged catalog capability priors for a resolved model, cloned off
-/// its `EffectiveRow`. Empty when the cell is `Disabled` / `Missing` (the
-/// conservative no-prior baseline) or carries no capability data.
-pub(super) fn catalog_capabilities(effective_row: &EffectiveRow) -> BTreeMap<String, bool> {
-    effective_row
-        .priced()
-        .map(|row| row.capabilities.clone())
-        .unwrap_or_default()
+    None
 }
 
 /// Emit the stable FeatureUnsupported observability event at a dispatch
@@ -690,6 +642,10 @@ mod capability_precedence_walk_tests;
 #[cfg(test)]
 #[path = "feature_filter_read_tests.rs"]
 mod feature_filter_read_tests;
+
+#[cfg(test)]
+#[path = "catalog_capability_equivalence_tests.rs"]
+mod catalog_capability_equivalence_tests;
 
 #[cfg(test)]
 #[path = "computer_tool_key_tests.rs"]

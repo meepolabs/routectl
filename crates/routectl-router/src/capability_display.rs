@@ -30,8 +30,6 @@ pub const SOURCE_OVERRIDE: &str = "override";
 pub const SOURCE_LIVE: &str = "live";
 /// Source tag: a learned observation from an out-of-band probe.
 pub const SOURCE_PROBE: &str = "probe";
-/// Source tag: a catalog capability prior.
-pub const SOURCE_PRIOR: &str = "prior";
 /// Source tag: the shipped beta seed.
 pub const SOURCE_SEED: &str = "seed";
 

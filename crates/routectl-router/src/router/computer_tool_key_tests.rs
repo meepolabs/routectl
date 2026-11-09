@@ -1,6 +1,6 @@
-//! The dated `computer_*` tool type a client sends, the `computer_use` key an
-//! operator writes in `[capability.overrides]`, and a `computer_use` catalog
-//! prior must all meet on one feature key at the filter seam.
+//! The dated `computer_*` tool type a client sends and the `computer_use` key
+//! an operator writes in `[capability.overrides]` must meet on one feature
+//! key at the filter seam.
 
 use super::*;
 
@@ -10,7 +10,6 @@ use routectl_core::capability::COMPUTER_USE;
 use routectl_core::{ChatChunk, ChatResponse, Provider, ToolDef};
 use serde_json::json;
 
-use crate::catalog::{CatalogRow, EffectiveRow, Source};
 use crate::config::Config;
 use crate::feature_keys::derive_feature_keys;
 use crate::resolved::ResolvedModel;
@@ -61,25 +60,10 @@ fn router_with(extra: &str) -> Router {
     Router::new(Arc::new(config))
 }
 
-/// A dispatch target on `provider` whose baked catalog row carries `priors`.
-fn target(
-    router: &Router,
-    provider: &str,
-    nickname: &str,
-    priors: &[(&str, bool)],
-) -> DispatchTarget {
-    let mut row = CatalogRow::sentinel();
-    for (key, value) in priors {
-        row.capabilities.insert((*key).to_string(), *value);
-    }
+/// A dispatch target on `provider`.
+fn target(router: &Router, provider: &str, nickname: &str) -> DispatchTarget {
     let stub: Arc<dyn Provider> = Arc::new(StubProvider);
-    let model = ResolvedModel::new(nickname, provider, stub, nickname).with_effective_row(
-        EffectiveRow::Present {
-            row,
-            source: Source::Baked,
-            verified_at: "seed".to_string(),
-        },
-    );
+    let model = ResolvedModel::new(nickname, provider, stub, nickname);
     router
         .expand_chain_to_targets(vec![Arc::new(model)], None)
         .pop()
@@ -98,7 +82,7 @@ fn computer_request_features() -> Vec<String> {
 }
 
 #[test]
-fn dated_computer_request_derives_the_override_and_prior_key() {
+fn dated_computer_request_derives_the_override_key() {
     // Act
     let features = computer_request_features();
 
@@ -110,10 +94,7 @@ fn dated_computer_request_derives_the_override_and_prior_key() {
 fn computer_use_override_keeps_a_dated_computer_request_off_the_target() {
     // Arrange
     let router = router_with("[capability.overrides.p1]\nunsupported = [\"computer_use\"]\n");
-    let chain = vec![
-        target(&router, "p1", "m1", &[]),
-        target(&router, "p2", "m2", &[]),
-    ];
+    let chain = vec![target(&router, "p1", "m1"), target(&router, "p2", "m2")];
     let mut admissions = Vec::new();
 
     // Act
@@ -130,27 +111,4 @@ fn computer_use_override_keeps_a_dated_computer_request_off_the_target() {
     // Assert
     let survivors: Vec<&str> = filtered.iter().map(|t| t.provider_name.as_str()).collect();
     assert_eq!(survivors, vec!["p2"]);
-}
-
-#[test]
-fn computer_use_false_prior_soft_tails_a_dated_computer_request() {
-    // Arrange
-    let router = router_with("");
-    let target = target(&router, "p1", "m1", &[(COMPUTER_USE, false)]);
-    let mut admissions = Vec::new();
-    let mut strip_keys = Vec::new();
-
-    // Act
-    let verdict = router.unsupported_feature_for_target(
-        &target,
-        &computer_request_features(),
-        &mut admissions,
-        &mut strip_keys,
-    );
-
-    // Assert
-    assert_eq!(
-        verdict,
-        Some((COMPUTER_USE.to_string(), FilterSource::Prior))
-    );
 }

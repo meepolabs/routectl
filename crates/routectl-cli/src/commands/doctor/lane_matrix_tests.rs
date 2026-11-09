@@ -14,7 +14,7 @@ use routectl_usage::{CapabilityEvent, insert_capability_event, open};
 use rusqlite::params;
 use tempfile::TempDir;
 
-use super::gather::{build_capability_inputs, gather_capability_matrix};
+use super::gather::gather_capability_matrix;
 use super::matrix::build_capability_matrix_panel;
 use super::*;
 use crate::commands::doctor_panels::render_capability_matrix_panel;
@@ -52,11 +52,9 @@ fn lane_config() -> Config {
 }
 
 pub(super) fn context(config: Config, source: CapabilityMatrixSource) -> DoctorContext {
-    let capability = build_capability_inputs(
-        &config,
-        None,
-        Some(routectl_router::CatalogOverlay::default()),
-    );
+    let capability = CapabilityInputs {
+        panel_unavailable: None,
+    };
     DoctorContext {
         config,
         raw_config: None,
@@ -583,108 +581,6 @@ fn a_bedrock_leaf_row_on_a_lane_now_of_another_kind_is_skipped_as_owner() {
         "a skipped row contributes no column: {:?}",
         panel.columns
     );
-}
-
-fn prior(nickname: &str, cap: &str, supported: bool) -> PriorCell {
-    PriorCell {
-        nickname: nickname.to_string(),
-        verified_at: "2026-01-01".to_string(),
-        capabilities: vec![(cap.to_string(), supported)],
-    }
-}
-
-#[test]
-fn nicknames_on_one_lane_with_opposing_priors_render_a_mixed_cell() {
-    // Arrange: alpha's catalog row supports structured_output, beta's does not.
-    let mut ctx = context(lane_config(), available(Vec::new(), Instant::now(), 0));
-    ctx.capability
-        .config
-        .as_mut()
-        .expect("config parsed")
-        .priors = vec![
-        prior("alpha", "structured_output", true),
-        prior("beta", "structured_output", false),
-    ];
-
-    // Act
-    let panel = build_capability_matrix_panel(&ctx);
-
-    // Assert
-    let mixed = cell(&panel, "p#up", "structured_output");
-    assert_eq!(mixed.verdict, "mixed");
-    assert_eq!(mixed.supported, None);
-    assert_eq!(mixed.action, "mixed");
-    assert_eq!(
-        nickname_resolutions(mixed),
-        [
-            ("alpha", "assumed", Some("prior"), "none"),
-            ("beta", "assumed", Some("prior"), "route_away"),
-        ]
-    );
-
-    let json = serde_json::to_value(&panel).expect("panel serializes");
-    let lane = json["lanes"]
-        .as_array()
-        .and_then(|lanes| lanes.iter().find(|l| l["lane"] == "p#up"))
-        .expect("p#up lane in json");
-    let column = panel
-        .columns
-        .iter()
-        .position(|c| c == "structured_output")
-        .expect("structured_output column");
-    assert_eq!(
-        lane["cells"][column]["nickname_actions"],
-        serde_json::json!([
-            {"nickname": "alpha", "verdict": "assumed", "layer": "prior",
-             "overrode_layer": null, "action": "none"},
-            {"nickname": "beta", "verdict": "assumed", "layer": "prior",
-             "overrode_layer": null, "action": "route_away"},
-        ])
-    );
-    let human = render_capability_matrix_panel(&panel);
-    assert!(
-        human.contains("mixed(alpha=none[assumed],beta=route_away[assumed])"),
-        "the human grid names each nickname's own prior resolution: {human}"
-    );
-}
-
-fn prior_verified(nickname: &str, cap: &str, verified_at: &str) -> PriorCell {
-    PriorCell {
-        verified_at: verified_at.to_string(),
-        ..prior(nickname, cap, true)
-    }
-}
-
-#[test]
-fn a_prior_cell_is_stale_when_any_agreeing_nickname_prior_is_stale() {
-    // `context` pins today to 2024-10-04 with a 14-day staleness hint.
-    const FRESH: &str = "2024-10-01";
-    const STALE: &str = "2024-01-01";
-    let cases = [
-        ("first fresh, second stale", FRESH, STALE, true),
-        ("first stale, second fresh", STALE, FRESH, true),
-        ("both fresh", FRESH, FRESH, false),
-    ];
-    for (name, alpha_at, beta_at, want_stale) in cases {
-        // Arrange: alpha and beta share lane p#up and agree on the prior.
-        let mut ctx = context(lane_config(), available(Vec::new(), Instant::now(), 0));
-        ctx.capability
-            .config
-            .as_mut()
-            .expect("config parsed")
-            .priors = vec![
-            prior_verified("alpha", "structured_output", alpha_at),
-            prior_verified("beta", "structured_output", beta_at),
-        ];
-
-        // Act
-        let panel = build_capability_matrix_panel(&ctx);
-
-        // Assert
-        let prior_cell = cell(&panel, "p#up", "structured_output");
-        assert_eq!(prior_cell.layer, Some("prior"), "{name}");
-        assert_eq!(prior_cell.stale, want_stale, "{name}");
-    }
 }
 
 #[test]

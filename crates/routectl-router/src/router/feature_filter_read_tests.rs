@@ -1,10 +1,10 @@
 //! The feature filter consults the learned registry through ONE guarded read
-//! per feature key per target, and that read alone decides strip, route-away,
-//! probe admission and the verified-positive mask on a catalog prior.
+//! per feature key per target, and that read alone decides strip, route-away
+//! and probe admission.
 
 use super::super::generation_barrier_tests::superseded_pair_with;
 use super::capability_precedence_matrix_tests::{
-    KIND, base_config, lane_of, seed_learned, seed_verified, target_with_priors,
+    KIND, base_config, fixture_target, lane_of, seed_learned, seed_verified,
 };
 use super::*;
 
@@ -94,17 +94,11 @@ fn filter(
 #[test]
 fn every_learned_feature_takes_the_registry_entries_lock_once_per_target() {
     // Each row: (name, router after a generation change, route-away present).
-    // Without a route-away the prior pass runs, so a second read there would
-    // show in the count.
     let rows = [
         ("fresh router, all five shapes", false, true),
-        ("fresh router, prior pass reached", false, false),
+        ("fresh router, no route-away", false, false),
         ("live router after a boundary, all five shapes", true, true),
-        (
-            "live router after a boundary, prior pass reached",
-            true,
-            false,
-        ),
+        ("live router after a boundary, no route-away", true, false),
     ];
     for (name, after_boundary, with_route_away) in rows {
         // Arrange
@@ -114,7 +108,7 @@ fn every_learned_feature_takes_the_registry_entries_lock_once_per_target() {
         } else {
             Router::new(config)
         };
-        let target = target_with_priors(&router, "nick", &[]);
+        let target = fixture_target(&router, "nick");
         let features = seed_shapes(&router, "nick", with_route_away);
         let count = count_entries_locks(&router);
 
@@ -135,46 +129,12 @@ fn every_learned_feature_takes_the_registry_entries_lock_once_per_target() {
 }
 
 #[test]
-fn verified_positive_masks_prior_false_beside_other_shapes() {
-    // Arrange -- the verified feature carries `prior=false`.
-    let router = Router::new(Arc::new(base_config("")));
-    let target = target_with_priors(&router, "nick", &[("structured_output", false)]);
-    let features = seed_shapes(&router, "nick", false);
-
-    // Act
-    let (verdict, admissions, strip_keys) = filter(&router, &target, &features);
-
-    // Assert -- not demoted; the strip and the admission still happen.
-    assert_eq!(verdict, None);
-    assert_eq!(strip_keys, vec!["advisor".to_string()]);
-    assert_eq!(admissions.len(), 1);
-}
-
-#[test]
-fn prior_false_on_an_unseeded_feature_demotes_and_keeps_learned_strips() {
-    // Arrange -- the unseeded feature carries `prior=false`.
-    let router = Router::new(Arc::new(base_config("")));
-    let target = target_with_priors(&router, "nick", &[("computer_use", false)]);
-    let features = seed_shapes(&router, "nick", false);
-
-    // Act
-    let (verdict, _, strip_keys) = filter(&router, &target, &features);
-
-    // Assert
-    assert_eq!(
-        verdict,
-        Some(("computer_use".to_string(), FilterSource::Prior))
-    );
-    assert_eq!(strip_keys, vec!["advisor".to_string()]);
-}
-
-#[test]
 fn a_lapsed_negative_admits_once_under_the_generation_its_read_saw() {
     // Arrange -- an admitted-but-uncommitted boundary makes the effective
     // generation differ from the one the Router was published at, so a
     // generation sampled outside the read would not match.
     let router = Router::new(Arc::new(base_config("")));
-    let target = target_with_priors(&router, "nick", &[]);
+    let target = fixture_target(&router, "nick");
     seed_lapsed(&router, "nick", "context_management");
     let BoundaryCut::Taken { receipt, .. } = router
         .learned_capabilities
@@ -197,13 +157,11 @@ fn a_lapsed_negative_admits_once_under_the_generation_its_read_saw() {
 }
 
 #[test]
-fn a_superseded_router_acts_on_no_learned_verdict_but_still_demotes_on_prior() {
-    // Arrange -- every shape resident, plus `prior=false` on the verified
-    // feature, which only a learned read could mask.
+fn a_superseded_router_acts_on_no_learned_verdict() {
+    // Arrange -- every shape resident.
     let (old, live) = superseded_pair_with(Arc::new(base_config("")));
-    let priors = [("structured_output", false)];
-    let old_target = target_with_priors(&old, "nick", &priors);
-    let live_target = target_with_priors(&live, "nick", &priors);
+    let old_target = fixture_target(&old, "nick");
+    let live_target = fixture_target(&live, "nick");
     let features = seed_shapes(&live, "nick", true);
 
     // Act
@@ -211,11 +169,8 @@ fn a_superseded_router_acts_on_no_learned_verdict_but_still_demotes_on_prior() {
     let current = filter(&live, &live_target, &features);
 
     // Assert -- the stale Router sees no verdict: no strip, no admission, no
-    // route-away, and the unmasked prior demotes.
-    assert_eq!(
-        stale.0,
-        Some(("structured_output".to_string(), FilterSource::Prior))
-    );
+    // route-away.
+    assert_eq!(stale.0, None, "a stale read routes nothing away");
     assert!(stale.1.is_empty(), "a stale read claims no re-probe slot");
     assert!(stale.2.is_empty(), "a stale read strips nothing");
     // Positive control -- the live Router reads the same entries.
@@ -291,7 +246,7 @@ fn an_operator_decided_cell_never_takes_the_claiming_read() {
         let mut config = base_config(extra);
         config.capability.enabled = enabled;
         let router = Router::new(Arc::new(config));
-        let target = target_with_priors(&router, "nick", &[]);
+        let target = fixture_target(&router, "nick");
         seed_lapsed(&router, "nick", feature);
         let count = count_entries_locks(&router);
 
