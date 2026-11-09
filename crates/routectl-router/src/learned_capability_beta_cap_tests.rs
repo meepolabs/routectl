@@ -93,7 +93,7 @@ fn the_beta_past_the_lane_bound_evicts_the_lanes_youngest_beta_and_warns() {
     assert_eq!(keys.len(), MAX_BETA_ENTRIES_PER_LANE);
     assert!(
         !keys.contains(&beta(MAX_BETA_ENTRIES_PER_LANE - 1)),
-        "the youngest beta must be evicted"
+        "the least-observed beta (latest first_seen among equals) must be evicted"
     );
     assert!(keys.contains(&beta(0)));
     assert!(keys.contains(&beta(MAX_BETA_ENTRIES_PER_LANE)));
@@ -142,7 +142,7 @@ fn the_lane_bound_leaves_non_beta_facts_and_other_lanes_and_kinds_untouched() {
     assert_eq!(beta_count(&reg, LANE, KIND), MAX_BETA_ENTRIES_PER_LANE);
     assert!(
         !keys.contains(&beta(MAX_BETA_ENTRIES_PER_LANE - 1)),
-        "the lane's own youngest beta is the victim"
+        "the lane's own least-observed beta (latest first_seen among equals) is the victim"
     );
     assert_eq!(resident(&reg, OTHER_LANE, KIND), vec![beta(0)]);
     assert_eq!(resident(&reg, LANE, "bedrock"), vec![beta(0)]);

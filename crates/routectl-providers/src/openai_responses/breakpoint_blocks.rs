@@ -9,6 +9,7 @@ use crate::system_filter::{is_billing_attribution_part, system_message_carries_b
 
 /// One `input_text` block the Responses egress emits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct BreakpointBlock<'a> {
     /// Index of the message in the slice the blocks were read from.
     pub message: usize,
