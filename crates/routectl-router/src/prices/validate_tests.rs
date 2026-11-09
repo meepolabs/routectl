@@ -355,7 +355,7 @@ fn no_download_string_renders_through_debug_display_or_errors() {
     }])))
     .expect("valid table");
     assert!(
-        String::from_utf8(parsed.to_canonical_json())
+        String::from_utf8(parsed.to_canonical_json().expect("serializes"))
             .expect("utf8")
             .contains(PLANTED),
         "positive control: the fixture carries the planted string"
@@ -387,7 +387,7 @@ fn canonical_json_round_trips_sorted_and_normalized() {
     ])))
     .expect("valid");
 
-    let written = parsed.to_canonical_json();
+    let written = parsed.to_canonical_json().expect("serializes");
     let reparsed = parse_and_validate(&written).expect("canonical output reparses");
     let doc: Value = serde_json::from_slice(&written).expect("json");
 

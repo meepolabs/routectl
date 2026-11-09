@@ -8,11 +8,11 @@
 //! Every other field is ignored.
 
 use std::fmt;
-use std::marker::PhantomData;
 
 use serde::Deserialize;
-use serde::de::{Deserializer, MapAccess, Visitor};
+use serde::de::{self, DeserializeSeed, Deserializer, IgnoredAny, MapAccess, Visitor};
 
+use super::bounded::{Bounds, not_seen};
 use super::format::{ApiBase, RawModel, RawProvider, RawTable, SCHEMA_VERSION, TableDate};
 use super::validate::{check_size, validate};
 use super::{PriceTable, PriceTableError};
@@ -23,46 +23,25 @@ use super::{PriceTable, PriceTableError};
 /// A provider `api` that the shared origin normalizer withholds (not a URL,
 /// a non-http(s) scheme) is dropped, leaving that provider reachable only
 /// through the first-party fallback. A placeholder inside an otherwise valid
-/// URL is kept as written. A model with no cost field is omitted. A provider
-/// or model id repeated in the source is a duplicate row, not a silent
-/// overwrite.
+/// URL is kept as written. A model with no cost field is omitted, though it
+/// still counts toward the row bound. A provider or model id repeated in the
+/// source is a duplicate row, not a silent overwrite.
 pub fn from_models_dev(
     bytes: &[u8],
     generated_at: TableDate,
 ) -> Result<PriceTable, PriceTableError> {
     check_size(bytes)?;
-    let source: Entries<DevProvider> =
-        serde_json::from_slice(bytes).map_err(|e| PriceTableError::syntax(&e))?;
-    let providers = source
-        .0
-        .into_iter()
-        .map(|(id, provider)| RawProvider {
-            id,
-            api_host: provider
-                .api
-                .as_deref()
-                .and_then(ApiBase::parse)
-                .map(|api| api.canonical()),
-            models: provider
-                .models
-                .0
-                .into_iter()
-                .filter_map(|(id, model)| model.cost.map(|cost| cost.into_row(id)))
-                .collect(),
-        })
-        .collect();
+    let bounds = Bounds::default();
+    let mut de = serde_json::Deserializer::from_slice(bytes);
+    let providers = ProvidersSeed(&bounds)
+        .deserialize(&mut de)
+        .and_then(|providers| de.end().map(|()| providers))
+        .map_err(|e| bounds.refusal_or_syntax(&e))?;
     validate(RawTable {
         schema_version: SCHEMA_VERSION,
         generated_at: generated_at.to_string(),
         providers,
     })
-}
-
-#[derive(Deserialize)]
-struct DevProvider {
-    #[serde(default)]
-    api: Option<String>,
-    models: Entries<DevModel>,
 }
 
 #[derive(Deserialize)]
@@ -96,30 +75,112 @@ impl DevCost {
     }
 }
 
-/// A JSON object read as its entries in source order, keeping a repeated key
-/// as a second entry so validation can refuse it.
-struct Entries<T>(Vec<(String, T)>);
+/// The top-level object keyed by provider id, read in source order so a
+/// repeated key stays a second entry for validation to refuse.
+struct ProvidersSeed<'a>(&'a Bounds);
 
-impl<'de, T: Deserialize<'de>> Deserialize<'de> for Entries<T> {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        struct EntriesVisitor<T>(PhantomData<T>);
+impl<'de> DeserializeSeed<'de> for ProvidersSeed<'_> {
+    type Value = Vec<RawProvider>;
 
-        impl<'de, T: Deserialize<'de>> Visitor<'de> for EntriesVisitor<T> {
-            type Value = Entries<T>;
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<Self::Value, D::Error> {
+        deserializer.deserialize_map(self)
+    }
+}
 
-            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str("an object")
-            }
+impl<'de> Visitor<'de> for ProvidersSeed<'_> {
+    type Value = Vec<RawProvider>;
 
-            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
-                let mut entries = Vec::new();
-                while let Some(entry) = map.next_entry::<String, T>()? {
-                    entries.push(entry);
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("an object of providers")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        let mut out = Vec::new();
+        while let Some(id) = map.next_key::<String>()? {
+            self.0.count_provider()?;
+            out.push(map.next_value_seed(ProviderSeed { id, bounds: self.0 })?);
+        }
+        Ok(out)
+    }
+}
+
+struct ProviderSeed<'a> {
+    id: String,
+    bounds: &'a Bounds,
+}
+
+impl<'de> DeserializeSeed<'de> for ProviderSeed<'_> {
+    type Value = RawProvider;
+
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<RawProvider, D::Error> {
+        deserializer.deserialize_map(self)
+    }
+}
+
+impl<'de> Visitor<'de> for ProviderSeed<'_> {
+    type Value = RawProvider;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("a provider object")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<RawProvider, A::Error> {
+        let mut api: Option<Option<String>> = None;
+        let mut models = None;
+        while let Some(key) = map.next_key::<String>()? {
+            match key.as_str() {
+                "api" => {
+                    not_seen(api.as_ref(), "api")?;
+                    api = Some(map.next_value()?);
                 }
-                Ok(Entries(entries))
+                "models" => {
+                    not_seen(models.as_ref(), "models")?;
+                    models = Some(map.next_value_seed(ModelsSeed(self.bounds))?);
+                }
+                _ => {
+                    map.next_value::<IgnoredAny>()?;
+                }
             }
         }
+        Ok(RawProvider {
+            id: self.id,
+            api_host: api
+                .flatten()
+                .as_deref()
+                .and_then(ApiBase::parse)
+                .map(|api| api.canonical()),
+            models: models.ok_or_else(|| de::Error::missing_field("models"))?,
+        })
+    }
+}
 
-        deserializer.deserialize_map(EntriesVisitor(PhantomData))
+/// A provider's `models` object; every entry counts toward the row bound
+/// and only the entries carrying a cost become rows.
+struct ModelsSeed<'a>(&'a Bounds);
+
+impl<'de> DeserializeSeed<'de> for ModelsSeed<'_> {
+    type Value = Vec<RawModel>;
+
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<Self::Value, D::Error> {
+        deserializer.deserialize_map(self)
+    }
+}
+
+impl<'de> Visitor<'de> for ModelsSeed<'_> {
+    type Value = Vec<RawModel>;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("an object of models")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        let mut out = Vec::new();
+        while let Some(id) = map.next_key::<String>()? {
+            self.0.count_row()?;
+            if let Some(cost) = map.next_value::<DevModel>()?.cost {
+                out.push(cost.into_row(id));
+            }
+        }
+        Ok(out)
     }
 }

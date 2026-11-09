@@ -1,0 +1,16 @@
+models_dev_slice.json
+-------------------------------------------------------------------
+A verbatim subset (providers anthropic, lmstudio, minimax,
+minimax-coding-plan, ollama-cloud, opencode, opencode-go) of the
+models.dev snapshot, used as test input for the models.dev converter.
+
+   Source:    models.dev model/pricing API, built from the sst/models.dev
+              repository
+   URL:       https://models.dev/api.json
+   License:   MIT (https://raw.githubusercontent.com/sst/models.dev/dev/LICENSE)
+   Copyright: Copyright (c) 2025 models.dev
+   Snapshot date: 2026-08-04
+
+MIT permits use, copy, modification, and redistribution, subject to
+including the license and copyright notice, reproduced above, alongside
+the copy.

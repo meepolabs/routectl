@@ -3993,15 +3993,20 @@ pub routectl_router::prices::PriceTableError::DuplicateModel
 pub routectl_router::prices::PriceTableError::DuplicateProvider
 pub routectl_router::prices::PriceTableError::InvalidApiHost
 pub routectl_router::prices::PriceTableError::InvalidDate
+pub routectl_router::prices::PriceTableError::ModelIdCharset
 pub routectl_router::prices::PriceTableError::ModelIdLength
 pub routectl_router::prices::PriceTableError::ModelIdLength::limit: usize
 pub routectl_router::prices::PriceTableError::NoPricedModels
+pub routectl_router::prices::PriceTableError::ProviderIdCharset
 pub routectl_router::prices::PriceTableError::ProviderIdLength
 pub routectl_router::prices::PriceTableError::ProviderIdLength::limit: usize
+pub routectl_router::prices::PriceTableError::Serialize
 pub routectl_router::prices::PriceTableError::Syntax
 pub routectl_router::prices::PriceTableError::Syntax::column: usize
 pub routectl_router::prices::PriceTableError::Syntax::line: usize
 pub routectl_router::prices::PriceTableError::TooLarge
+pub routectl_router::prices::PriceTableError::TooManyProviders
+pub routectl_router::prices::PriceTableError::TooManyProviders::limit: usize
 pub routectl_router::prices::PriceTableError::TooManyRows
 pub routectl_router::prices::PriceTableError::TooManyRows::limit: usize
 pub routectl_router::prices::PriceTableError::UnsupportedSchemaVersion
@@ -4067,7 +4072,8 @@ pub struct routectl_router::prices::PriceTable
 impl routectl_router::prices::PriceTable
 pub const fn routectl_router::prices::PriceTable::generated_at(&self) -> routectl_router::prices::TableDate
 pub fn routectl_router::prices::PriceTable::price_for(&self, &routectl_router::config::Config, &str, &str) -> core::option::Option<routectl_router::PricingConfig>
-pub fn routectl_router::prices::PriceTable::to_canonical_json(&self) -> alloc::vec::Vec<u8>
+pub fn routectl_router::prices::PriceTable::price_for_target(&self, &str, core::option::Option<&str>, &str) -> core::option::Option<routectl_router::PricingConfig>
+pub fn routectl_router::prices::PriceTable::to_canonical_json(&self) -> core::result::Result<alloc::vec::Vec<u8>, routectl_router::prices::PriceTableError>
 impl core::clone::Clone for routectl_router::prices::PriceTable
 pub fn routectl_router::prices::PriceTable::clone(&self) -> routectl_router::prices::PriceTable
 impl core::cmp::PartialEq for routectl_router::prices::PriceTable

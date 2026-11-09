@@ -34,9 +34,10 @@
 //! # Validation
 //!
 //! [`parse_and_validate`] and [`from_models_dev`] share one rule set: input
-//! over [`MAX_INPUT_BYTES`] is refused; more than 100000 model rows, a
-//! provider id empty or over 128 bytes, a model id empty or over 512 bytes, a
-//! duplicate provider, a duplicate (provider, model) row, an `api_host` that
+//! over [`MAX_INPUT_BYTES`] is refused; more than 100000 source model entries
+//! (counted while parsing, priced or not) or 100000 providers, a provider id
+//! empty or over 128 bytes, a model id empty or over 512 bytes, any id byte
+//! outside printable ASCII `0x21..=0x7E`, a duplicate provider, a duplicate (provider, model) row, an `api_host` that
 //! does not normalize to an origin, a `generated_at` that is not a calendar
 //! date, and a table with no priced model are all malformed. A price that is
 //! not finite, is negative or exceeds 10000 $/Mtok is dropped to `None`
@@ -66,6 +67,7 @@
 //! A pool target uses its first member that names a provider entry, the same
 //! member the config's provider-kind resolution reads.
 
+mod bounded;
 mod format;
 mod models_dev;
 mod select;
@@ -109,6 +111,12 @@ impl PriceTable {
     /// describe. `None` when no provider is selected or the selected provider
     /// has no row for the exact upstream id. A returned field left `None` is
     /// an unknown price.
+    ///
+    /// A usage row passes the provider entry that served the request, never
+    /// the pool it was routed through: a pool resolves to its first member,
+    /// which may not be the member that answered. A row whose provider entry
+    /// no longer exists in `config` uses [`Self::price_for_target`] with the
+    /// kind and base URL it recorded.
     pub fn price_for(
         &self,
         config: &Config,
@@ -120,9 +128,13 @@ impl PriceTable {
         self.price_for_target(entry.kind_str(), base_url.as_deref(), upstream)
     }
 
-    /// [`Self::price_for`] for an already-resolved provider kind and egress
-    /// base URL.
-    pub(crate) fn price_for_target(
+    /// Prices for `upstream` on a target of provider `kind` (a
+    /// `[providers]` `kind` string) egressing to `base_url`, selected as the
+    /// module docs describe, with no config lookup. This is the path for a
+    /// usage row whose provider entry no longer exists in the config; pass
+    /// `None` for `base_url` when none was recorded, which leaves only the
+    /// first-party fallback.
+    pub fn price_for_target(
         &self,
         kind: &str,
         base_url: Option<&str>,
@@ -136,8 +148,9 @@ impl PriceTable {
 
     /// The table serialized in the canonical format: pretty-printed, sorted,
     /// newline-terminated. This is the one place table strings leave the
-    /// module, as the bytes written back to the table file.
-    pub fn to_canonical_json(&self) -> Vec<u8> {
+    /// module, as the bytes written back to the table file. An error means
+    /// nothing should be written.
+    pub fn to_canonical_json(&self) -> Result<Vec<u8>, PriceTableError> {
         format::to_canonical_json(self)
     }
 
@@ -202,6 +215,18 @@ pub enum PriceTableError {
         /// The byte bound.
         limit: usize,
     },
+    /// The table lists more providers than the bound allows.
+    #[error("price table has more than {limit} providers")]
+    TooManyProviders {
+        /// The provider bound.
+        limit: usize,
+    },
+    /// A provider id holds a byte outside printable ASCII `0x21..=0x7E`.
+    #[error("price table provider id holds a byte outside printable ASCII")]
+    ProviderIdCharset,
+    /// A model id holds a byte outside printable ASCII `0x21..=0x7E`.
+    #[error("price table model id holds a byte outside printable ASCII")]
+    ModelIdCharset,
     /// Two providers share an id.
     #[error("price table lists a provider twice")]
     DuplicateProvider,
@@ -214,6 +239,9 @@ pub enum PriceTableError {
     /// No model carries any admitted price.
     #[error("price table has no priced model")]
     NoPricedModels,
+    /// The table could not be serialized; nothing should be written.
+    #[error("price table could not be serialized")]
+    Serialize,
 }
 
 impl PriceTableError {
@@ -225,6 +253,9 @@ impl PriceTableError {
     }
 }
 
+#[cfg(test)]
+#[path = "bounds_tests.rs"]
+mod bounds_tests;
 #[cfg(test)]
 #[path = "models_dev_tests.rs"]
 mod models_dev_tests;

@@ -72,6 +72,7 @@ impl PriceTable {
 /// The comparable form of a target base URL; `None` for a loopback or local
 /// target, which never matches a table host.
 fn remote_base(base_url: &str) -> Option<ApiBase> {
+    // Shared with field-verdict minting on purpose: one notion of "local".
     if loopback_target_suppresses_minting(base_url) {
         return None;
     }

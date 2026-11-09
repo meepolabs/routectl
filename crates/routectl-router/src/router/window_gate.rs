@@ -169,9 +169,10 @@ impl Router {
     ///
     /// Never returns an empty chain and never returns an error: a chain of
     /// one is returned untouched before any estimate is computed, a target
-    /// whose window is unconfirmed is kept, and a chain whose every target
-    /// overflows is returned unchanged so the caller still sees exactly
-    /// today's upstream error rather than a routectl-invented one.
+    /// whose `[models.X] context_window` is unset is kept, and a chain whose
+    /// every target overflows is returned unchanged so the caller still
+    /// sees exactly today's upstream error rather than a routectl-invented
+    /// one.
     pub(super) fn filter_chain_by_window(
         &self,
         chain: Vec<DispatchTarget>,
@@ -205,8 +206,8 @@ impl Router {
         // aged against the same instant.
         let now = SystemTime::now();
         for (idx, target) in chain.iter().enumerate() {
-            // An unconfirmed window (unset, `Disabled`, or `Missing`) KEEPS
-            // the target: skipping is the aggressive behavior here, and an
+            // A target whose `[models.X] context_window` is unset is KEPT:
+            // skipping is the aggressive behavior here, and an
             // unknown fact never enables it. The accessor is shared with the
             // `/v1/models` discovery read, so the two surfaces cannot report
             // different windows for one target.

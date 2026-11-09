@@ -512,6 +512,8 @@ enum CatalogCmd {
     /// `input_cost_per_token` (f32),
     /// `output_cost_per_token` (f32), and a capability flag via
     /// `cap:<name>=true|false` (e.g. `cap:web_search=true`).
+    /// `max_context_tokens` / `max_output_tokens` no longer feed routing or
+    /// the fill; set `[models.X] context_window` / `max_output_tokens`.
     /// `auto_cacher` / `has_storage_rent` / `storage_rent` / `source` /
     /// `verified_at` are hard-rejected: the first three live only on the
     /// baked catalog table, and `source` / `verified_at` are always

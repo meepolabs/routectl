@@ -1,5 +1,5 @@
 //! The models.dev converter: field mapping, api host handling, duplicate
-//! keys, and the vendored source shape end to end.
+//! keys, and a verbatim slice of the real source end to end.
 
 use serde_json::{Value, json};
 
@@ -14,7 +14,7 @@ fn convert(value: &Value) -> Result<PriceTable, PriceTableError> {
 }
 
 fn canonical(table: &PriceTable) -> Value {
-    serde_json::from_slice(&table.to_canonical_json()).expect("canonical json")
+    serde_json::from_slice(&table.to_canonical_json().expect("serializes")).expect("canonical json")
 }
 
 #[test]
@@ -133,15 +133,18 @@ fn source_shape_errors_fail_closed() {
     }
 }
 
-const VENDORED_SOURCE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/catalog_data/models_dev.json");
+const SOURCE_SLICE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/src/prices/testdata/models_dev_slice.json"
+);
 
 #[test]
-fn the_vendored_models_dev_snapshot_converts_and_selects_as_designed() {
-    let source = std::fs::read(VENDORED_SOURCE).expect("vendored models.dev snapshot is readable");
+fn a_real_models_dev_slice_converts_and_selects_as_designed() {
+    let source = std::fs::read(SOURCE_SLICE).expect("models.dev slice is readable");
 
     let converted = from_models_dev(&source, date()).expect("snapshot converts");
-    let reparsed =
-        parse_and_validate(&converted.to_canonical_json()).expect("canonical output reparses");
+    let reparsed = parse_and_validate(&converted.to_canonical_json().expect("serializes"))
+        .expect("canonical output reparses");
 
     assert_eq!(reparsed, converted);
     let price = |kind: &str, base: Option<&str>, model: &str| {

@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use super::bounded::parse_canonical;
 use super::format::{ApiBase, RawModel, RawTable, SCHEMA_VERSION, SchemaProbe, TableDate};
 use super::{PriceTable, PriceTableError, ProviderPrices};
 use crate::config::PricingConfig;
@@ -20,16 +21,10 @@ pub fn parse_and_validate(bytes: &[u8]) -> Result<PriceTable, PriceTableError> {
     check_size(bytes)?;
     let probe: SchemaProbe =
         serde_json::from_slice(bytes).map_err(|e| PriceTableError::syntax(&e))?;
-    if probe
-        .schema_version
-        .as_ref()
-        .and_then(serde_json::Value::as_u64)
-        != Some(SCHEMA_VERSION)
-    {
+    if probe.schema_version.and_then(|v| v.0) != Some(SCHEMA_VERSION) {
         return Err(PriceTableError::UnsupportedSchemaVersion);
     }
-    let raw: RawTable = serde_json::from_slice(bytes).map_err(|e| PriceTableError::syntax(&e))?;
-    validate(raw)
+    validate(parse_canonical(bytes)?)
 }
 
 pub(super) const fn check_size(bytes: &[u8]) -> Result<(), PriceTableError> {
@@ -39,13 +34,11 @@ pub(super) const fn check_size(bytes: &[u8]) -> Result<(), PriceTableError> {
     Ok(())
 }
 
-/// Applies every bound to a raw table and builds the sorted, sanitized form.
+/// Applies every per-row rule to a raw table and builds the sorted,
+/// sanitized form. The row and provider counts are bounded earlier, while
+/// the raw table is deserialized.
 pub(super) fn validate(raw: RawTable) -> Result<PriceTable, PriceTableError> {
     let generated_at = TableDate::parse(&raw.generated_at).ok_or(PriceTableError::InvalidDate)?;
-    let rows: usize = raw.providers.iter().map(|p| p.models.len()).sum();
-    if rows > MAX_ROWS {
-        return Err(PriceTableError::TooManyRows { limit: MAX_ROWS });
-    }
     let mut seen = BTreeSet::new();
     let mut providers = Vec::with_capacity(raw.providers.len());
     for provider in raw.providers {
@@ -53,6 +46,9 @@ pub(super) fn validate(raw: RawTable) -> Result<PriceTable, PriceTableError> {
             return Err(PriceTableError::ProviderIdLength {
                 limit: MAX_PROVIDER_ID_BYTES,
             });
+        }
+        if !id_charset_ok(&provider.id) {
+            return Err(PriceTableError::ProviderIdCharset);
         }
         if !seen.insert(provider.id.clone()) {
             return Err(PriceTableError::DuplicateProvider);
@@ -91,6 +87,9 @@ fn validate_models(
                 limit: MAX_MODEL_ID_BYTES,
             });
         }
+        if !id_charset_ok(&model.id) {
+            return Err(PriceTableError::ModelIdCharset);
+        }
         let prices = PricingConfig {
             input_per_mtok: model.input.and_then(admit_price),
             output_per_mtok: model.output.and_then(admit_price),
@@ -107,6 +106,11 @@ fn validate_models(
 
 const fn id_within(id: &str, limit: usize) -> bool {
     !id.is_empty() && id.len() <= limit
+}
+
+/// Printable ASCII without the space: every byte in `0x21..=0x7E`.
+fn id_charset_ok(id: &str) -> bool {
+    id.bytes().all(|b| matches!(b, 0x21..=0x7E))
 }
 
 /// A price outside `[0, MAX_PRICE_PER_MTOK]` is unknown; NaN and the

@@ -25,6 +25,9 @@ fn selection_table() -> PriceTable {
         provider("lmstudio", Some("http://127.0.0.1:1234/v1"), 4.0),
         provider("local-name", Some("http://localhost:8080/v1"), 12.0),
         provider("local-v6", Some("http://[::1]:9000/v1"), 13.0),
+        provider("any-addr", Some("http://0.0.0.0:1234/v1"), 14.0),
+        provider("sub-local", Some("http://foo.localhost/v1"), 15.0),
+        provider("mapped-v4", Some("http://[::ffff:127.0.0.1]:1234/v1"), 16.0),
         provider("twin-a", Some("https://shared.example/v1"), 5.0),
         provider("twin-b", Some("https://shared.example/v1/"), 6.0),
         provider("anthropic", None, 7.0),
@@ -99,6 +102,9 @@ fn a_loopback_base_url_never_matches_a_table_host() {
         ("ipv4 loopback", "http://127.0.0.1:1234/v1"),
         ("localhost", "http://localhost:8080/v1"),
         ("ipv6 loopback", "http://[::1]:9000/v1"),
+        ("unspecified ipv4", "http://0.0.0.0:1234/v1"),
+        ("localhost subdomain", "http://foo.localhost/v1"),
+        ("ipv4-mapped loopback", "http://[::ffff:127.0.0.1]:1234/v1"),
     ];
     for (name, base) in rows {
         let parsed = format::ApiBase::parse(base).expect("base parses");

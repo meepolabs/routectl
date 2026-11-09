@@ -3,9 +3,10 @@
 
 use std::fmt;
 
+use serde::de::{self, Deserializer, Visitor};
 use serde::{Deserialize, Serialize};
 
-use super::PriceTable;
+use super::{PriceTable, PriceTableError};
 use crate::config_effective::normalized_origin;
 
 /// The only schema version this build reads and writes.
@@ -16,23 +17,64 @@ pub(super) const SCHEMA_VERSION: u64 = 1;
 #[derive(Deserialize)]
 pub(super) struct SchemaProbe {
     #[serde(default)]
-    pub(super) schema_version: Option<serde_json::Value>,
+    pub(super) schema_version: Option<ProbedVersion>,
 }
 
-/// The whole file. Unknown fields are tolerated on every on-disk type.
-#[derive(Serialize, Deserialize)]
+/// A scalar `schema_version`: `Some` for a non-negative integer, `None` for
+/// any other scalar (unsupported). An object or array is a shape error and
+/// is never materialized.
+pub(super) struct ProbedVersion(pub(super) Option<u64>);
+
+impl<'de> Deserialize<'de> for ProbedVersion {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_any(ProbedVersionVisitor)
+    }
+}
+
+struct ProbedVersionVisitor;
+
+impl Visitor<'_> for ProbedVersionVisitor {
+    type Value = ProbedVersion;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("a scalar schema_version")
+    }
+
+    fn visit_u64<E: de::Error>(self, v: u64) -> Result<ProbedVersion, E> {
+        Ok(ProbedVersion(Some(v)))
+    }
+
+    fn visit_i64<E: de::Error>(self, v: i64) -> Result<ProbedVersion, E> {
+        Ok(ProbedVersion(u64::try_from(v).ok()))
+    }
+
+    fn visit_f64<E: de::Error>(self, _: f64) -> Result<ProbedVersion, E> {
+        Ok(ProbedVersion(None))
+    }
+
+    fn visit_bool<E: de::Error>(self, _: bool) -> Result<ProbedVersion, E> {
+        Ok(ProbedVersion(None))
+    }
+
+    fn visit_str<E: de::Error>(self, _: &str) -> Result<ProbedVersion, E> {
+        Ok(ProbedVersion(None))
+    }
+
+    fn visit_unit<E: de::Error>(self) -> Result<ProbedVersion, E> {
+        Ok(ProbedVersion(None))
+    }
+}
+
+/// The whole file. Read by the bounded seeds, which tolerate unknown
+/// fields on every on-disk type.
+#[derive(Serialize)]
 pub(super) struct RawTable {
-    #[serde(default = "schema_version")]
     pub(super) schema_version: u64,
     pub(super) generated_at: String,
     pub(super) providers: Vec<RawProvider>,
 }
 
-const fn schema_version() -> u64 {
-    SCHEMA_VERSION
-}
-
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize)]
 pub(super) struct RawProvider {
     pub(super) id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -55,7 +97,7 @@ pub(super) struct RawModel {
     pub(super) cache_write_1h: Option<f64>,
 }
 
-pub(super) fn to_canonical_json(table: &PriceTable) -> Vec<u8> {
+pub(super) fn to_canonical_json(table: &PriceTable) -> Result<Vec<u8>, PriceTableError> {
     let raw = RawTable {
         schema_version: SCHEMA_VERSION,
         generated_at: table.generated_at.to_string(),
@@ -80,10 +122,9 @@ pub(super) fn to_canonical_json(table: &PriceTable) -> Vec<u8> {
             })
             .collect(),
     };
-    // Serializing owned strings and finite floats into a Vec cannot fail.
-    let mut bytes = serde_json::to_vec_pretty(&raw).unwrap_or_default();
+    let mut bytes = serde_json::to_vec_pretty(&raw).map_err(|_| PriceTableError::Serialize)?;
     bytes.push(b'\n');
-    bytes
+    Ok(bytes)
 }
 
 /// A calendar date, `YYYY-MM-DD`. Rendered from its parsed numbers, never

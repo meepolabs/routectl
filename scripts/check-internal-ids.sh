@@ -64,6 +64,7 @@ SCANNER_SOURCES=(
 EXCLUDE_PATHS=(
     "crates/routectl-cli/tests/fixtures/captured/"
     "crates/routectl-router/catalog_data/"
+    "crates/routectl-router/src/prices/testdata/models_dev_slice.json"
     "${SCANNER_SOURCES[@]}"
 )
 

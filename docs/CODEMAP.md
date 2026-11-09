@@ -2379,6 +2379,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   normalized provider API base
 - `src/prices/validate.rs` -- `parse_and_validate` and the bounds every table
   passes
+- `src/prices/bounded.rs` -- the row and provider counts enforced while a
+  table is deserialized, and the bounded canonical-format seeds
 - `src/prices/models_dev.rs` -- `from_models_dev`: models.dev `api.json` to the
   canonical table
 - `src/prices/select.rs` -- provider selection for a config target
