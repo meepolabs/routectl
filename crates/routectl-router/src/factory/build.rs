@@ -834,6 +834,7 @@ fn resolve_max_thinking_entry_bytes(provider_name: &str, configured: Option<u32>
     v as usize
 }
 
+#[cfg(any(feature = "bedrock", feature = "openai-responses"))]
 async fn resolve(secrets: &dyn SecretStore, uri: &str) -> Result<String> {
     tracing::debug!(secret_scheme = scheme_of(uri), "resolving secret ref");
     let secret_ref = SecretRef::parse(uri)?;
