@@ -30,6 +30,14 @@ per-harness files small enough for the rule to stay affordable.
 | `pi-responses.sh` | `pi` from PATH | Expected ingress `openai-responses`. Owns its carrier: a `models.json` custom provider with `api: openai-responses` |
 | `pi-chat.sh` | `pi` from PATH | Expected ingress `openai`. Same carrier as the responses driver, with `api: openai-completions` |
 
+Every driver records its own basename (without `.sh`) as the client name
+in the run record, and a landed fixture is keyed by that name, so no two
+files share one. `hermes-anthropic.sh` and `pi-anthropic.sh` delegate to
+`external-agent-cli.sh` and name themselves through
+`ROUTECTL_DRIVER_AGENT_NAME`; run directly, that driver records
+`external-agent-cli`. A name that is not a lowercase hyphenated token
+(`^[a-z0-9]+(-[a-z0-9]+)*$`) is refused with exit 2 before the client runs.
+
 The three hermes files share [lib/hermes.sh](lib/hermes.sh): it points
 `HERMES_HOME` inside the run workspace, clears every inherited variable
 hermes would route or authenticate by (an operator's `OPENAI_BASE_URL`

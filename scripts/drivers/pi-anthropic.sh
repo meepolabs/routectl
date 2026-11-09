@@ -35,6 +35,7 @@ if [ "$ROUTECTL_FIXTURE_CONNECTION_MODE" = base-url ]; then
   pi_write_settings "$CASE_FILE"
 fi
 
+export ROUTECTL_DRIVER_AGENT_NAME="pi-anthropic"
 export ROUTECTL_DRIVER_AGENT_BIN="$HERE/lib/pi-continue-guard.sh"
 export ROUTECTL_DRIVER_AGENT_ONESHOT_FLAG="-p"
 export ROUTECTL_DRIVER_AGENT_CONTINUE_FLAG="-c"

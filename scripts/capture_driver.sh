@@ -259,6 +259,7 @@
 #   ROUTECTL_DRIVER_AGENT_REASONING_FLAG
 #   ROUTECTL_DRIVER_AGENT_REASONING_LEVEL
 #   ROUTECTL_DRIVER_AGENT_EXTRA_ARGS
+#   ROUTECTL_DRIVER_AGENT_NAME            the client name the run records
 #   ROUTECTL_DRIVER_CLIENT_API_KEY        the PLACEHOLDER credential the
 #   ROUTECTL_DRIVER_CLIENT_BEARER         client holds locally, which
 #                                         never reaches an upstream

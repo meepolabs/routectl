@@ -21,6 +21,10 @@
 #     (`ROUTECTL_DRIVER_AGENT_VERSION_FLAG`).
 #
 # Optional knobs, each skipped when unset:
+#   ROUTECTL_DRIVER_AGENT_NAME            the client name the run records,
+#                                         default `external-agent-cli`; a
+#                                         driver that delegates here sets
+#                                         its own basename
 #   ROUTECTL_DRIVER_AGENT_MODEL_FLAG      e.g. `-m`, takes the model id
 #   ROUTECTL_DRIVER_AGENT_REASONING_FLAG  e.g. `--reasoning`, takes a level
 #   ROUTECTL_DRIVER_AGENT_REASONING_LEVEL default `high`
@@ -48,6 +52,10 @@ AGENT_BIN="${ROUTECTL_DRIVER_AGENT_BIN:-}"
 command -v "$AGENT_BIN" >/dev/null 2>&1 || [ -x "$AGENT_BIN" ] ||
   driver_die "ROUTECTL_DRIVER_AGENT_BIN '$AGENT_BIN' is not executable" 2
 
+AGENT_NAME="${ROUTECTL_DRIVER_AGENT_NAME:-external-agent-cli}"
+[[ "$AGENT_NAME" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]] ||
+  driver_die "ROUTECTL_DRIVER_AGENT_NAME '$AGENT_NAME' is not a lowercase hyphenated token" 2
+
 ONESHOT_FLAG="${ROUTECTL_DRIVER_AGENT_ONESHOT_FLAG:--z}"
 VERSION_FLAG="${ROUTECTL_DRIVER_AGENT_VERSION_FLAG:---version}"
 REASONING_LEVEL="${ROUTECTL_DRIVER_AGENT_REASONING_LEVEL:-high}"
@@ -74,7 +82,7 @@ driver_apply_anthropic_connection_mode
 # The version read is what makes this run's fixture say which client shape
 # it pins. The flag is configurable because the binary is; a client that
 # prints nothing fails the run inside driver_record_client.
-driver_record_client external-agent-cli "$AGENT_BIN" "$VERSION_FLAG"
+driver_record_client "$AGENT_NAME" "$AGENT_BIN" "$VERSION_FLAG"
 
 # The updater brake, applied AFTER the version read so the value recorded is
 # the one the run will keep. A client that updated itself mid-run would land
@@ -126,4 +134,4 @@ done < <(driver_case_turns "$CASE_FILE")
 
 [ "$turn" -gt 0 ] || driver_die "case '$ROUTECTL_FIXTURE_CASE_ID' yielded no turns" 1
 
-echo "driver: external-agent-cli case=$ROUTECTL_FIXTURE_CASE_ID mode=$ROUTECTL_FIXTURE_CONNECTION_MODE turns=$turn"
+echo "driver: $AGENT_NAME case=$ROUTECTL_FIXTURE_CASE_ID mode=$ROUTECTL_FIXTURE_CONNECTION_MODE turns=$turn"

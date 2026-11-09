@@ -1370,6 +1370,30 @@ check "the run record's basename is non-empty in the driver library" \
 check "the runner reads the same run-record basename the library writes" \
     "$lib_record" "$runner_record"
 
+# EVERY DRIVER RECORDS ITS OWN BASENAME as the client name, which is what
+# keys a landed fixture: two scripts recording one name would land on one
+# key. A driver that delegates to external-agent-cli.sh names itself
+# through the export it hands over; the delegate's own name is its default.
+recorded_client_name() {
+    local code name
+    code="$(code_lines "$1")"
+    name="$(printf '%s\n' "$code" |
+        sed -n 's/^[[:space:]]*export[[:space:]]\{1,\}ROUTECTL_DRIVER_AGENT_NAME="\{0,1\}\([^"[:space:]]*\)"\{0,1\}[[:space:]]*$/\1/p')"
+    if [ -z "$name" ]; then
+        name="$(printf '%s\n' "$code" |
+            sed -n 's/^[[:space:]]*driver_record_client[[:space:]]\{1,\}\([^[:space:]]*\).*/\1/p')"
+    fi
+    if [ "$name" = '"$AGENT_NAME"' ]; then
+        name="$(printf '%s\n' "$code" |
+            sed -n 's/.*\${ROUTECTL_DRIVER_AGENT_NAME:-\([^}]*\)}.*/\1/p')"
+    fi
+    printf '%s\n' "$name" | tr '\n' ' ' | sed 's/ $//'
+}
+for driver in "${DRIVER_FILES[@]}"; do
+    check "$(basename "$driver"): the recorded client name is the script's basename" \
+        "$(basename "$driver" .sh)" "$(recorded_client_name "$driver")"
+done
+
 # ---------------------------------------------------------------------
 # Fixtures for the end-to-end cases
 # ---------------------------------------------------------------------
@@ -2121,9 +2145,11 @@ for driver in claude-code.sh claude-code-print.sh external-agent-cli.sh; do
             "9.9.9 (Stub Client)" "$(sed -n 's/^version=//p' "$kept/client.txt")"
         check "$driver: the run record names the case" \
             "tools-multiturn-01" "$(sed -n 's/^case_id=//p' "$kept/client.txt")"
+        check "$driver: the run record names the driver's own basename" \
+            "${driver%.sh}" "$(sed -n 's/^name=//p' "$kept/client.txt")"
     else
         fail "$driver: no client record in the kept run workspace"
-        fails=$((fails + 1))
+        fails=$((fails + 2))
     fi
 
     meta="$(landed_meta "$work" tools-multiturn-01)"
@@ -2362,6 +2388,8 @@ while IFS='|' read -r driver trace lane ingress route api_mode; do
         "$HERMES_LOCAL_KEY" "$(client_get "$work" key | head -1)"
 
     kept="$(kept_run "$work")"
+    check "$driver: the run record names the driver's own basename" \
+        "${driver%.sh}" "$(sed -n 's/^name=//p' "$kept/client.txt" 2>/dev/null)"
     case "$(client_get "$work" hermes_home | head -1)" in
         "$kept"/*) echo "PASS: $driver: hermes state lives inside the run workspace" ;;
         *) fail "$driver: HERMES_HOME was '$(client_get "$work" hermes_home | head -1)', not under the run" ;;
@@ -2613,6 +2641,8 @@ while IFS='|' read -r driver trace lane ingress route provider suffix api; do
         "$PI_LOCAL_KEY" "$(client_get "$work" key | head -1)"
 
     kept="$(kept_run "$work")"
+    check "$driver: the run record names the driver's own basename" \
+        "${driver%.sh}" "$(sed -n 's/^name=//p' "$kept/client.txt" 2>/dev/null)"
     case "$(client_get "$work" agent_dir | head -1)" in
         "$kept"/*) echo "PASS: $driver: pi state lives inside the run workspace" ;;
         *) fail "$driver: PI_CODING_AGENT_DIR was '$(client_get "$work" agent_dir | head -1)', not under the run" ;;
@@ -2951,6 +2981,23 @@ if grep -qF 'ROUTECTL_DRIVER_AGENT_BIN' "$work/direct.log"; then
     echo "PASS: the third driver's refusal names the missing client variable"
 else
     fail "the third driver's refusal did not name the missing client variable"
+fi
+rm -rf "$work"
+
+# The recorded client name keys a landed fixture, so a name that is not a
+# lowercase hyphenated token is refused before anything runs. The dead port
+# attributes the exit to the name check: the daemon probe, which precedes
+# every client invocation, would exit 1.
+work="$(make_work)"
+rc=0
+ROUTECTL_DRIVER_AGENT_NAME="Bad__x" DIRECT_CASE=plain-turn-01 \
+    direct_run "$work" external-agent-cli.sh "http://127.0.0.1:1" || rc=$?
+check "the third driver refuses a malformed client name with exit 2" "2" "$rc"
+if grep -qF 'ROUTECTL_DRIVER_AGENT_NAME' "$work/direct.log"; then
+    echo "PASS: the malformed-name refusal names the variable"
+else
+    fail "the malformed-name refusal did not name the variable"
+    sed -n '1,10p' "$work/direct.log"
 fi
 rm -rf "$work"
 

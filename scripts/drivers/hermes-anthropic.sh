@@ -33,6 +33,7 @@ if [ "$ROUTECTL_FIXTURE_CONNECTION_MODE" = base-url ]; then
   hermes_write_config "$CASE_FILE"
 fi
 
+export ROUTECTL_DRIVER_AGENT_NAME="hermes-anthropic"
 export ROUTECTL_DRIVER_AGENT_BIN="$HERMES_BIN"
 export ROUTECTL_DRIVER_AGENT_ONESHOT_FLAG="-z"
 export ROUTECTL_DRIVER_AGENT_CONTINUE_FLAG="-c"
