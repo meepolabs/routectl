@@ -280,6 +280,14 @@ assert_diff_caught "sibling of the vendored test slice IS scanned" \
 "+++ b/crates/routectl-router/src/prices/testdata/NOTICE
 +      \"MiniMax-M2.7\": {"
 
+assert_diff_clean "generated shipped price table is excluded" \
+"+++ b/crates/routectl-router/src/prices_shipped.json
++          \"id\": \"MiniMax-M2.7\","
+
+assert_diff_caught "sibling of the shipped price table IS scanned" \
+"+++ b/crates/routectl-router/src/prices_shipped.NOTICE
++          \"id\": \"MiniMax-M2.7\","
+
 assert_diff_caught "ordinary source file IS scanned" \
 "+++ b/crates/routectl-core/src/lib.rs
 +// TODO(M99) wire this up"

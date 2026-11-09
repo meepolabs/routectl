@@ -108,30 +108,81 @@ async fn a_cookie_set_by_the_source_is_never_sent_back() {
 }
 
 #[tokio::test]
-async fn a_redirect_is_refused_and_names_only_the_stripped_location() {
+async fn a_redirect_is_refused_and_names_only_the_location_origin() {
+    let rows: [(&str, &str, &str); 2] = [
+        (
+            "absolute location",
+            "http://u:p@127.0.0.1:9/served-path-text?served-query-text=v#frag",
+            "http://127.0.0.1:9",
+        ),
+        (
+            "relative location",
+            "/served-path-text?served-query-text=v",
+            "",
+        ),
+    ];
+    for (name, location, origin) in rows {
+        let server = MockServer::start().await;
+        serve_once(
+            &server,
+            "/api.json",
+            ResponseTemplate::new(302).insert_header("location", location),
+        )
+        .await;
+        let target = url(&format!("{}/api.json", server.uri()));
+        let client = build_client(TIMEOUTS).expect("client");
+        let origin = if origin.is_empty() {
+            server.uri()
+        } else {
+            origin.to_owned()
+        };
+
+        let err = fetch(&client, &target, MAX_INPUT_BYTES)
+            .await
+            .expect_err("a 3xx is an error");
+
+        let text = err.to_string();
+        assert!(
+            text.contains(&format!("HTTP 302 redirect to {origin};")),
+            "{name}: {text}"
+        );
+        for leaked in ["served-path-text", "served-query-text", "u:p", "frag"] {
+            assert!(!text.contains(leaked), "{name}: {leaked} in {text}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn fetch_never_sends_userinfo_from_the_url_it_is_given() {
     let server = MockServer::start().await;
     serve_once(
         &server,
         "/api.json",
-        ResponseTemplate::new(302)
-            .insert_header("location", "http://u:p@127.0.0.1:9/moved?k=v#frag"),
+        ResponseTemplate::new(200).set_body_bytes(valid_body()),
     )
     .await;
-    let target = url(&format!("{}/api.json", server.uri()));
     let client = build_client(TIMEOUTS).expect("client");
-
-    let err = fetch(&client, &target, MAX_INPUT_BYTES)
-        .await
-        .expect_err("a 3xx is an error");
-
-    let text = err.to_string();
-    assert!(
-        text.contains("HTTP 302 redirect to http://127.0.0.1:9/moved;"),
-        "{text}"
+    let target = url(&format!("http://u:p@{}/api.json", server.address()));
+    assert_eq!(
+        (target.username(), target.password()),
+        ("u", Some("p")),
+        "control: the url handed to fetch carries userinfo"
     );
-    for leaked in ["u:p", "k=v", "frag"] {
-        assert!(!text.contains(leaked), "{leaked} in {text}");
-    }
+
+    fetch(&client, &target, MAX_INPUT_BYTES)
+        .await
+        .expect("fetch succeeds");
+
+    let requests = server.received_requests().await.expect("recording on");
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0].headers.contains_key("host"),
+        "control: the recorded request exposes its headers"
+    );
+    assert!(
+        !requests[0].headers.contains_key("authorization"),
+        "userinfo became an authorization header"
+    );
 }
 
 #[tokio::test]
@@ -436,6 +487,28 @@ async fn a_valid_body_replaces_the_previous_table_with_the_canonical_form() {
         ["prices.json", "source.json"],
         "the refresh created nothing else in the config folder"
     );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_refresh_into_a_missing_config_folder_creates_it_owner_only() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let root = tempfile::tempdir().expect("tempdir");
+    let config_dir = root.path().join("absent").join("routectl");
+    let source = root.path().join("source.json");
+    std::fs::write(&source, valid_body()).expect("source");
+
+    refresh_into(&config_dir, Some(&source.display().to_string()), date())
+        .await
+        .expect("refresh");
+
+    assert!(config_dir.join(PRICES_FILE).is_file());
+    let mode = std::fs::metadata(&config_dir)
+        .expect("config folder")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o700, "config folder mode {mode:o}");
 }
 
 #[test]

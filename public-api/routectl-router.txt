@@ -4239,6 +4239,7 @@ pub fn routectl_router::prices::TableDate::into_shared(self) -> Shared
 pub const routectl_router::prices::MAX_INPUT_BYTES: usize
 pub fn routectl_router::prices::from_models_dev(&[u8], routectl_router::prices::TableDate) -> core::result::Result<routectl_router::prices::PriceTable, routectl_router::prices::PriceTableError>
 pub fn routectl_router::prices::parse_and_validate(&[u8]) -> core::result::Result<routectl_router::prices::PriceTable, routectl_router::prices::PriceTableError>
+pub fn routectl_router::prices::shipped_table() -> core::option::Option<&'static routectl_router::prices::PriceTable>
 pub mod routectl_router::pricing
 pub enum routectl_router::pricing::PricingSource
 pub routectl_router::pricing::PricingSource::Catalog

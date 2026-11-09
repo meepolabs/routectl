@@ -3238,10 +3238,12 @@ routectl prices refresh --from ./api.json      # a local copy
 routectl prices refresh --from https://mirror.example/api.json
 ```
 
-- The fetch is a plain GET on its own HTTP client: no credentials, no
-  cookies, no redirects (a 3xx is an error naming the target without its
-  userinfo, query or fragment), 5 s to connect and 15 s in total. The
-  usual `HTTPS_PROXY` / `ALL_PROXY` / `NO_PROXY` variables apply.
+- The fetch is a plain GET on its own HTTP client: no credentials (userinfo
+  in a `--from` URL is never sent), no cookies, no redirects (a 3xx is an
+  error naming only the target's `scheme://host[:port]`), 5 s to connect
+  and 15 s in total. The usual `HTTPS_PROXY` / `ALL_PROXY` / `NO_PROXY`
+  variables apply.
+- A missing config folder is created owner-only (`0700`).
 - A source over 32 MiB is refused, whether a URL or a file.
 - A source that is not valid JSON, or holds no usable price, exits
   non-zero and leaves the previous `prices.json` exactly as it was. A good

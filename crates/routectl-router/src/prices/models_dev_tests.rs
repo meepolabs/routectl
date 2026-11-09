@@ -64,7 +64,7 @@ fn api_base_urls_are_normalized_and_unusable_ones_dropped() {
             .find(|p| p["id"] == id)
             .map(|p| p["api_host"].clone())
     };
-    assert_eq!(host("go"), Some(json!("https://opencode.ai:443/zen/go/v1")));
+    assert_eq!(host("go"), Some(json!("https://opencode.ai/zen/go/v1")));
     assert_eq!(host("tmpl"), Some(Value::Null));
     assert_eq!(host("ftp"), Some(Value::Null));
     assert_eq!(host("first"), Some(Value::Null));

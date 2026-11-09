@@ -438,6 +438,23 @@ removing a build cache mid-gate breaks the run, so check `pgrep -a
 `target/debug` is cheaper to drop alone (`rm -rf target/debug`) than via
 `cargo clean`, which also discards the slower-to-rebuild release cache.
 
+## Releasing
+
+Each release ships a price table, `crates/routectl-router/src/prices_shipped.json`,
+that routectl reads when no refreshed copy prices a model. Regenerate it
+before tagging with the same `routectl prices refresh` users run, into a
+scratch config folder under `target/`, from the repo root:
+
+```bash
+d="$PWD/target/release-prices" && XDG_CONFIG_HOME="$d" CARGO_ENV_XDG_CONFIG_HOME="$d" cargo run -p routectl-cli -- prices refresh && cp "$d/routectl/prices.json" crates/routectl-router/src/prices_shipped.json
+```
+
+Both variables are needed because `.cargo/config.toml` forces
+`XDG_CONFIG_HOME` for `cargo run` (see "Verification gate"). The copy runs
+only when the refresh succeeded. Review the diff, then run
+`cargo test -p routectl-router`, which parses the embedded table.
+`prices_shipped.NOTICE` beside it carries the models.dev license.
+
 ## When the Anthropic ingress breaks (a real client sending a real body)
 
 1. **Reproduce against routectl directly** with a captured request

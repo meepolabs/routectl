@@ -44,11 +44,11 @@ if [[ "${ROUTECTL_SKIP_ID_SCAN:-0}" == "1" ]]; then
     exit 0
 fi
 
-# Captured replay fixtures and vendored catalog snapshots hold real
-# upstream model ids, token counts, and UUIDs that would false-trip the
-# high-signal patterns (e.g. vendor model names shaped like M<n>.<m>).
-# They are not author-written content, so exclude those trees from the
-# scan. The scanner's own self-test carries synthetic ID-shaped fixtures
+# Captured replay fixtures, vendored catalog snapshots and the generated
+# shipped price table hold real upstream model ids, token counts, and UUIDs
+# that would false-trip the high-signal patterns (e.g. vendor model names
+# shaped like M<n>.<m>). They are not author-written content, so exclude
+# those paths from the scan. The scanner's own self-test carries synthetic ID-shaped fixtures
 # by design, so it is excluded too.
 #
 # This script excludes ITSELF for the same reason: it IS the rule set, so
@@ -65,6 +65,7 @@ EXCLUDE_PATHS=(
     "crates/routectl-cli/tests/fixtures/captured/"
     "crates/routectl-router/catalog_data/"
     "crates/routectl-router/src/prices/testdata/models_dev_slice.json"
+    "crates/routectl-router/src/prices_shipped.json"
     "${SCANNER_SOURCES[@]}"
 )
 

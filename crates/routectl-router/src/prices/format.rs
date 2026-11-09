@@ -210,12 +210,27 @@ impl ApiBase {
         Some(Self { origin, segments })
     }
 
+    /// The written form: the origin without its scheme's default port, then
+    /// the path segments. Reading it back normalizes to the same origin.
     pub(super) fn canonical(&self) -> String {
-        let mut out = self.origin.clone();
+        // An explicit `:443` before a path reads to secret scanners as a key
+        // (`443/anthropic/v1`), and the table is committed to the repo.
+        let mut out = without_default_port(&self.origin).to_owned();
         for segment in &self.segments {
             out.push('/');
             out.push_str(segment);
         }
         out
     }
+}
+
+fn without_default_port(origin: &str) -> &str {
+    let default = if origin.starts_with("https://") {
+        ":443"
+    } else if origin.starts_with("http://") {
+        ":80"
+    } else {
+        return origin;
+    };
+    origin.strip_suffix(default).unwrap_or(origin)
 }

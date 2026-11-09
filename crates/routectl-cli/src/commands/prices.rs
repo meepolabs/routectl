@@ -6,8 +6,8 @@
 //! operator invokes it. The fetch uses its own client: a plain GET with no
 //! default headers, no cookie store, redirects off and fixed timeouts. It
 //! never reaches the secret store or a provider client, so no credential can
-//! ride on it; userinfo written into a `--from` URL is dropped before the
-//! request is built. The operator's proxy environment applies.
+//! ride on it; userinfo in any URL it is given is dropped before the request
+//! is built. The operator's proxy environment applies.
 //!
 //! The downloaded bytes are untrusted. They are bounded while they are read,
 //! converted and validated before anything is written, and no string from
@@ -85,7 +85,8 @@ pub enum PricesError {
         url: String,
         /// The response status code.
         status: u16,
-        /// The stripped redirect target, when it resolves to an http(s) URL.
+        /// The `scheme://host[:port]` of the redirect target, when it
+        /// resolves to an http(s) URL. Its path and query are never rendered.
         location: Option<String>,
     },
     /// The source answered with a non-success status.
@@ -191,16 +192,23 @@ impl Source {
     }
 
     fn url(text: &str) -> Result<Self, PricesError> {
-        let mut url = Url::parse(text).map_err(|_| PricesError::UnusableUrl)?;
+        let url = Url::parse(text).map_err(|_| PricesError::UnusableUrl)?;
         if !matches!(url.scheme(), "http" | "https") || url.host().is_none() {
             return Err(PricesError::UnusableUrl);
         }
-        url.set_username("")
-            .map_err(|()| PricesError::UnusableUrl)?;
-        url.set_password(None)
-            .map_err(|()| PricesError::UnusableUrl)?;
-        Ok(Self::Url(url))
+        without_userinfo(&url)
+            .map(Self::Url)
+            .ok_or(PricesError::UnusableUrl)
     }
+}
+
+/// `url` with its username and password removed; `None` for a URL that
+/// cannot carry userinfo at all (no host).
+fn without_userinfo(url: &Url) -> Option<Url> {
+    let mut stripped = url.clone();
+    stripped.set_username("").ok()?;
+    stripped.set_password(None).ok()?;
+    Some(stripped)
 }
 
 /// `url` with userinfo, query and fragment removed, sanitized for a log
@@ -209,9 +217,7 @@ pub fn display_url(url: &Url) -> Option<String> {
     if !matches!(url.scheme(), "http" | "https") {
         return None;
     }
-    let mut stripped = url.clone();
-    stripped.set_username("").ok()?;
-    stripped.set_password(None).ok()?;
+    let mut stripped = without_userinfo(url)?;
     stripped.set_query(None);
     stripped.set_fragment(None);
     Some(sanitize_for_log(stripped.as_str()))
@@ -272,13 +278,15 @@ pub async fn refresh_into(
     Ok(summary)
 }
 
-/// GET `url` and return its body, refusing more than `limit` bytes.
+/// GET `url` without its userinfo and return the body, refusing more than
+/// `limit` bytes.
 pub async fn fetch(
     client: &reqwest::Client,
     url: &Url,
     limit: usize,
 ) -> Result<Vec<u8>, PricesError> {
     let shown = display_url(url).ok_or(PricesError::UnusableUrl)?;
+    let url = &without_userinfo(url).ok_or(PricesError::UnusableUrl)?;
     tracing::info!(url = %shown, "prices refresh: fetching");
     let response = client
         .get(url.clone())
@@ -293,7 +301,7 @@ pub async fn fetch(
         return Err(PricesError::Redirect {
             url: shown,
             status: status.as_u16(),
-            location: redirect_location(url, &response),
+            location: redirect_origin(url, &response),
         });
     }
     if !status.is_success() {
@@ -324,15 +332,20 @@ fn request_cause(err: &reqwest::Error) -> &'static str {
     }
 }
 
-/// The `Location` of a redirect resolved against `base`, in its stripped
-/// form; `None` when absent or not an http(s) URL.
-fn redirect_location(base: &Url, response: &reqwest::Response) -> Option<String> {
+/// The `scheme://host[:port]` of a redirect's `Location` resolved against
+/// `base`; `None` when absent or not an http(s) URL with a host. The path
+/// and query are chosen by the server and are never rendered.
+fn redirect_origin(base: &Url, response: &reqwest::Response) -> Option<String> {
     let raw = response
         .headers()
         .get(reqwest::header::LOCATION)?
         .to_str()
         .ok()?;
-    display_url(&base.join(raw).ok()?)
+    let target = base.join(raw).ok()?;
+    if !matches!(target.scheme(), "http" | "https") || target.host().is_none() {
+        return None;
+    }
+    Some(sanitize_for_log(&target.origin().ascii_serialization()))
 }
 
 async fn read_capped_body(
@@ -404,19 +417,24 @@ pub fn read_bounded(reader: impl Read, limit: usize) -> Result<Vec<u8>, BoundedR
 }
 
 /// Replace `path` with `bytes`: a temp file in the same directory, fsync,
-/// rename over `path`, fsync the directory. A failure before the rename
-/// leaves any previous file untouched and removes the temp file.
+/// rename over `path`, fsync the directory. A named parent directory is
+/// created when missing and held at `0o700`, like routectl's other
+/// config-folder writers. A failure before the rename leaves any previous
+/// file untouched and removes the temp file.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), PricesError> {
     let fail = |stage, source| PricesError::Write {
         path: path.display().to_string(),
         stage,
         source,
     };
-    let parent = path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    std::fs::create_dir_all(parent).map_err(|e| fail("create directory", e))?;
+    let parent = match path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        Some(parent) => {
+            routectl_auth::atomic_write::ensure_dir_0700(parent)
+                .map_err(|reason| fail("create directory", std::io::Error::other(reason)))?;
+            parent
+        }
+        None => Path::new("."),
+    };
     let mut tmp = tempfile::Builder::new()
         .prefix(".prices.tmp.")
         .tempfile_in(parent)

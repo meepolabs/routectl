@@ -2387,6 +2387,12 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/prices/models_dev.rs` -- `from_models_dev`: models.dev `api.json` to the
   canonical table
 - `src/prices/select.rs` -- provider selection for a config target
+- `src/prices/shipped.rs` -- `shipped_table()`: the release table embedded with
+  `include_str!`, parsed once. Tests in `shipped_tests.rs`; the models.dev
+  test slice's weld to `catalog_data/models_dev.json` is `slice_weld_tests.rs`
+- `src/prices_shipped.json` -- the shipped price table, output of
+  `routectl prices refresh` at release time (docs/DEVELOPMENT.md
+  "Releasing"); its models.dev MIT notice is `src/prices_shipped.NOTICE`
 - `src/prices/prices_test_support.rs` -- shared table builders for the price-table
   tests
 - `src/pricing.rs` -- THE price-unit conversion + precedence boundary. The

@@ -395,10 +395,57 @@ fn canonical_json_round_trips_sorted_and_normalized() {
     assert_eq!(doc["providers"][0]["id"], "alpha");
     assert_eq!(
         doc["providers"][1]["api_host"],
-        "https://api.zeta.example:443/v1"
+        "https://api.zeta.example/v1"
     );
     assert_eq!(doc["providers"][1]["models"][0]["id"], "a");
     assert_eq!(doc["providers"][0]["models"][0]["cache_read"], 0.0);
     assert!(doc["providers"][0]["models"][0].get("input").is_none());
     assert!(written.ends_with(b"}\n"));
+}
+
+#[test]
+fn canonical_api_host_drops_only_the_scheme_default_port() {
+    let rows: [(&str, &str, &str); 5] = [
+        (
+            "https explicit 443",
+            "https://h.example:443/v1",
+            "https://h.example/v1",
+        ),
+        (
+            "http explicit 80",
+            "http://h.example:80/v1",
+            "http://h.example/v1",
+        ),
+        (
+            "https on 80 kept",
+            "https://h.example:80/v1",
+            "https://h.example:80/v1",
+        ),
+        (
+            "http on 443 kept",
+            "http://h.example:443/v1",
+            "http://h.example:443/v1",
+        ),
+        (
+            "other port kept",
+            "http://127.0.0.1:1234/v1",
+            "http://127.0.0.1:1234/v1",
+        ),
+    ];
+    for (name, host, expected) in rows {
+        let parsed = parse(&table(json!([
+            { "id": "acme", "api_host": host, "models": [priced_model("m")] },
+        ])))
+        .expect(name);
+
+        let written = parsed.to_canonical_json().expect("serializes");
+        let doc: Value = serde_json::from_slice(&written).expect("json");
+
+        assert_eq!(doc["providers"][0]["api_host"], expected, "{name}");
+        assert_eq!(
+            parse_and_validate(&written).expect("reparses"),
+            parsed,
+            "{name}: the written form selects the same provider"
+        );
+    }
 }

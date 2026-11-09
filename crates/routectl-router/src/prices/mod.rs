@@ -15,7 +15,7 @@
 //!   "providers": [
 //!     {
 //!       "id": "opencode-go",
-//!       "api_host": "https://opencode.ai:443/zen/go/v1",
+//!       "api_host": "https://opencode.ai/zen/go/v1",
 //!       "models": [
 //!         { "id": "glm-5", "input": 1.0, "output": 3.2, "cache_read": 0.2,
 //!           "cache_write_5m": 1.25, "cache_write_1h": 2.0 }
@@ -26,7 +26,9 @@
 //! ```
 //!
 //! Prices are USD per million tokens and every one is optional. `api_host`
-//! is optional (first-party providers carry none). Unknown fields are
+//! is optional (first-party providers carry none) and is written with a
+//! lowercased host and no default port; any form the origin normalizer
+//! accepts reads back to the same provider. Unknown fields are
 //! tolerated at every level so a newer writer stays readable; a
 //! `schema_version` other than 1 is refused. [`PriceTable::to_canonical_json`]
 //! writes the format pretty-printed with providers and models sorted by id.
@@ -73,12 +75,19 @@
 //! [`PriceBook`] holds the table the refresh writes into the config
 //! directory and re-reads it when the file's modification time or length
 //! changes, keeping the last good table when a new copy is refused.
+//!
+//! # The shipped table
+//!
+//! [`shipped_table`] is the table embedded in the build
+//! (`prices_shipped.json`, the same refresh's output at release time, under
+//! the models.dev MIT license in `prices_shipped.NOTICE`), parsed once.
 
 mod book;
 mod bounded;
 mod format;
 mod models_dev;
 mod select;
+mod shipped;
 mod validate;
 
 use std::collections::BTreeMap;
@@ -89,6 +98,7 @@ use crate::config::{Config, PricingConfig};
 pub use book::PriceBook;
 pub use format::TableDate;
 pub use models_dev::from_models_dev;
+pub use shipped::shipped_table;
 pub use validate::{MAX_INPUT_BYTES, parse_and_validate};
 
 /// A validated price table. Built only by [`parse_and_validate`] or
@@ -283,6 +293,12 @@ mod prices_test_support;
 #[cfg(test)]
 #[path = "select_tests.rs"]
 mod select_tests;
+#[cfg(test)]
+#[path = "shipped_tests.rs"]
+mod shipped_tests;
+#[cfg(test)]
+#[path = "slice_weld_tests.rs"]
+mod slice_weld_tests;
 #[cfg(test)]
 #[path = "validate_tests.rs"]
 mod validate_tests;
