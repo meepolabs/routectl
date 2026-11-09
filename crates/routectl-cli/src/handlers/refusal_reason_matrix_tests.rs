@@ -27,9 +27,7 @@ use routectl_providers::anthropic_api::{AnthropicApiConfig, AnthropicApiProvider
 use routectl_providers::bedrock::{
     BedrockApiShape, BedrockConfig, BedrockCreds, BedrockProvider, auth as bedrock_auth,
 };
-use routectl_providers::openai_compat::{
-    HistoryReasoning, OpenAiCompatConfig, OpenAiCompatProvider, ReasoningDialect,
-};
+use routectl_providers::openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
 use routectl_router::config::CredentialSource;
 use routectl_router::{
     AliasValue, Config, ModelEntry, ProviderEntry, ResolvedModel, RetryPolicy, Router,
@@ -681,18 +679,7 @@ async fn invoke_then_compat_router(base: &str) -> Router {
     let invoke = BedrockProvider::new(invoke_cfg, resolved)
         .expect("canonical region")
         .with_runtime_origin_for_tests(base);
-    let compat = OpenAiCompatProvider::new(OpenAiCompatConfig {
-        id: "openai-compat:p1".into(),
-        base_url: base.to_string(),
-        api_key: "k".into(),
-        header_extras: Vec::new(),
-        payload_extras: None,
-        reasoning_dialect: ReasoningDialect::OpenAi,
-        history_reasoning: HistoryReasoning::Auto,
-        user_agent: None,
-        strict_translation: false,
-        mantle: None,
-    });
+    let compat = OpenAiCompatProvider::new(OpenAiCompatConfig::new("openai-compat:p1", base, "k"));
     let mut router = Router::new(Arc::new(config));
     router.install_resolved_models(BTreeMap::from([
         (

@@ -1644,25 +1644,16 @@ mod tests {
     /// become the strict-host `Unsupported parameter(s)` rejection.
     fn openai_compat_egress_body(body: Value) -> Value {
         use routectl_core::Provider;
-        use routectl_providers::openai_compat::{
-            HistoryReasoning, OpenAiCompatConfig, OpenAiCompatProvider, ReasoningDialect,
-        };
+        use routectl_providers::openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
 
         let req = OpenAiIngress
             .parse_request_value(&HeaderMap::new(), body)
             .expect("openai ingress parse");
-        OpenAiCompatProvider::new(OpenAiCompatConfig {
-            id: "openai-compat:test".into(),
-            base_url: "https://example.invalid/v1".into(),
-            api_key: "test-key".into(),
-            header_extras: Vec::new(),
-            payload_extras: None,
-            reasoning_dialect: ReasoningDialect::OpenAi,
-            history_reasoning: HistoryReasoning::Auto,
-            user_agent: None,
-            strict_translation: false,
-            mantle: None,
-        })
+        OpenAiCompatProvider::new(OpenAiCompatConfig::new(
+            "openai-compat:test",
+            "https://example.invalid/v1",
+            "test-key",
+        ))
         .normalize_request(&req)
         .expect("openai-compat egress normalize")
     }

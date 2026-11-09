@@ -17,9 +17,7 @@ use routectl_core::{
 use routectl_providers::anthropic_api::{
     AnthropicApiConfig, AnthropicApiProvider, AuthKind, CloakConfig,
 };
-use routectl_providers::openai_compat::{
-    HistoryReasoning, OpenAiCompatConfig, OpenAiCompatProvider, ReasoningDialect,
-};
+use routectl_providers::openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
 use routectl_providers::translation_drop_metrics::{
     translation_drop_snapshot, translation_lane_seen,
 };
@@ -187,19 +185,11 @@ async fn compat_upstream(statuses: Vec<u16>) -> MockServer {
 }
 
 fn compat_provider(server: &MockServer) -> Arc<OpenAiCompatProvider> {
-    Arc::new(OpenAiCompatProvider::new(OpenAiCompatConfig {
-        id: "p-compat".into(),
-        base_url: server.uri(),
-        api_key: "test-key".into(),
-        header_extras: Vec::new(),
-        payload_extras: None,
-        reasoning_dialect: ReasoningDialect::OpenAi,
-        history_reasoning: HistoryReasoning::Auto,
-        user_agent: None,
-        strict_translation: false,
-        #[cfg(feature = "bedrock")]
-        mantle: None,
-    }))
+    Arc::new(OpenAiCompatProvider::new(OpenAiCompatConfig::new(
+        "p-compat",
+        server.uri(),
+        "test-key",
+    )))
 }
 
 /// With a `rejection`, answers it while the request's `anthropic-beta`

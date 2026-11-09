@@ -98,24 +98,14 @@ fn request() -> ChatRequest {
 }
 
 async fn openai_compat_provider(base_url: String, mantle: bool) -> Box<dyn Provider> {
-    use crate::openai_compat::{
-        HistoryReasoning, OpenAiCompatConfig, OpenAiCompatProvider, ReasoningDialect,
-    };
+    use crate::openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
     Box::new(OpenAiCompatProvider::new(OpenAiCompatConfig {
-        id: "seat-compat".into(),
-        base_url,
-        api_key: if mantle { String::new() } else { "k".into() },
-        header_extras: vec![],
-        payload_extras: None,
-        reasoning_dialect: ReasoningDialect::OpenAi,
-        history_reasoning: HistoryReasoning::Auto,
-        user_agent: None,
-        strict_translation: false,
         mantle: if mantle {
             Some(mantle_auth().await)
         } else {
             None
         },
+        ..OpenAiCompatConfig::new("seat-compat", base_url, if mantle { "" } else { "k" })
     }))
 }
 

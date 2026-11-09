@@ -6,9 +6,7 @@
 
 use axum::http::HeaderMap;
 use routectl_core::{ChatRequest, Provider};
-use routectl_providers::openai_compat::{
-    HistoryReasoning, OpenAiCompatConfig, OpenAiCompatProvider, ReasoningDialect,
-};
+use routectl_providers::openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
 use routectl_providers::openai_responses::{OpenAiResponsesConfig, OpenAiResponsesProvider};
 use serde_json::{Value, json};
 
@@ -72,18 +70,11 @@ fn parse(ingress: Ingress, body: Value) -> ChatRequest {
 
 fn egress_body(egress: Egress, req: &ChatRequest) -> Value {
     match egress {
-        Egress::OpenAiCompat => OpenAiCompatProvider::new(OpenAiCompatConfig {
-            id: "openai-compat:test".into(),
-            base_url: "https://example.invalid/v1".into(),
-            api_key: "test-key".into(),
-            header_extras: Vec::new(),
-            payload_extras: None,
-            reasoning_dialect: ReasoningDialect::OpenAi,
-            history_reasoning: HistoryReasoning::Auto,
-            user_agent: None,
-            strict_translation: false,
-            mantle: None,
-        })
+        Egress::OpenAiCompat => OpenAiCompatProvider::new(OpenAiCompatConfig::new(
+            "openai-compat:test",
+            "https://example.invalid/v1",
+            "test-key",
+        ))
         .normalize_request(req),
         Egress::OpenAiResponses => OpenAiResponsesProvider::new(OpenAiResponsesConfig::new(
             "openai-responses:test",

@@ -19,9 +19,7 @@ use routectl_core::{
     ChatRequest, Message, MessageContent, Provider, Role, SystemBlock, SystemContent,
 };
 use routectl_providers::gemini::{GeminiConfig, GeminiProvider};
-use routectl_providers::openai_compat::{
-    HistoryReasoning, OpenAiCompatConfig, OpenAiCompatProvider, ReasoningDialect,
-};
+use routectl_providers::openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
 use routectl_providers::openai_responses::{
     AuthKind, OpenAiResponsesConfig, OpenAiResponsesProvider,
 };
@@ -266,19 +264,11 @@ async fn an_openai_compat_first_hop_withholds_the_fingerprint_and_keeps_every_sy
         .mount(&responses_upstream)
         .await;
 
-    let compat = OpenAiCompatProvider::new(OpenAiCompatConfig {
-        id: "p-compat".into(),
-        base_url: compat_upstream.uri(),
-        api_key: "test-key".into(),
-        header_extras: Vec::new(),
-        payload_extras: None,
-        reasoning_dialect: ReasoningDialect::OpenAi,
-        history_reasoning: HistoryReasoning::Auto,
-        user_agent: None,
-        strict_translation: false,
-        #[cfg(feature = "bedrock")]
-        mantle: None,
-    });
+    let compat = OpenAiCompatProvider::new(OpenAiCompatConfig::new(
+        "p-compat",
+        compat_upstream.uri(),
+        "test-key",
+    ));
     let mut responses_cfg = OpenAiResponsesConfig::new("p-responses", "test-key");
     responses_cfg.auth_kind = AuthKind::ApiKey;
     responses_cfg.base_url = responses_upstream.uri();

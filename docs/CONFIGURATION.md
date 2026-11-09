@@ -5742,7 +5742,8 @@ empty one on this kind. Declining the offer writes nothing and exits 0 --
 pasted by hand.
 
 The `oauth://xai` ref resolves at request time against the credentials store;
-rotation is picked up live without restarting routectl. When the upstream marks
+rotation is picked up live without restarting routectl. An upstream 401 makes
+routectl refresh the login and retry the request once. When the upstream marks
 the refresh token dead (`invalid_grant` on 400/401), routectl surfaces a
 "re-run `routectl login xai`" error -- re-run the login and traffic resumes.
 

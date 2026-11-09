@@ -29,9 +29,7 @@ use routectl_providers::bedrock::{
     BedrockApiShape, BedrockConfig, BedrockCreds, BedrockProvider, auth::ResolvedCreds,
 };
 use routectl_providers::gemini::{GeminiConfig, GeminiProvider};
-use routectl_providers::openai_compat::{
-    HistoryReasoning, OpenAiCompatConfig, OpenAiCompatProvider, ReasoningDialect,
-};
+use routectl_providers::openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
 use routectl_providers::openai_responses::{OpenAiResponsesConfig, OpenAiResponsesProvider};
 
 const FINGERPRINT: &str = "x-anthropic-billing-header: cc_version=9.9.9; cch=sweepfp7";
@@ -145,18 +143,11 @@ fn lanes() -> Vec<(&'static str, Box<dyn Provider>)> {
     vec![
         (
             "openai-compat",
-            Box::new(OpenAiCompatProvider::new(OpenAiCompatConfig {
-                id: "openai-compat-sweep".into(),
-                base_url: "https://api.example.com/v1".into(),
-                api_key: "test-key".into(),
-                header_extras: Vec::new(),
-                payload_extras: None,
-                reasoning_dialect: ReasoningDialect::OpenAi,
-                history_reasoning: HistoryReasoning::Auto,
-                user_agent: None,
-                strict_translation: false,
-                mantle: None,
-            })),
+            Box::new(OpenAiCompatProvider::new(OpenAiCompatConfig::new(
+                "openai-compat-sweep",
+                "https://api.example.com/v1",
+                "test-key",
+            ))),
         ),
         (
             "anthropic",

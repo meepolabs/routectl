@@ -131,22 +131,13 @@ fn unknown_thinking_type_warn_carries_no_raw_control_characters() {
 #[test]
 fn a_cross_dialect_egress_adds_no_second_unrecognized_warn() {
     use routectl_core::Provider;
-    use routectl_providers::openai_compat::{
-        HistoryReasoning, OpenAiCompatConfig, OpenAiCompatProvider, ReasoningDialect,
-    };
+    use routectl_providers::openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
 
-    let provider = OpenAiCompatProvider::new(OpenAiCompatConfig {
-        id: "openai-compat:test".into(),
-        base_url: "http://127.0.0.1:9".into(),
-        api_key: "k".into(),
-        header_extras: Vec::new(),
-        payload_extras: None,
-        reasoning_dialect: ReasoningDialect::OpenAi,
-        history_reasoning: HistoryReasoning::Auto,
-        user_agent: None,
-        strict_translation: false,
-        mantle: None,
-    });
+    let provider = OpenAiCompatProvider::new(OpenAiCompatConfig::new(
+        "openai-compat:test",
+        "http://127.0.0.1:9",
+        "k",
+    ));
 
     let events = routectl_testkit::capture_events(|| {
         let req = parse(json!({"type": "interleaved"})).expect("parses");

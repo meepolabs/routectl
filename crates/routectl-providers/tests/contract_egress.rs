@@ -19,9 +19,7 @@ use routectl_core::Provider;
 use routectl_providers::anthropic_api::{
     AnthropicApiConfig, AnthropicApiProvider, AuthKind, CloakConfig,
 };
-use routectl_providers::openai_compat::{
-    HistoryReasoning, OpenAiCompatConfig, OpenAiCompatProvider, ReasoningDialect,
-};
+use routectl_providers::openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
 
 use common::scenarios;
 
@@ -51,19 +49,11 @@ fn anthropic_api_provider() -> AnthropicApiProvider {
 }
 
 fn openai_compat_provider() -> OpenAiCompatProvider {
-    OpenAiCompatProvider::new(OpenAiCompatConfig {
-        id: "openai-compat-test".into(),
-        base_url: "https://api.openai.com/v1".into(),
-        api_key: "test-key".into(),
-        header_extras: vec![],
-        payload_extras: None,
-        reasoning_dialect: ReasoningDialect::OpenAi,
-        history_reasoning: HistoryReasoning::Auto,
-        user_agent: None,
-        strict_translation: false,
-        #[cfg(feature = "bedrock")]
-        mantle: None,
-    })
+    OpenAiCompatProvider::new(OpenAiCompatConfig::new(
+        "openai-compat-test",
+        "https://api.openai.com/v1",
+        "test-key",
+    ))
 }
 
 // =====================================================================

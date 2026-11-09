@@ -24,9 +24,7 @@ use routectl_providers::bedrock::auth::{ResolvedCreds, resolve};
 use routectl_providers::bedrock::{BedrockApiShape, BedrockConfig, BedrockCreds, BedrockProvider};
 use routectl_providers::mantle::MantleAuth;
 #[cfg(feature = "openai-compat")]
-use routectl_providers::openai_compat::{
-    HistoryReasoning, OpenAiCompatConfig, OpenAiCompatProvider, ReasoningDialect,
-};
+use routectl_providers::openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
 #[cfg(feature = "openai-responses")]
 use routectl_providers::openai_responses::{
     AuthKind as ResponsesAuthKind, OpenAiResponsesConfig, OpenAiResponsesProvider,
@@ -254,19 +252,15 @@ fn anthropic_mantle(region: &str, resolved: ResolvedCreds) -> AnthropicApiProvid
 #[cfg(feature = "openai-compat")]
 fn compat_mantle(region: &str, resolved: ResolvedCreds) -> OpenAiCompatProvider {
     OpenAiCompatProvider::new(OpenAiCompatConfig {
-        id: "mantle-compat:tripwire".into(),
-        base_url: hand_built_mantle_base(region, "/openai/v1"),
-        api_key: String::new(),
-        header_extras: Vec::new(),
-        payload_extras: None,
-        reasoning_dialect: ReasoningDialect::OpenAi,
-        history_reasoning: HistoryReasoning::Auto,
-        user_agent: None,
-        strict_translation: false,
         mantle: Some(MantleAuth {
             region: region.into(),
             creds: resolved,
         }),
+        ..OpenAiCompatConfig::new(
+            "mantle-compat:tripwire",
+            hand_built_mantle_base(region, "/openai/v1"),
+            "",
+        )
     })
 }
 

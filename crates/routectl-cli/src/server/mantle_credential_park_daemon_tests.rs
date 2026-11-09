@@ -11,9 +11,7 @@ use std::time::Duration;
 
 use routectl_providers::bedrock::auth::ResolvedCreds;
 use routectl_providers::mantle::MantleAuth;
-use routectl_providers::openai_compat::{
-    HistoryReasoning, OpenAiCompatConfig, OpenAiCompatProvider, ReasoningDialect,
-};
+use routectl_providers::openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
 use routectl_router::{CURRENT_CONFIG_VERSION, Config, ResolvedModel, Router, parse_config};
 use routectl_testkit::ScopedEnv;
 use serde_json::{Value, json};
@@ -96,21 +94,10 @@ fn config_text(backup: Option<&str>) -> String {
 }
 
 fn compat_provider(id: &str, base_url: &str, mantle: Option<MantleAuth>) -> OpenAiCompatProvider {
+    let key = if mantle.is_some() { "" } else { "backup-key" };
     OpenAiCompatProvider::new(OpenAiCompatConfig {
-        id: id.into(),
-        base_url: base_url.into(),
-        api_key: if mantle.is_some() {
-            String::new()
-        } else {
-            "backup-key".into()
-        },
-        header_extras: Vec::new(),
-        payload_extras: None,
-        reasoning_dialect: ReasoningDialect::OpenAi,
-        history_reasoning: HistoryReasoning::Auto,
-        user_agent: None,
-        strict_translation: false,
         mantle,
+        ..OpenAiCompatConfig::new(id, base_url, key)
     })
 }
 

@@ -47,9 +47,7 @@ use routectl_core::{Provider, StaticToken};
 use routectl_providers::anthropic_api::{
     AnthropicApiConfig, AnthropicApiProvider, AuthKind, CloakConfig,
 };
-use routectl_providers::openai_compat::{
-    HistoryReasoning, OpenAiCompatConfig, OpenAiCompatProvider, ReasoningDialect,
-};
+use routectl_providers::openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
 use serde_json::Value;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -125,18 +123,7 @@ fn build_provider_for_kind(
             },
         )))),
         "openai-compat" => Ok(Some(Box::new(OpenAiCompatProvider::new(
-            OpenAiCompatConfig {
-                id: "openai-compat-replay".into(),
-                base_url,
-                api_key: "test-key".into(),
-                header_extras: Vec::new(),
-                payload_extras: None,
-                reasoning_dialect: ReasoningDialect::OpenAi,
-                history_reasoning: HistoryReasoning::Auto,
-                user_agent: None,
-                strict_translation: false,
-                mantle: None,
-            },
+            OpenAiCompatConfig::new("openai-compat-replay", base_url, "test-key"),
         )))),
         // FUTURE: replace with provider construction when SSE-aware ingress replay lands (see mount_for_kind comment).
         "openai-responses" => Ok(None),

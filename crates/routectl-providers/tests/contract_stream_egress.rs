@@ -33,9 +33,7 @@ use routectl_core::{ChatChunk, ChatRequest, Message, MessageContent, Provider, R
 use routectl_providers::anthropic_api::{
     AnthropicApiConfig, AnthropicApiProvider, AuthKind, CloakConfig,
 };
-use routectl_providers::openai_compat::{
-    HistoryReasoning, OpenAiCompatConfig, OpenAiCompatProvider, ReasoningDialect,
-};
+use routectl_providers::openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -71,19 +69,11 @@ fn anthropic_api_provider(base_url: &str) -> AnthropicApiProvider {
 }
 
 fn openai_compat_provider(base_url: &str) -> OpenAiCompatProvider {
-    OpenAiCompatProvider::new(OpenAiCompatConfig {
-        id: "openai-compat-test".into(),
-        base_url: base_url.into(),
-        api_key: "test-key".into(),
-        header_extras: vec![],
-        payload_extras: None,
-        reasoning_dialect: ReasoningDialect::OpenAi,
-        history_reasoning: HistoryReasoning::Auto,
-        user_agent: None,
-        strict_translation: false,
-        #[cfg(feature = "bedrock")]
-        mantle: None,
-    })
+    OpenAiCompatProvider::new(OpenAiCompatConfig::new(
+        "openai-compat-test",
+        base_url,
+        "test-key",
+    ))
 }
 
 fn stream_request(model: &str) -> ChatRequest {
@@ -475,17 +465,8 @@ async fn openai_compat_per_model_header_extras_reach_wire() {
     // request) sets the SAME key with a different value plus an
     // additional model-only key.
     let provider = OpenAiCompatProvider::new(OpenAiCompatConfig {
-        id: "openai-compat-test".into(),
-        base_url: server.uri(),
-        api_key: "test-key".into(),
         header_extras: vec![("x-shared".into(), "provider-only".into())],
-        payload_extras: None,
-        reasoning_dialect: ReasoningDialect::OpenAi,
-        history_reasoning: HistoryReasoning::Auto,
-        user_agent: None,
-        strict_translation: false,
-        #[cfg(feature = "bedrock")]
-        mantle: None,
+        ..OpenAiCompatConfig::new("openai-compat-test", server.uri(), "test-key")
     });
 
     // Simulate what the router would publish onto the request before
@@ -532,19 +513,10 @@ async fn openai_compat_egress_preserves_operator_supplied_stream_options() {
     // `include_usage = false`. The auto-inject must not flip it to
     // true -- explicit operator config wins.
     let provider = OpenAiCompatProvider::new(OpenAiCompatConfig {
-        id: "openai-compat-test".into(),
-        base_url: server.uri(),
-        api_key: "test-key".into(),
-        header_extras: vec![],
         payload_extras: Some(serde_json::json!({
             "stream_options": {"include_usage": false}
         })),
-        reasoning_dialect: ReasoningDialect::OpenAi,
-        history_reasoning: HistoryReasoning::Auto,
-        user_agent: None,
-        strict_translation: false,
-        #[cfg(feature = "bedrock")]
-        mantle: None,
+        ..OpenAiCompatConfig::new("openai-compat-test", server.uri(), "test-key")
     });
     let _ = collect_chunks(&provider, stream_request("gpt-4o")).await;
 

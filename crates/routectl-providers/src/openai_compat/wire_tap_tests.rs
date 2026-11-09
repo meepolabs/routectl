@@ -11,22 +11,13 @@ use serde_json::{Value, json};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use super::{HistoryReasoning, OpenAiCompatConfig, OpenAiCompatProvider, ReasoningDialect};
+use super::{OpenAiCompatConfig, OpenAiCompatProvider, ReasoningDialect};
 use routectl_core::Provider;
 
 fn config(base_url: &str, dialect: ReasoningDialect) -> OpenAiCompatConfig {
     OpenAiCompatConfig {
-        id: "compat-tap".into(),
-        base_url: base_url.into(),
-        api_key: "test-key".into(),
-        header_extras: vec![],
-        payload_extras: None,
         reasoning_dialect: dialect,
-        history_reasoning: HistoryReasoning::Auto,
-        user_agent: None,
-        strict_translation: false,
-        #[cfg(feature = "bedrock")]
-        mantle: None,
+        ..OpenAiCompatConfig::new("compat-tap", base_url, "test-key")
     }
 }
 
@@ -799,7 +790,6 @@ fn a_chat_ingress_mcp_servers_is_withheld_on_the_mantle_lane() {
                 key: "mantle-bearer-key".into(),
             },
         }),
-        api_key: String::new(),
         ..config(
             "https://bedrock-mantle.us-west-2.api.aws/openai/v1",
             ReasoningDialect::OpenAi,

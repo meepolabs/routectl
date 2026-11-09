@@ -2,7 +2,7 @@
 //!
 //! Covers DeepSeek, OpenRouter, OpenAI, vLLM, NIM, llama.cpp, Together, Groq,
 //! Fireworks, and any endpoint that speaks the OpenAI chat completions schema.
-//! Distinguished by `base_url` + `api_key` config + a `ReasoningDialect` flag.
+//! Distinguished by `base_url` + bearer `auth` config + a `ReasoningDialect` flag.
 //!
 //! Reasoning normalization overview:
 //!   - `normalize_request`: strip/translate per dialect before sending upstream.
@@ -29,6 +29,8 @@ pub(crate) mod wire_lift;
 
 pub use dialect::ReasoningDialect;
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use eventsource_stream::Eventsource;
 use futures::StreamExt;
@@ -38,8 +40,8 @@ use serde_json::Value;
 use tracing::debug;
 
 use routectl_core::{
-    ChatChunk, ChatRequest, ChatResponse, Error, Provider, Result, debug_upstream_error_body,
-    sanitize_for_log, trace_outgoing_body, trace_upstream_success_body,
+    ChatChunk, ChatRequest, ChatResponse, Error, Provider, Result, StaticToken, TokenSource,
+    debug_upstream_error_body, sanitize_for_log, trace_outgoing_body, trace_upstream_success_body,
     upstream_message_or_excerpt,
 };
 
@@ -70,8 +72,13 @@ pub struct OpenAiCompatConfig {
     pub id: String,
     /// Base URL of the upstream; the completions path is appended to it.
     pub base_url: String,
-    /// Bearer credential sent in the `Authorization` header.
-    pub api_key: String,
+    /// Source of the bearer credential sent in the `Authorization`
+    /// header, read once per upstream request. A `StaticToken` for a
+    /// credential resolved once at construction; a refreshing source for
+    /// a managed login, whose `on_auth_failure` the provider forwards so
+    /// an upstream 401 can rotate it. Unread on the mantle lane, where
+    /// the signer owns auth.
+    pub auth: Arc<dyn TokenSource>,
     /// Provider-level extra headers (renamed from `extra_headers` in
     /// v0.6.0). Operators set `[providers.X] header_extras = { ... }`;
     /// the router-side dispatch merges these with per-model
@@ -111,15 +118,50 @@ pub struct OpenAiCompatConfig {
     pub strict_translation: bool,
     /// Bedrock mantle authentication. `Some` selects the mantle lane: the
     /// request body is SigV4/bearer-signed under the `bedrock-mantle`
-    /// scope, the first-party `Authorization: Bearer <api_key>` insert is
-    /// skipped (the signer owns auth for both credential shapes; the
-    /// `api_key` is empty by config validation), a no-redirect client is
+    /// scope, the first-party `Authorization: Bearer <token>` insert is
+    /// skipped (the signer owns auth for both credential shapes; `auth`
+    /// is never read and the `api_key_ref` is empty by config
+    /// validation), a no-redirect client is
     /// used, and the probe resolves the credential rather than dialing
     /// `/models`. `None` (default) keeps the first-party openai-compat
     /// behavior byte-for-byte. Resolved at the factory from a
     /// `bedrock_mantle` sub-config.
     #[cfg(feature = "bedrock")]
     pub mantle: Option<MantleAuth>,
+}
+
+impl OpenAiCompatConfig {
+    /// Construct with a static bearer string and every other knob at its
+    /// default. The key is wrapped in a `StaticToken`.
+    pub fn new(
+        id: impl Into<String>,
+        base_url: impl Into<String>,
+        api_key: impl Into<String>,
+    ) -> Self {
+        Self::new_with_auth(id, base_url, Arc::new(StaticToken::new(api_key)))
+    }
+
+    /// Construct with a custom `TokenSource` and every other knob at its
+    /// default.
+    pub fn new_with_auth(
+        id: impl Into<String>,
+        base_url: impl Into<String>,
+        auth: Arc<dyn TokenSource>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            base_url: base_url.into(),
+            auth,
+            header_extras: Vec::new(),
+            payload_extras: None,
+            reasoning_dialect: ReasoningDialect::default(),
+            history_reasoning: HistoryReasoning::default(),
+            user_agent: None,
+            strict_translation: false,
+            #[cfg(feature = "bedrock")]
+            mantle: None,
+        }
+    }
 }
 
 /// Outgoing-history reasoning policy. Sibling of the router-side
@@ -191,7 +233,7 @@ impl OpenAiCompatProvider {
 
     /// True when this provider egresses on the Bedrock mantle lane. On
     /// this lane the signer owns auth (no `Authorization: Bearer
-    /// <api_key>`), the body is serialized to signable bytes, and a
+    /// <token>`), the body is serialized to signable bytes, and a
     /// no-redirect client is used. Always `false` in a build without the
     /// `bedrock` feature.
     const fn is_mantle(&self) -> bool {
@@ -269,17 +311,23 @@ impl OpenAiCompatProvider {
             .map_or(self.cfg.history_reasoning, HistoryReasoning::from)
     }
 
-    fn build_headers(&self, req: &ChatRequest) -> Result<HeaderMap> {
+    /// The first-party bearer for one upstream request, read from the
+    /// token source each time so a refreshed managed login is picked up
+    /// without a restart. `None` on the mantle lane, where the signer
+    /// attaches Authorization post-build.
+    async fn bearer_token(&self) -> Result<Option<String>> {
+        if self.is_mantle() {
+            return Ok(None);
+        }
+        self.cfg.auth.token().await.map(Some)
+    }
+
+    fn build_headers(&self, req: &ChatRequest, bearer: Option<&str>) -> Result<HeaderMap> {
         let mut headers = HeaderMap::new();
-        // Mantle lane: the SigV4/bearer signer attaches Authorization
-        // post-build and the `api_key` is empty by config validation, so
-        // skip the first-party Bearer insert entirely. The first-party
-        // lane stamps the bearer here. CONTENT_TYPE is stamped on both
-        // lanes below.
-        if !self.is_mantle() {
+        if let Some(token) = bearer {
             headers.insert(
                 AUTHORIZATION,
-                HeaderValue::from_str(&format!("Bearer {}", self.cfg.api_key))
+                HeaderValue::from_str(&format!("Bearer {token}"))
                     .map_err(|e| Error::Config(format!("invalid api_key for header: {e}")))?,
             );
         }
@@ -358,7 +406,8 @@ impl Provider for OpenAiCompatProvider {
         body["stream"] = Value::Bool(false);
         crate::wire_declare::declare_stream_flag(&req, false);
 
-        let headers = self.build_headers(&req)?;
+        let bearer = self.bearer_token().await?;
+        let headers = self.build_headers(&req, bearer.as_deref())?;
         let url = self.completions_url();
         debug!(provider = %self.cfg.id, url = %url, "POST chat/completions");
 
@@ -484,7 +533,8 @@ impl Provider for OpenAiCompatProvider {
             self.cfg.payload_extras.as_ref(),
         );
 
-        let headers = self.build_headers(&req)?;
+        let bearer = self.bearer_token().await?;
+        let headers = self.build_headers(&req, bearer.as_deref())?;
         let url = self.completions_url();
         debug!(provider = %self.cfg.id, url = %url, "POST chat/completions (stream)");
 
@@ -737,6 +787,13 @@ impl Provider for OpenAiCompatProvider {
         ))
     }
 
+    /// Forward an upstream 401 to the token source so a managed login
+    /// can rotate before the router's single retry. A no-op for a static
+    /// credential.
+    async fn on_auth_failure(&self) -> Result<()> {
+        self.cfg.auth.on_auth_failure().await
+    }
+
     async fn probe(&self) -> routectl_core::ProbeOutcome {
         // Mantle lane: the endpoint signs with SigV4/bearer and exposes no
         // free `/models` surface, so probe the credential rather than
@@ -745,9 +802,14 @@ impl Provider for OpenAiCompatProvider {
         if let Some(mantle) = &self.cfg.mantle {
             return crate::mantle::probe(&mantle.creds).await;
         }
+        let Ok(token) = self.cfg.auth.token().await else {
+            return routectl_core::ProbeOutcome::AuthFailed(
+                "provider credential unavailable".into(),
+            );
+        };
         let url = format!("{}/models", self.cfg.base_url.trim_end_matches('/'));
         let mut headers = HeaderMap::new();
-        match HeaderValue::from_str(&format!("Bearer {}", self.cfg.api_key)) {
+        match HeaderValue::from_str(&format!("Bearer {token}")) {
             Ok(v) => {
                 headers.insert(AUTHORIZATION, v);
             }
@@ -1933,7 +1995,7 @@ mod chat_shape_wire_tests;
 
 #[cfg(all(test, feature = "bedrock"))]
 mod mantle_header_tests {
-    use super::{HistoryReasoning, OpenAiCompatConfig, OpenAiCompatProvider, ReasoningDialect};
+    use super::{OpenAiCompatConfig, OpenAiCompatProvider};
     use crate::bedrock::auth::ResolvedCreds;
     use crate::mantle::MantleAuth;
     use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
@@ -1941,38 +2003,34 @@ mod mantle_header_tests {
 
     fn mantle_provider() -> OpenAiCompatProvider {
         OpenAiCompatProvider::new(OpenAiCompatConfig {
-            id: "mantle-compat".into(),
-            base_url: "https://bedrock-mantle.us-west-2.api.aws/openai/v1".into(),
-            // Empty by config validation on the mantle lane; the signer
-            // owns Authorization.
-            api_key: String::new(),
-            header_extras: vec![],
-            payload_extras: None,
-            reasoning_dialect: ReasoningDialect::OpenAi,
-            history_reasoning: HistoryReasoning::Auto,
-            user_agent: None,
-            strict_translation: false,
             mantle: Some(MantleAuth {
                 region: "us-west-2".into(),
                 creds: ResolvedCreds::Bearer {
                     key: "mantle-bearer-key".into(),
                 },
             }),
+            // A non-empty key proves the lane never reads the token source.
+            ..OpenAiCompatConfig::new(
+                "mantle-compat",
+                "https://bedrock-mantle.us-west-2.api.aws/openai/v1",
+                "first-party-key",
+            )
         })
     }
 
-    /// build_headers on the mantle lane must NOT insert the first-party
-    /// `Authorization: Bearer <api_key>` header -- the SigV4/bearer signer
+    /// The mantle lane must NOT insert the first-party
+    /// `Authorization: Bearer <token>` header -- the SigV4/bearer signer
     /// owns auth and attaches it post-build. CONTENT_TYPE still stamps.
-    #[test]
-    fn build_headers_skips_bearer_on_mantle_lane() {
+    #[tokio::test]
+    async fn build_headers_skips_bearer_on_mantle_lane() {
         let provider = mantle_provider();
         let req = ChatRequest {
             model: "anthropic.claude-haiku-4-5".into(),
             ..Default::default()
         };
 
-        let headers = provider.build_headers(&req).unwrap();
+        let bearer = provider.bearer_token().await.unwrap();
+        let headers = provider.build_headers(&req, bearer.as_deref()).unwrap();
 
         assert!(
             headers.get(AUTHORIZATION).is_none(),

@@ -30,8 +30,7 @@ async fn build_mantle_test_router(model_id: &str) -> Option<Arc<Router>> {
     use routectl_providers::bedrock::{BedrockCreds, auth as bedrock_auth};
     use routectl_providers::mantle::{MantleAuth, mantle_openai_base};
     use routectl_providers::openai_compat::{
-        HistoryReasoning, OpenAiCompatConfig, OpenAiCompatProvider,
-        ReasoningDialect as ProviderReasoningDialect,
+        OpenAiCompatConfig, OpenAiCompatProvider, ReasoningDialect as ProviderReasoningDialect,
     };
 
     let key = std::env::var("AWS_BEARER_TOKEN_BEDROCK").ok()?;
@@ -56,19 +55,17 @@ async fn build_mantle_test_router(model_id: &str) -> Option<Arc<Router>> {
 
     let provider_name = format!("mantle-{}", sanitize_provider_name(model_id));
     let cfg = OpenAiCompatConfig {
-        id: format!("mantle:{provider_name}"),
-        base_url: mantle_openai_base(&region).expect("AWS_REGION must be a canonical region"),
-        api_key: String::new(),
-        header_extras: Vec::new(),
-        payload_extras: None,
         reasoning_dialect: ProviderReasoningDialect::OpenAi,
-        history_reasoning: HistoryReasoning::Auto,
         user_agent: Some("routectl-live-test/0.4".into()),
-        strict_translation: false,
         mantle: Some(MantleAuth {
             region: region.clone(),
             creds: resolved,
         }),
+        ..OpenAiCompatConfig::new(
+            format!("mantle:{provider_name}"),
+            mantle_openai_base(&region).expect("AWS_REGION must be a canonical region"),
+            "",
+        )
     };
     let provider: ArcAlias<dyn routectl_core::Provider> =
         ArcAlias::new(OpenAiCompatProvider::new(cfg));

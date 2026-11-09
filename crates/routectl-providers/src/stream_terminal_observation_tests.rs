@@ -27,9 +27,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use crate::anthropic_api::{AnthropicApiConfig, AnthropicApiProvider, CloakConfig};
 use crate::bedrock::{BedrockApiShape, BedrockConfig, BedrockCreds, BedrockProvider, auth};
-use crate::openai_compat::{
-    HistoryReasoning, OpenAiCompatConfig, OpenAiCompatProvider, ReasoningDialect,
-};
+use crate::openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
 use crate::openai_responses::{OpenAiResponsesConfig, OpenAiResponsesProvider};
 use crate::stream_terminal_metrics::missing_terminal_total;
 
@@ -298,18 +296,11 @@ async fn open_compat_body(
     body: Vec<u8>,
 ) -> BoxStream<'static, Result<ChatChunk>> {
     let server = serve("/chat/completions", body, "text/event-stream").await;
-    let provider = OpenAiCompatProvider::new(OpenAiCompatConfig {
-        id: PROVIDER_ID.into(),
-        base_url: server.uri(),
-        api_key: "test-key".into(),
-        header_extras: vec![],
-        payload_extras: None,
-        reasoning_dialect: ReasoningDialect::OpenAi,
-        history_reasoning: HistoryReasoning::Auto,
-        user_agent: None,
-        strict_translation: false,
-        mantle: None,
-    });
+    let provider = OpenAiCompatProvider::new(OpenAiCompatConfig::new(
+        PROVIDER_ID,
+        server.uri(),
+        "test-key",
+    ));
     let stream = provider.stream(req).await.expect("stream opens");
     holding(server, stream)
 }

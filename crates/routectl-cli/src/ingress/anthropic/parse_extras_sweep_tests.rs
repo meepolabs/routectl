@@ -10,9 +10,7 @@ use routectl_core::Provider;
 use routectl_core::wire_check::{EditKind, EditSite, Leg, WireTap};
 use routectl_providers::anthropic_api::{AnthropicApiConfig, AnthropicApiProvider};
 use routectl_providers::bedrock::{BedrockApiShape, BedrockConfig, BedrockCreds};
-use routectl_providers::openai_compat::{
-    HistoryReasoning, OpenAiCompatConfig, OpenAiCompatProvider, ReasoningDialect,
-};
+use routectl_providers::openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
 use serde_json::{Value, json};
 
 use crate::ingress::IngressAdapter;
@@ -60,18 +58,11 @@ fn bedrock_cfg(api_shape: BedrockApiShape) -> BedrockConfig {
 }
 
 fn openai_compat() -> OpenAiCompatProvider {
-    OpenAiCompatProvider::new(OpenAiCompatConfig {
-        id: "openai-compat:test".into(),
-        base_url: "http://127.0.0.1:9".into(),
-        api_key: "k".into(),
-        header_extras: Vec::new(),
-        payload_extras: None,
-        reasoning_dialect: ReasoningDialect::OpenAi,
-        history_reasoning: HistoryReasoning::Auto,
-        user_agent: None,
-        strict_translation: false,
-        mantle: None,
-    })
+    OpenAiCompatProvider::new(OpenAiCompatConfig::new(
+        "openai-compat:test",
+        "http://127.0.0.1:9",
+        "k",
+    ))
 }
 
 /// `(lane, serialized egress body)` for each egress the weld covers.

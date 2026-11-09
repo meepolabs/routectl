@@ -24,17 +24,8 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn make_provider(base_url: &str, dialect: ReasoningDialect) -> OpenAiCompatProvider {
     OpenAiCompatProvider::new(OpenAiCompatConfig {
-        id: "test-provider".into(),
-        base_url: base_url.into(),
-        api_key: "test-key".into(),
-        header_extras: vec![],
-        payload_extras: None,
         reasoning_dialect: dialect,
-        history_reasoning: routectl_providers::openai_compat::HistoryReasoning::Auto,
-        user_agent: None,
-        strict_translation: false,
-        #[cfg(feature = "bedrock")]
-        mantle: None,
+        ..OpenAiCompatConfig::new("test-provider", base_url, "test-key")
     })
 }
 
@@ -90,18 +81,9 @@ async fn extra_headers_reserved_name_does_not_override_authorization() {
         .await;
 
     let provider = OpenAiCompatProvider::new(OpenAiCompatConfig {
-        id: "test-provider".into(),
-        base_url: server.uri(),
-        api_key: "real-token".into(),
         // Attempt to override with a different value -- must be ignored.
         header_extras: vec![("authorization".into(), "Bearer attacker-token".into())],
-        payload_extras: None,
-        reasoning_dialect: ReasoningDialect::OpenAi,
-        history_reasoning: routectl_providers::openai_compat::HistoryReasoning::Auto,
-        user_agent: None,
-        strict_translation: false,
-        #[cfg(feature = "bedrock")]
-        mantle: None,
+        ..OpenAiCompatConfig::new("test-provider", server.uri(), "real-token")
     });
 
     // If the guard is missing, the wiremock matcher above won't find
@@ -838,19 +820,11 @@ fn strict_translation_off_warns_and_allows_request() {
     use routectl_core::{
         ChatRequest, KnownContentPart, cache_control::CacheControl, content_part::ContentPart,
     };
-    let provider = OpenAiCompatProvider::new(OpenAiCompatConfig {
-        id: "openai-compat:test".into(),
-        base_url: "http://localhost".into(),
-        api_key: "k".into(),
-        header_extras: vec![],
-        payload_extras: None,
-        reasoning_dialect: ReasoningDialect::OpenAi,
-        history_reasoning: routectl_providers::openai_compat::HistoryReasoning::Auto,
-        user_agent: None,
-        strict_translation: false,
-        #[cfg(feature = "bedrock")]
-        mantle: None,
-    });
+    let provider = OpenAiCompatProvider::new(OpenAiCompatConfig::new(
+        "openai-compat:test",
+        "http://localhost",
+        "k",
+    ));
     let req = ChatRequest {
         model: "gpt-4o".into(),
         messages: vec![Message {
@@ -887,17 +861,8 @@ fn strict_translation_on_rejects_canonical_only_fields() {
     // [server] strict_translation at provider build time.
     use routectl_core::{ChatRequest, cache_control::CacheControl};
     let provider = OpenAiCompatProvider::new(OpenAiCompatConfig {
-        id: "openai-compat:strict".into(),
-        base_url: "http://localhost".into(),
-        api_key: "k".into(),
-        header_extras: vec![],
-        payload_extras: None,
-        reasoning_dialect: ReasoningDialect::OpenAi,
-        history_reasoning: routectl_providers::openai_compat::HistoryReasoning::Auto,
-        user_agent: None,
         strict_translation: true,
-        #[cfg(feature = "bedrock")]
-        mantle: None,
+        ..OpenAiCompatConfig::new("openai-compat:strict", "http://localhost", "k")
     });
     let req = ChatRequest {
         model: "gpt-4o".into(),
@@ -1328,7 +1293,7 @@ mod mantle {
     use routectl_providers::anthropic_api::MantleAuth;
     use routectl_providers::bedrock::BedrockCreds;
     use routectl_providers::bedrock::auth::resolve;
-    use routectl_providers::openai_compat::HistoryReasoning;
+
     use serde_json::Value;
 
     /// A mantle-lane compat provider posting to `base_url` with a resolved
@@ -1339,19 +1304,11 @@ mod mantle {
     async fn mantle_provider(base_url: &str, creds: BedrockCreds) -> OpenAiCompatProvider {
         let resolved = resolve(&creds, "us-west-2").await.unwrap();
         OpenAiCompatProvider::new(OpenAiCompatConfig {
-            id: "mantle-compat".into(),
-            base_url: base_url.to_string(),
-            api_key: String::new(),
-            header_extras: vec![],
-            payload_extras: None,
-            reasoning_dialect: ReasoningDialect::OpenAi,
-            history_reasoning: HistoryReasoning::Auto,
-            user_agent: None,
-            strict_translation: false,
             mantle: Some(MantleAuth {
                 region: "us-west-2".into(),
                 creds: resolved,
             }),
+            ..OpenAiCompatConfig::new("mantle-compat", base_url, "")
         })
     }
 

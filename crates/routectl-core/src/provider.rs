@@ -88,10 +88,11 @@ pub trait Provider: Send + Sync {
 
     /// Notify the provider that a token it minted just got rejected by
     /// the upstream (typically a 401). Refreshable-auth providers
-    /// (today: Anthropic with an `oauth://` ref) delegate to their
-    /// `TokenSource::on_auth_failure` to force a refresh; static-auth
-    /// providers (Bedrock SigV4, OpenAI-compat api-key) keep the
-    /// default no-op since they have no rotation path. The router
+    /// (anthropic-api, openai-responses, openai-compat and gemini)
+    /// delegate to their `TokenSource::on_auth_failure`, which forces a
+    /// refresh for an `oauth://` ref and is a no-op for a static one;
+    /// providers with no token source (Bedrock SigV4) keep the default
+    /// no-op since they have no rotation path. The router
     /// calls this before retrying the same provider once with a fresh
     /// token; a non-`Ok` return surfaces directly to the caller
     /// (the OAuth identity is dead until re-login -- walking the

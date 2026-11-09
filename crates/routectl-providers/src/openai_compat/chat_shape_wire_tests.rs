@@ -7,7 +7,7 @@ use routectl_core::{ChatRequest, Message, MessageContent, Provider, Role};
 use serde_json::{Value, json};
 
 use super::dialects::util::SAMPLING_DROP;
-use super::{HistoryReasoning, OpenAiCompatConfig, OpenAiCompatProvider, ReasoningDialect};
+use super::{OpenAiCompatConfig, OpenAiCompatProvider, ReasoningDialect};
 
 const SAMPLING_KEYS: [&str; 6] = [
     "temperature",
@@ -20,17 +20,8 @@ const SAMPLING_KEYS: [&str; 6] = [
 
 fn provider(dialect: ReasoningDialect) -> OpenAiCompatProvider {
     OpenAiCompatProvider::new(OpenAiCompatConfig {
-        id: "chat-shape".into(),
-        base_url: "http://127.0.0.1:9".into(),
-        api_key: "test-key".into(),
-        header_extras: vec![],
-        payload_extras: None,
         reasoning_dialect: dialect,
-        history_reasoning: HistoryReasoning::Auto,
-        user_agent: None,
-        strict_translation: false,
-        #[cfg(feature = "bedrock")]
-        mantle: None,
+        ..OpenAiCompatConfig::new("chat-shape", "http://127.0.0.1:9", "test-key")
     })
 }
 

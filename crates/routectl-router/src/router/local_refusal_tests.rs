@@ -332,17 +332,8 @@ async fn two_egress_refusals_with_different_reasons_on_one_lane_are_two_keys() {
 /// never dialed: the strict check refuses before any request is built.
 fn strict_openai_compat() -> OpenAiCompatProvider {
     OpenAiCompatProvider::new(OpenAiCompatConfig {
-        id: PROVIDER.into(),
-        base_url: "https://openai-compat.invalid/v1".into(),
-        api_key: "k".into(),
-        header_extras: vec![],
-        payload_extras: None,
-        reasoning_dialect: Default::default(),
-        history_reasoning: Default::default(),
-        user_agent: None,
         strict_translation: true,
-        #[cfg(feature = "bedrock")]
-        mantle: None,
+        ..OpenAiCompatConfig::new(PROVIDER, "https://openai-compat.invalid/v1", "k")
     })
 }
 

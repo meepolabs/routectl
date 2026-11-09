@@ -124,9 +124,10 @@ impl BedrockApiShape {
 /// `BedrockCreds` (in `routectl-router/src/config.rs`) carries
 /// `SecretRef` URIs; the factory resolves them through the workspace
 /// `SecretStore` and constructs this plaintext-side enum before
-/// handing it to `BedrockProvider::new`. Same pattern as
-/// `OpenAiCompatConfig::api_key` / `AnthropicApiConfig::api_key` -- the
-/// providers crate never sees a `SecretRef`.
+/// handing it to `BedrockProvider::new`. Same pattern as the
+/// `TokenSource` behind `OpenAiCompatConfig::auth` /
+/// `AnthropicApiConfig::auth` -- the providers crate never sees a
+/// `SecretRef`.
 ///
 /// Four shapes:
 ///

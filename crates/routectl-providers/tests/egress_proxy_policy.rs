@@ -304,28 +304,18 @@ async fn compat(
     base_url: &str,
     mantle: bool,
 ) -> routectl_providers::openai_compat::OpenAiCompatProvider {
-    use routectl_providers::openai_compat::{
-        HistoryReasoning, OpenAiCompatConfig, OpenAiCompatProvider, ReasoningDialect,
-    };
+    use routectl_providers::openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
     OpenAiCompatProvider::new(OpenAiCompatConfig {
-        id: "compat-proxy-policy".into(),
-        base_url: base_url.into(),
-        api_key: if mantle {
-            String::new()
-        } else {
-            "compat-key".into()
-        },
-        header_extras: vec![],
-        payload_extras: None,
-        reasoning_dialect: ReasoningDialect::OpenAi,
-        history_reasoning: HistoryReasoning::Auto,
-        user_agent: None,
-        strict_translation: false,
         mantle: if mantle {
             Some(mantle_auth().await)
         } else {
             None
         },
+        ..OpenAiCompatConfig::new(
+            "compat-proxy-policy",
+            base_url,
+            if mantle { "" } else { "compat-key" },
+        )
     })
 }
 

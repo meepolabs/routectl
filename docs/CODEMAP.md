@@ -5503,6 +5503,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   counters advance once per client request across a same-target retry, a
   learned beta repair, a fallback hop and two concurrent requests; the global
   drop delta equals the request's observation-slot count
+- `tests/openai_compat_token_source.rs` -- a factory-built openai-compat
+  provider reads an `oauth://` token per request, reads an `env://` ref once
+  at build, and refreshes a managed login once on an upstream 401
 
 ## routectl-auth
 

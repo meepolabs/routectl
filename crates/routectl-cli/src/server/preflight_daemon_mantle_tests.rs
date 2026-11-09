@@ -14,9 +14,7 @@ mod mantle {
     };
     use routectl_providers::bedrock::auth::ResolvedCreds;
     use routectl_providers::mantle::MantleAuth;
-    use routectl_providers::openai_compat::{
-        HistoryReasoning, OpenAiCompatConfig, OpenAiCompatProvider, ReasoningDialect,
-    };
+    use routectl_providers::openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
     use routectl_providers::openai_responses::{
         AuthKind as ResponsesAuthKind, OpenAiResponsesConfig, OpenAiResponsesProvider,
     };
@@ -212,16 +210,8 @@ mod mantle {
     /// The compat Mantle egress's config, dialing `base_url`.
     fn compat_config(base_url: String) -> OpenAiCompatConfig {
         OpenAiCompatConfig {
-            id: SEAT.into(),
-            base_url,
-            api_key: String::new(),
-            header_extras: Vec::new(),
-            payload_extras: None,
-            reasoning_dialect: ReasoningDialect::OpenAi,
-            history_reasoning: HistoryReasoning::Auto,
-            user_agent: None,
-            strict_translation: false,
             mantle: Some(mantle_auth()),
+            ..OpenAiCompatConfig::new(SEAT, base_url, "")
         }
     }
 

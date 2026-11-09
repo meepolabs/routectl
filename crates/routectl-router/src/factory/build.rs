@@ -248,9 +248,9 @@ async fn build_provider_inner(
                     base_url: mantle_base,
                     // Empty on the lane: the mantle credential rides the
                     // signed request and the first-party `Authorization:
-                    // Bearer <api_key>` insert is skipped. Validation already
-                    // rejects a non-empty api_key_ref on the lane.
-                    api_key: String::new(),
+                    // Bearer` insert is skipped. Validation already rejects
+                    // a non-empty api_key_ref on the lane.
+                    auth: Arc::new(routectl_core::StaticToken::new(String::new())),
                     header_extras: header_extras
                         .iter()
                         .map(|(k, v)| (k.clone(), v.clone()))
@@ -268,7 +268,10 @@ async fn build_provider_inner(
                 return Ok(Arc::new(OpenAiCompatProvider::new(cfg)));
             }
             validate_base_url_scheme(name, base_url)?;
-            let api_key = resolve(&*secrets, api_key_ref).await?;
+            // `oauth://<provider>` yields a refreshing `ManagedToken` read
+            // per request; env / file / literal resolve once into a
+            // `StaticToken`.
+            let auth = resolve_token_source(&secrets, api_key_ref).await?;
             // v0.6.0: reasoning_dialect + history_reasoning moved off
             // [providers.X] to [models.X]; the egress reads them from
             // `req.routectl_internal` at request time. The config-side
@@ -278,7 +281,7 @@ async fn build_provider_inner(
             let cfg = OpenAiCompatConfig {
                 id: format!("openai-compat:{name}"),
                 base_url: base_url.clone(),
-                api_key,
+                auth,
                 header_extras: header_extras
                     .iter()
                     .map(|(k, v)| (k.clone(), v.clone()))
