@@ -1930,7 +1930,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `config::resolve_tuning`. Consumed by `config show
   --effective` (cli) and the `/status/config` panel. Also home to
   `endpoint_origin`, the crate's ONE `base_url` -> origin
-  (`scheme://host:port`) reduction and the credential boundary for that field
+  (`scheme://host:port`) reduction, and `normalized_origin`, the shared
+  endpoint-comparison form built on it and the credential boundary for that field
   (userinfo/path/query/fragment dropped, unparseable or ambiguous-`@` input
   fail-safe to `None`); a second consumer is `ProviderEntry::redact_secrets`
   via `redact_base_url`, so its `None` must never be softened into a
@@ -2371,6 +2372,18 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `max_output_tokens` the one `#[serde(default)]` exception so a snapshot
   written before that column still feeds the drift diff on the boot that
   introduces it
+- `src/prices/mod.rs` -- `PriceTable` (`price_for`, `generated_at`,
+  `to_canonical_json`), `PriceTableError`; the usage-cost price table module,
+  format and rules in its `//!` doc
+- `src/prices/format.rs` -- canonical on-disk serde shapes, `TableDate`, the
+  normalized provider API base
+- `src/prices/validate.rs` -- `parse_and_validate` and the bounds every table
+  passes
+- `src/prices/models_dev.rs` -- `from_models_dev`: models.dev `api.json` to the
+  canonical table
+- `src/prices/select.rs` -- provider selection for a config target
+- `src/prices/prices_test_support.rs` -- shared table builders for the price-table
+  tests
 - `src/pricing.rs` -- THE price-unit conversion + precedence boundary. The
   canonical operator-facing unit is USD per MILLION tokens (`PricingConfig` /
   the usage leaf's `Rates`); the baked catalog's internal unit is USD per

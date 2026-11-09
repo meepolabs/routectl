@@ -187,7 +187,8 @@ pub struct ProviderCell {
 /// Three crate-internal consumers depend on this being the ONLY base_url
 /// projection: the effective-config view here,
 /// [`crate::config::ProviderEntry::redact_secrets`] via `redact_base_url`, and
-/// the dispatch walk's endpoint key. Its
+/// [`normalized_origin`] (the dispatch walk's endpoint key and the price
+/// table's provider selection). Its
 /// fail-safe `None` is the contract, not an inconvenience -- it must never be
 /// softened into a raw-string or best-effort fallback for a caller that would
 /// rather always have something to print.
@@ -240,6 +241,25 @@ pub fn endpoint_origin(base_url: &str) -> Option<String> {
         Some(port) => format!("{scheme}://{host}:{port}"),
         None => format!("{scheme}://{host}"),
     })
+}
+
+/// `scheme://host:port` for `base_url`: the crate's one origin normalization
+/// for comparing endpoints. Host lowercased with any trailing DNS root dot
+/// folded, port explicit or the scheme default, so `https://API.example.` and
+/// `https://api.example:443/v1` normalize alike.
+///
+/// Built on [`endpoint_origin`], whose guard withholds any URL whose written
+/// authority could put credential bytes in the host slot, so the result never
+/// carries userinfo, a path or a query, and inherits its fail-safe `None`.
+pub fn normalized_origin(base_url: &str) -> Option<String> {
+    let origin = endpoint_origin(base_url)?;
+    let url = url::Url::parse(&origin).ok()?;
+    let host = url.host_str()?.trim_end_matches('.').to_ascii_lowercase();
+    if host.is_empty() {
+        return None;
+    }
+    let port = url.port_or_known_default()?;
+    Some(format!("{}://{host}:{port}", url.scheme()))
 }
 
 /// The leak-safe scheme of a secret ref (`env://VAR` -> `env`), never the body.

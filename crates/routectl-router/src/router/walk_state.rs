@@ -21,6 +21,7 @@ use routectl_core::ScopeRow;
 use super::DispatchTarget;
 use super::class_observe::DispatchSurface;
 use crate::config::{Config, ProviderEntry};
+use crate::config_effective::normalized_origin;
 
 /// The identity of an upstream endpoint: a normalized origin
 /// (`scheme://host:port`, host lowercased with any trailing dot folded, port
@@ -65,21 +66,6 @@ pub(super) fn endpoint_key(provider_name: &str, entry: Option<&ProviderEntry>) -
             || EndpointKey(format!("provider:{provider_name}")),
             EndpointKey,
         )
-}
-
-/// `scheme://host:port` for `base_url`. The origin comes from
-/// [`crate::config_effective::endpoint_origin`], whose guard withholds any
-/// URL whose written authority could put credential bytes in the host slot,
-/// so the key never carries userinfo.
-fn normalized_origin(base_url: &str) -> Option<String> {
-    let origin = crate::config_effective::endpoint_origin(base_url)?;
-    let url = url::Url::parse(&origin).ok()?;
-    let host = url.host_str()?.trim_end_matches('.').to_ascii_lowercase();
-    if host.is_empty() {
-        return None;
-    }
-    let port = url.port_or_known_default()?;
-    Some(format!("{}://{host}:{port}", url.scheme()))
 }
 
 /// What the walk needs to know about one chain target to decide whether an

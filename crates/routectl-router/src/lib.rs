@@ -66,6 +66,7 @@ pub(crate) mod learned_replay;
 pub(crate) mod log_hash;
 pub(crate) mod override_registry;
 pub mod pool_build;
+pub mod prices;
 pub mod pricing;
 pub(crate) mod probe_scheduler;
 pub(crate) mod quota;
