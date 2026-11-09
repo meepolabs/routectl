@@ -1092,7 +1092,9 @@ for the full rules).
 At ingress, client flags from the body and the `anthropic-beta` header are
 split on commas, trimmed and deduplicated; a flag holding any byte outside
 visible ASCII is dropped, and a request with more than 64 distinct flags is
-rejected with 400.
+rejected with 400. A request that drops any flag logs exactly one warning,
+carrying the number of dropped flags and the length of the longest one, never
+the flag values; this holds when the same request is also rejected for the cap.
 
 On an `auth_kind = "oauth-bearer"` provider talking to `api.anthropic.com`,
 routectl also injects a 9-flag model-agnostic floor

@@ -146,6 +146,50 @@ fn dropped_flags_log_one_aggregated_warning_per_call() {
 }
 
 #[test]
+fn unsafe_flags_and_cap_overflow_log_one_warn_and_reject() {
+    let unsafe_flags = ["leak marker one", "leak\u{0001}marker-two-longest"];
+    let mut entries: Vec<String> = unsafe_flags.iter().map(|f| (*f).to_string()).collect();
+    entries.extend((0..=MAX_CLIENT_BETA_FLAGS).map(|i| format!("kept-marker-{i}")));
+    let longest = unsafe_flags
+        .iter()
+        .map(|f| f.len())
+        .max()
+        .expect("non-empty");
+
+    let mut result = None;
+    let events = routectl_testkit::capture_events(|| {
+        result = Some(normalize_client_betas(
+            "test",
+            entries.iter().map(String::as_str),
+        ));
+    });
+
+    let err = result.expect("normalizer ran").expect_err("over the cap");
+    assert!(matches!(err, Error::Validation(..)), "{err:?}");
+    let warns: Vec<_> = events
+        .iter()
+        .filter(|e| e.level == tracing::Level::WARN)
+        .collect();
+    assert_eq!(warns.len(), 1, "{events:?}");
+    assert_eq!(warns[0].message, DROP_MESSAGE);
+    assert_eq!(
+        warns[0].field("dropped"),
+        Some(unsafe_flags.len().to_string().as_str())
+    );
+    assert_eq!(
+        warns[0].field("value_len_max"),
+        Some(longest.to_string().as_str())
+    );
+    let leaked: Vec<_> = events
+        .iter()
+        .filter(|e| {
+            e.message.contains("marker") || e.fields.iter().any(|(_, v)| v.contains("marker"))
+        })
+        .collect();
+    assert!(leaked.is_empty(), "flag value logged: {leaked:?}");
+}
+
+#[test]
 fn clean_flags_log_no_drop_warning() {
     let events = routectl_testkit::capture_events(|| {
         normalize_client_betas("test", [" a-1 ", "b-2,a-1"]).expect("clean");

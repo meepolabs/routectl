@@ -228,6 +228,7 @@ impl Lane {
     /// call. The outcome is irrelevant: the servers record what arrived.
     async fn fire(self, base_url: &str, scratch: &std::path::Path) {
         let _cookie_env = self.cookie_env(scratch);
+        self.assert_cookie_jar_unresolvable();
         match self {
             Self::CompatComplete => {
                 let _ = compat(base_url, false)
@@ -297,6 +298,25 @@ impl Lane {
             ],
             _ => Vec::new(),
         }
+    }
+
+    /// A cookie-less lane proves the plain client only if the provider's
+    /// default jar path resolves to nothing: the same derivation the
+    /// provider walks, an unset or empty `ROUTECTL_COOKIE_FILE` and no
+    /// config directory.
+    fn assert_cookie_jar_unresolvable(self) {
+        if !matches!(self, Self::ResponsesCookieLess | Self::ResponsesProbe) {
+            return;
+        }
+        let cookie_file = std::env::var_os("ROUTECTL_COOKIE_FILE");
+        assert!(
+            cookie_file.as_ref().is_none_or(|v| v.is_empty()),
+            "{self:?}: ROUTECTL_COOKIE_FILE is set, so the cookie-backed client would be built"
+        );
+        assert!(
+            routectl_core::config_dir::config_dir().is_none(),
+            "{self:?}: a config directory resolves, so the cookie-backed client would be built"
+        );
     }
 }
 
