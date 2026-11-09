@@ -40,7 +40,7 @@ async fn a_success_admitted_before_a_reload_leaves_a_park_set_after_it() {
             let interleave = async {
                 hold.entered.notified().await;
                 if reload {
-                    router.lift_entry_credential_parks();
+                    router.lift_parks_for_entry_change_for_tests("p-a");
                 }
                 let generation = router
                     .admit_for_credential_tests("m-a")
@@ -81,7 +81,7 @@ async fn the_seam_lifts_a_park_only_in_the_success_generation() {
         let before_reload = router
             .admit_for_credential_tests("m-a")
             .expect("a healthy seat admits");
-        router.lift_entry_credential_parks();
+        router.lift_parks_for_entry_change_for_tests("p-a");
         let current = router
             .admit_for_credential_tests("m-a")
             .expect("a healthy seat admits");
@@ -119,7 +119,7 @@ async fn a_reload_erases_a_park_and_the_next_rejection_parks_again() {
 
         // Act: the reload lifts the park, then traffic resumes.
         let cleared = router
-            .lift_entry_credential_parks()
+            .lift_parks_for_entry_change_for_tests("p-a")
             .iter()
             .filter(|reset| reset.outcome.park_lifted)
             .count();

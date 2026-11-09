@@ -270,8 +270,8 @@ pub(super) fn parked_seat_finding(seat: &ParkedSeat) -> Finding {
         ),
         remediation: Some(
             "renew or replace the credential; changing an OAuth seat's credentials entry lifts \
-             its park and an accepted config reload lifts any other account's, otherwise the \
-             account is re-tested once the park lapses"
+             its park and a config reload that changes any other account's provider entry lifts \
+             that account's, otherwise the account is re-tested once the park lapses"
                 .to_string(),
         ),
     }

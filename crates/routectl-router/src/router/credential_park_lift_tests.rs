@@ -1,9 +1,11 @@
 //! A reload lifts only the credential parks whose credential it may have
 //! changed: the named OAuth seats a credentials reload changed (an
-//! entry-shaped name among them lifts nothing), or every `[providers]` entry
-//! account and no OAuth seat (a config reload). A lift starts a new generation on each account it names, so an
-//! attempt admitted before it cannot re-park that account, while an account
-//! it leaves alone keeps its generation and its park.
+//! entry-shaped name among them lifts nothing), or the account of each
+//! `[providers]` entry a config reload changed and no OAuth seat, never one
+//! the new Router built as a placeholder. A lift starts a new generation on
+//! each account it names, so an attempt admitted before it cannot re-park
+//! that account, while an account it leaves alone keeps its generation and
+//! its park.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -16,9 +18,10 @@ use super::super::credential_park_dispatch_tests::{
     INVALID, ScriptedProvider, Step, park_reason, rejection,
 };
 use super::super::{Config, Router};
-use crate::config::ProviderEntry;
+use crate::config::{ProviderEntry, ProviderRuntimePolicy};
+use crate::pool_build::{PoolPlaceholder, PoolReport};
 use crate::resolved::ResolvedModel;
-use crate::runtime_state::CREDENTIAL_PARK_BACKSTOP;
+use crate::runtime_state::{CREDENTIAL_PARK_BACKSTOP, UnusableCause};
 
 /// `m-a` on OAuth seat `anthropic#a`, `m-b` on OAuth seat `anthropic#b`, and
 /// `m-c` on entry `p-c` with a non-OAuth credential: three accounts.
@@ -65,7 +68,7 @@ fn park_every_account(router: &Router) {
 enum Lift {
     Accounts(&'static [&'static str]),
     OauthSeats(&'static [&'static str]),
-    Entries,
+    EntryChange(&'static str),
 }
 
 /// The accounts `lift` reset, and how many of them had a park lifted.
@@ -73,7 +76,7 @@ fn apply(router: &Router, lift: Lift) -> (Vec<String>, usize) {
     let resets = match lift {
         Lift::Accounts(accounts) => router.lift_credential_parks(accounts),
         Lift::OauthSeats(seats) => router.lift_oauth_credential_parks(seats),
-        Lift::Entries => router.lift_entry_credential_parks(),
+        Lift::EntryChange(entry) => router.lift_parks_for_entry_change_for_tests(entry),
     };
     let parks_lifted = resets.iter().filter(|r| r.outcome.park_lifted).count();
     (
@@ -84,7 +87,7 @@ fn apply(router: &Router, lift: Lift) -> (Vec<String>, usize) {
 
 #[tokio::test]
 async fn a_lift_clears_exactly_the_accounts_it_targets() {
-    let rows: [(&str, Lift, [bool; 3]); 10] = [
+    let rows: [(&str, Lift, [bool; 3]); 11] = [
         (
             "one oauth seat",
             Lift::Accounts(&["anthropic#b"]),
@@ -101,7 +104,16 @@ async fn a_lift_clears_exactly_the_accounts_it_targets() {
             Lift::Accounts(&["anthropic#gone"]),
             [false, false, false],
         ),
-        ("every entry account", Lift::Entries, [false, false, true]),
+        (
+            "a changed entry's account",
+            Lift::EntryChange("p-c"),
+            [false, false, true],
+        ),
+        (
+            "a changed entry whose model is on an oauth seat",
+            Lift::EntryChange("p-a"),
+            [false, false, false],
+        ),
         (
             "oauth: one seat",
             Lift::OauthSeats(&["anthropic#b"]),
@@ -154,7 +166,11 @@ async fn a_rejection_admitted_before_a_lift_parks_only_an_account_the_lift_left_
             Lift::Accounts(&["anthropic#b"]),
             [true, false, true],
         ),
-        ("every entry account", Lift::Entries, [true, true, false]),
+        (
+            "a changed entry's account",
+            Lift::EntryChange("p-c"),
+            [true, true, false],
+        ),
     ];
     for (name, lift, parks) in rows {
         // Arrange: one attempt in flight on every account.
@@ -196,7 +212,10 @@ async fn a_rejection_admitted_before_a_lift_parks_only_an_account_the_lift_left_
 /// it at the same generation it would have without the lift.
 #[tokio::test]
 async fn a_lift_of_an_account_with_no_record_leaves_it_without_one() {
-    for lift in [Lift::Accounts(&["anthropic#a", "#p-c"]), Lift::Entries] {
+    for lift in [
+        Lift::Accounts(&["anthropic#a", "#p-c"]),
+        Lift::EntryChange("p-c"),
+    ] {
         // Arrange
         let router = three_accounts();
 
@@ -213,4 +232,123 @@ async fn a_lift_of_an_account_with_no_record_leaves_it_without_one() {
             );
         }
     }
+}
+
+/// How a row's next config differs from the router's own.
+#[derive(Clone, Copy, Debug)]
+enum Edit {
+    None,
+    Runtime(&'static str),
+    Add(&'static str),
+    Remove(&'static str),
+}
+
+fn next_config(router: &Router, edit: Edit) -> Config {
+    let mut next = Config::clone(&router.config);
+    match edit {
+        Edit::None => {}
+        Edit::Runtime(entry) => {
+            let edited = next
+                .providers
+                .remove(entry)
+                .expect("the edited entry exists")
+                .with_runtime(ProviderRuntimePolicy {
+                    rpm_limit: Some(7),
+                    ..ProviderRuntimePolicy::default()
+                });
+            next.providers.insert(entry.into(), edited);
+        }
+        Edit::Add(entry) => {
+            next.providers
+                .insert(entry.into(), ProviderEntry::anthropic_api("literal:k"));
+        }
+        Edit::Remove(entry) => {
+            next.providers
+                .remove(entry)
+                .expect("the removed entry exists");
+        }
+    }
+    next
+}
+
+#[tokio::test]
+async fn a_config_lift_resets_only_the_accounts_of_changed_entries() {
+    // (case, edit, park expected to lift on m-a, m-b, m-c)
+    let rows: [(&str, Edit, [bool; 3]); 5] = [
+        ("unchanged config", Edit::None, [false, false, false]),
+        (
+            "the entry edited",
+            Edit::Runtime("p-c"),
+            [false, false, true],
+        ),
+        (
+            "a different entry edited",
+            Edit::Runtime("p-a"),
+            [false, false, false],
+        ),
+        ("an entry added", Edit::Add("p-new"), [false, false, false]),
+        (
+            "the entry removed",
+            Edit::Remove("p-c"),
+            [false, false, true],
+        ),
+    ];
+    for (name, edit, lifted) in rows {
+        // Arrange
+        let router = three_accounts();
+        park_every_account(&router);
+        let next = next_config(&router, edit);
+
+        // Act
+        let resets = router.lift_entry_credential_parks(&router.config, &next);
+
+        // Assert
+        for (model, lifted) in MODELS.into_iter().zip(lifted) {
+            let expected = (!lifted).then_some(UpstreamReason::CredentialInvalid);
+            assert_eq!(park_reason(&router, model), expected, "{name}: {model}");
+        }
+        let accounts: Vec<&str> = resets.iter().map(|r| r.account.as_str()).collect();
+        let expected: &[&str] = if lifted[2] { &["#p-c"] } else { &[] };
+        assert_eq!(accounts, expected, "{name}");
+    }
+}
+
+/// [`three_accounts`] with entry `p-c`'s account held as a placeholder seat
+/// the build could not read, so it is marked unusable at install.
+fn with_placeholder_on_p_c() -> Router {
+    let mut router = three_accounts();
+    router.install_pool_reports(vec![PoolReport {
+        pool: "the-pool".into(),
+        models: vec!["m-c".into()],
+        configured_members: 1,
+        usable_members: 0,
+        placeholders: vec![PoolPlaceholder {
+            member: "p-c".into(),
+            provider_kind: "anthropic-api",
+            cause: UnusableCause::Unreadable,
+            account: Some("#p-c".into()),
+        }],
+    }]);
+    router
+}
+
+#[tokio::test]
+async fn a_config_lift_never_resets_an_account_built_as_a_placeholder() {
+    // Arrange
+    let router = with_placeholder_on_p_c();
+    let marked = |router: &Router| {
+        router
+            .gate_status_for_tests("m-c")
+            .credential_unusable
+            .map(|mark| mark.cause)
+    };
+    assert_eq!(marked(&router), Some(UnusableCause::Unreadable), "premise");
+    let next = next_config(&router, Edit::Runtime("p-c"));
+
+    // Act
+    let resets = router.lift_entry_credential_parks(&router.config, &next);
+
+    // Assert
+    assert!(resets.is_empty(), "{resets:?}");
+    assert_eq!(marked(&router), Some(UnusableCause::Unreadable));
 }

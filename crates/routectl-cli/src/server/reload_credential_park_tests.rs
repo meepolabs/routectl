@@ -2,10 +2,11 @@
 //! changed. A credentials reload lifts the OAuth seats whose stored record it
 //! added, removed or changed, and nothing else: a routine in-process token
 //! refresh rewrites the file with what the cache already holds, so its reload
-//! lifts nothing. An accepted config reload re-resolves every `[providers]`
-//! entry's credential, so it lifts every entry account and no OAuth seat. A
-//! reload that fails keeps every park, and an attempt admitted before a reload
-//! that lifted its account cannot re-park it after it.
+//! lifts nothing. An accepted config reload lifts the account of each
+//! `[providers]` entry it changed and no OAuth seat, so an overlay-only
+//! reload, an unchanged config, and the config half of a SIGHUP lift nothing.
+//! A reload that fails keeps every park, and an attempt admitted before a
+//! reload that lifted its account cannot re-park it after it.
 
 use super::*;
 use routectl_core::UpstreamReason;
@@ -45,6 +46,25 @@ fn mixed_config_text(extra_model: bool) -> String {
 }
 
 const MODELS: [&str; 3] = ["claude-a", "claude-b", "glm"];
+
+/// [`mixed_config_text`] with `rpm_limit = 7` added to `[providers.{entry}]`.
+fn edited_entry_text(entry: &str) -> String {
+    let header = format!("[providers.{entry}]\n");
+    let text = mixed_config_text(false);
+    assert!(text.contains(&header), "no provider entry {entry}");
+    text.replacen(&header, &format!("{header}rpm_limit = 7\n"), 1)
+}
+
+/// Write an overlay at a new revision, so the overlay reload is accepted
+/// with a changed revision while config.toml stays as it was.
+fn write_overlay_revision(dir: &Path) {
+    std::fs::write(
+        dir.join("routectl").join("catalog_overlay.json"),
+        r#"{"schema_version":1,"revision":1,"cells":{"anthropic-api:claude-opus-4-8*":
+               {"source":"user","verified_at":"2026-07-01","wm":1.0}}}"#,
+    )
+    .unwrap();
+}
 
 /// The live rig the reload coordinator owns over [`mixed_config_text`]: the
 /// OAuth store and the composite secrets over one temp credentials file, the
@@ -123,13 +143,22 @@ impl Rig {
         &self,
         usage: &routectl_usage::UsageHandle,
     ) -> Result<Option<(Arc<Config>, Arc<CatalogOverlay>)>, ReloadFailure> {
+        self.reload_config_on(usage, ReloadTrigger::ConfigFile)
+            .await
+    }
+
+    async fn reload_config_on(
+        &self,
+        usage: &routectl_usage::UsageHandle,
+        trigger: ReloadTrigger,
+    ) -> Result<Option<(Arc<Config>, Arc<CatalogOverlay>)>, ReloadFailure> {
         Box::pin(handle_config_reload(
             Some(&self.cfg_path),
             &self.config,
             self.secrets.clone(),
             &self.swap,
             usage,
-            ReloadTrigger::ConfigFile,
+            trigger,
             &mut never_shutdown(),
         ))
         .await
@@ -291,32 +320,82 @@ async fn a_failed_credentials_reload_keeps_every_park() {
     assert_eq!(rig.parks(&MODELS), [PARKED, PARKED, PARKED]);
 }
 
+/// What happens on disk before a config-side reload, and which reload runs.
+#[derive(Clone, Copy, Debug)]
+enum ConfigSideReload {
+    /// Only the catalog overlay is rewritten; the overlay watcher fires.
+    OverlayOnly,
+    /// Nothing changes; the config watcher fires.
+    Unchanged,
+    /// `[providers.<entry>]` gains a key; the config watcher fires.
+    EntryEdited(&'static str),
+    /// Nothing changes; a SIGHUP sends a config reload, then a credentials
+    /// reload.
+    Sighup,
+}
+
 #[tokio::test]
 #[serial_test::serial]
-async fn an_accepted_config_reload_lifts_every_entry_account_and_no_oauth_seat() {
-    // Arrange
-    let dir = tempfile::tempdir().unwrap();
-    let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
-    let _key = ScopedEnv::set(KEY_ENV, "test-key");
-    let rig = Rig::new(dir.path()).await;
-    let (usage, writer) = build_usage_writer(&rig.config);
-    rig.park_every_account();
-    let before = rig.swap.load_full();
+async fn a_config_side_reload_lifts_only_the_parks_of_entries_it_changed() {
+    let rows: [(ConfigSideReload, ParkRow); 5] = [
+        (ConfigSideReload::OverlayOnly, [PARKED, PARKED, PARKED]),
+        (ConfigSideReload::Unchanged, [PARKED, PARKED, PARKED]),
+        (
+            ConfigSideReload::EntryEdited("compat"),
+            [PARKED, PARKED, None],
+        ),
+        (
+            ConfigSideReload::EntryEdited("seat_a"),
+            [PARKED, PARKED, PARKED],
+        ),
+        (ConfigSideReload::Sighup, [PARKED, PARKED, PARKED]),
+    ];
+    for (reload, expected) in rows {
+        // Arrange: every account parked, then the files edited.
+        let dir = tempfile::tempdir().unwrap();
+        let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
+        let _key = ScopedEnv::set(KEY_ENV, "test-key");
+        let rig = Rig::new(dir.path()).await;
+        let (usage, writer) = build_usage_writer(&rig.config);
+        rig.park_every_account();
+        let before = rig.swap.load_full();
+        let trigger = match reload {
+            ConfigSideReload::OverlayOnly => {
+                write_overlay_revision(dir.path());
+                ReloadTrigger::CatalogOverlay
+            }
+            ConfigSideReload::EntryEdited(entry) => {
+                std::fs::write(&rig.cfg_path, edited_entry_text(entry)).unwrap();
+                ReloadTrigger::ConfigFile
+            }
+            ConfigSideReload::Unchanged | ConfigSideReload::Sighup => ReloadTrigger::ConfigFile,
+        };
 
-    // Act
-    rig.reload_config(&usage)
-        .await
-        .expect("config reload applies")
-        .expect("a successful reload returns its config");
+        // Act
+        rig.reload_config_on(&usage, trigger)
+            .await
+            .expect("config reload applies")
+            .expect("a successful reload returns its config");
+        if matches!(reload, ConfigSideReload::Sighup) {
+            rig.reload_credentials().await;
+        }
 
-    // Assert
-    assert!(
-        !Arc::ptr_eq(&before, &rig.swap.load_full()),
-        "router swapped"
-    );
-    assert_eq!(rig.parks(&MODELS), [PARKED, PARKED, None]);
-    drop(usage);
-    drain_usage_writer_strict(writer).await;
+        // Assert
+        assert!(
+            !Arc::ptr_eq(&before, &rig.swap.load_full()),
+            "{reload:?}: router swapped"
+        );
+        if matches!(reload, ConfigSideReload::OverlayOnly) {
+            assert_eq!(
+                rig.swap.load().overlay_revision(),
+                1,
+                "{reload:?}: premise, the overlay revision moved"
+            );
+        }
+        assert_eq!(rig.parks(&MODELS), expected, "{reload:?}");
+        drop(usage);
+        drain_usage_writer_strict(writer).await;
+    }
 }
 
 #[tokio::test]
@@ -427,12 +506,13 @@ async fn a_rejection_admitted_before_a_credentials_reload_parks_only_an_unchange
     );
 }
 
-/// A config reload starts a new generation on every entry account and on no
-/// OAuth seat.
+/// A config reload starts a new generation on the account of each entry it
+/// changed and on no OAuth seat.
 #[tokio::test]
 #[serial_test::serial]
 async fn a_rejection_admitted_before_a_config_reload_parks_only_an_oauth_seat() {
-    // Arrange: an attempt in flight on every account.
+    // Arrange: an attempt in flight on every account, then the `compat`
+    // entry edited.
     let dir = tempfile::tempdir().unwrap();
     let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
     let _key = ScopedEnv::set(KEY_ENV, "test-key");
@@ -447,6 +527,8 @@ async fn a_rejection_admitted_before_a_config_reload_parks_only_an_oauth_seat() 
                 .expect("a healthy account admits")
         })
         .collect();
+
+    std::fs::write(&rig.cfg_path, edited_entry_text("compat")).unwrap();
 
     // Act: each attempt settles through the router that admitted it, after
     // the reload published a successor sharing its park map.

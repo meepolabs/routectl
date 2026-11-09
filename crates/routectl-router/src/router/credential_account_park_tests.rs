@@ -303,7 +303,7 @@ async fn the_account_generation_fences_a_stale_settlement_on_any_model_of_the_ac
             .admit_for_credential_tests("m-a")
             .expect("a healthy account admits");
         if reload {
-            fx.router.lift_entry_credential_parks();
+            fx.router.lift_parks_for_entry_change_for_tests("p-a");
         }
 
         // Act
@@ -550,7 +550,7 @@ fn concurrent_admission_settlement_and_reads_across_one_account_never_deadlock()
                         let _ = router.status_targets(Instant::now());
                     }
                     4 => {
-                        router.lift_entry_credential_parks();
+                        router.lift_parks_for_entry_change_for_tests("p-a");
                     }
                     _ => {
                         park(&router, model, Instant::now());

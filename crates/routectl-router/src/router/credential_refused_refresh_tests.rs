@@ -192,7 +192,7 @@ async fn a_refused_refresh_admitted_before_a_reset_marks_nothing() {
             let resetter = async {
                 hold.entered.notified().await;
                 if reset {
-                    router.lift_entry_credential_parks();
+                    router.lift_parks_for_entry_change_for_tests("p-a");
                 }
                 hold.release.notify_one();
             };

@@ -768,6 +768,8 @@ list with more narrative.
 
 ### Fixed
 
+- **A config reload lifts only the credential parks of the `[providers]` entries it changed.** An accepted config reload, including an overlay-only reload and the config half of a SIGHUP, lifts the park of each non-OAuth account whose `[providers]` entry it added, removed or changed, and keeps every other park; before, it lifted every non-OAuth account. A secret rotated behind an unchanged ref (a new env var value or key file content) no longer lifts its park on reload and waits for the park's hourly re-test. A config reload never clears the unusable mark of an account the new build kept as a placeholder seat. A success on an account parked through a target with no runtime slot now lifts the park. See [docs/LOGGING.md](docs/LOGGING.md).
+
 - **A response carrying a refusal block is never read as positive capability evidence.** The clean-stop gate rejects a response whose content holds a refusal block, the shape the OpenAI Responses lane maps a model refusal to; other unknown blocks stay inert.
 
 - **Positive capability observations never store a field-namespace key.** Positive, accepted-beta and replayed accepted-beta observations pass the field-namespace screen at the learned store's single writer, and a ledger rebuild counts only the positives the store kept.

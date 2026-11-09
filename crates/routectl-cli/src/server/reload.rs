@@ -747,11 +747,13 @@ pub(super) async fn handle_config_reload(
     }
     // Only past the commit point: the candidate shares the live router's park
     // map from carry-over on, so lifting any earlier would lift the live parks
-    // on a reload that is then rejected. A rebuild re-resolves every
-    // `[providers]` entry's credential, so each entry account may have a new
-    // one; an OAuth seat's credential lives in the credentials file, whose own
-    // reload lifts it.
-    log_lifted_parks(&router_swap.load().lift_entry_credential_parks(), "config");
+    // on a reload that is then rejected.
+    log_lifted_parks(
+        &router_swap
+            .load()
+            .lift_entry_credential_parks(&previous_router.config, &new_config),
+        "config",
+    );
 
     // Soft overlay defects are logged once per accepted overlay revision, not
     // on every reload that happens to re-read an unchanged file.

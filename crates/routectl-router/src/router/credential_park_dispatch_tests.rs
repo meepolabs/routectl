@@ -538,7 +538,7 @@ async fn a_rejection_admitted_before_a_reload_parks_only_when_no_reload_landed()
                 let reloader = async {
                     hold.entered.notified().await;
                     if reload {
-                        router.lift_entry_credential_parks();
+                        router.lift_parks_for_entry_change_for_tests("p-a");
                     }
                     hold.release.notify_one();
                 };

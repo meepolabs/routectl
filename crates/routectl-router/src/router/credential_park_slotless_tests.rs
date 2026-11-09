@@ -218,3 +218,31 @@ fn a_slotless_admission_refuses_an_unusable_account() {
         assert_eq!(got, expected, "{case}");
     }
 }
+
+#[test]
+fn a_slotless_success_lifts_the_account_park_in_its_generation() {
+    // (case, settle in the park's generation, expected park afterwards)
+    let rows: [(&str, bool, Option<UpstreamReason>); 2] = [
+        ("current generation", true, None),
+        (
+            "stale generation",
+            false,
+            Some(UpstreamReason::CredentialInvalid),
+        ),
+    ];
+    for (case, current, expected) in rows {
+        // Arrange: the account is parked by a slotless rejection.
+        let router = router();
+        let stale = slotless_generation(&router, ACCOUNT);
+        router.lift_credential_parks([ACCOUNT]);
+        let generation = slotless_generation(&router, ACCOUNT);
+        assert!(settle_rejection(&router, generation), "{case}: premise");
+        let settled_in = if current { generation } else { stale };
+
+        // Act
+        router.settle_seat_success_in_generation(SLOTLESS, Some(ACCOUNT), true, 0, settled_in);
+
+        // Assert
+        assert_eq!(park_reason(&router, "m-a"), expected, "{case}");
+    }
+}

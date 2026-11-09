@@ -13,7 +13,7 @@
 //! half-open release paths never touch the map. Nothing takes the map while
 //! holding a slot.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -21,6 +21,7 @@ use routectl_core::{EligibilityReason, Error, UpstreamReason, sanitize_for_log};
 
 use super::Router;
 use super::runtime_gate::ProbeSlotGuard;
+use crate::config::Config;
 use crate::runtime_state::{
     AccountCredential, AccountReset, MarkOutcome, RefreshSettlement, SuccessSettlement,
     UnusableCause,
@@ -168,6 +169,33 @@ pub(super) fn log_gate_refusal(
             "{message}",
         );
     }
+}
+
+/// The names of the `[providers]` entries present in either config whose
+/// entry is not identical in both. Entries are compared serialized, whole,
+/// so no field can be missed; an entry that fails to serialize counts as
+/// changed.
+fn changed_provider_entries<'a>(
+    previous: &'a Config,
+    next: &'a Config,
+) -> impl Iterator<Item = &'a str> {
+    let names: BTreeSet<&str> = previous
+        .providers
+        .keys()
+        .chain(next.providers.keys())
+        .map(String::as_str)
+        .collect();
+    names.into_iter().filter(|name| {
+        match (previous.providers.get(*name), next.providers.get(*name)) {
+            (Some(before), Some(after)) => {
+                match (serde_json::to_value(before), serde_json::to_value(after)) {
+                    (Ok(before), Ok(after)) => before != after,
+                    _ => true,
+                }
+            }
+            _ => true,
+        }
+    })
 }
 
 impl Router {
@@ -450,23 +478,38 @@ impl Router {
         )
     }
 
-    /// [`Self::lift_credential_parks`] over every account keyed by a
-    /// `[providers]` entry rather than an OAuth seat. A config reload
-    /// re-resolves those credentials on rebuild; an OAuth seat's credential
-    /// lives in the credentials file, whose own reload lifts it.
-    pub fn lift_entry_credential_parks(&self) -> Vec<AccountReset> {
-        let resets: Vec<AccountReset> = self
-            .credential_accounts
-            .lock()
-            .iter_mut()
-            .filter(|(account, _)| crate::seat_pool::is_entry_account(account))
-            .map(|(account, record)| AccountReset {
-                account: account.clone(),
-                outcome: record.reset(),
-            })
+    /// Reset every `[providers]` entry account whose entry differs between
+    /// `previous` and `next`, the configs either side of a config reload: an
+    /// entry added, removed, or changed in any field. An unchanged entry's
+    /// credential ref is unchanged, so its park and generation stay; a secret
+    /// rotated behind an unchanged ref waits for the park's re-test. An
+    /// account this Router built as a placeholder seat is never reset: its
+    /// unusable mark is the build's own evidence about the new entry. An
+    /// OAuth seat's credential lives in the credentials file, whose own
+    /// reload lifts it.
+    pub fn lift_entry_credential_parks(
+        &self,
+        previous: &Config,
+        next: &Config,
+    ) -> Vec<AccountReset> {
+        let accounts: Vec<String> = changed_provider_entries(previous, next)
+            .filter_map(|entry| self.credential_account_for(entry, None))
+            .filter(|account| !self.is_placeholder_account(account))
             .collect();
-        self.log_recovered_resets(&resets);
-        resets
+        self.lift_credential_parks(accounts)
+    }
+
+    /// [`Self::lift_entry_credential_parks`] for a reload whose config drops
+    /// `entry` from this Router's own. Test seam standing in for a config
+    /// reload that changed that entry.
+    #[cfg(test)]
+    pub(super) fn lift_parks_for_entry_change_for_tests(&self, entry: &str) -> Vec<AccountReset> {
+        let mut next = Config::clone(&self.config);
+        assert!(
+            next.providers.remove(entry).is_some(),
+            "no provider entry {entry}"
+        );
+        self.lift_entry_credential_parks(&self.config, &next)
     }
 
     /// Park `account` when `err` carries a typed credential reason and the
@@ -608,19 +651,17 @@ impl Router {
         breaker_epoch: u64,
         generation: u64,
     ) -> u64 {
-        let Some(state) = self.state.get(state_key) else {
-            return breaker_epoch;
-        };
         let (closed, held_epoch) = {
             let mut accounts = self.credential_accounts.lock();
-            let mut state = state.lock();
-            let settled = if record_breaker {
-                state.record_success_closing(Instant::now(), breaker_epoch)
-            } else {
-                SuccessSettlement {
+            let mut slot = self.state.get(state_key).map(|state| state.lock());
+            let settled = match slot.as_mut() {
+                Some(state) if record_breaker => {
+                    state.record_success_closing(Instant::now(), breaker_epoch)
+                }
+                _ => SuccessSettlement {
                     closed: false,
                     held_epoch: breaker_epoch,
-                }
+                },
             };
             #[cfg(test)]
             run_within_success_settle_hook();
