@@ -28,6 +28,7 @@ use serde_json::{Value, json};
 use super::super::field_repair::{TEST_UNSUPPORTED_PATH, TEST_UNSUPPORTED_SENTINEL};
 use super::super::scripted_provider_test_support::{content_chunk, ok_response};
 use super::super::{Router, RouterOptions};
+use crate::capability_matcher::FORCED_TOOL_CHOICE_REJECTION;
 use crate::class_policy::ConfigFailureClass;
 use crate::config::{AliasValue, Config, PoolEntry, ProviderEntry, ProviderRuntimePolicy};
 use crate::resolved::ResolvedModel;
@@ -59,6 +60,10 @@ enum Failure {
     FeatureUnsupported,
     /// A 400 the classifier lifts to an exceeded context window.
     ContextWindow,
+    /// An Anthropic 400 the classifier leaves as a bad request but the
+    /// capability resolver recognizes: a model refusing a forced
+    /// `tool_choice`.
+    ForcedToolChoice,
     /// A bare OAuth 429 the provider recognized.
     RecognizedRateLimit,
     /// A 429 no recognizer matched.
@@ -94,6 +99,9 @@ impl Failure {
                 Some("invalid_request_error".into()),
                 Some("context_length_exceeded".into()),
             ),
+            Self::ForcedToolChoice => {
+                anthropic_error(400, "invalid_request_error", FORCED_TOOL_CHOICE_REJECTION)
+            }
             Self::RecognizedRateLimit => anthropic_error(429, "rate_limit_error", "Error")
                 .with_scope_row(Some(ScopeRow::AnthropicBareRateLimit)),
             Self::RateLimit => anthropic_error(429, "rate_limit_error", "slow down"),
@@ -394,6 +402,7 @@ fn failing(failure: Failure) -> &'static [Step] {
         Failure::BadRequest => &[Step::Fail(Failure::BadRequest)],
         Failure::FeatureUnsupported => &[Step::Fail(Failure::FeatureUnsupported)],
         Failure::ContextWindow => &[Step::Fail(Failure::ContextWindow)],
+        Failure::ForcedToolChoice => &[Step::Fail(Failure::ForcedToolChoice)],
         Failure::RecognizedRateLimit => &[Step::Fail(Failure::RecognizedRateLimit)],
         Failure::RateLimit => &[Step::Fail(Failure::RateLimit)],
         Failure::Server => &[Step::Fail(Failure::Server)],
@@ -586,6 +595,49 @@ async fn a_capability_or_window_400_reaches_pool_b_on_the_same_origin() {
         calls[PASSTHROUGH] = 1;
         calls[POOL_B] = 1;
         assert_eq!(chain.calls(), calls, "{name}");
+    }
+}
+
+/// On the anthropic-api lane, whose classifier lifts neither class, a 400
+/// is scoped to the model only when the capability resolver names a
+/// capability in it: a model refusing a forced `tool_choice` lets the walk
+/// reach pool B on the same origin, while a generic 400 on every target
+/// stops at origin X (the passthrough on origin Y is its only other dial).
+///
+/// Mutation check: set the resolver flag to false at the dispatch walk's
+/// failure build -> red (the capability row never reaches pool B).
+#[tokio::test]
+async fn a_resolver_recognized_400_reaches_pool_b_and_a_generic_one_does_not() {
+    let rows = [
+        ("forced tool_choice", Failure::ForcedToolChoice, 1),
+        ("generic 400", Failure::BadRequest, 0),
+    ];
+    for (name, failure, pool_b_calls) in rows {
+        let mut scripts = all_failing(failure);
+        scripts[POOL_B] = SERVE;
+        let chain = chain(&scripts, 3, PoolB::OtherModel);
+
+        let dispatched = chain
+            .router
+            .complete_with_options(request(), RouterOptions::new())
+            .await;
+
+        assert_eq!(
+            dispatched.result.is_ok(),
+            pool_b_calls == 1,
+            "{name}: {:?}",
+            dispatched.result.as_ref().err()
+        );
+        let mut calls = vec![0; TARGETS];
+        calls[0] = 1;
+        calls[PASSTHROUGH] = 1;
+        calls[POOL_B] = pool_b_calls;
+        assert_eq!(chain.calls(), calls, "{name}");
+        assert_eq!(
+            chain.debits(),
+            vec![0; TARGETS],
+            "{name}: a 400 never debits"
+        );
     }
 }
 
@@ -822,6 +874,42 @@ async fn a_retry_spent_on_one_target_is_not_spent_again_on_the_next() {
 
     assert!(dispatched.result.is_ok(), "{:?}", dispatched.result.err());
     assert_eq!(chain.calls(), vec![2, 1, 1, 1, 1, 1, 0]);
+}
+
+/// A debit that opens the failed seat's breaker does not spend the retry
+/// budget on a dial the re-gate would refuse: with one retry allowed and a
+/// breaker that opens on its first failure, pool A's first seat is dialed
+/// once, and the next seat still retries its own 500 once.
+///
+/// Mutation check: ignore the opened breaker when settling the disposition
+/// -> red (the first seat spends the retry, the second is not retried).
+#[tokio::test]
+async fn a_debit_that_opens_the_breaker_does_not_spend_the_retry() {
+    let mut scripts = [SERVE; TARGETS];
+    scripts[0] = failing(Failure::Server);
+    scripts[1] = &[Step::Fail(Failure::Server), Step::Serve];
+    let chain = chain_with(&scripts, 2, PoolB::OtherModel, Lane::Anthropic, |idx| {
+        ProviderRuntimePolicy {
+            circuit_failures: Some(if idx == 0 { 1 } else { 100 }),
+            ..Default::default()
+        }
+    });
+
+    let dispatched = chain
+        .router
+        .complete_with_options(request(), RouterOptions::new())
+        .await;
+
+    assert!(dispatched.result.is_ok(), "{:?}", dispatched.result.err());
+    assert_eq!(chain.calls(), vec![1, 2, 0, 0, 0, 0, 0]);
+    assert_eq!(
+        chain
+            .router
+            .gate_status_for_tests(&Chain::state_key(0))
+            .circuit,
+        CircuitPhase::Open,
+        "premise: the first seat's 500 opened its breaker"
+    );
 }
 
 // ---------------------------------------------------------------------------

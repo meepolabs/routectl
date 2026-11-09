@@ -162,7 +162,7 @@ impl InferredPhrase {
 /// and identical on the first-party Messages API and on Bedrock (both
 /// InvokeModel and, inside its wrapper, Converse). It names both forcing
 /// modes at once, so it carries no signal about which one was sent.
-const FORCED_TOOL_CHOICE_REJECTION: &str =
+pub const FORCED_TOOL_CHOICE_REJECTION: &str =
     "tool_choice: type \"tool\" and \"any\" are not supported for this model.";
 
 /// Anthropic Messages API inferred-rejection phrases. Small by design;
@@ -253,6 +253,26 @@ pub fn resolve_requested_capability(
             .or_else(|| match_inferred(provider_kind, err)),
         _ => None,
     }
+}
+
+/// Whether the failure names a capability the target's model lacks, read by
+/// the failure decision to scope a native 400 or 422 to the `[models]` entry
+/// instead of the whole endpoint, so another model on the same origin stays
+/// reachable for the rest of the request.
+///
+/// A thin wrapper over [`resolve_requested_capability`], called with the
+/// class the classifier gave BEFORE any operator remap and the target's
+/// provider kind. Every row added to the resolver therefore also narrows
+/// routing scope, and must be as exact as a learn row already has to be. It
+/// reads neither the `[capability]` switch nor whether the credential is
+/// forwarded, and is the same on every dispatch surface: how far a failure
+/// reaches does not depend on whether this daemon learns from it.
+pub fn names_requested_capability(
+    provider_kind: &str,
+    err: &Error,
+    native: &ClassifiedFailure,
+) -> bool {
+    resolve_requested_capability(provider_kind, err, native).is_some()
 }
 
 /// The self-identifying arm. For openai-compat the class token is an

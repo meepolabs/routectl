@@ -34,6 +34,7 @@ fn decided_429(is_probe: bool, policy: &RetryPolicy) -> Disposition {
         err: &err,
         native_class: &class,
         class: &class,
+        native_capability_typed: false,
         is_probe,
         surface: DispatchSurface::Complete,
         deadline_fired: false,

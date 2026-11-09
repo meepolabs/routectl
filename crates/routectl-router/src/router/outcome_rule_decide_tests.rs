@@ -50,6 +50,7 @@ fn failure<'a>(err: &'a Error, class: &'a FailureClass, target: WalkTarget<'a>) 
         err,
         native_class: class,
         class,
+        native_capability_typed: false,
         is_probe: false,
         surface: DispatchSurface::Complete,
         deadline_fired: false,
@@ -660,6 +661,56 @@ fn the_scope_reads_the_native_class_before_any_remap() {
         let failure = Failure {
             native_class: &native,
             ..failure(&err, &remapped, target)
+        };
+
+        let disposition = decide_fresh(&failure, &RetryPolicy::default());
+
+        assert_eq!(disposition.scope, scope, "{name}");
+        assert_eq!(disposition.same_target, SameProvider::No, "{name}");
+        assert_eq!(excludes(&disposition, &target), exclusion, "{name}");
+    }
+}
+
+/// A generic native 400 is scoped to the model only when the capability
+/// resolver named a capability in it: a resolver hit narrows it to the
+/// `[models]` entry, and without one it keeps endpoint scope, even when an
+/// operator remap calls it an unsupported feature.
+#[test]
+fn a_bad_request_is_model_scoped_only_on_a_resolver_hit() {
+    use Excludes::{Endpoint, Model};
+    let cfg = seats();
+    let target = seat_a(&cfg);
+    let err = Error::upstream("p", 400, "x");
+    let bad_request = FailureClass::BadRequest;
+    let feature = feature_unsupported();
+    let rows = [
+        (
+            "resolver hit",
+            &bad_request,
+            true,
+            FailureScope::Model,
+            Model,
+        ),
+        (
+            "no resolver hit",
+            &bad_request,
+            false,
+            FailureScope::Endpoint,
+            Endpoint,
+        ),
+        (
+            "remapped to feature-unsupported, no resolver hit",
+            &feature,
+            false,
+            FailureScope::Endpoint,
+            Endpoint,
+        ),
+    ];
+    for (name, remapped, native_capability_typed, scope, exclusion) in rows {
+        let failure = Failure {
+            native_class: &bad_request,
+            native_capability_typed,
+            ..failure(&err, remapped, target)
         };
 
         let disposition = decide_fresh(&failure, &RetryPolicy::default());

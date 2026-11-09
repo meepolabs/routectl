@@ -240,9 +240,12 @@ mod tables {
 
     /// Bedrock (Anthropic-on-Bedrock in-stream tokens + converse tokens).
     ///
-    /// These lifts are reachable only via the in-stream / converse error
-    /// paths; the synchronous invoke HTTP path does not yet populate the
-    /// upstream type / code fields these tokens match on.
+    /// The synchronous invoke HTTP path populates the upstream type too: a
+    /// flat 400 body with no `__type` lifts the bare exception name from the
+    /// `x-amzn-errortype` header. That token is
+    /// an AWS exception name (`ValidationException`), which no row below
+    /// names, so a validation 400 stays `BadRequest` here; the router's
+    /// capability resolver reads its message.
     pub const BEDROCK: FamilyTokens = FamilyTokens {
         content_policy: &["content_filtered", "guardrail_intervened", "invalid_prompt"],
         context_window: &["model_context_window_exceeded", "context_window_exceeded"],

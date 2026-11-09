@@ -1790,9 +1790,14 @@ upstream returned for the request itself excludes every remaining
 chain target it would hit the same way, for the rest of that request:
 
 - A native 400 or 422 the classifier types as an unsupported feature
-  or an exceeded context window excludes its `[models]` entry: the
-  walk can still reach another entry, even on the same origin with the
-  same upstream id (a larger-window variant, say).
+  or an exceeded context window, or whose message the capability
+  matcher recognizes as naming a capability the model lacks (a Bedrock
+  `ValidationException` naming a tool type, say), excludes its
+  `[models]` entry: the walk can still reach another entry, even on
+  the same origin with the same upstream id (a larger-window variant,
+  say). This holds whether or not `[capability]` learning is on. An
+  Anthropic "prompt is too long" 400 is not recognized as either, so
+  it keeps endpoint scope.
 - Any other native 400 or 422 excludes its endpoint (the provider's
   normalized origin): pool siblings and every other entry on that
   origin are skipped, and the walk reaches only another origin.
@@ -1806,7 +1811,8 @@ chain target it would hit the same way, for the rest of that request:
   request-wide count, and the walk does not dial that seat again.
 
 None of these is retried on the same target except the last, and a
-4xx never debits the breaker whatever class a remap gives it. A
+native 400 or 422 never debits the breaker whatever class a remap
+gives it. A
 request whose targets were all excluded returns the last upstream
 error it received.
 

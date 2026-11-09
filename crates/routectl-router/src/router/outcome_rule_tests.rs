@@ -388,6 +388,7 @@ fn same_target_retry_table() {
             err: &row.err,
             native_class: &class,
             class: &class,
+            native_capability_typed: false,
             is_probe: row.is_probe,
             surface: row.surface,
             deadline_fired: false,
@@ -468,7 +469,7 @@ fn router_tripping_on_first_failure() -> Router {
 }
 
 #[tokio::test]
-async fn an_opened_debit_does_not_suppress_the_complete_retry() {
+async fn an_opened_debit_suppresses_the_complete_retry() {
     let router = router_tripping_on_first_failure();
     let req = ChatRequest {
         model: "solo".into(),
@@ -490,8 +491,8 @@ async fn an_opened_debit_does_not_suppress_the_complete_retry() {
     );
     assert_eq!(
         first.field("same_provider_retry"),
-        Some("true"),
-        "an opened debit is log-only: the same provider is still retried"
+        Some("false"),
+        "the re-gate would refuse an open breaker, so the seat is not retried"
     );
 }
 

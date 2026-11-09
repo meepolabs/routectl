@@ -24,6 +24,7 @@ use routectl_core::{
     TranslationReport, UpstreamReason, sanitize_for_log,
 };
 
+use crate::capability_matcher::names_requested_capability;
 use crate::config::{ResolvedTuning, RetryPolicy};
 
 use super::beta_report_learn::install_beta_assembly;
@@ -746,8 +747,11 @@ impl Router {
                         let native_cf = learning.classify(&e, target.provider_kind);
                         let original_class = native_cf.class.clone();
                         let remap_candidate_status = upstream_status_for_remap(&e);
-                        let (cf, remapped) =
-                            apply_remap(native_cf, remap_candidate_status, &target.class_overrides);
+                        let (cf, remapped) = apply_remap(
+                            native_cf.clone(),
+                            remap_candidate_status,
+                            &target.class_overrides,
+                        );
                         let remap_status = if remapped {
                             remap_candidate_status
                         } else {
@@ -910,11 +914,15 @@ impl Router {
                         // sleep floor both read it. `None` for every
                         // non-rate-limit error.
                         let reset_hint = rate_limit_reset_hint(&e, &policy);
+                        let native_capability_typed = target
+                            .provider_kind
+                            .is_some_and(|kind| names_requested_capability(kind, &e, &native_cf));
                         let disposition = decide(
                             &Failure {
                                 err: &e,
                                 native_class: &original_class,
                                 class: &cf.class,
+                                native_capability_typed,
                                 is_probe,
                                 surface: A::SURFACE,
                                 deadline_fired,
@@ -925,14 +933,15 @@ impl Router {
                             reset_hint,
                             walk,
                         );
-                        disposition.record_on(walk);
                         let debits = disposition.breaker != BreakerOutcome::None;
-                        let (_opened, breaker_effect) = self.apply_breaker_outcome(
+                        let (opened, breaker_effect) = self.apply_breaker_outcome(
                             state_key,
                             disposition.breaker,
                             &cf.class,
                             probe_guard.breaker_epoch(),
                         );
+                        let disposition = disposition.after_breaker(opened);
+                        disposition.record_on(walk);
                         // A debit or park settled any half-open slot the
                         // attempt held; an outcome that records nothing frees
                         // it here, before any retry, walk or terminal exit.

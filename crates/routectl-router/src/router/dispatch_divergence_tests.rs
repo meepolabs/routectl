@@ -321,6 +321,41 @@ async fn an_unknown_provider_error_from_an_attempt_ends_the_request_on_every_sur
     assert_eq!(observed, expected);
 }
 
+/// A chain entry with no provider that is not a pool's placeholder seat is
+/// passed over before any attempt on the message surfaces and ends a token
+/// count, whatever the class policy says.
+///
+/// Mutation check: return the unknown-provider error on every surface in
+/// the walk's provider-less arm -> red (the message surfaces fail).
+#[tokio::test]
+async fn an_entry_with_no_provider_walks_on_the_message_surfaces_and_is_terminal_on_count() {
+    let mut observed: Vec<WalkRow> = Vec::new();
+    for surface in SURFACES {
+        let first = answering();
+        let second = answering();
+        let router = router_over(
+            vec![
+                seat(FIRST, anthropic_entry(Some(0)), first.clone()),
+                seat(SECOND, anthropic_entry(Some(0)), second.clone()),
+            ],
+            |_| {},
+        )
+        .with_providerless_model_for_tests(FIRST);
+
+        let end = dispatch(&router, surface, request()).await;
+
+        assert_eq!(first.calls(), 0, "{}: no attempt", surface.label());
+        observed.push((surface.label(), end, second.calls()));
+    }
+
+    let expected: Vec<WalkRow> = vec![
+        ("complete", Ended::Served, 1),
+        ("stream", Ended::Served, 1),
+        ("count_tokens", failed("unknown provider"), 0),
+    ];
+    assert_eq!(observed, expected);
+}
+
 #[tokio::test]
 async fn a_503_debits_on_every_surface_but_only_the_message_surfaces_walk_on() {
     let observed = walk_rows(unavailable, Some(1)).await;

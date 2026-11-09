@@ -229,6 +229,7 @@ fn a_refusal_ignores_a_raised_bad_request_retry_cap_and_a_target_scoped_4xx_does
             err,
             native_class: &class,
             class: &class,
+            native_capability_typed: false,
             is_probe: false,
             surface: DispatchSurface::Complete,
             deadline_fired: false,

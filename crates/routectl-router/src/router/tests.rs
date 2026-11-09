@@ -47,6 +47,7 @@ fn decided(err: &Error, class: &FailureClass, policy: &RetryPolicy) -> Dispositi
         err,
         native_class: class,
         class,
+        native_capability_typed: false,
         is_probe: false,
         surface: DispatchSurface::Complete,
         deadline_fired: false,

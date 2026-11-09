@@ -3,7 +3,9 @@
 //! fallback) with no operator declaration: a rejection naming a capability
 //! the request carries is learned on the first miss per lane and the next
 //! request skips that lane; a rejection that names nothing the request
-//! carries is never learned and the lane keeps being dialed. A declared
+//! carries is never learned and the lane keeps being dialed; the second
+//! Bedrock lane, on the same regional endpoint, is dialed only when the
+//! matcher named a capability in the rejection. A declared
 //! `[capability.overrides]` `unsupported` entry still skips the Bedrock lanes
 //! before any dispatch. The learned negatives survive a restart through their persisted
 //! rows, are learned on the stream arm before the first chunk, and are never
@@ -36,18 +38,9 @@ const WIRE_A: &str = "wire-a";
 const WIRE_B: &str = "wire-b";
 const WIRE_C: &str = "wire-c";
 
-/// Lane a's Bedrock entry. Lane b's entry, `p3`, is in another region: a
-/// rejection no learner turns into a typed capability excludes its whole
-/// endpoint for the rest of the request, so two lanes on one region would
-/// stop the walk at the first.
 const BEDROCK_PROVIDER_BLOCK: &str = "[providers.p1]\n\
      kind = \"bedrock\"\n\
      region = \"us-east-1\"\n\
-     creds = { kind = \"default-chain\" }\n";
-
-const SECOND_BEDROCK_PROVIDER_BLOCK: &str = "[providers.p3]\n\
-     kind = \"bedrock\"\n\
-     region = \"us-west-2\"\n\
      creds = { kind = \"default-chain\" }\n";
 
 fn fixture() -> Value {
@@ -227,18 +220,18 @@ impl Lanes {
     fn for_row(fx: &Value, row: &ReplayRow) -> Self {
         Self {
             a: CountingLane::for_fixture_name("p1", fx, &row.lane_a),
-            b: CountingLane::for_fixture_name("p3", fx, &row.lane_b),
+            b: CountingLane::for_fixture_name("p1", fx, &row.lane_b),
             fallback: CountingLane::accepting("p2"),
         }
     }
 }
 
-/// `m1` -> `wire-a` on Bedrock `p1`, `m2` -> `wire-b` on Bedrock `p3`, `m3`
-/// on an openai-compat `p2`, chained `[m1, m2, m3]` under [`ALIAS`]. The
-/// synthetic wire ids keep every baked catalog prior out of play.
-fn three_lane_router(extra: &str, lanes: &Lanes) -> Router {
+/// `m1` -> `wire-a` and `m2` -> `wire-b` on Bedrock `p1`, `m3` on an
+/// openai-compat `p2`, chained `[m1, m2, m3]` under [`ALIAS`]. The synthetic
+/// wire ids keep every baked catalog prior out of play.
+fn three_lane_router(p1_extra: &str, lanes: &Lanes) -> Router {
     let toml_text = format!(
-        "{BEDROCK_PROVIDER_BLOCK}{SECOND_BEDROCK_PROVIDER_BLOCK}{extra}\
+        "{BEDROCK_PROVIDER_BLOCK}{p1_extra}\
          [providers.p2]\n\
          kind = \"openai-compat\"\n\
          base_url = \"https://example.test/v1\"\n\
@@ -250,7 +243,7 @@ fn three_lane_router(extra: &str, lanes: &Lanes) -> Router {
     let mut router = Router::new(Arc::new(config));
     let models: BTreeMap<String, Arc<ResolvedModel>> = [
         ResolvedModel::new("m1", "p1", lanes.a.clone(), WIRE_A),
-        ResolvedModel::new("m2", "p3", lanes.b.clone(), WIRE_B),
+        ResolvedModel::new("m2", "p1", lanes.b.clone(), WIRE_B),
         ResolvedModel::new("m3", "p2", lanes.fallback.clone(), WIRE_C),
     ]
     .into_iter()
@@ -349,11 +342,10 @@ async fn learn_rows_learn_once_per_lane_and_next_request_skips_it() {
         let expected = row.expect_capability.clone().expect("learn row");
         let lanes = Lanes::for_row(&fx, &row);
         let router = three_lane_router("", &lanes);
-        let rejecting: Vec<(&Arc<CountingLane>, &str)> =
-            [(&lanes.a, "p1#wire-a"), (&lanes.b, "p3#wire-b")]
-                .into_iter()
-                .filter(|(lane, _)| lane.rejects())
-                .collect();
+        let rejecting: Vec<(&Arc<CountingLane>, &str)> = [(&lanes.a, WIRE_A), (&lanes.b, WIRE_B)]
+            .into_iter()
+            .filter(|(lane, _)| lane.rejects())
+            .collect();
 
         // Act: the first request meets every rejecting lane once.
         let first = dispatch(&router, &row.request).await;
@@ -373,9 +365,9 @@ async fn learn_rows_learn_once_per_lane_and_next_request_skips_it() {
             rejecting.len(),
             "{label}: one learn per rejecting lane"
         );
-        for (event, (_, lane_key)) in learned.iter().zip(&rejecting) {
+        for (event, (_, wire)) in learned.iter().zip(&rejecting) {
             assert_eq!(event.capability_key, expected, "{label}");
-            assert_eq!(event.state_key, *lane_key, "{label}");
+            assert_eq!(event.state_key, format!("p1#{wire}"), "{label}");
             assert_eq!(event.signal_tier, SignalTier::SelfIdentifying, "{label}");
             assert_eq!(event.phase, FailurePhase::F1, "{label}");
         }
@@ -428,7 +420,34 @@ async fn must_not_learn_rows_learn_nothing_and_keep_dialing_the_lane() {
             );
         }
         assert_eq!(lanes.a.calls(), 2, "{label}: lane a still dialed");
+        let lane_b_calls = if row.expect_served == "m2" { 2 } else { 0 };
+        assert_eq!(
+            lanes.b.calls(),
+            lane_b_calls,
+            "{label}: lane b, on lane a's regional endpoint, is dialed only past a capability rejection"
+        );
     }
+}
+
+/// The positive control for the never-dialed assertion above: on the same
+/// one-region chain, a rejection the matcher names a capability in is scoped
+/// to lane a's model, so lane b on the same regional endpoint is dialed and
+/// serves.
+#[tokio::test]
+async fn a_learn_row_reaches_the_second_lane_in_the_same_region() {
+    let fx = fixture();
+    let row = replay_rows(&fx)
+        .into_iter()
+        .find(|row| row.expect_capability.is_some() && row.lane_b == ACCEPT)
+        .expect("a learn row whose second lane accepts");
+    let lanes = Lanes::for_row(&fx, &row);
+    let router = three_lane_router("", &lanes);
+
+    let first = dispatch(&router, &row.request).await;
+
+    assert_served(&first, "m2", &row.label());
+    assert_eq!(lanes.b.calls(), 1, "{}: lane b dialed", row.label());
+    assert_eq!(lanes.fallback.calls(), 0, "{}", row.label());
 }
 
 #[tokio::test]
@@ -441,8 +460,7 @@ async fn declared_unsupported_feature_skips_bedrock_lanes_before_dispatch() {
         .expect("first replay row");
     let lanes = Lanes::for_row(&fx, &row);
     let router = three_lane_router(
-        "[capability.overrides.p1]\nunsupported = [\"web_search\"]\n\
-         [capability.overrides.p3]\nunsupported = [\"web_search\"]\n",
+        "[capability.overrides.p1]\nunsupported = [\"web_search\"]\n",
         &lanes,
     );
 
@@ -587,7 +605,7 @@ async fn stream_rejection_before_the_first_chunk_is_learned_per_lane() {
         .collect();
     assert_eq!(
         learned,
-        vec![("web_search", "p1#wire-a"), ("web_search", "p3#wire-b")],
+        vec![("web_search", "p1#wire-a"), ("web_search", "p1#wire-b")],
         "one learned web_search negative per Bedrock lane"
     );
     assert_eq!(lanes.a.calls(), 1);

@@ -500,6 +500,11 @@ pub struct Router {
     /// that member. `None` everywhere but the synthetic-loss tests.
     #[cfg(any(test, feature = "test-utils"))]
     wire_tap_drop: Option<&'static str>,
+    /// Test-only: a model nickname whose dispatch targets lose their
+    /// provider, standing in for a chain entry no provider was registered
+    /// for. `None` everywhere but the tests of that walk.
+    #[cfg(test)]
+    providerless_model: Option<&'static str>,
     /// `true` iff `config.providers` contains a `ProviderEntry::AnthropicApi`
     /// with `credential_source == Forwarded`. Computed ONCE here at
     /// construction (a full `config.providers` scan) rather than re-scanned
@@ -2280,6 +2285,8 @@ impl Router {
             edit_rejected_warned: learn_revert::edit_rejected_warned(),
             #[cfg(any(test, feature = "test-utils"))]
             wire_tap_drop: None,
+            #[cfg(test)]
+            providerless_model: None,
             has_forwarded_provider,
             volatile_prefix_warned: Mutex::new(HashSet::new()),
             prefix_rewrite_warned: Arc::new(AtomicBool::new(false)),
@@ -3319,6 +3326,19 @@ impl Router {
     #[must_use]
     pub const fn with_wire_tap_drop_for_tests(mut self, pointer: &'static str) -> Self {
         self.wire_tap_drop = Some(pointer);
+        self
+    }
+
+    /// This router, with every dispatch target of the model `nickname`
+    /// carrying no provider and no seat set: a chain entry naming a provider
+    /// nothing registered.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) const fn with_providerless_model_for_tests(
+        mut self,
+        nickname: &'static str,
+    ) -> Self {
+        self.providerless_model = Some(nickname);
         self
     }
 

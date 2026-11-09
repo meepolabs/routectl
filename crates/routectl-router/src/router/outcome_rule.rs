@@ -158,6 +158,10 @@ pub(super) struct Failure<'a> {
     /// The class after the target's operator remap. The retry cap and the
     /// fallback switch read it.
     pub(super) class: &'a FailureClass,
+    /// The closed capability resolver named a capability in this failure,
+    /// read with the target's provider kind against the native class. A
+    /// native 400 or 422 it names is scoped to the model.
+    pub(super) native_capability_typed: bool,
     /// The request is an availability probe (`max_tokens` at or under
     /// `probe_max_tokens`).
     pub(super) is_probe: bool,
@@ -205,6 +209,21 @@ pub(super) struct Disposition {
 }
 
 impl Disposition {
+    /// This disposition once its breaker outcome is applied: a debit that
+    /// opened the failed seat's breaker leaves nothing to retry there, so the
+    /// same-target retry is dropped and the walk moves on per `next`.
+    #[must_use]
+    pub(super) fn after_breaker(self, opened: bool) -> Self {
+        if opened {
+            Self {
+                same_target: SameProvider::No,
+                ..self
+            }
+        } else {
+            self
+        }
+    }
+
     /// Record on the request's walk what this disposition spends and
     /// excludes: a same-target retry, the exclusions, and the recognized
     /// pattern.
@@ -226,8 +245,8 @@ impl Disposition {
 ///
 /// The scope comes from, in order: a recognized pattern; a typed credential
 /// reason (account scope, which the credential park already enforces); a
-/// native 400/422 (model scope when the native class is an unsupported
-/// feature or an exceeded context window, endpoint scope for any other);
+/// native 400/422 (model scope when it names a limit of the model, see
+/// [`names_a_model_limit`], endpoint scope for any other);
 /// otherwise the failed target alone, retryable per its class. Only a
 /// retryable target-scoped failure may retry the same target, and only on a
 /// completion. `[retry.classes]` only narrows: its retry cap bounds the
@@ -285,16 +304,31 @@ fn scope_of(failure: &Failure<'_>) -> (FailureScope, bool) {
         return (FailureScope::Account, false);
     }
     if is_request_rejection(native_status(failure.err)) {
-        return match failure.native_class {
-            FailureClass::FeatureUnsupported { .. } | FailureClass::ContextWindow => {
-                (FailureScope::Model, false)
-            }
-            _ => (FailureScope::Endpoint, false),
+        let scope = if names_a_model_limit(failure) {
+            FailureScope::Model
+        } else {
+            FailureScope::Endpoint
         };
+        return (scope, false);
     }
     // A local refusal is decided by the request's shape alone, so the same
     // target refuses it again.
     (FailureScope::Target, failure.err.refusal_reason().is_none())
+}
+
+/// Whether a native request rejection names a limit of the model rather
+/// than a fault every model on the endpoint would answer the same way: the
+/// classifier typed it as an unsupported feature or an exceeded context
+/// window, or the closed capability resolver named the capability. Nothing
+/// else narrows a 400 to the model, so an untyped context-overflow 400 (the
+/// Anthropic "prompt is too long" answer, which neither the classifier nor
+/// the resolver recognizes) keeps endpoint scope.
+const fn names_a_model_limit(failure: &Failure<'_>) -> bool {
+    failure.native_capability_typed
+        || matches!(
+            failure.native_class,
+            FailureClass::FeatureUnsupported { .. } | FailureClass::ContextWindow
+        )
 }
 
 fn retry_same_target(

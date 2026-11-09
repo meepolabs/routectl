@@ -472,6 +472,8 @@ impl Router {
             &req.model,
             req.routectl_internal.inbound_session_key.as_deref(),
         )?;
+        #[cfg(test)]
+        let chain = self.detach_providers_for_tests(chain);
         let observation = req.routectl_internal.observation.as_ref();
         let features = super::field_repair::request_feature_keys(self.field_repair_table(), req);
         let mut admissions = Vec::new();
@@ -506,6 +508,18 @@ impl Router {
         // a re-probe slot.
         let chain = self.withhold_betas_on_chain(chain, req, surface, &mut admissions);
         Ok((chain, admissions))
+    }
+
+    #[cfg(test)]
+    fn detach_providers_for_tests(&self, mut chain: Vec<DispatchTarget>) -> Vec<DispatchTarget> {
+        for target in &mut chain {
+            if self.providerless_model.is_some()
+                && target.nickname.as_deref() == self.providerless_model
+            {
+                target.provider = None;
+            }
+        }
+        chain
     }
 
     /// Count each target of `before` that `after` no longer holds as one
