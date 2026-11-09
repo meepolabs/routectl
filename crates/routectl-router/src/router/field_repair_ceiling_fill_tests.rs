@@ -640,12 +640,13 @@ mod fill_presence {
         }
     }
 
-    /// Converse sends no limit the client did not, yet its legacy thinking
-    /// window still fits the model's ceiling: the carrier reaches the budget
-    /// with no fill marker on the request.
+    /// With no client limit, Converse sizes its legacy thinking window from
+    /// the model's stamped ceiling and sends that same ceiling as
+    /// `maxTokens`, so the budget sits below the limit the upstream sees.
     ///
-    /// Mutation check: zero the slot on an egress that does not fill
-    /// `max_tokens` -> red (the window widens to the egress baseline).
+    /// Mutation checks: zero the slot on an egress that does not fill
+    /// `max_tokens` -> red (the window widens to the egress baseline); make
+    /// Converse forward the omitted client limit -> red (no `maxTokens`).
     #[cfg(feature = "bedrock")]
     #[tokio::test]
     async fn the_converse_thinking_budget_fits_the_stamped_ceiling_with_no_client_limit() {
@@ -693,10 +694,14 @@ mod fill_presence {
                 json!(expected),
                 "{name}",
             );
-            assert!(
-                body["inferenceConfig"].get("maxTokens").is_none(),
-                "{name}: Converse sends no limit the client did not",
-            );
+            let budget = body["additionalModelRequestFields"]["thinking"]["budget_tokens"]
+                .as_u64()
+                .expect("a thinking budget ships");
+            let sent = body["inferenceConfig"]["maxTokens"]
+                .as_u64()
+                .unwrap_or_else(|| panic!("{name}: no maxTokens: {}", body["inferenceConfig"]));
+            assert_eq!(sent, 8000, "{name}: the stamped ceiling is sent");
+            assert!(budget < sent, "{name}: budget {budget} fits {sent}");
         }
     }
 }
