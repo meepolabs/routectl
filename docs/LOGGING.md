@@ -2552,6 +2552,11 @@ translation counters ride the DEBUG metrics snapshot on target
 `routectl_router::router::metrics` (`rc_translation_drop_counts` /
 `rc_translation_policy_action_counts`), so reading them also needs
 `ROUTECTL_LOG=info,aws_config=warn,routectl_router::router::metrics=debug`.
+Inside a request's observation scope, a drop count and a lane's request count
+(`lane_seen`) advance once per client request, however many times retries,
+repairs or fallback hops normalize it again; policy-action counts advance once
+per normalize call that took the action, so they also count retries. A request
+with no observation scope counts every counter once per normalize call.
 
 | What moved | Still visible via |
 |---|---|

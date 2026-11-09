@@ -329,22 +329,8 @@ pub struct TranslationPolicyActionSnapshotEntry {
     pub action_count: u64,
     /// Cumulative count of client requests that reached `lane`, regardless
     /// of class, counted as [`TranslationDropSnapshotEntry::lane_seen_count`]
-    /// is. The denominator for [`action_rate`](Self::action_rate), shared with
-    /// the drop counter.
+    /// is: the same per-lane value the drop counter carries.
     pub lane_seen_count: u64,
-}
-
-impl TranslationPolicyActionSnapshotEntry {
-    /// Policy actions per request processed on this lane. `0.0` when the
-    /// lane has not yet been marked seen, rather than dividing by zero.
-    #[must_use]
-    pub fn action_rate(&self) -> f64 {
-        if self.lane_seen_count == 0 {
-            0.0
-        } else {
-            self.action_count as f64 / self.lane_seen_count as f64
-        }
-    }
 }
 
 /// Every currently-registered `(lane, policy_class)` counter, in
@@ -705,58 +691,5 @@ mod tests {
                 .any(|e| e.lane == lane && e.drop_class == class),
             "the drop must be recorded on its own counter"
         );
-    }
-
-    #[test]
-    fn action_rate_divides_policy_actions_by_the_shared_lane_denominator() {
-        // Arrange: one lane, one denominator, both numerators on it -- the
-        // shape that proves the policy counter reads the SAME lane_seen map
-        // the drop counter does rather than a second denominator.
-        let lane = "unit-test-lane-shared-denominator";
-        let drop_class = "unit-test-class-shared-drop";
-        let policy_class = "unit-test-class-shared-policy";
-
-        // Act
-        for _ in 0..4 {
-            record_translation_lane_seen(lane);
-        }
-        record_translation_drop(lane, drop_class);
-        record_translation_policy_action(lane, policy_class);
-        record_translation_policy_action(lane, policy_class);
-
-        // Assert
-        let policy = translation_policy_action_snapshot()
-            .into_iter()
-            .find(|e| e.lane == lane && e.policy_class == policy_class)
-            .expect("policy counter present");
-        let drop = translation_drop_snapshot()
-            .into_iter()
-            .find(|e| e.lane == lane && e.drop_class == drop_class)
-            .expect("drop counter present");
-        assert_eq!(policy.lane_seen_count, 4);
-        assert_eq!(drop.lane_seen_count, 4);
-        assert!((policy.action_rate() - 0.5).abs() < f64::EPSILON);
-        assert!((drop.drop_rate() - 0.25).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn action_rate_is_zero_when_the_lane_has_not_been_marked_seen() {
-        // Arrange
-        let lane = "unit-test-lane-policy-unseen";
-        let policy_class = "unit-test-class-policy-unseen";
-
-        // Act
-        record_translation_policy_action(lane, policy_class);
-
-        // Assert
-        let entry = translation_policy_action_snapshot()
-            .into_iter()
-            .find(|e| e.lane == lane && e.policy_class == policy_class)
-            .expect("counter present");
-        assert_eq!(entry.lane_seen_count, 0);
-        // Exact comparison is intentional, as in the drop-counter mirror: the
-        // zero-denominator branch returns the literal 0.0 rather than
-        // dividing, so there is no rounding to admit.
-        assert_eq!(entry.action_rate(), 0.0);
     }
 }
