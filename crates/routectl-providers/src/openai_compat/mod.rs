@@ -41,8 +41,8 @@ use tracing::debug;
 
 use routectl_core::{
     ChatChunk, ChatRequest, ChatResponse, Error, Provider, Result, StaticToken, TokenSource,
-    debug_upstream_error_body, sanitize_for_log, trace_outgoing_body, trace_upstream_success_body,
-    upstream_message_or_excerpt,
+    UpstreamBody, debug_upstream_error_body, sanitize_for_log, trace_outgoing_body,
+    trace_upstream_success_body, upstream_message_or_excerpt,
 };
 
 use sse::ThinkTagAccumulator;
@@ -1085,7 +1085,13 @@ fn detect_inline_error_2xx(
         .unwrap_or(502);
     Some(map_openai_compat_upstream_error(
         provider_id,
-        UpstreamErrorRead::from_parts(status, headers, body_text, false).aws_backed(aws_backed),
+        UpstreamErrorRead::from_body(
+            status,
+            headers,
+            UpstreamBody::from_parse(body_text, raw),
+            false,
+        )
+        .aws_backed(aws_backed),
     ))
 }
 

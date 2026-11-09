@@ -2,10 +2,11 @@
 //! [`crate::Error::Upstream`] so consumers read the envelope without parsing
 //! the body again.
 //!
-//! [`UpstreamBody::new`] is the only public producer: it owns the body text
-//! together with the parse of exactly that text, and
-//! [`crate::Error::upstream_with_body`] consumes the pair whole, so a parse
-//! can never be attached to a different body. The parse applies the same
+//! [`UpstreamBody`] owns the body text together with the parse of exactly
+//! that text: [`UpstreamBody::new`] parses the text itself, and
+//! [`UpstreamBody::from_parse`] takes a parse its caller already made of that
+//! same text. [`crate::Error::upstream_with_body`] consumes the pair whole,
+//! so a parse is never attached to a different body. The parse applies the same
 //! rules as the log-redaction reader: a body opens like JSON after leading
 //! whitespace and an optional UTF-8 BOM, and a body over
 //! [`crate::MAX_ERROR_BODY_BYTES`] is never parsed. HTML, plain-text, over-cap
@@ -29,8 +30,9 @@ use crate::log_safe::{ErrorJsonBody, read_error_json_body};
 pub struct ParsedErrorBody(Arc<Value>);
 
 /// An upstream error body and the capped parse of that same text, produced
-/// together so the pair always agrees. Fields are private: the only way to
-/// build one is [`UpstreamBody::new`].
+/// together so the pair always agrees. Fields are private: build one with
+/// [`UpstreamBody::new`], [`UpstreamBody::from_parse`] or
+/// [`UpstreamBody::error_envelope`].
 ///
 /// ```compile_fail,E0451
 /// let body = routectl_core::UpstreamBody { text: String::new(), parsed: None };
@@ -46,6 +48,21 @@ impl UpstreamBody {
     pub fn new(text: impl Into<String>) -> Self {
         let text = text.into();
         let parsed = ParsedErrorBody::parse(&text);
+        Self { text, parsed }
+    }
+
+    /// Pair `text` with `parsed`, the JSON parse the caller already made of
+    /// exactly that text, without parsing it again. The parse is kept (and
+    /// only then cloned) when [`UpstreamBody::new`] would have kept it:
+    /// `parsed` is an object or array (the text opens like JSON) and the
+    /// text is within [`crate::MAX_ERROR_BODY_BYTES`]. Otherwise the text is
+    /// carried with no parse.
+    #[must_use]
+    pub fn from_parse(text: impl Into<String>, parsed: &Value) -> Self {
+        let text = text.into();
+        let opens_like_json = parsed.is_object() || parsed.is_array();
+        let parsed = (opens_like_json && text.len() <= crate::MAX_ERROR_BODY_BYTES)
+            .then(|| ParsedErrorBody(Arc::new(parsed.clone())));
         Self { text, parsed }
     }
 
@@ -187,6 +204,44 @@ mod tests {
 
         assert!(body.parsed().is_none());
         assert!(body.text().len() > crate::MAX_ERROR_BODY_BYTES);
+    }
+
+    #[test]
+    fn from_parse_keeps_the_parse_exactly_when_new_would() {
+        let shell = r#"{"error":{"message":""}}"#;
+        let at_cap = format!(
+            r#"{{"error":{{"message":"{}"}}}}"#,
+            "x".repeat(crate::MAX_ERROR_BODY_BYTES - shell.len())
+        );
+        let over_cap = format!(
+            r#"{{"error":{{"message":"{}"}}}}"#,
+            "x".repeat(crate::MAX_ERROR_BODY_BYTES)
+        );
+        let cases: [(&str, &str, bool); 5] = [
+            ("in-cap object", r#"{"error":{"message":"m"}}"#, true),
+            ("in-cap array", r#"[{"error":{"message":"m"}}]"#, true),
+            ("exactly at cap", &at_cap, true),
+            ("over cap", &over_cap, false),
+            ("scalar", "42", false),
+        ];
+        for (name, text, keeps_parse) in cases {
+            let value: serde_json::Value = serde_json::from_str(text).expect("fixture is JSON");
+            let before = capped_parse_count();
+
+            let body = UpstreamBody::from_parse(text, &value);
+
+            assert_eq!(capped_parse_count() - before, 0, "{name}");
+            assert_eq!(body.text(), text, "{name}");
+            assert_eq!(body.parsed().is_some(), keeps_parse, "{name}");
+            assert_eq!(
+                body.parsed().is_some(),
+                UpstreamBody::new(text).parsed().is_some(),
+                "{name}: agrees with new"
+            );
+            if let Some(carried) = body.parsed() {
+                assert_eq!(carried.value(), &value, "{name}");
+            }
+        }
     }
 
     #[test]

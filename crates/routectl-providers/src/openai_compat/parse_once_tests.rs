@@ -1,7 +1,7 @@
 //! The error mapper parses an upstream error body at most once, within the
 //! shared error-body cap, and carries that parse on the error it builds.
 
-use super::map_openai_compat_upstream_error;
+use super::{detect_inline_error_2xx, map_openai_compat_upstream_error};
 use crate::upstream_error::UpstreamErrorRead;
 use reqwest::header::HeaderMap;
 use routectl_core::test_utils::capped_parse_count;
@@ -55,6 +55,64 @@ fn in_cap_json_bodies_parse_exactly_once() {
 
         assert_eq!(parses, 1, "{name}");
         assert_eq!(err.parsed_body().is_some(), carries_parse, "{name}");
+    }
+}
+
+/// The fields a client reads off an upstream error.
+fn client_view(err: &Error) -> (u16, Option<String>, Option<String>, String, Option<String>) {
+    let Error::Upstream {
+        status,
+        upstream_type,
+        upstream_code,
+        body,
+        ..
+    } = err
+    else {
+        panic!("expected Error::Upstream, got {err:?}");
+    };
+    (
+        *status,
+        upstream_type.as_deref().map(String::from),
+        upstream_code.as_deref().map(String::from),
+        body.clone(),
+        err.parsed_body()
+            .and_then(|p| p.error_message())
+            .map(String::from),
+    )
+}
+
+#[test]
+fn inline_2xx_error_reuses_the_success_parse() {
+    let cases: [(&str, u16, &str); 3] = [
+        (
+            "string code",
+            502,
+            r#"{"error":{"type":"rate_limit_exceeded","code":"slow_down","message":"upstream is rate limiting"}}"#,
+        ),
+        (
+            "numeric code",
+            503,
+            r#"{"error":{"type":"server_error","code":503,"message":"overloaded"}}"#,
+        ),
+        (
+            "403 naming a principal",
+            403,
+            &format!(
+                r#"{{"error":{{"code":403,"message":"User: {ARN} is not authorized to perform: bedrock-runtime:InvokeModel"}}}}"#
+            ),
+        ),
+    ];
+    for (name, status, body) in cases {
+        let raw: serde_json::Value = serde_json::from_str(body).expect("fixture is JSON");
+        let (reparsed, _) = map(status, body);
+
+        let (err, parses) = capped_parses_during(|| {
+            detect_inline_error_2xx("p", &raw, &HeaderMap::new(), body, false)
+                .expect("inline error envelope detected")
+        });
+
+        assert_eq!(parses, 0, "{name}");
+        assert_eq!(client_view(&err), client_view(&reparsed), "{name}");
     }
 }
 

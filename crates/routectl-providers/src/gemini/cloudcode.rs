@@ -18,6 +18,7 @@
 //! `loadCodeAssist`, `onboardUser` -- go to the ONE configured base: there
 //! is no separate onboarding host, so a pinned base moves the whole lane.
 
+use std::borrow::Cow;
 use std::time::Duration;
 
 use reqwest::{Client, RequestBuilder};
@@ -25,7 +26,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use routectl_core::identity::antigravity::{IDE_NAME, PINNED_IDE_VERSION, antigravity_user_agent};
-use routectl_core::{Error, Result, sanitize_for_log, sanitize_upstream_body};
+use routectl_core::{Error, ParsedErrorBody, Result, sanitize_for_log, sanitize_upstream_body};
+
+use crate::upstream_error::{CarriedBody, UpstreamErrorRead};
 
 // Wire constants. Kept private to this module: they are part of the
 // Cloud Code dialect, not configurable provider knobs. The two host
@@ -215,20 +218,23 @@ pub fn default_tier(load_resp: &Value) -> String {
 /// chars the first pass leaves. Never carries the bearer token (the token
 /// is only ever set in the Authorization header, never echoed by these
 /// endpoints in a body).
-fn clean_error_body(body: &str) -> String {
-    sanitize_for_log(&sanitize_upstream_body(
-        &routectl_core::redact_error_body_text(body),
-    ))
-}
-
-/// Lift the Google Cloud Code error classifier from an onboarding error
-/// body. Google's envelope is `{"error":{"code":<num>,"status":"<CANONICAL>"}}`;
-/// `status` (e.g. `RESOURCE_EXHAUSTED`, `UNAUTHENTICATED`) becomes the
-/// upstream type and the numeric `code` becomes the upstream code, so a
-/// quota / auth failure stays distinguishable from a generic 429 / 401
-/// downstream. Returns `(None, None)` for a non-JSON or non-enveloped body.
-fn parse_cloudcode_error_classifier(body: &str) -> (Option<String>, Option<String>) {
-    super::parse_gemini_error_classifier(body)
+///
+/// The redaction runs over the read's own parse, so the body is not parsed
+/// again; a body with no parse (not JSON, over the cap, unparseable) goes
+/// through the text redactor, which never parses an over-cap body.
+fn clean_error_body(read: &UpstreamErrorRead) -> String {
+    let redacted = match read.parsed().map(ParsedErrorBody::value) {
+        Some(parsed) => {
+            let redacted = routectl_core::redact_prompts_in(parsed);
+            if &redacted == parsed {
+                Cow::Borrowed(read.text())
+            } else {
+                Cow::Owned(redacted.to_string())
+            }
+        }
+        None => routectl_core::redact_error_body_text(read.text()),
+    };
+    sanitize_for_log(&sanitize_upstream_body(&redacted))
 }
 
 /// Whether `err` signals that the resolved Cloud Code project no longer
@@ -301,8 +307,8 @@ const HOST_REJECTION_HINT: &str = "This Cloud Code request egressed to the host 
 ///
 /// The rebuild preserves the whole structured surface (`status`,
 /// `retry_after`, `upstream_type`, `upstream_code`, `upstream_request_id`)
-/// via `Error::upstream_full` + `with_upstream_request_id`, the same path
-/// [`map_onboarding_error`] uses: the router's class policy and breaker read
+/// via `Error::upstream_full` + `with_upstream_request_id`, the same fields
+/// [`map_onboarding_error`] sets: the router's class policy and breaker read
 /// those fields, so a diagnostic that dropped one would silently change
 /// routing behavior.
 ///
@@ -375,10 +381,14 @@ fn is_host_sensitive_class(upstream_type: &str) -> bool {
 
 /// Map an onboarding (`loadCodeAssist` / `onboardUser`) HTTP failure into a
 /// routectl upstream error, preserving the Google Cloud Code classifier
-/// (`error.status` / `error.code`) and any rate-limit reset hint. Lifts the
-/// classifier via `Error::upstream_full` -- the path the reference providers
-/// use -- so a `RESOURCE_EXHAUSTED` / `UNAUTHENTICATED` is not collapsed
-/// into an indistinguishable generic 429 / 401.
+/// (`error.status` / `error.code`) and any rate-limit reset hint, so a
+/// `RESOURCE_EXHAUSTED` / `UNAUTHENTICATED` is not collapsed into an
+/// indistinguishable generic 429 / 401.
+///
+/// Google's envelope is `{"error":{"code":<num>,"status":"<CANONICAL>"}}`:
+/// `status` becomes the upstream type and the numeric `code` the upstream
+/// code. The classifier lifts from the read's one capped parse, so a body
+/// over [`routectl_core::MAX_ERROR_BODY_BYTES`] lifts nothing.
 ///
 /// When `hit_cap` is set the body was truncated at the shared response-body
 /// cap and is untrustworthy: the client-facing message collapses to the
@@ -391,28 +401,22 @@ fn map_onboarding_error(
     body_text: &str,
     hit_cap: bool,
 ) -> Error {
-    let retry_after = if crate::retry_after::is_rate_limit_status(status) {
-        crate::retry_after::parse_retry_after(headers)
+    let read = UpstreamErrorRead::from_parts(status, headers, body_text, hit_cap);
+    let tokens = read.parsed().map_or((None, None), |p| {
+        crate::upstream_error::lift_nested_status_tokens(p.value())
+    });
+    let carried = if hit_cap {
+        CarriedBody::Replacement(crate::http_client::body_cap_exceeded_message())
     } else {
-        None
+        let cleaned = clean_error_body(&read);
+        if cleaned == read.text() {
+            CarriedBody::Original
+        } else {
+            CarriedBody::Replacement(cleaned)
+        }
     };
-    let (upstream_type, upstream_code) = parse_cloudcode_error_classifier(body_text);
-    let body = if hit_cap {
-        crate::http_client::body_cap_exceeded_message()
-    } else {
-        clean_error_body(body_text)
-    };
-    Error::upstream_full(
-        provider_id,
-        status,
-        body,
-        retry_after,
-        upstream_type,
-        upstream_code,
-    )
-    .with_upstream_request_id(crate::upstream_request_id::parse_upstream_request_id(
-        headers,
-    ))
+    let retry_after = read.retry_after();
+    read.into_error_with_tokens(provider_id, carried, retry_after, tokens)
 }
 
 /// POST `loadCodeAssist` and return the parsed JSON response. The caller
@@ -738,32 +742,85 @@ mod tests {
         }
 
         // Must not panic on the mid-codepoint boundary.
-        let cleaned = clean_error_body(&body);
+        let read =
+            UpstreamErrorRead::from_parts(500, &reqwest::header::HeaderMap::new(), body, false);
+        let cleaned = clean_error_body(&read);
 
         assert!(!cleaned.contains('\r'), "CR must be stripped");
         assert!(!cleaned.contains('\n'), "LF must be stripped");
         assert!(!cleaned.contains('\u{1b}'), "ESC must be stripped");
     }
 
-    #[test]
-    fn parse_classifier_lifts_google_status_and_code() {
-        // Arrange: the Google Cloud Code error envelope.
-        let body = r#"{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","message":"quota"}}"#;
-
-        // Act
-        let (upstream_type, upstream_code) = parse_cloudcode_error_classifier(body);
-
-        // Assert
-        assert_eq!(upstream_type.as_deref(), Some("RESOURCE_EXHAUSTED"));
-        assert_eq!(upstream_code.as_deref(), Some("429"));
+    /// Run `f` and count the capped error-body parses it ran, with logging
+    /// off so no log sink redacts its own copy of the body.
+    fn capped_parses_during<T>(f: impl FnOnce() -> T) -> (T, usize) {
+        tracing::subscriber::with_default(tracing::subscriber::NoSubscriber::default(), || {
+            let before = routectl_core::test_utils::capped_parse_count();
+            let out = f();
+            (
+                out,
+                routectl_core::test_utils::capped_parse_count() - before,
+            )
+        })
     }
 
     #[test]
-    fn parse_classifier_returns_none_on_non_json_body() {
-        let (upstream_type, upstream_code) =
-            parse_cloudcode_error_classifier("503 Service Unavailable (plain text)");
-        assert!(upstream_type.is_none());
-        assert!(upstream_code.is_none());
+    fn onboarding_error_parses_once_and_lifts_classifier() {
+        let quota = r#"{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","message":"quota"}}"#;
+        let over_cap = format!(
+            r#"{{"error":{{"code":429,"status":"RESOURCE_EXHAUSTED","message":"{}"}}}}"#,
+            "x".repeat(routectl_core::MAX_ERROR_BODY_BYTES)
+        );
+        let plain = "503 Service Unavailable (plain text)";
+        // (name, body, parses, lifted (type, code))
+        let cases = [
+            (
+                "in-cap envelope",
+                quota,
+                1,
+                Some(("RESOURCE_EXHAUSTED", "429")),
+            ),
+            ("over the error-body cap", over_cap.as_str(), 0, None),
+            ("plain text", plain, 0, None),
+        ];
+        for (name, body, want_parses, want_lifted) in cases {
+            let (err, parses) = capped_parses_during(|| {
+                map_onboarding_error(
+                    "gemini-cc",
+                    429,
+                    &reqwest::header::HeaderMap::new(),
+                    body,
+                    false,
+                )
+            });
+
+            assert_eq!(parses, want_parses, "{name}");
+            let Error::Upstream {
+                status,
+                upstream_type,
+                upstream_code,
+                ..
+            } = &err
+            else {
+                panic!("{name}: expected Error::Upstream, got {err:?}");
+            };
+            assert_eq!(*status, 429, "{name}");
+            assert_eq!(
+                upstream_type.as_deref(),
+                want_lifted.map(|(t, _)| t),
+                "{name}"
+            );
+            assert_eq!(
+                upstream_code.as_deref(),
+                want_lifted.map(|(_, c)| c),
+                "{name}"
+            );
+            assert_eq!(
+                err.parsed_body().is_some(),
+                want_parses == 1,
+                "{name}: the carried parse is the read's"
+            );
+        }
     }
 
     #[test]

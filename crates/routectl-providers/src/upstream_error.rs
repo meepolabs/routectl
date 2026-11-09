@@ -419,6 +419,12 @@ impl UpstreamErrorRead {
         body_text: impl Into<String>,
         hit_cap: bool,
     ) -> Self {
+        Self::from_body(status, headers, UpstreamBody::new(body_text), hit_cap)
+    }
+
+    /// [`Self::from_parts`] for a body that already carries its parse
+    /// (an inline error the success path parsed): nothing is parsed here.
+    pub fn from_body(status: u16, headers: &HeaderMap, body: UpstreamBody, hit_cap: bool) -> Self {
         // Gated on rate-limit statuses so a stray Retry-After on a 400 does
         // not park the provider.
         let retry_after = if crate::retry_after::is_rate_limit_status(status) {
@@ -428,7 +434,7 @@ impl UpstreamErrorRead {
         };
         Self {
             status,
-            body: UpstreamBody::new(body_text),
+            body,
             hit_cap,
             retry_after,
             request_id: crate::upstream_request_id::parse_upstream_request_id(headers),

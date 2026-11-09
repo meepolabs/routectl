@@ -681,16 +681,6 @@ impl GeminiProvider {
     }
 }
 
-/// Best-effort lift of the Gemini error classifier from a 4xx/5xx body
-/// (see [`crate::upstream_error::lift_nested_status_tokens`]); `(None, None)`
-/// when the body is not JSON.
-pub(super) fn parse_gemini_error_classifier(body_text: &str) -> (Option<String>, Option<String>) {
-    match serde_json::from_str::<Value>(body_text) {
-        Ok(v) => crate::upstream_error::lift_nested_status_tokens(&v),
-        Err(_) => (None, None),
-    }
-}
-
 /// Map a Gemini `>= 400` upstream response to the client-facing error.
 ///
 /// When the body was truncated at the shared response-body cap it is
@@ -933,24 +923,30 @@ mod e2e_tests {
     }
 
     #[test]
-    fn parse_classifier_lifts_gemini_status_and_code() {
-        // Gemini error envelope: `status` is the string classifier,
-        // `code` is the numeric HTTP-status duplicate.
-        let body = r#"{"error":{"code":429,"message":"Resource exhausted","status":"RESOURCE_EXHAUSTED"}}"#;
+    fn map_error_lifts_no_classifier_from_a_non_json_body() {
+        let err = map_gemini_upstream_error(
+            "gemini:test",
+            UpstreamErrorRead::from_parts(
+                503,
+                &reqwest::header::HeaderMap::new(),
+                "503 Service Unavailable (plain text from a proxy)",
+                false,
+            ),
+        );
 
-        let (upstream_type, upstream_code) = parse_gemini_error_classifier(body);
-
-        assert_eq!(upstream_type.as_deref(), Some("RESOURCE_EXHAUSTED"));
-        assert_eq!(upstream_code.as_deref(), Some("429"));
-    }
-
-    #[test]
-    fn parse_classifier_returns_none_on_non_json_body() {
-        let (upstream_type, upstream_code) =
-            parse_gemini_error_classifier("503 Service Unavailable (plain text from a proxy)");
-
-        assert!(upstream_type.is_none());
-        assert!(upstream_code.is_none());
+        match err {
+            Error::Upstream {
+                status,
+                upstream_type,
+                upstream_code,
+                ..
+            } => {
+                assert_eq!(status, 503);
+                assert!(upstream_type.is_none());
+                assert!(upstream_code.is_none());
+            }
+            other => panic!("expected Upstream, got {other:?}"),
+        }
     }
 
     #[test]
