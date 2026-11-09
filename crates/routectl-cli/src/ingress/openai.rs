@@ -495,8 +495,8 @@ const RESPONSE_ENVELOPE_MEMBERS: [(&str, &str); 4] = [
 /// `system_fingerprint` echoes the upstream value when one was carried.
 const STREAM_ENVELOPE_PATHS: [&str; 4] = ["/object", "/id", "/created", STREAM_FINGERPRINT_PATH];
 
-/// The stream envelope member that echoes a held upstream value: it is an
-/// added member only while no upstream value is held.
+/// The stream envelope member that echoes a held upstream value: it is a
+/// stamped member only while no upstream value is held.
 const STREAM_FINGERPRINT_PATH: &str = "/system_fingerprint";
 
 /// Stamp the OpenAI streaming envelope onto a serialized `ChatChunk` body:
@@ -518,9 +518,10 @@ fn apply_openai_chunk_envelope(
     };
     let holds_upstream_fingerprint = state.system_fingerprint.is_some();
     for path in STREAM_ENVELOPE_PATHS {
-        if !(holds_upstream_fingerprint && path == STREAM_FINGERPRINT_PATH) {
-            edits.declare(EditSite::StreamEnvelopeStamp, path, EditKind::Add);
+        if holds_upstream_fingerprint && path == STREAM_FINGERPRINT_PATH {
+            continue;
         }
+        edits.declare(EditSite::StreamEnvelopeStamp, path, EditKind::Add);
         edits.declare(EditSite::StreamEnvelopeStamp, path, EditKind::Rewrite);
     }
     obj.insert("object".into(), Value::from("chat.completion.chunk"));
@@ -2087,11 +2088,11 @@ mod tests {
         }
     }
 
-    /// The stream declares the `/system_fingerprint` Add only while no
-    /// upstream value is held; the Rewrite and the other members stay
-    /// declared either way.
+    /// The stream declares the `/system_fingerprint` Add and Rewrite only
+    /// while no upstream value is held; the other members stay declared
+    /// either way.
     #[test]
-    fn stream_declares_fingerprint_add_only_when_none_held() {
+    fn stream_declares_fingerprint_stamp_only_when_none_held() {
         let rows: [(&str, Option<UpstreamMeta>, bool); 2] = [
             (
                 "upstream value held",
@@ -2127,14 +2128,16 @@ mod tests {
                     "{name}, {chunk} chunk: {:?}",
                     edits.as_slice()
                 );
-                assert!(
+                assert_eq!(
                     declares(
                         edits,
                         EditSite::StreamEnvelopeStamp,
                         "/system_fingerprint",
                         EditKind::Rewrite
                     ),
-                    "{name}, {chunk} chunk"
+                    declares_add,
+                    "{name}, {chunk} chunk: {:?}",
+                    edits.as_slice()
                 );
                 assert!(
                     declares(

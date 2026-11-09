@@ -749,6 +749,64 @@ async fn transport_error_flushes_held_think_bytes_first() {
     }
 }
 
+/// RawThinkTag bytes held back as a possible `</think>` prefix reach the
+/// client before the error that ends the stream on an unpairable tool call.
+#[tokio::test]
+async fn unpairable_tool_call_error_flushes_held_think_bytes_first() {
+    // Arrange: "abc" is reasoning and "</th" is held; the next event's
+    // id-less tool call has no `index`, so no stable id can be minted.
+    let server = MockServer::start().await;
+    let sse_body = concat!(
+        "data: {\"id\":\"t1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"<think>abc</th\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"t1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"type\":\"function\",\"function\":{\"name\":\"f\",\"arguments\":\"\"}}]},\"finish_reason\":null}]}\n\n",
+        "data: [DONE]\n\n"
+    );
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse_body),
+        )
+        .mount(&server)
+        .await;
+    let provider = make_provider(&server.uri(), ReasoningDialect::RawThinkTag);
+
+    // Act
+    let items: Vec<_> = provider
+        .stream(user_request("m"))
+        .await
+        .unwrap()
+        .collect()
+        .await;
+
+    // Assert
+    assert_eq!(items.len(), 3, "items: {items:?}");
+    let delta = |i: usize| {
+        items[i]
+            .as_ref()
+            .ok()
+            .and_then(|c| c.choices.first())
+            .map(|choice| choice.delta.clone())
+    };
+    assert_eq!(
+        delta(0).and_then(|d| d.reasoning).as_deref(),
+        Some("abc"),
+        "the reasoning chunk comes first"
+    );
+    assert_eq!(
+        delta(1).and_then(|d| d.content).as_deref(),
+        Some("</th"),
+        "the held bytes come before the error"
+    );
+    match &items[2] {
+        Err(routectl_core::Error::Streaming(msg)) => {
+            assert!(msg.contains("tool_call"), "tool-call error, got {msg:?}");
+        }
+        other => panic!("expected the tool-call error last, got {other:?}"),
+    }
+}
+
 /// Pin: for `n > 1` the streaming stop-sequence heuristic must track
 /// per-choice content, not one shared buffer. Choice 0 streams `fooEND`
 /// (ends with the configured stop -> matches); choice 1 streams `bar`

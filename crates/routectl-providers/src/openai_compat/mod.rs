@@ -675,6 +675,9 @@ impl Provider for OpenAiCompatProvider {
                         // index or a genuinely ambiguous id collision) fails
                         // the stream rather than mispairing a tool_result.
                         if let Err(e) = tool_call_ids.fill_missing_ids(&provider_id, &mut chunk) {
+                            if let Some(flushed) = take_think_flush(dialect, &mut think_acc) {
+                                yield Ok(flushed);
+                            }
                             yield Err(e);
                             return;
                         }

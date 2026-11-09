@@ -143,11 +143,6 @@ pub(crate) fn lift_and_strip_usage_extras(usage: &mut Usage) -> Vec<&'static str
     stripped
 }
 
-/// Strip OpenAI-compat envelope keys from `ChatResponse.extras`.
-/// Anthropic-spec / Anthropic-beta fields (`service_tier`,
-/// `context_management`, `container`, ...) and any unknown forward-
-/// compat keys stay intact. Returns the list of keys actually
-/// removed so `normalize` can audit-log the strip.
 /// Lift a non-empty upstream `system_fingerprint` out of `extras` onto the
 /// transport-internal meta, where an OpenAI-shape ingress reads it, before
 /// the envelope strip removes the key from canonical.
@@ -167,6 +162,11 @@ fn carry_system_fingerprint(resp: &mut ChatResponse) {
     });
 }
 
+/// Strip OpenAI-compat envelope keys from `ChatResponse.extras`.
+/// Anthropic-spec / Anthropic-beta fields (`service_tier`,
+/// `context_management`, `container`, ...) and any unknown forward-
+/// compat keys stay intact. Returns the list of keys actually
+/// removed so `normalize` can audit-log the strip.
 fn strip_envelope_extras(extras: &mut serde_json::Map<String, Value>) -> Vec<&'static str> {
     let mut dropped: Vec<&'static str> = Vec::new();
     for k in OPENAI_COMPAT_ENVELOPE_KEYS {
