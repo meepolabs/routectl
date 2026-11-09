@@ -9539,10 +9539,11 @@ new section or a second doc.
   `--dry-run`; the pi version is read from `container/pi/package-lock.json`)
 - `container/run_capture.sh` -- host wrapper that runs ONE capture inside the
   image; a caller of `capture_driver.sh`, taking `--scratch` / `--image` /
-  `--name` / repeatable `--provider` plus a verbatim `--` passthrough of the runner's own
-  argv. The one owner of the `ROUTECTL_DRIVER_<PROVIDER>_API_KEY` credential
-  convention: per-provider resolution from the seat or the environment, with
-  the chatgpt-oauth account-id variable; `bedrock` instead takes
+  `--name` / repeatable `--provider` / `--max-seconds` / `--tmp-size` plus a
+  verbatim `--` passthrough of the runner's own argv. The one owner of the
+  `ROUTECTL_DRIVER_<PROVIDER>_API_KEY` credential convention: per-provider
+  resolution from the seat or the environment, with the chatgpt-oauth
+  account-id variable; `bedrock` instead takes
   `--aws-profile` / `--aws-config` / `--aws-credential-file` and mounts a
   generated one-profile config plus the credential file read-only
 - `container/aws_profile.py` -- host-side strict extractor of ONE AWS
@@ -9612,8 +9613,8 @@ new section or a second doc.
   `findings.jsonl`, published only after a scrub check
 - `wire_watch/classify.py` -- `classify`: one final outcome per cell from
   `run.json` and the cell's evidence
-- `wire_watch/legs.py` -- `legs_captured`: which of the four wire legs a
-  cell's landed fixture holds
+- `wire_watch/legs.py` -- `landing_leaf` / `legs_captured`: a cell's fixture
+  directory name and which of the four wire legs that landed fixture holds
 - `wire_watch/refusal.py` -- `load_rules` / `first_match` over
   `refusal_rules.tsv`, plus `key_expiry` for short-term Bedrock keys
 - `wire_watch/refusal_rules.tsv` -- the upstream-refusal table that fixes a
