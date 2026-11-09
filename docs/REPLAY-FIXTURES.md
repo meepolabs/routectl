@@ -46,7 +46,7 @@ There are two fixture roots, siblings under
   repo root unless `--out` says otherwise), because a rerun of a case
   overwrites that case's fixture and a corpus default would replace a
   reviewed fixture in place. Fixtures land two levels deep under this
-  root (`<root>/<lane>/<case_id>`), which is why the loader walks it
+  root (`<root>/<lane>/<leaf>`), which is why the loader walks it
   through `discover_driver_fixtures` rather than the single-level
   `discover_fixtures` the flat `captured/` root uses.
 
@@ -149,18 +149,33 @@ lands at:
 
     crates/routectl-cli/tests/fixtures/captured/<request_id>/
 
-A DRIVER capture (`--driver-mode`) lands keyed on `(lane, case_id)`, two
-components under the run's output root:
+A DRIVER capture (`--driver-mode`) lands keyed on `(lane, case_id,
+driver, config variant)`, two components under the run's output root:
 
-    <out>/<lane>/<case_id>/
+    <out>/<lane>/<case_id>__<driver>__<config_variant>/
+
+`<driver>` is the name the driver script records in its run record (its
+own basename: `claude-code` and `claude-code-print` drive one binary with
+one user-agent, so only this token tells their captures apart).
+`<config_variant>` is the stem of the committed lane config the run booted
+(`scripts/drivers/config/<stem>.toml`, the runner's `--lane`): it fixes
+egress, api shape and connection mode, and it is what keeps
+`bedrock-invoke` and `bedrock-converse` apart when both normalize to the
+`bedrock` lane. Each of the three leaf components must match
+`^[a-z0-9]+([.-][a-z0-9]+)*$`, so none can carry the `__` separator, a
+`/`, or a `.`/`..` segment, and the leaf is at most 255 bytes; the rig
+refuses anything else with exit 2 before it reads the trace. No hash is
+part of the key: a hash in the path would land a rerun under an edited
+config as a sibling instead of replacing it, and both hashes are in
+`meta.json`.
 
 `<out>` is the gitignored SCRATCH root by default
 (`.routectl-driver-scratch/` at the repo root; `scripts/capture_driver.sh
 --out` may name another path, confined to `--out-root`), never the
 committed corpus: an exploratory rerun of a case would otherwise replace
 a reviewed fixture in place. A scratch fixture enters the corpus at
-`crates/routectl-cli/tests/fixtures/driver/<lane>/<case_id>/` only
-through `scripts/promote_fixture.sh`, which requires the source to sit
+`crates/routectl-cli/tests/fixtures/driver/<lane>/<leaf>/` (the same two
+components it landed under) only through `scripts/promote_fixture.sh`, which requires the source to sit
 exactly two components under its `--scratch-root`, requires the dialect the
 fixture is being landed as (`--expected-ingress`), re-runs
 `scrub-fixture.sh --check` on the STAGED copy (a scratch fixture is
@@ -168,9 +183,9 @@ hand-editable between capture and promotion, so the rig's own capture-time
 scrub is no longer sufficient evidence), and refuses the promotion
 outright on a non-zero check.
 
-The lane component is also the key to the per-lane HERMETIC CONFIG the
-driver run booted under: `scripts/drivers/config/<lane>.toml`, committed,
-one file per lane. `scripts/capture_driver.sh` copies it into the run's
+The config-variant token is also the key to the HERMETIC CONFIG the
+driver run booted under: `scripts/drivers/config/<config_variant>.toml`,
+committed, one file per variant. `scripts/capture_driver.sh` copies it into the run's
 throwaway `$XDG_CONFIG_HOME/routectl/config.toml` and records its sha256
 as `meta.config_sha` -- the sha of the COMMITTED file, not of the booted
 copy, so the field names the scenario's config identity rather than
@@ -181,11 +196,11 @@ client drift.
 
 Case keying is what makes a driver corpus diffable. A UUID-keyed corpus
 grows a fresh sibling on every rerun and has nothing to compare against;
-case-keyed, a rerun of the same scenario RE-LANDS on the same path, so it
-either matches or diffs. The lane component is the NORMALIZED lane
+case-keyed, a rerun of the same scenario with the same driver and config
+variant RE-LANDS on the same path, so it either matches or diffs. The lane component is the NORMALIZED lane
 (`kind_str()` vocabulary, as in `meta.lane`), and driver mode refuses to
 promote a fixture whose provider kind did not map to one -- an empty lane
-would collapse the path to `<out>/<case_id>` and put a fixture nothing can
+would collapse the path to `<out>/<leaf>` and put a fixture nothing can
 gate into the canonical corpus.
 
 A rerun REPLACES the previous directory rather than merging into it: the
@@ -312,8 +327,11 @@ broke the corpus.)
       "case_id": String,
       "config_sha": String,
       "wire_pattern": "baseline" | "tool-use-multiturn" | "cache-breakpoints" | "thinking" | "large-context",
+      "config_variant": String,
+      "client_config_sha": String,
       "client": {
         "name": String,
+        "driver": String,
         "version": String,
         "binary_version": String,
         "connection_mode": String
@@ -407,11 +425,23 @@ Fields:
   one-off `request_id`. A rerun of the same case re-lands on the same
   identity, so it either matches or diffs. Written from
   `ROUTECTL_FIXTURE_CASE_ID`; empty for an unpinned live-box capture. In
-  driver mode it also NAMES the landing directory (see the layout above),
-  so it must be a single path-safe scenario name and it is mandatory.
+  driver mode it is the first token of the landing directory's name (see
+  the layout above), so it must be a single lowercase token and it is
+  mandatory.
 - `config_sha` -- hash of the config in force at capture time, so a
   rerun under a drifted config does not read as client drift. Written
   from `ROUTECTL_FIXTURE_CONFIG_SHA`.
+- `config_variant` -- the stem of the committed lane config the run
+  booted (`anthropic-api.front-proxy`, `bedrock-invoke`), the third token
+  of the landing directory's name. Written from
+  `ROUTECTL_FIXTURE_CONFIG_VARIANT`, which the runner sets to its `--lane`;
+  empty in live-box mode.
+- `client_config_sha` -- sha256 of the committed driver script
+  `scripts/drivers/<client.driver>.sh`, the script only and not `lib/`, so
+  a rerun under an edited driver does not read as client drift. Written
+  from `ROUTECTL_FIXTURE_CLIENT_CONFIG_SHA`; empty in live-box mode, and
+  empty (with a runner warning) when no committed script carries the
+  recorded name.
 - `wire_pattern` -- the wire shape the driven case CLAIMS to cover, a
   string in the closed `WIRE_PATTERNS` vocabulary enforced by
   `scripts/drivers/lib/validate_case.py` (`baseline`,
@@ -554,7 +584,11 @@ Fields:
   implementations of the three structural predicates classify the shared
   record set identically.
 - `client` -- which client produced the request. `name` / `version`
-  come from the captured ingress `user-agent`; `connection_mode` comes
+  come from the captured ingress `user-agent`; `driver` is the name the
+  driver script recorded in its run record (its basename), forwarded as
+  `ROUTECTL_FIXTURE_DRIVER` and the second token of the landing
+  directory's name, kept apart from the user-agent `name` because two
+  drivers can drive one client; empty in live-box mode. `connection_mode` comes
   from `ROUTECTL_FIXTURE_CONNECTION_MODE`, because the trace cannot
   observe it. The mode matters: Claude Code sends `role:"system"` turns
   in `messages[]` through a MITM front proxy but inlines the same
@@ -604,8 +638,11 @@ Fields:
   unset on the live-box path, where a trace genuinely cannot observe them,
   and MANDATORY in driver mode, where an unset pin is a bug in the driver
   rather than a fact about the capture. Driver mode aborts naming the
-  missing variable. `ROUTECTL_FIXTURE_EXPECTED_INGRESS` is the fifth
-  mandatory driver-mode pin and is NOT recorded: the value it pins is
+  missing variable. `ROUTECTL_FIXTURE_DRIVER` and
+  `ROUTECTL_FIXTURE_CONFIG_VARIANT` are mandatory in driver mode too (they
+  name the landing directory) and empty on the live-box path.
+  `ROUTECTL_FIXTURE_EXPECTED_INGRESS` is the seventh mandatory driver-mode
+  pin and is NOT recorded: the value it pins is
   already on disk as the traced `ingress_kind`, so a second copy could
   only ever disagree with the fact it was checked against.
 - `stream` -- `true` for SSE-bytes responses, `false` for JSON

@@ -165,6 +165,16 @@
 # user-agent) as the only statement about the client, with nothing to check
 # it against. An absent record forwards an EMPTY value; nothing invents one.
 #
+# The same record names the DRIVER: its `name=` line is the driver
+# script's basename, forwarded as `ROUTECTL_FIXTURE_DRIVER`. With
+# `ROUTECTL_FIXTURE_CONFIG_VARIANT` (the `--lane` config stem) it keys the
+# landing directory, `<out>/<lane>/<case>__<driver>__<lane config stem>`,
+# so two drivers or two configs that normalize to one lane land side by
+# side. The rig refuses a run whose record names no driver. Beside it,
+# `ROUTECTL_FIXTURE_CLIENT_CONFIG_SHA` is the sha256 of the committed
+# `scripts/drivers/<name>.sh` (the script only, not lib/), or EMPTY with a
+# warning when no such script exists.
+#
 # A driver maps ROUTECTL_BASE_URL onto whatever variable its client
 # reads; this script stays client-agnostic on purpose.
 #
@@ -240,6 +250,9 @@
 #   ROUTECTL_FIXTURE_WIRE_PATTERN
 #   ROUTECTL_FIXTURE_EXPECTED_INGRESS
 #   ROUTECTL_FIXTURE_CLIENT_BINARY_VERSION
+#   ROUTECTL_FIXTURE_DRIVER
+#   ROUTECTL_FIXTURE_CONFIG_VARIANT
+#   ROUTECTL_FIXTURE_CLIENT_CONFIG_SHA
 #
 # STABLE -- a contributor codes against these. Renaming one breaks a
 # driver, or changes what a landed fixture MEANS, so it moves only behind
@@ -311,7 +324,8 @@ set -eu
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RIG="$ROOT/scripts/capture_fixtures.sh"
-CONFIG_DIR="$ROOT/scripts/drivers/config"
+DRIVERS_DIR="$ROOT/scripts/drivers"
+CONFIG_DIR="$DRIVERS_DIR/config"
 CASES_DIR="$ROOT/scripts/drivers/cases"
 VALIDATE_CASE="$ROOT/scripts/drivers/lib/validate_case.py"
 
@@ -1104,8 +1118,31 @@ fi
 # `head -1` bounds the read to one line; the record is written one
 # `key=value` per line by the driver library.
 CLIENT_BINARY_VERSION=""
+DRIVER_NAME=""
 if [ -r "$CLIENT_RECORD" ]; then
   CLIENT_BINARY_VERSION="$(sed -n 's/^version=//p' "$CLIENT_RECORD" | head -1)"
+  DRIVER_NAME="$(sed -n 's/^name=//p' "$CLIENT_RECORD" | head -1)"
+fi
+[ -n "$DRIVER_NAME" ] ||
+  echo "capture_driver: WARN the driver recorded no client name in $CLIENT_RECORD; the rig will refuse the fixture" >&2
+
+# The driver script's own bytes, hashed from the committed tree rather than
+# from the command that ran: the name is what keys the fixture, so the
+# hash has to describe the script that name means. A name with a path
+# separator or a leading dot names no committed script and is not
+# resolved; the rig refuses it as a landing token anyway.
+CLIENT_CONFIG_SHA=""
+DRIVER_SCRIPT="$DRIVERS_DIR/$DRIVER_NAME.sh"
+case "$DRIVER_NAME" in
+  ''|*/*|.*) ;;
+  *)
+    if [ -f "$DRIVER_SCRIPT" ] && [ -r "$DRIVER_SCRIPT" ]; then
+      CLIENT_CONFIG_SHA="$(sha256sum "$DRIVER_SCRIPT" | cut -d' ' -f1)"
+    fi
+    ;;
+esac
+if [ -n "$DRIVER_NAME" ] && [ -z "$CLIENT_CONFIG_SHA" ]; then
+  echo "capture_driver: WARN no committed driver script for client name '$DRIVER_NAME' at $DRIVER_SCRIPT; recording an empty client_config_sha" >&2
 fi
 
 # Stop the daemon BEFORE the rig reads the trace: a still-running daemon
@@ -1132,6 +1169,9 @@ ROUTECTL_FIXTURE_CONNECTION_MODE="$CONNECTION_MODE" \
 ROUTECTL_FIXTURE_WIRE_PATTERN="$WIRE_PATTERN" \
 ROUTECTL_FIXTURE_EXPECTED_INGRESS="$EXPECTED_INGRESS" \
 ROUTECTL_FIXTURE_CLIENT_BINARY_VERSION="$CLIENT_BINARY_VERSION" \
+ROUTECTL_FIXTURE_DRIVER="$DRIVER_NAME" \
+ROUTECTL_FIXTURE_CONFIG_VARIANT="$LANE" \
+ROUTECTL_FIXTURE_CLIENT_CONFIG_SHA="$CLIENT_CONFIG_SHA" \
   bash "$RIG" --driver-mode --force \
     --log "$TRACE" \
     --out "$DRIVER_OUT" \
@@ -1152,4 +1192,4 @@ if [ "$rig_rc" != 0 ]; then
   exit 5
 fi
 
-echo "capture_driver: lane=$LANE case=$CASE_ID port=$PORT${MITM_PORT:+ mitm_port=$MITM_PORT} config_sha=$CONFIG_SHA expected_ingress=$EXPECTED_INGRESS out=$DRIVER_OUT"
+echo "capture_driver: lane=$LANE case=$CASE_ID port=$PORT${MITM_PORT:+ mitm_port=$MITM_PORT} config_sha=$CONFIG_SHA driver=$DRIVER_NAME client_config_sha=$CLIENT_CONFIG_SHA expected_ingress=$EXPECTED_INGRESS out=$DRIVER_OUT"

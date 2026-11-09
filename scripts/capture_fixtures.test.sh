@@ -703,24 +703,34 @@ check_log() {
     fi
 }
 
-# Set / clear the five driver pins in one call, so a case cannot leak a
-# pin into the next one (driver mode is fail-closed on all five, so a
-# leaked pin turns a refusal assertion into a silent pass). The wire
-# pattern and the expected ingress default because most cases care about
-# the other three; a case that needs a specific claim passes it as the
-# fourth or fifth argument. Both defaults match what `trace_driver`
-# produces, so a case that does not name them still promotes.
+# Set / clear the driver pins in one call, so a case cannot leak a pin
+# into the next one (driver mode is fail-closed on them, so a leaked pin
+# turns a refusal assertion into a silent pass). The wire pattern and the
+# expected ingress default because most cases care about the other three;
+# a case that needs a specific claim passes it as the fourth or fifth
+# argument. Both defaults match what `trace_driver` produces, so a case
+# that does not name them still promotes. The driver and config variant
+# default to PIN_DRIVER / PIN_CONFIG_VARIANT; a case about the landing key
+# itself overrides them after the call.
+PIN_DRIVER="claude-code"
+PIN_CONFIG_VARIANT="anthropic-api"
+# What a default-pinned driver capture appends to its case id to form the
+# landing leaf `<case>__<driver>__<config variant>`.
+PIN_LEAF_SUFFIX="__${PIN_DRIVER}__${PIN_CONFIG_VARIANT}"
 set_pins() {
     export ROUTECTL_FIXTURE_CASE_ID="$1"
     export ROUTECTL_FIXTURE_CONFIG_SHA="$2"
     export ROUTECTL_FIXTURE_CONNECTION_MODE="$3"
     export ROUTECTL_FIXTURE_WIRE_PATTERN="${4:-baseline}"
     export ROUTECTL_FIXTURE_EXPECTED_INGRESS="${5:-anthropic}"
+    export ROUTECTL_FIXTURE_DRIVER="$PIN_DRIVER"
+    export ROUTECTL_FIXTURE_CONFIG_VARIANT="$PIN_CONFIG_VARIANT"
 }
 clear_pins() {
     unset ROUTECTL_FIXTURE_CASE_ID ROUTECTL_FIXTURE_CONFIG_SHA \
         ROUTECTL_FIXTURE_CONNECTION_MODE ROUTECTL_FIXTURE_WIRE_PATTERN \
-        ROUTECTL_FIXTURE_EXPECTED_INGRESS
+        ROUTECTL_FIXTURE_EXPECTED_INGRESS ROUTECTL_FIXTURE_DRIVER \
+        ROUTECTL_FIXTURE_CONFIG_VARIANT ROUTECTL_FIXTURE_CLIENT_CONFIG_SHA
 }
 
 if ! command -v python3 >/dev/null 2>&1; then
@@ -1226,10 +1236,11 @@ fi
 rm -rf "$work"
 
 # --- Case 7: driver mode refuses on each unset pin, naming it ---------
-# Five cases plus a paired control. Without the control a rig that
+# Seven cases plus a paired control. Without the control a rig that
 # refused unconditionally -- or one that refused for an unrelated reason --
 # would pass all five refusal assertions.
-for missing in CASE_ID CONFIG_SHA CONNECTION_MODE WIRE_PATTERN EXPECTED_INGRESS; do
+for missing in CASE_ID CONFIG_SHA CONNECTION_MODE WIRE_PATTERN EXPECTED_INGRESS \
+    DRIVER CONFIG_VARIANT; do
     set_pins drift-01 abc123 base-url
     unset "ROUTECTL_FIXTURE_$missing"
     work="$(make_repo)"
@@ -1270,6 +1281,12 @@ if [ -f "$meta" ] && is_valid_json "$meta"; then
         "" "$(meta_get "$meta" client.connection_mode)"
     check "an unpinned live-box capture leaves wire_pattern empty" \
         "" "$(meta_get "$meta" wire_pattern)"
+    check "an unpinned live-box capture leaves config_variant empty" \
+        "" "$(meta_get "$meta" config_variant)"
+    check "an unpinned live-box capture leaves client.driver empty" \
+        "" "$(meta_get "$meta" client.driver)"
+    check "an unpinned live-box capture leaves client_config_sha empty" \
+        "" "$(meta_get "$meta" client_config_sha)"
 else
     echo "FAIL: unpinned live-box capture produced no parseable meta.json"
     cat "$work/rig.log"
@@ -1277,7 +1294,7 @@ else
 fi
 rm -rf "$work"
 
-# --- Case 8: driver landing keys on (lane, case_id) -------------------
+# --- Case 8: driver landing keys on (lane, case_id, driver, variant) -
 # A UUID-keyed corpus grows a fresh sibling per rerun and has nothing to
 # diff against. The lane directory comes from the NORMALIZED lane
 # (`anthropic` -> `anthropic-api`), so this also pins that the landing
@@ -1287,6 +1304,7 @@ rm -rf "$work"
 # `tool-use-multiturn`, and the promotion gate now checks the captured
 # bytes against the recorded claim.
 set_pins tools-multiturn-01 abc123 base-url tool-use-multiturn
+export ROUTECTL_FIXTURE_CLIENT_CONFIG_SHA="f00dfeed"
 work="$(make_repo)"
 rc=0
 rig_run "$work" "$(trace_driver_tools 019eab77-0000-4000-8000-000000000008)" \
@@ -1294,16 +1312,24 @@ rig_run "$work" "$(trace_driver_tools 019eab77-0000-4000-8000-000000000008)" \
 captured="$(captured_of "$work")"
 clear_pins
 check "a driver capture exits 0" "0" "$rc"
-dir="$captured/anthropic-api/tools-multiturn-01"
+dir="$captured/anthropic-api/tools-multiturn-01${PIN_LEAF_SUFFIX}"
 if [ -d "$dir" ]; then
-    echo "PASS: driver mode lands at <lane>/<case_id>"
+    echo "PASS: driver mode lands at <lane>/<case_id>__<driver>__<config variant>"
     assert_files_present "$dir" "a driver capture" "${REQUIRED_FILES[@]}"
     check "request_id survives in meta.json for traceability" \
         "019eab77-0000-4000-8000-000000000008" "$(meta_get "$dir/meta.json" request_id)"
     check "the wire pattern pin reaches a driver meta.json" \
         "tool-use-multiturn" "$(meta_get "$dir/meta.json" wire_pattern)"
+    check "the driver pin reaches meta.client.driver" \
+        "$PIN_DRIVER" "$(meta_get "$dir/meta.json" client.driver)"
+    check "the config variant pin reaches meta.config_variant" \
+        "$PIN_CONFIG_VARIANT" "$(meta_get "$dir/meta.json" config_variant)"
+    check "the client config sha pin reaches meta.client_config_sha" \
+        "f00dfeed" "$(meta_get "$dir/meta.json" client_config_sha)"
+    check "client.name stays the user-agent product, not the driver" \
+        "claude-cli" "$(meta_get "$dir/meta.json" client.name)"
 else
-    echo "FAIL: driver mode did not land at <lane>/<case_id> (rig log: $work/rig.log)"
+    echo "FAIL: driver mode did not land at <lane>/<case_id>__<driver>__<config variant> (rig log: $work/rig.log)"
     cat "$work/rig.log"
     fails=$((fails + 1))
 fi
@@ -1315,8 +1341,9 @@ else
 fi
 rm -rf "$work"
 
-# --- Case 9: a driver rerun REPLACES the same case's directory --------
-# Second run, different request_id, same case id, and a trace shape whose
+# --- Case 9: a driver rerun REPLACES the same key's directory ---------
+# Second run, different request_id, same case id, driver and config
+# variant (so the same landing leaf), and a trace shape whose
 # response-slot file set DIFFERS (stream: headers but no body). Replace
 # means the stale non-stream `upstream_response.json` is gone; a merge
 # would leave it behind and file presence IS the schema.
@@ -1324,14 +1351,14 @@ work="$(make_repo)"
 set_pins tools-multiturn-01 abc123 base-url
 rig_run "$work" "$(trace_driver 019eab77-0000-4000-8000-000000000009)" --driver-mode || true
 captured="$(captured_of "$work")"
-dir="$captured/anthropic-api/tools-multiturn-01"
+dir="$captured/anthropic-api/tools-multiturn-01${PIN_LEAF_SUFFIX}"
 first_req="$(meta_get "$dir/meta.json" request_id)"
 first_has_body=absent
 [ -f "$dir/upstream_response.json" ] && first_has_body=present
 rc=0
 rig_run "$work" "$(trace_driver_stream 019eab77-0000-4000-8000-00000000000a)" --driver-mode --force || rc=$?
 clear_pins
-check "a rerun of the same case exits 0" "0" "$rc"
+check "a rerun with identical key tokens exits 0" "0" "$rc"
 check "the first run wrote an upstream response body" "present" "$first_has_body"
 check "the rerun re-lands on the same directory" \
     "019eab77-0000-4000-8000-00000000000a" "$(meta_get "$dir/meta.json" request_id)"
@@ -1355,7 +1382,7 @@ rm -rf "$work"
 
 # --- Case 10: two different cases land side by side -------------------
 # The negative control for case 9: the replace behavior must be keyed on
-# the case id, not on the lane.
+# the case id, not on the lane alone.
 work="$(make_repo)"
 set_pins case-alpha abc123 base-url
 rig_run "$work" "$(trace_driver 019eab77-0000-4000-8000-00000000000b)" --driver-mode || true
@@ -1364,7 +1391,7 @@ rig_run "$work" "$(trace_driver 019eab77-0000-4000-8000-00000000000c)" --driver-
 clear_pins
 captured="$(captured_of "$work")"
 for case_name in case-alpha case-beta; do
-    if [ -f "$captured/anthropic-api/$case_name/meta.json" ]; then
+    if [ -f "$captured/anthropic-api/$case_name${PIN_LEAF_SUFFIX}/meta.json" ]; then
         echo "PASS: $case_name lands in its own directory"
     else
         echo "FAIL: $case_name did not land (rig log: $work/rig.log)"
@@ -1372,6 +1399,144 @@ for case_name in case-alpha case-beta; do
         fails=$((fails + 1))
     fi
 done
+rm -rf "$work"
+
+# --- Case 10b: two config variants on one lane land side by side ------
+# bedrock-invoke and bedrock-converse both normalize to the `bedrock`
+# lane, so a key of (lane, case) alone would land the second capture over
+# the first. The config variant is what keeps them apart.
+work="$(make_repo)"
+set_pins variant-pair-01 abc123 base-url
+export ROUTECTL_FIXTURE_CONFIG_VARIANT="bedrock-invoke"
+rig_run "$work" "$(trace_driver 019eab77-0000-4000-8000-0000000000d1 bedrock-invoke)" \
+    --driver-mode || true
+export ROUTECTL_FIXTURE_CONFIG_VARIANT="bedrock-converse"
+rig_run "$work" "$(trace_driver 019eab77-0000-4000-8000-0000000000d2 bedrock-converse)" \
+    --driver-mode --force || true
+clear_pins
+captured="$(captured_of "$work")"
+for variant in bedrock-invoke bedrock-converse; do
+    leaf="variant-pair-01__${PIN_DRIVER}__$variant"
+    if [ -f "$captured/bedrock/$leaf/meta.json" ]; then
+        echo "PASS: config variant $variant lands at bedrock/$leaf"
+        check "bedrock/$leaf records its own config variant" \
+            "$variant" "$(meta_get "$captured/bedrock/$leaf/meta.json" config_variant)"
+    else
+        echo "FAIL: config variant $variant did not land at bedrock/$leaf (rig log: $work/rig.log)"
+        cat "$work/rig.log"
+        fails=$((fails + 1))
+    fi
+done
+check "two config variants on one lane leave two directories under it" "2" \
+    "$(find "$captured/bedrock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')"
+rm -rf "$work"
+
+# --- Case 10c: two drivers of one case and config land side by side ---
+# The interactive and print drivers run one binary with one user-agent, so
+# nothing traced tells their captures apart; the driver token does.
+work="$(make_repo)"
+for driver in claude-code claude-code-print; do
+    set_pins driver-pair-01 abc123 base-url
+    export ROUTECTL_FIXTURE_DRIVER="$driver"
+    rig_run "$work" "$(trace_driver "019eab77-0000-4000-8000-0000000000d$([ "$driver" = claude-code ] && echo 3 || echo 4)")" \
+        --driver-mode --force || true
+    clear_pins
+done
+captured="$(captured_of "$work")"
+for driver in claude-code claude-code-print; do
+    leaf="driver-pair-01__${driver}__$PIN_CONFIG_VARIANT"
+    if [ -f "$captured/anthropic-api/$leaf/meta.json" ]; then
+        echo "PASS: driver $driver lands at anthropic-api/$leaf"
+        check "anthropic-api/$leaf records its own driver" \
+            "$driver" "$(meta_get "$captured/anthropic-api/$leaf/meta.json" client.driver)"
+    else
+        echo "FAIL: driver $driver did not land at anthropic-api/$leaf (rig log: $work/rig.log)"
+        cat "$work/rig.log"
+        fails=$((fails + 1))
+    fi
+done
+check "two drivers of one case leave two directories under the lane" "2" \
+    "$(find "$captured/anthropic-api" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')"
+rm -rf "$work"
+
+# --- Case 10d: every leaf component is held to the token grammar -------
+# One row per (component, value). Each refused value would either forge
+# the `__` separator (two different triples spelling one leaf) or step out
+# of the lane directory. A refusal exits 2 before the trace is read and
+# lands nothing at all.
+leaf_grammar_row() {
+    local component="$1" value="$2" label="$3" rc=0
+    set_pins grammar-01 abc123 base-url
+    export "ROUTECTL_FIXTURE_$component=$value"
+    work="$(make_repo)"
+    rig_run "$work" "$(trace_driver 019eab77-0000-4000-8000-0000000000d5)" \
+        --driver-mode || rc=$?
+    clear_pins
+    check "$component $label is refused with exit 2" "2" "$rc"
+    check_log "the $component $label refusal names the grammar" \
+        "must be one lowercase token" "$work/rig.log"
+    check "$component $label lands nothing" "0" \
+        "$(find "$(captured_of "$work")" -mindepth 1 -maxdepth 1 ! -name '.*' 2>/dev/null | wc -l | tr -d ' ')"
+    rm -rf "$work"
+}
+for component in CASE_ID DRIVER CONFIG_VARIANT; do
+    leaf_grammar_row "$component" 'a__b' "carrying the separator"
+    leaf_grammar_row "$component" 'a/b' "carrying a path separator"
+    leaf_grammar_row "$component" '..' "naming the parent directory"
+    leaf_grammar_row "$component" 'Upper' "carrying an uppercase letter"
+done
+
+# Paired ACCEPT control, one per component: a dotted, hyphenated token
+# (the config stems are spelled that way) lands at exactly the leaf it
+# composes. Without it a rig that refused every pin would pass the table.
+leaf_accept_row() {
+    local component="$1" value="$2" leaf="$3" rc=0
+    set_pins grammar-01 abc123 base-url
+    export "ROUTECTL_FIXTURE_$component=$value"
+    work="$(make_repo)"
+    rig_run "$work" "$(trace_driver 019eab77-0000-4000-8000-0000000000d6)" \
+        --driver-mode || rc=$?
+    clear_pins
+    check "$component '$value' is accepted" "0" "$rc"
+    check "$component '$value' lands at anthropic-api/$leaf" "yes" \
+        "$([ -f "$(captured_of "$work")/anthropic-api/$leaf/meta.json" ] && echo yes || echo no)"
+    rm -rf "$work"
+}
+leaf_accept_row CASE_ID "grammar.case-01" "grammar.case-01${PIN_LEAF_SUFFIX}"
+leaf_accept_row DRIVER "driver.v2-x" "grammar-01__driver.v2-x__$PIN_CONFIG_VARIANT"
+leaf_accept_row CONFIG_VARIANT "anthropic-api.front-proxy" \
+    "grammar-01__${PIN_DRIVER}__anthropic-api.front-proxy"
+
+# The leaf is one path component, and a filesystem caps that at 255 bytes.
+# A 255-byte leaf lands; one byte more is refused up front rather than
+# failing at the mkdir after every gate ran.
+leaf_case_of_length() {
+    local want="$1" overhead
+    overhead=$(( ${#PIN_LEAF_SUFFIX} ))
+    printf 'c%.0s' $(seq 1 $((want - overhead)))
+}
+case_255="$(leaf_case_of_length 255)"
+case_256="$(leaf_case_of_length 256)"
+check "the 255-byte fixture composes a 255-byte leaf" "255" \
+    "$(printf '%s%s' "$case_255" "$PIN_LEAF_SUFFIX" | wc -c | tr -d ' ')"
+set_pins "$case_255" abc123 base-url
+work="$(make_repo)"
+rc=0
+rig_run "$work" "$(trace_driver 019eab77-0000-4000-8000-0000000000d7)" --driver-mode || rc=$?
+clear_pins
+check "a 255-byte leaf is accepted" "0" "$rc"
+check "a 255-byte leaf lands" "yes" \
+    "$([ -f "$(captured_of "$work")/anthropic-api/$case_255$PIN_LEAF_SUFFIX/meta.json" ] && echo yes || echo no)"
+rm -rf "$work"
+set_pins "$case_256" abc123 base-url
+work="$(make_repo)"
+rc=0
+rig_run "$work" "$(trace_driver 019eab77-0000-4000-8000-0000000000d8)" --driver-mode || rc=$?
+clear_pins
+check "a 256-byte leaf is refused with exit 2" "2" "$rc"
+check_log "the 256-byte refusal names the limit" "over the 255-byte limit" "$work/rig.log"
+check "a 256-byte leaf lands nothing" "0" \
+    "$(find "$(captured_of "$work")" -mindepth 1 -maxdepth 1 ! -name '.*' 2>/dev/null | wc -l | tr -d ' ')"
 rm -rf "$work"
 
 # --- Case 11: a body line quoting the phrase cannot displace the -------
@@ -1386,7 +1551,7 @@ set_pins decoy-01 abc123 base-url
 work="$(make_repo)"
 rig_run "$work" "$(trace_driver_decoy 019eab77-0000-4000-8000-00000000000d)" --driver-mode || true
 clear_pins
-structural="$(captured_of "$work")/anthropic-api/decoy-01/structural.txt"
+structural="$(captured_of "$work")/anthropic-api/decoy-01${PIN_LEAF_SUFFIX}/structural.txt"
 if [ -f "$structural" ]; then
     check "the decoy trace still lands both structural summaries" \
         "2" "$(wc -l <"$structural" | tr -d ' ')"
@@ -1421,7 +1586,7 @@ set_pins clean-01 abc123 base-url
 work="$(make_repo)"
 rig_run "$work" "$(trace_driver 019eab77-0000-4000-8000-00000000000e)" --driver-mode || true
 clear_pins
-structural="$(captured_of "$work")/anthropic-api/clean-01/structural.txt"
+structural="$(captured_of "$work")/anthropic-api/clean-01${PIN_LEAF_SUFFIX}/structural.txt"
 if [ -f "$structural" ]; then
     check "a clean pair lands two structural lines" \
         "2" "$(wc -l <"$structural" | tr -d ' ')"
@@ -1451,7 +1616,7 @@ if [ "$rc" -eq 0 ]; then
 else
     echo "PASS: driver mode fails a fixture with no structural summary"
 fi
-if [ -d "$(captured_of "$work")/anthropic-api/halfway-01" ]; then
+if [ -d "$(captured_of "$work")/anthropic-api/halfway-01${PIN_LEAF_SUFFIX}" ]; then
     echo "FAIL: driver mode landed a fixture with no structural summary"
     fails=$((fails + 1))
 else
@@ -1494,7 +1659,7 @@ fi
 # refused fixture is a defect a runner must never retry, while a zero
 # landing is retryable. Conflated, the caller has to parse stderr.
 check "a scrub refusal exits 1, not the zero-landing 3" "1" "$rc"
-if [ -d "$(captured_of "$work")/anthropic-api/dirty-01" ]; then
+if [ -d "$(captured_of "$work")/anthropic-api/dirty-01${PIN_LEAF_SUFFIX}" ]; then
     echo "FAIL: a scrub-refused fixture reached the corpus"
     fails=$((fails + 1))
 else
@@ -1513,7 +1678,7 @@ rc=0
 rig_run "$work" "$(trace_driver 019eab77-0000-4000-8000-000000000012)" --driver-mode || rc=$?
 clear_pins
 check "driver mode promotes a fixture the scrub check accepts" "0" "$rc"
-if [ -f "$(captured_of "$work")/anthropic-api/clean-scrub-01/meta.json" ]; then
+if [ -f "$(captured_of "$work")/anthropic-api/clean-scrub-01${PIN_LEAF_SUFFIX}/meta.json" ]; then
     echo "PASS: a clean driver fixture is promoted"
 else
     echo "FAIL: a clean driver fixture was not promoted (rig log: $work/rig.log)"
@@ -1593,7 +1758,7 @@ rig_run "$work" "$(trace_driver 019eab77-0000-4000-8000-00000000001e gemini)" \
     --driver-mode || rc=$?
 clear_pins
 check "a classified lane still promotes at exit 0" "0" "$rc"
-if [ -f "$(captured_of "$work")/gemini/classified-lane-01/meta.json" ]; then
+if [ -f "$(captured_of "$work")/gemini/classified-lane-01${PIN_LEAF_SUFFIX}/meta.json" ]; then
     echo "PASS: a fixture on a classified lane is promoted"
 else
     echo "FAIL: a fixture on a classified lane was not promoted (rig log: $work/rig.log)"
@@ -1635,7 +1800,7 @@ work="$(make_repo)"
 rig_run "$work" "$(trace_driver 019eab77-0000-4000-8000-000000000013)" --driver-mode || true
 clear_pins
 captured="$(captured_of "$work")"
-meta="$captured/anthropic-api/quote-case-01/meta.json"
+meta="$captured/anthropic-api/quote-case-01${PIN_LEAF_SUFFIX}/meta.json"
 if [ -f "$meta" ]; then
     if is_valid_json "$meta"; then
         echo "PASS: a driver meta.json parses with a quote in a pin"
@@ -1836,7 +2001,7 @@ check_log "the deep-residue refusal names the home-prefix class" "home-prefix" \
     "$work/rig.log"
 check_log "the deep-residue refusal is the scrub check" "scrub check refused" \
     "$work/rig.log"
-if [ -d "$(captured_of "$work")/anthropic-api/deep-residue-01" ]; then
+if [ -d "$(captured_of "$work")/anthropic-api/deep-residue-01${PIN_LEAF_SUFFIX}" ]; then
     echo "FAIL: a fixture with a deep residue reached the corpus"
     fails=$((fails + 1))
 else
@@ -1866,7 +2031,7 @@ rig_run "$work" \
     --driver-mode || rc=$?
 clear_pins
 check "the same large body without the residue promotes at exit 0" "0" "$rc"
-ingress="$(captured_of "$work")/anthropic-api/large-clean-01/ingress_request.json"
+ingress="$(captured_of "$work")/anthropic-api/large-clean-01${PIN_LEAF_SUFFIX}/ingress_request.json"
 if [ -f "$ingress" ]; then
     echo "PASS: a large clean driver fixture is promoted"
     # The promoted bytes are the FULL body: the contract's third step is
@@ -1913,7 +2078,7 @@ if [ -n "$own_home" ] && [ "$own_home" != "$placeholder_home" ]; then
     clear_pins
     check "a body holding the contributor's own home promotes: --write ran before --check" \
         "0" "$rc"
-    ingress="$(captured_of "$work")/anthropic-api/own-home-01/ingress_request.json"
+    ingress="$(captured_of "$work")/anthropic-api/own-home-01${PIN_LEAF_SUFFIX}/ingress_request.json"
     if [ -f "$ingress" ] && ! grep -qF -- "$own_home" "$ingress"; then
         echo "PASS: the promoted fixture carries the placeholder home, not the real one"
     else
@@ -1960,7 +2125,7 @@ check "a fixture contradicting its claimed pattern refuses with exit 1" "1" "$rc
 check_log "the pattern refusal names the claimed pattern" "baseline" "$work/rig.log"
 check_log "the pattern refusal names the clause that failed" "thinking_shape" \
     "$work/rig.log"
-if [ -d "$(captured_of "$work")/anthropic-api/pattern-mismatch-01" ]; then
+if [ -d "$(captured_of "$work")/anthropic-api/pattern-mismatch-01${PIN_LEAF_SUFFIX}" ]; then
     echo "FAIL: a fixture contradicting its claimed pattern reached the corpus"
     fails=$((fails + 1))
 else
@@ -1987,7 +2152,7 @@ rc=0
 rig_run "$work" "$(trace_driver 019eab77-0000-4000-8000-000000000031)" --driver-mode || rc=$?
 clear_pins
 check "a fixture exhibiting its claimed pattern still promotes at exit 0" "0" "$rc"
-if [ -f "$(captured_of "$work")/anthropic-api/pattern-match-01/meta.json" ]; then
+if [ -f "$(captured_of "$work")/anthropic-api/pattern-match-01${PIN_LEAF_SUFFIX}/meta.json" ]; then
     echo "PASS: a fixture exhibiting its claimed pattern is promoted"
 else
     echo "FAIL: a matching fixture was not promoted (rig log: $work/rig.log)"
@@ -2007,7 +2172,7 @@ rig_run "$work" "$(trace_driver_tools 019eab77-0000-4000-8000-000000000032)" \
     --driver-mode || rc=$?
 clear_pins
 check "a tool-loop fixture claiming tool-use-multiturn promotes at exit 0" "0" "$rc"
-if [ -f "$(captured_of "$work")/anthropic-api/tools-pattern-01/meta.json" ]; then
+if [ -f "$(captured_of "$work")/anthropic-api/tools-pattern-01${PIN_LEAF_SUFFIX}/meta.json" ]; then
     echo "PASS: a body-census pattern is verified off the captured body"
 else
     echo "FAIL: a tool-loop fixture was not promoted (rig log: $work/rig.log)"
@@ -2122,7 +2287,7 @@ clear_pins
 check "a front-proxy fixture with no seam header refuses with exit 1" "1" "$rc"
 check_log "the refusal says the run did not transit the MITM listener" \
     "did not transit the MITM listener" "$work/rig.log"
-if [ -d "$(captured_of "$work")/anthropic-api/fp-no-seam-01" ]; then
+if [ -d "$(captured_of "$work")/anthropic-api/fp-no-seam-01${PIN_LEAF_SUFFIX}" ]; then
     echo "FAIL: a front-proxy fixture with no seam header reached the corpus"
     fails=$((fails + 1))
 else
@@ -2144,7 +2309,7 @@ rc=0
 rig_run "$work" "$seam_trace" --driver-mode || rc=$?
 clear_pins
 check "a front-proxy fixture carrying the seam header promotes at exit 0" "0" "$rc"
-seam_headers="$(captured_of "$work")/anthropic-api/fp-seam-01/ingress_request.headers.json"
+seam_headers="$(captured_of "$work")/anthropic-api/fp-seam-01${PIN_LEAF_SUFFIX}/ingress_request.headers.json"
 if [ -f "$seam_headers" ] && grep -qF "$SEAM_HEADER" "$seam_headers"; then
     echo "PASS: the promoted front-proxy fixture retains the seam header name"
 else
@@ -2175,7 +2340,7 @@ clear_pins
 check "a base-url fixture carrying the seam header refuses with exit 1" "1" "$rc"
 check_log "the refusal says the run DID transit the MITM listener" \
     "DID transit the MITM listener" "$work/rig.log"
-if [ -d "$(captured_of "$work")/anthropic-api/bu-seam-01" ]; then
+if [ -d "$(captured_of "$work")/anthropic-api/bu-seam-01${PIN_LEAF_SUFFIX}" ]; then
     echo "FAIL: a base-url fixture carrying the seam header reached the corpus"
     fails=$((fails + 1))
 else
@@ -2192,7 +2357,7 @@ rc=0
 rig_run "$work" "$(trace_driver 019eab77-0000-4000-8000-000000000037)" --driver-mode || rc=$?
 clear_pins
 check "a base-url fixture with no seam header promotes at exit 0" "0" "$rc"
-if [ -f "$(captured_of "$work")/anthropic-api/bu-no-seam-01/meta.json" ]; then
+if [ -f "$(captured_of "$work")/anthropic-api/bu-no-seam-01${PIN_LEAF_SUFFIX}/meta.json" ]; then
     echo "PASS: a base-url fixture with no seam header is promoted"
 else
     echo "FAIL: a clean base-url fixture was not promoted (rig log: $work/rig.log)"
@@ -2292,7 +2457,7 @@ check "a capture on an unexpected ingress dialect refuses with exit 1" "1" "$rc"
 check_log "the refusal names the traced dialect" "openai-responses" "$work/rig.log"
 check_log "the refusal names the expected dialect" "expects 'anthropic'" \
     "$work/rig.log"
-if [ -d "$(captured_of "$work")/anthropic-api/ingress-mismatch-01" ]; then
+if [ -d "$(captured_of "$work")/anthropic-api/ingress-mismatch-01${PIN_LEAF_SUFFIX}" ]; then
     echo "FAIL: a fixture on an unexpected dialect reached the corpus"
     fails=$((fails + 1))
 else
@@ -2318,11 +2483,11 @@ rig_run "$work" \
     --driver-mode || rc=$?
 clear_pins
 check "the same capture under the matching pin promotes at exit 0" "0" "$rc"
-if [ -f "$(captured_of "$work")/anthropic-api/ingress-match-01/meta.json" ]; then
+if [ -f "$(captured_of "$work")/anthropic-api/ingress-match-01${PIN_LEAF_SUFFIX}/meta.json" ]; then
     echo "PASS: a capture whose traced dialect equals its pin is promoted"
     check "the promoted fixture records the traced dialect it was gated on" \
         "openai-responses" \
-        "$(meta_get "$(captured_of "$work")/anthropic-api/ingress-match-01/meta.json" ingress_kind)"
+        "$(meta_get "$(captured_of "$work")/anthropic-api/ingress-match-01${PIN_LEAF_SUFFIX}/meta.json" ingress_kind)"
 else
     echo "FAIL: a matching-dialect fixture was not promoted (rig log: $work/rig.log)"
     cat "$work/rig.log"
@@ -2453,7 +2618,7 @@ rig_run "$work" "$(trace_driver 019eab77-0000-4000-8000-00000000003a)" --driver-
 clear_pins
 clear_binary_version
 check "agreeing client versions promote at exit 0" "0" "$rc"
-meta="$(captured_of "$work")/anthropic-api/cv-agree-01/meta.json"
+meta="$(captured_of "$work")/anthropic-api/cv-agree-01${PIN_LEAF_SUFFIX}/meta.json"
 if [ -f "$meta" ] && is_valid_json "$meta"; then
     check "the binary-side version lands verbatim, decoration included" \
         "2.1.167 (Claude Code)" "$(meta_get "$meta" client.binary_version)"
@@ -2477,7 +2642,7 @@ clear_pins
 clear_binary_version
 check "disagreeing client versions refuse with exit 1" "1" "$rc"
 check_log "the refusal names the binary-side reading" "off the binary" "$work/rig.log"
-if [ -d "$(captured_of "$work")/anthropic-api/cv-disagree-01" ]; then
+if [ -d "$(captured_of "$work")/anthropic-api/cv-disagree-01${PIN_LEAF_SUFFIX}" ]; then
     echo "FAIL: a fixture whose two client versions disagree reached the corpus"
     fails=$((fails + 1))
 else
@@ -2497,7 +2662,7 @@ rc=0
 rig_run "$work" "$(trace_driver 019eab77-0000-4000-8000-00000000003c)" --driver-mode || rc=$?
 clear_pins
 check "an unset binary-side version promotes at exit 0" "0" "$rc"
-meta="$(captured_of "$work")/anthropic-api/cv-absent-binary-01/meta.json"
+meta="$(captured_of "$work")/anthropic-api/cv-absent-binary-01${PIN_LEAF_SUFFIX}/meta.json"
 if [ -f "$meta" ] && is_valid_json "$meta"; then
     check "an unset binary-side version is recorded as empty" "" \
         "$(meta_get "$meta" client.binary_version)"
@@ -2525,7 +2690,7 @@ rig_run "$work" \
 clear_pins
 clear_binary_version
 check "an absent wire version promotes at exit 0" "0" "$rc"
-meta="$(captured_of "$work")/anthropic-api/cv-absent-wire-01/meta.json"
+meta="$(captured_of "$work")/anthropic-api/cv-absent-wire-01${PIN_LEAF_SUFFIX}/meta.json"
 if [ -f "$meta" ] && is_valid_json "$meta"; then
     check "an absent wire version is recorded as empty" "" \
         "$(meta_get "$meta" client.version)"
@@ -2626,7 +2791,7 @@ work="$(make_repo)"
 rc=0
 rig_run "$work" "$(selector_trace baseline tools)" --driver-mode || rc=$?
 clear_pins
-dir="$(captured_of "$work")/anthropic-api/select-second-01"
+dir="$(captured_of "$work")/anthropic-api/select-second-01${PIN_LEAF_SUFFIX}"
 check "a run whose second candidate matches exits 0" "0" "$rc"
 check "the landed body is the SECOND request's, not the first's" "tools" \
     "$(landed_shape "$dir")"
@@ -2645,7 +2810,7 @@ work="$(make_repo)"
 rc=0
 rig_run "$work" "$(selector_trace tools baseline)" --driver-mode || rc=$?
 clear_pins
-dir="$(captured_of "$work")/anthropic-api/select-first-01"
+dir="$(captured_of "$work")/anthropic-api/select-first-01${PIN_LEAF_SUFFIX}"
 check "a run whose FIRST candidate matches exits 0" "0" "$rc"
 check "the landed body is the FIRST request's" "tools" "$(landed_shape "$dir")"
 check "meta.request_id names the first candidate" "$SEL_ID_A" \
@@ -2672,7 +2837,7 @@ check_log "the refusal names how many candidates it examined" "examined 2 candid
     "$work/rig.err"
 check_log "the refusal names the claim none of them exhibited" "thinking" \
     "$work/rig.err"
-if [ -d "$(captured_of "$work")/anthropic-api/select-none-01" ]; then
+if [ -d "$(captured_of "$work")/anthropic-api/select-none-01${PIN_LEAF_SUFFIX}" ]; then
     echo "FAIL: a run whose candidates all failed still landed a fixture"
     fails=$((fails + 1))
 else
@@ -2719,7 +2884,7 @@ work="$(make_repo)"
 rc=0
 rig_run_split "$work" "$(selector_trace tools tools-long)" --driver-mode || rc=$?
 clear_pins
-dir="$(captured_of "$work")/anthropic-api/select-both-01"
+dir="$(captured_of "$work")/anthropic-api/select-both-01${PIN_LEAF_SUFFIX}"
 check "two candidates that BOTH satisfy the claim SUCCEED" "0" "$rc"
 check "the FIRST candidate's body landed, not the later witness's" "3" \
     "$(landed_turn_count "$dir")"
@@ -2773,7 +2938,7 @@ rc=0
 rig_run_split "$work" "$(selector_trace_3 baseline tools tools-long)" \
     --driver-mode || rc=$?
 clear_pins
-dir="$(captured_of "$work")/anthropic-api/select-measured-01"
+dir="$(captured_of "$work")/anthropic-api/select-measured-01${PIN_LEAF_SUFFIX}"
 check "the measured three-candidate shape SUCCEEDS" "0" "$rc"
 check "the SECOND candidate's body landed" "3" "$(landed_turn_count "$dir")"
 check "meta.request_id names the second candidate" "$SEL_ID_B" \
@@ -2808,7 +2973,7 @@ for leg in \
     clear_pins
     check "a non-continuation redundant match ($name) REFUSES with exit 1" "1" "$rc"
     check_log "the $name refusal names the field that differs" "$msg" "$work/rig.err"
-    if [ -d "$(captured_of "$work")/anthropic-api/noncont-$name-01" ]; then
+    if [ -d "$(captured_of "$work")/anthropic-api/noncont-$name-01${PIN_LEAF_SUFFIX}" ]; then
         echo "FAIL: the $name non-continuation left a promoted fixture"
         fails=$((fails + 1))
     else
@@ -2832,7 +2997,7 @@ rig_run_split "$work" "$(selector_trace tools tools-long)" --driver-mode || rc=$
 clear_pins
 check "a strict continuation of the selected candidate promotes at exit 0" "0" "$rc"
 check "and the FIRST candidate's body is what landed" "3" \
-    "$(landed_turn_count "$(captured_of "$work")/anthropic-api/noncont-accept-01")"
+    "$(landed_turn_count "$(captured_of "$work")/anthropic-api/noncont-accept-01${PIN_LEAF_SUFFIX}")"
 rm -rf "$work"
 
 # CONTROL 4e: the client's SESSION-TITLE side-request is set aside by its
@@ -2851,7 +3016,7 @@ for leg in "title-first:title:turn:$SEL_ID_B" "title-second:turn:title:$SEL_ID_A
     rc=0
     rig_run_split "$work" "$(selector_trace "$first" "$second")" --driver-mode || rc=$?
     clear_pins
-    dir="$(captured_of "$work")/anthropic-api/side-$name-01"
+    dir="$(captured_of "$work")/anthropic-api/side-$name-01${PIN_LEAF_SUFFIX}"
     check "a title side-request beside the main turn ($name) promotes at exit 0" "0" "$rc"
     check "the MAIN turn landed, not the title request ($name)" "$want_id" \
         "$([ -f "$dir/meta.json" ] && meta_get "$dir/meta.json" request_id)"
@@ -2909,7 +3074,7 @@ for leg in "genuine:turn-other" "near-miss:title-open" \
     check_log "the $name refusal is the continuation refusal" \
         "A continuation extends the history" "$work/rig.err"
     check "the $name refusal lands nothing" "no" \
-        "$([ -d "$(captured_of "$work")/anthropic-api/side-$name-01" ] && echo yes || echo no)"
+        "$([ -d "$(captured_of "$work")/anthropic-api/side-$name-01${PIN_LEAF_SUFFIX}" ] && echo yes || echo no)"
     rm -rf "$work"
 done
 unset name second
@@ -2937,7 +3102,7 @@ clear_pins
 captured="$(captured_of "$work")"
 check "scrub residue on a REDUNDANT candidate is FATAL, not a redundant skip" "1" "$rc"
 check_log "the fatal refusal is the scrub check" "scrub check refused" "$work/rig.err"
-if [ -d "$captured/anthropic-api/redundant-scrub-01" ]; then
+if [ -d "$captured/anthropic-api/redundant-scrub-01${PIN_LEAF_SUFFIX}" ]; then
     echo "FAIL: residue on a redundant candidate still promoted the selection"
     fails=$((fails + 1))
 else
@@ -2991,7 +3156,7 @@ captured="$(captured_of "$work")"
 check "a refusal from a LATER candidate exits 1" "1" "$rc"
 check_log "the later candidate's own dialect is what refused" \
     "was captured on ingress dialect 'openai'" "$work/rig.err"
-if [ -d "$captured/anthropic-api/later-refusal-01" ]; then
+if [ -d "$captured/anthropic-api/later-refusal-01${PIN_LEAF_SUFFIX}" ]; then
     echo "FAIL: a later candidate's refusal left the selection promoted"
     fails=$((fails + 1))
 else
@@ -3028,7 +3193,7 @@ rig_run_split "$work" "$(selector_trace tools tools-long)" --driver-mode || rc=$
 clear_pins
 captured="$(captured_of "$work")"
 check "the same shape without the later refusal exits 0" "0" "$rc"
-if [ -d "$captured/anthropic-api/later-refusal-clean-01" ]; then
+if [ -d "$captured/anthropic-api/later-refusal-clean-01${PIN_LEAF_SUFFIX}" ]; then
     echo "PASS: the clean run DOES create the lane directory and land the fixture"
 else
     echo "FAIL: the clean run landed nothing, so 4e's lane assertion is vacuous"
@@ -3087,7 +3252,7 @@ rig_run_split "$work" "$(
 )" --driver-mode || rc=$?
 clear_pins
 captured="$(captured_of "$work")"
-dir="$captured/anthropic-api/lane-skip-01"
+dir="$captured/anthropic-api/lane-skip-01${PIN_LEAF_SUFFIX}"
 check "a laneless LATER candidate does not discard the selection" "0" "$rc"
 check "the selected candidate's body is what landed" "3" "$(landed_turn_count "$dir")"
 check "meta.request_id names the selected candidate" "$SEL_ID_A" \
@@ -3118,7 +3283,7 @@ captured="$(captured_of "$work")"
 check "a laneless SELECTED candidate still REFUSES the run" "1" "$rc"
 check_log "the refusal names the candidate and does not promote" \
     "not promoting the fixture" "$work/rig.err"
-if [ -d "$captured/anthropic-api/lane-refuse-01" ]; then
+if [ -d "$captured/anthropic-api/lane-refuse-01${PIN_LEAF_SUFFIX}" ]; then
     echo "FAIL: a laneless selected candidate promoted anyway"
     fails=$((fails + 1))
 else
@@ -3156,7 +3321,7 @@ rig_run_split "$work" "$(selector_trace tools tools-long)" --driver-mode || rc=$
 clear_pins
 check "the same shape with a LANEABLE later candidate also exits 0" "0" "$rc"
 check "and lands the same selected body" "3" \
-    "$(landed_turn_count "$(captured_of "$work")/anthropic-api/lane-skip-clean-01")"
+    "$(landed_turn_count "$(captured_of "$work")/anthropic-api/lane-skip-clean-01${PIN_LEAF_SUFFIX}")"
 check_log "but counts the later candidate REDUNDANT, not skipped" \
     "candidates_skipped=0 candidates_redundant=1" "$work/rig.out"
 rm -rf "$work"
@@ -3219,7 +3384,7 @@ check "a seam/mode refusal still ABORTS the run despite a matching later candida
     "1" "$rc"
 check_log "the seam refusal is the class that fired" "DID transit the MITM listener" \
     "$work/rig.log"
-if [ -d "$(captured_of "$work")/anthropic-api/hazard-seam-01" ]; then
+if [ -d "$(captured_of "$work")/anthropic-api/hazard-seam-01${PIN_LEAF_SUFFIX}" ]; then
     echo "FAIL: a seam-incoherent run landed a later candidate anyway"
     fails=$((fails + 1))
 else
@@ -3252,7 +3417,7 @@ if strip_shape_row "$work" anthropic-api; then
         "1" "$rc"
     check_log "the unclassified-lane refusal is the class that fired" \
         "has no credential-shape classification" "$work/rig.log"
-    if [ -d "$(captured_of "$work")/anthropic-api/hazard-lane-01" ]; then
+    if [ -d "$(captured_of "$work")/anthropic-api/hazard-lane-01${PIN_LEAF_SUFFIX}" ]; then
         echo "FAIL: an unclassified-lane run landed a later candidate anyway"
         fails=$((fails + 1))
     else
@@ -3298,7 +3463,7 @@ rig_run "$work" "$(
 clear_pins
 check "scrub residue on a skippable candidate is FATAL, not skipped" "1" "$rc"
 check_log "the fatal refusal is the scrub check" "scrub check refused" "$work/rig.log"
-if [ -d "$(captured_of "$work")/anthropic-api/hazard-scrub-01" ]; then
+if [ -d "$(captured_of "$work")/anthropic-api/hazard-scrub-01${PIN_LEAF_SUFFIX}" ]; then
     echo "FAIL: a run with scrub residue landed the clean candidate anyway"
     fails=$((fails + 1))
 else
@@ -3317,7 +3482,7 @@ rig_run "$work" "$(selector_trace baseline tools)" --driver-mode || rc=$?
 clear_pins
 check "the same shape without the residue promotes at exit 0" "0" "$rc"
 check "and lands the matching candidate's body" "tools" \
-    "$(landed_shape "$(captured_of "$work")/anthropic-api/hazard-scrub-clean-01")"
+    "$(landed_shape "$(captured_of "$work")/anthropic-api/hazard-scrub-clean-01${PIN_LEAF_SUFFIX}")"
 rm -rf "$work"
 
 # CONTROL 7: a run ending in a REFUSAL leaves NO promoted fixture and no
@@ -3341,7 +3506,7 @@ rig_run "$work" "$(selector_trace tools tools-retry)" --driver-mode || rc=$?
 clear_pins
 captured="$(captured_of "$work")"
 check "a run ending in refusal exits 1" "1" "$rc"
-if [ -d "$captured/anthropic-api/refusal-clean-01" ]; then
+if [ -d "$captured/anthropic-api/refusal-clean-01${PIN_LEAF_SUFFIX}" ]; then
     echo "FAIL: a run ending in refusal left a promoted fixture behind"
     find "$captured" -mindepth 1 -maxdepth 3 | sed -n '1,10p'
     fails=$((fails + 1))
@@ -3430,7 +3595,7 @@ rig_run "$work" "$(
     candidate_trace "$SEL_ID_B" "$SEL_TS_ING_B" "$SEL_TS_COMP_A" baseline
 )" --driver-mode || rc=$?
 clear_pins
-dir="$(captured_of "$work")/anthropic-api/order-landing-01"
+dir="$(captured_of "$work")/anthropic-api/order-landing-01${PIN_LEAF_SUFFIX}"
 check "the earlier-initiated candidate lands though the other completed first" "0" "$rc"
 check "and the landed request is the earlier-INITIATED one" "$SEL_ID_A" \
     "$([ -f "$dir/meta.json" ] && meta_get "$dir/meta.json" request_id)"
@@ -3932,7 +4097,7 @@ work="$(make_repo)"
 rc=0
 rig_run "$work" "$forgery_trace" --driver-mode || rc=$?
 clear_pins
-dir="$(captured_of "$work")/anthropic-api/forgery-01"
+dir="$(captured_of "$work")/anthropic-api/forgery-01${PIN_LEAF_SUFFIX}"
 check "a forged event in a span value does not stop the real capture" "0" "$rc"
 check "the forged span value does not set provider_kind" "anthropic" \
     "$([ -f "$dir/meta.json" ] && meta_get "$dir/meta.json" provider_kind)"
@@ -3965,7 +4130,7 @@ rig_run_split "$work" "$unstyled_trace" --driver-mode || rc=$?
 clear_pins
 check "an unstyled-only trace in driver mode takes the no-candidate exit" "3" "$rc"
 check "and lands no fixture" "no" \
-    "$([ -d "$(captured_of "$work")/anthropic-api/unstyled-01" ] && echo yes || echo no)"
+    "$([ -d "$(captured_of "$work")/anthropic-api/unstyled-01${PIN_LEAF_SUFFIX}" ] && echo yes || echo no)"
 check_log "driver mode names the cause too" "no styled log_safe events found" "$work/rig.err"
 rm -rf "$work"
 # PAIRED CONTROL: the same trace, styled, lands, so the two legs above
@@ -3976,7 +4141,7 @@ rc=0
 rig_run_split "$work" "$(trace_driver 019eab77-0000-4000-8000-0000000000f6)" --driver-mode || rc=$?
 clear_pins
 check "the same trace with styling lands" "0 yes" \
-    "$rc $([ -d "$(captured_of "$work")/anthropic-api/unstyled-01" ] && echo yes || echo no)"
+    "$rc $([ -d "$(captured_of "$work")/anthropic-api/unstyled-01${PIN_LEAF_SUFFIX}" ] && echo yes || echo no)"
 if grep -q "no styled log_safe events" "$work/rig.err"; then
     echo "FAIL: a styled trace was reported as unstyled"
     fails=$((fails + 1))

@@ -1370,10 +1370,13 @@ check "the run record's basename is non-empty in the driver library" \
 check "the runner reads the same run-record basename the library writes" \
     "$lib_record" "$runner_record"
 
-# EVERY DRIVER RECORDS ITS OWN BASENAME as the client name, which is what
-# keys a landed fixture: two scripts recording one name would land on one
-# key. A driver that delegates to external-agent-cli.sh names itself
-# through the export it hands over; the delegate's own name is its default.
+# EVERY DRIVER RECORDS ITS OWN BASENAME as the client name. The runner
+# forwards that name as the driver token of the landing key
+# `<lane>/<case>__<driver>__<lane config stem>` and hashes
+# `scripts/drivers/<name>.sh` into `client_config_sha`, so two scripts
+# recording one name would land on one key under one script's hash. A
+# driver that delegates to external-agent-cli.sh names itself through the
+# export it hands over; the delegate's own name is its default.
 recorded_client_name() {
     local code name
     code="$(code_lines "$1")"
@@ -2104,8 +2107,16 @@ PY
 # Where the runner lands a fixture with no `--out`: the gitignored scratch
 # root at the repo root, not the committed corpus. This suite drives the
 # real runner in a throwaway repo, so the default is what it exercises.
+#
+# The leaf is `<case>__<driver>__<lane config stem>`: the driver token is
+# the name the driver script records (its basename) and the stem is the
+# runner's `--lane`. args: <work> <case> <driver script> [lane config stem,
+# default anthropic-api] [landing lane, default anthropic-api]
 landed_meta() {
-    printf '%s\n' "$1/repo/.routectl-driver-scratch/anthropic-api/$2/meta.json"
+    local work="$1" case_id="$2" driver="$3"
+    local stem="${4:-anthropic-api}" lane="${5:-anthropic-api}"
+    printf '%s\n' \
+        "$work/repo/.routectl-driver-scratch/$lane/${case_id}__${driver%.sh}__$stem/meta.json"
 }
 
 # ---------------------------------------------------------------------
@@ -2152,9 +2163,14 @@ for driver in claude-code.sh claude-code-print.sh external-agent-cli.sh; do
         fails=$((fails + 2))
     fi
 
-    meta="$(landed_meta "$work" tools-multiturn-01)"
+    meta="$(landed_meta "$work" tools-multiturn-01 "$driver")"
     if [ -f "$meta" ]; then
-        echo "PASS: $driver: the rig landed a fixture at <lane>/<case_id>"
+        echo "PASS: $driver: the rig landed a fixture at <lane>/<case>__<driver>__<lane config stem>"
+        check "$driver: meta.client.driver is the script's own name" \
+            "${driver%.sh}" "$(meta_get "$meta" client.driver)"
+        check "$driver: meta.client_config_sha is the script's sha256" \
+            "$(sha256sum "$DRIVERS/$driver" | cut -d' ' -f1)" \
+            "$(meta_get "$meta" client_config_sha)"
         check "$driver: meta.case_id carries the case" "tools-multiturn-01" \
             "$(meta_get "$meta" case_id)"
         check "$driver: meta.client.version is populated" "9.9.9" \
@@ -2245,9 +2261,9 @@ else
     fails=$((fails + 1))
 fi
 
-meta="$(printf '%s\n' "$work/repo/.routectl-driver-scratch/openai-responses/tools-multiturn-01/meta.json")"
+meta="$(landed_meta "$work" tools-multiturn-01 codex.sh anthropic-api openai-responses)"
 if [ -f "$meta" ]; then
-    echo "PASS: codex: the rig landed a fixture at <lane>/<case_id>"
+    echo "PASS: codex: the rig landed a fixture at <lane>/<case>__<driver>__<lane config stem>"
     check "codex: meta.case_id carries the case" "tools-multiturn-01" \
         "$(meta_get "$meta" case_id)"
     check "codex: meta.client.version is populated" "9.9.9" \
@@ -2437,7 +2453,7 @@ PY
         fails=$((fails + 6))
     fi
 
-    meta="$work/repo/.routectl-driver-scratch/$lane/tools-multiturn-01/meta.json"
+    meta="$(landed_meta "$work" tools-multiturn-01 "$driver" "$lane" "$lane")"
     if [ -f "$meta" ]; then
         check "$driver: meta.ingress_kind carries the traced $ingress dialect" \
             "$ingress" "$(meta_get "$meta" ingress_kind)"
@@ -2500,7 +2516,7 @@ while IFS='|' read -r driver trace lane ingress route api_mode; do
     check "$driver: turn 2 never ran as a fresh one-shot" "0" \
         "$(client_get "$work" argv | sed -n 2p | grep -vcE '(^| )-c( |$)')"
     check_ne "$driver: the unresumable run landed no fixture" "yes" \
-        "$([ -f "$work/repo/.routectl-driver-scratch/$lane/tools-multiturn-01/meta.json" ] && echo yes || echo no)"
+        "$([ -f "$(landed_meta "$work" tools-multiturn-01 "$driver" "$lane" "$lane")" ] && echo yes || echo no)"
     kept="$(kept_run "$work")"
     [ -n "$kept" ] && rm -rf "$kept"
     rm -rf "$work"
@@ -2694,7 +2710,7 @@ PY
         fails=$((fails + 9))
     fi
 
-    meta="$work/repo/.routectl-driver-scratch/$lane/tools-multiturn-01/meta.json"
+    meta="$(landed_meta "$work" tools-multiturn-01 "$driver" "$lane" "$lane")"
     if [ -f "$meta" ]; then
         check "$driver: meta.ingress_kind carries the traced $ingress dialect" \
             "$ingress" "$(meta_get "$meta" ingress_kind)"
@@ -2755,7 +2771,7 @@ while IFS='|' read -r driver trace lane ingress route provider suffix api; do
         sed -n '1,30p' "$work/runner.log"
     fi
     check_ne "$driver: the unresumable run landed no fixture" "yes" \
-        "$([ -f "$work/repo/.routectl-driver-scratch/$lane/tools-multiturn-01/meta.json" ] && echo yes || echo no)"
+        "$([ -f "$(landed_meta "$work" tools-multiturn-01 "$driver" "$lane" "$lane")" ] && echo yes || echo no)"
     kept="$(kept_run "$work")"
     [ -n "$kept" ] && rm -rf "$kept"
     rm -rf "$work"
@@ -2790,7 +2806,7 @@ if [ -z "$kept" ] && [ ! -d "$work/runs" ] || [ -z "$(ls -A "$work/runs" 2>/dev/
 else
     fail "the run workspace survived at $work/runs, so the crossing is unproven"
 fi
-meta="$(landed_meta "$work" plain-turn-01)"
+meta="$(landed_meta "$work" plain-turn-01 claude-code-print.sh)"
 if [ -f "$meta" ]; then
     check "the binary-side version reached the fixture with no workspace to read" \
         "9.9.9 (Stub Client)" "$(meta_get "$meta" client.binary_version)"
@@ -2812,7 +2828,7 @@ rc=0
 STUB_CLIENT_VERSION="1.1.1 (Stub Client)" \
     DRIVER_KEEP=0 driver_run "$work" claude-code-print.sh plain-turn-01 || rc=$?
 check_ne "a binary-vs-wire disagreement fails the run" "0" "$rc"
-if [ -f "$(landed_meta "$work" plain-turn-01)" ]; then
+if [ -f "$(landed_meta "$work" plain-turn-01 claude-code-print.sh)" ]; then
     fail "a fixture whose two client versions disagree still landed"
 else
     echo "PASS: a fixture whose two client versions disagree does not land"
@@ -2837,7 +2853,7 @@ canned_trace | sed 's|claude-cli/9\.9\.9 (external, cli)|claude-cli|' \
 rc=0
 DRIVER_KEEP=0 driver_run "$work" claude-code-print.sh plain-turn-01 || rc=$?
 check "an absent wire version still lands a fixture" "0" "$rc"
-meta="$(landed_meta "$work" plain-turn-01)"
+meta="$(landed_meta "$work" plain-turn-01 claude-code-print.sh)"
 if [ -f "$meta" ]; then
     check "an absent wire version is recorded as empty" "" \
         "$(meta_get "$meta" client.version)"
@@ -2941,7 +2957,7 @@ work="$(make_work)"
 rc=0
 STUB_CLIENT_RC=9 driver_run "$work" claude-code-print.sh plain-turn-01 || rc=$?
 check_ne "a failing client aborts the run" "0" "$rc"
-if [ -f "$(landed_meta "$work" plain-turn-01)" ]; then
+if [ -f "$(landed_meta "$work" plain-turn-01 claude-code-print.sh)" ]; then
     fail "a failing client still landed a fixture"
 else
     echo "PASS: a failing client lands no fixture"
@@ -2958,7 +2974,7 @@ rc=0
 driver_run "$work" claude-code-print.sh no-such-case || rc=$?
 check_ne "an unknown case id aborts the run" "0" "$rc"
 check_ne "the unknown-case run landed no fixture" "yes" \
-    "$([ -f "$(landed_meta "$work" no-such-case)" ] && echo yes || echo no)"
+    "$([ -f "$(landed_meta "$work" no-such-case claude-code-print.sh)" ] && echo yes || echo no)"
 kept="$(kept_run "$work")"
 [ -n "$kept" ] && rm -rf "$kept"
 rm -rf "$work"
@@ -3112,7 +3128,7 @@ check "claude-code: base-url sets no proxy in the client's environment" \
     "" "$(client_get "$work" https_proxy | head -1)"
 check "claude-code: base-url clears an inherited bearer and sets none" \
     "" "$(client_get "$work" bearer | head -1)"
-meta="$(landed_meta "$work" thinking-01)"
+meta="$(landed_meta "$work" thinking-01 claude-code.sh)"
 if [ -f "$meta" ]; then
     check "claude-code: base-url reaches the fixture pin" "base-url" \
         "$(meta_get "$meta" client.connection_mode)"
@@ -3556,7 +3572,7 @@ check "claude-code: front-proxy still exports the client's api key too" \
 # The landing lane is NORMALIZED by the rig from the trace's
 # provider_kind, not copied from the runner's --lane, so the front-proxy
 # lane's fixture still lands under the provider lane.
-meta="$(landed_meta "$work" thinking-01)"
+meta="$(landed_meta "$work" thinking-01 claude-code.sh anthropic-api.front-proxy)"
 if [ -f "$meta" ]; then
     check "claude-code: front-proxy reaches the fixture pin" "front-proxy" \
         "$(meta_get "$meta" client.connection_mode)"
@@ -4063,12 +4079,6 @@ rm -rf "$work"
 # needs one.
 committed_profiles="$(find "$DRIVERS/profiles" -maxdepth 1 -name '*.env' 2>/dev/null | wc -l)"
 check "the committed profile set is still empty" "0" "$committed_profiles"
-
-# No `client_config_sha` anywhere yet: it lands with the first profile, and
-# an always-empty pin answers neither question the two-pin design separates.
-check "no script writes a client_config_sha pin" "0" \
-    "$(grep -rl 'client_config_sha' "$RIG" "$RUNNER" "$DRIVERS" \
-        --exclude=README.md 2>/dev/null | wc -l)"
 
 if [ "$fails" -gt 0 ]; then
     echo "drivers self-test: $fails failure(s)"

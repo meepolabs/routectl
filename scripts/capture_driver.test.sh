@@ -398,10 +398,15 @@ fi
 # The run record a real driver writes through `driver_record_client`. The
 # probe does not source the driver library -- it is the RUNNER under test
 # here -- so it writes the record by hand, which is what lets a case drive
-# the recorded version (or its absence) independently of any client.
-if [ -n "${PROBE_CLIENT_VERSION:-}" ]; then
-    printf 'name=probe\nversion=%s\n' "$PROBE_CLIENT_VERSION" \
-        >"$ROUTECTL_DRIVER_RUN/client.txt"
+# the recorded name and version (or their absence) independently of any
+# client. An EMPTY name writes no record at all.
+if [ -n "${PROBE_CLIENT_NAME:-}" ]; then
+    {
+        printf 'name=%s\n' "$PROBE_CLIENT_NAME"
+        if [ -n "${PROBE_CLIENT_VERSION:-}" ]; then
+            printf 'version=%s\n' "$PROBE_CLIENT_VERSION"
+        fi
+    } >"$ROUTECTL_DRIVER_RUN/client.txt"
 fi
 # The driver runs as a direct child of the runner, so its parent pid is the
 # runner's. Signalling it from here interrupts a FOREGROUND runner, the
@@ -540,6 +545,7 @@ runner_run() {
         STUB_STATUS_MODE="${STUB_STATUS_MODE-}" \
         PROBE_OUT="$work/probe.txt" \
         PROBE_CLIENT_VERSION="${PROBE_CLIENT_VERSION-}" \
+        PROBE_CLIENT_NAME="${PROBE_CLIENT_NAME-probe}" \
         PROBE_EXIT="${PROBE_EXIT-}" \
         PROBE_SIGNAL_RUNNER="${PROBE_SIGNAL_RUNNER-}" \
         ROUTECTL_DRIVER_OUT_ROOT="${ROUTECTL_DRIVER_OUT_ROOT-$work
@@ -572,6 +578,12 @@ PY
 default_landing_root() {
     printf '%s\n' "$1/repo/.routectl-driver-scratch"
 }
+
+# What the probe's run appends to its case id to form the landing leaf
+# `<case>__<driver>__<lane config stem>`: the probe records the client name
+# `probe`, and the stem is the `--lane` the run booted.
+PROBE_LEAF_SUFFIX="__probe__anthropic-api"
+PROBE_LEAF_FP_SUFFIX="__probe__anthropic-api.front-proxy"
 
 # The script's CODE, comments stripped. The live-daemon greps below are
 # about what the runner DOES, and the runner's own header explains at
@@ -709,11 +721,15 @@ fi
 
 # The pins must reach the RIG too, not just the driver: meta.json is where
 # a rerun comparison reads them back.
-meta="$(default_landing_root "$work")/anthropic-api/driver-selftest-01/meta.json"
+meta="$(default_landing_root "$work")/anthropic-api/driver-selftest-01${PROBE_LEAF_SUFFIX}/meta.json"
 if [ -f "$meta" ]; then
-    echo "PASS: the rig lands the fixture at <lane>/<case_id>"
+    echo "PASS: the rig lands the fixture at <lane>/<case_id>__<driver>__<lane config stem>"
     check "meta.case_id carries the pin" "driver-selftest-01" \
         "$(meta_get "$meta" case_id)"
+    check "meta.client.driver carries the name the driver recorded" "probe" \
+        "$(meta_get "$meta" client.driver)"
+    check "meta.config_variant carries the --lane config stem" "anthropic-api" \
+        "$(meta_get "$meta" config_variant)"
     check "meta.config_sha carries the committed config's sha" "$EXPECTED_SHA" \
         "$(meta_get "$meta" config_sha)"
     check "meta.client.connection_mode carries the pin" "base-url" \
@@ -736,7 +752,7 @@ print(json.load(open(sys.argv[1]))["wire_pattern"])' \
 else
     echo "FAIL: no fixture landed at $meta (runner log: $work/runner.log)"
     sed -n '1,30p' "$work/runner.log"
-    fails=$((fails + 7))
+    fails=$((fails + 9))
 fi
 
 # Teardown: the run's own daemon pid is gone, and the workspace with it.
@@ -827,10 +843,12 @@ esac
 check "the CA the carrier names is readable from the driver" "yes" \
     "$(probe_get "$work" proxy_ca_readable)"
 
-meta="$(default_landing_root "$work")/anthropic-api/driver-selftest-02/meta.json"
+meta="$(default_landing_root "$work")/anthropic-api/driver-selftest-02${PROBE_LEAF_FP_SUFFIX}/meta.json"
 if [ -f "$meta" ]; then
     check "the explicit connection mode reaches meta.json" "front-proxy" \
         "$(meta_get "$meta" client.connection_mode)"
+    check "the front-proxy config stem reaches meta.config_variant" \
+        "anthropic-api.front-proxy" "$(meta_get "$meta" config_variant)"
 else
     echo "FAIL: no fixture landed for the front-proxy case"
     fails=$((fails + 1))
@@ -893,7 +911,7 @@ if [ -n "$stub_pid" ] && kill -0 "$stub_pid" 2>/dev/null; then
 else
     echo "PASS: an exit-8 run kills the daemon it started"
 fi
-if [ -d "$(default_landing_root "$work")/anthropic-api/driver-selftest-02" ]; then
+if [ -d "$(default_landing_root "$work")/anthropic-api/driver-selftest-02${PROBE_LEAF_FP_SUFFIX}" ]; then
     echo "FAIL: the exit-8 run landed a fixture"
     fails=$((fails + 1))
 else
@@ -1075,7 +1093,7 @@ if [ -n "$stub_pid" ] && kill -0 "$stub_pid" 2>/dev/null; then
 else
     echo "PASS: an aborted run kills the daemon it started"
 fi
-if [ -d "$(default_landing_root "$work")/anthropic-api/driver-selftest-04" ]; then
+if [ -d "$(default_landing_root "$work")/anthropic-api/driver-selftest-04${PROBE_LEAF_SUFFIX}" ]; then
     echo "FAIL: the aborted run landed a fixture"
     fails=$((fails + 1))
 else
@@ -1283,7 +1301,7 @@ rc=0
 check "a failing driver aborts with the driver exit code" "4" "$rc"
 check_log "the abort reports the driver's status" "driver command exited 7" \
     "$work/runner.log"
-if [ -d "$(default_landing_root "$work")/anthropic-api/driver-selftest-08" ]; then
+if [ -d "$(default_landing_root "$work")/anthropic-api/driver-selftest-08${PROBE_LEAF_SUFFIX}" ]; then
     echo "FAIL: a failing driver still landed a fixture"
     fails=$((fails + 1))
 else
@@ -1318,6 +1336,7 @@ relative_run() {
         STUB_TRACE_FILE="$work/canned-trace.log" \
         STUB_LISTENER="$work/bin/listener.py" \
         PROBE_OUT="$work/probe.txt" \
+        PROBE_CLIENT_NAME=probe \
         ROUTECTL_DRIVER_PORT_MIN="$port_r" \
         ROUTECTL_DRIVER_PORT_MAX="$port_r" \
             bash scripts/capture_driver.sh --lane anthropic-api \
@@ -1361,7 +1380,7 @@ check_log "the exit-7 message names the case" "driver-selftest-09" \
 # machine-facing half (the one carrying the trace path) was unpinned here.
 check_log "the rig's own zero-landing message reaches the runner log" \
     "holds no completed request" "$work/runner.log"
-if [ -d "$(default_landing_root "$work")/anthropic-api/driver-selftest-09" ]; then
+if [ -d "$(default_landing_root "$work")/anthropic-api/driver-selftest-09${PROBE_LEAF_SUFFIX}" ]; then
     echo "FAIL: a run that landed no fixture created a corpus directory"
     fails=$((fails + 1))
 else
@@ -1406,7 +1425,7 @@ check_log "the rig's all-skipped message names the candidate count" \
     "examined 2 candidate" "$work/runner.log"
 check_log "the rig's selection line reaches the runner log" \
     "candidates_skipped=2" "$work/runner.log"
-if [ -d "$(default_landing_root "$work")/anthropic-api/driver-selftest-09c" ]; then
+if [ -d "$(default_landing_root "$work")/anthropic-api/driver-selftest-09c${PROBE_LEAF_SUFFIX}" ]; then
     echo "FAIL: a run whose candidates all failed created a corpus directory"
     fails=$((fails + 1))
 else
@@ -1843,7 +1862,7 @@ for kind in "${SELFTEST_INGRESS_KINDS[@]}"; do
         "5" "$rc"
     check_log "the rig's refusal names the pin the runner forwarded" "$kind" \
         "$work/runner.log"
-    if [ -d "$(default_landing_root "$work")/anthropic-api/driver-selftest-13b" ]; then
+    if [ -d "$(default_landing_root "$work")/anthropic-api/driver-selftest-13b${PROBE_LEAF_SUFFIX}" ]; then
         echo "FAIL: a fixture landed under a pin the traced dialect contradicts"
         fails=$((fails + 1))
     else
@@ -1896,7 +1915,7 @@ check "a run whose driver recorded a client version exits 0" "0" "$rc"
 # below cannot have been read from it after the fact.
 check "the run workspace was removed" "no" \
     "$([ -n "$(ls -A "$work/runs" 2>/dev/null)" ] && echo yes || echo no)"
-meta="$(default_landing_root "$work")/anthropic-api/driver-selftest-15/meta.json"
+meta="$(default_landing_root "$work")/anthropic-api/driver-selftest-15${PROBE_LEAF_SUFFIX}/meta.json"
 if [ -f "$meta" ]; then
     check "meta.client.binary_version carries the driver's own read" \
         "2.1.167 (Probe Client)" "$(meta_get "$meta" client.binary_version)"
@@ -1917,7 +1936,7 @@ rc=0
 ROUTECTL_DRIVER_PORT_MIN="$port_v" ROUTECTL_DRIVER_PORT_MAX="$port_v" \
     runner_run "$work" --lane anthropic-api --case driver-selftest-15 || rc=$?
 check "a run whose driver recorded no client version still exits 0" "0" "$rc"
-meta="$(default_landing_root "$work")/anthropic-api/driver-selftest-15/meta.json"
+meta="$(default_landing_root "$work")/anthropic-api/driver-selftest-15${PROBE_LEAF_SUFFIX}/meta.json"
 if [ -f "$meta" ]; then
     check "an unrecorded binary version lands as empty, not invented" "" \
         "$(meta_get "$meta" client.binary_version)"
@@ -1931,6 +1950,74 @@ else
     sed -n '1,30p' "$work/runner.log"
     fails=$((fails + 2))
 fi
+rm -rf "$work"
+
+# --- Case 13d: client_config_sha is the named driver script's sha -------
+# The runner hashes `scripts/drivers/<recorded name>.sh` from the committed
+# tree. The script planted here has bytes unlike the lane config, so a
+# runner hashing the config (or anything but the named script) is red.
+work="$(make_work)"
+printf '#!/usr/bin/env bash\n# probe driver script, hashed by name\nexit 0\n' \
+    >"$work/repo/scripts/drivers/probe.sh"
+expected_driver_sha="$(sha256sum "$work/repo/scripts/drivers/probe.sh" | cut -d' ' -f1)"
+check_ne "the planted driver script differs from the lane config" \
+    "$EXPECTED_SHA" "$expected_driver_sha"
+port_v="$(free_port)"
+rc=0
+ROUTECTL_DRIVER_PORT_MIN="$port_v" ROUTECTL_DRIVER_PORT_MAX="$port_v" \
+    runner_run "$work" --lane anthropic-api --case driver-selftest-15 || rc=$?
+check "a run whose recorded name has a committed script exits 0" "0" "$rc"
+meta="$(default_landing_root "$work")/anthropic-api/driver-selftest-15${PROBE_LEAF_SUFFIX}/meta.json"
+if [ -f "$meta" ]; then
+    check "meta.client_config_sha is the sha256 of scripts/drivers/<name>.sh" \
+        "$expected_driver_sha" "$(meta_get "$meta" client_config_sha)"
+else
+    echo "FAIL: no fixture landed at $meta (runner log: $work/runner.log)"
+    sed -n '1,30p' "$work/runner.log"
+    fails=$((fails + 1))
+fi
+if grep -qF "no committed driver script" "$work/runner.log"; then
+    echo "FAIL: a run whose driver script exists still warned it was missing"
+    fails=$((fails + 1))
+else
+    echo "PASS: a run whose driver script exists prints no missing-script warning"
+fi
+rm -rf "$work"
+
+# PAIRED: a recorded name with no committed script records an EMPTY sha and
+# says so, rather than hashing something else under that name.
+work="$(make_work)"
+port_v="$(free_port)"
+rc=0
+ROUTECTL_DRIVER_PORT_MIN="$port_v" ROUTECTL_DRIVER_PORT_MAX="$port_v" \
+    runner_run "$work" --lane anthropic-api --case driver-selftest-15 || rc=$?
+check "a run whose recorded name has no committed script still exits 0" "0" "$rc"
+meta="$(default_landing_root "$work")/anthropic-api/driver-selftest-15${PROBE_LEAF_SUFFIX}/meta.json"
+if [ -f "$meta" ]; then
+    check "a name with no committed script records an empty client_config_sha" "" \
+        "$(meta_get "$meta" client_config_sha)"
+else
+    echo "FAIL: no fixture landed at $meta (runner log: $work/runner.log)"
+    sed -n '1,30p' "$work/runner.log"
+    fails=$((fails + 1))
+fi
+check_log "a name with no committed script prints a warning naming it" \
+    "no committed driver script for client name 'probe'" "$work/runner.log"
+rm -rf "$work"
+
+# A driver that recorded NO name gives the rig no driver token, and the
+# rig refuses rather than landing a fixture under a partial key.
+work="$(make_work)"
+port_v="$(free_port)"
+rc=0
+PROBE_CLIENT_NAME="" \
+ROUTECTL_DRIVER_PORT_MIN="$port_v" ROUTECTL_DRIVER_PORT_MAX="$port_v" \
+    runner_run "$work" --lane anthropic-api --case driver-selftest-15 || rc=$?
+check "a run whose driver recorded no name is a rig refusal" "5" "$rc"
+check_log "the no-name refusal names the driver pin" \
+    "ROUTECTL_FIXTURE_DRIVER" "$work/runner.log"
+check "a run whose driver recorded no name lands nothing" "0" \
+    "$(find "$(default_landing_root "$work")" -mindepth 1 -maxdepth 1 -type d ! -name '.*' 2>/dev/null | wc -l | tr -d ' ')"
 rm -rf "$work"
 
 # --- Case 14: an unreadable case file fails closed before any boot ----
@@ -1984,7 +2071,7 @@ ROUTECTL_DRIVER_PORT_MIN="$port_o" ROUTECTL_DRIVER_PORT_MAX="$port_o" \
     runner_run "$work" --lane anthropic-api --case driver-selftest-15 || rc=$?
 check "a run with no --out exits 0" "0" "$rc"
 check "with no --out the fixture lands in the scratch root" "yes" \
-    "$([ -f "$(default_landing_root "$work")/anthropic-api/driver-selftest-15/meta.json" ] \
+    "$([ -f "$(default_landing_root "$work")/anthropic-api/driver-selftest-15${PROBE_LEAF_SUFFIX}/meta.json" ] \
         && echo yes || echo no)"
 check "with no --out nothing lands under tests/fixtures/" "no" \
     "$([ -e "$work/repo/crates/routectl-cli/tests/fixtures/driver" ] && echo yes || echo no)"
@@ -2009,7 +2096,7 @@ ROUTECTL_DRIVER_PORT_MIN="$port_p" ROUTECTL_DRIVER_PORT_MAX="$port_p" \
     --out "$scratch/land" --out-root "$scratch" || rc=$?
 check "an --out under the allowed root exits 0" "0" "$rc"
 check "an --out under the allowed root lands the fixture there" "yes" \
-    "$([ -f "$scratch/land/anthropic-api/driver-selftest-15/meta.json" ] && echo yes || echo no)"
+    "$([ -f "$scratch/land/anthropic-api/driver-selftest-15${PROBE_LEAF_SUFFIX}/meta.json" ] && echo yes || echo no)"
 check_log "the accepted run reports the landing root it used" \
     "out=$scratch/land" "$work/runner.log"
 rm -rf "$work"
@@ -2165,7 +2252,7 @@ ROUTECTL_DRIVER_OUT_ROOT="$scratch" \
     --out "$scratch/land" --out-root "$scratch" || rc=$?
 check "an --out-root named by the environment seam is accepted" "0" "$rc"
 check "the accepted root lands the fixture under itself" "yes" \
-    "$([ -f "$scratch/land/anthropic-api/driver-selftest-15/meta.json" ] &&
+    "$([ -f "$scratch/land/anthropic-api/driver-selftest-15${PROBE_LEAF_SUFFIX}/meta.json" ] &&
         echo yes || echo no)"
 
 # --- Case 16: the resume marker is PER landing root -------------------
@@ -2191,6 +2278,8 @@ rig_run() {
         ROUTECTL_FIXTURE_CONNECTION_MODE="base-url" \
         ROUTECTL_FIXTURE_WIRE_PATTERN="baseline" \
         ROUTECTL_FIXTURE_EXPECTED_INGRESS="anthropic" \
+        ROUTECTL_FIXTURE_DRIVER="probe" \
+        ROUTECTL_FIXTURE_CONFIG_VARIANT="anthropic-api" \
             bash scripts/capture_fixtures.sh --driver-mode \
             --log "$work/canned-trace.log" --out "$out" --allow-unsafe-out "$@"
     ) >>"$work/rig.log" 2>&1 || rc=$?
@@ -2223,8 +2312,8 @@ check "a run into the second landing root exits 0" "0" "$rc"
 check "the second landing root holds its own marker too" "yes" \
     "$([ -f "$root_b/.last_capture_ts" ] && echo yes || echo no)"
 check "each root's fixture landed under that root" "yes" \
-    "$([ -f "$root_a/anthropic-api/driver-selftest-16/meta.json" ] &&
-        [ -f "$root_b/anthropic-api/driver-selftest-16/meta.json" ] && echo yes || echo no)"
+    "$([ -f "$root_a/anthropic-api/driver-selftest-16${PROBE_LEAF_SUFFIX}/meta.json" ] &&
+        [ -f "$root_b/anthropic-api/driver-selftest-16${PROBE_LEAF_SUFFIX}/meta.json" ] && echo yes || echo no)"
 
 # The suppression pair, asserted without `--force` so the marker is
 # load-bearing. First direction is the POSITIVE CONTROL: a marker whose
@@ -2245,7 +2334,7 @@ rc=0
 rig_run "$work" "$root_b" driver-selftest-16b || rc=$?
 check "the first root's marker does not suppress a capture into the second" "0" "$rc"
 check "the second root's capture landed despite the first root's marker" "yes" \
-    "$([ -f "$root_b/anthropic-api/driver-selftest-16b/meta.json" ] && echo yes || echo no)"
+    "$([ -f "$root_b/anthropic-api/driver-selftest-16b${PROBE_LEAF_SUFFIX}/meta.json" ] && echo yes || echo no)"
 rm -rf "$work"
 
 # --- Case 17: per-cell evidence lands beside the fixture ---------------
@@ -2340,7 +2429,7 @@ check "client_result records connection_mode" '"base-url"' "$(result_get "$res" 
 check "client_result records the case's turn count" "1" "$(result_get "$res" turns 2>/dev/null)"
 check "a complete cell names nothing missing" "{}" "$(result_get "$res" missing 2>/dev/null)"
 check "the fixture still lands beside the evidence" "yes" \
-    "$([ -f "$(default_landing_root "$work")/anthropic-api/driver-selftest-17/meta.json" ] && echo yes || echo no)"
+    "$([ -f "$(default_landing_root "$work")/anthropic-api/driver-selftest-17${PROBE_LEAF_SUFFIX}/meta.json" ] && echo yes || echo no)"
 check "no temp snapshot is left behind" "" "$(find "$ev" -name '.*.tmp' 2>/dev/null)"
 rm -rf "$work"
 
@@ -2592,7 +2681,7 @@ for unkillable_path in normal:0 failing-driver:9; do
     check "[$path_name] the unkillable-daemon run never ran the rig" "null" \
         "$(result_get "$ev/client_result.json" rig_rc 2>/dev/null)"
     check "[$path_name] the unkillable-daemon run lands no fixture" "no" \
-        "$([ -e "$(default_landing_root "$work")/anthropic-api/driver-selftest-17f" ] && echo yes || echo no)"
+        "$([ -e "$(default_landing_root "$work")/anthropic-api/driver-selftest-17f${PROBE_LEAF_SUFFIX}" ] && echo yes || echo no)"
     check "[$path_name] the unkillable-daemon run parses no live trace" '"daemon still running"' \
         "$(result_get "$ev/client_result.json" missing/fidelity.log 2>/dev/null)"
     check "[$path_name] the unkillable-daemon run writes no trace artifact" "no" \

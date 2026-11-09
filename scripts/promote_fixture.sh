@@ -9,8 +9,9 @@
 #
 #   --from          the fixture directory to promote. Must live exactly
 #                   two components under --scratch-root, i.e.
-#                   `<scratch-root>/<lane>/<case-id>`, because that pair
-#                   IS the corpus key the capture rig lands on.
+#                   `<scratch-root>/<lane>/<case-id>__<driver>__<config>`,
+#                   because that pair IS the corpus key the capture rig
+#                   lands on.
 #   --scratch-root  the confinement root --from must live under. Required:
 #                   the scratch tree is outside the repo (the capture
 #                   container mounts the repo read-only), so there is no
@@ -89,7 +90,7 @@
 #      `--expected-ingress` names, or two client-version statements that
 #      contradict each other. Nothing was promoted.
 #   2  usage error, a confinement refusal, a fixture path that is not
-#      `<scratch-root>/<lane>/<case-id>`, or a missing prerequisite
+#      `<scratch-root>/<lane>/<leaf>`, or a missing prerequisite
 #      (this is also what a scrub gate that could not run at all reports)
 #
 # Run it from anywhere:
@@ -214,8 +215,8 @@ case "$SRC" in
 esac
 REL="${SRC#"$SCRATCH_ROOT"/}"
 
-# A fixture is keyed `(lane, case_id)`, so its path under either root is
-# exactly two components. Refusing anything else is not tidiness: the
+# A fixture is keyed `<lane>/<case_id>__<driver>__<config variant>`, so
+# its path under either root is exactly two components. Refusing anything else is not tidiness: the
 # loader mistakes a lane DIRECTORY handed to it as a fixture for a
 # fixture, and a REL that collapsed to one component (or to nothing, when
 # --from IS the scratch root) would aim the rename-aside below at a lane

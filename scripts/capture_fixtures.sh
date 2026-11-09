@@ -50,6 +50,19 @@
 #   ROUTECTL_FIXTURE_CONFIG_SHA       hash of the config in force
 #   ROUTECTL_FIXTURE_CONNECTION_MODE  how the client reached routectl
 #   ROUTECTL_FIXTURE_WIRE_PATTERN     wire shape the case claims to cover
+#   ROUTECTL_FIXTURE_DRIVER           the driver script that drove the
+#                                     client (the `name=` it recorded),
+#                                     recorded as `client.driver`
+#   ROUTECTL_FIXTURE_CONFIG_VARIANT   the committed lane config stem the
+#                                     run booted, recorded as
+#                                     `config_variant`
+#   ROUTECTL_FIXTURE_CLIENT_CONFIG_SHA
+#                                     sha256 of that driver script's bytes
+#                                     (the script only, not its lib/),
+#                                     recorded as `client_config_sha`.
+#                                     Optional in both modes: the runner
+#                                     forwards it empty when no committed
+#                                     script carries the recorded name
 #
 # One further driver-mode pin is NOT recorded into meta.json, because the
 # value it pins is already there as a traced fact:
@@ -78,10 +91,11 @@
 # `--driver-mode`: a hermetic capture produced by a driver that KNOWS
 # every pin, so an empty pin is a bug rather than a fact:
 #
-#   * All five pins are MANDATORY. An unset one aborts the run naming
-#     the variable, because an empty case id collapses every case in a
-#     lane onto one landing directory and the corpus silently
-#     overwrites itself.
+#   * Seven pins are MANDATORY: the four recorded ones above, the
+#     driver and the config variant, and the expected ingress. An unset
+#     one aborts the run naming the variable, because an empty case id,
+#     driver or config variant collapses distinct captures onto one
+#     landing directory and the corpus silently overwrites itself.
 #   * ROUTECTL_FIXTURE_EXPECTED_INGRESS is checked against the
 #     vocabulary in scripts/drivers/lib/ingress_kinds.sh before any
 #     daemon output is read, and then against the TRACED
@@ -91,9 +105,18 @@
 #     for the wrong one -- an environment check cannot see that, because
 #     the environment said what the run intended. The traced token says
 #     what the daemon actually parsed.
-#   * Landing directories key on `(lane, case_id)` --
-#     `<out>/<lane>/<case_id>/` -- so a rerun of the same case RE-LANDS
-#     on the same path and produces a DIFF instead of a fresh sibling.
+#   * Landing directories key on `(lane, case_id, driver, config
+#     variant)` -- `<out>/<lane>/<case_id>__<driver>__<config_variant>/`
+#     -- so a rerun with the same four tokens RE-LANDS on the same path
+#     and produces a DIFF instead of a fresh sibling, while two drivers
+#     or two configs normalizing to one lane (bedrock-invoke and
+#     bedrock-converse are both `bedrock`) land side by side. Each of the
+#     three leaf components must match `^[a-z0-9]+([.-][a-z0-9]+)*$` (so
+#     none can carry the `__` separator, a `/`, or a `.`/`..` segment) and
+#     the leaf is at most 255 bytes; anything else exits 2 before the
+#     trace is read. No hash is part of the key: a hash in the path would
+#     land a rerun under a changed config as a sibling instead of
+#     replacing it, and the hashes are in meta.json anyway.
 #     The rerun REPLACES the previous directory: the old one is renamed
 #     aside into a `.tmp.stale.*` name, the new one moves into place,
 #     then the old one is deleted, so a reader either sees the whole
@@ -831,12 +854,37 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-# Driver mode fails closed on the five pins. `:?` aborts under `set -u`
+# One component of the driver-mode landing leaf. The letters are spelled
+# out rather than written as a range because a bracket range follows the
+# locale's collation, under which `[a-z]` can admit characters outside
+# ASCII lowercase.
+LEAF_TOKEN_CHAR='[abcdefghijklmnopqrstuvwxyz0123456789]'
+LEAF_TOKEN_RE="^$LEAF_TOKEN_CHAR+([.-]$LEAF_TOKEN_CHAR+)*\$"
+LEAF_SEP="__"
+LEAF_MAX_BYTES=255
+
+require_leaf_token() {
+  local what="$1" value="$2" example="$3"
+  if ! [[ "$value" =~ $LEAF_TOKEN_RE ]]; then
+    echo "capture_fixtures: refusing $what '$value': it is a component of the landing directory" >&2
+    echo "name, so it must be one lowercase token matching ^[a-z0-9]+([.-][a-z0-9]+)*\$ (e.g. $example)." >&2
+    exit 2
+  fi
+}
+
+# The driver-mode landing leaf: `<case_id>__<driver>__<config_variant>`.
+driver_leaf_name() {
+  printf '%s%s%s%s%s\n' "$ROUTECTL_FIXTURE_CASE_ID" "$LEAF_SEP" \
+    "$ROUTECTL_FIXTURE_DRIVER" "$LEAF_SEP" "$ROUTECTL_FIXTURE_CONFIG_VARIANT"
+}
+DRIVER_LEAF=""
+
+# Driver mode fails closed on its pins. `:?` aborts under `set -u`
 # naming the variable, which is the whole point: an unset pin in a driver
-# run is a bug in the driver, and an empty case_id would collapse every
-# case in the lane onto one landing directory before anyone noticed. The
-# live-box path below never reaches this block and keeps today's
-# tolerance.
+# run is a bug in the driver, and an empty case_id, driver or config
+# variant would collapse distinct captures onto one landing directory
+# before anyone noticed. The live-box path below never reaches this block
+# and keeps today's tolerance.
 if [ "$DRIVER_MODE" = 1 ]; then
   : "${ROUTECTL_FIXTURE_CASE_ID:?driver mode requires a case id (ROUTECTL_FIXTURE_CASE_ID)}"
   : "${ROUTECTL_FIXTURE_CONFIG_SHA:?driver mode requires a config sha (ROUTECTL_FIXTURE_CONFIG_SHA)}"
@@ -854,17 +902,25 @@ if [ "$DRIVER_MODE" = 1 ]; then
     exit 2
   fi
 
-  # The case id becomes two path components' worth of directory name, so
-  # a separator or a traversal segment in it would land the fixture
-  # outside the lane directory -- past the --out confinement check, which
-  # ran on OUT alone.
-  case "$ROUTECTL_FIXTURE_CASE_ID" in
-    */*|.|..)
-      echo "capture_fixtures: refusing case id '$ROUTECTL_FIXTURE_CASE_ID': it names the landing directory," >&2
-      echo "so it must be a single path-safe scenario name (e.g. tools-multiturn-01)." >&2
-      exit 2
-      ;;
-  esac
+  : "${ROUTECTL_FIXTURE_DRIVER:?driver mode requires a driver name (ROUTECTL_FIXTURE_DRIVER)}"
+  : "${ROUTECTL_FIXTURE_CONFIG_VARIANT:?driver mode requires a config variant (ROUTECTL_FIXTURE_CONFIG_VARIANT)}"
+
+  # The case id, driver and config variant are joined with `__` into the
+  # landing directory's name, so each must be one token that can carry
+  # neither the separator (two different triples would then spell one
+  # leaf) nor a `/` or `.`/`..` segment (the fixture would land outside
+  # the lane directory, past the --out confinement check, which ran on OUT
+  # alone).
+  require_leaf_token "case id" "$ROUTECTL_FIXTURE_CASE_ID" "tools-multiturn-01"
+  require_leaf_token "driver" "$ROUTECTL_FIXTURE_DRIVER" "claude-code-print"
+  require_leaf_token "config variant" "$ROUTECTL_FIXTURE_CONFIG_VARIANT" \
+    "anthropic-api.front-proxy"
+  DRIVER_LEAF="$(driver_leaf_name)"
+  if [ "${#DRIVER_LEAF}" -gt "$LEAF_MAX_BYTES" ]; then
+    echo "capture_fixtures: refusing landing directory name '$DRIVER_LEAF': it is ${#DRIVER_LEAF} bytes," >&2
+    echo "over the $LEAF_MAX_BYTES-byte limit a filesystem puts on one path component." >&2
+    exit 2
+  fi
 fi
 
 # Confine --out to the default captured dir unless the operator
@@ -1348,6 +1404,7 @@ write_fixture() {
   # quoted or escaped.
   local j_id j_ts j_version j_alias j_model j_case j_sha j_wire
   local j_cname j_cversion j_cbinver j_cmode j_ikind j_pkind j_lane j_finish
+  local j_variant j_driver j_ccsha
   j_id="$(json_escape "$id")"
   j_ts="$(json_escape "$ts")"
   j_version="$(json_escape "$ROUTECTL_VERSION")"
@@ -1356,6 +1413,9 @@ write_fixture() {
   j_case="$(json_escape "${ROUTECTL_FIXTURE_CASE_ID:-}")"
   j_sha="$(json_escape "${ROUTECTL_FIXTURE_CONFIG_SHA:-}")"
   j_wire="$(json_escape "${ROUTECTL_FIXTURE_WIRE_PATTERN:-}")"
+  j_variant="$(json_escape "${ROUTECTL_FIXTURE_CONFIG_VARIANT:-}")"
+  j_driver="$(json_escape "${ROUTECTL_FIXTURE_DRIVER:-}")"
+  j_ccsha="$(json_escape "${ROUTECTL_FIXTURE_CLIENT_CONFIG_SHA:-}")"
   j_cname="$(json_escape "${client_name:-}")"
   j_cversion="$(json_escape "${client_version:-}")"
   j_cbinver="$(json_escape "$client_binary_version")"
@@ -1376,8 +1436,11 @@ write_fixture() {
   "case_id": "$j_case",
   "config_sha": "$j_sha",
   "wire_pattern": "$j_wire",
+  "config_variant": "$j_variant",
+  "client_config_sha": "$j_ccsha",
   "client": {
     "name": "$j_cname",
+    "driver": "$j_driver",
     "version": "$j_cversion",
     "binary_version": "$j_cbinver",
     "connection_mode": "$j_cmode"
@@ -1522,12 +1585,12 @@ META
     fi
   fi
 
-  # Resolve the landing path. Driver mode keys on `(lane, case_id)` so a
-  # rerun of the same case re-lands on the same path and diffs; live-box
-  # mode keys on request_id. An empty lane means normalize_lane could not
-  # map the traced provider_kind, which in driver mode would collapse the
-  # path to `$OUT/<case_id>` and put a fixture nothing can gate into the
-  # canonical corpus.
+  # Resolve the landing path. Driver mode keys on `(lane, case_id, driver,
+  # config variant)` so a rerun with the same tokens re-lands on the same
+  # path and diffs; live-box mode keys on request_id. An empty lane means
+  # normalize_lane could not map the traced provider_kind, which in driver
+  # mode would collapse the path to `$OUT/<leaf>` and put a fixture nothing
+  # can gate into the canonical corpus.
   local dst
   if [ "$DRIVER_MODE" = 1 ]; then
     if [ -z "$lane" ]; then
@@ -1561,7 +1624,7 @@ META
       rm -rf "$tmp"
       return 1
     fi
-    dst="$OUT/$lane/$ROUTECTL_FIXTURE_CASE_ID"
+    dst="$OUT/$lane/$DRIVER_LEAF"
 
     # THE SELECTION, and the reason nothing is promoted here. This candidate
     # has now passed every gate; whether it is the case's evidence depends

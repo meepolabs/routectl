@@ -430,6 +430,9 @@ report_credential() {
         printf 'run_dir_exec=FAILED\n'
     fi
 } >"$out"
+# The run record a real driver writes through `driver_record_client`: the
+# runner reads `name=` back as the driver token of the landing key.
+printf 'name=stub-driver\n' >"${ROUTECTL_DRIVER_RUN:-/nonexistent}/client.txt"
 # `sleepy` outlives any short --max-seconds: the wall-clock bound, not
 # the driver, has to end the cell.
 if [ "$(cat "$assets/mode" 2>/dev/null)" = sleepy ]; then
@@ -1284,8 +1287,13 @@ run_container_legs() {
 
     local land="$root/land"
 
-    check "the fixture landed in the scratch mount at <lane>/<case>" "yes" \
-        "$([ -f "$land/anthropic-api/plain-turn-01/meta.json" ] && echo yes || echo no)"
+    # The leaf is `<case>__<driver>__<lane config stem>`: the stub driver
+    # records `stub-driver`, and the run boots the `anthropic-api` config.
+    local leaf="anthropic-api/plain-turn-01__stub-driver__anthropic-api"
+    check "the fixture landed in the scratch mount at <lane>/<case>__<driver>__<config>" "yes" \
+        "$([ -f "$land/$leaf/meta.json" ] && echo yes || echo no)"
+    check "the landed fixture records the driver the stub named" "stub-driver" \
+        "$(sed -n 's/^ *"driver": "\(.*\)",$/\1/p' "$land/$leaf/meta.json" 2>/dev/null)"
 
     # The runner's contract, observed from inside: the pins arrived and
     # the daemon it booted is the one the driver talked to.
@@ -1367,7 +1375,7 @@ run_container_legs() {
     # root-owned fixture cannot be scrubbed, promoted or deleted without
     # sudo.
     check "the landed fixture is owned by the invoking user" "$(id -u)" \
-        "$(stat -c '%u' "$land/anthropic-api/plain-turn-01/meta.json" 2>/dev/null)"
+        "$(stat -c '%u' "$land/$leaf/meta.json" 2>/dev/null)"
 
     # --- the codex pair: token AND account id ------------------------
     # `openai-responses` + `chatgpt-oauth` requires BOTH. This is the

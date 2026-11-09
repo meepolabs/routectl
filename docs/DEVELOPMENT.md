@@ -718,13 +718,14 @@ being unset, because an empty pin is honest there.
 `scripts/capture_fixtures.sh --driver-mode` is the other mode, for a
 hermetic capture where a driver KNOWS every pin. It changes six things:
 
-- **All five pins become mandatory.** `ROUTECTL_FIXTURE_CASE_ID`,
+- **Seven pins become mandatory.** `ROUTECTL_FIXTURE_CASE_ID`,
   `ROUTECTL_FIXTURE_CONFIG_SHA`, `ROUTECTL_FIXTURE_CONNECTION_MODE`,
-  `ROUTECTL_FIXTURE_WIRE_PATTERN`, and
-  `ROUTECTL_FIXTURE_EXPECTED_INGRESS` must be set; an unset one aborts the
-  run naming the variable. An empty case id would collapse every case in
-  the lane onto one landing directory and the corpus would quietly
-  overwrite itself, and an empty wire pattern would land a fixture whose
+  `ROUTECTL_FIXTURE_WIRE_PATTERN`, `ROUTECTL_FIXTURE_EXPECTED_INGRESS`,
+  `ROUTECTL_FIXTURE_DRIVER` and `ROUTECTL_FIXTURE_CONFIG_VARIANT` must be
+  set; an unset one aborts the run naming the variable. An empty case id,
+  driver or config variant would collapse distinct captures onto one
+  landing directory and the corpus would quietly overwrite itself, and an
+  empty wire pattern would land a fixture whose
   coverage claim nothing downstream can tell from a claim nobody recorded.
 
   **There is no `--wire-pattern` flag, and looking for one is the wrong
@@ -763,10 +764,16 @@ hermetic capture where a driver KNOWS every pin. It changes six things:
   `scripts/drivers/lib/ingress_kinds.sh` (a replica of `IngressAdapter::id()`,
   welded to it by the shell self-tests), and a pin outside it is a usage
   error rather than a guaranteed mismatch.
-- **Landing keys on `(lane, case_id)`**, at `<out>/<lane>/<case_id>/`
-  rather than `<out>/<request_id>/`, so a rerun of the same case produces
-  a DIFF instead of a fresh sibling. The rerun replaces the previous
-  directory wholesale. Keep case ids neutral scenario names
+- **Landing keys on `(lane, case_id, driver, config variant)`**, at
+  `<out>/<lane>/<case_id>__<driver>__<config_variant>/` rather than
+  `<out>/<request_id>/`, so a rerun of the same case with the same driver
+  and lane config produces a DIFF instead of a fresh sibling, while two
+  drivers of one client (`claude-code`, `claude-code-print`) or two
+  configs of one lane (`bedrock-invoke`, `bedrock-converse`) land side by
+  side. `<driver>` is the name the driver recorded (its script basename)
+  and `<config_variant>` the runner's `--lane` stem; each token must match
+  `^[a-z0-9]+([.-][a-z0-9]+)*$` and the leaf is at most 255 bytes, or the
+  rig exits 2. The rerun replaces the previous directory wholesale. Keep case ids neutral scenario names
   (`tools-multiturn-01`) and never derive one from the environment: the
   scrub check below reads `meta.json` too, so a hostname or a real path
   in a case id refuses the fixture.
@@ -846,8 +853,12 @@ What each run then does, in order:
 6. Stops the daemon by the pid it captured from its own `$!` (never by
    name, and never under `setsid`, which would capture the wrapper), then
    runs the rig in `--driver-mode` against the trace, landing under
-   `<out>/<lane>/<case-id>/`. With no `--out`, that is
-   `.routectl-driver-scratch/<lane>/<case-id>/` at the repo root.
+   `<out>/<lane>/<case-id>__<driver>__<lane config stem>/`, where
+   `<driver>` is the `name=` the driver wrote to its run record. With no
+   `--out`, that is `.routectl-driver-scratch/<lane>/<that leaf>/` at the
+   repo root. The runner also forwards the sha256 of
+   `scripts/drivers/<driver>.sh` as `meta.client_config_sha` (empty, with
+   a warning, when no committed script has that name).
 
 A cleanup trap runs on every exit path, so an interrupted or failed run
 never leaves a daemon holding its port. Exit codes: 2 usage, 3 unhealthy
@@ -1128,9 +1139,8 @@ project caught once, so the loader carries a latch instead of trusting the
 order, and it refuses connection carriers and provider credentials by name
 on top of it.
 
-No `client_config_sha` pin exists yet: it lands in the same change as the
-first profile. An always-empty second pin answers neither of the two
-questions two pins exist to separate.
+`meta.client_config_sha` hashes the driver SCRIPT only
+(`scripts/drivers/<driver>.sh`); a profile's bytes are not part of it.
 
 ### Where a driver capture lands: scratch, then promotion
 
@@ -1200,7 +1210,8 @@ nothing. `--to` selects the corpus root and defaults to
 `crates/routectl-cli/tests/fixtures/driver`, confined to that default -- it
 can narrow the destination but never leave the corpus. `--from` must name
 a path exactly two components under the scratch root
-(`<scratch-root>/<lane>/<case-id>`), because that pair IS the corpus key.
+(`<scratch-root>/<lane>/<case-id>__<driver>__<lane config stem>`), because
+that pair IS the corpus key.
 
 Two things the script does that a `mv` does not:
 
@@ -1222,7 +1233,7 @@ Two things the script does that a `mv` does not:
 
 Exit codes: 0 promoted, 1 the staged content failed the scrub gate
 (nothing was promoted and the destination is untouched), 2 usage, a
-confinement refusal, a `--from` that is not `<lane>/<case-id>` deep, or a
+confinement refusal, a `--from` that is not `<lane>/<leaf>` deep, or a
 scrub gate that could not run at all.
 
 ### The canonical interaction set

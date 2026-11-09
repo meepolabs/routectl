@@ -31,8 +31,12 @@ per-harness files small enough for the rule to stay affordable.
 | `pi-chat.sh` | `pi` from PATH | Expected ingress `openai`. Same carrier as the responses driver, with `api: openai-completions` |
 
 Every driver records its own basename (without `.sh`) as the client name
-in the run record, and a landed fixture is keyed by that name, so no two
-files share one. `hermes-anthropic.sh` and `pi-anthropic.sh` delegate to
+in the run record, so no two files share one. The runner forwards that
+name as the driver token of the landing key
+`<lane>/<case>__<driver>__<lane config stem>` (recorded as
+`meta.client.driver`) and records the sha256 of `scripts/drivers/<name>.sh`
+as `meta.client_config_sha` (the script only, not `lib/`; empty, with a
+warning, when no committed script has that name). `hermes-anthropic.sh` and `pi-anthropic.sh` delegate to
 `external-agent-cli.sh` and name themselves through
 `ROUTECTL_DRIVER_AGENT_NAME`; run directly, that driver records
 `external-agent-cli`. A name that is not a lowercase hyphenated token
