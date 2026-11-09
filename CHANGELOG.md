@@ -458,6 +458,8 @@ list with more narrative.
 
 - **`routectl prices refresh [--from <url|file>]` writes the usage-cost price table.** It downloads the models.dev price list (or reads a copy from a file), converts and validates it, and atomically replaces `prices.json` in the config folder. The fetch is a plain GET on its own client (no credentials, cookies or redirects; 5 s connect, 15 s total; 32 MiB cap; operator proxy variables apply), a source that fails validation leaves the previous file unchanged and exits non-zero, and the output carries counts and the table date only. Nothing runs it automatically; [docs/CONFIGURATION.md](docs/CONFIGURATION.md#refreshing-the-price-table-routectl-prices-refresh) has cron and systemd timer examples.
 
+- **Internal:** the routectl-router `prices` module gains `PriceBook`, which re-reads `prices.json` when its modification time or length changes, keeps the last good table when a new copy is refused (one WARN per bad file state, naming only the retained table's date), and treats an absent file as no refreshed table. A models.dev source that repeats a model key within one provider is now refused even when one copy has no cost. Nothing reads the book yet. No change for `routectl` binary users.
+
 ### Changed
 
 - **API-key and ChatGPT-OAuth Responses requests carry a session-derived `prompt_cache_key`.** When neither the client nor the operator set `prompt_cache_key`, the request carries the lowercase hex SHA-256 of the inbound session key, whatever ingress it arrived on, so cache routing follows the session without the raw session id leaving routectl. Bedrock Mantle gets none. This changes the cache key for Claude Code traffic routed to those upstreams.

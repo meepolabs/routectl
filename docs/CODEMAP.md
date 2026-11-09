@@ -2379,6 +2379,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   normalized provider API base
 - `src/prices/validate.rs` -- `parse_and_validate` and the bounds every table
   passes
+- `src/prices/book.rs` -- `PriceBook`: the refreshed `prices.json`, re-read
+  when its mtime or length changes, last good table kept on a refused copy
+  with one WARN naming its date. Tests in `book_tests.rs`
 - `src/prices/bounded.rs` -- the row and provider counts enforced while a
   table is deserialized, and the bounded canonical-format seeds
 - `src/prices/models_dev.rs` -- `from_models_dev`: models.dev `api.json` to the

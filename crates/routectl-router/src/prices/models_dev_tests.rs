@@ -100,6 +100,16 @@ fn source_shape_errors_fail_closed() {
             Some(PriceTableError::DuplicateModel),
         ),
         (
+            "duplicate model key, second copy without cost",
+            r#"{"p":{"models":{"m":{"cost":{"input":1}},"m":{}}}}"#,
+            Some(PriceTableError::DuplicateModel),
+        ),
+        (
+            "duplicate model key, first copy without cost",
+            r#"{"p":{"models":{"m":{},"m":{"cost":{"input":1}}}}}"#,
+            Some(PriceTableError::DuplicateModel),
+        ),
+        (
             "duplicate provider key",
             r#"{"p":{"models":{"m":{"cost":{"input":1}}}},"p":{"models":{"n":{"cost":{"input":1}}}}}"#,
             Some(PriceTableError::DuplicateProvider),

@@ -9,7 +9,7 @@ use serde::de::{self, DeserializeSeed, Deserializer, IgnoredAny, MapAccess, SeqA
 
 use super::PriceTableError;
 use super::format::{RawModel, RawProvider, RawTable, SCHEMA_VERSION};
-use super::validate::MAX_ROWS;
+use super::validate::{MAX_PROVIDERS, MAX_ROWS};
 
 /// Running provider and model-row counts for one parse, shared by every
 /// provider in the document. This is the only place the row and provider
@@ -24,25 +24,42 @@ pub(super) struct Bounds {
 impl Bounds {
     /// Counts one source model entry, priced or not.
     pub(super) fn count_row<E: de::Error>(&self) -> Result<(), E> {
-        self.bump(&self.rows, PriceTableError::TooManyRows { limit: MAX_ROWS })
+        self.bump(
+            &self.rows,
+            MAX_ROWS,
+            PriceTableError::TooManyRows { limit: MAX_ROWS },
+        )
     }
 
     pub(super) fn count_provider<E: de::Error>(&self) -> Result<(), E> {
         self.bump(
             &self.providers,
-            PriceTableError::TooManyProviders { limit: MAX_ROWS },
+            MAX_PROVIDERS,
+            PriceTableError::TooManyProviders {
+                limit: MAX_PROVIDERS,
+            },
         )
     }
 
-    fn bump<E: de::Error>(&self, counter: &Cell<usize>, refusal: PriceTableError) -> Result<(), E> {
+    fn bump<E: de::Error>(
+        &self,
+        counter: &Cell<usize>,
+        limit: usize,
+        refusal: PriceTableError,
+    ) -> Result<(), E> {
         let next = counter.get().saturating_add(1);
         counter.set(next);
-        if next > MAX_ROWS {
-            let message = refusal.to_string();
-            self.refusal.set(Some(refusal));
-            return Err(E::custom(message));
+        if next > limit {
+            return Err(self.refuse(refusal));
         }
         Ok(())
+    }
+
+    /// Stops the parse with `refusal` as its outcome.
+    pub(super) fn refuse<E: de::Error>(&self, refusal: PriceTableError) -> E {
+        let message = refusal.to_string();
+        self.refusal.set(Some(refusal));
+        E::custom(message)
     }
 
     /// The bound a failed parse stopped at, or the syntax error at `err`.

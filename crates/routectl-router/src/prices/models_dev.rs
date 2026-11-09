@@ -7,6 +7,7 @@
 //! `cache_write` is the 5-minute write tier; the source has no 1-hour tier.
 //! Every other field is ignored.
 
+use std::collections::HashSet;
 use std::fmt;
 
 use serde::Deserialize;
@@ -155,7 +156,8 @@ impl<'de> Visitor<'de> for ProviderSeed<'_> {
 }
 
 /// A provider's `models` object; every entry counts toward the row bound
-/// and only the entries carrying a cost become rows.
+/// and only the entries carrying a cost become rows. A key repeated within
+/// one provider is a duplicate row whether or not either copy has a cost.
 struct ModelsSeed<'a>(&'a Bounds);
 
 impl<'de> DeserializeSeed<'de> for ModelsSeed<'_> {
@@ -175,8 +177,12 @@ impl<'de> Visitor<'de> for ModelsSeed<'_> {
 
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
         let mut out = Vec::new();
+        let mut seen = HashSet::new();
         while let Some(id) = map.next_key::<String>()? {
             self.0.count_row()?;
+            if !seen.insert(id.clone()) {
+                return Err(self.0.refuse(PriceTableError::DuplicateModel));
+            }
             if let Some(cost) = map.next_value::<DevModel>()?.cost {
                 out.push(cost.into_row(id));
             }

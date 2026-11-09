@@ -12,6 +12,7 @@ use crate::config::PricingConfig;
 pub const MAX_INPUT_BYTES: usize = 32 * 1024 * 1024;
 
 pub(super) const MAX_ROWS: usize = 100_000;
+pub(super) const MAX_PROVIDERS: usize = 100_000;
 pub(super) const MAX_PROVIDER_ID_BYTES: usize = 128;
 pub(super) const MAX_MODEL_ID_BYTES: usize = 512;
 pub(super) const MAX_PRICE_PER_MTOK: f64 = 10_000.0;

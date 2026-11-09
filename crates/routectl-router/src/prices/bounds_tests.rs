@@ -6,7 +6,7 @@ use std::fmt::Write as _;
 use serde_json::{Value, json};
 
 use super::prices_test_support::{bytes, one_provider, priced_model, table};
-use super::validate::MAX_ROWS;
+use super::validate::{MAX_PROVIDERS, MAX_ROWS};
 use super::*;
 
 fn date() -> TableDate {
@@ -189,16 +189,18 @@ fn models_dev_entries_count_toward_the_bound_with_or_without_a_cost() {
 #[test]
 fn provider_count_is_bounded_on_both_formats() {
     let mut canonical = vec![json!({ "id": "anchor", "models": [priced_model("m")] })];
-    canonical.extend((0..MAX_ROWS).map(|i| json!({ "id": format!("p{i}"), "models": [] })));
+    canonical.extend((0..MAX_PROVIDERS).map(|i| json!({ "id": format!("p{i}"), "models": [] })));
     let mut dev = serde_json::Map::new();
     dev.insert(
         "anchor".into(),
         json!({ "models": { "m": { "cost": { "input": 1 } } } }),
     );
-    for i in 0..MAX_ROWS {
+    for i in 0..MAX_PROVIDERS {
         dev.insert(format!("p{i}"), json!({ "models": {} }));
     }
-    let over = Some(PriceTableError::TooManyProviders { limit: MAX_ROWS });
+    let over = Some(PriceTableError::TooManyProviders {
+        limit: MAX_PROVIDERS,
+    });
 
     assert_eq!(
         parse_and_validate(&bytes(&table(Value::Array(canonical)))).err(),
@@ -211,7 +213,7 @@ fn provider_count_is_bounded_on_both_formats() {
         "models.dev"
     );
     let mut at_limit = vec![json!({ "id": "anchor", "models": [priced_model("m")] })];
-    at_limit.extend((1..MAX_ROWS).map(|i| json!({ "id": format!("p{i}"), "models": [] })));
+    at_limit.extend((1..MAX_PROVIDERS).map(|i| json!({ "id": format!("p{i}"), "models": [] })));
     assert!(
         parse_and_validate(&bytes(&table(Value::Array(at_limit)))).is_ok(),
         "at limit"
@@ -245,31 +247,111 @@ fn a_structured_schema_version_is_malformed() {
     );
 }
 
+/// Which parser a shape row goes through.
+#[derive(Clone, Copy)]
+enum Source {
+    Canonical,
+    ModelsDev,
+}
+
+const SHAPE_ROWS: &[(&str, Source, &str)] = &[
+    (
+        "missing provider id",
+        Source::Canonical,
+        r#"{"schema_version":1,"generated_at":"2026-11-01","providers":[{"models":[{"id":"m","input":1}]}]}"#,
+    ),
+    (
+        "missing models on a second provider",
+        Source::Canonical,
+        r#"{"schema_version":1,"generated_at":"2026-11-01","providers":[{"id":"p","models":[{"id":"m","input":1}]},{"id":"q"}]}"#,
+    ),
+    (
+        "missing providers",
+        Source::Canonical,
+        r#"{"schema_version":1,"generated_at":"2026-11-01"}"#,
+    ),
+    (
+        "missing generated_at",
+        Source::Canonical,
+        r#"{"schema_version":1,"providers":[{"id":"p","models":[{"id":"m","input":1}]}]}"#,
+    ),
+    (
+        "provider id twice",
+        Source::Canonical,
+        r#"{"schema_version":1,"generated_at":"2026-11-01","providers":[{"id":"p","id":"q","models":[{"id":"m","input":1}]}]}"#,
+    ),
+    (
+        "api_host twice",
+        Source::Canonical,
+        r#"{"schema_version":1,"generated_at":"2026-11-01","providers":[{"id":"p","api_host":"https://a.example","api_host":"https://b.example","models":[{"id":"m","input":1}]}]}"#,
+    ),
+    (
+        "generated_at twice",
+        Source::Canonical,
+        r#"{"schema_version":1,"generated_at":"2026-11-01","generated_at":"2026-11-02","providers":[{"id":"p","models":[{"id":"m","input":1}]}]}"#,
+    ),
+    (
+        "models twice",
+        Source::Canonical,
+        r#"{"schema_version":1,"generated_at":"2026-11-01","providers":[{"id":"p","models":[{"id":"m","input":1}],"models":[]}]}"#,
+    ),
+    (
+        "providers twice",
+        Source::Canonical,
+        r#"{"schema_version":1,"generated_at":"2026-11-01","providers":[],"providers":[{"id":"p","models":[{"id":"m","input":1}]}]}"#,
+    ),
+    (
+        "models.dev api twice",
+        Source::ModelsDev,
+        r#"{"p":{"api":"https://a.example","api":"https://b.example","models":{"m":{"cost":{"input":1}}}}}"#,
+    ),
+    (
+        "models.dev models twice",
+        Source::ModelsDev,
+        r#"{"p":{"models":{"m":{"cost":{"input":1}}},"models":{}}}"#,
+    ),
+    (
+        "models.dev trailing data",
+        Source::ModelsDev,
+        r#"{"p":{"models":{"m":{"cost":{"input":1}}}}} {}"#,
+    ),
+];
+
+fn parse_row(source: Source, text: &str) -> Result<PriceTable, PriceTableError> {
+    match source {
+        Source::Canonical => parse_and_validate(text.as_bytes()),
+        Source::ModelsDev => from_models_dev(text.as_bytes(), date()),
+    }
+}
+
 #[test]
-fn a_field_repeated_in_one_object_is_malformed() {
-    let rows = [
-        (
-            "models twice",
-            r#"{"schema_version":1,"generated_at":"2026-11-01","providers":[{"id":"p","models":[{"id":"m","input":1}],"models":[]}]}"#,
-        ),
-        (
-            "providers twice",
-            r#"{"schema_version":1,"generated_at":"2026-11-01","providers":[],"providers":[{"id":"p","models":[{"id":"m","input":1}]}]}"#,
-        ),
-        (
-            "models.dev models twice",
-            r#"{"p":{"models":{"m":{"cost":{"input":1}}},"models":{}}}"#,
-        ),
-    ];
-    for (name, text) in rows {
-        let result = if name.starts_with("models.dev") {
-            from_models_dev(text.as_bytes(), date())
-        } else {
-            parse_and_validate(text.as_bytes())
-        };
+fn a_missing_required_or_repeated_field_or_trailing_data_is_malformed() {
+    for (name, source, text) in SHAPE_ROWS {
         assert!(
-            matches!(result, Err(PriceTableError::Syntax { .. })),
+            matches!(
+                parse_row(*source, text),
+                Err(PriceTableError::Syntax { .. })
+            ),
             "{name}"
         );
+    }
+}
+
+#[test]
+fn shape_rows_parse_once_their_defect_is_removed() {
+    let controls: &[(&str, Source, &str)] = &[
+        (
+            "canonical, every field once",
+            Source::Canonical,
+            r#"{"schema_version":1,"generated_at":"2026-11-01","providers":[{"id":"p","api_host":"https://a.example","models":[{"id":"m","input":1}]},{"id":"q","models":[]}]}"#,
+        ),
+        (
+            "models.dev, every field once",
+            Source::ModelsDev,
+            r#"{"p":{"api":"https://a.example","models":{"m":{"cost":{"input":1}}}}} "#,
+        ),
+    ];
+    for (name, source, text) in controls {
+        assert!(parse_row(*source, text).is_ok(), "{name}");
     }
 }

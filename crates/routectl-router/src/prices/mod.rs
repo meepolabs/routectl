@@ -37,11 +37,12 @@
 //! over [`MAX_INPUT_BYTES`] is refused; more than 100000 source model entries
 //! (counted while parsing, priced or not) or 100000 providers, a provider id
 //! empty or over 128 bytes, a model id empty or over 512 bytes, any id byte
-//! outside printable ASCII `0x21..=0x7E`, a duplicate provider, a duplicate (provider, model) row, an `api_host` that
-//! does not normalize to an origin, a `generated_at` that is not a calendar
-//! date, and a table with no priced model are all malformed. A price that is
-//! not finite, is negative or exceeds 10000 $/Mtok is dropped to `None`
-//! (unknown, never zero); a known `0` is kept.
+//! outside printable ASCII `0x21..=0x7E`, a duplicate provider, a duplicate
+//! (provider, model) row, an `api_host` that does not normalize to an origin,
+//! a `generated_at` that is not a calendar date, and a table with no priced
+//! model are all malformed. A price that is not finite, is negative or
+//! exceeds 10000 $/Mtok is dropped to `None` (unknown, never zero); a known
+//! `0` is kept.
 //!
 //! # No download string is rendered
 //!
@@ -66,7 +67,14 @@
 //!
 //! A pool target uses its first member that names a provider entry, the same
 //! member the config's provider-kind resolution reads.
+//!
+//! # The refreshed table file
+//!
+//! [`PriceBook`] holds the table the refresh writes into the config
+//! directory and re-reads it when the file's modification time or length
+//! changes, keeping the last good table when a new copy is refused.
 
+mod book;
 mod bounded;
 mod format;
 mod models_dev;
@@ -78,6 +86,7 @@ use std::fmt;
 
 use crate::config::{Config, PricingConfig};
 
+pub use book::PriceBook;
 pub use format::TableDate;
 pub use models_dev::from_models_dev;
 pub use validate::{MAX_INPUT_BYTES, parse_and_validate};
