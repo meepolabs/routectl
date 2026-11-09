@@ -41,12 +41,10 @@ impl AttemptLearning<'_> {
                 req.provider_extras.as_ref(),
                 req.response_format.as_ref(),
             );
-            meta.learned_capabilities.extend(plan.commit(
-                self.replay_reject_status,
-                &features,
-                Instant::now(),
-            ));
-            settle_replay_repair(meta, repair, true);
+            let rows = plan.commit(self.replay_reject_status, &features, Instant::now());
+            let learned = !rows.is_empty();
+            meta.learned_capabilities.extend(rows);
+            settle_replay_repair(meta, repair, learned);
         } else {
             meta.cleared_capabilities.extend(plan.settle_success());
         }

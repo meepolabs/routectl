@@ -508,3 +508,121 @@ async fn ambiguous_tag_toward_mantle_is_stripped_by_the_ladder() {
         "carried attempt rejected, stripped repair succeeded",
     );
 }
+
+/// A mantle-lane backend that rejects the carried variant and serves the
+/// stripped one, advancing the shared capability registry's generation as it
+/// serves: a reload landing after the carry was admitted and before its
+/// settlement.
+struct ReloadDuringRepairProvider {
+    inner: ReplayMockProvider,
+    registry: std::sync::OnceLock<Arc<crate::learned_capability::LearnedCapabilityRegistry>>,
+}
+
+#[async_trait::async_trait]
+impl Provider for ReloadDuringRepairProvider {
+    fn id(&self) -> &'static str {
+        "replay-mock"
+    }
+    fn normalize_request(&self, req: &ChatRequest) -> Result<serde_json::Value> {
+        self.inner.normalize_request(req)
+    }
+    fn normalize_response(&self, raw: serde_json::Value) -> Result<ChatResponse> {
+        self.inner.normalize_response(raw)
+    }
+    fn replay_lane(&self) -> routectl_core::ReplayScheme {
+        self.inner.replay_lane()
+    }
+    async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
+        let result = self.inner.complete(req).await;
+        if result.is_ok() {
+            self.registry
+                .get()
+                .expect("registry installed before dispatch")
+                .advance_generation();
+        }
+        result
+    }
+    async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
+        self.inner.stream(req).await
+    }
+}
+
+async fn dispatch_one_repair(router: &Router) -> super::super::Dispatched {
+    router
+        .complete_with_options(
+            req_carrying(CODEX_OAUTH),
+            super::super::RouterOptions::default(),
+        )
+        .await
+}
+
+#[tokio::test]
+async fn stale_generation_commit_settles_repair_without_learning() {
+    // Arrange -- the generation advances while the stripped repair is in
+    // flight, so its commit is refused as stale.
+    let provider = Arc::new(ReloadDuringRepairProvider {
+        inner: ReplayMockProvider::new(),
+        registry: std::sync::OnceLock::new(),
+    });
+    let router = router_from_toml(SINGLE_TARGET_TOML, provider.clone());
+    let generation_before = router.learned_capabilities.generation();
+    provider
+        .registry
+        .set(Arc::clone(&router.learned_capabilities))
+        .expect("registry installed once");
+
+    // Act
+    let dispatched = dispatch_one_repair(&router).await;
+
+    // Assert -- the repair served, but nothing was persisted, so the record
+    // must not claim a learned negative.
+    assert!(dispatched.result.is_ok(), "the stripped repair served");
+    assert_eq!(
+        provider.inner.calls.load(Ordering::SeqCst),
+        2,
+        "premise: one carried attempt plus one stripped repair",
+    );
+    assert_eq!(
+        router.learned_capabilities.generation(),
+        generation_before + 1,
+        "premise: the generation advanced between admission and settlement",
+    );
+    assert!(
+        router.learned_capability_snapshot().is_empty(),
+        "premise: the stale commit persisted nothing",
+    );
+    assert!(dispatched.meta.learned_capabilities.is_empty());
+    let records: Vec<_> = dispatched
+        .meta
+        .replay_degradations
+        .iter()
+        .map(|record| (record.repair_succeeded, record.learned))
+        .collect();
+    assert_eq!(records, vec![(true, false)]);
+}
+
+#[tokio::test]
+async fn live_generation_commit_settles_repair_as_learned() {
+    // Arrange
+    let provider = Arc::new(ReplayMockProvider::new());
+    let router = router_from_toml(SINGLE_TARGET_TOML, provider.clone());
+
+    // Act
+    let dispatched = dispatch_one_repair(&router).await;
+
+    // Assert -- the positive control: the same repair with no reload in
+    // between persists the negative and reports it learned.
+    assert!(dispatched.result.is_ok(), "the stripped repair served");
+    assert!(
+        !router.learned_capability_snapshot().is_empty(),
+        "the commit persisted the negative",
+    );
+    assert_eq!(dispatched.meta.learned_capabilities.len(), 1);
+    let records: Vec<_> = dispatched
+        .meta
+        .replay_degradations
+        .iter()
+        .map(|record| (record.repair_succeeded, record.learned))
+        .collect();
+    assert_eq!(records, vec![(true, true)]);
+}
