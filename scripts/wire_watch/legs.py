@@ -1,10 +1,12 @@
 """Which of the four wire legs a cell's capture landed.
 
 Stdlib only. The capture rig lands a cell's fixture at
-`<cell dir>/<lane>/<case>/`, where `<lane>` is the rig's own lane name for
-the traced provider kind (not the cells.tsv lane), so the case directory
-is looked up under every lane directory. A leg is captured when its body
-file is a non-empty regular file:
+`<cell dir>/<lane dir>/<case>__<driver>__<config>/`. `<lane dir>` is the
+rig's own lane name for the traced provider kind (not the cells.tsv
+lane), so the leaf is looked up under every lane directory. `<driver>` is
+the cell's driver script name without `.sh` and `<config>` is the
+cells.tsv lane column (the lane config stem). A leg is captured when its
+body file is a non-empty regular file:
 
   leg 1  ingress_request.json    client -> routectl
   leg 2  outgoing_request.json   routectl -> upstream
@@ -19,7 +21,8 @@ as not captured; so do the stream legs an egress traces no body for.
 
 Public API
   LEG_FILES              the four body file names, in leg order
-  legs_captured(cell_dir, case)  tuple of four bools
+  landing_leaf(spec)     the fixture directory name, or None when unsafe
+  legs_captured(cell_dir, spec)  tuple of four bools
 """
 
 from __future__ import annotations
@@ -27,7 +30,7 @@ from __future__ import annotations
 import os
 import stat
 import sys
-from typing import List, Optional, Tuple
+from typing import List, Optional, Protocol, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -44,8 +47,31 @@ NONE_CAPTURED: Tuple[bool, ...] = (False,) * len(LEG_FILES)
 # that planted thousands is not worth walking.
 MAX_LANE_DIRS = 64
 
+LEAF_SEP = "__"
+DRIVER_SUFFIX = ".sh"
+
 _CLOEXEC = getattr(os, "O_CLOEXEC", 0)
 _SUBDIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | _CLOEXEC
+
+
+class LegSpec(Protocol):
+    @property
+    def case(self) -> str: ...
+    @property
+    def driver(self) -> str: ...
+    @property
+    def lane(self) -> str: ...
+
+
+def landing_leaf(spec: LegSpec) -> Optional[str]:
+    driver = spec.driver[: -len(DRIVER_SUFFIX)] if spec.driver.endswith(DRIVER_SUFFIX) else spec.driver
+    parts = (spec.case, driver, spec.lane)
+    if any(part == "" for part in parts):
+        return None
+    leaf = LEAF_SEP.join(parts)
+    if "/" in leaf:
+        return None
+    return leaf
 
 
 def _open_subdir(parent_fd: int, name: str) -> Optional[int]:
@@ -71,12 +97,12 @@ def _lane_names(cell_fd: int) -> List[str]:
     return names[:MAX_LANE_DIRS]
 
 
-def _case_legs(cell_fd: int, lane: str, case: str) -> Tuple[bool, ...]:
+def _leaf_legs(cell_fd: int, lane: str, leaf: str) -> Tuple[bool, ...]:
     lane_fd = _open_subdir(cell_fd, lane)
     if lane_fd is None:
         return NONE_CAPTURED
     try:
-        case_fd = _open_subdir(lane_fd, case)
+        case_fd = _open_subdir(lane_fd, leaf)
     finally:
         os.close(lane_fd)
     if case_fd is None:
@@ -87,8 +113,9 @@ def _case_legs(cell_fd: int, lane: str, case: str) -> Tuple[bool, ...]:
         os.close(case_fd)
 
 
-def legs_captured(cell_dir: str, case: str) -> Tuple[bool, ...]:
-    if case in ("", ".", "..") or "/" in case:
+def legs_captured(cell_dir: str, spec: LegSpec) -> Tuple[bool, ...]:
+    leaf = landing_leaf(spec)
+    if leaf is None:
         return NONE_CAPTURED
     try:
         cell_fd = nofollow.open_dir(cell_dir)
@@ -97,7 +124,7 @@ def legs_captured(cell_dir: str, case: str) -> Tuple[bool, ...]:
     try:
         found = NONE_CAPTURED
         for lane in _lane_names(cell_fd):
-            legs = _case_legs(cell_fd, lane, case)
+            legs = _leaf_legs(cell_fd, lane, leaf)
             found = tuple(a or b for a, b in zip(found, legs))
         return found
     finally:

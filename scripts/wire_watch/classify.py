@@ -385,7 +385,7 @@ def classify(entry: Entry, cell_dir: str, ctx: Context) -> CellResult:
     fixed = _ledger_outcome(entry)
     if fixed is not None:
         return fixed
-    base = CellResult(entry, Outcome.INCOMPLETE, legs=legs_captured(cell_dir, entry.spec.case))
+    base = CellResult(entry, Outcome.INCOMPLETE, legs=legs_captured(cell_dir, entry.spec))
     read = evidence.read_cell(cell_dir)
     if isinstance(read, Incomplete):
         detail = " ".join(p for p in (read.artifact, read.detail) if p) or None

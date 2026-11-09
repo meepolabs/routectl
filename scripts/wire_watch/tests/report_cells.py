@@ -177,10 +177,16 @@ def write_evidence(cell_dir: str, plan: CellPlan) -> None:
             handle.write(text)
 
 
+def fixture_leaf(plan: CellPlan) -> str:
+    """The rig's driver-mode landing leaf, `<case>__<driver>__<config>`;
+    welded to capture_driver.sh / capture_fixtures.sh in test_report."""
+    return "__".join((CASE, plan.driver[: -len(".sh")], plan.lane))
+
+
 def write_legs(cell_dir: str, plan: CellPlan) -> None:
     if not plan.legs:
         return
-    case_dir = os.path.join(cell_dir, plan.fixture_lane, CASE)
+    case_dir = os.path.join(cell_dir, plan.fixture_lane, fixture_leaf(plan))
     os.makedirs(case_dir)
     for name in plan.legs:
         with open(os.path.join(case_dir, name), "w", encoding="utf-8") as handle:

@@ -78,6 +78,8 @@ SCRUB = os.path.join(rc.REPO, "scripts", "scrub-fixture.sh")
 GENERATED = "2026-10-12T18:00:00Z"
 CORE_WIRE_CHECK = os.path.join(rc.REPO, "crates", "routectl-core", "src", "wire_check")
 CAPTURE_FIXTURES = os.path.join(rc.REPO, "scripts", "capture_fixtures.sh")
+CAPTURE_DRIVER = os.path.join(rc.REPO, "scripts", "capture_driver.sh")
+DRIVERS_DIR = os.path.join(rc.REPO, "scripts", "drivers")
 STATUS_HEALTH = os.path.join(rc.REPO, "crates", "routectl-cli", "src", "handlers", "status", "health.rs")
 
 # One /status/health learned row in the daemon's current shape. The recorded
@@ -714,12 +716,97 @@ class LegCoverageTests(RunCase):
         target = os.path.join(self._tmp.name, "outside.json")
         with open(target, "w", encoding="utf-8") as handle:
             handle.write("{}\n")
-        os.symlink(target, os.path.join(self.run_dir, "cells", plan.cell_id, "openai-compat", rc.CASE,
+        os.symlink(target, os.path.join(self.cell_dir(plan), "openai-compat", rc.fixture_leaf(plan),
                                         legs.LEG_FILES[0]))
 
-        captured = legs.legs_captured(os.path.join(self.run_dir, "cells", plan.cell_id), rc.CASE)
+        captured = legs.legs_captured(self.cell_dir(plan), plan.spec())
 
         self.assertEqual(captured, (False, True, True, True))
+
+    def cell_dir(self, plan: CellPlan) -> str:
+        return os.path.join(self.run_dir, "cells", plan.cell_id)
+
+    def plant_leaf(self, plan: CellPlan, lane_dir: str, leaf: str, names: Sequence[str]) -> None:
+        leaf_dir = os.path.join(self.cell_dir(plan), lane_dir, leaf)
+        os.makedirs(leaf_dir)
+        for name in names:
+            with open(os.path.join(leaf_dir, name), "w", encoding="utf-8") as handle:
+                handle.write("{}\n")
+
+    def test_a_fixture_under_the_bare_case_directory_is_not_captured(self) -> None:
+        plan = plant("clean-control")
+        rc.build_run(self.run_dir, [plan])
+        self.plant_leaf(plan, "openai-compat", rc.CASE, legs.LEG_FILES)
+
+        captured = legs.legs_captured(self.cell_dir(plan), plan.spec())
+
+        self.assertEqual(captured, legs.NONE_CAPTURED)
+
+    def test_a_fixture_another_driver_landed_for_the_same_case_is_not_captured(self) -> None:
+        plan = plant("clean-control")
+        rc.build_run(self.run_dir, [plan])
+        other = rc.fixture_leaf(replace(plan, driver="codex.sh"))
+        self.plant_leaf(plan, "openai-compat", other, legs.LEG_FILES)
+
+        captured = legs.legs_captured(self.cell_dir(plan), plan.spec())
+
+        self.assertEqual(captured, legs.NONE_CAPTURED)
+
+    def test_a_fixture_for_another_config_of_the_same_driver_is_not_captured(self) -> None:
+        plan = plant("clean-control")
+        rc.build_run(self.run_dir, [plan])
+        other = rc.fixture_leaf(replace(plan, lane="openai-responses"))
+        self.plant_leaf(plan, "openai-compat", other, legs.LEG_FILES)
+
+        captured = legs.legs_captured(self.cell_dir(plan), plan.spec())
+
+        self.assertEqual(captured, legs.NONE_CAPTURED)
+
+    def test_each_model_cell_reads_only_its_own_fixture(self) -> None:
+        first = plant("clean-control", model="model-a", legs=legs.LEG_FILES[:1], fixture_lane="openai-compat")
+        second = plant("clean-control", model="model-b", legs=legs.LEG_FILES[2:], fixture_lane="openai-compat")
+        self.assertEqual(rc.fixture_leaf(first), rc.fixture_leaf(second))
+
+        results = self.build([first, second]).results
+
+        by_id = {r.entry.spec.id: r.legs for r in results}
+        self.assertEqual(by_id[first.cell_id], (True, False, False, False))
+        self.assertEqual(by_id[second.cell_id], (False, False, True, True))
+
+    def test_a_composed_leaf_with_a_path_separator_is_refused(self) -> None:
+        plan = plant("clean-control")
+        rc.build_run(self.run_dir, [plan])
+        nested = replace(plan, lane=plan.lane + "/nested")
+        self.plant_leaf(plan, "openai-compat", rc.fixture_leaf(nested), legs.LEG_FILES)
+
+        captured = legs.legs_captured(self.cell_dir(plan), nested.spec())
+
+        self.assertEqual(captured, legs.NONE_CAPTURED)
+
+    def test_the_fixture_leaf_matches_the_rig_landing_name(self) -> None:
+        if not os.path.isfile(CAPTURE_FIXTURES):
+            self.skipTest("capture_fixtures.sh absent")
+        with open(CAPTURE_FIXTURES, encoding="utf-8") as handle:
+            rig = handle.read()
+        with open(CAPTURE_DRIVER, encoding="utf-8") as handle:
+            driver = handle.read()
+
+        self.assertIn(f'LEAF_SEP="{legs.LEAF_SEP}"', rig)
+        self.assertRegex(rig, r'"\$ROUTECTL_FIXTURE_CASE_ID" "\$LEAF_SEP" \\\s*'
+                              r'"\$ROUTECTL_FIXTURE_DRIVER" "\$LEAF_SEP" "\$ROUTECTL_FIXTURE_CONFIG_VARIANT"')
+        self.assertIn('ROUTECTL_FIXTURE_DRIVER="$DRIVER_NAME"', driver)
+        self.assertIn('ROUTECTL_FIXTURE_CONFIG_VARIANT="$LANE"', driver)
+        self.assertIn('DRIVER_SCRIPT="$DRIVERS_DIR/$DRIVER_NAME.sh"', driver)
+
+    def test_every_cells_tsv_driver_records_its_script_name(self) -> None:
+        for script in sorted({r.driver for r in rc.matrix.load_rows(rc.PATHS)}):
+            with self.subTest(script):
+                with open(os.path.join(DRIVERS_DIR, script), encoding="utf-8") as handle:
+                    body = handle.read()
+                name = script[: -len(legs.DRIVER_SUFFIX)]
+                recorded = re.search(r'^driver_record_client (\S+) ', body, re.M)
+                agent = re.search(r'^export ROUTECTL_DRIVER_AGENT_NAME="([^"]+)"', body, re.M)
+                self.assertEqual((recorded or agent).group(1), name)  # type: ignore[union-attr]
 
     def test_the_report_names_each_cell_leg(self) -> None:
         text = self.build([converse(legs=legs.LEG_FILES[:2], fixture_lane="bedrock")]).files[report.REPORT_MD]
