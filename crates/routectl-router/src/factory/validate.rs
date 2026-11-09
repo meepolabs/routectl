@@ -1818,6 +1818,9 @@ pub fn collect_config_validation(config: &Config) -> ConfigValidation {
     if let Err(e) = crate::config::validate_cache_pricing_retired(config) {
         errors.push(e);
     }
+    if let Err(e) = crate::config::validate_model_token_limits(config) {
+        errors.push(e);
+    }
     #[cfg(feature = "bedrock")]
     if let Err(e) = validate_bedrock_invoke_model_family(config) {
         errors.push(bare_validation_message(e));

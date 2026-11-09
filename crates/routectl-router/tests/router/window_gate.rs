@@ -3,7 +3,7 @@
 
 use super::*;
 
-use routectl_router::{CatalogRow, EffectiveRow, WindowGateConfig};
+use routectl_router::WindowGateConfig;
 
 /// A request whose serialized size is far past any window these tests
 /// configure.
@@ -22,17 +22,6 @@ fn oversized_req(model: &str) -> ChatRequest {
         }]
         .into(),
         ..Default::default()
-    }
-}
-
-/// An effective row confirming `window` context tokens.
-fn row_with_window(window: u32) -> EffectiveRow {
-    let mut row = CatalogRow::sentinel();
-    row.max_context_tokens = Some(window);
-    EffectiveRow::Present {
-        row,
-        source: routectl_router::Source::Baked,
-        verified_at: "seed".into(),
     }
 }
 
@@ -59,16 +48,13 @@ fn router_with_windows(
     let mut resolved: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
     resolved.insert(
         "m1".into(),
-        Arc::new(
-            ResolvedModel::new("m1", "p1", p1, "m1")
-                .with_effective_row(row_with_window(first_window)),
-        ),
+        Arc::new(ResolvedModel::new("m1", "p1", p1, "m1").with_context_window(first_window)),
     );
     let second = ResolvedModel::new("m2", "p2", p2, "m2");
     resolved.insert(
         "m2".into(),
         Arc::new(match second_window {
-            Some(window) => second.with_effective_row(row_with_window(window)),
+            Some(window) => second.with_context_window(window),
             None => second,
         }),
     );

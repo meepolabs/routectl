@@ -194,8 +194,8 @@ pub(crate) use self::served::{
 ///
 /// v20 -> v21: the `knobs` section loses its config state (the output ceiling
 /// is no longer a `[models.X]` setting): every row is the catalog fill or the
-/// egress baseline, and the catalog row's detail names
-/// `routectl catalog set ... max_output_tokens` as the way to correct it.
+/// egress baseline, and the catalog row's detail names the catalog command
+/// that corrects it.
 ///
 /// v21 -> v22: additive. Every capability matrix cell gains `value`, the
 /// value the resident learned verdict applies (`shape:<v>` / `ceiling:<n>`),
@@ -228,7 +228,13 @@ pub(crate) use self::served::{
 /// `routectl login` does not accept. The CLI cannot see daemon
 /// memory and reports none. The `pools` remediations name the local
 /// `credential_unusable` refusal.
-pub(crate) const SCHEMA_VERSION: u32 = 25;
+///
+/// v25 -> v26: every `knobs` row reads its ceiling from the model's own
+/// `[models.X] max_output_tokens`. A row names its source as `model-config`
+/// (the configured value) or `default` (the egress baseline); the catalog
+/// source, its `routectl catalog set` pointer, and the section-unavailable
+/// line for an unreadable catalog overlay are gone.
+pub(crate) const SCHEMA_VERSION: u32 = 26;
 
 /// A section-producer: pure mapping of the read-only [`DoctorContext`] to a
 /// section's findings.
@@ -356,11 +362,9 @@ pub(crate) struct DoctorContext {
     /// the section renders an honest unavailable line instead.
     pricing: Option<Vec<PricingRow>>,
     /// The knobs section's rows: one per configured model, resolved once at
-    /// gather time so the section producer stays a pure mapping. `None` when
-    /// the catalog overlay could not be loaded -- the overlay both corrects and
-    /// disables catalog ceilings, so without it no source attribution can be
-    /// trusted and the section renders an honest unavailable line instead.
-    knobs: Option<Vec<KnobRow>>,
+    /// gather time so the section producer stays a pure mapping. Read from
+    /// the config alone.
+    knobs: Vec<KnobRow>,
     /// The tuning section's rows: one per `[providers.X]` entry, then one per
     /// model with its own first-content timeout, each cell carrying the tier
     /// that supplied it. Read from the config alone, so an unloadable catalog
@@ -422,9 +426,9 @@ enum LegacyFolder {
 /// Where one configured model's outbound `max_output_tokens` ceiling comes
 /// from, and what it resolves to.
 ///
-/// Resolved through the SAME `EffectiveRow::output_ceiling_tokens` accessor the
-/// factory's fill reads, so the diagnostic can never name a ceiling the served
-/// router would not apply.
+/// Read off the same `[models.X] max_output_tokens` field the factory stamps,
+/// so the diagnostic can never name a ceiling the served router would not
+/// apply.
 struct KnobRow {
     /// The `[models.<nickname>]` key.
     nickname: String,
@@ -438,15 +442,15 @@ struct KnobRow {
 }
 
 /// The two states a [`KnobRow`] can report, in the precedence order the
-/// factory resolves them: the catalog fill, else the Anthropic-shape egress's
-/// own hardcoded baseline. A learned ceiling lowers either at dispatch.
+/// egress resolves them: the model's configured value, else the
+/// Anthropic-shape egress's own hardcoded baseline. A learned ceiling lowers
+/// either at dispatch.
 enum OutputCeilingSource {
-    /// The model's resolved catalog cell confirmed a ceiling, so the factory
-    /// filled it.
-    Catalog(u32),
-    /// Neither layer supplies a ceiling: the Anthropic-shape egresses fall
-    /// through to their hardcoded baseline and every other egress forwards
-    /// caller omission untouched.
+    /// `[models.X] max_output_tokens` sets the ceiling.
+    ModelConfig(u32),
+    /// No ceiling is configured: the Anthropic-shape egresses fall through to
+    /// their hardcoded baseline and every other egress forwards caller
+    /// omission untouched.
     Default,
 }
 

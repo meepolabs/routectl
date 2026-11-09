@@ -86,7 +86,7 @@ pub(super) fn context(config: Config, source: CapabilityMatrixSource) -> DoctorC
             import_result: None,
         },
         pricing: None,
-        knobs: None,
+        knobs: Vec::new(),
         tuning: Vec::new(),
         reload_failure: None,
         parked_seats: Vec::new(),

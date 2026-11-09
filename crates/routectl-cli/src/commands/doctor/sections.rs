@@ -1028,45 +1028,13 @@ pub(super) fn staleness_threshold_days(hint_days: u64) -> i64 {
 /// outbound `max_output_tokens` ceiling comes from. Purely informational --
 /// every state is a legitimate configuration -- so no row here can Fail and the
 /// section can never move the exit code.
-///
-/// An unresolvable overlay collapses the whole section to ONE unavailable line:
-/// see [`knobs_unavailable`].
 pub(super) fn section_knobs(ctx: &DoctorContext) -> Vec<Finding> {
-    match &ctx.knobs {
-        Some(rows) => rows.iter().map(knob_finding).collect(),
-        None => vec![knobs_unavailable()],
-    }
-}
-
-/// The section-unavailable finding: the catalog overlay could not be loaded.
-///
-/// The overlay both CORRECTS a baked ceiling and can disable a cell outright,
-/// so with it unreadable the baked ceiling for any selector may be exactly the
-/// one the served router does not fill from. Naming a superseded figure is
-/// worse than naming none.
-///
-/// `Warn`, matching the pricing section: it degrades honestly without flipping
-/// the exit code (the version section owns the overlay-load `Fail`).
-fn knobs_unavailable() -> Finding {
-    Finding {
-        section: "knobs",
-        name: "section".to_string(),
-        status: Status::Warn,
-        detail: "output-ceiling sources unavailable: the catalog overlay could not be loaded, so \
-                 no model's effective max_output_tokens can be attributed (the overlay corrects \
-                 and disables baked ceilings, so reporting the baked figure could name a ceiling \
-                 the router does not use)"
-            .to_string(),
-        remediation: Some(
-            "resolve the catalog-overlay error reported above, then re-run `routectl doctor`"
-                .to_string(),
-        ),
-    }
+    ctx.knobs.iter().map(knob_finding).collect()
 }
 
 /// Pure mapping of one resolved [`KnobRow`] to its finding. The detail names
-/// the model's kind and upstream in every state so an operator can see WHICH
-/// selector was resolved, and every state names the ceiling that results.
+/// the source token (`model-config` or `default`) and the model's kind and
+/// upstream in every state.
 fn knob_finding(row: &KnobRow) -> Finding {
     let selector = format!(
         "kind {} upstream {}",
@@ -1074,14 +1042,14 @@ fn knob_finding(row: &KnobRow) -> Finding {
         safe(&row.upstream)
     );
     let detail = match row.source {
-        OutputCeilingSource::Catalog(ceiling) => format!(
-            "max_output_tokens {ceiling} filled from the catalog -- {selector}; correct it with \
-             `routectl catalog set ... max_output_tokens`"
+        OutputCeilingSource::ModelConfig(ceiling) => format!(
+            "max_output_tokens {ceiling} (model-config) -- {selector}; a ceiling learned from an \
+             upstream refusal can lower it"
         ),
         OutputCeilingSource::Default => format!(
-            "max_output_tokens unset and the catalog confirms no ceiling -- {selector}; the \
-             Anthropic-shape egresses fall back to their built-in baseline and every other \
-             egress forwards caller omission untouched"
+            "max_output_tokens unset (default) -- {selector}; the Anthropic-shape egresses send \
+             their built-in baseline and every other egress forwards caller omission untouched; \
+             set `max_output_tokens` on the model for one whose ceiling is lower"
         ),
     };
     Finding {

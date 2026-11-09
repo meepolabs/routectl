@@ -490,18 +490,12 @@ synthesizing or dropping turns.
 only route outside the auth layer (so liveness probes work under
 `--unsafe-public`).
 
-Each `/v1/models` entry also carries `context_length` -- the context
-window in tokens of the id's resolved target, read from the same
-overlay-corrected catalog row the proactive window gate acts on, so a
-client and the router never disagree about a model's window. For a
-chain alias it is the FIRST configured target's window. The field is
-OMITTED when routectl has no confirmed window for that target (never
-`null`, never `0`). `routectl catalog set <selector>
-max_context_tokens=<n>` corrects a window for a selector the catalog
-already covers; for an upstream with no baked row or overlay cell, add
-`--create` to the same command to write a NARROW cell for that one model
-(`routectl catalog set --create openai-compat:my-model
-max_context_tokens=<n>`) -- see the `catalog set` section below.
+Each `/v1/models` entry also carries `context_length` -- the id's
+resolved target's [`context_window`](#context-window-and-output-ceiling),
+the same figure the proactive window gate acts on, so a client and the
+router never disagree about a model's window. For a chain alias it is
+the FIRST configured target's window. The field is OMITTED when that
+target sets no `context_window` (never `null`, never `0`).
 
 **`max_body_bytes`** (u32, default 33554432 -- 32 MiB)
 
@@ -641,6 +635,8 @@ semantics in the [field-assignment table](#field-assignment-table).
 | `history_reasoning`            | `[models.X]`        | model-only (NO provider fallback)                                      |
 | `additional_request_fields`    | `[models.X]`        | model-only (Bedrock Converse / Invoke bag)                             |
 | `stream_first_byte_timeout_ms` | `[models.X]`        | model > provider > pool > global > default (`0` on a model is ignored) |
+| `context_window`               | `[models.X]`        | Option<u32>, `0` refused; total context window for the window gate and `/v1/models` `context_length` |
+| `max_output_tokens`            | `[models.X]`        | Option<u32>, `0` refused; `max_tokens` sent when the client omits it (anthropic-api, bedrock-invoke), else 64000 |
 | `reported_model`               | `[models.X]`        | Option<String>, default None (-> echo client's requested alias); override for the response `model` label |
 | `visible_routectl_provider`    | `[models.X]`        | bool, default true; set false to drop the `routectl_provider` field from the client response (opaque proxy) |
 | `header_extras`                | BOTH                | model wins on key collision; `anthropic-beta` comma-unions (see below) |
@@ -2057,8 +2053,8 @@ the outcome in `apply_breaker_outcome`
 ## Proactive context-window gate (`[window_gate]`)
 
 Before dispatch, routectl estimates the request's token size and skips
-fallback-chain targets whose catalog context window cannot hold it, so
-an oversized request avoids a doomed round trip on a small-window
+fallback-chain targets whose configured context window cannot hold it,
+so an oversized request avoids a doomed round trip on a small-window
 entry. This runs after the capability pre-filter, as the second chain
 filter pass.
 
@@ -2068,30 +2064,36 @@ A target is skipped when
 estimate + output reserve + 1024 > context window
 ```
 
-The context window is the target's catalog `max_context_tokens`, after any
-catalog overlay cell (see `routectl catalog`). It is total context, so the
-upstream sets the output limit aside before any input fits; the output
-reserve accounts for that. It is the request's own `max_tokens` when the
-client sent one, otherwise the target's output ceiling (the catalog
-`max_output_tokens`, the value Anthropic-shape egresses send when the
-client sets none), otherwise 0. With no known ceiling the reserve is 0
-even where the egress fills its own 64000-token baseline; the reactive
-path below is the backstop for that gap, within its limits. The 1024
-tokens are a fixed headroom, not a fraction of the window, so a 1M-window
-target is not held to a smaller effective size than a 200k one: on a 1M
-window with a 64000-token reserve, a request estimated at up to 934976
-tokens is kept.
+The context window is the target model's
+[`context_window`](#context-window-and-output-ceiling) and nothing else:
+routectl never takes a window from outside data. A model without one is
+never skipped. Set `context_window` on every model in a gated chain
+(the gate only acts on targets that have one), and above all on a
+small-window fallback, which is the target the gate exists to step past.
+
+The window is total context, so the upstream sets the output limit aside
+before any input fits; the output reserve accounts for that. It is the
+request's own `max_tokens` when the client sent one, otherwise the
+model's configured `max_output_tokens`, otherwise the 64000 tokens
+the `anthropic-api` and `bedrock-invoke` egresses send when the client
+sets none, otherwise 0 (an egress that forwards an omitted limit as
+omitted). A ceiling learned from an upstream refusal is not part of the
+reserve, so the reserve can overstate what is sent, which only makes a
+skip more likely, never less. The 1024 tokens are a fixed headroom, not a
+fraction of the window, so a 1M-window target is not held to a smaller
+effective size than a 200k one: on a 1M window with a 64000-token
+reserve, a request estimated at up to 934976 tokens is kept.
 
 It is a best-effort filter, not a guarantee. A skip requires a
-CONFIRMED catalog window and a non-final target, so several cases still
-dispatch: a target whose
-window is unconfirmed, a chain of one, a chain whose every target
+configured window and a non-final target, so several cases still
+dispatch: a target with no
+`context_window`, a chain of one, a chain whose every target
 overflows, and any request the estimate undercounts. Each of those falls
 through to the reactive path below.
 
 The gate can never be the reason a request has nowhere to go: it has no
 empty-chain error path. A chain of one is returned untouched before any
-estimate is computed, a target whose catalog window is unconfirmed is
+estimate is computed, a target with no configured window is
 kept (an unknown fact never enables a skip), and a chain whose every
 target overflows is returned unchanged so the caller sees exactly
 today's upstream error rather than a routectl-invented one.
@@ -2137,7 +2139,7 @@ over.
 constant, not an operator knob. A margin tuned per deployment turns a
 routing decision into a support surface, and both error directions are
 already survivable: an underestimate misses a skip and costs one round
-trip, while an overestimate is a re-route among confirmed windows rather
+trip, while an overestimate is a re-route among configured windows rather
 than a denial. The switch above is the whole operator surface; if the
 gate misbehaves, the answer is off, not retuned.
 
@@ -2156,14 +2158,14 @@ instead of leaving the gate quietly at its default.
 Whether the gate is acting is observable in the log: a throttled
 `window_gate_skip` WARN (at most one line per minute per process) names
 the first skipped target with the estimate, the corrected figure the
-decision actually used, the output reserve, the target's catalog window,
-and the running skip total.
-Routectl-internal identifiers and catalog figures only -- never anything
+decision actually used, the output reserve, the target's configured
+window, and the running skip total.
+Routectl-internal identifiers and token figures only -- never anything
 from the request body.
 
 ## Learned token-estimate correction (`[calibration]`)
 
-The gate above compares its estimate against a target's catalog window,
+The gate above compares its estimate against a target's configured window,
 and that estimate is serialized bytes over four -- wrong per model, and
 wrong *differently* per model. routectl measures that per-model error
 from traffic it has already served: a request that completes
@@ -2356,8 +2358,8 @@ how that decision is named.
 
 ### Removed model keys
 
-`supports_adaptive_thinking`, `effort_levels`, `max_thinking_budget` and
-`max_output_tokens` are no longer `[models.X]` keys. A config that still
+`supports_adaptive_thinking`, `effort_levels` and `max_thinking_budget`
+are no longer `[models.X]` keys. A config that still
 carries any of them is refused at load, reload and every config edit,
 with one message listing every `models.<nick>.<key>` path (values are
 never echoed), what now decides that behavior, and "delete the key".
@@ -2368,7 +2370,6 @@ Delete the lines by hand.
 | `supports_adaptive_thinking` | client thinking is forwarded; effort alone adds no thinking                   |
 | `effort_levels`              | refused effort levels are learned per lane                                    |
 | `max_thinking_budget`        | client thinking budgets are forwarded                                         |
-| `max_output_tokens`          | an omitted limit uses the learned ceiling, else the catalog prior, else 64000 |
 
 A client's Anthropic `thinking` object (`enabled`, `adaptive`, `disabled`,
 `between_tools`, `display` included) is forwarded as sent; a model that
@@ -2380,20 +2381,41 @@ lane which level to use instead. An `enabled` budget is forwarded whatever
 its size; a budget routectl translates from another dialect is fitted under
 the output ceiling below.
 
-#### Output ceiling (`max_tokens` fill)
+#### Context window and output ceiling
+
+Two `[models.X]` keys state the model's token limits. routectl never
+takes either from outside data, so set them yourself:
+
+```toml
+[models.sonnet]
+provider          = "anthropic"
+upstream          = "claude-sonnet-4-6"
+context_window    = 200000   # total tokens, input plus output
+max_output_tokens = 64000    # sent as max_tokens when the client omits it
+```
+
+- **`context_window`** (u32, optional, `0` refused at load) -- the
+  model's total context window. The
+  [window gate](#proactive-context-window-gate-window_gate) skips the
+  model when a request cannot fit, and `GET /v1/models` reports it as
+  `context_length`. Unset: the gate keeps the model and `/v1/models`
+  omits `context_length`. Set it on every model in a gated fallback
+  chain, and above all on small-window models.
+- **`max_output_tokens`** (u32, optional, `0` refused at load) -- the
+  output ceiling used when the client sends no `max_tokens`. Set it on
+  any model whose real ceiling is below 64000, so a request is not
+  refused, and on any model that allows more than 64000 when you want
+  long outputs without a client limit.
+
+A zero for either key is refused at load, reload and every config edit,
+naming the dotted `models.<nick>.<key>` path.
 
 The `max_tokens` value the Anthropic-shape egresses (`anthropic-api`,
 `bedrock-invoke`) send when the caller omits the field resolves at
 dispatch:
 
 1. `request.max_tokens` -- caller-supplied value always wins.
-2. The two-layer catalog (baked ceilings, corrected by the catalog
-   overlay) for the model's `(provider kind, upstream)` pair, filled at
-   chain-build time -- but ONLY from a cell that pins one figure. A glob
-   spanning models with genuinely different ceilings fills nothing rather
-   than guessing. Correct or add a figure with
-   `routectl catalog set <selector> max_output_tokens=<n>` (see
-   [`routectl catalog set`](#routectl-catalog-set--routectl-catalog-disable)).
+2. `[models.X] max_output_tokens`.
 3. `64000` -- hardcoded baseline.
 
 A learned output ceiling then caps the result. When a lane has learned
@@ -2412,8 +2434,8 @@ repair; lowering the value routectl filled in is not, since the client
 asked for no particular limit.
 
 `routectl doctor`'s **Model knobs** section names, for every configured
-model, whether its ceiling is the catalog fill or the egress baseline, and
-one startup line names the models whose ceiling came from the catalog.
+model, whether its ceiling is `model-config` (its `max_output_tokens`) or
+`default` (the egress baseline).
 
 **Spend note.** Reasoning tokens bill as output, and on the legacy
 `enabled` thinking path a budget routectl translates from canonical
@@ -2442,9 +2464,9 @@ A caller that omits `max_tokens` on a model whose real cap is below the
 resolved ceiling draws one 400 from the upstream's per-model validation.
 On a lane field repair acts on, routectl retries that request at the
 limit the 400 names and learns it, so later requests go out at the
-learned ceiling; a catalog figure (`routectl catalog set`) saves even the
-first refusal. On a lane field repair does not act on (a loopback
-`base_url`; a forwarded client credential), set the catalog figure. On a
+learned ceiling; `[models.X] max_output_tokens` saves even the first
+refusal. On a lane field repair does not act on (a loopback `base_url`; a
+forwarded client credential), set `max_output_tokens`. On a
 Bedrock Mantle lane field repair acts on the rows a refusal captured on
 that sub-lane grounds: the `max_tokens` ceiling on the Anthropic lane;
 `top_p`, `presence_penalty` and `frequency_penalty` on the Chat
@@ -3348,9 +3370,14 @@ multiplier can make a cache break look falsely profitable. `rm` must be
 `> 0`; neither `max_context_tokens` nor `max_output_tokens` may be `0`
 (an unconfirmed figure is expressed by omitting the field).
 
+A cell's `max_context_tokens` and `max_output_tokens` no longer reach the
+window gate, `/v1/models` or the `max_tokens` fill; set
+[`context_window` and `max_output_tokens`](#context-window-and-output-ceiling)
+on the model instead.
+
 ```sh
 routectl catalog set openai-compat:my-cheap-host-* wm=1.0 --acknowledge-cost-risk
-routectl catalog set --create openai-compat:my-model max_context_tokens=262144
+routectl catalog set --create openai-compat:my-model rm=0.1
 routectl catalog disable openai-compat:retired-model-*
 ```
 
@@ -4847,7 +4874,7 @@ The battery sections, in render order:
 | Capability (`capability`) | The learned-capability findings NOT absorbed by the capability matrix panel below: a WARN when the config layer could not be parsed (so the panel is honestly degraded rather than silently empty). Never emits a FAIL, so it can never flip the exit code. |
 | Catalog freshness (`freshness`) | Three advisory rows on how current the catalog data is: the baked catalog version and snapshot date, the freshest overlay verification stamp and its age, and the last SUCCESSFUL `catalog import` with its row counts. A stale overlay or import is a WARN pointing at `catalog import`; never a FAIL. |
 | Cost pricing (`pricing`) | One row per configured model naming WHERE its cost rates come from -- an operator `[registry]` row (taken verbatim), the baked catalog's own rates (the auto-fill when `[registry]` is silent), a managed subscription (billed by seat, no per-token rate), or unpriced (neither layer has rates, so usage reports no cost for it). Every priced row names the resolved per-million input / output rates; a dimension the winning layer left unset reads `unset`, never `$0`, and a `[registry]` row that sets no rate at all says it prices nothing. A subscription row adds a second clause naming its API-EQUIVALENCE basis: the bill is by seat either way, but `usage` values that seat's traffic at API-equivalent rates only when every dimension resolves one, so the row says whether that basis is complete and, when it is not, which dimensions are unpriced (cache read and the two cache-write buckets are `[registry]`-only, so a catalog basis always lacks them) or that neither layer prices the upstream at all. If the catalog overlay could not be loaded the whole section collapses to one WARN: the overlay supersedes baked rates, so reporting the baked figure could name a rate the bill does not use. Never FAILs, so it can never move the exit code. |
-| Model knobs (`knobs`) | One row per configured model naming WHERE its outbound `max_output_tokens` ceiling comes from -- the catalog fill (when the model's resolved cell confirms one figure; the row names `routectl catalog set ... max_output_tokens` as the correction), or neither (the Anthropic-shape egresses then use their built-in baseline and every other egress forwards caller omission untouched). Every row names the resolved ceiling and the `(kind, upstream)` selector it was resolved for. If the catalog overlay could not be loaded the whole section collapses to one WARN: the overlay both corrects and disables baked ceilings, so reporting the baked figure could name a ceiling the router does not use. Never FAILs, so it can never move the exit code. |
+| Model knobs (`knobs`) | One row per configured model naming WHERE its outbound `max_output_tokens` ceiling comes from: `model-config` with the figure when `[models.X] max_output_tokens` is set, else `default` (the Anthropic-shape egresses then send their built-in baseline and every other egress forwards caller omission untouched). Every row names the model's `(kind, upstream)`. Never FAILs, so it can never move the exit code. |
 | Resolved tuning (`tuning`) | One PASS row per `[providers.X]` entry (pool members included), named `provider <id>`, then one per `[models.X]` entry that sets its own `stream_first_byte_timeout_ms`, named `model <nickname>` (one row per seat, named `model <nickname>#<member>`, for a model on a pool). The detail lists `circuit_failures`, `circuit_cooldown_ms`, `rpm_limit`, `request_timeout_ms` and `stream_first_byte_timeout_ms` as `key=value(source)`, the same cells and tier tokens (`model`, `provider`, `pool`, `global`, `default`) `config show --effective` prints; a breaker turned off renders `off`, an unlimited RPM or absent timeout `none`. Read from the config alone, so an unloadable catalog overlay does not affect it. Never WARNs or FAILs, so it can never move the exit code. |
 
 Two structured panels render after the sections:

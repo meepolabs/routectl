@@ -1577,7 +1577,7 @@ pub async fn build_resolved_models_reported(
 /// cannot drift: a knob added to one would otherwise silently not apply to
 /// models on a pool, and the omission would be invisible (the knob simply
 /// reads as unset).
-fn apply_model_knobs(
+pub fn apply_model_knobs(
     mut resolved: ResolvedModel,
     nickname: &str,
     entry: &crate::config::ModelEntry,
@@ -1610,6 +1610,12 @@ fn apply_model_knobs(
     }
     if let Some(label) = entry.reported_model.as_ref() {
         resolved = resolved.with_reported_model(label.clone());
+    }
+    if let Some(tokens) = entry.max_output_tokens {
+        resolved = resolved.with_max_output_tokens(tokens);
+    }
+    if let Some(tokens) = entry.context_window {
+        resolved = resolved.with_context_window(tokens);
     }
     resolved.with_visible_routectl_provider(entry.visible_routectl_provider)
 }
@@ -1693,16 +1699,10 @@ fn pool_reports(
 /// `tier` is fixed to `None` (the 5m default), matching the ONE tier the
 /// dispatch-path pricing call has ever priced against.
 ///
-/// Also the OUTPUT-CEILING FILL site. A model's `max_output_tokens` (the
-/// resolved `0` sentinel until here) takes the ceiling the merged row
-/// confirms for its selector -- the catalog prior, which an operator corrects
-/// with `routectl catalog set ... max_output_tokens`. The fill happens HERE
-/// because the effective row -- the only place the catalog figure exists --
-/// is resolved on this pass; the precedence `catalog > egress baseline` then
-/// falls out of the egress's own existing ladder with no provider-side
-/// change, and a learned ceiling lowers the result at dispatch. The fill is
-/// gated on the sentinel, so a model the caller already stamped keeps its
-/// value.
+/// The stamped row never supplies a model's output ceiling or context
+/// window: both come from `[models.X]` alone, stamped by
+/// `build_resolved_models`, so a catalog figure cannot truncate a response
+/// or steer the window gate.
 #[must_use]
 pub fn apply_catalog_overlay(
     models: BTreeMap<String, Arc<ResolvedModel>>,
@@ -1720,12 +1720,7 @@ pub fn apply_catalog_overlay(
                 &config.cache_pricing,
                 overlay,
             );
-            let mut stamped = (*model).clone().with_effective_row(effective_row);
-            if stamped.max_output_tokens == 0
-                && let Some(ceiling) = stamped.output_ceiling_tokens()
-            {
-                stamped = stamped.with_max_output_tokens(ceiling);
-            }
+            let stamped = (*model).clone().with_effective_row(effective_row);
             (nickname, Arc::new(stamped))
         })
         .collect()

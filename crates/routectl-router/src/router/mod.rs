@@ -2079,9 +2079,9 @@ struct DispatchTarget {
     /// Per-model openai-compat outgoing-history reasoning policy.
     history_reasoning: Option<HistoryReasoning>,
     /// Per-model `max_tokens` ceiling for the Anthropic-shape egresses:
-    /// the catalog prior, threaded from `ResolvedModel.max_output_tokens`.
-    /// Zero means no ceiling known: an egress that sends the field then
-    /// selects its own baseline.
+    /// `[models.X] max_output_tokens`, threaded from
+    /// `ResolvedModel.max_output_tokens`. Zero means none configured: an
+    /// egress that sends the field then selects its own baseline.
     max_output_tokens: u32,
     /// Operator-declared label echoed back in the response `model`
     /// field. Threaded from `ResolvedModel.reported_model`. `None`
@@ -2419,28 +2419,6 @@ impl Router {
             );
         }
         self.admit_quota_seats();
-    }
-
-    /// The nicknames whose outbound output-token ceiling came from the catalog,
-    /// each with the ceiling that was filled, in
-    /// nickname order.
-    ///
-    /// Read off the INSTALLED table, not re-derived from config: the fill runs
-    /// in `factory::apply_catalog_overlay`, whose per-model selector resolves a
-    /// pool-backed model's provider kind off a SEAT (a pool name is not a
-    /// provider kind). A config-only re-derivation would silently report
-    /// nothing for exactly the models a pool serves.
-    ///
-    /// A model is reported iff its resolved cell confirms a ceiling: no config
-    /// key sets the output ceiling, so the fill applies to every such model.
-    #[must_use]
-    pub fn catalog_filled_output_ceilings(&self) -> Vec<(&str, u32)> {
-        self.resolved_models
-            .iter()
-            .filter_map(|(nickname, model)| {
-                Some((nickname.as_str(), model.output_ceiling_tokens()?))
-            })
-            .collect()
     }
 
     /// Declare the OAuth account keys the quota store will hold readings for:

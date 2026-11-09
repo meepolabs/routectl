@@ -68,8 +68,8 @@ pub async fn list_models(State(state): State<Arc<AppState>>, headers: HeaderMap)
 }
 
 /// One entry of the local `/v1/models` payload. `context_length` is an
-/// OpenRouter-compatible extension: an ABSENT key means routectl has no
-/// confirmed window for that id, which the `skip_serializing_if` makes
+/// OpenRouter-compatible extension: an ABSENT key means the id's first
+/// target configures no `context_window`, which the `skip_serializing_if` makes
 /// structural -- no code path can emit `null` or `0` for it.
 #[derive(serde::Serialize)]
 struct ModelListEntry {
@@ -345,46 +345,74 @@ mod tests {
     /// from a single `anthropic` probe outcome. Mirrors
     /// `compute_activation`'s real caller shape (one probe per known oauth
     /// id) rather than hand-building an `ActivationState`, which has no
-    /// public constructor outside that path. The model carries a confirmed
+    /// public constructor outside that path. The model carries a configured
     /// context window so a suppressed `context_length` is distinguishable
     /// from a fixture that never had one to report.
     fn router_and_activation(
         api_key_ref: &str,
         probe: LocalProbe,
     ) -> (Router, routectl_router::ActivationState) {
-        use routectl_router::{CatalogRow, EffectiveRow, Source};
+        router_with_window(api_key_ref, probe, Some(128_000))
+    }
 
+    /// [`router_and_activation`] with the model's configured window stated.
+    fn router_with_window(
+        api_key_ref: &str,
+        probe: LocalProbe,
+        window: Option<u32>,
+    ) -> (Router, routectl_router::ActivationState) {
         let mut providers = BTreeMap::new();
         providers.insert("p".into(), ProviderEntry::anthropic_api(api_key_ref));
+        let mut entry = ModelEntry::new("p", "claude-upstream");
+        let mut resolved_model =
+            ResolvedModel::new("claude", "p", Arc::new(TestProvider), "claude-upstream");
+        if let Some(window) = window {
+            entry = entry.with_context_window(window);
+            resolved_model = resolved_model.with_context_window(window);
+        }
         let mut models = BTreeMap::new();
-        models.insert("claude".into(), ModelEntry::new("p", "claude-upstream"));
+        models.insert("claude".into(), entry);
         let config = Arc::new(Config {
             providers,
             models,
             ..Default::default()
         });
 
-        let mut row = CatalogRow::sentinel();
-        row.max_context_tokens = Some(128_000);
-        let effective_row = EffectiveRow::Present {
-            row,
-            source: Source::Baked,
-            verified_at: "seed".to_string(),
-        };
-
         let mut router = Router::new(config.clone());
         let mut resolved = BTreeMap::new();
-        resolved.insert(
-            "claude".to_string(),
-            Arc::new(
-                ResolvedModel::new("claude", "p", Arc::new(TestProvider), "claude-upstream")
-                    .with_effective_row(effective_row),
-            ),
-        );
+        resolved.insert("claude".to_string(), Arc::new(resolved_model));
         router.install_resolved_models(resolved);
 
         let activation = compute_activation(&[("anthropic", probe)], &config);
         (router, activation)
+    }
+
+    /// `context_length` is the configured `context_window`, and is absent
+    /// when the model configures none.
+    ///
+    /// Mutation check: make `ResolvedModel::context_window_tokens` return
+    /// `None` -> red on the configured row.
+    #[test]
+    fn local_models_list_reports_context_length_only_for_a_configured_window() {
+        let rows: [(&str, Option<u32>, Option<u64>); 2] = [
+            ("configured", Some(200_000), Some(200_000)),
+            ("unconfigured", None, None),
+        ];
+
+        for (name, window, expected) in rows {
+            let (router, activation) =
+                router_with_window("literal:sk-test", LocalProbe::Missing, window);
+
+            let body = local_models_list(&router, &activation);
+            let entry = &body["data"][0];
+
+            assert_eq!(entry["id"], "claude", "{name}");
+            assert_eq!(
+                entry.get("context_length").and_then(Value::as_u64),
+                expected,
+                "{name}: {entry:?}"
+            );
+        }
     }
 
     /// Bare no-op provider, only ever used to satisfy `ResolvedModel::new`'s
@@ -466,7 +494,7 @@ mod tests {
         assert_eq!(entry["id"], "claude");
         assert!(
             entry.get("context_length").is_some(),
-            "a non-oauth ref must report its confirmed window unconditionally: {entry:?}"
+            "a non-oauth ref must report its configured window unconditionally: {entry:?}"
         );
     }
 

@@ -840,10 +840,10 @@ pub struct RegistryEntry {
 ///      `apply_layered_overlays` (router.rs) copies it from the
 ///      `DispatchTarget`.
 ///
-/// The output-token ceiling is NOT configured here: `ResolvedModel`'s
-/// `max_output_tokens` carries the catalog prior (filled by
-/// `factory::apply_catalog_overlay`), and a learned ceiling lowers what
-/// the egress sends at dispatch. The hop is the price
+/// `max_output_tokens` takes this relay: the factory stamps it onto
+/// `ResolvedModel`, and a learned ceiling lowers what the egress sends at
+/// dispatch. `context_window` stops at `ResolvedModel`, where the window
+/// gate and `/v1/models` read it. The hop is the price
 /// of the config-crate (TOML serde shape) / core-crate (wire-internal)
 /// separation: `reasoning_dialect` / `history_reasoning` even change
 /// type at the core boundary (config-side enum -> `Core*` enum via the
@@ -946,6 +946,24 @@ pub struct ModelEntry {
     /// `DispatchMeta.served_provider` / `served_upstream`.
     #[serde(default = "default_true")]
     pub visible_routectl_provider: bool,
+
+    /// The model's total context window in tokens (input plus output).
+    /// The proactive window gate skips this model when a request cannot
+    /// fit, and `GET /v1/models` reports it as `context_length`. Unset
+    /// means unknown: the gate keeps the model and discovery omits the
+    /// field. `0` is refused at load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub context_window: Option<u32>,
+
+    /// The `max_tokens` value sent for this model when the client omits
+    /// one, on the egresses that must send it (anthropic-api,
+    /// bedrock-invoke). A ceiling learned from an upstream refusal lowers
+    /// it at dispatch; unset falls back to 64000. A client value always
+    /// wins. `0` is refused at load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub max_output_tokens: Option<u32>,
 }
 
 impl ModelEntry {
@@ -964,6 +982,8 @@ impl ModelEntry {
             stream_first_byte_timeout_ms: None,
             reported_model: None,
             visible_routectl_provider: true,
+            context_window: None,
+            max_output_tokens: None,
         }
     }
     /// Set the reasoning dialect that governs how thinking is expressed on the wire.
@@ -1022,6 +1042,18 @@ impl ModelEntry {
     /// suppress the served-provider name on the response.
     pub const fn with_visible_routectl_provider(mut self, b: bool) -> Self {
         self.visible_routectl_provider = b;
+        self
+    }
+
+    /// Set the model's total context window in tokens.
+    pub const fn with_context_window(mut self, tokens: u32) -> Self {
+        self.context_window = Some(tokens);
+        self
+    }
+
+    /// Set the `max_tokens` value sent when the client omits one.
+    pub const fn with_max_output_tokens(mut self, tokens: u32) -> Self {
+        self.max_output_tokens = Some(tokens);
         self
     }
 }

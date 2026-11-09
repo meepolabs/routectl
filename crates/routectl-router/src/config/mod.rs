@@ -33,6 +33,7 @@ pub use schema::{
 pub use schema::{BedrockApiShapeConfig, BedrockCredsConfig, BedrockMantleConfig};
 pub use tuning::{BreakerThreshold, Resolved, ResolvedTuning, TuningSource, resolve_tuning};
 use validate::default_config_version;
+pub(crate) use validate::validate_model_token_limits;
 pub use validate::{
     CONFIG_VERSION_REMEDIATION, CURRENT_CONFIG_VERSION, ConfigVersionError,
     LegacyMitmCredentialSourceError, RawConfigPreflightError, RemovedPaidProbeCapsError,

@@ -8,8 +8,9 @@
 //!
 //!   - `nickname`, `provider_name`, `provider`, `upstream`: identity
 //!     + transport (see field docs for details).
-//!   - `max_output_tokens`: the output ceiling carrier (catalog prior,
-//!     learned ceiling at dispatch).
+//!   - `max_output_tokens`: the output ceiling carrier (`[models.X]`
+//!     value, lowered by a learned ceiling at dispatch).
+//!   - `context_window`: the `[models.X]` total context window.
 //!   - `reasoning_dialect` / `history_reasoning`: per-model
 //!     openai-compat knobs (v0.6.0 moved off `[providers.X]`).
 //!   - `header_extras` / `payload_extras`: per-model overlays merged
@@ -28,7 +29,7 @@ use crate::config::{HistoryReasoning, ReasoningDialect};
 
 /// One fully-resolved model entry: a nickname bound to a concrete
 /// provider, an upstream string, per-model settings lifted off
-/// `[models.X]`, and the catalog output ceiling. See module docs.
+/// `[models.X]`. See module docs.
 ///
 /// A field the egress reads reaches it through `DispatchTarget` and
 /// `RoutectlInternal`, which `apply_layered_overlays` rebuilds per
@@ -71,11 +72,14 @@ pub struct ResolvedModel {
     pub stream_first_byte_timeout_ms: Option<u64>,
     /// Per-model ceiling for the `max_tokens` value the Anthropic-shape
     /// egresses (anthropic-api, bedrock-invoke) inject on omitted-by-caller
-    /// requests: the catalog prior, filled by
-    /// `factory::apply_catalog_overlay`; a learned ceiling lowers it at
-    /// dispatch. `0` is the sentinel for "no ceiling known" -- the egress
-    /// then falls through to its hardcoded 64000 baseline.
+    /// requests: `[models.X] max_output_tokens`; a learned ceiling lowers it
+    /// at dispatch. `0` is the sentinel for "no ceiling configured" -- the
+    /// egress then falls through to its hardcoded 64000 baseline.
     pub max_output_tokens: u32,
+    /// `[models.X] context_window`: the model's total context window in
+    /// tokens, or `None` when the operator configured none. Read through
+    /// [`Self::context_window_tokens`].
+    pub context_window: Option<u32>,
     /// Operator-declared label echoed back in the response `model`
     /// field. `None` makes the response echo the client's requested
     /// alias (`req.model`); `Some(label)` overrides with a fixed
@@ -134,6 +138,7 @@ impl ResolvedModel {
             payload_extras: None,
             stream_first_byte_timeout_ms: None,
             max_output_tokens: 0,
+            context_window: None,
             reported_model: None,
             visible_routectl_provider: true,
             auth_secret_ref: None,
@@ -182,10 +187,16 @@ impl ResolvedModel {
     }
 
     /// Set the per-model `max_output_tokens` ceiling. `0` is the
-    /// sentinel for "no ceiling known" -- the consuming Anthropic-
+    /// sentinel for "no ceiling configured" -- the consuming Anthropic-
     /// shape egresses fall through to their hardcoded 64000 baseline.
     pub const fn with_max_output_tokens(mut self, tokens: u32) -> Self {
         self.max_output_tokens = tokens;
+        self
+    }
+
+    /// Set the per-model total context window in tokens.
+    pub const fn with_context_window(mut self, tokens: u32) -> Self {
+        self.context_window = Some(tokens);
         self
     }
 
@@ -247,36 +258,20 @@ impl ResolvedModel {
         }
     }
 
-    /// This model's confirmed context window in tokens, or `None` when the
-    /// window is unconfirmed (`EffectiveRow::Disabled` / `Missing`, or a
-    /// present row leaving `max_context_tokens` unset).
+    /// This model's configured context window in tokens, or `None` when the
+    /// operator set no `[models.X] context_window`.
     ///
-    /// THE one read of the overlay-corrected window: the proactive window
-    /// gate and the `/v1/models` discovery payload both call it, so a
-    /// client can never be told a window the router would not gate on.
+    /// THE one read of the window: the proactive window gate and the
+    /// `/v1/models` discovery payload both call it, so a client can never be
+    /// told a window the router would not gate on.
     ///
-    /// `Some(0)` degrades to `None`. Import and overlay validation already
-    /// reject a zero window, so this is defense-in-depth: were one to slip
-    /// through, discovery omits the field and the gate keeps the target,
-    /// instead of a window every request is "too large" for.
+    /// `Some(0)` degrades to `None`. Config validation already refuses a zero
+    /// window, so this is defense-in-depth: were one to slip through,
+    /// discovery omits the field and the gate keeps the target, instead of a
+    /// window every request is "too large" for.
     #[must_use]
     pub fn context_window_tokens(&self) -> Option<u32> {
-        self.effective_row
-            .priced()
-            .and_then(|row| row.max_context_tokens)
-            .filter(|window| *window > 0)
-    }
-
-    /// This model's catalog-confirmed output-token ceiling, or `None` when the
-    /// ceiling is unconfirmed.
-    ///
-    /// Delegates to [`crate::catalog::EffectiveRow::output_ceiling_tokens`] --
-    /// the ONE ceiling read the factory's unset-config fill and the doctor
-    /// `knobs` section share, so the diagnostic can never name a ceiling the
-    /// fill would not apply.
-    #[must_use]
-    pub fn output_ceiling_tokens(&self) -> Option<u32> {
-        self.effective_row.output_ceiling_tokens()
+        self.context_window.filter(|window| *window > 0)
     }
 
     /// Stamp the precomputed two-layer catalog merge for this model.
@@ -309,6 +304,7 @@ impl std::fmt::Debug for ResolvedModel {
                 &self.stream_first_byte_timeout_ms,
             )
             .field("max_output_tokens", &self.max_output_tokens)
+            .field("context_window", &self.context_window)
             .field("reported_model", &self.reported_model)
             .field("visible_routectl_provider", &self.visible_routectl_provider)
             .field(

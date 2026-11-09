@@ -1565,16 +1565,23 @@ fn dispatch_target_carries_catalog_capability_prior() {
 // resolution rules around it: first chain entry, no `default` fallback,
 // and a zero window degrading to unknown on both surfaces.
 
-/// A `Present` effective row confirming `window` tokens, or leaving the
-/// window unset when `window` is `None`.
-fn window_row(window: Option<u32>) -> crate::catalog::EffectiveRow {
-    use crate::catalog::{CatalogRow, EffectiveRow, Source};
-    let mut row = CatalogRow::sentinel();
-    row.max_context_tokens = window;
-    EffectiveRow::Present {
-        row,
-        source: Source::Baked,
-        verified_at: "seed".to_string(),
+/// A resolved model on provider `p` stamped from its `[models.X]` entry
+/// through the factory's own per-model stamp.
+fn stamped_model(nickname: &str, entry: &crate::config::ModelEntry) -> ResolvedModel {
+    crate::factory::apply_model_knobs(
+        ResolvedModel::new(nickname, "p", make_provider("p"), nickname),
+        nickname,
+        entry,
+    )
+}
+
+/// The `[models.X]` entry for `nickname` on provider `p`, with `window` as
+/// its `context_window` when set.
+fn windowed_entry(nickname: &str, window: Option<u32>) -> crate::config::ModelEntry {
+    let entry = crate::config::ModelEntry::new("p", nickname);
+    match window {
+        Some(window) => entry.with_context_window(window),
+        None => entry,
     }
 }
 
@@ -1585,8 +1592,8 @@ fn gate_enabled() -> crate::config::WindowGateConfig {
 }
 
 /// A router whose `[aliases] chain` names `models` in the given order, each
-/// nickname resolved onto provider `p` with the stated context window
-/// stamped on its effective row. `aliases` adds further alias keys (used to
+/// nickname resolved onto provider `p` with the stated `context_window`
+/// configured and stamped. `aliases` adds further alias keys (used to
 /// pin that a configured `default` is NOT consulted).
 fn router_with_window(models: &[(&str, Option<u32>)], aliases: &[(&str, AliasValue)]) -> Router {
     let mut config = Config {
@@ -1603,33 +1610,29 @@ fn router_with_window(models: &[(&str, Option<u32>)], aliases: &[(&str, AliasVal
     for (key, value) in aliases {
         config.aliases.insert((*key).into(), value.clone());
     }
+    for (nickname, window) in models {
+        config
+            .models
+            .insert((*nickname).into(), windowed_entry(nickname, *window));
+    }
+    let mut resolved: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
     for (nickname, _) in models {
-        config.models.insert(
-            (*nickname).into(),
-            crate::config::ModelEntry::new("p", *nickname),
-        );
+        let model = stamped_model(nickname, &config.models[*nickname]);
+        resolved.insert((*nickname).into(), Arc::new(model));
     }
     let mut router = Router::new(Arc::new(config));
-    let mut resolved: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
-    for (nickname, window) in models {
-        resolved.insert(
-            (*nickname).into(),
-            Arc::new(
-                ResolvedModel::new(*nickname, "p", make_provider("p"), *nickname)
-                    .with_effective_row(window_row(*window)),
-            ),
-        );
-    }
     router.install_resolved_models(resolved);
     router
 }
 
 /// A request whose estimate is far above the estimator's own granularity,
 /// so the windows derived from it below pin the gate's RATIO rather than a
-/// byte count.
+/// byte count. Its one-token `max_tokens` keeps the output reserve out of
+/// those windows.
 fn oversized_request() -> ChatRequest {
     ChatRequest {
         model: "chain".into(),
+        max_tokens: Some(1),
         messages: vec![Message {
             refusal: None,
             role: routectl_core::Role::User,
@@ -1716,7 +1719,7 @@ fn context_window_for_is_none_for_a_configured_model_missing_from_the_installed_
     // what the build actually produced. A model whose provider failed to
     // build is absent from the table, so discovery has no dispatch target to
     // report a window off and must omit the figure -- even though the config
-    // entry (and its catalog cell) still exists. The /v1/models entry itself
+    // entry still exists. The /v1/models entry itself
     // stays listed; only the enrichment is suppressed.
     let mut config = Config::default();
     config
@@ -1738,10 +1741,10 @@ fn context_window_for_is_none_for_a_configured_model_missing_from_the_installed_
     let mut resolved: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
     resolved.insert(
         "installed".into(),
-        Arc::new(
-            ResolvedModel::new("installed", "p", make_provider("p"), "installed")
-                .with_effective_row(window_row(Some(128_000))),
-        ),
+        Arc::new(stamped_model(
+            "installed",
+            &windowed_entry("installed", Some(128_000)),
+        )),
     );
     let mut router = Router::new(Arc::new(config));
     router.install_resolved_models(resolved);
@@ -1855,86 +1858,18 @@ fn first_target_oauth_id_is_none_for_an_api_key_or_env_ref() {
     );
 }
 
+/// Discovery and the gate read one configured window: a `[models.X]
+/// context_window` too small for the request is the figure `/v1/models`
+/// reports AND the reason the gate skips that target, while a sibling that
+/// configures no window is kept.
 #[test]
-fn the_gate_and_discovery_read_the_same_overlay_corrected_window() {
-    // The weld, against the REAL overlay merge
-    // (`factory::apply_catalog_overlay`) rather than a hand-stamped row: an
-    // operator overlay that shrinks the window must move the discovery
-    // figure AND the gate decision together. Near-tautological while both
-    // read one accessor -- it pins that against a future fork.
-    use crate::catalog_overlay::{CatalogOverlay, OverlayCell, OverlaySource};
-
+fn the_gate_and_discovery_read_the_same_configured_window() {
     let req = oversized_request();
-    let overlay_window =
+    let configured =
         u32::try_from(crate::context_trim::estimate_total_tokens(&req) / 2).expect("fits u32");
+    let router = router_with_window(&[("shrunk", Some(configured)), ("unconfirmed", None)], &[]);
 
-    let mut config = Config {
-        window_gate: gate_enabled(),
-        ..Config::default()
-    };
-    config
-        .providers
-        .insert("p".into(), ProviderEntry::anthropic_api("literal:k"));
-    config.aliases.insert(
-        "chain".into(),
-        AliasValue::Chain(vec!["shrunk".into(), "unconfirmed".into()]),
-    );
-    config.models.insert(
-        "shrunk".into(),
-        crate::config::ModelEntry::new("p", "shrunk-upstream"),
-    );
-    config.models.insert(
-        "unconfirmed".into(),
-        crate::config::ModelEntry::new("p", "unconfirmed-upstream"),
-    );
-
-    let mut overlay = CatalogOverlay::default();
-    overlay.cells.insert(
-        "anthropic-api:shrunk-upstream".to_string(),
-        Some(OverlayCell {
-            source: OverlaySource::User,
-            verified_at: "2026-08-21".to_string(),
-            wm: None,
-            rm: None,
-            ttl_seconds: None,
-            min_prefix_tokens: None,
-            max_context_tokens: Some(overlay_window),
-            max_output_tokens: None,
-            input_cost_per_token: None,
-            output_cost_per_token: None,
-            capabilities: None,
-        }),
-    );
-
-    let mut resolved: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
-    resolved.insert(
-        "shrunk".into(),
-        Arc::new(ResolvedModel::new(
-            "shrunk",
-            "p",
-            make_provider("p"),
-            "shrunk-upstream",
-        )),
-    );
-    resolved.insert(
-        "unconfirmed".into(),
-        Arc::new(ResolvedModel::new(
-            "unconfirmed",
-            "p",
-            make_provider("p"),
-            "unconfirmed-upstream",
-        )),
-    );
-    let stamped = crate::factory::apply_catalog_overlay(resolved, &config, &overlay);
-
-    let mut router = Router::new(Arc::new(config));
-    router.install_resolved_models(stamped);
-
-    // Discovery reports the overlay-corrected window...
-    assert_eq!(router.context_window_for("chain"), Some(overlay_window));
-
-    // ...and the gate acts on that same number: the estimate is twice it, so
-    // the head is skipped while the sibling remains.
+    assert_eq!(router.context_window_for("chain"), Some(configured));
     let chain = router
         .dispatch_chain("chain", None)
         .expect("chain resolves");
@@ -1946,7 +1881,7 @@ fn the_gate_and_discovery_read_the_same_overlay_corrected_window() {
     assert_eq!(
         nicknames,
         vec!["unconfirmed"],
-        "the gate skipped exactly the target whose overlay-corrected window discovery reported",
+        "the gate skipped exactly the target whose configured window discovery reported",
     );
     assert_eq!(router.metrics.window_gate_skips_total(), 1);
 }

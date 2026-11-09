@@ -15,7 +15,6 @@ use routectl_core::{
 
 use super::super::{DispatchMeta, DispatchTarget, Router};
 use crate::calibration::{CalibrationLedgerReader, CalibrationLedgerRow};
-use crate::catalog::{CatalogRow, EffectiveRow, Source};
 use crate::config::{AliasValue, Config, CredentialSource, PoolEntry, ProviderEntry};
 use crate::resolved::ResolvedModel;
 use crate::seat_pool::SeatTarget;
@@ -61,18 +60,14 @@ fn own_compat() -> ProviderEntry {
     ProviderEntry::openai_compat("https://example.invalid/v1", "env://K")
 }
 
-/// A resolved model whose catalog row confirms `window` tokens, or carries no
-/// window when `None`.
+/// A resolved model configured with `window` tokens, or with no window when
+/// `None`.
 fn model(nickname: &str, provider: &str, upstream: &str, window: Option<u32>) -> ResolvedModel {
-    let mut row = CatalogRow::sentinel();
-    row.max_context_tokens = window;
-    ResolvedModel::new(nickname, provider, stub(), upstream).with_effective_row(
-        EffectiveRow::Present {
-            row,
-            source: Source::Baked,
-            verified_at: "seed".to_string(),
-        },
-    )
+    let model = ResolvedModel::new(nickname, provider, stub(), upstream);
+    match window {
+        Some(window) => model.with_context_window(window),
+        None => model,
+    }
 }
 
 /// A two-seat pool model: the model's `provider` names the pool, which is not
@@ -105,10 +100,12 @@ fn config_with(providers: &[(&str, ProviderEntry)]) -> Config {
 }
 
 /// A request large enough that the windows derived from its estimate sit far
-/// from the estimator's own granularity.
+/// from the estimator's own granularity. Its one-token `max_tokens` keeps the
+/// output reserve out of the windows derived from the estimate.
 fn request(model: &str) -> ChatRequest {
     ChatRequest {
         model: model.into(),
+        max_tokens: Some(1),
         messages: vec![Message {
             refusal: None,
             role: Role::User,

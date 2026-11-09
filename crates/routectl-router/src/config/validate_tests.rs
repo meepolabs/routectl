@@ -596,8 +596,7 @@ mod retired_model_knobs_preflight_tests {
             "[models.{nick}]\nprovider = \"p\"\nupstream = \"u\"\n\
              supports_adaptive_thinking = \"{sentinel}\"\n\
              effort_levels = [\"{sentinel}\"]\n\
-             max_thinking_budget = \"{sentinel}\"\n\
-             max_output_tokens = \"{sentinel}\"\n"
+             max_thinking_budget = \"{sentinel}\"\n"
         )
     }
 
@@ -624,7 +623,6 @@ mod retired_model_knobs_preflight_tests {
             .flat_map(|nick| {
                 [
                     "effort_levels",
-                    "max_output_tokens",
                     "max_thinking_budget",
                     "supports_adaptive_thinking",
                 ]
@@ -633,7 +631,7 @@ mod retired_model_knobs_preflight_tests {
             .collect();
         assert_eq!(err.paths, expected_paths);
         let lines: Vec<&str> = msg.lines().collect();
-        assert_eq!(lines.len(), 8, "{msg}");
+        assert_eq!(lines.len(), 6, "{msg}");
         for (line, path) in lines.iter().zip(&expected_paths) {
             assert!(line.starts_with(&format!("`{path}` ")), "{line}");
         }
@@ -653,10 +651,18 @@ mod retired_model_knobs_preflight_tests {
             assert!(line.contains(replacement), "{knob}: {line}");
             assert!(line.ends_with("; delete the key"), "{knob}: {line}");
         }
-        assert!(
-            msg.contains("`routectl catalog set ... max_output_tokens`"),
-            "{msg}"
-        );
+        assert!(!msg.contains("catalog"), "{msg}");
+    }
+
+    /// `max_output_tokens` and `context_window` are model settings again, so
+    /// the preflight lets them through to the typed parse.
+    #[test]
+    fn the_token_limit_keys_are_not_retired() {
+        let body = "[models.m]\nprovider = \"p\"\nupstream = \"u\"\n\
+                    max_output_tokens = 8000\ncontext_window = 200000\n";
+
+        assert_eq!(preflight_retired_model_knobs(&current_with(body)), Ok(()));
+        assert_eq!(RETIRED_MODEL_KNOBS.len(), 3);
     }
 
     #[test]
@@ -684,7 +690,7 @@ mod retired_model_knobs_preflight_tests {
 
         // Assert
         assert!(!msg.contains(sentinel), "{msg}");
-        assert_eq!(msg.lines().count(), 4, "{msg}");
+        assert_eq!(msg.lines().count(), 3, "{msg}");
     }
 
     #[test]
@@ -884,6 +890,107 @@ mod raw_config_preflight_tests {
         assert_eq!(
             preflight_raw_config("[mitm\ncredential_source = = 1\n"),
             Ok(())
+        );
+    }
+}
+
+mod model_token_limit_tests {
+    use super::validate_model_token_limits;
+    use crate::config::{Config, ModelEntry};
+
+    fn config_with(entries: &[(&str, ModelEntry)]) -> Config {
+        let mut config = Config::default();
+        for (nickname, entry) in entries {
+            config.models.insert((*nickname).to_string(), entry.clone());
+        }
+        config
+    }
+
+    /// Both keys parse from `[models.X]` into the typed entry.
+    #[test]
+    fn context_window_and_max_output_tokens_parse_from_a_model_entry() {
+        let config: Config = toml::from_str(
+            "[models.m]\nprovider = \"p\"\nupstream = \"u\"\n\
+             context_window = 200000\nmax_output_tokens = 32000\n",
+        )
+        .expect("parses");
+
+        let entry = &config.models["m"];
+        assert_eq!(entry.context_window, Some(200_000));
+        assert_eq!(entry.max_output_tokens, Some(32_000));
+    }
+
+    /// A zero for either key is refused naming the dotted key; a positive
+    /// value or an absent key passes.
+    ///
+    /// Mutation check: make `validate_model_token_limits` always return
+    /// `Ok` -> red on both zero rows.
+    #[test]
+    fn a_zero_token_limit_is_refused_naming_the_dotted_key() {
+        let rows: [(&str, ModelEntry, Option<&str>); 4] = [
+            (
+                "zero window",
+                ModelEntry::new("p", "u").with_context_window(0),
+                Some("`models.m.context_window` is 0"),
+            ),
+            (
+                "zero ceiling",
+                ModelEntry::new("p", "u").with_max_output_tokens(0),
+                Some("`models.m.max_output_tokens` is 0"),
+            ),
+            (
+                "positive values",
+                ModelEntry::new("p", "u")
+                    .with_context_window(1)
+                    .with_max_output_tokens(1),
+                None,
+            ),
+            ("absent keys", ModelEntry::new("p", "u"), None),
+        ];
+
+        for (name, entry, refusal) in rows {
+            let result = validate_model_token_limits(&config_with(&[("m", entry)]));
+
+            match refusal {
+                Some(expected) => {
+                    let msg = result.expect_err(name);
+                    assert!(msg.starts_with(expected), "{name}: {msg}");
+                }
+                None => assert_eq!(result, Ok(()), "{name}"),
+            }
+        }
+    }
+
+    /// Every zero across every model is listed, one line each, so an
+    /// operator fixes them all at once; a hostile nickname is sanitized.
+    #[test]
+    fn every_zero_is_listed_and_a_control_byte_never_reaches_the_message() {
+        let zeroed = ModelEntry::new("p", "u")
+            .with_context_window(0)
+            .with_max_output_tokens(0);
+        let config = config_with(&[("a", zeroed.clone()), ("b\u{1b}\n", zeroed)]);
+
+        let msg = validate_model_token_limits(&config).expect_err("refused");
+
+        assert_eq!(msg.lines().count(), 4, "{msg:?}");
+        assert!(!msg.contains('\u{1b}'), "{msg:?}");
+        assert!(msg.contains("`models.a.context_window`"), "{msg}");
+        assert!(msg.contains("`models.a.max_output_tokens`"), "{msg}");
+    }
+
+    /// The refusal reaches every config-validation surface through the one
+    /// ordered suite.
+    #[test]
+    fn the_shared_validation_suite_carries_the_zero_refusal() {
+        let config = config_with(&[("m", ModelEntry::new("p", "u").with_context_window(0))]);
+
+        let errors = crate::factory::collect_config_validation(&config).errors;
+
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("`models.m.context_window` is 0")),
+            "{errors:?}"
         );
     }
 }

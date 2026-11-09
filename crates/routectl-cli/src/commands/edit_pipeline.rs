@@ -231,7 +231,7 @@ mod tests {
             ),
             (
                 "removed model key",
-                at(current, "[models.m]\nmax_output_tokens = 8000\n"),
+                at(current, "[models.m]\neffort_levels = []\n"),
                 |e| matches!(e, Refusal::RetiredModelKnobs(_)),
             ),
         ];

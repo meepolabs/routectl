@@ -278,9 +278,9 @@ pub struct ResponsesCacheBreakpoint {
 ///
 /// The router's `apply_layered_overlays` rebuilds this carrier from
 /// `Default` on every attempt, right before dispatch, carrying the
-/// ingress-captured fields across. `max_output_tokens` is not a
-/// `[models.X]` setting: it is the catalog prior, lowered by a learned
-/// ceiling at dispatch. The egress reads each field directly off this
+/// ingress-captured fields across. `max_output_tokens` is the
+/// `[models.X]` value, lowered by a learned ceiling at dispatch. The
+/// egress reads each field directly off this
 /// struct, so the fields are flat (no shared sub-struct) by design.
 ///
 /// Library consumers constructing a `ChatRequest` directly never set the
@@ -357,14 +357,14 @@ pub struct RoutectlInternal {
     /// pre-passthrough behavior.
     pub stainless_headers: Vec<(String, String)>,
     /// The per-model output ceiling the router resolves on every egress:
-    /// the catalog prior, lowered by a learned ceiling. Consumed by the Anthropic-shape egresses (anthropic-api,
+    /// the `[models.X]` value, lowered by a learned ceiling. Consumed by the Anthropic-shape egresses (anthropic-api,
     /// bedrock-invoke) as the wire `max_tokens` when the client sent none,
     /// and by Converse's legacy thinking window, which fits a budget under
     /// it. Converse sends no `max_tokens` the client did not
     /// (good-translator principle: do not inject where the upstream
     /// already handles it).
     ///
-    /// Sentinel `0` means no ceiling is known; a consumer then falls
+    /// Sentinel `0` means no ceiling is configured; a consumer then falls
     /// through to its hardcoded baseline (64000). A client value always
     /// wins.
     pub max_output_tokens: u32,

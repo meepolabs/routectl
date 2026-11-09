@@ -150,6 +150,34 @@ pub fn validate_cache_pricing_retired(config: &Config) -> Result<(), String> {
     Ok(())
 }
 
+/// Refuse a `[models.X] context_window` or `max_output_tokens` of `0`, naming
+/// every offending dotted key on its own line. A zero window would make every
+/// request "too large" for the window gate, and a zero ceiling would read as
+/// unset to the egress fill, so neither is a usable value.
+pub fn validate_model_token_limits(config: &Config) -> Result<(), String> {
+    let lines: Vec<String> = config
+        .models
+        .iter()
+        .flat_map(|(nickname, entry)| {
+            [
+                ("context_window", entry.context_window),
+                ("max_output_tokens", entry.max_output_tokens),
+            ]
+            .into_iter()
+            .filter(|(_, value)| *value == Some(0))
+            .map(move |(key, _)| {
+                let path = message_safe_key(&format!("models.{nickname}.{key}"));
+                format!("`{path}` is 0; set a positive token count or delete the key")
+            })
+        })
+        .collect();
+    if lines.is_empty() {
+        Ok(())
+    } else {
+        Err(lines.join("\n"))
+    }
+}
+
 /// The exact `[providers.X]` replacement block named in
 /// [`LegacyMitmCredentialSourceError`] and the CHANGELOG: a forwarded
 /// credential is now a provider-level choice, not a `[mitm]`-level one.
@@ -343,15 +371,10 @@ fn retired_entry_keys(value: &toml::Value, section: &str, keys: &[&str]) -> Vec<
 
 /// Each removed per-model key with what now decides the behavior it used to
 /// set. Sorted by key, which is also the order a model's paths render in.
-const RETIRED_MODEL_KNOBS: [(&str, &str); 4] = [
+const RETIRED_MODEL_KNOBS: [(&str, &str); 3] = [
     (
         "effort_levels",
         "refused effort levels are learned per lane",
-    ),
-    (
-        "max_output_tokens",
-        "an omitted limit uses the learned ceiling, else the catalog prior \
-         (`routectl catalog set ... max_output_tokens`), else 64000",
     ),
     (
         "max_thinking_budget",

@@ -1016,15 +1016,11 @@ impl EffectiveRow {
     /// none (`Disabled` / `Missing`, or a present row whose glob spans models
     /// that disagree on one figure).
     ///
-    /// THE weld for the ceiling read. The factory's unset-config fill reaches
-    /// it through [`crate::ResolvedModel::output_ceiling_tokens`] and the
-    /// doctor `knobs` section calls it directly on a resolved cell, so the
-    /// diagnostic can never name a ceiling the fill would not apply.
+    /// Nothing in routing or the `max_tokens` fill reads it: a model's output
+    /// ceiling comes from `[models.X] max_output_tokens` only.
     ///
     /// `Some(0)` degrades to `None`. Codegen derivation, import, and overlay
-    /// validation all reject a zero ceiling, so this is defense-in-depth: were
-    /// one to slip through, the fill declines and the egress keeps its
-    /// hardcoded baseline, instead of a `max_tokens` every request would 400 on.
+    /// validation all reject a zero ceiling, so this is defense-in-depth.
     #[must_use]
     pub fn output_ceiling_tokens(&self) -> Option<u32> {
         self.priced()

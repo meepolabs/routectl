@@ -56,7 +56,7 @@ pub(super) fn ctx(
 ) -> DoctorContext {
     let capability = build_capability_inputs(&config, None, Some(CatalogOverlay::default()));
     let pricing = Some(derive_pricing_rows(&config, &CatalogOverlay::default()));
-    let knobs = Some(derive_knob_rows(&config, &CatalogOverlay::default()));
+    let knobs = derive_knob_rows(&config);
     let tuning = derive_tuning_rows(&config);
     DoctorContext {
         config,
@@ -707,8 +707,8 @@ fn capability_section_emits_no_finding_for_a_loaded_config() {
 }
 
 #[test]
-fn schema_version_is_twenty_five() {
-    assert_eq!(SCHEMA_VERSION, 25);
+fn schema_version_is_twenty_six() {
+    assert_eq!(SCHEMA_VERSION, 26);
 
     let context = ctx(
         config_with_overrides(),
@@ -717,7 +717,7 @@ fn schema_version_is_twenty_five() {
         Vec::new(),
     );
     let report = build_report(&context);
-    assert_eq!(report.schema_version, 25);
+    assert_eq!(report.schema_version, 26);
 
     // JSON mode carries the structured capability matrix panel; the
     // superseded override / prior / learned finding text is gone.
@@ -2554,7 +2554,7 @@ fn rendered_report_leaks_neither_a_config_secret_nor_a_store_path() {
         beta_seed: routectl_router::BetaSeedScope::EMPTY,
         freshness: sample_freshness(),
         pricing: Some(Vec::new()),
-        knobs: Some(Vec::new()),
+        knobs: Vec::new(),
         tuning: Vec::new(),
         reload_failure: None,
         parked_seats: Vec::new(),
@@ -2724,7 +2724,7 @@ fn build_report_no_network_matches_network_minus_probe() {
     let network = build_report(&context);
     let no_net = build_report_no_network(&context);
 
-    assert_eq!(no_net.schema_version, 25);
+    assert_eq!(no_net.schema_version, 26);
     assert!(
         no_net.findings.iter().all(|f| f.section != "probe"),
         "no-network report must have no probe rows"
@@ -4331,87 +4331,17 @@ mod seeded_matrix_surfaces {
     }
 }
 
-/// The knobs section names each configured model's `max_output_tokens` SOURCE,
-/// and the catalog row names the command that corrects it: the output ceiling
-/// is not a `[models.X]` setting, so pointing there would send an operator to
-/// a key the loader refuses.
+/// The knobs section names each configured model's `max_output_tokens` SOURCE
+/// token: `model-config` with the configured figure when the entry sets one,
+/// `default` when it does not. A Claude upstream the baked catalog once filled
+/// stays `default` without a configured value, so no row can name a figure
+/// from outside the config.
+///
+/// Mutation check: map an unset entry to `ModelConfig(0)` in
+/// `derive_knob_rows` -> red on the `default` rows.
 #[test]
 fn knobs_section_names_each_models_output_ceiling_source_by_nickname() {
-    // Arrange: one model per state.
-    //   `filled`  -- a Claude upstream the baked catalog confirms -> Catalog.
-    //   `neither` -- an openai-compat upstream whose only matching cell is
-    //                output-ambiguous -> Default.
-    let mut cfg = Config::default();
-    cfg.providers.insert(
-        "anthropic".to_string(),
-        ProviderEntry::anthropic_api("env://ANTHROPIC_KEY"),
-    );
-    cfg.providers.insert(
-        "vendor".to_string(),
-        ProviderEntry::openai_compat("https://example.invalid", "env://VENDOR_KEY"),
-    );
-    cfg.models.insert(
-        "filled".to_string(),
-        ModelEntry::new("anthropic", "claude-opus-4-6"),
-    );
-    cfg.models.insert(
-        "neither".to_string(),
-        ModelEntry::new("vendor", "deepseek-v3"),
-    );
-
-    // Act
-    let context = ctx(cfg, Some(&current_version_stamp()), Vec::new(), Vec::new());
-    let findings = section_knobs(&context);
-
-    // Assert: one row per configured model, each naming its own source.
-    assert_eq!(
-        findings.len(),
-        2,
-        "one row per configured model: {findings:?}"
-    );
-
-    let filled = find(&findings, "knobs", "filled");
-    assert!(
-        filled.detail.contains("filled from the catalog")
-            && filled
-                .detail
-                .contains("`routectl catalog set ... max_output_tokens`"),
-        "a catalog-filled row must name the catalog and how to correct it: {}",
-        filled.detail
-    );
-    for f in &findings {
-        assert!(
-            !f.detail.contains("[models."),
-            "no row points at config: {f:?}"
-        );
-    }
-
-    let neither = find(&findings, "knobs", "neither");
-    assert!(
-        neither.detail.contains("catalog confirms no ceiling"),
-        "a row neither layer supplies must say so: {}",
-        neither.detail
-    );
-
-    // Purely informational: no row here can move the exit code.
-    for f in &findings {
-        assert_eq!(f.status, Status::Pass, "{f:?}");
-        assert!(f.remediation.is_none(), "{f:?}");
-    }
-}
-
-/// The doctor's catalog figure and the factory's fill must be the SAME number.
-/// They read one accessor, and this pins that they still agree: a doctor that
-/// named a ceiling the router does not apply is worse than no diagnostic, since
-/// an operator would tune against a figure that never reaches the wire.
-///
-/// A POOL-BACKED model is asserted alongside the plain one: `[models.X]
-/// provider` resolves against providers and pools in ONE namespace, so a
-/// kind lookup that consulted only `[providers]` would resolve an empty kind,
-/// hit no catalog cell, and report "no ceiling" for a model the factory fills
-/// at the very figure the plain row names.
-#[test]
-fn the_knobs_catalog_figure_matches_what_the_factory_fills() {
+    // Arrange
     let mut cfg = Config::default();
     cfg.providers.insert(
         "anthropic".to_string(),
@@ -4425,106 +4355,75 @@ fn the_knobs_catalog_figure_matches_what_the_factory_fills() {
         "anthropic-pool".to_string(),
         PoolEntry::new(vec!["anthropic-seat".to_string()]),
     );
+    cfg.providers.insert(
+        "vendor".to_string(),
+        ProviderEntry::openai_compat("https://example.invalid", "env://VENDOR_KEY"),
+    );
     cfg.models.insert(
-        "filled".to_string(),
-        ModelEntry::new("anthropic", "claude-opus-4-6"),
+        "configured".to_string(),
+        ModelEntry::new("anthropic", "claude-opus-4-6").with_max_output_tokens(32_000),
     );
     cfg.models.insert(
         "pooled".to_string(),
-        ModelEntry::new("anthropic-pool", "claude-opus-4-6"),
-    );
-
-    // The router-side truth: the very accessor the fill is gated on, resolved
-    // for the same selector.
-    let confirmed = routectl_router::resolve_effective_row(
-        "anthropic-api",
-        "claude-opus-4-6",
-        None,
-        &cfg.cache_pricing,
-        &CatalogOverlay::default(),
-    )
-    .output_ceiling_tokens()
-    .expect("test premise: the baked table confirms a ceiling for this selector");
-
-    let context = ctx(cfg, Some(&current_version_stamp()), Vec::new(), Vec::new());
-    let findings = section_knobs(&context);
-    let filled = find(&findings, "knobs", "filled").detail.clone();
-    let pooled = find(&findings, "knobs", "pooled").detail.clone();
-
-    assert!(
-        filled.contains(&confirmed.to_string()),
-        "the doctor row must name the ceiling the fill would apply ({confirmed}): {filled}"
-    );
-    assert!(
-        pooled.contains("filled from the catalog") && pooled.contains(&confirmed.to_string()),
-        "a pool-backed model must resolve its kind off a member and name the \
-         same catalog ceiling ({confirmed}): {pooled}"
-    );
-    assert!(
-        !pooled.contains("catalog confirms no ceiling"),
-        "a pool name is not a provider kind, but the pool must still resolve \
-         one: {pooled}"
-    );
-}
-
-/// The overlay both CORRECTS and DISABLES catalog ceilings, so when it could
-/// not be LOADED a baked figure may be exactly the one the router does not fill
-/// from. The available-overlay context below is the POSITIVE CONTROL, proving
-/// this selector DOES render a figure when the overlay is readable -- so its
-/// absence is the degradation firing, not a missing catalog cell.
-#[test]
-fn an_unloadable_overlay_reports_knobs_unavailable_never_the_baked_ceiling() {
-    let mut cfg = Config::default();
-    cfg.providers.insert(
-        "anthropic".to_string(),
-        ProviderEntry::anthropic_api("env://ANTHROPIC_KEY"),
+        ModelEntry::new("anthropic-pool", "claude-opus-4-6").with_max_output_tokens(16_000),
     );
     cfg.models.insert(
-        "filled".to_string(),
+        "cataloged".to_string(),
         ModelEntry::new("anthropic", "claude-opus-4-6"),
     );
-    let resolved = ctx(cfg, Some(&current_version_stamp()), Vec::new(), Vec::new());
-
-    // Positive control: with the overlay available, a catalog figure renders.
-    let control = section_knobs(&resolved);
-    let control_detail = find(&control, "knobs", "filled").detail.clone();
-    assert!(
-        control_detail.contains("filled from the catalog"),
-        "test premise: an available overlay must attribute the fill: {control_detail}"
+    cfg.models.insert(
+        "vendor".to_string(),
+        ModelEntry::new("vendor", "deepseek-v3"),
     );
+    let rows = [
+        (
+            "configured",
+            "max_output_tokens 32000 (model-config)",
+            "anthropic-api",
+        ),
+        (
+            "pooled",
+            "max_output_tokens 16000 (model-config)",
+            "anthropic-api",
+        ),
+        (
+            "cataloged",
+            "max_output_tokens unset (default)",
+            "anthropic-api",
+        ),
+        (
+            "vendor",
+            "max_output_tokens unset (default)",
+            "openai-compat",
+        ),
+    ];
 
-    // Act: the same context with the overlay load having failed.
-    let degraded = DoctorContext {
-        knobs: None,
-        ..resolved
-    };
-    let findings = section_knobs(&degraded);
+    // Act
+    let context = ctx(cfg, Some(&current_version_stamp()), Vec::new(), Vec::new());
+    let findings = section_knobs(&context);
 
-    // Assert: one honest unavailable line, and NOT an attributed ceiling.
+    // Assert
     assert_eq!(
         findings.len(),
-        1,
-        "one degradation line, not rows: {findings:?}"
+        rows.len(),
+        "one row per model: {findings:?}"
     );
-    let only = &findings[0];
-    assert_eq!(only.status, Status::Warn, "{only:?}");
-    assert!(
-        only.detail.contains("output-ceiling sources unavailable"),
-        "the line must name the degradation: {}",
-        only.detail
-    );
-    assert!(
-        only.remediation.is_some(),
-        "an unavailable section must name its fix: {only:?}"
-    );
-    assert!(
-        !only.detail.contains("filled from the catalog"),
-        "a superseded baked ceiling must never be attributed: {}",
-        only.detail
-    );
-
-    // Degradation, not failure: the exit code stays the version section's call.
-    assert_eq!(overall_exit(&findings), 0);
+    for (nickname, source, kind) in rows {
+        let detail = &find(&findings, "knobs", nickname).detail;
+        assert!(detail.starts_with(source), "{nickname}: {detail}");
+        assert!(
+            detail.contains(&format!("kind {kind} ")),
+            "{nickname}: {detail}"
+        );
+    }
+    for f in &findings {
+        assert!(
+            !f.detail.contains("catalog"),
+            "no row names the catalog: {f:?}"
+        );
+        assert_eq!(f.status, Status::Pass, "{f:?}");
+        assert!(f.remediation.is_none(), "{f:?}");
+    }
 }
 
 /// The `config` findings naming a catalog overlay soft defect, in report

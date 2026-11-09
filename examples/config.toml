@@ -38,8 +38,8 @@ version = 5
 # Caller intent flows through directly: the egress emits whatever the
 # caller sent for reasoning effort and thinking. An effort level or
 # thinking shape a model refuses is repaired and learned per lane, and an
-# omitted output limit uses the learned ceiling, else the catalog prior
-# (`routectl catalog set ... max_output_tokens`), else 64000.
+# omitted output limit uses the model's `max_output_tokens` lowered by a
+# learned ceiling, else 64000.
 
 [server]
 host = "127.0.0.1"
@@ -199,11 +199,15 @@ upstream = "gpt-5.4"
 provider = "codex"
 upstream = "gpt-5.4"
 
-# The output limit routectl fills when a caller OMITS max_tokens (the
-# Anthropic-shape egresses only: anthropic-api, bedrock-invoke) is the
-# learned ceiling, else the catalog prior, else 64000. Correct a wrong
-# catalog prior in the catalog overlay, not here:
-#   routectl catalog set anthropic-api:claude-opus-4 max_output_tokens=32000
+# A model's token limits are set here and nowhere else. `context_window`
+# (total tokens) lets the window gate skip a model a request cannot fit
+# and is reported on /v1/models; set it on every model in a gated chain.
+# `max_output_tokens` is the limit routectl fills when a caller OMITS
+# max_tokens (the Anthropic-shape egresses only: anthropic-api,
+# bedrock-invoke), lowered by a learned ceiling; unset means 64000. Set it
+# on any model whose real ceiling is lower:
+#   context_window    = 200000
+#   max_output_tokens = 32000
 
 # ---- Aliases (wire-string -> model nickname) ----
 # A single key with a string value resolves to one model. A list value

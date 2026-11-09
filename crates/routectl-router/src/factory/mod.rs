@@ -12,6 +12,8 @@ mod validate_region;
 mod validate_state_keys;
 mod warnings;
 
+#[cfg(test)]
+pub use build::apply_model_knobs;
 pub use build::ipv4_compatible_embedded;
 #[cfg(test)]
 pub use build::resolve_max_thinking_entry_bytes_for_test;

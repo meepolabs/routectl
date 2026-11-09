@@ -13,9 +13,7 @@ use std::sync::Arc;
 
 use routectl_core::{ChatChunk, ChatResponse, Message, MessageContent, Provider, Result, Role};
 
-use crate::catalog::{CatalogRow, EffectiveRow, Source};
-use crate::catalog_overlay::{CatalogOverlay, OverlayCell, OverlaySource};
-use crate::config::Config;
+use crate::config::{Config, ModelEntry};
 use crate::resolved::ResolvedModel;
 use crate::router::chain::into_one_dispatch_target;
 
@@ -118,42 +116,30 @@ fn comfortably_large(req: &ChatRequest) -> u32 {
     u32::try_from(estimated_tokens(req) * 8).expect("fixture estimate fits u32")
 }
 
-/// A dispatch target on provider `p` whose effective row is the given
-/// merge result. Each nickname sends its own name as its upstream, so two
-/// fixture targets are two calibration lanes.
-fn target(nickname: &str, effective_row: EffectiveRow) -> DispatchTarget {
+/// A dispatch target on provider `p` stamped from `entry` through the
+/// factory's own per-model stamp. Each nickname sends its own name as its
+/// upstream, so two fixture targets are two calibration lanes.
+fn target(nickname: &str, entry: &ModelEntry) -> DispatchTarget {
     let provider: Arc<dyn Provider> = Arc::new(StubProvider);
-    let model =
-        ResolvedModel::new(nickname, "p", provider, nickname).with_effective_row(effective_row);
+    let model = crate::factory::apply_model_knobs(
+        ResolvedModel::new(nickname, "p", provider, nickname),
+        nickname,
+        entry,
+    );
     into_one_dispatch_target(Arc::new(model))
 }
 
-/// A target whose catalog row confirms `window` tokens.
+/// A target whose `[models.X] context_window` is `window` tokens.
 fn target_with_window(nickname: &str, window: u32) -> DispatchTarget {
-    let mut row = CatalogRow::sentinel();
-    row.max_context_tokens = Some(window);
     target(
         nickname,
-        EffectiveRow::Present {
-            row,
-            source: Source::Baked,
-            verified_at: "seed".to_string(),
-        },
+        &ModelEntry::new("p", nickname).with_context_window(window),
     )
 }
 
-/// A target whose catalog row exists but leaves the window unset.
+/// A target whose `[models.X]` entry sets no window.
 fn target_without_window(nickname: &str) -> DispatchTarget {
-    let mut row = CatalogRow::sentinel();
-    row.max_context_tokens = None;
-    target(
-        nickname,
-        EffectiveRow::Present {
-            row,
-            source: Source::Baked,
-            verified_at: "seed".to_string(),
-        },
-    )
+    target(nickname, &ModelEntry::new("p", nickname))
 }
 
 fn nicknames(chain: &[DispatchTarget]) -> Vec<&str> {
@@ -233,14 +219,17 @@ fn every_target_overflowing_returns_the_original_chain() {
     assert_eq!(router.metrics.window_gate_skips_total(), 0);
 }
 
+/// A target whose entry sets no `context_window` is kept however large the
+/// request, and one whose configured window is too small is skipped.
+///
+/// Mutation check: make `ResolvedModel::context_window_tokens` ignore the
+/// configured window (return `None`) -> red (nothing is skipped).
 #[test]
-fn an_unconfirmed_window_keeps_the_target() {
+fn an_unconfigured_window_keeps_the_target_and_a_configured_small_one_is_skipped() {
     let router = router(true);
     let req = oversized_request();
     let chain = vec![
         target_without_window("unset"),
-        target("disabled", EffectiveRow::Disabled),
-        target("missing", EffectiveRow::Missing),
         target_with_window("small", clearly_too_small(&req)),
     ];
 
@@ -248,8 +237,8 @@ fn an_unconfirmed_window_keeps_the_target() {
 
     assert_eq!(
         nicknames(&kept),
-        vec!["unset", "disabled", "missing"],
-        "only the confirmed-too-small window is skipped",
+        vec!["unset"],
+        "only the configured too-small window is skipped",
     );
     assert_eq!(router.metrics.window_gate_skips_total(), 1);
 }
@@ -396,39 +385,152 @@ fn the_skip_rule_counts_estimate_reserve_and_headroom_against_the_window() {
     }
 }
 
+/// The reserve is the request's `max_tokens`, else the configured ceiling,
+/// else the default the egress fills when it must send `max_tokens`, else 0.
+///
+/// Mutation check: drop the default-fill arm of `output_reserve` (return 0
+/// when no ceiling is configured) -> red on the anthropic-api and
+/// bedrock-invoke default rows.
 #[test]
-fn the_output_reserve_prefers_the_request_then_the_target_ceiling_then_zero() {
-    let rows: [(&str, Option<u32>, u32, u64); 5] = [
-        (
-            "request max_tokens beats the target ceiling",
+fn the_output_reserve_prefers_the_request_then_the_ceiling_then_the_egress_fill() {
+    use routectl_core::wire_check::EgressKind;
+    use routectl_providers::anthropic_api::DEFAULT_MAX_OUTPUT_TOKENS;
+    struct ReserveRow {
+        name: &'static str,
+        max_tokens: Option<u32>,
+        ceiling: u32,
+        egress: Option<EgressKind>,
+        reserve: u64,
+    }
+    let fill = u64::from(DEFAULT_MAX_OUTPUT_TOKENS);
+    let row = |name, max_tokens, ceiling, egress, reserve| ReserveRow {
+        name,
+        max_tokens,
+        ceiling,
+        egress,
+        reserve,
+    };
+    let rows = [
+        row(
+            "request max_tokens beats the configured ceiling",
             Some(1_000),
             64_000,
+            Some(EgressKind::AnthropicApi),
             1_000,
         ),
-        (
-            "request max_tokens above the target ceiling still wins",
+        row(
+            "request max_tokens above the configured ceiling still wins",
             Some(128_000),
             64_000,
+            Some(EgressKind::AnthropicApi),
             128_000,
         ),
-        ("request max_tokens alone", Some(1_000), 0, 1_000),
-        (
-            "target ceiling when the request sets none",
-            None,
-            64_000,
-            64_000,
+        row(
+            "request max_tokens on an egress that never fills",
+            Some(1_000),
+            0,
+            Some(EgressKind::OpenaiCompat),
+            1_000,
         ),
-        ("both absent reserves nothing", None, 0, 0),
+        row(
+            "configured ceiling when the request sets none",
+            None,
+            32_000,
+            Some(EgressKind::AnthropicApi),
+            32_000,
+        ),
+        row(
+            "anthropic-api with no configured ceiling reserves the egress fill",
+            None,
+            0,
+            Some(EgressKind::AnthropicApi),
+            fill,
+        ),
+        row(
+            "bedrock-invoke with no configured ceiling reserves the egress fill",
+            None,
+            0,
+            Some(EgressKind::BedrockInvoke),
+            fill,
+        ),
+        row(
+            "openai-compat with no configured ceiling reserves nothing",
+            None,
+            0,
+            Some(EgressKind::OpenaiCompat),
+            0,
+        ),
+        row("an unknown egress reserves nothing", None, 0, None, 0),
     ];
+    assert_eq!(fill, 64_000, "the egress default is the documented 64000");
 
-    for (name, max_tokens, ceiling, expected) in rows {
+    for row in rows {
         let mut req = oversized_request();
-        req.max_tokens = max_tokens;
+        req.max_tokens = row.max_tokens;
         let mut target = target_with_window("t", 200_000);
-        target.max_output_tokens = ceiling;
+        target.max_output_tokens = row.ceiling;
+        target.egress_kind = row.egress;
 
-        assert_eq!(output_reserve(&req, &target), expected, "{name}");
+        assert_eq!(output_reserve(&req, &target), row.reserve, "{}", row.name);
     }
+}
+
+/// An anthropic-api target with no configured ceiling is gated with the
+/// 64000 tokens its egress will send: a request that fits only when no
+/// output is reserved is skipped, through the real chain expansion that
+/// derives the egress kind from `[providers.X]`.
+#[test]
+fn an_anthropic_target_without_a_ceiling_reserves_the_egress_fill() {
+    let config: Config = toml::from_str(
+        "version = 3\n\
+         [providers.p]\n\
+         kind = \"anthropic-api\"\n\
+         api_key_ref = \"literal:k\"\n\
+         [window_gate]\n\
+         enabled = true\n",
+    )
+    .expect("config parses");
+    let mut router = Router::new(Arc::new(config));
+    let window: u32 = 200_000;
+    let fits_without_reserve = u64::from(window) - HEADROOM_TOKENS - 1_000;
+    let req = request_with_estimate(fits_without_reserve, None);
+    let provider: Arc<dyn Provider> = Arc::new(StubProvider);
+    let models = BTreeMap::from([
+        (
+            "windowed".to_string(),
+            Arc::new(crate::factory::apply_model_knobs(
+                ResolvedModel::new("windowed", "p", Arc::clone(&provider), "windowed"),
+                "windowed",
+                &ModelEntry::new("p", "windowed").with_context_window(window),
+            )),
+        ),
+        (
+            "unconfirmed".to_string(),
+            Arc::new(ResolvedModel::new(
+                "unconfirmed",
+                "p",
+                provider,
+                "unconfirmed",
+            )),
+        ),
+    ]);
+    router.install_resolved_models(models);
+    let chain = router.expand_chain_to_targets(
+        vec![
+            Arc::clone(&router.resolved_models["windowed"]),
+            Arc::clone(&router.resolved_models["unconfirmed"]),
+        ],
+        None,
+    );
+    assert_eq!(
+        chain[0].egress_kind,
+        Some(routectl_core::wire_check::EgressKind::AnthropicApi),
+        "premise: chain expansion derives the egress kind",
+    );
+
+    let kept = router.filter_chain_by_window(chain, &req);
+
+    assert_eq!(nicknames(&kept), vec!["unconfirmed"]);
 }
 
 #[test]
@@ -834,8 +936,8 @@ fn the_skip_warn_reports_both_the_raw_and_the_corrected_figure() {
 }
 
 // ---------------------------------------------------------------------------
-// Reserve-aware boundary on real window sizes, set through the catalog
-// overlay the daemon stamps resolved models with.
+// Reserve-aware boundary on real window sizes, set through the `[models.X]`
+// entry the factory stamps resolved models from.
 // ---------------------------------------------------------------------------
 
 /// The output ceiling Anthropic-shape lanes commonly carry.
@@ -871,46 +973,15 @@ fn request_with_estimate(tokens: u64, max_tokens: Option<u32>) -> ChatRequest {
 }
 
 /// A target named `nickname` whose context window and output ceiling come
-/// from a catalog overlay cell, resolved the way the daemon resolves them.
-fn overlay_target(nickname: &str, window: u32, ceiling: Option<u32>) -> DispatchTarget {
-    let config: Config = toml::from_str(&format!(
-        "version = 3\n\
-         [providers.p]\n\
-         kind = \"openai-compat\"\n\
-         base_url = \"https://x\"\n\
-         api_key_ref = \"literal:k\"\n\
-         [models.{nickname}]\n\
-         provider = \"p\"\n\
-         upstream = \"{nickname}\"\n"
-    ))
-    .expect("config parses");
-    let mut overlay = CatalogOverlay::default();
-    overlay.cells.insert(
-        format!("openai-compat:{nickname}"),
-        Some(OverlayCell {
-            source: OverlaySource::User,
-            verified_at: "2026-01-01".to_string(),
-            wm: None,
-            rm: None,
-            ttl_seconds: None,
-            min_prefix_tokens: None,
-            max_context_tokens: Some(window),
-            max_output_tokens: ceiling,
-            input_cost_per_token: None,
-            output_cost_per_token: None,
-            capabilities: None,
-        }),
-    );
-    let provider: Arc<dyn Provider> = Arc::new(StubProvider);
-    let model = ResolvedModel::new(nickname, "p", provider, nickname);
-    let mut models = crate::factory::apply_catalog_overlay(
-        BTreeMap::from([(nickname.to_string(), Arc::new(model))]),
-        &config,
-        &overlay,
-    );
-    let model = models.remove(nickname).expect("model stamped");
-    assert_eq!(model.context_window_tokens(), Some(window));
-    into_one_dispatch_target(model)
+/// from its `[models.X]` entry, stamped the way the factory stamps them.
+fn configured_target(nickname: &str, window: u32, ceiling: Option<u32>) -> DispatchTarget {
+    let mut entry = ModelEntry::new("p", nickname).with_context_window(window);
+    if let Some(ceiling) = ceiling {
+        entry = entry.with_max_output_tokens(ceiling);
+    }
+    let target = target(nickname, &entry);
+    assert_eq!(target.model.context_window_tokens(), Some(window));
+    target
 }
 
 struct BoundaryRow {
@@ -1022,7 +1093,7 @@ fn the_gate_keeps_a_target_exactly_at_input_plus_reserve_plus_headroom() {
         let router = router(true);
         let req = request_with_estimate(row.input_tokens, row.max_tokens);
         let chain = vec![
-            overlay_target("windowed", row.window, row.ceiling),
+            configured_target("windowed", row.window, row.ceiling),
             target_without_window("unconfirmed"),
         ];
 

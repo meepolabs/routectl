@@ -32,14 +32,14 @@ use super::types::{OutputConfig, ThinkingConfig, WireThinking};
 /// Anthropic-shape requests when the caller omits the field AND the
 /// per-model ceiling slot (`routectl_internal.max_output_tokens`) is zero.
 /// Any nonzero value in that slot suppresses the baseline, whatever put it
-/// there: an operator override, a catalog prior, or a learned ceiling. The
+/// there: the model's configured value or a learned ceiling. The
 /// Anthropic Messages API requires `max_tokens` and 400s on omission;
 /// 64000 is above the 64K ceiling of Sonnet 4.5/4.6 and Opus 4.5 and
 /// within Opus 4.7's 128K window.
 ///
-/// A model whose real ceiling is lower gets it from the catalog prior
-/// (`routectl catalog set ... max_output_tokens`) or learns it from the
-/// upstream's refusal. See docs/CONFIGURATION.md.
+/// A model whose real ceiling is lower gets it from `[models.X]
+/// max_output_tokens` or learns it from the upstream's refusal. See
+/// docs/CONFIGURATION.md.
 pub const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 64_000;
 
 /// Whether `egress` must send `max_tokens` and so fills it when the client

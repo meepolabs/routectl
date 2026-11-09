@@ -20,7 +20,6 @@ use serde_json::json;
 
 use super::super::credential_park_dispatch_tests::{ScriptedProvider, Step, Surface};
 use super::super::{DispatchMeta, Router, RouterOptions};
-use crate::catalog::{CatalogRow, EffectiveRow, Source};
 use crate::config::{
     AliasValue, Config, OverrideEntry, ProviderEntry, ProviderRuntimePolicy, RetryPolicy,
 };
@@ -46,16 +45,8 @@ fn rpm1_entry() -> ProviderEntry {
     })
 }
 
-/// A catalog row confirming a one-token window: every request overflows it.
-fn one_token_window() -> EffectiveRow {
-    let mut row = CatalogRow::sentinel();
-    row.max_context_tokens = Some(1);
-    EffectiveRow::Present {
-        row,
-        source: Source::Baked,
-        verified_at: "seed".to_string(),
-    }
-}
+/// A configured one-token window: every request overflows it.
+const ONE_TOKEN_WINDOW: u32 = 1;
 
 /// How one reconciliation row is arranged and what it must record.
 struct Row {
@@ -66,7 +57,7 @@ struct Row {
     config: fn(&mut Config),
     /// Scripts for the targets that do not simply answer.
     scripts: &'static [(usize, &'static [Step])],
-    /// Targets whose catalog row confirms a one-token context window.
+    /// Targets configured with a one-token context window.
     tiny_windows: &'static [usize],
     state: fn(&Router),
     tools: bool,
@@ -139,7 +130,7 @@ fn fixture(row: &Row) -> Fixture {
                 format!("claude-{}", nickname(idx)),
             );
             if row.tiny_windows.contains(&idx) {
-                model = model.with_effective_row(one_token_window());
+                model = model.with_context_window(ONE_TOKEN_WINDOW);
             }
             (nickname(idx), Arc::new(model))
         })

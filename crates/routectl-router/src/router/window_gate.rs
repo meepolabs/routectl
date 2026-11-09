@@ -57,15 +57,29 @@ const fn exceeds_window(estimate: u64, reserve: u64, window: u64) -> bool {
 }
 
 /// The output tokens the target's context window must leave room for: the
-/// request's own `max_tokens`, else the target's resolved output ceiling
-/// (the value request shaping sends when the client sets none), else `0`
-/// when neither is known.
+/// request's own `max_tokens`, else the target's configured output ceiling,
+/// else the default the egress itself sends when it must fill `max_tokens`,
+/// else `0` for an egress that forwards an omitted limit as omitted.
 ///
-/// The catalog window is TOTAL context, so the upstream reserves the output
-/// limit from it before any input fits.
+/// The configured window is TOTAL context, so the upstream reserves the
+/// output limit from it before any input fits. A learned ceiling can lower
+/// what is sent at dispatch; this reserve does not see it and so may
+/// overstate the output, which only makes the gate more conservative.
 fn output_reserve(req: &ChatRequest, target: &DispatchTarget) -> u64 {
-    req.max_tokens
-        .map_or(u64::from(target.max_output_tokens), u64::from)
+    if let Some(max_tokens) = req.max_tokens {
+        return u64::from(max_tokens);
+    }
+    if target.max_output_tokens > 0 {
+        return u64::from(target.max_output_tokens);
+    }
+    let egress_fills = target
+        .egress_kind
+        .is_some_and(routectl_providers::anthropic_api::egress_fills_max_tokens);
+    if egress_fills {
+        u64::from(routectl_providers::anthropic_api::DEFAULT_MAX_OUTPUT_TOKENS)
+    } else {
+        0
+    }
 }
 
 /// Epoch-second stamp of the last emitted skip WARN.
@@ -114,7 +128,7 @@ fn now_epoch_secs() -> u64 {
 }
 
 /// What one skipped target contributes to the WARN line: routectl-internal
-/// identifiers and the catalog window only.
+/// identifiers and the configured window only.
 struct SkipReport {
     state_key: String,
     nickname: String,
@@ -248,7 +262,7 @@ impl Router {
         }
         // One line per interval per process, naming the first skipped
         // target. routectl-internal identifiers (state key, model nickname)
-        // and catalog / estimate figures ONLY -- never anything from the
+        // and window / estimate figures ONLY -- never anything from the
         // request body, its tools, its attachments, or the session key.
         //
         // Both figures are reported: the raw estimate, and the corrected one

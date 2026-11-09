@@ -645,10 +645,19 @@
     },
     "ModelEntry": {
       "additionalProperties": false,
-      "description": "One row in the `[models]` table. Carries the nickname-to-upstream\nbinding plus per-model knobs.\n\nFields that vary per-model belong here. Fields that vary per-\ntransport (auth, base URL, runtime gates) stay on `[providers.X]`.\nTwo fields, `header_extras` and `payload_extras`, live BOTH here and\non every provider variant; the dispatch layer merges them per\nrequest (model wins on key collision; see `Router` merge helpers).\n\nPER-MODEL VALUE RELAY (read before adding a per-model value here).\nA per-model value the egress reads passes through FOUR struct\ndefinitions, each a deliberate layer, not a redundant copy:\n\n  1. `ModelEntry`                (this struct, config.rs) -- TOML\n     deserialization target; `#[serde(deny_unknown_fields)]`.\n  2. `crate::resolved::ResolvedModel`   -- startup-resolved per\n     nickname; adds the `Arc<dyn Provider>` and may transform the\n     type.\n  3. `crate::router::DispatchTarget`    -- per-request dispatch hop;\n     adds `state_key`, makes `provider` optional.\n  4. `routectl_core::RoutectlInternal`  -- the transport-internal\n     carrier on `ChatRequest`; the egress reads the value here.\n     `apply_layered_overlays` (router.rs) copies it from the\n     `DispatchTarget`.\n\nThe output-token ceiling is NOT configured here: `ResolvedModel`'s\n`max_output_tokens` carries the catalog prior (filled by\n`factory::apply_catalog_overlay`), and a learned ceiling lowers what\nthe egress sends at dispatch. The hop is the price\nof the config-crate (TOML serde shape) / core-crate (wire-internal)\nseparation: `reasoning_dialect` / `history_reasoning` even change\ntype at the core boundary (config-side enum -> `Core*` enum via the\n`From` impls below), so a single shared struct cannot span both\ncrates without inverting the `core <- router` dependency.",
+      "description": "One row in the `[models]` table. Carries the nickname-to-upstream\nbinding plus per-model knobs.\n\nFields that vary per-model belong here. Fields that vary per-\ntransport (auth, base URL, runtime gates) stay on `[providers.X]`.\nTwo fields, `header_extras` and `payload_extras`, live BOTH here and\non every provider variant; the dispatch layer merges them per\nrequest (model wins on key collision; see `Router` merge helpers).\n\nPER-MODEL VALUE RELAY (read before adding a per-model value here).\nA per-model value the egress reads passes through FOUR struct\ndefinitions, each a deliberate layer, not a redundant copy:\n\n  1. `ModelEntry`                (this struct, config.rs) -- TOML\n     deserialization target; `#[serde(deny_unknown_fields)]`.\n  2. `crate::resolved::ResolvedModel`   -- startup-resolved per\n     nickname; adds the `Arc<dyn Provider>` and may transform the\n     type.\n  3. `crate::router::DispatchTarget`    -- per-request dispatch hop;\n     adds `state_key`, makes `provider` optional.\n  4. `routectl_core::RoutectlInternal`  -- the transport-internal\n     carrier on `ChatRequest`; the egress reads the value here.\n     `apply_layered_overlays` (router.rs) copies it from the\n     `DispatchTarget`.\n\n`max_output_tokens` takes this relay: the factory stamps it onto\n`ResolvedModel`, and a learned ceiling lowers what the egress sends at\ndispatch. `context_window` stops at `ResolvedModel`, where the window\ngate and `/v1/models` read it. The hop is the price\nof the config-crate (TOML serde shape) / core-crate (wire-internal)\nseparation: `reasoning_dialect` / `history_reasoning` even change\ntype at the core boundary (config-side enum -> `Core*` enum via the\n`From` impls below), so a single shared struct cannot span both\ncrates without inverting the `core <- router` dependency.",
       "properties": {
         "additional_request_fields": {
           "description": "Bedrock Converse `additionalModelRequestFields` -- vendor-\nspecific knobs that don't have a top-level Converse slot. The\nBedrock Invoke egress also reads this map for non-routectl-\nmanaged body fields. Other egresses ignore it."
+        },
+        "context_window": {
+          "description": "The model's total context window in tokens (input plus output).\nThe proactive window gate skips this model when a request cannot\nfit, and `GET /v1/models` reports it as `context_length`. Unset\nmeans unknown: the gate keeps the model and discovery omits the\nfield. `0` is refused at load.",
+          "format": "uint32",
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "header_extras": {
           "additionalProperties": {
@@ -667,6 +676,15 @@
             }
           ],
           "description": "Per-model openai-compat outgoing-history reasoning policy.\nLives ONLY on `[models.X]` (no provider fallback). See\n[`HistoryReasoning`] docs for v3-vs-v4 motivation."
+        },
+        "max_output_tokens": {
+          "description": "The `max_tokens` value sent for this model when the client omits\none, on the egresses that must send it (anthropic-api,\nbedrock-invoke). A ceiling learned from an upstream refusal lowers\nit at dispatch; unset falls back to 64000. A client value always\nwins. `0` is refused at load.",
+          "format": "uint32",
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "payload_extras": {
           "description": "Extras merged into the outbound request body. Combined with the\nprovider's `payload_extras` at dispatch time via a deep recursive\nmerge (model wins on leaf collision; nested objects merge\nrecursively). Lands on canonical `req.provider_extras`; each\negress merges that into the wire body via its existing path."

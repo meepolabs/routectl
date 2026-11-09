@@ -19,24 +19,26 @@ mod ceiling_fill {
     );
     /// The limit the capture names.
     const NAMED_LIMIT: u32 = 128_000;
-    /// The model's stamped `max_output_tokens`, the value the capture was
+    /// The model's configured `max_output_tokens`, the value the capture was
     /// refused for, so the seat refuses the very body the upstream refused.
     const FILLED: u32 = 1_000_000;
     const TOML: &str = "[wire_check]\nfirst_n = 8\nsample_one_in = 1\n\
          [retry]\nmax_attempts = 1\ninitial_backoff_ms = 0\njitter_ms = 0\n\n\
          [providers.p0]\nkind = \"anthropic-api\"\napi_key_ref = \"literal:k\"\n";
 
-    fn messages_ceiling_rejection() -> Error {
+    /// The captured refusal, naming `limit` in place of [`NAMED_LIMIT`].
+    fn messages_ceiling_rejection(limit: u32) -> Error {
         let fixture: serde_json::Value =
             serde_json::from_str(MESSAGES_CEILING_FIXTURE).expect("the fixture is JSON");
+        let body = fixture["body"]
+            .as_str()
+            .expect("the fixture carries its body");
+        let named = NAMED_LIMIT.to_string();
+        assert_eq!(body.matches(&named).count(), 1, "premise: named once");
         Error::upstream_with_body(
             "fill-seat",
             400,
-            routectl_core::UpstreamBody::new(
-                fixture["body"]
-                    .as_str()
-                    .expect("the fixture carries its body"),
-            ),
+            routectl_core::UpstreamBody::new(body.replace(&named, &limit.to_string())),
             None,
             Some("invalid_request_error".to_string()),
             None,
@@ -52,15 +54,21 @@ mod ceiling_fill {
         egress_edits: Vec<routectl_core::wire_check::DeclaredEdit>,
     }
 
-    /// A seat that refuses every body whose `max_tokens` is above
-    /// [`NAMED_LIMIT`] and serves the rest.
+    /// A seat that refuses every body whose `max_tokens` is above its
+    /// limit, naming that limit, and serves the rest.
     struct FillSeat {
+        limit: u32,
         attempts: Mutex<Vec<Attempt>>,
     }
 
     impl FillSeat {
         fn new() -> Arc<Self> {
+            Self::with_limit(NAMED_LIMIT)
+        }
+
+        fn with_limit(limit: u32) -> Arc<Self> {
             Arc::new(Self {
+                limit,
                 attempts: Mutex::new(Vec::new()),
             })
         }
@@ -109,14 +117,14 @@ mod ceiling_fill {
             }
             let above = body["max_tokens"]
                 .as_u64()
-                .is_some_and(|sent| sent > u64::from(NAMED_LIMIT));
+                .is_some_and(|sent| sent > u64::from(self.limit));
             self.attempts.lock().push(Attempt {
                 req: req.clone(),
                 body,
                 egress_edits,
             });
             if above {
-                return Err(messages_ceiling_rejection());
+                return Err(messages_ceiling_rejection(self.limit));
             }
             Ok(())
         }
@@ -145,24 +153,103 @@ mod ceiling_fill {
     }
 
     fn fill_router(seat: &Arc<FillSeat>) -> Router {
-        let mut config: Config = toml::from_str(TOML).expect("valid test toml");
+        fill_router_configured(seat, FILLED)
+    }
+
+    /// A one-seat router whose model sets `[models.m0] max_output_tokens =
+    /// configured`, stamped through the factory's own per-model stamp.
+    fn fill_router_configured(seat: &Arc<FillSeat>, configured: u32) -> Router {
+        let mut config: Config = toml::from_str(&format!(
+            "{TOML}\n[models.m0]\nprovider = \"p0\"\nupstream = \"upstream\"\n\
+             max_output_tokens = {configured}\n"
+        ))
+        .expect("valid test toml");
         config
             .aliases
             .insert(ALIAS.to_string(), AliasValue::Chain(vec!["m0".to_string()]));
-        let mut router = Router::new(Arc::new(config));
-        router.install_resolved_models(BTreeMap::from([(
-            "m0".to_string(),
-            Arc::new(
-                ResolvedModel::new(
-                    "m0",
-                    "p0",
-                    Arc::clone(seat) as Arc<dyn Provider>,
-                    "upstream",
-                )
-                .with_max_output_tokens(FILLED),
+        let model = crate::factory::apply_model_knobs(
+            ResolvedModel::new(
+                "m0",
+                "p0",
+                Arc::clone(seat) as Arc<dyn Provider>,
+                "upstream",
             ),
-        )]));
+            "m0",
+            &config.models["m0"],
+        );
+        let mut router = Router::new(Arc::new(config));
+        router.install_resolved_models(BTreeMap::from([("m0".to_string(), Arc::new(model))]));
         router.with_capability_writes_assumed_durable_for_tests()
+    }
+
+    /// Serve one request with no client limit and, when it committed a
+    /// learned ceiling, acknowledge the durable write as the daemon does.
+    async fn serve_and_acknowledge(router: &Router) {
+        let done = router
+            .complete_with_options(unlimited_req(None), RouterOptions::new())
+            .await;
+        if let Some(event) = done.meta.learned_capabilities.first() {
+            assert!(
+                router.acknowledge_durable_field_confirmation(
+                    &event.state_key,
+                    &event.capability_key,
+                    &event.provider_kind,
+                    event.persistence_generation,
+                    event.incarnation,
+                    event.observations,
+                ),
+                "premise: the durable write acknowledges the confirmation",
+            );
+        }
+    }
+
+    /// With no client limit, two requests go out at the configured fill, a
+    /// learned ceiling lowers it from the second request on, and a limit
+    /// below the floor never does.
+    ///
+    /// Mutation check: compare the ceiling with `0 <` in place of the floor
+    /// in `FieldSurface::clamp_lowers` -> red on the "below the floor" row.
+    #[tokio::test]
+    async fn the_fill_is_the_configured_value_lowered_by_a_learned_ceiling_to_the_floor() {
+        use super::super::MIN_LEARNED_OUTPUT_CEILING as FLOOR;
+        let rows: [(&str, u32, u32, Vec<u32>); 4] = [
+            (
+                "config value within the limit",
+                8_000,
+                NAMED_LIMIT,
+                vec![8_000, 8_000],
+            ),
+            (
+                "learned ceiling lowers the config value",
+                FILLED,
+                NAMED_LIMIT,
+                vec![FILLED, NAMED_LIMIT, NAMED_LIMIT],
+            ),
+            (
+                "learned ceiling at the floor lowers it",
+                64_000,
+                FLOOR,
+                vec![64_000, FLOOR, FLOOR],
+            ),
+            (
+                "a limit below the floor never lowers it",
+                64_000,
+                FLOOR - 1,
+                vec![64_000, 64_000],
+            ),
+        ];
+
+        for (name, configured, limit, sent) in rows {
+            let seat = FillSeat::with_limit(limit);
+            let router = fill_router_configured(&seat, configured);
+
+            serve_and_acknowledge(&router).await;
+            serve_and_acknowledge(&router).await;
+
+            let expected: Vec<serde_json::Value> = sent.into_iter().map(|v| json!(v)).collect();
+            assert_eq!(seat.sent_limits(), expected, "{name}");
+            assert_eq!(seat.client_limits().iter().flatten().count(), 0, "{name}");
+        }
     }
 
     /// An Anthropic client's request with no `max_tokens`, client bytes
@@ -395,7 +482,7 @@ mod ceiling_fill {
 }
 
 /// What reaches each egress for a client that sent no `max_tokens`, and the
-/// limit the egress then sends, through the real chain stamp and catalog fill.
+/// limit the egress then sends, through the real per-model stamp.
 mod fill_presence {
     use super::*;
 
@@ -425,28 +512,30 @@ mod fill_presence {
     }
 
     /// The request one dispatch hands a seat on `provider_toml`, its model
-    /// `upstream` and an optional ceiling already stamped on the resolved
-    /// model (which the catalog fill then leaves alone), after the catalog
-    /// fill stamps the resolved model.
+    /// `upstream` and an optional `[models.m0] max_output_tokens`, stamped
+    /// through the factory's own per-model stamp.
     async fn dispatched(
         provider_toml: &str,
         upstream: &str,
-        stamped: Option<u32>,
+        configured: Option<u32>,
         client: Option<u32>,
     ) -> ChatRequest {
-        dispatched_with(provider_toml, upstream, stamped, client, None).await
+        dispatched_with(provider_toml, upstream, configured, client, None).await
     }
 
     /// [`dispatched`] for a request carrying `reasoning` canonically.
     async fn dispatched_with(
         provider_toml: &str,
         upstream: &str,
-        stamped: Option<u32>,
+        configured: Option<u32>,
         client: Option<u32>,
         reasoning: Option<ReasoningConfig>,
     ) -> ChatRequest {
+        let ceiling_line = configured.map_or_else(String::new, |tokens| {
+            format!("max_output_tokens = {tokens}\n")
+        });
         let toml_text = format!(
-            "[providers.p0]\n{provider_toml}\n[models.m0]\nprovider = \"p0\"\nupstream = \"{upstream}\"\n"
+            "[providers.p0]\n{provider_toml}\n[models.m0]\nprovider = \"p0\"\nupstream = \"{upstream}\"\n{ceiling_line}"
         );
         let mut config: Config = toml::from_str(&toml_text).expect("valid test toml");
         config
@@ -455,18 +544,13 @@ mod fill_presence {
         let seat = Arc::new(RecordingSeat {
             seen: Mutex::new(Vec::new()),
         });
-        let mut model =
-            ResolvedModel::new("m0", "p0", Arc::clone(&seat) as Arc<dyn Provider>, upstream);
-        if let Some(tokens) = stamped {
-            model = model.with_max_output_tokens(tokens);
-        }
-        let models = crate::factory::apply_catalog_overlay(
-            BTreeMap::from([("m0".to_string(), Arc::new(model))]),
-            &config,
-            &overlay_ceiling(),
+        let model = crate::factory::apply_model_knobs(
+            ResolvedModel::new("m0", "p0", Arc::clone(&seat) as Arc<dyn Provider>, upstream),
+            "m0",
+            &config.models["m0"],
         );
         let mut router = Router::new(Arc::new(config));
-        router.install_resolved_models(models);
+        router.install_resolved_models(BTreeMap::from([("m0".to_string(), Arc::new(model))]));
         let mut req = req_on(ALIAS);
         req.max_tokens = client;
         req.reasoning = reasoning;
@@ -482,38 +566,14 @@ mod fill_presence {
         seen[0].clone()
     }
 
-    /// A Bedrock upstream whose output ceiling only the overlay below names,
-    /// so a body that sends it can only have read the catalog.
-    const OVERLAID_BEDROCK: &str = "anthropic.claude-overlaid-v1:0";
-    const OVERLAID_CEILING: u32 = 32_000;
-
-    /// The catalog overlay naming [`OVERLAID_CEILING`] for
-    /// [`OVERLAID_BEDROCK`] and nothing else.
-    fn overlay_ceiling() -> crate::catalog_overlay::CatalogOverlay {
-        let mut overlay = crate::catalog_overlay::CatalogOverlay::default();
-        overlay.cells.insert(
-            format!("bedrock:{OVERLAID_BEDROCK}"),
-            Some(crate::catalog_overlay::OverlayCell {
-                source: crate::catalog_overlay::OverlaySource::User,
-                verified_at: "2026-01-01".to_string(),
-                wm: None,
-                rm: None,
-                ttl_seconds: None,
-                min_prefix_tokens: None,
-                max_context_tokens: None,
-                max_output_tokens: Some(OVERLAID_CEILING),
-                input_cost_per_token: None,
-                output_cost_per_token: None,
-                capabilities: None,
-            }),
-        );
-        overlay
-    }
+    /// A Bedrock Anthropic upstream id.
+    #[cfg(feature = "bedrock")]
+    const BEDROCK_UPSTREAM: &str = "anthropic.claude-opus-4-6-v1:0";
 
     const ANTHROPIC: &str = "kind = \"anthropic-api\"\napi_key_ref = \"literal:k\"\n";
     const OPENAI: &str = "kind = \"openai-compat\"\nbase_url = \"https://example.test/v1\"\napi_key_ref = \"literal:k\"\n";
-    /// An Anthropic upstream the baked catalog gives a 128000 ceiling.
-    const CATALOGED: &str = "claude-opus-4-6";
+    /// An Anthropic upstream id.
+    const CLAUDE: &str = "claude-opus-4-6";
 
     /// Mutation check: stamp the slot on every egress again -> red on the
     /// openai-compat rows; present only on a client value -> red on the
@@ -528,20 +588,26 @@ mod fill_presence {
                 None,
                 true,
             ),
-            ("anthropic-api, catalog", ANTHROPIC, CATALOGED, None, true),
+            ("anthropic-api, unset", ANTHROPIC, CLAUDE, None, true),
             (
-                "anthropic-api, stamped",
+                "anthropic-api, configured",
                 ANTHROPIC,
-                CATALOGED,
+                CLAUDE,
                 Some(8000),
                 true,
             ),
             ("openai-compat, no override", OPENAI, "gpt-x", None, false),
-            ("openai-compat, stamped", OPENAI, "gpt-x", Some(8000), false),
+            (
+                "openai-compat, configured",
+                OPENAI,
+                "gpt-x",
+                Some(8000),
+                false,
+            ),
         ];
 
-        for (name, provider, upstream, stamped, present) in rows {
-            let req = dispatched(provider, upstream, stamped, None).await;
+        for (name, provider, upstream, configured, present) in rows {
+            let req = dispatched(provider, upstream, configured, None).await;
 
             assert_eq!(
                 super::super::FieldSurface::MaxTokens.present_in(&req),
@@ -561,14 +627,19 @@ mod fill_presence {
             )
         };
         let rows = [
-            ("invoke, catalog", bedrock("invoke"), None, true),
-            ("invoke, stamped", bedrock("invoke"), Some(8000), true),
-            ("converse, catalog", bedrock("converse"), None, false),
-            ("converse, stamped", bedrock("converse"), Some(8000), false),
+            ("invoke, unset", bedrock("invoke"), None, true),
+            ("invoke, configured", bedrock("invoke"), Some(8000), true),
+            ("converse, unset", bedrock("converse"), None, false),
+            (
+                "converse, configured",
+                bedrock("converse"),
+                Some(8000),
+                false,
+            ),
         ];
 
-        for (name, provider, stamped, present) in rows {
-            let req = dispatched(&provider, OVERLAID_BEDROCK, stamped, None).await;
+        for (name, provider, configured, present) in rows {
+            let req = dispatched(&provider, BEDROCK_UPSTREAM, configured, None).await;
 
             assert_eq!(
                 super::super::FieldSurface::MaxTokens.present_in(&req),
@@ -588,19 +659,20 @@ mod fill_presence {
     }
 
     /// The fill reproduces the egress's own ladder: a client value, else the
-    /// model's stamped ceiling, else the catalog's, else the baseline, byte
-    /// for byte.
+    /// model's configured ceiling, else the baseline, byte for byte.
+    ///
+    /// Mutation check: drop the `max_output_tokens` stamp from
+    /// `apply_model_knobs` -> red on the "configured" row.
     #[tokio::test]
-    async fn the_anthropic_body_limit_is_the_stamped_then_catalog_then_baseline_value() {
+    async fn the_anthropic_body_limit_is_the_client_then_configured_then_baseline_value() {
         let rows = [
-            ("client", CATALOGED, Some(8000), Some(1234), 1234),
-            ("stamped", CATALOGED, Some(8000), None, 8000),
-            ("catalog", CATALOGED, None, None, 128_000),
-            ("baseline", "claude-unlisted", None, None, 64_000),
+            ("client", CLAUDE, Some(8000), Some(1234), 1234),
+            ("configured", CLAUDE, Some(8000), None, 8000),
+            ("neither", CLAUDE, None, None, 64_000),
         ];
 
-        for (name, upstream, stamped, client, sent) in rows {
-            let req = dispatched(ANTHROPIC, upstream, stamped, client).await;
+        for (name, upstream, configured, client, sent) in rows {
+            let req = dispatched(ANTHROPIC, upstream, configured, client).await;
 
             assert_eq!(anthropic_body_limit(&req), json!(sent), "{name}");
         }
@@ -608,17 +680,16 @@ mod fill_presence {
 
     #[cfg(feature = "bedrock")]
     #[tokio::test]
-    async fn the_invoke_body_limit_is_the_stamped_then_catalog_then_baseline_value() {
+    async fn the_invoke_body_limit_is_the_configured_then_baseline_value() {
         use routectl_providers::bedrock::{BedrockApiShape, BedrockConfig, BedrockCreds};
         let provider = "kind = \"bedrock\"\nregion = \"us-east-1\"\ncreds = { kind = \"default-chain\" }\napi_shape = \"invoke\"\n";
         let rows = [
-            ("stamped", OVERLAID_BEDROCK, Some(8000), 8000),
-            ("catalog", OVERLAID_BEDROCK, None, OVERLAID_CEILING),
-            ("baseline", "anthropic.claude-unlisted-v1:0", None, 64_000),
+            ("configured", BEDROCK_UPSTREAM, Some(8000), 8000),
+            ("baseline", BEDROCK_UPSTREAM, None, 64_000),
         ];
 
-        for (name, upstream, stamped, sent) in rows {
-            let req = dispatched(provider, upstream, stamped, None).await;
+        for (name, upstream, configured, sent) in rows {
+            let req = dispatched(provider, upstream, configured, None).await;
             let cfg = BedrockConfig {
                 id: "bedrock:p0".into(),
                 region: "us-east-1".into(),
@@ -641,7 +712,7 @@ mod fill_presence {
     }
 
     /// With no client limit, Converse sizes its legacy thinking window from
-    /// the model's stamped ceiling and sends that same ceiling as
+    /// the model's configured ceiling and sends that same ceiling as
     /// `maxTokens`, so the budget sits below the limit the upstream sees.
     ///
     /// Mutation checks: zero the slot on an egress that does not fill
@@ -649,7 +720,7 @@ mod fill_presence {
     /// Converse forward the omitted client limit -> red (no `maxTokens`).
     #[cfg(feature = "bedrock")]
     #[tokio::test]
-    async fn the_converse_thinking_budget_fits_the_stamped_ceiling_with_no_client_limit() {
+    async fn the_converse_thinking_budget_fits_the_configured_ceiling_with_no_client_limit() {
         use routectl_providers::bedrock::{BedrockApiShape, BedrockConfig, BedrockCreds};
         let provider = "kind = \"bedrock\"\nregion = \"us-east-1\"\ncreds = { kind = \"default-chain\" }\napi_shape = \"converse\"\n";
         let rows = [
@@ -666,7 +737,7 @@ mod fill_presence {
             };
             let req = dispatched_with(
                 provider,
-                OVERLAID_BEDROCK,
+                BEDROCK_UPSTREAM,
                 Some(8000),
                 None,
                 Some(reasoning),
@@ -675,7 +746,7 @@ mod fill_presence {
             let cfg = BedrockConfig {
                 id: "bedrock:p0".into(),
                 region: "us-east-1".into(),
-                model_id: OVERLAID_BEDROCK.into(),
+                model_id: BEDROCK_UPSTREAM.into(),
                 api_shape: BedrockApiShape::Converse,
                 creds: BedrockCreds::BearerKey {
                     key: ["converse", "seat", "test"].join("-"),
@@ -700,7 +771,7 @@ mod fill_presence {
             let sent = body["inferenceConfig"]["maxTokens"]
                 .as_u64()
                 .unwrap_or_else(|| panic!("{name}: no maxTokens: {}", body["inferenceConfig"]));
-            assert_eq!(sent, 8000, "{name}: the stamped ceiling is sent");
+            assert_eq!(sent, 8000, "{name}: the configured ceiling is sent");
             assert!(budget < sent, "{name}: budget {budget} fits {sent}");
         }
     }

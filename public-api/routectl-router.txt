@@ -2443,8 +2443,10 @@ impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for ro
 pub fn routectl_router::MitmConfig::into_shared(self) -> Shared
 #[non_exhaustive] pub struct routectl_router::config::ModelEntry
 pub routectl_router::config::ModelEntry::additional_request_fields: core::option::Option<serde_json::value::Value>
+pub routectl_router::config::ModelEntry::context_window: core::option::Option<u32>
 pub routectl_router::config::ModelEntry::header_extras: alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::string::String>
 pub routectl_router::config::ModelEntry::history_reasoning: core::option::Option<routectl_router::HistoryReasoning>
+pub routectl_router::config::ModelEntry::max_output_tokens: core::option::Option<u32>
 pub routectl_router::config::ModelEntry::payload_extras: core::option::Option<serde_json::value::Value>
 pub routectl_router::config::ModelEntry::provider: alloc::string::String
 pub routectl_router::config::ModelEntry::reasoning_dialect: core::option::Option<routectl_router::ReasoningDialect>
@@ -2455,8 +2457,10 @@ pub routectl_router::config::ModelEntry::upstream: alloc::string::String
 pub routectl_router::config::ModelEntry::visible_routectl_provider: bool
 impl routectl_router::ModelEntry
 pub fn routectl_router::ModelEntry::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
+pub const fn routectl_router::ModelEntry::with_context_window(self, u32) -> Self
 pub fn routectl_router::ModelEntry::with_header_extras(self, alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::string::String>) -> Self
 pub const fn routectl_router::ModelEntry::with_history_reasoning(self, routectl_router::HistoryReasoning) -> Self
+pub const fn routectl_router::ModelEntry::with_max_output_tokens(self, u32) -> Self
 pub fn routectl_router::ModelEntry::with_payload_extras(self, serde_json::value::Value) -> Self
 pub const fn routectl_router::ModelEntry::with_reasoning_dialect(self, routectl_router::ReasoningDialect) -> Self
 pub fn routectl_router::ModelEntry::with_reported_model(self, impl core::convert::Into<alloc::string::String>) -> Self
@@ -6060,7 +6064,6 @@ pub fn routectl_router::router::Router::carry_over_prefix_epochs_from(&mut self,
 pub fn routectl_router::router::Router::carry_over_quota_from(&mut self, &Self)
 pub fn routectl_router::router::Router::carry_over_runtime_state_from(&mut self, &Self)
 pub fn routectl_router::router::Router::carry_over_sticky_from(&mut self, &Self)
-pub fn routectl_router::router::Router::catalog_filled_output_ceilings(&self) -> alloc::vec::Vec<(&str, u32)>
 pub fn routectl_router::router::Router::catalog_overlay(&self) -> &routectl_router::CatalogOverlay
 pub const fn routectl_router::router::Router::catalog_version(&self) -> u32
 pub fn routectl_router::router::Router::commit_carried_state(&self)
@@ -15966,8 +15969,10 @@ impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for ro
 pub fn routectl_router::ModelCell::into_shared(self) -> Shared
 #[non_exhaustive] pub struct routectl_router::ModelEntry
 pub routectl_router::ModelEntry::additional_request_fields: core::option::Option<serde_json::value::Value>
+pub routectl_router::ModelEntry::context_window: core::option::Option<u32>
 pub routectl_router::ModelEntry::header_extras: alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::string::String>
 pub routectl_router::ModelEntry::history_reasoning: core::option::Option<routectl_router::HistoryReasoning>
+pub routectl_router::ModelEntry::max_output_tokens: core::option::Option<u32>
 pub routectl_router::ModelEntry::payload_extras: core::option::Option<serde_json::value::Value>
 pub routectl_router::ModelEntry::provider: alloc::string::String
 pub routectl_router::ModelEntry::reasoning_dialect: core::option::Option<routectl_router::ReasoningDialect>
@@ -15978,8 +15983,10 @@ pub routectl_router::ModelEntry::upstream: alloc::string::String
 pub routectl_router::ModelEntry::visible_routectl_provider: bool
 impl routectl_router::ModelEntry
 pub fn routectl_router::ModelEntry::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
+pub const fn routectl_router::ModelEntry::with_context_window(self, u32) -> Self
 pub fn routectl_router::ModelEntry::with_header_extras(self, alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::string::String>) -> Self
 pub const fn routectl_router::ModelEntry::with_history_reasoning(self, routectl_router::HistoryReasoning) -> Self
+pub const fn routectl_router::ModelEntry::with_max_output_tokens(self, u32) -> Self
 pub fn routectl_router::ModelEntry::with_payload_extras(self, serde_json::value::Value) -> Self
 pub const fn routectl_router::ModelEntry::with_reasoning_dialect(self, routectl_router::ReasoningDialect) -> Self
 pub fn routectl_router::ModelEntry::with_reported_model(self, impl core::convert::Into<alloc::string::String>) -> Self
@@ -17836,6 +17843,7 @@ impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for ro
 pub fn routectl_router::ResolvedLearnedLane::into_shared(self) -> Shared
 pub struct routectl_router::ResolvedModel
 pub routectl_router::ResolvedModel::auth_secret_ref: core::option::Option<routectl_auth::secret_ref::SecretRef>
+pub routectl_router::ResolvedModel::context_window: core::option::Option<u32>
 pub routectl_router::ResolvedModel::effective_row: routectl_router::catalog::EffectiveRow
 pub routectl_router::ResolvedModel::header_extras: alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::string::String>
 pub routectl_router::ResolvedModel::history_reasoning: core::option::Option<routectl_router::HistoryReasoning>
@@ -17852,8 +17860,8 @@ pub routectl_router::ResolvedModel::visible_routectl_provider: bool
 impl routectl_router::ResolvedModel
 pub fn routectl_router::ResolvedModel::context_window_tokens(&self) -> core::option::Option<u32>
 pub fn routectl_router::ResolvedModel::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, alloc::sync::Arc<dyn routectl_core::provider::Provider>, impl core::convert::Into<alloc::string::String>) -> Self
-pub fn routectl_router::ResolvedModel::output_ceiling_tokens(&self) -> core::option::Option<u32>
 pub fn routectl_router::ResolvedModel::with_auth_secret_ref(self, routectl_auth::secret_ref::SecretRef) -> Self
+pub const fn routectl_router::ResolvedModel::with_context_window(self, u32) -> Self
 pub fn routectl_router::ResolvedModel::with_effective_row(self, routectl_router::catalog::EffectiveRow) -> Self
 pub fn routectl_router::ResolvedModel::with_header_extras(self, alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::string::String>) -> Self
 pub const fn routectl_router::ResolvedModel::with_history_reasoning(self, routectl_router::HistoryReasoning) -> Self
@@ -18298,7 +18306,6 @@ pub fn routectl_router::router::Router::carry_over_prefix_epochs_from(&mut self,
 pub fn routectl_router::router::Router::carry_over_quota_from(&mut self, &Self)
 pub fn routectl_router::router::Router::carry_over_runtime_state_from(&mut self, &Self)
 pub fn routectl_router::router::Router::carry_over_sticky_from(&mut self, &Self)
-pub fn routectl_router::router::Router::catalog_filled_output_ceilings(&self) -> alloc::vec::Vec<(&str, u32)>
 pub fn routectl_router::router::Router::catalog_overlay(&self) -> &routectl_router::CatalogOverlay
 pub const fn routectl_router::router::Router::catalog_version(&self) -> u32
 pub fn routectl_router::router::Router::commit_carried_state(&self)

@@ -415,7 +415,6 @@ default = \"gpt\"
             "supports_adaptive_thinking",
             "effort_levels",
             "max_thinking_budget",
-            "max_output_tokens",
         ] {
             assert_no_write(&current_base(), &format!("models.gpt.{knob}"), "1");
         }
@@ -423,6 +422,25 @@ default = \"gpt\"
         let dir = tempfile::tempdir().unwrap();
         let path = write_config(dir.path(), &current_base());
         set(&path, "models.gpt.upstream", "gpt-4.1").expect("control: a live model key applies");
+    }
+
+    /// The per-model token limits are settable, and a zero for either is
+    /// refused by the shared validation suite with the file left unchanged.
+    #[test]
+    fn the_model_token_limits_are_settable_and_zero_is_refused() {
+        for key in ["context_window", "max_output_tokens"] {
+            assert_no_write(&current_base(), &format!("models.gpt.{key}"), "0");
+
+            let dir = tempfile::tempdir().unwrap();
+            let path = write_config(dir.path(), &current_base());
+            set(&path, &format!("models.gpt.{key}"), "32000")
+                .unwrap_or_else(|e| panic!("{key}: a positive value applies: {e}"));
+            let on_disk = std::fs::read_to_string(&path).unwrap();
+            assert!(
+                on_disk.contains(&format!("{key} = 32000")),
+                "{key}: {on_disk}"
+            );
+        }
     }
 
     #[test]

@@ -112,12 +112,7 @@ pub async fn gather_context_no_network(
     let pricing = overlay
         .as_ref()
         .map(|overlay| derive_pricing_rows(&config, overlay));
-    // Same reasoning for the ceiling attribution: the overlay can correct a
-    // baked ceiling and can disable a cell outright, so an unreadable overlay
-    // would have this section name a figure the served router does not use.
-    let knobs = overlay
-        .as_ref()
-        .map(|overlay| derive_knob_rows(&config, overlay));
+    let knobs = derive_knob_rows(&config);
     let tuning = derive_tuning_rows(&config);
     let overlay_soft_defects = overlay
         .as_ref()
@@ -285,27 +280,21 @@ pub(super) fn disk_layers(config_path: &Path) -> GatheredLayers {
 }
 
 /// One knob row per `[models.X]` entry, naming where its outbound
-/// `max_output_tokens` ceiling comes from.
-///
-/// The catalog cell is resolved through the same `resolve_effective_row`
-/// selector `derive_effective_view` uses, and the ceiling is read off it
-/// through the shared `output_ceiling_tokens` accessor -- so the row cannot
-/// claim a source the factory's fill would not produce for the same config.
-pub(super) fn derive_knob_rows(config: &Config, overlay: &CatalogOverlay) -> Vec<KnobRow> {
-    derive_effective_view(config, overlay)
+/// `max_output_tokens` ceiling comes from: the entry's own value, else the
+/// egress default. Read off the same config field the factory stamps, so the
+/// row cannot name a ceiling the router does not send.
+pub(super) fn derive_knob_rows(config: &Config) -> Vec<KnobRow> {
+    config
         .models
-        .into_iter()
-        .map(|cell| {
-            let source = cell
-                .row
-                .output_ceiling_tokens()
-                .map_or(OutputCeilingSource::Default, OutputCeilingSource::Catalog);
-            KnobRow {
-                nickname: cell.nickname,
-                provider_kind: cell.provider_kind,
-                upstream: cell.upstream,
-                source,
-            }
+        .iter()
+        .map(|(nickname, entry)| KnobRow {
+            nickname: nickname.clone(),
+            provider_kind: config.provider_kind_for_target(&entry.provider).to_string(),
+            upstream: entry.upstream.clone(),
+            source: entry.max_output_tokens.map_or(
+                OutputCeilingSource::Default,
+                OutputCeilingSource::ModelConfig,
+            ),
         })
         .collect()
 }

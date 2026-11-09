@@ -38,8 +38,8 @@ release cut. Highlights, roughly in dependency order:
   `top_p`, `presence_penalty` or `frequency_penalty` is dropped and
   learned per lane; a `max_tokens` above the model's limit is clamped
   to the limit the refusal names and learned; an omitted `max_tokens`
-  is filled from the catalog ceiling (else 64000) and capped by a
-  learned ceiling.
+  is filled from the model's `max_output_tokens` (else 64000) and
+  capped by a learned ceiling.
 - **Read-only status dashboard** -- `GET /` single-file dashboard +
   `/status/{usage,health,config,doctor}` JSON panels; structurally
   read-only.

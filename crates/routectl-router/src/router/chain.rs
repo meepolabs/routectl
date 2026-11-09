@@ -64,8 +64,8 @@ impl Router {
     }
 
     /// The context window in tokens routectl would report for the wire
-    /// model `model`, or `None` when it is unconfirmed. Backs the
-    /// `context_length` field on `GET /v1/models`.
+    /// model `model`, or `None` when its first target configures none.
+    /// Backs the `context_length` field on `GET /v1/models`.
     ///
     /// Resolution mirrors `dispatch_chain`'s first two steps only:
     /// exact-then-glob alias match, else a direct `[models]` nickname. The

@@ -161,13 +161,12 @@ async fn health_returns_ok() {
 // GET /v1/models
 // ---------------------------------------------------------------------------
 
-/// An upstream id the baked catalog confirms a context window for. The
-/// expected figure is read from `lookup()` rather than written out, so a
-/// catalog refresh moves both sides together.
-const KNOWN_WINDOW_UPSTREAM: &str = "claude-sonnet-4-6";
+/// An upstream id the baked catalog has a context window for, which
+/// `/v1/models` must never report: the window comes from config only.
+const CATALOGED_UPSTREAM: &str = "claude-sonnet-4-6";
 
-/// An upstream id no catalog cell matches, so its window is unconfirmed.
-const BOGUS_UPSTREAM: &str = "no-such-model-in-any-catalog-cell";
+/// The `[models.X] context_window` the windowed fixtures configure.
+const CONFIGURED_WINDOW: u32 = 150_000;
 
 /// An environment variable no test process sets, used to make a provider's
 /// credential resolution fail so its models never reach the resolved table.
@@ -281,27 +280,23 @@ fn context_length_of(body: &Value, id: &str) -> Option<u32> {
     })
 }
 
-/// `context_length` is the resolved target's catalog window, and the key is
-/// OMITTED (never null, never 0) when routectl has no confirmed window.
+/// `context_length` is the resolved target's configured `context_window`,
+/// and the key is OMITTED (never null, never 0) when the model configures
+/// none, even on an upstream the baked catalog has a window for.
 ///
-/// Both halves live in one test on purpose: the known-window model is the
+/// Both halves live in one test on purpose: the configured model is the
 /// positive control for the omission assertion -- without it, a handler that
 /// dropped the field entirely would satisfy the omission half vacuously.
 ///
 /// Typed field assertions rather than a body snapshot: `created` is a
 /// wall-clock stamp, so a snapshot of this payload could never be stable.
-/// The expected figure comes from the public catalog `lookup()` oracle, so
-/// the test states "whatever the catalog says for this cell" rather than
-/// re-hardcoding a window the baked table owns.
 ///
-/// Runs on the real serve path (the only path that applies the catalog
-/// overlay) with `XDG_CONFIG_HOME` pinned at an empty tree, so the overlay
-/// resolves to the missing-file empty overlay and the baked lookup IS the
-/// effective row. `serial_test::serial` is non-negotiable: the pin mutates a
-/// process-global env var.
+/// Runs on the real serve path with `XDG_CONFIG_HOME` pinned at an empty
+/// tree, so no operator file is read. `serial_test::serial` is
+/// non-negotiable: the pin mutates a process-global env var.
 #[tokio::test]
 #[serial_test::serial]
-async fn models_reports_the_catalog_context_window_and_omits_an_unknown_one() {
+async fn models_reports_the_configured_context_window_and_omits_an_unset_one() {
     let xdg = tempfile::tempdir().unwrap();
     let _guard = ScopedEnv::set("XDG_CONFIG_HOME", xdg.path());
 
@@ -313,11 +308,11 @@ async fn models_reports_the_catalog_context_window_and_omits_an_unknown_one() {
     let mut models = BTreeMap::new();
     models.insert(
         "known-window".to_string(),
-        ModelEntry::new("anthropic", KNOWN_WINDOW_UPSTREAM),
+        ModelEntry::new("anthropic", CATALOGED_UPSTREAM).with_context_window(CONFIGURED_WINDOW),
     );
     models.insert(
         "unknown-window".to_string(),
-        ModelEntry::new("anthropic", BOGUS_UPSTREAM),
+        ModelEntry::new("anthropic", CATALOGED_UPSTREAM),
     );
     let mut aliases = BTreeMap::new();
     aliases.insert(
@@ -341,24 +336,27 @@ async fn models_reports_the_catalog_context_window_and_omits_an_unknown_one() {
         .await
         .unwrap();
 
-    let expected = routectl_router::lookup("anthropic-api", KNOWN_WINDOW_UPSTREAM, None)
-        .max_context_tokens
-        .expect("the baked catalog must confirm a window for the known-window fixture");
+    assert!(
+        routectl_router::lookup("anthropic-api", CATALOGED_UPSTREAM, None)
+            .max_context_tokens
+            .is_some(),
+        "premise: the catalog has a window the unset model must not report"
+    );
     assert_eq!(
         context_length_of(&body, "known-window"),
-        Some(expected),
-        "a confirmed catalog window must surface as context_length: {body}"
+        Some(CONFIGURED_WINDOW),
+        "a configured window must surface as context_length: {body}"
     );
     // An alias resolves to its target's window through the same read.
     assert_eq!(
         context_length_of(&body, "known-alias"),
-        Some(expected),
+        Some(CONFIGURED_WINDOW),
         "an alias must report its resolved target's window: {body}"
     );
     assert_eq!(
         context_length_of(&body, "unknown-window"),
         None,
-        "an unconfirmed window must OMIT the key -- never null, never 0: {body}"
+        "an unset window must OMIT the key -- never null, never 0: {body}"
     );
 }
 
@@ -367,10 +365,9 @@ async fn models_reports_the_catalog_context_window_and_omits_an_unknown_one() {
 /// carries NO `context_length` (enrichment is servability-shaped: routectl
 /// has no dispatch target to report a window off).
 ///
-/// The healthy sibling on the same upstream id is the positive control: it
-/// proves the catalog cell does confirm a window, so the omission on the
-/// unservable entry is caused by the failed build and not by a missing
-/// catalog row.
+/// The healthy sibling with the same configured window is the positive
+/// control: the omission on the unservable entry is caused by the failed
+/// build and not by a missing window.
 ///
 /// The unservable model is deliberately NOT referenced by any alias --
 /// `build_router_from_config_with_overlay` refuses to start when a failed
@@ -400,11 +397,11 @@ async fn models_lists_an_unservable_entry_without_a_context_length() {
     let mut models = BTreeMap::new();
     models.insert(
         "servable".to_string(),
-        ModelEntry::new("healthy", KNOWN_WINDOW_UPSTREAM),
+        ModelEntry::new("healthy", CATALOGED_UPSTREAM).with_context_window(CONFIGURED_WINDOW),
     );
     models.insert(
         "unservable".to_string(),
-        ModelEntry::new("unresolvable", KNOWN_WINDOW_UPSTREAM),
+        ModelEntry::new("unresolvable", CATALOGED_UPSTREAM).with_context_window(CONFIGURED_WINDOW),
     );
 
     let config = Arc::new(Config {
@@ -422,12 +419,9 @@ async fn models_lists_an_unservable_entry_without_a_context_length() {
         .await
         .unwrap();
 
-    let expected = routectl_router::lookup("anthropic-api", KNOWN_WINDOW_UPSTREAM, None)
-        .max_context_tokens
-        .expect("the baked catalog must confirm a window for the shared upstream fixture");
     assert_eq!(
         context_length_of(&body, "servable"),
-        Some(expected),
+        Some(CONFIGURED_WINDOW),
         "positive control: the healthy sibling on this upstream must report the window: {body}"
     );
     // `context_length_of` panics when the id is absent, so this assertion
