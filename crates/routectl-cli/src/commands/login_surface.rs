@@ -606,7 +606,9 @@ impl std::fmt::Display for SkipReason {
             Self::Unwritable { detail } if detail.ends_with(CONFIG_VERSION_REMEDIATION) => {
                 f.write_str(detail.trim_end_matches('.'))
             }
-            Self::Unwritable { detail } => write!(f, "{detail} Nothing was written"),
+            Self::Unwritable { detail } => {
+                write!(f, "{}. Nothing was written", detail.trim_end_matches('.'))
+            }
             Self::Unreadable => write!(
                 f,
                 "{CONFIG_UNREADABLE}, so no config change was proposed. Nothing was written"

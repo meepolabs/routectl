@@ -309,6 +309,63 @@ fn an_unwritable_skip_says_nothing_was_written_exactly_once() {
     }
 }
 
+/// A removed-key refusal is its own sentence: the preflight's wording, one
+/// period, then "Nothing was written".
+#[test]
+fn a_removed_key_skip_separates_the_refusal_from_nothing_was_written_with_one_period() {
+    let rows = [
+        ("retired capability key", format!("{}[bedrock]\n", base())),
+        (
+            "retired model knob",
+            format!("{}[models.fast]\nmax_thinking_budget = 1\n", base()),
+        ),
+        (
+            "removed paid probe caps",
+            format!("{}[fidelity]\npaid_probe_daily_caps = 1\n", base()),
+        ),
+    ];
+
+    for (row, body) in rows {
+        // Arrange
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write_config(dir.path(), &body);
+
+        // Act
+        let outcome = surface(&path, "anthropic", None, true).expect("a skip is not an error");
+
+        // Assert
+        let SurfaceOutcome::Skipped(reason @ SkipReason::Unwritable { detail }) = &outcome else {
+            panic!("row `{row}`: expected an unwritable skip, got {outcome:?}");
+        };
+        assert!(
+            !detail.ends_with('.'),
+            "row `{row}`: the fixture must carry no sentence end of its own: {detail}"
+        );
+        assert_eq!(
+            skip_line(reason),
+            format!("{detail}. Nothing was written."),
+            "row `{row}`"
+        );
+    }
+}
+
+#[test]
+fn an_unwritable_detail_ending_in_a_period_is_not_given_a_second_one() {
+    // Arrange
+    let reason = SkipReason::Unwritable {
+        detail: "the config carries a removed key.".to_string(),
+    };
+
+    // Act
+    let shown = skip_line(&reason);
+
+    // Assert
+    assert_eq!(
+        shown,
+        "the config carries a removed key. Nothing was written."
+    );
+}
+
 #[test]
 fn an_unparseable_config_is_skipped_and_the_parse_error_carries_no_config_value() {
     // Arrange: the fixture's RAW toml error must itself echo the sentinel,
