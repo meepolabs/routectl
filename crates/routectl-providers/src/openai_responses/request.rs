@@ -15,7 +15,7 @@
 use routectl_core::cache_control::{BreakpointPosition, CacheBreakpointSource};
 use routectl_core::wire_check::{EditKind, EditSite, WireTap};
 use routectl_core::{
-    ChatRequest, ContentPart, KnownContentPart, MessageContent, RequestProvenance,
+    ChatRequest, ContentPart, KnownContentPart, Message, MessageContent, RequestProvenance,
     ResponsesCacheBreakpoint, ResponsesPassthroughItem, Result, Role,
 };
 use serde_json::Value;
@@ -118,7 +118,7 @@ pub fn translate(cfg: &OpenAiResponsesConfig, req: &ChatRequest) -> Result<Respo
     extras::merge_provider_extras(&mut request, req, cfg.auth_kind, tap, &mut cache_withheld);
     cache_withheld.flush();
     // Runs after merge_provider_extras so a client or operator key wins.
-    extras::apply_session_cache_key(&mut request, req, tap);
+    extras::apply_session_cache_key(&mut request, req, cfg.auth_kind, tap);
     // Runs after merge_provider_extras so the stamp lands on the merged
     // object; the resolved id wins over any request-carried value.
     extras::apply_installation_id(
@@ -163,12 +163,20 @@ fn build_input_with_passthrough(
     cache_withheld: &mut extras::PromptCacheWithheldTally,
 ) -> Result<Vec<ResponseInput>> {
     let provenance = req.routectl_internal.provenance;
-    let mut items = build_input(id, auth_kind, provenance, &req.messages, tap);
+    let mut items = build_input(
+        id,
+        auth_kind,
+        provenance,
+        &req.messages,
+        tap,
+        cache_withheld,
+    );
     if provenance == RequestProvenance::ResponsesIngress {
         place_cache_breakpoints(
             id,
             auth_kind,
             &req.routectl_internal.responses_cache_breakpoints,
+            &req.messages,
             items.as_deref_mut().ok(),
             tap,
             cache_withheld,
@@ -188,10 +196,10 @@ fn build_input_with_passthrough(
 /// it came from. Only the api-key surface takes one; the ChatGPT-OAuth and
 /// Mantle surfaces have no recorded acceptance of the field.
 ///
-/// A block is identified by its position in the `input_text` stream the
-/// ingress counted (every `input_text` of a non-assistant message item, in
-/// order) and by the digest of its text: both must match, so a breakpoint
-/// never lands on a block whose text changed between ingress and egress.
+/// A block is identified by its ordinal in [`super::breakpoint_blocks`],
+/// the one rule the ingress and this egress share, and by the digest of its
+/// text: both must match, so a breakpoint never lands on a block whose text
+/// changed between ingress and egress.
 /// Every breakpoint left unplaced (refused by the surface, lifted into
 /// `instructions`, moved, rewritten, or `items` absent because the input
 /// build failed) is recorded in `cache_withheld` and declared as a Remove
@@ -202,6 +210,7 @@ fn place_cache_breakpoints(
     id: &str,
     auth_kind: AuthKind,
     breakpoints: &[ResponsesCacheBreakpoint],
+    messages: &[Message],
     items: Option<&mut [ResponseInputItem]>,
     tap: Option<&WireTap>,
     cache_withheld: &mut extras::PromptCacheWithheldTally,
@@ -210,8 +219,9 @@ fn place_cache_breakpoints(
         return;
     }
     let mut placed = vec![false; breakpoints.len()];
-    if let (AuthKind::ApiKey, Some(items)) = (auth_kind, items) {
-        attach_matching_breakpoints(breakpoints, items, &mut placed);
+    let surface_accepts = extras::PromptCacheField::Breakpoint.forwards_on(auth_kind);
+    if let (true, Some(items)) = (surface_accepts, items) {
+        attach_matching_breakpoints(breakpoints, messages, items, &mut placed);
     }
     let unplaced: Vec<&ResponsesCacheBreakpoint> = breakpoints
         .iter()
@@ -229,7 +239,7 @@ fn place_cache_breakpoints(
         "dropping prompt_cache_breakpoint values the Responses egress could not place"
     );
     if let Some(tap) = tap {
-        let site = if auth_kind == AuthKind::ApiKey {
+        let site = if surface_accepts {
             EditSite::DialectFieldStrip
         } else {
             EditSite::AuthSurfaceGate
@@ -238,47 +248,62 @@ fn place_cache_breakpoints(
             crate::wire_declare::declare(
                 tap,
                 site,
-                format!("{}/prompt_cache_breakpoint", breakpoint.client_pointer),
+                format!(
+                    "{}/{}",
+                    breakpoint.client_pointer,
+                    extras::PromptCacheField::Breakpoint.key()
+                ),
                 EditKind::Remove,
             );
         }
     }
 }
 
-/// Walk the `input_text` stream in the order the ingress counted it and set
-/// each breakpoint whose ordinal and text digest both match, marking it in
-/// `placed`.
+/// Set each breakpoint on the emitted `input_text` block at its ordinal in
+/// [`super::breakpoint_blocks`], the rule the ingress recorded it against,
+/// when that block's text digest matches, marking it in `placed`. When the
+/// emitted stream disagrees with the rule nothing is placed: a breakpoint
+/// never lands on a block the ingress did not mean.
 fn attach_matching_breakpoints(
     breakpoints: &[ResponsesCacheBreakpoint],
+    messages: &[Message],
     items: &mut [ResponseInputItem],
     placed: &mut [bool],
 ) {
-    let mut ordinal = 0usize;
-    for item in items {
-        // An assistant turn emits `output_text` and a tool turn a
-        // `function_call_output`, so neither adds to the stream, as at ingress.
-        let ResponseInputItem::Message { content, .. } = item else {
-            continue;
-        };
-        for block in content {
-            let ResponsesContentItem::InputText {
+    let expected = super::breakpoint_blocks(messages);
+    let mut emitted: Vec<(&String, &mut Option<Value>)> = items
+        .iter_mut()
+        .filter_map(|item| match item {
+            ResponseInputItem::Message { content, .. } => Some(content),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|block| match block {
+            ResponsesContentItem::InputText {
                 text,
                 prompt_cache_breakpoint,
-            } = block
-            else {
-                continue;
-            };
-            for (index, breakpoint) in breakpoints.iter().enumerate() {
-                let matches = !placed[index]
-                    && breakpoint.ordinal == Some(ordinal)
-                    && breakpoint.text_digest == extras::breakpoint_text_digest(text);
-                if matches {
-                    *prompt_cache_breakpoint = Some(breakpoint.value.clone());
-                    placed[index] = true;
-                    break;
-                }
-            }
-            ordinal += 1;
+            } => Some((&*text, prompt_cache_breakpoint)),
+            _ => None,
+        })
+        .collect();
+    let agrees = emitted.len() == expected.len()
+        && emitted
+            .iter()
+            .zip(&expected)
+            .all(|((text, _), block)| text.as_str() == block.text);
+    if !agrees {
+        return;
+    }
+    for (index, breakpoint) in breakpoints.iter().enumerate() {
+        let Some(ordinal) = breakpoint.ordinal else {
+            continue;
+        };
+        let Some((text, slot)) = emitted.get_mut(ordinal) else {
+            continue;
+        };
+        if slot.is_none() && breakpoint.text_digest == extras::breakpoint_text_digest(text) {
+            **slot = Some(breakpoint.value.clone());
+            placed[index] = true;
         }
     }
 }

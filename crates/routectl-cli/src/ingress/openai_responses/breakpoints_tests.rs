@@ -115,6 +115,24 @@ fn breakpoints_record_post_lift_ordinal_digest_and_pointer() {
             }],
         },
         Row {
+            name: "a breakpoint on an unmodeled block is not recorded",
+            input: json!([message(
+                "user",
+                vec![
+                    json!({ "type": "input_document", "doc": "d-1",
+                            "prompt_cache_breakpoint": breakpoint() }),
+                    json!({ "type": "input_file", "file_id": "file-1",
+                            "prompt_cache_breakpoint": breakpoint() }),
+                    text_block("input_text", "after", true),
+                ]
+            )]),
+            expected: vec![Expected {
+                ordinal: Some(0),
+                pointer: "/input/0/content/2",
+                text: "after",
+            }],
+        },
+        Row {
             name: "output_text and function_call_output breakpoints get no ordinal",
             input: json!([
                 message("user", vec![text_block("input_text", "run it", false)]),
@@ -277,5 +295,74 @@ fn breakpoints_round_trip_through_the_responses_egress_onto_their_blocks() {
         marked_texts(&wire),
         ["first", "look here", "fourth"],
         "each breakpoint lands on the block it was sent on: {wire}"
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn a_breakpoint_on_an_unmodeled_block_rides_inside_it_on_the_api_key_egress() {
+    use routectl_core::wire_check::{Leg, WireTap};
+    // Arrange
+    let document = json!({ "type": "input_document", "doc": "d-1",
+                           "prompt_cache_breakpoint": breakpoint() });
+    let mut req = parse(json!({
+        "model": "gpt-5.6",
+        "input": [message("user", vec![text_block("input_text", "look", false), document.clone()])]
+    }));
+    let tap = WireTap::default();
+    req.routectl_internal.wire_tap = Some(tap.clone());
+
+    // Act
+    let wire = api_key_egress(&req);
+
+    // Assert
+    assert_eq!(wire["input"][0]["content"][1], document, "{wire}");
+    let breakpoint_edits: Vec<String> = tap
+        .take_request()
+        .edits(Leg::Request)
+        .iter()
+        .map(|e| e.path().to_string())
+        .filter(|path| path.contains("prompt_cache_breakpoint"))
+        .collect();
+    assert!(
+        breakpoint_edits.is_empty(),
+        "nothing about the shipped breakpoint is declared: {breakpoint_edits:?}"
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn a_breakpoint_after_a_withheld_billing_part_reattaches_on_the_egress() {
+    // Arrange: the system turn keeps its place (it carries an image), and
+    // the egress withholds its billing/attribution text, so that block takes
+    // no ordinal on either side.
+    let body = json!({
+        "model": "gpt-5.6",
+        "input": [
+            message("system", vec![
+                text_block("input_text", "x-anthropic-billing-header: v=1; fp=abc", false),
+                text_block("input_text", "look here", true),
+                json!({ "type": "input_image", "image_url": "https://example.com/b.png" }),
+            ]),
+            message("user", vec![
+                text_block("input_text", "first", false),
+                text_block("input_text", "second", true),
+            ]),
+        ]
+    });
+
+    // Act
+    let req = parse(body);
+    let wire = api_key_egress(&req);
+
+    // Assert
+    assert_eq!(
+        marked_texts(&wire),
+        ["look here", "second"],
+        "each breakpoint lands on the block it was sent on: {wire}"
+    );
+    assert!(
+        !wire.to_string().contains("x-anthropic-billing-header"),
+        "the billing block is withheld: {wire}"
     );
 }

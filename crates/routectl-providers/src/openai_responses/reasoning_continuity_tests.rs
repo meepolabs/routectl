@@ -79,6 +79,7 @@ fn input_for(lane: AuthKind, parts: Vec<ContentPart>) -> Vec<ResponseInputItem> 
         routectl_core::RequestProvenance::Library,
         &[user_turn("hi"), assistant_parts(parts)],
         None,
+        &mut super::extras::PromptCacheWithheldTally::default(),
     )
     .expect("translation must not fail on a well-formed turn")
 }
@@ -569,6 +570,7 @@ fn a_natively_tagged_same_family_artifact_still_replays() {
         routectl_core::RequestProvenance::Library,
         &messages,
         None,
+        &mut super::extras::PromptCacheWithheldTally::default(),
     )
     .expect("translation");
 

@@ -97,6 +97,7 @@ use serde_json::Map;
 use crate::bounded_diagnostics::BoundedLogSample;
 use crate::skipped_format::render_skipped_format;
 
+use super::extras::{PromptCacheField, PromptCacheWithheldTally};
 use super::types::{
     FunctionCallOutputBody, FunctionCallOutputContentItem, ReasoningContentItem,
     ReasoningSummaryItem, ResponseInputItem, ResponsesContentItem,
@@ -128,6 +129,10 @@ struct ResponsesDropTally {
     reasoning_text_unsigned: bool,
     tool_result_part_unsupported: bool,
     content_part_unrepresentable: bool,
+    /// Whether an unmodeled part forwarded or rebuilt for this lane lost its
+    /// `prompt_cache_breakpoint` to the auth-surface gate. Flushed into the
+    /// request's shared prompt-cache tally, not counted here.
+    forwarded_breakpoint_withheld: bool,
 }
 
 impl ResponsesDropTally {
@@ -159,6 +164,10 @@ impl ResponsesDropTally {
         self.content_part_unrepresentable = true;
     }
 
+    const fn record_forwarded_breakpoint_withheld(&mut self) {
+        self.forwarded_breakpoint_withheld = true;
+    }
+
     /// Bump one process-wide counter per drop class this request hit at
     /// least once. The lane's request-volume denominator is NOT bumped
     /// here: `request::translate` owns the single `record_translation_lane_seen`
@@ -174,8 +183,10 @@ impl ResponsesDropTally {
     /// pinning tests assert.
     ///
     /// A dropped unmodeled content part is also declared on `tap` as one
-    /// Remove under the client's `messages` content, once per request.
-    fn flush(&self, tap: Option<&WireTap>) {
+    /// Remove under the client's `messages` content, once per request; so is a
+    /// breakpoint the surface gate took off a forwarded one, which is
+    /// recorded on `cache_withheld` rather than counted here.
+    fn flush(&self, tap: Option<&WireTap>, cache_withheld: &mut PromptCacheWithheldTally) {
         if self.image_source_kind {
             record_translation_drop(super::LANE, "image_source_kind_unrepresentable");
         }
@@ -201,6 +212,17 @@ impl ResponsesDropTally {
                     tap,
                     EditSite::DialectFieldStrip,
                     "/messages/*/content/*",
+                    EditKind::Remove,
+                );
+            }
+        }
+        if self.forwarded_breakpoint_withheld {
+            cache_withheld.record();
+            if let Some(tap) = tap {
+                crate::wire_declare::declare(
+                    tap,
+                    EditSite::AuthSurfaceGate,
+                    format!("/input/*/content/*/{}", PromptCacheField::Breakpoint.key()),
                     EditKind::Remove,
                 );
             }
@@ -251,19 +273,23 @@ impl UnknownParts {
 ///
 /// `provenance` decides what happens to a content part this egress does not
 /// model (see [`UnknownParts`]).
+///
+/// A breakpoint this lane withholds from a forwarded unmodeled part is
+/// recorded on `cache_withheld`, which the caller flushes.
 pub(super) fn build_input(
     id: &str,
     auth_kind: AuthKind,
     provenance: RequestProvenance,
     messages: &[Message],
     tap: Option<&WireTap>,
+    cache_withheld: &mut PromptCacheWithheldTally,
 ) -> Result<Vec<ResponseInputItem>> {
     let mut tally = ResponsesDropTally::default();
     let unknown = UnknownParts::for_request(provenance, auth_kind);
     let out = build_input_tallied(id, auth_kind, unknown, messages, &mut tally);
     // Flushed before the `?`-free return so a request that FAILS after
     // dropping something still reports the drop it already made.
-    tally.flush(tap);
+    tally.flush(tap, cache_withheld);
     out
 }
 
@@ -1320,10 +1346,14 @@ fn unknown_content_part(
     tally: &mut ResponsesDropTally,
 ) -> Result<Option<ResponsesContentItem>> {
     match unknown {
-        UnknownParts::Forward => Ok(Some(forward_unknown_part(part))),
+        UnknownParts::Forward => Ok(Some(forward_unknown_part(auth_kind, part, tally))),
         UnknownParts::RebuildFilesOnly if part.type_tag == "input_file" => {
             let fields = Value::Object(part.extras.clone());
-            translate_file_part(id, auth_kind, &fields).map(Some)
+            let rebuilt = translate_file_part(id, auth_kind, &fields)?;
+            if part.extras.contains_key(PromptCacheField::Breakpoint.key()) {
+                tally.record_forwarded_breakpoint_withheld();
+            }
+            Ok(Some(rebuilt))
         }
         // TRANSLATION-DROP: lane=openai-responses class=content_part_unrepresentable test=unknown_user_part_forwards_same_dialect_and_counts_otherwise
         UnknownParts::RebuildFilesOnly | UnknownParts::Drop => {
@@ -1339,8 +1369,19 @@ fn unknown_content_part(
     }
 }
 
-fn forward_unknown_part(part: &UnknownPart<'_>) -> ResponsesContentItem {
+/// The part as the client wrote it, less a `prompt_cache_breakpoint` the
+/// auth surface does not take: the block carries its own breakpoint, so this
+/// is the one place that decides whether it ships.
+fn forward_unknown_part(
+    auth_kind: AuthKind,
+    part: &UnknownPart<'_>,
+    tally: &mut ResponsesDropTally,
+) -> ResponsesContentItem {
     let mut block = part.extras.clone();
+    let breakpoint = PromptCacheField::Breakpoint;
+    if !breakpoint.forwards_on(auth_kind) && block.remove(breakpoint.key()).is_some() {
+        tally.record_forwarded_breakpoint_withheld();
+    }
     block.insert("type".into(), Value::String(part.type_tag.to_string()));
     ResponsesContentItem::Verbatim(block)
 }
@@ -2278,6 +2319,7 @@ mod tool_calls_field_tests {
             routectl_core::RequestProvenance::Library,
             &messages,
             None,
+            &mut super::super::extras::PromptCacheWithheldTally::default(),
         )
         .unwrap();
 
@@ -2337,6 +2379,7 @@ mod tool_calls_field_tests {
             routectl_core::RequestProvenance::Library,
             &messages,
             None,
+            &mut super::super::extras::PromptCacheWithheldTally::default(),
         )
         .unwrap();
 
@@ -2392,6 +2435,7 @@ mod tool_calls_field_tests {
             routectl_core::RequestProvenance::Library,
             &messages,
             None,
+            &mut super::super::extras::PromptCacheWithheldTally::default(),
         )
         .unwrap();
 
@@ -2452,6 +2496,7 @@ mod tool_calls_field_tests {
             routectl_core::RequestProvenance::Library,
             &messages,
             None,
+            &mut super::super::extras::PromptCacheWithheldTally::default(),
         )
         .unwrap();
 
@@ -2516,6 +2561,7 @@ mod tool_calls_field_tests {
             routectl_core::RequestProvenance::Library,
             &messages,
             None,
+            &mut super::super::extras::PromptCacheWithheldTally::default(),
         )
         .unwrap();
 
@@ -2579,6 +2625,7 @@ mod tool_calls_field_tests {
             routectl_core::RequestProvenance::Library,
             &via_part,
             None,
+            &mut super::super::extras::PromptCacheWithheldTally::default(),
         )
         .unwrap();
         let field_out = build_input(
@@ -2587,6 +2634,7 @@ mod tool_calls_field_tests {
             routectl_core::RequestProvenance::Library,
             &via_field,
             None,
+            &mut super::super::extras::PromptCacheWithheldTally::default(),
         )
         .unwrap();
 
@@ -2638,6 +2686,7 @@ mod tool_calls_field_tests {
             routectl_core::RequestProvenance::Library,
             &messages,
             None,
+            &mut super::super::extras::PromptCacheWithheldTally::default(),
         )
         .unwrap();
 
@@ -2692,6 +2741,7 @@ mod tool_calls_field_tests {
             routectl_core::RequestProvenance::Library,
             &messages,
             None,
+            &mut super::super::extras::PromptCacheWithheldTally::default(),
         )
         .unwrap();
 
@@ -2760,6 +2810,7 @@ mod role_other_field_tests {
                 routectl_core::RequestProvenance::Library,
                 &messages,
                 None,
+                &mut super::super::extras::PromptCacheWithheldTally::default(),
             )
             .unwrap();
         });
@@ -2800,6 +2851,7 @@ mod role_other_field_tests {
                 routectl_core::RequestProvenance::Library,
                 &messages,
                 None,
+                &mut super::super::extras::PromptCacheWithheldTally::default(),
             )
             .unwrap();
         });
@@ -2902,6 +2954,7 @@ mod empty_tool_id_policy_tests {
                 routectl_core::RequestProvenance::Library,
                 &messages,
                 None,
+                &mut super::super::extras::PromptCacheWithheldTally::default(),
             )
             .unwrap_or_else(|e| panic!("{name}: the output must forward, got {e}"));
 
@@ -2922,6 +2975,7 @@ mod empty_tool_id_policy_tests {
             routectl_core::RequestProvenance::Library,
             &messages,
             None,
+            &mut super::super::extras::PromptCacheWithheldTally::default(),
         )
         .expect("the output must forward");
 
@@ -2966,6 +3020,7 @@ mod empty_tool_id_policy_tests {
             routectl_core::RequestProvenance::Library,
             &messages,
             None,
+            &mut super::super::extras::PromptCacheWithheldTally::default(),
         )
         .expect("the transcript must forward");
 
@@ -2993,6 +3048,7 @@ mod empty_tool_id_policy_tests {
             routectl_core::RequestProvenance::Library,
             &messages,
             None,
+            &mut super::super::extras::PromptCacheWithheldTally::default(),
         )
         .expect("a valid tool_call_id must translate");
 
@@ -3012,6 +3068,7 @@ mod empty_tool_id_policy_tests {
             routectl_core::RequestProvenance::Library,
             &messages,
             None,
+            &mut super::super::extras::PromptCacheWithheldTally::default(),
         )
         .expect("a valid tool_use_id must translate");
 
@@ -3069,6 +3126,7 @@ mod part_type_log_injection_tests {
                 routectl_core::RequestProvenance::Library,
                 &messages,
                 None,
+                &mut super::super::extras::PromptCacheWithheldTally::default(),
             )
             .expect("a forward-compat part warn-drops rather than failing");
         });

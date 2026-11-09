@@ -62,6 +62,8 @@ mod client;
 pub use client::{OpenAiResponsesConfig, OpenAiResponsesProvider};
 
 pub(crate) mod auth;
+mod breakpoint_blocks;
+pub use breakpoint_blocks::{BreakpointBlock, breakpoint_blocks};
 pub(crate) mod cookies;
 pub(crate) mod extras;
 pub use extras::breakpoint_text_digest;

@@ -26,7 +26,8 @@
 //! [`PromptCacheWithheldTally`]. When neither the client nor the operator
 //! set `prompt_cache_key`, the egress sends the hex SHA-256 of the inbound
 //! session key: OpenAI refuses keys over 64 characters, and the raw client
-//! session id stays off another vendor's wire.
+//! session id stays off another vendor's wire. Bedrock Mantle gets no such
+//! derived key, since nothing records that it accepts the field.
 //!
 //! ChatGPT-OAuth lock: `store` is always written to `false` when the
 //! provider authenticates via `AuthKind::ChatgptOauth`, regardless of
@@ -245,32 +246,40 @@ pub(super) fn merge_provider_extras(
     }
 }
 
-/// A top-level Responses prompt-cache field the egress forwards per auth
-/// surface.
+/// A Responses prompt-cache field the egress forwards per auth surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum PromptCacheField {
     Options,
     Retention,
+    /// A per-block `prompt_cache_breakpoint`.
+    Breakpoint,
+    /// The `prompt_cache_key` routectl derives from the inbound session key
+    /// when neither the client nor the operator set one.
+    SessionKeyFallback,
 }
 
 impl PromptCacheField {
-    /// The wire pointer of the field.
-    const fn path(self) -> &'static str {
+    /// The wire member name: top-level, or on a content block for
+    /// `Breakpoint`.
+    pub(super) const fn key(self) -> &'static str {
         match self {
-            Self::Options => "/prompt_cache_options",
-            Self::Retention => "/prompt_cache_retention",
+            Self::Options => "prompt_cache_options",
+            Self::Retention => "prompt_cache_retention",
+            Self::Breakpoint => "prompt_cache_breakpoint",
+            Self::SessionKeyFallback => "prompt_cache_key",
         }
     }
 
     /// Whether `auth_kind` accepts the field. The ChatGPT-OAuth backend
-    /// refuses fields its codex client never sends, and codex sends
-    /// `prompt_cache_options` but not `prompt_cache_retention`. Nothing
-    /// records that the Mantle surface accepts either.
-    const fn forwards_on(self, auth_kind: AuthKind) -> bool {
-        let mantle = matches!(auth_kind, AuthKind::BedrockMantle);
-        match self {
-            Self::Options => !mantle,
-            Self::Retention => !mantle && !auth_kind.is_codex_lane(),
+    /// refuses fields its codex client never sends: codex sends
+    /// `prompt_cache_options` and `prompt_cache_key` but neither
+    /// `prompt_cache_retention` nor a breakpoint. Nothing records that the
+    /// Mantle surface accepts any of them.
+    pub(super) const fn forwards_on(self, auth_kind: AuthKind) -> bool {
+        match auth_kind {
+            AuthKind::ApiKey => true,
+            AuthKind::ChatgptOauth => matches!(self, Self::Options | Self::SessionKeyFallback),
+            AuthKind::BedrockMantle => false,
         }
     }
 }
@@ -325,29 +334,34 @@ fn apply_prompt_cache_field(
             declare(
                 tap,
                 EditSite::AuthSurfaceGate,
-                field.path(),
+                format!("/{}", field.key()),
                 EditKind::Remove,
             );
         }
         return;
     }
-    let slot = match field {
-        PromptCacheField::Options => &mut request.prompt_cache_options,
-        PromptCacheField::Retention => &mut request.prompt_cache_retention,
-    };
-    *slot = Some(value.clone());
+    match field {
+        PromptCacheField::Options => request.prompt_cache_options = Some(value.clone()),
+        PromptCacheField::Retention => request.prompt_cache_retention = Some(value.clone()),
+        PromptCacheField::Breakpoint | PromptCacheField::SessionKeyFallback => {}
+    }
 }
 
 /// When neither the client nor the operator set `prompt_cache_key`, key
 /// the upstream prompt cache on the lowercase hex SHA-256 of the inbound
-/// session key (always 64 characters, whatever the session key's length).
+/// session key (always 64 characters, whatever the session key's length),
+/// on the surfaces [`PromptCacheField::SessionKeyFallback`] forwards on.
+/// Nothing is withheld where it does not: no client field is involved.
 /// Must run AFTER `merge_provider_extras` so their key wins.
 pub(super) fn apply_session_cache_key(
     request: &mut ResponsesRequest,
     req: &ChatRequest,
+    auth_kind: AuthKind,
     tap: Option<&WireTap>,
 ) {
-    if request.prompt_cache_key.is_some() {
+    if request.prompt_cache_key.is_some()
+        || !PromptCacheField::SessionKeyFallback.forwards_on(auth_kind)
+    {
         return;
     }
     let Some(session) = req.routectl_internal.inbound_session_key.as_deref() else {

@@ -1151,6 +1151,10 @@ license.
   (allowlist-pinned to non-secret cookie names); `default_cookie_path` is
   `ROUTECTL_COOKIE_FILE`, else `cookies/chatgpt.json` under the shared
   `routectl_core::config_dir` folder
+- `src/openai_responses/breakpoint_blocks.rs` -- `breakpoint_blocks`: the
+  `input_text` blocks this egress emits from canonical messages, in order;
+  the one ordinal rule the Responses ingress records a
+  `prompt_cache_breakpoint` against and the egress re-attaches it by
 - `src/openai_responses/request.rs` -- orchestrator: builds `ResponsesRequest`
   from `ChatRequest` via system/messages/tools/extras submodules; owns this
   lane's single `record_translation_lane_seen` site (bumped before the first

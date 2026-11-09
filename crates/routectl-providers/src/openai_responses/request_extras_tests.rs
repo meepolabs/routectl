@@ -791,6 +791,9 @@ fn withheld_cache_fields_count_once_per_request() {
     }
 }
 
+/// The session-key fallback is withheld on Bedrock Mantle, whose acceptance
+/// of `prompt_cache_*` is unrecorded; a client or operator key still
+/// forwards there.
 #[test]
 fn prompt_cache_key_falls_back_to_hashed_session_key() {
     use routectl_core::wire_check::{EditKind, EditSite};
@@ -847,6 +850,7 @@ fn prompt_cache_key_falls_back_to_hashed_session_key() {
         },
     ];
     for (surface, cfg) in prompt_cache_surfaces() {
+        let derives_fallback = surface != "bedrock-mantle";
         for row in &rows {
             // Arrange
             let label = format!("{surface} / {}", row.name);
@@ -868,14 +872,21 @@ fn prompt_cache_key_falls_back_to_hashed_session_key() {
                 req.provider_extras = Some(Value::Object(extras));
             }
 
+            let before = responses_drop_count("prompt_cache_field_withheld");
+
             // Act
             let (wire, edits) = translate_declaring(&cfg, &req);
 
             // Assert
+            let after = responses_drop_count("prompt_cache_field_withheld");
+            assert_eq!(after, before, "{label}: no client field was withheld");
             let key = wire.get("prompt_cache_key").and_then(Value::as_str);
-            let hashed =
+            let falls_back =
                 row.client_key.is_none() && row.operator_key.is_none() && row.session.is_some();
-            if hashed {
+            let hashed = falls_back && derives_fallback;
+            if falls_back && !derives_fallback {
+                assert_eq!(key, None, "{label}: no derived key on this surface: {wire}");
+            } else if hashed {
                 let key = key.unwrap_or_else(|| panic!("{label}: no key: {wire}"));
                 assert_eq!(key.len(), 64, "{label}");
                 assert!(
@@ -1169,4 +1180,114 @@ fn a_breakpoint_withhold_counts_when_translation_then_fails() {
     let after = responses_drop_count("prompt_cache_field_withheld");
     assert!(err.contains("image_url"), "unexpected error: {err}");
     assert_eq!(after - before, 1, "the withhold counts despite the failure");
+}
+
+/// A Responses-dialect unmodeled part carrying a breakpoint of its own.
+fn unmodeled_part_with_breakpoint(type_tag: &str, fields: Value) -> ContentPart {
+    let mut extras = fields.as_object().cloned().unwrap_or_default();
+    extras.insert("prompt_cache_breakpoint".into(), breakpoint_value());
+    ContentPart::Other {
+        type_tag: type_tag.into(),
+        cache_control: None,
+        extras,
+    }
+}
+
+/// A breakpoint on a block the egress forwards as written rides inside that
+/// block, so the ApiKey-only rule is applied there: kept on api-key, taken
+/// off, counted and declared on chatgpt-oauth, and never shipped by Mantle,
+/// which drops an unmodeled part or rebuilds an `input_file` from its
+/// carrier fields.
+#[test]
+fn breakpoint_on_a_forwarded_part_follows_the_surface_rule() {
+    use routectl_core::wire_check::{EditKind, EditSite};
+    struct Row {
+        name: &'static str,
+        cfg: OpenAiResponsesConfig,
+        part: ContentPart,
+        /// The wire block at `input[0].content[1]`, or `None` when the part
+        /// does not ship.
+        shipped: Option<Value>,
+        withheld: bool,
+    }
+    let file_data = "data:application/pdf;base64,JVBER";
+    let document = || unmodeled_part_with_breakpoint("input_document", json!({"doc": "d-1"}));
+    let rows = [
+        Row {
+            name: "input_document on api-key",
+            cfg: cfg_api_key(),
+            part: document(),
+            shipped: Some(json!({
+                "type": "input_document",
+                "doc": "d-1",
+                "prompt_cache_breakpoint": breakpoint_value()
+            })),
+            withheld: false,
+        },
+        Row {
+            name: "input_document on chatgpt-oauth",
+            cfg: cfg(),
+            part: document(),
+            shipped: Some(json!({"type": "input_document", "doc": "d-1"})),
+            withheld: true,
+        },
+        Row {
+            name: "input_document on bedrock-mantle",
+            cfg: cfg_bedrock_mantle(),
+            part: document(),
+            shipped: None,
+            withheld: false,
+        },
+        Row {
+            name: "input_file on bedrock-mantle",
+            cfg: cfg_bedrock_mantle(),
+            part: unmodeled_part_with_breakpoint("input_file", json!({"file_data": file_data})),
+            shipped: Some(json!({"type": "input_file", "file_data": file_data})),
+            withheld: true,
+        },
+    ];
+    for row in rows {
+        // Arrange
+        let req = req_with_breakpoints(vec![user_parts(vec![text_part("look"), row.part])], vec![]);
+        let before = responses_drop_count("prompt_cache_field_withheld");
+
+        // Act
+        let (wire, edits) = translate_declaring(&row.cfg, &req);
+
+        // Assert
+        let after = responses_drop_count("prompt_cache_field_withheld");
+        assert_eq!(
+            wire.pointer("/input/0/content/1"),
+            row.shipped.as_ref(),
+            "{}: {wire}",
+            row.name
+        );
+        let ships_key = row
+            .shipped
+            .as_ref()
+            .is_some_and(|block| block.get("prompt_cache_breakpoint").is_some());
+        assert_eq!(
+            wire.to_string().contains("prompt_cache_breakpoint"),
+            ships_key,
+            "{}: the key reaches the wire only inside the forwarded part: {wire}",
+            row.name
+        );
+        assert_eq!(
+            after - before,
+            u64::from(row.withheld),
+            "{}: withheld breakpoints count once per request",
+            row.name
+        );
+        let gate = (
+            EditSite::AuthSurfaceGate,
+            "/input/*/content/*/prompt_cache_breakpoint".to_string(),
+            EditKind::Remove,
+        );
+        assert_eq!(
+            edits.contains(&gate),
+            row.withheld,
+            "{}: the withhold is declared exactly when made: {edits:?}",
+            row.name
+        );
+    }
 }

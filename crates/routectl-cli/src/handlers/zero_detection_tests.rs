@@ -6,6 +6,9 @@
 //! the site that makes it, or a known loss listed in [`KNOWN_UNDECLARED`] by
 //! lane, leg and path with its reason.
 //!
+//! The Responses lane through Bedrock Mantle is walked with a real Mantle
+//! egress aimed at the mock.
+//!
 //! Bedrock Converse is a TRANSLATION lane: its request leg is checked for
 //! client extras the Converse body does not carry, and its response leg is
 //! not compared at all, since the upstream answers in a dialect no ingress
@@ -57,6 +60,7 @@ const ANTHROPIC: &str = "anthropic->anthropic-api";
 const CHAT: &str = "chat->openai-compat";
 const BEDROCK_INVOKE: &str = "anthropic->bedrock-invoke";
 const BEDROCK_CONVERSE: &str = "anthropic->bedrock-converse";
+const RESPONSES_MANTLE: &str = "responses->openai-responses-mantle";
 
 /// Findings the check correctly reports that no declaration explains.
 const KNOWN_UNDECLARED: &[KnownUndeclared] = &[KnownUndeclared {
@@ -101,6 +105,8 @@ enum Egress {
         shape: BedrockShape,
         model_id: &'static str,
     },
+    /// A real openai-responses provider on the Bedrock Mantle surface.
+    ResponsesMantle,
 }
 
 /// One request through the harness: what the client sends, how the
@@ -123,6 +129,7 @@ impl Case {
     const fn lane(&self) -> &'static str {
         match self.egress {
             Egress::Entry(_) => self.ingress.lane(),
+            Egress::ResponsesMantle => RESPONSES_MANTLE,
             Egress::Bedrock {
                 shape: BedrockShape::Invoke,
                 ..
@@ -142,6 +149,7 @@ impl Case {
                 ..
             } => &[Leg::Request],
             Egress::Entry(_)
+            | Egress::ResponsesMantle
             | Egress::Bedrock {
                 shape: BedrockShape::Invoke,
                 ..
@@ -928,6 +936,22 @@ fn responses_cases() -> Vec<Case> {
     ]
 }
 
+/// Responses traffic through the Bedrock Mantle surface, walked by a real
+/// Mantle egress.
+fn responses_mantle_cases() -> Vec<Case> {
+    vec![Case {
+        egress: Egress::ResponsesMantle,
+        ..case(
+            "responses-mantle/plain",
+            Ingress::Responses,
+            json!({"model": ALIAS, "input": [{"type": "message", "role": "user",
+                   "content": [{"type": "input_text", "text": "hi"}]}]}),
+            responses_stream(),
+            responses_provider,
+        )
+    }]
+}
+
 fn anthropic_cases() -> Vec<Case> {
     let hi = json!([{"role": "user", "content": "hi"}]);
     vec![
@@ -1121,6 +1145,7 @@ async fn router_for(case: &Case, base: &str) -> Router {
     let provider = match case.egress {
         Egress::Entry(provider) => provider,
         Egress::Bedrock { shape, model_id } => return bedrock_router(shape, model_id, base).await,
+        Egress::ResponsesMantle => return responses_mantle_router(base),
     };
     let mut retry = RetryPolicy::default();
     retry.max_attempts = 1;
@@ -1199,6 +1224,61 @@ async fn bedrock_router(shape: BedrockShape, model_id: &str, origin: &str) -> Ro
             PROVIDER,
             Arc::new(provider),
             model_id,
+        )),
+    )]));
+    router
+}
+
+const MANTLE_UPSTREAM: &str = "openai.gpt-oss-120b";
+
+fn mantle_key() -> String {
+    ["zero", "detection", "mantle"].join("-")
+}
+
+/// A router whose one target is a real Bedrock Mantle Responses provider
+/// dialing `origin`, checking every request. The config entry keeps its
+/// `bedrock_mantle` block, so the check names the Mantle lane.
+fn responses_mantle_router(origin: &str) -> Router {
+    use routectl_providers::bedrock::auth::ResolvedCreds;
+    use routectl_providers::mantle::MantleAuth;
+    use routectl_providers::openai_responses::{
+        AuthKind, OpenAiResponsesConfig, OpenAiResponsesProvider,
+    };
+    let text = format!(
+        "version = {CURRENT_CONFIG_VERSION}\n\n\
+         [providers.{PROVIDER}]\n\
+         kind = \"openai-responses\"\n\
+         api_key_ref = \"\"\n\
+         bedrock_mantle = {{ region = \"{BEDROCK_REGION}\", creds = {{ kind = \"bearer-key\", key_ref = \"{key_ref}\" }} }}\n\n\
+         [models.{NICKNAME}]\n\
+         provider = \"{PROVIDER}\"\n\
+         upstream = \"{MANTLE_UPSTREAM}\"\n\n\
+         [aliases]\n\
+         {ALIAS} = \"{NICKNAME}\"\n\n\
+         [retry]\n\
+         max_attempts = 1\n",
+        key_ref = crate::test_secret::file_ref(&mantle_key()),
+    );
+    let mut config = parse_config(&text).expect("valid mantle test config");
+    check_every_request(&mut config);
+    let mut cfg = OpenAiResponsesConfig::new_with_auth(
+        PROVIDER,
+        Arc::new(routectl_core::StaticToken::new(String::new())),
+    );
+    cfg.base_url = format!("{origin}/openai/v1");
+    cfg.auth_kind = AuthKind::BedrockMantle;
+    cfg.mantle = Some(MantleAuth {
+        region: BEDROCK_REGION.into(),
+        creds: ResolvedCreds::Bearer { key: mantle_key() },
+    });
+    let mut router = Router::new(Arc::new(config));
+    router.install_resolved_models(BTreeMap::from([(
+        NICKNAME.to_string(),
+        Arc::new(ResolvedModel::new(
+            NICKNAME,
+            PROVIDER,
+            Arc::new(OpenAiResponsesProvider::new(cfg)),
+            MANTLE_UPSTREAM,
         )),
     )]));
     router
@@ -1369,6 +1449,7 @@ async fn every_walked_request_is_clean_or_a_listed_known_loss_on_both_legs() {
         .chain(anthropic_cases())
         .chain(chat_cases())
         .chain(responses_cases())
+        .chain(responses_mantle_cases())
         .chain(bedrock_invoke_cases())
         .chain(bedrock_converse_cases())
         .collect();

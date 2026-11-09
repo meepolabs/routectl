@@ -6,10 +6,8 @@
 //! value verbatim, and where the client put it. Canonical content is never
 //! touched.
 
-use routectl_core::{
-    ContentPart, KnownContentPart, Message, MessageContent, ResponsesCacheBreakpoint, Role,
-};
-use routectl_providers::openai_responses::breakpoint_text_digest;
+use routectl_core::{Message, ResponsesCacheBreakpoint};
+use routectl_providers::openai_responses::{breakpoint_blocks, breakpoint_text_digest};
 use serde_json::Value;
 
 const BREAKPOINT_KEY: &str = "prompt_cache_breakpoint";
@@ -29,7 +27,9 @@ pub(super) struct BreakpointSite {
 
 /// Every breakpoint on a content block of a modeled `input[]` item: a
 /// message's `content` and a `function_call_output`'s `output`. Unmodeled
-/// items are forwarded verbatim, so their breakpoints need no record.
+/// items, and unmodeled blocks in a message's `content`, are forwarded as
+/// the client wrote them, so their breakpoints ride inside them and need
+/// no record.
 pub(super) fn collect_sites(input: &Value) -> Vec<BreakpointSite> {
     let Some(items) = input.as_array() else {
         return Vec::new();
@@ -43,7 +43,8 @@ pub(super) fn collect_sites(input: &Value) -> Vec<BreakpointSite> {
     sites
 }
 
-/// Resolve each site's ordinal against the post-lift `messages`.
+/// Resolve each site's ordinal against the post-lift `messages`: the index
+/// of its block in the `input_text` stream the Responses egress emits.
 /// `message_items` maps each PRE-lift message to its `input[]` index and
 /// `lifted` lists the pre-lift indices the lift removed.
 pub(super) fn resolve(
@@ -55,15 +56,21 @@ pub(super) fn resolve(
     if sites.is_empty() {
         return Vec::new();
     }
-    let spans = ordinal_spans(messages, message_items, lifted);
+    let kept_items: Vec<usize> = message_items
+        .iter()
+        .enumerate()
+        .filter(|(message, _)| !lifted.contains(message))
+        .map(|(_, &item)| item)
+        .collect();
+    let blocks = breakpoint_blocks(messages);
     sites
         .into_iter()
         .map(|site| {
-            let ordinal = spans
-                .iter()
-                .find(|span| span.item == site.item)
-                .zip(site.text_rank)
-                .and_then(|(span, rank)| (rank < span.count).then_some(span.base + rank));
+            let ordinal = site.text_rank.and_then(|rank| {
+                blocks.iter().position(|block| {
+                    kept_items.get(block.message) == Some(&site.item) && block.text_rank == rank
+                })
+            });
             ResponsesCacheBreakpoint {
                 ordinal,
                 text_digest: site.text_digest,
@@ -72,57 +79,6 @@ pub(super) fn resolve(
             }
         })
         .collect()
-}
-
-/// The ordinals one post-lift message occupies in the text-block stream.
-struct OrdinalSpan {
-    item: usize,
-    base: usize,
-    count: usize,
-}
-
-fn ordinal_spans(
-    messages: &[Message],
-    message_items: &[usize],
-    lifted: &[usize],
-) -> Vec<OrdinalSpan> {
-    let kept_items = message_items
-        .iter()
-        .enumerate()
-        .filter(|(message, _)| !lifted.contains(message))
-        .map(|(_, &item)| item);
-    let mut spans = Vec::new();
-    let mut next = 0usize;
-    for (message, item) in messages.iter().zip(kept_items) {
-        if !carries_breakpoints(&message.role) {
-            continue;
-        }
-        let count = text_block_count(&message.content);
-        spans.push(OrdinalSpan {
-            item,
-            base: next,
-            count,
-        });
-        next += count;
-    }
-    spans
-}
-
-const fn carries_breakpoints(role: &Role) -> bool {
-    matches!(role, Role::User | Role::System | Role::Other(_))
-}
-
-fn text_block_count(content: &MessageContent) -> usize {
-    match content {
-        MessageContent::Text(text) => usize::from(!text.is_empty()),
-        MessageContent::Parts(parts) => parts
-            .iter()
-            .filter(|part| {
-                matches!(part, ContentPart::Known(KnownContentPart::Text { text, .. }) if !text.is_empty())
-            })
-            .count(),
-        MessageContent::Null => 0,
-    }
 }
 
 /// The block array of a modeled item, with the field it sits under. The
@@ -150,6 +106,9 @@ fn collect_item_sites(item: usize, field: &str, blocks: &[Value], sites: &mut Ve
         let Some(value) = block.get(BREAKPOINT_KEY) else {
             continue;
         };
+        if field == "content" && !is_modeled_block(block) {
+            continue;
+        }
         sites.push(BreakpointSite {
             item,
             text_rank,
@@ -158,6 +117,15 @@ fn collect_item_sites(item: usize, field: &str, blocks: &[Value], sites: &mut Ve
             client_pointer: format!("/input/{item}/{field}/{index}"),
         });
     }
+}
+
+/// Whether `parse_content_block` maps `block` onto a modeled canonical part.
+/// Any other block becomes a forward-compat part that keeps every member.
+fn is_modeled_block(block: &Value) -> bool {
+    matches!(
+        block.get("type").and_then(Value::as_str),
+        Some("input_text" | "output_text" | "input_image")
+    )
 }
 
 /// The text a block contributes to canonical content, read the way

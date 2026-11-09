@@ -137,6 +137,11 @@ const EXPECTED_OUT_OF_SCOPE: &[(&str, &str)] = &[
         "auth header dispatch per auth kind; carries no request body",
     ),
     (
+        "openai_responses/breakpoint_blocks.rs",
+        "read-only listing of the input_text blocks the egress emits, for breakpoint ordinals; \
+         it builds no wire body and never drops or edits content",
+    ),
+    (
         "openai_responses/client.rs",
         "provider construction and header assembly; reads the request only for its operator \
          header extras, which are not translated content",
