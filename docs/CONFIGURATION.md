@@ -1795,7 +1795,10 @@ chain target it would hit the same way, for the rest of that request:
   `ValidationException` naming a tool type, say), excludes its
   `[models]` entry: the walk can still reach another entry, even on
   the same origin with the same upstream id (a larger-window variant,
-  say). This holds whether or not `[capability]` learning is on. An
+  say). This holds whether or not `[capability]` learning is on. The
+  exclusion covers that entry's seats on every origin, pool members
+  on another base URL included: a capability the model lacks is a
+  fact about the model, not the endpoint that answered. An
   Anthropic "prompt is too long" 400 is not recognized as either, so
   it keeps endpoint scope.
 - Any other native 400 or 422 excludes its endpoint (the provider's

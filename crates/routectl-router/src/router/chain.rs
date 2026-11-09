@@ -516,6 +516,10 @@ impl Router {
             if self.providerless_model.is_some()
                 && target.nickname.as_deref() == self.providerless_model
             {
+                debug_assert!(
+                    target.model.seats.is_none(),
+                    "a provider-less test model must not be pool-backed"
+                );
                 target.provider = None;
             }
         }

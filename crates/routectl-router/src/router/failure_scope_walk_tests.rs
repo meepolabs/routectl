@@ -19,6 +19,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures::stream::{self, BoxStream, StreamExt};
 use parking_lot::Mutex;
+use routectl_core::schema::ForwardedBearer;
 use routectl_core::{
     ChatChunk, ChatRequest, ChatResponse, Error, Provider, RequestObservation, Result, ScopeRow,
     SkipCounts, TokenCount,
@@ -251,6 +252,10 @@ enum Lane {
     /// an unsupported feature or an exceeded window; the anthropic-api table
     /// lifts neither.
     OpenaiCompat,
+    /// The anthropic-api lane relaying the client's credential on origin X;
+    /// the passthrough on origin Y keeps its own key, since a forwarded
+    /// entry must egress to api.anthropic.com.
+    AnthropicForwarded,
 }
 
 fn anthropic_entry(base_url: &str, runtime: ProviderRuntimePolicy) -> ProviderEntry {
@@ -265,6 +270,10 @@ fn entry(lane: Lane, origin: &str, runtime: ProviderRuntimePolicy) -> ProviderEn
         Lane::OpenaiCompat => format!(
             "kind = \"openai-compat\"\napi_key_ref = \"literal:k\"\nbase_url = \"{origin}/v1\"\n"
         ),
+        Lane::AnthropicForwarded if origin == ORIGIN_X => format!(
+            "kind = \"anthropic-api\"\ncredential_source = \"forwarded\"\nbase_url = \"{origin}\"\n"
+        ),
+        Lane::AnthropicForwarded => return entry(Lane::Anthropic, origin, runtime),
     };
     let parsed: ProviderEntry = toml::from_str(&toml_text).expect("valid provider entry");
     parsed.with_runtime(runtime)
@@ -291,6 +300,18 @@ fn chain_with(
     pool_b: PoolB,
     lane: Lane,
     runtime: impl Fn(usize) -> ProviderRuntimePolicy,
+) -> Chain {
+    chain_configured(scripts, max_attempts, pool_b, lane, runtime, |_| {})
+}
+
+/// [`chain_with`], with `configure` applied to the config last.
+fn chain_configured(
+    scripts: &[&[Step]; TARGETS],
+    max_attempts: u32,
+    pool_b: PoolB,
+    lane: Lane,
+    runtime: impl Fn(usize) -> ProviderRuntimePolicy,
+    configure: impl FnOnce(&mut Config),
 ) -> Chain {
     let mut config = Config::default();
     config.retry.max_attempts = max_attempts;
@@ -319,11 +340,13 @@ fn chain_with(
         ALIAS.into(),
         AliasValue::Chain(vec!["pool-a".into(), "passthrough".into(), "pool-b".into()]),
     );
+    configure(&mut config);
 
+    let forwarded = lane == Lane::AnthropicForwarded;
     let seats: Vec<Arc<Seat>> = scripts.iter().map(|script| Seat::new(script)).collect();
     let mut router = Router::new(Arc::new(config));
     let pool_a: Vec<SeatTarget> = (0..POOL_A_SEATS)
-        .map(|idx| SeatTarget::new(seat_member(idx), provider(&seats[idx]), None, false))
+        .map(|idx| SeatTarget::new(seat_member(idx), provider(&seats[idx]), None, forwarded))
         .collect();
     let pool_b_upstream = "claude-pool-b";
     let mut b_model = ResolvedModel::new(
@@ -345,7 +368,7 @@ fn chain_with(
         "b-0".into(),
         provider(&seats[POOL_B]),
         None,
-        false,
+        forwarded,
     )]));
     let models = BTreeMap::from([
         (
@@ -598,36 +621,110 @@ async fn a_capability_or_window_400_reaches_pool_b_on_the_same_origin() {
     }
 }
 
+/// How a row of the resolver-recognized 400 test dispatches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Variant {
+    Complete,
+    /// `[capability] enabled = false`.
+    LearningOff,
+    Stream,
+    /// Pool A and pool B relay the client's credential.
+    Forwarded,
+}
+
+impl Variant {
+    async fn dispatch(self, scripts: &[&[Step]; TARGETS]) -> (Chain, bool) {
+        let lane = if self == Self::Forwarded {
+            Lane::AnthropicForwarded
+        } else {
+            Lane::Anthropic
+        };
+        let chain = chain_configured(
+            scripts,
+            3,
+            PoolB::OtherModel,
+            lane,
+            |_| quiet_breaker(),
+            |config| config.capability.enabled = self != Self::LearningOff,
+        );
+        let mut req = request();
+        if self == Self::Forwarded {
+            let unforwarded = chain
+                .router
+                .complete_with_options(request(), RouterOptions::new())
+                .await;
+            assert!(
+                unforwarded.result.is_err() && chain.calls() == vec![0; TARGETS],
+                "premise: pool A relays the client's credential"
+            );
+            req.routectl_internal.forwarded_bearer =
+                Some(ForwardedBearer::new("client-bearer".into()));
+        }
+        let served = if self == Self::Stream {
+            chain
+                .router
+                .stream_with_options(req, RouterOptions::new())
+                .await
+                .result
+                .is_ok()
+        } else {
+            chain
+                .router
+                .complete_with_options(req, RouterOptions::new())
+                .await
+                .result
+                .is_ok()
+        };
+        (chain, served)
+    }
+}
+
 /// On the anthropic-api lane, whose classifier lifts neither class, a 400
 /// is scoped to the model only when the capability resolver names a
 /// capability in it: a model refusing a forced `tool_choice` lets the walk
 /// reach pool B on the same origin, while a generic 400 on every target
 /// stops at origin X (the passthrough on origin Y is its only other dial).
+/// The scope holds with capability learning off, on the stream surface, and
+/// on a lane that relays the client's credential, none of which learns.
 ///
 /// Mutation check: set the resolver flag to false at the dispatch walk's
-/// failure build -> red (the capability row never reaches pool B).
+/// failure build -> red (the capability rows never reach pool B).
 #[tokio::test]
 async fn a_resolver_recognized_400_reaches_pool_b_and_a_generic_one_does_not() {
     let rows = [
-        ("forced tool_choice", Failure::ForcedToolChoice, 1),
-        ("generic 400", Failure::BadRequest, 0),
+        (
+            "forced tool_choice",
+            Failure::ForcedToolChoice,
+            Variant::Complete,
+            1,
+        ),
+        (
+            "forced tool_choice, learning off",
+            Failure::ForcedToolChoice,
+            Variant::LearningOff,
+            1,
+        ),
+        (
+            "forced tool_choice, stream",
+            Failure::ForcedToolChoice,
+            Variant::Stream,
+            1,
+        ),
+        (
+            "forced tool_choice, forwarded credential",
+            Failure::ForcedToolChoice,
+            Variant::Forwarded,
+            1,
+        ),
+        ("generic 400", Failure::BadRequest, Variant::Complete, 0),
     ];
-    for (name, failure, pool_b_calls) in rows {
+    for (name, failure, variant, pool_b_calls) in rows {
         let mut scripts = all_failing(failure);
         scripts[POOL_B] = SERVE;
-        let chain = chain(&scripts, 3, PoolB::OtherModel);
 
-        let dispatched = chain
-            .router
-            .complete_with_options(request(), RouterOptions::new())
-            .await;
+        let (chain, served) = variant.dispatch(&scripts).await;
 
-        assert_eq!(
-            dispatched.result.is_ok(),
-            pool_b_calls == 1,
-            "{name}: {:?}",
-            dispatched.result.as_ref().err()
-        );
+        assert_eq!(served, pool_b_calls == 1, "{name}");
         let mut calls = vec![0; TARGETS];
         calls[0] = 1;
         calls[PASSTHROUGH] = 1;
@@ -876,40 +973,82 @@ async fn a_retry_spent_on_one_target_is_not_spent_again_on_the_next() {
     assert_eq!(chain.calls(), vec![2, 1, 1, 1, 1, 1, 0]);
 }
 
-/// A debit that opens the failed seat's breaker does not spend the retry
-/// budget on a dial the re-gate would refuse: with one retry allowed and a
-/// breaker that opens on its first failure, pool A's first seat is dialed
-/// once, and the next seat still retries its own 500 once.
+/// A failed seat whose breaker reads open after the failure's debit does not
+/// spend the retry budget on a dial the re-gate would refuse, whoever opened
+/// it: with one retry allowed, pool A's first seat is dialed once, and the
+/// next seat still retries its own 500 once. In one row the seat's own 500
+/// opens a breaker that trips on its first failure; in the other a concurrent
+/// admission force-opens the seat between this request's admission and its
+/// failure, so this request's debit carries an outdated epoch and opens
+/// nothing itself.
 ///
-/// Mutation check: ignore the opened breaker when settling the disposition
-/// -> red (the first seat spends the retry, the second is not retried).
+/// Mutation check: ignore the open breaker when settling the disposition ->
+/// red on both rows; key the retry drop on whether this debit opened the
+/// breaker -> red on the concurrent row.
 #[tokio::test]
 async fn a_debit_that_opens_the_breaker_does_not_spend_the_retry() {
-    let mut scripts = [SERVE; TARGETS];
-    scripts[0] = failing(Failure::Server);
-    scripts[1] = &[Step::Fail(Failure::Server), Step::Serve];
-    let chain = chain_with(&scripts, 2, PoolB::OtherModel, Lane::Anthropic, |idx| {
-        ProviderRuntimePolicy {
-            circuit_failures: Some(if idx == 0 { 1 } else { 100 }),
-            ..Default::default()
+    let rows = [
+        ("this debit opens it", 1, false),
+        ("opened concurrently", 100, true),
+    ];
+    for (name, first_seat_threshold, opened_concurrently) in rows {
+        let mut scripts = [SERVE; TARGETS];
+        scripts[0] = failing(Failure::Server);
+        scripts[1] = &[Step::Fail(Failure::Server), Step::Serve];
+        let chain = chain_with(&scripts, 2, PoolB::OtherModel, Lane::Anthropic, |idx| {
+            ProviderRuntimePolicy {
+                circuit_failures: Some(if idx == 0 { first_seat_threshold } else { 100 }),
+                ..Default::default()
+            }
+        });
+        if opened_concurrently {
+            force_open_after_next_admission(&chain, 0);
         }
-    });
 
-    let dispatched = chain
-        .router
-        .complete_with_options(request(), RouterOptions::new())
-        .await;
+        let dispatched = chain
+            .router
+            .complete_with_options(request(), RouterOptions::new())
+            .await;
 
-    assert!(dispatched.result.is_ok(), "{:?}", dispatched.result.err());
-    assert_eq!(chain.calls(), vec![1, 2, 0, 0, 0, 0, 0]);
-    assert_eq!(
+        assert!(
+            dispatched.result.is_ok(),
+            "{name}: {:?}",
+            dispatched.result.err()
+        );
+        assert_eq!(chain.calls(), vec![1, 2, 0, 0, 0, 0, 0], "{name}");
+        assert_eq!(
+            chain
+                .router
+                .gate_status_for_tests(&Chain::state_key(0))
+                .circuit,
+            CircuitPhase::Open,
+            "{name}: premise: the first seat's breaker is open"
+        );
+        let own_debit = u32::from(!opened_concurrently);
+        assert_eq!(
+            chain.failures(0),
+            own_debit,
+            "{name}: premise: only the seat's own trip counts this debit"
+        );
+    }
+}
+
+/// Force the breaker of chain target `idx` open for a minute right after the
+/// next admission this thread makes, as a concurrent request would, which
+/// moves the breaker to a new epoch.
+fn force_open_after_next_admission(chain: &Chain, idx: usize) {
+    let state = Arc::clone(
         chain
             .router
-            .gate_status_for_tests(&Chain::state_key(0))
-            .circuit,
-        CircuitPhase::Open,
-        "premise: the first seat's 500 opened its breaker"
+            .state
+            .get(&Chain::state_key(idx))
+            .expect("every chain target has a state slot"),
     );
+    super::super::runtime_gate::set_after_admission_hook(move || {
+        state
+            .lock()
+            .force_open(std::time::Instant::now(), Duration::from_mins(1));
+    });
 }
 
 // ---------------------------------------------------------------------------

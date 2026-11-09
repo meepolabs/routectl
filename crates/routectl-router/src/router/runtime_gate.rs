@@ -11,7 +11,9 @@ use routectl_core::{
 };
 
 use crate::config::RetryPolicy;
-use crate::runtime_state::{AdmissionKind, GateAdmission, GateDecision, ProviderState};
+use crate::runtime_state::{
+    AdmissionKind, CircuitPhase, GateAdmission, GateDecision, ProviderState,
+};
 
 use super::Router;
 use super::breaker_transition;
@@ -334,33 +336,48 @@ impl Router {
         }
     }
 
-    /// Apply a failed attempt's [`BreakerOutcome`] to the seat's breaker.
-    /// Returns whether a debit opened the breaker, plus the
-    /// `breaker_effect` label (`none` / `opened` / `parked`) the retry
-    /// decision log reports. `epoch` is the attempt's admission epoch.
-    /// Probe-slot settlement stays with the caller.
+    /// Apply a failed attempt's [`BreakerOutcome`] to the seat's breaker,
+    /// returning the `breaker_effect` label (`none` / `opened` / `parked`)
+    /// the retry decision log reports. `epoch` is the attempt's admission
+    /// epoch. Probe-slot settlement stays with the caller.
     pub(super) fn apply_breaker_outcome(
         &self,
         state_key: &str,
         outcome: BreakerOutcome,
         class: &FailureClass,
         epoch: u64,
-    ) -> (bool, &'static str) {
+    ) -> &'static str {
         match outcome {
-            BreakerOutcome::None => (false, "none"),
+            BreakerOutcome::None => "none",
             BreakerOutcome::Debit => {
                 let opened = self.record_failure_opened(
                     state_key,
                     LastOutcome::from_failure_class(class),
                     epoch,
                 );
-                (opened, if opened { "opened" } else { "none" })
+                if opened { "opened" } else { "none" }
             }
             BreakerOutcome::Park(cooldown) => {
                 self.park_provider(state_key, cooldown, epoch);
-                (false, "parked")
+                "parked"
             }
         }
+    }
+
+    /// Whether the breaker for `state_key` refuses a dispatch right now,
+    /// whoever opened it, read without claiming the half-open slot: a circuit
+    /// whose window has lapsed with no probe in flight would admit the next
+    /// dispatch, so it does not read open. A caller holding the half-open
+    /// claim settles it first, or its own claim reads as open. `false` when
+    /// no state slot exists for the key.
+    pub(super) fn breaker_reads_open(&self, state_key: &str) -> bool {
+        self.state.get(state_key).is_some_and(|state| {
+            state
+                .lock()
+                .capacity_snapshot_under(Instant::now(), None, None)
+                .circuit
+                == CircuitPhase::Open
+        })
     }
 }
 

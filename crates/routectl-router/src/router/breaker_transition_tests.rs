@@ -227,14 +227,12 @@ async fn only_a_debit_that_moves_the_circuit_to_open_reports_and_logs_opened() {
                 match step {
                     Step::Debit => {
                         let epoch = router.breaker_epoch_for_tests(MODEL);
-                        let (opened, effect) = router.apply_breaker_outcome(
+                        effects.push(router.apply_breaker_outcome(
                             MODEL,
                             BreakerOutcome::Debit,
                             &FailureClass::ServerError,
                             epoch,
-                        );
-                        assert_eq!(opened, effect == "opened", "{label}: {effect}");
-                        effects.push(effect);
+                        ));
                     }
                     Step::ClaimProbe => {
                         let (refusal, mut guard) = router.admit_dispatch(MODEL);

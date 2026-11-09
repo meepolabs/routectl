@@ -209,12 +209,13 @@ pub(super) struct Disposition {
 }
 
 impl Disposition {
-    /// This disposition once its breaker outcome is applied: a debit that
-    /// opened the failed seat's breaker leaves nothing to retry there, so the
-    /// same-target retry is dropped and the walk moves on per `next`.
+    /// This disposition once its breaker outcome is applied: a failed seat
+    /// whose breaker then reads open, whoever opened it, leaves nothing to
+    /// retry there, so the same-target retry is dropped and the walk moves on
+    /// per `next`.
     #[must_use]
-    pub(super) fn after_breaker(self, opened: bool) -> Self {
-        if opened {
+    pub(super) fn after_breaker(self, breaker_open: bool) -> Self {
+        if breaker_open {
             Self {
                 same_target: SameProvider::No,
                 ..self

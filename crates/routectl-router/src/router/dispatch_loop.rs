@@ -431,6 +431,8 @@ impl Router {
                     }
                     continue;
                 }
+                // Defensive: config builds a provider-less target only as a pool's
+                // placeholder seat, which the arm above handles.
                 let err = Error::UnknownProvider(provider_name.to_string());
                 if !A::SURFACE.unknown_provider_walks() {
                     return Err(err);
@@ -934,18 +936,20 @@ impl Router {
                             walk,
                         );
                         let debits = disposition.breaker != BreakerOutcome::None;
-                        let (opened, breaker_effect) = self.apply_breaker_outcome(
+                        let breaker_effect = self.apply_breaker_outcome(
                             state_key,
                             disposition.breaker,
                             &cf.class,
                             probe_guard.breaker_epoch(),
                         );
-                        let disposition = disposition.after_breaker(opened);
-                        disposition.record_on(walk);
                         // A debit or park settled any half-open slot the
                         // attempt held; an outcome that records nothing frees
-                        // it here, before any retry, walk or terminal exit.
+                        // it here, before the breaker is read and before any
+                        // retry, walk or terminal exit.
                         probe_guard.settle(disposition.breaker);
+                        let disposition =
+                            disposition.after_breaker(self.breaker_reads_open(state_key));
+                        disposition.record_on(walk);
                         // Outside the debit gate: a credential rejection
                         // classifies Auth, which never debits.
                         self.park_credential_on_rejection(

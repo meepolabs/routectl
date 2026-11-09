@@ -3330,8 +3330,9 @@ impl Router {
     }
 
     /// This router, with every dispatch target of the model `nickname`
-    /// carrying no provider and no seat set: a chain entry naming a provider
-    /// nothing registered.
+    /// carrying no provider: a chain entry naming a provider nothing
+    /// registered. The model must not be pool-backed; a provider-less seat
+    /// reads as a pool placeholder instead.
     #[cfg(test)]
     #[must_use]
     pub(crate) const fn with_providerless_model_for_tests(
