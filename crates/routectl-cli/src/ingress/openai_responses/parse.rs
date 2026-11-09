@@ -519,14 +519,15 @@ fn push_message_item(messages: &mut Vec<Message>, item: &Value) {
     });
 }
 
-fn parse_role(role: Option<&str>) -> Role {
+pub(super) fn parse_role(role: Option<&str>) -> Role {
     match role {
         Some("assistant") => Role::Assistant,
         Some("system" | "developer") => Role::System,
-        // user is the default for any other / missing role: a Responses
-        // input item with no recognized role is overwhelmingly a user
-        // turn, and defaulting to user keeps the conversation coherent.
-        _ => Role::User,
+        Some("user") | None => Role::User,
+        // Each egress decides how to carry a tag it does not know; collapsing
+        // it onto user here would erase the choice for the egresses that can
+        // forward it verbatim.
+        Some(other) => Role::Other(other.to_owned()),
     }
 }
 

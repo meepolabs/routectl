@@ -301,6 +301,34 @@ fn message_item_without_type_but_with_role_is_treated_as_message() {
 }
 
 #[test]
+fn unknown_role_parses_to_other_and_missing_role_to_user() {
+    // Arrange
+    let rows: [(&str, Option<&str>, Role); 4] = [
+        ("unknown tag", Some("critic"), Role::Other("critic".into())),
+        ("missing role", None, Role::User),
+        ("developer", Some("developer"), Role::System),
+        ("assistant", Some("assistant"), Role::Assistant),
+    ];
+
+    for (name, wire, expected) in rows {
+        // Act
+        let role = super::parse::parse_role(wire);
+
+        // Assert
+        assert_eq!(
+            role.as_wire_str(),
+            expected.as_wire_str(),
+            "row `{name}`: {role:?}"
+        );
+        assert_eq!(
+            matches!(role, Role::Other(_)),
+            matches!(expected, Role::Other(_)),
+            "row `{name}`: {role:?}"
+        );
+    }
+}
+
+#[test]
 fn system_role_message_item_maps_to_role_system() {
     // Arrange
     let body = json!({
@@ -2032,6 +2060,34 @@ fn unmodeled_input_item_kinds_round_trip_through_responses_egress() {
     assert_eq!(lsc["id"], "lsc_1");
     assert_eq!(lsc["action"]["command"][0], "ls");
     assert_eq!(lsc["action"]["command"][1], "-la");
+}
+
+#[test]
+fn unknown_role_round_trips_to_the_responses_wire() {
+    // Arrange
+    let body = json!({
+        "model": "gpt-5",
+        "input": [
+            {"type": "message", "role": "user", "content": "draft"},
+            {"type": "message", "role": "critic", "content": [
+                {"type": "input_text", "text": "review it"}
+            ]}
+        ]
+    });
+
+    // Act
+    let req = parse(body);
+    let out = responses_egress_body_api_key(&req);
+
+    // Assert
+    let roles: Vec<&str> = out["input"]
+        .as_array()
+        .expect("egress input array")
+        .iter()
+        .filter(|i| i["type"] == "message")
+        .filter_map(|i| i.get("role").and_then(serde_json::Value::as_str))
+        .collect();
+    assert_eq!(roles, ["user", "critic"], "egress body: {out}");
 }
 
 #[test]
