@@ -534,6 +534,11 @@ jobs:
       - name: AWS-LC build environment preflight self-test
         run: bash scripts/assert-aws-lc-env.test.sh
 
+      # The release workflow runs this linkage check on every Linux artifact
+      # before attesting it; the self-test compiles its own control binaries.
+      - name: release linkage check self-test
+        run: bash scripts/check-release-linkage.test.sh
+
       # The fixture corpus is gitignored, so CI has no fixture to load and
       # a rig regression would otherwise only surface on a contributor's
       # next capture -- against a corpus that cannot be recaptured. The

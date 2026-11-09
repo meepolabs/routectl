@@ -9667,6 +9667,11 @@ new section or a second doc.
   names only
 - `assert-aws-lc-env.test.sh` -- self-test for the AWS-LC environment
   preflight
+- `check-release-linkage.sh` -- release-workflow check that a staged Linux
+  binary has no NEEDED `libssl` / `libcrypto` entry and does have
+  `libc.so.6` (via `readelf -d`)
+- `check-release-linkage.test.sh` -- self-test for the release linkage
+  check; compiles its control binaries with `cc`
 - `check-nav-index.sh` -- check that every `crates/**/*.rs` (minus
   `*_tests.rs` sidecars) and every `scripts/**/*.sh` appears by path in this
   file or `DEVELOPMENT.md`; existence only, never row wording or freshness.
