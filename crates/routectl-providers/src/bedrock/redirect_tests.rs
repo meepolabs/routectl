@@ -3,23 +3,14 @@
 //! cross-host hop, so this lane's client refuses to follow a 3xx and
 //! the lane maps the surfaced status to a retryable upstream 502.
 //!
-//! Unlike every other credentialed lane, `BedrockConfig` carries no
-//! `base_url`: the endpoint is derived from the region
-//! (`endpoint::bedrock_runtime_url`), so no config can point
-//! `complete()` at a mock server and the two halves of the posture are
-//! pinned separately.
-//!
-//!   - The refusal is pinned against the provider's OWN client -- the
-//!     exact `reqwest::Client` a lane-local `Client::builder()`
-//!     regression would replace -- driven through the same two-server
-//!     harness the other lanes use.
-//!   - The error class is pinned on the mapping the lane's `300..400`
-//!     arm calls, resolved under the `bedrock` classification family
-//!     (which has its own token table, so a 502 is not classified for
-//!     this lane by the other lanes' passing tests).
+//! `BedrockConfig` carries no `base_url` (the endpoint is derived from
+//! the region), so a real provider is aimed at the two-server harness
+//! through `with_runtime_origin_for_tests` and driven via `complete()`.
+//! The error class is resolved under the `bedrock` classification
+//! family, which has its own token table, so a 502 is not classified
+//! for this lane by the other lanes' passing tests.
 
 use super::*;
-use routectl_core::failure_class::{FailureClass, classify};
 use routectl_testkit::redirect_pin::CrossHostRedirect;
 
 const PROVIDER_ID: &str = "bedrock:redirect";
@@ -70,20 +61,29 @@ async fn lane_client_does_not_follow_cross_host_redirect() {
     pin.assert_target_untouched().await;
 }
 
-#[test]
-fn unfollowed_redirect_classifies_as_a_retryable_server_fault() {
-    let err = crate::http_client::redirect_not_followed_error(PROVIDER_ID);
+fn redirect_request() -> ChatRequest {
+    serde_json::from_value(serde_json::json!({
+        "model": "claude-x",
+        "max_tokens": 64,
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "ping"}]}],
+    }))
+    .expect("fixture is a canonical request")
+}
 
-    match &err {
-        Error::Upstream { status, .. } => assert_eq!(
-            *status, 502,
-            "a 3xx must surface as a mapped upstream server fault, not the bare redirect status"
-        ),
-        other => panic!("expected Error::Upstream from an unfollowed 302, got {other:?}"),
-    }
-    assert_eq!(
-        classify(&err, Some("bedrock")).class,
-        FailureClass::ServerError,
-        "a redirect the client refuses to follow must classify (and retry / fail over) like a server fault"
-    );
+#[tokio::test]
+async fn complete_surfaces_cross_host_redirect_as_retryable_502() {
+    let pin = CrossHostRedirect::start().await;
+    let resolved = auth::resolve(&redirect_creds(), "us-west-2")
+        .await
+        .expect("resolve");
+    let provider = BedrockProvider::new(redirect_cfg(), resolved)
+        .expect("canonical region")
+        .with_runtime_origin_for_tests(&pin.origin_uri());
+
+    let err = provider
+        .complete(redirect_request())
+        .await
+        .expect_err("a 302 from the configured host must not yield a response");
+
+    pin.assert_not_followed(&err, "bedrock").await;
 }
