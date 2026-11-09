@@ -5,9 +5,11 @@
 use std::sync::Arc;
 
 use futures::StreamExt;
+use routectl_core::wire_check::{DeclaredEdit, EditKind, EditSite, Leg, WireTap};
 use routectl_core::{
     ChatRequest, ContentPart, CustomTool, Error, KnownContentPart, Message, MessageContent,
-    Provider, RefusalReason, ResponsesPassthroughItem, Role, StaticToken, ToolDef,
+    Provider, RefusalReason, RequestProvenance, ResponsesPassthroughItem, Role, StaticToken,
+    ToolDef,
 };
 use serde_json::{Value, json};
 use wiremock::matchers::{method, path};
@@ -467,4 +469,176 @@ async fn mantle_does_not_inspect_tool_schemas() {
         Some(&Value::String(planted_s3())),
         "{body}"
     );
+}
+
+fn planted_http() -> String {
+    format!("http://{PLANTED_HOST}/{PLANTED_PATH}.png")
+}
+
+/// A user turn from the Responses dialect carrying one unmodeled part built
+/// from `block`, which the egress forwards as written.
+fn forwarded_part_request(block: &Value) -> ChatRequest {
+    let mut extras = block.as_object().cloned().expect("block is an object");
+    let type_tag = match extras.remove("type") {
+        Some(Value::String(tag)) => tag,
+        other => panic!("block needs a string type, got {other:?}"),
+    };
+    let part = ContentPart::Other {
+        type_tag,
+        cache_control: None,
+        extras,
+    };
+    let mut req = request(vec![message(
+        Role::User,
+        MessageContent::Parts(vec![text("look"), part]),
+    )]);
+    req.routectl_internal.provenance = RequestProvenance::ResponsesIngress;
+    req
+}
+
+/// How a forwarded-part row must end on the Mantle lane.
+enum Outcome {
+    /// Refused locally by the media URL check.
+    MediaRefusal,
+    /// Refused locally by the user file url rule.
+    UrlOnlyFileRefusal,
+    /// Sent, with the part on the wire as `expected`.
+    Sent { expected: Value },
+}
+
+fn forwarded_part_rows() -> Vec<(&'static str, Value, Outcome)> {
+    let http = planted_http();
+    let file_data = "data:application/pdf;base64,JVBER";
+    vec![
+        (
+            "http image_url nested two levels deep",
+            json!({
+                "type": "input_bundle_x",
+                "payload": {"inner": {"image_url": {"url": http}}}
+            }),
+            Outcome::MediaRefusal,
+        ),
+        (
+            "http file_url",
+            json!({"type": "input_document_x", "file_url": http}),
+            Outcome::MediaRefusal,
+        ),
+        (
+            "non-string url member",
+            json!({"type": "input_video_x", "video_url": 7}),
+            Outcome::MediaRefusal,
+        ),
+        (
+            "input_file carrying only an https file_url",
+            json!({"type": "input_file", "file_url": "https://example.com/a.pdf"}),
+            Outcome::UrlOnlyFileRefusal,
+        ),
+        (
+            "https and data urls nested",
+            json!({
+                "type": "input_bundle_x",
+                "payload": {
+                    "inner": {"image_url": {"url": "https://example.com/a.png"}},
+                    "thumb_url": "data:image/png;base64,AAAA"
+                }
+            }),
+            Outcome::Sent {
+                expected: json!({
+                    "type": "input_bundle_x",
+                    "payload": {
+                        "inner": {"image_url": {"url": "https://example.com/a.png"}},
+                        "thumb_url": "data:image/png;base64,AAAA"
+                    }
+                }),
+            },
+        ),
+        (
+            "input_file with file_data and file_url",
+            json!({
+                "type": "input_file",
+                "file_data": file_data,
+                "file_url": "https://example.com/a.pdf",
+                "filename": "a.pdf"
+            }),
+            Outcome::Sent {
+                expected: json!({
+                    "type": "input_file",
+                    "file_data": file_data,
+                    "filename": "a.pdf"
+                }),
+            },
+        ),
+    ]
+}
+
+fn assert_url_only_file_refusal(result: Result<(), Error>, row: &str) {
+    match result {
+        Err(Error::NormalizeRequest(_, msg, RefusalReason::Unrepresentable)) => {
+            assert!(msg.contains("only file_url"), "{row}: {msg}");
+            assert!(!msg.contains("example.com"), "{row}: echoes the url: {msg}");
+        }
+        other => panic!("{row}: expected the url-only file refusal, got {other:?}"),
+    }
+}
+
+fn declares_file_url_withhold(edits: &[DeclaredEdit]) -> bool {
+    edits.iter().any(|e| {
+        e.site() == EditSite::AuthSurfaceGate
+            && e.path() == "/input/*/content/*/file_url"
+            && e.kind() == EditKind::Remove
+    })
+}
+
+async fn send_forwarded(stream: bool, req: ChatRequest) -> (MockServer, Result<(), Error>) {
+    let server = mock_upstream().await;
+    let provider = mantle_provider(&server.uri()).await;
+    let result = if stream {
+        match provider.stream(req).await {
+            Ok(mut chunks) => {
+                while chunks.next().await.is_some() {}
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
+    } else {
+        provider.complete(req).await.map(|_| ())
+    };
+    (server, result)
+}
+
+#[tokio::test]
+async fn mantle_refuses_unforwardable_url_inside_forwarded_part() {
+    for (row, block, outcome) in forwarded_part_rows() {
+        for stream in [false, true] {
+            let row = format!("{row} (stream={stream})");
+            let tap = WireTap::default();
+            let mut req = forwarded_part_request(&block);
+            req.routectl_internal.wire_tap = Some(tap.clone());
+
+            let (server, result) = send_forwarded(stream, req).await;
+
+            match &outcome {
+                Outcome::MediaRefusal => {
+                    assert_media_refusal(result, &row);
+                    assert_eq!(hit_count(&server).await, 0, "{row}: no upstream call");
+                }
+                Outcome::UrlOnlyFileRefusal => {
+                    assert_url_only_file_refusal(result, &row);
+                    assert_eq!(hit_count(&server).await, 0, "{row}: no upstream call");
+                }
+                Outcome::Sent { expected } => {
+                    result.unwrap_or_else(|e| panic!("{row}: must reach the upstream, got {e:?}"));
+                    let body = wire_body(&server).await;
+                    assert_eq!(body.pointer("/input/0/content/1"), Some(expected), "{row}");
+                    let withheld = block.get("file_data").is_some();
+                    let edits = tap.take_request();
+                    assert_eq!(
+                        declares_file_url_withhold(edits.edits(Leg::Request)),
+                        withheld,
+                        "{row}: file_url withhold declaration"
+                    );
+                }
+            }
+        }
+    }
 }

@@ -244,6 +244,11 @@ pub enum ResponsesContentItem {
         #[serde(skip_serializing_if = "Option::is_none")]
         filename: Option<String>,
     },
+    /// A content block this hub does not model, forwarded as the client
+    /// sent it: the object carries its own `type`. Only a request that
+    /// arrived in the Responses dialect produces one.
+    #[serde(untagged)]
+    Verbatim(Map<String, Value>),
 }
 
 /// One summary block on a `Reasoning` input item. Mirrors the codex

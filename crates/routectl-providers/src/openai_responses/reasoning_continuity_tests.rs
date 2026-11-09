@@ -73,8 +73,14 @@ fn thinking(text: &str, signature: Option<&str>) -> ContentPart {
 
 /// The `input[]` a client turn carrying `parts` produces on `lane`.
 fn input_for(lane: AuthKind, parts: Vec<ContentPart>) -> Vec<ResponseInputItem> {
-    build_input("test", lane, &[user_turn("hi"), assistant_parts(parts)])
-        .expect("translation must not fail on a well-formed turn")
+    build_input(
+        "test",
+        lane,
+        routectl_core::RequestProvenance::Library,
+        &[user_turn("hi"), assistant_parts(parts)],
+        None,
+    )
+    .expect("translation must not fail on a well-formed turn")
 }
 
 fn reasoning_items(items: &[ResponseInputItem]) -> Vec<(&Option<String>, &str)> {
@@ -557,7 +563,14 @@ fn a_natively_tagged_same_family_artifact_still_replays() {
     ];
 
     // Act
-    let out = build_input("test", AuthKind::ChatgptOauth, &messages).expect("translation");
+    let out = build_input(
+        "test",
+        AuthKind::ChatgptOauth,
+        routectl_core::RequestProvenance::Library,
+        &messages,
+        None,
+    )
+    .expect("translation");
 
     // Assert
     assert_eq!(

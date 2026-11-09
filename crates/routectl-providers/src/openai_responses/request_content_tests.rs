@@ -439,31 +439,170 @@ fn image_values_no_string_slot_can_hold_are_refused_as_unrepresentable() {
 }
 
 // ---------------------------------------------------------------------------
-// unrepresentable parts still warn-drop, and their neighbours still ship
+// unmodeled content parts: forwarded from the Responses dialect, counted and
+// declared from any other
 // ---------------------------------------------------------------------------
 
-#[test]
-fn user_forward_compat_part_drops_and_neighbouring_text_still_ships() {
-    // Arrange: an unknown part type beside valid text. The part is
-    // well-formed, just unrepresentable here, so the turn still ships.
-    let req = req_with(vec![user_parts(vec![
-        text_part("hello"),
-        ContentPart::Other {
-            type_tag: "video_url".into(),
-            cache_control: None,
-            extras: serde_json::Map::new(),
-        },
-    ])]);
-
-    // Act
-    let v = translate_to_json(&cfg(), &req);
-
-    // Assert: the text survives; the unknown part is gone.
-    assert_eq!(
-        v["input"][0]["content"],
-        json!([{"type": "input_text", "text": "hello"}])
-    );
+/// The client block an unmodeled part was preserved from, with nested
+/// members so a forward that rebuilt or flattened it would show.
+fn unknown_block() -> Value {
+    json!({
+        "type": "input_audio_x",
+        "audio": {"data": "AAAA", "format": "wav"},
+        "segments": [1, {"label": "intro"}]
+    })
 }
+
+fn unknown_part() -> ContentPart {
+    let mut extras = unknown_block().as_object().cloned().expect("object");
+    extras.remove("type");
+    ContentPart::Other {
+        type_tag: "input_audio_x".into(),
+        cache_control: None,
+        extras,
+    }
+}
+
+/// What one translation of `messages` under `provenance` produced: the wire
+/// body, the drop and lane-volume deltas, and the declared request edits.
+struct UnknownPartRun {
+    wire: Value,
+    drop_delta: u64,
+    seen_delta: u64,
+    edits: Vec<(
+        routectl_core::wire_check::EditSite,
+        String,
+        routectl_core::wire_check::EditKind,
+    )>,
+}
+
+fn run_unknown_part(
+    provenance: routectl_core::RequestProvenance,
+    messages: Vec<Message>,
+) -> UnknownPartRun {
+    let tap = routectl_core::wire_check::WireTap::default();
+    let mut req = req_with(messages);
+    req.routectl_internal.provenance = provenance;
+    req.routectl_internal.wire_tap = Some(tap.clone());
+
+    let drops_before = responses_drop_count("content_part_unrepresentable");
+    let seen_before = responses_lane_seen_count();
+    let wire = translate_to_json(&cfg_api_key(), &req);
+    let drop_delta = responses_drop_count("content_part_unrepresentable") - drops_before;
+    let seen_delta = responses_lane_seen_count() - seen_before;
+
+    let edits = tap
+        .take_request()
+        .edits(routectl_core::wire_check::Leg::Request)
+        .iter()
+        .map(|e| (e.site(), e.path().to_string(), e.kind()))
+        .collect();
+    UnknownPartRun {
+        wire,
+        drop_delta,
+        seen_delta,
+        edits,
+    }
+}
+
+fn declares_unknown_part_remove(run: &UnknownPartRun) -> bool {
+    run.edits.iter().any(|(site, path, kind)| {
+        *site == routectl_core::wire_check::EditSite::DialectFieldStrip
+            && path == "/messages/*/content/*"
+            && *kind == routectl_core::wire_check::EditKind::Remove
+    })
+}
+
+/// Rows by provenance: only the Responses dialect forwards; every other
+/// source drops the part, counts it once and declares the Remove.
+fn unknown_part_rows() -> [(&'static str, routectl_core::RequestProvenance, bool); 4] {
+    use routectl_core::RequestProvenance as P;
+    [
+        ("responses ingress", P::ResponsesIngress, true),
+        ("anthropic ingress", P::AnthropicIngress, false),
+        ("chat ingress", P::OpenaiIngress, false),
+        ("library", P::Library, false),
+    ]
+}
+
+fn assert_unknown_part_policy(
+    row: &str,
+    forwards: bool,
+    run: &UnknownPartRun,
+    content: &Value,
+    text_item: &Value,
+) {
+    // Positive control: the lane saw exactly this request, so a zero drop
+    // delta is a real zero rather than a request that never translated.
+    assert_eq!(run.seen_delta, 1, "{row}: lane_seen");
+    let items = content.as_array().expect("content array");
+    assert_eq!(items[0], *text_item, "{row}: neighbouring text ships");
+    if forwards {
+        assert_eq!(items.len(), 2, "{row}: {content}");
+        assert_eq!(
+            serde_json::to_vec(&items[1]).expect("serialize"),
+            serde_json::to_vec(&unknown_block()).expect("serialize"),
+            "{row}: the part reaches the wire byte-identical"
+        );
+        assert_eq!(run.drop_delta, 0, "{row}: a forward is not a drop");
+        assert!(!declares_unknown_part_remove(run), "{row}: {:?}", run.edits);
+    } else {
+        assert_eq!(items.len(), 1, "{row}: the part is gone: {content}");
+        assert_eq!(run.drop_delta, 1, "{row}: one drop per request");
+        assert!(declares_unknown_part_remove(run), "{row}: {:?}", run.edits);
+    }
+}
+
+#[test]
+fn unknown_user_part_forwards_same_dialect_and_counts_otherwise() {
+    for (row, provenance, forwards) in unknown_part_rows() {
+        // Arrange: two unmodeled parts in one request still count once.
+        let messages = vec![
+            user_parts(vec![text_part("hello"), unknown_part()]),
+            user_parts(vec![text_part("again"), unknown_part()]),
+        ];
+
+        // Act
+        let run = run_unknown_part(provenance, messages);
+
+        // Assert
+        assert_unknown_part_policy(
+            row,
+            forwards,
+            &run,
+            &run.wire["input"][0]["content"],
+            &json!({"type": "input_text", "text": "hello"}),
+        );
+    }
+}
+
+#[test]
+fn unknown_assistant_part_forwards_same_dialect_and_counts_otherwise() {
+    for (row, provenance, forwards) in unknown_part_rows() {
+        // Arrange
+        let messages = vec![
+            user_text("hi"),
+            assistant_parts(vec![text_part("answer"), unknown_part()]),
+        ];
+
+        // Act
+        let run = run_unknown_part(provenance, messages);
+
+        // Assert
+        assert_unknown_part_policy(
+            row,
+            forwards,
+            &run,
+            &run.wire["input"][1]["content"],
+            &json!({"type": "output_text", "text": "answer"}),
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// unrepresentable tool-result parts still warn-drop, and their neighbours
+// still ship
+// ---------------------------------------------------------------------------
 
 #[test]
 fn tool_result_unrepresentable_part_drops_and_image_still_ships() {

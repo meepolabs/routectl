@@ -310,12 +310,6 @@ const EXPECTED_UNMARKED_LOSS_LOGS: &[(&str, &str, &str, &str)] = &[
          two callers is itself caller-attributed rather than marked, so the chain does not close",
     ),
     (
-        "openai_responses/messages.rs",
-        "build_user_content",
-        "dropping forward-compat user content part",
-        "the forward-compat half of the same user part drop, on the same unclosed chain",
-    ),
-    (
         "openai_responses/mod.rs",
         "complete",
         "output_item.done beyond cap",
@@ -495,7 +489,8 @@ const EXPECTED_RESOLVED_LOG_COUNTS: &[(&str, &str, usize)] = &[
         1,
     ),
     ("openai_responses/messages.rs", "translate_user_message", 1),
-    ("openai_responses/messages.rs", "walk_assistant_part", 4),
+    ("openai_responses/messages.rs", "unknown_content_part", 1),
+    ("openai_responses/messages.rs", "walk_assistant_part", 3),
     (
         "openai_responses/request.rs",
         "log_dropped_cache_control",

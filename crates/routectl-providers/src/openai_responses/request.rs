@@ -20,7 +20,9 @@ use routectl_core::{
 };
 use serde_json::Value;
 
-use super::messages::build_input;
+use super::messages::{
+    UnknownParts, build_input, withholds_forwarded_file_url, withholds_user_file_url,
+};
 use super::system::{flush_fingerprint_tally, record_developer_turn_withhold, translate_system};
 use super::tools::{translate_tool_choice, translate_tools};
 use super::types::{ResponseInput, ResponsesRequest};
@@ -144,7 +146,8 @@ fn build_input_with_passthrough(
     req: &ChatRequest,
     tap: Option<&WireTap>,
 ) -> Result<Vec<ResponseInput>> {
-    let items = build_input(id, auth_kind, &req.messages)?;
+    let provenance = req.routectl_internal.provenance;
+    let items = build_input(id, auth_kind, provenance, &req.messages, tap)?;
     let modeled: Vec<ResponseInput> = items.into_iter().map(ResponseInput::Item).collect();
     let passthrough = &req.routectl_internal.responses_input_passthrough;
     let merged = merge_passthrough(modeled, passthrough);
@@ -251,16 +254,27 @@ fn declare_lane_gates(tap: &WireTap, auth_kind: AuthKind, req: &ChatRequest) {
     }
 }
 
-/// True when a user turn carries a file part whose `file_url` the Mantle
-/// lane leaves off the wire.
+/// True when the Mantle lane leaves a client `file_url` off the wire: on a
+/// user turn's modeled file part, or on any turn's unmodeled `input_file`
+/// part forwarded from the Responses dialect.
 fn carries_user_file_url(req: &ChatRequest) -> bool {
+    let forwards_unknown =
+        UnknownParts::for_provenance(req.routectl_internal.provenance) == UnknownParts::Forward;
+    let withholds = |is_user: bool, part: &ContentPart| match part {
+        ContentPart::Known(KnownContentPart::File { file, .. }) => {
+            is_user && withholds_user_file_url(AuthKind::BedrockMantle, file)
+        }
+        ContentPart::Other {
+            type_tag, extras, ..
+        } => {
+            forwards_unknown
+                && withholds_forwarded_file_url(AuthKind::BedrockMantle, type_tag, extras)
+        }
+        ContentPart::Known(_) => false,
+    };
     req.messages.iter().any(|m| {
-        matches!(m.role, Role::User)
-            && matches!(&m.content, MessageContent::Parts(parts) if parts.iter().any(|p| matches!(
-                p,
-                ContentPart::Known(KnownContentPart::File { file, .. })
-                    if super::messages::withholds_user_file_url(AuthKind::BedrockMantle, file)
-            )))
+        let is_user = matches!(m.role, Role::User);
+        matches!(&m.content, MessageContent::Parts(parts) if parts.iter().any(|p| withholds(is_user, p)))
     })
 }
 

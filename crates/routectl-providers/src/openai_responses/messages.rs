@@ -21,20 +21,23 @@
 //!   base64 `data` or `url` is absent or empty, and a file part naming none
 //!   of `file_data`, `file_id`, `file_url` all ship as sent (`image_url: ""`,
 //!   a bare `input_file`). The upstream decides, and its rejection is
-//!   learnable. Bedrock Mantle is the exception for media URLs: it fetches
+//!   learnable. A content part this egress does not model ships as the
+//!   client wrote it when the request arrived in the Responses dialect.
+//!   Bedrock Mantle is the exception for media URLs: it fetches
 //!   them itself, so a non-`https`/`data` (or empty) `image_url` or
 //!   `file_url` is refused on that lane after translation.
 //! - REFUSED (`unrepresentable`): no slot can hold the value -- an
 //!   `image_url` that is not an object, an image `data` / `url` that is
 //!   not a string, or a file part whose only carriers are not strings.
 //!   A user file whose only carrier is `file_url` is refused on Bedrock
-//!   Mantle too, though the slot exists (see `translate_file_part`).
+//!   Mantle too, though the slot exists (see `translate_file_part`); so is
+//!   a forwarded unmodeled `input_file` part of that shape.
 //!   The request FAILS with a `normalize_request` error that names the
 //!   offending field and content location, and never echoes a
 //!   caller-controlled type tag or any raw content value.
 //! - DROPPED: the part is well-formed but this egress has no slot for it (a
 //!   canonical part kind the Responses API does not model, a forward-compat
-//!   part, an unknown image-source kind, a tool-result part with no
+//!   part from another dialect, an unknown image-source kind, a tool-result part with no
 //!   tool-output slot). The request is legitimate and serviceable, so the
 //!   part DROPS with a WARN and the rest of the turn still ships;
 //!   hard-failing here would turn working cross-dialect routes into 400s
@@ -80,10 +83,13 @@
 
 use serde_json::Value;
 
+use routectl_core::wire_check::{EditKind, EditSite, WireTap};
 use routectl_core::{
-    ContentPart, Error, KnownContentPart, Message, MessageContent, Replayability, Result, Role,
-    is_replayable, is_responses_family, reasoning_envelope, sanitize_for_log, scheme_of,
+    ContentPart, Error, KnownContentPart, Message, MessageContent, Replayability,
+    RequestProvenance, Result, Role, is_replayable, is_responses_family, reasoning_envelope,
+    sanitize_for_log, scheme_of,
 };
+use serde_json::Map;
 
 use crate::bounded_diagnostics::BoundedLogSample;
 use crate::skipped_format::render_skipped_format;
@@ -118,6 +124,7 @@ struct ResponsesDropTally {
     reasoning_scheme_incompatible: bool,
     reasoning_text_unsigned: bool,
     tool_result_part_unsupported: bool,
+    content_part_unrepresentable: bool,
 }
 
 impl ResponsesDropTally {
@@ -145,6 +152,10 @@ impl ResponsesDropTally {
         self.tool_result_part_unsupported = true;
     }
 
+    const fn record_content_part_unrepresentable(&mut self) {
+        self.content_part_unrepresentable = true;
+    }
+
     /// Bump one process-wide counter per drop class this request hit at
     /// least once. The lane's request-volume denominator is NOT bumped
     /// here: `request::translate` owns the single `record_translation_lane_seen`
@@ -158,7 +169,10 @@ impl ResponsesDropTally {
     /// agree there. A drop RATE computed inside the test binary is therefore
     /// not meaningful; a delta on a single class still is, which is what the
     /// pinning tests assert.
-    fn flush(&self) {
+    ///
+    /// A dropped unmodeled content part is also declared on `tap` as one
+    /// Remove under the client's `messages` content, once per request.
+    fn flush(&self, tap: Option<&WireTap>) {
         if self.image_source_kind {
             record_translation_drop(super::LANE, "image_source_kind_unrepresentable");
         }
@@ -177,6 +191,38 @@ impl ResponsesDropTally {
         if self.tool_result_part_unsupported {
             record_translation_drop(super::LANE, "tool_result_part_unsupported");
         }
+        if self.content_part_unrepresentable {
+            record_translation_drop(super::LANE, "content_part_unrepresentable");
+            if let Some(tap) = tap {
+                crate::wire_declare::declare(
+                    tap,
+                    EditSite::DialectFieldStrip,
+                    "/messages/*/content/*",
+                    EditKind::Remove,
+                );
+            }
+        }
+    }
+}
+
+/// What this egress does with a content part it does not model.
+///
+/// A request that arrived in the Responses dialect sent that block to a
+/// Responses API, so it is forwarded as written. From any other dialect the
+/// block was shaped for a different wire and has no slot here, so it drops
+/// and is counted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum UnknownParts {
+    Forward,
+    Drop,
+}
+
+impl UnknownParts {
+    pub(super) const fn for_provenance(provenance: RequestProvenance) -> Self {
+        match provenance {
+            RequestProvenance::ResponsesIngress => Self::Forward,
+            _ => Self::Drop,
+        }
     }
 }
 
@@ -189,22 +235,29 @@ impl ResponsesDropTally {
 /// `auth_kind` names the lane this request is bound for: replay
 /// portability is a property of the (artifact lane, target lane) pair,
 /// so every reasoning artifact is gated against it before egress.
+///
+/// `provenance` decides what happens to a content part this egress does not
+/// model (see [`UnknownParts`]).
 pub(super) fn build_input(
     id: &str,
     auth_kind: AuthKind,
+    provenance: RequestProvenance,
     messages: &[Message],
+    tap: Option<&WireTap>,
 ) -> Result<Vec<ResponseInputItem>> {
     let mut tally = ResponsesDropTally::default();
-    let out = build_input_tallied(id, auth_kind, messages, &mut tally);
+    let unknown = UnknownParts::for_provenance(provenance);
+    let out = build_input_tallied(id, auth_kind, unknown, messages, &mut tally);
     // Flushed before the `?`-free return so a request that FAILS after
     // dropping something still reports the drop it already made.
-    tally.flush();
+    tally.flush(tap);
     out
 }
 
 fn build_input_tallied(
     id: &str,
     auth_kind: AuthKind,
+    unknown: UnknownParts,
     messages: &[Message],
     tally: &mut ResponsesDropTally,
 ) -> Result<Vec<ResponseInputItem>> {
@@ -220,11 +273,13 @@ fn build_input_tallied(
             // TRANSLATION-DROP: structural -- a text-only system turn is lifted into `instructions` by the system translation, and any other system turn is emitted in place below
             Role::System => {
                 if msg.content.has_non_text_part() {
-                    translate_system_message(id, auth_kind, msg, &mut out, tally)?;
+                    translate_system_message(id, auth_kind, unknown, msg, &mut out, tally)?;
                 }
             }
-            Role::User => translate_user_message(id, auth_kind, msg, &mut out, tally)?,
-            Role::Assistant => translate_assistant_message(id, auth_kind, msg, &mut out, tally)?,
+            Role::User => translate_user_message(id, auth_kind, unknown, msg, &mut out, tally)?,
+            Role::Assistant => {
+                translate_assistant_message(id, auth_kind, unknown, msg, &mut out, tally)?;
+            }
             Role::Tool => translate_tool_message(id, auth_kind, msg, &mut out, tally)?,
             // This function serves callers whose ingress dialect is
             // openai_responses itself as well as callers translating in
@@ -240,7 +295,7 @@ fn build_input_tallied(
             // goes through the same tool-result lift and content build a
             // `Role::User` turn does.
             Role::Other(tag) => {
-                translate_other_message(id, auth_kind, tag, msg, &mut out, tally)?;
+                translate_other_message(id, auth_kind, unknown, tag, msg, &mut out, tally)?;
             }
         }
     }
@@ -254,6 +309,7 @@ fn build_input_tallied(
 fn translate_user_message(
     id: &str,
     auth_kind: AuthKind,
+    unknown: UnknownParts,
     msg: &Message,
     out: &mut Vec<ResponseInputItem>,
     tally: &mut ResponsesDropTally,
@@ -267,7 +323,7 @@ fn translate_user_message(
     // function call <id>".
     extract_tool_results(id, &msg.content, out);
 
-    let content = build_user_content(id, auth_kind, &msg.content, tally)?;
+    let content = build_user_content(id, auth_kind, unknown, &msg.content, tally)?;
     if content.is_empty() {
         tracing::debug!(
             provider = id,
@@ -290,6 +346,7 @@ fn translate_user_message(
 fn translate_other_message(
     id: &str,
     auth_kind: AuthKind,
+    unknown: UnknownParts,
     tag: &str,
     msg: &Message,
     out: &mut Vec<ResponseInputItem>,
@@ -309,7 +366,7 @@ fn translate_other_message(
     let msg = &msg;
     extract_tool_results(id, &msg.content, out);
 
-    let content = build_user_content(id, auth_kind, &msg.content, tally)?;
+    let content = build_user_content(id, auth_kind, unknown, &msg.content, tally)?;
     if content.is_empty() {
         tracing::debug!(
             provider = id,
@@ -332,6 +389,7 @@ fn translate_other_message(
 fn translate_system_message(
     id: &str,
     auth_kind: AuthKind,
+    unknown: UnknownParts,
     msg: &Message,
     out: &mut Vec<ResponseInputItem>,
     tally: &mut ResponsesDropTally,
@@ -339,7 +397,7 @@ fn translate_system_message(
     let Some(msg) = crate::system_filter::without_billing_attribution(msg) else {
         return Ok(());
     };
-    let content = build_user_content(id, auth_kind, &msg.content, tally)?;
+    let content = build_user_content(id, auth_kind, unknown, &msg.content, tally)?;
     if !content.is_empty() {
         out.push(ResponseInputItem::Message {
             role: "system".into(),
@@ -455,6 +513,7 @@ fn tool_result_to_output_body(id: &str, content: &Value) -> FunctionCallOutputBo
 fn translate_assistant_message(
     id: &str,
     auth_kind: AuthKind,
+    unknown: UnknownParts,
     msg: &Message,
     out: &mut Vec<ResponseInputItem>,
     tally: &mut ResponsesDropTally,
@@ -492,15 +551,28 @@ fn translate_assistant_message(
                 .iter()
                 .any(|p| matches!(p, ContentPart::Known(KnownContentPart::ToolUse { .. })));
             for p in parts {
-                walk_assistant_part(
-                    id,
-                    auth_kind,
-                    p,
-                    suppress_thinking_parts,
-                    &mut reasoning_items,
-                    &mut message_content,
-                    &mut tool_calls,
-                )?;
+                match p {
+                    ContentPart::Known(known) => walk_assistant_part(
+                        id,
+                        auth_kind,
+                        known,
+                        suppress_thinking_parts,
+                        &mut reasoning_items,
+                        &mut message_content,
+                        &mut tool_calls,
+                    )?,
+                    ContentPart::Other {
+                        type_tag, extras, ..
+                    } => {
+                        let part = UnknownPart {
+                            role: "assistant",
+                            type_tag,
+                            extras,
+                        };
+                        message_content
+                            .extend(unknown_content_part(id, auth_kind, unknown, &part, tally)?);
+                    }
+                }
             }
         }
     }
@@ -842,6 +914,7 @@ fn translate_tool_message(
 fn build_user_content(
     id: &str,
     auth_kind: AuthKind,
+    unknown: UnknownParts,
     content: &MessageContent,
     tally: &mut ResponsesDropTally,
 ) -> Result<Vec<ResponsesContentItem>> {
@@ -883,13 +956,15 @@ fn build_user_content(
                             "dropping unsupported user content part on Responses egress"
                         );
                     }
-                    ContentPart::Other { type_tag, .. } => {
-                        tracing::warn!(
-                            provider = id,
-                            part_type = %sanitize_for_log(type_tag),
-                            role = "user",
-                            "dropping forward-compat user content part on Responses egress"
-                        );
+                    ContentPart::Other {
+                        type_tag, extras, ..
+                    } => {
+                        let part = UnknownPart {
+                            role: "user",
+                            type_tag,
+                            extras,
+                        };
+                        out.extend(unknown_content_part(id, auth_kind, unknown, &part, tally)?);
                     }
                 }
             }
@@ -904,7 +979,8 @@ fn build_user_content(
 /// self-describing envelope, otherwise nothing (an opaque foreign blob is
 /// not a valid token for the `encrypted_content` slot); `Text` -> message
 /// content (output_text); `ToolUse` -> a separate `FunctionCall` input
-/// item. Everything else drops with a WARN.
+/// item. Every other known part drops with a WARN; an unmodeled part never
+/// reaches this walker (see [`unknown_content_part`]).
 ///
 /// `suppress_thinking_parts` is true when `reasoning_details` already
 /// produced Reasoning items: in that case Thinking + RedactedThinking
@@ -916,22 +992,22 @@ fn build_user_content(
 fn walk_assistant_part(
     id: &str,
     auth_kind: AuthKind,
-    p: &ContentPart,
+    p: &KnownContentPart,
     suppress_thinking_parts: bool,
     reasoning: &mut Vec<ResponseInputItem>,
     message_content: &mut Vec<ResponsesContentItem>,
     tool_calls: &mut Vec<ResponseInputItem>,
 ) -> Result<()> {
     match p {
-        ContentPart::Known(KnownContentPart::Text { text, .. }) => {
+        KnownContentPart::Text { text, .. } => {
             if !text.is_empty() {
                 message_content.push(ResponsesContentItem::OutputText { text: text.clone() });
             }
         }
-        ContentPart::Known(KnownContentPart::Thinking {
+        KnownContentPart::Thinking {
             thinking,
             signature,
-        }) => {
+        } => {
             if suppress_thinking_parts {
                 tracing::debug!(
                     provider = id,
@@ -947,7 +1023,7 @@ fn walk_assistant_part(
                 ));
             }
         }
-        ContentPart::Known(KnownContentPart::RedactedThinking { data }) => {
+        KnownContentPart::RedactedThinking { data } => {
             if suppress_thinking_parts {
                 tracing::debug!(
                     provider = id,
@@ -973,12 +1049,12 @@ fn walk_assistant_part(
                 reasoning.extend(decode_redacted_thinking(data, auth_kind));
             }
         }
-        ContentPart::Known(KnownContentPart::ToolUse {
+        KnownContentPart::ToolUse {
             id: tu_id,
             name,
             input,
             ..
-        }) => {
+        } => {
             tool_calls.push(ResponseInputItem::FunctionCall {
                 call_id: crate::tool_id::sanitize_tool_id(tu_id).into_owned(),
                 name: name.clone(),
@@ -987,20 +1063,12 @@ fn walk_assistant_part(
                 })?,
             });
         }
-        ContentPart::Known(other) => {
+        other => {
             tracing::warn!(
                 provider = id,
                 part_type = other.type_tag(),
                 role = "assistant",
                 "dropping unsupported assistant content part on Responses egress"
-            );
-        }
-        ContentPart::Other { type_tag, .. } => {
-            tracing::warn!(
-                provider = id,
-                part_type = %sanitize_for_log(type_tag),
-                role = "assistant",
-                "dropping forward-compat assistant content part on Responses egress"
             );
         }
     }
@@ -1152,14 +1220,34 @@ const FILE_CARRIER_KEYS: [&str; 3] = ["file_data", "file_id", "file_url"];
 /// part still names its bytes without the url. A Mantle part whose only
 /// carrier is the url is refused instead (see `translate_file_part`).
 pub(super) fn withholds_user_file_url(auth_kind: AuthKind, file: &Value) -> bool {
-    let non_empty = |key: &str| {
-        file.get(key)
-            .and_then(Value::as_str)
-            .is_some_and(|s| !s.is_empty())
-    };
+    file.as_object()
+        .is_some_and(|fields| withholds_file_url_field(auth_kind, fields))
+}
+
+/// [`withholds_user_file_url`] over a file part's carrier fields.
+fn withholds_file_url_field(auth_kind: AuthKind, fields: &Map<String, Value>) -> bool {
     matches!(auth_kind, AuthKind::BedrockMantle)
-        && non_empty("file_url")
-        && (non_empty("file_data") || non_empty("file_id"))
+        && non_empty_str(fields, "file_url")
+        && (non_empty_str(fields, "file_data") || non_empty_str(fields, "file_id"))
+}
+
+fn non_empty_str(fields: &Map<String, Value>, key: &str) -> bool {
+    fields
+        .get(key)
+        .and_then(Value::as_str)
+        .is_some_and(|s| !s.is_empty())
+}
+
+/// The refusal for a user file whose only carrier is `file_url` on Bedrock
+/// Mantle, which forwards no client-supplied file url: a file must arrive
+/// inline or by file id there.
+fn url_only_file_refusal(id: &str) -> Error {
+    Error::normalize_request(
+        id,
+        "file content part on a user message carries only file_url, which \
+         bedrock-mantle does not forward: send file_data or file_id",
+        RefusalReason::Unrepresentable,
+    )
 }
 
 /// Translate an OpenAI-shape `File` part's nested `file` object into a
@@ -1176,19 +1264,12 @@ fn translate_file_part(
         file_url,
         filename,
     } = file_carrier(id, file.as_object())?;
-    // The Mantle lane forwards no client-supplied file url: a file must
-    // arrive inline or by file id there.
     if matches!(auth_kind, AuthKind::BedrockMantle)
         && file_url.is_some()
         && file_data.is_none()
         && file_id.is_none()
     {
-        return Err(Error::normalize_request(
-            id,
-            "file content part on a user message carries only file_url, which \
-             bedrock-mantle does not forward: send file_data or file_id",
-            RefusalReason::Unrepresentable,
-        ));
+        return Err(url_only_file_refusal(id));
     }
     let file_url = file_url.filter(|_| !withholds_user_file_url(auth_kind, file));
     Ok(ResponsesContentItem::InputFile {
@@ -1197,6 +1278,75 @@ fn translate_file_part(
         file_url,
         filename,
     })
+}
+
+/// A content part this egress does not model, as the ingress preserved it.
+struct UnknownPart<'a> {
+    role: &'static str,
+    type_tag: &'a str,
+    extras: &'a Map<String, Value>,
+}
+
+/// The wire item for an unmodeled content part, or `None` when it drops.
+///
+/// Forwarded verbatim (see [`UnknownParts`]), except that an `input_file`
+/// keeps the file url rule `translate_file_part` applies, on every turn: on
+/// Bedrock Mantle a url-only file is refused and a url beside the file's
+/// bytes is withheld. Any media url left in the part is checked on the
+/// serialized body before a Mantle send.
+fn unknown_content_part(
+    id: &str,
+    auth_kind: AuthKind,
+    unknown: UnknownParts,
+    part: &UnknownPart<'_>,
+    tally: &mut ResponsesDropTally,
+) -> Result<Option<ResponsesContentItem>> {
+    match unknown {
+        UnknownParts::Forward => forward_unknown_part(id, auth_kind, part).map(Some),
+        // TRANSLATION-DROP: lane=openai-responses class=content_part_unrepresentable test=unknown_user_part_forwards_same_dialect_and_counts_otherwise
+        UnknownParts::Drop => {
+            tracing::warn!(
+                provider = id,
+                part_type = %sanitize_for_log(part.type_tag),
+                role = part.role,
+                "dropping forward-compat content part on Responses egress"
+            );
+            tally.record_content_part_unrepresentable();
+            Ok(None)
+        }
+    }
+}
+
+fn forward_unknown_part(
+    id: &str,
+    auth_kind: AuthKind,
+    part: &UnknownPart<'_>,
+) -> Result<ResponsesContentItem> {
+    let mut block = part.extras.clone();
+    block.insert("type".into(), Value::String(part.type_tag.to_string()));
+    if part.type_tag == "input_file" {
+        let url_only = matches!(auth_kind, AuthKind::BedrockMantle)
+            && non_empty_str(&block, "file_url")
+            && !non_empty_str(&block, "file_data")
+            && !non_empty_str(&block, "file_id");
+        if url_only {
+            return Err(url_only_file_refusal(id));
+        }
+        if withholds_file_url_field(auth_kind, &block) {
+            block.remove("file_url");
+        }
+    }
+    Ok(ResponsesContentItem::Verbatim(block))
+}
+
+/// Whether this lane withholds the `file_url` of an unmodeled `input_file`
+/// part forwarded from the Responses dialect.
+pub(super) fn withholds_forwarded_file_url(
+    auth_kind: AuthKind,
+    type_tag: &str,
+    extras: &Map<String, Value>,
+) -> bool {
+    type_tag == "input_file" && withholds_file_url_field(auth_kind, extras)
 }
 
 /// Build a tool-output `input_file` item from a file part's carrier fields.
@@ -2116,7 +2266,14 @@ mod tool_calls_field_tests {
         ];
 
         // Act
-        let out = build_input("test", AuthKind::ChatgptOauth, &messages).unwrap();
+        let out = build_input(
+            "test",
+            AuthKind::ChatgptOauth,
+            routectl_core::RequestProvenance::Library,
+            &messages,
+            None,
+        )
+        .unwrap();
 
         // Assert: a function_call item carries the call data.
         let fc_idx = out
@@ -2168,7 +2325,14 @@ mod tool_calls_field_tests {
         ];
 
         // Act
-        let out = build_input("test", AuthKind::ChatgptOauth, &messages).unwrap();
+        let out = build_input(
+            "test",
+            AuthKind::ChatgptOauth,
+            routectl_core::RequestProvenance::Library,
+            &messages,
+            None,
+        )
+        .unwrap();
 
         // Assert
         let call_id = out
@@ -2216,7 +2380,14 @@ mod tool_calls_field_tests {
         ];
 
         // Act
-        let out = build_input("test", AuthKind::ChatgptOauth, &messages).unwrap();
+        let out = build_input(
+            "test",
+            AuthKind::ChatgptOauth,
+            routectl_core::RequestProvenance::Library,
+            &messages,
+            None,
+        )
+        .unwrap();
 
         // Assert: exactly one function_call item, not two.
         let count = out
@@ -2269,7 +2440,14 @@ mod tool_calls_field_tests {
         ];
 
         // Act
-        let out = build_input("test", AuthKind::ChatgptOauth, &messages).unwrap();
+        let out = build_input(
+            "test",
+            AuthKind::ChatgptOauth,
+            routectl_core::RequestProvenance::Library,
+            &messages,
+            None,
+        )
+        .unwrap();
 
         // Assert
         assert_eq!(
@@ -2326,7 +2504,14 @@ mod tool_calls_field_tests {
         ];
 
         // Act
-        let out = build_input("test", AuthKind::ChatgptOauth, &messages).unwrap();
+        let out = build_input(
+            "test",
+            AuthKind::ChatgptOauth,
+            routectl_core::RequestProvenance::Library,
+            &messages,
+            None,
+        )
+        .unwrap();
 
         // Assert
         assert_eq!(
@@ -2382,8 +2567,22 @@ mod tool_calls_field_tests {
         ];
 
         // Act
-        let part_out = build_input("test", AuthKind::ChatgptOauth, &via_part).unwrap();
-        let field_out = build_input("test", AuthKind::ChatgptOauth, &via_field).unwrap();
+        let part_out = build_input(
+            "test",
+            AuthKind::ChatgptOauth,
+            routectl_core::RequestProvenance::Library,
+            &via_part,
+            None,
+        )
+        .unwrap();
+        let field_out = build_input(
+            "test",
+            AuthKind::ChatgptOauth,
+            routectl_core::RequestProvenance::Library,
+            &via_field,
+            None,
+        )
+        .unwrap();
 
         // Assert
         assert_eq!(
@@ -2427,7 +2626,14 @@ mod tool_calls_field_tests {
         ];
 
         // Act
-        let out = build_input("test", AuthKind::ChatgptOauth, &messages).unwrap();
+        let out = build_input(
+            "test",
+            AuthKind::ChatgptOauth,
+            routectl_core::RequestProvenance::Library,
+            &messages,
+            None,
+        )
+        .unwrap();
 
         // Assert
         assert_eq!(emitted_call_id(&out), "call_abc-1");
@@ -2474,7 +2680,14 @@ mod tool_calls_field_tests {
         ];
 
         // Act
-        let out = build_input("test", AuthKind::ChatgptOauth, &messages).unwrap();
+        let out = build_input(
+            "test",
+            AuthKind::ChatgptOauth,
+            routectl_core::RequestProvenance::Library,
+            &messages,
+            None,
+        )
+        .unwrap();
 
         // Assert: no function_call items; the assistant Message survives.
         assert!(
@@ -2535,7 +2748,14 @@ mod role_other_field_tests {
         // Act
         let mut out = Vec::new();
         let events = routectl_testkit::capture_events(|| {
-            out = build_input("test", AuthKind::ChatgptOauth, &messages).unwrap();
+            out = build_input(
+                "test",
+                AuthKind::ChatgptOauth,
+                routectl_core::RequestProvenance::Library,
+                &messages,
+                None,
+            )
+            .unwrap();
         });
 
         // Assert
@@ -2568,7 +2788,14 @@ mod role_other_field_tests {
         // Act
         let mut out = Vec::new();
         let events = routectl_testkit::capture_events(|| {
-            out = build_input("test", AuthKind::ChatgptOauth, &messages).unwrap();
+            out = build_input(
+                "test",
+                AuthKind::ChatgptOauth,
+                routectl_core::RequestProvenance::Library,
+                &messages,
+                None,
+            )
+            .unwrap();
         });
 
         // Assert
@@ -2663,8 +2890,14 @@ mod empty_tool_id_policy_tests {
             let messages = vec![user_text("hi"), tool_role_message(tool_call_id)];
 
             // Act
-            let out = build_input("test", AuthKind::ChatgptOauth, &messages)
-                .unwrap_or_else(|e| panic!("{name}: the output must forward, got {e}"));
+            let out = build_input(
+                "test",
+                AuthKind::ChatgptOauth,
+                routectl_core::RequestProvenance::Library,
+                &messages,
+                None,
+            )
+            .unwrap_or_else(|e| panic!("{name}: the output must forward, got {e}"));
 
             // Assert
             assert_eq!(output_call_ids(&out), vec![""], "{name}");
@@ -2677,8 +2910,14 @@ mod empty_tool_id_policy_tests {
         let messages = vec![user_text("hi"), tool_result_turn("")];
 
         // Act
-        let out = build_input("test", AuthKind::ChatgptOauth, &messages)
-            .expect("the output must forward");
+        let out = build_input(
+            "test",
+            AuthKind::ChatgptOauth,
+            routectl_core::RequestProvenance::Library,
+            &messages,
+            None,
+        )
+        .expect("the output must forward");
 
         // Assert
         assert_eq!(output_call_ids(&out), vec![""]);
@@ -2715,8 +2954,14 @@ mod empty_tool_id_policy_tests {
         );
 
         // Act
-        let out = build_input("test", AuthKind::ChatgptOauth, &messages)
-            .expect("the transcript must forward");
+        let out = build_input(
+            "test",
+            AuthKind::ChatgptOauth,
+            routectl_core::RequestProvenance::Library,
+            &messages,
+            None,
+        )
+        .expect("the transcript must forward");
 
         // Assert
         let call_ids: Vec<&str> = out
@@ -2736,8 +2981,14 @@ mod empty_tool_id_policy_tests {
         let messages = vec![user_text("hi"), tool_role_message(Some("call_1"))];
 
         // Act
-        let out = build_input("test", AuthKind::ChatgptOauth, &messages)
-            .expect("a valid tool_call_id must translate");
+        let out = build_input(
+            "test",
+            AuthKind::ChatgptOauth,
+            routectl_core::RequestProvenance::Library,
+            &messages,
+            None,
+        )
+        .expect("a valid tool_call_id must translate");
 
         // Assert
         assert_eq!(output_call_ids(&out), vec!["call_1"]);
@@ -2749,8 +3000,14 @@ mod empty_tool_id_policy_tests {
         let messages = vec![user_text("hi"), tool_result_turn("call_1")];
 
         // Act
-        let out = build_input("test", AuthKind::ChatgptOauth, &messages)
-            .expect("a valid tool_use_id must translate");
+        let out = build_input(
+            "test",
+            AuthKind::ChatgptOauth,
+            routectl_core::RequestProvenance::Library,
+            &messages,
+            None,
+        )
+        .expect("a valid tool_use_id must translate");
 
         // Assert
         assert_eq!(output_call_ids(&out), vec!["call_1"]);
@@ -2800,8 +3057,14 @@ mod part_type_log_injection_tests {
     fn rendered_part_types(role: Role) -> Vec<String> {
         let messages = vec![msg_with_hostile_part(role)];
         let events = routectl_testkit::capture_events(|| {
-            build_input("test", AuthKind::ChatgptOauth, &messages)
-                .expect("a forward-compat part warn-drops rather than failing");
+            build_input(
+                "test",
+                AuthKind::ChatgptOauth,
+                routectl_core::RequestProvenance::Library,
+                &messages,
+                None,
+            )
+            .expect("a forward-compat part warn-drops rather than failing");
         });
         events
             .iter()
