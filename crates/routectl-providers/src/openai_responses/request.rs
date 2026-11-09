@@ -256,10 +256,11 @@ fn declare_lane_gates(tap: &WireTap, auth_kind: AuthKind, req: &ChatRequest) {
 
 /// True when the Mantle lane leaves a client `file_url` off the wire: on a
 /// user turn's modeled file part, or on any turn's unmodeled `input_file`
-/// part forwarded from the Responses dialect.
+/// part rebuilt from the Responses dialect.
 fn carries_user_file_url(req: &ChatRequest) -> bool {
-    let forwards_unknown =
-        UnknownParts::for_provenance(req.routectl_internal.provenance) == UnknownParts::Forward;
+    let rebuilds_unknown_files =
+        UnknownParts::for_request(req.routectl_internal.provenance, AuthKind::BedrockMantle)
+            == UnknownParts::RebuildFilesOnly;
     let withholds = |is_user: bool, part: &ContentPart| match part {
         ContentPart::Known(KnownContentPart::File { file, .. }) => {
             is_user && withholds_user_file_url(AuthKind::BedrockMantle, file)
@@ -267,7 +268,7 @@ fn carries_user_file_url(req: &ChatRequest) -> bool {
         ContentPart::Other {
             type_tag, extras, ..
         } => {
-            forwards_unknown
+            rebuilds_unknown_files
                 && withholds_forwarded_file_url(AuthKind::BedrockMantle, type_tag, extras)
         }
         ContentPart::Known(_) => false,

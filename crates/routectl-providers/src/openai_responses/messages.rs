@@ -22,7 +22,8 @@
 //!   of `file_data`, `file_id`, `file_url` all ship as sent (`image_url: ""`,
 //!   a bare `input_file`). The upstream decides, and its rejection is
 //!   learnable. A content part this egress does not model ships as the
-//!   client wrote it when the request arrived in the Responses dialect.
+//!   client wrote it when the request arrived in the Responses dialect,
+//!   except on Bedrock Mantle (see `UnknownParts`).
 //!   Bedrock Mantle is the exception for media URLs: it fetches
 //!   them itself, so a non-`https`/`data` (or empty) `image_url` or
 //!   `file_url` is refused on that lane after translation.
@@ -31,15 +32,17 @@
 //!   not a string, or a file part whose only carriers are not strings.
 //!   A user file whose only carrier is `file_url` is refused on Bedrock
 //!   Mantle too, though the slot exists (see `translate_file_part`); so is
-//!   a forwarded unmodeled `input_file` part of that shape.
+//!   an unmodeled `input_file` part of that shape from the Responses
+//!   dialect, which that lane rebuilds as a modeled file part.
 //!   The request FAILS with a `normalize_request` error that names the
 //!   offending field and content location, and never echoes a
 //!   caller-controlled type tag or any raw content value.
 //! - DROPPED: the part is well-formed but this egress has no slot for it (a
 //!   canonical part kind the Responses API does not model, a forward-compat
-//!   part from another dialect, an unknown image-source kind, a tool-result part with no
-//!   tool-output slot). The request is legitimate and serviceable, so the
-//!   part DROPS with a WARN and the rest of the turn still ships;
+//!   part from another dialect or bound for Bedrock Mantle, an unknown
+//!   image-source kind, a tool-result part with no tool-output slot). The
+//!   request is legitimate and serviceable, so the part DROPS with a WARN
+//!   and the rest of the turn still ships;
 //!   hard-failing here would turn working cross-dialect routes into 400s
 //!   and make every new canonical part kind a breaking change at every
 //!   egress that cannot emit it. The audience for that WARN is the
@@ -211,16 +214,26 @@ impl ResponsesDropTally {
 /// Responses API, so it is forwarded as written. From any other dialect the
 /// block was shaped for a different wire and has no slot here, so it drops
 /// and is counted.
+///
+/// Bedrock Mantle fetches urls in `input` under the operator's identity and
+/// documents no list of the members it reads, so no client-shaped block
+/// reaches it: an `input_file` is rebuilt from its modeled carrier fields
+/// and every other unmodeled part drops and is counted, whatever the
+/// dialect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum UnknownParts {
     Forward,
+    RebuildFilesOnly,
     Drop,
 }
 
 impl UnknownParts {
-    pub(super) const fn for_provenance(provenance: RequestProvenance) -> Self {
-        match provenance {
-            RequestProvenance::ResponsesIngress => Self::Forward,
+    pub(super) const fn for_request(provenance: RequestProvenance, auth_kind: AuthKind) -> Self {
+        match (provenance, auth_kind) {
+            (RequestProvenance::ResponsesIngress, AuthKind::BedrockMantle) => {
+                Self::RebuildFilesOnly
+            }
+            (RequestProvenance::ResponsesIngress, _) => Self::Forward,
             _ => Self::Drop,
         }
     }
@@ -246,7 +259,7 @@ pub(super) fn build_input(
     tap: Option<&WireTap>,
 ) -> Result<Vec<ResponseInputItem>> {
     let mut tally = ResponsesDropTally::default();
-    let unknown = UnknownParts::for_provenance(provenance);
+    let unknown = UnknownParts::for_request(provenance, auth_kind);
     let out = build_input_tallied(id, auth_kind, unknown, messages, &mut tally);
     // Flushed before the `?`-free return so a request that FAILS after
     // dropping something still reports the drop it already made.
@@ -1289,11 +1302,10 @@ struct UnknownPart<'a> {
 
 /// The wire item for an unmodeled content part, or `None` when it drops.
 ///
-/// Forwarded verbatim (see [`UnknownParts`]), except that an `input_file`
-/// keeps the file url rule `translate_file_part` applies, on every turn: on
-/// Bedrock Mantle a url-only file is refused and a url beside the file's
-/// bytes is withheld. Any media url left in the part is checked on the
-/// serialized body before a Mantle send.
+/// Forwarded verbatim, rebuilt as a modeled `input_file`, or dropped, per
+/// [`UnknownParts`]. A rebuilt `input_file` goes through
+/// `translate_file_part`, so only its carrier fields can ship and the
+/// Mantle file url rule applies to it as to a modeled file part.
 fn unknown_content_part(
     id: &str,
     auth_kind: AuthKind,
@@ -1302,9 +1314,13 @@ fn unknown_content_part(
     tally: &mut ResponsesDropTally,
 ) -> Result<Option<ResponsesContentItem>> {
     match unknown {
-        UnknownParts::Forward => forward_unknown_part(id, auth_kind, part).map(Some),
+        UnknownParts::Forward => Ok(Some(forward_unknown_part(part))),
+        UnknownParts::RebuildFilesOnly if part.type_tag == "input_file" => {
+            let fields = Value::Object(part.extras.clone());
+            translate_file_part(id, auth_kind, &fields).map(Some)
+        }
         // TRANSLATION-DROP: lane=openai-responses class=content_part_unrepresentable test=unknown_user_part_forwards_same_dialect_and_counts_otherwise
-        UnknownParts::Drop => {
+        UnknownParts::RebuildFilesOnly | UnknownParts::Drop => {
             tracing::warn!(
                 provider = id,
                 part_type = %sanitize_for_log(part.type_tag),
@@ -1317,26 +1333,10 @@ fn unknown_content_part(
     }
 }
 
-fn forward_unknown_part(
-    id: &str,
-    auth_kind: AuthKind,
-    part: &UnknownPart<'_>,
-) -> Result<ResponsesContentItem> {
+fn forward_unknown_part(part: &UnknownPart<'_>) -> ResponsesContentItem {
     let mut block = part.extras.clone();
     block.insert("type".into(), Value::String(part.type_tag.to_string()));
-    if part.type_tag == "input_file" {
-        let url_only = matches!(auth_kind, AuthKind::BedrockMantle)
-            && non_empty_str(&block, "file_url")
-            && !non_empty_str(&block, "file_data")
-            && !non_empty_str(&block, "file_id");
-        if url_only {
-            return Err(url_only_file_refusal(id));
-        }
-        if withholds_file_url_field(auth_kind, &block) {
-            block.remove("file_url");
-        }
-    }
-    Ok(ResponsesContentItem::Verbatim(block))
+    ResponsesContentItem::Verbatim(block)
 }
 
 /// Whether this lane withholds the `file_url` of an unmodeled `input_file`

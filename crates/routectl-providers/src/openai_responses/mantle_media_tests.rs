@@ -475,66 +475,114 @@ fn planted_http() -> String {
     format!("http://{PLANTED_HOST}/{PLANTED_PATH}.png")
 }
 
-/// A user turn from the Responses dialect carrying one unmodeled part built
-/// from `block`, which the egress forwards as written.
-fn forwarded_part_request(block: &Value) -> ChatRequest {
+/// A turn from the Responses dialect carrying `parts`.
+fn responses_request(role: Role, parts: Vec<ContentPart>) -> ChatRequest {
+    let mut req = request(vec![message(role, MessageContent::Parts(parts))]);
+    req.routectl_internal.provenance = RequestProvenance::ResponsesIngress;
+    req
+}
+
+/// The unmodeled part the ingress builds from `block`.
+fn other_part(block: &Value) -> ContentPart {
     let mut extras = block.as_object().cloned().expect("block is an object");
     let type_tag = match extras.remove("type") {
         Some(Value::String(tag)) => tag,
         other => panic!("block needs a string type, got {other:?}"),
     };
-    let part = ContentPart::Other {
+    ContentPart::Other {
         type_tag,
         cache_control: None,
         extras,
-    };
-    let mut req = request(vec![message(
-        Role::User,
-        MessageContent::Parts(vec![text("look"), part]),
-    )]);
-    req.routectl_internal.provenance = RequestProvenance::ResponsesIngress;
-    req
+    }
+}
+
+/// A `role` turn from the Responses dialect: a text part, then one
+/// unmodeled part built from `block`.
+fn forwarded_part_request(role: Role, block: &Value) -> ChatRequest {
+    responses_request(role, vec![text("look"), other_part(block)])
+}
+
+fn content_part_drops() -> u64 {
+    crate::translation_drop_metrics::translation_drop_snapshot()
+        .into_iter()
+        .find(|e| e.lane == "openai-responses" && e.drop_class == "content_part_unrepresentable")
+        .map_or(0, |e| e.drop_count)
 }
 
 /// How a forwarded-part row must end on the Mantle lane.
 enum Outcome {
-    /// Refused locally by the media URL check.
-    MediaRefusal,
-    /// Refused locally by the user file url rule.
-    UrlOnlyFileRefusal,
+    /// Refused locally, before any upstream call, with an unrepresentable
+    /// error naming `message`.
+    Refused { message: &'static str },
+    /// Sent with the part gone, counted once and its Remove declared.
+    Dropped,
     /// Sent, with the part on the wire as `expected`.
     Sent { expected: Value },
 }
 
-fn forwarded_part_rows() -> Vec<(&'static str, Value, Outcome)> {
+fn sent(expected: Value) -> Outcome {
+    Outcome::Sent { expected }
+}
+
+const URL_ONLY_FILE: Outcome = Outcome::Refused {
+    message: "only file_url",
+};
+
+fn unmodeled_part_rows() -> Vec<(&'static str, Role, Value, Outcome)> {
     let http = planted_http();
-    let file_data = "data:application/pdf;base64,JVBER";
+    let s3 = planted_s3();
     vec![
         (
             "http image_url nested two levels deep",
-            json!({
-                "type": "input_bundle_x",
-                "payload": {"inner": {"image_url": {"url": http}}}
-            }),
-            Outcome::MediaRefusal,
+            Role::User,
+            json!({"type": "input_bundle_x", "payload": {"inner": {"image_url": {"url": http}}}}),
+            Outcome::Dropped,
         ),
         (
             "http file_url",
+            Role::User,
             json!({"type": "input_document_x", "file_url": http}),
-            Outcome::MediaRefusal,
+            Outcome::Dropped,
+        ),
+        (
+            "upper-case FILE_URL",
+            Role::User,
+            json!({"type": "input_document_x", "FILE_URL": http}),
+            Outcome::Dropped,
         ),
         (
             "non-string url member",
+            Role::User,
             json!({"type": "input_video_x", "video_url": 7}),
-            Outcome::MediaRefusal,
+            Outcome::Dropped,
         ),
         (
-            "input_file carrying only an https file_url",
-            json!({"type": "input_file", "file_url": "https://example.com/a.pdf"}),
-            Outcome::UrlOnlyFileRefusal,
+            "s3 source with a uri member",
+            Role::User,
+            json!({"type": "input_document_x", "source": {"type": "s3", "uri": s3}}),
+            Outcome::Dropped,
+        ),
+        (
+            "url under a parameters member",
+            Role::User,
+            json!({"type": "input_bundle_x", "parameters": {"image_url": http}}),
+            Outcome::Dropped,
+        ),
+        (
+            "tool_use shaped part with a file_url input",
+            Role::User,
+            json!({"type": "tool_use", "input": {"file_url": http}}),
+            Outcome::Dropped,
+        ),
+        (
+            "upper-case INPUT_FILE type with an http file_url",
+            Role::User,
+            json!({"type": "INPUT_FILE", "file_url": http}),
+            Outcome::Dropped,
         ),
         (
             "https and data urls nested",
+            Role::User,
             json!({
                 "type": "input_bundle_x",
                 "payload": {
@@ -542,42 +590,99 @@ fn forwarded_part_rows() -> Vec<(&'static str, Value, Outcome)> {
                     "thumb_url": "data:image/png;base64,AAAA"
                 }
             }),
-            Outcome::Sent {
-                expected: json!({
-                    "type": "input_bundle_x",
-                    "payload": {
-                        "inner": {"image_url": {"url": "https://example.com/a.png"}},
-                        "thumb_url": "data:image/png;base64,AAAA"
-                    }
-                }),
+            Outcome::Dropped,
+        ),
+        (
+            "assistant turn s3 source",
+            Role::Assistant,
+            json!({"type": "input_document_x", "source": {"type": "s3", "uri": s3}}),
+            Outcome::Dropped,
+        ),
+    ]
+}
+
+fn input_file_rows() -> Vec<(&'static str, Role, Value, Outcome)> {
+    let http = planted_http();
+    let file_data = "data:application/pdf;base64,JVBER";
+    vec![
+        (
+            "input_file carrying only an https file_url",
+            Role::User,
+            json!({"type": "input_file", "file_url": "https://example.com/a.pdf"}),
+            URL_ONLY_FILE,
+        ),
+        (
+            "assistant input_file carrying only an https file_url",
+            Role::Assistant,
+            json!({"type": "input_file", "file_url": "https://example.com/a.pdf"}),
+            URL_ONLY_FILE,
+        ),
+        (
+            "input_file carrying only a non-string file_url",
+            Role::User,
+            json!({"type": "input_file", "file_url": {"url": http}}),
+            Outcome::Refused {
+                message: "no string carrier",
             },
         ),
         (
             "input_file with file_data and file_url",
+            Role::User,
             json!({
                 "type": "input_file",
                 "file_data": file_data,
                 "file_url": "https://example.com/a.pdf",
                 "filename": "a.pdf"
             }),
-            Outcome::Sent {
-                expected: json!({
-                    "type": "input_file",
-                    "file_data": file_data,
-                    "filename": "a.pdf"
-                }),
-            },
+            sent(json!({"type": "input_file", "file_data": file_data, "filename": "a.pdf"})),
+        ),
+        (
+            "input_file with file_data and an upper-case FILE_URL",
+            Role::User,
+            json!({"type": "input_file", "file_data": file_data, "FILE_URL": http}),
+            sent(json!({"type": "input_file", "file_data": file_data})),
+        ),
+        (
+            "input_file with file_data and a nested url source",
+            Role::User,
+            json!({
+                "type": "input_file",
+                "file_data": file_data,
+                "source": {"type": "url", "url": http}
+            }),
+            sent(json!({"type": "input_file", "file_data": file_data})),
+        ),
+        (
+            "input_file with file_data and an empty file_url",
+            Role::User,
+            json!({"type": "input_file", "file_data": file_data, "file_url": ""}),
+            sent(json!({"type": "input_file", "file_data": file_data})),
+        ),
+        (
+            "input_file with file_data and a non-string file_url",
+            Role::User,
+            json!({"type": "input_file", "file_data": file_data, "file_url": {"url": http}}),
+            sent(json!({"type": "input_file", "file_data": file_data})),
+        ),
+        (
+            "input_file with file_id and an http file_url",
+            Role::User,
+            json!({"type": "input_file", "file_id": "file-abc", "file_url": http}),
+            sent(json!({"type": "input_file", "file_id": "file-abc"})),
         ),
     ]
 }
 
-fn assert_url_only_file_refusal(result: Result<(), Error>, row: &str) {
+fn assert_local_refusal(result: Result<(), Error>, row: &str, expected: &str) {
     match result {
         Err(Error::NormalizeRequest(_, msg, RefusalReason::Unrepresentable)) => {
-            assert!(msg.contains("only file_url"), "{row}: {msg}");
-            assert!(!msg.contains("example.com"), "{row}: echoes the url: {msg}");
+            assert!(msg.contains(expected), "{row}: {msg}");
+            assert!(
+                !msg.contains("example.com") && !msg.contains(PLANTED_HOST),
+                "{row}: echoes the url: {msg}"
+            );
         }
-        other => panic!("{row}: expected the url-only file refusal, got {other:?}"),
+        other => panic!("{row}: expected an unrepresentable refusal, got {other:?}"),
     }
 }
 
@@ -589,56 +694,180 @@ fn declares_file_url_withhold(edits: &[DeclaredEdit]) -> bool {
     })
 }
 
-async fn send_forwarded(stream: bool, req: ChatRequest) -> (MockServer, Result<(), Error>) {
-    let server = mock_upstream().await;
-    let provider = mantle_provider(&server.uri()).await;
-    let result = if stream {
-        match provider.stream(req).await {
-            Ok(mut chunks) => {
-                while chunks.next().await.is_some() {}
-                Ok(())
-            }
-            Err(e) => Err(e),
-        }
+fn declares_part_remove(edits: &[DeclaredEdit]) -> bool {
+    edits.iter().any(|e| {
+        e.site() == EditSite::DialectFieldStrip
+            && e.path() == "/messages/*/content/*"
+            && e.kind() == EditKind::Remove
+    })
+}
+
+async fn send(
+    provider: &OpenAiResponsesProvider,
+    stream: bool,
+    req: ChatRequest,
+) -> Result<(), Error> {
+    if stream {
+        let mut chunks = provider.stream(req).await?;
+        while chunks.next().await.is_some() {}
+        Ok(())
     } else {
         provider.complete(req).await.map(|_| ())
-    };
-    (server, result)
+    }
+}
+
+/// What one Mantle send of a forwarded-part request produced.
+struct MantleRun {
+    server: MockServer,
+    result: Result<(), Error>,
+    drop_delta: u64,
+    edits: Vec<DeclaredEdit>,
+}
+
+async fn send_mantle(stream: bool, mut req: ChatRequest) -> MantleRun {
+    let tap = WireTap::default();
+    req.routectl_internal.wire_tap = Some(tap.clone());
+    let server = mock_upstream().await;
+    let provider = mantle_provider(&server.uri()).await;
+    let before = content_part_drops();
+    let result = send(&provider, stream, req).await;
+    let drop_delta = content_part_drops() - before;
+    let edits = tap.take_request().edits(Leg::Request).to_vec();
+    MantleRun {
+        server,
+        result,
+        drop_delta,
+        edits,
+    }
+}
+
+/// No planted url, upper-case url member or s3 uri survives into `body`.
+fn assert_no_planted_url(body: &Value, row: &str) {
+    let raw = body.to_string();
+    for needle in [PLANTED_HOST, "FILE_URL", "s3://"] {
+        assert!(
+            !raw.contains(needle),
+            "{row}: {needle} reached the wire: {raw}"
+        );
+    }
+}
+
+async fn assert_mantle_outcome(row: &str, block: &Value, outcome: &Outcome, run: MantleRun) {
+    match outcome {
+        Outcome::Refused { message } => {
+            assert_local_refusal(run.result, row, message);
+            assert_eq!(hit_count(&run.server).await, 0, "{row}: no upstream call");
+        }
+        Outcome::Dropped => {
+            run.result
+                .unwrap_or_else(|e| panic!("{row}: must reach the upstream, got {e:?}"));
+            let body = wire_body(&run.server).await;
+            let content = body.pointer("/input/0/content").expect("content");
+            assert_eq!(content.as_array().map(Vec::len), Some(1), "{row}: {body}");
+            assert_no_planted_url(&body, row);
+            assert_eq!(run.drop_delta, 1, "{row}: one drop per request");
+            assert!(declares_part_remove(&run.edits), "{row}: {:?}", run.edits);
+        }
+        Outcome::Sent { expected } => {
+            run.result
+                .unwrap_or_else(|e| panic!("{row}: must reach the upstream, got {e:?}"));
+            let body = wire_body(&run.server).await;
+            assert_eq!(body.pointer("/input/0/content/1"), Some(expected), "{row}");
+            assert_no_planted_url(&body, row);
+            assert_eq!(run.drop_delta, 0, "{row}: a rebuilt file is not a drop");
+            assert!(!declares_part_remove(&run.edits), "{row}: {:?}", run.edits);
+            let withheld = block
+                .get("file_url")
+                .and_then(Value::as_str)
+                .is_some_and(|u| !u.is_empty());
+            assert_eq!(
+                declares_file_url_withhold(&run.edits),
+                withheld,
+                "{row}: file_url withhold declaration"
+            );
+        }
+    }
 }
 
 #[tokio::test]
 async fn mantle_refuses_unforwardable_url_inside_forwarded_part() {
-    for (row, block, outcome) in forwarded_part_rows() {
+    for (row, role, block, outcome) in unmodeled_part_rows() {
         for stream in [false, true] {
             let row = format!("{row} (stream={stream})");
-            let tap = WireTap::default();
-            let mut req = forwarded_part_request(&block);
-            req.routectl_internal.wire_tap = Some(tap.clone());
-
-            let (server, result) = send_forwarded(stream, req).await;
-
-            match &outcome {
-                Outcome::MediaRefusal => {
-                    assert_media_refusal(result, &row);
-                    assert_eq!(hit_count(&server).await, 0, "{row}: no upstream call");
-                }
-                Outcome::UrlOnlyFileRefusal => {
-                    assert_url_only_file_refusal(result, &row);
-                    assert_eq!(hit_count(&server).await, 0, "{row}: no upstream call");
-                }
-                Outcome::Sent { expected } => {
-                    result.unwrap_or_else(|e| panic!("{row}: must reach the upstream, got {e:?}"));
-                    let body = wire_body(&server).await;
-                    assert_eq!(body.pointer("/input/0/content/1"), Some(expected), "{row}");
-                    let withheld = block.get("file_data").is_some();
-                    let edits = tap.take_request();
-                    assert_eq!(
-                        declares_file_url_withhold(edits.edits(Leg::Request)),
-                        withheld,
-                        "{row}: file_url withhold declaration"
-                    );
-                }
-            }
+            let run = send_mantle(stream, forwarded_part_request(role.clone(), &block)).await;
+            assert_mantle_outcome(&row, &block, &outcome, run).await;
         }
+    }
+}
+
+#[tokio::test]
+async fn mantle_rebuilds_forwarded_input_file_from_its_carrier_fields() {
+    for (row, role, block, outcome) in input_file_rows() {
+        for stream in [false, true] {
+            let row = format!("{row} (stream={stream})");
+            let run = send_mantle(stream, forwarded_part_request(role.clone(), &block)).await;
+            assert_mantle_outcome(&row, &block, &outcome, run).await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn mantle_ships_modeled_media_beside_a_dropped_unmodeled_part() {
+    let file_data = "data:application/pdf;base64,JVBER";
+    for stream in [false, true] {
+        let req = responses_request(
+            Role::User,
+            vec![
+                text("look"),
+                image_url("https://example.com/a.png"),
+                other_part(&json!({"type": "input_file", "file_data": file_data})),
+                other_part(&json!({
+                    "type": "input_document_x",
+                    "source": {"type": "s3", "uri": planted_s3()}
+                })),
+            ],
+        );
+
+        let run = send_mantle(stream, req).await;
+
+        run.result
+            .unwrap_or_else(|e| panic!("stream={stream}: must reach the upstream, got {e:?}"));
+        let body = wire_body(&run.server).await;
+        assert_eq!(
+            body.pointer("/input/0/content"),
+            Some(&json!([
+                {"type": "input_text", "text": "look"},
+                {"type": "input_image", "image_url": "https://example.com/a.png"},
+                {"type": "input_file", "file_data": file_data}
+            ])),
+            "stream={stream}"
+        );
+        assert_eq!(run.drop_delta, 1, "stream={stream}");
+    }
+}
+
+#[tokio::test]
+async fn first_party_lane_forwards_an_unmodeled_part_verbatim() {
+    let block = json!({"type": "input_document_x", "source": {"type": "s3", "uri": planted_s3()}});
+    for stream in [false, true] {
+        let server = mock_upstream().await;
+        let provider = first_party_provider(&server.uri());
+        let before = content_part_drops();
+
+        send(
+            &provider,
+            stream,
+            forwarded_part_request(Role::User, &block),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("stream={stream}: must reach the upstream, got {e:?}"));
+
+        let body = wire_body(&server).await;
+        assert_eq!(
+            body.pointer("/input/0/content/1"),
+            Some(&block),
+            "stream={stream}"
+        );
+        assert_eq!(content_part_drops() - before, 0, "stream={stream}");
     }
 }

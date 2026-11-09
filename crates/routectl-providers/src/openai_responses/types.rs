@@ -246,7 +246,8 @@ pub enum ResponsesContentItem {
     },
     /// A content block this hub does not model, forwarded as the client
     /// sent it: the object carries its own `type`. Only a request that
-    /// arrived in the Responses dialect produces one.
+    /// arrived in the Responses dialect, bound for a lane other than
+    /// Bedrock Mantle, produces one.
     #[serde(untagged)]
     Verbatim(Map<String, Value>),
 }
