@@ -541,7 +541,7 @@ fn translate_known_part(k: &KnownContentPart, envelopes: &mut EnvelopeUnwrapTall
             input,
             cache_control,
         } => ContentBlock::ToolUse {
-            id: id.clone(),
+            id: crate::tool_id::sanitize_tool_id(id).into_owned(),
             name: name.clone(),
             input: input.clone(),
             cache_control: cache_control.clone(),

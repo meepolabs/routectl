@@ -37,9 +37,22 @@ fn base(extra: Value) -> ChatRequest {
 
 /// Assemble the Anthropic body through the shared normalizer with a tap.
 fn assemble(req: ChatRequest) -> (Value, Vec<DeclaredEdit>) {
+    assemble_on_lane(req, true)
+}
+
+/// [`assemble`] with the lane's `forward_system_turns` stated.
+fn assemble_on_lane(req: ChatRequest, forward_system_turns: bool) -> (Value, Vec<DeclaredEdit>) {
     let (req, tap) = tapped(req);
-    let body = request::normalize("wire-edits-test", &req, false, None, true, true, false)
-        .expect("fixture assembles");
+    let body = request::normalize(
+        "wire-edits-test",
+        &req,
+        false,
+        None,
+        true,
+        forward_system_turns,
+        false,
+    )
+    .expect("fixture assembles");
     (body, tap.take_request().edits(Leg::Request).to_vec())
 }
 
@@ -638,4 +651,66 @@ fn only_the_injected_schema_keys_are_explained() {
     for (name, extra, expected) in rows {
         assert_eq!(schema_findings(extra), expected, "row {name}");
     }
+}
+
+/// `call.1` in its wire-charset form.
+const SANITIZED_CALL_1: &str = "esc_call_2e1";
+
+#[test]
+fn tool_use_id_sanitized_and_declared_off_assistant_turns() {
+    let req = request_from(json!({"model": "claude-x", "max_tokens": 16, "messages": [
+        {"role": "user", "content": [
+            {"type": "text", "text": "replayed"},
+            {"type": "tool_use", "id": "call.1", "name": "f", "input": {}},
+        ]},
+    ]}));
+
+    let (body, edits) = assemble(req);
+
+    assert_eq!(body["messages"][0]["content"][1]["type"], "tool_use");
+    assert_eq!(body["messages"][0]["content"][1]["id"], SANITIZED_CALL_1);
+    assert_eq!(
+        edits_of(&edits, EditSite::ToolIdSanitize),
+        owned(&[(EditKind::Rewrite, "/messages/0/content/1/id")])
+    );
+}
+
+/// A system turn carrying a `tool_result` part, between two user turns,
+/// under a canonical `system` so the lane decides whether it rides in place.
+fn system_turn_with_tool_result() -> ChatRequest {
+    request_from(
+        json!({"model": "claude-x", "max_tokens": 16, "system": "rules",
+        "messages": [
+            user_turn(),
+            {"role": "system", "content": [
+                {"type": "text", "text": "note"},
+                {"type": "tool_result", "tool_use_id": "call.1", "content": "ok"},
+            ]},
+            {"role": "assistant", "content": "ok"},
+            user_turn(),
+        ]}),
+    )
+}
+
+#[test]
+fn forwarded_system_turn_tool_result_id_rewrite_is_declared() {
+    let (forwarded, forward_edits) = assemble_on_lane(system_turn_with_tool_result(), true);
+    let (lifted, lift_edits) = assemble_on_lane(system_turn_with_tool_result(), false);
+
+    assert_eq!(forwarded["messages"][1]["role"], "system");
+    assert_eq!(
+        forwarded["messages"][1]["content"][1]["tool_use_id"],
+        SANITIZED_CALL_1
+    );
+    assert_eq!(
+        edits_of(&forward_edits, EditSite::ToolIdSanitize),
+        owned(&[(EditKind::Rewrite, "/messages/1/content/1/tool_use_id")])
+    );
+    assert!(
+        lifted["messages"]
+            .as_array()
+            .is_some_and(|turns| turns.iter().all(|turn| turn["role"] != "system")),
+        "the lift keeps system turns off the wire: {lifted}"
+    );
+    assert!(edits_of(&lift_edits, EditSite::ToolIdSanitize).is_empty());
 }

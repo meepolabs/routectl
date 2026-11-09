@@ -15,6 +15,8 @@ use routectl_core::{
     ChatRequest, ContentPart, KnownContentPart, Message, MessageContent, Role, SystemContent,
 };
 
+use super::messages::SystemTurnPolicy;
+
 pub use crate::wire_declare::tap as tap_of;
 
 /// Declare one request-body edit when a tap is present; see
@@ -115,12 +117,17 @@ pub fn declare_sampling_clamp(
 /// Declare each `tool_use` id and `tool_result` `tool_use_id` the wire
 /// charset forces a rewrite of, at its canonical message and block index --
 /// the client's own indices on the Anthropic ingress, the one lane whose diff
-/// reads them. A `tool_use` id is rewritten on assistant turns only; a
-/// `tool_result` id on any turn translated part by part. Chat-shaped
-/// `tool_calls` and tool turns reach this egress only from a translating
-/// ingress, where no path is compared. The ids are re-sanitized to learn
-/// whether any changes; the walk runs only with a tap.
-pub fn declare_tool_id_sanitize(tap: Option<&WireTap>, messages: &[Message]) {
+/// reads them. Both ids are rewritten on every turn translated part by part:
+/// user, assistant and unrecognized-role turns, and system turns only when
+/// `system_turns` forwards them in place (a lifted system turn carries text
+/// alone). Chat-shaped `tool_calls` and tool turns reach this egress only from
+/// a translating ingress, where no path is compared. The ids are re-sanitized
+/// to learn whether any changes; the walk runs only with a tap.
+pub(super) fn declare_tool_id_sanitize(
+    tap: Option<&WireTap>,
+    messages: &[Message],
+    system_turns: SystemTurnPolicy,
+) {
     if tap.is_none() {
         return;
     }
@@ -128,15 +135,17 @@ pub fn declare_tool_id_sanitize(tap: Option<&WireTap>, messages: &[Message]) {
         let MessageContent::Parts(parts) = &msg.content else {
             continue;
         };
-        if matches!(msg.role, Role::Tool | Role::System) {
+        let is_translated = match msg.role {
+            Role::Tool => false,
+            Role::System => system_turns == SystemTurnPolicy::Forward,
+            Role::User | Role::Assistant | Role::Other(_) => true,
+        };
+        if !is_translated {
             continue;
         }
-        let is_assistant = matches!(msg.role, Role::Assistant);
         for (block, part) in parts.iter().enumerate() {
             let (id, field) = match part {
-                ContentPart::Known(KnownContentPart::ToolUse { id, .. }) if is_assistant => {
-                    (id, "id")
-                }
+                ContentPart::Known(KnownContentPart::ToolUse { id, .. }) => (id, "id"),
                 ContentPart::Known(KnownContentPart::ToolResult { tool_use_id, .. }) => {
                     (tool_use_id, "tool_use_id")
                 }
