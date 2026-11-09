@@ -104,6 +104,10 @@ pub(super) fn apply_layered_overlays(
     // attempt -- silently reintroducing the drop this field exists to fix.
     let captured_responses_input_passthrough =
         std::mem::take(&mut req.routectl_internal.responses_input_passthrough);
+    // The client's per-block cache breakpoints are inbound-request data the
+    // Responses egress re-attaches, so every chain attempt carries them.
+    let captured_responses_cache_breakpoints =
+        std::mem::take(&mut req.routectl_internal.responses_cache_breakpoints);
     // Preserve the ingress-captured verbatim `thinking.display` string:
     // like `responses_input_passthrough`, it is inbound-request data (the
     // client's literal display vocabulary the Anthropic-API egress
@@ -159,6 +163,7 @@ pub(super) fn apply_layered_overlays(
     internal.forwarded_bearer = captured_forwarded_bearer;
     internal.stainless_headers = captured_stainless_headers;
     internal.responses_input_passthrough = captured_responses_input_passthrough;
+    internal.responses_cache_breakpoints = captured_responses_cache_breakpoints;
     internal.anthropic_thinking_display = captured_anthropic_thinking_display;
     internal.anthropic_thinking = captured_anthropic_thinking;
     internal.withheld_betas = std::sync::Arc::clone(&target.withheld_betas);

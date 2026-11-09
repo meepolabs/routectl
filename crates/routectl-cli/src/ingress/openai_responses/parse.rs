@@ -125,8 +125,10 @@ pub(super) fn translate_request(headers: &HeaderMap, body: Value) -> Result<Chat
     // (see build_messages) rather than dropped. Tool declarations from
     // `additional_tools` items are held until the top-level tools parse.
     let mut origins = InputOrigins::default();
+    let mut breakpoint_sites = Vec::new();
     let additional_tools: Vec<Value> = match obj.remove("input") {
         Some(input) => {
+            breakpoint_sites = super::breakpoints::collect_sites(&input);
             let ParsedInput {
                 messages,
                 passthrough,
@@ -146,6 +148,12 @@ pub(super) fn translate_request(headers: &HeaderMap, body: Value) -> Result<Chat
     let lifted = crate::ingress::lift_system_messages(&mut req);
     let lift_edits = system_lift_edits(sent_instructions, &lifted, &origins);
     req.routectl_internal.declared_edits.extend(lift_edits);
+    req.routectl_internal.responses_cache_breakpoints = super::breakpoints::resolve(
+        breakpoint_sites,
+        &req.messages,
+        &origins.items,
+        &lifted.indices,
+    );
 
     // tools -> ToolDef[].
     if let Some(tools) = obj.remove("tools") {

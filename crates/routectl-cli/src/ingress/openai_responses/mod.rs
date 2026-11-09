@@ -36,6 +36,7 @@ use super::{
     StreamErrorClass, StreamRequestContext,
 };
 
+mod breakpoints;
 mod parse;
 #[cfg(test)]
 #[path = "parse_tests.rs"]

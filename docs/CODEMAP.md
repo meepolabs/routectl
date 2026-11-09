@@ -7908,6 +7908,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `src/ingress/openai_responses/parse.rs` -- Responses body -> canonical
   `ChatRequest`: `input[]` items, `instructions`, tools incl. `additional_tools`
   merge, reasoning, and the forward-compat `provider_extras` sweep
+- `src/ingress/openai_responses/breakpoints.rs` -- records per-block
+  `prompt_cache_breakpoint` values as `ResponsesCacheBreakpoint` entries
+  (post-lift text-block ordinal, text digest, value, client pointer) without
+  touching canonical content
 - `src/ingress/openai_responses/render.rs` -- canonical `ChatResponse` ->
   Responses response body (`object:"response"`, `status`, `output[]` of
   message / function_call / reasoning items)

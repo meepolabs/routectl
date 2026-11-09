@@ -104,8 +104,9 @@ pub use safe_token::{MAX_SAFE_TOKEN_LEN, is_safe_token};
 pub use schema::{
     AnthropicThinking, CacheCreation, ChatChunk, ChatRequest, ChatResponse, Choice, ChunkChoice,
     ChunkDelta, ForwardedBearer, Message, MessageContent, Reasoning, ReasoningConfig,
-    ReasoningDetail, ReasoningDetailKind, RequestProvenance, ResponsesPassthroughItem, Role,
-    RoutectlInternal, ThinkingObject, TokenCount, Usage, UsageDelta,
+    ReasoningDetail, ReasoningDetailKind, RequestProvenance, ResponsesCacheBreakpoint,
+    ResponsesPassthroughItem, Role, RoutectlInternal, ThinkingObject, TokenCount, Usage,
+    UsageDelta,
 };
 pub use schema_opaque::OpaqueSseEvent;
 pub use system_content::{SystemBlock, SystemContent};

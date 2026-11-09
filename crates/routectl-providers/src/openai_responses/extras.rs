@@ -369,6 +369,14 @@ pub(super) fn apply_session_cache_key(
     request.prompt_cache_key = Some(sha256_hex(session));
 }
 
+/// Digest of a content block's text, as recorded beside a Responses
+/// `prompt_cache_breakpoint`: the ingress computes it when it records the
+/// breakpoint and the egress recomputes it to confirm the block it is about
+/// to mark still holds the same text. Hex SHA-256.
+pub fn breakpoint_text_digest(text: &str) -> String {
+    sha256_hex(text)
+}
+
 fn sha256_hex(input: &str) -> String {
     let digest = Sha256::digest(input.as_bytes());
     let mut out = String::with_capacity(digest.len() * 2);

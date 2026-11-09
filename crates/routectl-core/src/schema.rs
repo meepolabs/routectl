@@ -245,6 +245,30 @@ pub struct ResponsesPassthroughItem {
     pub item: Value,
 }
 
+/// One per-block Responses `prompt_cache_breakpoint` the client sent,
+/// recorded by the Responses ingress so a same-dialect Responses egress can
+/// put it back on the `input_text` part it came from. The canonical content
+/// part never carries it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResponsesCacheBreakpoint {
+    /// 0-based position of the block in the request's text-block stream,
+    /// counted after in-array system/developer messages are lifted into
+    /// `system`: a non-empty flat-text content counts one, and so does each
+    /// non-empty text part, on user, system and unrecognized-role messages;
+    /// assistant and tool messages count none. `None` when the block was
+    /// lifted into `system` or sits where no breakpoint can ride (an
+    /// assistant or tool turn, a non-text block, an empty text).
+    pub ordinal: Option<usize>,
+    /// Hex SHA-256 of the block's text, so a reader can tell whether the
+    /// block at `ordinal` still holds the text the client marked.
+    pub text_digest: String,
+    /// The `prompt_cache_breakpoint` value, verbatim.
+    pub value: Value,
+    /// JSON pointer to the block in the client's body (for example
+    /// `/input/0/content/0`).
+    pub client_pointer: String,
+}
+
 /// Transport-internal carrier for resolved-model values the dispatch
 /// layer hands to the egress without bouncing through the wire. In
 /// practice it carries resolved per-model values (reasoning dialect,
@@ -269,7 +293,8 @@ pub struct ResponsesPassthroughItem {
 /// here ever reaches a wire, a config file, or a persisted body -- that
 /// holds for the resolved-knob fields and equally for the inbound capture
 /// fields (`claude_code_headers`, `stainless_headers`,
-/// `responses_input_passthrough`, `inbound_session_key`,
+/// `responses_input_passthrough`, `responses_cache_breakpoints`,
+/// `inbound_session_key`,
 /// `forwarded_bearer`, `provenance`, `anthropic_thinking_display`,
 /// `anthropic_thinking`), which
 /// egresses read and re-emit deliberately rather than by serialization.
@@ -450,6 +475,13 @@ pub struct RoutectlInternal {
     /// inbound-request data, not a per-model knob; empty for library
     /// consumers and for every non-Responses ingress.
     pub responses_input_passthrough: Vec<ResponsesPassthroughItem>,
+
+    /// Per-block `prompt_cache_breakpoint` values the OpenAI Responses
+    /// ingress found on the client's content blocks, in input order. Only
+    /// the Responses egress reads them; every other egress ignores the
+    /// field. Inbound-request data like `responses_input_passthrough`;
+    /// empty for library consumers and for every non-Responses ingress.
+    pub responses_cache_breakpoints: Vec<ResponsesCacheBreakpoint>,
 
     /// INBOUND per-conversation key captured by EVERY ingress dialect from
     /// a HEADER candidate first, a BODY candidate second. The Anthropic

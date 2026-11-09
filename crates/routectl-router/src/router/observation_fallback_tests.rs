@@ -1,5 +1,6 @@
 //! The request observation slot survives the per-attempt `routectl_internal`
-//! rebuild, so every chain attempt bumps the one slot the caller kept.
+//! rebuild, so every chain attempt bumps the one slot the caller kept; the
+//! Responses cache breakpoints ride the same rebuild.
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -7,7 +8,7 @@ use futures::stream::BoxStream;
 use parking_lot::Mutex;
 use routectl_core::{
     ChatChunk, ChatResponse, Choice, Error, Message, MessageContent, Provider, RequestObservation,
-    Result, Role, ServedIdentity,
+    ResponsesCacheBreakpoint, Result, Role, ServedIdentity,
 };
 use serde_json::json;
 
@@ -317,4 +318,45 @@ async fn probe_flag_follows_max_tokens_against_the_probe_threshold() {
 
         assert_eq!(kept.snapshot().probe, expected, "{name}");
     }
+}
+
+#[tokio::test]
+async fn responses_cache_breakpoints_survive_the_per_attempt_rebuild() {
+    let (router, first, second) = two_entry_chain();
+    let recorded = vec![
+        ResponsesCacheBreakpoint {
+            ordinal: Some(0),
+            text_digest: "a".repeat(64),
+            value: json!({ "mode": "explicit" }),
+            client_pointer: "/input/0/content/0".into(),
+        },
+        ResponsesCacheBreakpoint {
+            ordinal: None,
+            text_digest: "b".repeat(64),
+            value: json!(true),
+            client_pointer: "/input/1/content/0".into(),
+        },
+    ];
+    let mut req = ChatRequest {
+        model: "flow".into(),
+        ..Default::default()
+    };
+    req.routectl_internal.responses_cache_breakpoints = recorded.clone();
+
+    Box::pin(router.complete(req))
+        .await
+        .expect("the second entry serves");
+
+    let first = first.lock();
+    let second = second.lock();
+    assert_eq!(first.len(), 1, "the first entry is tried once");
+    assert_eq!(second.len(), 1, "the chain falls back to the second entry");
+    assert_eq!(
+        first[0].routectl_internal.responses_cache_breakpoints, recorded,
+        "first chain attempt carries the breakpoints",
+    );
+    assert_eq!(
+        second[0].routectl_internal.responses_cache_breakpoints, recorded,
+        "second chain attempt carries the breakpoints",
+    );
 }

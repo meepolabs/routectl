@@ -64,6 +64,7 @@ pub use client::{OpenAiResponsesConfig, OpenAiResponsesProvider};
 pub(crate) mod auth;
 pub(crate) mod cookies;
 pub(crate) mod extras;
+pub use extras::breakpoint_text_digest;
 #[cfg(feature = "bedrock")]
 mod mantle_media;
 pub(crate) mod messages;
