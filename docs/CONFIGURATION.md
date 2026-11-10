@@ -5770,7 +5770,7 @@ moment it lands rather than waiting for a routectl release.
 kind          = "openai-responses"
 auth_kind     = "chatgpt-oauth"
 api_key_ref   = "oauth://codex"
-# codex_version = "0.145.0"   # default: the version pinned into this build
+# codex_version = "0.167.0"   # default: the version pinned into this build
 ```
 
 - **Default is the pinned version.** Omit the knob and routectl uses its

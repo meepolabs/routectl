@@ -1133,12 +1133,14 @@ section is the contributor-facing maintenance contract.
 
 **Pinned default** (source of truth for the baked-in `codex_version`):
 
-- Tag: `rust-v0.145.0` (most recent codex Rust release tag at adoption)
-- Commit: `1635de866c61d1b76e50b31928ee6d61482435a8`
-- Source: the `version` field on `codex-rs/cli/Cargo.toml` in the
-  upstream codex repo (workspace `version = "0.0.0"` is the
-  tip-of-tree dev placeholder; the tag pin above is what routectl
-  encodes against)
+- Tag: `rust-v0.167.0` (most recent stable codex Rust release tag at adoption)
+- Commit: `086ccc833bc9cf01024ad2dd6af7dbd421b6bf9a`
+- Source: `[workspace.package].version` in `codex-rs/Cargo.toml` at
+  that commit (`codex-rs/cli/Cargo.toml` inherits it via
+  `version.workspace = true`; tip-of-tree carries a dev placeholder,
+  so the tag pin above is what routectl encodes against). A unit test
+  in `crates/routectl-core/src/identity/codex.rs` fails when the Tag
+  line and `PINNED_CODEX_VERSION` disagree.
 
 Keep this pin in sync with the codex CLI version routectl targets by
 default; the `codex_version` config knob is the per-deployment escape

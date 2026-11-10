@@ -405,6 +405,8 @@ list with more narrative.
 
 ### Changed
 
+- **The compiled Codex client version is now 0.167.0 (was 0.145.0).** Without a `codex_version` override, ChatGPT-OAuth Responses requests send `codex_cli_rs/0.167.0` in the User-Agent and `0.167.0` in the `version` header, and Codex login and refresh send the same User-Agent; a configured `codex_version` still wins. `gpt-6-luna` on the ChatGPT-OAuth lane has not been verified with this version. See [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
+
 - **API-key and ChatGPT-OAuth Responses requests carry a session-derived `prompt_cache_key`.** When neither the client nor the operator set `prompt_cache_key`, the request carries the lowercase hex SHA-256 of the inbound session key, whatever ingress it arrived on, so cache routing follows the session without the raw session id leaving routectl. Bedrock Mantle gets none. This changes the cache key for Claude Code traffic routed to those upstreams.
 
 - **Responses egress withholds `temperature` and `top_p` on every auth surface.** Each request that carried either counts once as the `sampling_param_unsupported` drop class. See [docs/LOGGING.md](docs/LOGGING.md).

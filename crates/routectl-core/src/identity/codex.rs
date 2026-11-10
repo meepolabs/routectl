@@ -51,7 +51,7 @@ use std::sync::OnceLock;
 /// Codex CLI version routectl mimics on the wire. Update when
 /// upstream codex bumps `[workspace.package].version` past this on a
 /// stable release tag (`rust-vX.Y.Z`).
-pub const PINNED_CODEX_VERSION: &str = "0.145.0";
+pub const PINNED_CODEX_VERSION: &str = "0.167.0";
 
 /// `originator` header value for first-party codex CLI traffic.
 /// Mirrors codex's `DEFAULT_ORIGINATOR` in `default_client.rs:36`.
@@ -428,5 +428,25 @@ mod tests {
             .strip_prefix(&format!("{CODEX_ORIGINATOR}/9.9.9-test"))
             .expect("custom UA carries the custom prefix");
         assert_eq!(pinned_tail, custom_tail);
+    }
+
+    const WIRE_GOTCHAS_MD: &str = include_str!("../../../../docs/WIRE-GOTCHAS.md");
+
+    fn pin_record_tags(doc: &str) -> Vec<&str> {
+        doc.lines()
+            .filter_map(|line| line.strip_prefix("- Tag: `rust-v"))
+            .filter_map(|rest| rest.split_once('`').map(|(version, _)| version))
+            .collect()
+    }
+
+    #[test]
+    fn pin_record_tag_matches_pinned_version() {
+        let tags = pin_record_tags(WIRE_GOTCHAS_MD);
+        assert_eq!(
+            tags,
+            [PINNED_CODEX_VERSION],
+            "docs/WIRE-GOTCHAS.md must carry exactly one `- Tag: `rust-v<version>`` pin line, \
+             equal to PINNED_CODEX_VERSION",
+        );
     }
 }

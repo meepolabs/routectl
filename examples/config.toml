@@ -113,7 +113,7 @@ accepts_new_logins = true
 kind        = "openai-responses"
 auth_kind   = "chatgpt-oauth"
 api_key_ref = "oauth://codex"
-# codex_version = "0.145.0"   # override the pinned codex CLI version on the
+# codex_version = "0.167.0"   # override the pinned codex CLI version on the
                               # wire without a rebuild; restart-required.
 
 # A single-member growth pool -- the exact shape a first `routectl login
