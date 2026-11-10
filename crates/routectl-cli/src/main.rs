@@ -740,9 +740,12 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 let loaded = load_config_with_overlay(cli.config.as_deref())?;
                 emit_staleness_hint_for(&loaded, false);
                 let result = if effective {
+                    let prices = commands::pricing::default_price_book();
                     commands::config_effective::show_effective(
                         &loaded.config,
                         &loaded.catalog_overlay,
+                        prices.current().as_deref(),
+                        routectl_router::prices::shipped_table(),
                     )
                 } else {
                     commands::config::show(&loaded.config)

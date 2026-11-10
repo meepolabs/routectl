@@ -496,7 +496,7 @@ pub(super) const fn replay_summary(
 pub(super) fn derive_tuning_rows(config: &Config) -> Vec<TuningRow> {
     // The tuning rows read the config alone, so any overlay yields the same
     // rows; the empty one keeps this section independent of overlay loading.
-    derive_effective_view(config, &CatalogOverlay::default()).tuning
+    derive_effective_view(config, &CatalogOverlay::default(), None, None).tuning
 }
 
 /// The freshest `verified_at` among the effective view's OVERLAY-sourced
@@ -510,7 +510,7 @@ pub(super) fn freshest_overlay_verified_at(
     config: &Config,
     overlay: &CatalogOverlay,
 ) -> Option<String> {
-    derive_effective_view(config, overlay)
+    derive_effective_view(config, overlay, None, None)
         .models
         .into_iter()
         .filter_map(|cell| match cell.row {

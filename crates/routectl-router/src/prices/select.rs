@@ -86,10 +86,7 @@ fn common_prefix(a: &[String], b: &[String]) -> usize {
 /// The provider entry a `[providers]` or `[pools]` key resolves to: the entry
 /// itself, or a pool's first member naming an entry (the member
 /// `Config::provider_kind_for_target` reads).
-pub(super) fn provider_entry_for_target<'a>(
-    config: &'a Config,
-    name: &str,
-) -> Option<&'a ProviderEntry> {
+pub fn provider_entry_for_target<'a>(config: &'a Config, name: &str) -> Option<&'a ProviderEntry> {
     config.providers.get(name).or_else(|| {
         config
             .pools

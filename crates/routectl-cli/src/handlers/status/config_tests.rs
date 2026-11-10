@@ -4,7 +4,8 @@ use crate::server::AppState;
 use arc_swap::ArcSwap;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
-use routectl_router::config::AliasValue;
+use routectl_router::config::{AliasValue, PricingConfig};
+use routectl_router::prices::{PriceSources, parse_and_validate};
 use routectl_router::{
     CatalogOverlay, CatalogRow, Config, Router, TuningSource, derive_effective_view,
 };
@@ -26,7 +27,7 @@ fn sample_daemon() -> DaemonMetaSnapshot {
 /// Build the wire DTO through the SAME derivation the handler uses, so a
 /// config-shaped assertion exercises the real path end to end.
 fn panel_from_config(config: &Config) -> ConfigPanel {
-    let effective = derive_effective_view(config, &CatalogOverlay::default());
+    let effective = derive_effective_view(config, &CatalogOverlay::default(), None, None);
     build_panel(
         effective,
         &ActivationState::default(),
@@ -66,6 +67,20 @@ fn present_model(nickname: &str, source: Source) -> ModelCell {
             source,
             verified_at: "2026-07-01".to_string(),
         },
+        context_window: None,
+        fill: None,
+        pricing: PricingConfig::default(),
+        price_sources: unknown_sources(),
+    }
+}
+
+fn unknown_sources() -> PriceSources {
+    PriceSources {
+        input: PriceSource::Unknown,
+        output: PriceSource::Unknown,
+        cache_read: PriceSource::Unknown,
+        cache_write_5m: PriceSource::Unknown,
+        cache_write_1h: PriceSource::Unknown,
     }
 }
 
@@ -110,6 +125,10 @@ fn build_panel_maps_every_effective_surface_with_provenance() {
                 provider_kind: String::new(),
                 upstream: "nope".to_string(),
                 row: EffectiveRow::Missing,
+                context_window: None,
+                fill: None,
+                pricing: PricingConfig::default(),
+                price_sources: unknown_sources(),
             },
         ],
         classes: vec![ClassPolicyCell {
@@ -126,6 +145,7 @@ fn build_panel_maps_every_effective_surface_with_provenance() {
         aliases: Vec::new(),
         providers: Vec::new(),
         tuning: Vec::new(),
+        price_tables: PriceTableDates::default(),
     };
     let activation = ActivationState::default();
 
@@ -134,9 +154,8 @@ fn build_panel_maps_every_effective_surface_with_provenance() {
     let opus = &panel.models[0];
     assert_eq!(opus.source, "user");
     assert_eq!(opus.verified_at.as_deref(), Some("2026-07-01"));
-    assert!(opus.economics.is_some());
     assert_eq!(panel.models[1].source, "missing");
-    assert!(panel.models[1].economics.is_none());
+    assert_eq!(panel.models[1].verified_at, None);
 
     assert_eq!(panel.classes[0].class, "rate-limited");
     assert_eq!(panel.classes[0].retry_cap, 7);
@@ -204,7 +223,7 @@ fn source_object_carries_every_declared_field() {
         AliasValue::Chain(vec!["small".to_string()]),
     );
 
-    let effective = derive_effective_view(&config, &CatalogOverlay::default());
+    let effective = derive_effective_view(&config, &CatalogOverlay::default(), None, None);
     let panel = build_panel(
         effective,
         &ActivationState::default(),
@@ -390,7 +409,7 @@ rpm_limit = 40
         provider_json(&config, "seat-b")["rpm_limit"],
         Value::from(15)
     );
-    let effective = derive_effective_view(&config, &CatalogOverlay::default());
+    let effective = derive_effective_view(&config, &CatalogOverlay::default(), None, None);
     let seat_a = effective
         .tuning
         .iter()
@@ -398,7 +417,7 @@ rpm_limit = 40
         .expect("seat-a tuning row");
     assert_eq!(seat_a.tuning.rpm_limit.value, Some(40));
     assert_eq!(seat_a.tuning.rpm_limit.source, TuningSource::Pool);
-    assert_eq!(SCHEMA_VERSION, 3);
+    assert_eq!(SCHEMA_VERSION, 4);
 }
 
 /// Every declared provider field reaches the wire, and the endpoint is the
@@ -579,11 +598,10 @@ upstream = "claude-opus-4-8"
         opus.source, "user",
         "the panel must render the accepted overlay's provenance, not the baked layer"
     );
-    assert_eq!(opus.verified_at.as_deref(), Some("2026-07-01"));
     assert_eq!(
-        opus.economics.as_ref().expect("economics present").wm,
-        9.5,
-        "the economics must come from the accepted overlay cell"
+        opus.verified_at.as_deref(),
+        Some("2026-07-01"),
+        "the stamp must come from the accepted overlay cell"
     );
 }
 
@@ -614,7 +632,7 @@ fn a_reload_after_the_daemon_read_skews_the_age_and_never_the_counts() {
         .aliases
         .insert("fresh".to_string(), AliasValue::Single("opus".to_string()));
     router_swap.store(Arc::new(Router::new(Arc::new(reloaded))));
-    let effective = state.router.view().effective_view();
+    let effective = state.router.view().effective_view(None, None);
     let panel = build_panel(effective, &ActivationState::default(), None, pinned_daemon);
 
     assert_eq!(
@@ -684,4 +702,194 @@ async fn handler_returns_available_panel_with_effective_view() {
     assert!(json["data"]["providers"].is_array());
     assert!(json["data"]["source"].is_object());
     assert!(json["data"]["activation"].is_array());
+}
+
+/// One model priced by every source the wire can name, a host-matched table
+/// provider whose id and host are planted strings no wire field may carry,
+/// and a configured window and fill.
+fn priced_panel_json() -> Value {
+    let config: Config = toml::from_str(
+        r#"
+version = 2
+
+[providers.anthropic]
+kind = "anthropic-api"
+api_key_ref = "env://K"
+
+[providers.compat]
+kind = "openai-compat"
+base_url = "https://compat.example/v1"
+api_key_ref = "env://K"
+
+[models.opus]
+provider = "anthropic"
+upstream = "claude-opus-4-8"
+context_window = 200000
+
+[models.opus.pricing]
+output_per_mtok = 30.0
+
+[models.glm]
+provider = "compat"
+upstream = "glm-5"
+max_output_tokens = 9000
+"#,
+    )
+    .expect("valid config");
+    let table = |date: &str, opus_input: f64| {
+        let json = serde_json::json!({
+            "schema_version": 1,
+            "generated_at": date,
+            "providers": [
+                {
+                    "id": "anthropic",
+                    "models": [{ "id": "claude-opus-4-8", "input": opus_input }],
+                },
+                {
+                    "id": "planted-provider-id",
+                    "api_host": "https://compat.example/v1",
+                    "models": [{ "id": "glm-5", "input": 1.0 }],
+                },
+            ],
+        });
+        parse_and_validate(&serde_json::to_vec(&json).expect("json")).expect("valid table")
+    };
+    let refreshed = table("2026-11-05", 5.0);
+    let shipped = table("2026-10-01", 4.0);
+    let effective = derive_effective_view(
+        &config,
+        &CatalogOverlay::default(),
+        Some(&refreshed),
+        Some(&shipped),
+    );
+    let panel = build_panel(
+        effective,
+        &ActivationState::default(),
+        None,
+        sample_daemon(),
+    );
+    serde_json::to_value(&panel).expect("panel serializes")
+}
+
+fn wire_model<'a>(json: &'a Value, nickname: &str) -> &'a Value {
+    json["models"]
+        .as_array()
+        .expect("models array")
+        .iter()
+        .find(|m| m["nickname"] == nickname)
+        .unwrap_or_else(|| panic!("{nickname} on the wire"))
+}
+
+#[test]
+fn model_wire_carries_window_fill_and_each_price_with_its_source() {
+    let json = priced_panel_json();
+
+    let opus = wire_model(&json, "opus");
+    assert_eq!(opus["context_window"], 200_000);
+    assert_eq!(
+        opus["fill"],
+        serde_json::json!({ "tokens": 64_000, "source": "default" })
+    );
+    assert_eq!(
+        opus["prices"],
+        serde_json::json!([
+            { "field": "input_per_mtok", "per_mtok": 5.0,
+              "source": "refreshed", "table_date": "2026-11-05" },
+            { "field": "output_per_mtok", "per_mtok": 30.0,
+              "source": "model-config", "table_date": null },
+            { "field": "cache_read_per_mtok", "per_mtok": null,
+              "source": "unknown", "table_date": null },
+            { "field": "cache_write_5m_per_mtok", "per_mtok": null,
+              "source": "unknown", "table_date": null },
+            { "field": "cache_write_1h_per_mtok", "per_mtok": 10.0,
+              "source": "derived", "table_date": null },
+        ])
+    );
+
+    let glm = wire_model(&json, "glm");
+    assert!(glm["context_window"].is_null());
+    assert_eq!(
+        glm["fill"],
+        serde_json::json!({ "tokens": 9000, "source": "model-config" })
+    );
+    assert_eq!(glm["prices"][0]["source"], "refreshed");
+}
+
+#[test]
+fn model_wire_carries_no_economics_block() {
+    let json = priced_panel_json();
+
+    for model in json["models"].as_array().expect("models array") {
+        let keys: Vec<&str> = model
+            .as_object()
+            .expect("model object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert!(keys.contains(&"prices"), "keys: {keys:?}");
+        assert!(!keys.contains(&"economics"), "keys: {keys:?}");
+    }
+}
+
+#[test]
+fn no_table_provider_string_reaches_the_wire() {
+    let json = priced_panel_json();
+    let text = json.to_string();
+
+    assert_eq!(
+        wire_model(&json, "glm")["prices"][0]["per_mtok"],
+        1.0,
+        "the planted provider must be the one that priced glm"
+    );
+    assert!(!text.contains("planted-provider-id"), "{text}");
+    assert!(!text.contains("compat.example/v1"), "{text}");
+}
+
+/// The panel prices against the status state's price book: a table file
+/// present in the book's path reaches the wire as a `refreshed` price with
+/// that table's date, read at build time.
+#[tokio::test]
+async fn panel_reports_a_refreshed_price_from_the_status_price_book() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let book_path = dir.path().join("prices.json");
+    let table = serde_json::json!({
+        "schema_version": 1,
+        "generated_at": "2026-11-07",
+        "providers": [{
+            "id": "anthropic",
+            "models": [{ "id": "claude-opus-4-8", "input": 7.5 }],
+        }],
+    });
+    std::fs::write(&book_path, serde_json::to_vec(&table).expect("json")).expect("write table");
+    let config: Config = toml::from_str(
+        r#"
+version = 2
+
+[providers.anthropic]
+kind = "anthropic-api"
+api_key_ref = "env://K"
+
+[models.opus]
+provider = "anthropic"
+upstream = "claude-opus-4-8"
+"#,
+    )
+    .expect("valid config");
+    let router = router_with(config, CatalogOverlay::default());
+    let app = AppState::for_test(Arc::new(ArcSwap::from_pointee(router)));
+    let mut state = StatusState::from_app(&app, None, DaemonMeta::for_test());
+    state.prices = Arc::new(routectl_router::prices::PriceBook::new(book_path));
+
+    let panel = build(&state).await;
+
+    let json = serde_json::to_value(panel.data.expect("panel data")).expect("serializes");
+    assert_eq!(
+        wire_model(&json, "opus")["prices"][0],
+        serde_json::json!({
+            "field": "input_per_mtok",
+            "per_mtok": 7.5,
+            "source": "refreshed",
+            "table_date": "2026-11-07",
+        })
+    );
 }

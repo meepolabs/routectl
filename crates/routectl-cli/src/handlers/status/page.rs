@@ -1407,6 +1407,27 @@ mod tests {
         }
     }
 
+    /// The config tab reads the model facts the panel sends and nothing from
+    /// the catalog economics block the panel no longer carries.
+    ///
+    /// Mutation check: drop the `prices` read from `modelRow`, or read
+    /// `m.economics` again -> red.
+    #[test]
+    fn config_model_row_reads_the_model_facts() {
+        let body = function_body("modelRow");
+        for field in ["m.context_window", "m.fill", "m.prices"] {
+            assert!(body.contains(field), "`modelRow` must render `{field}`");
+        }
+        assert!(
+            !strip_js_comments(&script()).contains("economics"),
+            "the dashboard must not read the retired economics block"
+        );
+        let price = function_body("pricePair");
+        for field in ["p.per_mtok", "p.source", "p.table_date"] {
+            assert!(price.contains(field), "`pricePair` must render `{field}`");
+        }
+    }
+
     /// The eligibility reasons the shared target-phase rule treats as needing
     /// attention must be tokens the server emits; a renamed or misspelled
     /// token would file a dead login back under "not observed yet".

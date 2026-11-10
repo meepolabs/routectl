@@ -10,7 +10,7 @@
 //! The overlay half of that view is the generation the daemon ACCEPTED at
 //! its last successful boot or reload: it is retained on the live router and
 //! read from memory, never re-read from disk per request. Reading disk here
-//! would let the panel render economics and provenance from a file the daemon
+//! would let the panel render catalog provenance from a file the daemon
 //! REJECTED (routing continues on the previous generation), and would make a
 //! corrupt file on disk take the whole panel down while routing is healthy.
 //! Because config and overlay now come from the SAME pinned router, one
@@ -23,10 +23,11 @@ use axum::extract::State;
 use serde::Serialize;
 
 use routectl_router::class_policy::ConfigFailureClass;
+use routectl_router::prices::{PriceSource, PriceTable, shipped_table};
 use routectl_router::{
     ActivationEntry, ActivationState, ActivationStatus, AliasChain, ClassPolicyCell,
     ClassPolicySource, EffectiveRow, EffectiveView, ModelCell, OverrideRow, OverrideVerdict,
-    ProviderCell, Source, class_debits,
+    PriceTableDates, ProviderCell, Source, class_debits,
 };
 
 use super::daemon_meta::DaemonMetaSnapshot;
@@ -34,10 +35,10 @@ use super::vocabulary::{codes, provenance};
 use super::{Panel, StatusState, guard_panel, utc_rfc3339};
 
 /// Wire-shape version of the config panel payload.
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
 
 /// The provenance-annotated effective view plus the activation inventory. Every
-/// field is a display-safe projection: model economics and capability verdicts
+/// field is a display-safe projection: model facts and capability verdicts
 /// carry no secrets, and the activation entries carry only discriminants.
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct ConfigPanel {
@@ -130,7 +131,7 @@ struct SourceWire {
     version: &'static str,
 }
 
-/// One `[models.X]` entry's effective catalog cell.
+/// One `[models.X]` entry's effective catalog cell and model facts.
 #[derive(Debug, Clone, Serialize)]
 struct ModelCellWire {
     nickname: String,
@@ -141,15 +142,38 @@ struct ModelCellWire {
     /// or `disabled` / `missing`.
     source: &'static str,
     verified_at: Option<String>,
-    economics: Option<EconomicsWire>,
+    /// `[models.X] context_window`; `null` when none is configured.
+    context_window: Option<u32>,
+    /// The output fill and its source; `null` when none applies.
+    fill: Option<FillWire>,
+    /// One entry per price field, in a fixed order.
+    prices: Vec<PriceWire>,
 }
 
-/// The secret-free economics fields of a present catalog row.
+/// A model's output fill and its fixed source token.
 #[derive(Debug, Clone, Serialize)]
-struct EconomicsWire {
-    wm: f32,
-    rm: f32,
-    max_context_tokens: Option<u32>,
+struct FillWire {
+    tokens: u32,
+    /// `model-config` or `default`.
+    source: &'static str,
+}
+
+/// One effective price field. Every string is a fixed token or a date
+/// rendered from parsed numbers; nothing from a downloaded table is carried.
+#[derive(Debug, Clone, Serialize)]
+struct PriceWire {
+    /// The `[models.X.pricing]` key: `input_per_mtok`, `output_per_mtok`,
+    /// `cache_read_per_mtok`, `cache_write_5m_per_mtok` or
+    /// `cache_write_1h_per_mtok`.
+    field: &'static str,
+    /// USD per million tokens; `null` when unknown.
+    per_mtok: Option<f64>,
+    /// `model-config`, `registry`, `refreshed`, `shipped`, `derived` or
+    /// `unknown`.
+    source: &'static str,
+    /// The table date (`YYYY-MM-DD`) for a `refreshed` or `shipped` source,
+    /// else `null`.
+    table_date: Option<String>,
 }
 
 /// One failure class's resolved retry/fallback policy and winning layer.
@@ -233,32 +257,52 @@ const fn verdict_token(verdict: OverrideVerdict) -> &'static str {
     }
 }
 
-fn map_model(cell: ModelCell) -> ModelCellWire {
-    let (source, verified_at, economics) = match cell.row {
+fn map_model(cell: ModelCell, dates: &PriceTableDates) -> ModelCellWire {
+    let prices = map_prices(&cell, dates);
+    let (source, verified_at) = match cell.row {
         EffectiveRow::Present {
-            row,
             source,
             verified_at,
-        } => (
-            source_token(source),
-            Some(verified_at),
-            Some(EconomicsWire {
-                wm: row.wm,
-                rm: row.rm,
-                max_context_tokens: row.max_context_tokens,
-            }),
-        ),
-        EffectiveRow::Disabled => ("disabled", None, None),
-        EffectiveRow::Missing => ("missing", None, None),
+            ..
+        } => (source_token(source), Some(verified_at)),
+        EffectiveRow::Disabled => ("disabled", None),
+        EffectiveRow::Missing => ("missing", None),
     };
+    let fill = cell.fill.map(|fill| FillWire {
+        tokens: fill.tokens,
+        source: fill.source.as_str(),
+    });
     ModelCellWire {
+        prices,
         nickname: cell.nickname,
         provider: cell.provider,
         provider_kind: cell.provider_kind,
         upstream: cell.upstream,
         source,
         verified_at,
-        economics,
+        context_window: cell.context_window,
+        fill,
+    }
+}
+
+fn map_prices(cell: &ModelCell, dates: &PriceTableDates) -> Vec<PriceWire> {
+    cell.price_fields()
+        .into_iter()
+        .map(|(field, per_mtok, source)| price_wire(field, per_mtok, source, dates))
+        .collect()
+}
+
+fn price_wire(
+    field: &'static str,
+    per_mtok: Option<f64>,
+    source: PriceSource,
+    dates: &PriceTableDates,
+) -> PriceWire {
+    PriceWire {
+        field,
+        per_mtok,
+        source: source.as_str(),
+        table_date: dates.date_for(source).map(|date| date.to_string()),
     }
 }
 
@@ -351,8 +395,13 @@ fn build_panel(
     daemon: DaemonMetaSnapshot,
 ) -> ConfigPanel {
     let source = build_source(&effective, config_path, daemon);
+    let dates = effective.price_tables;
     ConfigPanel {
-        models: effective.models.into_iter().map(map_model).collect(),
+        models: effective
+            .models
+            .into_iter()
+            .map(|cell| map_model(cell, &dates))
+            .collect(),
         classes: effective.classes.into_iter().map(map_class).collect(),
         capabilities: effective
             .capabilities
@@ -364,6 +413,12 @@ fn build_panel(
         source,
         activation: activation.iter().map(map_activation).collect(),
     }
+}
+
+/// The refreshed price table the panel's prices resolve against: the status
+/// state's price book as it is now, read once per panel build.
+fn refreshed_prices(state: &StatusState) -> Option<Arc<PriceTable>> {
+    state.prices.current()
 }
 
 pub(super) async fn build(state: &StatusState) -> Panel<ConfigPanel> {
@@ -393,6 +448,7 @@ pub(super) async fn build(state: &StatusState) -> Panel<ConfigPanel> {
     let as_of = utc_rfc3339(now);
     let daemon = state.daemon_meta.snapshot(now.timestamp_millis());
     let view = state.router.view();
+    let refreshed = refreshed_prices(state);
     let activation = state.activation.load_full();
     let config_path = state
         .config_path
@@ -403,7 +459,7 @@ pub(super) async fn build(state: &StatusState) -> Panel<ConfigPanel> {
         SCHEMA_VERSION,
         codes::CONFIG_UNAVAILABLE,
         move || {
-            let effective = view.effective_view();
+            let effective = view.effective_view(refreshed.as_deref(), shipped_table());
             let dto = build_panel(effective, &activation, config_path.as_deref(), daemon);
             Panel::available(SCHEMA_VERSION, as_of, dto)
         },

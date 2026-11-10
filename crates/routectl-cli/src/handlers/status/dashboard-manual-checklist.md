@@ -110,6 +110,15 @@ banner, no retry signal -- silently mislabeled data.
   card IS present. Each operator-authored surface added to this tab has to
   join that card's suppression condition, or the tab tells an operator their
   configuration is not in effect while displaying it.
+- Config's model detail row names where each fact comes from. Serve a config
+  with one `anthropic-api` model carrying `context_window`, a
+  `[models.X.pricing] output_per_mtok`, and no `max_output_tokens`, plus an
+  `openai-compat` model with none of them, with a `prices.json` refreshed into
+  the config folder. Expand both rows: the first reads its window with
+  `(model-config)`, output fill `64K (default)`, input with `refreshed` and the
+  table date, output with `(model-config)`, and the 1h write `(derived)`; the
+  second reads `not configured`, `not filled`, and `unknown` for every price it
+  has no row for, never `0`. No provider id or host from the table appears.
 
 ## 5. Doctor tab capability surface
 

@@ -160,27 +160,49 @@
   }
 
   // One row per `[models.X]` entry with the catalog layer that won it. The
-  // economics and the confirmed context window sit in the detail row: they are
-  // reference figures an operator opens, not a reading to scan.
+  // model facts (window, output fill, prices, each with its source) sit in the
+  // detail row: they are reference figures an operator opens, not a reading to
+  // scan.
   function modelSection(models) {
     var tbl = mkTable('Configured models',
       [R('model'), C('provider'), C('upstream'), C('catalog layer')], true);
     models.forEach(function (m) { modelRow(tbl, m); });
-    return card('Models', 'what each name dispatches to, and which catalog row backs it',
+    return card('Models', 'what each name dispatches to, and where its facts come from',
       tableScroll(tbl));
   }
 
   function modelRow(tbl, m) {
-    var econ = m.economics || {};
+    var prices = Array.isArray(m.prices) ? m.prices : [];
     xrow(tbl, m.nickname,
       [m.nickname, m.provider, m.upstream, tokLabeled('src', 'src', m.source)],
       presentPairs([
         ['provider kind', m.provider_kind],
-        ['max context', econ.max_context_tokens ? humanCount(econ.max_context_tokens) : null],
-        ['cache write multiplier', econ.wm],
-        ['cache read multiplier', econ.rm],
+        ['context window', windowText(m.context_window)],
+        ['output fill', fillText(m.fill)],
         ['verified at', m.verified_at]
-      ]));
+      ]).concat(prices.map(pricePair)));
+  }
+
+  // The window has one source, the model's own config; an unset one is a fact
+  // the gate and /v1/models act on, so it reads as such rather than vanishing.
+  function windowText(tokens) {
+    if (tokens === null || tokens === undefined) { return 'not configured'; }
+    return humanCount(tokens) + ' (model-config)';
+  }
+
+  // An absent fill means the egress forwards an omitted limit as omitted.
+  function fillText(fill) {
+    if (!fill) { return 'not filled'; }
+    return humanCount(fill.tokens) + ' (' + fill.source + ')';
+  }
+
+  // One price field: its figure and source, the table date beside a table
+  // source. An unpriced field reads "unknown", never zero.
+  function pricePair(p) {
+    var label = String(p.field).replace(/_per_mtok$/, '').replace(/_/g, ' ') + ' $/Mtok';
+    if (p.per_mtok === null || p.per_mtok === undefined) { return [label, 'unknown']; }
+    var source = p.table_date ? p.source + ' ' + p.table_date : p.source;
+    return [label, String(p.per_mtok) + ' (' + source + ')'];
   }
 
   // A model with no catalog row behind it carries none of these figures, and a

@@ -73,7 +73,7 @@ pub struct PriceSources {
 }
 
 impl PriceSources {
-    const UNKNOWN: Self = Self {
+    pub(crate) const UNKNOWN: Self = Self {
         input: PriceSource::Unknown,
         output: PriceSource::Unknown,
         cache_read: PriceSource::Unknown,

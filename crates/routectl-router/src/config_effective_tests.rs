@@ -9,7 +9,9 @@ use routectl_core::{ChatChunk, ChatRequest, ChatResponse, Error, Provider, Resul
 use crate::catalog::Source;
 use crate::catalog_overlay::CatalogOverlay;
 use crate::class_policy::ClassPolicy;
-use crate::config::{BreakerThreshold, Config, Resolved, ResolvedTuning, TuningSource};
+use crate::config::{
+    BreakerThreshold, Config, PricingConfig, Resolved, ResolvedTuning, TuningSource,
+};
 use crate::factory::apply_catalog_overlay;
 use crate::override_registry::OverrideVerdict;
 use crate::resolved::ResolvedModel;
@@ -74,7 +76,7 @@ fn model_row_matches_apply_catalog_overlay_stamp() {
 
     // Act
     let stamped = apply_catalog_overlay(resolved, &config, &overlay);
-    let view = derive_effective_view(&config, &overlay);
+    let view = derive_effective_view(&config, &overlay, None, None);
 
     // Assert: the derivation reproduces the stamped merge exactly.
     let derived = view.models.iter().find(|m| m.nickname == "opus").unwrap();
@@ -106,7 +108,7 @@ fn overlay_user_cell_tags_user_source() {
     .expect("valid overlay");
 
     // Act
-    let view = derive_effective_view(&config, &overlay);
+    let view = derive_effective_view(&config, &overlay, None, None);
 
     // Assert
     let derived = view.models.iter().find(|m| m.nickname == "opus").unwrap();
@@ -129,7 +131,7 @@ fn disable_overlay_cell_yields_disabled_row() {
     }))
     .expect("valid overlay");
 
-    let view = derive_effective_view(&config, &overlay);
+    let view = derive_effective_view(&config, &overlay, None, None);
     let derived = view.models.iter().find(|m| m.nickname == "opus").unwrap();
     assert_eq!(derived.row, EffectiveRow::Disabled);
 }
@@ -142,7 +144,7 @@ fn unpriced_selector_yields_missing_row() {
     let mut config = config_with_opus_model();
     config.models.get_mut("opus").unwrap().provider = "ghost".to_string();
 
-    let view = derive_effective_view(&config, &CatalogOverlay::default());
+    let view = derive_effective_view(&config, &CatalogOverlay::default(), None, None);
     let derived = view.models.iter().find(|m| m.nickname == "opus").unwrap();
     assert_eq!(derived.provider_kind, "");
     assert_eq!(derived.row, EffectiveRow::Missing);
@@ -161,7 +163,7 @@ fn class_with_operator_leaf_tags_config_others_baked_default() {
     );
 
     // Act
-    let view = derive_effective_view(&config, &CatalogOverlay::default());
+    let view = derive_effective_view(&config, &CatalogOverlay::default(), None, None);
 
     // Assert: rate-limited tagged config with the overridden cap; a class
     // with no leaf tags baked-default.
@@ -198,7 +200,7 @@ fn seeded_override_appears_as_capability_cell_with_override_source() {
     );
 
     // Act
-    let view = derive_effective_view(&config, &CatalogOverlay::default());
+    let view = derive_effective_view(&config, &CatalogOverlay::default(), None, None);
 
     // Assert: the capability layer carries the cell with the route-away
     // verdict.
@@ -238,7 +240,7 @@ fn endpoint_origin_strips_userinfo_path_query_and_fragment() {
     let config = config_with_provider_base_url(LEAKY_BASE_URL);
 
     // Act
-    let view = derive_effective_view(&config, &CatalogOverlay::default());
+    let view = derive_effective_view(&config, &CatalogOverlay::default(), None, None);
 
     // Assert: only the origin survives.
     let cell = &view.providers[0];
@@ -255,7 +257,7 @@ fn credential_never_appears_anywhere_in_the_projection() {
 
     // Act: scan the WHOLE projection, not just the endpoint field -- a
     // future field that copies config text must fail this too.
-    let view = derive_effective_view(&config, &CatalogOverlay::default());
+    let view = derive_effective_view(&config, &CatalogOverlay::default(), None, None);
     let rendered = format!("{:?}", view.providers);
 
     // Assert
@@ -272,7 +274,7 @@ fn credential_never_appears_anywhere_in_the_projection() {
 #[test]
 fn endpoint_origin_keeps_a_nondefault_port() {
     let config = config_with_provider_base_url("http://127.0.0.1:8080/v1");
-    let view = derive_effective_view(&config, &CatalogOverlay::default());
+    let view = derive_effective_view(&config, &CatalogOverlay::default(), None, None);
     assert_eq!(
         view.providers[0].endpoint_origin.as_deref(),
         Some("http://127.0.0.1:8080")
@@ -285,7 +287,7 @@ fn unparseable_endpoint_yields_none_not_a_raw_fallback() {
     // would republish whatever the operator wrote, which is the entire
     // hazard this projection exists to close.
     let config = config_with_provider_base_url("sk-live-LEAKED-not-a-url");
-    let view = derive_effective_view(&config, &CatalogOverlay::default());
+    let view = derive_effective_view(&config, &CatalogOverlay::default(), None, None);
     assert_eq!(view.providers[0].endpoint_origin, None);
     assert!(!format!("{:?}", view.providers).contains("sk-live-LEAKED"));
 }
@@ -293,7 +295,7 @@ fn unparseable_endpoint_yields_none_not_a_raw_fallback() {
 #[test]
 fn credential_ref_scheme_carries_the_scheme_only() {
     let config = config_with_provider_base_url("https://upstream.example");
-    let view = derive_effective_view(&config, &CatalogOverlay::default());
+    let view = derive_effective_view(&config, &CatalogOverlay::default(), None, None);
     let cell = &view.providers[0];
     assert_eq!(cell.credential_ref_scheme.as_deref(), Some("env"));
     assert!(
@@ -325,7 +327,7 @@ fn unrecognized_credential_ref_publishes_none_of_its_bytes() {
         (":sk-live-leading", "sk-live-leading"),
     ] {
         let config = config_with_provider_api_key_ref(pasted);
-        let view = derive_effective_view(&config, &CatalogOverlay::default());
+        let view = derive_effective_view(&config, &CatalogOverlay::default(), None, None);
         let cell = &view.providers[0];
         assert_eq!(
             cell.credential_ref_scheme.as_deref(),
@@ -452,7 +454,7 @@ fn an_at_sign_past_the_authority_withholds_fail_safe() {
 #[test]
 fn anthropic_entry_carries_its_own_auth_token_and_kind() {
     let config = config_with_provider_base_url("https://upstream.example");
-    let view = derive_effective_view(&config, &CatalogOverlay::default());
+    let view = derive_effective_view(&config, &CatalogOverlay::default(), None, None);
     let cell = &view.providers[0];
     assert_eq!(cell.id, "acme");
     assert_eq!(cell.kind, "anthropic-api");
@@ -475,7 +477,7 @@ base_url = "https://compat.example/v1"
     )
     .expect("valid config");
 
-    let view = derive_effective_view(&config, &CatalogOverlay::default());
+    let view = derive_effective_view(&config, &CatalogOverlay::default(), None, None);
     assert_eq!(view.providers[0].auth_token, None);
 }
 
@@ -487,7 +489,7 @@ base_url = "https://compat.example/v1"
 /// each is cfg-gated to the feature that compiles its arm.
 fn only_provider(toml_text: &str) -> ProviderCell {
     let config: Config = toml::from_str(toml_text).expect("valid config");
-    let view = derive_effective_view(&config, &CatalogOverlay::default());
+    let view = derive_effective_view(&config, &CatalogOverlay::default(), None, None);
     view.providers
         .into_iter()
         .next()
@@ -664,7 +666,7 @@ rpm_limit = 60
     )
     .expect("valid config");
 
-    let view = derive_effective_view(&limited, &CatalogOverlay::default());
+    let view = derive_effective_view(&limited, &CatalogOverlay::default(), None, None);
     let rpm = |id: &str| {
         view.providers
             .iter()
@@ -694,7 +696,7 @@ api_key_ref = "env://K"
     )
     .expect("valid config");
 
-    let view = derive_effective_view(&config, &CatalogOverlay::default());
+    let view = derive_effective_view(&config, &CatalogOverlay::default(), None, None);
     let ids: Vec<&str> = view.providers.iter().map(|p| p.id.as_str()).collect();
     assert_eq!(ids, ["alpha", "zeta"]);
 }
@@ -704,7 +706,7 @@ fn capability_layer_empty_when_no_overrides() {
     // A config with no capability overrides yields an empty capability
     // layer -- rendered empty, never an error.
     let config = config_with_opus_model();
-    let view = derive_effective_view(&config, &CatalogOverlay::default());
+    let view = derive_effective_view(&config, &CatalogOverlay::default(), None, None);
     assert!(view.capabilities.is_empty());
 }
 
@@ -833,7 +835,7 @@ fn untuned_row(target: &str) -> TuningRow {
 fn live_shape_config_resolves_to_the_expected_tuning_table() {
     let config = live_shape_config();
 
-    let view = derive_effective_view(&config, &CatalogOverlay::default());
+    let view = derive_effective_view(&config, &CatalogOverlay::default(), None, None);
 
     let mut relay = untuned_row("relay");
     relay.tuning.circuit_failures = resolved(after(5), TuningSource::Provider);
@@ -861,7 +863,7 @@ fn a_pooled_model_first_byte_override_adds_one_row_per_seat_in_member_order() {
         .stream_first_byte_timeout_ms = Some(90_000);
     config.pools.get_mut("seats").expect("seats pool").rpm_limit = Some(20);
 
-    let view = derive_effective_view(&config, &CatalogOverlay::default());
+    let view = derive_effective_view(&config, &CatalogOverlay::default(), None, None);
 
     let model_rows: Vec<&TuningRow> = view
         .tuning
@@ -946,7 +948,7 @@ stream_first_byte_timeout_ms = 50000
 fn a_pooled_model_row_per_seat_resolves_through_its_member() {
     let config = member_override_config();
 
-    let view = derive_effective_view(&config, &CatalogOverlay::default());
+    let view = derive_effective_view(&config, &CatalogOverlay::default(), None, None);
 
     let model_row = |target: &str,
                      failures: Resolved<BreakerThreshold>,
@@ -999,7 +1001,7 @@ fn a_zero_model_first_byte_override_adds_no_row() {
         .expect("big model")
         .stream_first_byte_timeout_ms = Some(0);
 
-    let view = derive_effective_view(&config, &CatalogOverlay::default());
+    let view = derive_effective_view(&config, &CatalogOverlay::default(), None, None);
 
     assert!(
         view.tuning
@@ -1013,7 +1015,7 @@ fn a_pool_rpm_limit_leaves_member_provider_cells_unset_and_shows_on_their_tuning
     let mut config = live_shape_config();
     config.pools.get_mut("seats").expect("seats pool").rpm_limit = Some(20);
 
-    let view = derive_effective_view(&config, &CatalogOverlay::default());
+    let view = derive_effective_view(&config, &CatalogOverlay::default(), None, None);
 
     for cell in &view.providers {
         assert_eq!(cell.rpm_limit, None, "provider cell {}", cell.id);
@@ -1030,4 +1032,171 @@ fn a_pool_rpm_limit_leaves_member_provider_cells_unset_and_shows_on_their_tuning
         };
         assert_eq!(row.tuning.rpm_limit, expected, "tuning row {}", row.target);
     }
+}
+
+/// One config with a model per fill and window shape: a configured fill and
+/// window, an Anthropic-shape egress with neither, a pass-through egress with
+/// neither, and an Anthropic-shape pool.
+fn facts_config() -> Config {
+    toml::from_str(
+        r#"
+version = 2
+
+[providers.anthropic]
+kind = "anthropic-api"
+api_key_ref = "env://ANTHROPIC_API_KEY"
+
+[providers.compat]
+kind = "openai-compat"
+base_url = "https://compat.example/v1"
+api_key_ref = "env://K"
+
+[providers.seat-a]
+kind = "anthropic-api"
+api_key_ref = "env://A"
+
+[pools.seats]
+members = ["seat-a"]
+
+[models.configured]
+provider = "compat"
+upstream = "glm-5"
+context_window = 200000
+max_output_tokens = 12000
+
+[models.opus]
+provider = "anthropic"
+upstream = "claude-opus-4-8"
+
+[models.plain]
+provider = "compat"
+upstream = "glm-5"
+
+[models.pooled]
+provider = "seats"
+upstream = "claude-opus-4-8"
+"#,
+    )
+    .expect("valid config")
+}
+
+fn model<'a>(view: &'a EffectiveView, nickname: &str) -> &'a ModelCell {
+    view.models
+        .iter()
+        .find(|m| m.nickname == nickname)
+        .unwrap_or_else(|| panic!("model {nickname} in the view"))
+}
+
+#[test]
+fn model_window_and_fill_carry_their_source() {
+    let view = derive_effective_view(&facts_config(), &CatalogOverlay::default(), None, None);
+
+    let default_fill = Some(FillCeiling {
+        tokens: routectl_providers::anthropic_api::DEFAULT_MAX_OUTPUT_TOKENS,
+        source: FillSource::Default,
+    });
+    let rows: [(&str, Option<u32>, Option<FillCeiling>); 4] = [
+        (
+            "configured",
+            Some(200_000),
+            Some(FillCeiling {
+                tokens: 12_000,
+                source: FillSource::ModelConfig,
+            }),
+        ),
+        ("opus", None, default_fill),
+        ("plain", None, None),
+        ("pooled", None, default_fill),
+    ];
+    for (nickname, window, fill) in rows {
+        let cell = model(&view, nickname);
+        assert_eq!(cell.context_window, window, "{nickname} window");
+        assert_eq!(cell.fill, fill, "{nickname} fill");
+    }
+}
+
+#[test]
+fn fill_source_tokens_are_fixed() {
+    assert_eq!(FillSource::ModelConfig.as_str(), "model-config");
+    assert_eq!(FillSource::Default.as_str(), "default");
+}
+
+fn dated_table(date: &str, input: f64) -> PriceTable {
+    let json = serde_json::json!({
+        "schema_version": 1,
+        "generated_at": date,
+        "providers": [{
+            "id": "anthropic",
+            "models": [{ "id": "claude-opus-4-8", "input": input, "output": 25.0 }],
+        }],
+    });
+    crate::prices::parse_and_validate(&serde_json::to_vec(&json).expect("serializes"))
+        .expect("valid table")
+}
+
+#[test]
+fn model_prices_carry_each_field_source_and_the_view_carries_table_dates() {
+    let mut config = facts_config();
+    config.models.get_mut("opus").expect("opus").pricing = Some(PricingConfig {
+        output_per_mtok: Some(30.0),
+        ..PricingConfig::default()
+    });
+    let refreshed = dated_table("2026-11-05", 5.0);
+    let shipped = dated_table("2026-10-01", 4.0);
+
+    let view = derive_effective_view(
+        &config,
+        &CatalogOverlay::default(),
+        Some(&refreshed),
+        Some(&shipped),
+    );
+
+    let opus = model(&view, "opus");
+    assert_eq!(
+        opus.price_fields(),
+        [
+            ("input_per_mtok", Some(5.0), PriceSource::Refreshed),
+            ("output_per_mtok", Some(30.0), PriceSource::ModelConfig),
+            ("cache_read_per_mtok", None, PriceSource::Unknown),
+            ("cache_write_5m_per_mtok", None, PriceSource::Unknown),
+            ("cache_write_1h_per_mtok", Some(10.0), PriceSource::Derived),
+        ]
+    );
+    let refreshed_date = TableDate::parse("2026-11-05");
+    let shipped_date = TableDate::parse("2026-10-01");
+    assert_eq!(
+        view.price_tables,
+        PriceTableDates {
+            refreshed: refreshed_date,
+            shipped: shipped_date,
+        }
+    );
+    assert_eq!(
+        view.price_tables.date_for(PriceSource::Refreshed),
+        refreshed_date
+    );
+    assert_eq!(
+        view.price_tables.date_for(PriceSource::Shipped),
+        shipped_date
+    );
+    for source in [
+        PriceSource::ModelConfig,
+        PriceSource::Registry,
+        PriceSource::Derived,
+        PriceSource::Unknown,
+    ] {
+        assert_eq!(view.price_tables.date_for(source), None, "{source:?}");
+    }
+}
+
+#[test]
+fn a_model_no_source_prices_reads_unknown_on_every_field() {
+    let view = derive_effective_view(&facts_config(), &CatalogOverlay::default(), None, None);
+
+    let plain = model(&view, "plain");
+    for (key, value, source) in plain.price_fields() {
+        assert_eq!(value, None, "{key}");
+        assert_eq!(source, PriceSource::Unknown, "{key}");
+    }
+    assert_eq!(view.price_tables, PriceTableDates::default());
 }

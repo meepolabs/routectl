@@ -1,19 +1,22 @@
 //! Pure, provenance-annotated derivation of the effective config view that
 //! backs `config show --effective`.
 //!
-//! Three surfaces have more than one layer competing for a value, so only
+//! Several surfaces have more than one layer competing for a value, so only
 //! those carry provenance: a model's catalog cell (the compiled-in baked
-//! table vs an operator overlay), a retry class's policy (the baked class
-//! default vs a `[retry.classes.<class>]` leaf), and a capability cell (the
-//! config-derived override layer, tagged with the source that set it). Every
-//! other config field is trivially the value in `config.toml`; annotating it
-//! would be noise.
+//! table vs an operator overlay), a model's facts (context window, output
+//! fill and per-field prices, each tagged with its source), a retry class's
+//! policy (the baked class default vs a `[retry.classes.<class>]` leaf), and
+//! a capability cell (the config-derived override layer, tagged with the
+//! source that set it). Every other config field is trivially the value in
+//! `config.toml`; annotating it would be noise.
 //!
-//! The derivation is a PURE function over `(&Config, &CatalogOverlay)`. It
-//! runs the SAME `(provider_kind, upstream)` catalog lookups the router's
-//! chain-build merge runs, so an operator inspecting the view sees exactly the
-//! cells dispatch prices against -- with no secret resolution, no provider
-//! construction, and no network.
+//! The derivation is a PURE function over the config, the catalog overlay
+//! and the price tables it is handed. It runs the SAME `(provider_kind,
+//! upstream)` catalog lookups the router's chain-build merge runs and the
+//! same price precedence usage cost resolves through, so an operator
+//! inspecting the view sees exactly the cells dispatch and cost read -- with
+//! no secret resolution, no provider construction, no file read, and no
+//! network.
 //!
 //! The capability layer carries only the config-derived override cells (the
 //! same read-model the routing filter consults). Learned-capability negatives
@@ -35,8 +38,14 @@ use crate::catalog_overlay::CatalogOverlay;
 use crate::class_policy::ConfigFailureClass;
 #[cfg(feature = "bedrock")]
 use crate::config::BedrockCredsConfig;
-use crate::config::{Config, ProviderEntry, ResolvedTuning, resolve_tuning};
+use crate::config::{
+    Config, ModelEntry, PricingConfig, ProviderEntry, ResolvedTuning, resolve_tuning,
+};
 use crate::override_registry::{OverrideRegistry, OverrideRow};
+use crate::prices::{
+    PriceSource, PriceSources, PriceSubject, PriceTable, TableDate, effective_pricing,
+    provider_entry_for_target,
+};
 use crate::seat_pool::seat_state_key;
 
 /// The catalog cell a single `[models.X]` entry resolves to, tagged with the
@@ -57,6 +66,96 @@ pub struct ModelCell {
     pub upstream: String,
     /// The merged catalog row and its winning-layer provenance.
     pub row: EffectiveRow,
+    /// `[models.X] context_window`, the one window source; `None` when the
+    /// operator configured none (the window gate keeps the model and
+    /// `/v1/models` omits it).
+    pub context_window: Option<u32>,
+    /// The `max_tokens` sent when a client omits one, before any learned
+    /// ceiling lowers it at dispatch. `None` when nothing is configured and
+    /// the model's egress forwards an omitted limit as omitted.
+    pub fill: Option<FillCeiling>,
+    /// The effective per-million-token prices; a field left `None` is unknown.
+    pub pricing: PricingConfig,
+    /// The source of each field of [`Self::pricing`].
+    pub price_sources: PriceSources,
+}
+
+impl ModelCell {
+    /// Each price field as `(config key, value, source)`, in the
+    /// `[models.X.pricing]` key order.
+    pub const fn price_fields(&self) -> [(&'static str, Option<f64>, PriceSource); 5] {
+        let p = &self.pricing;
+        let s = &self.price_sources;
+        [
+            ("input_per_mtok", p.input_per_mtok, s.input),
+            ("output_per_mtok", p.output_per_mtok, s.output),
+            ("cache_read_per_mtok", p.cache_read_per_mtok, s.cache_read),
+            (
+                "cache_write_5m_per_mtok",
+                p.cache_write_5m_per_mtok,
+                s.cache_write_5m,
+            ),
+            (
+                "cache_write_1h_per_mtok",
+                p.cache_write_1h_per_mtok,
+                s.cache_write_1h,
+            ),
+        ]
+    }
+}
+
+/// A model's output fill and the layer that supplied it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FillCeiling {
+    /// The fill value in tokens.
+    pub tokens: u32,
+    /// Which layer supplied [`Self::tokens`].
+    pub source: FillSource,
+}
+
+/// Where a [`FillCeiling`] came from. Each variant renders as one fixed token
+/// through [`Self::as_str`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FillSource {
+    /// `[models.X] max_output_tokens`.
+    ModelConfig,
+    /// The built-in fill of an egress that must send `max_tokens`.
+    Default,
+}
+
+impl FillSource {
+    /// The fixed token for this source.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ModelConfig => "model-config",
+            Self::Default => "default",
+        }
+    }
+}
+
+/// The price tables a view was derived against, by date. A `refreshed` or
+/// `shipped` price source is read beside the matching date.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PriceTableDates {
+    /// The refreshed table's date, or `None` when no refreshed table was given.
+    pub refreshed: Option<TableDate>,
+    /// The shipped table's date, or `None` when no shipped table was given.
+    pub shipped: Option<TableDate>,
+}
+
+impl PriceTableDates {
+    /// The date of the table a price `source` names: the refreshed or the
+    /// shipped table's date, `None` for every other source.
+    pub const fn date_for(&self, source: PriceSource) -> Option<TableDate> {
+        match source {
+            PriceSource::Refreshed => self.refreshed,
+            PriceSource::Shipped => self.shipped,
+            PriceSource::ModelConfig
+            | PriceSource::Registry
+            | PriceSource::Derived
+            | PriceSource::Unknown => None,
+        }
+    }
 }
 
 /// The resolved retry/fallback policy for one failure class, tagged with the
@@ -461,6 +560,8 @@ pub struct EffectiveView {
     /// rows of each `[models.X]` first-content override, one per seat for a
     /// pooled model (see [`TuningRow`]).
     pub tuning: Vec<TuningRow>,
+    /// The dates of the price tables the model prices were resolved against.
+    pub price_tables: PriceTableDates,
 }
 
 /// Every operator-nameable failure class, in a stable render order.
@@ -477,17 +578,32 @@ const ALL_CONFIG_CLASSES: [ConfigFailureClass; 10] = [
     ConfigFailureClass::FeatureUnsupported,
 ];
 
-/// Derive the provenance-annotated effective view from a parsed config and its
-/// catalog overlay. Pure: the model rows come from the same lookups the router
-/// stamps onto `ResolvedModel::effective_row` at chain-build; the class rows
-/// come from [`crate::config::RetryPolicy::resolved_class`].
+/// Derive the provenance-annotated effective view from a parsed config, its
+/// catalog overlay, and the refreshed and shipped price tables (either may be
+/// absent). Pure: the catalog rows come from the same lookups the router
+/// stamps onto `ResolvedModel::effective_row` at chain-build; the prices from
+/// [`effective_pricing`]; the class rows from
+/// [`crate::config::RetryPolicy::resolved_class`].
 #[must_use]
-pub fn derive_effective_view(config: &Config, overlay: &CatalogOverlay) -> EffectiveView {
+pub fn derive_effective_view(
+    config: &Config,
+    overlay: &CatalogOverlay,
+    refreshed: Option<&PriceTable>,
+    shipped: Option<&PriceTable>,
+) -> EffectiveView {
     let models = config
         .models
         .iter()
         .map(|(nickname, entry)| {
             let provider_kind = config.provider_kind_for_target(&entry.provider);
+            let subject = PriceSubject {
+                model: Some(nickname),
+                provider: &entry.provider,
+                upstream: &entry.upstream,
+                persisted_kind: None,
+            };
+            let (pricing, price_sources) = effective_pricing(config, &subject, refreshed, shipped)
+                .unwrap_or((PricingConfig::default(), PriceSources::UNKNOWN));
             ModelCell {
                 nickname: nickname.clone(),
                 provider: entry.provider.clone(),
@@ -500,6 +616,10 @@ pub fn derive_effective_view(config: &Config, overlay: &CatalogOverlay) -> Effec
                     &config.cache_pricing,
                     overlay,
                 ),
+                context_window: entry.context_window.filter(|tokens| *tokens > 0),
+                fill: fill_ceiling(config, entry),
+                pricing,
+                price_sources,
             }
         })
         .collect();
@@ -556,7 +676,28 @@ pub fn derive_effective_view(config: &Config, overlay: &CatalogOverlay) -> Effec
         aliases,
         providers,
         tuning,
+        price_tables: PriceTableDates {
+            refreshed: refreshed.map(PriceTable::generated_at),
+            shipped: shipped.map(PriceTable::generated_at),
+        },
     }
+}
+
+/// The configured `max_output_tokens`, else the built-in default when the
+/// model's egress must send `max_tokens`, else `None`. A pool is read through
+/// its first member, as price selection reads it.
+fn fill_ceiling(config: &Config, entry: &ModelEntry) -> Option<FillCeiling> {
+    if let Some(tokens) = entry.max_output_tokens.filter(|tokens| *tokens > 0) {
+        return Some(FillCeiling {
+            tokens,
+            source: FillSource::ModelConfig,
+        });
+    }
+    let egress = provider_entry_for_target(config, &entry.provider)?.egress_kind();
+    routectl_providers::anthropic_api::egress_fills_max_tokens(egress).then_some(FillCeiling {
+        tokens: routectl_providers::anthropic_api::DEFAULT_MAX_OUTPUT_TOKENS,
+        source: FillSource::Default,
+    })
 }
 
 #[cfg(test)]

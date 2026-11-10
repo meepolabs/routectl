@@ -106,6 +106,7 @@ pub use book::PriceBook;
 pub use effective::{PriceSource, PriceSources, PriceSubject, effective_pricing};
 pub use format::TableDate;
 pub use models_dev::from_models_dev;
+pub(crate) use select::provider_entry_for_target;
 pub use shipped::shipped_table;
 pub use validate::{MAX_INPUT_BYTES, parse_and_validate};
 

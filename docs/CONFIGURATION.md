@@ -3531,10 +3531,12 @@ would be noise).
 
 The derivation is pure: it runs the SAME `(provider_kind, upstream)`
 catalog lookups the router runs at chain-build, over the loaded config
-and `catalog_overlay.json`. It resolves no secrets, builds no provider,
-and makes no network call, so it is safe to run against any config.
+and `catalog_overlay.json`, and the same price precedence usage cost
+uses, over `prices.json` in the config folder and the table shipped with
+the release. It resolves no secrets, builds no provider, and makes no
+network call, so it is safe to run against any config.
 
-Four sections are printed:
+Five sections are printed:
 
 - **model catalog cells** -- one row per `[models.X]` entry, showing its
   `provider_kind/upstream` selector and the merged catalog cell. The
@@ -3548,6 +3550,24 @@ Four sections are printed:
   - `disabled` -- the overlay explicitly disabled this selector
     (overlay `null`); pricing falls back to the conservative sentinel;
   - `missing` -- neither layer has a row (an unpriced upstream).
+- **model facts** -- a header naming the refreshed and shipped table
+  dates (`none` when that table is absent), then one row per
+  `[models.X]` entry with `context_window`, `fill` and the five price
+  fields (`input_per_mtok`, `output_per_mtok`, `cache_read_per_mtok`,
+  `cache_write_5m_per_mtok`, `cache_write_1h_per_mtok`) as
+  `key=value(source)`:
+  - `context_window` comes only from `[models.X] context_window`
+    (`model-config`); unset renders `none`.
+  - `fill` is the `max_tokens` sent when a client omits one: `model-config`
+    for `[models.X] max_output_tokens`, else `default` (64000) on an
+    egress that must send `max_tokens`; `none` when the egress forwards an
+    omitted limit as omitted. A learned ceiling can lower it at dispatch.
+  - each price names its source: `model-config` (`[models.X.pricing]`),
+    `registry` (a matching `[registry]` row), `refreshed` or `shipped`
+    (followed by `:YYYY-MM-DD`, the table date), or `derived` (the
+    Anthropic-family 1h cache write, twice the input price). A field no
+    source prices renders `unknown`, never `0`. Sources are fixed tokens:
+    no provider id or host from a downloaded table is printed.
 - **retry class policy** -- one row per failure class, showing the
   resolved `retry`/`fallback` pair and a `source=` tag:
   - `config` -- a `[retry.classes.<class>]` leaf set this class;

@@ -159,8 +159,8 @@ pub use config::{
 #[cfg(feature = "bedrock")]
 pub use config::{BedrockApiShapeConfig, BedrockCredsConfig, BedrockMantleConfig};
 pub use config_effective::{
-    AliasChain, ClassPolicyCell, ClassPolicySource, EffectiveView, ModelCell, ProviderCell,
-    TuningRow, TuningTargetKind, derive_effective_view,
+    AliasChain, ClassPolicyCell, ClassPolicySource, EffectiveView, FillCeiling, FillSource,
+    ModelCell, PriceTableDates, ProviderCell, TuningRow, TuningTargetKind, derive_effective_view,
 };
 pub use config_error::parse_config;
 pub use config_locate::locate_dotted_path;

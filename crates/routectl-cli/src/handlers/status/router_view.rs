@@ -16,7 +16,7 @@ use std::time::Instant;
 
 use arc_swap::ArcSwap;
 use routectl_core::EligibilityReason;
-use routectl_router::prices::PriceBook;
+use routectl_router::prices::{PriceBook, PriceTable};
 use routectl_router::router::RouteTargetStatus;
 use routectl_router::wire_check_state::WireCheckSnapshot;
 use routectl_router::{
@@ -191,10 +191,22 @@ impl StatusRouterView {
     /// memory. Neither input is re-read from disk here, so one derivation can
     /// never pair a config generation with a different overlay generation.
     ///
+    /// Model prices resolve against the `refreshed` and `shipped` tables the
+    /// caller pinned for this read.
+    ///
     /// The raw `Config` is read only inside this method; the panel receives
     /// the already-derived, secret-free [`EffectiveView`].
-    pub fn effective_view(&self) -> EffectiveView {
-        derive_effective_view(&self.router.config, self.router.catalog_overlay())
+    pub fn effective_view(
+        &self,
+        refreshed: Option<&PriceTable>,
+        shipped: Option<&PriceTable>,
+    ) -> EffectiveView {
+        derive_effective_view(
+            &self.router.config,
+            self.router.catalog_overlay(),
+            refreshed,
+            shipped,
+        )
     }
 
     /// The served doctor gather's inputs, owned so the gather can run on a
@@ -290,7 +302,7 @@ mod tests {
         let _per_request: Vec<u64> = view.repairs_per_request();
         let _fidelity: FidelitySnapshot = view.fidelity_snapshot();
         let _wire_check: WireCheckSnapshot = view.wire_check_snapshot();
-        let _effective: EffectiveView = view.effective_view();
+        let _effective: EffectiveView = view.effective_view(None, None);
         let _served: ServedInputs = view.served_doctor_inputs(WarmReport::not_run());
     }
 

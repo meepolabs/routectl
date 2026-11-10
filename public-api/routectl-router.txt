@@ -9449,6 +9449,67 @@ impl<T> typenum::type_operators::Same for routectl_router::ExistingCell
 pub type routectl_router::ExistingCell::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::ExistingCell where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::ExistingCell::into_shared(self) -> Shared
+pub enum routectl_router::FillSource
+pub routectl_router::FillSource::Default
+pub routectl_router::FillSource::ModelConfig
+impl routectl_router::FillSource
+pub const fn routectl_router::FillSource::as_str(self) -> &'static str
+impl core::clone::Clone for routectl_router::FillSource
+pub fn routectl_router::FillSource::clone(&self) -> routectl_router::FillSource
+impl core::cmp::Eq for routectl_router::FillSource
+impl core::cmp::PartialEq for routectl_router::FillSource
+pub fn routectl_router::FillSource::eq(&self, &routectl_router::FillSource) -> bool
+impl core::fmt::Debug for routectl_router::FillSource
+pub fn routectl_router::FillSource::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for routectl_router::FillSource
+impl core::marker::StructuralPartialEq for routectl_router::FillSource
+impl core::marker::Freeze for routectl_router::FillSource
+impl core::marker::Send for routectl_router::FillSource
+impl core::marker::Sync for routectl_router::FillSource
+impl core::marker::Unpin for routectl_router::FillSource
+impl core::marker::UnsafeUnpin for routectl_router::FillSource
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::FillSource
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::FillSource
+impl<Q, K> equivalent::Equivalent<K> for routectl_router::FillSource where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_router::FillSource::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_router::FillSource where U: core::convert::From<T>
+pub fn routectl_router::FillSource::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::FillSource where U: core::convert::Into<T>
+pub type routectl_router::FillSource::Error = core::convert::Infallible
+pub fn routectl_router::FillSource::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::FillSource where U: core::convert::TryFrom<T>
+pub type routectl_router::FillSource::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::FillSource::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::FillSource where T: core::clone::Clone
+pub type routectl_router::FillSource::Owned = T
+pub fn routectl_router::FillSource::clone_into(&self, &mut T)
+pub fn routectl_router::FillSource::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::FillSource where T: core::clone::Clone
+pub fn routectl_router::FillSource::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::FillSource where T: 'static + ?core::marker::Sized
+pub fn routectl_router::FillSource::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::FillSource where T: ?core::marker::Sized
+pub fn routectl_router::FillSource::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::FillSource where T: ?core::marker::Sized
+pub fn routectl_router::FillSource::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::FillSource where T: core::clone::Clone
+pub unsafe fn routectl_router::FillSource::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::FillSource
+pub fn routectl_router::FillSource::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::FillSource where T: core::clone::Clone
+pub fn routectl_router::FillSource::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::FillSource
+impl<T> outref::AsOut<T> for routectl_router::FillSource where T: core::marker::Copy
+pub fn routectl_router::FillSource::as_out(&mut self) -> outref::Out<'_, T>
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::FillSource where T: ?core::marker::Sized
+pub fn routectl_router::FillSource::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::FillSource::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::FillSource
+impl<T> tracing::instrument::WithSubscriber for routectl_router::FillSource
+impl<T> typenum::type_operators::Same for routectl_router::FillSource
+pub type routectl_router::FillSource::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::FillSource where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::FillSource::into_shared(self) -> Shared
 #[non_exhaustive] pub enum routectl_router::GateDecision
 pub routectl_router::GateDecision::Break
 pub routectl_router::GateDecision::Break::delta_tokens: u64
@@ -14279,6 +14340,7 @@ pub routectl_router::EffectiveView::aliases: alloc::vec::Vec<routectl_router::Al
 pub routectl_router::EffectiveView::capabilities: alloc::vec::Vec<routectl_router::OverrideRow>
 pub routectl_router::EffectiveView::classes: alloc::vec::Vec<routectl_router::ClassPolicyCell>
 pub routectl_router::EffectiveView::models: alloc::vec::Vec<routectl_router::ModelCell>
+pub routectl_router::EffectiveView::price_tables: routectl_router::PriceTableDates
 pub routectl_router::EffectiveView::providers: alloc::vec::Vec<routectl_router::ProviderCell>
 pub routectl_router::EffectiveView::tuning: alloc::vec::Vec<routectl_router::TuningRow>
 impl core::clone::Clone for routectl_router::EffectiveView
@@ -14704,6 +14766,65 @@ impl<T> typenum::type_operators::Same for routectl_router::FieldVerdictStatus
 pub type routectl_router::FieldVerdictStatus::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::FieldVerdictStatus where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::FieldVerdictStatus::into_shared(self) -> Shared
+pub struct routectl_router::FillCeiling
+pub routectl_router::FillCeiling::source: routectl_router::FillSource
+pub routectl_router::FillCeiling::tokens: u32
+impl core::clone::Clone for routectl_router::FillCeiling
+pub fn routectl_router::FillCeiling::clone(&self) -> routectl_router::FillCeiling
+impl core::cmp::Eq for routectl_router::FillCeiling
+impl core::cmp::PartialEq for routectl_router::FillCeiling
+pub fn routectl_router::FillCeiling::eq(&self, &routectl_router::FillCeiling) -> bool
+impl core::fmt::Debug for routectl_router::FillCeiling
+pub fn routectl_router::FillCeiling::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for routectl_router::FillCeiling
+impl core::marker::StructuralPartialEq for routectl_router::FillCeiling
+impl core::marker::Freeze for routectl_router::FillCeiling
+impl core::marker::Send for routectl_router::FillCeiling
+impl core::marker::Sync for routectl_router::FillCeiling
+impl core::marker::Unpin for routectl_router::FillCeiling
+impl core::marker::UnsafeUnpin for routectl_router::FillCeiling
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::FillCeiling
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::FillCeiling
+impl<Q, K> equivalent::Equivalent<K> for routectl_router::FillCeiling where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_router::FillCeiling::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_router::FillCeiling where U: core::convert::From<T>
+pub fn routectl_router::FillCeiling::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::FillCeiling where U: core::convert::Into<T>
+pub type routectl_router::FillCeiling::Error = core::convert::Infallible
+pub fn routectl_router::FillCeiling::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::FillCeiling where U: core::convert::TryFrom<T>
+pub type routectl_router::FillCeiling::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::FillCeiling::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::FillCeiling where T: core::clone::Clone
+pub type routectl_router::FillCeiling::Owned = T
+pub fn routectl_router::FillCeiling::clone_into(&self, &mut T)
+pub fn routectl_router::FillCeiling::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::FillCeiling where T: core::clone::Clone
+pub fn routectl_router::FillCeiling::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::FillCeiling where T: 'static + ?core::marker::Sized
+pub fn routectl_router::FillCeiling::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::FillCeiling where T: ?core::marker::Sized
+pub fn routectl_router::FillCeiling::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::FillCeiling where T: ?core::marker::Sized
+pub fn routectl_router::FillCeiling::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::FillCeiling where T: core::clone::Clone
+pub unsafe fn routectl_router::FillCeiling::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::FillCeiling
+pub fn routectl_router::FillCeiling::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::FillCeiling where T: core::clone::Clone
+pub fn routectl_router::FillCeiling::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::FillCeiling
+impl<T> outref::AsOut<T> for routectl_router::FillCeiling where T: core::marker::Copy
+pub fn routectl_router::FillCeiling::as_out(&mut self) -> outref::Out<'_, T>
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::FillCeiling where T: ?core::marker::Sized
+pub fn routectl_router::FillCeiling::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::FillCeiling::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::FillCeiling
+impl<T> tracing::instrument::WithSubscriber for routectl_router::FillCeiling
+impl<T> typenum::type_operators::Same for routectl_router::FillCeiling
+pub type routectl_router::FillCeiling::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::FillCeiling where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::FillCeiling::into_shared(self) -> Shared
 pub struct routectl_router::Finding
 pub routectl_router::Finding::detail: alloc::string::String
 pub routectl_router::Finding::name: alloc::string::String
@@ -16207,11 +16328,17 @@ pub type routectl_router::MitmConfig::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::MitmConfig where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::MitmConfig::into_shared(self) -> Shared
 pub struct routectl_router::ModelCell
+pub routectl_router::ModelCell::context_window: core::option::Option<u32>
+pub routectl_router::ModelCell::fill: core::option::Option<routectl_router::FillCeiling>
 pub routectl_router::ModelCell::nickname: alloc::string::String
+pub routectl_router::ModelCell::price_sources: routectl_router::prices::PriceSources
+pub routectl_router::ModelCell::pricing: routectl_router::PricingConfig
 pub routectl_router::ModelCell::provider: alloc::string::String
 pub routectl_router::ModelCell::provider_kind: alloc::string::String
 pub routectl_router::ModelCell::row: routectl_router::catalog::EffectiveRow
 pub routectl_router::ModelCell::upstream: alloc::string::String
+impl routectl_router::ModelCell
+pub const fn routectl_router::ModelCell::price_fields(&self) -> [(&'static str, core::option::Option<f64>, routectl_router::prices::PriceSource); 5]
 impl core::clone::Clone for routectl_router::ModelCell
 pub fn routectl_router::ModelCell::clone(&self) -> routectl_router::ModelCell
 impl core::cmp::PartialEq for routectl_router::ModelCell
@@ -17254,6 +17381,69 @@ impl<T> typenum::type_operators::Same for routectl_router::PrefixReductionCandid
 pub type routectl_router::PrefixReductionCandidate::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::PrefixReductionCandidate where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::PrefixReductionCandidate::into_shared(self) -> Shared
+pub struct routectl_router::PriceTableDates
+pub routectl_router::PriceTableDates::refreshed: core::option::Option<routectl_router::prices::TableDate>
+pub routectl_router::PriceTableDates::shipped: core::option::Option<routectl_router::prices::TableDate>
+impl routectl_router::PriceTableDates
+pub const fn routectl_router::PriceTableDates::date_for(&self, routectl_router::prices::PriceSource) -> core::option::Option<routectl_router::prices::TableDate>
+impl core::clone::Clone for routectl_router::PriceTableDates
+pub fn routectl_router::PriceTableDates::clone(&self) -> routectl_router::PriceTableDates
+impl core::cmp::Eq for routectl_router::PriceTableDates
+impl core::cmp::PartialEq for routectl_router::PriceTableDates
+pub fn routectl_router::PriceTableDates::eq(&self, &routectl_router::PriceTableDates) -> bool
+impl core::default::Default for routectl_router::PriceTableDates
+pub fn routectl_router::PriceTableDates::default() -> routectl_router::PriceTableDates
+impl core::fmt::Debug for routectl_router::PriceTableDates
+pub fn routectl_router::PriceTableDates::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for routectl_router::PriceTableDates
+impl core::marker::StructuralPartialEq for routectl_router::PriceTableDates
+impl core::marker::Freeze for routectl_router::PriceTableDates
+impl core::marker::Send for routectl_router::PriceTableDates
+impl core::marker::Sync for routectl_router::PriceTableDates
+impl core::marker::Unpin for routectl_router::PriceTableDates
+impl core::marker::UnsafeUnpin for routectl_router::PriceTableDates
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::PriceTableDates
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::PriceTableDates
+impl<Q, K> equivalent::Equivalent<K> for routectl_router::PriceTableDates where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn routectl_router::PriceTableDates::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for routectl_router::PriceTableDates where U: core::convert::From<T>
+pub fn routectl_router::PriceTableDates::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::PriceTableDates where U: core::convert::Into<T>
+pub type routectl_router::PriceTableDates::Error = core::convert::Infallible
+pub fn routectl_router::PriceTableDates::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::PriceTableDates where U: core::convert::TryFrom<T>
+pub type routectl_router::PriceTableDates::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::PriceTableDates::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::PriceTableDates where T: core::clone::Clone
+pub type routectl_router::PriceTableDates::Owned = T
+pub fn routectl_router::PriceTableDates::clone_into(&self, &mut T)
+pub fn routectl_router::PriceTableDates::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::PriceTableDates where T: core::clone::Clone
+pub fn routectl_router::PriceTableDates::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::PriceTableDates where T: 'static + ?core::marker::Sized
+pub fn routectl_router::PriceTableDates::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::PriceTableDates where T: ?core::marker::Sized
+pub fn routectl_router::PriceTableDates::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::PriceTableDates where T: ?core::marker::Sized
+pub fn routectl_router::PriceTableDates::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::PriceTableDates where T: core::clone::Clone
+pub unsafe fn routectl_router::PriceTableDates::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::PriceTableDates
+pub fn routectl_router::PriceTableDates::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::PriceTableDates where T: core::clone::Clone
+pub fn routectl_router::PriceTableDates::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::PriceTableDates
+impl<T> outref::AsOut<T> for routectl_router::PriceTableDates where T: core::marker::Copy
+pub fn routectl_router::PriceTableDates::as_out(&mut self) -> outref::Out<'_, T>
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::PriceTableDates where T: ?core::marker::Sized
+pub fn routectl_router::PriceTableDates::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::PriceTableDates::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::PriceTableDates
+impl<T> tracing::instrument::WithSubscriber for routectl_router::PriceTableDates
+impl<T> typenum::type_operators::Same for routectl_router::PriceTableDates
+pub type routectl_router::PriceTableDates::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::PriceTableDates where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::PriceTableDates::into_shared(self) -> Shared
 pub struct routectl_router::PricingConfig
 pub routectl_router::PricingConfig::cache_read_per_mtok: core::option::Option<f64>
 pub routectl_router::PricingConfig::cache_write_1h_per_mtok: core::option::Option<f64>
@@ -20188,7 +20378,7 @@ pub fn routectl_router::codex_identity_warnings(&routectl_router::config::Config
 pub fn routectl_router::collect_config_validation(&routectl_router::config::Config) -> routectl_router::ConfigValidation
 pub fn routectl_router::collect_near_lossless_marks(&routectl_core::schema::ChatRequest, usize, usize) -> routectl_router::NearLosslessMarks
 pub fn routectl_router::compute_activation(&[(&str, routectl_auth::oauth::store::LocalProbe)], &routectl_router::config::Config) -> routectl_router::ActivationState
-pub fn routectl_router::derive_effective_view(&routectl_router::config::Config, &routectl_router::CatalogOverlay) -> routectl_router::EffectiveView
+pub fn routectl_router::derive_effective_view(&routectl_router::config::Config, &routectl_router::CatalogOverlay, core::option::Option<&routectl_router::prices::PriceTable>, core::option::Option<&routectl_router::prices::PriceTable>) -> routectl_router::EffectiveView
 pub fn routectl_router::detect(&routectl_router::DetectorContext, &routectl_core::schema::ChatResponse) -> alloc::vec::Vec<routectl_router::CapabilityObservation>
 pub fn routectl_router::diff_activation(&routectl_router::ActivationState, &routectl_router::ActivationState) -> routectl_router::ActivationDelta
 pub fn routectl_router::diff_has_no_effective_change(&routectl_router::ImportDiff) -> bool
