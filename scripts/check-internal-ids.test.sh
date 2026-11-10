@@ -288,6 +288,14 @@ assert_diff_caught "sibling of the shipped price table IS scanned" \
 "+++ b/crates/routectl-router/src/prices_shipped.NOTICE
 +          \"id\": \"MiniMax-M2.7\","
 
+# The retired vendored snapshot directory is no longer excluded: a file
+# reappearing there is scanned like any other. The name is assembled so no
+# tracked file spells the retired path.
+RETIRED_SNAPSHOT_DIR="$(printf '%s_%s' 'catalog' 'data')"
+assert_diff_caught "the retired vendored snapshot directory IS scanned" \
+"+++ b/crates/routectl-router/$RETIRED_SNAPSHOT_DIR/x.json
++see RV-99 here"
+
 assert_diff_caught "ordinary source file IS scanned" \
 "+++ b/crates/routectl-core/src/lib.rs
 +// TODO(M99) wire this up"
@@ -304,17 +312,17 @@ assert_diff_caught "sibling .bak of scanner IS scanned" \
 "+++ b/scripts/check-internal-ids.sh.bak
 +    'this milestone'"
 
-# DIFF-PATH: the vendored catalog selector source is NOT path-excluded and
-# must stay clean of bare labels on its own merits.
-assert_diff_clean "catalog selector source with vendor model name is clean" \
-"+++ b/crates/routectl-router/src/catalog_codegen_selectors.rs
+# DIFF-PATH: the models.dev converter source is NOT path-excluded and must
+# stay clean of bare labels on its own merits.
+assert_diff_clean "price converter source with vendor model name is clean" \
+"+++ b/crates/routectl-router/src/prices/models_dev.rs
 +// keeps MiniMax-M3 selectable"
 
 # INTERNAL DOCUMENT references. This class leaked four times in one
 # feature's batch and passed every hook, because the id tiers look for
 # identifier shapes and a private doc's filename is ordinary prose to
 # them. Each accept below is the false positive that shaped a bound: a
-# real catalog-codegen function whose name ends in the private-docs
+# real upstream-derived function name ending in the private-docs
 # directory name matched a bare-name core, and `Table Api` /
 # `table_a_helper` are the prose and identifier forms an unbounded
 # table-label core would catch.
@@ -360,9 +368,8 @@ assert_caught "a backticked private-docs path is caught" \
 assert_caught "a private-docs path at line start is caught" \
     "$DOCS_DIR/research/notes.txt"
 
-# The left boundary is what keeps the path core off real identifiers: the
-# catalog codegen has a function whose name ends in the directory name, and
-# a directory or crate whose name merely ENDS in it is not the private-docs
+# The left boundary is what keeps the path core off real identifiers: a
+# function name may end in the directory name, and a directory or crate whose name merely ENDS in it is not the private-docs
 # directory.
 assert_clean "a longer name ending in the directory name is not a private-docs path" \
     "cached under lite$DOCS_DIR/window"
@@ -413,8 +420,8 @@ assert_diff_clean "an underscored cloak identifier is not the document" \
 +pub const CLOAK_DIR: &str = \"anthropic_api/cloak\";
 +fn cloak_baseline_population() {}"
 
-assert_diff_clean "the catalog codegen function is not a private-docs path" \
-"+++ b/crates/routectl-router/src/catalog_codegen.rs
+assert_diff_clean "a function ending in the directory name is not a private-docs path" \
+"+++ b/crates/routectl-router/src/prices/models_dev.rs
 +    let window = lite$DOCS_DIR(entry)?;"
 
 assert_diff_clean "table prose and identifiers are not internal labels" \
@@ -459,10 +466,10 @@ assert_diff_clean "an underscore-prefixed directory in a scanner source is clean
 "+++ b/scripts/check-internal-ids.test.sh
 +# cached under my_$DOCS_DIR/window"
 assert_diff_clean "an underscore-prefixed directory in an ordinary source is clean" \
-"+++ b/crates/routectl-router/src/catalog_codegen.rs
+"+++ b/crates/routectl-router/src/prices/models_dev.rs
 +// cached under my_$DOCS_DIR/window"
 assert_diff_caught "the same ordinary-source line with the bare directory is caught" \
-"+++ b/crates/routectl-router/src/catalog_codegen.rs
+"+++ b/crates/routectl-router/src/prices/models_dev.rs
 +// cached under $DOCS_DIR/window"
 
 # PORTABLE mktemp. BSD / macOS mktemp has no `-p DIR` and no long options;

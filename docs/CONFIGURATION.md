@@ -59,8 +59,7 @@ overlays merge, what's reserved.
 - [Model prices (`[models.X.pricing]`)](#model-prices-modelsxpricing)
 - [Pricing registry](#pricing-registry-registrypatternpricing)
 - [Refreshing the price table (`routectl prices refresh`)](#refreshing-the-price-table-routectl-prices-refresh)
-- [Catalog: prompt-cache economics](#catalog-prompt-cache-economics-routectl-catalog)
-  ([retired `[cache_pricing]`](#retired-cache_pricing))
+- [Retired: `[cache_pricing]` and `routectl catalog`](#retired-cache_pricing-and-routectl-catalog)
 - [Learned capability tempo (`[capability]`)](#learned-capability-tempo-capability)
 - [Fidelity pre-flight opt-in (`[fidelity]`)](#fidelity-pre-flight-opt-in-fidelity)
 - [OpenAI chat-lane rule (`reasoning_dialect`)](#openai-chat-lane-rule-reasoning_dialect)
@@ -214,8 +213,7 @@ version = 5           # config schema version; see "Config schema version"
 [registry."<glob>"]   # per-upstream pricing for cost estimation.
                       # Optional; no defaults shipped.
 
-# Prompt-cache economics (wm/rm/ttl/...) live outside config.toml as of
-# schema v2. A [cache_pricing] table is a hard startup error; set prices
+# A [cache_pricing] table (schema v1) is a hard startup error; set prices
 # under [models.X.pricing] instead. See "Retired: [cache_pricing]" below.
 
 [mitm]                # MITM front-proxy: local TLS-terminating
@@ -230,7 +228,7 @@ it is a REFERENCE, and none resolves until the named env var is set or
 the matching `routectl login` has run (an unresolved ref is a warning,
 never an error). Copy and edit; do not re-derive. Carrying a v1
 `[cache_pricing]` table: see
-[Retired: `[cache_pricing]`](#retired-cache_pricing).
+[Retired: `[cache_pricing]`](#retired-cache_pricing-and-routectl-catalog).
 
 ## Config schema version (`version`)
 
@@ -286,9 +284,9 @@ settings over by hand using this reference. `init` refuses to edit a file
 it cannot load, which is why the old file has to move first. What each
 schema version retired, and where its replacement lives:
 
-- **v1 -> v2:** the `[cache_pricing]` table; cache economics live in the
-  catalog overlay (see
-  [Retired: `[cache_pricing]`](#retired-cache_pricing)).
+- **v1 -> v2:** the `[cache_pricing]` table; set a model's prices under
+  `[models.X.pricing]` (see
+  [Retired: `[cache_pricing]`](#retired-cache_pricing-and-routectl-catalog)).
 - **v2 -> v3:** the raw-status retry allow/deny escape hatch; use
   per-class policy (see
   [Per-class retry and fallback policy](#per-class-retry-and-fallback-policy-retryclasses)).
@@ -917,8 +915,7 @@ ledger, and the flag is sent from then on, across restarts. The lift is
 accepted only for a lane some configured model routes to, and it lasts
 until the upstream rejects the flag again on that lane (the rejection is
 learned as usual and the seed's withhold returns with it) or the lane's
-provider entry is removed or changes `kind`. A catalog or overlay change
-does not restore the seed.
+provider entry is removed or changes `kind`.
 To send a flag permanently, use a `force_supported` override on
 `beta:<flag>` instead.
 
@@ -3120,7 +3117,7 @@ K-gate read): `anthropic-api` and `bedrock` write at 1.25x and read at
 0.1x with a 5-minute TTL and a 4096-token floor; `openai-compat` caches
 automatically (1.0x / 0.1x, 5 minutes, 4096 tokens); `openai-responses`
 caches automatically (0.1x reads, 24 hours, 1024 tokens); `gemini` has no
-rules. The model, the catalog and any per-model prices play no part.
+rules. The model and any per-model prices play no part.
 
 ```sh
 # Just the break-even threshold K* for a 50k-token cut:
@@ -3226,7 +3223,7 @@ prices](#model-prices-modelsxpricing):
 
 `routectl doctor`'s **Cost pricing** section names which of these
 resolved for every configured model, so you can see whether a figure came
-from your `[registry]` row or from the catalog.
+from your own config, your `[registry]` row or a price table.
 
 Cost is computed at **query time**, never persisted, so correcting a
 price later retroactively fixes the cost of every historical row priced
@@ -3333,51 +3330,43 @@ Persistent=true
 WantedBy=timers.target
 ```
 
-## Catalog: prompt-cache economics (`routectl catalog`)
+## Retired: `[cache_pricing]` and `routectl catalog`
 
-routectl ships a two-layer catalog of prompt-cache *economics*
-multipliers -- the write multiplier (`wm`), read multiplier (`rm`), TTL,
-minimum cacheable prefix, and a small set of capability flags -- per
-`(provider_kind, model)`. These feed the cache-break break-even
-reasoning (see `prompt-size --hypothetical-d` above); they are distinct
-from the `[registry]` dollar prices above, which feed usage-cost
-estimation.
+Earlier releases kept prompt-cache economics and per-model limits in a
+separate catalog: a table baked into the binary plus a
+`catalog_overlay.json` of hand-entered cells, managed with `routectl
+catalog`. That catalog is gone. What replaced each part:
 
-**Layer 1: the baked table.** Every routectl build carries a table
-derived from vendor-published pricing snapshots, re-verified on each
-release. You do not normally need to touch it.
+- **Prices** resolve per field as described in
+  [Model prices](#model-prices-modelsxpricing): `[models.X.pricing]`, then
+  a matching `[registry]` row, then the table
+  [`routectl prices refresh`](#refreshing-the-price-table-routectl-prices-refresh)
+  wrote, then the table shipped with the release; a price none of them
+  sets is unknown, never zero.
+- **Context window and output ceiling** come only from `[models.X]
+  context_window` and `max_output_tokens`. With no `max_output_tokens`, an
+  egress that must send `max_tokens` fills 64000.
+- **Cache rules** (write and read multipliers, TTL, minimum cacheable
+  prefix) are fixed per `[providers.X] kind`; see the
+  [cache-break economics projection](#cache-break-economics-projection-advisory).
 
-**Layer 2: the overlay.** `catalog_overlay.json` -- next to
-`config.toml` and `credentials.json`, under
-`$XDG_CONFIG_HOME/routectl/` (falling back to `~/.config/routectl/`;
-`XDG_CONFIG_HOME` and `HOME` are each used only when they are an absolute
-path, and an empty or relative value counts as unset) --
-holds per-selector overrides on top of the baked table. An overlay cell
-wins over the baked row field by field: a field it sets wins, a field it
-leaves unset inherits the baked value. A JSON `null` value for a
-selector key DISABLES that row outright, overriding even the baked
-table's own default; a selector absent from the overlay falls through
-to the baked row unchanged. `routectl serve` no longer reads this file:
-a leftover copy is ignored at boot and writing it triggers no reload.
+Cells in a leftover `catalog_overlay.json` are **not migrated**: they stop
+applying, and the daemon ignores the file at boot and on reload. To keep
+a price one of them carried, set it under `[models.X.pricing]`; to keep a
+window or output limit, set `context_window` / `max_output_tokens` on the
+model. `routectl doctor` names any leftover catalog file in the config
+folder (`catalog_overlay.json`, `catalog_overlay.json.lock`,
+`catalog_state.json`, `catalog_import_state.json`) so you can remove it.
 
-### Retired: `[cache_pricing]`
-
-Config schema v1's `[cache_pricing]` TOML table (and its
-`pricing_verifications.json` sidecar) is retired. A version 5 file with a
-non-empty `[cache_pricing]` table is a hard startup error naming the
-table, not silently-ignored data; remove the table by hand. To keep a
-price it carried, set it under
-[`[models.X.pricing]`](#model-prices-modelsxpricing).
+**`[cache_pricing]`.** Config schema v1's `[cache_pricing]` TOML table
+(and its `pricing_verifications.json` sidecar) is retired. A version 5
+file with a non-empty `[cache_pricing]` table is a hard startup error
+naming the table, not silently-ignored data; remove the table by hand.
 Nothing reads `pricing_verifications.json` any more.
 
-### The `routectl catalog` command is removed
-
-Every `routectl catalog` subcommand (`list`, `verify`, `import`, `set`,
-`disable`, `export`) is gone. Running any of them prints a pointer and
-exits 2. Refresh prices with
-[`routectl prices refresh`](#refreshing-the-price-table-routectl-prices-refresh),
-and set a model's prices in `config.toml` under
-[`[models.X.pricing]`](#model-prices-modelsxpricing).
+**`routectl catalog`.** Every subcommand (`list`, `verify`, `import`,
+`set`, `disable`, `export`) is gone. Running any of them prints a pointer
+to `routectl prices refresh` and `[models.X.pricing]` and exits 2.
 
 ## Inspecting the effective config (`config show --effective`)
 
@@ -3390,32 +3379,18 @@ dump says in a leading `#` comment -- your own `config.toml` remains the
 authoritative source for verbatim `base_url` values.
 Adding `--effective` appends a provenance-annotated view of the
 surfaces where MORE THAN ONE LAYER can supply a value -- so you can see
-which layer actually won without cross-referencing the baked table, the
-overlay, and the retry defaults by hand. Every other config field is
+which layer actually won without cross-referencing the price tables and
+the retry defaults by hand. Every other config field is
 trivially whatever `config.toml` says, so it is not re-annotated (that
 would be noise).
 
-The derivation is pure: it runs the SAME `(provider_kind, upstream)`
-catalog lookups the router runs at chain-build, over the loaded config
-and `catalog_overlay.json`, and the same price precedence usage cost
-uses, over `prices.json` in the config folder and the table shipped with
-the release. It resolves no secrets, builds no provider, and makes no
+The derivation is pure: it runs the same price precedence usage cost
+uses, over the loaded config, `prices.json` in the config folder and the
+table shipped with the release. It resolves no secrets, builds no provider, and makes no
 network call, so it is safe to run against any config.
 
-Five sections are printed:
+Four sections are printed:
 
-- **model catalog cells** -- one row per `[models.X]` entry, showing its
-  `provider_kind/upstream` selector and the merged catalog cell. The
-  `source=` tag reads the same as `catalog list`:
-  - `baked` -- the value came from the compiled-in baked table (no
-    overlay cell for this selector);
-  - `import` -- an overlay cell written by `catalog import` (or, by an
-    earlier build, from a legacy `[cache_pricing]` entry);
-  - `user` -- an overlay cell an operator wrote (`catalog set` /
-    `catalog verify`);
-  - `disabled` -- the overlay explicitly disabled this selector
-    (overlay `null`); pricing falls back to the conservative sentinel;
-  - `missing` -- neither layer has a row (an unpriced upstream).
 - **model facts** -- a header naming the refreshed and shipped table
   dates (`none` when that table is absent), then one row per
   `[models.X]` entry with `context_window`, `fill` and the five price
@@ -3520,8 +3495,8 @@ prints no restart notice.
 ### Removing an override (`config unset`)
 
 `routectl config unset <path>` removes one override so the value falls
-back to whatever it inherits -- a shared knob, or the baked catalog
-default -- rather than assigning a new one:
+back to whatever it inherits -- a shared knob, or the built-in default
+-- rather than assigning a new one:
 
 ```sh
 routectl config unset retry.classes.server-error.retry
@@ -4190,7 +4165,7 @@ What it does and does not do:
 - **Purging something that is not there is a clean no-op**, reported as
   such and exiting zero, so re-running it is safe.
 - **It touches learned entries only.** It never edits your config, your
-  `[capability.overrides]` cells, or the baked catalog.
+  `[capability.overrides]` cells.
 
 ## Fidelity pre-flight opt-in (`[fidelity]`)
 
@@ -4697,8 +4672,8 @@ before the upgrade, so snapshot the database first if they matter.
 ## Diagnostics (`routectl doctor` and `routectl provider probe`)
 
 `routectl doctor` and `routectl provider probe` are the two read-only
-health surfaces. Both mutate NOTHING -- config, credentials, the catalog
-overlay, and the usage DB are byte-identical after a run -- and both share
+health surfaces. Both mutate NOTHING -- config, credentials, and the usage
+DB are byte-identical after a run -- and both share
 one exit-code contract and one probe-classification seam, so the two
 never disagree about a provider.
 

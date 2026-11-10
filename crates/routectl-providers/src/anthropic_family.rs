@@ -15,7 +15,7 @@
 //!
 //! The classification is purely lexical, and deliberately narrower than
 //! either a `starts_with("anthropic.")` (which rejects every
-//! region-prefixed id the catalog actually ships) or a
+//! region-prefixed id Bedrock actually ships) or a
 //! `contains("anthropic")` (which decides nothing for an inference
 //! profile ARN):
 //!
@@ -39,7 +39,7 @@
 //!
 //! The routing-prefix set is MEASURED, not guessed: it is the set of
 //! regional prefixes on Anthropic Bedrock ids in the LiteLLM and models.dev
-//! price catalogs when it was set. Widening it needs that kind of evidence -- an invented prefix is a
+//! price tables when it was set. Widening it needs that kind of evidence -- an invented prefix is a
 //! fabricated constraint, and a missing one rejects a working config.
 //!
 //! This module holds no provider types and carries no feature gate, so

@@ -358,11 +358,12 @@ enum ConfigCmd {
     /// Validate config syntax + provider references.
     Check,
     /// Print the resolved config (secrets redacted). With `--effective`,
-    /// also print the provenance-annotated view: catalog cells tagged
-    /// baked/import/user/disabled, retry classes tagged config/baked-default.
+    /// also print the provenance-annotated view: model facts tagged with the
+    /// source of each price, retry classes tagged config/baked-default.
     Show {
-        /// Append the provenance-annotated effective view (catalog cells +
-        /// retry class policy) after the plain config dump.
+        /// Append the provenance-annotated effective view (model facts, retry
+        /// class policy, resolved tuning, capability cells) after the plain
+        /// config dump.
         #[arg(long)]
         effective: bool,
     },
@@ -383,7 +384,7 @@ enum ConfigCmd {
         yes: bool,
     },
     /// Remove a config override by dotted path (e.g. `retry.max_attempts`),
-    /// so the value falls back to its inherited or catalog default. Parent
+    /// so the value falls back to its inherited or built-in default. Parent
     /// tables the removal empties are pruned. The whole file is re-validated
     /// through the shared gate before an atomic write. Removing an
     /// egress-defining override prompts for confirmation unless `--yes` is

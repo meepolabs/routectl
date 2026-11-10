@@ -190,10 +190,8 @@ jobs:
       # workspace suite on the test-release profile) runs in a network
       # namespace whose recorder captures every packet to a non-loopback
       # address or to the resolver. The all-features run contains every test
-      # of the default-features run and of the routectl-router gen-catalog
-      # lib run (the catalog-codegen tests: the selectors/snapshot flag welds
-      # and the catalog_baked.rs drift guards), as their test inventories
-      # show. Tests that compile only with a feature off, such as the
+      # of the default-features run, as their test inventories show. Tests
+      # that compile only with a feature off, such as the
       # routectl-router cfg(not(feature = "gemini")) cases, are not in it;
       # the debug-lanes job lints and runs those, outside the namespace and
       # without the planted credentials. Zero attempts is the pass
@@ -237,7 +235,7 @@ jobs:
       # (workspace-all-features) narrowed by --test, so cargo reuses that
       # step's conservation binary instead of building another feature set.
       # The extra features change nothing the harness runs: they only add
-      # test seams, the gen-catalog codegen, and the live and dhat targets.
+      # test seams and the live and dhat targets.
       - name: wire conservation (verdict on the committed corpus)
         run: |
           set -e

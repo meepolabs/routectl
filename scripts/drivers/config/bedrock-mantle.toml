@@ -23,7 +23,7 @@
 # it. With no such config the daemon cannot resolve the profile and never
 # becomes healthy, rather than silently routing somewhere else.
 #
-# The daemon's state (usage database, catalog state) lands under
+# The daemon's state (usage database, runtime state) lands under
 # `$XDG_CONFIG_HOME/routectl/`, which the runner points at a throwaway
 # directory. That default resolution is what keeps a driven run off the
 # operator's own state -- no path in this file names it.

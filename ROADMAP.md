@@ -19,9 +19,11 @@ release cut. Highlights, roughly in dependency order:
   taxonomy (`rate-limited`, `auth`, `bad-request`, ...) with
   `[retry.classes.<class>]` per-class retry/fallback overrides and
   `[providers.X.class_overrides]` status remaps.
-- **Model catalog** -- baked cache-economics catalog + user overlay
-  with provenance and verification stamps; `routectl catalog
-  list/verify/import/set/disable`.
+- **Model prices** -- per-field price precedence
+  (`[models.X.pricing]`, `[registry]`, the `routectl prices refresh`
+  table, the shipped table); window and output ceiling from
+  `[models.X]`; per-kind cache rules. The earlier cache-economics
+  catalog and its `routectl catalog` command are removed.
 - **Config schema v5** -- versioned config refused at load when its
   version is not the current one; `config set/show/check` with
   dotted-key paths; a committed JSON Schema (`routectl.schema.json`).
@@ -167,8 +169,8 @@ estimator warm-start follow behind it.
 - SSO / LDAP / OIDC / SAML auth -- use a sidecar proxy.
 - Multi-tenancy, per-user routing, multi-tenant server-session
   state -- fork if needed. (Persistent LOCAL state is in scope and
-  shipped: the usage ledger, learned-capability registry, catalog
-  overlay.)
+  shipped: the usage ledger, learned-capability registry, refreshed
+  price table.)
 - Config-editing / interactive admin web UI -- the read-only status
   dashboard (GET / and the /status JSON family) is deliberate; all
   mutation stays config.toml + CLI.

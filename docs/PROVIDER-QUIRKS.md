@@ -254,8 +254,7 @@ across restarts, decaying after 48 hours into one re-probe, visible in
 `routectl doctor`, and removable with `routectl capability purge
 <provider#upstream> beta:<flag>`. The same purge lifts a seeded flag on a
 routed lane until the upstream rejects that flag again there, or the
-lane's provider entry is removed or changes `kind`; a catalog or overlay
-change keeps the lift. To pin a
+lane's provider entry is removed or changes `kind`. To pin a
 decision, put the flag under `[capability.overrides.<provider>]`:
 `unsupported = ["beta:<flag>"]` never sends it, `force_supported`
 always does. The operator floor (provider `anthropic_beta` plus

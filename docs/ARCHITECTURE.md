@@ -40,7 +40,13 @@ for TOML configuration see [CONFIGURATION.md](CONFIGURATION.md).
 
 - `crates/routectl-router/` -- alias resolution, fallback chain
   walker, retry policy, capability filter (`[capability.overrides]`),
-  provider factory. A `[pools.<name>]` block groups same-kind member
+  provider factory, and model facts: `prices/` (the price-table
+  format, its bounded parser, the models.dev converter, and the
+  per-field precedence `[models.X.pricing]` > `[registry]` > refreshed
+  table > shipped table > unknown) and `cost_gate.rs` (fixed cache
+  rules per provider kind). A model's context window and output
+  ceiling come only from its `[models.X]` entry; there is no model
+  catalog. A `[pools.<name>]` block groups same-kind member
   provider entries; the factory compiles one seat per usable member
   (from that member's OWN credential ref) once per pool, and
   `seat_pool.rs` owns the request-time dispatch order plus the
@@ -59,7 +65,8 @@ for TOML configuration see [CONFIGURATION.md](CONFIGURATION.md).
 - `crates/routectl-usage/` -- SQLite-backed per-request usage
   accounting: `UsageWriter` (async-producer -> blocking-writer
   bridge), `UsageHandle` (dispatch-time send handle), `cost.rs`
-  (request pricing), `query.rs` (the `routectl usage` read path).
+  (request pricing over the router's resolved prices), `query.rs` (the
+  `routectl usage` read path).
   Intentionally thin -- no AWS SDK or axum dependency.
 
 - `crates/routectl-cli/` -- axum HTTP server, clap CLI (`serve`,

@@ -1471,17 +1471,17 @@ pub struct DispatchMeta {
     pub would_trim_tokens: Option<u64>,
     /// Non-mutating steady-state would-trim advisory: the break-even reuse
     /// count K* the cost gate priced for the would-cut candidate. `None` when
-    /// the trimmer proposed no cut, OR the two-layer catalog merge resolved
-    /// `Disabled` / `Missing` (an unknown provider or a disabled cell records
-    /// the freed-token count but no K* -- no trusted pricing), OR the
-    /// resolved row carried no finite break-even. Recording only.
+    /// the trimmer proposed no cut, OR the target's provider kind has no
+    /// cache rules (the freed-token count is still recorded, but no K* --
+    /// nothing to price against), OR the rules yield no finite break-even.
+    /// Recording only.
     pub would_trim_break_even_k: Option<f64>,
     /// Non-mutating steady-state would-trim advisory: the lower confidence
     /// bound `k_floor` of the per-session K estimate, recorded ONLY when the
     /// K estimator returned a `Calibrated` confidence (the only bound the
     /// cost gate may consult to authorize a future cut). `None` for a
-    /// `Cold` / `Low` estimate (insufficient history), for a `Disabled` /
-    /// `Missing` catalog cell (no `break_even_k` to compare against), and
+    /// `Cold` / `Low` estimate (insufficient history), for a provider kind
+    /// with no cache rules (no `break_even_k` to compare against), and
     /// when no would-cut candidate was proposed. Recording only.
     pub would_trim_k_floor: Option<f64>,
     /// Non-mutating shadow misfire monitor: `Some(0)` when the trimmed

@@ -268,7 +268,7 @@ Surfaces: [openai-compat](#openai-compat-surface) -
   refused.** The Messages API 400s a body without `max_tokens`, so the
   `anthropic-api` egress (Mantle included) and Bedrock Invoke send the
   client's value, else the per-model ceiling the router resolves (the
-  catalog prior, lowered by a learned ceiling), else 64000
+  model's `max_output_tokens`, lowered by a learned ceiling), else 64000
   (`resolve_max_tokens` in `anthropic_api/extras.rs`). The fill is
   declared as a required-field default. A model whose output limit is
   lower answers `max_tokens: SENT > N, which is the maximum allowed
@@ -711,8 +711,8 @@ Surfaces: [openai-compat](#openai-compat-surface) -
   from the client's `max_tokens` alone (`build_inference_config` in
   `bedrock/converse/request.rs`) and sends none when the client sent
   none, so only a client value is ever clamped there, and the clamp is
-  lossy. The output ceiling stamped on the request (the catalog prior,
-  lowered by a learned ceiling) still sizes the legacy thinking budget
+  lossy. The output ceiling stamped on the request (the model's
+  `max_output_tokens`, lowered by a learned ceiling) still sizes the legacy thinking budget
   in the bag
   (`the_converse_thinking_budget_fits_the_stamped_ceiling_with_no_client_limit`).
   The grounding envelopes are

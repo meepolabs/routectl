@@ -44,8 +44,8 @@ if [[ "${ROUTECTL_SKIP_ID_SCAN:-0}" == "1" ]]; then
     exit 0
 fi
 
-# Captured replay fixtures, vendored catalog snapshots and the generated
-# shipped price table hold real upstream model ids, token counts, and UUIDs
+# Captured replay fixtures, the vendored models.dev test slice and the
+# generated shipped price table hold real upstream model ids, token counts, and UUIDs
 # that would false-trip the high-signal patterns (e.g. vendor model names
 # shaped like M<n>.<m>). They are not author-written content, so exclude
 # those paths from the scan. The scanner's own self-test carries synthetic ID-shaped fixtures
@@ -63,7 +63,6 @@ SCANNER_SOURCES=(
 )
 EXCLUDE_PATHS=(
     "crates/routectl-cli/tests/fixtures/captured/"
-    "crates/routectl-router/catalog_data/"
     "crates/routectl-router/src/prices/testdata/models_dev_slice.json"
     "crates/routectl-router/src/prices_shipped.json"
     "${SCANNER_SOURCES[@]}"
@@ -284,8 +283,7 @@ PATTERNS=(
     #     path: the whole-token boundaries catch it before a `/` (any path
     #     tail at any depth), a space, a period, a backtick, or a colon, while
     #     the left boundary keeps a longer identifier that merely ENDS in the
-    #     name clean (the catalog codegen has a real function of that shape)
-    #     and the right boundary keeps a `<name>_window`-style identifier
+    #     name clean and the right boundary keeps a `<name>_window`-style identifier
     #     clean.
     'Table-[AB]'
     'Table [AB]'
@@ -324,7 +322,7 @@ PATTERNS=(
 # `(pre-|post-)f<n>` legitimately sit after or contain a hyphen.
 #
 # Bare `T<n>` is MEASURED-safe here (this supersedes the older refusal to
-# match it): across all tracked files, minus `catalog_data/` and this
+# match it): across all tracked files, minus the excluded paths and this
 # scanner's self-test, whole-token `T<n>` returned exactly 6 lines, every
 # one an internal label the scrub removed -- zero generic-parameter or
 # type-name collisions. Bare `F<n>` stays uncatchable: `FailurePhase::F1`

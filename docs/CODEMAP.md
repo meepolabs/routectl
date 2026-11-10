@@ -1839,8 +1839,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   string (move the old file aside, run `routectl init`, see
   `docs/CONFIGURATION.md`) both refusals end with and doctor reads, so the
   advice cannot drift; `validate_cache_pricing_retired` rejects a non-empty
-  `[cache_pricing]` at the current version as a hand-edited inconsistency
-  (remove the table by hand).
+  `[cache_pricing]` at the current version as a hand-edited inconsistency, its
+  message pointing at `[models.X.pricing]` for the prices and telling the
+  operator to remove the table by hand.
   `preflight_raw_config(raw_toml) -> Result<(), RawConfigPreflightError>`
   (`#[non_exhaustive]`, `Display` is the wrapped check's own message) is THE
   public raw-text driver every caller runs once, first refusal wins, in a
@@ -8748,10 +8749,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   instead. NEVER `Fail`, so it can never move the exit code.
   `section_knobs`/`knob_finding` are the ceiling sibling of that pair: one
   informational `Pass` per configured model naming whether its outbound
-  `max_output_tokens` came from the catalog fill (naming `routectl catalog set`
-  as the correction) or neither (egress baseline), each detail naming the
-  resolved figure and the `(kind, upstream)` selector; a `knobs: None` context collapses to the single
-  `knobs_unavailable` Warn. NEVER `Fail`.
+  `max_output_tokens` came from `[models.X]` (`model-config`), a ceiling
+  learned from an upstream refusal (`learned`) or the egress baseline
+  (`default`), each detail naming the resolved figure and the model's kind and
+  upstream. NEVER `Fail`.
   `section_tuning`/`tuning_finding`: one informational `Pass` per tuning row.
   `legacy_folder_finding` adds one config-section `legacy folder` Warn per old
   folder that still holds files or could not be listed, naming it only by its
