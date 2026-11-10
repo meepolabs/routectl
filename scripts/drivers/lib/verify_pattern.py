@@ -84,12 +84,15 @@ ANTHROPIC_INGRESS_ID = "anthropic"
 # block types each dialect spells a tool call and a tool result with. The
 # census picks the list by which key the body ACTUALLY carries: the claimed
 # dialect lives in meta.json beside the wire_pattern claim, so gating one
-# claim on the other would verify nothing.
+# claim on the other would verify nothing. Responses spells a freeform
+# (grammar-constrained) tool's pair as `custom_tool_call` /
+# `custom_tool_call_output`; Codex's code-mode `exec` tool is freeform, so
+# a Codex tool loop reaches the wire in that spelling.
 ANTHROPIC_TURNS_KEY = "messages"
 RESPONSES_TURNS_KEY = "input"
 TURNS_KEYS = (ANTHROPIC_TURNS_KEY, RESPONSES_TURNS_KEY)
-TOOL_CALL_TYPES = ("tool_use", "function_call")
-TOOL_RESULT_TYPES = ("tool_result", "function_call_output")
+TOOL_CALL_TYPES = ("tool_use", "function_call", "custom_tool_call")
+TOOL_RESULT_TYPES = ("tool_result", "function_call_output", "custom_tool_call_output")
 
 # A `large-context` claim must mean the CONTEXT was large, not that the
 # client's own preamble was. Claude Code's floor request -- one short
@@ -328,8 +331,9 @@ def _tool_use_multiturn(fixture_dir):
     assistant `tool_use` block plus a `tool_result` block in the Anthropic
     shape, as a `tool_calls` array plus a `role: "tool"` turn in the
     chat-completions shape, and as `function_call` / `function_call_output`
-    input items in the Responses shape. The ORDER clause is the same in all
-    three, which is why they share one predicate rather than branching.
+    (or `custom_tool_call` / `custom_tool_call_output`) input items in the
+    Responses shape. The ORDER clause is the same in all three, which is
+    why they share one predicate rather than branching.
     """
     turns, turns_key = _turn_list(_read_ingress_body(fixture_dir))
 

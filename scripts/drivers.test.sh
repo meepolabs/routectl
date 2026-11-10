@@ -674,6 +674,18 @@ responses_pair='{"tools":[{"type":"function","name":"read"}],"input":[
 exhibits "tool-use-multiturn accepts a Responses function_call / output pair" \
     "$(stage responses-pair "" "$responses_pair")" tool-use-multiturn
 
+# A freeform (grammar) tool's pair is spelled `custom_tool_call` /
+# `custom_tool_call_output`, the shape Codex's code-mode `exec` loop
+# resends. Either spelling missing from the census reads that loop as no
+# tool loop at all.
+responses_custom_pair='{"tools":[{"type":"custom","name":"exec"}],"input":[
+ {"type":"message","role":"user","content":[{"type":"input_text","text":"read it"}]},
+ {"type":"custom_tool_call","call_id":"call_1","name":"exec","input":"text(1)"},
+ {"type":"custom_tool_call_output","call_id":"call_1","output":"7"},
+ {"type":"message","role":"user","content":[{"type":"input_text","text":"and the next one"}]}]}'
+exhibits "tool-use-multiturn accepts a Responses custom_tool_call / output pair" \
+    "$(stage responses-custom-pair "" "$responses_custom_pair")" tool-use-multiturn
+
 # The chat-completions spelling of the same pair -- an assistant
 # `tool_calls` array plus a `role: "tool"` turn -- under `messages`. The
 # predicate has always read it; asserted here because the census now

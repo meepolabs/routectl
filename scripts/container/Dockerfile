@@ -125,14 +125,29 @@ ARG CODEX_VERSION=0.151.0
 # bits were wrong. `nobody` has no writable passwd HOME, so codex's own
 # best-effort PATH-alias write on startup fails harmlessly (a warning on
 # stderr, not a build failure) rather than leaving state in the layer.
+#
+# codex-code-mode-host comes from the same release. codex's bundled model
+# metadata puts its default models in code-mode-only tool mode, which no
+# config key overrides and which fails CLOSED when the host is missing: the
+# model is offered only `exec`/`wait`, and every call it makes is refused, so
+# no tool loop ever reaches the wire. codex looks for the host beside its own
+# resolved executable, under exactly this name, so it lands in /opt/codex
+# next to the binary the symlink points at. The host takes no --version; the
+# unprivileged `--help` run proves the same mode bits the codex check does.
 RUN mkdir -p /opt/codex \
     && curl -fsSL "https://github.com/openai/codex/releases/download/rust-v${CODEX_VERSION}/codex-x86_64-unknown-linux-musl.tar.gz" \
         -o /tmp/codex.tar.gz \
     && tar -xzf /tmp/codex.tar.gz -C /opt/codex \
     && rm -f /tmp/codex.tar.gz \
+    && curl -fsSL "https://github.com/openai/codex/releases/download/rust-v${CODEX_VERSION}/codex-code-mode-host-x86_64-unknown-linux-musl.tar.gz" \
+        -o /tmp/codex-code-mode-host.tar.gz \
+    && tar -xzf /tmp/codex-code-mode-host.tar.gz -C /opt/codex \
+    && rm -f /tmp/codex-code-mode-host.tar.gz \
+    && mv /opt/codex/codex-code-mode-host-x86_64-unknown-linux-musl /opt/codex/codex-code-mode-host \
     && ln -s /opt/codex/codex-x86_64-unknown-linux-musl /usr/local/bin/codex \
     && chmod -R a+rX /opt/codex \
-    && su -s /bin/sh -c 'codex --version' nobody
+    && su -s /bin/sh -c 'codex --version' nobody \
+    && su -s /bin/sh -c '/opt/codex/codex-code-mode-host --help' nobody >/dev/null
 
 # Node is the runtime pi needs (its package declares node >= 22.19). The
 # official linux-x64 tarball, not the distro package: the archive's node
