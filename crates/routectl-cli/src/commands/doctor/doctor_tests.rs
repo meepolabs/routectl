@@ -4,12 +4,14 @@ use std::path::PathBuf;
 use routectl_auth::{OAuthError, OAuthStore};
 use routectl_providers::anthropic_api::AuthKind;
 use routectl_router::{
-    AliasValue, CONFIG_VERSION_REMEDIATION, CURRENT_CONFIG_VERSION, CatalogImportState,
-    CatalogOverlay, ModelEntry, PoolEntry, ProviderEntry,
+    AliasValue, CONFIG_VERSION_REMEDIATION, CURRENT_CONFIG_VERSION, CatalogImportState, ModelEntry,
+    ProviderEntry,
 };
 use routectl_testkit::ScopedEnv;
 
 use crate::commands::parse_error_redaction::redact_config_load_error;
+use crate::commands::pricing::PriceSnapshot;
+use routectl_router::prices::shipped_table;
 
 use super::gather::{
     derive_knob_rows, derive_pricing_rows, derive_tuning_rows, gather_capability_matrix,
@@ -19,8 +21,8 @@ use super::gather::{
 use super::matrix::build_capability_matrix_panel;
 use super::sections::{
     freshness_findings, secret_finding, section_auth, section_capability, section_config,
-    section_knobs, section_pricing, section_probe, section_seat_orphans, section_seat_pools,
-    section_secret_orphans, section_version,
+    section_probe, section_seat_orphans, section_seat_pools, section_secret_orphans,
+    section_version,
 };
 use super::*;
 
@@ -56,8 +58,8 @@ pub(super) fn ctx(
     let capability = CapabilityInputs {
         panel_unavailable: None,
     };
-    let pricing = Some(derive_pricing_rows(&config, &CatalogOverlay::default()));
-    let knobs = derive_knob_rows(&config);
+    let pricing = derive_pricing_rows(&config, &PriceSnapshot::from_tables(None, shipped_table()));
+    let knobs = derive_knob_rows(&config, &CapabilityMatrixSource::Unavailable("no_data"));
     let tuning = derive_tuning_rows(&config);
     DoctorContext {
         config,
@@ -586,8 +588,8 @@ fn capability_section_emits_no_finding_for_a_loaded_config() {
 }
 
 #[test]
-fn schema_version_is_twenty_seven() {
-    assert_eq!(SCHEMA_VERSION, 27);
+fn schema_version_is_twenty_eight() {
+    assert_eq!(SCHEMA_VERSION, 28);
 
     let context = ctx(
         config_with_overrides(),
@@ -596,7 +598,7 @@ fn schema_version_is_twenty_seven() {
         Vec::new(),
     );
     let report = build_report(&context);
-    assert_eq!(report.schema_version, 27);
+    assert_eq!(report.schema_version, 28);
 
     // JSON mode carries the structured capability matrix panel; the
     // superseded override / prior / learned finding text is gone.
@@ -2430,7 +2432,7 @@ fn rendered_report_leaks_neither_a_config_secret_nor_a_store_path() {
         matrix_origin: MatrixOrigin::LedgerReplay,
         beta_seed: routectl_router::BetaSeedScope::EMPTY,
         freshness: sample_freshness(),
-        pricing: Some(Vec::new()),
+        pricing: Vec::new(),
         knobs: Vec::new(),
         tuning: Vec::new(),
         reload_failure: None,
@@ -2601,7 +2603,7 @@ fn build_report_no_network_matches_network_minus_probe() {
     let network = build_report(&context);
     let no_net = build_report_no_network(&context);
 
-    assert_eq!(no_net.schema_version, 27);
+    assert_eq!(no_net.schema_version, 28);
     assert!(
         no_net.findings.iter().all(|f| f.section != "probe"),
         "no-network report must have no probe rows"
@@ -2930,458 +2932,6 @@ fn import_state(date: &str) -> CatalogImportState {
         per_family_counts: BTreeMap::new(),
         source_hashes: BTreeMap::new(),
     }
-}
-
-/// The pricing section names each configured model's rate SOURCE. The
-/// catalog-fill case is the one this feature added, so it is asserted by
-/// nickname alongside the registry, subscription, and unpriced cases -- naming
-/// the wrong source would send an operator to the wrong knob.
-#[test]
-fn pricing_section_names_each_models_rate_source_by_nickname() {
-    // Arrange: five models, one per state.
-    //   `filled`   -- an anthropic-api model the baked catalog prices, no
-    //                 [registry] row -> Catalog.
-    //   `explicit` -- the same upstream WITH a [registry] row -> Registry.
-    //   `seat`     -- an oauth:// provider -> Subscription.
-    //   `pooled`   -- a model routed at a POOL of oauth:// members. A pool name
-    //                 is not a provider key, so a providers-only lookup would
-    //                 resolve neither the subscription nor a kind and misreport
-    //                 it as unpriced.
-    //   `nothing`  -- an openai-compat model whose only matching baked cell is
-    //                 the price-ambiguous catch-all -> Unpriced.
-    let mut cfg = Config::default();
-    cfg.providers.insert(
-        "paid".to_string(),
-        ProviderEntry::anthropic_api("env://PAID_KEY"),
-    );
-    cfg.providers.insert(
-        "billed".to_string(),
-        ProviderEntry::anthropic_api("env://BILLED_KEY"),
-    );
-    cfg.providers.insert(
-        "seatprov".to_string(),
-        ProviderEntry::anthropic_api("oauth://anthropic"),
-    );
-    cfg.providers.insert(
-        "vendor".to_string(),
-        ProviderEntry::openai_compat("https://example.invalid", "env://VENDOR_KEY"),
-    );
-    cfg.pools.insert(
-        "anthropic-pool".to_string(),
-        PoolEntry::new(vec!["seatprov".to_string()]),
-    );
-    cfg.models.insert(
-        "filled".to_string(),
-        ModelEntry::new("paid", "claude-sonnet-4-6"),
-    );
-    cfg.models.insert(
-        "explicit".to_string(),
-        ModelEntry::new("billed", "priced-by-operator"),
-    );
-    cfg.models.insert(
-        "seat".to_string(),
-        ModelEntry::new("seatprov", "claude-sonnet-4-6"),
-    );
-    cfg.models.insert(
-        "pooled".to_string(),
-        ModelEntry::new("anthropic-pool", "claude-sonnet-4-6"),
-    );
-    cfg.models.insert(
-        "nothing".to_string(),
-        ModelEntry::new("vendor", "some-unpriced-vendor-model"),
-    );
-    cfg.registry.insert(
-        "priced-by-operator".to_string(),
-        routectl_router::RegistryEntry {
-            pricing: Some(routectl_router::PricingConfig {
-                input_per_mtok: Some(1.0),
-                output_per_mtok: Some(2.0),
-                ..Default::default()
-            }),
-            provider: None,
-        },
-    );
-
-    // Act
-    let context = ctx(cfg, Some(&current_version_stamp()), Vec::new(), Vec::new());
-    let findings = section_pricing(&context);
-
-    // Assert: one row per configured model, each naming its own source.
-    assert_eq!(
-        findings.len(),
-        5,
-        "one row per configured model: {findings:?}"
-    );
-
-    let filled = find(&findings, "pricing", "filled");
-    assert!(
-        filled.detail.contains("priced from the baked catalog"),
-        "the catalog-fill row must name the catalog: {}",
-        filled.detail
-    );
-    assert!(
-        filled.detail.contains("$3") && filled.detail.contains("$15"),
-        "the catalog-fill row must name its resolved rates: {}",
-        filled.detail
-    );
-
-    let explicit = find(&findings, "pricing", "explicit");
-    assert!(
-        explicit.detail.contains("priced from the [registry] table"),
-        "an operator-priced row must name the registry: {}",
-        explicit.detail
-    );
-
-    let seat = find(&findings, "pricing", "seat");
-    assert!(
-        seat.detail.contains("billed by subscription"),
-        "a managed-OAuth row must report as subscription: {}",
-        seat.detail
-    );
-
-    let pooled = find(&findings, "pricing", "pooled");
-    assert!(
-        pooled.detail.contains("billed by subscription"),
-        "a pool of managed-OAuth members must report as subscription, not \
-         unpriced: {}",
-        pooled.detail
-    );
-    assert!(
-        !pooled.detail.contains("unpriced"),
-        "a pool name is not a provider key, but must not fall through to \
-         unpriced: {}",
-        pooled.detail
-    );
-
-    let nothing = find(&findings, "pricing", "nothing");
-    assert!(
-        nothing.detail.contains("unpriced"),
-        "a row neither layer prices must say so: {}",
-        nothing.detail
-    );
-    assert!(
-        !nothing.detail.contains("$0"),
-        "an unpriced row must never render a fabricated zero: {}",
-        nothing.detail
-    );
-
-    // Purely informational: no row here can move the exit code.
-    for f in &findings {
-        assert_eq!(f.status, Status::Pass, "{f:?}");
-        assert!(f.remediation.is_none(), "{f:?}");
-    }
-}
-
-/// A subscription model whose `[registry]` row prices EVERY dimension is the one
-/// configuration under which `usage` reports an API-equivalent value, so the row
-/// must say the basis is complete -- and must still lead with the billed-by-seat
-/// statement, which the equivalence clause does not replace.
-#[test]
-fn a_subscription_row_with_complete_registry_rates_reports_a_complete_basis() {
-    // Arrange: an oauth:// provider plus a [registry] row pricing all five
-    // dimensions the equivalent needs.
-    let mut cfg = Config::default();
-    cfg.providers.insert(
-        "seatprov".to_string(),
-        ProviderEntry::anthropic_api("oauth://anthropic"),
-    );
-    cfg.models.insert(
-        "seat".to_string(),
-        ModelEntry::new("seatprov", "priced-everywhere"),
-    );
-    cfg.registry.insert(
-        "priced-everywhere".to_string(),
-        routectl_router::RegistryEntry {
-            pricing: Some(routectl_router::PricingConfig {
-                input_per_mtok: Some(3.0),
-                output_per_mtok: Some(15.0),
-                cache_read_per_mtok: Some(0.3),
-                cache_write_5m_per_mtok: Some(3.75),
-                cache_write_1h_per_mtok: Some(6.0),
-            }),
-            provider: None,
-        },
-    );
-
-    // Act
-    let context = ctx(cfg, Some(&current_version_stamp()), Vec::new(), Vec::new());
-    let findings = section_pricing(&context);
-    let seat = find(&findings, "pricing", "seat");
-
-    // Assert: both clauses, and the priced-row vocabulary is not borrowed.
-    assert!(
-        seat.detail.contains("billed by subscription"),
-        "the billed-by-seat statement must survive the added clause: {}",
-        seat.detail
-    );
-    assert!(
-        seat.detail.contains("complete via the [registry] table"),
-        "a fully priced [registry] row is a complete equivalence basis: {}",
-        seat.detail
-    );
-    assert!(
-        !seat.detail.contains("NO API-equivalent"),
-        "a complete basis must not also claim the equivalent is absent: {}",
-        seat.detail
-    );
-    assert!(
-        !seat.detail.contains("priced from"),
-        "a subscription row must not read as priced by that layer: {}",
-        seat.detail
-    );
-}
-
-/// The catalog can never supply cache rates (it leaves them unset rather than
-/// deriving them from unconfirmed multipliers), so a subscription model with no
-/// `[registry]` row ALWAYS has an incomplete equivalence basis. That is the case
-/// an operator hits by default, and the row must name the three missing cache
-/// dimensions rather than saying "incomplete" and leaving them to guess.
-#[test]
-fn a_subscription_row_on_catalog_rates_names_the_missing_cache_dimensions() {
-    // Arrange: an oauth:// provider on an upstream the baked catalog prices,
-    // with no [registry] row -- base rates resolve, cache rates cannot.
-    let mut cfg = Config::default();
-    cfg.providers.insert(
-        "seatprov".to_string(),
-        ProviderEntry::anthropic_api("oauth://anthropic"),
-    );
-    cfg.models.insert(
-        "seat".to_string(),
-        ModelEntry::new("seatprov", "claude-sonnet-4-6"),
-    );
-
-    // Act
-    let context = ctx(cfg, Some(&current_version_stamp()), Vec::new(), Vec::new());
-    let findings = section_pricing(&context);
-    let seat = find(&findings, "pricing", "seat");
-
-    // Assert: the absent equivalent is explained by NAME, per dimension.
-    assert!(
-        seat.detail.contains("billed by subscription"),
-        "the billed-by-seat statement must survive the added clause: {}",
-        seat.detail
-    );
-    assert!(
-        seat.detail
-            .contains("withholds the API-equivalent value for traffic that uses"),
-        "an incomplete basis must scope the withholding to unrated-dimension traffic, \
-         never claim the value is unconditionally absent: {}",
-        seat.detail
-    );
-    assert!(
-        !seat.detail.contains("NO API-equivalent value"),
-        "an incomplete basis must not overclaim unconditional absence (base-only traffic \
-         still values): {}",
-        seat.detail
-    );
-    assert!(
-        seat.detail.contains("the baked catalog (base rates only)"),
-        "the partial basis must name its layer: {}",
-        seat.detail
-    );
-    for dimension in ["cache read", "cache write 5m", "cache write 1h"] {
-        assert!(
-            seat.detail.contains(dimension),
-            "the missing dimension `{dimension}` must be named: {}",
-            seat.detail
-        );
-    }
-    // The catalog DID price input and output, so neither is listed as missing.
-    assert!(
-        !seat.detail.contains("(input,"),
-        "a dimension the catalog priced must not read as missing: {}",
-        seat.detail
-    );
-}
-
-/// A subscription model on a selector NEITHER layer prices has no basis at all
-/// -- a distinct state from a partial one, since naming missing dimensions would
-/// imply the others resolved.
-#[test]
-fn a_subscription_row_with_no_resolvable_rates_reports_no_basis() {
-    let mut cfg = Config::default();
-    cfg.providers.insert(
-        "seatprov".to_string(),
-        ProviderEntry::anthropic_api("oauth://anthropic"),
-    );
-    cfg.models.insert(
-        "seat".to_string(),
-        ModelEntry::new("seatprov", "no-such-upstream-in-the-catalog"),
-    );
-
-    let context = ctx(cfg, Some(&current_version_stamp()), Vec::new(), Vec::new());
-    let findings = section_pricing(&context);
-    let seat = find(&findings, "pricing", "seat");
-
-    assert!(
-        seat.detail.contains("billed by subscription"),
-        "the billed-by-seat statement must survive the added clause: {}",
-        seat.detail
-    );
-    assert!(
-        seat.detail
-            .contains("neither [registry] nor the catalog resolves rates"),
-        "an unresolvable selector must say nothing prices it: {}",
-        seat.detail
-    );
-    assert!(
-        !seat.detail.contains("cache read"),
-        "with no basis at all, naming dimensions would imply a partial one: {}",
-        seat.detail
-    );
-}
-
-/// The equivalence clause is SUBSCRIPTION-only: a priced row's own detail is
-/// unchanged by this feature, since the complete-or-absent rule the clause
-/// explains applies to the equivalent channel alone.
-#[test]
-fn non_subscription_pricing_rows_carry_no_equivalence_clause() {
-    let mut cfg = Config::default();
-    cfg.providers.insert(
-        "paid".to_string(),
-        ProviderEntry::anthropic_api("env://PAID_KEY"),
-    );
-    cfg.providers.insert(
-        "vendor".to_string(),
-        ProviderEntry::openai_compat("https://example.invalid", "env://VENDOR_KEY"),
-    );
-    cfg.models.insert(
-        "filled".to_string(),
-        ModelEntry::new("paid", "claude-sonnet-4-6"),
-    );
-    cfg.models.insert(
-        "nothing".to_string(),
-        ModelEntry::new("vendor", "some-unpriced-vendor-model"),
-    );
-
-    let context = ctx(cfg, Some(&current_version_stamp()), Vec::new(), Vec::new());
-    let findings = section_pricing(&context);
-
-    let filled = find(&findings, "pricing", "filled");
-    assert!(
-        !filled.detail.contains("API-equivalent"),
-        "a priced row has no equivalence basis to report: {}",
-        filled.detail
-    );
-
-    let nothing = find(&findings, "pricing", "nothing");
-    assert!(
-        !nothing.detail.contains("API-equivalent"),
-        "an unpriced API-key row has no equivalence basis to report: {}",
-        nothing.detail
-    );
-}
-
-/// A `[registry]` row whose every `*_per_mtok` field is optional-and-omitted is
-/// a legitimate config that deliberately charges nothing. It wins whole, so it
-/// is NOT the unpriced state -- but rendering it as "input unset / output unset"
-/// reads as a lookup that came up empty. The row is an operator decision, so the
-/// detail says the row prices nothing.
-#[test]
-fn a_registry_row_setting_no_rate_says_it_prices_nothing() {
-    let mut cfg = Config::default();
-    cfg.providers.insert(
-        "billed".to_string(),
-        ProviderEntry::anthropic_api("env://KEY"),
-    );
-    cfg.models.insert(
-        "free".to_string(),
-        ModelEntry::new("billed", "priced-at-nothing"),
-    );
-    cfg.registry.insert(
-        "priced-at-nothing".to_string(),
-        routectl_router::RegistryEntry {
-            pricing: Some(routectl_router::PricingConfig::default()),
-            provider: None,
-        },
-    );
-
-    let context = ctx(cfg, Some(&current_version_stamp()), Vec::new(), Vec::new());
-    let findings = section_pricing(&context);
-
-    let free = find(&findings, "pricing", "free");
-    assert!(
-        free.detail.contains("prices nothing"),
-        "an empty [registry] row must read as a deliberate zero-price row: {}",
-        free.detail
-    );
-    assert!(
-        !free.detail.contains("unset"),
-        "the both-unset wording must not survive: {}",
-        free.detail
-    );
-    assert!(
-        !free.detail.contains("$0"),
-        "an unset dimension must never render as free: {}",
-        free.detail
-    );
-}
-
-/// The overlay is the rate CORRECTION channel: it disables entries and
-/// supersedes baked rates. When it could not be LOADED, a baked figure may be
-/// exactly the one the effective pricing does not use, so the section must
-/// report nothing resolved rather than that figure. The priced context below is
-/// the POSITIVE CONTROL, proving this very selector DOES render the baked
-/// figure when the overlay is available -- so its absence is the degradation
-/// firing, not a missing catalog cell.
-#[test]
-fn an_unloadable_overlay_reports_pricing_unavailable_never_the_baked_figure() {
-    // Arrange: one model the baked catalog prices at $3.00 / $15.00 -- exactly
-    // the kind of selector an overlay cell would disable or reprice.
-    let mut cfg = Config::default();
-    cfg.providers.insert(
-        "paid".to_string(),
-        ProviderEntry::anthropic_api("env://PAID_KEY"),
-    );
-    cfg.models.insert(
-        "filled".to_string(),
-        ModelEntry::new("paid", "claude-sonnet-4-6"),
-    );
-    let priced = ctx(cfg, Some(&current_version_stamp()), Vec::new(), Vec::new());
-
-    // Positive control: with the overlay available, the baked figure renders.
-    let control = section_pricing(&priced);
-    assert!(
-        control
-            .iter()
-            .any(|f| f.detail.contains("$3.00") && f.detail.contains("$15.00")),
-        "test premise: an available overlay must render the baked figure: {control:?}"
-    );
-
-    // Act: the same context with the overlay load having failed.
-    let degraded = DoctorContext {
-        pricing: None,
-        ..priced
-    };
-    let findings = section_pricing(&degraded);
-
-    // Assert: one honest unavailable line, and NOT the baked figure.
-    assert_eq!(
-        findings.len(),
-        1,
-        "one degradation line, not rows: {findings:?}"
-    );
-    let only = &findings[0];
-    assert_eq!(only.status, Status::Warn, "{only:?}");
-    assert!(
-        only.detail.contains("cost pricing unavailable"),
-        "the line must name the degradation: {}",
-        only.detail
-    );
-    assert!(
-        only.remediation.is_some(),
-        "an unavailable section must name its fix: {only:?}"
-    );
-    for f in &findings {
-        assert!(
-            !f.detail.contains("$3.00") && !f.detail.contains("$15.00"),
-            "a superseded baked figure must never render: {}",
-            f.detail
-        );
-    }
-
-    // Degradation, not failure: the exit code stays the version section's call.
-    assert_eq!(overall_exit(&findings), 0);
 }
 
 #[test]
@@ -4142,101 +3692,6 @@ mod seeded_matrix_surfaces {
         );
         assert_eq!(unavailable_avail["state"], Value::from("unavailable"));
         assert_eq!(unavailable_avail["code"], Value::from("revision_mismatch"));
-    }
-}
-
-/// The knobs section names each configured model's `max_output_tokens` SOURCE
-/// token: `model-config` with the configured figure when the entry sets one,
-/// `default` when it does not. A Claude upstream the baked catalog once filled
-/// stays `default` without a configured value, so no row can name a figure
-/// from outside the config.
-///
-/// Mutation check: map an unset entry to `ModelConfig(0)` in
-/// `derive_knob_rows` -> red on the `default` rows.
-#[test]
-fn knobs_section_names_each_models_output_ceiling_source_by_nickname() {
-    // Arrange
-    let mut cfg = Config::default();
-    cfg.providers.insert(
-        "anthropic".to_string(),
-        ProviderEntry::anthropic_api("env://ANTHROPIC_KEY"),
-    );
-    cfg.providers.insert(
-        "anthropic-seat".to_string(),
-        ProviderEntry::anthropic_api("oauth://anthropic"),
-    );
-    cfg.pools.insert(
-        "anthropic-pool".to_string(),
-        PoolEntry::new(vec!["anthropic-seat".to_string()]),
-    );
-    cfg.providers.insert(
-        "vendor".to_string(),
-        ProviderEntry::openai_compat("https://example.invalid", "env://VENDOR_KEY"),
-    );
-    cfg.models.insert(
-        "configured".to_string(),
-        ModelEntry::new("anthropic", "claude-opus-4-6").with_max_output_tokens(32_000),
-    );
-    cfg.models.insert(
-        "pooled".to_string(),
-        ModelEntry::new("anthropic-pool", "claude-opus-4-6").with_max_output_tokens(16_000),
-    );
-    cfg.models.insert(
-        "cataloged".to_string(),
-        ModelEntry::new("anthropic", "claude-opus-4-6"),
-    );
-    cfg.models.insert(
-        "vendor".to_string(),
-        ModelEntry::new("vendor", "deepseek-v3"),
-    );
-    let rows = [
-        (
-            "configured",
-            "max_output_tokens 32000 (model-config)",
-            "anthropic-api",
-        ),
-        (
-            "pooled",
-            "max_output_tokens 16000 (model-config)",
-            "anthropic-api",
-        ),
-        (
-            "cataloged",
-            "max_output_tokens unset (default)",
-            "anthropic-api",
-        ),
-        (
-            "vendor",
-            "max_output_tokens unset (default)",
-            "openai-compat",
-        ),
-    ];
-
-    // Act
-    let context = ctx(cfg, Some(&current_version_stamp()), Vec::new(), Vec::new());
-    let findings = section_knobs(&context);
-
-    // Assert
-    assert_eq!(
-        findings.len(),
-        rows.len(),
-        "one row per model: {findings:?}"
-    );
-    for (nickname, source, kind) in rows {
-        let detail = &find(&findings, "knobs", nickname).detail;
-        assert!(detail.starts_with(source), "{nickname}: {detail}");
-        assert!(
-            detail.contains(&format!("kind {kind} ")),
-            "{nickname}: {detail}"
-        );
-    }
-    for f in &findings {
-        assert!(
-            !f.detail.contains("catalog"),
-            "no row names the catalog: {f:?}"
-        );
-        assert_eq!(f.status, Status::Pass, "{f:?}");
-        assert!(f.remediation.is_none(), "{f:?}");
     }
 }
 

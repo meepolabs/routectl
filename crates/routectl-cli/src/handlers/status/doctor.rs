@@ -59,7 +59,10 @@ use crate::commands::usage::{WindowBounds, WindowFlag, window_bounds};
 /// embedded report gained its `tuning` section. At 25 the embedded report's
 /// `auth` section gained one finding per unusable seat. At 26 the embedded
 /// report's `knobs` rows name `model-config` or `default`. At 27 the
-/// capability matrix carries no `prior` layer or `assumed` verdict.
+/// capability matrix carries no `prior` layer or `assumed` verdict. At 28 the
+/// embedded report's `pricing` rows name a source per price plus the price
+/// table dates, and its `knobs` rows name `model-config`, `learned` or
+/// `default`.
 pub const DOCTOR_SCHEMA_VERSION: u32 = SCHEMA_VERSION;
 
 /// The no-network doctor report plus the circuit-derived reachability summary,
@@ -208,7 +211,7 @@ async fn build_from_path(
         .daemon_meta
         .reload_failure(chrono::Utc::now().timestamp_millis());
     let served = view
-        .served_doctor_inputs(*state.warm_report())
+        .served_doctor_inputs(*state.warm_report(), &state.prices)
         .with_reload_failure(reload_failure);
     // Counter reads, not I/O, so these stay out here beside the router snapshot.
     let writer_degraded = state.usage_health.writer_degraded();

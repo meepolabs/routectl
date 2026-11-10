@@ -221,9 +221,16 @@ impl StatusRouterView {
     /// seats come off one per-target status read, the same one the health
     /// panel uses, which changes no gate state.
     ///
+    /// The pricing section resolves against one snapshot of `prices`, the
+    /// book the daemon's cost reads use, pinned here.
+    ///
     /// The returned value's fields are private to the doctor module: a panel
     /// holding it can pass it to the gather and nothing else.
-    pub(crate) fn served_doctor_inputs(&self, warm: WarmReport) -> ServedInputs {
+    pub(crate) fn served_doctor_inputs(
+        &self,
+        warm: WarmReport,
+        prices: &PriceBook,
+    ) -> ServedInputs {
         let entries = self.router.learned_capability_snapshot();
         let seed_clears = self.router.learned_seed_clear_snapshot();
         let learned = ResidentLearned {
@@ -238,6 +245,7 @@ impl StatusRouterView {
             self.router.catalog_overlay().clone(),
             learned,
             warm,
+            PriceSnapshot::pin(prices),
         )
         .with_parked_seats(parked)
         .with_unusable_seats(unusable)
@@ -303,7 +311,8 @@ mod tests {
         let _fidelity: FidelitySnapshot = view.fidelity_snapshot();
         let _wire_check: WireCheckSnapshot = view.wire_check_snapshot();
         let _effective: EffectiveView = view.effective_view(None, None);
-        let _served: ServedInputs = view.served_doctor_inputs(WarmReport::not_run());
+        let book = PriceBook::new(std::path::PathBuf::from("absent-prices.json"));
+        let _served: ServedInputs = view.served_doctor_inputs(WarmReport::not_run(), &book);
     }
 
     #[test]

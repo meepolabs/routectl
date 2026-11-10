@@ -681,10 +681,10 @@ async fn served_overlay_defect_findings(swap: &Arc<ArcSwap<Router>>, config_path
         None,
         crate::handlers::status::DaemonMeta::for_test(),
     );
-    let inputs = status
-        .router
-        .view()
-        .served_doctor_inputs(crate::server::capability_rebuild::WarmReport::not_run());
+    let inputs = status.router.view().served_doctor_inputs(
+        crate::server::capability_rebuild::WarmReport::not_run(),
+        &status.prices,
+    );
     let context = crate::commands::doctor::gather_context_no_network(
         config_path,
         crate::commands::doctor::GatherSources::Served(Box::new(inputs)),

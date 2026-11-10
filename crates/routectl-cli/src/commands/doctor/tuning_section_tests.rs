@@ -173,6 +173,7 @@ async fn the_served_no_network_report_carries_the_tuning_section() {
             summary: None,
             loaded_rows: 0,
         },
+        crate::commands::pricing::PriceSnapshot::default(),
     );
 
     let context =

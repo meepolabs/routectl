@@ -635,6 +635,47 @@ impl FieldSurface {
 /// would break every thinking request on the lane until it decays.
 pub(in crate::router) const MIN_LEARNED_OUTPUT_CEILING: u32 = 4096;
 
+/// The output ceiling the learned registry holds for `lane` at `now`: the
+/// lowest value among the lane's unlapsed `max_tokens` negatives that a clamp
+/// would write (at or above the floor every clamp honors). `None` when no
+/// such verdict is resident or none carries a value.
+///
+/// Reads registry rows as the read-only surfaces receive them, with each
+/// row's value attached; a row without one names no ceiling.
+#[must_use]
+pub fn learned_output_ceiling(
+    entries: &[crate::learned_capability::LearnedRegistryEntry],
+    lane: &str,
+    now: Instant,
+) -> Option<u32> {
+    let row = FIELD_REPAIRS
+        .iter()
+        .find(|row| matches!(row.surface, FieldSurface::MaxTokens))?;
+    let key = crate::field_capability::field_capability_key(row.path)?;
+    entries
+        .iter()
+        .filter(|entry| entry.state_key == lane && entry.feature_key == key)
+        .filter(|entry| {
+            matches!(
+                entry.verdict,
+                routectl_core::capability::Verdict::LearnedBroken(_)
+            ) && !crate::learned_capability::negative_lapsed(
+                entry.expires_at,
+                entry.recheck_owned,
+                now,
+            )
+        })
+        .filter_map(|entry| match entry.value {
+            Some(crate::field_verdict_value::VerdictValue::Ceiling(ceiling))
+                if ceiling >= MIN_LEARNED_OUTPUT_CEILING =>
+            {
+                Some(ceiling)
+            }
+            _ => None,
+        })
+        .min()
+}
+
 /// The `max_tokens` the request's egress sends: the client's value; else,
 /// on an egress that fills it, the value the provider resolves; else none.
 const fn emitted_max_tokens(req: &ChatRequest) -> Option<u32> {

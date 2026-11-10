@@ -4,12 +4,15 @@ use routectl_auth::oauth::types::TokenRecord;
 use routectl_core::{sanitize_for_log, sanitize_for_log_with_cap};
 use routectl_router::{
     ActivationEntry, ActivationStatus, CONFIG_VERSION_REMEDIATION, CURRENT_CONFIG_VERSION,
-    ConfigVersionError, Finding, OverlaySoftDefect, PricingSource, Status, TuningRow,
+    ConfigVersionError, Finding, OverlaySoftDefect, PricingConfig, Status, TuningRow,
     UnresolvedReason, compute_activation, epoch_day_age, is_stale_days, preflight_config_version,
 };
 
+use routectl_router::prices::{PriceSource, PriceSources, TableDate};
+
 use crate::commands::config::MAX_REPORTED_LINE_CHARS;
 use crate::commands::config_effective::{tuning_cells, tuning_kind};
+use crate::commands::pricing::missing_equivalence_dimensions;
 use crate::commands::probe::{login_id_for, probe_finding};
 use crate::commands::seat_report::{
     PoolHealth, PoolRow, describe_pool, describe_row, pool_rows, safe, stored_seat_pool_rows,
@@ -19,8 +22,8 @@ use crate::server::reload_failure::ReloadFailureSnapshot;
 use super::gather::{SecretCheck, SecretPresence};
 use super::served::{SeatFix, parked_seat_finding, unusable_seat_finding};
 use super::{
-    DoctorContext, EquivalenceBasis, FreshnessInputs, KnobRow, LegacyFolder, OutputCeilingSource,
-    PricingRow, PricingRowSource,
+    DoctorContext, FreshnessInputs, KnobRow, LegacyFolder, OutputCeilingSource, PricingRow,
+    TableDates,
 };
 
 /// Probe section: one finding per configured provider, mapped from its
@@ -854,56 +857,26 @@ fn last_import_finding(f: &FreshnessInputs) -> Finding {
     }
 }
 
-/// Pricing section: one deterministic row per configured model naming where
-/// its cost rates come from. Purely informational -- an unpriced model is a
-/// legitimate configuration (the operator may not care about cost accounting),
-/// so no row here can Fail, and the section can never move the exit code.
-///
-/// An unresolvable overlay collapses the whole section to ONE unavailable
-/// line: see [`pricing_unavailable`].
+/// Pricing section: one deterministic row per configured model naming each of
+/// its five prices with the source that gave it, and the date of each price
+/// table read. Purely informational -- an unpriced model is a legitimate
+/// configuration -- so no row here can Fail and the section can never move
+/// the exit code.
 pub(super) fn section_pricing(ctx: &DoctorContext) -> Vec<Finding> {
-    match &ctx.pricing {
-        Some(rows) => rows.iter().map(pricing_finding).collect(),
-        None => vec![pricing_unavailable()],
-    }
-}
-
-/// The section-unavailable finding: the catalog overlay could not be loaded.
-///
-/// The overlay is the rate CORRECTION channel -- it disables entries and
-/// supersedes baked rates -- so with it unreadable, the baked figure for any
-/// selector may be exactly the one the effective pricing does NOT use. A
-/// superseded dollar figure is worse than no figure, so the section reports
-/// nothing resolved rather than the baked layer alone.
-///
-/// `Warn`, matching [`capability_unavailable`]: it degrades honestly without
-/// flipping the exit code (the version section owns the overlay-load `Fail`).
-fn pricing_unavailable() -> Finding {
-    Finding {
-        section: "pricing",
-        name: "section".to_string(),
-        status: Status::Warn,
-        detail: "cost pricing unavailable: the catalog overlay could not be loaded, so no \
-                 model's effective rates can be resolved (the overlay supersedes baked rates, \
-                 so reporting the baked figure could name a rate the bill does not use)"
-            .to_string(),
-        remediation: Some(
-            "resolve the catalog-overlay error reported above, then re-run `routectl doctor`"
-                .to_string(),
-        ),
-    }
+    ctx.pricing.iter().map(pricing_finding).collect()
 }
 
 /// Pure mapping of one resolved [`PricingRow`] to its finding. The detail
-/// names the model's provider, kind, and upstream in every state so an
-/// operator can see WHICH selector was resolved, and the two priced states
-/// additionally name the resolved per-million rates.
+/// names the model's provider, kind and upstream from the config, then each
+/// price as `<field> <value> (<source>)`, then the table dates.
 ///
-/// A subscription row carries a SECOND clause: the bill is by seat, but the
-/// usage report still values that seat's traffic at API-equivalent rates, and
-/// that equivalent is complete-or-absent. Without the clause the section is
-/// silent on the one question the rule creates -- why an equivalent reads
-/// absent -- since the billed-by-seat statement is true either way.
+/// Nothing from a price table is rendered beyond the prices and the table
+/// dates: sources are fixed tokens, and the table provider that matched is
+/// never named.
+///
+/// A subscription row is billed by seat; its prices are the basis of the
+/// usage report's API-equivalent value, so it carries a clause saying whether
+/// that value is complete or which prices it lacks.
 pub(super) fn pricing_finding(row: &PricingRow) -> Finding {
     let selector = format!(
         "provider {} (kind {}) upstream {}",
@@ -911,29 +884,28 @@ pub(super) fn pricing_finding(row: &PricingRow) -> Finding {
         safe(&row.provider_kind),
         safe(&row.upstream)
     );
-    let detail = match &row.source {
-        PricingRowSource::Subscription(basis) => format!(
-            "billed by subscription; no per-token rate applies -- {selector}; {}",
-            render_equivalence_basis(basis)
-        ),
-        PricingRowSource::Registry {
-            input_per_mtok,
-            output_per_mtok,
-        } => format!(
-            "priced from the [registry] table {} -- {selector}",
-            render_rates(*input_per_mtok, *output_per_mtok)
-        ),
-        PricingRowSource::Catalog {
-            input_per_mtok,
-            output_per_mtok,
-        } => format!(
-            "priced from the baked catalog {} -- {selector}",
-            render_rates(*input_per_mtok, *output_per_mtok)
-        ),
-        PricingRowSource::Unpriced => format!(
-            "unpriced: neither [registry] nor the catalog has rates -- {selector}; usage reports \
-             no cost for it"
-        ),
+    let unpriced = (PricingConfig::default(), UNKNOWN_SOURCES);
+    let (pricing, sources) = row.resolved.as_ref().unwrap_or(&unpriced);
+    let fields = render_price_fields(pricing, sources);
+    let tables = render_table_dates(row.tables);
+    let detail = if row.subscription {
+        format!(
+            "billed by subscription; no per-token rate applies -- {selector}; API-equivalent \
+             prices: {fields}; {}; {tables}",
+            render_equivalence_clause(&row.nickname, row.resolved.as_ref())
+        )
+    } else if row.resolved.is_none() {
+        format!(
+            "unpriced: no source prices it -- {selector}; {fields}; usage reports no cost for \
+             it; {tables}"
+        )
+    } else if *sources == UNKNOWN_SOURCES {
+        format!(
+            "a [registry] row matches but sets no price, so it prices nothing -- {selector}; \
+             {fields}; {tables}"
+        )
+    } else {
+        format!("priced -- {selector}; {fields}; {tables}")
     };
     Finding {
         section: "pricing",
@@ -944,74 +916,93 @@ pub(super) fn pricing_finding(row: &PricingRow) -> Finding {
     }
 }
 
-/// The subscription row's equivalence clause: whether `usage` can value this
-/// seat's traffic at API rates, and on which layer's rates.
-///
-/// The incomplete arm NAMES the dimensions without a rate, because a
-/// catalog-basis subscription model is always incomplete -- the catalog supplies
-/// base rates only -- and "incomplete" alone would leave the operator with
-/// nowhere to look.
-///
-/// "unpriced" is deliberately absent from every arm: that word is the
-/// [`PricingRowSource::Unpriced`] row's own vocabulary, and a subscription row
-/// is never in that state.
-fn render_equivalence_basis(basis: &EquivalenceBasis) -> String {
-    match basis {
-        EquivalenceBasis::Complete { source } => format!(
-            "usage values it at API-equivalent rates, complete via {}",
-            basis_layer(*source)
+const UNKNOWN_SOURCES: PriceSources = PriceSources {
+    input: PriceSource::Unknown,
+    output: PriceSource::Unknown,
+    cache_read: PriceSource::Unknown,
+    cache_write_5m: PriceSource::Unknown,
+    cache_write_1h: PriceSource::Unknown,
+};
+
+/// The five prices in a fixed order, each `<field> <value> (<source>)`. An
+/// unknown price reads `unknown`, never `$0`; a known zero reads `$0.00`.
+fn render_price_fields(pricing: &PricingConfig, sources: &PriceSources) -> String {
+    [
+        ("input", pricing.input_per_mtok, sources.input),
+        ("output", pricing.output_per_mtok, sources.output),
+        (
+            "cache read",
+            pricing.cache_read_per_mtok,
+            sources.cache_read,
         ),
-        EquivalenceBasis::Incomplete { source, missing } => format!(
-            "usage withholds the API-equivalent value for traffic that uses unrated dimensions \
-             ({}): {} carries no rate for them, and the equivalent is computed only when every \
-             dimension the traffic used resolves one; add a complete [registry] pricing row for \
-             this upstream to value cached traffic",
-            missing.join(", "),
-            basis_layer(*source)
+        (
+            "cache write 5m",
+            pricing.cache_write_5m_per_mtok,
+            sources.cache_write_5m,
         ),
-        EquivalenceBasis::Unresolved => "usage reports NO API-equivalent value: neither \
-             [registry] nor the catalog resolves rates for this upstream, so there is nothing to \
-             value it at; add a [registry] pricing row for it"
-            .to_string(),
-    }
+        (
+            "cache write 1h",
+            pricing.cache_write_1h_per_mtok,
+            sources.cache_write_1h,
+        ),
+    ]
+    .iter()
+    .map(|(label, value, source)| format!("{label} {} ({})", render_rate(*value), source.as_str()))
+    .collect::<Vec<_>>()
+    .join(", ")
 }
 
-/// The operator-facing name of the layer an equivalence basis came from.
-const fn basis_layer(source: PricingSource) -> &'static str {
-    match source {
-        PricingSource::Registry => "the [registry] table",
-        // The catalog's cache dimensions are unset by construction (an
-        // unconfirmed multiplier would fabricate a figure), so this layer can
-        // only ever be a partial basis.
-        PricingSource::Catalog => "the baked catalog (base rates only)",
-    }
-}
-
-/// Render one row's resolved per-million rates. A dimension the winning layer
-/// left unset renders as `unset`, never as `$0` -- an unpriced dimension
-/// contributes nothing to a cost and must not read as free.
-///
-/// A winning row that priced NEITHER dimension is a distinct state from a
-/// half-priced one, and only an operator `[registry]` row can reach it (a
-/// catalog row pricing neither dimension resolves to `Unpriced` upstream of
-/// here). "input unset / output unset" would read as a lookup that came up
-/// empty; the row is instead a deliberate act that charges nothing, so it says
-/// so.
-fn render_rates(input_per_mtok: Option<f64>, output_per_mtok: Option<f64>) -> String {
-    if input_per_mtok.is_none() && output_per_mtok.is_none() {
-        return "but that row sets no per-token rate, so it prices nothing".to_string();
-    }
+/// The date of each price table layer, or `none` for an absent layer.
+fn render_table_dates(tables: TableDates) -> String {
+    let date = |d: Option<TableDate>| d.map_or_else(|| "none".to_string(), |d| d.to_string());
     format!(
-        "at input {} / output {} per Mtok",
-        render_rate(input_per_mtok),
-        render_rate(output_per_mtok)
+        "price tables: refreshed {}, shipped {}",
+        date(tables.refreshed),
+        date(tables.shipped)
     )
 }
 
-/// One per-million rate as money: two decimals like every other dollar
-/// surface, or `unset` for a dimension the winning layer left absent.
+/// The subscription row's equivalence clause: the usage report's
+/// API-equivalent value is complete-or-absent, so this says whether every
+/// price resolves, which ones do not, or that none does.
+fn render_equivalence_clause(
+    nickname: &str,
+    resolved: Option<&(PricingConfig, PriceSources)>,
+) -> String {
+    let fix = format!("set them in [models.{}.pricing]", safe(nickname));
+    let Some((pricing, _)) = resolved else {
+        return format!(
+            "usage reports NO API-equivalent value: no source prices this upstream; {fix}"
+        );
+    };
+    let missing = missing_equivalence_dimensions(pricing);
+    if missing.is_empty() {
+        "usage values it at API-equivalent rates; every price resolves".to_string()
+    } else {
+        format!(
+            "usage withholds the API-equivalent value for traffic that uses unpriced \
+             dimensions ({}); {fix}",
+            missing.join(", ")
+        )
+    }
+}
+
+/// One per-million price as money: at least two decimals, up to four so a
+/// sub-cent price is not rounded away, or `unknown` when no source gives it.
 fn render_rate(per_mtok: Option<f64>) -> String {
-    per_mtok.map_or_else(|| "unset".to_string(), |v| format!("${v:.2}"))
+    per_mtok.map_or_else(
+        || "unknown".to_string(),
+        |v| {
+            let four = format!("{v:.4}");
+            let trimmed = four.trim_end_matches('0');
+            let decimals = trimmed.split_once('.').map_or(0, |(_, d)| d.len());
+            if decimals < 2 {
+                format!("${v:.2}")
+            } else {
+                format!("${trimmed}")
+            }
+        },
+    )
 }
 
 /// The operator staleness hint as the `i64` the epoch-day checks take. A
@@ -1022,16 +1013,17 @@ pub(super) fn staleness_threshold_days(hint_days: u64) -> i64 {
 }
 
 /// Knobs section: one deterministic row per configured model naming where its
-/// outbound `max_output_tokens` ceiling comes from. Purely informational --
-/// every state is a legitimate configuration -- so no row here can Fail and the
-/// section can never move the exit code.
+/// outbound `max_output_tokens` ceiling comes from and what it resolves to.
+/// Purely informational -- every state is a legitimate configuration -- so no
+/// row here can Fail and the section can never move the exit code.
 pub(super) fn section_knobs(ctx: &DoctorContext) -> Vec<Finding> {
     ctx.knobs.iter().map(knob_finding).collect()
 }
 
-/// Pure mapping of one resolved [`KnobRow`] to its finding. The detail names
-/// the source token (`model-config` or `default`) and the model's kind and
-/// upstream in every state.
+/// Pure mapping of one resolved [`KnobRow`] to its finding. The detail leads
+/// with `max_output_tokens <value> (<source>)`, the source one of
+/// `model-config`, `learned` or `default`, then names the model's kind and
+/// upstream.
 fn knob_finding(row: &KnobRow) -> Finding {
     let selector = format!(
         "kind {} upstream {}",
@@ -1043,10 +1035,24 @@ fn knob_finding(row: &KnobRow) -> Finding {
             "max_output_tokens {ceiling} (model-config) -- {selector}; a ceiling learned from an \
              upstream refusal can lower it"
         ),
-        OutputCeilingSource::Default => format!(
-            "max_output_tokens unset (default) -- {selector}; the Anthropic-shape egresses send \
-             their built-in baseline and every other egress forwards caller omission untouched; \
-             set `max_output_tokens` on the model for one whose ceiling is lower"
+        OutputCeilingSource::Learned { ceiling, lowers } => {
+            let lowers = lowers.map_or_else(
+                || "a larger client limit".to_string(),
+                |base| format!("{base}"),
+            );
+            format!(
+                "max_output_tokens {ceiling} (learned) -- {selector}; learned from an upstream \
+                 refusal, it lowers {lowers} until it decays"
+            )
+        }
+        OutputCeilingSource::Default { fill: Some(fill) } => format!(
+            "max_output_tokens {fill} (default) -- {selector}; the egress sends this baseline \
+             when the caller omits a limit; set `max_output_tokens` on the model for one whose \
+             ceiling is lower"
+        ),
+        OutputCeilingSource::Default { fill: None } => format!(
+            "max_output_tokens unset (default) -- {selector}; the egress forwards an omitted \
+             limit untouched"
         ),
     };
     Finding {

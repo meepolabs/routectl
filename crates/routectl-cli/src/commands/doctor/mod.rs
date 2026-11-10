@@ -50,6 +50,10 @@ mod value_matrix_tests;
 #[path = "tuning_section_tests.rs"]
 mod tuning_section_tests;
 
+#[cfg(test)]
+#[path = "price_fill_section_tests.rs"]
+mod price_fill_section_tests;
+
 use std::path::Path;
 use std::time::Instant;
 
@@ -59,9 +63,10 @@ use crate::config_folder::LegacyConfigDir;
 use crate::server::reload_failure::ReloadFailureSnapshot;
 use routectl_auth::oauth::types::TokenRecord;
 use routectl_core::ProbeOutcome;
+use routectl_router::prices::{PriceSources, TableDate};
 use routectl_router::{
     BetaSeedScope, CatalogImportState, Config, DoctorPanels, DoctorReport, Finding,
-    LearnedRegistryEntry, MatrixReplaySummary, MatrixWarm, OverlaySoftDefect, PricingSource,
+    LearnedRegistryEntry, MatrixReplaySummary, MatrixWarm, OverlaySoftDefect, PricingConfig,
     SeedClearMarker, Status, TuningRow, WouldTrimPanel, overall_exit,
 };
 
@@ -241,7 +246,15 @@ pub(crate) use self::served::{
 /// marks only a verified learned cell past the staleness hint. The panel's
 /// state line names `seed/override cells` where it named
 /// `prior/seed/override cells`.
-pub(crate) const SCHEMA_VERSION: u32 = 27;
+///
+/// v27 -> v28: every `pricing` row resolves through the price tables and
+/// names a source token per price (`model-config`, `registry`, `refreshed`,
+/// `shipped`, `derived` or `unknown`) plus the date of each table read; the
+/// `baked catalog` source and the section-unavailable line for an unreadable
+/// catalog overlay are gone. A subscription row keeps its API-equivalence
+/// clause. A `knobs` row names `model-config`, `learned` or `default` and the
+/// value that source resolves.
+pub(crate) const SCHEMA_VERSION: u32 = 28;
 
 /// A section-producer: pure mapping of the read-only [`DoctorContext`] to a
 /// section's findings.
@@ -361,14 +374,12 @@ pub(crate) struct DoctorContext {
     /// additive to the context; gathered once like every other input.
     freshness: FreshnessInputs,
     /// The pricing section's rows: one per configured model, resolved once at
-    /// gather time so the section producer stays a pure mapping. `None` when
-    /// the catalog overlay could not be loaded -- the overlay is the rate
-    /// CORRECTION channel, so without it no resolved figure can be trusted and
-    /// the section renders an honest unavailable line instead.
-    pricing: Option<Vec<PricingRow>>,
+    /// gather time against one pinned pair of price tables so the section
+    /// producer stays a pure mapping.
+    pricing: Vec<PricingRow>,
     /// The knobs section's rows: one per configured model, resolved once at
     /// gather time so the section producer stays a pure mapping. Read from
-    /// the config alone.
+    /// the config and the learned layer the capability matrix shows.
     knobs: Vec<KnobRow>,
     /// The tuning section's rows: one per `[providers.X]` entry, then one per
     /// model with its own first-content timeout, each cell carrying the tier
@@ -431,9 +442,9 @@ enum LegacyFolder {
 /// Where one configured model's outbound `max_output_tokens` ceiling comes
 /// from, and what it resolves to.
 ///
-/// Read off the same `[models.X] max_output_tokens` field the factory stamps,
-/// so the diagnostic can never name a ceiling the served router would not
-/// apply.
+/// Read off the same `[models.X] max_output_tokens` field the factory stamps
+/// and the learned ceiling the field pre-flight clamps to, so the diagnostic
+/// can never name a ceiling the served router would not apply.
 struct KnobRow {
     /// The `[models.<nickname>]` key.
     nickname: String,
@@ -446,24 +457,33 @@ struct KnobRow {
     source: OutputCeilingSource,
 }
 
-/// The two states a [`KnobRow`] can report, in the precedence order the
-/// egress resolves them: the model's configured value, else the
-/// Anthropic-shape egress's own hardcoded baseline. A learned ceiling lowers
-/// either at dispatch.
+/// The three states a [`KnobRow`] can report: a learned ceiling below what
+/// the egress would otherwise send, else the model's configured value, else
+/// the egress default.
+#[derive(Debug, PartialEq, Eq)]
 enum OutputCeilingSource {
     /// `[models.X] max_output_tokens` sets the ceiling.
     ModelConfig(u32),
-    /// No ceiling is configured: the Anthropic-shape egresses fall through to
-    /// their hardcoded baseline and every other egress forwards caller
-    /// omission untouched.
-    Default,
+    /// A ceiling learned from an upstream refusal on one of the model's lanes
+    /// lowers what would otherwise be sent.
+    Learned {
+        /// The learned ceiling.
+        ceiling: u32,
+        /// The value it lowers: the configured ceiling, else the egress
+        /// default; `None` on an egress that sends no limit of its own, where
+        /// it lowers only a larger client value.
+        lowers: Option<u32>,
+    },
+    /// No ceiling is configured or learned: `fill` is the baseline the
+    /// egress sends when the caller omits one, `None` for an egress that
+    /// forwards the omission untouched.
+    Default { fill: Option<u32> },
 }
 
-/// Where one configured model's cost rates come from, and what they are.
-///
-/// Resolved through the SAME `routectl_router::effective_pricing` boundary the
-/// usage report prices rows against, so the diagnostic can never claim a
-/// source the bill does not use.
+/// One configured model's effective prices, resolved per field through
+/// `routectl_router::prices::effective_pricing`, the same resolution the
+/// usage report prices rows with, so the diagnostic can never claim a source
+/// the bill does not use.
 struct PricingRow {
     /// The `[models.<nickname>]` key.
     nickname: String,
@@ -472,62 +492,24 @@ struct PricingRow {
     /// The referenced provider's kind token (empty when the provider is
     /// unknown to the config).
     provider_kind: String,
-    /// The upstream model id the rates were resolved for.
+    /// The upstream model id the prices were resolved for.
     upstream: String,
-    /// The resolved rates and the layer that supplied them.
-    source: PricingRowSource,
+    /// Whether the provider bills by managed subscription rather than per
+    /// token. Classified before any price decides anything.
+    subscription: bool,
+    /// The effective prices and the source of each field; `None` when no
+    /// source prices any field.
+    resolved: Option<(PricingConfig, PriceSources)>,
+    /// The dates of the price tables the resolution read.
+    tables: TableDates,
 }
 
-/// The four states a [`PricingRow`] can report, in the same vocabulary the
-/// usage report's cost column uses.
-enum PricingRowSource {
-    /// A managed-OAuth (`oauth://`) provider: billed by subscription, so no
-    /// per-token rate applies to the bill. The basis carried alongside is what
-    /// the usage report's API-EQUIVALENT value for that seat's traffic resolves
-    /// from -- a separate question from the bill, and the only one that explains
-    /// why an equivalent reads absent.
-    Subscription(EquivalenceBasis),
-    /// An operator `[registry]` pricing row, taken verbatim.
-    Registry {
-        input_per_mtok: Option<f64>,
-        output_per_mtok: Option<f64>,
-    },
-    /// The two-layer catalog's own baked rates, converted to per-million.
-    Catalog {
-        input_per_mtok: Option<f64>,
-        output_per_mtok: Option<f64>,
-    },
-    /// Neither layer prices this model: its usage reports as unpriced rather
-    /// than as a fabricated zero.
-    Unpriced,
-}
-
-/// Whether a subscription model's usage can carry an API-equivalent value, and
-/// on which layer's rates.
-///
-/// The usage report's equivalent is complete-or-absent: it appears only when
-/// every dimension the traffic used resolved a positive rate. A diagnostic has
-/// no token counts, so it reports which rate DIMENSIONS resolve for the
-/// selector -- the same positivity rule, one step earlier.
-enum EquivalenceBasis {
-    /// Every dimension resolves a positive rate, so any traffic on this
-    /// selector carries an equivalent.
-    ///
-    /// Reachable from `PricingSource::Catalog` only if the catalog ever starts
-    /// supplying cache rates; it deliberately does not today (an unconfirmed
-    /// multiplier would fabricate a figure), so a catalog basis is always
-    /// `Incomplete`. The arm is kept general rather than pinned to the registry
-    /// so a catalog that gains cache rates needs no change here.
-    Complete { source: PricingSource },
-    /// The winning layer leaves at least one dimension unpriced, so traffic
-    /// touching it carries no equivalent. `missing` names those dimensions.
-    Incomplete {
-        source: PricingSource,
-        missing: Vec<&'static str>,
-    },
-    /// Neither layer prices the selector at all: no equivalent can be based on
-    /// anything.
-    Unresolved,
+/// The generation date of each price table layer a pricing row was resolved
+/// against; `None` when that layer is absent.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct TableDates {
+    refreshed: Option<TableDate>,
+    shipped: Option<TableDate>,
 }
 
 /// The capability section's input: whether the config parsed. The section

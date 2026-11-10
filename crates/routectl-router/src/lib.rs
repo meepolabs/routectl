@@ -231,6 +231,7 @@ pub use router::{
     LaneBudgetExhaustions, LaneLossyRepairs, LearnedLaneProjection, LiveSampleSink, OpeningLane,
     PoolEligibility, PreflightBlockedReason, ProbeClearAcknowledgement, ResolvedLearnedLane,
     ResponseCheck, Router, RouterOptions, StreamEvidence, acting_field_verdicts, class_debits,
+    learned_output_ceiling,
 };
 #[cfg(any(test, feature = "test-utils"))]
 pub use router::{

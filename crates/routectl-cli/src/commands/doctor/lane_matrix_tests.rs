@@ -83,7 +83,7 @@ pub(super) fn context(config: Config, source: CapabilityMatrixSource) -> DoctorC
             last_import: None,
             import_result: None,
         },
-        pricing: None,
+        pricing: Vec::new(),
         knobs: Vec::new(),
         tuning: Vec::new(),
         reload_failure: None,

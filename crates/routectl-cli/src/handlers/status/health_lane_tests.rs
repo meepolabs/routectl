@@ -337,7 +337,12 @@ mod doctor_agreement {
         // Act
         let served = gather_context_no_network(
             &config_path,
-            GatherSources::Served(Box::new(view.served_doctor_inputs(WarmReport::not_run()))),
+            GatherSources::Served(Box::new(view.served_doctor_inputs(
+                WarmReport::not_run(),
+                &routectl_router::prices::PriceBook::new(std::path::PathBuf::from(
+                    "absent-prices.json",
+                )),
+            ))),
             &[],
         )
         .await;

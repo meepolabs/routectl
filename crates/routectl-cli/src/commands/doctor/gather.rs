@@ -9,17 +9,19 @@ use routectl_auth::oauth::types::{TokenRecord, seat_key, unix_now};
 use routectl_auth::{OAuthError, OAuthStore};
 use routectl_auth::{SecretRef, SecretScheme, default_secret_dir};
 use routectl_core::ProbeOutcome;
+use routectl_router::prices::{PriceSubject, effective_pricing};
 use routectl_router::{
     BetaSeedScope, CATALOG_VERSION, CapabilityEventRow, CapabilityRebuildSummary, CatalogOverlay,
     Config, EffectiveRow, FROZEN_CATALOG_VERSION, FROZEN_OVERLAY_REVISION,
-    LearnedCapabilityRegistry, MatrixReplaySummary, PricingSource, ProviderEntry, ReplayTombstone,
-    Source, StateKey, TuningRow, catalog_import_state_default_path, derive_effective_view,
-    effective_pricing, load_last_import, rebuild_capabilities_with_values, today_epoch_day,
+    LearnedCapabilityRegistry, LearnedLaneProjection, MatrixReplaySummary, ProviderEntry,
+    ReplayTombstone, Source, StateKey, TuningRow, catalog_import_state_default_path,
+    derive_effective_view, learned_output_ceiling, load_last_import,
+    rebuild_capabilities_with_values, today_epoch_day,
 };
 
 use crate::commands::doctor_panels::compute_would_trim_panel;
 use crate::commands::parse_error_redaction::redact_config_load_error;
-use crate::commands::pricing::{is_subscription, missing_equivalence_dimensions};
+use crate::commands::pricing::{PriceSnapshot, default_price_book, is_subscription};
 use crate::commands::probe::{PROBE_DEADLINE, probe_all};
 use crate::config_folder::LegacyConfigDir;
 use crate::server::CompositeStore;
@@ -29,9 +31,9 @@ use crate::server::ledger_reader::{
 
 use super::served::{GatherSources, GatheredLayers, served_layers};
 use super::{
-    CapabilityInputs, CapabilityMatrixSource, DoctorContext, EquivalenceBasis, FreshnessInputs,
-    KnobRow, LEGACY_FOLDER_NAME_CAP, LegacyFolder, MatrixOrigin, OutputCeilingSource, PricingRow,
-    PricingRowSource,
+    CapabilityInputs, CapabilityMatrixSource, DoctorContext, FreshnessInputs, KnobRow,
+    LEGACY_FOLDER_NAME_CAP, LegacyFolder, MatrixOrigin, OutputCeilingSource, PricingRow,
+    TableDates,
 };
 
 /// The network doctor gather: the no-network context PLUS one upstream
@@ -90,6 +92,7 @@ pub async fn gather_context_no_network(
         reload_failure,
         parked_seats,
         unusable_seats,
+        prices,
     } = layers;
 
     let overlay_verified_at = overlay
@@ -104,15 +107,8 @@ pub async fn gather_context_no_network(
         last_import: load_last_import(&catalog_import_state_default_path()),
         import_result: None,
     };
-    // An overlay that would not load leaves pricing UNRESOLVABLE, not
-    // baked-only: the overlay is the correction channel, so a selector it
-    // disables or reprices would render its superseded baked figure here while
-    // the bill uses the corrected one. `None` renders an honest unavailable
-    // line instead.
-    let pricing = overlay
-        .as_ref()
-        .map(|overlay| derive_pricing_rows(&config, overlay));
-    let knobs = derive_knob_rows(&config);
+    let pricing = derive_pricing_rows(&config, &prices);
+    let knobs = derive_knob_rows(&config, &capability_matrix);
     let tuning = derive_tuning_rows(&config);
     let overlay_soft_defects = overlay
         .as_ref()
@@ -268,14 +264,18 @@ pub(super) fn disk_layers(config_path: &Path) -> GatheredLayers {
         reload_failure: None,
         parked_seats: Vec::new(),
         unusable_seats: Vec::new(),
+        prices: PriceSnapshot::pin(&default_price_book()),
     }
 }
 
 /// One knob row per `[models.X]` entry, naming where its outbound
-/// `max_output_tokens` ceiling comes from: the entry's own value, else the
-/// egress default. Read off the same config field the factory stamps, so the
-/// row cannot name a ceiling the router does not send.
-pub(super) fn derive_knob_rows(config: &Config) -> Vec<KnobRow> {
+/// `max_output_tokens` ceiling comes from: a learned ceiling that lowers what
+/// would otherwise be sent, else the entry's own value, else the egress
+/// default. The configured value is the field the factory stamps; the learned
+/// one is read off `learned`, the same learned layer the capability matrix
+/// shows, never a second read of the store.
+pub(super) fn derive_knob_rows(config: &Config, learned: &CapabilityMatrixSource) -> Vec<KnobRow> {
+    let lanes = LearnedLaneProjection::from_config(config);
     config
         .models
         .iter()
@@ -283,98 +283,109 @@ pub(super) fn derive_knob_rows(config: &Config) -> Vec<KnobRow> {
             nickname: nickname.clone(),
             provider_kind: config.provider_kind_for_target(&entry.provider).to_string(),
             upstream: entry.upstream.clone(),
-            source: entry.max_output_tokens.map_or(
-                OutputCeilingSource::Default,
-                OutputCeilingSource::ModelConfig,
+            source: output_ceiling_source(
+                entry.max_output_tokens,
+                egress_fills(config, &entry.provider),
+                model_learned_ceiling(&lanes, nickname, learned),
             ),
         })
         .collect()
 }
 
-/// One pricing row per `[models.X]` entry, resolved through the shared
-/// `effective_pricing` boundary.
+/// The ceiling one model sends and where it comes from. A learned ceiling
+/// wins only where it lowers the value that would otherwise go out, the rule
+/// the dispatch clamp applies.
+pub(super) fn output_ceiling_source(
+    configured: Option<u32>,
+    egress_fills: bool,
+    learned: Option<u32>,
+) -> OutputCeilingSource {
+    let fill = egress_fills.then_some(routectl_providers::anthropic_api::DEFAULT_MAX_OUTPUT_TOKENS);
+    let base = configured.or(fill);
+    match learned {
+        Some(ceiling) if base.is_none_or(|base| ceiling < base) => OutputCeilingSource::Learned {
+            ceiling,
+            lowers: base,
+        },
+        _ => configured.map_or(
+            OutputCeilingSource::Default { fill },
+            OutputCeilingSource::ModelConfig,
+        ),
+    }
+}
+
+/// Whether the egress of the `[providers]` entry or `[pools]` key `target`
+/// (a pool through its first member naming an entry) fills an omitted
+/// `max_tokens`.
+fn egress_fills(config: &Config, target: &str) -> bool {
+    config
+        .providers
+        .get(target)
+        .or_else(|| {
+            config
+                .pools
+                .get(target)?
+                .members
+                .iter()
+                .find_map(|member| config.providers.get(member))
+        })
+        .is_some_and(|entry| {
+            routectl_providers::anthropic_api::egress_fills_max_tokens(entry.egress_kind())
+        })
+}
+
+/// The lowest learned output ceiling across the lanes `nickname` dispatches
+/// to, from the resident entries of `learned`.
+fn model_learned_ceiling(
+    lanes: &LearnedLaneProjection,
+    nickname: &str,
+    learned: &CapabilityMatrixSource,
+) -> Option<u32> {
+    let CapabilityMatrixSource::Available { entries, now, .. } = learned else {
+        return None;
+    };
+    lanes
+        .lanes()
+        .iter()
+        .filter(|lane| lane.nicknames.iter().any(|n| n == nickname))
+        .filter_map(|lane| learned_output_ceiling(entries, lane.lane.as_lane_key(), *now))
+        .min()
+}
+
+/// One pricing row per `[models.X]` entry, each price resolved field by field
+/// through `effective_pricing` against `prices`, the tables the usage report
+/// reads.
 ///
-/// The kind comes from `provider_kind_for_target`, which resolves a pool-backed
-/// model off a member: `[models.X] provider` may name a pool, and an empty kind
-/// identifies no catalog cell, so a bare provider-table lookup would report
-/// every pooled model as unpriced.
-///
-/// A managed-OAuth provider is classified as `Subscription` BEFORE the rate
-/// lookup decides anything, matching the order the usage report classifies a row
-/// in -- a subscription is billed by seat, so what its per-token rates would
-/// have been is not a fact about the bill. The rates ARE still resolved for such
-/// a row, but only to report the API-EQUIVALENCE basis (see
-/// [`equivalence_basis`]), never as the row's price.
-pub(super) fn derive_pricing_rows(config: &Config, overlay: &CatalogOverlay) -> Vec<PricingRow> {
+/// A managed-OAuth provider is classified as a subscription BEFORE any price
+/// decides anything, matching the order the usage report classifies a row in:
+/// a subscription is billed by seat, so its resolved prices are only the
+/// basis of its API-equivalent value, never its bill.
+pub(super) fn derive_pricing_rows(config: &Config, prices: &PriceSnapshot) -> Vec<PricingRow> {
+    let tables = TableDates {
+        refreshed: prices.refreshed().map(|table| table.generated_at()),
+        shipped: prices.shipped().map(|table| table.generated_at()),
+    };
     config
         .models
         .iter()
         .map(|(nickname, entry)| {
-            let provider_kind = config.provider_kind_for_target(&entry.provider);
+            let subject = PriceSubject {
+                model: Some(nickname),
+                provider: &entry.provider,
+                upstream: &entry.upstream,
+                persisted_kind: None,
+            };
             PricingRow {
                 nickname: nickname.clone(),
                 provider: entry.provider.clone(),
-                provider_kind: provider_kind.to_string(),
+                provider_kind: config.provider_kind_for_target(&entry.provider).to_string(),
                 upstream: entry.upstream.clone(),
-                source: pricing_row_source(config, overlay, provider_kind, entry),
+                subscription: is_subscription(config, &entry.provider),
+                resolved: effective_pricing(config, &subject, prices.refreshed(), prices.shipped()),
+                tables,
             }
         })
         .collect()
-}
-
-/// Classify ONE model's rate source. Subscription first, then the shared
-/// registry-or-catalog resolution.
-fn pricing_row_source(
-    config: &Config,
-    overlay: &CatalogOverlay,
-    provider_kind: &str,
-    entry: &routectl_router::ModelEntry,
-) -> PricingRowSource {
-    let resolved = effective_pricing(
-        config,
-        overlay,
-        provider_kind,
-        &entry.upstream,
-        &entry.provider,
-    );
-    if is_subscription(config, &entry.provider) {
-        return PricingRowSource::Subscription(equivalence_basis(resolved.as_ref()));
-    }
-    match resolved {
-        Some((pricing, PricingSource::Registry)) => PricingRowSource::Registry {
-            input_per_mtok: pricing.input_per_mtok,
-            output_per_mtok: pricing.output_per_mtok,
-        },
-        Some((pricing, PricingSource::Catalog)) => PricingRowSource::Catalog {
-            input_per_mtok: pricing.input_per_mtok,
-            output_per_mtok: pricing.output_per_mtok,
-        },
-        None => PricingRowSource::Unpriced,
-    }
-}
-
-/// Classify what a subscription model's API-equivalent value can be based on,
-/// from the SAME `effective_pricing` result a priced row would have used.
-///
-/// The completeness test is the shared
-/// [`missing_equivalence_dimensions`] rule -- the diagnostic half of the usage
-/// report's complete-or-absent gate -- so doctor cannot claim an equivalent will
-/// appear where the report would withhold it.
-fn equivalence_basis(
-    resolved: Option<&(routectl_router::PricingConfig, PricingSource)>,
-) -> EquivalenceBasis {
-    let Some((pricing, source)) = resolved else {
-        return EquivalenceBasis::Unresolved;
-    };
-    let missing = missing_equivalence_dimensions(pricing);
-    if missing.is_empty() {
-        EquivalenceBasis::Complete { source: *source }
-    } else {
-        EquivalenceBasis::Incomplete {
-            source: *source,
-            missing,
-        }
-    }
 }
 
 /// Rebuild the learned-capability matrix read-only from the usage ledger for

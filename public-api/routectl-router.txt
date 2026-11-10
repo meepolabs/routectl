@@ -6521,6 +6521,7 @@ pub trait routectl_router::router::ProbeClearAcknowledgement: core::marker::Send
 pub fn routectl_router::router::ProbeClearAcknowledgement::acknowledge_clear<'life0, 'async_trait>(&'life0 self, routectl_router::router::CapabilityClearedEvent) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = bool> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait
 pub fn routectl_router::router::acting_field_verdicts(&[routectl_router::LearnedRegistryEntry]) -> alloc::vec::Vec<routectl_router::ActingFieldVerdict>
 pub const fn routectl_router::router::class_debits(&routectl_core::failure_class::FailureClass) -> bool
+pub fn routectl_router::router::learned_output_ceiling(&[routectl_router::LearnedRegistryEntry], &str, std::time::Instant) -> core::option::Option<u32>
 pub fn routectl_router::router::merge_header_extras(&str, core::option::Option<&alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::string::String>>, &alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::string::String>, &mut routectl_core::schema::ChatRequest)
 pub fn routectl_router::router::merge_payload_extras(&str, core::option::Option<&serde_json::value::Value>, core::option::Option<&serde_json::value::Value>, &mut routectl_core::schema::ChatRequest)
 pub mod routectl_router::runtime_state
@@ -20397,6 +20398,7 @@ pub fn routectl_router::is_import_cell(&routectl_router::CatalogOverlay, &str) -
 pub fn routectl_router::is_stale_days(&str, i64, i64) -> bool
 pub fn routectl_router::is_stale_days_today(&str, i64) -> bool
 pub fn routectl_router::is_stale_today(&str) -> bool
+pub fn routectl_router::learned_output_ceiling(&[routectl_router::LearnedRegistryEntry], &str, std::time::Instant) -> core::option::Option<u32>
 pub fn routectl_router::load_catalog_import_baseline(&std::path::Path, routectl_router::ShrinkCounts) -> routectl_router::ShrinkCounts
 pub fn routectl_router::load_catalog_overlay(&std::path::Path) -> core::result::Result<routectl_router::CatalogOverlay, routectl_router::OverlayError>
 pub fn routectl_router::load_last_import(&std::path::Path) -> core::option::Option<routectl_router::CatalogImportState>

@@ -99,6 +99,7 @@ pub use fidelity_status::{
     seed_distinct_fidelity_counters_for_tests,
 };
 pub(crate) use field_repair::FieldRepairTable;
+pub use field_repair::learned_output_ceiling;
 pub(crate) use field_repair::negative_recovers_only_by_recheck;
 pub(crate) use field_repair::value_slot_for_capability_key as value_slot_for_capability;
 #[cfg(any(test, feature = "test-utils"))]

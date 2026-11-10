@@ -225,6 +225,7 @@ async fn a_served_version_finding_reads_the_accepted_config_not_the_disk_file() 
         CatalogOverlay::default(),
         learned(Vec::new()),
         warm(WarmOutcome::Replayed),
+        PriceSnapshot::default(),
     );
     let version_finding = |findings: Vec<Finding>| {
         findings
@@ -323,6 +324,7 @@ async fn a_served_gather_renders_one_warn_per_overlay_soft_defect() {
             overlay,
             learned(Vec::new()),
             warm(WarmOutcome::Replayed),
+            PriceSnapshot::default(),
         );
 
         // Act

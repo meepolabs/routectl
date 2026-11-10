@@ -17,6 +17,7 @@ use routectl_router::{
     CatalogOverlay, Config, Finding, LearnedRegistryEntry, MatrixWarm, SeedClearMarker, Status,
 };
 
+use crate::commands::pricing::PriceSnapshot;
 use crate::commands::seat_report::safe;
 use crate::server::capability_rebuild::{WarmOutcome, WarmReport};
 use crate::server::reload_failure::ReloadFailureSnapshot;
@@ -43,6 +44,7 @@ pub struct ServedInputs {
     overlay: CatalogOverlay,
     learned: ResidentLearned,
     warm: WarmReport,
+    prices: PriceSnapshot,
     reload_failure: Option<ReloadFailureSnapshot>,
     parked_seats: Vec<ParkedSeat>,
     unusable_seats: Vec<UnusableSeat>,
@@ -210,17 +212,20 @@ pub struct ResidentLearned {
 impl ServedInputs {
     /// `config` and `overlay` must come from the same router, so one gather
     /// never pairs a config generation with a foreign overlay generation.
+    /// `prices` are the tables the daemon's own cost reads use, pinned once.
     pub const fn new(
         config: Arc<Config>,
         overlay: CatalogOverlay,
         learned: ResidentLearned,
         warm: WarmReport,
+        prices: PriceSnapshot,
     ) -> Self {
         Self {
             config,
             overlay,
             learned,
             warm,
+            prices,
             reload_failure: None,
             parked_seats: Vec::new(),
             unusable_seats: Vec::new(),
@@ -325,6 +330,9 @@ pub(super) struct GatheredLayers {
     /// The daemon's unusable seats; always empty from disk, which cannot see
     /// daemon memory.
     pub(super) unusable_seats: Vec<UnusableSeat>,
+    /// The price tables the pricing section resolves against, pinned once
+    /// per gather.
+    pub(super) prices: PriceSnapshot,
 }
 
 /// The served layers. The daemon accepted this config and overlay, so neither
@@ -335,6 +343,7 @@ pub(super) fn served_layers(inputs: Box<ServedInputs>) -> GatheredLayers {
         overlay,
         learned,
         warm,
+        prices,
         reload_failure,
         parked_seats,
         unusable_seats,
@@ -350,6 +359,7 @@ pub(super) fn served_layers(inputs: Box<ServedInputs>) -> GatheredLayers {
         reload_failure,
         parked_seats,
         unusable_seats,
+        prices,
     }
 }
 
