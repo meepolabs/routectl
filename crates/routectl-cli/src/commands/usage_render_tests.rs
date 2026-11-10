@@ -1758,3 +1758,129 @@ fn k_calibration_remaining_future_counts_only_later_group_reuse() {
         cal.accuracy
     );
 }
+
+// --- walk line ---
+
+/// Insert a row carrying the five dispatch walk counts, in the order
+/// request-caused failures, excluded endpoint, model, target, probe-run.
+fn walk_row(db: &UsageDb, request_id: &str, ts_start: i64, walk: [i64; 5]) {
+    db.conn()
+        .execute(
+            "INSERT INTO requests (ts_start, ts_end, request_id, ingress_dialect, \
+             requested_model, alias, model, provider, upstream, stream, outcome, \
+             latency_ms, tool_count, msg_count, attempt_count, fallback_count, \
+             request_caused_failures, excluded_endpoint, excluded_model, \
+             excluded_target, excluded_probe_run) \
+             VALUES (?1, ?1, ?2, 'openai', 'req-model', 'al', 'm', 'paid', \
+             'up-paid', 0, 'ok', 5, 0, 0, 1, 0, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![
+                ts_start, request_id, walk[0], walk[1], walk[2], walk[3], walk[4],
+            ],
+        )
+        .expect("insert walk row");
+}
+
+fn ledger_gap(db: &UsageDb, ts_ms: i64, dropped: i64) {
+    db.conn()
+        .execute(
+            "INSERT INTO ledger_gaps (ts_ms, cause, dropped) VALUES (?1, 'queue_full', ?2)",
+            rusqlite::params![ts_ms, dropped],
+        )
+        .expect("insert ledger gap");
+}
+
+const WALK_WINDOW: WindowBounds = WindowBounds {
+    from_ms: 1_000,
+    to_ms: 5_000,
+};
+
+fn walk_report(db: &UsageDb) -> WindowReport {
+    build_window_report(
+        db,
+        &cost_config(),
+        &no_prices(),
+        "t".into(),
+        WALK_WINDOW,
+        None,
+        false,
+    )
+    .unwrap()
+}
+
+fn walk_line(out: &str) -> &str {
+    out.lines()
+        .find(|l| l.starts_with("walk: "))
+        .expect("walk line present")
+}
+
+#[test]
+fn the_usage_report_prints_the_window_walk_counts_exactly() {
+    // Arrange: two in-window rows whose per-field sums are distinct primes,
+    // so a swapped or dropped field cannot still match, plus one row past
+    // the window end that must not be counted.
+    let (_dir, _path, db) = temp_db();
+    walk_row(&db, "w1", 1_000, [1, 1, 2, 3, 5]);
+    walk_row(&db, "w2", 4_999, [1, 2, 3, 4, 6]);
+    walk_row(&db, "late", 5_000, [100, 100, 100, 100, 100]);
+
+    // Act
+    let out = render_report(&walk_report(&db));
+
+    // Assert
+    assert_eq!(
+        walk_line(&out),
+        "walk: request-caused failures=2  |  excluded endpoint=3 model=5 target=7 probe-run=11",
+    );
+}
+
+#[test]
+fn the_walk_line_says_lower_bound_only_when_the_window_has_a_gap() {
+    struct Case {
+        name: &'static str,
+        gaps: &'static [(i64, i64)],
+        clause: Option<&'static str>,
+    }
+    let cases = [
+        Case {
+            name: "no gap row",
+            gaps: &[],
+            clause: None,
+        },
+        Case {
+            name: "gap rows inside the window",
+            gaps: &[(1_000, 4), (4_999, 9)],
+            clause: Some(
+                "  |  lower bound: the ledger recorded 2 gap rows (13 request rows dropped) in this window",
+            ),
+        },
+        Case {
+            name: "gap rows only outside the window",
+            gaps: &[(999, 4), (5_000, 9)],
+            clause: None,
+        },
+    ];
+    for case in cases {
+        // Arrange
+        let (_dir, _path, db) = temp_db();
+        walk_row(&db, "w1", 2_000, [1, 2, 3, 4, 5]);
+        for &(ts_ms, dropped) in case.gaps {
+            ledger_gap(&db, ts_ms, dropped);
+        }
+
+        // Act
+        let out = render_report(&walk_report(&db));
+        let line = walk_line(&out);
+
+        // Assert
+        let counts =
+            "walk: request-caused failures=1  |  excluded endpoint=2 model=3 target=4 probe-run=5";
+        let expected = format!("{counts}{}", case.clause.unwrap_or(""));
+        assert_eq!(line, expected, "{}", case.name);
+        assert_eq!(
+            line.contains("lower bound"),
+            case.clause.is_some(),
+            "{}: {line}",
+            case.name
+        );
+    }
+}

@@ -4554,7 +4554,19 @@ whose subscription rows recorded no tokens at all resolves a measured
 `~$0.00`: nothing was used, so nothing is the honest equivalent.
 
 A footer reports the window's cache-hit-rate
-(`cache_read / (cache_read + input)`) and error count.
+(`cache_read / (cache_read + input)`) and error count, then one `walk:`
+line with the window's dispatch walk counts summed over its request rows:
+`request-caused failures` (failed attempts the request itself caused) and
+the targets passed over by an `excluded endpoint`, `model`, `target` or
+`probe-run` exclusion. A row recorded before usage schema 20 adds 0. When
+the ledger recorded a gap inside the window (request rows dropped before
+they were written), the line ends with a `lower bound` clause naming the
+gap rows and dropped rows: every count on it is then a minimum.
+
+The `--detail` reduction and k-suppressed-session blocks end with a
+`validity:` note: they report counts seen, and a ratio or cost claim needs
+the running service's usage-channel `dropped_full`, `dropped_closed`,
+`dropped_disabled` and `write_errors` counters flat across the window.
 
 If the database does not exist yet (or has never been written), the
 command prints `no usage data yet (...)` and exits 0 -- it is not an

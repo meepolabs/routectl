@@ -23,11 +23,12 @@ use routectl_router::Config;
 use routectl_router::prices::{PriceSubject, effective_pricing};
 use routectl_usage::{
     AggRow, BucketSpec, CacheDecisionSummary, GroupKey, KCalibration,
-    NearLosslessAttributionSummary, OpenError, QueryError, QuotaSnapshot, Rates, ReductionSummary,
-    RowCost, SUPPRESSED_SESSION_CAP, ShadowMisfireSummary, SuppressedSessions, UsageDb,
-    WouldTrimSummary, aggregate, cache_decision_summary, estimate_cost_tokens,
-    k_calibration_summary, latest_quota_by_seat, near_lossless_attribution_summary, open_readonly,
-    reduction_summary, shadow_misfire_summary, suppressed_sessions, ttfbs, would_trim_summary,
+    NearLosslessAttributionSummary, ObservationTotals, OpenError, QueryError, QuotaSnapshot, Rates,
+    ReductionSummary, RowCost, SUPPRESSED_SESSION_CAP, ShadowMisfireSummary, SuppressedSessions,
+    UsageDb, WouldTrimSummary, aggregate, cache_decision_summary, estimate_cost_tokens,
+    k_calibration_summary, latest_quota_by_seat, near_lossless_attribution_summary,
+    observation_totals, open_readonly, reduction_summary, shadow_misfire_summary,
+    suppressed_sessions, ttfbs, would_trim_summary,
 };
 
 use crate::commands::pricing::{
@@ -516,6 +517,9 @@ pub struct WindowReport {
     /// The detection surface for a session wrongly latched off caching, whose
     /// cost accrues at HTTP 200 with every health signal green.
     pub suppressed_sessions: SuppressedSessions,
+    /// The window's ledger observation totals: the dispatch walk counts that
+    /// the walk line prints, and the gap fields that make them a lower bound.
+    pub observation: ObservationTotals,
 }
 
 /// The provider kind whose reasoning tokens are DISJOINT from its output count
@@ -944,6 +948,8 @@ pub fn build_window_report(
         SuppressedSessions::default()
     };
 
+    let observation = observation_totals(db, bounds.from_ms, bounds.to_ms)?;
+
     let mut display_rows: Vec<DisplayRow> = groups
         .into_iter()
         .map(|(label, acc)| finalize_row(label, acc, &ttft))
@@ -980,6 +986,7 @@ pub fn build_window_report(
         reduction,
         cache_decision,
         suppressed_sessions: suppressed,
+        observation,
     })
 }
 
@@ -1411,7 +1418,7 @@ fn render_shadow_misfire(report: &WindowReport) -> String {
 /// proportional conclusion from a window.
 const REDUCTION_VALIDITY_NOTE: &str = "  validity: counts observed, not a rate -- \
 a ratio or cost claim needs the service's usage-channel dropped_full / \
-dropped_disabled / write_errors counters flat across the window\n";
+dropped_closed / dropped_disabled / write_errors counters flat across the window\n";
 
 /// The lossless-minifier outcome block: the per-decision request histogram,
 /// the summed raw effect counters, the read-time-derived token estimate, and
@@ -1497,13 +1504,13 @@ fn format_suppression_ts(ts_ms: i64) -> String {
     )
 }
 
-/// The K-suppression finder's validity caveat. Same shape and the same three
+/// The K-suppression finder's validity caveat. Same shape and the same four
 /// counters as [`REDUCTION_VALIDITY_NOTE`]: the finder reports what the ledger
 /// recorded, and a window the usage channel dropped records in under-reports
 /// both the triple list and each count by an unknown amount.
 const SUPPRESSED_SESSIONS_VALIDITY_NOTE: &str = "  validity: sessions seen, not a rate -- \
 a ratio or cost claim needs the service's usage-channel dropped_full / \
-dropped_disabled / write_errors counters flat across the window\n";
+dropped_closed / dropped_disabled / write_errors counters flat across the window\n";
 
 /// The session-reference scope caveat, printed alongside the finder rows so
 /// an operator does not try to match a reference against a serve log or a
@@ -1593,9 +1600,35 @@ fn render_footer(report: &WindowReport) -> String {
         |r| format!("cache hit {:.1}%", r * 100.0),
     );
     format!(
-        "{hit}\nclient disconnects: {} ({} pre-dispatch)\ncancelled: {}\n",
-        report.client_disconnects, report.client_disconnects_pre_dispatch, report.cancellations
+        "{hit}\nclient disconnects: {} ({} pre-dispatch)\ncancelled: {}\n{}",
+        report.client_disconnects,
+        report.client_disconnects_pre_dispatch,
+        report.cancellations,
+        render_walk_line(&report.observation),
     )
+}
+
+/// One line of the window's dispatch walk counts, summed over the ledger's
+/// `requests` rows (a row written before the columns existed adds 0). When
+/// the ledger recorded a gap inside the window, rows were lost before they
+/// reached it, so the line says its counts are a lower bound.
+fn render_walk_line(o: &ObservationTotals) -> String {
+    let mut line = format!(
+        "walk: request-caused failures={}  |  excluded endpoint={} model={} target={} probe-run={}",
+        o.request_caused_failures,
+        o.excluded_endpoint,
+        o.excluded_model,
+        o.excluded_target,
+        o.excluded_probe_run,
+    );
+    if o.has_gap() {
+        line.push_str(&format!(
+            "  |  lower bound: the ledger recorded {} gap rows ({} request rows dropped) in this window",
+            o.gap_rows, o.gap_dropped,
+        ));
+    }
+    line.push('\n');
+    line
 }
 
 /// End-of-report legend explaining the derived columns and markers, one entry
