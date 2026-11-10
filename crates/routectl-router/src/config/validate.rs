@@ -178,6 +178,45 @@ pub fn validate_model_token_limits(config: &Config) -> Result<(), String> {
     }
 }
 
+/// Refuse a `[models.X.pricing]` value that is not finite or is negative,
+/// naming every offending dotted key on its own line. A price feeds cost
+/// arithmetic, where NaN or infinity poisons every sum it joins and a
+/// negative price is never a real rate.
+pub fn validate_model_pricing(config: &Config) -> Result<(), String> {
+    let lines: Vec<String> = config
+        .models
+        .iter()
+        .filter_map(|(nickname, entry)| Some((nickname, entry.pricing.as_ref()?)))
+        .flat_map(|(nickname, pricing)| {
+            [
+                ("input_per_mtok", pricing.input_per_mtok),
+                ("output_per_mtok", pricing.output_per_mtok),
+                ("cache_read_per_mtok", pricing.cache_read_per_mtok),
+                ("cache_write_5m_per_mtok", pricing.cache_write_5m_per_mtok),
+                ("cache_write_1h_per_mtok", pricing.cache_write_1h_per_mtok),
+            ]
+            .into_iter()
+            .filter_map(move |(key, value)| {
+                let value = value?;
+                let problem = if !value.is_finite() {
+                    "must be a finite number"
+                } else if value < 0.0 {
+                    "must not be negative"
+                } else {
+                    return None;
+                };
+                let path = message_safe_key(&format!("models.{nickname}.pricing.{key}"));
+                Some(format!("`{path}` is `{value}`; {problem}"))
+            })
+        })
+        .collect();
+    if lines.is_empty() {
+        Ok(())
+    } else {
+        Err(lines.join("\n"))
+    }
+}
+
 /// The exact `[providers.X]` replacement block named in
 /// [`LegacyMitmCredentialSourceError`] and the CHANGELOG: a forwarded
 /// credential is now a provider-level choice, not a `[mitm]`-level one.

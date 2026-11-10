@@ -33,13 +33,13 @@ pub use schema::{
 pub use schema::{BedrockApiShapeConfig, BedrockCredsConfig, BedrockMantleConfig};
 pub use tuning::{BreakerThreshold, Resolved, ResolvedTuning, TuningSource, resolve_tuning};
 use validate::default_config_version;
-pub(crate) use validate::validate_model_token_limits;
 pub use validate::{
     CONFIG_VERSION_REMEDIATION, CURRENT_CONFIG_VERSION, ConfigVersionError,
     LegacyMitmCredentialSourceError, RawConfigPreflightError, RemovedPaidProbeCapsError,
     RetiredCapabilityKeysError, RetiredModelKnobsError, VersionTooNewError,
     preflight_config_version, preflight_raw_config, validate_cache_pricing_retired,
 };
+pub(crate) use validate::{validate_model_pricing, validate_model_token_limits};
 
 /// The parsed `config.toml`: server bind, providers, aliases, models, and
 /// the cross-cutting policy tables the router reads at startup.

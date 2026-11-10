@@ -895,8 +895,8 @@ mod raw_config_preflight_tests {
 }
 
 mod model_token_limit_tests {
-    use super::validate_model_token_limits;
-    use crate::config::{Config, ModelEntry};
+    use super::{validate_model_pricing, validate_model_token_limits};
+    use crate::config::{Config, ModelEntry, PricingConfig};
 
     fn config_with(entries: &[(&str, ModelEntry)]) -> Config {
         let mut config = Config::default();
@@ -992,5 +992,110 @@ mod model_token_limit_tests {
                 .any(|e| e.contains("`models.m.context_window` is 0")),
             "{errors:?}"
         );
+    }
+
+    /// `[models.X.pricing]` parses from TOML into the typed entry.
+    #[test]
+    fn model_pricing_parses_from_a_model_entry() {
+        let config: Config = toml::from_str(
+            "[models.m]\nprovider = \"p\"\nupstream = \"u\"\n\
+             [models.m.pricing]\ninput_per_mtok = 3.0\ncache_write_1h_per_mtok = 6.0\n",
+        )
+        .expect("parses");
+
+        let pricing = config.models["m"].pricing.clone().expect("pricing");
+        assert_eq!(pricing.input_per_mtok, Some(3.0));
+        assert_eq!(pricing.cache_write_1h_per_mtok, Some(6.0));
+        assert_eq!(pricing.output_per_mtok, None);
+    }
+
+    /// A non-finite or negative price is refused naming the dotted key; a
+    /// known zero, a positive price and an absent block pass.
+    #[test]
+    fn a_non_finite_or_negative_model_price_is_refused_naming_the_dotted_key() {
+        let priced = |pricing: PricingConfig| ModelEntry::new("p", "u").with_pricing(pricing);
+        let rows: [(&str, ModelEntry, Option<&str>); 7] = [
+            (
+                "nan input",
+                priced(PricingConfig {
+                    input_per_mtok: Some(f64::NAN),
+                    ..Default::default()
+                }),
+                Some("`models.m.pricing.input_per_mtok` is `NaN`; must be a finite number"),
+            ),
+            (
+                "infinite output",
+                priced(PricingConfig {
+                    output_per_mtok: Some(f64::INFINITY),
+                    ..Default::default()
+                }),
+                Some("`models.m.pricing.output_per_mtok` is `inf`; must be a finite number"),
+            ),
+            (
+                "negative cache read",
+                priced(PricingConfig {
+                    cache_read_per_mtok: Some(-0.5),
+                    ..Default::default()
+                }),
+                Some("`models.m.pricing.cache_read_per_mtok` is `-0.5`; must not be negative"),
+            ),
+            (
+                "negative 5m write",
+                priced(PricingConfig {
+                    cache_write_5m_per_mtok: Some(-1.0),
+                    ..Default::default()
+                }),
+                Some("`models.m.pricing.cache_write_5m_per_mtok` is `-1`; must not be negative"),
+            ),
+            (
+                "negative infinite 1h write",
+                priced(PricingConfig {
+                    cache_write_1h_per_mtok: Some(f64::NEG_INFINITY),
+                    ..Default::default()
+                }),
+                Some(
+                    "`models.m.pricing.cache_write_1h_per_mtok` is `-inf`; must be a finite number",
+                ),
+            ),
+            (
+                "known zero and positive",
+                priced(PricingConfig {
+                    input_per_mtok: Some(0.0),
+                    output_per_mtok: Some(15.0),
+                    ..Default::default()
+                }),
+                None,
+            ),
+            ("absent block", ModelEntry::new("p", "u"), None),
+        ];
+
+        for (name, entry, refusal) in rows {
+            let result = validate_model_pricing(&config_with(&[("m", entry)]));
+
+            match refusal {
+                Some(expected) => assert_eq!(result, Err(expected.to_string()), "{name}"),
+                None => assert_eq!(result, Ok(()), "{name}"),
+            }
+        }
+    }
+
+    /// The refusal reaches every config-validation surface, including a
+    /// value written in TOML, with a hostile nickname sanitized.
+    #[test]
+    fn the_shared_validation_suite_refuses_a_bad_model_price_from_toml() {
+        let config: Config = toml::from_str(
+            "[models.\"m\\u001b\"]\nprovider = \"p\"\nupstream = \"u\"\n\
+             [models.\"m\\u001b\".pricing]\noutput_per_mtok = nan\n",
+        )
+        .expect("parses");
+
+        let errors = crate::factory::collect_config_validation(&config).errors;
+
+        let refusal = errors
+            .iter()
+            .find(|e| e.contains(".pricing.output_per_mtok"))
+            .unwrap_or_else(|| panic!("no pricing refusal: {errors:?}"));
+        assert!(refusal.contains("must be a finite number"), "{refusal}");
+        assert!(!refusal.contains('\u{1b}'), "{refusal:?}");
     }
 }

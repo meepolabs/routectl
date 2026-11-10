@@ -56,6 +56,7 @@ overlays merge, what's reserved.
 - [Context reduction (`[reduction]`)](#context-reduction-reduction)
   ([kill switch + recovery](#kill-switch-reduction-enabled-is-the-live-off-switch))
 - [Steady-state advisory trim (`[trim]`)](#steady-state-advisory-trim-trim)
+- [Model prices (`[models.X.pricing]`)](#model-prices-modelsxpricing)
 - [Pricing registry](#pricing-registry-registrypatternpricing)
 - [Refreshing the price table (`routectl prices refresh`)](#refreshing-the-price-table-routectl-prices-refresh)
 - [Catalog: prompt-cache economics](#catalog-prompt-cache-economics-routectl-catalog)
@@ -638,6 +639,7 @@ semantics in the [field-assignment table](#field-assignment-table).
 | `stream_first_byte_timeout_ms` | `[models.X]`        | model > provider > pool > global > default (`0` on a model is ignored) |
 | `context_window`               | `[models.X]`        | Option<u32>, `0` refused; total context window for the window gate and `/v1/models` `context_length` |
 | `max_output_tokens`            | `[models.X]`        | Option<u32>, `0` refused; `max_tokens` sent when the client omits it (anthropic-api, bedrock-invoke), else 64000 |
+| `pricing`                      | `[models.X]`        | Option<table>, per-Mtok prices, each field optional; non-finite or negative refused; per-field precedence in [Model prices](#model-prices-modelsxpricing) |
 | `reported_model`               | `[models.X]`        | Option<String>, default None (-> echo client's requested alias); override for the response `model` label |
 | `visible_routectl_provider`    | `[models.X]`        | bool, default true; set false to drop the `routectl_provider` field from the client response (opaque proxy) |
 | `header_extras`                | BOTH                | model wins on key collision; `anthropic-beta` comma-unions (see below) |
@@ -3153,6 +3155,48 @@ model / tier, the pricing cell's trust label (`verified` or
 `--hypothetical-k` is supplied -- the verdict. An unverified / sentinel
 cell shows no live K* and a `KEEP (insufficient data)` verdict, because
 its multipliers are not trusted for a live decision.
+
+## Model prices (`[models.X.pricing]`)
+
+Usage cost and the API-equivalent value of subscription traffic are
+display figures; nothing in routing reads a price. Each of the five
+prices resolves on its own, in this order, and the first source that
+gives a field wins:
+
+1. **`model-config`**: `[models.X.pricing]` on the served model, while
+   that entry still names the served upstream.
+2. **`registry`**: a matching [`[registry]` row](#pricing-registry-registrypatternpricing),
+   taken whole: a field the row leaves unset stays unknown, and the
+   tables below never fill it.
+3. **`refreshed`**: the table `routectl prices refresh` wrote into the
+   config folder.
+4. **`shipped`**: the table shipped with the release.
+5. **`derived`**: for the Anthropic family only (`anthropic-api`, or
+   `bedrock` with an Anthropic model id), the 1-hour cache-write price
+   is twice the effective input price, when a refreshed or shipped row
+   was found and no source above gives it.
+6. **`unknown`**: shown as unknown, never as zero.
+
+A managed-subscription (`oauth://`) provider resolves through the same
+order; it is still billed by seat, and the figure is its API-equivalent.
+A usage row whose provider entry was since renamed or removed prices a
+first-party upstream (Anthropic, OpenAI, Google, Bedrock) through the
+provider kind recorded with the row.
+
+```toml
+[models.sonnet]
+provider = "anthropic"
+upstream = "claude-sonnet-4-6"
+
+[models.sonnet.pricing]
+cache_write_1h_per_mtok = 6.0   # fixes one figure; the rest come from the tables
+```
+
+The fields are those of a `[registry]` pricing row, in USD per million
+tokens: `input_per_mtok`, `output_per_mtok`, `cache_read_per_mtok`,
+`cache_write_5m_per_mtok`, `cache_write_1h_per_mtok`. A non-finite or
+negative value is refused at load, reload and every config edit, naming
+the dotted `models.<nick>.pricing.<field>` path; a known `0` is kept.
 
 ## Pricing registry (`[registry."<pattern>".pricing]`)
 

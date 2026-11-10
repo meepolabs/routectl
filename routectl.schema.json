@@ -689,6 +689,17 @@
         "payload_extras": {
           "description": "Extras merged into the outbound request body. Combined with the\nprovider's `payload_extras` at dispatch time via a deep recursive\nmerge (model wins on leaf collision; nested objects merge\nrecursively). Lands on canonical `req.provider_extras`; each\negress merges that into the wire body via its existing path."
         },
+        "pricing": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PricingConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Per-million-token prices for this model, each field optional. A set\nfield wins over every other price source for that field; an unset\nfield falls through to a matching `[registry]` row, then the\nrefreshed and shipped price tables. Prices feed cost display only.\nA non-finite or negative value is refused at load."
+        },
         "provider": {
           "description": "Provider name (a key in the `[providers]` table). The router\nvalidates at startup that every model entry references a known\nprovider.",
           "type": "string"
@@ -838,7 +849,7 @@
     },
     "PricingConfig": {
       "additionalProperties": false,
-      "description": "Per-million-token pricing for one `[registry.*]` entry. All fields\nare USD per million tokens -- the CANONICAL operator-facing price unit\nthroughout routectl -- and all are optional: routectl ships no price\ndefaults, so any field left unset means \"this dimension is unpriced\" and\ncontributes nothing to a derived cost. Cost is computed at query time,\nnever persisted, so a corrected price retroactively fixes historical rows.\n\nA row here wins WHOLE over the baked catalog's own rates, which fill in\nonly when no row prices an upstream: this struct has no\nexplicitly-unpriced sentinel, so a per-field fill could not tell a\ndeliberate omission from an absent value.\n\n`Eq` is deliberately NOT derived: `f64` is not `Eq`.",
+      "description": "Per-million-token pricing for a `[registry.*]` or `[models.X]` entry. All fields\nare USD per million tokens -- the CANONICAL operator-facing price unit\nthroughout routectl -- and all are optional: routectl ships no price\ndefaults, so any field left unset means \"this dimension is unpriced\" and\ncontributes nothing to a derived cost. Cost is computed at query time,\nnever persisted, so a corrected price retroactively fixes historical rows.\n\nA `[registry]` row wins WHOLE over the baked catalog's own rates, which fill in only\nwhen no row prices an upstream: this struct has no explicitly-unpriced\nsentinel, so a per-field fill could not tell a deliberate omission from\nan absent value. A `[models.X.pricing]` block instead fills field by\nfield over the other sources.\n\n`Eq` is deliberately NOT derived: `f64` is not `Eq`.",
       "properties": {
         "cache_read_per_mtok": {
           "description": "USD per million tokens read from the prompt cache. `None` leaves it unpriced.",

@@ -81,9 +81,16 @@
 //! [`shipped_table`] is the table embedded in the build
 //! (`prices_shipped.json`, the same refresh's output at release time, under
 //! the models.dev MIT license in `prices_shipped.NOTICE`), parsed once.
+//!
+//! # Effective pricing
+//!
+//! [`effective_pricing`] combines `[models.X.pricing]`, a matching
+//! `[registry]` row, the refreshed and shipped tables and a derived 1-hour
+//! cache-write price per field, naming each field's [`PriceSource`].
 
 mod book;
 mod bounded;
+mod effective;
 mod format;
 mod models_dev;
 mod select;
@@ -96,6 +103,7 @@ use std::fmt;
 use crate::config::{Config, PricingConfig};
 
 pub use book::PriceBook;
+pub use effective::{PriceSource, PriceSources, PriceSubject, effective_pricing};
 pub use format::TableDate;
 pub use models_dev::from_models_dev;
 pub use shipped::shipped_table;
@@ -285,6 +293,9 @@ impl PriceTableError {
 #[cfg(test)]
 #[path = "bounds_tests.rs"]
 mod bounds_tests;
+#[cfg(test)]
+#[path = "effective_tests.rs"]
+mod effective_tests;
 #[cfg(test)]
 #[path = "models_dev_tests.rs"]
 mod models_dev_tests;

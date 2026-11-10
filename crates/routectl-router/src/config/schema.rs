@@ -756,17 +756,18 @@ fn default_mitm_host() -> String {
     "api.anthropic.com".into()
 }
 
-/// Per-million-token pricing for one `[registry.*]` entry. All fields
+/// Per-million-token pricing for a `[registry.*]` or `[models.X]` entry. All fields
 /// are USD per million tokens -- the CANONICAL operator-facing price unit
 /// throughout routectl -- and all are optional: routectl ships no price
 /// defaults, so any field left unset means "this dimension is unpriced" and
 /// contributes nothing to a derived cost. Cost is computed at query time,
 /// never persisted, so a corrected price retroactively fixes historical rows.
 ///
-/// A row here wins WHOLE over the baked catalog's own rates, which fill in
-/// only when no row prices an upstream: this struct has no
-/// explicitly-unpriced sentinel, so a per-field fill could not tell a
-/// deliberate omission from an absent value.
+/// A `[registry]` row wins WHOLE over the baked catalog's own rates, which fill in only
+/// when no row prices an upstream: this struct has no explicitly-unpriced
+/// sentinel, so a per-field fill could not tell a deliberate omission from
+/// an absent value. A `[models.X.pricing]` block instead fills field by
+/// field over the other sources.
 ///
 /// `Eq` is deliberately NOT derived: `f64` is not `Eq`.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize, schemars::JsonSchema)]
@@ -964,6 +965,14 @@ pub struct ModelEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1))]
     pub max_output_tokens: Option<u32>,
+
+    /// Per-million-token prices for this model, each field optional. A set
+    /// field wins over every other price source for that field; an unset
+    /// field falls through to a matching `[registry]` row, then the
+    /// refreshed and shipped price tables. Prices feed cost display only.
+    /// A non-finite or negative value is refused at load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pricing: Option<PricingConfig>,
 }
 
 impl ModelEntry {
@@ -984,6 +993,7 @@ impl ModelEntry {
             visible_routectl_provider: true,
             context_window: None,
             max_output_tokens: None,
+            pricing: None,
         }
     }
     /// Set the reasoning dialect that governs how thinking is expressed on the wire.
@@ -1054,6 +1064,12 @@ impl ModelEntry {
     /// Set the `max_tokens` value sent when the client omits one.
     pub const fn with_max_output_tokens(mut self, tokens: u32) -> Self {
         self.max_output_tokens = Some(tokens);
+        self
+    }
+
+    /// Set the per-model prices.
+    pub const fn with_pricing(mut self, pricing: PricingConfig) -> Self {
+        self.pricing = Some(pricing);
         self
     }
 }

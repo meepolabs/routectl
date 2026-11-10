@@ -2393,6 +2393,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/prices_shipped.json` -- the shipped price table, output of
   `routectl prices refresh` at release time (docs/DEVELOPMENT.md
   "Releasing"); its models.dev MIT notice is `src/prices_shipped.NOTICE`
+- `src/prices/effective.rs` -- `effective_pricing`: per-field price precedence
+  (`[models.X.pricing]`, `[registry]` whole, refreshed, shipped, derived
+  Anthropic-family 1h write) with a `PriceSource` per field. Tests in
+  `effective_tests.rs`
 - `src/prices/prices_test_support.rs` -- shared table builders for the price-table
   tests
 - `src/pricing.rs` -- THE price-unit conversion + precedence boundary. The
