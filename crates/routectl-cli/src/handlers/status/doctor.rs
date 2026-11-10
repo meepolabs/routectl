@@ -63,6 +63,7 @@ use crate::commands::usage::{WindowBounds, WindowFlag, window_bounds};
 /// table dates, and its `knobs` rows name `model-config`, `learned` or
 /// `default`. At 29 the embedded report drops its `freshness` section and its
 /// `catalog overlay` findings and gains the `leftover catalog files` finding.
+/// At 30 the panel's `observation` block gains the five walk counts.
 pub const DOCTOR_SCHEMA_VERSION: u32 = SCHEMA_VERSION;
 
 /// The no-network doctor report plus the circuit-derived reachability summary,

@@ -191,7 +191,7 @@ async fn build_panel_data_emits_the_field_verdict_snapshot_log() {
 #[test]
 fn no_config_path_yields_unavailable_panel() {
     let panel = Panel::<DoctorPanel>::unavailable(DOCTOR_SCHEMA_VERSION, codes::NO_CONFIG_PATH);
-    assert_eq!(panel.schema_version, 29);
+    assert_eq!(panel.schema_version, 30);
     assert_eq!(panel.unavailable.as_deref(), Some("no_config_path"));
     assert!(panel.data.is_none());
 }
@@ -280,12 +280,12 @@ async fn handler_returns_report_with_no_probe_section() {
     let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
     let json: Value = serde_json::from_slice(&bytes).unwrap();
 
-    assert_eq!(json["schema_version"], 29);
+    assert_eq!(json["schema_version"], 30);
     assert!(json["unavailable"].is_null());
     let as_of = json["as_of"].as_str().expect("as_of present");
     assert!(chrono::DateTime::parse_from_rfc3339(as_of).is_ok());
 
-    assert_eq!(json["data"]["report"]["schema_version"], 29);
+    assert_eq!(json["data"]["report"]["schema_version"], 30);
     let findings = json["data"]["report"]["findings"].as_array().unwrap();
     assert!(
         !findings.is_empty(),
@@ -486,8 +486,9 @@ async fn ledger_health_reports_full_and_closed_drops_apart() {
     );
 }
 
-/// The doctor panel carries today's observation block from the ledger, and a
-/// gap row recorded today marks it incomplete. An unreadable ledger leaves the
+/// The doctor panel carries today's observation block from the ledger (the
+/// walk counts included, a pre-v20 row adding nothing), and a gap row recorded
+/// today marks it incomplete. An unreadable ledger leaves the
 /// block `null` while the rest of the panel stands.
 ///
 /// Mutation check: build the panel with `observation: None` -> red on the
@@ -503,11 +504,23 @@ async fn doctor_panel_carries_todays_observation_and_marks_a_gap_incomplete() {
             .execute(
                 "INSERT INTO requests (ts_start, ts_end, request_id, ingress_dialect, \
                  requested_model, alias, stream, outcome, latency_ms, tool_count, \
-                 msg_count, attempt_count, fallback_count, wire_losses, field_repairs) \
-                 VALUES (?1, ?1, 'r', 'openai', 'm', 'a', 0, 'ok', 5, 0, 0, 1, 0, 2, 3)",
+                 msg_count, attempt_count, fallback_count, wire_losses, field_repairs, \
+                 request_caused_failures, excluded_endpoint, excluded_model, \
+                 excluded_target, excluded_probe_run) \
+                 VALUES (?1, ?1, 'r', 'openai', 'm', 'a', 0, 'ok', 5, 0, 0, 1, 0, 2, 3, \
+                 5, 7, 11, 13, 17)",
                 [now],
             )
             .expect("seed row");
+        db.conn()
+            .execute(
+                "INSERT INTO requests (ts_start, ts_end, request_id, ingress_dialect, \
+                 requested_model, alias, stream, outcome, latency_ms, tool_count, \
+                 msg_count, attempt_count, fallback_count) \
+                 VALUES (?1, ?1, 'pre-walk', 'openai', 'm', 'a', 0, 'ok', 5, 0, 0, 1, 0)",
+                [now],
+            )
+            .expect("seed pre-walk row");
         db.conn()
             .execute(
                 "INSERT INTO ledger_gaps (ts_ms, cause, dropped) VALUES (?1, 'queue_full', 4)",
@@ -524,6 +537,11 @@ async fn doctor_panel_carries_todays_observation_and_marks_a_gap_incomplete() {
     let observation = &json["data"]["observation"];
     assert_eq!(observation["wire_losses"], 2);
     assert_eq!(observation["field_repairs"], 3);
+    assert_eq!(observation["request_caused_failures"], 5);
+    assert_eq!(observation["excluded_endpoint"], 7);
+    assert_eq!(observation["excluded_model"], 11);
+    assert_eq!(observation["excluded_target"], 13);
+    assert_eq!(observation["excluded_probe_run"], 17);
     assert_eq!(observation["gap_rows"], 1);
     assert_eq!(observation["gap_dropped"], 4);
     assert_eq!(observation["complete"], false);

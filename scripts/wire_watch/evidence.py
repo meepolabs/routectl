@@ -61,7 +61,7 @@ TRACE_ARTIFACTS: Tuple[str, ...] = tuple(cell_evidence.TRACE_ARTIFACTS)
 SNAPSHOT_ARTIFACTS: Tuple[str, ...] = tuple(cell_evidence.SNAPSHOT_ARTIFACTS)
 
 HEALTH_SCHEMA_VERSION = 9
-USAGE_SCHEMA_VERSION = 4
+USAGE_SCHEMA_VERSION = 5
 SNAPSHOT_SCHEMA_VERSIONS: Mapping[str, int] = {
     "health.json": HEALTH_SCHEMA_VERSION,
     "usage.json": USAGE_SCHEMA_VERSION,

@@ -300,3 +300,96 @@ fn gap_read_searches_the_covering_index_instead_of_scanning() {
         "the gap read must not scan ledger_gaps; plan was {plan:?}"
     );
 }
+
+/// The five walk counts of one row, in column order; `None` is the NULL a
+/// row written before the walk-count columns existed carries.
+type WalkCounts = [Option<i64>; 5];
+
+fn insert_walk_row(db: &UsageDb, request_id: &str, ts_start: i64, walk: WalkCounts) {
+    db.conn()
+        .execute(
+            "INSERT INTO requests (ts_start, ts_end, request_id, ingress_dialect, \
+             requested_model, alias, stream, outcome, latency_ms, tool_count, \
+             msg_count, attempt_count, fallback_count, request_caused_failures, \
+             excluded_endpoint, excluded_model, excluded_target, excluded_probe_run) \
+             VALUES (?1, ?1, ?2, 'openai', 'm', 'a', 0, 'ok', 0, 0, 0, 1, 0, \
+             ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![
+                ts_start, request_id, walk[0], walk[1], walk[2], walk[3], walk[4]
+            ],
+        )
+        .expect("insert walk row");
+}
+
+fn walk_of(totals: &ObservationTotals) -> [i64; 5] {
+    [
+        totals.request_caused_failures,
+        totals.excluded_endpoint,
+        totals.excluded_model,
+        totals.excluded_target,
+        totals.excluded_probe_run,
+    ]
+}
+
+#[test]
+fn observation_totals_sum_walk_columns_and_read_pre_v20_null_rows_as_zero() {
+    // One case per column with only that column nonzero, so each sum is
+    // attributable to its own column; then all-NULL legacy rows alone, and a
+    // mix of written and NULL rows. Every case carries one all-NULL row.
+    let cases: [(&str, Vec<WalkCounts>, [i64; 5]); 7] = [
+        (
+            "request_caused_failures only",
+            vec![[Some(3), Some(0), Some(0), Some(0), Some(0)]],
+            [3, 0, 0, 0, 0],
+        ),
+        (
+            "excluded_endpoint only",
+            vec![[Some(0), Some(5), Some(0), Some(0), Some(0)]],
+            [0, 5, 0, 0, 0],
+        ),
+        (
+            "excluded_model only",
+            vec![[Some(0), Some(0), Some(7), Some(0), Some(0)]],
+            [0, 0, 7, 0, 0],
+        ),
+        (
+            "excluded_target only",
+            vec![[Some(0), Some(0), Some(0), Some(11), Some(0)]],
+            [0, 0, 0, 11, 0],
+        ),
+        (
+            "excluded_probe_run only",
+            vec![[Some(0), Some(0), Some(0), Some(0), Some(13)]],
+            [0, 0, 0, 0, 13],
+        ),
+        ("pre-v20 rows only", vec![[None; 5]], [0; 5]),
+        (
+            "written rows beside a pre-v20 row",
+            vec![
+                [Some(1), Some(2), Some(3), Some(4), Some(5)],
+                [Some(10), Some(20), Some(30), Some(40), Some(50)],
+            ],
+            [11, 22, 33, 44, 55],
+        ),
+    ];
+    for (label, rows, expected) in cases {
+        // Arrange
+        let (_dir, _path, db) = open_db();
+        insert_walk_row(&db, "legacy", FROM + 1, [None; 5]);
+        for (ts, walk) in (FROM + 2..).zip(rows) {
+            insert_walk_row(&db, &format!("r{ts}"), ts, walk);
+        }
+        insert_walk_row(
+            &db,
+            "outside",
+            TO,
+            [Some(1000), Some(1000), Some(1000), Some(1000), Some(1000)],
+        );
+
+        // Act
+        let totals = observation_totals(&db, FROM, TO).expect("observation_totals");
+
+        // Assert
+        assert_eq!(walk_of(&totals), expected, "case: {label}");
+    }
+}

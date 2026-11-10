@@ -1026,7 +1026,7 @@ mod tests {
         assert_eq!(panels["usage"]["unavailable"], "no_data");
         assert!(panels["usage"]["data"].is_null());
         assert!(panels["usage"]["as_of"].is_null());
-        assert_eq!(panels["usage"]["schema_version"], 4);
+        assert_eq!(panels["usage"]["schema_version"], 5);
 
         // The three siblings are available and untouched.
         for name in ["health", "config", "doctor"] {
@@ -1039,10 +1039,10 @@ mod tests {
                 "{name} panel should carry data"
             );
         }
-        // Each panel carries its OWN schema_version (usage 4, health 9,
-        // doctor 29, config 5).
+        // Each panel carries its OWN schema_version (usage 5, health 9,
+        // doctor 30, config 5).
         assert_eq!(panels["health"]["schema_version"], 9);
         assert_eq!(panels["config"]["schema_version"], 5);
-        assert_eq!(panels["doctor"]["schema_version"], 29);
+        assert_eq!(panels["doctor"]["schema_version"], 30);
     }
 }

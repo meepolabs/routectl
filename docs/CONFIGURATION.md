@@ -2931,6 +2931,20 @@ groups), so counting traffic never inflates request totals or spend;
 the per-window observation totals include them. A body that fails to
 parse writes no row.
 
+**Walk counts on the status surface.** The `observation` block on
+`/status/usage` (usage panel schema 5, for the requested window) and on
+`/status/doctor` (doctor schema 30, for today) sums five walk counts over
+every `requests` row in the window, token-count rows included:
+`request_caused_failures` (failed attempts the request itself caused,
+scoped to the endpoint or the model) and `excluded_endpoint`,
+`excluded_model`, `excluded_target` and `excluded_probe_run` (targets
+passed over because an earlier failure's exclusion of that scope covered
+them). A row written before the usage database reached schema 20 carries
+NULL in these columns and adds 0. The counts sit beside the block's
+`gap_rows`, `gap_dropped` and `complete` fields: when `complete` is false
+the window lost rows, so each count is a lower bound. They are not part of
+the skip counts and never reconcile against attempt counts.
+
 ## Live wire check (`[wire_check]`)
 
 routectl can compare the body a client sent with the body it sent upstream

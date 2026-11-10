@@ -36,8 +36,10 @@ use super::{Panel, StatusState, guard_panel, now_utc_rfc3339};
 
 /// Wire-shape version of the usage panel payload. At 4 the totals and every
 /// group gained `cancelled_total` (so `errors` no longer has to absorb it) and
-/// the panel gained the window's `observation` block.
-pub const SCHEMA_VERSION: u32 = 4;
+/// the panel gained the window's `observation` block. At 5 the `observation`
+/// block gained the five walk counts (`request_caused_failures` and the four
+/// `excluded_<scope>` counts).
+pub const SCHEMA_VERSION: u32 = 5;
 
 /// The `window` query parameter for `GET /status/usage`.
 #[derive(Debug, Deserialize)]
@@ -1035,6 +1037,11 @@ mod tests {
                 local_refusals: 0,
                 field_repairs: 0,
                 missing_terminals: 0,
+                request_caused_failures: 0,
+                excluded_endpoint: 0,
+                excluded_model: 0,
+                excluded_target: 0,
+                excluded_probe_run: 0,
                 gap_rows: 0,
                 gap_dropped: 0,
                 complete: true,
@@ -1373,7 +1380,7 @@ mod tests {
             json["unavailable"].is_null(),
             "a migrated v12 DB must read as available: {json}"
         );
-        assert_eq!(json["schema_version"], 4);
+        assert_eq!(json["schema_version"], 5);
         assert_eq!(json["data"]["totals"]["requests"], 2);
     }
 
@@ -1415,13 +1422,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn usage_panel_reports_schema_version_four() {
+    async fn usage_panel_reports_schema_version_five() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("usage.db");
         seed_ledger(&path, &[Local::now().timestamp_millis()]);
         let (status, json) = get_usage(state_with_ledger(path), "/status/usage").await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(json["schema_version"], 4);
+        assert_eq!(json["schema_version"], 5);
     }
 
     /// Build a `StatusState` over the caller's usage handle, whose counters
@@ -1481,6 +1488,50 @@ mod tests {
         assert_eq!(all["data"]["observation"]["gap_rows"], 1);
         assert_eq!(all["data"]["observation"]["gap_dropped"], 3);
         assert_eq!(all["data"]["observation"]["complete"], false);
+    }
+
+    /// The observation block carries the window's five walk counts beside its
+    /// gap fields: a seeded row's distinct values arrive exactly, a pre-v20
+    /// row (walk columns NULL) adds nothing, and a gap row in the window
+    /// still marks the counts incomplete.
+    #[tokio::test]
+    async fn the_observation_block_carries_walk_counts_beside_the_gap_fields() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("usage.db");
+        let now = Local::now().timestamp_millis();
+        seed_ledger(&path, &[now]);
+        seed_walk_row(&path, now, [2, 3, 5, 7, 11]);
+        seed_gap(&path, now);
+
+        let (status, json) = get_usage(state_with_ledger(path), "/status/usage").await;
+
+        assert_eq!(status, StatusCode::OK);
+        let observation = &json["data"]["observation"];
+        assert_eq!(observation["request_caused_failures"], 2);
+        assert_eq!(observation["excluded_endpoint"], 3);
+        assert_eq!(observation["excluded_model"], 5);
+        assert_eq!(observation["excluded_target"], 7);
+        assert_eq!(observation["excluded_probe_run"], 11);
+        assert_eq!(observation["gap_rows"], 1);
+        assert_eq!(observation["gap_dropped"], 3);
+        assert_eq!(observation["complete"], false);
+    }
+
+    /// Record one request row at `ts_ms` with the five walk counts in column
+    /// order.
+    fn seed_walk_row(path: &Path, ts_ms: i64, walk: [i64; 5]) {
+        let db = open(path).expect("open ledger");
+        db.conn()
+            .execute(
+                "INSERT INTO requests (ts_start, ts_end, request_id, ingress_dialect, \
+                 requested_model, alias, stream, outcome, latency_ms, tool_count, \
+                 msg_count, attempt_count, fallback_count, request_caused_failures, \
+                 excluded_endpoint, excluded_model, excluded_target, excluded_probe_run) \
+                 VALUES (?1, ?1, 'walk', 'openai', 'm', 'a', 0, 'ok', 5, 0, 0, 1, 0, \
+                 ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![ts_ms, walk[0], walk[1], walk[2], walk[3], walk[4]],
+            )
+            .expect("seed walk row");
     }
 
     /// Mutation check: drop the `dropped_closed` arm of

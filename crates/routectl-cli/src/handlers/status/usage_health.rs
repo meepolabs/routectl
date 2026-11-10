@@ -102,6 +102,17 @@ pub(super) struct WindowObservation {
     pub local_refusals: i64,
     pub field_repairs: i64,
     pub missing_terminals: i64,
+    /// Failed attempts the requests themselves caused (endpoint or model
+    /// scope).
+    pub request_caused_failures: i64,
+    /// Targets passed over under an endpoint exclusion.
+    pub excluded_endpoint: i64,
+    /// Targets passed over under a model exclusion.
+    pub excluded_model: i64,
+    /// Targets passed over under a target exclusion.
+    pub excluded_target: i64,
+    /// Targets passed over under a probe-run exclusion.
+    pub excluded_probe_run: i64,
     /// `ledger_gaps` rows recorded inside the window.
     pub gap_rows: i64,
     /// Request rows those gap rows say were lost.
@@ -126,6 +137,11 @@ pub(super) fn window_observation(
         local_refusals: totals.local_refusals,
         field_repairs: totals.field_repairs,
         missing_terminals: totals.missing_terminals,
+        request_caused_failures: totals.request_caused_failures,
+        excluded_endpoint: totals.excluded_endpoint,
+        excluded_model: totals.excluded_model,
+        excluded_target: totals.excluded_target,
+        excluded_probe_run: totals.excluded_probe_run,
         gap_rows: totals.gap_rows,
         gap_dropped: totals.gap_dropped,
         complete: !totals.has_gap() && !health.has_unrecorded_loss(),
