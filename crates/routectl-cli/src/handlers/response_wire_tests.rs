@@ -1536,3 +1536,498 @@ async fn a_streamed_custom_tool_call_reaches_the_responses_client_at_its_index()
         [(Dialect::Responses.lane(), CheckOutcome::Clean, 2)]
     );
 }
+
+/// One codex-lane answer carrying a message, a freeform custom tool call
+/// and a function call whose optional argument came back empty, as each
+/// daily client receives it: a Responses client declaring its tools in
+/// namespaces, and an Anthropic client declaring the same function flat.
+mod codex_lane_mixed_output {
+    use std::sync::Mutex;
+
+    use futures::stream::BoxStream;
+    use routectl_core::{
+        Provider, ReplayScheme, RequestObservation, Result, StaticToken, TokenSource,
+    };
+    use routectl_providers::openai_responses::{
+        AuthKind, OpenAiResponsesConfig, OpenAiResponsesProvider,
+    };
+    use routectl_router::ResolvedModel;
+
+    use super::*;
+
+    const LANE: &str = "openai-responses";
+    const UNREPRESENTABLE: &str = "output_item_unrepresentable";
+    const EMPTY_OPTIONAL: &str = "codex_empty_optional_dropped";
+
+    #[derive(Clone, Copy, Debug)]
+    enum Client {
+        Responses,
+        Anthropic,
+    }
+
+    fn read_doc_schema() -> Value {
+        json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}, "pages": {"type": "string"}},
+            "required": ["path"]
+        })
+    }
+
+    fn request_body(client: Client, stream: bool) -> Value {
+        match client {
+            Client::Responses => json!({
+                "model": "a", "stream": stream,
+                "input": [
+                    {"type": "additional_tools", "role": "developer", "tools": [
+                        {"type": "namespace", "name": "functions", "description": "work tools",
+                         "tools": [
+                            {"type": "custom", "name": "exec", "description": "run",
+                             "format": {"type": "grammar", "syntax": "lark",
+                                        "definition": "start: /.+/"}},
+                            {"type": "function", "name": "read_doc", "description": "read",
+                             "parameters": read_doc_schema(), "strict": false}
+                         ]},
+                        {"type": "namespace", "name": "helpers", "description": "helpers",
+                         "tools": [
+                            {"type": "function", "name": "list_items", "description": "list",
+                             "parameters": {"type": "object",
+                                            "properties": {"dir": {"type": "string"}}},
+                             "strict": false}
+                         ]}
+                    ]},
+                    {"type": "message", "role": "user",
+                     "content": [{"type": "input_text", "text": "read it"}]}
+                ]
+            }),
+            Client::Anthropic => json!({
+                "model": "a", "max_tokens": 64, "stream": stream,
+                "tools": [{"name": "read_doc", "description": "read",
+                           "input_schema": read_doc_schema()}],
+                "messages": [{"role": "user", "content": "read it"}]
+            }),
+        }
+    }
+
+    fn message_item() -> Value {
+        json!({"type": "message", "id": "msg_1", "role": "assistant", "status": "completed",
+               "content": [{"type": "output_text", "text": "ok", "annotations": []}]})
+    }
+
+    fn custom_call_item() -> Value {
+        json!({"type": "custom_tool_call", "id": "ctc_1", "call_id": "call_exec",
+               "name": "exec", "input": "ls -la", "status": "completed"})
+    }
+
+    const READ_DOC_ARGUMENTS: &str = r#"{"path":"a.md","pages":""}"#;
+
+    fn function_call_item() -> Value {
+        json!({"type": "function_call", "id": "fc_1", "call_id": "call_read",
+               "name": "read_doc", "arguments": READ_DOC_ARGUMENTS, "status": "completed"})
+    }
+
+    /// The upstream's stream: each item opened, filled by its deltas and
+    /// closed in turn, then the completed body holding all three. The
+    /// Responses egress reads a complete answer from this same stream; its
+    /// complete render echoes a nonzero `created_at`, which the stream render
+    /// has no slot for.
+    fn upstream_stream(created_at: i64) -> String {
+        let response = |status: &str, output: Value| {
+            json!({"id": "resp_1", "object": "response", "created_at": created_at,
+                   "status": status, "model": "upstream", "output": output,
+                   "usage": {"input_tokens": 3, "output_tokens": 5, "total_tokens": 8}})
+        };
+        let mut pending_message = message_item();
+        pending_message["status"] = json!("in_progress");
+        pending_message["content"] = json!([]);
+        let mut pending_custom = custom_call_item();
+        pending_custom["status"] = json!("in_progress");
+        pending_custom["input"] = json!("");
+        let mut pending_call = function_call_item();
+        pending_call["status"] = json!("in_progress");
+        pending_call["arguments"] = json!("");
+        let part = json!({"type": "output_text", "text": "ok", "annotations": []});
+        let frames = [
+            json!({"type": "response.created", "response": response("in_progress", json!([]))}),
+            json!({"type": "response.output_item.added", "output_index": 0,
+                   "item": pending_message}),
+            json!({"type": "response.content_part.added", "output_index": 0,
+                   "item_id": "msg_1", "content_index": 0,
+                   "part": {"type": "output_text", "text": "", "annotations": []}}),
+            json!({"type": "response.output_text.delta", "output_index": 0,
+                   "item_id": "msg_1", "content_index": 0, "delta": "ok"}),
+            json!({"type": "response.output_text.done", "output_index": 0,
+                   "item_id": "msg_1", "content_index": 0, "text": "ok"}),
+            json!({"type": "response.content_part.done", "output_index": 0,
+                   "item_id": "msg_1", "content_index": 0, "part": part}),
+            json!({"type": "response.output_item.done", "output_index": 0,
+                   "item": message_item()}),
+            json!({"type": "response.output_item.added", "output_index": 1,
+                   "item": pending_custom}),
+            json!({"type": "response.custom_tool_call_input.delta", "output_index": 1,
+                   "item_id": "ctc_1", "delta": "ls -la"}),
+            json!({"type": "response.output_item.done", "output_index": 1,
+                   "item": custom_call_item()}),
+            json!({"type": "response.output_item.added", "output_index": 2,
+                   "item": pending_call}),
+            json!({"type": "response.function_call_arguments.delta", "output_index": 2,
+                   "item_id": "fc_1", "delta": r#"{"path":"a.md","#}),
+            json!({"type": "response.function_call_arguments.delta", "output_index": 2,
+                   "item_id": "fc_1", "delta": r#""pages":""}"#}),
+            json!({"type": "response.function_call_arguments.done", "output_index": 2,
+                   "item_id": "fc_1", "arguments": READ_DOC_ARGUMENTS}),
+            json!({"type": "response.output_item.done", "output_index": 2,
+                   "item": function_call_item()}),
+            json!({"type": "response.completed", "response": response(
+                "completed",
+                json!([message_item(), custom_call_item(), function_call_item()]),
+            )}),
+        ];
+        frames
+            .iter()
+            .map(|frame| {
+                let event = frame["type"].as_str().expect("type");
+                format!("event: {event}\ndata: {frame}\n\n")
+            })
+            .collect()
+    }
+
+    /// The real codex-lane provider, keeping each dispatched request's
+    /// observation slot so the test can read what the request was charged.
+    struct ObservedProvider {
+        inner: OpenAiResponsesProvider,
+        slots: Arc<Mutex<Vec<RequestObservation>>>,
+    }
+
+    impl ObservedProvider {
+        fn keep(&self, req: &ChatRequest) {
+            if let Some(slot) = &req.routectl_internal.observation {
+                self.slots.lock().expect("slots").push(slot.clone());
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for ObservedProvider {
+        fn id(&self) -> &str {
+            self.inner.id()
+        }
+        fn normalize_request(&self, req: &ChatRequest) -> Result<Value> {
+            self.inner.normalize_request(req)
+        }
+        fn normalize_response(&self, raw: Value) -> Result<ChatResponse> {
+            self.inner.normalize_response(raw)
+        }
+        async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
+            self.keep(&req);
+            self.inner.complete(req).await
+        }
+        async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
+            self.keep(&req);
+            self.inner.stream(req).await
+        }
+        async fn on_auth_failure(&self) -> Result<()> {
+            self.inner.on_auth_failure().await
+        }
+        fn replay_lane(&self) -> ReplayScheme {
+            self.inner.replay_lane()
+        }
+    }
+
+    /// A router whose one target is the ChatGPT-OAuth Responses provider
+    /// dialing `base`, checking every request. Built directly rather than
+    /// through the factory, which would resolve an installation id under
+    /// the real config folder.
+    fn codex_router(base: &str, slots: &Arc<Mutex<Vec<RequestObservation>>>) -> Router {
+        let mut retry = RetryPolicy::default();
+        retry.max_attempts = 1;
+        let entry = ProviderEntry::openai_responses(crate::test_secret::file_ref("k"))
+            .with_openai_responses_auth_kind(AuthKind::ChatgptOauth)
+            .with_account_id_ref(crate::test_secret::file_ref("acct-synthetic"))
+            .with_openai_responses_base_url(base);
+        let mut config = Config {
+            providers: BTreeMap::from([("p".to_string(), entry)]),
+            models: BTreeMap::from([("m".to_string(), ModelEntry::new("p", "upstream"))]),
+            aliases: BTreeMap::from([("a".to_string(), AliasValue::Single("m".to_string()))]),
+            retry,
+            ..Default::default()
+        };
+        let (first_n, sample_one_in) = CHECK_EVERY;
+        config.wire_check.first_n = first_n;
+        config.wire_check.sample_one_in =
+            std::num::NonZeroU32::new(sample_one_in).expect("nonzero sample");
+        let token = Arc::new(StaticToken::new("synthetic-bearer")) as Arc<dyn TokenSource>;
+        let mut cfg = OpenAiResponsesConfig::new_with_auth("openai-responses:p", token);
+        cfg.account_id = Some("acct-synthetic".into());
+        cfg.base_url = base.to_string();
+        cfg.auth_kind = AuthKind::ChatgptOauth;
+        let provider = ObservedProvider {
+            inner: OpenAiResponsesProvider::new(cfg),
+            slots: Arc::clone(slots),
+        };
+        let mut router = Router::new(Arc::new(config));
+        router.install_resolved_models(BTreeMap::from([(
+            "m".to_string(),
+            Arc::new(ResolvedModel::new("m", "p", Arc::new(provider), "upstream")),
+        )]));
+        router
+    }
+
+    struct Served {
+        client: Vec<u8>,
+        snapshot: WireCheckSnapshot,
+        slots: Vec<RequestObservation>,
+    }
+
+    async fn serve(client: Client, stream: bool) -> Served {
+        let created_at = if stream { 0 } else { 1_700_000_000 };
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/responses"))
+            .respond_with(sse(upstream_stream(created_at)))
+            .mount(&server)
+            .await;
+        let slots = Arc::new(Mutex::new(Vec::new()));
+        let swap = Arc::new(arc_swap::ArcSwap::from_pointee(codex_router(
+            &server.uri(),
+            &slots,
+        )));
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
+        headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
+        let body = Bytes::from(serde_json::to_vec(&request_body(client, stream)).expect("json"));
+        let state = AppState::for_test(Arc::clone(&swap));
+        let resp = match client {
+            Client::Responses => {
+                ingress_handle(state, headers, None, Ok(body), ResponsesIngress).await
+            }
+            Client::Anthropic => {
+                ingress_handle(state, headers, None, Ok(body), AnthropicIngress).await
+            }
+        };
+        let client = to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("body")
+            .to_vec();
+        let snapshot = swap.load().wire_check_snapshot();
+        let slots = slots.lock().expect("slots").clone();
+        Served {
+            client,
+            snapshot,
+            slots,
+        }
+    }
+
+    fn frames(client: &[u8]) -> Vec<Value> {
+        String::from_utf8_lossy(client)
+            .split("\n\n")
+            .filter_map(|block| block.lines().find_map(|l| l.strip_prefix("data: ")))
+            .filter_map(|data| serde_json::from_str::<Value>(data).ok())
+            .collect()
+    }
+
+    /// The function call a Responses client should get back: namespaced as
+    /// declared, the empty optional `pages` removed.
+    fn assert_returned_call(row: &str, call: &Value) {
+        assert_eq!(call["type"], "function_call", "{row}: {call}");
+        assert_eq!(call["name"], "read_doc", "{row}: {call}");
+        assert_eq!(call["call_id"], "call_read", "{row}: {call}");
+        assert_eq!(call["namespace"], "functions", "{row}: {call}");
+        let arguments: Value =
+            serde_json::from_str(call["arguments"].as_str().expect("arguments string"))
+                .expect("arguments json");
+        assert_eq!(arguments, json!({"path": "a.md"}), "{row}: {call}");
+    }
+
+    fn assert_responses_output(row: &str, output: &[Value]) {
+        let types: Vec<&str> = output.iter().filter_map(|i| i["type"].as_str()).collect();
+        assert_eq!(
+            types,
+            ["message", "custom_tool_call", "function_call"],
+            "{row}: {output:?}"
+        );
+        assert_eq!(output[0]["content"][0]["text"], "ok", "{row}");
+        assert_eq!(output[1], custom_call_item(), "{row}");
+        assert_returned_call(row, &output[2]);
+    }
+
+    fn responses_complete_output(row: &str, client: &[u8]) -> Vec<Value> {
+        let body: Value = serde_json::from_slice(client).expect("json body");
+        let output = body["output"].as_array().cloned().unwrap_or_default();
+        assert_responses_output(row, &output);
+        output
+    }
+
+    /// The streamed items, checked dense and in order, and identical to the
+    /// completed body's output.
+    fn responses_stream_output(row: &str, client: &[u8]) -> Vec<Value> {
+        let frames = frames(client);
+        let indexed = |event: &str| -> Vec<(u64, Value)> {
+            frames
+                .iter()
+                .filter(|f| f["type"] == event)
+                .map(|f| {
+                    (
+                        f["output_index"].as_u64().unwrap_or(u64::MAX),
+                        f["item"].clone(),
+                    )
+                })
+                .collect()
+        };
+        let added = indexed("response.output_item.added");
+        let done = indexed("response.output_item.done");
+        let added_indices: Vec<u64> = added.iter().map(|(i, _)| *i).collect();
+        let done_indices: Vec<u64> = done.iter().map(|(i, _)| *i).collect();
+        assert_eq!(added_indices, [0, 1, 2], "{row}: added {added:?}");
+        assert_eq!(done_indices, [0, 1, 2], "{row}: done {done:?}");
+        let done_items: Vec<Value> = done.into_iter().map(|(_, item)| item).collect();
+        assert_responses_output(row, &done_items);
+        let completed = frames
+            .iter()
+            .find(|f| f["type"] == "response.completed")
+            .unwrap_or_else(|| panic!("{row}: no response.completed"));
+        let output = completed["response"]["output"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(
+            output, done_items,
+            "{row}: completed body vs streamed items"
+        );
+        output
+    }
+
+    /// The Anthropic message's content blocks and stop reason, from a
+    /// complete body or reassembled from the stream.
+    fn anthropic_message(client: &[u8], stream: bool) -> (Vec<Value>, Value) {
+        if !stream {
+            let body: Value = serde_json::from_slice(client).expect("json body");
+            let content = body["content"].as_array().cloned().unwrap_or_default();
+            return (content, body["stop_reason"].clone());
+        }
+        let mut blocks: Vec<Value> = Vec::new();
+        let mut partial_json: Vec<String> = Vec::new();
+        let mut stop_reason = Value::Null;
+        for frame in frames(client) {
+            match frame["type"].as_str() {
+                Some("content_block_start") => {
+                    blocks.push(frame["content_block"].clone());
+                    partial_json.push(String::new());
+                }
+                Some("content_block_delta") => {
+                    let at = blocks.len() - 1;
+                    let delta = &frame["delta"];
+                    match delta["type"].as_str() {
+                        Some("text_delta") => {
+                            let text = format!(
+                                "{}{}",
+                                blocks[at]["text"].as_str().unwrap_or_default(),
+                                delta["text"].as_str().unwrap_or_default()
+                            );
+                            blocks[at]["text"] = json!(text);
+                        }
+                        Some("input_json_delta") => partial_json[at]
+                            .push_str(delta["partial_json"].as_str().unwrap_or_default()),
+                        _ => {}
+                    }
+                }
+                Some("message_delta") => stop_reason = frame["delta"]["stop_reason"].clone(),
+                _ => {}
+            }
+        }
+        for (block, json) in blocks.iter_mut().zip(&partial_json) {
+            if block["type"] == "tool_use" && !json.is_empty() {
+                block["input"] = serde_json::from_str(json).expect("tool input json");
+            }
+        }
+        (blocks, stop_reason)
+    }
+
+    /// Whether this request's observation slot holds `class` on the lane.
+    /// Noting a pair the slot already holds returns false, so the probe
+    /// reads the set without a reader of its own.
+    fn charged(slot: &RequestObservation, class: &'static str) -> bool {
+        !slot.note_translation_drop(LANE, class)
+    }
+
+    fn assert_charged(row: &str, slots: &[RequestObservation], expected: &[&'static str]) {
+        let [slot] = slots else {
+            panic!("{row}: one dispatch: {} slots", slots.len());
+        };
+        assert_eq!(
+            slot.snapshot().translation_drops,
+            u64::try_from(expected.len()).expect("small"),
+            "{row}: distinct drops charged to the request"
+        );
+        for class in [UNREPRESENTABLE, EMPTY_OPTIONAL] {
+            assert_eq!(
+                charged(slot, class),
+                expected.contains(&class),
+                "{row}: {class}"
+            );
+        }
+    }
+
+    fn assert_responses_client(row: &str, stream: bool, served: &Served) {
+        if stream {
+            responses_stream_output(row, &served.client);
+        } else {
+            responses_complete_output(row, &served.client);
+        }
+        // The function call render does not yet carry the upstream item's id and status.
+        let known_render_gap = [
+            ("/output/2/id".to_string(), "missing"),
+            ("/output/2/status".to_string(), "missing"),
+        ];
+        assert_eq!(
+            response_findings(&served.snapshot),
+            known_render_gap,
+            "{row}: {}",
+            String::from_utf8_lossy(&served.client)
+        );
+        assert_charged(row, &served.slots, &[EMPTY_OPTIONAL]);
+    }
+
+    fn assert_anthropic_client(row: &str, stream: bool, served: &Served) {
+        let wire = String::from_utf8_lossy(&served.client).to_string();
+        let (content, stop_reason) = anthropic_message(&served.client, stream);
+        let types: Vec<&str> = content.iter().filter_map(|b| b["type"].as_str()).collect();
+        assert_eq!(types, ["text", "tool_use"], "{row}: {wire}");
+        assert_eq!(content[0]["text"], "ok", "{row}: {wire}");
+        assert_eq!(content[1]["name"], "read_doc", "{row}: {wire}");
+        assert_eq!(
+            content[1]["input"],
+            json!({"path": "a.md"}),
+            "{row}: {wire}"
+        );
+        assert_eq!(stop_reason, "tool_use", "{row}: {wire}");
+        assert!(
+            !wire.contains("custom_tool_call") && !wire.contains("ls -la"),
+            "{row}: the custom call reached the client: {wire}"
+        );
+        assert_charged(row, &served.slots, &[UNREPRESENTABLE, EMPTY_OPTIONAL]);
+    }
+
+    #[tokio::test]
+    async fn each_client_gets_the_message_the_custom_call_and_the_namespaced_call_as_its_dialect_allows()
+     {
+        let rows = [
+            ("responses client, complete", Client::Responses, false),
+            ("responses client, stream", Client::Responses, true),
+            ("anthropic client, complete", Client::Anthropic, false),
+            ("anthropic client, stream", Client::Anthropic, true),
+        ];
+        for (row, client, stream) in rows {
+            // Arrange + Act
+            let served = serve(client, stream).await;
+
+            // Assert
+            match client {
+                Client::Responses => assert_responses_client(row, stream, &served),
+                Client::Anthropic => assert_anthropic_client(row, stream, &served),
+            }
+        }
+    }
+}

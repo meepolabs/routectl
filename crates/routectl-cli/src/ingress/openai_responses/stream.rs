@@ -55,6 +55,8 @@ use routectl_core::{
     is_responses_family, schema::Choice,
 };
 
+use routectl_core::wire_check::{EditKind, EditSite};
+
 use crate::ingress::{IngressStreamState, ResponseEdits, SseEvent, StreamErrorClass};
 
 use super::render::{
@@ -206,6 +208,24 @@ fn emit_delta_events(
         for tc in tcs {
             buffer_tool_call(tc, state);
         }
+        declare_buffered_namespace_stamps(state, edits);
+    }
+}
+
+/// The calls are rendered only at end of stream, which has no edit
+/// collector and is the first point their output index is known, so a
+/// namespaced call is declared here, at any output index.
+fn declare_buffered_namespace_stamps(state: &ResponsesStreamState, edits: &mut ResponseEdits) {
+    if state
+        .tool_buffers
+        .iter()
+        .any(|buf| state.tool_namespaces.contains_key(&buf.name))
+    {
+        edits.declare(
+            EditSite::ResponsesNamespaceStamp,
+            "/output/*/namespace",
+            EditKind::Add,
+        );
     }
 }
 

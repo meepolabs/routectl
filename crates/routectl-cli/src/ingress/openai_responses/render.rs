@@ -202,7 +202,13 @@ fn build_output(
     }
 
     output.extend(build_unmodeled_items(&msg.content));
-    output.extend(build_function_call_items(msg, tool_namespaces));
+    for item in build_function_call_items(msg) {
+        let item = stamp_namespace(item, tool_namespaces);
+        if item.get("namespace").is_some() {
+            declare_namespace_stamp(output.len(), edits);
+        }
+        output.push(item);
+    }
 
     output
 }
@@ -327,19 +333,27 @@ fn other_item(type_tag: &str, extras: &Map<String, Value>) -> Value {
 /// canonical tool_call shape is `{id, type:"function", function:{name,
 /// arguments}}` (arguments is a JSON string); the Responses item is
 /// `{type:"function_call", call_id, name, arguments}`. Inverse of the
-/// egress, which built tool_calls from FunctionCall items. A call to a tool
-/// the client declared inside a namespace carries that `namespace`.
-fn build_function_call_items(
-    msg: &Message,
-    tool_namespaces: &BTreeMap<String, String>,
-) -> Vec<Value> {
+/// egress, which built tool_calls from FunctionCall items.
+fn build_function_call_items(msg: &Message) -> Vec<Value> {
     let Some(tool_calls) = msg.tool_calls.as_ref() else {
         return Vec::new();
     };
-    tool_calls
-        .iter()
-        .map(|tc| stamp_namespace(function_call_item(tc), tool_namespaces))
-        .collect()
+    tool_calls.iter().map(function_call_item).collect()
+}
+
+/// The upstream function call carries no `namespace`; the render adds the
+/// one the client declared the tool in, so the client resolves the call.
+pub(super) fn declare_namespace_stamp(output_index: usize, edits: &mut ResponseEdits) {
+    edits.declare_at(
+        EditSite::ResponsesNamespaceStamp,
+        || {
+            WirePath::root()
+                .child("output")
+                .index(output_index)
+                .child("namespace")
+        },
+        EditKind::Add,
+    );
 }
 
 /// Add `namespace` to a `function_call` item whose name `tool_namespaces`

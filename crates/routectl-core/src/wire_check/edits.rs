@@ -177,11 +177,14 @@ pub enum EditSite {
     /// Response: stream frames arriving after the terminal frame, or a
     /// repeated stop reason, withheld from the client.
     StreamStragglerDrop,
+    /// Response: a returned Responses function call stamped with the
+    /// namespace its client declared the tool in.
+    ResponsesNamespaceStamp,
 }
 
 impl EditSite {
     /// Every site, in declaration order.
-    pub const ALL: [Self; 49] = [
+    pub const ALL: [Self; 50] = [
         Self::ModelRename,
         Self::OperatorPayloadExtras,
         Self::ContextReduction,
@@ -231,6 +234,7 @@ impl EditSite {
         Self::AnthropicStreamUsageFill,
         Self::ResponsesStatusRewrite,
         Self::StreamStragglerDrop,
+        Self::ResponsesNamespaceStamp,
     ];
 
     /// Static label for logs and counters.
@@ -285,6 +289,7 @@ impl EditSite {
             Self::AnthropicStreamUsageFill => "anthropic_stream_usage_fill",
             Self::ResponsesStatusRewrite => "responses_status_rewrite",
             Self::StreamStragglerDrop => "stream_straggler_drop",
+            Self::ResponsesNamespaceStamp => "responses_namespace_stamp",
         }
     }
 }
