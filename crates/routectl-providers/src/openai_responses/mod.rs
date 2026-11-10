@@ -415,6 +415,7 @@ impl Provider for OpenAiResponsesProvider {
         }
 
         let mut chat_resp = self.normalize_response(raw_body)?;
+        gate_unmodeled_output_items(&req, &mut chat_resp);
         chat_resp.routectl_provider = Some(self.cfg.id.clone());
         chat_resp.upstream_meta = match (upstream_meta, chat_resp.upstream_meta.take()) {
             (Some(head), Some(body)) => Some(head.merge(body)),
@@ -634,6 +635,68 @@ impl Provider for OpenAiResponsesProvider {
     }
 }
 
+/// Remove the parts `normalize_response` keeps for unmodeled upstream output
+/// items unless the client speaks Responses, the only dialect with a shape to
+/// carry one. A refusal part is modeled everywhere and stays. Synchronous: the
+/// observation scope it opens must never span an `.await`.
+fn gate_unmodeled_output_items(req: &ChatRequest, resp: &mut ChatResponse) {
+    if req.routectl_internal.provenance == routectl_core::RequestProvenance::ResponsesIngress {
+        return;
+    }
+    let mut dropped: Vec<String> = Vec::new();
+    for choice in &mut resp.choices {
+        drop_unmodeled_parts(&mut choice.message.content, &mut dropped);
+    }
+    if dropped.is_empty() {
+        return;
+    }
+    tracing::warn!(
+        lane = LANE,
+        item_types = %sanitize_for_log(&dropped.join(",")),
+        count = dropped.len(),
+        "openai-responses: dropping unmodeled output items the client dialect cannot carry"
+    );
+    let _observation = crate::translation_drop_metrics::ObservationScope::enter_slot(
+        req.routectl_internal.observation.as_ref(),
+    );
+    // TRANSLATION-DROP: lane=openai-responses class=output_item_unrepresentable test=a_non_responses_client_loses_the_unmodeled_item_and_counts_it_once
+    crate::translation_drop_metrics::record_translation_drop(LANE, "output_item_unrepresentable");
+    crate::wire_declare::declare_response(
+        crate::wire_declare::tap(req),
+        routectl_core::wire_check::EditSite::DialectFieldStrip,
+        "/output/*",
+        routectl_core::wire_check::EditKind::Remove,
+    );
+}
+
+/// Drop every non-refusal `ContentPart::Other`, naming each in `dropped`; what
+/// is left as text alone collapses to the text shape of a text-only answer.
+fn drop_unmodeled_parts(content: &mut routectl_core::MessageContent, dropped: &mut Vec<String>) {
+    use routectl_core::{ContentPart, KnownContentPart, MessageContent};
+    let MessageContent::Parts(parts) = content else {
+        return;
+    };
+    let before = dropped.len();
+    parts.retain(|part| match part {
+        ContentPart::Other { type_tag, .. } if type_tag != "refusal" => {
+            dropped.push(type_tag.clone());
+            false
+        }
+        _ => true,
+    });
+    if dropped.len() == before {
+        return;
+    }
+    let mut text = String::new();
+    for part in parts.iter() {
+        match part {
+            ContentPart::Known(KnownContentPart::Text { text: piece, .. }) => text.push_str(piece),
+            _ => return,
+        }
+    }
+    *content = MessageContent::Text(text);
+}
+
 /// Map a non-success Responses-API HTTP response into a canonical
 /// `Error::Upstream`. Single source of truth shared by both `complete()`
 /// and `stream()`: the response-derived pieces (gated header reset hint,
@@ -730,3 +793,7 @@ mod stream_terminal_tests;
 #[cfg(test)]
 #[path = "wire_tap_tests.rs"]
 mod wire_tap_tests;
+
+#[cfg(test)]
+#[path = "output_item_gate_tests.rs"]
+mod output_item_gate_tests;

@@ -61,6 +61,8 @@ const CHAT: &str = "chat->openai-compat";
 const BEDROCK_INVOKE: &str = "anthropic->bedrock-invoke";
 const BEDROCK_CONVERSE: &str = "anthropic->bedrock-converse";
 const RESPONSES_MANTLE: &str = "responses->openai-responses-mantle";
+const ANTHROPIC_TO_RESPONSES: &str = "anthropic->openai-responses";
+const CHAT_TO_RESPONSES: &str = "chat->openai-responses";
 
 /// Findings the check correctly reports that no declaration explains.
 const KNOWN_UNDECLARED: &[KnownUndeclared] = &[KnownUndeclared {
@@ -107,6 +109,12 @@ enum Egress {
     },
     /// A real openai-responses provider on the Bedrock Mantle surface.
     ResponsesMantle,
+    /// A provider entry speaking another dialect than the client, recorded
+    /// on `lane`: a TRANSLATION lane, so only its request leg is compared.
+    Translation {
+        provider: fn(&str) -> ProviderEntry,
+        lane: &'static str,
+    },
 }
 
 /// One request through the harness: what the client sends, how the
@@ -130,6 +138,7 @@ impl Case {
         match self.egress {
             Egress::Entry(_) => self.ingress.lane(),
             Egress::ResponsesMantle => RESPONSES_MANTLE,
+            Egress::Translation { lane, .. } => lane,
             Egress::Bedrock {
                 shape: BedrockShape::Invoke,
                 ..
@@ -147,7 +156,8 @@ impl Case {
             Egress::Bedrock {
                 shape: BedrockShape::Converse,
                 ..
-            } => &[Leg::Request],
+            }
+            | Egress::Translation { .. } => &[Leg::Request],
             Egress::Entry(_)
             | Egress::ResponsesMantle
             | Egress::Bedrock {
@@ -833,6 +843,13 @@ fn responses_cases() -> Vec<Case> {
             responses_provider,
         ),
         case(
+            "responses/unmodeled-output-item",
+            Ingress::Responses,
+            json!({"model": ALIAS, "input": input}),
+            responses_stream_with_unmodeled_item(),
+            responses_provider,
+        ),
+        case(
             "responses/stream",
             Ingress::Responses,
             json!({"model": ALIAS, "stream": true, "input": input}),
@@ -950,6 +967,58 @@ fn responses_mantle_cases() -> Vec<Case> {
             responses_provider,
         )
     }]
+}
+
+/// A Responses answer carrying an output item no other client dialect can
+/// carry, after the message: a Responses client gets it back as a top-level
+/// item, and the provider removes it for any other client.
+fn responses_stream_with_unmodeled_item() -> ResponseTemplate {
+    let mut done = responses_document();
+    done["output"].as_array_mut().expect("output array").push(
+        json!({"type": "custom_tool_call", "id": "ctc_1", "call_id": "call_1",
+                     "name": "exec", "input": "ls", "status": "completed"}),
+    );
+    sse_response(sse(
+        &[(
+            Some("response.completed"),
+            json!({"type": "response.completed", "response": done}),
+        )],
+        false,
+    ))
+}
+
+/// Anthropic and Chat clients served by openai-responses, whose upstream
+/// answers with an item neither dialect can carry.
+fn cross_dialect_responses_cases() -> Vec<Case> {
+    let hi = json!([{"role": "user", "content": "hi"}]);
+    vec![
+        Case {
+            egress: Egress::Translation {
+                provider: responses_provider,
+                lane: ANTHROPIC_TO_RESPONSES,
+            },
+            ..case(
+                "anthropic-to-responses/unmodeled-output-item",
+                Ingress::Anthropic,
+                json!({"model": ALIAS, "max_tokens": 16, "messages": hi}),
+                responses_stream_with_unmodeled_item(),
+                responses_provider,
+            )
+        },
+        Case {
+            egress: Egress::Translation {
+                provider: responses_provider,
+                lane: CHAT_TO_RESPONSES,
+            },
+            ..case(
+                "chat-to-responses/unmodeled-output-item",
+                Ingress::Chat,
+                json!({"model": ALIAS, "messages": hi}),
+                responses_stream_with_unmodeled_item(),
+                responses_provider,
+            )
+        },
+    ]
 }
 
 fn anthropic_cases() -> Vec<Case> {
@@ -1143,7 +1212,7 @@ fn bedrock_converse_cases() -> Vec<Case> {
 /// Checks every request on each leg its lane compares.
 async fn router_for(case: &Case, base: &str) -> Router {
     let provider = match case.egress {
-        Egress::Entry(provider) => provider,
+        Egress::Entry(provider) | Egress::Translation { provider, .. } => provider,
         Egress::Bedrock { shape, model_id } => return bedrock_router(shape, model_id, base).await,
         Egress::ResponsesMantle => return responses_mantle_router(base),
     };
@@ -1450,6 +1519,7 @@ async fn every_walked_request_is_clean_or_a_listed_known_loss_on_both_legs() {
         .chain(chat_cases())
         .chain(responses_cases())
         .chain(responses_mantle_cases())
+        .chain(cross_dialect_responses_cases())
         .chain(bedrock_invoke_cases())
         .chain(bedrock_converse_cases())
         .collect();

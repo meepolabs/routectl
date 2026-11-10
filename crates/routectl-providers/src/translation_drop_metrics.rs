@@ -101,6 +101,12 @@
 //! runtime thread cannot see each other's slot. The guard restores on drop,
 //! including during a panic unwind.
 //!
+//! A drop decided on the RESPONSE path runs after the request entry's scope
+//! has closed. It opens its own scope over the slot the request carried
+//! (`ObservationScope::enter_slot`) around the synchronous step that decides
+//! the drop, and calls [`record_translation_drop`] inside it as any request
+//! arm does, so the drop reaches the same request's usage row.
+//!
 //! # Testing against this registry
 //!
 //! The registry is PROCESS-GLOBAL in every build except this crate's own
@@ -189,7 +195,22 @@ pub(crate) struct ObservationScope {
 impl ObservationScope {
     /// Install `req`'s observation slot (or none) until the guard drops.
     pub(crate) fn enter(req: &ChatRequest) -> Self {
-        let slot = req.routectl_internal.observation.clone();
+        Self::enter_slot(req.routectl_internal.observation.as_ref())
+    }
+
+    /// Install `slot` (or none) until the guard drops.
+    ///
+    /// For a drop decided on the RESPONSE path, after the request entry's own
+    /// scope has closed: the complete path after it parsed the upstream body,
+    /// or a stream's per-event step, holding the slot cloned out of the
+    /// request before the stream began. Open it around the synchronous step
+    /// that decides the drop, call [`record_translation_drop`] inside it with
+    /// the lane and class spelled at the call site, and let it drop before the
+    /// next `.await`. With the slot installed the drop counts once per client
+    /// request and reaches that request's `translation_drops`; with `None`
+    /// every call counts.
+    pub(crate) fn enter_slot(slot: Option<&RequestObservation>) -> Self {
+        let slot = slot.cloned();
         let previous = ACTIVE_OBSERVATION.with_borrow_mut(|active| std::mem::replace(active, slot));
         Self { previous }
     }
@@ -714,6 +735,35 @@ mod tests {
             .expect("the drop must be recorded on its own counter");
         assert_eq!(policy.action_count, 1);
         assert_eq!(drop.drop_count, 1);
+    }
+
+    #[test]
+    fn a_slot_scope_counts_a_repeated_pair_once_and_notes_it_on_the_slot() {
+        // Arrange
+        let lane = "unit-test-lane-slot-scope";
+        let drop_class = "unit-test-class-slot-scope";
+        let slot = RequestObservation::new();
+        let count = || {
+            translation_drop_snapshot()
+                .into_iter()
+                .find(|e| e.lane == lane && e.drop_class == drop_class)
+                .map_or(0, |e| e.drop_count)
+        };
+        let before = count();
+
+        // Act: two response-path steps of one request record the same pair.
+        for _ in 0..2 {
+            let _scope = ObservationScope::enter_slot(Some(&slot));
+            record_translation_drop(lane, drop_class);
+        }
+
+        // Assert
+        assert_eq!(count() - before, 1, "the census counts the pair once");
+        assert_eq!(
+            slot.snapshot().translation_drops,
+            1,
+            "the slot holds the pair once"
+        );
     }
 
     #[test]

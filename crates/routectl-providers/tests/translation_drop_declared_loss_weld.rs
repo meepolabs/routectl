@@ -491,6 +491,7 @@ const EXPECTED_RESOLVED_LOG_COUNTS: &[(&str, &str, usize)] = &[
     ("openai_responses/messages.rs", "translate_user_message", 1),
     ("openai_responses/messages.rs", "unknown_content_part", 1),
     ("openai_responses/messages.rs", "walk_assistant_part", 3),
+    ("openai_responses/mod.rs", "gate_unmodeled_output_items", 1),
     (
         "openai_responses/request.rs",
         "log_dropped_cache_control",
