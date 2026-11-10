@@ -14,7 +14,11 @@
 //!   accumulate, encrypted_content flushes on item.done
 //! - `ToolUse`  -- function_call item; argument deltas stream
 //!   through, or, when no delta carried them, the final arguments from
-//!   `function_call_arguments.done` / `output_item.done` are emitted once
+//!   `function_call_arguments.done` / `output_item.done` are emitted once.
+//!   On the codex lane a call to a tool whose empty optional arguments the
+//!   `empty_optional` filter can remove is held back instead: its arguments
+//!   are emitted once, filtered, when a done event (or completion) settles
+//!   them
 //! - `Passthrough` -- any other item type (e.g. `custom_tool_call`); the
 //!   whole item rides one `OpaqueSseEvent::OutputItem` chunk, emitted at
 //!   `output_item.done` (or flushed at completion when no done event came),
@@ -35,9 +39,10 @@ use uuid::Uuid;
 
 use routectl_core::{
     ChatChunk, Error, OpaqueSseEvent, ReasoningDetail, ReasoningDetailKind, RequestObservation,
-    RequestProvenance, ResponsesEnvelope, Result, Role, UpstreamMeta, UsageInputSource,
+    RequestProvenance, ResponsesEnvelope, Result, Role, ToolDef, UpstreamMeta, UsageInputSource,
     sanitize_for_log,
     schema::{ChunkChoice, ChunkDelta, UsageDelta},
+    wire_check::WireTap,
 };
 
 /// Discriminant returned by `BlockState::tag` for log-context strings.
@@ -54,6 +59,7 @@ const BLOCK_TAG_PASSTHROUGH: &str = "passthrough";
 /// legitimate breadth.
 pub(super) const MAX_OUTPUT_BLOCKS: usize = 4096;
 
+use super::empty_optional::EmptyOptionalFilter;
 use super::response::{map_finish_reason, upstream_error_from_failed};
 use super::response_types::{ResponsesResponse, ResponsesStreamEvent};
 use super::{AuthKind, lane_format_tag};
@@ -89,7 +95,9 @@ enum BlockState {
     /// value, so it is dropped. `zero_arg_deferred` records an empty
     /// `function_call_arguments.done` left for `output_item.done` to
     /// settle; a stream that completes without that event settles it as
-    /// `{}` at completion.
+    /// `{}` at completion. `buffered` holds the deltas back: `arguments`
+    /// then accumulates bytes not yet sent, emitted filtered and whole once
+    /// a done event or the completion settles them.
     ToolUse {
         #[allow(dead_code)]
         item_id: String,
@@ -99,6 +107,7 @@ enum BlockState {
         arguments: String,
         finalized: bool,
         zero_arg_deferred: bool,
+        buffered: bool,
     },
     /// An output item of a type this parser does not model, held as the
     /// item.added payload until its done event (or completion) settles it.
@@ -167,19 +176,34 @@ pub struct ResponsesStreamState {
     /// Set once an item.added past the block cap was WARNed; later ones
     /// log at DEBUG so an over-producing upstream cannot flood the log.
     cap_warned: bool,
+    /// The request's empty-optional lookup, present only on the codex lane.
+    /// A call to a tool it can filter is buffered.
+    empty_optional: Option<EmptyOptionalFilter>,
+    /// The request's wire tap, for declaring a removal on a compared
+    /// response leg.
+    wire_tap: Option<WireTap>,
 }
 
 impl ResponsesStreamState {
+    /// The stream state for one request: `tools` are the tools it declared
+    /// and `wire_tap` its tap, read only on the codex lane.
     #[must_use]
     pub(crate) fn new(
         auth_kind: AuthKind,
         provenance: RequestProvenance,
         observation: Option<RequestObservation>,
+        tools: &[ToolDef],
+        wire_tap: Option<WireTap>,
     ) -> Self {
+        let empty_optional = auth_kind
+            .is_codex_lane()
+            .then(|| EmptyOptionalFilter::from_tools(tools));
         Self {
             auth_kind,
             provenance,
             observation,
+            empty_optional,
+            wire_tap,
             ..Self::default()
         }
     }
@@ -195,7 +219,35 @@ impl ResponsesStreamState {
         event: ResponsesStreamEvent,
     ) -> Result<Vec<ChatChunk>> {
         let kind = event.kind.clone();
-        match kind.as_str() {
+        let result = self.dispatch_event(provider_id, &kind, event);
+        if is_terminal_event(&kind) {
+            self.report_removed_empty_optionals(provider_id);
+        }
+        result
+    }
+
+    /// Count, log and declare the empty optional arguments this stream
+    /// removed, at most once: called when the stream ends, whichever way.
+    pub(crate) fn report_removed_empty_optionals(&mut self, provider_id: &str) {
+        let Some(filter) = self.empty_optional.as_mut() else {
+            return;
+        };
+        let removed = filter.take_removed();
+        super::response::report_empty_optionals_removed(
+            provider_id,
+            self.observation.as_ref(),
+            self.wire_tap.as_ref(),
+            &removed,
+        );
+    }
+
+    fn dispatch_event(
+        &mut self,
+        provider_id: &str,
+        kind: &str,
+        event: ResponsesStreamEvent,
+    ) -> Result<Vec<ChatChunk>> {
+        match kind {
             "response.created" => Ok(self.handle_created(&event)),
             "response.in_progress" => Ok(Vec::new()),
             "response.output_item.added" => Ok(self.handle_item_added(provider_id, &event)),
@@ -361,6 +413,10 @@ impl ResponsesStreamState {
                     .to_string();
                 let call_index = self.next_call_index;
                 self.next_call_index += 1;
+                let buffered = self
+                    .empty_optional
+                    .as_ref()
+                    .is_some_and(|filter| filter.filters(&name));
                 self.blocks.insert(
                     idx,
                     BlockState::ToolUse {
@@ -371,6 +427,7 @@ impl ResponsesStreamState {
                         arguments: String::new(),
                         finalized: false,
                         zero_arg_deferred: false,
+                        buffered,
                     },
                 );
                 // The sticky `saw_function_call` flag was already set
@@ -507,9 +564,13 @@ impl ResponsesStreamState {
                 name,
                 call_index,
                 arguments,
+                buffered,
                 ..
             }) => {
                 arguments.push_str(delta);
+                if *buffered {
+                    return Vec::new();
+                }
                 (call_id.clone(), name.clone(), *call_index)
             }
             _ => return Vec::new(),
@@ -562,13 +623,29 @@ impl ResponsesStreamState {
             call_index,
             arguments,
             finalized,
+            buffered,
             ..
         }) = self.blocks.get_mut(&idx)
         else {
             return None;
         };
-        *finalized = true;
+        let was_finalized = std::mem::replace(finalized, true);
         let final_args = super::response::zero_arg_as_empty_object(final_args);
+        if *buffered {
+            if was_finalized {
+                return None;
+            }
+            if arguments.is_empty() {
+                arguments.push_str(final_args);
+            }
+            let held = (
+                call_id.clone(),
+                name.clone(),
+                *call_index,
+                arguments.clone(),
+            );
+            return Some(self.emit_buffered_arguments(held));
+        }
         if !arguments.is_empty() {
             if arguments.as_str() != final_args {
                 tracing::debug!(
@@ -584,6 +661,20 @@ impl ResponsesStreamState {
         arguments.push_str(final_args);
         let (call_id, name, call_index) = (call_id.clone(), name.clone(), *call_index);
         Some(self.tool_delta_chunk(call_id, name, call_index, final_args.to_string()))
+    }
+
+    /// The one chunk carrying a buffered call's arguments, without the empty
+    /// optional arguments the filter removes. Held deltas win over a done
+    /// payload, as they do for a call whose deltas streamed.
+    fn emit_buffered_arguments(
+        &mut self,
+        (call_id, name, call_index, held): (String, String, u32, String),
+    ) -> ChatChunk {
+        let arguments = match self.empty_optional.as_mut() {
+            Some(filter) => filter.apply(&name, &held).into_owned(),
+            None => held,
+        };
+        self.tool_delta_chunk(call_id, name, call_index, arguments)
     }
 
     fn handle_item_done(
@@ -734,7 +825,7 @@ impl ResponsesStreamState {
             self.model = resp.model;
         }
 
-        let mut chunks = self.flush_deferred_zero_arg_calls(provider_id);
+        let mut chunks = self.flush_unsettled_calls(provider_id);
         chunks.extend(unsettled_items);
         chunks.push(ChatChunk {
             id: self.response_id.clone(),
@@ -754,23 +845,29 @@ impl ResponsesStreamState {
         Ok(chunks)
     }
 
-    /// Settle, as `{}`, every call whose empty `function_call_arguments.done`
-    /// deferred to an `output_item.done` that never arrived, in output order.
-    fn flush_deferred_zero_arg_calls(&mut self, provider_id: &str) -> Vec<ChatChunk> {
-        let mut deferred: Vec<u32> = self
+    /// Settle, in output order, every call no done event settled that is
+    /// still owed to the client: one whose empty `function_call_arguments.done`
+    /// deferred to an `output_item.done` that never arrived (as `{}`), and a
+    /// buffered call holding deltas (its held arguments, filtered). A buffered
+    /// call with nothing held stays unsent, as an unbuffered call with no
+    /// arguments event does.
+    fn flush_unsettled_calls(&mut self, provider_id: &str) -> Vec<ChatChunk> {
+        let mut unsettled: Vec<u32> = self
             .blocks
             .iter()
             .filter_map(|(idx, block)| match block {
                 BlockState::ToolUse {
-                    zero_arg_deferred: true,
                     finalized: false,
+                    zero_arg_deferred,
+                    buffered,
+                    arguments,
                     ..
-                } => Some(*idx),
+                } if *zero_arg_deferred || (*buffered && !arguments.is_empty()) => Some(*idx),
                 _ => None,
             })
             .collect();
-        deferred.sort_unstable();
-        deferred
+        unsettled.sort_unstable();
+        unsettled
             .into_iter()
             .filter_map(|idx| self.finalize_tool_arguments(provider_id, idx, ""))
             .collect()

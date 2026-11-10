@@ -29,8 +29,8 @@ use uuid::Uuid;
 
 use routectl_core::{
     ChatRequest, ChatResponse, Choice, ContentPart, Error, KnownContentPart, Message,
-    MessageContent, ReasoningDetail, ReasoningDetailKind, ResponsesEnvelope, Result, Role,
-    UpstreamMeta, Usage, sanitize_for_log,
+    MessageContent, ReasoningDetail, ReasoningDetailKind, RequestObservation, ResponsesEnvelope,
+    Result, Role, UpstreamMeta, Usage, sanitize_for_log, wire_check::WireTap,
 };
 
 use super::empty_optional::EmptyOptionalFilter;
@@ -71,13 +71,22 @@ pub fn translate_for_request(
     let tools = req.tools.as_deref().unwrap_or_default();
     let mut filter = EmptyOptionalFilter::from_tools(tools);
     let resp = translate_filtered(provider_id, auth_kind, body, Some(&mut filter))?;
-    report_empty_optionals_removed(provider_id, req, filter.removed());
+    report_empty_optionals_removed(
+        provider_id,
+        req.routectl_internal.observation.as_ref(),
+        crate::wire_declare::tap(req),
+        filter.removed(),
+    );
     Ok(resp)
 }
 
-fn report_empty_optionals_removed(
+/// Log, count and declare the empty optional arguments one response had
+/// removed, once per client request through `observation`. Synchronous: the
+/// observation scope it opens must never span an `.await`.
+pub(super) fn report_empty_optionals_removed(
     provider_id: &str,
-    req: &ChatRequest,
+    observation: Option<&RequestObservation>,
+    wire_tap: Option<&WireTap>,
     removed: &[(String, usize)],
 ) {
     if removed.is_empty() {
@@ -94,9 +103,7 @@ fn report_empty_optionals_removed(
         calls = removed.len(),
         "openai-responses: dropping empty optional function call arguments"
     );
-    let _observation = crate::translation_drop_metrics::ObservationScope::enter_slot(
-        req.routectl_internal.observation.as_ref(),
-    );
+    let _observation = crate::translation_drop_metrics::ObservationScope::enter_slot(observation);
     // TRANSLATION-DROP: lane=openai-responses class=codex_empty_optional_dropped test=two_empty_optionals_in_one_response_count_once
     crate::translation_drop_metrics::record_translation_drop(
         super::LANE,
@@ -105,7 +112,7 @@ fn report_empty_optionals_removed(
     // Records only on a tap that compares the response leg: a Responses
     // client, whose output carries the call's arguments string as rewritten.
     crate::wire_declare::declare_response(
-        crate::wire_declare::tap(req),
+        wire_tap,
         routectl_core::wire_check::EditSite::DialectFieldStrip,
         EMPTY_OPTIONAL_ARGUMENTS_PATH,
         routectl_core::wire_check::EditKind::Rewrite,
@@ -120,7 +127,7 @@ fn translate_filtered(
     provider_id: &str,
     auth_kind: AuthKind,
     body: ResponsesResponse,
-    filter: Option<&mut EmptyOptionalFilter<'_>>,
+    filter: Option<&mut EmptyOptionalFilter>,
 ) -> Result<ChatResponse> {
     let status = body.status.clone();
     let incomplete_reason = body
@@ -205,7 +212,7 @@ fn walk_output(
     provider_id: &str,
     auth_kind: AuthKind,
     output: &[ResponseOutputItem],
-    mut filter: Option<&mut EmptyOptionalFilter<'_>>,
+    mut filter: Option<&mut EmptyOptionalFilter>,
 ) -> Result<(
     String,
     Vec<ReasoningDetail>,

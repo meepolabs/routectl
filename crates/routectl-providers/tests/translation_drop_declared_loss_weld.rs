@@ -338,7 +338,7 @@ const EXPECTED_UNMARKED_LOSS_LOGS: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "openai_responses/sse.rs",
-        "parse_event",
+        "dispatch_event",
         "skipping unknown stream event",
         "response-side streaming: skips an unknown upstream event kind at DEBUG, a forward-compat \
          tolerance on the response path",

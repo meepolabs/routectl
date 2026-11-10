@@ -75,7 +75,13 @@ fn message_item() -> Value {
 }
 
 fn responses_state() -> ResponsesStreamState {
-    ResponsesStreamState::new(AuthKind::ApiKey, RequestProvenance::ResponsesIngress, None)
+    ResponsesStreamState::new(
+        AuthKind::ApiKey,
+        RequestProvenance::ResponsesIngress,
+        None,
+        &[],
+        None,
+    )
 }
 
 fn drive_all(state: &mut ResponsesStreamState, events: Vec<Value>) -> Vec<ChatChunk> {
@@ -327,6 +333,8 @@ fn state_at_cap(slot: &RequestObservation) -> ResponsesStreamState {
         AuthKind::ApiKey,
         RequestProvenance::ResponsesIngress,
         Some(slot.clone()),
+        &[],
+        None,
     );
     let fill = (0..MAX_OUTPUT_BLOCKS as u32).map(|idx| {
         json!({"type": "response.output_item.added", "output_index": idx,

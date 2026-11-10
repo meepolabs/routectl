@@ -72,8 +72,13 @@ fn streaming_details(auth_kind: AuthKind) -> Vec<ReasoningDetail> {
         }),
     ];
 
-    let mut state =
-        ResponsesStreamState::new(auth_kind, routectl_core::RequestProvenance::Library, None);
+    let mut state = ResponsesStreamState::new(
+        auth_kind,
+        routectl_core::RequestProvenance::Library,
+        None,
+        &[],
+        None,
+    );
     let mut details = Vec::new();
     for ev in events {
         let typed: ResponsesStreamEvent = serde_json::from_value(ev).unwrap();

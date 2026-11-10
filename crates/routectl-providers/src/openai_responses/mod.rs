@@ -504,17 +504,23 @@ impl Provider for OpenAiResponsesProvider {
         let event_stream = byte_stream.eventsource();
         let response_tap = crate::wire_declare::response_tap(&req);
         let observation = req.routectl_internal.observation.clone();
-        let provenance = req.routectl_internal.provenance;
+        let mut state = sse::ResponsesStreamState::new(
+            auth_kind,
+            req.routectl_internal.provenance,
+            observation.clone(),
+            req.tools.as_deref().unwrap_or_default(),
+            crate::wire_declare::tap(&req).cloned(),
+        );
 
         let stream = async_stream::stream! {
             let mut pending_upstream_meta = upstream_meta;
-            let mut state = sse::ResponsesStreamState::new(auth_kind, provenance, observation.clone());
             let mut completion = StreamCompletion::new(PROVIDER_KIND, sse::is_terminal_event)
                 .with_observation(observation);
             futures::pin_mut!(event_stream);
             while let Some(result) = event_stream.next().await {
                 match result {
                     Err(e) => {
+                        state.report_removed_empty_optionals(&provider_id);
                         yield Err(Error::Streaming(e.to_string()));
                         return;
                     }
@@ -533,6 +539,7 @@ impl Provider for OpenAiResponsesProvider {
                         let parsed = match sse::parse_data_line(&provider_id, &event.data) {
                             Ok(p) => p,
                             Err(e) => {
+                                state.report_removed_empty_optionals(&provider_id);
                                 yield Err(e);
                                 return;
                             }
@@ -563,6 +570,7 @@ impl Provider for OpenAiResponsesProvider {
                     }
                 }
             }
+            state.report_removed_empty_optionals(&provider_id);
             if let Err(e) = completion.end_of_stream(&provider_id) {
                 tracing::warn!(
                     provider = %provider_id,

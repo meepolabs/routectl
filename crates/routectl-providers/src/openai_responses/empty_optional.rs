@@ -11,41 +11,42 @@
 //! touched, and arguments with nothing to remove pass through byte for byte.
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use serde_json::{Map, Value};
+use serde_json::Value;
 
 use routectl_core::ToolDef;
 
-/// The argument schema of one declared tool, borrowed from the request.
-struct ArgShape<'a> {
-    properties: &'a Map<String, Value>,
-    required: Vec<&'a str>,
+/// The argument names one declared tool's schema lists.
+#[derive(Debug)]
+struct ArgShape {
+    properties: HashSet<String>,
+    required: HashSet<String>,
 }
 
-impl ArgShape<'_> {
+impl ArgShape {
     fn is_empty_optional(&self, key: &str, value: &Value) -> bool {
-        value.as_str() == Some("")
-            && self.properties.contains_key(key)
-            && !self.required.contains(&key)
+        value.as_str() == Some("") && self.properties.contains(key) && !self.required.contains(key)
     }
 }
 
 /// The empty optional arguments removed over one response, per tool name.
-pub struct EmptyOptionalFilter<'a> {
-    shapes: HashMap<&'a str, ArgShape<'a>>,
+/// Owns its lookup, so a stream can carry it past the request's lifetime.
+#[derive(Debug, Default)]
+pub struct EmptyOptionalFilter {
+    shapes: HashMap<String, ArgShape>,
     removed: Vec<(String, usize)>,
 }
 
-impl<'a> EmptyOptionalFilter<'a> {
+impl EmptyOptionalFilter {
     /// Index the request's declared tools. Only canonical function tools
     /// carry an argument schema; a tool whose schema has no `properties`
     /// object is left out, so its calls are never filtered.
-    pub fn from_tools(tools: &'a [ToolDef]) -> Self {
+    pub fn from_tools(tools: &[ToolDef]) -> Self {
         let shapes = tools
             .iter()
             .filter_map(|tool| match tool {
-                ToolDef::Custom(c) => Some((c.name.as_str(), arg_shape(&c.input_schema)?)),
+                ToolDef::Custom(c) => Some((c.name.clone(), arg_shape(&c.input_schema)?)),
                 ToolDef::Other(_) => None,
             })
             .collect();
@@ -53,6 +54,11 @@ impl<'a> EmptyOptionalFilter<'a> {
             shapes,
             removed: Vec::new(),
         }
+    }
+
+    /// Whether a call to `name` can have arguments removed at all.
+    pub fn filters(&self, name: &str) -> bool {
+        self.shapes.contains_key(name)
     }
 
     /// `arguments` of a call to `name` without its empty optional top-level
@@ -83,16 +89,27 @@ impl<'a> EmptyOptionalFilter<'a> {
     pub fn removed(&self) -> &[(String, usize)] {
         &self.removed
     }
+
+    /// [`Self::removed`], emptied, so a stream reports its removals once.
+    pub fn take_removed(&mut self) -> Vec<(String, usize)> {
+        std::mem::take(&mut self.removed)
+    }
 }
 
-fn arg_shape(schema: &Value) -> Option<ArgShape<'_>> {
-    let properties = schema.get("properties")?.as_object()?;
+fn arg_shape(schema: &Value) -> Option<ArgShape> {
+    let properties = schema
+        .get("properties")?
+        .as_object()?
+        .keys()
+        .cloned()
+        .collect();
     let required = schema
         .get("required")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
         .filter_map(Value::as_str)
+        .map(str::to_owned)
         .collect();
     Some(ArgShape {
         properties,
