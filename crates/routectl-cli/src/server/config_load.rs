@@ -65,8 +65,10 @@ pub fn load_effective_config(path: &Path) -> Result<LoadedConfig, String> {
 /// [`load_effective_config`] and hot reload through
 /// `read_parse_validate_config`; both keep the fail-fast validation posture.
 pub fn load_effective_config_unvalidated(path: &Path) -> Result<LoadedConfig, String> {
+    let text = read_config_text(path)?;
     Ok(LoadedConfig {
-        config: parse_config_only(path)?,
+        config: parse_config_text(path, &text)?,
+        raw_text: text,
     })
 }
 
@@ -77,23 +79,33 @@ pub fn load_effective_config_unvalidated(path: &Path) -> Result<LoadedConfig, St
 /// [`load_effective_config_unvalidated`] so callers redact them through one
 /// shared path.
 pub fn parse_config_only(path: &Path) -> Result<Config, String> {
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| format!("cannot read config `{}`: {e}", path.display()))?;
+    parse_config_text(path, &read_config_text(path)?)
+}
 
+fn read_config_text(path: &Path) -> Result<String, String> {
+    std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read config `{}`: {e}", path.display()))
+}
+
+/// The parse body of [`parse_config_only`] over `text`, already read from
+/// `path` (named in errors only).
+fn parse_config_text(path: &Path, text: &str) -> Result<Config, String> {
     // The raw-text checks run before the `deny_unknown_fields` typed
     // deserialize, whose generic "unknown field" error would neither name a
     // refused `version` nor a removed key. A hot reload
     // refused here keeps the prior router live (`read_parse_validate_config`
     // treats any `Err` from this function that way).
-    routectl_router::preflight_raw_config(&text).map_err(|e| e.to_string())?;
+    routectl_router::preflight_raw_config(text).map_err(|e| e.to_string())?;
 
-    routectl_router::parse_config(&text)
+    routectl_router::parse_config(text)
         .map_err(|e| format!("config parse error in `{}`: {e}", path.display()))
 }
 
-/// Return of [`load_effective_config`]: the parsed `Config`.
+/// Return of [`load_effective_config`]: the parsed `Config` and the text it
+/// was parsed from, read once.
 pub struct LoadedConfig {
     pub config: Config,
+    pub raw_text: String,
 }
 
 /// The startup validators shared by [`load_effective_config`] and
@@ -137,14 +149,9 @@ pub(super) fn read_parse_validate_config(path: &Path) -> Result<LoadedConfig, Re
     // Unix-only: WARN when the config file is group/world-readable
     // and carries sensitive values. Non-fatal so dev setups with
     // literal: secrets still start; the operator is informed and can
-    // restrict permissions when it matters. A second small read is
-    // acceptable on this rarely-hit reload path -- `load_effective_config`
-    // does not hand back the raw text, and this check is orthogonal to
-    // parsing.
+    // restrict permissions when it matters.
     #[cfg(unix)]
-    if let Ok(text) = std::fs::read_to_string(path) {
-        warn_if_config_world_readable(path, &loaded.config, &text);
-    }
+    warn_if_config_world_readable(path, &loaded.config, &loaded.raw_text);
 
     Ok(loaded)
 }

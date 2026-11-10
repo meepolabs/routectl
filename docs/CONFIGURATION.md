@@ -3418,7 +3418,9 @@ the output is NOT round-trippable back into a config file, which the
 dump says in a leading `#` comment -- your own `config.toml` remains the
 authoritative source for verbatim `base_url` values.
 Adding `--effective` appends a provenance-annotated view: every setting
-with whether `config.toml` set it or the default in code applies, then
+with the layer it comes from (the file, the code default, an environment
+variable, or another entry), all computed from the one read of the
+config file that produced the dump, then
 the surfaces where MORE THAN ONE LAYER can supply a value -- so you can
 see which layer actually won without cross-referencing the price tables
 and the retry defaults by hand.
@@ -3431,14 +3433,30 @@ network call, so it is safe to run against any config.
 Five sections are printed:
 
 - **settings** -- one row per setting, sorted by its dotted key path,
-  as `path=value(source)`. `source` is `file` when `config.toml` writes
-  the key (as a `[section]` key, a dotted key or an inline table: all
-  three read alike) and `default` when the value is the one in code.
+  as `path=value(source)`, where the value is the one the runtime
+  resolves and `source` is one of four, computed by the same resolution
+  the runtime uses:
+  - `file` -- `config.toml` writes the key (as a `[section]` key, a
+    dotted key or an inline table: all three read alike);
+  - `default` -- nothing sets it and the value is the one in code;
+  - `env: <VAR>` -- an environment variable decides the value over the
+    file: `ROUTECTL_TRACE_HEADERS`, `ROUTECTL_LOG_REDACT_PROMPTS` and
+    `ROUTECTL_TRACE_BODY_BYTES` for the three `[log]` knobs. This
+    reflects the environment of the shell that runs `config show`,
+    which is not necessarily the daemon's: a daemon started by a
+    service manager or another terminal may see different variables.
+    Its own startup log line for each knob states what it resolved;
+  - `from <path>` -- the key is unset here and another entry's value
+    applies: an `openai-responses` entry with no `codex_version` runs
+    under the one another entry sets (`from
+    providers.<name>.codex_version`); with none set it reads `default`,
+    the version pinned in this build.
+
   Values come from the same redacted tree as the plain dump, so every
   value redacted there (listed above) prints its sentinel here too and a
-  `base_url` prints only its origin. An array prints as one row. A key that has no value until
-  you set one is not printed unless its default is a fixed value in
-  code: `[retry] max_honored_retry_after_ms`, the three `[log]` knobs,
+  `base_url` prints only its origin. An array prints as one row. A key
+  that has no value until you set one is not printed unless its default
+  is a fixed value in code: `[retry] max_honored_retry_after_ms`, the three `[log]` knobs,
   and on each entry of the matching kind `max_thinking_entry_bytes`
   (`anthropic-api`) and `codex_version` (`openai-responses`). The five
   tiered tuning keys an entry leaves unset resolve in **resolved

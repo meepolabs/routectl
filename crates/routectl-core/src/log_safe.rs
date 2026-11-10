@@ -406,12 +406,7 @@ fn truncate_json_for_log(body: &serde_json::Value, cap: usize) -> String {
 pub fn trace_body_cap() -> usize {
     static CAP: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *CAP.get_or_init(|| {
-        std::env::var("ROUTECTL_TRACE_BODY_BYTES")
-            .ok()
-            .and_then(|v| v.trim().parse::<usize>().ok())
-            .filter(|&n| n > 0)
-            .or_else(|| OVERRIDE_TRACE_BODY_BYTES.get().copied().filter(|&n| n > 0))
-            .unwrap_or(MAX_TRACE_BODY_BYTES)
+        resolve_trace_body_bytes(process_env, OVERRIDE_TRACE_BODY_BYTES.get().copied()).value
     })
 }
 
@@ -468,11 +463,7 @@ fn parse_bool_env(v: &str) -> bool {
 pub(crate) fn redact_enabled() -> bool {
     static REDACT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *REDACT.get_or_init(|| {
-        std::env::var("ROUTECTL_LOG_REDACT_PROMPTS")
-            .ok()
-            .map(|v| parse_bool_env(&v))
-            .or_else(|| OVERRIDE_REDACT_PROMPTS.get().copied())
-            .unwrap_or(false)
+        resolve_redact_prompts(process_env, OVERRIDE_REDACT_PROMPTS.get().copied()).value
     })
 }
 
@@ -509,12 +500,119 @@ pub fn redact_prompts_enabled() -> bool {
 pub fn header_trace_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| {
-        std::env::var("ROUTECTL_TRACE_HEADERS")
-            .ok()
-            .map(|v| parse_bool_env(&v))
-            .or_else(|| OVERRIDE_TRACE_HEADERS.get().copied())
-            .unwrap_or(false)
+        resolve_trace_headers(process_env, OVERRIDE_TRACE_HEADERS.get().copied()).value
     })
+}
+
+/// Env var that decides [`header_trace_enabled`] when set.
+pub const TRACE_HEADERS_ENV: &str = "ROUTECTL_TRACE_HEADERS";
+/// Env var that decides [`redact_prompts_enabled`] when set.
+pub const REDACT_PROMPTS_ENV: &str = "ROUTECTL_LOG_REDACT_PROMPTS";
+/// Env var that decides [`trace_body_cap`] when set to a positive integer.
+pub const TRACE_BODY_BYTES_ENV: &str = "ROUTECTL_TRACE_BODY_BYTES";
+/// `[log] trace_headers` when neither the env var nor the config sets it.
+pub const DEFAULT_TRACE_HEADERS: bool = false;
+/// `[log] redact_prompts` when neither the env var nor the config sets it.
+pub const DEFAULT_REDACT_PROMPTS: bool = false;
+
+/// Where a resolved `[log]` knob's value came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogKnobSource {
+    /// The named environment variable decided it.
+    Env(&'static str),
+    /// The `[log]` config value.
+    Config,
+    /// Nothing set it; the value is the code default.
+    Default,
+}
+
+/// A `[log]` knob's value with the layer that supplied it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LogKnob<T> {
+    /// The value the knob resolves to.
+    pub value: T,
+    /// The layer that supplied [`Self::value`].
+    pub source: LogKnobSource,
+}
+
+/// The process environment reader the `[log]` knob readers resolve with.
+#[must_use]
+pub fn process_env(var: &str) -> Option<String> {
+    std::env::var(var).ok()
+}
+
+/// Resolve `[log] trace_headers`: the env var when set (any value; only
+/// the truthy spellings read true), else `config`, else
+/// [`DEFAULT_TRACE_HEADERS`]. `env` looks up an environment variable;
+/// [`header_trace_enabled`] passes [`process_env`].
+pub fn resolve_trace_headers(
+    env: impl Fn(&str) -> Option<String>,
+    config: Option<bool>,
+) -> LogKnob<bool> {
+    resolve_bool_knob(&env, TRACE_HEADERS_ENV, config, DEFAULT_TRACE_HEADERS)
+}
+
+/// Resolve `[log] redact_prompts` the way [`resolve_trace_headers`]
+/// resolves its knob, over [`REDACT_PROMPTS_ENV`] and
+/// [`DEFAULT_REDACT_PROMPTS`].
+pub fn resolve_redact_prompts(
+    env: impl Fn(&str) -> Option<String>,
+    config: Option<bool>,
+) -> LogKnob<bool> {
+    resolve_bool_knob(&env, REDACT_PROMPTS_ENV, config, DEFAULT_REDACT_PROMPTS)
+}
+
+/// Resolve `[log] trace_body_bytes`: the env var when it parses to a
+/// positive integer, else a positive `config`, else
+/// [`MAX_TRACE_BODY_BYTES`]. A zero or unparseable value at either layer
+/// falls through to the next.
+pub fn resolve_trace_body_bytes(
+    env: impl Fn(&str) -> Option<String>,
+    config: Option<usize>,
+) -> LogKnob<usize> {
+    if let Some(n) = env(TRACE_BODY_BYTES_ENV)
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|&n| n > 0)
+    {
+        return LogKnob {
+            value: n,
+            source: LogKnobSource::Env(TRACE_BODY_BYTES_ENV),
+        };
+    }
+    match config.filter(|&n| n > 0) {
+        Some(n) => LogKnob {
+            value: n,
+            source: LogKnobSource::Config,
+        },
+        None => LogKnob {
+            value: MAX_TRACE_BODY_BYTES,
+            source: LogKnobSource::Default,
+        },
+    }
+}
+
+fn resolve_bool_knob(
+    env: &impl Fn(&str) -> Option<String>,
+    var: &'static str,
+    config: Option<bool>,
+    default: bool,
+) -> LogKnob<bool> {
+    if let Some(v) = env(var) {
+        return LogKnob {
+            value: parse_bool_env(&v),
+            source: LogKnobSource::Env(var),
+        };
+    }
+    match config {
+        Some(value) => LogKnob {
+            value,
+            source: LogKnobSource::Config,
+        },
+        None => LogKnob {
+            value: default,
+            source: LogKnobSource::Default,
+        },
+    }
 }
 
 /// Read the redaction env var and emit a single `info` line so
@@ -2136,3 +2234,7 @@ mod tests;
 #[cfg(test)]
 #[path = "log_safe_credential_tests.rs"]
 mod credential_tests;
+
+#[cfg(test)]
+#[path = "log_safe_knob_tests.rs"]
+mod knob_tests;

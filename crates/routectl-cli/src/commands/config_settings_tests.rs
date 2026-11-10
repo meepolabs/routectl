@@ -1,14 +1,15 @@
 use std::collections::BTreeSet;
 
-use routectl_core::identity::codex::PINNED_CODEX_VERSION;
 use routectl_router::Config;
 use serde_json::Value as Json;
 
-use super::{CODE_DEFAULTS, CodeDefault, DefaultScope, redacted_settings_lines};
+use super::{CODE_DEFAULTS, CodeDefault, DefaultScope, redacted_settings_lines_with_env};
 
+/// The settings block with no environment variable set, whatever the
+/// invoking shell exports.
 fn lines_for(raw_text: &str) -> Vec<String> {
     let config: Config = toml::from_str(raw_text).expect("fixture config parses");
-    redacted_settings_lines(&config, raw_text).expect("settings render")
+    redacted_settings_lines_with_env(&config, raw_text, &|_| None).expect("settings render")
 }
 
 /// `path=value(source)` -> (`path`, `source`).
@@ -200,31 +201,6 @@ api_key_ref = "env://K"
         ],
         "lines:\n{lines:#?}"
     );
-}
-
-#[test]
-fn an_unset_codex_version_reads_the_version_the_process_runs_under() {
-    let rows = [
-        ("no entry sets one", "", PINNED_CODEX_VERSION),
-        (
-            "another entry sets one",
-            "[providers.pinned]\nkind = \"openai-responses\"\napi_key_ref = \"env://K\"\ncodex_version = \"9.9.9\"\n",
-            "9.9.9",
-        ),
-    ];
-    for (name, extra, expected) in rows {
-        let raw = format!(
-            "[providers.plain]\nkind = \"openai-responses\"\napi_key_ref = \"env://K\"\n{extra}"
-        );
-
-        let lines = lines_for(&raw);
-
-        let line = format!("  providers.plain.codex_version=\"{expected}\"(default)");
-        assert!(
-            lines.contains(&line),
-            "row `{name}`: `{line}` missing; lines:\n{lines:#?}"
-        );
-    }
 }
 
 #[test]

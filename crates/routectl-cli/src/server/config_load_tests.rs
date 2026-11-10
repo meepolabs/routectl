@@ -1000,3 +1000,18 @@ fn cold_start_and_reload_ignore_a_leftover_overlay_file() {
     assert!(cold.is_ok(), "cold start: {:?}", cold.err());
     assert!(reload.is_ok(), "reload: {:?}", reload.err());
 }
+
+/// The loader hands back the exact text it parsed, so a caller that needs
+/// the raw file renders from the same revision as the typed config.
+#[test]
+fn load_returns_the_text_it_parsed() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cfg_path = dir.path().join("config.toml");
+    let body = format!("version = {CURRENT_CONFIG_VERSION}\n[server]\nport = 9012\n");
+    std::fs::write(&cfg_path, &body).expect("write config.toml");
+
+    let loaded = load_effective_config(&cfg_path).expect("load must succeed");
+
+    assert_eq!(loaded.raw_text, body);
+    assert_eq!(loaded.config.server.port, 9012);
+}

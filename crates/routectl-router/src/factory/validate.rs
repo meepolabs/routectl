@@ -1562,10 +1562,16 @@ fn member_authenticates_with_oauth(entry: &ProviderEntry) -> bool {
 /// rejected divergent values, so returning the first configured value is
 /// authoritative.
 pub fn resolved_codex_version(config: &Config) -> Option<String> {
+    configured_codex_version(config).map(|(_, version)| version.to_owned())
+}
+
+/// The `[providers.X]` entry whose `codex_version` [`resolved_codex_version`]
+/// returns, with that value: `(X, version)`. `None` when no entry sets one.
+pub fn configured_codex_version(config: &Config) -> Option<(&str, &str)> {
     config
         .providers
-        .values()
-        .find_map(|entry| entry.codex_version().map(str::to_owned))
+        .iter()
+        .find_map(|(name, entry)| entry.codex_version().map(|v| (name.as_str(), v)))
 }
 
 /// Reject a config whose `[capability] essential` list names a key the

@@ -6,7 +6,9 @@
 //! competes for a value, tagging each with the layer that won:
 //!
 //!   - settings (every scalar key, `(file)` when `config.toml` sets it,
-//!     `(default)` when the value is the one in code),
+//!     `(default)` when the value is the one in code, `(env: <VAR>)` when an
+//!     environment variable of this process decides it, `(from <path>)` when
+//!     another entry's value applies),
 //!   - model facts (context window, output fill and each price field, tagged
 //!     with a fixed source token and, for a table price, the table date),
 //!   - retry class policy (baked class default vs `[retry.classes.<class>]`),
@@ -23,29 +25,29 @@ use routectl_core::Result;
 use std::fmt::Display;
 
 use super::config_settings::redacted_settings_lines;
+use crate::server::LoadedConfig;
 
 use routectl_router::prices::{PriceSource, PriceTable};
 use routectl_router::{
-    BreakerThreshold, ClassPolicyCell, ClassPolicySource, Config, ModelCell, OverrideRow,
-    OverrideVerdict, PriceTableDates, Resolved, ResolvedTuning, TuningRow, TuningTargetKind,
-    derive_effective_view,
+    BreakerThreshold, ClassPolicyCell, ClassPolicySource, ModelCell, OverrideRow, OverrideVerdict,
+    PriceTableDates, Resolved, ResolvedTuning, TuningRow, TuningTargetKind, derive_effective_view,
 };
 
 /// Print the plain redacted config dump, then the provenance-annotated
 /// effective view (settings + model facts + retry class policy +
-/// resolved tuning + capability cells). `raw_text` is the config file the
-/// config was loaded from; `refreshed` and `shipped` are the price tables
-/// the model prices resolve against.
+/// resolved tuning + capability cells). Values and settings provenance
+/// both come from `loaded`, the one read of the config file; `refreshed`
+/// and `shipped` are the price tables the model prices resolve against.
 pub fn show_effective(
-    config: &Config,
-    raw_text: &str,
+    loaded: &LoadedConfig,
     refreshed: Option<&PriceTable>,
     shipped: Option<&PriceTable>,
 ) -> Result<()> {
+    let config = &loaded.config;
     super::config::show(config)?;
 
     println!("effective view -- provenance-annotated");
-    render_settings(config, raw_text)?;
+    render_settings(loaded)?;
     let view = derive_effective_view(config, refreshed, shipped);
     render_model_facts(&view.models, &view.price_tables);
     render_class_cells(&view.classes);
@@ -54,12 +56,19 @@ pub fn show_effective(
     Ok(())
 }
 
-/// Render every scalar setting of the redacted config tagged `(file)` or
-/// `(default)`.
-fn render_settings(config: &Config, raw_text: &str) -> Result<()> {
-    let lines = redacted_settings_lines(config, raw_text)?;
+/// The settings block of `loaded`, from its own config and raw text.
+fn settings_block(loaded: &LoadedConfig) -> Result<Vec<String>> {
+    redacted_settings_lines(&loaded.config, &loaded.raw_text)
+}
+
+/// Render every scalar setting of the redacted config tagged with its
+/// source.
+fn render_settings(loaded: &LoadedConfig) -> Result<()> {
+    let lines = settings_block(loaded)?;
     println!(
-        "\nsettings (file: config.toml sets it; default: the value in code; the five \
+        "\nsettings (file: config.toml sets it; default: the value in code; env: an \
+         environment variable of this shell decides it, which a daemon started \
+         elsewhere may not share; from: another entry's value applies; the five \
          tiered keys an entry leaves unset resolve under resolved tuning):"
     );
     for line in lines {
@@ -298,6 +307,32 @@ const fn class_name(class: routectl_router::class_policy::ConfigFailureClass) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use routectl_router::Config;
+
+    #[test]
+    fn the_settings_block_describes_the_buffer_the_config_was_loaded_from() {
+        // Arrange: load a file that sets `server.port`, then replace the
+        // file with one that does not.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let version = routectl_router::CURRENT_CONFIG_VERSION;
+        std::fs::write(
+            &path,
+            format!("version = {version}\n[server]\nport = 9011\n"),
+        )
+        .expect("write config");
+        let loaded = crate::server::load_effective_config(&path).expect("config loads");
+        std::fs::write(&path, format!("version = {version}\n")).expect("replace config");
+
+        // Act
+        let lines = settings_block(&loaded).expect("settings render");
+
+        // Assert: value and source both describe the loaded revision.
+        assert!(
+            lines.iter().any(|l| l == "  server.port=9011(file)"),
+            "lines:\n{lines:#?}"
+        );
+    }
 
     #[test]
     fn capability_line_carries_source_tag_for_seeded_override_cell() {
