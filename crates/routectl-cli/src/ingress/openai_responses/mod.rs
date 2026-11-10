@@ -25,6 +25,7 @@
 //! and `stream.rs` the SSE stream state machine.
 
 use std::any::Any;
+use std::collections::BTreeMap;
 
 use axum::http::HeaderMap;
 use routectl_core::wire_check::IngressDialect;
@@ -32,7 +33,7 @@ use routectl_core::{ChatChunk, ChatRequest, ChatResponse, Result};
 use serde_json::Value;
 
 use super::{
-    ErrorEnvelopeShape, IngressAdapter, IngressStreamState, ResponseEdits, SseEvent,
+    ErrorEnvelopeShape, IngressAdapter, IngressStreamState, RenderContext, ResponseEdits, SseEvent,
     StreamErrorClass, StreamRequestContext,
 };
 
@@ -132,6 +133,9 @@ pub struct ResponsesStreamState {
     /// Accumulated reasoning details (summary / text / encrypted),
     /// replayed into the completed body's `reasoning` items.
     reasoning_accumulator: Vec<routectl_core::ReasoningDetail>,
+    /// Bare tool name -> the namespace the client declared it in, stamped
+    /// onto each returned `function_call` item.
+    tool_namespaces: BTreeMap<String, String>,
 }
 
 /// One open Responses output item, tagged with the canonical channel
@@ -216,22 +220,30 @@ impl IngressAdapter for ResponsesIngress {
     }
 
     fn render_response(&self, resp: ChatResponse) -> Result<bytes::Bytes> {
-        self.render_response_declared(resp, &mut ResponseEdits::default())
+        self.render_response_declared(
+            resp,
+            &RenderContext::default(),
+            &mut ResponseEdits::default(),
+        )
     }
 
     fn render_response_declared(
         &self,
         resp: ChatResponse,
+        ctx: &RenderContext,
         edits: &mut ResponseEdits,
     ) -> Result<bytes::Bytes> {
         crate::ingress::render_value_to_bytes(
             self.id(),
-            render::render_responses_response_declared(resp, edits)?,
+            render::render_responses_response_declared(resp, &ctx.tool_namespaces, edits)?,
         )
     }
 
-    fn new_stream_state(&self, _ctx: &StreamRequestContext) -> Box<dyn IngressStreamState> {
-        Box::new(ResponsesStreamState::default())
+    fn new_stream_state(&self, ctx: &StreamRequestContext) -> Box<dyn IngressStreamState> {
+        Box::new(ResponsesStreamState {
+            tool_namespaces: ctx.render.tool_namespaces.clone(),
+            ..ResponsesStreamState::default()
+        })
     }
 
     fn render_chunk(

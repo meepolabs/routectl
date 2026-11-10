@@ -3338,6 +3338,7 @@ async fn stream_gate_fast_ok_renders_message_start_with_estimate_no_early_frame(
     let stream_ctx = StreamRequestContext {
         input_tokens_estimate: 42,
         model: "m".into(),
+        render: Default::default(),
     };
 
     // Act
@@ -3457,6 +3458,7 @@ async fn warm_render_first_byte_is_message_start_with_estimate_no_duplicate() {
     let stream_ctx = StreamRequestContext {
         input_tokens_estimate: 77,
         model: "m".into(),
+        render: Default::default(),
     };
     let (tx, rx) = tokio::sync::mpsc::channel::<SseEvent>(64);
 
@@ -3605,6 +3607,7 @@ async fn warm_render_dispatch_err_emits_one_terminal_error_and_pre_content_row()
         let stream_ctx = StreamRequestContext {
             input_tokens_estimate: 10,
             model: "m".into(),
+            render: Default::default(),
         };
         let (tx, rx) = tokio::sync::mpsc::channel::<SseEvent>(64);
 
@@ -3734,6 +3737,7 @@ async fn warm_render_cancels_pending_dispatch_on_client_disconnect_before_conten
     let stream_ctx = StreamRequestContext {
         input_tokens_estimate: 5,
         model: "m".into(),
+        render: Default::default(),
     };
     let (tx, mut rx) = tokio::sync::mpsc::channel::<SseEvent>(64);
 
@@ -3801,6 +3805,7 @@ async fn stream_gate_grace_expiry_commits_sse_response() {
     let stream_ctx = StreamRequestContext {
         input_tokens_estimate: 5,
         model: "m".into(),
+        render: Default::default(),
     };
 
     // Act: with paused time + a pending dispatch, the runtime auto-advances to
@@ -3851,6 +3856,7 @@ async fn warm_render_ok_then_mid_stream_error_marks_mid_stream_stage() {
     let stream_ctx = StreamRequestContext {
         input_tokens_estimate: 10,
         model: "m".into(),
+        render: Default::default(),
     };
     let (tx, rx) = tokio::sync::mpsc::channel::<SseEvent>(64);
 
@@ -3936,6 +3942,7 @@ async fn warm_render_post_content_anthropic_error_is_terminal_with_preserved_typ
     let stream_ctx = StreamRequestContext {
         input_tokens_estimate: 10,
         model: "m".into(),
+        render: Default::default(),
     };
     let (tx, rx) = tokio::sync::mpsc::channel::<SseEvent>(64);
 
@@ -4018,6 +4025,7 @@ async fn warm_render_client_disconnect_before_flush_drops_to_client_disconnect()
     let stream_ctx = StreamRequestContext {
         input_tokens_estimate: 10,
         model: "m".into(),
+        render: Default::default(),
     };
     let (tx, rx) = tokio::sync::mpsc::channel::<SseEvent>(64);
     drop(rx);
@@ -4077,6 +4085,7 @@ async fn warm_render_openai_dialect_commits_with_no_leading_early_frame() {
     let stream_ctx = StreamRequestContext {
         input_tokens_estimate: 5,
         model: "m".into(),
+        render: Default::default(),
     };
 
     // Act
@@ -4127,6 +4136,7 @@ async fn warm_render_openai_dialect_commits_with_no_leading_early_frame() {
             StreamRequestContext {
                 input_tokens_estimate: 5,
                 model: "m".into(),
+                render: Default::default(),
             },
         ),
     )
@@ -6092,5 +6102,159 @@ async fn a_client_leaving_during_a_send_compares_before_its_row() {
         );
         assert_eq!(rows.len(), 1, "{site:?}");
         assert_eq!(rows[0].outcome, "client_disconnect", "{site:?}");
+    }
+}
+
+/// A Responses client's namespace record survives the dispatch that moves
+/// its request into the router, so the returned call carries its
+/// namespace on both the complete and the stream path.
+mod namespace_on_returned_calls {
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    use axum::body::{Bytes, to_bytes};
+    use axum::http::{HeaderMap, HeaderValue, header};
+    use routectl_router::{AliasValue, Config, ModelEntry, ProviderEntry, RetryPolicy};
+    use serde_json::{Value, json};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use crate::handlers::ingress_handle::ingress_handle;
+    use crate::ingress::openai_responses::ResponsesIngress;
+    use crate::server::AppState;
+
+    const CALL: &str =
+        r#"{"id":"call_ns","type":"function","function":{"name":"alpha_wait","arguments":"{}"}}"#;
+
+    /// A chat upstream answering every request with one call to
+    /// `alpha_wait`, streamed or whole.
+    async fn upstream_calling_alpha_wait(stream: bool) -> MockServer {
+        let call: Value = serde_json::from_str(CALL).expect("call json");
+        let template = if stream {
+            let mut streamed = call.clone();
+            streamed["index"] = json!(0);
+            let frames = [
+                json!({"id": "c1", "object": "chat.completion.chunk", "created": 1, "model": "u",
+                       "choices": [{"index": 0, "delta": {"role": "assistant", "tool_calls": [streamed]}}]}),
+                json!({"id": "c1", "object": "chat.completion.chunk", "created": 1, "model": "u",
+                       "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]}),
+            ];
+            let mut body: String = frames.iter().map(|f| format!("data: {f}\n\n")).collect();
+            body.push_str("data: [DONE]\n\n");
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(body)
+        } else {
+            ResponseTemplate::new(200).set_body_json(json!({
+                "id": "c1", "object": "chat.completion", "created": 1, "model": "u",
+                "choices": [{"index": 0, "finish_reason": "tool_calls",
+                             "message": {"role": "assistant", "content": null, "tool_calls": [call]}}],
+                "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5}
+            }))
+        };
+        let upstream = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(template)
+            .mount(&upstream)
+            .await;
+        upstream
+    }
+
+    async fn state_for(upstream: &MockServer) -> Arc<AppState> {
+        let mut retry = RetryPolicy::default();
+        retry.max_attempts = 1;
+        let config = Config {
+            providers: BTreeMap::from([(
+                "p".to_string(),
+                ProviderEntry::openai_compat(upstream.uri(), crate::test_secret::file_ref("k")),
+            )]),
+            models: BTreeMap::from([("m".to_string(), ModelEntry::new("p", "u"))]),
+            aliases: BTreeMap::from([("a".to_string(), AliasValue::Single("m".to_string()))]),
+            retry,
+            ..Default::default()
+        };
+        let router = super::build_test_router(Arc::new(config)).await;
+        AppState::for_test(Arc::new(arc_swap::ArcSwap::from_pointee(router)))
+    }
+
+    fn body(stream: bool) -> Bytes {
+        let body = json!({
+            "model": "a", "stream": stream,
+            "tools": [{"type": "namespace", "name": "ns_alpha", "tools": [
+                {"type": "function", "name": "alpha_wait", "parameters": {"type": "object"}}
+            ]}],
+            "input": [{"type": "message", "role": "user", "content": "q"}]
+        });
+        Bytes::from(serde_json::to_vec(&body).expect("body serializes"))
+    }
+
+    /// Every `function_call` item the client received: the `output` of a
+    /// complete body, or each item on a streamed `output_item.done` plus the
+    /// completed body's `output`.
+    fn returned_calls(raw: &[u8], stream: bool) -> Vec<Value> {
+        let is_call = |item: &Value| item["type"] == "function_call";
+        if !stream {
+            let body: Value = serde_json::from_slice(raw).expect("json body");
+            return body["output"]
+                .as_array()
+                .expect("output")
+                .iter()
+                .filter(|i| is_call(i))
+                .cloned()
+                .collect();
+        }
+        let text = std::str::from_utf8(raw).expect("utf8");
+        let mut calls = Vec::new();
+        for data in text.lines().filter_map(|l| l.strip_prefix("data:")) {
+            let Ok(frame) = serde_json::from_str::<Value>(data.trim()) else {
+                continue;
+            };
+            match frame["type"].as_str() {
+                Some("response.output_item.done") if is_call(&frame["item"]) => {
+                    calls.push(frame["item"].clone());
+                }
+                Some("response.completed") => calls.extend(
+                    frame["response"]["output"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter(|i| is_call(i))
+                        .cloned(),
+                ),
+                _ => {}
+            }
+        }
+        calls
+    }
+
+    #[tokio::test]
+    async fn a_returned_call_carries_the_namespace_its_request_declared() {
+        for stream in [false, true] {
+            // Arrange
+            let upstream = upstream_calling_alpha_wait(stream).await;
+            let state = state_for(&upstream).await;
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            );
+
+            // Act
+            let resp =
+                ingress_handle(state, headers, None, Ok(body(stream)), ResponsesIngress).await;
+            let raw = to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .expect("body drains");
+
+            // Assert
+            let calls = returned_calls(&raw, stream);
+            let expected = if stream { 2 } else { 1 };
+            assert_eq!(calls.len(), expected, "stream={stream}: {calls:?}");
+            for call in &calls {
+                assert_eq!(call["name"], "alpha_wait", "stream={stream}");
+                assert_eq!(call["namespace"], "ns_alpha", "stream={stream}: {call}");
+            }
+        }
     }
 }

@@ -165,6 +165,11 @@ pub enum ResponseInputItem {
         call_id: String,
         name: String,
         arguments: String,
+        /// The namespace the client declared the called tool in. Absent
+        /// for a flat tool: the upstream resolves a call with no namespace
+        /// against the default one.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        namespace: Option<String>,
     },
     FunctionCallOutput {
         call_id: String,
@@ -461,6 +466,7 @@ mod tests {
             call_id: "call_1".into(),
             name: "calc".into(),
             arguments: "{\"a\":1}".into(),
+            namespace: None,
         };
 
         // Act

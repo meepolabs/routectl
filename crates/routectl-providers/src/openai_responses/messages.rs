@@ -84,6 +84,8 @@
 //! lane becomes the more faithful option; that is a lane-awareness change
 //! to the shared sanitizer, not a change here.
 
+use std::collections::BTreeMap;
+
 use serde_json::Value;
 
 use routectl_core::wire_check::{EditKind, EditSite, WireTap};
@@ -663,6 +665,24 @@ pub(super) fn retain_replayable_reasoning(items: &mut Vec<ResponseInputItem>) {
     });
 }
 
+/// Put back the `namespace` the Responses ingress took off each replayed
+/// `function_call` history item, from the request's record of which
+/// namespace declared each tool. A call to a flat tool stays without one.
+pub(super) fn restamp_namespaces(
+    items: &mut [ResponseInputItem],
+    tool_namespaces: &BTreeMap<String, String>,
+) {
+    for item in items {
+        if let ResponseInputItem::FunctionCall {
+            name, namespace, ..
+        } = item
+            && let Some(declared) = tool_namespaces.get(name.as_str())
+        {
+            *namespace = Some(declared.clone());
+        }
+    }
+}
+
 /// Re-emit OpenAI-shape `Message.tool_calls` as Responses `function_call`
 /// input items. See `translate_assistant_message` for the orphaned-output
 /// failure this prevents. No-op when `tool_calls` is empty or when the
@@ -686,6 +706,7 @@ fn append_function_calls_from_tool_calls(
             arguments: serde_json::to_string(&call.arguments).map_err(|e| {
                 Error::Internal(format!("provider `{id}`: serialize tool arguments: {e}"))
             })?,
+            namespace: None,
         });
     }
     Ok(())
@@ -1106,6 +1127,7 @@ fn walk_assistant_part(
                 arguments: serde_json::to_string(input).map_err(|e| {
                     Error::Internal(format!("provider `{id}`: serialize tool arguments: {e}"))
                 })?,
+                namespace: None,
             });
         }
         other => {
@@ -2329,7 +2351,7 @@ mod tool_calls_field_tests {
             .position(|i| {
                 matches!(
                     i,
-                    ResponseInputItem::FunctionCall { call_id, name, arguments }
+                    ResponseInputItem::FunctionCall { call_id, name, arguments, .. }
                         if call_id == "call_1"
                             && name == "get_weather"
                             && arguments == "{\"city\":\"SF\"}"

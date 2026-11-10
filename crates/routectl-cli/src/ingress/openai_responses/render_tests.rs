@@ -954,3 +954,55 @@ fn complete_render_without_an_envelope_emits_no_message_item_id() {
     assert_eq!(v["output"][0]["type"], "message");
     assert!(v["output"][0].get("id").is_none());
 }
+
+// ---------------------------------------------------------------------------
+// namespace on returned calls
+// ---------------------------------------------------------------------------
+
+/// A turn calling one tool the client declared in a namespace and one
+/// declared flat, rendered with that request's namespace record.
+fn render_namespaced_and_flat_calls() -> Value {
+    use crate::ingress::openai_responses::ResponsesIngress;
+    use crate::ingress::{IngressAdapter, RenderContext, ResponseEdits};
+
+    let mut msg = assistant_message(MessageContent::Null);
+    msg.tool_calls = Some(vec![
+        json!({"id": "call_ns", "type": "function",
+               "function": {"name": "alpha_wait", "arguments": "{}"}}),
+        json!({"id": "call_flat", "type": "function",
+               "function": {"name": "flat_one", "arguments": "{}"}}),
+    ]);
+    let ctx = RenderContext {
+        tool_namespaces: [("alpha_wait".to_string(), "ns_alpha".to_string())].into(),
+    };
+    let body = ResponsesIngress
+        .render_response_declared(
+            response_with(msg, Some("tool_calls")),
+            &ctx,
+            &mut ResponseEdits::default(),
+        )
+        .expect("renders");
+    serde_json::from_slice(&body).expect("json body")
+}
+
+#[test]
+fn a_call_to_a_namespaced_tool_carries_its_namespace() {
+    // Act
+    let v = render_namespaced_and_flat_calls();
+
+    // Assert
+    let items = output(&v);
+    assert_eq!(items[0]["name"], "alpha_wait");
+    assert_eq!(items[0]["namespace"], "ns_alpha", "got: {v}");
+}
+
+#[test]
+fn a_call_to_a_flat_tool_carries_no_namespace() {
+    // Act
+    let v = render_namespaced_and_flat_calls();
+
+    // Assert
+    let items = output(&v);
+    assert_eq!(items[1]["name"], "flat_one");
+    assert!(items[1].get("namespace").is_none(), "got: {v}");
+}

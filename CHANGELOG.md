@@ -763,6 +763,8 @@ list with more narrative.
 
 ### Fixed
 
+- **Returned calls to a Responses client's namespaced tools carry their namespace.** A `function_call` output item for a tool the client declared inside a `type:"namespace"` container now carries that container's `namespace`, on complete responses, on streamed `output_item` events and in the `response.completed` body; before, the client resolved the call against its default namespace. Calls to flat tools carry no `namespace`. When such a call is replayed in history to a Responses upstream, its `namespace` is sent back with it. Other ingress dialects are unchanged.
+
 - **A Responses client's `parallel_tool_calls` reaches a Responses upstream as sent.** An explicit `false` (as Codex CLI sends) is no longer rewritten to `true`; when the field is absent the egress still sends `true`, and a value carried from another dialect's ingress is still pinned `true`.
 
 - **Unmodeled Responses output items arrive as top-level items on complete responses.** An output item routectl does not model (for example a `custom_tool_call`) now renders as its own entry in `output[]`, after the message and before the function calls, with its fields as the upstream sent them, instead of as a block inside the message content. A `refusal` stays a block on the message.

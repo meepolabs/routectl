@@ -52,6 +52,8 @@
 //! item-level `encrypted_content` signature, any further Encrypted
 //! details become inner `reasoning_encrypted` content blocks.
 
+use std::collections::BTreeMap;
+
 use serde_json::{Map, Value, json};
 
 use routectl_core::wire_check::{EditKind, EditSite, WirePath};
@@ -63,14 +65,18 @@ use routectl_core::{
 use crate::ingress::ResponseEdits;
 
 /// Render a canonical `ChatResponse` into a Responses `response` object.
+#[cfg(test)]
 pub(super) fn render_responses_response(resp: ChatResponse) -> Result<Value> {
-    render_responses_response_declared(resp, &mut ResponseEdits::default())
+    render_responses_response_declared(resp, &BTreeMap::new(), &mut ResponseEdits::default())
 }
 
-/// [`render_responses_response`], declaring into `edits` every response
-/// edit the render makes on purpose.
+/// Render a canonical `ChatResponse` into a Responses `response` object,
+/// stamping each returned call with its namespace from `tool_namespaces`
+/// and declaring into `edits` every response edit the render makes on
+/// purpose.
 pub(super) fn render_responses_response_declared(
     resp: ChatResponse,
+    tool_namespaces: &BTreeMap<String, String>,
     edits: &mut ResponseEdits,
 ) -> Result<Value> {
     let message_item_id = resp
@@ -95,7 +101,14 @@ pub(super) fn render_responses_response_declared(
     }
 
     let output = first
-        .map(|c| build_output(&c.message, message_item_id.as_deref(), edits))
+        .map(|c| {
+            build_output(
+                &c.message,
+                message_item_id.as_deref(),
+                tool_namespaces,
+                edits,
+            )
+        })
         .unwrap_or_default();
     body.insert("output".into(), Value::Array(output));
 
@@ -174,6 +187,7 @@ pub(super) fn declare_status_rebuild(finish_reason: Option<&str>, edits: &mut Re
 fn build_output(
     msg: &Message,
     message_item_id: Option<&str>,
+    tool_namespaces: &BTreeMap<String, String>,
     edits: &mut ResponseEdits,
 ) -> Vec<Value> {
     let mut output: Vec<Value> = Vec::new();
@@ -188,7 +202,7 @@ fn build_output(
     }
 
     output.extend(build_unmodeled_items(&msg.content));
-    output.extend(build_function_call_items(msg));
+    output.extend(build_function_call_items(msg, tool_namespaces));
 
     output
 }
@@ -313,12 +327,36 @@ fn other_item(type_tag: &str, extras: &Map<String, Value>) -> Value {
 /// canonical tool_call shape is `{id, type:"function", function:{name,
 /// arguments}}` (arguments is a JSON string); the Responses item is
 /// `{type:"function_call", call_id, name, arguments}`. Inverse of the
-/// egress, which built tool_calls from FunctionCall items.
-fn build_function_call_items(msg: &Message) -> Vec<Value> {
+/// egress, which built tool_calls from FunctionCall items. A call to a tool
+/// the client declared inside a namespace carries that `namespace`.
+fn build_function_call_items(
+    msg: &Message,
+    tool_namespaces: &BTreeMap<String, String>,
+) -> Vec<Value> {
     let Some(tool_calls) = msg.tool_calls.as_ref() else {
         return Vec::new();
     };
-    tool_calls.iter().map(function_call_item).collect()
+    tool_calls
+        .iter()
+        .map(|tc| stamp_namespace(function_call_item(tc), tool_namespaces))
+        .collect()
+}
+
+/// Add `namespace` to a `function_call` item whose name `tool_namespaces`
+/// maps; any other item is returned unchanged.
+pub(super) fn stamp_namespace(
+    mut item: Value,
+    tool_namespaces: &BTreeMap<String, String>,
+) -> Value {
+    let namespace = item
+        .get("name")
+        .and_then(Value::as_str)
+        .and_then(|name| tool_namespaces.get(name))
+        .cloned();
+    if let (Some(namespace), Some(obj)) = (namespace, item.as_object_mut()) {
+        obj.insert("namespace".into(), Value::String(namespace));
+    }
+    item
 }
 
 pub(super) fn function_call_item(tc: &Value) -> Value {

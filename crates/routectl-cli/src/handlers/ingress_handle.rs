@@ -40,7 +40,8 @@ use crate::handlers::usage_capture::{
     StreamStage, UsageCapture, build_usage_draft, outcome_for_dispatch_err,
 };
 use crate::ingress::{
-    ErrorEnvelopeShape, IngressAdapter, IngressStreamState, SseEvent, StreamRequestContext,
+    ErrorEnvelopeShape, IngressAdapter, IngressStreamState, RenderContext, SseEvent,
+    StreamRequestContext,
 };
 use crate::server::AppState;
 use crate::server::confirmation_advance::ConfirmationTracker;
@@ -528,6 +529,7 @@ async fn complete_response<A: IngressAdapter>(
     // this same value the usage ledger's `session_id` column was seeded
     // from (`build_usage_draft`) -- one derivation, read twice.
     let session_key = req.routectl_internal.inbound_session_key.clone();
+    let render_ctx = RenderContext::of(&req);
     let mut dispatched = router.complete_with_options(req, opts).await;
     let response_check = dispatched.meta.response_check.take();
     capture.observe_meta(
@@ -559,7 +561,7 @@ async fn complete_response<A: IngressAdapter>(
             capture.mark_first_byte();
             capture.observe_response(&resp);
             let mut response_edits = response_edits_for(response_check.as_ref());
-            match adapter.render_response_declared(resp, &mut response_edits) {
+            match adapter.render_response_declared(resp, &render_ctx, &mut response_edits) {
                 Ok(body) => {
                     // Upstream delivered AND we serialized it: this is the
                     // only path where the client receives 200 + body. The
@@ -639,6 +641,7 @@ async fn stream_response<A: IngressAdapter + 'static>(
             OpeningMeter::raw_tokens,
         ),
         model: req.model.clone(),
+        render: RenderContext::of(&req),
     };
     let turn = StreamTurn {
         session_key,

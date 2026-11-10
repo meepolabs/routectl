@@ -18,7 +18,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use rand::TryRng;
 use rand::rngs::SysRng;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use routectl_core::wire_check::IngressDialect;
 use routectl_core::{
@@ -863,13 +863,39 @@ pub enum ErrorEnvelopeShape {
 ///   (serialized bytes / 4, never zero for a nonempty request).
 /// - `model`: the resolved request model, used as the early-frame model
 ///   id when the upstream stream's first chunk carries no model string.
+/// - `render`: the request-scoped values the complete-body render also
+///   reads (see [`RenderContext`]).
 ///
-/// The Anthropic adapter reads both; the OpenAI and Responses adapters
-/// ignore the context entirely (their state carries neither field).
+/// The Anthropic adapter reads the first two; the Responses adapter reads
+/// `render`; the OpenAI adapter ignores the context entirely.
 #[derive(Debug, Clone, Default)]
 pub struct StreamRequestContext {
     pub input_tokens_estimate: u64,
     pub model: String,
+    pub render: RenderContext,
+}
+
+/// Request-derived values a renderer needs that the canonical response
+/// does not carry, built by the handler from the `ChatRequest` before
+/// dispatch moves the request into the router.
+///
+/// - `tool_namespaces`: bare tool name -> the Responses namespace the
+///   client declared it in. The Responses renderer stamps `namespace` on a
+///   returned `function_call` whose name is here; a client resolves a call
+///   by (namespace, name), so a call missing its namespace is resolved
+///   against the default one. Empty for every other ingress.
+#[derive(Debug, Clone, Default)]
+pub struct RenderContext {
+    pub tool_namespaces: BTreeMap<String, String>,
+}
+
+impl RenderContext {
+    /// The render context for `req`.
+    pub fn of(req: &ChatRequest) -> Self {
+        Self {
+            tool_namespaces: req.routectl_internal.responses_namespaces.members.clone(),
+        }
+    }
 }
 
 /// Finish a non-streaming render: emit the direction-4 egress-body trace
@@ -934,10 +960,13 @@ pub trait IngressAdapter: Send + Sync {
     fn render_response(&self, resp: ChatResponse) -> Result<bytes::Bytes>;
 
     /// [`Self::render_response`], declaring into `edits` every response edit
-    /// the render makes on purpose. Same bytes either way.
+    /// the render makes on purpose, with the request-derived values in
+    /// `ctx`. An empty `ctx` renders the same bytes as
+    /// [`Self::render_response`].
     fn render_response_declared(
         &self,
         resp: ChatResponse,
+        _ctx: &RenderContext,
         _edits: &mut ResponseEdits,
     ) -> Result<bytes::Bytes> {
         self.render_response(resp)

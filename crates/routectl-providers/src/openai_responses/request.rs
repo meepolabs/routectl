@@ -22,7 +22,8 @@ use routectl_core::{
 use serde_json::Value;
 
 use super::messages::{
-    UnknownParts, build_input, withholds_forwarded_file_url, withholds_user_file_url,
+    UnknownParts, build_input, restamp_namespaces, withholds_forwarded_file_url,
+    withholds_user_file_url,
 };
 use super::system::{flush_fingerprint_tally, record_developer_turn_withhold, translate_system};
 use super::tools::{translate_tool_choice, translate_tools};
@@ -173,6 +174,9 @@ fn build_input_with_passthrough(
         cache_withheld,
     );
     if provenance == RequestProvenance::ResponsesIngress {
+        if let Ok(items) = items.as_mut() {
+            restamp_namespaces(items, &req.routectl_internal.responses_namespaces.members);
+        }
         place_cache_breakpoints(
             id,
             auth_kind,

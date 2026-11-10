@@ -28,7 +28,7 @@ use routectl_core::{
 };
 
 use super::{
-    ErrorEnvelopeShape, IngressAdapter, IngressStreamState, ResponseEdits, SseEvent,
+    ErrorEnvelopeShape, IngressAdapter, IngressStreamState, RenderContext, ResponseEdits, SseEvent,
     StreamErrorClass, StreamRequestContext,
 };
 
@@ -341,12 +341,17 @@ impl IngressAdapter for AnthropicIngress {
     }
 
     fn render_response(&self, resp: ChatResponse) -> Result<bytes::Bytes> {
-        self.render_response_declared(resp, &mut ResponseEdits::default())
+        self.render_response_declared(
+            resp,
+            &RenderContext::default(),
+            &mut ResponseEdits::default(),
+        )
     }
 
     fn render_response_declared(
         &self,
         resp: ChatResponse,
+        _ctx: &RenderContext,
         edits: &mut ResponseEdits,
     ) -> Result<bytes::Bytes> {
         crate::ingress::render_value_to_bytes(self.id(), render_messages_response(resp, edits))

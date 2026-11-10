@@ -91,6 +91,7 @@ pub(super) fn metered_turn(
         ctx: StreamRequestContext {
             input_tokens_estimate: meter.raw_tokens(),
             model: req.model.clone(),
+            render: Default::default(),
         },
         meter: Some(meter),
         evidence: crate::handlers::stream_evidence_settle::StreamEvidenceSlot::default(),

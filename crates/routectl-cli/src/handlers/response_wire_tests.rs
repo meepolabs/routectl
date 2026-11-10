@@ -18,7 +18,7 @@ use crate::ingress::anthropic::AnthropicIngress;
 use crate::ingress::openai::OpenAiIngress;
 use crate::ingress::openai_responses::ResponsesIngress;
 use crate::ingress::{
-    ErrorEnvelopeShape, IngressAdapter, IngressStreamState, ResponseEdits, SseEvent,
+    ErrorEnvelopeShape, IngressAdapter, IngressStreamState, RenderContext, ResponseEdits, SseEvent,
     StreamErrorClass, StreamRequestContext,
 };
 use crate::server::AppState;
@@ -464,14 +464,19 @@ impl<A: IngressAdapter> IngressAdapter for DroppingAdapter<A> {
         self.inner.parse_request(headers, body)
     }
     fn render_response(&self, resp: ChatResponse) -> routectl_core::Result<bytes::Bytes> {
-        self.render_response_declared(resp, &mut ResponseEdits::default())
+        self.render_response_declared(
+            resp,
+            &RenderContext::default(),
+            &mut ResponseEdits::default(),
+        )
     }
     fn render_response_declared(
         &self,
         resp: ChatResponse,
+        ctx: &RenderContext,
         edits: &mut ResponseEdits,
     ) -> routectl_core::Result<bytes::Bytes> {
-        let body = self.inner.render_response_declared(resp, edits)?;
+        let body = self.inner.render_response_declared(resp, ctx, edits)?;
         self.declare(edits);
         let value: Value = serde_json::from_slice(&body).expect("rendered json");
         let (body_pointer, _, _) = self.dialect.dropped();

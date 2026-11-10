@@ -26,7 +26,7 @@ use serde_json::{Map, Value};
 
 use super::normalize_client_betas;
 use super::{
-    ErrorEnvelopeShape, IngressAdapter, IngressStreamState, ResponseEdits, SseEvent,
+    ErrorEnvelopeShape, IngressAdapter, IngressStreamState, RenderContext, ResponseEdits, SseEvent,
     StreamErrorClass, StreamRequestContext, read_alias_header,
     session_key::{first_session_header, resolve_session_key},
 };
@@ -230,12 +230,17 @@ impl IngressAdapter for OpenAiIngress {
     }
 
     fn render_response(&self, resp: ChatResponse) -> Result<bytes::Bytes> {
-        self.render_response_declared(resp, &mut ResponseEdits::default())
+        self.render_response_declared(
+            resp,
+            &RenderContext::default(),
+            &mut ResponseEdits::default(),
+        )
     }
 
     fn render_response_declared(
         &self,
         resp: ChatResponse,
+        _ctx: &RenderContext,
         edits: &mut ResponseEdits,
     ) -> Result<bytes::Bytes> {
         crate::ingress::render_value_to_bytes(self.id(), render_openai_response_value(resp, edits)?)

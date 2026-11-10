@@ -1406,3 +1406,83 @@ fn stream_without_an_envelope_keeps_zero_created_at_and_no_item_id() {
     let added = data_of(&events, "response.output_item.added");
     assert!(added["item"].get("id").is_none());
 }
+
+// ---------------------------------------------------------------------------
+// namespace on returned calls
+// ---------------------------------------------------------------------------
+
+/// Stream one call to a namespaced tool and one to a flat tool through a
+/// state built from a request whose namespace record maps the first.
+fn stream_namespaced_and_flat_calls() -> Vec<SseEvent> {
+    use crate::ingress::openai_responses::ResponsesIngress;
+    use crate::ingress::{IngressAdapter, RenderContext, StreamRequestContext};
+
+    let ctx = StreamRequestContext {
+        render: RenderContext {
+            tool_namespaces: [("alpha_wait".to_string(), "ns_alpha".to_string())].into(),
+        },
+        ..StreamRequestContext::default()
+    };
+    let mut boxed = ResponsesIngress.new_stream_state(&ctx);
+    let state = state_mut(boxed.as_mut());
+    let mut events = render(state, tool_chunk(0, "call_ns", "alpha_wait", "{}"));
+    events.extend(render(state, tool_chunk(1, "call_flat", "flat_one", "{}")));
+    events.extend(render(state, finish_chunk("tool_calls", None)));
+    events.extend(render_eos_internal(state));
+    events
+}
+
+/// Every `function_call` item the stream emitted on `event_name`, keyed by
+/// name, in emission order.
+fn streamed_call_items(events: &[SseEvent], event_name: &str) -> Vec<Value> {
+    events
+        .iter()
+        .filter(|e| e.event.as_deref() == Some(event_name))
+        .map(|e| serde_json::from_str::<Value>(&e.data).expect("json")["item"].clone())
+        .filter(|item| item["type"] == "function_call")
+        .collect()
+}
+
+#[test]
+fn a_streamed_call_to_a_namespaced_tool_carries_its_namespace() {
+    // Act
+    let events = stream_namespaced_and_flat_calls();
+
+    // Assert
+    for event_name in ["response.output_item.added", "response.output_item.done"] {
+        let items = streamed_call_items(&events, event_name);
+        assert_eq!(items.len(), 2, "{event_name}: {items:?}");
+        assert_eq!(items[0]["name"], "alpha_wait");
+        assert_eq!(items[0]["namespace"], "ns_alpha", "{event_name}: {items:?}");
+    }
+    let completed = data_of(&events, "response.completed");
+    let output = &completed["response"]["output"];
+    assert_eq!(output[0]["name"], "alpha_wait");
+    assert_eq!(
+        output[0]["namespace"], "ns_alpha",
+        "completed body: {output}"
+    );
+}
+
+#[test]
+fn a_streamed_call_to_a_flat_tool_carries_no_namespace() {
+    // Act
+    let events = stream_namespaced_and_flat_calls();
+
+    // Assert
+    for event_name in ["response.output_item.added", "response.output_item.done"] {
+        let items = streamed_call_items(&events, event_name);
+        assert_eq!(items[1]["name"], "flat_one");
+        assert!(
+            items[1].get("namespace").is_none(),
+            "{event_name}: {items:?}"
+        );
+    }
+    let completed = data_of(&events, "response.completed");
+    let output = &completed["response"]["output"];
+    assert_eq!(output[1]["name"], "flat_one");
+    assert!(
+        output[1].get("namespace").is_none(),
+        "completed body: {output}"
+    );
+}

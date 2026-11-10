@@ -40,7 +40,7 @@
 //! Completed-body parity: the renderer accumulates the streamed text,
 //! reasoning details, and tool calls into a canonical `Message`, then
 //! builds the `response.completed` body via the non-stream
-//! renderer (`render::render_responses_response`). That guarantees the
+//! renderer (`render::render_responses_response_declared`). That guarantees the
 //! terminal body matches the non-stream render byte-for-byte. The
 //! per-item shapes emitted on `output_item.added` / `.done` reuse the
 //! same `render` helpers (`output_text_block`, `function_call_item`,
@@ -59,7 +59,8 @@ use crate::ingress::{IngressStreamState, ResponseEdits, SseEvent, StreamErrorCla
 
 use super::render::{
     declare_message_item_status, declare_status_rebuild, function_call_item, message_item,
-    output_text_block, render_responses_response, status_from_finish_reason,
+    output_text_block, render_responses_response_declared, stamp_namespace,
+    status_from_finish_reason,
 };
 use super::{OpenOutputItem, ResponsesStreamState, ToolCallBuffer};
 
@@ -467,7 +468,10 @@ fn flush_tool_calls(state: &mut ResponsesStreamState, events: &mut Vec<SseEvent>
     {
         close_open_item(state, events);
         let output_index = alloc_output_index(state);
-        let item = function_call_item(&tool_call_value(&buf));
+        let item = stamp_namespace(
+            function_call_item(&tool_call_value(&buf)),
+            &state.tool_namespaces,
+        );
         push_event(
             state,
             events,
@@ -488,7 +492,10 @@ fn flush_tool_calls(state: &mut ResponsesStreamState, events: &mut Vec<SseEvent>
             "response.function_call_arguments.done",
             json!({"output_index": output_index, "arguments": buf.arguments}),
         );
-        let done_item = function_call_item(&tool_call_value(&buf));
+        let done_item = stamp_namespace(
+            function_call_item(&tool_call_value(&buf)),
+            &state.tool_namespaces,
+        );
         push_event(
             state,
             events,
@@ -689,7 +696,12 @@ pub(super) fn render_eos_internal(state: &mut ResponsesStreamState) -> Vec<SseEv
 /// each, in first-seen order, after the first item.
 fn completed_output(state: &ResponsesStreamState) -> Vec<Value> {
     let resp = accumulated_response(state);
-    let rendered = render_responses_response(resp).unwrap_or_else(|_| json!({"output": []}));
+    let rendered = render_responses_response_declared(
+        resp,
+        &state.tool_namespaces,
+        &mut ResponseEdits::default(),
+    )
+    .unwrap_or_else(|_| json!({"output": []}));
     let mut output = rendered
         .get("output")
         .and_then(Value::as_array)

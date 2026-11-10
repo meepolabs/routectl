@@ -276,3 +276,82 @@ fn an_absent_or_empty_tool_output_id_reaches_the_body_as_an_empty_call_id() {
         );
     }
 }
+
+/// A replayed history turn calling one namespaced tool and one flat tool,
+/// shaped as the Responses ingress parses it (`tool_calls` on the assistant
+/// turn, the call's namespace kept only in the request's namespace record).
+fn req_replaying_namespaced_call(provenance: routectl_core::RequestProvenance) -> ChatRequest {
+    let mut calls = assistant_text("");
+    calls.content = MessageContent::Null;
+    calls.tool_calls = Some(vec![
+        json!({"id": "call_ns", "type": "function",
+               "function": {"name": "alpha_wait", "arguments": "{}"}}),
+        json!({"id": "call_flat", "type": "function",
+               "function": {"name": "flat_one", "arguments": "{}"}}),
+    ]);
+    let mut req = req_with(vec![
+        user_text("go"),
+        calls,
+        tool_message("call_ns", "waited"),
+        tool_message("call_flat", "done"),
+    ]);
+    req.routectl_internal.provenance = provenance;
+    req.routectl_internal
+        .responses_namespaces
+        .members
+        .insert("alpha_wait".into(), "ns_alpha".into());
+    req
+}
+
+fn function_call_items(v: &Value) -> Vec<&Value> {
+    v["input"]
+        .as_array()
+        .expect("input array")
+        .iter()
+        .filter(|item| item["type"] == "function_call")
+        .collect()
+}
+
+#[test]
+fn a_responses_client_replaying_a_namespaced_call_sends_its_namespace_upstream() {
+    // Arrange
+    let req = req_replaying_namespaced_call(routectl_core::RequestProvenance::ResponsesIngress);
+
+    // Act
+    let v = translate_to_json(&cfg(), &req);
+
+    // Assert
+    let calls = function_call_items(&v);
+    assert_eq!(calls.len(), 2, "got: {v}");
+    assert_eq!(calls[0]["name"], "alpha_wait");
+    assert_eq!(calls[0]["namespace"], "ns_alpha", "got: {v}");
+    assert_eq!(calls[1]["name"], "flat_one");
+    assert!(
+        calls[1].get("namespace").is_none(),
+        "a flat call carries none: {v}"
+    );
+}
+
+#[test]
+fn a_replayed_call_from_any_other_ingress_carries_no_namespace() {
+    use routectl_core::RequestProvenance;
+    for provenance in [
+        RequestProvenance::OpenaiIngress,
+        RequestProvenance::AnthropicIngress,
+        RequestProvenance::Library,
+    ] {
+        // Arrange
+        let req = req_replaying_namespaced_call(provenance);
+
+        // Act
+        let v = translate_to_json(&cfg(), &req);
+
+        // Assert
+        let calls = function_call_items(&v);
+        assert_eq!(calls.len(), 2, "{provenance:?}: {v}");
+        assert!(
+            calls.iter().all(|c| c.get("namespace").is_none()),
+            "{provenance:?}: {v}"
+        );
+    }
+}
