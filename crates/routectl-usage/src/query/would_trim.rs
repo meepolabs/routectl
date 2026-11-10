@@ -4,15 +4,15 @@ use crate::db::UsageDb;
 
 use super::QueryError;
 
-/// Windowed steady-state would-trim opportunity: how many requests in the
-/// window carried a non-mutating would-cut candidate, and the summed
+/// Windowed steady-state would-trim opportunity: how many inference requests
+/// in the window carried a non-mutating would-cut candidate, and the summed
 /// `would_trim_tokens` (the candidate freed-token count `d`) over them. The
 /// verdict counts (`met`/`unmet`/`cold`/`unpriced`) are derived at query time
 /// from the numeric advisory columns -- never persisted as a token. Plain
 /// data; the caller decides how to display it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct WouldTrimSummary {
-    /// Count of requests in the window with a would-cut candidate
+    /// Count of inference requests in the window with a would-cut candidate
     /// (`would_trim_tokens IS NOT NULL`).
     pub candidate_requests: i64,
     /// Summed `would_trim_tokens` over those requests.
@@ -65,8 +65,8 @@ WHERE ts_start >= ?1 AND ts_start < ?2
 );
 
 /// The window's steady-state would-trim opportunity. `COUNT(col)` ignores
-/// NULLs, so `candidate_requests` is the number of requests the trimmer
-/// flagged; `would_trim_tokens` is the summed candidate freed-token count.
+/// NULLs, so `candidate_requests` is the number of inference requests the
+/// trimmer flagged; `would_trim_tokens` is the summed candidate freed-token count.
 /// The verdict counts partition the candidate rows by the derived
 /// met/unmet/cold/unpriced classification. All fields are 0 when no row in
 /// the window carried a candidate.
@@ -89,11 +89,12 @@ pub fn would_trim_summary(
     Ok(summary)
 }
 
-/// Windowed shadow misfire monitor summary. Counts candidate turns compared
-/// (rows where `would_trim_shadow_misfire IS NOT NULL`) and misfire turns
-/// (`would_trim_shadow_misfire = 1`). A misfire means the trimmed cacheable
-/// prefix fingerprint shifted turn-to-turn -- the canary that a live cut would
-/// break the upstream cache. Plain data; the caller decides how to display it.
+/// Windowed shadow misfire monitor summary over inference requests. Counts
+/// candidate turns compared (rows where `would_trim_shadow_misfire IS NOT
+/// NULL`) and misfire turns (`would_trim_shadow_misfire = 1`). A misfire means
+/// the trimmed cacheable prefix fingerprint shifted turn-to-turn -- the canary
+/// that a live cut would break the upstream cache. Plain data; the caller
+/// decides how to display it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ShadowMisfireSummary {
     /// Count of turns where a shadow comparison was made (NOT NULL).
@@ -143,7 +144,7 @@ pub fn shadow_misfire_summary(
 /// per-row rate. Plain data; the caller decides how to display it.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct NearLosslessAttributionSummary {
-    /// Count of requests where the near-lossless recorder ran
+    /// Count of inference requests where the near-lossless recorder ran
     /// (`would_trim_recorder_version IS NOT NULL`), regardless of whether it
     /// found any marks. The recorder candidate count.
     pub recorder_requests: i64,
@@ -207,7 +208,7 @@ pub fn near_lossless_attribution_summary(
     Ok(summary)
 }
 
-/// K-estimator calibration triple over all history. Populated by
+/// K-estimator calibration triple over all inference history. Populated by
 /// `k_calibration_summary`; zero-fields indicate no calibrated predictions.
 ///
 /// The calibration measures the persisted FLOOR (`would_trim_k_floor`, the
@@ -312,8 +313,8 @@ struct HitRow {
     hit: bool,
 }
 
-/// K-estimator calibration over all history. Measures how well the recorded
-/// floor predictions track REMAINING-FUTURE realized reuse (see
+/// K-estimator calibration over all inference history. Measures how well the
+/// recorded floor predictions track REMAINING-FUTURE realized reuse (see
 /// [`KCalibration`]). Returns a `KCalibration` with n=0 when there are no
 /// calibrated predictions.
 ///
@@ -493,6 +494,7 @@ ORDER BY ts_start ASC, rid ASC"
 /// `cache_read`, but it never reaches the live K store, so the warm rebuild
 /// must not replay it either -- otherwise a restart would admit rows live
 /// traffic never would, silently diverging the two paths' K-store contents.
+/// Token-count rows are filtered out: only inference requests are samples.
 /// Rows without a `session_id`, `provider_kind`, or `model` are filtered out:
 /// the K estimator keys on the full (session, provider_kind, model) triple, so
 /// a NULL in any of the three has no usable identity and is dropped rather than

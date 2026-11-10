@@ -153,7 +153,7 @@ macro_rules! cache_prompt_total {
 }
 
 /// The `/status/query` SELECT clause: [`AGG_SQL`]'s base columns at the SAME
-/// fine grain, plus the thirteen expressions the derived display metrics need.
+/// fine grain, plus the twelve expressions the derived display metrics need.
 ///
 /// A macro rather than a `const` for the same reason [`agg_base_columns`] is:
 /// both [`QUERY_AGG_SQL`] and [`SERIES_AGG_SQL`] assemble it with `concat!` at
@@ -431,12 +431,19 @@ GROUP BY COALESCE(model, requested_model), provider, upstream, alias,
          COALESCE(resolved_class, 'unclassified')"
 );
 
-/// Windowed per-group error breakdown by resolved failure class. Returns one
-/// `(group key, class, count)` triple per `(group, class)` pair; the caller
-/// merges these into a per-group `class -> count` map (`GroupKey` derives
-/// `Hash` for that merge). By construction the counts sum to `AggRow::errors`
-/// per group and at totals (identical predicate). Rows outside `[from_ms,
-/// to_ms)` are excluded.
+/// Windowed per-group error breakdown, grouped by the `resolved_class` column
+/// (the canonical failure class), not by `outcome` or `error_class`, so a row
+/// can count here under a different name than those columns give it: a
+/// stream the upstream cut before its terminal event is written with
+/// `outcome = upstream_error` and `error_class = upstream`, but its status-0
+/// upstream error classifies as `network-error`, and that is the class it
+/// counts under here.
+///
+/// Returns one `(group key, class, count)` triple per `(group, class)` pair;
+/// the caller merges these into a per-group `class -> count` map (`GroupKey`
+/// derives `Hash` for that merge). By construction the counts sum to
+/// `AggRow::errors` per group and at totals (identical predicate). Rows
+/// outside `[from_ms, to_ms)` are excluded.
 pub fn errors_by_class(
     db: &UsageDb,
     from_ms: i64,

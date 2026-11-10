@@ -23,23 +23,24 @@ pub enum Outcome {
     Ok,
     /// The upstream provider returned an error after a dispatch attempt.
     UpstreamError,
-    /// The client hung up before the request finalized. Also the enum's
-    /// `Default`, so it is the abnormal-exit sentinel stamped on a
-    /// finalize-less exit.
+    /// Routectl observed the client leave before the request finalized: the
+    /// handler saw the client channel close or a send fail, or a complete
+    /// body was dropped before it was handed to the client. Also the enum's
+    /// `Default`.
     //
-    // `#[default]` resolves to the real, persisted `ClientDisconnect`
-    // outcome -- chosen because it is the abnormal-exit sentinel the
-    // finalize/Drop path already stamps via `mem::take` for a
-    // finalize-less exit. CAUTION: this default is NOT an inert
+    // CAUTION: `#[default]` is a real, persisted outcome, not an inert
     // placeholder. A default-constructed `Outcome`/`UsageRecord` that
-    // reaches the persistence path is silently written as
-    // `ClientDisconnect`, so default-construction must never feed the
-    // DB writer except on that abnormal-exit path.
+    // reaches the DB writer is written as `client_disconnect`, a hangup that
+    // never happened. The capture's unobserved-exit fallback does not rely
+    // on this default: its Drop stamps `Cancelled` explicitly.
     #[default]
     ClientDisconnect,
     /// The request exceeded its deadline before completing.
     Timeout,
-    /// The request was cancelled before completing.
+    /// The request's handler was dropped before any exit it observes ran, so
+    /// nothing recorded why: a server shutdown, a task abort mid-dispatch,
+    /// or a client hangup that drops the handler before the response is
+    /// built. The capture's Drop fallback stamps this outcome.
     Cancelled,
     /// A local gate refused the request before any dispatch attempt.
     GateBlocked,
