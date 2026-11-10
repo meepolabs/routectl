@@ -9,8 +9,9 @@
 //!
 //! `store` defaults to `false` here; the `extras` module flips it for
 //! non-ChatgptOauth auth_kinds when the operator opts in via
-//! `provider_extras["store"]`. `parallel_tool_calls` defaults to
-//! `true`, matching codex's `ResponsesApiRequest` default.
+//! `provider_extras["store"]`. `parallel_tool_calls` forwards a Responses
+//! client's own boolean and otherwise defaults to `true`, matching codex's
+//! `ResponsesApiRequest` default.
 
 use routectl_core::cache_control::{BreakpointPosition, CacheBreakpointSource};
 use routectl_core::wire_check::{EditKind, EditSite, WireTap};
@@ -82,7 +83,7 @@ pub fn translate(cfg: &OpenAiResponsesConfig, req: &ChatRequest) -> Result<Respo
         input,
         tools,
         tool_choice,
-        parallel_tool_calls: true,
+        parallel_tool_calls: resolve_parallel_tool_calls(req).value,
         reasoning: None,
         // Every lane starts at store=false; extras.rs honors a
         // provider_extras["store"] override only on lanes that allow it.
@@ -368,24 +369,46 @@ fn declare_instructions(
     }
 }
 
+/// The `parallel_tool_calls` value this egress sends, and the edit that
+/// value makes to what the request carried (`None` when it sends the
+/// request's own value).
+struct ParallelToolCalls {
+    value: bool,
+    edit: Option<EditKind>,
+}
+
+/// Resolve `parallel_tool_calls` for the body and its declaration alike. A
+/// Responses-ingress boolean is the client's own field in this dialect and
+/// is forwarded as sent. The key stays off the extras allowlist: from any
+/// other ingress it spelled another dialect's toggle, so the field is
+/// pinned `true` there and the difference declared.
+fn resolve_parallel_tool_calls(req: &ChatRequest) -> ParallelToolCalls {
+    let carried = req
+        .provider_extras
+        .as_ref()
+        .and_then(|v| v.as_object())
+        .and_then(|o| o.get("parallel_tool_calls"));
+    let is_responses = req.routectl_internal.provenance == RequestProvenance::ResponsesIngress;
+    let (value, edit) = match carried {
+        None => (true, Some(EditKind::Add)),
+        Some(Value::Bool(sent)) if is_responses => (*sent, None),
+        Some(Value::Bool(true)) => (true, None),
+        Some(_) => (true, Some(EditKind::Rewrite)),
+    };
+    ParallelToolCalls { value, edit }
+}
+
 /// Declare the fields this egress writes or withholds by lane, whatever the
 /// request carried: `store` is always sent with routectl's value (the
-/// ingress never forwards the client's), `parallel_tool_calls` is always
-/// sent `true` (the extras allowlist does not forward the client's), the
+/// ingress never forwards the client's), `parallel_tool_calls` differs from
+/// the request wherever `resolve_parallel_tool_calls` says it does, the
 /// ChatGPT-OAuth lane never sends `max_output_tokens`, and no lane sends the
 /// client's `temperature` or `top_p`.
 fn declare_lane_gates(tap: &WireTap, auth_kind: AuthKind, req: &ChatRequest) {
-    let extras = req.provider_extras.as_ref().and_then(|v| v.as_object());
-    let extra = |key: &str| extras.and_then(|o| o.get(key));
     let site = EditSite::RequiredFieldDefault;
     crate::wire_declare::declare(tap, site, "/store", EditKind::Add);
     crate::wire_declare::declare(tap, site, "/store", EditKind::Rewrite);
-    let parallel_kind = match extra("parallel_tool_calls") {
-        None => Some(EditKind::Add),
-        Some(Value::Bool(true)) => None,
-        Some(_) => Some(EditKind::Rewrite),
-    };
-    if let Some(kind) = parallel_kind {
+    if let Some(kind) = resolve_parallel_tool_calls(req).edit {
         crate::wire_declare::declare(tap, site, "/parallel_tool_calls", kind);
     }
     for (path, carried) in sampling_params(req) {

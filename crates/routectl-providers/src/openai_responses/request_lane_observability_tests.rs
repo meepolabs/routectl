@@ -462,3 +462,110 @@ fn no_sampling_warn_when_no_sampling_field_set() {
         "no sampling field must mean no sampling drop event; captured {events:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// parallel_tool_calls: a Responses client's boolean is its own field and is
+// forwarded; any other carrier is pinned `true`. The body and the declared
+// edit come from one resolver, so each row checks both.
+// ---------------------------------------------------------------------------
+
+/// One `parallel_tool_calls` case: what the request carried under which
+/// ingress, and the body value and declared edit expected for it.
+struct ParallelRow {
+    name: &'static str,
+    provenance: routectl_core::RequestProvenance,
+    carried: Option<Value>,
+    sent: bool,
+    edit: Option<routectl_core::wire_check::EditKind>,
+}
+
+#[test]
+fn parallel_tool_calls_body_and_declaration_follow_provenance() {
+    use routectl_core::RequestProvenance as P;
+    use routectl_core::wire_check::{EditKind, EditSite};
+
+    let row = |name, provenance, carried, sent, edit| ParallelRow {
+        name,
+        provenance,
+        carried,
+        sent,
+        edit,
+    };
+    let rows = [
+        row(
+            "responses false forwarded",
+            P::ResponsesIngress,
+            Some(json!(false)),
+            false,
+            None,
+        ),
+        row(
+            "responses true forwarded",
+            P::ResponsesIngress,
+            Some(json!(true)),
+            true,
+            None,
+        ),
+        row(
+            "responses absent defaults",
+            P::ResponsesIngress,
+            None,
+            true,
+            Some(EditKind::Add),
+        ),
+        row(
+            "responses non-boolean pinned",
+            P::ResponsesIngress,
+            Some(json!("no")),
+            true,
+            Some(EditKind::Rewrite),
+        ),
+        row(
+            "chat false pinned",
+            P::OpenaiIngress,
+            Some(json!(false)),
+            true,
+            Some(EditKind::Rewrite),
+        ),
+        row(
+            "chat true unchanged",
+            P::OpenaiIngress,
+            Some(json!(true)),
+            true,
+            None,
+        ),
+    ];
+    for case in rows {
+        // Arrange
+        let mut req = req_with(vec![user_text("hi")]);
+        req.routectl_internal.provenance = case.provenance;
+        req.provider_extras = case.carried.map(|v| json!({ "parallel_tool_calls": v }));
+
+        // Act
+        let (wire, edits) = translate_declaring(&cfg(), &req);
+
+        // Assert
+        let name = case.name;
+        assert_eq!(
+            wire["parallel_tool_calls"],
+            json!(case.sent),
+            "{name}: {wire}"
+        );
+        let declared: Vec<_> = edits
+            .into_iter()
+            .filter(|(_, path, _)| path == "/parallel_tool_calls")
+            .collect();
+        let want: Vec<_> = case
+            .edit
+            .map(|kind| {
+                (
+                    EditSite::RequiredFieldDefault,
+                    "/parallel_tool_calls".to_string(),
+                    kind,
+                )
+            })
+            .into_iter()
+            .collect();
+        assert_eq!(declared, want, "{name}");
+    }
+}

@@ -763,6 +763,8 @@ list with more narrative.
 
 ### Fixed
 
+- **A Responses client's `parallel_tool_calls` reaches a Responses upstream as sent.** An explicit `false` (as Codex CLI sends) is no longer rewritten to `true`; when the field is absent the egress still sends `true`, and a value carried from another dialect's ingress is still pinned `true`.
+
 - **Unmodeled Responses output items arrive as top-level items on complete responses.** An output item routectl does not model (for example a `custom_tool_call`) now renders as its own entry in `output[]`, after the message and before the function calls, with its fields as the upstream sent them, instead of as a block inside the message content. A `refusal` stays a block on the message.
 
 - **openai-responses no longer hands a non-Responses client an output item its dialect cannot carry.** In a complete response, an upstream item routectl does not model (for example `custom_tool_call`) is removed for Anthropic and Chat Completions clients and counted once per request as the `output_item_unrepresentable` drop class, which also reaches the request's usage row. The finish reason is unchanged. A Responses client keeps the item. See [docs/LOGGING.md](docs/LOGGING.md).
