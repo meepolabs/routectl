@@ -20,7 +20,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use arc_swap::ArcSwap;
 use routectl_core::failure_class::LastOutcome;
 use routectl_router::runtime_state::CircuitPhase;
-use routectl_router::{CURRENT_CONFIG_VERSION, CatalogOverlay, Config, Router};
+use routectl_router::{CURRENT_CONFIG_VERSION, Config, Router};
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
 use wiremock::matchers::{header, method, path};
@@ -331,7 +331,6 @@ async fn serve(
     let handle = tokio::spawn(async move {
         super::serve::serve_on_listener_with_injected_router(
             Arc::new(config),
-            Arc::new(CatalogOverlay::default()),
             listener,
             None,
             Some(secrets),

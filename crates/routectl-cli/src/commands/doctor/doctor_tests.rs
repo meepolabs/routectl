@@ -2348,20 +2348,13 @@ fn config_load_error_redacts_a_secret_bearing_parse_error() {
 
 #[test]
 fn config_load_error_sanitizes_path_bearing_non_parse_errors() {
-    // The loader formats an unreadable config and a catalog-overlay failure
-    // with the FULL filesystem path; both must collapse to a path-free
-    // class message.
+    // The loader formats an unreadable config with the FULL filesystem path;
+    // it must collapse to a path-free class message.
     let unreadable = "cannot read config `/home/someone/.config/routectl/config.toml`: \
                       Permission denied (os error 13)";
     let redacted = redact_config_load_error(unreadable);
     assert!(!redacted.contains("/home/someone"), "{redacted}");
     assert!(!redacted.contains("config.toml"), "{redacted}");
-
-    let overlay = "catalog overlay load error: failed to read \
-                   /home/someone/.config/routectl/catalog_overlay.json: broken";
-    let redacted = redact_config_load_error(overlay);
-    assert!(!redacted.contains("/home/someone"), "{redacted}");
-    assert!(!redacted.contains("catalog_overlay.json"), "{redacted}");
 }
 
 #[test]

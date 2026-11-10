@@ -49,7 +49,7 @@ use routectl_core::{
     Role, TokenCount, Usage,
 };
 use routectl_router::plant_acting_field_verdict_for_tests;
-use routectl_router::{AliasValue, CatalogOverlay, Config, ModelEntry, ResolvedModel, Router};
+use routectl_router::{AliasValue, Config, ModelEntry, ResolvedModel, Router};
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
 
@@ -382,7 +382,6 @@ async fn spawn_daemon_full(
     let handle = tokio::spawn(async move {
         super::serve_on_listener_with_injected_router(
             config,
-            Arc::new(CatalogOverlay::default()),
             listener,
             config_path,
             None,

@@ -154,10 +154,9 @@ async fn a_reload_carrying_a_refused_pool_member_keeps_the_running_router_servin
         let mut config = routectl_router::parse_config(&good).expect("fixture parses");
         let _usage_dir = isolate_usage_db(&mut config);
         let config = Arc::new(config);
-        let router =
-            build_router_from_config_with_overlay(config.clone(), &Arc::default(), secrets.clone())
-                .await
-                .expect("initial router build");
+        let router = build_router_from_config(config.clone(), secrets.clone())
+            .await
+            .expect("initial router build");
         let swap = Arc::new(ArcSwap::from_pointee(router));
         let before = swap.load_full();
         let daemon_meta = crate::handlers::status::DaemonMeta::for_test();
@@ -176,7 +175,6 @@ async fn a_reload_carrying_a_refused_pool_member_keeps_the_running_router_servin
             daemon_meta: daemon_meta.clone(),
         };
         let mut current_config = config;
-        let mut current_overlay: Arc<CatalogOverlay> = Arc::default();
         let candidate = candidate.replace("http://placeholder", &upstream.uri());
         std::fs::write(&cfg_path, &candidate).unwrap();
         let check_lines = if expected_class == ReloadFailure::RouterBuildFailed {
@@ -197,8 +195,6 @@ async fn a_reload_carrying_a_refused_pool_member_keeps_the_running_router_servin
         let ((), events) = routectl_testkit::with_capture(Box::pin(apply_config_reload(
             &ctx,
             &mut current_config,
-            &mut current_overlay,
-            ReloadTrigger::ConfigFile,
             &mut never_shutdown(),
         )))
         .await;

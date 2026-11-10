@@ -240,8 +240,7 @@ async fn the_clear_is_stamped_with_the_frozen_revision() {
     let (_dir, path, usage, writer) = live_usage_writer().await;
     let swap = Arc::new(ArcSwap::from_pointee(lane_router()));
     let ack = ack_over(&usage, &swap);
-    let mut replacement = lane_router();
-    replacement.install_catalog_overlay(crate::server::test_support::overlay_at_revision(9));
+    let replacement = lane_router();
     swap.store(Arc::new(replacement));
 
     assert!(

@@ -7,14 +7,10 @@
 //! internally. The raw `Config` is never imported or serialized here; a
 //! regression that tried to would trip the forbidden-import seam test.
 //!
-//! The overlay half of that view is the generation the daemon ACCEPTED at
-//! its last successful boot or reload: it is retained on the live router and
-//! read from memory, never re-read from disk per request. Reading disk here
-//! would let the panel render catalog provenance from a file the daemon
-//! REJECTED (routing continues on the previous generation), and would make a
-//! corrupt file on disk take the whole panel down while routing is healthy.
-//! Because config and overlay now come from the SAME pinned router, one
-//! render can never pair a config generation with a different overlay one.
+//! The view is the generation the daemon ACCEPTED at its last successful boot
+//! or reload, read from the live router's memory and never re-read from disk
+//! per request: a file on disk the daemon REJECTED (routing continues on the
+//! previous generation) never reaches the panel.
 
 use std::sync::Arc;
 

@@ -28,8 +28,7 @@ use routectl_providers::anthropic_api::{
 use routectl_providers::stream_terminal_metrics::missing_terminal_total;
 use routectl_providers::translation_drop_metrics::translation_drop_snapshot;
 use routectl_router::{
-    AliasValue, CatalogOverlay, Config, ModelEntry, ProviderEntry, ResolvedModel, RetryPolicy,
-    Router,
+    AliasValue, Config, ModelEntry, ProviderEntry, ResolvedModel, RetryPolicy, Router,
 };
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
@@ -117,7 +116,6 @@ impl Daemon {
         let handle = tokio::spawn(async move {
             super::serve::serve_on_listener_with_injected_router(
                 Arc::new(config),
-                Arc::new(CatalogOverlay::default()),
                 listener,
                 None,
                 Some(secrets),

@@ -185,11 +185,9 @@ impl StatusRouterView {
         self.router.wire_check_snapshot()
     }
 
-    /// The derived effective-config view for the config panel, folding the
-    /// live config together with the catalog overlay the pinned Router was
-    /// BUILT against -- the generation the daemon accepted, read out of
-    /// memory. Neither input is re-read from disk here, so one derivation can
-    /// never pair a config generation with a different overlay generation.
+    /// The derived effective-config view for the config panel, from the live
+    /// config the pinned Router was BUILT against -- the generation the
+    /// daemon accepted, read out of memory, never re-read from disk.
     ///
     /// Model prices resolve against the `refreshed` and `shipped` tables the
     /// caller pinned for this read.
@@ -201,12 +199,7 @@ impl StatusRouterView {
         refreshed: Option<&PriceTable>,
         shipped: Option<&PriceTable>,
     ) -> EffectiveView {
-        derive_effective_view(
-            &self.router.config,
-            self.router.catalog_overlay(),
-            refreshed,
-            shipped,
-        )
+        derive_effective_view(&self.router.config, &Default::default(), refreshed, shipped)
     }
 
     /// The served doctor gather's inputs, owned so the gather can run on a

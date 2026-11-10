@@ -92,7 +92,6 @@ fn load_leaves_a_current_version_config_unchanged() {
         routectl_router::CURRENT_CONFIG_VERSION
     );
     assert!(loaded.config.cache_pricing.is_empty());
-    assert!(loaded.catalog_overlay.cells.is_empty());
     let after = std::fs::read_to_string(&cfg_path).expect("read config after load");
     assert_eq!(
         after, body,
@@ -971,16 +970,18 @@ fn a_previous_version_file_with_a_retired_key_names_the_version_refusal() {
     assert!(!err.contains("was retired"), "err: {err}");
 }
 
-/// Cold start and hot reload share one loader, so a corrupt overlay fails both
-/// at the SAME layer: the reload records `OverlayLoadFailed` and the cold-start
-/// error is the overlay loader's own message, not a config one.
+/// A leftover `catalog_overlay.json` in the config folder is not read: cold
+/// start and hot reload both load a valid config beside one that no longer
+/// parses.
 #[test]
 #[serial_test::serial]
-fn cold_start_and_reload_classify_a_corrupt_overlay_identically() {
-    // Arrange: a valid config beside an unparseable overlay.
+fn cold_start_and_reload_ignore_a_leftover_overlay_file() {
+    // Arrange: a valid config beside an unparseable leftover overlay.
     let dir = tempfile::tempdir().expect("tempdir");
     let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
-    let cfg_path = dir.path().join("config.toml");
+    let config_dir = dir.path().join("routectl");
+    std::fs::create_dir_all(&config_dir).expect("create config dir");
+    let cfg_path = config_dir.join("config.toml");
     std::fs::write(
         &cfg_path,
         format!(
@@ -988,24 +989,14 @@ fn cold_start_and_reload_classify_a_corrupt_overlay_identically() {
         ),
     )
     .expect("write config.toml");
-    let overlay_dir = dir.path().join("routectl");
-    std::fs::create_dir_all(&overlay_dir).expect("create overlay dir");
-    std::fs::write(overlay_dir.join("catalog_overlay.json"), b"not json {{{")
-        .expect("write overlay");
+    std::fs::write(config_dir.join("catalog_overlay.json"), b"not json {{{")
+        .expect("write leftover overlay");
 
     // Act
-    let cold = load_effective_config(&cfg_path).err();
-    let shared = load_classified(&cfg_path).err();
-    let reload = read_parse_validate_config(&cfg_path).err();
+    let cold = load_effective_config(&cfg_path);
+    let reload = read_parse_validate_config(&cfg_path);
 
     // Assert
-    let shared = shared.expect("a corrupt overlay must fail the shared loader");
-    assert_eq!(shared.class, ReloadFailure::OverlayLoadFailed);
-    assert_eq!(reload, Some(ReloadFailure::OverlayLoadFailed));
-    let cold = cold.expect("a corrupt overlay must fail cold start");
-    assert_eq!(cold, shared.message);
-    assert!(
-        cold.starts_with("catalog overlay load error"),
-        "cold: {cold}"
-    );
+    assert!(cold.is_ok(), "cold start: {:?}", cold.err());
+    assert!(reload.is_ok(), "reload: {:?}", reload.err());
 }

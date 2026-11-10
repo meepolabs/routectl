@@ -3357,8 +3357,8 @@ wins over the baked row field by field: a field it sets wins, a field it
 leaves unset inherits the baked value. A JSON `null` value for a
 selector key DISABLES that row outright, overriding even the baked
 table's own default; a selector absent from the overlay falls through
-to the baked row unchanged. A running `routectl serve` watches the
-overlay file and picks up a write automatically -- no restart needed.
+to the baked row unchanged. `routectl serve` no longer reads this file:
+a leftover copy is ignored at boot and writing it triggers no reload.
 
 ### Retired: `[cache_pricing]`
 

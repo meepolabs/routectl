@@ -1,13 +1,13 @@
 //! Listener bind, axum router build, serve loop, and bounded drain.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use axum::Router as AxumRouter;
 use routectl_auth::{MemoryStore, SecretRef, SecretStore};
 use routectl_core::{Error, Result};
-use routectl_router::{ActivationState, CatalogOverlay, Config, check_drift_and_persist_state};
+use routectl_router::{ActivationState, Config};
 use routectl_usage::{CHANNEL_CAPACITY, UsageHandle, UsageWriter};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
@@ -18,7 +18,7 @@ use super::auth::{self, TokenSet};
 use super::config_load::compute_max_body_bytes;
 use super::reload::{ActivationTrigger, apply_activation, spawn_reload_pipeline};
 use super::reload_shutdown::await_reload_tasks;
-use super::router_build::build_router_from_config_with_overlay;
+use super::router_build::build_router_from_config;
 use super::{
     AppState, CompositeStore, calibration_rebuild, capability_rebuild, check_bind_safety,
     k_rebuild, request_id, status_gate,
@@ -30,20 +30,8 @@ use super::{
 /// config file. The file-watch coordinator uses it to pick up edits
 /// without a restart. `None` disables the config half of the watcher
 /// (tests that build a `Config` in-memory have no path to watch).
-///
-/// `catalog_overlay` is the overlay [`load_effective_config`](super::config_load::load_effective_config) loaded
-/// alongside `config` at the SAME cold-start read -- `main.rs` threads it
-/// straight through rather than this function re-reading the overlay file
-/// itself, so a config-path reload (which DOES re-read both) and the
-/// cold-start boot never diverge on how the overlay was obtained. `serve`
-/// has exactly one caller (`main.rs`'s `Cmd::Serve`), so its signature
-/// carries the overlay directly; [`serve_on_listener`] stays a thin
-/// empty-overlay wrapper over [`serve_on_listener_with_overlay`] because
-/// it is ALSO the test seam a dozen integration tests call with an
-/// in-memory `Config` and no loader involved at all.
 pub async fn serve(
     config: Arc<Config>,
-    catalog_overlay: Arc<CatalogOverlay>,
     host: &str,
     port: u16,
     unsafe_public: bool,
@@ -56,7 +44,7 @@ pub async fn serve(
         .await
         .map_err(|e| Error::Internal(format!("bind {addr}: {e}")))?;
 
-    serve_on_listener_with_overlay(config, catalog_overlay, listener, config_path).await
+    serve_on_listener(config, listener, config_path).await
 }
 
 /// Format the one-line startup cache-policy banner from the two policy
@@ -73,61 +61,19 @@ pub(super) fn cache_policy_banner(auto_emit_top_level: bool, reduction: bool) ->
     )
 }
 
-/// Serve on an already-bound listener, with an EMPTY catalog overlay. Used
-/// by the many integration tests that build a `Config` in-memory and never
-/// go through the shared loader at all -- an empty overlay is what every
-/// target already resolved to before the overlay existed, so this keeps
-/// those tests behavior-unchanged. Kept as the STABLE public signature
-/// (unlike `serve`, this one has a dozen external callers); production
-/// boot goes through [`serve`] -> [`serve_on_listener_with_overlay`]
-/// instead.
+/// Serve on an already-bound listener. `config_path` follows the same
+/// semantics as `serve`: `Some(path)` installs the file-watch + SIGHUP
+/// coordinator; `None` skips the config-half of the watcher (the
+/// credentials half still wires when the OAuth arm is available).
 pub async fn serve_on_listener(
     config: Arc<Config>,
     listener: TcpListener,
     config_path: Option<PathBuf>,
 ) -> Result<()> {
-    serve_on_listener_with_overlay(
-        config,
-        Arc::new(CatalogOverlay::default()),
-        listener,
-        config_path,
-    )
-    .await
+    serve_on_listener_with_secrets(config, listener, config_path, None).await
 }
 
-/// Every `(provider_kind, upstream)` pair this boot's SELECTABLE
-/// `[models]` entries reference. Mirrors
-/// `routectl_router::apply_catalog_overlay`'s own per-model derivation
-/// (`config.models` -> provider -> `ProviderEntry::kind_str`) so the
-/// drift log's "in use" set matches what the router actually resolves,
-/// without needing the built `Router` itself -- the pair is a pure
-/// function of `config`.
-fn in_use_catalog_selectors(config: &Config) -> Vec<(String, String)> {
-    config
-        .models
-        .values()
-        .filter(|entry| entry.selectable)
-        .filter_map(|entry| {
-            let provider_kind = config.providers.get(&entry.provider)?.kind_str();
-            Some((provider_kind.to_string(), entry.upstream.clone()))
-        })
-        .collect()
-}
-
-/// The real `serve_on_listener` body. `config_path` follows the same
-/// semantics as `serve`: `Some(path)` installs the file-watch + SIGHUP
-/// coordinator; `None` skips the config-half of the watcher (the
-/// credentials half still wires when the OAuth arm is available).
-pub async fn serve_on_listener_with_overlay(
-    config: Arc<Config>,
-    catalog_overlay: Arc<CatalogOverlay>,
-    listener: TcpListener,
-    config_path: Option<PathBuf>,
-) -> Result<()> {
-    serve_on_listener_with_secrets(config, catalog_overlay, listener, config_path, None).await
-}
-
-/// `serve_on_listener_with_overlay` with the secret resolver INJECTABLE.
+/// `serve_on_listener` with the secret resolver INJECTABLE.
 ///
 /// `secrets: None` is the production path and behaves exactly as before: a
 /// `CompositeStore` opened from the default location, whose OAuth arm also
@@ -147,14 +93,12 @@ pub async fn serve_on_listener_with_overlay(
 /// invisible at the call site.
 pub async fn serve_on_listener_with_secrets(
     config: Arc<Config>,
-    catalog_overlay: Arc<CatalogOverlay>,
     listener: TcpListener,
     config_path: Option<PathBuf>,
     secrets: Option<Arc<dyn SecretStore>>,
 ) -> Result<()> {
     serve_on_listener_with_injected_router(
         config,
-        catalog_overlay,
         listener,
         config_path,
         secrets,
@@ -262,21 +206,12 @@ pub(crate) struct DaemonTestSeams {
 )]
 pub(crate) async fn serve_on_listener_with_injected_router(
     config: Arc<Config>,
-    catalog_overlay: Arc<CatalogOverlay>,
     listener: TcpListener,
     config_path: Option<PathBuf>,
     secrets: Option<Arc<dyn SecretStore>>,
     seams: DaemonTestSeams,
 ) -> Result<()> {
-    serve_inner(
-        config,
-        catalog_overlay,
-        listener,
-        config_path,
-        secrets,
-        seams,
-    )
-    .await
+    serve_inner(config, listener, config_path, secrets, seams).await
 }
 
 /// The production path. The test-only parameter is present but typed `Option<()>`,
@@ -289,28 +224,18 @@ pub(crate) async fn serve_on_listener_with_injected_router(
 #[cfg(not(test))]
 async fn serve_on_listener_with_injected_router(
     config: Arc<Config>,
-    catalog_overlay: Arc<CatalogOverlay>,
     listener: TcpListener,
     config_path: Option<PathBuf>,
     secrets: Option<Arc<dyn SecretStore>>,
     _seams: Option<()>,
 ) -> Result<()> {
-    serve_inner(
-        config,
-        catalog_overlay,
-        listener,
-        config_path,
-        secrets,
-        None,
-    )
-    .await
+    serve_inner(config, listener, config_path, secrets, None).await
 }
 
 /// The whole serve body. One implementation, so the injected and ordinary paths
 /// cannot drift.
 async fn serve_inner(
     config: Arc<Config>,
-    catalog_overlay: Arc<CatalogOverlay>,
     listener: TcpListener,
     config_path: Option<PathBuf>,
     secrets: Option<Arc<dyn SecretStore>>,
@@ -350,52 +275,14 @@ async fn serve_inner(
     #[cfg(test)]
     let router = match injected_router {
         Some(injected) => injected,
-        None => {
-            build_router_from_config_with_overlay(config.clone(), &catalog_overlay, secrets.clone())
-                .await?
-        }
+        None => build_router_from_config(config.clone(), secrets.clone()).await?,
     };
     #[cfg(not(test))]
     let router = {
         let _ = _seams;
-        build_router_from_config_with_overlay(config.clone(), &catalog_overlay, secrets.clone())
-            .await?
+        build_router_from_config(config.clone(), secrets.clone()).await?
     };
     router.log_placeholder_seats();
-
-    // Cross-version catalog drift observability: AFTER the router
-    // build, so the in-use selectors below are the same set
-    // `apply_catalog_overlay` just resolved against. Startup-only (not
-    // wired into the config-reload path) -- `catalog_state.json` is a
-    // separate, rebuildable file the overlay never touches, and this
-    // call is fully self-contained: it never fails serve, no matter
-    // what state its own file is in.
-    //
-    // Colocated with `config_path`'s directory rather than the
-    // hardcoded `routectl_config_dir()`, and skipped entirely when
-    // `config_path` is `None`: the many in-memory-`Config` test
-    // helpers that call `serve_on_listener` (never `serve` itself)
-    // pass `None` here precisely because they have no real on-disk
-    // config to anchor a reload watch to either -- writing this file
-    // to a hardcoded real path regardless would mean every `cargo
-    // test` run mutates the developer's ACTUAL `~/.config/routectl/`
-    // directory. When `config_path` IS `Some`, its parent directory is
-    // `routectl_config_dir()` in every real deployment (see
-    // `main.rs::resolve_config_path`) and is the test's own tempdir
-    // when a test explicitly points `config_path` at one (e.g.
-    // `hot_reload.rs`) -- either way this lands next to the config
-    // that actually produced this boot's router.
-    if let Some(dir) = config_path.as_deref().and_then(Path::parent) {
-        check_drift_and_persist_state(
-            &in_use_catalog_selectors(&config),
-            &catalog_overlay,
-            &dir.join("catalog_state.json"),
-        );
-    }
-
-    routectl_router::log_overlay_soft_defects(&routectl_router::overlay_soft_defects(
-        &catalog_overlay,
-    ));
 
     // Both security refuses below run BEFORE the ledger-reading warms and
     // before the usage writer starts, so a boot that is going to be refused
@@ -697,7 +584,6 @@ async fn serve_inner(
 
     let mut reload_handles = spawn_reload_pipeline(
         config.clone(),
-        catalog_overlay.clone(),
         config_path.clone(),
         oauth_store,
         secrets.clone(),

@@ -10,9 +10,7 @@
 
 use super::*;
 use crate::handlers::control::cleared_event;
-use crate::server::test_support::{
-    drain_usage_writer_strict, isolate_usage_db, overlay_at_revision,
-};
+use crate::server::test_support::{drain_usage_writer_strict, isolate_usage_db};
 use crate::server::{capability_rebuild, ledger_reader};
 use routectl_router::Config;
 use routectl_router::Router;
@@ -152,8 +150,7 @@ fn seeded_router_with_both_classes(
         "the pre-reload session must be persisted",
     );
 
-    let mut router = Router::new(config.clone());
-    router.install_catalog_overlay(overlay_at_revision(revision));
+    let router = Router::new(config.clone());
     warm_off_runtime(&config.usage.db_path, &router, usage);
     assert_eq!(
         resident_keys(&router).len(),
@@ -183,9 +180,8 @@ fn resident_keys(router: &Router) -> Vec<String> {
 
 /// Simulate a process restart: a fresh router (empty registry) warmed from the
 /// ledger exactly as `serve` does at bootstrap.
-fn restart_from_ledger(config: &Arc<Config>, revision: u64, usage: &UsageHandle) -> Router {
-    let mut router = Router::new(config.clone());
-    router.install_catalog_overlay(overlay_at_revision(revision));
+fn restart_from_ledger(config: &Arc<Config>, usage: &UsageHandle) -> Router {
+    let router = Router::new(config.clone());
     warm_off_runtime(&config.usage.db_path, &router, usage);
     router
 }
@@ -218,7 +214,6 @@ async fn every_verdict_survives_a_boundary_and_two_restarts() {
     // entry, and the boundary batch persists the new tombstone plus the
     // survivor restatements atomically.
     let mut reloaded = Router::new(config.clone());
-    reloaded.install_catalog_overlay(overlay_at_revision(2));
     reloaded.carry_over_learned_from(&before);
     let reloaded = Arc::new(reloaded);
     let reloaded = Arc::new(reloaded);
@@ -233,7 +228,7 @@ async fn every_verdict_survives_a_boundary_and_two_restarts() {
     assert_eq!(resident_keys(&reloaded), both_keys());
 
     // Act, phase two: the first restart, warming from the ledger.
-    let restarted = restart_from_ledger(&config, 2, &usage);
+    let restarted = restart_from_ledger(&config, &usage);
 
     // Assert: both verdicts came back.
     assert_eq!(
@@ -245,7 +240,7 @@ async fn every_verdict_survives_a_boundary_and_two_restarts() {
     // Act, phase three: a SECOND consecutive restart. The first restart wrote
     // no fresh boundary (its tombstone matched), so the survivor's restated
     // row must still be visible past the same boundary.
-    let restarted_again = restart_from_ledger(&config, 2, &usage);
+    let restarted_again = restart_from_ledger(&config, &usage);
 
     // Assert: still resident -- the guarantee does not decay per boot.
     assert_eq!(
@@ -286,7 +281,6 @@ async fn a_restated_survivor_keeps_its_original_observation_age() {
         .expect("the wire-shape survivor is resident");
 
     let mut reloaded = Router::new(config.clone());
-    reloaded.install_catalog_overlay(overlay_at_revision(2));
     reloaded.carry_over_learned_from(&before);
     let reloaded = Arc::new(reloaded);
     let reloaded = Arc::new(reloaded);
@@ -344,8 +338,7 @@ async fn a_reload_with_no_survivors_still_commits_the_boundary() {
         config.usage.enabled,
     );
 
-    let mut reloaded = Router::new(config.clone());
-    reloaded.install_catalog_overlay(overlay_at_revision(2));
+    let reloaded = Router::new(config.clone());
 
     let reloaded = Arc::new(reloaded);
     let outcome = commit_capability_boundary(&usage, &reloaded).await;
@@ -433,7 +426,6 @@ async fn a_write_failure_commits_no_row_and_reports_a_failed_boundary() {
     }
 
     let mut reloaded = Router::new(config.clone());
-    reloaded.install_catalog_overlay(overlay_at_revision(2));
     reloaded.carry_over_learned_from(&before);
     let reloaded = Arc::new(reloaded);
     let reloaded = Arc::new(reloaded);
@@ -508,8 +500,7 @@ async fn an_evidence_bearing_survivor_keeps_its_class_through_reload_and_restart
         routectl_usage::BatchCommit::Committed { rows: 2 }
     );
 
-    let mut before = Router::new(config.clone());
-    before.install_catalog_overlay(overlay_at_revision(1));
+    let before = Router::new(config.clone());
     warm_off_runtime(&config.usage.db_path, &before, &usage);
     assert_eq!(
         resident_keys(&before),
@@ -519,7 +510,6 @@ async fn an_evidence_bearing_survivor_keeps_its_class_through_reload_and_restart
 
     // Act: revision-changing reload, then a restart.
     let mut reloaded = Router::new(config.clone());
-    reloaded.install_catalog_overlay(overlay_at_revision(2));
     reloaded.carry_over_learned_from(&before);
     let reloaded = Arc::new(reloaded);
     let reloaded = Arc::new(reloaded);
@@ -531,7 +521,7 @@ async fn an_evidence_bearing_survivor_keeps_its_class_through_reload_and_restart
         ),
         "got {outcome:?}",
     );
-    let restarted = restart_from_ledger(&config, 2, &usage);
+    let restarted = restart_from_ledger(&config, &usage);
 
     // Assert: the survivor is still resident after the restart, with its class.
     assert_eq!(
@@ -617,7 +607,7 @@ async fn a_verified_row_on_a_field_key_is_not_resident_after_a_cold_rebuild() {
     );
 
     // Act: the cold rebuild a boot runs.
-    let booted = restart_from_ledger(&config, 1, &usage);
+    let booted = restart_from_ledger(&config, &usage);
 
     // Assert: only the catalog-key positive came back.
     assert_eq!(
@@ -695,7 +685,7 @@ async fn a_stale_boundary_boot_makes_its_own_boundary_durable_while_capture_is_d
 
     // Act, phase one: boot. The boundary is stale against the frozen stamp,
     // so the warm restates past its own -- durably, despite capture being off.
-    let booted = restart_from_ledger(&config, 2, &usage);
+    let booted = restart_from_ledger(&config, &usage);
     assert!(
         resident_keys(&booted).is_empty(),
         "the stale boundary carried no rows to restate",
@@ -719,7 +709,7 @@ async fn a_stale_boundary_boot_makes_its_own_boundary_durable_while_capture_is_d
     );
 
     // Act, phase three: restart at the same revision.
-    let restarted = restart_from_ledger(&config, 2, &usage);
+    let restarted = restart_from_ledger(&config, &usage);
 
     // Assert: the verdict learned after the boot's boundary is replayable.
     // Without a durable startup boundary it would sit before a stale
@@ -761,8 +751,7 @@ async fn shutdown_during_an_admitted_wait_abandons_without_publishing() {
     let (tx, _rx_held) = tokio::sync::mpsc::channel(8);
     let usage = routectl_usage::handle_over_channel(tx);
 
-    let mut reloaded = Router::new(config.clone());
-    reloaded.install_catalog_overlay(overlay_at_revision(2));
+    let reloaded = Router::new(config.clone());
     let generation_before = reloaded.learned_registry().generation();
 
     let reloaded = Arc::new(reloaded);
@@ -807,8 +796,7 @@ async fn cloned_handles_cannot_wedge_an_abandoned_boundary() {
     let _clone_a = usage.clone();
     let _clone_b = usage.clone();
 
-    let mut reloaded = Router::new(config.clone());
-    reloaded.install_catalog_overlay(overlay_at_revision(2));
+    let reloaded = Router::new(config.clone());
     let reloaded = Arc::new(reloaded);
     let reloaded = Arc::new(reloaded);
     let admitted = admit_capability_boundary(&usage, &reloaded).expect("admitted");
@@ -848,7 +836,6 @@ async fn a_refused_admission_leaves_the_live_state_pointer_identical() {
 
     // The replacement shares the registry; admission is then refused.
     let mut reloaded = Router::new(config.clone());
-    reloaded.install_catalog_overlay(overlay_at_revision(2));
     reloaded.carry_over_learned_from(&live);
     let reloaded = Arc::new(reloaded);
     let reloaded = Arc::new(reloaded);
@@ -971,7 +958,6 @@ async fn a_delayed_pre_boundary_event_is_dropped_while_a_post_admission_field_ev
 
     // Act: admit the boundary, then emit both kinds of event.
     let mut reloaded = Router::new(config.clone());
-    reloaded.install_catalog_overlay(overlay_at_revision(2));
     reloaded.carry_over_learned_from(&before);
     let reloaded = Arc::new(reloaded);
     let reloaded = Arc::new(reloaded);
@@ -1052,7 +1038,6 @@ async fn a_write_failure_runs_no_boundary_transition() {
     }
 
     let mut reloaded = Router::new(config.clone());
-    reloaded.install_catalog_overlay(overlay_at_revision(2));
     reloaded.carry_over_learned_from(&before);
     let generation_before = reloaded.learned_registry().generation();
     let resident_before = resident_keys(&reloaded).len();
@@ -1133,7 +1118,6 @@ async fn a_committed_boundary_applies_the_reloads_tuning() {
         ..owning_config()
     });
     let mut reloaded = Router::new(retuned);
-    reloaded.install_catalog_overlay(overlay_at_revision(2));
     reloaded.carry_over_learned_from(&before);
     let reloaded = Arc::new(reloaded);
 
@@ -1176,7 +1160,6 @@ async fn an_old_router_field_observation_during_an_admitted_boundary_survives_a_
 
     let before = seeded_router_with_both_classes(&config, 1, &usage);
     let mut reloaded = Router::new(config.clone());
-    reloaded.install_catalog_overlay(overlay_at_revision(2));
     reloaded.carry_over_learned_from(&before);
     let reloaded = Arc::new(reloaded);
 
@@ -1228,7 +1211,7 @@ async fn an_old_router_field_observation_during_an_admitted_boundary_survives_a_
     );
 
     // Restart: the observation replays.
-    let restarted = restart_from_ledger(&config, 2, &usage);
+    let restarted = restart_from_ledger(&config, &usage);
     assert!(
         resident_keys(&restarted).contains(&observed_key),
         "the old Router's observation must survive the boundary and the restart: {:?}",
@@ -1280,7 +1263,7 @@ async fn a_clear_settled_across_a_boundary_stays_cleared_across_two_restarts() {
         1,
     );
     assert_eq!(seeded, routectl_usage::BatchCommit::Committed { rows: 2 });
-    let live = restart_from_ledger(&config, 1, &usage);
+    let live = restart_from_ledger(&config, &usage);
     assert_eq!(
         resident_keys(&live),
         vec![field_key()],
@@ -1289,7 +1272,6 @@ async fn a_clear_settled_across_a_boundary_stays_cleared_across_two_restarts() {
 
     // (2) The replacement shares the registry; its boundary is ADMITTED.
     let mut reloaded = Router::new(config.clone());
-    reloaded.install_catalog_overlay(overlay_at_revision(2));
     reloaded.carry_over_learned_from(&live);
     let reloaded = Arc::new(reloaded);
     let admitted = admit_capability_boundary(&usage, &reloaded).expect("admitted");
@@ -1359,13 +1341,13 @@ async fn a_clear_settled_across_a_boundary_stays_cleared_across_two_restarts() {
         0,
         config.usage.enabled,
     );
-    let first = restart_from_ledger(&config, 2, &usage2);
+    let first = restart_from_ledger(&config, &usage2);
     assert!(
         !resident_keys(&first).contains(&field_key()),
         "the clear must survive the first restart: {:?}",
         resident_keys(&first),
     );
-    let second = restart_from_ledger(&config, 2, &usage2);
+    let second = restart_from_ledger(&config, &usage2);
     assert!(
         !resident_keys(&second).contains(&field_key()),
         "and the second: {:?}",
@@ -1392,7 +1374,6 @@ async fn a_settlement_after_shutdown_abandonment_uses_the_rolled_back_generation
     let live = Router::new(config.clone());
     let generation_before = live.learned_registry().generation();
     let mut reloaded = Router::new(config.clone());
-    reloaded.install_catalog_overlay(overlay_at_revision(2));
     reloaded.carry_over_learned_from(&live);
     let reloaded = Arc::new(reloaded);
 
@@ -1468,7 +1449,6 @@ async fn an_inferred_survivors_corroboration_survives_a_reload_and_restart() {
 
     // Act: revision-changing reload, boundary committed, then a restart.
     let mut reloaded = Router::new(config.clone());
-    reloaded.install_catalog_overlay(overlay_at_revision(2));
     reloaded.carry_over_learned_from(&live);
     let reloaded = Arc::new(reloaded);
     let outcome = commit_capability_boundary(&usage, &reloaded).await;
@@ -1479,7 +1459,7 @@ async fn an_inferred_survivors_corroboration_survives_a_reload_and_restart() {
         ),
         "got {outcome:?}",
     );
-    let restarted = restart_from_ledger(&config, 2, &usage);
+    let restarted = restart_from_ledger(&config, &usage);
 
     // Assert on the count that DECIDES acting state, not on residency.
     assert_eq!(
@@ -1593,7 +1573,6 @@ async fn a_reconfirmed_inferred_survivor_still_acts_after_a_reload_and_restart()
 
     // Act: revision-changing reload, boundary committed, then a restart.
     let mut reloaded = Router::new(config.clone());
-    reloaded.install_catalog_overlay(overlay_at_revision(2));
     reloaded.carry_over_learned_from(&live);
     let reloaded = Arc::new(reloaded);
     let outcome = commit_capability_boundary(&usage, &reloaded).await;
@@ -1604,7 +1583,7 @@ async fn a_reconfirmed_inferred_survivor_still_acts_after_a_reload_and_restart()
         ),
         "got {outcome:?}",
     );
-    let restarted = restart_from_ledger(&config, 2, &usage);
+    let restarted = restart_from_ledger(&config, &usage);
 
     // Assert: still CORROBORATED, so still acting. A first_seen/last_seen pair
     // would have replayed the second row as too-late and reset this to 1.
@@ -1640,7 +1619,6 @@ async fn the_committed_ledger_generation_equals_the_registry_generation() {
 
     let before = seeded_router_with_both_classes(&config, 1, &usage);
     let mut reloaded = Router::new(config.clone());
-    reloaded.install_catalog_overlay(overlay_at_revision(2));
     reloaded.carry_over_learned_from(&before);
     let reloaded = Arc::new(reloaded);
 
@@ -1690,7 +1668,6 @@ async fn a_second_boundary_admission_is_refused_while_the_first_is_in_flight() {
 
     let live = Router::new(config.clone());
     let mut reloaded = Router::new(config.clone());
-    reloaded.install_catalog_overlay(overlay_at_revision(2));
     reloaded.carry_over_learned_from(&live);
     let reloaded = Arc::new(reloaded);
 
@@ -1732,7 +1709,6 @@ async fn a_purge_that_holds_the_lease_refuses_a_racing_boundary_then_both_commit
 
     let before = seeded_router_with_both_classes(&config, 1, &usage);
     let mut reloaded = Router::new(config.clone());
-    reloaded.install_catalog_overlay(overlay_at_revision(2));
     reloaded.carry_over_learned_from(&before);
     let reloaded = Arc::new(reloaded);
 
@@ -1819,13 +1795,13 @@ async fn a_purge_that_holds_the_lease_refuses_a_racing_boundary_then_both_commit
     );
 
     // Durable across two consecutive cold boots.
-    let restarted = restart_from_ledger(&config, 2, &usage);
+    let restarted = restart_from_ledger(&config, &usage);
     assert_eq!(
         resident_keys(&restarted),
         vec!["web_search".to_string()],
         "the purge must survive the first restart",
     );
-    let restarted_again = restart_from_ledger(&config, 2, &usage);
+    let restarted_again = restart_from_ledger(&config, &usage);
     assert_eq!(
         resident_keys(&restarted_again),
         vec!["web_search".to_string()],
@@ -1853,7 +1829,6 @@ async fn a_purge_attempted_while_a_boundary_is_unsettled_is_refused_then_retried
 
     let before = seeded_router_with_both_classes(&config, 1, &usage);
     let mut reloaded = Router::new(config.clone());
-    reloaded.install_catalog_overlay(overlay_at_revision(2));
     reloaded.carry_over_learned_from(&before);
     let reloaded = Arc::new(reloaded);
 
@@ -1939,13 +1914,13 @@ async fn a_purge_attempted_while_a_boundary_is_unsettled_is_refused_then_retried
     );
 
     // Durable across two consecutive cold boots.
-    let restarted = restart_from_ledger(&config, 2, &usage);
+    let restarted = restart_from_ledger(&config, &usage);
     assert_eq!(
         resident_keys(&restarted),
         vec!["web_search".to_string()],
         "the purge must survive the first restart",
     );
-    let restarted_again = restart_from_ledger(&config, 2, &usage);
+    let restarted_again = restart_from_ledger(&config, &usage);
     assert_eq!(
         resident_keys(&restarted_again),
         vec!["web_search".to_string()],
@@ -2030,7 +2005,6 @@ async fn an_old_kind_write_between_carry_over_and_cut_is_not_restated_as_the_new
     let before = seeded_router_with_both_classes(&config, 1, &usage);
 
     let mut reloaded = Router::new(flipped.clone());
-    reloaded.install_catalog_overlay(overlay_at_revision(2));
     reloaded.carry_over_learned_from(&before);
     let delayed = observe_field(&before, "nick#upstream", "output.format", NICK_KIND);
     let kept = observe_field(&before, "keep#upstream", "output.format", NICK_KIND);
@@ -2055,7 +2029,7 @@ async fn an_old_kind_write_between_carry_over_and_cut_is_not_restated_as_the_new
         .map(|(_, _, capability)| capability.as_str())
         .collect();
     assert_eq!(restated, vec![kept.as_str()]);
-    let restarted = restart_from_ledger(&flipped, 2, &usage);
+    let restarted = restart_from_ledger(&flipped, &usage);
     assert_eq!(
         resident_lanes(&restarted),
         vec![("keep#upstream".to_string(), kept)],

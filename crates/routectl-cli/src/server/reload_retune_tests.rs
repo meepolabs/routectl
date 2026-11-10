@@ -58,10 +58,9 @@ impl Rig {
             routectl_router::parse_config(&gate_config_text(5, 100)).expect("fixture parses");
         let usage_dir = isolate_usage_db(&mut config);
         let config = Arc::new(config);
-        let router =
-            build_router_from_config_with_overlay(config.clone(), &Arc::default(), secrets.clone())
-                .await
-                .expect("initial router build");
+        let router = build_router_from_config(config.clone(), secrets.clone())
+            .await
+            .expect("initial router build");
         Self {
             cfg_path,
             config,
@@ -75,7 +74,7 @@ impl Rig {
     async fn reload_to_tighter_gates(
         &self,
         usage: &routectl_usage::UsageHandle,
-    ) -> Result<Option<(Arc<Config>, Arc<CatalogOverlay>)>, ReloadFailure> {
+    ) -> Result<Option<Arc<Config>>, ReloadFailure> {
         std::fs::write(&self.cfg_path, gate_config_text(2, 1)).unwrap();
         Box::pin(handle_config_reload(
             Some(&self.cfg_path),
@@ -83,7 +82,6 @@ impl Rig {
             self.secrets.clone(),
             &self.swap,
             usage,
-            ReloadTrigger::ConfigFile,
             &mut never_shutdown(),
         ))
         .await

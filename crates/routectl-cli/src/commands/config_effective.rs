@@ -23,9 +23,9 @@ use std::fmt::Display;
 
 use routectl_router::prices::{PriceSource, PriceTable};
 use routectl_router::{
-    BreakerThreshold, CatalogOverlay, ClassPolicyCell, ClassPolicySource, Config, EffectiveRow,
-    ModelCell, OverrideRow, OverrideVerdict, PriceTableDates, Resolved, ResolvedTuning, Source,
-    TuningRow, TuningTargetKind, derive_effective_view,
+    BreakerThreshold, ClassPolicyCell, ClassPolicySource, Config, EffectiveRow, ModelCell,
+    OverrideRow, OverrideVerdict, PriceTableDates, Resolved, ResolvedTuning, Source, TuningRow,
+    TuningTargetKind, derive_effective_view,
 };
 
 /// Print the plain redacted config dump, then the provenance-annotated
@@ -34,13 +34,12 @@ use routectl_router::{
 /// price tables the model prices resolve against.
 pub fn show_effective(
     config: &Config,
-    overlay: &CatalogOverlay,
     refreshed: Option<&PriceTable>,
     shipped: Option<&PriceTable>,
 ) -> Result<()> {
     super::config::show(config)?;
 
-    let view = derive_effective_view(config, overlay, refreshed, shipped);
+    let view = derive_effective_view(config, &Default::default(), refreshed, shipped);
     println!("effective view -- provenance-annotated (layered surfaces only)");
     render_model_cells(&view.models);
     render_model_facts(&view.models, &view.price_tables);
@@ -394,8 +393,7 @@ upstream = "u"
     }
 
     fn rendered_lines() -> Vec<String> {
-        let view =
-            derive_effective_view(&every_tier_config(), &CatalogOverlay::default(), None, None);
+        let view = derive_effective_view(&every_tier_config(), &Default::default(), None, None);
         view.tuning.iter().map(tuning_line).collect()
     }
 
@@ -470,7 +468,7 @@ api_key_ref = "env://K"
 "#,
         )
         .expect("valid config");
-        let view = derive_effective_view(&config, &CatalogOverlay::default(), None, None);
+        let view = derive_effective_view(&config, &Default::default(), None, None);
 
         let line = tuning_line(&view.tuning[0]);
 
@@ -535,12 +533,7 @@ upstream = "glm-5"
     }
 
     fn facts_lines(refreshed: Option<&PriceTable>, shipped: Option<&PriceTable>) -> Vec<String> {
-        let view = derive_effective_view(
-            &priced_config(),
-            &CatalogOverlay::default(),
-            refreshed,
-            shipped,
-        );
+        let view = derive_effective_view(&priced_config(), &Default::default(), refreshed, shipped);
         view.models
             .iter()
             .map(|cell| model_facts_line(cell, &view.price_tables))
@@ -604,7 +597,7 @@ upstream = "glm-5"
             .get_mut("opus")
             .expect("opus")
             .max_output_tokens = None;
-        let view = derive_effective_view(&config, &CatalogOverlay::default(), None, None);
+        let view = derive_effective_view(&config, &Default::default(), None, None);
 
         let opus = view
             .models
@@ -632,12 +625,8 @@ upstream = "glm-5"
             ),
         ];
         for (name, refreshed, expected) in rows {
-            let view = derive_effective_view(
-                &priced_config(),
-                &CatalogOverlay::default(),
-                refreshed,
-                None,
-            );
+            let view =
+                derive_effective_view(&priced_config(), &Default::default(), refreshed, None);
             assert_eq!(table_dates_text(&view.price_tables), expected, "{name}");
         }
     }

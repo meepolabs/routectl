@@ -21,8 +21,8 @@ use routectl_router::{
 use routectl_testkit::ScopedEnv;
 
 use super::*;
-use crate::server::build_router_from_config_with_overlay;
-use crate::server::reload::{ReloadTrigger, handle_config_reload};
+use crate::server::build_router_from_config;
+use crate::server::reload::handle_config_reload;
 use crate::server::reload_failure::ReloadFailure;
 use crate::server::serve::build_usage_writer;
 use crate::server::test_support::{drain_usage_writer_strict, isolate_usage_db, never_shutdown};
@@ -136,10 +136,9 @@ async fn a_reload_refused_by_any_raw_class_keeps_the_published_router() {
     let _usage_dir = isolate_usage_db(&mut config);
     let config = Arc::new(config);
     let (usage, writer) = build_usage_writer(&config);
-    let router =
-        build_router_from_config_with_overlay(config.clone(), &Arc::default(), secrets.clone())
-            .await
-            .expect("build the live router");
+    let router = build_router_from_config(config.clone(), secrets.clone())
+        .await
+        .expect("build the live router");
     let swap = Arc::new(ArcSwap::from_pointee(router));
 
     for (row, raw, is_class) in refusal_rows() {
@@ -153,7 +152,6 @@ async fn a_reload_refused_by_any_raw_class_keeps_the_published_router() {
             secrets.clone(),
             &swap,
             &usage,
-            ReloadTrigger::ConfigFile,
             &mut never_shutdown(),
         ))
         .await;
@@ -177,7 +175,6 @@ async fn a_reload_refused_by_any_raw_class_keeps_the_published_router() {
         secrets,
         &swap,
         &usage,
-        ReloadTrigger::ConfigFile,
         &mut never_shutdown(),
     ))
     .await;

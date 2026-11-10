@@ -215,7 +215,7 @@ mod tests {
         let meta = Arc::new(DaemonMeta::new("127.0.0.1:9000".to_string()));
         let handle = DaemonMetaHandle::new(meta.clone());
         meta.stamp_config_loaded();
-        meta.record_reload_failure(ReloadFailure::OverlayLoadFailed);
+        meta.record_reload_failure(ReloadFailure::ConfigLoadFailed);
 
         meta.stamp_config_loaded();
 

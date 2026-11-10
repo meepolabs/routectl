@@ -104,10 +104,10 @@ pub mod vocabulary {
         /// is missing or unreadable, or a panel builder failed unexpectedly
         /// (the panic-isolation guard's catch-all).
         pub const DB_UNAVAILABLE: &str = "db_unavailable";
-        /// Config: the per-request catalog-overlay load failed, so the
-        /// effective view cannot be rendered. The raw loader error (which can
-        /// carry a filesystem path or a config value) is never surfaced -- it
-        /// is redacted and logged, and only this fixed code reaches the wire.
+        /// Config: the effective view could not be built (the panel builder
+        /// failed or panicked). No raw error text (which can carry a
+        /// filesystem path or a config value) is surfaced -- only this fixed
+        /// code reaches the wire.
         pub const CONFIG_UNAVAILABLE: &str = "config_unavailable";
         /// Doctor: the no-network gather failed (or the builder panicked), so
         /// no report could be produced.

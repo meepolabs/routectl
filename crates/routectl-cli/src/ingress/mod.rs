@@ -58,7 +58,7 @@ const MITM_SEAM_NONCE_BYTES: usize = 16;
 /// Per-process random value that makes `MITM_PROXIED_HEADER` unspoofable
 /// in practice. The MITM front-proxy's re-inject leg (`proxy::split`) is the
 /// ONLY legitimate stamper: it stamps this exact value, generated once at
-/// server bootstrap (`server::serve_on_listener_with_overlay`) and shared
+/// server bootstrap (`server::serve_on_listener`) and shared
 /// with every ingress checker (`handlers::pure_proxy_admission`,
 /// `handlers::ingress_handle`) via `AppState`.
 ///

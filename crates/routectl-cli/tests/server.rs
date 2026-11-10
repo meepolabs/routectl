@@ -370,7 +370,7 @@ async fn models_reports_the_configured_context_window_and_omits_an_unset_one() {
 /// build and not by a missing window.
 ///
 /// The unservable model is deliberately NOT referenced by any alias --
-/// `build_router_from_config_with_overlay` refuses to start when a failed
+/// `build_router_from_config` refuses to start when a failed
 /// model is reachable through `[aliases]`, so an aliased fixture could not
 /// reach a serving `/v1/models` at all.
 ///

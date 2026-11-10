@@ -6,9 +6,7 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use routectl_router::config::{AliasValue, PricingConfig};
 use routectl_router::prices::{PriceSources, parse_and_validate};
-use routectl_router::{
-    CatalogOverlay, CatalogRow, Config, Router, TuningSource, derive_effective_view,
-};
+use routectl_router::{CatalogRow, Config, Router, TuningSource, derive_effective_view};
 use routectl_testkit::ScopedEnv;
 use serde_json::Value;
 use std::path::PathBuf;
@@ -27,7 +25,7 @@ fn sample_daemon() -> DaemonMetaSnapshot {
 /// Build the wire DTO through the SAME derivation the handler uses, so a
 /// config-shaped assertion exercises the real path end to end.
 fn panel_from_config(config: &Config) -> ConfigPanel {
-    let effective = derive_effective_view(config, &CatalogOverlay::default(), None, None);
+    let effective = derive_effective_view(config, &Default::default(), None, None);
     build_panel(
         effective,
         &ActivationState::default(),
@@ -36,18 +34,12 @@ fn panel_from_config(config: &Config) -> ConfigPanel {
     )
 }
 
-/// A router over `config` with `overlay` RETAINED on it, matching what the
-/// server builder installs -- the panel derives its view from these two,
-/// so a test that wants an overlay in the view injects it here rather than
-/// writing a file the panel no longer reads.
-fn router_with(config: Config, overlay: CatalogOverlay) -> Router {
-    let mut router = Router::new(Arc::new(config));
-    router.install_catalog_overlay(Arc::new(overlay));
-    router
+fn router_with(config: Config) -> Router {
+    Router::new(Arc::new(config))
 }
 
 fn test_state() -> Arc<StatusState> {
-    let router = router_with(Config::default(), CatalogOverlay::default());
+    let router = router_with(Config::default());
     let app = AppState::for_test(Arc::new(ArcSwap::from_pointee(router)));
     Arc::new(StatusState::from_app(
         &app,
@@ -223,7 +215,7 @@ fn source_object_carries_every_declared_field() {
         AliasValue::Chain(vec!["small".to_string()]),
     );
 
-    let effective = derive_effective_view(&config, &CatalogOverlay::default(), None, None);
+    let effective = derive_effective_view(&config, &Default::default(), None, None);
     let panel = build_panel(
         effective,
         &ActivationState::default(),
@@ -409,7 +401,7 @@ rpm_limit = 40
         provider_json(&config, "seat-b")["rpm_limit"],
         Value::from(15)
     );
-    let effective = derive_effective_view(&config, &CatalogOverlay::default(), None, None);
+    let effective = derive_effective_view(&config, &Default::default(), None, None);
     let seat_a = effective
         .tuning
         .iter()
@@ -524,33 +516,31 @@ fn provider_count_matches_the_rendered_rows() {
     assert_eq!(panel.providers.len(), 3);
 }
 
-/// The panel serves the LAST ACCEPTED catalog generation, so a corrupt
-/// overlay sitting on disk cannot take it down while routing is healthy.
-/// The overlay file here is structurally invalid (no `cells` key, which
-/// `catalog_overlay::load` rejects -- a merely MISSING file loads as an
-/// empty overlay and would prove nothing), and the ambient config dir is
-/// pointed at it, so a panel that re-read disk would fold that load error
-/// into an unavailable payload.
+/// A leftover `catalog_overlay.json` in the config folder is not read: a
+/// router built through the daemon's own builder beside a VALID overlay file
+/// carrying a user cell renders that model without the cell's provenance.
+/// The premise row proves the fixture is a file the old overlay loader
+/// accepted with that very cell, so the absence below is not vacuous.
 ///
 /// `#[serial]` per the `ScopedEnv` contract.
 #[tokio::test]
 #[serial_test::serial]
-async fn a_corrupt_overlay_on_disk_never_unavailables_the_panel() {
-    // Arrange: an isolated config dir holding a corrupt overlay file, and
-    // a live router carrying the accepted generation in memory.
+async fn a_leftover_overlay_file_never_reaches_the_panel() {
+    // Arrange: an isolated config dir holding a valid leftover overlay.
     let dir = tempfile::tempdir().unwrap();
     let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
-    let overlay_dir = dir.path().join("routectl");
-    std::fs::create_dir_all(&overlay_dir).unwrap();
+    let config_dir = dir.path().join("routectl");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let leftover = config_dir.join("catalog_overlay.json");
     std::fs::write(
-        overlay_dir.join("catalog_overlay.json"),
-        br#"{"schema_version":1,"revision":4}"#,
+        &leftover,
+        br#"{"schema_version":1,"revision":2,"cells":{"anthropic-api:claude-opus-4-8*":
+                 {"source":"user","verified_at":"2026-07-01","wm":9.5}}}"#,
     )
     .unwrap();
-    assert!(
-        routectl_router::load_catalog_overlay(&routectl_router::overlay_default_path()).is_err(),
-        "the fixture must be a genuinely CORRUPT overlay, not a missing one"
-    );
+    let premise = routectl_router::load_catalog_overlay(&leftover)
+        .expect("premise: the old overlay loader accepts this file");
+    assert!(premise.cells.contains_key("anthropic-api:claude-opus-4-8*"));
 
     let config: Config = toml::from_str(
         r#"
@@ -567,42 +557,31 @@ upstream = "claude-opus-4-8"
 "#,
     )
     .expect("valid config");
-    // The accepted generation, in the same JSON shape the loader parses,
-    // so the fixture cannot drift from what a real accepted overlay is.
-    let accepted: CatalogOverlay = serde_json::from_str(
-        r#"{"schema_version":1,"revision":2,"cells":{"anthropic-api:claude-opus-4-8*":
-                 {"source":"user","verified_at":"2026-07-01","wm":9.5}}}"#,
+    let router = crate::server::build_router_from_config(
+        Arc::new(config),
+        Arc::new(routectl_auth::MemoryStore::new()),
     )
-    .expect("valid overlay");
-    let router = router_with(config, accepted);
+    .await
+    .expect("router builds");
     let app = AppState::for_test(Arc::new(ArcSwap::from_pointee(router)));
     let state = Arc::new(StatusState::from_app(&app, None, DaemonMeta::for_test()));
 
     // Act
     let panel = build(&state).await;
 
-    // Assert: available, and rendering the ACCEPTED generation's
-    // provenance -- not the baked fallback and not an unavailable code.
-    assert!(
-        panel.unavailable.is_none(),
-        "a corrupt overlay on disk must not unavailable the panel: {:?}",
-        panel.unavailable
-    );
+    // Assert
+    assert!(panel.unavailable.is_none(), "{:?}", panel.unavailable);
     let data = panel.data.expect("the panel must carry data");
     let opus = data
         .models
         .iter()
         .find(|m| m.nickname == "opus")
         .expect("the configured model reaches the wire");
-    assert_eq!(
+    assert_ne!(
         opus.source, "user",
-        "the panel must render the accepted overlay's provenance, not the baked layer"
+        "the leftover overlay cell must not render"
     );
-    assert_eq!(
-        opus.verified_at.as_deref(),
-        Some("2026-07-01"),
-        "the stamp must come from the accepted overlay cell"
-    );
+    assert_ne!(opus.verified_at.as_deref(), Some("2026-07-01"));
 }
 
 /// A read that lands mid-reload must skew CONSERVATIVELY: the source strip
@@ -758,7 +737,7 @@ max_output_tokens = 9000
     let shipped = table("2026-10-01", 4.0);
     let effective = derive_effective_view(
         &config,
-        &CatalogOverlay::default(),
+        &Default::default(),
         Some(&refreshed),
         Some(&shipped),
     );
@@ -875,7 +854,7 @@ upstream = "claude-opus-4-8"
 "#,
     )
     .expect("valid config");
-    let router = router_with(config, CatalogOverlay::default());
+    let router = router_with(config);
     let app = AppState::for_test(Arc::new(ArcSwap::from_pointee(router)));
     let mut state = StatusState::from_app(&app, None, DaemonMeta::for_test());
     state.prices = Arc::new(routectl_router::prices::PriceBook::new(book_path));

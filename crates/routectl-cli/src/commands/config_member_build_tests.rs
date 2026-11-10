@@ -148,14 +148,10 @@ async fn check_refuses_a_member_whose_provider_fails_to_build_as_serve_does() {
 
     // Act
     let check = member_build_errors(&config, rig.offline()).await;
-    let serve = crate::server::build_router_from_config_with_overlay(
-        Arc::new(config),
-        &Arc::default(),
-        rig.live(),
-    )
-    .await
-    .err()
-    .map(|e| e.to_string());
+    let serve = crate::server::build_router_from_config(Arc::new(config), rig.live())
+        .await
+        .err()
+        .map(|e| e.to_string());
 
     // Assert: one refusal naming the pool, the entry and the rule, and the
     // same text serve refuses to start with.

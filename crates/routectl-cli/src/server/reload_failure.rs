@@ -1,16 +1,14 @@
-//! The closed vocabulary a rejected config / overlay reload is recorded under.
+//! The closed vocabulary a rejected config reload is recorded under.
 //!
 //! A recorded failure reaches the status surface, so it carries only a fixed
 //! token: never the loader's error text, which can inline a config value or a
 //! local path.
 
-/// Why a config / overlay reload was rejected, as a path-free closed token.
+/// Why a config reload was rejected, as a path-free closed token.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReloadFailure {
     /// config.toml could not be read, parsed, or validated.
     ConfigLoadFailed,
-    /// The catalog overlay could not be read or failed its load checks.
-    OverlayLoadFailed,
     /// The blocking loader task panicked.
     LoaderPanicked,
     /// The candidate router could not be built from the loaded config.
@@ -26,7 +24,6 @@ impl ReloadFailure {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::ConfigLoadFailed => "config_load_failed",
-            Self::OverlayLoadFailed => "overlay_load_failed",
             Self::LoaderPanicked => "loader_panicked",
             Self::RouterBuildFailed => "router_build_failed",
             Self::BoundaryNotAdmitted => "boundary_not_admitted",
@@ -51,7 +48,6 @@ mod tests {
     fn every_class_renders_its_own_token() {
         let rows = [
             (ReloadFailure::ConfigLoadFailed, "config_load_failed"),
-            (ReloadFailure::OverlayLoadFailed, "overlay_load_failed"),
             (ReloadFailure::LoaderPanicked, "loader_panicked"),
             (ReloadFailure::RouterBuildFailed, "router_build_failed"),
             (ReloadFailure::BoundaryNotAdmitted, "boundary_not_admitted"),

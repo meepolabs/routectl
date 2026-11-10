@@ -504,46 +504,6 @@ async fn learned_negative_survives_restart_and_acts_without_a_fresh_attempt() {
     assert_eq!(acting_decision(entry, now), ActingDecision::RouteAway);
 }
 
-// --- Scenario 3: overlay revision change, restart, negative kept ---------
-
-#[tokio::test]
-async fn an_overlay_revision_change_across_restart_keeps_the_negative() {
-    // Arrange: a tombstone + negative learned under the frozen stamps.
-    let tmp = TempDir::new().expect("tempdir");
-    let ts = now_ms();
-    let ledger = tmp.path().join("usage.db");
-
-    let seed_router = default_router(&tmp).await;
-    let (cat, overlay) = revision_of(&seed_router);
-    let (handle, writer) = writer_at(&ledger);
-    handle.try_send_capability_event_in_generation(CapabilityEvent::tombstone(ts, cat, overlay), 1);
-    handle.try_send_capability_event_in_generation(
-        broken(
-            ts,
-            "gpt-nick#upstream",
-            WEB_SEARCH,
-            "self-identifying",
-            cat,
-            overlay,
-        ),
-        1,
-    );
-    drop(handle);
-    drain_usage_writer_strict(writer).await;
-
-    // Act: restart under a router that installed an overlay at revision 7.
-    let mut bumped = default_router(&tmp).await;
-    bumped.install_catalog_overlay(crate::server::test_support::overlay_at_revision(7));
-    let scratch = tmp.path().join("scratch.db");
-    let snap = warm_and_snapshot(&ledger, &bumped, &scratch).await;
-
-    // Assert: the overlay revision does not reach the replay boundary.
-    assert!(
-        find(&snap, "gpt-nick#upstream", WEB_SEARCH).is_some(),
-        "the negative replays across an overlay revision change",
-    );
-}
-
 // --- Scenario 4: decay across restart lapses to a single re-probe --------
 
 #[tokio::test]
@@ -693,8 +653,7 @@ async fn reload_then_restart_replays_only_post_reload_negatives() {
     drain_usage_writer_strict(writer).await;
 
     // Act: restart at the post-reload revision.
-    let mut router = default_router(&tmp).await;
-    router.install_catalog_overlay(crate::server::test_support::overlay_at_revision(1));
+    let router = default_router(&tmp).await;
     let scratch = tmp.path().join("scratch.db");
     let snap = warm_and_snapshot(&ledger, &router, &scratch).await;
 

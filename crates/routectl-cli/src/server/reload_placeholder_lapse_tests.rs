@@ -72,10 +72,9 @@ impl Rig {
         let mut config = routectl_router::parse_config(config_text).expect("fixture parses");
         let usage_dir = isolate_usage_db(&mut config);
         let config = Arc::new(config);
-        let router =
-            build_router_from_config_with_overlay(config.clone(), &Arc::default(), secrets.clone())
-                .await
-                .expect("initial router build");
+        let router = build_router_from_config(config.clone(), secrets.clone())
+            .await
+            .expect("initial router build");
         Self {
             creds,
             cfg_path,
@@ -91,7 +90,6 @@ impl Rig {
         handle_credentials_reload(
             &Some(self.oauth.clone()),
             &self.config,
-            &Arc::new(CatalogOverlay::default()),
             self.secrets.clone(),
             &self.swap,
             &Arc::new(ArcSwap::from_pointee(ActivationState::default())),
@@ -115,14 +113,13 @@ impl Rig {
     async fn reload_config(
         &self,
         usage: &routectl_usage::UsageHandle,
-    ) -> Result<Option<(Arc<Config>, Arc<CatalogOverlay>)>, ReloadFailure> {
+    ) -> Result<Option<Arc<Config>>, ReloadFailure> {
         Box::pin(handle_config_reload(
             Some(&self.cfg_path),
             &self.config,
             self.secrets.clone(),
             &self.swap,
             usage,
-            ReloadTrigger::ConfigFile,
             &mut never_shutdown(),
         ))
         .await

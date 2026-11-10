@@ -22,9 +22,7 @@ use routectl_auth::{MemoryStore, SecretStore};
 use routectl_providers::bedrock::{
     BedrockApiShape, BedrockConfig, BedrockCreds, BedrockProvider, auth,
 };
-use routectl_router::{
-    CURRENT_CONFIG_VERSION, CatalogOverlay, Config, ResolvedModel, Router, parse_config,
-};
+use routectl_router::{CURRENT_CONFIG_VERSION, Config, ResolvedModel, Router, parse_config};
 use routectl_testkit::ScopedEnv;
 use serde_json::{Value, json};
 use wiremock::matchers::{method, path_regex};
@@ -176,7 +174,6 @@ impl Boot {
         let handle = tokio::spawn(async move {
             super::serve::serve_on_listener_with_injected_router(
                 Arc::new(config),
-                Arc::new(CatalogOverlay::default()),
                 listener,
                 None,
                 Some(secrets),

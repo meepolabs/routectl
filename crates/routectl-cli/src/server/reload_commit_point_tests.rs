@@ -96,7 +96,7 @@ async fn a_committed_config_reload_marks_a_logged_out_seat_and_lifts_only_edited
     let config = Arc::new(config);
     let (usage, writer) = build_usage_writer(&config);
     let live = Arc::new(
-        build_router_from_config_with_overlay(config.clone(), &Arc::default(), secrets.clone())
+        build_router_from_config(config.clone(), secrets.clone())
             .await
             .expect("initial router build"),
     );
@@ -137,7 +137,6 @@ async fn a_committed_config_reload_marks_a_logged_out_seat_and_lifts_only_edited
         secrets,
         &swap,
         &usage,
-        ReloadTrigger::ConfigFile,
         &mut never_shutdown(),
     ))
     .await;
@@ -229,10 +228,9 @@ impl CredentialsRig {
             routectl_router::parse_config(&credentials_config_text()).expect("fixture parses");
         let usage_dir = isolate_usage_db(&mut config);
         let config = Arc::new(config);
-        let router =
-            build_router_from_config_with_overlay(config.clone(), &Arc::default(), secrets.clone())
-                .await
-                .expect("initial router build");
+        let router = build_router_from_config(config.clone(), secrets.clone())
+            .await
+            .expect("initial router build");
         Self {
             creds,
             stamp,
@@ -248,7 +246,6 @@ impl CredentialsRig {
         handle_credentials_reload(
             &Some(self.oauth.clone()),
             &self.config,
-            &Arc::new(CatalogOverlay::default()),
             self.secrets.clone(),
             &self.swap,
             &Arc::new(ArcSwap::from_pointee(ActivationState::default())),

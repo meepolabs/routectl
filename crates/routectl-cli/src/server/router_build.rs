@@ -1,13 +1,12 @@
-//! Router construction from a parsed config + catalog overlay: the
-//! validation gauntlet run on every build and the empty-overlay test
-//! wrapper. Split out of `serve` so the reload coordinator depends on
-//! this builder directly, keeping the serve <-> reload edge one-way.
+//! Router construction from a parsed config: the validation gauntlet run
+//! on every build. Split out of `serve` so the reload coordinator depends
+//! on this builder directly, keeping the serve <-> reload edge one-way.
 
 use std::sync::Arc;
 
 use routectl_auth::SecretStore;
 use routectl_core::{Error, Result, sanitize_for_log_with_cap};
-use routectl_router::{CatalogOverlay, Config, Router};
+use routectl_router::{Config, Router};
 
 use crate::commands::config::MAX_REPORTED_LINE_CHARS;
 
@@ -24,35 +23,13 @@ fn sanitize_warning_for_log(warning: &str) -> String {
 }
 
 /// Build a `Router` from the parsed config + a shared
-/// `Arc<dyn SecretStore>`, with an EMPTY catalog overlay. Thin wrapper kept
-/// for the many call sites (this crate's own unit tests plus
-/// `handlers::ingress_handle_tests`) that build a Router without caring
-/// about the overlay -- an empty overlay is behaviorally identical to
-/// "every target falls through to the baked catalog", which is what those
-/// callers already exercised before the overlay existed. Callers that DO
-/// care (the server's boot + reload paths) use
-/// [`build_router_from_config_with_overlay`] instead.
-#[cfg(test)]
-pub async fn build_router_from_config(
-    config: Arc<Config>,
-    secrets: Arc<dyn SecretStore>,
-) -> Result<Router> {
-    build_router_from_config_with_overlay(config, &Arc::default(), secrets).await
-}
-
-/// Build a `Router` from the parsed config + catalog overlay + a shared
 /// `Arc<dyn SecretStore>`. The store is hoisted out of this function
 /// (the caller passes it in) so a hot-reload config change that
 /// triggers a Router rebuild reuses the SAME store handle, preserving
 /// the OAuthStore in-memory token cache and the per-provider
 /// single-flight refresh mutex across rebuilds.
-///
-/// The overlay arrives as an `Arc` because the built Router RETAINS it (see
-/// `Router::install_catalog_overlay`): every caller already holds one, so
-/// retention costs a refcount rather than a clone of the overlay map.
-pub async fn build_router_from_config_with_overlay(
+pub async fn build_router_from_config(
     config: Arc<Config>,
-    catalog_overlay: &Arc<CatalogOverlay>,
     secrets: Arc<dyn SecretStore>,
 ) -> Result<Router> {
     // The whole shared validation suite, in its one deterministic order,
@@ -104,12 +81,6 @@ pub async fn build_router_from_config_with_overlay(
         routectl_router::validate_mitm_config(&config)?;
     }
 
-    // Advisory: warn (never fail) if the WHOLE baked catalog table's
-    // snapshot has gone stale (> 90 days). A redesign dropped the per-row
-    // `verified_at`, so this is now a single table-wide check rather than
-    // per-cell (see `routectl_router::catalog::warn_if_stale`'s doc).
-    routectl_router::catalog::warn_if_stale();
-
     let mut router = Router::new(config.clone());
 
     let opts = routectl_router::BuildOptions::new()
@@ -126,20 +97,9 @@ pub async fn build_router_from_config_with_overlay(
     // is installed: a degraded pool is invisible to config alone, so the read
     // side has to be handed the build's own observation.
     router.install_pool_reports(built.pool_reports);
-    // Stamp each resolved model's precomputed two-layer catalog merge
-    // (baked table + this boot/reload's overlay) onto the table BEFORE
-    // installing it, so `Router::record_would_trim` reads a resolved
-    // `EffectiveRow` straight off the dispatch target instead of
-    // re-resolving the merge per request.
     let resolved_models =
-        routectl_router::apply_catalog_overlay(resolved_models, &config, catalog_overlay);
+        routectl_router::apply_catalog_overlay(resolved_models, &config, &Default::default());
     router.install_resolved_models(resolved_models);
-    // Retain the overlay the resolved-model table was merged against, which
-    // also stamps its revision so a later hot-reload can detect an overlay
-    // change and invalidate the learned-capability registry. Retaining it
-    // (rather than leaving each reader to re-read the file) is what lets the
-    // status read side report the ACCEPTED generation.
-    router.install_catalog_overlay(catalog_overlay.clone());
 
     // Provider build failures are normally non-fatal (an operator
     // may have an unused-but-declared model whose provider creds

@@ -30,7 +30,7 @@ async fn build_router_twice_from_same_secrets_handle_succeeds() {
 }
 
 /// `validate_provider_credential_sources` is wired into
-/// `build_router_from_config_with_overlay` itself (not only reachable
+/// `build_router_from_config` itself (not only reachable
 /// via the separate `commands::config::check` call to the same
 /// validator) -- a forwarded provider pointed at a non-Anthropic host
 /// must fail the router build, i.e. serve startup and hot reload,
@@ -211,7 +211,7 @@ async fn build_router_from_config_runs_the_shared_validation_suite() {
 }
 
 /// The Bedrock invoke-lane model-family gate is wired into
-/// `build_router_from_config_with_overlay` itself, not only into the
+/// `build_router_from_config` itself, not only into the
 /// collected-validation path that `config check` and the serve pre-parse
 /// use. Serve startup and hot reload call this builder directly, so a
 /// gate reachable only from collected validation would leave both

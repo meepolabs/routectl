@@ -11,10 +11,10 @@ use routectl_auth::{SecretRef, SecretScheme, default_secret_dir};
 use routectl_core::ProbeOutcome;
 use routectl_router::prices::{PriceSubject, effective_pricing};
 use routectl_router::{
-    BetaSeedScope, CapabilityEventRow, CapabilityRebuildSummary, CatalogOverlay, Config,
-    FROZEN_CATALOG_VERSION, FROZEN_OVERLAY_REVISION, LearnedCapabilityRegistry,
-    LearnedLaneProjection, MatrixReplaySummary, ProviderEntry, ReplayTombstone, StateKey,
-    TuningRow, derive_effective_view, learned_output_ceiling, rebuild_capabilities_with_values,
+    BetaSeedScope, CapabilityEventRow, CapabilityRebuildSummary, Config, FROZEN_CATALOG_VERSION,
+    FROZEN_OVERLAY_REVISION, LearnedCapabilityRegistry, LearnedLaneProjection, MatrixReplaySummary,
+    ProviderEntry, ReplayTombstone, StateKey, TuningRow, derive_effective_view,
+    learned_output_ceiling, rebuild_capabilities_with_values,
 };
 
 use crate::commands::doctor_panels::compute_would_trim_panel;
@@ -486,7 +486,7 @@ pub(super) const fn replay_summary(
 pub(super) fn derive_tuning_rows(config: &Config) -> Vec<TuningRow> {
     // The tuning rows read the config alone, so any overlay yields the same
     // rows; the empty one keeps this section independent of overlay loading.
-    derive_effective_view(config, &CatalogOverlay::default(), None, None).tuning
+    derive_effective_view(config, &Default::default(), None, None).tuning
 }
 
 /// Probe every configured provider read-only through the shared `probe_all`

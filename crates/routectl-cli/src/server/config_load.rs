@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use routectl_core::Result;
-use routectl_router::{CatalogOverlay, Config};
+use routectl_router::Config;
 
 use super::reload_failure::ReloadFailure;
 
@@ -27,77 +27,26 @@ pub(super) fn compute_max_body_bytes(config: &Config) -> usize {
 }
 
 /// SINGLE shared config loader: preflight the schema `version`, parse
-/// `config.toml`, load the catalog overlay (fail-closed per
-/// `routectl_router::load_catalog_overlay`'s matrix), and run the startup
-/// validators. Used by the CLI's cold-start `load_config` (`main.rs`); the
-/// hot-reload path (`read_parse_validate_config`) runs the SAME
-/// `load_classified` body, so the two cannot diverge on which layers load
-/// or in which order. A reload re-reads the overlay from disk too -- both a
-/// config-file touch and a dedicated overlay-file write
-/// (`WatchTarget::CatalogOverlay` in `file_watch.rs`) trigger this same
-/// re-read via `ReloadRequest::Config` / `ReloadRequest::CatalogOverlay`.
-/// The load NEVER rewrites the file in place: a `version` outside the
-/// range this build reads, or a missing one, fails closed in the preflight
-/// (a too-old or versionless file is told to move it aside and run
-/// `routectl init`; a too-new file to upgrade routectl).
+/// `config.toml`, and run the startup validators. Used by the CLI's
+/// cold-start `load_config` (`main.rs`); the hot-reload path
+/// (`read_parse_validate_config`) runs this SAME function, so the two cannot
+/// diverge on what loads or in which order. The load NEVER
+/// rewrites the file in place: a `version` outside the range this build
+/// reads, or a missing one, fails closed in the preflight (a too-old or
+/// versionless file is told to move it aside and run `routectl init`; a
+/// too-new file to upgrade routectl).
 ///
-/// The loaded overlay rides back on [`LoadedConfig::catalog_overlay`] --
-/// callers that build a Router thread it into
-/// `build_router_from_config_with_overlay` so the two-layer merge
-/// (`routectl_router::apply_catalog_overlay`) sees the SAME overlay this
-/// call validated, at both cold start and every config reload.
-///
-/// Overlay / parse / validate failure ALWAYS returns `Err`; callers choose
-/// the posture -- cold startup propagates the error (fails hard), a hot
-/// reload logs a warn and keeps the prior config + router live.
+/// Parse / validate failure ALWAYS returns `Err`; callers choose the posture
+/// -- cold startup propagates the error (fails hard), a hot reload logs a
+/// warn and keeps the prior config + router live.
 pub fn load_effective_config(path: &Path) -> Result<LoadedConfig, String> {
-    load_classified(path).map_err(|e| e.message)
-}
-
-/// A rejected load: the loader's raw message (redact before logging -- it can
-/// inline a config value or a local path) and the layer that failed it.
-#[derive(Debug)]
-struct ClassifiedLoadError {
-    message: String,
-    class: ReloadFailure,
-}
-
-impl ClassifiedLoadError {
-    const fn config(message: String) -> Self {
-        Self {
-            message,
-            class: ReloadFailure::ConfigLoadFailed,
-        }
-    }
-
-    const fn overlay(message: String) -> Self {
-        Self {
-            message,
-            class: ReloadFailure::OverlayLoadFailed,
-        }
-    }
-}
-
-/// The body of [`load_effective_config`], keeping which layer failed: a
-/// config read / parse / validation failure is `ConfigLoadFailed`, an overlay
-/// failure `OverlayLoadFailed`.
-fn load_classified(path: &Path) -> Result<LoadedConfig, ClassifiedLoadError> {
-    let loaded = load_layers(path)?;
-    validate_effective_config(&loaded.config).map_err(ClassifiedLoadError::config)?;
+    let loaded = load_effective_config_unvalidated(path)?;
+    validate_effective_config(&loaded.config)?;
     Ok(loaded)
 }
 
-fn load_layers(path: &Path) -> Result<LoadedConfig, ClassifiedLoadError> {
-    let config = parse_config_only(path).map_err(ClassifiedLoadError::config)?;
-    let catalog_overlay = load_overlay_default().map_err(ClassifiedLoadError::overlay)?;
-    Ok(LoadedConfig {
-        config,
-        catalog_overlay,
-    })
-}
-
-/// The parse + overlay body of [`load_effective_config`], WITHOUT the
-/// fail-fast `validate_effective_config` gate.
+/// The parse body of [`load_effective_config`], WITHOUT the fail-fast
+/// `validate_effective_config` gate.
 ///
 /// Only `config check` uses this: it is the showcase surface that runs the
 /// FULL shared validator suite itself and renders EVERY error with a source
@@ -113,20 +62,20 @@ fn load_layers(path: &Path) -> Result<LoadedConfig, ClassifiedLoadError> {
 /// path; neither path mutates the file on load.
 ///
 /// Serve cold start, test and prompt-size go through
-/// [`load_effective_config`] and hot reload through `load_classified`;
-/// both keep the fail-fast validation posture.
+/// [`load_effective_config`] and hot reload through
+/// `read_parse_validate_config`; both keep the fail-fast validation posture.
 pub fn load_effective_config_unvalidated(path: &Path) -> Result<LoadedConfig, String> {
-    load_layers(path).map_err(|e| e.message)
+    Ok(LoadedConfig {
+        config: parse_config_only(path)?,
+    })
 }
 
 /// Parse `config.toml` ONLY -- the router's raw-config preflight
 /// (`routectl_router::preflight_raw_config`: schema version, then removed
-/// and retired keys) and the typed `deny_unknown_fields` deserialize --
-/// WITHOUT loading the catalog overlay. Doctor's capability panel uses this so an unreadable
-/// overlay degrades the catalog priors alone while the config-derived
-/// override rows still render. Produces the SAME wrapped error strings as
-/// the coupled [`load_effective_config_unvalidated`] so callers redact them
-/// through one shared path.
+/// and retired keys) and the typed `deny_unknown_fields` deserialize.
+/// Produces the SAME wrapped error strings as
+/// [`load_effective_config_unvalidated`] so callers redact them through one
+/// shared path.
 pub fn parse_config_only(path: &Path) -> Result<Config, String> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| format!("cannot read config `{}`: {e}", path.display()))?;
@@ -142,21 +91,9 @@ pub fn parse_config_only(path: &Path) -> Result<Config, String> {
         .map_err(|e| format!("config parse error in `{}`: {e}", path.display()))
 }
 
-/// Load the default catalog overlay independently of any config parse
-/// (fail-closed per `routectl_router::load_catalog_overlay`'s matrix).
-pub fn load_overlay_default() -> Result<CatalogOverlay, String> {
-    let overlay_path = routectl_router::overlay_default_path();
-    routectl_router::load_catalog_overlay(&overlay_path)
-        .map_err(|e| format!("catalog overlay load error: {e}"))
-}
-
-/// Return of [`load_effective_config`]: the parsed `Config` alongside the
-/// catalog overlay loaded from the SAME call, so a caller building a Router
-/// (`build_router_from_config_with_overlay`) never has the two drift apart
-/// by loading them at different times.
+/// Return of [`load_effective_config`]: the parsed `Config`.
 pub struct LoadedConfig {
     pub config: Config,
-    pub catalog_overlay: CatalogOverlay,
 }
 
 /// The startup validators shared by [`load_effective_config`] and
@@ -177,13 +114,12 @@ fn validate_effective_config(config: &Config) -> Result<(), String> {
     }
 }
 
-/// Hot-reload entry to [`load_classified`]: emits a warn on any failure so the
-/// coordinator can keep the previous config installed, and returns the
-/// failing layer's class.
+/// Hot-reload entry to [`load_effective_config`]: emits a warn on any failure so the
+/// coordinator can keep the previous config installed.
 pub(super) fn read_parse_validate_config(path: &Path) -> Result<LoadedConfig, ReloadFailure> {
-    let loaded = match load_classified(path) {
+    let loaded = match load_effective_config(path) {
         Ok(loaded) => loaded,
-        Err(ClassifiedLoadError { message, class }) => {
+        Err(message) => {
             // The loader error can inline the offending config VALUE (a
             // secret mistyped into a non-string field or a `literal:`
             // credential on the failing source line) plus local paths.
@@ -194,7 +130,7 @@ pub(super) fn read_parse_validate_config(path: &Path) -> Result<LoadedConfig, Re
                 error = %crate::commands::parse_error_redaction::redact_config_load_error(&message),
                 "config reload failed; keeping previous config",
             );
-            return Err(class);
+            return Err(ReloadFailure::ConfigLoadFailed);
         }
     };
 

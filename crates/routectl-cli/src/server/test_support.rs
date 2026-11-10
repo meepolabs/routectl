@@ -1,10 +1,9 @@
 //! Shared unit-test helpers used by more than one server sidecar.
 
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::Duration;
 
-use routectl_router::{CatalogOverlay, Config};
+use routectl_router::Config;
 use routectl_usage::{CHANNEL_CAPACITY, UsageHandle, UsageWriter};
 use tokio::sync::watch;
 
@@ -39,16 +38,6 @@ pub(super) fn never_shutdown() -> watch::Receiver<()> {
     let (tx, rx) = watch::channel(());
     std::mem::forget(tx);
     rx
-}
-
-/// An otherwise-empty overlay stamped at `revision`, for the reload /
-/// capability-boundary tests that turn on the REVISION a Router was built
-/// against and not on any cell content.
-pub(super) fn overlay_at_revision(revision: u64) -> Arc<CatalogOverlay> {
-    Arc::new(CatalogOverlay {
-        revision,
-        ..CatalogOverlay::default()
-    })
 }
 
 /// A writer drain that is PROVABLY under way, and can be asked whether it has

@@ -7,12 +7,13 @@
 //! `/status/doctor` builders all have to be wired exactly as shipped for the
 //! count to mean anything.
 //!
-//! The fixture seeds the two inputs that used to make every poll log: a catalog
-//! overlay carrying a soft cell defect (a below-sentinel write multiplier) and
-//! usage-ledger rows the replay cannot map (an unknown vocabulary version). The
-//! boot warm sees both once. A poll must see neither again: it renders the
-//! daemon's resident state, so it neither reloads the overlay file nor replays
-//! the ledger, and the field-verdict snapshot line is change-gated.
+//! The fixture seeds usage-ledger rows the replay cannot map (an unknown
+//! vocabulary version), which the boot warm sees once. A poll must not see them
+//! again: it renders the daemon's resident state, so it never replays the
+//! ledger, and the field-verdict snapshot line is change-gated. A leftover
+//! catalog overlay file carrying a soft cell defect (a below-sentinel write
+//! multiplier) sits in the config folder too: the daemon no longer reads it, so
+//! neither the boot nor a poll logs its defect.
 //!
 //! Log reads are synchronised by a barrier rather than a sleep: a request to a
 //! non-polling path closes an INFO span carrying a caller-chosen request id.
@@ -21,8 +22,8 @@
 //! poll produced precedes the barrier line.
 //!
 //! Isolation: the child runs with a CLEARED environment whose `HOME` and
-//! `XDG_CONFIG_HOME` point into a fresh tempdir, so the config, the overlay and
-//! the usage ledger all resolve there and never under the developer's real
+//! `XDG_CONFIG_HOME` point into a fresh tempdir, so the config, the leftover
+//! overlay and the usage ledger all resolve there and never under the developer's real
 //! config directory. The child binds a fresh loopback port.
 
 use std::io::{BufRead, BufReader, Read, Write};
@@ -45,7 +46,7 @@ const READY_DEADLINE: Duration = Duration::from_secs(30);
 /// Give-up bound for one barrier line to reach the parent.
 const BARRIER_DEADLINE: Duration = Duration::from_secs(10);
 
-/// Give-up bound for the file watcher to deliver the invalid overlay and the
+/// Give-up bound for the file watcher to deliver the invalid config and the
 /// daemon to record the rejected reload.
 const RELOAD_DEADLINE: Duration = Duration::from_secs(15);
 
@@ -56,7 +57,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 /// Each one is skipped by every replay that reads it.
 const UNMAPPABLE_ROWS: usize = 4;
 
-/// Overlay revision the fixture stamps on the overlay.
+/// Overlay revision the fixture stamps on the leftover overlay.
 const OVERLAY_REVISION: i64 = 3;
 
 /// The overlay cell carrying the soft defect.
@@ -375,8 +376,8 @@ fn write_config(dir: &Path, port: u16) -> PathBuf {
     path
 }
 
-/// An overlay whose one cell carries a finite write multiplier below the
-/// sentinel: accepted by the loader, reported as a soft defect.
+/// A leftover overlay whose one cell carries a finite write multiplier below
+/// the sentinel: the old overlay loader accepted it and reported a soft defect.
 fn write_overlay(dir: &Path) -> PathBuf {
     let path = dir.join("catalog_overlay.json");
     std::fs::write(
@@ -432,12 +433,12 @@ fn seed_ledger(dir: &Path) -> PathBuf {
     path
 }
 
-/// Replace the overlay with text that fails to parse, in one rename so the
+/// Replace the config with text that fails to parse, in one rename so the
 /// watcher sees a single complete write.
-fn corrupt_overlay(path: &Path) {
-    let staged = path.with_extension("json.staged");
-    std::fs::write(&staged, b"{ not json").expect("write invalid overlay");
-    std::fs::rename(&staged, path).expect("swap in invalid overlay");
+fn corrupt_config(path: &Path) {
+    let staged = path.with_extension("toml.staged");
+    std::fs::write(&staged, b"version = [ not toml").expect("write invalid config");
+    std::fs::rename(&staged, path).expect("swap in invalid config");
 }
 
 fn findings(report: &Value) -> &[Value] {
@@ -448,8 +449,8 @@ fn finding<'a>(report: &'a Value, name: &str) -> Option<&'a Value> {
     findings(report).iter().find(|f| f["name"] == name)
 }
 
-/// The doctor no longer reads the overlay: its soft defect is not a finding,
-/// and the file is named only as a leftover the daemon's doctor does not read.
+/// The overlay is not read: its soft defect is not a finding, and the file is
+/// named only as a leftover.
 fn assert_overlay_is_only_a_leftover_file(report: &Value) {
     assert!(
         finding(report, "catalog overlay").is_none(),
@@ -466,31 +467,41 @@ fn assert_overlay_is_only_a_leftover_file(report: &Value) {
     );
 }
 
-fn assert_no_overlay_load_error(report: &Value) {
+/// The report renders the daemon's accepted config: no finding reports a
+/// load error, whatever the files on disk hold.
+fn assert_no_load_error(report: &Value) {
     let schema = finding(report, "config schema")
         .unwrap_or_else(|| panic!("the report must carry the config schema finding: {report}"));
     assert_eq!(
         schema["status"], "Pass",
-        "a poll must not load the on-disk overlay: {schema}"
+        "a poll must render the accepted config: {schema}"
     );
     assert!(
         findings(report).iter().all(|f| !f["detail"]
             .as_str()
             .unwrap_or("")
             .contains("could not be loaded")),
-        "a poll must not report an overlay load error: {report}"
+        "a poll must not report a load error: {report}"
     );
 }
 
 #[test]
 fn polling_status_neither_grows_the_log_nor_rereads_disk_state() {
-    // Arrange: hermetic home, seeded overlay and ledger, a serving daemon.
+    // Arrange: hermetic home, a leftover overlay, a seeded ledger, a serving
+    // daemon.
     let port = free_port();
     let home = tempfile::tempdir().expect("tempdir");
     let dir = config_dir(home.path());
     std::fs::create_dir_all(&dir).expect("mkdir config dir");
     let config = write_config(&dir, port);
     let overlay = write_overlay(&dir);
+    let premise = routectl_router::load_catalog_overlay(&overlay)
+        .expect("premise: the old overlay loader accepts the leftover");
+    assert_eq!(
+        routectl_router::overlay_soft_defects(&premise).len(),
+        1,
+        "premise: the leftover carries the soft defect a read would log"
+    );
     let ledger = seed_ledger(&dir);
     for path in [&config, &overlay, &ledger] {
         assert!(
@@ -506,7 +517,7 @@ fn polling_status_neither_grows_the_log_nor_rereads_disk_state() {
     });
 
     let settled = assert_polls_leave_the_log_flat(&mut daemon);
-    assert_a_rejected_reload_keeps_the_served_overlay(&mut daemon, &overlay, settled);
+    assert_a_rejected_reload_keeps_the_served_state(&mut daemon, &config, settled);
 }
 
 /// Boot, then 3 polls of each endpoint, then 30 more: every class stays at its
@@ -528,7 +539,12 @@ fn assert_polls_leave_the_log_flat(daemon: &mut Daemon) -> Counts {
         "the boot warm skips each unmappable row once; log:\n{}",
         daemon.log.dump()
     );
-    assert_eq!(boot.overlay_soft_defect, 1, "log:\n{}", daemon.log.dump());
+    assert_eq!(
+        boot.overlay_soft_defect,
+        0,
+        "the leftover overlay is not read at boot; log:\n{}",
+        daemon.log.dump()
+    );
     assert_eq!(boot.warm, 1, "log:\n{}", daemon.log.dump());
     assert_eq!(
         after_3.warn_or_error, boot.warn_or_error,
@@ -543,8 +559,8 @@ fn assert_polls_leave_the_log_flat(daemon: &mut Daemon) -> Counts {
         "a poll must not replay the ledger"
     );
     assert_eq!(
-        after_33.overlay_soft_defect, 1,
-        "a poll must not reload the overlay"
+        after_33.overlay_soft_defect, 0,
+        "a poll must not read the overlay"
     );
     assert_eq!(after_33.warm, 1);
     // The first poll emits the snapshot (the classifier's positive control);
@@ -560,20 +576,20 @@ fn assert_polls_leave_the_log_flat(daemon: &mut Daemon) -> Counts {
         "the boot warm must have read the seeded rows: {matrix}"
     );
     assert_overlay_is_only_a_leftover_file(&report);
-    assert_no_overlay_load_error(&report);
+    assert_no_load_error(&report);
     after_33
 }
 
-/// Make the on-disk overlay unloadable: the daemon refuses the reload, the
-/// doctor reports the refusal while still rendering the served overlay, and
+/// Make the on-disk config unparseable: the daemon refuses the reload, the
+/// doctor reports the refusal while still rendering the served state, and
 /// later polls neither re-read the broken file nor log per poll.
-fn assert_a_rejected_reload_keeps_the_served_overlay(
+fn assert_a_rejected_reload_keeps_the_served_state(
     daemon: &mut Daemon,
-    overlay: &Path,
+    config: &Path,
     after_33: Counts,
 ) {
     // Act
-    corrupt_overlay(overlay);
+    corrupt_config(config);
     let until = Instant::now() + RELOAD_DEADLINE;
     let rejected = loop {
         let report = daemon.doctor();
@@ -595,17 +611,17 @@ fn assert_a_rejected_reload_keeps_the_served_overlay(
     let report = daemon.doctor();
 
     // Assert: the rejection is reported from the daemon's record while the
-    // served overlay keeps rendering, and nothing re-reads the broken file.
+    // served state keeps rendering, and nothing re-reads the broken file.
     let reload = finding(&rejected, "reload").expect("reload finding");
     assert!(
         reload["detail"]
             .as_str()
-            .is_some_and(|d| d.contains("overlay_load_failed")),
-        "the reload finding must name the overlay class: {reload}"
+            .is_some_and(|d| d.contains("config_load_failed")),
+        "the reload finding must name the config class: {reload}"
     );
     for report in [&rejected, &report] {
         assert_overlay_is_only_a_leftover_file(report);
-        assert_no_overlay_load_error(report);
+        assert_no_load_error(report);
         assert_eq!(report["panels"]["capability_matrix"]["source"], "resident");
     }
     assert_eq!(after_33.reload_rejected, 0);
@@ -627,6 +643,6 @@ fn assert_a_rejected_reload_keeps_the_served_overlay(
         daemon.log.texts(after_reload_end..after_more_end)
     );
     assert_eq!(after_more.rebuild_skip, UNMAPPABLE_ROWS);
-    assert_eq!(after_more.overlay_soft_defect, 1);
+    assert_eq!(after_more.overlay_soft_defect, 0);
     assert_eq!(after_more.field_verdict, after_33.field_verdict);
 }

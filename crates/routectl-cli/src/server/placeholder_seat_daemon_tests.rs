@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use arc_swap::ArcSwap;
 use routectl_auth::SecretStore;
 use routectl_router::runtime_state::UnusableCause;
-use routectl_router::{CURRENT_CONFIG_VERSION, CatalogOverlay, Config, Router, parse_config};
+use routectl_router::{CURRENT_CONFIG_VERSION, Config, Router, parse_config};
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
 
@@ -73,7 +73,6 @@ async fn spawn(config: Config, secrets: Arc<dyn SecretStore>) -> Daemon {
     let handle = tokio::spawn(async move {
         super::serve::serve_on_listener_with_injected_router(
             Arc::new(config),
-            Arc::new(CatalogOverlay::default()),
             listener,
             None,
             Some(secrets),
@@ -280,13 +279,9 @@ async fn a_config_reload_with_an_unchanged_placeholder_keeps_its_mark_and_since(
     let mut config = parse_config(&text).expect("the config parses");
     let _usage_dir = isolate_usage_db(&mut config);
     let config = Arc::new(config);
-    let router = super::build_router_from_config_with_overlay(
-        config.clone(),
-        &Arc::default(),
-        secrets.clone(),
-    )
-    .await
-    .expect("a pool of placeholders builds");
+    let router = super::build_router_from_config(config.clone(), secrets.clone())
+        .await
+        .expect("a pool of placeholders builds");
     let swap = Arc::new(ArcSwap::from_pointee(router));
     let (usage, writer) = super::serve::build_usage_writer(&config);
     let (cause, first_age) = mark_of(&swap.load(), "grok#seat-a").expect("marked at install");
@@ -301,7 +296,6 @@ async fn a_config_reload_with_an_unchanged_placeholder_keeps_its_mark_and_since(
         secrets,
         &swap,
         &usage,
-        super::reload::ReloadTrigger::ConfigFile,
         &mut never_shutdown(),
     ))
     .await;

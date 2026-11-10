@@ -530,8 +530,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             unsafe_public,
         } => {
             let resolved_config_path = resolve_config_path(cli.config.as_deref());
-            let loaded = load_config_with_overlay(cli.config.as_deref())?;
-            let mut config = loaded.config;
+            let mut config = load_config(cli.config.as_deref())?;
 
             if let Some(h) = host {
                 config.server.host = h;
@@ -544,11 +543,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             let host = config.server.host.clone();
             let port = config.server.port;
             let config = Arc::new(config);
-            let catalog_overlay = Arc::new(loaded.catalog_overlay);
 
             if let Err(e) = server::serve(
                 config,
-                catalog_overlay,
                 &host,
                 port,
                 unsafe_public,
@@ -633,17 +630,16 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             ConfigCmd::Show { effective } => {
-                let loaded = load_config_with_overlay(cli.config.as_deref())?;
+                let config = load_config(cli.config.as_deref())?;
                 let result = if effective {
                     let prices = commands::pricing::default_price_book();
                     commands::config_effective::show_effective(
-                        &loaded.config,
-                        &loaded.catalog_overlay,
+                        &config,
                         prices.current().as_deref(),
                         routectl_router::prices::shipped_table(),
                     )
                 } else {
-                    commands::config::show(&loaded.config)
+                    commands::config::show(&config)
                 };
                 if let Err(e) = result {
                     eprintln!("error: {e}");
@@ -759,8 +755,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         } => {
             let db_path = match db {
                 Some(path) => path,
-                None => load_config_unvalidated_with_overlay(cli.config.as_deref())?
-                    .config
+                None => load_config_unvalidated(cli.config.as_deref())?
                     .usage
                     .db_path
                     .clone(),
@@ -787,7 +782,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             k_calibration,
             opening_accuracy,
         } => {
-            let loaded = load_config_unvalidated_with_overlay(cli.config.as_deref())?;
+            let config = load_config_unvalidated(cli.config.as_deref())?;
             let window = if today {
                 commands::usage::WindowFlag::Today
             } else if this_week {
@@ -800,7 +795,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 commands::usage::WindowFlag::None
             };
             if opening_accuracy {
-                let db_path = db.unwrap_or_else(|| loaded.config.usage.db_path.clone());
+                let db_path = db.unwrap_or_else(|| config.usage.db_path.clone());
                 match commands::opening_accuracy::run(
                     &db_path,
                     window,
@@ -828,7 +823,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     db,
                     k_calibration,
                 };
-                if let Err(e) = commands::usage::run(&loaded.config, &args) {
+                if let Err(e) = commands::usage::run(&config, &args) {
                     eprintln!("error: {e}");
                     std::process::exit(1);
                 }
@@ -875,37 +870,11 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 /// Cold-start config load via `server::load_effective_config`, which shares
 /// its parse, preflight, and validate body with the hot-reload path, so
 /// cold start and reload treat a config the same way.
-///
-/// Discards the loaded catalog overlay for callers that never consult it.
-/// Callers that DO need the overlay (`Cmd::Serve`, `config show`) use
-/// [`load_config_with_overlay`] instead.
 fn load_config(
     explicit: Option<&std::path::Path>,
 ) -> Result<routectl_router::Config, Box<dyn std::error::Error>> {
-    Ok(load_config_with_overlay(explicit)?.config)
-}
-
-/// Cold-start config + catalog-overlay load, via the SAME shared loader
-/// [`load_config`] wraps. `Cmd::Serve` threads both into the Router build.
-fn load_config_with_overlay(
-    explicit: Option<&std::path::Path>,
-) -> Result<server::LoadedConfig, Box<dyn std::error::Error>> {
     let path = resolve_config_path(explicit);
-    Ok(server::load_effective_config(&path)?)
-}
-
-/// Config + catalog-overlay load WITHOUT the fail-fast startup validators, for
-/// a read-only report surface.
-///
-/// `usage` reads history and must render it even when the config carries a
-/// semantic error the validators would reject -- a report that refuses to run
-/// because some unrelated provider block is invalid tells the operator nothing
-/// about their spend. Parse-level failures still propagate.
-fn load_config_unvalidated_with_overlay(
-    explicit: Option<&std::path::Path>,
-) -> Result<server::LoadedConfig, Box<dyn std::error::Error>> {
-    let path = resolve_config_path(explicit);
-    Ok(server::load_effective_config_unvalidated(&path)?)
+    Ok(server::load_effective_config(&path)?.config)
 }
 
 /// What `routectl catalog ...` prints before exiting 2.
@@ -921,11 +890,16 @@ fn exit_catalog_removed() -> ! {
 }
 
 /// Cold-start config load that PARSES but SKIPS the fail-fast
-/// semantic validation gate. Only `config check` uses this: it runs the full
+/// semantic validation gate. `config check` uses this: it runs the full
 /// shared validator suite itself and renders every error with a source line,
 /// so it must receive a parseable-but-semantically-invalid config intact
 /// rather than have the load abort on the first semantic error. Parse-level
 /// failures still propagate (nothing for `check` to render against).
+///
+/// `usage` uses it too: it reads history and must render it even when the
+/// config carries a semantic error the validators would reject -- a report
+/// that refuses to run because some unrelated provider block is invalid
+/// tells the operator nothing about their spend.
 fn load_config_unvalidated(
     explicit: Option<&std::path::Path>,
 ) -> Result<routectl_router::Config, Box<dyn std::error::Error>> {

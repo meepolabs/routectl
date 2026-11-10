@@ -17,8 +17,8 @@ use routectl_providers::bedrock::{
     BedrockApiShape, BedrockConfig, BedrockCreds, BedrockProvider, auth,
 };
 use routectl_router::{
-    AliasValue, CURRENT_CONFIG_VERSION, CatalogOverlay, Config, ModelEntry, ProviderEntry,
-    ResolvedModel, RetryPolicy, Router, parse_config,
+    AliasValue, CURRENT_CONFIG_VERSION, Config, ModelEntry, ProviderEntry, ResolvedModel,
+    RetryPolicy, Router, parse_config,
 };
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
@@ -282,7 +282,6 @@ impl Daemon {
         let handle = tokio::spawn(async move {
             super::serve::serve_on_listener_with_injected_router(
                 Arc::new(config),
-                Arc::new(CatalogOverlay::default()),
                 listener,
                 config_path,
                 Some(secrets),

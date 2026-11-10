@@ -43,16 +43,12 @@ mod warm_open;
 
 pub(crate) use config_load::parse_config_only;
 pub use config_load::{LoadedConfig, load_effective_config, load_effective_config_unvalidated};
-pub(crate) use router_build::build_router_from_config_with_overlay;
+pub(crate) use router_build::build_router_from_config;
 pub use secrets::CompositeStore;
-pub use serve::{
-    serve, serve_on_listener, serve_on_listener_with_overlay, serve_on_listener_with_secrets,
-};
+pub use serve::{serve, serve_on_listener, serve_on_listener_with_secrets};
 
 #[cfg(test)]
 use routectl_usage::{CHANNEL_CAPACITY, UsageWriter};
-#[cfg(test)]
-pub(crate) use router_build::build_router_from_config;
 
 /// Shared state every axum handler reads from. The `Router` lives
 /// behind an `ArcSwap` so the file-watch / SIGHUP coordinator can

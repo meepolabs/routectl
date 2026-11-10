@@ -177,11 +177,9 @@ async fn a_new_stored_seat_does_not_expand_a_standalone_provider_entry() {
         &creds,
         &[("anthropic", "tok-default"), ("anthropic#seat-b", "tok-b")],
     );
-    let overlay = Arc::new(CatalogOverlay::default());
     handle_credentials_reload(
         &Some(oauth),
         &config,
-        &overlay,
         secrets,
         &swap,
         &Arc::new(ArcSwap::from_pointee(ActivationState::default())),
@@ -194,74 +192,6 @@ async fn a_new_stored_seat_does_not_expand_a_standalone_provider_entry() {
         swap.load().seat_count_for("claude"),
         None,
         "a stored seat must not join a route without a config decision"
-    );
-}
-
-/// A credentials-only reload rebuilds the Router off the CURRENT (unchanged)
-/// overlay, so the replacement must carry that overlay through -- both the
-/// revision stamp the capability boundary compares and the retained generation
-/// the status read side derives the in-effect view from. Dropping either would
-/// silently reset the operator's overlay to empty on a routine seat change.
-#[tokio::test]
-async fn credentials_reload_seat_change_carries_the_overlay_onto_the_new_router() {
-    // Arrange: one seat on disk, and a live Router built against a real
-    // overlay rather than the empty default.
-    let dir = tempfile::tempdir().unwrap();
-    let creds = dir.path().join("routectl").join("credentials.json");
-    write_pool_credentials(&creds, &[("anthropic", "tok-default")]);
-    let config = pooled_oauth_config();
-    let overlay: Arc<CatalogOverlay> = Arc::new(
-        serde_json::from_str(
-            r#"{"schema_version":1,"revision":5,"cells":{"anthropic-api:claude-sonnet-4-6*":
-                 {"source":"user","verified_at":"2026-07-01","wm":9.5}}}"#,
-        )
-        .expect("valid overlay"),
-    );
-    let composite = CompositeStore::open_at(&creds)
-        .await
-        .expect("open composite store at temp creds path");
-    let oauth = composite.oauth_store().expect("oauth arm present");
-    let secrets: Arc<dyn SecretStore> = Arc::new(composite);
-    let router = build_router_from_config_with_overlay(config.clone(), &overlay, secrets.clone())
-        .await
-        .expect("initial router build");
-    let swap = Arc::new(ArcSwap::from_pointee(router));
-    let before = swap.load_full();
-    assert_eq!(before.catalog_overlay().revision, 5);
-
-    // Act: add a second seat on disk (a real seat-set change), then reload.
-    write_pool_credentials(
-        &creds,
-        &[("anthropic", "tok-default"), ("anthropic#seat-b", "tok-b")],
-    );
-    handle_credentials_reload(
-        &Some(oauth),
-        &config,
-        &overlay,
-        secrets,
-        &swap,
-        &Arc::new(ArcSwap::from_pointee(ActivationState::default())),
-    )
-    .await;
-
-    // Assert: the rebuild happened, and the replacement carries the same
-    // overlay generation -- never the empty default.
-    let after = swap.load_full();
-    assert!(
-        !Arc::ptr_eq(&before, &after),
-        "a seat-set change must rebuild and swap the router"
-    );
-    assert_eq!(
-        after.catalog_overlay().revision,
-        5,
-        "the replacement must keep the accepted overlay's revision"
-    );
-    assert!(
-        after
-            .catalog_overlay()
-            .cells
-            .contains_key("anthropic-api:claude-sonnet-4-6*"),
-        "the replacement must retain the accepted overlay itself, not an empty one"
     );
 }
 
@@ -290,11 +220,9 @@ async fn credentials_reload_token_only_change_does_not_rebuild() {
             ("anthropic#seat-b", "tok-b-rotated"),
         ],
     );
-    let overlay = Arc::new(CatalogOverlay::default());
     handle_credentials_reload(
         &Some(oauth),
         &config,
-        &overlay,
         secrets,
         &swap,
         &Arc::new(ArcSwap::from_pointee(ActivationState::default())),
@@ -338,11 +266,9 @@ async fn credentials_reload_rebuild_failure_keeps_previous_router() {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&creds, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
-    let overlay = Arc::new(CatalogOverlay::default());
     handle_credentials_reload(
         &Some(oauth),
         &config,
-        &overlay,
         secrets,
         &swap,
         &Arc::new(ArcSwap::from_pointee(ActivationState::default())),
@@ -375,19 +301,7 @@ fn usage_config_text(enabled: bool, db_path: &std::path::Path) -> String {
 /// the live gate WITHOUT rebuilding the writer: the same `UsageHandle`
 /// the daemon holds reports `is_enabled() == false` after the reload,
 /// and the Router Arc is swapped (proving the reload ran).
-///
-/// `#[serial]`: `handle_config_reload` reads the AMBIENT
-/// `catalog_overlay.json` via `routectl_router::overlay_default_path()`
-/// (XDG_CONFIG_HOME / HOME), same as every other loader call. Without
-/// this, a concurrently-running `#[serial]` test that points
-/// `XDG_CONFIG_HOME` at a tempdir holding a DELIBERATELY corrupt
-/// overlay (see `config_reload_picks_up_overlay_file_change_and_fails_closed_on_corruption`)
-/// can race this test's reload into reading that corrupt file and
-/// failing closed here too -- `serial_test` only excludes OTHER
-/// `#[serial]` tests, so this test must join the same group to be
-/// protected.
 #[tokio::test]
-#[serial_test::serial]
 async fn config_reload_flips_usage_enabled_gate_live() {
     // Arrange: a temp DB + a config file starting enabled=true, and a
     // writer/handle pair the daemon would own across the reload.
@@ -411,13 +325,12 @@ async fn config_reload_flips_usage_enabled_gate_live() {
     let before_router = swap.load_full();
 
     // Act: reload the on-disk config (enabled=false).
-    let (new_config, _new_overlay) = handle_config_reload(
+    let new_config = handle_config_reload(
         Some(&cfg_path),
         &start_config,
         secrets,
         &swap,
         &usage,
-        ReloadTrigger::ConfigFile,
         &mut never_shutdown(),
     )
     .await
@@ -439,19 +352,20 @@ async fn config_reload_flips_usage_enabled_gate_live() {
     drain_usage_writer_strict(writer).await;
 }
 
-/// Shared-loader symmetry: a config reload re-reads
-/// the catalog overlay from disk, not just config.toml -- and a corrupt
-/// overlay fails the reload closed, keeping the previously-installed
-/// router live. Isolated `XDG_CONFIG_HOME` so this test controls
-/// exactly what `routectl_router::overlay_default_path()` resolves to.
+/// A leftover `catalog_overlay.json` in the config folder is not read: a
+/// config reload beside one that no longer parses is accepted and swaps the
+/// router, exactly as with no such file.
 #[tokio::test]
 #[serial_test::serial]
-async fn config_reload_picks_up_overlay_file_change_and_fails_closed_on_corruption() {
-    // Arrange: an isolated config dir, a minimal config.toml, and NO
-    // overlay file yet (first run -> empty overlay).
+async fn config_reload_ignores_a_leftover_overlay_file() {
+    // Arrange: an isolated config dir holding a corrupt leftover overlay.
     let dir = tempfile::tempdir().unwrap();
     let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
-    let cfg_path = dir.path().join("config.toml");
+    let config_dir = dir.path().join("routectl");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let leftover = config_dir.join("catalog_overlay.json");
+    std::fs::write(&leftover, b"not json {{{").unwrap();
+    let cfg_path = config_dir.join("config.toml");
     std::fs::write(
         &cfg_path,
         format!("version = {CURRENT_CONFIG_VERSION}\n[server]\nhost = \"127.0.0.1\"\nport = 0\n"),
@@ -463,214 +377,35 @@ async fn config_reload_picks_up_overlay_file_change_and_fails_closed_on_corrupti
     let _usage_dir = isolate_usage_db(&mut initial_config);
     let initial_config = Arc::new(initial_config);
     let (usage, writer) = build_usage_writer(&initial_config);
-    let router = build_router_from_config_with_overlay(
-        initial_config.clone(),
-        &Arc::default(),
-        secrets.clone(),
-    )
-    .await
-    .expect("initial router build");
+    let router = build_router_from_config(initial_config.clone(), secrets.clone())
+        .await
+        .expect("initial router build");
     let swap = Arc::new(ArcSwap::from_pointee(router));
+    let before = swap.load_full();
 
-    // Act 1: write a real overlay cell to disk, then reload.
-    let overlay_dir = dir.path().join("routectl");
-    std::fs::create_dir_all(&overlay_dir).unwrap();
-    std::fs::write(
-        overlay_dir.join("catalog_overlay.json"),
-        r#"{"schema_version":1,"revision":1,"cells":{"anthropic-api:claude-opus-4-8*":
-               {"source":"user","verified_at":"2026-07-01","wm":9.5}}}"#,
-    )
-    .unwrap();
-    let (new_config, new_overlay) = handle_config_reload(
-        Some(&cfg_path),
-        &initial_config,
-        secrets.clone(),
-        &swap,
-        &usage,
-        ReloadTrigger::ConfigFile,
-        &mut never_shutdown(),
-    )
-    .await
-    .expect("reload with a fresh overlay file must apply")
-    .expect("a successful reload returns its config");
-
-    // Assert: the reload re-read the overlay from disk (not the empty
-    // overlay the initial router booted with).
-    assert!(
-        new_overlay
-            .cells
-            .contains_key("anthropic-api:claude-opus-4-8*"),
-        "config reload must re-read the catalog overlay file from disk",
-    );
-    let router_after_good_reload = swap.load_full();
-
-    // Act 2: corrupt the overlay file, reload again.
-    std::fs::write(overlay_dir.join("catalog_overlay.json"), b"not json {{{").unwrap();
+    // Act
     let result = handle_config_reload(
         Some(&cfg_path),
-        &new_config,
+        &initial_config,
         secrets,
         &swap,
         &usage,
-        ReloadTrigger::ConfigFile,
         &mut never_shutdown(),
     )
     .await;
 
-    // Assert: a corrupt overlay fails the reload closed -- no
-    // config/overlay update, and the router installed by the LAST GOOD
-    // reload stays live.
-    assert_eq!(
-        result.err(),
-        Some(ReloadFailure::OverlayLoadFailed),
-        "a corrupt overlay must fail the reload"
+    // Assert
+    assert!(
+        matches!(result, Ok(Some(_))),
+        "a leftover overlay file must not reject the reload: {:?}",
+        result.err()
     );
     assert!(
-        Arc::ptr_eq(&swap.load_full(), &router_after_good_reload),
-        "a failed reload must keep the previously-installed router",
+        !Arc::ptr_eq(&before, &swap.load_full()),
+        "the accepted reload swaps the router"
     );
     drop(usage);
     drain_usage_writer_strict(writer).await;
-}
-
-/// The message `routectl_router::log_overlay_soft_defects` emits per defect.
-const OVERLAY_SOFT_DEFECT_MESSAGE: &str = "catalog overlay cell has a below-sentinel write \
-    multiplier; accepting it as an intentional operator override (a too-cheap wm can make a \
-    cache break look falsely profitable)";
-
-fn overlay_soft_defect_warns(events: &[routectl_testkit::CapturedEvent]) -> usize {
-    events
-        .iter()
-        .filter(|e| e.level == tracing::Level::WARN && e.message == OVERLAY_SOFT_DEFECT_MESSAGE)
-        .count()
-}
-
-const UNSET_KEY_ENV: &str = "ROUTECTL_SOFT_DEFECT_UNSET_TEST_KEY";
-
-/// A config whose `glm` model reads an env key that is never set, behind an
-/// alias that routes it, so the router build fails after the config and
-/// overlay load succeed.
-fn unbuildable_config_text() -> String {
-    format!(
-        "version = {CURRENT_CONFIG_VERSION}\n\
-         [server]\nhost = \"127.0.0.1\"\nport = 0\n\n\
-         [providers.compat]\nkind = \"openai-compat\"\nbase_url = \"http://127.0.0.1:1/v1\"\n\
-         api_key_ref = \"env://{UNSET_KEY_ENV}\"\n\n\
-         [models.glm]\nprovider = \"compat\"\nupstream = \"glm-4.6\"\n\n\
-         [aliases]\nfast = \"glm\"\n"
-    )
-}
-
-/// Soft overlay defects are logged on the reload that installs a new overlay
-/// revision, and NOT on a reload rejected before it installs one, nor again on
-/// a later reload that re-reads the same revision.
-/// `#[serial]`: the loader reads the ambient `overlay_default_path()`.
-#[tokio::test]
-#[serial_test::serial]
-async fn config_reload_logs_overlay_soft_defects_only_when_the_overlay_revision_changes() {
-    // Arrange: an isolated config dir and a router booted off an empty
-    // overlay (revision 0); then an overlay at revision 1 carrying one
-    // below-sentinel wm cell.
-    let dir = tempfile::tempdir().unwrap();
-    let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
-    let _unset = ScopedEnv::unset(UNSET_KEY_ENV);
-    let cfg_path = dir.path().join("config.toml");
-    let buildable_config_text =
-        format!("version = {CURRENT_CONFIG_VERSION}\n[server]\nhost = \"127.0.0.1\"\nport = 0\n");
-    let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::new());
-    let mut config = Config::default();
-    let _usage_dir = isolate_usage_db(&mut config);
-    let config = Arc::new(config);
-    let (usage, _writer) = build_usage_writer(&config);
-    let router =
-        build_router_from_config_with_overlay(config.clone(), &Arc::default(), secrets.clone())
-            .await
-            .expect("initial router build");
-    let swap = Arc::new(ArcSwap::from_pointee(router));
-    let overlay_dir = dir.path().join("routectl");
-    std::fs::create_dir_all(&overlay_dir).unwrap();
-    std::fs::write(
-        overlay_dir.join("catalog_overlay.json"),
-        r#"{"schema_version":1,"revision":1,"cells":{"anthropic-api:claude-opus-4-8*":
-               {"source":"user","verified_at":"2026-07-01","wm":1.0}}}"#,
-    )
-    .unwrap();
-
-    // Act 0: a reload whose router build fails, over the overlay at revision 1.
-    std::fs::write(&cfg_path, unbuildable_config_text()).unwrap();
-    let (rejected_result, rejected_events) =
-        routectl_testkit::with_capture(Box::pin(handle_config_reload(
-            Some(&cfg_path),
-            &config,
-            secrets.clone(),
-            &swap,
-            &usage,
-            ReloadTrigger::CatalogOverlay,
-            &mut never_shutdown(),
-        )))
-        .await;
-
-    // Act 1: the reload that installs overlay revision 1.
-    std::fs::write(&cfg_path, buildable_config_text).unwrap();
-    let (changed_result, changed_events) =
-        routectl_testkit::with_capture(Box::pin(handle_config_reload(
-            Some(&cfg_path),
-            &config,
-            secrets.clone(),
-            &swap,
-            &usage,
-            ReloadTrigger::CatalogOverlay,
-            &mut never_shutdown(),
-        )))
-        .await;
-    let (new_config, _) = changed_result
-        .expect("overlay reload must apply")
-        .expect("a successful reload returns its config");
-    let revision_after_first = swap.load().catalog_overlay().revision;
-
-    // Act 2: a config-only reload that re-reads the same overlay revision.
-    let (same_result, same_events) =
-        routectl_testkit::with_capture(Box::pin(handle_config_reload(
-            Some(&cfg_path),
-            &new_config,
-            secrets,
-            &swap,
-            &usage,
-            ReloadTrigger::ConfigFile,
-            &mut never_shutdown(),
-        )))
-        .await;
-    same_result
-        .expect("config reload must apply")
-        .expect("a successful reload returns its config");
-
-    // Assert
-    assert_eq!(
-        rejected_result.err(),
-        Some(ReloadFailure::RouterBuildFailed),
-        "test premise: the first reload's router build fails"
-    );
-    assert_eq!(
-        overlay_soft_defect_warns(&rejected_events),
-        0,
-        "a rejected reload must not log the candidate overlay's soft defects: \
-         {rejected_events:?}"
-    );
-    assert_eq!(
-        overlay_soft_defect_warns(&changed_events),
-        1,
-        "a revision-changing reload logs each soft defect once: {changed_events:?}"
-    );
-    assert_eq!(
-        swap.load().catalog_overlay().revision,
-        revision_after_first,
-        "test premise: the second reload kept the overlay revision"
-    );
-    assert_eq!(
-        overlay_soft_defect_warns(&same_events),
-        0,
-        "a same-revision reload must not re-log soft defects: {same_events:?}"
-    );
 }
 
 /// Config text for one openai-compat model whose prompt-shaping policy
@@ -711,10 +446,9 @@ async fn a_config_only_reload_advances_the_publication_generation() {
     let _usage_dir = isolate_usage_db(&mut config);
     let config = Arc::new(config);
     let (usage, writer) = build_usage_writer(&config);
-    let router =
-        build_router_from_config_with_overlay(config.clone(), &Arc::default(), secrets.clone())
-            .await
-            .expect("initial router build");
+    let router = build_router_from_config(config.clone(), secrets.clone())
+        .await
+        .expect("initial router build");
     let swap = Arc::new(ArcSwap::from_pointee(router));
     let before = swap.load_full();
     let lane_before = before.opening_lane("glm").expect("lane resolves");
@@ -727,7 +461,6 @@ async fn a_config_only_reload_advances_the_publication_generation() {
         secrets,
         &swap,
         &usage,
-        ReloadTrigger::ConfigFile,
         &mut never_shutdown(),
     )
     .await
@@ -766,14 +499,10 @@ async fn a_config_only_reload_advances_the_publication_generation() {
     drain_usage_writer_strict(writer).await;
 }
 
-/// `ReloadRequest::Config` and `ReloadRequest::CatalogOverlay` both
-/// call `handle_config_reload` -- the SAME loader re-reads config +
-/// overlay together regardless of which file changed -- but each
-/// must label its own success log with the trigger that fired it, so
-/// an operator can tell an overlay-driven reload from a config-file
-/// one. Drives `handle_config_reload` directly (no `tokio::spawn`)
-/// under `with_capture` so the thread-local capture subscriber sees
-/// the event.
+/// A config reload labels its success log with the config-file trigger, a
+/// stable field operators grep. Drives `handle_config_reload` directly (no
+/// `tokio::spawn`) under `with_capture` so the thread-local capture subscriber
+/// sees the event.
 #[tokio::test]
 #[serial_test::serial]
 async fn handle_config_reload_labels_its_trigger_in_the_success_log() {
@@ -792,16 +521,14 @@ async fn handle_config_reload_labels_its_trigger_in_the_success_log() {
     let _usage_dir = isolate_usage_db(&mut config);
     let config = Arc::new(config);
     let (usage, writer) = build_usage_writer(&config);
-    let router =
-        build_router_from_config_with_overlay(config.clone(), &Arc::default(), secrets.clone())
-            .await
-            .unwrap();
+    let router = build_router_from_config(config.clone(), secrets.clone())
+        .await
+        .unwrap();
     let swap = Arc::new(ArcSwap::from_pointee(router));
 
-    // Act: the SAME function, once per trigger. `Box::pin` keeps
-    // each call's future off this test's own stack frame --
-    // `handle_config_reload`'s future is large enough to trip
-    // clippy's large-futures lint otherwise.
+    // Act: `Box::pin` keeps the future off this test's own stack frame --
+    // `handle_config_reload`'s future is large enough to trip clippy's
+    // large-futures lint otherwise.
     let (config_result, config_events) =
         routectl_testkit::with_capture(Box::pin(handle_config_reload(
             Some(&cfg_path),
@@ -809,7 +536,6 @@ async fn handle_config_reload_labels_its_trigger_in_the_success_log() {
             secrets.clone(),
             &swap,
             &usage,
-            ReloadTrigger::ConfigFile,
             &mut never_shutdown(),
         )))
         .await;
@@ -817,22 +543,7 @@ async fn handle_config_reload_labels_its_trigger_in_the_success_log() {
         .expect("config-triggered reload must apply")
         .expect("a successful reload returns its config");
 
-    let (overlay_result, overlay_events) =
-        routectl_testkit::with_capture(Box::pin(handle_config_reload(
-            Some(&cfg_path),
-            &config,
-            secrets,
-            &swap,
-            &usage,
-            ReloadTrigger::CatalogOverlay,
-            &mut never_shutdown(),
-        )))
-        .await;
-    overlay_result
-        .expect("overlay-triggered reload must apply")
-        .expect("a successful reload returns its config");
-
-    // Assert: each call's success log names its OWN trigger.
+    // Assert
     let success_message = "config reloaded; router rebuilt and swapped";
     let config_trigger = config_events
         .iter()
@@ -840,131 +551,7 @@ async fn handle_config_reload_labels_its_trigger_in_the_success_log() {
         .and_then(|e| e.field("trigger"))
         .expect("config-triggered reload must log a trigger field");
     assert_eq!(config_trigger, "config change");
-
-    let overlay_trigger = overlay_events
-        .iter()
-        .find(|e| e.message == success_message)
-        .and_then(|e| e.field("trigger"))
-        .expect("overlay-triggered reload must log a trigger field");
-    assert_eq!(overlay_trigger, "overlay change");
     drop(usage);
-    drain_usage_writer_strict(writer).await;
-}
-
-/// Full-stack proof that `spawn_reload_pipeline` -- the actual
-/// production wiring, not a hand-rolled substitute -- watches the
-/// catalog overlay path and routes its writes through the SAME
-/// reload coordinator as config: a real overlay write (through the
-/// real `notify` watcher) swaps the router, and a corrupt overlay
-/// write keeps the PRIOR router live. `#[serial]`: the path this
-/// wiring watches is the ambient `routectl_router::overlay_default_path()`
-/// (XDG_CONFIG_HOME-derived).
-#[tokio::test]
-#[serial_test::serial]
-async fn spawn_reload_pipeline_watches_overlay_and_swaps_router_on_write() {
-    // Arrange: config.toml and the (not-yet-written) overlay share
-    // `routectl_config_dir()`, mirroring the real deployment layout
-    // -- the watcher needs the overlay's PARENT directory to exist at
-    // watch-install time even though the overlay FILE does not.
-    let dir = tempfile::tempdir().unwrap();
-    let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
-    let config_dir = dir.path().join("routectl");
-    std::fs::create_dir_all(&config_dir).unwrap();
-    let cfg_path = config_dir.join("config.toml");
-    std::fs::write(
-        &cfg_path,
-        format!("version = {CURRENT_CONFIG_VERSION}\n[server]\nhost = \"127.0.0.1\"\nport = 0\n"),
-    )
-    .unwrap();
-
-    let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::new());
-    let mut initial_config = Config::default();
-    let _usage_dir = isolate_usage_db(&mut initial_config);
-    let initial_config = Arc::new(initial_config);
-    let (usage, writer) = build_usage_writer(&initial_config);
-    let router = build_router_from_config_with_overlay(
-        initial_config.clone(),
-        &Arc::default(),
-        secrets.clone(),
-    )
-    .await
-    .unwrap();
-    let swap = Arc::new(ArcSwap::from_pointee(router));
-    let before_router = swap.load_full();
-
-    let (shutdown_tx, shutdown_rx) = watch::channel(());
-    let handles = spawn_reload_pipeline(
-        initial_config,
-        Arc::new(CatalogOverlay::default()),
-        Some(cfg_path),
-        None,
-        secrets,
-        swap.clone(),
-        Arc::new(ArcSwap::from_pointee(ActivationState::default())),
-        usage,
-        shutdown_rx,
-        crate::handlers::status::DaemonMeta::for_test(),
-    );
-
-    // Settle the watch install before writing.
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-
-    // Act 1: a real overlay write, via the same tempfile + rename
-    // pattern `catalog_overlay::save` uses.
-    let overlay_path = routectl_router::overlay_default_path();
-    std::fs::create_dir_all(overlay_path.parent().unwrap()).unwrap();
-    let tmp = tempfile::Builder::new()
-        .prefix(".catalog_overlay.tmp.")
-        .suffix(".json")
-        .tempfile_in(overlay_path.parent().unwrap())
-        .unwrap();
-    std::fs::write(
-        tmp.path(),
-        br#"{"schema_version":1,"revision":1,"cells":{"anthropic-api:claude-opus-4-8*":
-               {"source":"user","verified_at":"2026-07-01","wm":9.5}}}"#,
-    )
-    .unwrap();
-    tmp.persist(&overlay_path).unwrap();
-
-    // Assert: the router swaps within the debounce + reload window.
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
-    let mut router_after_write = swap.load_full();
-    while tokio::time::Instant::now() < deadline {
-        router_after_write = swap.load_full();
-        if !Arc::ptr_eq(&before_router, &router_after_write) {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
-    assert!(
-        !Arc::ptr_eq(&before_router, &router_after_write),
-        "an overlay write through the real watcher must trigger a reload and swap the router",
-    );
-
-    // Act 2: a corrupt overlay write, same rename pattern.
-    let tmp2 = tempfile::Builder::new()
-        .prefix(".catalog_overlay.tmp.")
-        .suffix(".json")
-        .tempfile_in(overlay_path.parent().unwrap())
-        .unwrap();
-    std::fs::write(tmp2.path(), b"not json {{{").unwrap();
-    tmp2.persist(&overlay_path).unwrap();
-
-    // No positive signal to poll for here (the swap must NOT
-    // happen); a fixed settle window mirrors the negative-outcome
-    // checks in the integration suite (`partial_write_keeps_old_config`).
-    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
-
-    assert!(
-        Arc::ptr_eq(&swap.load_full(), &router_after_write),
-        "a corrupt overlay write must keep the previously-installed router live",
-    );
-    // The reload coordinator owns the usage handle; it must exit before the
-    // drain, or the open channel holds the drain to its full deadline.
-    shutdown_tx.send(()).unwrap();
-    for handle in handles {
-        handle.await.expect("pipeline task must not panic");
-    }
     drain_usage_writer_strict(writer).await;
 }
 
@@ -993,13 +580,9 @@ async fn config_reload_accepts_a_candidate_whose_pool_members_are_all_unreadable
     let _usage_dir = isolate_usage_db(&mut initial_config);
     let initial_config = Arc::new(initial_config);
     let (usage, writer) = build_usage_writer(&initial_config);
-    let router = build_router_from_config_with_overlay(
-        initial_config.clone(),
-        &Arc::default(),
-        secrets.clone(),
-    )
-    .await
-    .expect("initial router build");
+    let router = build_router_from_config(initial_config.clone(), secrets.clone())
+        .await
+        .expect("initial router build");
     let swap = Arc::new(ArcSwap::from_pointee(router));
     let router_before = swap.load_full();
 
@@ -1031,7 +614,6 @@ async fn config_reload_accepts_a_candidate_whose_pool_members_are_all_unreadable
         secrets,
         &swap,
         &usage,
-        ReloadTrigger::ConfigFile,
         &mut never_shutdown(),
     )
     .await;
@@ -1083,13 +665,9 @@ async fn config_reload_rejects_a_version_newer_than_supported_and_keeps_prior_ro
     let _usage_dir = isolate_usage_db(&mut initial_config);
     let initial_config = Arc::new(initial_config);
     let (usage, writer) = build_usage_writer(&initial_config);
-    let router = build_router_from_config_with_overlay(
-        initial_config.clone(),
-        &Arc::default(),
-        secrets.clone(),
-    )
-    .await
-    .expect("initial router build");
+    let router = build_router_from_config(initial_config.clone(), secrets.clone())
+        .await
+        .expect("initial router build");
     let swap = Arc::new(ArcSwap::from_pointee(router));
     let router_before = swap.load_full();
 
@@ -1106,7 +684,6 @@ async fn config_reload_rejects_a_version_newer_than_supported_and_keeps_prior_ro
         secrets,
         &swap,
         &usage,
-        ReloadTrigger::ConfigFile,
         &mut never_shutdown(),
     )
     .await;
@@ -1141,82 +718,12 @@ fn tombstone_count(path: &std::path::Path) -> i64 {
         .expect("count tombstones")
 }
 
-/// An overlay reload that advances the overlay revision moves no replay
-/// boundary: the capability revision stamps are frozen, so it enqueues no
-/// tombstone and publishes the new overlay. Drives `handle_config_reload`
-/// directly against a real, enabled usage writer, then drains it and inspects
-/// the ledger. `#[serial]`: the loader reads the ambient
-/// `overlay_default_path()` (XDG_CONFIG_HOME-derived).
-#[tokio::test]
-#[serial_test::serial]
-async fn config_reload_overlay_revision_change_enqueues_no_tombstone() {
-    // Arrange: isolated config dir, a config.toml with usage enabled at a temp
-    // DB, and an initial router built from an empty overlay (revision 0).
-    let dir = tempfile::tempdir().unwrap();
-    let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
-    let db_path = dir.path().join("usage.db");
-    let cfg_path = dir.path().join("config.toml");
-    std::fs::write(&cfg_path, usage_config_text(true, &db_path)).unwrap();
-
-    let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::new());
-    let mut start_config = Config::default();
-    start_config.usage.db_path = db_path.clone();
-    start_config.usage.enabled = true;
-    let start_config = Arc::new(start_config);
-    let (usage, writer) = build_usage_writer(&start_config);
-
-    let router = build_router_from_config_with_overlay(
-        start_config.clone(),
-        &Arc::default(),
-        secrets.clone(),
-    )
-    .await
-    .expect("initial router build");
-    let swap = Arc::new(ArcSwap::from_pointee(router));
-
-    // Act: write an overlay file at revision 1, then reload.
-    let overlay_dir = dir.path().join("routectl");
-    std::fs::create_dir_all(&overlay_dir).unwrap();
-    std::fs::write(
-        overlay_dir.join("catalog_overlay.json"),
-        r#"{"schema_version":1,"revision":1,"cells":{"anthropic-api:claude-opus-4-8*":
-               {"source":"user","verified_at":"2026-07-01","wm":9.5}}}"#,
-    )
-    .unwrap();
-    handle_config_reload(
-        Some(&cfg_path),
-        &start_config,
-        secrets,
-        &swap,
-        &usage,
-        ReloadTrigger::CatalogOverlay,
-        &mut never_shutdown(),
-    )
-    .await
-    .expect("overlay reload must apply")
-    .expect("a successful reload returns its config");
-
-    // Assert
-    assert_eq!(
-        swap.load().catalog_overlay().revision,
-        1,
-        "premise: the reload published the new overlay"
-    );
-    drop(usage);
-    drain_usage_writer_strict(writer).await;
-    assert_eq!(tombstone_count(&db_path), 0);
-}
-
-/// A reload that leaves the catalog version and overlay revision unchanged
-/// (here: no overlay file, config identical) must enqueue NO tombstone: the
+/// A reload that leaves the config identical must enqueue NO tombstone: the
 /// revision stamps are frozen, so no reload moves the replay boundary.
-/// `#[serial]`: the test sets the process-global `XDG_CONFIG_HOME` the loader's
-/// `overlay_default_path()` reads.
 #[tokio::test]
 #[serial_test::serial]
 async fn config_reload_without_revision_change_enqueues_no_tombstone() {
-    // Arrange: isolated config dir with NO overlay file (revision stays 0),
-    // usage enabled at a temp DB, and an initial router off an empty overlay.
+    // Arrange: usage enabled at a temp DB, and an initial router.
     let dir = tempfile::tempdir().unwrap();
     let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
     let db_path = dir.path().join("usage.db");
@@ -1230,24 +737,19 @@ async fn config_reload_without_revision_change_enqueues_no_tombstone() {
     let start_config = Arc::new(start_config);
     let (usage, writer) = build_usage_writer(&start_config);
 
-    let router = build_router_from_config_with_overlay(
-        start_config.clone(),
-        &Arc::default(),
-        secrets.clone(),
-    )
-    .await
-    .expect("initial router build");
+    let router = build_router_from_config(start_config.clone(), secrets.clone())
+        .await
+        .expect("initial router build");
     let swap = Arc::new(ArcSwap::from_pointee(router));
     let before = swap.load_full();
 
-    // Act: reload the unchanged config against the same (absent) overlay.
+    // Act: reload the unchanged config.
     handle_config_reload(
         Some(&cfg_path),
         &start_config,
         secrets,
         &swap,
         &usage,
-        ReloadTrigger::ConfigFile,
         &mut never_shutdown(),
     )
     .await
@@ -1273,75 +775,6 @@ async fn config_reload_without_revision_change_enqueues_no_tombstone() {
         "an unchanged-revision reload must enqueue no tombstone"
     );
 }
-/// value (rm <= 0) fails the fail-closed load, so the reload is
-/// rejected and the prior router stays live -- same posture as any
-/// other reload-time load failure.
-#[tokio::test]
-#[serial_test::serial]
-async fn config_reload_rejects_a_corrupt_overlay_cell_and_keeps_prior_router() {
-    // Arrange: a good current-version config and an initial router built
-    // from an empty overlay.
-    let dir = tempfile::tempdir().unwrap();
-    let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
-    let cfg_path = dir.path().join("config.toml");
-    std::fs::write(
-        &cfg_path,
-        format!("version = {CURRENT_CONFIG_VERSION}\n[server]\nhost = \"127.0.0.1\"\nport = 0\n"),
-    )
-    .unwrap();
-
-    let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::new());
-    let mut initial_config = Config {
-        version: routectl_router::CURRENT_CONFIG_VERSION,
-        ..Default::default()
-    };
-    let _usage_dir = isolate_usage_db(&mut initial_config);
-    let initial_config = Arc::new(initial_config);
-    let (usage, writer) = build_usage_writer(&initial_config);
-    let router = build_router_from_config_with_overlay(
-        initial_config.clone(),
-        &Arc::default(),
-        secrets.clone(),
-    )
-    .await
-    .expect("initial router build");
-    let swap = Arc::new(ArcSwap::from_pointee(router));
-    let router_before = swap.load_full();
-
-    // Act: write a hand-edited overlay carrying a degenerate cell
-    // (rm = 0) at the default overlay path, then reload.
-    let overlay_dir = dir.path().join("routectl");
-    std::fs::create_dir_all(&overlay_dir).unwrap();
-    std::fs::write(
-            overlay_dir.join("catalog_overlay.json"),
-            r#"{"schema_version":1,"revision":0,"cells":{"openai-compat:grok-*":{"source":"user","verified_at":"2026-01-01","rm":0.0}}}"#,
-        )
-        .unwrap();
-    let result = handle_config_reload(
-        Some(&cfg_path),
-        &initial_config,
-        secrets,
-        &swap,
-        &usage,
-        ReloadTrigger::CatalogOverlay,
-        &mut never_shutdown(),
-    )
-    .await;
-
-    // Assert: the reload rejects and the prior router stays installed.
-    assert_eq!(
-        result.err(),
-        Some(ReloadFailure::OverlayLoadFailed),
-        "a corrupt overlay cell must reject the reload"
-    );
-    let router_after = swap.load_full();
-    assert!(
-        Arc::ptr_eq(&router_before, &router_after),
-        "the prior router must stay installed on a rejected reload"
-    );
-    drop(usage);
-    drain_usage_writer_strict(writer).await;
-}
 
 /// Minimal on-disk config text with `[reduction] enabled` set explicitly, so
 /// a reload's reduction value is stated rather than inherited from the schema
@@ -1361,9 +794,6 @@ fn reduction_config_text(enabled: bool) -> String {
 ///
 /// Drives `handle_config_reload` directly (no `tokio::spawn`) under
 /// `with_capture` so the thread-local capture subscriber sees the event.
-/// `#[serial]`: the loader re-reads the ambient `catalog_overlay.json` via
-/// `routectl_router::overlay_default_path()`, so it joins the same
-/// XDG-pinning group as its siblings above.
 #[tokio::test]
 #[serial_test::serial]
 async fn reduction_flip_is_stamped_on_the_reload_success_log() {
@@ -1380,10 +810,9 @@ async fn reduction_flip_is_stamped_on_the_reload_success_log() {
     config.reduction.enabled = true;
     let config = Arc::new(config);
     let (usage, writer) = build_usage_writer(&config);
-    let router =
-        build_router_from_config_with_overlay(config.clone(), &Arc::default(), secrets.clone())
-            .await
-            .unwrap();
+    let router = build_router_from_config(config.clone(), secrets.clone())
+        .await
+        .unwrap();
     let swap = Arc::new(ArcSwap::from_pointee(router));
 
     // Act 1: reload against the flipping candidate. `Box::pin` keeps the
@@ -1395,11 +824,10 @@ async fn reduction_flip_is_stamped_on_the_reload_success_log() {
             secrets.clone(),
             &swap,
             &usage,
-            ReloadTrigger::ConfigFile,
             &mut never_shutdown(),
         )))
         .await;
-    let (flipped_config, _) = flip_result
+    let flipped_config = flip_result
         .expect("the flipping reload must apply")
         .expect("a successful reload returns its config");
     assert!(!flipped_config.reduction.enabled);
@@ -1413,7 +841,6 @@ async fn reduction_flip_is_stamped_on_the_reload_success_log() {
             secrets,
             &swap,
             &usage,
-            ReloadTrigger::ConfigFile,
             &mut never_shutdown(),
         )))
         .await;
@@ -1467,9 +894,6 @@ fn k_gated_emission_config_text(enabled: bool) -> String {
 ///
 /// Drives `handle_config_reload` directly (no `tokio::spawn`) under
 /// `with_capture` so the thread-local capture subscriber sees the event.
-/// `#[serial]`: the loader re-reads the ambient `catalog_overlay.json` via
-/// `routectl_router::overlay_default_path()`, so it joins the same
-/// XDG-pinning group as its siblings above.
 #[tokio::test]
 #[serial_test::serial]
 async fn k_gated_emission_flip_is_stamped_on_the_reload_success_log() {
@@ -1489,10 +913,9 @@ async fn k_gated_emission_flip_is_stamped_on_the_reload_success_log() {
         "the shipped default must be off, so the flip below is a real transition"
     );
     let (usage, writer) = build_usage_writer(&config);
-    let router =
-        build_router_from_config_with_overlay(config.clone(), &Arc::default(), secrets.clone())
-            .await
-            .unwrap();
+    let router = build_router_from_config(config.clone(), secrets.clone())
+        .await
+        .unwrap();
     let swap = Arc::new(ArcSwap::from_pointee(router));
 
     // Act 1: reload against the flipping candidate. `Box::pin` keeps the
@@ -1504,11 +927,10 @@ async fn k_gated_emission_flip_is_stamped_on_the_reload_success_log() {
             secrets.clone(),
             &swap,
             &usage,
-            ReloadTrigger::ConfigFile,
             &mut never_shutdown(),
         )))
         .await;
-    let (flipped_config, _) = flip_result
+    let flipped_config = flip_result
         .expect("the flipping reload must apply")
         .expect("a successful reload returns its config");
     assert!(flipped_config.cache.k_gated_emission);
@@ -1522,7 +944,6 @@ async fn k_gated_emission_flip_is_stamped_on_the_reload_success_log() {
             secrets,
             &swap,
             &usage,
-            ReloadTrigger::ConfigFile,
             &mut never_shutdown(),
         )))
         .await;
@@ -1567,9 +988,6 @@ async fn k_gated_emission_flip_is_stamped_on_the_reload_success_log() {
 /// `k_gated_emission_after=true` on a reload that was declined would assert a
 /// live suppression gate that is not in fact armed.
 ///
-/// `#[serial]`: the loader re-reads the ambient `catalog_overlay.json` via
-/// `routectl_router::overlay_default_path()`, so it joins the same XDG-pinning
-/// group as its siblings.
 #[tokio::test]
 #[serial_test::serial]
 async fn failed_reload_logs_no_k_gated_emission_transition() {
@@ -1592,10 +1010,9 @@ async fn failed_reload_logs_no_k_gated_emission_transition() {
     let _usage_dir = isolate_usage_db(&mut config);
     let config = Arc::new(config);
     let (usage, writer) = build_usage_writer(&config);
-    let router =
-        build_router_from_config_with_overlay(config.clone(), &Arc::default(), secrets.clone())
-            .await
-            .unwrap();
+    let router = build_router_from_config(config.clone(), secrets.clone())
+        .await
+        .unwrap();
     let swap = Arc::new(ArcSwap::from_pointee(router));
     let router_before = swap.load_full();
 
@@ -1607,7 +1024,6 @@ async fn failed_reload_logs_no_k_gated_emission_transition() {
         secrets,
         &swap,
         &usage,
-        ReloadTrigger::ConfigFile,
         &mut never_shutdown(),
     )))
     .await;
@@ -1641,9 +1057,6 @@ async fn failed_reload_logs_no_k_gated_emission_transition() {
 /// fields on the one success line -- the arm an operator hits when recovering
 /// from a bad rollout by reverting a config that changed both.
 ///
-/// `#[serial]`: the loader re-reads the ambient `catalog_overlay.json` via
-/// `routectl_router::overlay_default_path()`, so it joins the same XDG-pinning
-/// group as its siblings.
 #[tokio::test]
 #[serial_test::serial]
 async fn a_reload_flipping_both_switches_stamps_both_pairs() {
@@ -1667,10 +1080,9 @@ async fn a_reload_flipping_both_switches_stamps_both_pairs() {
     config.reduction.enabled = true;
     let config = Arc::new(config);
     let (usage, writer) = build_usage_writer(&config);
-    let router =
-        build_router_from_config_with_overlay(config.clone(), &Arc::default(), secrets.clone())
-            .await
-            .unwrap();
+    let router = build_router_from_config(config.clone(), secrets.clone())
+        .await
+        .unwrap();
     let swap = Arc::new(ArcSwap::from_pointee(router));
 
     // Act. `Box::pin` keeps the large future off this test's stack frame
@@ -1681,7 +1093,6 @@ async fn a_reload_flipping_both_switches_stamps_both_pairs() {
         secrets,
         &swap,
         &usage,
-        ReloadTrigger::ConfigFile,
         &mut never_shutdown(),
     )))
     .await;
@@ -1731,9 +1142,6 @@ fn reduction_config_text_unparseable(enabled: bool) -> String {
 /// capture subscriber cannot see. Both are exercised -- the loader for the log,
 /// the reload for the state it leaves behind.
 ///
-/// `#[serial]`: the loader re-reads the ambient `catalog_overlay.json` via
-/// `routectl_router::overlay_default_path()`, so it joins the same XDG-pinning
-/// group as its siblings.
 #[tokio::test]
 #[serial_test::serial]
 async fn unparseable_candidate_logs_its_rejection_and_keeps_reduction_on() {
@@ -1750,10 +1158,9 @@ async fn unparseable_candidate_logs_its_rejection_and_keeps_reduction_on() {
     config.reduction.enabled = true;
     let config = Arc::new(config);
     let (usage, writer) = build_usage_writer(&config);
-    let router =
-        build_router_from_config_with_overlay(config.clone(), &Arc::default(), secrets.clone())
-            .await
-            .unwrap();
+    let router = build_router_from_config(config.clone(), secrets.clone())
+        .await
+        .unwrap();
     let swap = Arc::new(ArcSwap::from_pointee(router));
     let router_before = swap.load_full();
 
@@ -1778,7 +1185,6 @@ async fn unparseable_candidate_logs_its_rejection_and_keeps_reduction_on() {
         secrets,
         &swap,
         &usage,
-        ReloadTrigger::ConfigFile,
         &mut never_shutdown(),
     ))
     .await;
@@ -2055,13 +1461,9 @@ async fn the_coordinator_records_a_rejected_reload_until_a_later_reload_succeeds
     )
     .unwrap();
     let config = Arc::new(Config::default());
-    let router = build_router_from_config_with_overlay(
-        config.clone(),
-        &Arc::default(),
-        Arc::new(MemoryStore::new()),
-    )
-    .await
-    .expect("initial router build");
+    let router = build_router_from_config(config.clone(), Arc::new(MemoryStore::new()))
+        .await
+        .expect("initial router build");
     let swap = Arc::new(ArcSwap::from_pointee(router));
     let daemon_meta = crate::handlers::status::DaemonMeta::for_test();
     let status = crate::handlers::status::StatusState::from_app(
@@ -2079,15 +1481,12 @@ async fn the_coordinator_records_a_rejected_reload_until_a_later_reload_succeeds
         daemon_meta,
     };
     let mut current_config = config;
-    let mut current_overlay: Arc<CatalogOverlay> = Arc::default();
     let now_ms = || chrono::Utc::now().timestamp_millis();
 
     // Act 1: the rejected reload.
     Box::pin(apply_config_reload(
         &ctx,
         &mut current_config,
-        &mut current_overlay,
-        ReloadTrigger::ConfigFile,
         &mut never_shutdown(),
     ))
     .await;
@@ -2102,8 +1501,6 @@ async fn the_coordinator_records_a_rejected_reload_until_a_later_reload_succeeds
     Box::pin(apply_config_reload(
         &ctx,
         &mut current_config,
-        &mut current_overlay,
-        ReloadTrigger::ConfigFile,
         &mut never_shutdown(),
     ))
     .await;

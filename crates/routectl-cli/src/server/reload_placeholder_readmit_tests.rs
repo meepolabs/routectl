@@ -107,13 +107,9 @@ impl Rig {
             .expect("fixture config parses");
         let usage_dir = isolate_usage_db(&mut config);
         let config = Arc::new(config);
-        let router = build_router_from_config_with_overlay(
-            config.clone(),
-            &Arc::default(),
-            Self::secrets_of(&oauth),
-        )
-        .await
-        .expect("initial router build");
+        let router = build_router_from_config(config.clone(), Self::secrets_of(&oauth))
+            .await
+            .expect("initial router build");
         Self {
             creds,
             stamp,
@@ -145,7 +141,6 @@ impl Rig {
         handle_credentials_reload(
             &Some(self.oauth.clone()),
             &self.config,
-            &Arc::new(CatalogOverlay::default()),
             Self::secrets_of(&self.oauth),
             &self.swap,
             &Arc::new(ArcSwap::from_pointee(ActivationState::default())),

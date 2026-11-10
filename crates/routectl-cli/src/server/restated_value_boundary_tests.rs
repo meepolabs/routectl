@@ -24,9 +24,7 @@ use routectl_usage::{BatchCommit, CHANNEL_CAPACITY, CapabilityEvent, UsageHandle
 use serde_json::json;
 
 use super::{BoundaryOutcomeReport, admit_capability_boundary};
-use crate::server::test_support::{
-    drain_usage_writer_strict, isolate_usage_db, overlay_at_revision,
-};
+use crate::server::test_support::{drain_usage_writer_strict, isolate_usage_db};
 use crate::server::{capability_rebuild, ledger_reader};
 
 /// A remote-looking base URL, so the attributability gate admits the lane.
@@ -120,9 +118,9 @@ fn config() -> (Arc<Config>, tempfile::TempDir) {
     (Arc::new(config), dir)
 }
 
-/// A Router at `revision` dispatching to `seat`, with durable capability
+/// A Router dispatching to `seat`, with durable capability
 /// writes assumed so pre-flight is not suspended.
-fn router_at(config: &Arc<Config>, revision: u64, seat: Arc<Seat>) -> Router {
+fn router_at(config: &Arc<Config>, seat: Arc<Seat>) -> Router {
     let mut router = Router::new(Arc::clone(config)).with_synthetic_field_rows_for_tests();
     let models = BTreeMap::from([(
         NICKNAME.to_string(),
@@ -134,7 +132,6 @@ fn router_at(config: &Arc<Config>, revision: u64, seat: Arc<Seat>) -> Router {
         )),
     )]);
     router.install_resolved_models(models);
-    router.install_catalog_overlay(overlay_at_revision(revision));
     router.with_capability_writes_assumed_durable_for_tests()
 }
 
@@ -211,15 +208,11 @@ fn token_of(rows: &[(String, Option<String>)], capability: &str) -> Option<Strin
         .clone()
 }
 
-/// Restart at `revision` from the ledger, dispatch one request carrying the
+/// Restart from the ledger, dispatch one request carrying the
 /// rewrite row's field, and return the value the upstream received for it.
-async fn value_sent_after_restart(
-    config: &Arc<Config>,
-    revision: u64,
-    usage: &UsageHandle,
-) -> Option<String> {
+async fn value_sent_after_restart(config: &Arc<Config>, usage: &UsageHandle) -> Option<String> {
     let seat = Arc::new(Seat::default());
-    let router = router_at(config, revision, Arc::clone(&seat));
+    let router = router_at(config, Arc::clone(&seat));
     warm_off_runtime(config, &router, usage);
     let req = ChatRequest {
         model: ALIAS.to_string(),
@@ -278,7 +271,7 @@ async fn a_rewrite_value_survives_a_revision_mismatch_boot_and_is_applied() {
         "control: every seeded row carries the token: {planted:?}",
     );
 
-    warm_off_runtime(&config, &router_at(&config, 2, Arc::default()), &usage);
+    warm_off_runtime(&config, &router_at(&config, Arc::default()), &usage);
     let restated = rows_past_newest_tombstone(&config);
 
     assert_eq!(token_of(&restated, &rewrite), Some(shape_token()));
@@ -293,9 +286,7 @@ async fn a_rewrite_value_survives_a_revision_mismatch_boot_and_is_applied() {
         "a non-field row writes no value"
     );
     assert_eq!(
-        value_sent_after_restart(&config, 2, &usage)
-            .await
-            .as_deref(),
+        value_sent_after_restart(&config, &usage).await.as_deref(),
         Some(MEMBER),
         "the next boot's pre-flight rewrites the field to the restated value",
     );
@@ -327,10 +318,10 @@ async fn a_rewrite_value_survives_a_revision_reload_and_a_restart() {
             broken(&rewrite, 1, catalog, Some(shape_token())),
         ],
     );
-    let before = router_at(&config, 1, Arc::default());
+    let before = router_at(&config, Arc::default());
     warm_off_runtime(&config, &before, &usage);
 
-    let mut reloaded = router_at(&config, 2, Arc::default());
+    let mut reloaded = router_at(&config, Arc::default());
     reloaded.carry_over_learned_from(&before);
     let reloaded = Arc::new(reloaded);
     let (_tx, mut never) = tokio::sync::watch::channel(());
@@ -351,9 +342,7 @@ async fn a_rewrite_value_survives_a_revision_reload_and_a_restart() {
         Some(shape_token()),
     );
     assert_eq!(
-        value_sent_after_restart(&config, 2, &usage)
-            .await
-            .as_deref(),
+        value_sent_after_restart(&config, &usage).await.as_deref(),
         Some(MEMBER),
     );
 

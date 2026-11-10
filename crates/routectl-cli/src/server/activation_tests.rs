@@ -287,7 +287,6 @@ async fn credentials_reload_adding_live_token_emits_activated() {
     let ((), events) = with_capture(Box::pin(handle_credentials_reload(
         &Some(oauth),
         &cfg,
-        &Arc::new(CatalogOverlay::default()),
         secrets,
         &router_swap,
         &activation_swap,
@@ -326,7 +325,6 @@ async fn credentials_reload_removing_token_emits_deactivated_with_reason() {
     let ((), events) = with_capture(Box::pin(handle_credentials_reload(
         &Some(oauth),
         &cfg,
-        &Arc::new(CatalogOverlay::default()),
         secrets,
         &router_swap,
         &activation_swap,
@@ -369,7 +367,6 @@ async fn credentials_reload_unchanged_seat_set_recomputes_without_router_rebuild
     let ((), events) = with_capture(Box::pin(handle_credentials_reload(
         &Some(oauth),
         &cfg,
-        &Arc::new(CatalogOverlay::default()),
         secrets,
         &router_swap,
         &activation_swap,
@@ -441,7 +438,6 @@ async fn failed_config_reload_keeps_previous_activation() {
     // Act
     let ((), events) = with_capture(Box::pin(run_reload_coordinator(
         cfg.clone(),
-        Arc::new(CatalogOverlay::default()),
         ctx,
         reload_rx,
         shutdown_rx,

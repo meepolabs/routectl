@@ -866,7 +866,7 @@ fn reload_findings(findings: &[Value]) -> Vec<&Value> {
 #[serial_test::serial]
 async fn a_recorded_reload_failure_renders_one_warn_finding_on_the_served_report() {
     let failed = DaemonMeta::for_test();
-    failed.record_reload_failure(ReloadFailure::OverlayLoadFailed);
+    failed.record_reload_failure(ReloadFailure::ConfigLoadFailed);
 
     let with_failure = served_findings(failed).await;
     let without_failure = served_findings(DaemonMeta::for_test()).await;
@@ -875,7 +875,7 @@ async fn a_recorded_reload_failure_renders_one_warn_finding_on_the_served_report
     assert_eq!(reload.len(), 1, "{with_failure:?}");
     assert_eq!(reload[0]["status"], "Warn");
     let rendered = reload[0].to_string();
-    assert!(rendered.contains("overlay_load_failed"), "{rendered}");
+    assert!(rendered.contains("config_load_failed"), "{rendered}");
     for leak in ["/", "catalog_overlay.json", "config.toml", "error:"] {
         assert!(
             !rendered.contains(leak),

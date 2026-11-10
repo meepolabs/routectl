@@ -39,9 +39,7 @@ use crate::handlers::control::purge_capability;
 use crate::handlers::usage_capture::drain_capability_events;
 use crate::server::AppState;
 use crate::server::capability_rebuild::warm_capability_registry_from_ledger;
-use crate::server::test_support::{
-    drain_usage_writer_strict, isolate_usage_db, overlay_at_revision,
-};
+use crate::server::test_support::{drain_usage_writer_strict, isolate_usage_db};
 
 const PURGE_PATH: &str = "/control/capability/purge";
 
@@ -63,10 +61,6 @@ const SEEDED_FLAG: &str = "fx-seeded";
 /// Installed through the test-utils setter on every Router here, so the
 /// shipped seed's contents never decide an assertion.
 const FIXTURE_SEED: &[&str] = &[SEEDED_FLAG];
-
-/// An overlay revision other than the default zero every first session boots
-/// at.
-const BUMPED_REVISION: u64 = 7;
 
 fn beta_key(flag: &str) -> String {
     routectl_router::beta_capability_key(flag).expect("fixture flags are well formed")
@@ -169,14 +163,11 @@ fn fixture_config() -> (Arc<Config>, tempfile::TempDir) {
     (Arc::new(config), dir)
 }
 
-/// A Router as one daemon session builds it: the fixture seed, the overlay
-/// revision this session boots at, and `seat` resolved for [`NICKNAME`].
-fn boot(config: &Arc<Config>, overlay_revision: u64, seat: Arc<BetaSeat>) -> Router {
+/// A Router as one daemon session builds it: the fixture seed and `seat`
+/// resolved for [`NICKNAME`].
+fn boot(config: &Arc<Config>, seat: Arc<BetaSeat>) -> Router {
     let mut router = Router::new(Arc::clone(config));
     router.set_beta_seed_for_tests(FIXTURE_SEED);
-    if overlay_revision != 0 {
-        router.install_catalog_overlay(overlay_at_revision(overlay_revision));
-    }
     let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
     models.insert(
         NICKNAME.to_string(),
@@ -229,17 +220,13 @@ async fn dispatch(router: &Router, flag: &str) -> routectl_router::Dispatched {
     dispatched
 }
 
-/// A fresh session over the ledger: start a writer, boot at `overlay_revision`,
+/// A fresh session over the ledger: start a writer, boot,
 /// warm from the ledger, dispatch one request carrying `flag`, stop the writer.
 /// Returns the withheld set the provider was handed.
-async fn withheld_after_restart(
-    config: &Arc<Config>,
-    overlay_revision: u64,
-    flag: &str,
-) -> Vec<String> {
+async fn withheld_after_restart(config: &Arc<Config>, flag: &str) -> Vec<String> {
     let (usage, writer) = start_writer(config);
     let seat = Arc::new(BetaSeat::default());
-    let router = boot(config, overlay_revision, Arc::clone(&seat));
+    let router = boot(config, Arc::clone(&seat));
     warm_off_runtime(config, &router, &usage);
     let _ = dispatch(&router, flag).await;
     stop_writer(usage, writer).await;
@@ -290,7 +277,7 @@ async fn lift_seed_through_the_control_route(router: Router, usage: &UsageHandle
 async fn first_seed_session(config: &Arc<Config>, lift: bool) {
     let (usage, writer) = start_writer(config);
     let seat = Arc::new(BetaSeat::default());
-    let router = boot(config, 0, Arc::clone(&seat));
+    let router = boot(config, Arc::clone(&seat));
     warm_off_runtime(config, &router, &usage);
     let _ = dispatch(&router, SEEDED_FLAG).await;
     assert_eq!(
@@ -320,7 +307,7 @@ async fn a_learned_beta_negative_survives_a_restart() {
         rejects: Some(LEARNED_FLAG),
         ..BetaSeat::default()
     });
-    let router = boot(&config, 0, Arc::clone(&seat));
+    let router = boot(&config, Arc::clone(&seat));
     warm_off_runtime(&config, &router, &usage);
     let dispatched = dispatch(&router, LEARNED_FLAG).await;
     let withheld: Vec<Vec<String>> = seat.calls().into_iter().map(|c| c.withheld_betas).collect();
@@ -345,7 +332,7 @@ async fn a_learned_beta_negative_survives_a_restart() {
     stop_writer(usage, writer).await;
 
     // Act
-    let withheld = withheld_after_restart(&config, 0, LEARNED_FLAG).await;
+    let withheld = withheld_after_restart(&config, LEARNED_FLAG).await;
 
     // Assert
     assert_eq!(
@@ -362,7 +349,7 @@ async fn a_learned_beta_negative_survives_a_restart() {
 async fn a_restart_over_an_empty_ledger_forwards_the_unlearned_beta() {
     let (config, _dir) = fixture_config();
 
-    let withheld = withheld_after_restart(&config, 0, LEARNED_FLAG).await;
+    let withheld = withheld_after_restart(&config, LEARNED_FLAG).await;
 
     assert!(withheld.is_empty(), "withheld: {withheld:?}");
 }
@@ -375,7 +362,7 @@ async fn a_seed_lift_survives_a_restart() {
     let (config, _dir) = fixture_config();
     first_seed_session(&config, true).await;
 
-    let withheld = withheld_after_restart(&config, 0, SEEDED_FLAG).await;
+    let withheld = withheld_after_restart(&config, SEEDED_FLAG).await;
 
     assert!(
         withheld.is_empty(),
@@ -391,24 +378,7 @@ async fn without_a_lift_a_restart_still_withholds_the_seeded_beta() {
     let (config, _dir) = fixture_config();
     first_seed_session(&config, false).await;
 
-    let withheld = withheld_after_restart(&config, 0, SEEDED_FLAG).await;
+    let withheld = withheld_after_restart(&config, SEEDED_FLAG).await;
 
     assert_eq!(withheld, vec![SEEDED_FLAG.to_string()]);
-}
-
-/// A seed lift survives a boot under a different overlay: the capability
-/// revision stamps are frozen, so the overlay revision no longer reaches the
-/// replay boundary.
-#[tokio::test]
-#[serial_test::serial]
-async fn a_seed_lift_survives_an_overlay_revision_change() {
-    // Arrange -- the lift is durable.
-    let (config, _dir) = fixture_config();
-    first_seed_session(&config, true).await;
-
-    // Act
-    let withheld = withheld_after_restart(&config, BUMPED_REVISION, SEEDED_FLAG).await;
-
-    // Assert
-    assert!(withheld.is_empty(), "withheld: {withheld:?}");
 }

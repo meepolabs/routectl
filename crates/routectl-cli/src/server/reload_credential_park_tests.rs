@@ -3,8 +3,8 @@
 //! added, removed or changed, and nothing else: a routine in-process token
 //! refresh rewrites the file with what the cache already holds, so its reload
 //! lifts nothing. An accepted config reload lifts the account of each
-//! `[providers]` entry it changed and no OAuth seat, so an overlay-only
-//! reload, an unchanged config, and the config half of a SIGHUP lift nothing.
+//! `[providers]` entry it changed and no OAuth seat, so an unchanged config
+//! and the config half of a SIGHUP lift nothing.
 //! A reload that fails keeps every park, and an attempt admitted before a
 //! reload that lifted its account cannot re-park it after it.
 
@@ -55,17 +55,6 @@ fn edited_entry_text(entry: &str) -> String {
     text.replacen(&header, &format!("{header}rpm_limit = 7\n"), 1)
 }
 
-/// Write an overlay at a new revision, so the overlay reload is accepted
-/// with a changed revision while config.toml stays as it was.
-fn write_overlay_revision(dir: &Path) {
-    std::fs::write(
-        dir.join("routectl").join("catalog_overlay.json"),
-        r#"{"schema_version":1,"revision":1,"cells":{"anthropic-api:claude-opus-4-8*":
-               {"source":"user","verified_at":"2026-07-01","wm":1.0}}}"#,
-    )
-    .unwrap();
-}
-
 /// The live rig the reload coordinator owns over [`mixed_config_text`]: the
 /// OAuth store and the composite secrets over one temp credentials file, the
 /// router swap, and the config file a config reload reads. The caller holds
@@ -104,10 +93,9 @@ impl Rig {
             .expect("fixture config parses");
         let usage_dir = isolate_usage_db(&mut config);
         let config = Arc::new(config);
-        let router =
-            build_router_from_config_with_overlay(config.clone(), &Arc::default(), secrets.clone())
-                .await
-                .expect("initial router build");
+        let router = build_router_from_config(config.clone(), secrets.clone())
+            .await
+            .expect("initial router build");
         Self {
             creds,
             cfg_path,
@@ -131,7 +119,6 @@ impl Rig {
         handle_credentials_reload(
             &Some(self.oauth.clone()),
             &self.config,
-            &Arc::new(CatalogOverlay::default()),
             self.secrets.clone(),
             &self.swap,
             &Arc::new(ArcSwap::from_pointee(ActivationState::default())),
@@ -142,23 +129,13 @@ impl Rig {
     async fn reload_config(
         &self,
         usage: &routectl_usage::UsageHandle,
-    ) -> Result<Option<(Arc<Config>, Arc<CatalogOverlay>)>, ReloadFailure> {
-        self.reload_config_on(usage, ReloadTrigger::ConfigFile)
-            .await
-    }
-
-    async fn reload_config_on(
-        &self,
-        usage: &routectl_usage::UsageHandle,
-        trigger: ReloadTrigger,
-    ) -> Result<Option<(Arc<Config>, Arc<CatalogOverlay>)>, ReloadFailure> {
+    ) -> Result<Option<Arc<Config>>, ReloadFailure> {
         Box::pin(handle_config_reload(
             Some(&self.cfg_path),
             &self.config,
             self.secrets.clone(),
             &self.swap,
             usage,
-            trigger,
             &mut never_shutdown(),
         ))
         .await
@@ -323,8 +300,6 @@ async fn a_failed_credentials_reload_keeps_every_park() {
 /// What happens on disk before a config-side reload, and which reload runs.
 #[derive(Clone, Copy, Debug)]
 enum ConfigSideReload {
-    /// Only the catalog overlay is rewritten; the overlay watcher fires.
-    OverlayOnly,
     /// Nothing changes; the config watcher fires.
     Unchanged,
     /// `[providers.<entry>]` gains a key; the config watcher fires.
@@ -337,8 +312,7 @@ enum ConfigSideReload {
 #[tokio::test]
 #[serial_test::serial]
 async fn a_config_side_reload_lifts_only_the_parks_of_entries_it_changed() {
-    let rows: [(ConfigSideReload, ParkRow); 5] = [
-        (ConfigSideReload::OverlayOnly, [PARKED, PARKED, PARKED]),
+    let rows: [(ConfigSideReload, ParkRow); 4] = [
         (ConfigSideReload::Unchanged, [PARKED, PARKED, PARKED]),
         (
             ConfigSideReload::EntryEdited("compat"),
@@ -359,20 +333,12 @@ async fn a_config_side_reload_lifts_only_the_parks_of_entries_it_changed() {
         let (usage, writer) = build_usage_writer(&rig.config);
         rig.park_every_account();
         let before = rig.swap.load_full();
-        let trigger = match reload {
-            ConfigSideReload::OverlayOnly => {
-                write_overlay_revision(dir.path());
-                ReloadTrigger::CatalogOverlay
-            }
-            ConfigSideReload::EntryEdited(entry) => {
-                std::fs::write(&rig.cfg_path, edited_entry_text(entry)).unwrap();
-                ReloadTrigger::ConfigFile
-            }
-            ConfigSideReload::Unchanged | ConfigSideReload::Sighup => ReloadTrigger::ConfigFile,
-        };
+        if let ConfigSideReload::EntryEdited(entry) = reload {
+            std::fs::write(&rig.cfg_path, edited_entry_text(entry)).unwrap();
+        }
 
         // Act
-        rig.reload_config_on(&usage, trigger)
+        rig.reload_config(&usage)
             .await
             .expect("config reload applies")
             .expect("a successful reload returns its config");
@@ -385,13 +351,6 @@ async fn a_config_side_reload_lifts_only_the_parks_of_entries_it_changed() {
             !Arc::ptr_eq(&before, &rig.swap.load_full()),
             "{reload:?}: router swapped"
         );
-        if matches!(reload, ConfigSideReload::OverlayOnly) {
-            assert_eq!(
-                rig.swap.load().catalog_overlay().revision,
-                1,
-                "{reload:?}: premise, the overlay revision moved"
-            );
-        }
         assert_eq!(rig.parks(&MODELS), expected, "{reload:?}");
         drop(usage);
         drain_usage_writer_strict(writer).await;

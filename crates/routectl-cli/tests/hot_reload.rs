@@ -672,6 +672,132 @@ async fn concurrent_self_write_no_loop() {
 }
 
 // -----------------------------------------------------------------
+// Leftover catalog overlay file
+// -----------------------------------------------------------------
+
+/// How long `a_leftover_overlay_file_is_ignored_at_boot_and_by_the_watcher`
+/// keeps rewriting the leftover file while watching for a reload.
+const LEFTOVER_HOLD_WINDOW: Duration = Duration::from_secs(4);
+
+/// The live config's load age from `/status/config`. An accepted config
+/// reload restamps it, so it drops back toward zero; with no reload it only
+/// grows.
+async fn config_loaded_age_ms(client: &reqwest::Client, base_url: &str) -> i64 {
+    let body: Value = client
+        .get(format!("{base_url}/status/config"))
+        .send()
+        .await
+        .expect("GET /status/config")
+        .json()
+        .await
+        .expect("/status/config is JSON");
+    body["data"]["source"]["loaded_age_ms"]
+        .as_i64()
+        .unwrap_or_else(|| panic!("the config panel must carry a load age: {body}"))
+}
+
+/// Atomic-rename write of a VALID overlay document at `path`.
+fn write_leftover_overlay(path: &Path, revision: u32) {
+    let parent = path.parent().expect("overlay path has a parent");
+    let tmp = tempfile::Builder::new()
+        .prefix(".overlay.tmp.")
+        .suffix(".json")
+        .tempfile_in(parent)
+        .unwrap();
+    std::fs::write(
+        tmp.path(),
+        format!(r#"{{"schema_version":1,"revision":{revision},"cells":{{}}}}"#),
+    )
+    .unwrap();
+    tmp.persist(path).unwrap();
+}
+
+/// A `catalog_overlay.json` left in the config folder is no longer read: the
+/// daemon boots through the cold-start loader beside one that does not parse,
+/// and rewriting it never reloads the config.
+///
+/// The boot mirrors `routectl serve`: `load_effective_config` on the on-disk
+/// file, then `serve_on_listener` watching it. "No reload" is the live config
+/// load age never dropping across a window of repeated overlay writes; the
+/// watch is proven delivering on both sides of that window, so a dropped
+/// event cannot pass the check vacuously.
+///
+/// `serial_test::serial`: this test sets the process-global
+/// `XDG_CONFIG_HOME`.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_leftover_overlay_file_is_ignored_at_boot_and_by_the_watcher() {
+    // Arrange: an isolated config folder holding config.toml and a leftover
+    // overlay that does not parse.
+    let xdg = tempfile::tempdir().unwrap();
+    let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", xdg.path());
+    let config_dir = xdg.path().join("routectl");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let config_path = config_dir.join("config.toml");
+    let overlay_path = config_dir.join("catalog_overlay.json");
+    std::fs::write(&config_path, config_text_with_alias("stable-alias")).unwrap();
+    std::fs::write(&overlay_path, b"{ not json").unwrap();
+
+    // Act 1: boot as `routectl serve` does.
+    let loaded = routectl_cli::server::load_effective_config(&config_path)
+        .unwrap_or_else(|e| panic!("boot must ignore the leftover overlay: {e}"));
+    let config = common::isolate_usage_db(Arc::new(loaded.config));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let watched_path = config_path.clone();
+    tokio::spawn(async move {
+        let _ = routectl_cli::server::serve_on_listener(config, listener, Some(watched_path)).await;
+    });
+    let client = reqwest::Client::new();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !matches!(
+        client.get(format!("{base_url}/health")).send().await,
+        Ok(resp) if resp.status().is_success()
+    ) {
+        assert!(
+            Instant::now() < deadline,
+            "server failed to come up at {base_url}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        list_model_ids(&base_url)
+            .await
+            .iter()
+            .any(|s| s == "stable-alias")
+    );
+    prove_watch_delivering(&base_url, &config_path, "stable-alias", "leftover-armed").await;
+
+    // Act 2: rewrite the leftover overlay on the restimulus cadence, sampling
+    // the config load age throughout.
+    let mut previous_age = config_loaded_age_ms(&client, &base_url).await;
+    let window_end = Instant::now() + LEFTOVER_HOLD_WINDOW;
+    let mut revision = 1;
+    write_leftover_overlay(&overlay_path, revision);
+    let mut last_write = Instant::now();
+    while Instant::now() < window_end {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        if last_write.elapsed() >= RESTIMULUS_INTERVAL {
+            revision += 1;
+            write_leftover_overlay(&overlay_path, revision);
+            last_write = Instant::now();
+        }
+        let age = config_loaded_age_ms(&client, &base_url).await;
+
+        // Assert: the age never drops, so no config reload ran.
+        assert!(
+            age >= previous_age,
+            "the config load age dropped from {previous_age} to {age} ms after a \
+             leftover overlay write, so the write reloaded the config"
+        );
+        previous_age = age;
+    }
+
+    // Assert: the watch was still delivering config writes after the window.
+    prove_watch_delivering(&base_url, &config_path, "stable-alias", "leftover-after").await;
+}
+
+// -----------------------------------------------------------------
 // Credentials hot-reload (oauth:// path)
 // -----------------------------------------------------------------
 
@@ -1730,18 +1856,15 @@ async fn wait_for_learned_negative(
 /// replacement Router, so the same resident entry spans the reload and nothing
 /// is copied.
 ///
-/// A reload re-reads the overlay from the process-global `XDG_CONFIG_HOME`
-/// path, while the test-only boot installs an empty overlay. Pinning
-/// `XDG_CONFIG_HOME` at an isolated empty tree keeps the reload's overlay read
-/// hermetic: it never picks up a real or sibling test's overlay file.
-/// `serial_test::serial` is non-negotiable: this test mutates the
-/// process-global `XDG_CONFIG_HOME`, so a sibling test reading or writing it in
-/// parallel would see -- or stomp -- the pinned value.
+/// The credential store resolves under the process-global `XDG_CONFIG_HOME`,
+/// so it is pinned at an isolated empty tree: the daemon never picks up a real
+/// or sibling test's files. `serial_test::serial` is non-negotiable: this test
+/// mutates the process-global `XDG_CONFIG_HOME`, so a sibling test reading or
+/// writing it in parallel would see -- or stomp -- the pinned value.
 #[tokio::test]
 #[serial_test::serial]
 async fn capability_kill_switch_flips_off_and_registry_carries_over_reload() {
-    // Pin XDG at an isolated empty tree so every reload's overlay read resolves
-    // to the same missing overlay the boot installed.
+    // Pin XDG at an isolated empty tree.
     let xdg = tempfile::tempdir().unwrap();
     let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", xdg.path());
 

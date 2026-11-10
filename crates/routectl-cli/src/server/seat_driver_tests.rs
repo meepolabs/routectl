@@ -11,7 +11,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use routectl_auth::SecretStore;
 use routectl_auth::oauth::testing::{ScriptedRefresh, ScriptedRefreshFlow};
-use routectl_router::{ActivationState, CURRENT_CONFIG_VERSION, CatalogOverlay};
+use routectl_router::{ActivationState, CURRENT_CONFIG_VERSION};
 use routectl_testkit::{ScopedEnv, with_capture};
 use tokio::sync::oneshot;
 
@@ -158,7 +158,6 @@ impl Rig {
         handle_credentials_reload(
             &Some(self.store.clone()),
             &self.config,
-            &Arc::new(CatalogOverlay::default()),
             secrets,
             &self.swap,
             &Arc::new(ArcSwap::from_pointee(ActivationState::default())),
@@ -715,7 +714,6 @@ async fn the_reload_pipeline_runs_the_driver_only_with_a_credential_store_and_jo
         // Act
         let handles = spawn_reload_pipeline(
             rig.config.clone(),
-            Arc::new(CatalogOverlay::default()),
             None,
             with_store.then(|| rig.store.clone()),
             secrets,
