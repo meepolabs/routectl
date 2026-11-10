@@ -108,6 +108,10 @@ pub(super) fn apply_layered_overlays(
     // Responses egress re-attaches, so every chain attempt carries them.
     let captured_responses_cache_breakpoints =
         std::mem::take(&mut req.routectl_internal.responses_cache_breakpoints);
+    // The flattened namespace record is inbound data too: without it a
+    // Responses egress on any chain attempt declares every member twice.
+    let captured_responses_namespaces =
+        std::mem::take(&mut req.routectl_internal.responses_namespaces);
     // Preserve the ingress-captured verbatim `thinking.display` string:
     // like `responses_input_passthrough`, it is inbound-request data (the
     // client's literal display vocabulary the Anthropic-API egress
@@ -164,6 +168,7 @@ pub(super) fn apply_layered_overlays(
     internal.stainless_headers = captured_stainless_headers;
     internal.responses_input_passthrough = captured_responses_input_passthrough;
     internal.responses_cache_breakpoints = captured_responses_cache_breakpoints;
+    internal.responses_namespaces = captured_responses_namespaces;
     internal.anthropic_thinking_display = captured_anthropic_thinking_display;
     internal.anthropic_thinking = captured_anthropic_thinking;
     internal.withheld_betas = std::sync::Arc::clone(&target.withheld_betas);

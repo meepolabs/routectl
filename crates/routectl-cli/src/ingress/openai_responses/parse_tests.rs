@@ -996,7 +996,7 @@ fn inline_hosted_declarations_do_not_duplicate_or_alter_top_level_ones() {
 }
 
 #[test]
-fn namespace_containers_stay_out_of_canonical_tools_while_function_siblings_merge() {
+fn namespace_members_flatten_beside_function_siblings_and_the_item_replays_whole() {
     // Arrange: a namespace container between an ordinary function and a
     // hosted tool, all in one inline item.
     let body = json!({
@@ -1026,15 +1026,24 @@ fn namespace_containers_stay_out_of_canonical_tools_while_function_siblings_merg
     let req = parse(body);
 
     // Assert
-    let tools = req.tools.expect("the function sibling still merges");
-    assert_eq!(tools.len(), 1, "{tools:?}");
+    let tools = req
+        .tools
+        .expect("the function sibling and the member merge");
+    assert_eq!(tools.len(), 2, "{tools:?}");
     assert!(matches!(&tools[0], ToolDef::Custom(c) if c.name == "shell"));
+    assert!(matches!(&tools[1], ToolDef::Custom(c) if c.name == "nested_lookup"));
     let rendered = serde_json::to_string(&tools).expect("tools render");
     assert!(!rendered.contains("namespace"), "{rendered}");
     assert!(!rendered.contains("mcp_docs"), "{rendered}");
+    assert!(!rendered.contains("web_search"), "{rendered}");
+    let namespaces = &req.routectl_internal.responses_namespaces;
+    assert_eq!(
+        namespaces.members.get("nested_lookup").map(String::as_str),
+        Some("mcp_docs")
+    );
     assert!(
-        !rendered.contains("nested_lookup"),
-        "nested children must not be fabricated: {rendered}"
+        namespaces.containers.is_empty(),
+        "the item carries its own container"
     );
     let passthrough = &req.routectl_internal.responses_input_passthrough;
     assert_eq!(passthrough.len(), 1);
@@ -1061,7 +1070,15 @@ fn mixed_inline_item() -> serde_json::Value {
                 "server_url": "https://marker-mcp.example.invalid/sse",
                 "headers": {"Authorization": "Bearer marker-mcp-credential"}
             },
-            {"type": "namespace", "name": "marker_namespace", "tools": [{"type": "function", "name": "marker_nested"}]},
+            {
+                "type": "namespace",
+                "name": "marker_namespace",
+                "tools": [{
+                    "type": "mcp",
+                    "server_label": "marker_nested_label",
+                    "headers": {"Authorization": "Bearer marker-nested-credential"}
+                }]
+            },
             {"type": "marker_future_kind", "token": "marker-unknown-secret"},
             {"type": "function", "name": "marker_bad_description", "description": 42},
             {"type": "function", "description": "marker_nameless"}
@@ -1075,7 +1092,8 @@ const OPAQUE_MARKERS: &[&str] = &[
     "marker-mcp.example.invalid",
     "marker-mcp-credential",
     "marker_namespace",
-    "marker_nested",
+    "marker_nested_label",
+    "marker-nested-credential",
     "marker_future_kind",
     "marker-unknown-secret",
     "marker_bad_description",
@@ -1204,7 +1222,7 @@ fn top_level_opaque_tools_stay_canonical_beside_an_inline_item() {
 }
 
 #[test]
-fn an_inline_item_holding_only_a_namespace_adds_no_canonical_tools() {
+fn an_inline_item_holding_only_an_empty_namespace_adds_no_canonical_tools() {
     // Arrange
     let body = json!({
         "model": "m",
@@ -1220,6 +1238,30 @@ fn an_inline_item_holding_only_a_namespace_adds_no_canonical_tools() {
 
     // Assert
     assert!(req.tools.is_none(), "{:?}", req.tools);
+    assert_eq!(req.routectl_internal.responses_input_passthrough.len(), 1);
+}
+
+#[test]
+fn an_inline_item_holding_only_a_namespace_adds_its_function_members() {
+    // Arrange
+    let body = json!({
+        "model": "m",
+        "input": [{
+            "type": "additional_tools",
+            "role": "developer",
+            "tools": [{"type": "namespace", "name": "ns", "tools": [
+                {"type": "function", "name": "ns_member"}
+            ]}]
+        }]
+    });
+
+    // Act
+    let req = parse(body);
+
+    // Assert
+    let tools = req.tools.expect("the member is canonical");
+    assert_eq!(tools.len(), 1, "{tools:?}");
+    assert!(matches!(&tools[0], ToolDef::Custom(c) if c.name == "ns_member"));
     assert_eq!(req.routectl_internal.responses_input_passthrough.len(), 1);
 }
 

@@ -361,8 +361,10 @@ fn user_input_item() -> Value {
 }
 
 /// An inline item mixing a valid function with hosted, MCP, namespace,
-/// unknown, and malformed declarations. Each opaque entry carries a marker
-/// that must never reach a non-Responses wire body.
+/// unknown, and malformed declarations; the namespace holds a function
+/// beside a hosted and an MCP member. Each opaque entry carries a marker
+/// that must never reach a non-Responses wire body; the namespaced function
+/// reaches it under its bare name.
 fn mixed_inline_item() -> Value {
     json!({
         "type": "additional_tools",
@@ -380,7 +382,19 @@ fn mixed_inline_item() -> Value {
                 "server_url": "https://marker-mcp.example.invalid/sse",
                 "headers": {"Authorization": "Bearer marker-mcp-credential"}
             },
-            {"type": "namespace", "name": "marker_namespace", "tools": [{"type": "function", "name": "marker_nested"}]},
+            {
+                "type": "namespace",
+                "name": "marker_namespace",
+                "tools": [
+                    {"type": "function", "name": "ns_member_fn", "parameters": {"type": "object"}},
+                    {
+                        "type": "mcp",
+                        "server_label": "marker_nested_label",
+                        "headers": {"Authorization": "Bearer marker-nested-credential"}
+                    },
+                    {"type": "web_search", "search_context_size": "marker_nested_hosted"}
+                ]
+            },
             {"type": "marker_future_kind", "token": "marker-unknown-secret"},
             {"type": "function", "name": "marker_bad_description", "description": 42}
         ]
@@ -394,7 +408,10 @@ const OPAQUE_MARKERS: &[&str] = &[
     "marker-mcp.example.invalid",
     "marker-mcp-credential",
     "marker_namespace",
-    "marker_nested",
+    "marker_nested_label",
+    "marker-nested-credential",
+    "marker_nested_hosted",
+    "namespace",
     "marker_future_kind",
     "marker-unknown-secret",
     "marker_bad_description",
@@ -434,8 +451,12 @@ async fn inline_functions_reach_an_openai_compat_egress_without_opaque_declarati
     assert_eq!(received.len(), 1);
     let upstream_body: Value = serde_json::from_slice(&received[0].body).unwrap();
     let tools = upstream_body["tools"].as_array().expect("tools array");
-    assert_eq!(tools.len(), 1, "{upstream_body}");
+    assert_eq!(tools.len(), 2, "{upstream_body}");
     assert_eq!(tools[0]["function"]["name"], "shell", "{upstream_body}");
+    assert_eq!(
+        tools[1]["function"]["name"], "ns_member_fn",
+        "{upstream_body}"
+    );
     assert_eq!(
         tools[0]["function"]["parameters"]["properties"]["cmd"]["type"], "string",
         "{upstream_body}"
@@ -475,8 +496,9 @@ async fn inline_functions_reach_an_anthropic_egress_without_opaque_declarations(
     assert_eq!(received.len(), 1);
     let upstream_body: Value = serde_json::from_slice(&received[0].body).unwrap();
     let tools = upstream_body["tools"].as_array().expect("tools array");
-    assert_eq!(tools.len(), 1, "{upstream_body}");
+    assert_eq!(tools.len(), 2, "{upstream_body}");
     assert_eq!(tools[0]["name"], "shell", "{upstream_body}");
+    assert_eq!(tools[1]["name"], "ns_member_fn", "{upstream_body}");
     assert_eq!(
         tools[0]["input_schema"]["properties"]["cmd"]["type"], "string",
         "{upstream_body}"
@@ -555,8 +577,8 @@ async fn request_without_inline_tools_routes_to_the_first_chain_target() {
 async fn a_later_inline_function_definition_is_the_one_routed_and_serialized_cross_dialect() {
     // Arrange: the top-level `shell` and a later inline `shell` disagree on
     // schema, description, and strictness; the inline item also carries a
-    // namespace container and a hosted tool, which must not reach the
-    // cross-dialect egress.
+    // namespace container, whose function member reaches the cross-dialect
+    // egress under its bare name, and a hosted tool, which does not.
     let no_search = MockServer::start().await;
     let fallback = MockServer::start().await;
     mount_upstream(&no_search).await;
@@ -609,7 +631,15 @@ async fn a_later_inline_function_definition_is_the_one_routed_and_serialized_cro
         .expect("tools array")
         .iter()
         .collect();
-    assert_eq!(functions.len(), 1, "one shell declaration: {upstream_body}");
+    assert_eq!(
+        functions.len(),
+        2,
+        "one shell declaration and the member: {upstream_body}"
+    );
+    assert_eq!(
+        functions[1]["function"]["name"], "nested_tell",
+        "{upstream_body}"
+    );
     assert_eq!(
         functions[0]["function"],
         json!({
@@ -623,7 +653,7 @@ async fn a_later_inline_function_definition_is_the_one_routed_and_serialized_cro
     let rendered = upstream_body.to_string();
     assert!(!rendered.contains("stale"), "{rendered}");
     assert!(!rendered.contains("ns_tell"), "{rendered}");
-    assert!(!rendered.contains("nested_tell"), "{rendered}");
+    assert!(!rendered.contains("namespace"), "{rendered}");
     assert!(!rendered.contains("web_search"), "{rendered}");
 }
 
@@ -807,4 +837,230 @@ fn anthropic_response_body() -> Value {
         "stop_sequence": null,
         "usage": {"input_tokens": 5, "output_tokens": 1}
     })
+}
+
+// ---------------------------------------------------------------------------
+// Namespace containers: flattened for other dialects, sent back as written to
+// a Responses upstream
+// ---------------------------------------------------------------------------
+
+fn ns_function(name: &str) -> Value {
+    json!({
+        "type": "function",
+        "name": name,
+        "description": format!("{name} description"),
+        "parameters": {"type": "object", "properties": {"arg": {"type": "string"}}},
+        "strict": false
+    })
+}
+
+/// Two containers shaped like the ones a Codex client sends: one holding a
+/// freeform grammar tool beside functions, one holding functions.
+fn codex_shaped_containers() -> [Value; 2] {
+    [
+        json!({
+            "type": "namespace",
+            "name": "ns_alpha",
+            "description": "alpha tools",
+            "tools": [
+                {"type": "custom", "name": "exec", "description": "run", "format": {"type": "grammar", "syntax": "lark", "definition": "start: /.+/"}},
+                ns_function("alpha_wait")
+            ]
+        }),
+        json!({
+            "type": "namespace",
+            "name": "ns_beta",
+            "description": "beta tools",
+            "tools": [ns_function("beta_read"), ns_function("beta_list")]
+        }),
+    ]
+}
+
+/// Codex's request shape: no top-level `tools`, every declaration inside one
+/// `additional_tools` item.
+fn codex_shaped_body() -> Value {
+    json!({
+        "model": "tool-chain",
+        "input": [
+            {"type": "additional_tools", "role": "developer", "tools": codex_shaped_containers()},
+            user_input_item()
+        ]
+    })
+}
+
+/// The `[flat, namespace, flat]` top-level shape.
+fn top_level_namespace_body() -> Value {
+    let [alpha, _] = codex_shaped_containers();
+    json!({
+        "model": "tool-chain",
+        "tools": [ns_function("flat_one"), alpha, ns_function("flat_two")],
+        "input": [user_input_item()]
+    })
+}
+
+#[tokio::test]
+async fn namespaced_tools_reach_an_anthropic_upstream_under_their_bare_names() {
+    // Arrange
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(anthropic_response_body()))
+        .mount(&upstream)
+        .await;
+    let mut providers = BTreeMap::new();
+    providers.insert(
+        "anthropic-mock".to_string(),
+        ProviderEntry::anthropic_api(common::file_ref("test-key")).with_base_url(upstream.uri()),
+    );
+    let mut models = BTreeMap::new();
+    models.insert(
+        "haiku".to_string(),
+        ModelEntry::new("anthropic-mock", "claude-haiku-4-5"),
+    );
+    let mut aliases = BTreeMap::new();
+    aliases.insert("tool-chain".to_string(), AliasValue::Single("haiku".into()));
+    let base = helpers::spawn(single_alias_config(providers, models, aliases)).await;
+
+    // Act
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/v1/responses"))
+        .json(&codex_shaped_body())
+        .send()
+        .await
+        .unwrap();
+
+    // Assert
+    assert_eq!(resp.status(), 200);
+    let received = upstream.received_requests().await.expect("requests");
+    assert_eq!(received.len(), 1);
+    let upstream_body: Value = serde_json::from_slice(&received[0].body).unwrap();
+    let names: Vec<&str> = upstream_body["tools"]
+        .as_array()
+        .expect("tools array")
+        .iter()
+        .filter_map(|t| t["name"].as_str())
+        .collect();
+    assert_eq!(
+        names,
+        ["exec", "alpha_wait", "beta_read", "beta_list"],
+        "{upstream_body}"
+    );
+    let rendered = upstream_body.to_string();
+    assert!(!rendered.contains(r#""namespace""#), "{rendered}");
+    assert!(!rendered.contains("ns_alpha"), "{rendered}");
+    assert!(!rendered.contains("ns_beta"), "{rendered}");
+}
+
+#[tokio::test]
+async fn a_gemini_upstream_gets_no_declaration_named_after_a_container() {
+    // Arrange
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/models/gemini-2.5-pro:generateContent"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "candidates": [{
+                "content": {"parts": [{"text": "ok"}], "role": "model"},
+                "finishReason": "STOP",
+                "index": 0
+            }],
+            "usageMetadata": {"promptTokenCount": 5, "candidatesTokenCount": 1, "totalTokenCount": 6},
+            "modelVersion": "gemini-2.5-pro",
+            "responseId": "resp-gemini"
+        })))
+        .mount(&upstream)
+        .await;
+    let toml_src = format!(
+        r#"
+[providers.gemini-mock]
+kind = "gemini"
+api_key_ref = "{key}"
+base_url = "{base}"
+
+[models.target]
+provider = "gemini-mock"
+upstream = "gemini-2.5-pro"
+
+[aliases]
+tool-chain = "target"
+"#,
+        key = common::file_ref("test-key"),
+        base = upstream.uri()
+    );
+    let mut cfg: Config = toml::from_str(&toml_src).expect("gemini test config parses");
+    cfg.server = ServerConfig {
+        host: "127.0.0.1".into(),
+        port: 0,
+        strict_translation: false,
+        allow_disable_fallbacks: true,
+        ..Default::default()
+    };
+    let base = helpers::spawn(Arc::new(cfg)).await;
+
+    // Act
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/v1/responses"))
+        .json(&codex_shaped_body())
+        .send()
+        .await
+        .unwrap();
+
+    // Assert
+    assert_eq!(resp.status(), 200);
+    let received = upstream.received_requests().await.expect("requests");
+    assert_eq!(received.len(), 1);
+    let upstream_body: Value = serde_json::from_slice(&received[0].body).unwrap();
+    let declared: Vec<&str> = upstream_body["tools"]
+        .as_array()
+        .expect("tools array")
+        .iter()
+        .flat_map(|t| t["functionDeclarations"].as_array().into_iter().flatten())
+        .filter_map(|d| d["name"].as_str())
+        .collect();
+    assert!(declared.contains(&"beta_read"), "{upstream_body}");
+    assert!(declared.contains(&"alpha_wait"), "{upstream_body}");
+    for container in ["ns_alpha", "ns_beta"] {
+        assert!(!declared.contains(&container), "{upstream_body}");
+    }
+    assert!(
+        !upstream_body.to_string().contains(r#""namespace""#),
+        "{upstream_body}"
+    );
+}
+
+#[tokio::test]
+async fn same_dialect_replays_inline_namespaces_verbatim_and_declares_nothing_twice() {
+    // Arrange
+    let (upstream, base) = spawn_responses_upstream().await;
+    let body = codex_shaped_body();
+
+    // Act
+    let upstream_body = post_to_responses_upstream(&upstream, &base, &body).await;
+
+    // Assert
+    assert_eq!(
+        serde_json::to_vec(&upstream_body["input"][0]).unwrap(),
+        serde_json::to_vec(&body["input"][0]).unwrap(),
+        "the declaring item replays byte-for-byte: {upstream_body}"
+    );
+    assert!(
+        upstream_body.get("tools").is_none(),
+        "no member is declared top-level: {upstream_body}"
+    );
+}
+
+#[tokio::test]
+async fn same_dialect_sends_top_level_namespaces_back_in_their_original_order() {
+    // Arrange
+    let (upstream, base) = spawn_responses_upstream().await;
+    let body = top_level_namespace_body();
+
+    // Act
+    let upstream_body = post_to_responses_upstream(&upstream, &base, &body).await;
+
+    // Assert
+    assert_eq!(
+        serde_json::to_vec(&upstream_body["tools"]).unwrap(),
+        serde_json::to_vec(&body["tools"]).unwrap(),
+        "{upstream_body}"
+    );
 }

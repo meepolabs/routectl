@@ -10,7 +10,7 @@ use routectl_core::{
     BEDROCK_MANTLE, CODEX_OAUTH, ChatRequest, ContentPart, CustomTool, KnownContentPart, Message,
     MessageContent, ReasoningConfig, ReasoningDetail, ReasoningDetailKind, RefusalReason,
     ResponsesPassthroughItem, Role, SystemBlock, SystemContent, ToolDef,
-    cache_control::CacheControl,
+    cache_control::CacheControl, schema::ResponsesNamespaceContainer,
 };
 use routectl_testkit::CapturedEvent;
 
@@ -455,6 +455,110 @@ fn a_valid_inline_function_still_suppresses_the_same_name_top_level_tool() {
         .filter_map(|t| t["name"].as_str())
         .collect();
     assert_eq!(names, vec!["top_only"], "got: {v}");
+}
+
+fn ns_function(name: &str) -> Value {
+    json!({"type": "function", "name": name, "parameters": {"type": "object"}})
+}
+
+fn ns_custom(name: &str) -> ToolDef {
+    ToolDef::Custom(CustomTool::from_responses_function(&ns_function(name)).expect("normalizes"))
+}
+
+/// A request shaped the way the Responses ingress leaves one with a
+/// top-level `[flat, namespace, flat]` tools array: the members flattened in
+/// place, the container recorded at index 1.
+fn req_with_top_level_namespace() -> (ChatRequest, Value) {
+    let container = json!({
+        "type": "namespace",
+        "name": "ns_alpha",
+        "tools": [
+            ns_function("alpha_wait"),
+            {"type": "custom", "name": "exec", "format": {"type": "text"}},
+            {"type": "web_search"}
+        ]
+    });
+    let mut req = req_with(vec![user_text("hi")]);
+    req.tools = Some(vec![
+        ns_custom("flat_one"),
+        ns_custom("alpha_wait"),
+        ToolDef::Other(container["tools"][1].clone()),
+        ToolDef::Other(container["tools"][2].clone()),
+        ns_custom("flat_two"),
+    ]);
+    let ns = &mut req.routectl_internal.responses_namespaces;
+    ns.members = [("alpha_wait", "ns_alpha"), ("exec", "ns_alpha")]
+        .into_iter()
+        .map(|(k, v)| (k.to_owned(), v.to_owned()))
+        .collect();
+    ns.unnamed_members = vec![container["tools"][2].clone()];
+    ns.containers = vec![ResponsesNamespaceContainer {
+        index: 1,
+        raw: container.clone(),
+    }];
+    (req, container)
+}
+
+#[test]
+fn a_top_level_namespace_is_spliced_back_and_its_members_are_not_redeclared() {
+    // Arrange
+    let (req, container) = req_with_top_level_namespace();
+
+    // Act
+    let v = translate_to_json(&cfg(), &req);
+
+    // Assert
+    assert_eq!(
+        v["tools"],
+        json!([ns_function("flat_one"), container, ns_function("flat_two")]),
+        "got: {v}"
+    );
+}
+
+#[test]
+fn members_of_an_inline_namespace_are_declared_only_by_the_replayed_item() {
+    // Arrange: the container rides the additional_tools item, so nothing is
+    // spliced and no member is declared top-level.
+    let item = json!({
+        "type": "additional_tools",
+        "role": "developer",
+        "tools": [{"type": "namespace", "name": "ns_beta", "tools": [ns_function("beta_read")]}]
+    });
+    let mut req = req_with(vec![user_text("hi")]);
+    req.tools = Some(vec![ns_custom("beta_read")]);
+    req.routectl_internal
+        .responses_namespaces
+        .members
+        .insert("beta_read".into(), "ns_beta".into());
+    req.routectl_internal.responses_input_passthrough = vec![ResponsesPassthroughItem {
+        modeled_prefix: 0,
+        item: item.clone(),
+    }];
+
+    // Act
+    let v = translate_to_json(&cfg(), &req);
+
+    // Assert
+    assert!(v.get("tools").is_none(), "got: {v}");
+    assert_eq!(v["input"][0], item, "the declaring item replays verbatim");
+}
+
+#[test]
+fn a_flat_tools_array_without_namespaces_serializes_as_before() {
+    // Arrange: positive control; nothing recorded, nothing suppressed.
+    let mut req = req_with(vec![user_text("hi")]);
+    req.tools = Some(vec![
+        ns_custom("flat_one"),
+        ToolDef::Other(json!({"type": "web_search"})),
+    ]);
+
+    // Act
+    let body = serde_json::to_vec(&translate(&cfg(), &req).expect("translate")).unwrap();
+
+    // Assert
+    let tools = r#""tools":[{"type":"function","name":"flat_one","parameters":{"type":"object"}},{"type":"web_search"}]"#;
+    let body = String::from_utf8(body).unwrap();
+    assert!(body.contains(tools), "got: {body}");
 }
 
 #[test]

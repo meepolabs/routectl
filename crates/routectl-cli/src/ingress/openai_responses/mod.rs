@@ -43,6 +43,7 @@ mod parse;
 mod parse_tests;
 mod render;
 mod stream;
+pub(crate) mod tools;
 
 use parse::translate_request;
 

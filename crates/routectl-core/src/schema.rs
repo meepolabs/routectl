@@ -245,6 +245,47 @@ pub struct ResponsesPassthroughItem {
     pub item: Value,
 }
 
+/// What the OpenAI Responses ingress did with the client's
+/// `type:"namespace"` tool containers. Their members are flattened into
+/// `ChatRequest.tools` under their bare names so every egress declares them;
+/// this record lets a same-dialect Responses egress send the containers
+/// back as written instead of declaring each member a second time.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ResponsesNamespaces {
+    /// Bare name of every flattened member -> the namespace it came from.
+    /// A member whose name collides is absent.
+    pub members: std::collections::BTreeMap<String, String>,
+    /// Flattened members that carry no name (hosted tools), verbatim.
+    pub unnamed_members: Vec<Value>,
+    /// Containers from the top-level `tools` array, in inbound order. The
+    /// `additional_tools` input item carries its own containers and is
+    /// replayed whole, so none of its containers appear here.
+    pub containers: Vec<ResponsesNamespaceContainer>,
+    /// Members left unflattened because their name clashed with a flat
+    /// tool or with a member of another container.
+    pub collisions: Vec<ResponsesNamespaceCollision>,
+}
+
+/// One top-level `tools[]` namespace container, verbatim, with its index
+/// in the inbound array.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResponsesNamespaceContainer {
+    /// Position of the container in the inbound top-level `tools` array.
+    pub index: usize,
+    /// The container as the client sent it.
+    pub raw: Value,
+}
+
+/// A namespace member kept out of `ChatRequest.tools` because its bare
+/// name is declared more than once.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResponsesNamespaceCollision {
+    /// The container's name.
+    pub namespace: String,
+    /// The member's bare name.
+    pub tool: String,
+}
+
 /// One per-block Responses `prompt_cache_breakpoint` the client sent,
 /// recorded by the Responses ingress so a same-dialect Responses egress can
 /// put it back on the `input_text` part it came from. The canonical content
@@ -294,6 +335,7 @@ pub struct ResponsesCacheBreakpoint {
 /// holds for the resolved-knob fields and equally for the inbound capture
 /// fields (`claude_code_headers`, `stainless_headers`,
 /// `responses_input_passthrough`, `responses_cache_breakpoints`,
+/// `responses_namespaces`,
 /// `inbound_session_key`,
 /// `forwarded_bearer`, `provenance`, `anthropic_thinking_display`,
 /// `anthropic_thinking`), which
@@ -482,6 +524,11 @@ pub struct RoutectlInternal {
     /// field. Inbound-request data like `responses_input_passthrough`;
     /// empty for library consumers and for every non-Responses ingress.
     pub responses_cache_breakpoints: Vec<ResponsesCacheBreakpoint>,
+
+    /// Namespace containers the OpenAI Responses ingress flattened into
+    /// `ChatRequest.tools`. Only the Responses egress reads it; empty for
+    /// library consumers and for every non-Responses ingress.
+    pub responses_namespaces: ResponsesNamespaces,
 
     /// INBOUND per-conversation key captured by EVERY ingress dialect from
     /// a HEADER candidate first, a BODY candidate second. The Anthropic

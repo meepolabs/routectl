@@ -16,6 +16,10 @@ list with more narrative.
 
 ### Added
 
+- **Responses clients' namespaced tools reach every other dialect.** A tool a Responses client declares inside a `type:"namespace"` container (in the top-level `tools` array or an `additional_tools` input item) is now declared to Anthropic, Chat Completions, Bedrock and Gemini upstreams under its own name; before, those lanes did not see it. A Responses upstream still gets the containers as the client wrote them, with no tool declared twice. A namespaced tool whose name another declaration also uses is left out of the other lanes, logged once per request at WARN, and counted as the `namespace_tool_name_collision` drop class. See [docs/LOGGING.md](docs/LOGGING.md).
+
+- **Internal:** routectl-core adds `RoutectlInternal::responses_namespaces` with `ResponsesNamespaces`, `ResponsesNamespaceContainer` and `ResponsesNamespaceCollision`, plus `tool_def::responses_namespace_members` and `tool_def::RESPONSES_NAMESPACE_TYPE`. No change for `routectl` binary users.
+
 - **Responses clients routed to a Responses upstream see the upstream's message item id and `created_at`.** The `message` output item carries the id the upstream sent, on complete responses and streams alike (interleaved message items each keep their own id), and a stream's `created_at` comes from the upstream's `response.created`. A response with no upstream envelope renders as before.
 
 - **A Responses client's prompt-cache fields reach Responses upstreams that accept them.** `prompt_cache_options` and `prompt_cache_retention` from a client speaking the Responses dialect are forwarded per surface: an API-key upstream gets both, a ChatGPT-OAuth upstream gets `prompt_cache_options` only, and Bedrock Mantle gets neither. A per-block `prompt_cache_breakpoint` is put back on the `input_text` block it was sent on for API-key upstreams. Every withheld cache field or breakpoint counts once per request as the `prompt_cache_field_withheld` drop class; the same fields from any other ingress are not forwarded. See [docs/LOGGING.md](docs/LOGGING.md).

@@ -15,6 +15,7 @@
 
 use serde_json::{Value, json};
 
+use routectl_core::schema::ResponsesNamespaces;
 use routectl_core::{ChatRequest, CustomTool, ToolDef, sanitize_for_log};
 
 use super::types::{ResponsesFunctionTag, ResponsesTool};
@@ -70,19 +71,49 @@ impl<'a> InlineDeclarations<'a> {
     }
 }
 
+/// Whether `td` is a member the Responses ingress flattened out of a
+/// namespace container. Its container is sent instead (spliced back here
+/// when it came from the top-level `tools`, replayed inside the
+/// `additional_tools` item otherwise), so the member is never declared on
+/// its own.
+fn is_flattened_member(namespaces: &ResponsesNamespaces, td: &ToolDef) -> bool {
+    match td {
+        ToolDef::Custom(c) => namespaces.members.contains_key(&c.name),
+        ToolDef::Other(v) => match v.get("name").and_then(Value::as_str) {
+            Some(name) => namespaces.members.contains_key(name),
+            None => namespaces.unnamed_members.contains(v),
+        },
+    }
+}
+
+/// Put each top-level namespace container back at its inbound index. The
+/// ingress recorded the index in the client's `tools` array; with nothing
+/// else removed the remaining tools are exactly that array's other
+/// entries, so ascending inserts rebuild its order. An index past the end
+/// (a tool removed on the way) appends.
+fn splice_containers(out: &mut Vec<ResponsesTool>, namespaces: &ResponsesNamespaces) {
+    for container in &namespaces.containers {
+        let at = container.index.min(out.len());
+        out.insert(at, ResponsesTool::Other(container.raw.clone()));
+    }
+}
+
 /// Translate `req.tools` into the Responses `tools` array. Returns an
 /// empty Vec when no tools are configured -- the parent
 /// `ResponsesRequest` skips serializing the field when empty. Tools an
 /// `additional_tools` input item already declares are omitted: that item
 /// is replayed verbatim in `input[]`, and declaring a tool twice is
-/// rejected upstream.
+/// rejected upstream. For the same reason a member flattened out of a
+/// namespace container is omitted and its container sent as written.
 pub(super) fn translate_tools(req: &ChatRequest) -> Vec<ResponsesTool> {
-    let Some(tools) = req.tools.as_ref() else {
-        return Vec::new();
-    };
+    let namespaces = &req.routectl_internal.responses_namespaces;
+    let tools = req.tools.as_deref().unwrap_or_default();
     let inline = InlineDeclarations::collect(req);
     let mut out: Vec<ResponsesTool> = Vec::with_capacity(tools.len());
-    for td in tools.iter().filter(|td| !inline.declares(td)) {
+    let declared = tools
+        .iter()
+        .filter(|td| !inline.declares(td) && !is_flattened_member(namespaces, td));
+    for td in declared {
         match td {
             ToolDef::Custom(c) => {
                 // Flat Responses shape: {type, name, description?, parameters, strict?}
@@ -119,6 +150,7 @@ pub(super) fn translate_tools(req: &ChatRequest) -> Vec<ResponsesTool> {
             }
         }
     }
+    splice_containers(&mut out, namespaces);
     out
 }
 

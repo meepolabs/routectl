@@ -184,6 +184,38 @@ impl CustomTool {
     }
 }
 
+/// `type` tag of a Responses tool container that groups member declarations
+/// under one namespace name (`{type: "namespace", name, tools: [...]}`).
+pub const RESPONSES_NAMESPACE_TYPE: &str = "namespace";
+
+/// If `v` is a Responses namespace container with a string `name` and an
+/// array `tools`, its name and the entries declared directly inside it.
+/// Returns `None` for any other value, so a caller treats it as an ordinary
+/// declaration.
+///
+/// One level deep: a namespace nested inside the container is skipped (and
+/// logged at DEBUG), never walked, because a namespaced call carries exactly
+/// one namespace on the way back.
+pub fn responses_namespace_members(v: &Value) -> Option<(&str, impl Iterator<Item = &Value>)> {
+    let obj = v.as_object()?;
+    if obj.get("type").and_then(Value::as_str) != Some(RESPONSES_NAMESPACE_TYPE) {
+        return None;
+    }
+    let namespace = obj.get("name").and_then(Value::as_str)?;
+    let members = obj.get("tools").and_then(Value::as_array)?;
+    let walk = members.iter().filter(move |member| {
+        let nested = member.get("type").and_then(Value::as_str) == Some(RESPONSES_NAMESPACE_TYPE);
+        if nested {
+            tracing::debug!(
+                namespace = %crate::log_safe::sanitize_for_log(namespace),
+                "responses namespace nested inside a namespace is not flattened"
+            );
+        }
+        !nested
+    });
+    Some((namespace, walk))
+}
+
 impl ToolDef {
     /// Cache_control if the tool def carries one. The validator uses this
     /// to count breakpoints. Owned because for the `Other` variant the

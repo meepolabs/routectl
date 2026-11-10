@@ -7773,6 +7773,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   merge, reasoning, and the forward-compat `provider_extras` sweep; an
   unrecognized input role is kept as `Role::Other`; hands the input to
   `breakpoints.rs` for breakpoint capture
+- `src/ingress/openai_responses/tools.rs` -- Responses tool declarations
+  (top-level `tools` plus `additional_tools` items) -> canonical `ToolDef`s,
+  flattening `type:"namespace"` containers into bare-named members, recording
+  them on `RoutectlInternal::responses_namespaces`, and counting name
+  collisions (`namespace_tool_name_collision`)
 - `src/ingress/openai_responses/breakpoints.rs` -- records per-block
   `prompt_cache_breakpoint` values as `ResponsesCacheBreakpoint` entries
   (post-lift text-block ordinal, text digest, value, client pointer) without

@@ -1,6 +1,7 @@
 //! The ingress installs the request's observation slot before dispatch, so
-//! what the router counts against the request reaches its ledger row, on
-//! both the complete and the stream path.
+//! what the router counts against the request, and what the ingress parse
+//! found before the slot existed, reaches its ledger row, on both the
+//! complete and the stream path.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -15,6 +16,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use crate::handlers::ingress_handle::ingress_handle;
 use crate::ingress::openai::OpenAiIngress;
+use crate::ingress::openai_responses::ResponsesIngress;
 use crate::server::AppState;
 
 async fn anthropic_api_router(base: &str) -> Router {
@@ -112,4 +114,85 @@ async fn a_router_refusal_reaches_the_persisted_row_on_both_paths() {
             (true, (StatusCode::BAD_REQUEST, vec![Some(1)])),
         ]
     );
+}
+
+/// A Responses body declaring `shared` flat and inside a namespace when
+/// `colliding`, else declaring the namespaced member under its own name.
+fn responses_body(stream: bool, colliding: bool) -> Bytes {
+    let member = if colliding { "shared" } else { "member_only" };
+    let body = json!({
+        "model": "a", "max_output_tokens": 16, "stream": stream,
+        "tools": [
+            {"type": "function", "name": "shared", "parameters": {"type": "object"}},
+            {"type": "namespace", "name": "ns_one", "tools": [
+                {"type": "function", "name": member, "parameters": {"type": "object"}}
+            ]}
+        ],
+        "input": [{"type": "message", "role": "user", "content": "q"}]
+    });
+    Bytes::from(serde_json::to_vec(&body).expect("body serializes"))
+}
+
+/// Serve one Responses request through the real ingress; the persisted
+/// `translation_drops` of every row. The upstream fails, which no ingress-side
+/// count depends on.
+async fn responses_drops_persisted(body: Bytes) -> Vec<Option<i64>> {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&upstream)
+        .await;
+    let swap = Arc::new(arc_swap::ArcSwap::from_pointee(
+        anthropic_api_router(&upstream.uri()).await,
+    ));
+    let dir = tempfile::tempdir().expect("usage tempdir");
+    let db_path = dir.path().join("usage.db");
+    let (usage, writer) = UsageWriter::start(db_path.clone(), CHANNEL_CAPACITY, 0, true);
+    let state = AppState::for_test_with_usage(swap, usage);
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+
+    let resp = ingress_handle(state, headers, None, Ok(body), ResponsesIngress).await;
+    to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("response body drains");
+    tokio::task::spawn_blocking(move || writer.shutdown())
+        .await
+        .expect("usage writer shutdown");
+
+    let conn = rusqlite::Connection::open(&db_path).expect("read open");
+    let mut query = conn
+        .prepare("SELECT translation_drops FROM requests")
+        .expect("prepare");
+    query
+        .query_map([], |r| r.get(0))
+        .expect("query")
+        .collect::<Result<Vec<Option<i64>>, _>>()
+        .expect("rows")
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn a_namespace_name_collision_reaches_the_persisted_row_on_both_paths() {
+    for stream in [false, true] {
+        // Arrange: the clean body is the control; it shares every other loss.
+        let clean = responses_body(stream, false);
+        let colliding = responses_body(stream, true);
+
+        // Act
+        let clean_rows = responses_drops_persisted(clean).await;
+        let colliding_rows = responses_drops_persisted(colliding).await;
+
+        // Assert
+        let [Some(clean)] = clean_rows[..] else {
+            panic!("stream={stream}: one row with a count: {clean_rows:?}");
+        };
+        let [Some(colliding)] = colliding_rows[..] else {
+            panic!("stream={stream}: one row with a count: {colliding_rows:?}");
+        };
+        assert_eq!(colliding - clean, 1, "stream={stream}");
+    }
 }

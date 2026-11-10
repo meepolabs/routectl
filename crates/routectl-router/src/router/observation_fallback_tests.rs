@@ -360,3 +360,38 @@ async fn responses_cache_breakpoints_survive_the_per_attempt_rebuild() {
         "second chain attempt carries the breakpoints",
     );
 }
+
+#[tokio::test]
+async fn responses_namespaces_survive_the_per_attempt_rebuild() {
+    let (router, first, second) = two_entry_chain();
+    let mut recorded = routectl_core::schema::ResponsesNamespaces::default();
+    recorded.members.insert("member_fn".into(), "ns_one".into());
+    recorded
+        .containers
+        .push(routectl_core::schema::ResponsesNamespaceContainer {
+            index: 1,
+            raw: json!({"type": "namespace", "name": "ns_one", "tools": []}),
+        });
+    let mut req = ChatRequest {
+        model: "flow".into(),
+        ..Default::default()
+    };
+    req.routectl_internal.responses_namespaces = recorded.clone();
+
+    Box::pin(router.complete(req))
+        .await
+        .expect("the second entry serves");
+
+    let first = first.lock();
+    let second = second.lock();
+    assert_eq!(first.len(), 1, "the first entry is tried once");
+    assert_eq!(second.len(), 1, "the chain falls back to the second entry");
+    assert_eq!(
+        first[0].routectl_internal.responses_namespaces, recorded,
+        "first chain attempt carries the record",
+    );
+    assert_eq!(
+        second[0].routectl_internal.responses_namespaces, recorded,
+        "second chain attempt carries the record",
+    );
+}

@@ -19,11 +19,13 @@
 //! - `tools`                            -> `tools[]` (ToolDef)
 //! - `additional_tools` input item      -> its function declarations merged
 //!   into `tools[]`, a later same-name function replacing the earlier one;
-//!   every other declaration stays out of `tools[]` (the item is still
+//!   every other flat declaration stays out of `tools[]` (the item is still
 //!   preserved verbatim for same-dialect replay). "Function declaration"
 //!   means one `CustomTool::from_responses_function` accepts; the Responses
 //!   egress applies the same predicate, `CustomTool::responses_function_name`,
 //!   to the replayed item.
+//! - `namespace` containers (either carrier) -> members flattened into
+//!   `tools[]` under their bare names (see `tools.rs`)
 //! - `tool_choice`                      -> `tool_choice` (named-forcing shape normalized to nested)
 //! - `reasoning` (object)               -> `reasoning` (ReasoningConfig)
 //! - `max_output_tokens`                -> `max_tokens`
@@ -48,9 +50,9 @@ use serde_json::{Map, Value};
 
 use routectl_core::wire_check::{DeclaredEdit, EditKind, EditSite};
 use routectl_core::{
-    ChatRequest, ContentPart, CustomTool, Error, KnownContentPart, Message, MessageContent,
-    ReasoningConfig, ReasoningDetail, ReasoningDetailKind, RefusalReason, ResponsesPassthroughItem,
-    Result, Role, SystemContent, ToolDef,
+    ChatRequest, ContentPart, Error, KnownContentPart, Message, MessageContent, ReasoningConfig,
+    ReasoningDetail, ReasoningDetailKind, RefusalReason, ResponsesPassthroughItem, Result, Role,
+    SystemContent,
 };
 
 use crate::ingress::read_alias_header;
@@ -155,11 +157,11 @@ pub(super) fn translate_request(headers: &HeaderMap, body: Value) -> Result<Chat
         &lifted.indices,
     );
 
-    // tools -> ToolDef[].
-    if let Some(tools) = obj.remove("tools") {
-        req.tools = build_tools(tools);
-    }
-    req.tools = merge_additional_tools(req.tools.take(), &additional_tools);
+    // tools -> ToolDef[], namespace containers flattened.
+    let (tools, namespaces) =
+        super::tools::build_tools(obj.remove("tools").as_ref(), &additional_tools);
+    req.tools = tools;
+    req.routectl_internal.responses_namespaces = namespaces;
 
     // tool_choice -> canonical tool_choice. The Responses wire uses a
     // flat named-forcing shape; normalize it to the nested OpenAI form
@@ -866,7 +868,7 @@ fn reasoning_detail(
 }
 
 // ---------------------------------------------------------------------------
-// tools -> ToolDef[]
+// tool_choice
 // ---------------------------------------------------------------------------
 
 /// Normalize a Responses named-forcing `tool_choice` into the canonical
@@ -892,66 +894,6 @@ fn normalize_tool_choice(tc: Value) -> Value {
         Some(name) => serde_json::json!({"type": "function", "function": {"name": name}}),
         None => tc,
     }
-}
-
-/// Translate the Responses `tools` array into canonical `ToolDef`s. A
-/// flat Responses function tool (`{type:"function", name, description?,
-/// parameters, strict?}`) becomes `ToolDef::Custom`; any other shape
-/// passes through as `ToolDef::Other` verbatim (inverse of the egress
-/// tools.rs, which emits the flat function shape from Custom and passes
-/// Other through).
-fn build_tools(tools: Value) -> Option<Vec<ToolDef>> {
-    let arr = tools.as_array()?;
-    let mut out: Vec<ToolDef> = Vec::with_capacity(arr.len());
-    for tool in arr {
-        out.push(build_tool(tool));
-    }
-    if out.is_empty() { None } else { Some(out) }
-}
-
-/// Merge the function declarations carried by `additional_tools` input
-/// items into the top-level tools, in input order. A later function with an
-/// already-merged name replaces the earlier one in place, because the
-/// same-dialect replay emits the inline item verbatim and every other lane
-/// must route and serialize that same definition.
-///
-/// Only declarations that normalize to `ToolDef::Custom` are admitted.
-/// Hosted, MCP, namespace, unknown, and malformed declarations have no
-/// portable canonical form and may carry server URLs or credentials, so they
-/// reach only the verbatim Responses replay, never another dialect's wire.
-fn merge_additional_tools(
-    tools: Option<Vec<ToolDef>>,
-    additional: &[Value],
-) -> Option<Vec<ToolDef>> {
-    if additional.is_empty() {
-        return tools;
-    }
-    let mut merged = tools.unwrap_or_default();
-    for candidate in additional
-        .iter()
-        .filter_map(CustomTool::from_responses_function)
-    {
-        match merged
-            .iter()
-            .position(|known| matches!(known, ToolDef::Custom(k) if k.name == candidate.name))
-        {
-            Some(at) => merged[at] = ToolDef::Custom(candidate),
-            None => merged.push(ToolDef::Custom(candidate)),
-        }
-    }
-    if merged.is_empty() {
-        None
-    } else {
-        Some(merged)
-    }
-}
-
-/// A flat Responses function declaration becomes `ToolDef::Custom`; every
-/// other value -- builtin, unknown, or a malformed function -- passes
-/// through verbatim so the egress can forward it or surface its own error.
-fn build_tool(tool: &Value) -> ToolDef {
-    CustomTool::from_responses_function(tool)
-        .map_or_else(|| ToolDef::Other(tool.clone()), ToolDef::Custom)
 }
 
 // ---------------------------------------------------------------------------

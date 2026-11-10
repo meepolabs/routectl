@@ -522,6 +522,7 @@ async fn complete_response<A: IngressAdapter>(
     draft: UsageRecord,
 ) -> Response {
     let mut capture = UsageCapture::for_request(draft, usage, adapter.id().to_string(), &mut req);
+    crate::ingress::openai_responses::tools::note_collisions_on_observation(&req);
     // Extract the canonical live session key BEFORE dispatch moves `req`
     // into the router. POST-response K-sample recording (below) keys on
     // this same value the usage ledger's `session_id` column was seeded
@@ -622,6 +623,7 @@ async fn stream_response<A: IngressAdapter + 'static>(
     evidence: StreamEvidenceSlot,
 ) -> Response {
     let capture = UsageCapture::for_request(draft, usage, adapter.id().to_string(), &mut req);
+    crate::ingress::openai_responses::tools::note_collisions_on_observation(&req);
     // Extract the canonical live session key BEFORE dispatch moves `req`
     // into the router; it rides into the render task for POST-response
     // K-sample recording at natural end-of-stream.
