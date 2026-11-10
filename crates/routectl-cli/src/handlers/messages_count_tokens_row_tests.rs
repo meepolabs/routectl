@@ -263,6 +263,34 @@ async fn a_failed_count_writes_one_row_with_the_dispatch_error_outcome_and_targe
     assert_eq!(request_id, &posted.response_request_id);
 }
 
+/// The `http_status` column of every persisted row.
+fn http_statuses(db_path: &Path) -> Vec<Option<i64>> {
+    let conn = rusqlite::Connection::open(db_path).expect("read open");
+    let mut stmt = conn
+        .prepare("SELECT http_status FROM requests")
+        .expect("prepare");
+    stmt.query_map([], |r| r.get(0))
+        .expect("query")
+        .collect::<std::result::Result<_, _>>()
+        .expect("rows")
+}
+
+#[tokio::test]
+async fn a_successful_count_row_records_http_status_200() {
+    let posted = post_count(CountDouble::counting(), COUNT_BODY).await;
+
+    assert_eq!(posted.status, StatusCode::OK);
+    assert_eq!(http_statuses(&posted.db_path), [Some(200)]);
+}
+
+#[tokio::test]
+async fn a_failed_count_row_keeps_the_status_its_error_left() {
+    let posted = post_count(CountDouble::refusing(), COUNT_BODY).await;
+
+    assert_ne!(posted.status, StatusCode::OK);
+    assert_eq!(http_statuses(&posted.db_path), [None]);
+}
+
 #[tokio::test]
 async fn a_count_row_is_absent_from_aggregate_and_cost_views_and_present_in_observation_totals() {
     // Arrange: a refused count, so the row carries a nonzero observation

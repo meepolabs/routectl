@@ -994,6 +994,8 @@ list with more narrative.
 
 - **A daemon that starts while the previous one is still writing keeps its usage ledger.** The usage database's schema upgrade now waits for the other writer's lock, up to the 5 s busy timeout, instead of failing at once and leaving usage accounting off for the daemon's lifetime. At shutdown the `usage writer drained` line now appears only when the drain finished; a drain that hit its deadline logs a WARN saying whether queued rows were abandoned (and how many) or a sender was still open with nothing queued, and a writer panic logs an ERROR.
 
+- **A successful `/v1/messages/count_tokens` row records `http_status` 200.** The usage ledger stamped no status on a delivered count, so usage reports read the row as missing data; a failed count keeps the status its error left.
+
 ### Security
 
 - **The fixture scrub gate (`scripts/scrub-fixture.sh --check`) catches more credential and task-id shapes.** A vendor key after a percent-encoded boundary (`%22`, `%3D`, `%20`) is now refused like one after a JSON escape; OpenAI keys carrying the `T3BlbkFJ` infix and `sk-None-` keys are refused as `provider-key`; a vendor `req_` id under a JSON `request_id` key is refused as the new `upstream-request-id` class in raw, JSON-escaped, pretty-printed, percent-encoded and percent-encoded JSON-escaped bodies, while the `request-id` response header and the uuid `request_id` in `meta.json` stay accepted; and the scratch task-id class matches case-insensitively, still accepting all-hex slugs.

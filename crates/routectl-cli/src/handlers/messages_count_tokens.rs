@@ -126,6 +126,7 @@ pub async fn count_tokens(
     match counted.result {
         Ok(tc) => {
             capture.mark_first_byte();
+            capture.mark_body_delivered();
             capture.finalize(Outcome::Ok);
             // Anthropic's wire shape is `{"input_tokens": N, ...}`.
             // `TokenCount` serializes back to that exact shape with

@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use super::EligibilityReason;
 
 const TOKENS: [(EligibilityReason, &str, bool); 6] = [
@@ -77,5 +79,35 @@ fn a_locally_unavailable_error_displays_only_its_token() {
 
         assert_eq!(err.to_string(), format!("locally unavailable: {token}"));
         assert!(format!("{err:?}").contains(token), "{err:?}");
+    }
+}
+
+/// The index each variant holds in `ALL`. The match has no wildcard arm, so a
+/// variant added to the enum fails to compile here until it is listed.
+const fn all_index(reason: EligibilityReason) -> usize {
+    match reason {
+        EligibilityReason::CredentialUnusable => 0,
+        EligibilityReason::AccountParked => 1,
+        EligibilityReason::BreakerOpen => 2,
+        EligibilityReason::RateLimited => 3,
+        EligibilityReason::Capability => 4,
+        EligibilityReason::ContextWindow => 5,
+    }
+}
+
+#[test]
+fn all_lists_every_reason_once_in_declaration_order() {
+    let distinct: HashSet<EligibilityReason> = EligibilityReason::ALL.into_iter().collect();
+
+    assert_eq!(distinct.len(), EligibilityReason::ALL.len());
+    for (index, reason) in EligibilityReason::ALL.into_iter().enumerate() {
+        assert_eq!(all_index(reason), index, "{reason:?}");
+    }
+    for (reason, _, _) in TOKENS {
+        assert_eq!(
+            EligibilityReason::ALL[all_index(reason)],
+            reason,
+            "{reason:?}"
+        );
     }
 }

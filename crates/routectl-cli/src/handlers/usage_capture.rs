@@ -852,7 +852,7 @@ impl UsageCapture {
     /// Stamp the token / quota / finish columns from a non-streaming
     /// `ChatResponse`. HTTP status is fixed at 200 for a delivered body.
     pub(crate) fn observe_response(&mut self, resp: &routectl_core::ChatResponse) {
-        self.record.http_status = Some(200);
+        self.mark_body_delivered();
         self.record.finish_reason = resp
             .choices
             .iter()
@@ -1072,6 +1072,12 @@ impl UsageCapture {
                 .class_token()
                 .map(str::to_string);
         }
+    }
+
+    /// Stamp `http_status = 200` for a non-streaming success whose body the
+    /// handler is about to return. Records the 200 the client receives.
+    pub(crate) const fn mark_body_delivered(&mut self) {
+        self.record.http_status = Some(200);
     }
 
     /// Stamp `http_status = 200` at the point the SSE head becomes

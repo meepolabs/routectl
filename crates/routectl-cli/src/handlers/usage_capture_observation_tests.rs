@@ -298,15 +298,7 @@ fn read_skips(db_path: &std::path::Path) -> [Option<i64>; 6] {
 
 #[test]
 fn each_skip_reason_on_the_slot_persists_in_its_own_column_only() {
-    let reasons = [
-        EligibilityReason::CredentialUnusable,
-        EligibilityReason::AccountParked,
-        EligibilityReason::BreakerOpen,
-        EligibilityReason::RateLimited,
-        EligibilityReason::Capability,
-        EligibilityReason::ContextWindow,
-    ];
-    for (column, reason) in reasons.into_iter().enumerate() {
+    for (column, reason) in EligibilityReason::ALL.into_iter().enumerate() {
         // Arrange
         let rig = rig();
         rig.slot.add_skip(reason);
@@ -335,7 +327,8 @@ fn the_skip_columns_are_named_for_exactly_the_eligibility_tokens() {
     // Act
     let mut stmt = conn
         .prepare(
-            "SELECT name FROM pragma_table_info('requests') WHERE name LIKE 'skip\\_%' ESCAPE '\\'",
+            "SELECT name FROM pragma_table_info('requests') WHERE name LIKE 'skip\\_%' ESCAPE '\\' \
+             ORDER BY cid",
         )
         .expect("prepare");
     let suffixes: Vec<String> = stmt
@@ -350,17 +343,10 @@ fn the_skip_columns_are_named_for_exactly_the_eligibility_tokens() {
         .collect();
 
     // Assert
-    let tokens: Vec<&str> = [
-        EligibilityReason::CredentialUnusable,
-        EligibilityReason::AccountParked,
-        EligibilityReason::BreakerOpen,
-        EligibilityReason::RateLimited,
-        EligibilityReason::Capability,
-        EligibilityReason::ContextWindow,
-    ]
-    .iter()
-    .map(|reason| reason.as_str())
-    .collect();
+    let tokens: Vec<&str> = EligibilityReason::ALL
+        .iter()
+        .map(|reason| reason.as_str())
+        .collect();
     assert_eq!(suffixes, tokens, "one column per token, in token order");
     for suffix in &suffixes {
         assert!(

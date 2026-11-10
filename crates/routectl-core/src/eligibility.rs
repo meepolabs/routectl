@@ -27,6 +27,16 @@ pub enum EligibilityReason {
 }
 
 impl EligibilityReason {
+    /// Every reason, in declaration order.
+    pub const ALL: [Self; 6] = [
+        Self::CredentialUnusable,
+        Self::AccountParked,
+        Self::BreakerOpen,
+        Self::RateLimited,
+        Self::Capability,
+        Self::ContextWindow,
+    ];
+
     /// The stable snake_case token for this reason: the single source of the
     /// vocabulary in client error types, logs and persisted rows.
     pub const fn as_str(self) -> &'static str {
