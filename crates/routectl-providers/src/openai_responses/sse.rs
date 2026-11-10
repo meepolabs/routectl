@@ -34,6 +34,7 @@
 
 use std::collections::HashMap;
 
+use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -763,7 +764,7 @@ impl ResponsesStreamState {
             }
         };
         let unsettled_items = self.flush_unsettled_passthrough(provider_id, &resp_value);
-        let resp: ResponsesResponse = serde_json::from_value(resp_value).unwrap_or_default_resp();
+        let resp = ResponsesResponse::deserialize(&resp_value).unwrap_or_default_resp();
 
         // `has_function_call` decides whether a `completed` status
         // maps to `tool_calls` (when present) or `stop` (when absent).
@@ -825,7 +826,7 @@ impl ResponsesStreamState {
             self.model = resp.model;
         }
 
-        let mut chunks = self.flush_unsettled_calls(provider_id);
+        let mut chunks = self.flush_unsettled_calls(provider_id, &resp_value);
         chunks.extend(unsettled_items);
         chunks.push(ChatChunk {
             id: self.response_id.clone(),
@@ -845,14 +846,16 @@ impl ResponsesStreamState {
         Ok(chunks)
     }
 
-    /// Settle, in output order, every call no done event settled that is
-    /// still owed to the client: one whose empty `function_call_arguments.done`
-    /// deferred to an `output_item.done` that never arrived (as `{}`), and a
-    /// buffered call holding deltas (its held arguments, filtered). A buffered
-    /// call with nothing held stays unsent, as an unbuffered call with no
-    /// arguments event does.
-    fn flush_unsettled_calls(&mut self, provider_id: &str) -> Vec<ChatChunk> {
-        let mut unsettled: Vec<u32> = self
+    /// Settle, in output order, every call no done event settled. The
+    /// terminal body's copy of the call at the same `output_index` supplies
+    /// the arguments; held deltas still win over it, as they do over a done
+    /// payload. Without a body copy, a call whose empty
+    /// `function_call_arguments.done` deferred to an `output_item.done` that
+    /// never arrived settles as `{}` and a buffered call settles its held
+    /// arguments; any other call has nothing to send.
+    fn flush_unsettled_calls(&mut self, provider_id: &str, body: &Value) -> Vec<ChatChunk> {
+        let body_output = body.get("output").and_then(Value::as_array);
+        let mut unsettled: Vec<(u32, Option<String>)> = self
             .blocks
             .iter()
             .filter_map(|(idx, block)| match block {
@@ -861,15 +864,27 @@ impl ResponsesStreamState {
                     zero_arg_deferred,
                     buffered,
                     arguments,
+                    call_id,
                     ..
-                } if *zero_arg_deferred || (*buffered && !arguments.is_empty()) => Some(*idx),
+                } => {
+                    let body_args = body_output
+                        .and_then(|items| items.get(*idx as usize))
+                        .and_then(|item| body_call_arguments(item, call_id));
+                    let owed = body_args.is_some()
+                        || *zero_arg_deferred
+                        || (*buffered && !arguments.is_empty());
+                    owed.then_some((*idx, body_args))
+                }
                 _ => None,
             })
             .collect();
-        unsettled.sort_unstable();
+        unsettled.sort_unstable_by_key(|(idx, _)| *idx);
         unsettled
             .into_iter()
-            .filter_map(|idx| self.finalize_tool_arguments(provider_id, idx, ""))
+            .filter_map(|(idx, body_args)| {
+                let final_args = body_args.as_deref().unwrap_or("");
+                self.finalize_tool_arguments(provider_id, idx, final_args)
+            })
             .collect()
     }
 
@@ -1194,6 +1209,20 @@ const fn json_type_name(v: &Value) -> &'static str {
         Value::Array(_) => "array",
         Value::Object(_) => "object",
     }
+}
+
+/// The arguments of the terminal body's `item` when it is the held call
+/// `call_id`; arguments that are not a string settle as empty, as on
+/// `output_item.done`.
+fn body_call_arguments(item: &Value, call_id: &str) -> Option<String> {
+    let is_held_call = item_type_of(item) == "function_call"
+        && item.get("call_id").and_then(Value::as_str) == Some(call_id);
+    is_held_call.then(|| {
+        item.get("arguments")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned()
+    })
 }
 
 fn item_type_of(item: &Value) -> &str {

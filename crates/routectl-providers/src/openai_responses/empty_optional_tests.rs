@@ -166,3 +166,41 @@ fn removed_names_each_call_and_its_count() {
         [("read_file".to_string(), 1), ("read_file".to_string(), 2)]
     );
 }
+
+#[test]
+fn filters_only_a_tool_with_an_optional_declared_property() {
+    // (row, schema, filters)
+    let rows = [
+        (
+            "one optional property",
+            json!({"type": "object", "properties": {"q": {}, "scope": {}}, "required": ["q"]}),
+            true,
+        ),
+        (
+            "no required list",
+            json!({"type": "object", "properties": {"q": {}}}),
+            true,
+        ),
+        (
+            "all properties required",
+            json!({"type": "object", "properties": {"q": {}, "scope": {}}, "required": ["scope", "q"]}),
+            false,
+        ),
+        (
+            "empty properties",
+            json!({"type": "object", "properties": {}}),
+            false,
+        ),
+        ("no properties", json!({"type": "object"}), false),
+    ];
+    for (row, schema, expected) in rows {
+        // Arrange
+        let filter = EmptyOptionalFilter::from_tools(&[function_tool("t", schema)]);
+
+        // Act
+        let filters = filter.filters("t");
+
+        // Assert
+        assert_eq!(filters, expected, "{row}");
+    }
+}

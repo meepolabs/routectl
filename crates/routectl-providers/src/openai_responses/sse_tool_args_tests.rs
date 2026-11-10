@@ -648,6 +648,21 @@ fn deltas_stream_unchanged_where_the_filter_does_not_apply() {
             AuthKind::ChatgptOauth,
             json!({"type": "object"}),
         ),
+        (
+            "all properties required",
+            AuthKind::ChatgptOauth,
+            json!({
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string"},
+                    "pages": {"type": "string"},
+                    "offset": {"type": "integer"},
+                    "limit": {"type": "integer"},
+                    "allow_large": {"type": "boolean"}
+                },
+                "required": ["file_path", "pages", "offset", "limit", "allow_large"]
+            }),
+        ),
     ];
     for (row, auth_kind, schema) in rows {
         // Arrange
@@ -717,6 +732,206 @@ fn only_a_call_to_a_filterable_tool_is_held_back_on_the_codex_lane() {
     // Assert
     assert!(tool_deltas(&reader_delta).is_empty());
     assert_eq!(tool_deltas(&now_delta).len(), 1);
+}
+
+/// A terminal event whose body carries `output`, under `status`.
+fn terminal_with(kind: &str, status: &str, output: Vec<Value>) -> Value {
+    json!({
+        "type": kind,
+        "response": {"id": "r", "status": status, "model": "m", "output": output}
+    })
+}
+
+fn body_call(call_id: &str, args: &str) -> Value {
+    json!({"type": "function_call", "id": "fc_1", "call_id": call_id,
+           "name": READER, "arguments": args, "status": "completed"})
+}
+
+#[test]
+fn a_call_settled_only_by_the_terminal_body_reaches_the_client_once() {
+    let completed_with =
+        |output: Vec<Value>| terminal_with("response.completed", "completed", output);
+    let call = |args: &str| (0, "call_a".into(), READER.into(), args.to_string());
+    // (row, lane, events, expected tool-call deltas)
+    type Row = (
+        &'static str,
+        AuthKind,
+        Vec<Value>,
+        Vec<(u64, String, String, String)>,
+    );
+    let rows: Vec<Row> = vec![
+        (
+            "buffered, arguments only in the completed body",
+            AuthKind::ChatgptOauth,
+            vec![
+                function_call_added(0, "call_a", READER),
+                completed_with(vec![body_call("call_a", EMPTY_PAGES)]),
+            ],
+            vec![call(WITHOUT_PAGES)],
+        ),
+        (
+            "unbuffered, arguments only in the completed body",
+            AuthKind::ApiKey,
+            vec![
+                function_call_added(0, "call_a", READER),
+                completed_with(vec![body_call("call_a", EMPTY_PAGES)]),
+            ],
+            vec![call(EMPTY_PAGES)],
+        ),
+        (
+            "buffered, arguments only in the incomplete body",
+            AuthKind::ChatgptOauth,
+            vec![
+                function_call_added(0, "call_a", READER),
+                terminal_with(
+                    "response.incomplete",
+                    "incomplete",
+                    vec![body_call("call_a", EMPTY_PAGES)],
+                ),
+            ],
+            vec![call(WITHOUT_PAGES)],
+        ),
+        (
+            "buffered, held deltas win over a differing completed body",
+            AuthKind::ChatgptOauth,
+            {
+                let mut events = vec![function_call_added(0, "call_a", READER)];
+                events.extend(args_deltas(0, EMPTY_PAGES));
+                events.push(completed_with(vec![body_call(
+                    "call_a",
+                    r#"{"file_path":"/w/other"}"#,
+                )]));
+                events
+            },
+            vec![call(WITHOUT_PAGES)],
+        ),
+        (
+            "deferred empty arguments take the completed body's arguments",
+            AuthKind::ChatgptOauth,
+            vec![
+                function_call_added(0, "call_a", READER),
+                args_done(0, ""),
+                completed_with(vec![body_call("call_a", EMPTY_PAGES)]),
+            ],
+            vec![call(WITHOUT_PAGES)],
+        ),
+        (
+            "empty body arguments settle as an empty object",
+            AuthKind::ChatgptOauth,
+            vec![
+                function_call_added(0, "call_a", READER),
+                completed_with(vec![body_call("call_a", "")]),
+            ],
+            vec![call("{}")],
+        ),
+        (
+            "empty object body arguments pass through",
+            AuthKind::ChatgptOauth,
+            vec![
+                function_call_added(0, "call_a", READER),
+                completed_with(vec![body_call("call_a", "{}")]),
+            ],
+            vec![call("{}")],
+        ),
+        (
+            "body arguments that are not an object pass through",
+            AuthKind::ChatgptOauth,
+            vec![
+                function_call_added(0, "call_a", READER),
+                completed_with(vec![body_call("call_a", r#"["",1]"#)]),
+            ],
+            vec![call(r#"["",1]"#)],
+        ),
+        (
+            "body arguments that are not a string settle as an empty object",
+            AuthKind::ChatgptOauth,
+            vec![
+                function_call_added(0, "call_a", READER),
+                completed_with(vec![json!({"type": "function_call", "id": "fc_1",
+                    "call_id": "call_a", "name": READER, "arguments": {"file_path": "/w"}})]),
+            ],
+            vec![call("{}")],
+        ),
+        (
+            "a call settled by item.done is not re-sent from the body",
+            AuthKind::ChatgptOauth,
+            vec![
+                function_call_added(0, "call_a", READER),
+                function_call_item_done(0, "call_a", READER, EMPTY_PAGES),
+                completed_with(vec![body_call("call_a", EMPTY_PAGES)]),
+            ],
+            vec![call(WITHOUT_PAGES)],
+        ),
+        (
+            "calls settle in output order from their own body items",
+            AuthKind::ApiKey,
+            vec![
+                function_call_added(1, "call_b", READER),
+                function_call_added(0, "call_a", READER),
+                completed_with(vec![
+                    body_call("call_a", r#"{"file_path":"/w/a"}"#),
+                    body_call("call_b", r#"{"file_path":"/w/b"}"#),
+                ]),
+            ],
+            vec![
+                (
+                    1,
+                    "call_a".into(),
+                    READER.into(),
+                    r#"{"file_path":"/w/a"}"#.into(),
+                ),
+                (
+                    0,
+                    "call_b".into(),
+                    READER.into(),
+                    r#"{"file_path":"/w/b"}"#.into(),
+                ),
+            ],
+        ),
+    ];
+    let tools = [reader_tool(reader_schema())];
+    for (row, auth_kind, events, expected) in rows {
+        // Arrange
+        let mut state = lane_state(auth_kind, &tools, None);
+
+        // Act
+        let chunks = drive(&mut state, events);
+
+        // Assert
+        assert_eq!(tool_deltas(&chunks), expected, "{row}");
+        let terminal = chunks.last().expect("terminal chunk");
+        assert!(
+            terminal.choices[0].delta.tool_calls.is_none(),
+            "{row}: the tool call precedes the terminal chunk",
+        );
+    }
+}
+
+#[test]
+fn a_body_item_that_is_not_the_held_call_settles_nothing() {
+    // (row, body item at the call's output_index)
+    let rows = [
+        (
+            "a message item",
+            json!({"type": "message", "id": "msg_1", "role": "assistant", "content": []}),
+        ),
+        ("a different call", body_call("call_other", EMPTY_PAGES)),
+    ];
+    let tools = [reader_tool(reader_schema())];
+    for (row, item) in rows {
+        // Arrange
+        let mut state = lane_state(AuthKind::ChatgptOauth, &tools, None);
+        let events = vec![
+            function_call_added(0, "call_a", READER),
+            terminal_with("response.completed", "completed", vec![item]),
+        ];
+
+        // Act
+        let chunks = drive(&mut state, events);
+
+        // Assert
+        assert!(tool_deltas(&chunks).is_empty(), "{row}");
+    }
 }
 
 #[test]

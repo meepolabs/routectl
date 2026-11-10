@@ -25,6 +25,10 @@ struct ArgShape {
 }
 
 impl ArgShape {
+    fn has_optional(&self) -> bool {
+        !self.properties.is_subset(&self.required)
+    }
+
     fn is_empty_optional(&self, key: &str, value: &Value) -> bool {
         value.as_str() == Some("") && self.properties.contains(key) && !self.required.contains(key)
     }
@@ -56,17 +60,18 @@ impl EmptyOptionalFilter {
         }
     }
 
-    /// Whether a call to `name` can have arguments removed at all.
+    /// Whether a call to `name` can have arguments removed at all: its
+    /// schema declares at least one property it does not require.
     pub fn filters(&self, name: &str) -> bool {
-        self.shapes.contains_key(name)
+        self.shapes.get(name).is_some_and(ArgShape::has_optional)
     }
 
     /// `arguments` of a call to `name` without its empty optional top-level
     /// arguments. Borrowed unchanged when there is nothing to remove, when
-    /// the tool is unknown or schemaless, or when the arguments are not a
-    /// JSON object.
+    /// the tool is unknown, schemaless or requires every property, or when
+    /// the arguments are not a JSON object.
     pub fn apply<'s>(&mut self, name: &str, arguments: &'s str) -> Cow<'s, str> {
-        let Some(shape) = self.shapes.get(name) else {
+        let Some(shape) = self.shapes.get(name).filter(|shape| shape.has_optional()) else {
             return Cow::Borrowed(arguments);
         };
         let Ok(Value::Object(mut args)) = serde_json::from_str::<Value>(arguments) else {
