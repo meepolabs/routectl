@@ -33,7 +33,7 @@ once; jump to the doc that matches your task.
   rejected at parse and resolve)
 - `routectl-cli` -- axum HTTP server, clap subcommands
   (serve / init / provider / doctor / login / logout /
-  refresh / whoami / test / config / catalog / prices / usage / rc),
+  refresh / whoami / test / config / prices / usage / rc),
   the read-only status dashboard, live matrix integration tests
 - `routectl-usage` -- SQLite per-request usage accounting:
   `UsageRecord`, `UsageHandle`, cost estimation, retention pruning,

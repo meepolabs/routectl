@@ -215,10 +215,8 @@ version = 5           # config schema version; see "Config schema version"
                       # Optional; no defaults shipped.
 
 # Prompt-cache economics (wm/rm/ttl/...) live outside config.toml as of
-# schema v2: a baked table plus catalog_overlay.json, managed via
-# `routectl catalog`. A [cache_pricing] table is a hard startup error;
-# set the values with `routectl catalog set` instead. See
-# "Retired: [cache_pricing]" below.
+# schema v2. A [cache_pricing] table is a hard startup error; set prices
+# under [models.X.pricing] instead. See "Retired: [cache_pricing]" below.
 
 [mitm]                # MITM front-proxy: local TLS-terminating
                       # listener fronting a first-party upstream.
@@ -3368,152 +3366,18 @@ Config schema v1's `[cache_pricing]` TOML table (and its
 `pricing_verifications.json` sidecar) is retired. A version 5 file with a
 non-empty `[cache_pricing]` table is a hard startup error naming the
 table, not silently-ignored data; remove the table by hand. To keep a
-value it carried, write it into the overlay with
-[`routectl catalog set`](#routectl-catalog-set--routectl-catalog-disable).
+price it carried, set it under
+[`[models.X.pricing]`](#model-prices-modelsxpricing).
 Nothing reads `pricing_verifications.json` any more.
 
-### `routectl catalog list`
+### The `routectl catalog` command is removed
 
-Prints the EFFECTIVE catalog (the baked table merged with the overlay)
-as an aligned ASCII table, headed by a summary line (overlay revision,
-cell counts by source, disabled count). Columns: `provider_kind`,
-`model_glob`, `status`, `tier`, `wm`, `rm`, `ttl(s)`, `min_prefix`,
-`auto`, `max_ctx`, `source`, `verified_at`, `stale`. Every row renders
-`PRESENT` (with its provenance and a staleness marker) or `DISABLED`
-(overlay `null`); a trailing punch-list names any selector with an
-unknown `max_context_tokens` (its context-fraction advisory falls back
-to absolute tokens for those).
-
-### `routectl catalog verify <selector>`
-
-Stamps an EXISTING overlay cell's `verified_at` to today (UTC) and flips
-its `source` to `user` -- verifying is a user act, even for a cell an
-import last wrote. Every other field on the cell carries through
-unchanged. `selector` is `"provider_kind:model_glob"` (e.g.
-`openai-compat:grok-*`). A selector with no overlay cell yet (baked-only,
-or unknown to the catalog), or one that is explicitly disabled, has
-nothing to stamp and is rejected -- creating a new overlay cell is a
-`set` concern.
-
-### `routectl catalog import`
-
-Opt-in bulk refresh of the overlay from the two vendored economics
-sources (litellm + models.dev): fetches both over the network (or reads
-both from disk via the file flags below), derives one candidate, prints
-an impact-labeled diff, and -- on confirmation -- applies it.
-
-```sh
-routectl catalog import
-routectl catalog import --litellm-file ./litellm.json \
-  --models-dev-file ./models_dev.json --yes
-```
-
-- `--litellm-file <PATH>` / `--models-dev-file <PATH>` -- read a source
-  from disk instead of the network. Must be given together (both, or
-  neither).
-- `--yes` -- skip the y/N confirmation prompt (scripting).
-- `--allow-shrink` -- bypass ONLY the shrink guard's per-source /
-  per-family floors (a candidate whose row counts dropped too far
-  relative to the last successful import). Never bypasses a fetch
-  failure, a cross-check disagreement, a `source: user` conflict, or a
-  revision conflict.
-
-The printed diff sorts every candidate selector into exactly one bucket:
-`applied` (a fresh selector, or one whose existing overlay cell is
-itself `source: import`), `skipped` (a per-selector cross-check
-disagreement between the two sources, or a selector unknown to the
-baked table), or `conflicted` (an existing `source: user` cell, or an
-explicit disable). USER-WINS: a conflicted row's existing value is
-always preserved untouched, regardless of what the candidate proposed.
-Each `applied` / `conflicted` row is labeled `display-only`,
-`cost-affecting`, or `routing-affecting`, and flags whether the change
-trends toward a lower cache-break break-even reuse count.
-
-The apply is TRANSACTIONAL: a fetch failure on either source aborts
-before a candidate is even built, leaving the overlay byte-identical.
-Once a candidate is built and confirmed, only the `applied` rows are
-written, through the same revision-checked, advisory-locked writer every
-overlay mutation goes through -- a write from a concurrent `catalog`
-invocation is detected and recomputes one bounded fresh diff rather than
-silently overwriting or losing an update.
-
-### `routectl catalog set` / `routectl catalog disable`
-
-`set <selector> <field>=<value>...` writes a `source: user` cell for a
-KNOWN selector (an existing baked row, or an existing overlay cell of
-either provenance), field by field; a field left unnamed inherits the
-prior cell's value. `disable <selector>` writes a JSON-null cell for a
-KNOWN selector, discarding whatever it previously carried. Both REJECT a
-selector unknown to the catalog (no baked row, no existing overlay
-cell); creating one is `set --create`'s job (below), and `disable` has
-nothing to disable on a selector no layer covers.
-
-**`set --create`** writes a brand-new cell for a selector the catalog
-does NOT cover yet -- an upstream whose facts (a context window, a rate,
-a capability prior) routectl has no row for. The flag INVERTS the
-admission rule rather than relaxing it: with it, an already-known
-selector is refused (use plain `set` to edit that one), so a typo can
-never fork an existing cell into a competing second one. The created
-selector must name a `provider_kind` a `[providers.*]` block can declare
-(`openai-compat`, `anthropic-api`, `bedrock`, `openai-responses`,
-`gemini`) and ONE model -- an exact
-model id, or a single trailing-asterisk prefix. `*:<model>` and
-`<kind>:*` are both refused: a catch-all applies the value to every
-sibling model on the provider kind, which is precisely what a per-model
-create path exists to avoid. A kind carrying NO baked rows at all is
-still creatable -- an overlay cell is served on the selector's own kind
-string, so it does not need the baked table to have heard of the kind.
-Everything past admission is the same code
-plain `set` runs -- the same field vocabulary, the same value
-validation, the same `source: user` / `verified_at` stamping.
-
-Supported `set` fields: `wm` (f32), `rm` (f32), `ttl_seconds` (u32),
-`min_prefix_tokens` (u32), `max_context_tokens` (u32),
-`max_output_tokens` (u32), and a capability
-flag via `cap:<name>=true|false`. `auto_cacher` / `has_storage_rent` /
-`storage_rent` are hard-rejected -- they live only on the baked table;
-`source` and `verified_at` are hard-rejected too, since `set` and
-`verify` alike always stamp them automatically (a user cell, dated today
-UTC).
-
-A `wm` set below the conservative sentinel (`2.0`) is rejected unless
-the call also carries `--acknowledge-cost-risk`: a too-cheap write
-multiplier can make a cache break look falsely profitable. `rm` must be
-`> 0`; neither `max_context_tokens` nor `max_output_tokens` may be `0`
-(an unconfirmed figure is expressed by omitting the field).
-
-A cell's `max_context_tokens` and `max_output_tokens` no longer reach the
-window gate, `/v1/models` or the `max_tokens` fill; set
-[`context_window` and `max_output_tokens`](#context-window-and-output-ceiling)
-on the model instead.
-
-```sh
-routectl catalog set openai-compat:my-cheap-host-* wm=1.0 --acknowledge-cost-risk
-routectl catalog set --create openai-compat:my-model rm=0.1
-routectl catalog disable openai-compat:retired-model-*
-```
-
-### `routectl catalog export`
-
-Serialize the on-disk overlay (`catalog_overlay.json`) to pretty JSON,
-printed to stdout or written to a file with `--out <path>`. It is
-read-only: the overlay file is left byte-identical.
-
-```sh
-routectl catalog export
-routectl catalog export --out ./catalog_overlay.backup.json
-```
-
-The export is CATALOG CELLS ONLY. It does NOT back up credentials --
-provider keys, OAuth tokens, and every other secret live in separate
-files (`config.toml`, the OAuth credentials store) that this command
-never reads, so a leaked export can never disclose one.
-
-There is no separate overlay-import format to pair with it: to restore an
-export, place the JSON back at the overlay path (`catalog_overlay.json`
-next to `config.toml`), where the next load picks it up. `catalog import`
-consumes the VENDOR economics snapshots (litellm + models.dev), not an
-overlay dump.
+Every `routectl catalog` subcommand (`list`, `verify`, `import`, `set`,
+`disable`, `export`) is gone. Running any of them prints a pointer and
+exits 2. Refresh prices with
+[`routectl prices refresh`](#refreshing-the-price-table-routectl-prices-refresh),
+and set a model's prices in `config.toml` under
+[`[models.X.pricing]`](#model-prices-modelsxpricing).
 
 ## Inspecting the effective config (`config show --effective`)
 
@@ -4060,8 +3924,8 @@ essential = []
 - **`staleness_hint_days`** (u64, default 14) -- the age past which a
   verified capability reads as stale in diagnostics. This is
   **display-only**: it drives the stale-cell flag in the `routectl
-  doctor` capability matrix and the CLI staleness hint, and is never
-  wired into router construction or the act path.
+  doctor` capability matrix, and is never wired into router construction
+  or the act path.
 
 ### Global essential capabilities (`essential`)
 
@@ -5142,9 +5006,8 @@ stored but whose provider the factory could not construct is visible only
 to a surface that has a built router (`serve`, or `/status/health` on a
 running daemon).
 
-Neither command reads a secret it does not need: like
-[`catalog export`](#routectl-catalog-export), a probe or doctor run reads
-only what it classifies and never discloses a credential value.
+Neither command reads a secret it does not need: a probe or doctor run
+reads only what it classifies and never discloses a credential value.
 
 ## Validating config
 

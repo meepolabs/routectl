@@ -15,7 +15,7 @@ use routectl_router::{
 };
 use routectl_usage::{OpenError, WouldTrimSummary, open_readonly_fastfail, would_trim_summary};
 
-use super::catalog::render_table;
+use super::text_table::render_table;
 use super::usage::{WindowFlag, human_count, window_bounds};
 use crate::server::ledger_reader::open_error_class;
 

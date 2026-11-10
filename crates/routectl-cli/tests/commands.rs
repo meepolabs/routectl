@@ -782,6 +782,63 @@ fn run_routectl(args: &[&str]) -> (i32, String) {
     (code, stderr)
 }
 
+/// Each row is an old `routectl catalog` invocation. All of them exit 2
+/// with the pointer to the replacement surfaces, never clap's generic
+/// unknown-command error.
+#[test]
+fn removed_catalog_command_exits_2_with_the_replacement_pointer() {
+    let rows: &[(&str, &[&str])] = &[
+        ("bare", &["catalog"]),
+        ("import --yes", &["catalog", "import", "--yes"]),
+        ("set with fields", &["catalog", "set", "x", "y"]),
+        ("help flag", &["catalog", "--help"]),
+    ];
+    for (name, args) in rows {
+        let (code, stderr) = run_routectl(args);
+        assert_eq!(code, 2, "{name}: exit code; stderr: {stderr}");
+        assert!(
+            stderr.contains("`routectl prices refresh`") && stderr.contains("`[models.X.pricing]`"),
+            "{name}: pointer missing; stderr: {stderr}"
+        );
+        assert!(
+            !stderr.contains("unrecognized subcommand"),
+            "{name}: clap's generic error leaked; stderr: {stderr}"
+        );
+    }
+}
+
+/// The removed command stays out of the top-level help, while the
+/// replacement it points to is listed there.
+#[test]
+fn top_level_help_omits_catalog_and_lists_prices() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = sandboxed(
+        &mut std::process::Command::new(env!("CARGO_BIN_EXE_routectl")),
+        tmp.path(),
+    )
+    .arg("--help")
+    .output()
+    .expect("spawn routectl binary");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let commands: Vec<&str> = stdout
+        .lines()
+        .skip_while(|l| !l.starts_with("Commands:"))
+        .skip(1)
+        .take_while(|l| !l.trim().is_empty())
+        .filter_map(|l| l.split_whitespace().next())
+        .collect();
+
+    assert!(out.status.success(), "--help exit: {:?}", out.status);
+    assert!(
+        commands.contains(&"prices"),
+        "help lists no prices command: {stdout}"
+    );
+    assert!(
+        !commands.contains(&"catalog"),
+        "help lists the removed catalog command: {stdout}"
+    );
+}
+
 #[test]
 fn clap_rejects_unknown_login_provider_listing_valid_set() {
     // A made-up provider must be rejected by clap (exit 2) with an error

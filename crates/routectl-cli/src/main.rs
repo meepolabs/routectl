@@ -12,7 +12,7 @@
 //!            credentials store.
 //!   test     One-shot completion against an alias or model nickname.
 //!   config   Validate or print the resolved config.
-//!   catalog  Inspect, verify, import, or edit the cache-economics catalog.
+//!   prices   Refresh the usage-cost price table.
 //!   rc       Print MITM-proxy env vars, or force a CA rotation.
 
 use std::path::PathBuf;
@@ -278,10 +278,13 @@ enum Cmd {
         )]
         opening_accuracy: bool,
     },
-    /// Inspect, verify, import, or edit the cache-economics catalog.
+    // Takes any arguments so every old spelling, `--help` included, gets
+    // the pointer and exit 2 rather than clap's unknown-command error.
+    /// Removed: use `routectl prices refresh` and `[models.X.pricing]`.
+    #[command(hide = true, disable_help_flag = true)]
     Catalog {
-        #[command(subcommand)]
-        action: CatalogCmd,
+        #[arg(num_args = 0.., trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
     /// Usage-cost price tables.
     Prices {
@@ -461,113 +464,6 @@ enum ProviderCmd {
 }
 
 #[derive(Debug, Subcommand)]
-enum CatalogCmd {
-    /// List the effective catalog (baked table merged with the on-disk
-    /// overlay): every selector renders PRESENT (with provenance and a
-    /// staleness marker) or DISABLED (overlay `null`). A catalog-only
-    /// listing never enumerates a selector missing from BOTH layers, so
-    /// MISSING never appears here -- it is a real merge outcome the two-
-    /// layer merge still distinguishes at request-lookup time. Headed by
-    /// an overlay summary line (revision + counts by source + disabled
-    /// count).
-    List,
-    /// Stamp an EXISTING overlay cell's `verified_at` to today (its
-    /// `source` becomes `user`). Errors if the selector has no overlay
-    /// cell yet (baked-only, or unknown) -- creating one is a `set`
-    /// concern. `selector` is `"provider_kind:model_glob"` (e.g.
-    /// `openai-compat:grok-*`).
-    Verify { selector: String },
-    /// Opt-in refresh of the catalog overlay from the litellm + models.dev
-    /// sources: fetches both (or reads both from disk via the `--*-file`
-    /// flags), builds one candidate, shows an impact-labeled diff, and --
-    /// on confirmation -- applies it ALL-OR-NOTHING. Never runs at
-    /// startup; a fetch failure on either source aborts the whole apply
-    /// with the overlay left byte-identical.
-    Import {
-        /// Read the litellm source from this file instead of the network.
-        /// Must be given together with `--models-dev-file`.
-        #[arg(long)]
-        litellm_file: Option<PathBuf>,
-        /// Read the models.dev source from this file instead of the
-        /// network. Must be given together with `--litellm-file`.
-        #[arg(long)]
-        models_dev_file: Option<PathBuf>,
-        /// Skip the y/N confirmation prompt (scripting).
-        #[arg(long)]
-        yes: bool,
-        /// Bypass ONLY the shrink guard's per-source/per-family floors.
-        /// Never bypasses a fetch failure, a cross-check skip, a
-        /// `source: user` conflict, or a revision conflict.
-        #[arg(long)]
-        allow_shrink: bool,
-    },
-    /// Write a `source: user` cell for a KNOWN selector (an existing
-    /// baked row, or an existing overlay cell of either provenance),
-    /// field by field. `selector` is `"provider_kind:model_glob"`.
-    /// Rejects a selector unknown to the catalog -- creating one is
-    /// `--create`'s job (see below).
-    ///
-    /// Each `field` is a `field=value` pair; supported fields are `wm`
-    /// (f32), `rm` (f32), `ttl_seconds` (u32), `min_prefix_tokens` (u32),
-    /// `max_context_tokens` (u32), `max_output_tokens` (u32),
-    /// `input_cost_per_token` (f32),
-    /// `output_cost_per_token` (f32), and a capability flag via
-    /// `cap:<name>=true|false` (e.g. `cap:web_search=true`).
-    /// `max_context_tokens` / `max_output_tokens` no longer feed routing or
-    /// the fill; set `[models.X] context_window` / `max_output_tokens`.
-    /// `auto_cacher` / `has_storage_rent` / `storage_rent` / `source` /
-    /// `verified_at` are hard-rejected: the first three live only on the
-    /// baked catalog table, and `source` / `verified_at` are always
-    /// stamped automatically (a user cell, dated today UTC).
-    ///
-    /// A `wm` below the conservative sentinel (2.0) needs
-    /// `--acknowledge-cost-risk`; `rm` must be `> 0`; `max_context_tokens`
-    /// and `max_output_tokens` must not be `0`; the per-token rates are
-    /// dollars per token and must not be negative.
-    ///
-    /// `--create` inverts the admission rule to write a NARROW cell for a
-    /// selector the catalog does not cover yet (the alternative -- a
-    /// provider catch-all -- would apply the value to every sibling model
-    /// on that provider kind).
-    Set {
-        selector: String,
-        #[arg(required = true, num_args = 1..)]
-        fields: Vec<String>,
-        /// Required to set a `wm` below the conservative sentinel (2.0):
-        /// a too-cheap write multiplier can make a cache break look
-        /// falsely profitable.
-        #[arg(long = "acknowledge-cost-risk")]
-        acknowledge_cost_risk: bool,
-        /// Create a brand-new overlay cell for a selector the catalog does
-        /// NOT cover (no baked row, no overlay cell). The selector must
-        /// name a cataloged `provider_kind` and one model -- an exact model
-        /// or a single trailing-asterisk prefix; the `*` catch-alls are
-        /// refused, since they would apply the value to every sibling
-        /// model. A selector that IS already known is refused too (use
-        /// `set` without the flag to edit it), so a typo can never fork an
-        /// existing cell.
-        #[arg(long)]
-        create: bool,
-    },
-    /// Write a JSON-null overlay cell for a KNOWN selector, disabling it
-    /// regardless of what it previously carried. Rejects a selector
-    /// unknown to the catalog. Re-enabling is a fresh `set`.
-    Disable { selector: String },
-    /// Serialize the on-disk overlay (`catalog_overlay.json`) to pretty
-    /// JSON, printed to stdout or written to `--out <path>`. The export is
-    /// catalog cells ONLY -- it does NOT back up credentials (provider
-    /// keys, OAuth tokens, and every other secret live in separate files
-    /// this command never reads). To restore, place the exported JSON back
-    /// at the overlay path; there is no separate overlay-import format
-    /// (`import` consumes vendor economics snapshots, not this dump).
-    Export {
-        /// Write the export to this file instead of stdout.
-        #[arg(long)]
-        out: Option<PathBuf>,
-    },
-}
-
-#[derive(Debug, Subcommand)]
 enum PricesCmd {
     /// Download the models.dev price list (or read one from a file),
     /// convert and validate it, and atomically replace `prices.json` in the
@@ -616,6 +512,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     routectl_cli::log_sink::init();
 
     let cli = Cli::parse();
+    if matches!(cli.cmd, Cmd::Catalog { .. }) {
+        exit_catalog_removed();
+    }
     if cli.config.is_none() {
         routectl_cli::config_folder::refuse_stranded_config(
             &resolve_config_path(None),
@@ -706,9 +605,6 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         },
         Cmd::Doctor { json } => {
             let path = resolve_config_path(cli.config.as_deref());
-            if let Ok(loaded) = load_config_with_overlay(cli.config.as_deref()) {
-                emit_staleness_hint_for(&loaded, json);
-            }
             let legacy_dirs = routectl_cli::config_folder::legacy_config_dirs_from_env();
             std::process::exit(commands::doctor::run(&path, &legacy_dirs, json).await);
         }
@@ -738,7 +634,6 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             ConfigCmd::Show { effective } => {
                 let loaded = load_config_with_overlay(cli.config.as_deref())?;
-                emit_staleness_hint_for(&loaded, false);
                 let result = if effective {
                     let prices = commands::pricing::default_price_book();
                     commands::config_effective::show_effective(
@@ -939,64 +834,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
-        Cmd::Catalog { action } => match action {
-            CatalogCmd::List => {
-                let loaded = load_config_with_overlay(cli.config.as_deref())?;
-                emit_staleness_hint_for(&loaded, false);
-                if let Err(e) = commands::catalog::list(&loaded.catalog_overlay) {
-                    eprintln!("error: {e}");
-                    std::process::exit(1);
-                }
-            }
-            CatalogCmd::Verify { selector } => {
-                if let Err(e) = commands::catalog::verify(&selector) {
-                    eprintln!("error: {e}");
-                    std::process::exit(1);
-                }
-            }
-            CatalogCmd::Import {
-                litellm_file,
-                models_dev_file,
-                yes,
-                allow_shrink,
-            } => {
-                let args = commands::catalog_import::ImportArgs {
-                    litellm_file,
-                    models_dev_file,
-                    yes,
-                    allow_shrink,
-                };
-                if let Err(e) = commands::catalog_import::run(&args).await {
-                    eprintln!("error: {e}");
-                    std::process::exit(1);
-                }
-            }
-            CatalogCmd::Set {
-                selector,
-                fields,
-                acknowledge_cost_risk,
-                create,
-            } => {
-                if let Err(e) =
-                    commands::catalog::set(&selector, &fields, acknowledge_cost_risk, create)
-                {
-                    eprintln!("error: {e}");
-                    std::process::exit(1);
-                }
-            }
-            CatalogCmd::Disable { selector } => {
-                if let Err(e) = commands::catalog::disable(&selector) {
-                    eprintln!("error: {e}");
-                    std::process::exit(1);
-                }
-            }
-            CatalogCmd::Export { out } => {
-                if let Err(e) = commands::catalog::export(out.as_deref()) {
-                    eprintln!("error: {e}");
-                    std::process::exit(1);
-                }
-            }
-        },
+        Cmd::Catalog { .. } => exit_catalog_removed(),
         Cmd::Prices {
             action: PricesCmd::Refresh { from },
         } => match commands::prices::run(from.as_deref()).await {
@@ -1039,9 +877,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 /// cold start and reload treat a config the same way.
 ///
 /// Discards the loaded catalog overlay for callers that never consult it.
-/// `Cmd::Serve` and `Cmd::Catalog`'s `list` verb -- the
-/// callers that DO need the overlay (list renders the two-layer merge) --
-/// use [`load_config_with_overlay`] instead.
+/// Callers that DO need the overlay (`Cmd::Serve`, `config show`) use
+/// [`load_config_with_overlay`] instead.
 fn load_config(
     explicit: Option<&std::path::Path>,
 ) -> Result<routectl_router::Config, Box<dyn std::error::Error>> {
@@ -1071,35 +908,16 @@ fn load_config_unvalidated_with_overlay(
     Ok(server::load_effective_config_unvalidated(&path)?)
 }
 
-/// Emit the catalog-overlay staleness hint for a loaded config, reading the
-/// real emission gates (stderr terminal-ness, `CI`, the
-/// `ROUTECTL_NO_STALENESS_HINT` kill switch) and the freshest overlay stamp.
-/// The pure gate logic lives in [`commands::staleness_hint`]; this seam only
-/// binds it to the live environment. `is_json` is the calling verb's JSON
-/// posture -- the hint never rides a machine-readable stream.
-fn emit_staleness_hint_for(loaded: &server::LoadedConfig, is_json: bool) {
-    use std::io::IsTerminal as _;
+/// What `routectl catalog ...` prints before exiting 2.
+const CATALOG_REMOVED_MESSAGE: &str = "\
+error: `routectl catalog` has been removed.
+  Refresh the price table with `routectl prices refresh`.
+  Set a model's prices in config.toml under `[models.X.pricing]`.
+  See docs/CONFIGURATION.md, \"Model prices\".";
 
-    let Some(verified_at) = commands::staleness_hint::freshest_verified_at(&loaded.catalog_overlay)
-    else {
-        return;
-    };
-    let threshold_days =
-        i64::try_from(loaded.config.capability.staleness_hint_days).unwrap_or(i64::MAX);
-    let is_tty = std::io::stderr().is_terminal();
-    let is_ci = std::env::var_os("CI").is_some();
-    let kill_switch = std::env::var_os("ROUTECTL_NO_STALENESS_HINT").is_some();
-    let mut err = std::io::stderr().lock();
-    commands::staleness_hint::emit_staleness_hint(
-        &mut err,
-        &verified_at,
-        threshold_days,
-        routectl_router::today_epoch_day(),
-        is_tty,
-        is_ci,
-        kill_switch,
-        is_json,
-    );
+fn exit_catalog_removed() -> ! {
+    eprintln!("{CATALOG_REMOVED_MESSAGE}");
+    std::process::exit(2);
 }
 
 /// Cold-start config load that PARSES but SKIPS the fail-fast
@@ -1190,17 +1008,29 @@ mod tests {
         }
     }
 
-    /// Positive control for `removed_commands_are_rejected`: the surviving
-    /// spelling of a removed alias still parses to its family.
+    /// Every old `catalog` spelling, flags and `--help` included, parses
+    /// to the hidden pointer command instead of a clap error.
     #[test]
-    fn catalog_list_parses_to_the_catalog_family() {
-        let cli = Cli::parse_from(["routectl", "catalog", "list"]);
-        assert!(matches!(
-            cli.cmd,
-            Cmd::Catalog {
-                action: CatalogCmd::List
-            }
-        ));
+    fn every_old_catalog_spelling_parses_to_the_pointer_command() {
+        let rows: &[(&str, &[&str])] = &[
+            ("bare", &["routectl", "catalog"]),
+            ("list", &["routectl", "catalog", "list"]),
+            (
+                "import with flag",
+                &["routectl", "catalog", "import", "--yes"],
+            ),
+            ("set with fields", &["routectl", "catalog", "set", "x", "y"]),
+            ("help flag", &["routectl", "catalog", "--help"]),
+        ];
+        for (name, argv) in rows {
+            let cli = Cli::try_parse_from(*argv)
+                .unwrap_or_else(|e| panic!("{name}: {argv:?} must parse: {e}"));
+            assert!(
+                matches!(cli.cmd, Cmd::Catalog { .. }),
+                "{name}: {argv:?} parsed to {:?}",
+                cli.cmd
+            );
+        }
     }
 
     #[test]

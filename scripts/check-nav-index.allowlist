@@ -6,9 +6,6 @@ crates/routectl-auth/src/oauth/providers/refresh_classify.rs
 crates/routectl-auth/src/oauth/providers/xai.rs
 crates/routectl-auth/src/oauth/store/test_support.rs
 crates/routectl-cli/benches/hotpath.rs
-crates/routectl-cli/src/commands/catalog/mod.rs
-crates/routectl-cli/src/commands/catalog/render.rs
-crates/routectl-cli/src/commands/catalog/write.rs
 crates/routectl-cli/src/commands/init/orchestrate.rs
 crates/routectl-cli/src/commands/parse_error_redaction.rs
 crates/routectl-cli/src/commands/rc.rs

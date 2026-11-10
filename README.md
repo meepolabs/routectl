@@ -197,7 +197,7 @@ outright:
 | `oauth://<provider>` | routectl-managed OAuth credential, populated by `routectl login <provider>` |
 
 The full config surface -- retry policy, capability overrides, cache
-knobs, the model catalog, hot-reload, managed OAuth -- lives in
+knobs, per-model prices, hot-reload, managed OAuth -- lives in
 [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md), with a committed
 JSON Schema (`routectl.schema.json`) for editor completion.
 

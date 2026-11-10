@@ -64,7 +64,7 @@ for TOML configuration see [CONFIGURATION.md](CONFIGURATION.md).
 
 - `crates/routectl-cli/` -- axum HTTP server, clap CLI (`serve`,
   `init`, `provider`, `doctor`, `probe`, `login`, `logout`,
-  `refresh`, `whoami`, `test`, `config`, `catalog`, `usage`, `rc`),
+  `refresh`, `whoami`, `test`, `config`, `prices`, `usage`, `rc`),
   the three ingress dialects (`openai.rs` for
   `POST /v1/chat/completions`, `anthropic/` for `POST /v1/messages`
   + `POST /v1/messages/count_tokens`, `openai_responses/` for

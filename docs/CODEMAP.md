@@ -8551,17 +8551,6 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   Signatures take seat KEYS only, never
   a `TokenRecord`, so token material cannot reach the render; labels, pool
   names and entry names go through `routectl_core::sanitize_for_log`
-- `src/commands/staleness_hint.rs` -- catalog-overlay staleness nudge for the
-  human CLI verbs. Pure `staleness_hint_line(verified_at, threshold_days,
-  today_epoch_days)` (delegates the strict-greater-than age check to
-  `routectl_router::is_stale_days`) + `freshest_verified_at(&CatalogOverlay)`
-  (lexicographic max stamp over present cells) + the `emit_staleness_hint`
-  seam that takes every gate (is_tty / is_ci / kill_switch / is_json) as an
-  injected boolean and writes ONLY to the passed stderr handle. `main.rs`'s
-  `emit_staleness_hint_for` binds the seam to the live environment (stderr
-  terminal-ness, `CI`, the `ROUTECTL_NO_STALENESS_HINT` kill switch,
-  `[capability] staleness_hint_days`) at `doctor`, `catalog list`, and `config
-  show` (non-JSON verbs only; never `serve`, `--json`, or an empty overlay)
 - `src/commands/pricing.rs` -- the CLI's shared cost-pricing seams.
   `PriceSnapshot` (`pin(&PriceBook)` = the book's current refreshed table plus
   `shipped_table()`; `from_tables` for tests) is the price-table pair one cost
@@ -8701,59 +8690,6 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   defects, unverified counts, cohort and rate, error buckets by source,
   cold-start buckets, lanes, then exactly one `verdict:` line and
   `PROVENANCE_NOTICE`; the title is sanitized to one line
-- `src/commands/catalog/` -- `routectl catalog`, split into a
-  command-entry facade plus two concern modules; every original
-  `commands::catalog::{list,verify,set,disable,export,build_list_data,render_table,print_pickup_note,verify_at,set_at,CatalogWriteError}`
-  path is preserved via re-exports.
-  - `mod.rs` -- command entry + module doc (subcommand overview) and the
-    re-export facade; owns
-    `today_verified_at` (the one shared UTC `verified_at` stamp every writer
-    reads).
-  - `render.rs` -- `list` rendering: `overlay_summary_line` header (revision +
-    counts by source + disabled count) then the EFFECTIVE catalog (the
-    two-layer merge of the baked table with `catalog_overlay.json`,
-    `routectl_router::merge`) via `build_list_data` as an aligned ASCII table
-    (columns: provider_kind, model_glob, status, tier, wm, rm, ttl(s),
-    min_prefix, auto, max_ctx, source, verified_at, stale); every row renders
-    PRESENT (with derived provenance + a staleness marker) or DISABLED
-    (overlay `null`). `render_table` is `pub(crate)` so
-    `commands::catalog_import` reuses the same aligner for its diff table.
-  - `write.rs` -- overlay write verbs. `verify <selector>` stamps an EXISTING
-    overlay cell's `verified_at` to today and flips its `source` to `user`
-    (verifying is a user act) via the revision-checked writer; a selector with
-    no overlay cell (baked-only or unknown) errors -- creating a cell is a
-    `set` concern. `set <selector> <field>=<value>...` writes a `source: user`
-    cell for a selector KNOWN to the catalog (exact baked-table key, or
-    existing overlay cell of either provenance) -- an unknown selector is a
-    hard `CatalogWriteError::UnknownSelector`, the synthetic-row poisoning
-    guard; fields are
-    `wm`/`rm`/`ttl_seconds`/`min_prefix_tokens`/`max_context_tokens`/`max_output_tokens`/`input_cost_per_token`/`output_cost_per_token`
-    plus
-    `cap:<name>=true|false` flags;
-    `UNSUPPORTED_FIELDS` names every deliberately-excluded field with its own
-    operator-facing reason
-    (`auto_cacher`/`has_storage_rent`/`storage_rent`/`source`/`verified_at`/`capabilities`),
-    welded to `OverlayCell`'s serialized field set by
-    `every_overlay_cell_field_is_settable_or_deliberately_excluded` so the next
-    overlay field is a one-touch change;
-    value validation reuses `CachePricingOverride::validate` against ONLY the
-    fields this call touches (`validate_updates`). `set --create` INVERTS that
-    admission rule for the explicit create path: an already-known selector is
-    a hard `SelectorAlreadyKnown` (a typo can never fork an existing cell) and
-    a brand-new one is admitted if `validate_creatable_selector` clears its
-    shape -- a `provider_kind` in `CONFIG_PROVIDER_KINDS` (never `*`; the
-    CONFIG vocabulary, not baked-table membership, so a kind with zero baked
-    rows like `gemini` is creatable) plus one model the
-    overlay lookup can serve (exact or single trailing-asterisk prefix, never
-    the `*` provider catch-all, whose value would hit every sibling model);
-    field parsing, value validation, and provenance stamping are the same code
-    either way. `disable <selector>` writes
-    JSON `null` for a known selector, discarding prior fields. `export`
-    serializes the on-disk overlay to pretty JSON (read-only, no credential
-    material). Both `set`/`disable` stamp today (UTC) and print the same
-    serve-pickup note `catalog import` does. `verify_at`/`set_at` are
-    re-exported `pub(crate)` (test-only) so `commands::catalog_import` reuses
-    the writer cores in its own tests.
 - `src/commands/prices.rs` -- `routectl prices refresh [--from <url|file>]`:
   the only network path for prices. Its own reqwest client (no default
   headers, no cookie store, redirects off with a 3xx rendering only the
@@ -8763,39 +8699,6 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   then writes `<config_dir>/prices.json` by same-directory temp, fsync,
   rename, dir fsync. Logs the URL without userinfo, query or fragment; output
   is counts and the table date. Tests in `prices_tests.rs`
-- `src/commands/catalog_import.rs` -- `routectl catalog import`: the opt-in,
-  never-at-startup overlay refresh from the litellm + models.dev sources. This
-  is the CLI fetch boundary (`reqwest`, ~10s timeout, one retry, no-redirect
-  client whose 3xx maps to a named source failure;
-  `--litellm-file`/`--models-dev-file` read both sources from disk instead,
-  both-or-neither) -- `routectl-router` itself stays reqwest-free. Flow: fetch
-  both sources -> `build_import_candidate` (one run-wide UTC `verified_at`) ->
-  `shrink_guard` vs the persisted `catalog_import_state.json` baseline
-  (`--allow-shrink` bypasses ONLY the shrink floors; the shrink-refusal report
-  `shrink_verdict_report` also prints the count of selectors skipped for an
-  EXPECTED cross-check disagreement, which count as present toward the totals)
-  -> `diff_overlay` against the overlay loaded before any lock is taken ->
-  render the impact-labeled diff (reuses `catalog::render_table`; sections
-  applied/skipped/conflicted/cleared, a `cheaper?` flag, and an "identical (user cell
-  preserved)" note for a display-only conflict against an already-matching
-  user cell) -> y/N confirm (`--yes` skips it) ->
-  `confirm_and_apply`/`apply_diff` acquire `with_overlay_write_lock` ONLY at
-  this point, merge `diff.applied` rows and REMOVE `diff.cleared`'s stale
-  import cells (never conflicted/skipped; each clear re-checks
-  `is_import_cell` under the lock so a removal can never take out a
-  `source: user` cell), and
-  on a revision conflict release, recompute ONE fresh diff + confirm against
-  the latest overlay (a second conflict aborts, no retry loop); a diff with
-  nothing to write (empty `cleared` and no `applied` row that differs from
-  disk) skips the lock entirely rather than pay for a no-op revision
-  bump. Any source-level fetch failure (non-200 / invalid JSON / non-object
-  top-level shape) aborts before the overlay is ever opened, so it stays
-  byte-identical. `catalog_import_state.json`'s baseline is persisted only
-  after `confirm_and_apply` returns `Ok`. Structured `tracing` events per
-  phase (start/fetch/cross-check/shrink/diff/commit); prints that a running
-  `serve` picks up the change via the overlay watch. Tests include an
-  import-vs-`catalog::set_at` writer-serialization case alongside the
-  import-vs-`verify_at` one.
 - `src/commands/probe/mod.rs` -- `routectl provider probe [<name>]`: the
   read-only, free-only reachability report. `probe_all(config, store,
   deadline)` is THE shared orchestration (reused by the doctor aggregator) --
@@ -9065,6 +8968,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   battery via `render_section`/`section_title`/`status_label`, then the
   capability matrix panel block and the would-trim panel block, then a
   `summary: PASS n WARN n FAIL n` line via `render_summary`)
+- `src/commands/text_table.rs` -- `render_table`, the shared plain-text
+  aligner (column 0 left, the rest right, two-space gutter, trailing spaces
+  trimmed) used by `doctor_panels.rs`'s capability matrix grid
 - `src/commands/doctor_panels.rs` -- doctor's read-only would-trim opportunity
   panel, kept apart from the aggregator so the compute/map/render seam is
   unit-testable against a temp DB. `compute_would_trim_panel(config, now) ->
