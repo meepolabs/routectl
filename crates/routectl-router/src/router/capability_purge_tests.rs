@@ -677,16 +677,16 @@ fn purging_a_field_negative_resets_its_canary_state() {
     );
 }
 
-/// A finalized purge of a catalog-scoped key must leave canary state alone:
+/// A finalized purge of a non-field key must leave canary state alone:
 /// canary state exists only for field-namespace identities, and the reset
 /// must be scoped to those, never widen to a capability-key coincidence.
 #[test]
-fn purging_a_catalog_scoped_key_does_not_touch_canary_state() {
+fn purging_a_non_field_key_does_not_touch_canary_state() {
     use crate::field_verdict::FieldVerdictKey;
 
     // Arrange: canary state resident under a directly-constructed key that
     // shares the purged identity's `(state_key, provider_kind)` but carries
-    // the catalog-scoped capability name -- a shape only reachable directly
+    // the non-field capability name -- a shape only reachable directly
     // in a test, since the normal constructor rejects a non-field path, but
     // exactly the shape the scope guard in `finalize_learned_capability_purge`
     // must reject on the capability key alone.
@@ -706,15 +706,12 @@ fn purging_a_catalog_scoped_key_does_not_touch_canary_state() {
     let report = purge(&router, SONNET, WEB_SEARCH);
 
     // Assert
-    assert!(
-        report.removed,
-        "premise: the catalog-scoped negative must purge"
-    );
+    assert!(report.removed, "premise: the non-field negative must purge");
     let snap = router
         .field_verdicts
         .canaries()
         .snapshot(&canary_key)
-        .expect("a catalog-scoped purge must not reset canary state");
+        .expect("a non-field purge must not reset canary state");
     assert_eq!(snap.confirmations, 3);
 }
 

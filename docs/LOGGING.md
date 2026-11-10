@@ -830,7 +830,7 @@ consume the slots real traffic needs.
 | `rc_field_repair_budget_exhausted_lanes_omitted` | Lane rows the render ceiling dropped; non-zero says the map field is a SUBSET |
 | `rc_field_repair_budget_exhausted_by_lane` | The exhaustion map rows that fit, one `{ lane, exhausted }` per lane in lane-key order then `other`, each its share of `rc_field_repair_budget_exhausted_total`. Capped at the same 32-row code constant |
 | `rc_field_repairs_per_request` | Finished requests by repairs drawn: a six-entry array whose index `n` counts the requests that spent exactly `n` repairs, zero through the per-request allowance of five. Recorded once per request on complete, stream and token-count walks, whatever the outcome |
-| `rc_acting_field_verdicts_total` | Count of learned rows currently steering dispatch (field-scoped, not cleared, not catalog-scoped) |
+| `rc_acting_field_verdicts_total` | Count of learned rows currently steering dispatch (field-scoped, not cleared) |
 | `rc_acting_field_verdicts` | One entry per acting row: `state_key`, `feature_key`, `phase`, `source` |
 | `rc_field_verdict_rows_total` | Count of resident field verdicts the surface HAS, before the render ceiling. Rows are produced for every resident verdict, ACTING OR NOT: an operator debugging why pre-flight is not firing needs the row whose `blocked_reason` explains it |
 | `rc_field_verdict_rows_omitted` | Rows the render ceiling dropped. Zero in the ordinary case; non-zero says the rows field is a SUBSET, so a truncated line is self-describing rather than silently partial |
@@ -1728,7 +1728,7 @@ Summary (grep the `event` field to isolate a kind):
 | `route_away` | DEBUG / WARN | `routectl_router::router::feature_filter` | `capability negative de-prioritized this target to the tail` (DEBUG) / `capability negative routed this target away; request survives only via the de-prioritized tail` (WARN) |
 | `hard_exclusion` | WARN | `routectl_router::router::feature_filter` | `capability refused on every lane; request excluded before dispatch` |
 | `count_tokens` | DEBUG | `routectl_router::router::count_tokens` | `count_tokens seat terminal; resilience class policy applied` |
-| `invalidation` | WARN | `routectl_router::router` | `catalog/overlay changed across reload; catalog-scoped learned capabilities are evicted at the replay boundary` |
+| `invalidation` | WARN | `routectl_router::router` | `catalog/overlay changed across reload; catalog-scoped learned capabilities are evicted at the replay boundary` (no longer emitted) |
 | `strip` | WARN | `routectl_router::router::feature_filter` | `capability_strip_decision` |
 | `suppression` | WARN | `routectl_router::router::capability_learn` | `force_supported override contradicted: masked capability still rejected upstream` / `f2 feature-naming negative suppressed: same-chain f1 already observed for this capability` |
 | `dead_override_key` | WARN | `routectl_router::override_registry` | `capability override key normalizes to a form that is not normalization-stable; ...` |
@@ -2174,54 +2174,52 @@ DEBUG routectl_router::router::count_tokens event=count_tokens state_key=haiku
 
 ### Capability replay boundary (INFO / ERROR)
 
-Emitted when a hot reload changes the catalog version or overlay revision.
-Moving the replay boundary makes every earlier ledger row invisible to
-later boots, so the reload re-appends the catalog-independent verdicts
-past the new boundary in one atomic batch before publishing the
-replacement router.
+No hot reload moves the replay boundary any more: capability events and
+tombstones are stamped with a fixed catalog version (4) and overlay
+revision (0) whatever catalog or overlay is installed, so a reload,
+overlay-only or not, never changes them. The four reload lines below are
+no longer emitted; they are kept so a line in an older log can be looked
+up. They named the boundary a reload once committed: every earlier ledger
+row became invisible to later boots, so the reload re-appended the
+carried verdicts past the new boundary in one atomic batch before
+publishing the replacement router.
 
 | Level | Message | Meaning |
 |---|---|---|
-| INFO | `capability replay boundary committed; catalog-independent verdicts restated` | The tombstone and every restatement are durable. `restated_survivors` counts the carried verdicts, `generation` is the registry generation now active, and `pruned_catalog_scoped` counts the entries the transition evicted. |
-| ERROR | `capability replay boundary NOT admitted; keeping the previous router` | The batch was never queued (`reason`: unavailable writer or full channel). Nothing was written, no generation advanced, nothing pruned. |
-| ERROR | `capability replay boundary NOT committed; keeping the previous router` | The batch was admitted and the transaction failed. `reason` names it; `pending_survivors` counts what would have been restated. The generation does not advance and no entry is pruned -- the boundary was never recorded, so evicting anything would discard live state. |
-| WARN | `shutdown during a capability boundary write; publishing nothing` | Shutdown won the race against the admitted wait. The rows may or may not commit; nothing is published on the strength of them and the process does not resume serving. |
+| INFO | `capability replay boundary committed; catalog-independent verdicts restated` | No longer emitted. The tombstone and every restatement were durable. `restated_survivors` counted the carried verdicts, `generation` the registry generation then active, and `pruned_catalog_scoped` the entries the transition removed. |
+| ERROR | `capability replay boundary NOT admitted; keeping the previous router` | No longer emitted. The batch was never queued (`reason`: unavailable writer or full channel); the reload was rejected. |
+| ERROR | `capability replay boundary NOT committed; keeping the previous router` | No longer emitted. The batch was admitted and the transaction failed (`reason`; `pending_survivors` counted what would have been restated); the reload was rejected. |
+| WARN | `shutdown during a capability boundary write; publishing nothing` | No longer emitted. Shutdown won the race against the boundary write; nothing was published. |
 
-Every non-committed outcome rejects the reload and leaves the previous router
-live. There is deliberately no timed-out outcome: answering while the queued
-transaction can still commit would let the ledger's boundary move behind a
-router that never adopted it.
-
-Capability events are stamped with the registry generation that produced them
-(the pending generation while a boundary is admitted), so an observation made
-during a boundary sorts after it rather than being discarded. A `debug` line on
-target `routectl_usage::writer` --
+A `debug` line on target `routectl_usage::writer` --
 `dropped a capability event older than the committed replay boundary` --
-records a straggler event the writer refused because a boundary has since
-committed at a newer generation (`event_generation` / `boundary_generation`).
-Persisting it would restore, on the next boot, state the boundary evicted.
+records a capability event the writer refused because it carries a registry
+generation older than the newest committed boundary (`event_generation` /
+`boundary_generation`). Only a reload boundary advances that generation, so
+this line is no longer emitted either.
 
-At boot, the same acknowledged path writes the fail-closed boundary when the
-ledger's tombstone is missing or stamped a different revision:
+At boot, an acknowledged write commits the fail-closed boundary when the
+ledger's tombstone is missing or stamped a different revision. A ledger
+whose newest tombstone carries another revision (one written before the
+stamps were fixed) has every verdict past it restated after a fresh
+tombstone, so nothing is dropped:
 
 | Level | Message | Meaning |
 |---|---|---|
 | INFO | `committed fresh capability tombstone at boot (fail-closed replay boundary)` | This boot's boundary is durable. Verdicts learned this session sort after it and replay on the next boot. |
 | ERROR | `capability boot tombstone NOT committed; verdicts learned this session may not survive a restart` | The boundary write failed. Boot continues (it never fails on the usage subsystem), but the consequence is named: this session's verdicts may sit before a stale boundary and be invisible to later boots. |
 
-A reload that did NOT change either revision writes no boundary and emits
-neither line.
+A reload writes no boundary and emits neither line.
 
 ### `invalidation` (WARN)
 
-Emitted when a catalog or overlay change across a hot reload means the
-catalog-scoped learned capabilities will be evicted (fresher config truth
-wins over learned negatives). The eviction happens when the replay boundary
-commits -- see "Capability replay boundary" above, whose INFO line counts the
-pruned entries (`pruned_catalog_scoped`) and the carried ones
-(`restated_survivors`). Entries whose truth does not depend on the catalog --
-the envelope-field verdicts, keyed `field:<dotted.path>` -- are carried
-across.
+No longer emitted, and `rc_invalidations_total` stays 0: no catalog or
+overlay change evicts a learned capability, because every verdict is
+stamped with the same fixed catalog version and overlay revision. The
+section is kept so a line in an older log can be looked up. It was emitted
+when a catalog or overlay change across a hot reload evicted the learned
+capabilities other than the envelope-field verdicts (keyed
+`field:<dotted.path>`), which were carried across.
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -2246,9 +2244,7 @@ WARN routectl_router::router event=invalidation catalog_changed=true
 Emitted on a hot reload when learned capabilities were dropped because the
 provider entry their lane names was removed from `[providers]`, or now has a
 `kind` other than the one the entry was written under. A same-kind `base_url`
-change drops nothing. A config-only reload sweeps at the reload; a reload that
-moves the catalog or overlay revision sweeps only once its replay boundary has
-committed, so a failed boundary leaves the previous router's entries in place. Each dropped entry also
+change drops nothing. The sweep runs at the reload. Each dropped entry also
 emits a DEBUG `owner_sweep` line carrying `reason` (`owner_entry_removed` or
 `owner_kind_changed`), the sanitized `state_key`, and `capability_key`.
 
@@ -2284,7 +2280,7 @@ history from a fully evicted one:
 | Field | Type | Meaning |
 |---|---|---|
 | `skipped_unknown` | integer | Rows skipped because a persisted TOKEN (verdict / phase / source / tier / evidence class) is not one this build recognizes. |
-| `skipped_revision` | integer | Catalog-scoped rows skipped because their stamped catalog / overlay revision is not the replay boundary's -- an eviction. Envelope-field rows are never counted here: their truth is catalog-independent, so they replay under a superseded revision. |
+| `skipped_revision` | integer | Always 0. No row is skipped for its stamped catalog or overlay revision: every verdict replays whatever revision it carries. Kept so the field set is unchanged. |
 | `skipped_vocab` | integer | Rows skipped whole before decoding because their stored vocabulary version is unknown to this build (for example a row a newer build wrote) or a vocabulary step retires one of their tokens. Stored rows are never rewritten; a known older vocabulary is mapped forward on read. Each skip also emits a `rebuild_skip` DEBUG event with `reason` `unknown_vocab_version` or `retired_vocab_token`. |
 | `skipped_lane` | integer | Rows skipped because their lane key does not parse as a learned lane (`provider_entry#upstream`), in any capability namespace: such a row names no provider entry to check ownership against. Checked before ownership and revision, so these rows count nowhere else. Each skip also emits a `rebuild_skip` DEBUG event with `reason` `unparseable_lane`. |
 | `skipped_owner` | integer | Lane-keyed rows skipped because the provider entry their lane names no longer owns them: the entry is absent from the current config, it now has a different `kind` than the row recorded, or the row recorded no kind. Each skip also emits a `rebuild_skip` DEBUG event with `reason` `owner_entry_removed`, `owner_kind_changed`, or `owner_kind_unrecorded`. A same-kind `base_url` change keeps ownership. |
@@ -2420,7 +2416,7 @@ Repeat behavior is noted where the line is latched, sampled, or aggregated
 | WARN | `routectl_cli::server::{calibration_rebuild,k_rebuild,ledger_reader,capability_rebuild}` | `usage ledger read failed during ... startup warm`, `usage ledger not readable during capability startup warm`, `capability event ... read failed after the boundary read` | The usage DB could not be read at boot, so the store starts cold or empty: check the DB file's permissions and integrity (`failure_class` / `reason`). |
 | WARN | `routectl_cli::server::capability_rebuild` | `capability warm rebuild hit the row cap; warm state may be truncated` (once per boot) | The boot replay read only the newest 5000 capability-ledger rows past the replay boundary. Older verdicts were not replayed, and a lost learned NEGATIVE is re-learned only by failing real requests again. Action: shorten the usage `retention_days` (it prunes the capability ledger too) or accept the truncated replay. This differs from the K-estimator and calibration warm caps, which are DEBUG: those stores keep only a short recent window anyway, so a cap there only shortens the warm window and drops nothing an operator would act on. |
 | ERROR | `routectl_cli::server::capability_rebuild` | `capability event slice unreadable after the boundary read`, `capability boot boundary NOT committed`, `capability boot tombstone NOT committed` | A boot-time ledger write or read failed: verdicts learned this session may not survive a restart, or the registry starts empty. Check usage DB writes and disk space. |
-| ERROR / WARN | `routectl_cli::server::capability_boundary` | `capability replay boundary NOT admitted ...`, `... batch not queued`, `... NOT committed ...` (ERROR); `shutdown during a capability boundary write` (WARN) | The reload was refused and the previous router kept. Retry the reload; if it persists, check usage-writer health and DB writes. The WARN means shutdown raced the write: after restart, confirm the reload took effect. |
+| ERROR / WARN | `routectl_cli::server::capability_boundary` | `capability replay boundary NOT admitted ...`, `... batch not queued`, `... NOT committed ...` (ERROR); `shutdown during a capability boundary write` (WARN) | No longer emitted: no reload writes a replay boundary. A line in an older log meant the reload was refused and the previous router kept. |
 | WARN | `routectl_cli::server::cc_pin_drift` | `client self-reports a Claude Code version this build does not mint` (once per version); `Claude Code version dedup set reached its cap` (once) | The outbound fingerprint no longer matches the client: upgrade routectl. A full dedup set means many distinct versions; check for odd user agents. |
 | WARN | `routectl_cli::server::config_load` | `config reload failed; keeping previous config`, `config file is group/world-readable and carries secrets` | Fix config.toml per the redacted error (`routectl config check`); `chmod 600` the config file. |
 | WARN / ERROR | `routectl_cli::server::file_watch` | `watch target has no parent directory`, `failed to install fs watch on parent directory`, `watched file was removed`, `reload coordinator channel closed` (WARN); `fs watcher backend error` (ERROR) | Hot reload for that file is off or degraded: raise inotify limits or reload with SIGHUP. A removed file should be restored (in-memory state is kept). A closed coordinator outside shutdown means the reload pipeline is dead: restart. |
@@ -2485,7 +2481,7 @@ Repeat behavior is noted where the line is latched, sampled, or aggregated
 | WARN | `routectl_router::router::dispatch_loop` | `forwarded-token upstream auth failure surfaced verbatim`, `forwarded target has no captured client bearer; refusing` (every surface) | The client's forwarded credential was rejected or absent: the client must re-authenticate, or fix the forwarded-credential config. |
 | WARN | `routectl_router::router::dispatch` | `unknown failure classification on upstream outcome (fail-closed)` | An upstream `status` / `upstream_type` is unclassified: add a `class_overrides` entry or file a bug. |
 | WARN | `routectl_router::router` | `rejecting invalid alias glob pattern; entry ignored`, `refusing resolved model: its runtime state key is ambiguous` (boot / reload) | Fix the `[aliases]` glob, or rename the model or pool member so its state key is unique. |
-| WARN | `routectl_router::router` | `invalidation` event (reload) | Catalog-scoped learned capabilities are evicted: expect re-learning. No action unless the catalog or overlay change was unintended. |
+| WARN | `routectl_router::router` | `invalidation` event (reload) | No longer emitted: a catalog or overlay change evicts no learned capability. A line in an older log meant the non-field verdicts were evicted and re-learned. |
 | WARN | `routectl_router::router::count_tokens` | `alias chain has no count_tokens-capable provider` | Add a token-count-capable provider to the alias, or expect 501s. |
 | WARN | `routectl_router::router::{field_preflight,field_repair}` | `envelope_field_preflight` (acted), `envelope_field_repaired` (once per repair) | A learned verdict rewrote a client request, or an upstream rejected a field that was then dropped: review `field_path`, `lane` and provenance, and purge the verdict if it is wrong. |
 | WARN | `routectl_router::router::prefix_rewrite` | `cache_prefix_rewritten_in_epoch` (once per process) | A client rewrote its cached prefix mid-session, so later turns pay full price: investigate the client. |

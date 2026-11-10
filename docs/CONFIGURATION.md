@@ -917,8 +917,10 @@ otherwise.
 seed for that lane: the daemon commits a `cleared` row to its capability
 ledger, and the flag is sent from then on, across restarts. The lift is
 accepted only for a lane some configured model routes to, and it lasts
-until the next catalog or overlay revision change, which restores the
-seed. A rejection the upstream later names is learned again as usual.
+until the upstream rejects the flag again on that lane (the rejection is
+learned as usual and the seed's withhold returns with it) or the lane's
+provider entry is removed or changes `kind`. A catalog or overlay change
+does not restore the seed.
 To send a flag permanently, use a `force_supported` override on
 `beta:<flag>` instead.
 
@@ -5017,7 +5019,8 @@ Two structured panels render after the sections:
   read" is never collapsed into "nothing learned"; whenever the replay ran,
   `replay` reports the rows read, replayed, and skipped by reason
   (`skipped_vocab`, `skipped_owner`, `skipped_revision`, `skipped_lane`,
-  `skipped_unknown`). On a `bedrock` lane every flag the shipped beta seed
+  `skipped_unknown`; `skipped_revision` is always 0, since no verdict is
+  dropped for its catalog or overlay revision). On a `bedrock` lane every flag the shipped beta seed
   withholds appears as a `beta:<flag>` column even with no learned row: the
   cell reads `broken` from layer `seed` with action `withhold` (the seed acts
   even with `[capability] enabled = false`), or `cleared` with action

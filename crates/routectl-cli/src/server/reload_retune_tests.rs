@@ -27,19 +27,6 @@ fn gate_config_text(circuit_failures: u32, rpm_limit: u32) -> String {
     )
 }
 
-/// An overlay revision bump, so the reload must cross the capability replay
-/// boundary before it can publish.
-fn write_revised_overlay(dir: &Path) {
-    let overlay_dir = dir.join("routectl");
-    std::fs::create_dir_all(&overlay_dir).unwrap();
-    std::fs::write(
-        overlay_dir.join("catalog_overlay.json"),
-        r#"{"schema_version":1,"revision":1,"cells":{"anthropic-api:claude-opus-4-8*":
-               {"source":"user","verified_at":"2026-07-01","wm":9.5}}}"#,
-    )
-    .unwrap();
-}
-
 /// The published router's projected RPM bucket for the model: a fresh bucket
 /// sits at its capacity, and a retune caps it at the new one.
 fn published_rpm_available(swap: &ArcSwap<Router>) -> Option<f64> {
@@ -84,14 +71,12 @@ impl Rig {
         }
     }
 
-    /// Write the candidate config and an overlay revision bump, then reload.
+    /// Write the candidate config with tighter gates, then reload.
     async fn reload_to_tighter_gates(
         &self,
-        dir: &Path,
         usage: &routectl_usage::UsageHandle,
     ) -> Result<Option<(Arc<Config>, Arc<CatalogOverlay>)>, ReloadFailure> {
         std::fs::write(&self.cfg_path, gate_config_text(2, 1)).unwrap();
-        write_revised_overlay(dir);
         Box::pin(handle_config_reload(
             Some(&self.cfg_path),
             &self.config,
@@ -108,7 +93,7 @@ impl Rig {
 /// A committed reload surfaces the retune on the published router.
 #[tokio::test]
 #[serial_test::serial]
-async fn a_config_reload_committed_at_the_boundary_retunes_the_carried_gates() {
+async fn a_config_reload_retunes_the_carried_gates() {
     // Arrange
     let dir = tempfile::tempdir().unwrap();
     let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
@@ -118,7 +103,7 @@ async fn a_config_reload_committed_at_the_boundary_retunes_the_carried_gates() {
     let before = rig.swap.load_full();
 
     // Act
-    rig.reload_to_tighter_gates(dir.path(), &usage)
+    rig.reload_to_tighter_gates(&usage)
         .await
         .expect("config reload applies")
         .expect("a successful reload returns its config");

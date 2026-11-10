@@ -70,10 +70,10 @@ fn acting_field_verdicts_includes_a_field_namespaced_learned_broken_row() {
     assert_eq!(acting[0].source, EvidenceSource::Live);
 }
 
-/// A catalog-scoped `LearnedBroken` row (no `field:` prefix) is a different
+/// A non-field `LearnedBroken` row (no `field:` prefix) is a different
 /// namespace entirely and must not be reported as an acting field verdict.
 #[test]
-fn acting_field_verdicts_excludes_a_catalog_scoped_negative() {
+fn acting_field_verdicts_excludes_a_non_field_negative() {
     let rows = vec![entry(
         "web_search",
         Verdict::LearnedBroken(FailurePhase::F2),

@@ -944,8 +944,11 @@ async fn the_startup_warm_runs_off_the_tokio_worker() {
 /// A delayed PRE-boundary event is dropped, while a field observation made
 /// AFTER admission is persisted after the boundary.
 ///
-/// Both halves matter. The drop stops a straggler from restoring, on the next
-/// boot, the catalog-scoped state the boundary evicted. The persist is what the
+/// Both halves matter. The drop is the writer's generation barrier, which
+/// refuses an event stamped with a superseded generation whatever its key: the
+/// boundary's restatement already carries the registry as the cut saw it, so a
+/// straggler appended after the tombstone would replay, on the next boot, an
+/// observation the restatement did not account for. The persist is what the
 /// shared registry buys: an observation from a request still dispatching on the
 /// old Router is real, and its event must land after the tombstone so a restart
 /// replays it.
@@ -995,7 +998,7 @@ async fn a_delayed_pre_boundary_event_is_dropped_while_a_post_admission_field_ev
     drain_usage_writer_strict(writer).await;
 
     // Assert: after the newest tombstone, the field event is present and the
-    // stale catalog-scoped straggler is not.
+    // superseded-generation straggler is not.
     let rows = ledger_capability_rows(&config.usage.db_path);
     let last_tombstone = rows
         .iter()

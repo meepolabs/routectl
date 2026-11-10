@@ -1,8 +1,7 @@
 //! A reload that publishes a router in which a seat the live router held as a
 //! placeholder is built readmits that seat at its commit point, whatever the
 //! reload changed: the build mark lapses even when the seat's `[providers]`
-//! entry and its stored credential are as they were. A reload rejected after
-//! carry-over keeps the mark.
+//! entry and its stored credential are as they were.
 
 use super::*;
 use routectl_auth::oauth::testing::{ScriptedRefresh, ScriptedRefreshFlow};
@@ -21,13 +20,6 @@ fn unusable_cause(router: &Router, state_key: &str) -> Option<UnusableCause> {
         .gate
         .credential_unusable
         .map(|mark| mark.cause)
-}
-
-/// How the operator's SIGHUP ends.
-#[derive(Clone, Copy, Debug)]
-enum Sighup {
-    /// The config half commits and the credentials half follows.
-    Commits,
 }
 
 /// The config reload rig: a config file, the secrets over one credentials
@@ -109,16 +101,11 @@ impl Rig {
 
     /// A SIGHUP with config.toml unchanged: a config reload, then, when it
     /// committed, a credentials reload.
-    async fn sighup(&self, sighup: Sighup) -> Result<(), ReloadFailure> {
-        let outcome = match sighup {
-            Sighup::Commits => {
-                let (usage, writer) = build_usage_writer(&self.config);
-                let outcome = self.reload_config(&usage).await;
-                drop(usage);
-                drain_usage_writer_strict(writer).await;
-                outcome
-            }
-        };
+    async fn sighup(&self) -> Result<(), ReloadFailure> {
+        let (usage, writer) = build_usage_writer(&self.config);
+        let outcome = self.reload_config(&usage).await;
+        drop(usage);
+        drain_usage_writer_strict(writer).await;
         if outcome.is_ok() {
             self.reload_credentials().await;
         }
@@ -151,13 +138,6 @@ impl Rig {
         )
     }
 }
-
-/// `(sighup, reload verdict, seat a's mark and admission afterwards)`.
-type LapseRow = (
-    Sighup,
-    Result<(), ReloadFailure>,
-    (Option<UnusableCause>, bool),
-);
 
 /// Pool `the-pool` of OAuth seats `anthropic#a` and `anthropic#b` behind
 /// model `claude`, plus direct model `glm` on an env key that alias `fast`
@@ -192,57 +172,53 @@ fn oauth_pool_config_text() -> String {
 #[tokio::test]
 #[serial_test::serial]
 async fn a_sighup_after_a_failed_credentials_rebuild_readmits_the_seat_it_builds() {
-    let rows: [LapseRow; 1] = [(Sighup::Commits, Ok(()), (None, true))];
-    for (sighup, expected, expected_a) in rows {
-        // Arrange
-        let dir = tempfile::tempdir().unwrap();
-        let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
-        let key = ScopedEnv::set(KEY_ENV, "test-key");
-        let rig = Rig::new(
-            dir.path(),
-            &oauth_pool_config_text(),
-            &[("anthropic#b", "tok-b")],
-        )
-        .await;
-        assert_eq!(
-            rig.seat("claude#seat_a"),
-            (Some(UnusableCause::NotLoggedIn), false),
-            "{sighup:?}: premise, seat a is a placeholder"
-        );
-        drop(key);
-        write_pool_credentials(
-            &rig.creds,
-            &[("anthropic#a", "tok-a"), ("anthropic#b", "tok-b")],
-        );
-        let live = rig.swap.load_full();
-        rig.reload_credentials().await;
-        assert!(
-            Arc::ptr_eq(&live, &rig.swap.load_full()),
-            "{sighup:?}: premise, the credentials rebuild failed"
-        );
-        assert!(
-            rig.swap.load().is_placeholder_account("anthropic#a"),
-            "{sighup:?}: premise, seat a is still a placeholder"
-        );
-        let _key = ScopedEnv::set(KEY_ENV, "test-key");
+    // Arrange
+    let dir = tempfile::tempdir().unwrap();
+    let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
+    let key = ScopedEnv::set(KEY_ENV, "test-key");
+    let rig = Rig::new(
+        dir.path(),
+        &oauth_pool_config_text(),
+        &[("anthropic#b", "tok-b")],
+    )
+    .await;
+    assert_eq!(
+        rig.seat("claude#seat_a"),
+        (Some(UnusableCause::NotLoggedIn), false),
+        "premise: seat a is a placeholder"
+    );
+    drop(key);
+    write_pool_credentials(
+        &rig.creds,
+        &[("anthropic#a", "tok-a"), ("anthropic#b", "tok-b")],
+    );
+    let live = rig.swap.load_full();
+    rig.reload_credentials().await;
+    assert!(
+        Arc::ptr_eq(&live, &rig.swap.load_full()),
+        "premise: the credentials rebuild failed"
+    );
+    assert!(
+        rig.swap.load().is_placeholder_account("anthropic#a"),
+        "premise: seat a is still a placeholder"
+    );
+    let _key = ScopedEnv::set(KEY_ENV, "test-key");
 
-        // Act
-        let outcome = rig.sighup(sighup).await;
+    // Act
+    let outcome = rig.sighup().await;
 
-        // Assert
-        assert_eq!(outcome, expected, "{sighup:?}");
-        assert_eq!(
-            rig.swap.load().is_placeholder_account("anthropic#a"),
-            expected.is_err(),
-            "{sighup:?}: only a committed reload publishes the build of seat a"
-        );
-        assert_eq!(rig.seat("claude#seat_a"), expected_a, "{sighup:?}");
-        assert_eq!(
-            rig.seat("claude#seat_b"),
-            (None, true),
-            "{sighup:?}: a seat built throughout is untouched"
-        );
-    }
+    // Assert
+    assert_eq!(outcome, Ok(()));
+    assert!(
+        !rig.swap.load().is_placeholder_account("anthropic#a"),
+        "the committed reload publishes the build of seat a"
+    );
+    assert_eq!(rig.seat("claude#seat_a"), (None, true));
+    assert_eq!(
+        rig.seat("claude#seat_b"),
+        (None, true),
+        "a seat built throughout is untouched"
+    );
 }
 
 /// Pool `the-pool` of OAuth seats `seat_a` and `seat_b` behind model
@@ -274,45 +250,42 @@ fn pool_only_config_text() -> String {
 #[tokio::test]
 #[serial_test::serial]
 async fn a_sighup_after_a_failed_boot_refresh_readmits_the_seat_it_builds() {
-    let rows: [LapseRow; 1] = [(Sighup::Commits, Ok(()), (None, true))];
-    for (sighup, expected, expected_a) in rows {
-        // Arrange
-        let dir = tempfile::tempdir().unwrap();
-        let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
-        let creds = dir.path().join("routectl").join("credentials.json");
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        write_pool_credentials_at(&creds, &[("anthropic#b", "tok-b")], now);
-        expire_seat_a(&creds, now);
-        let flow = Arc::new(ScriptedRefreshFlow::new(ScriptedRefresh::Transient));
-        let rig = Rig::scripted(dir.path(), &pool_only_config_text(), Arc::clone(&flow)).await;
-        rig.oauth.set_cooldown_clock_for_tests(now);
-        assert_eq!(
-            rig.seat("claude#seat_a"),
-            (Some(UnusableCause::Unreadable), false),
-            "{sighup:?}: premise, seat a is a placeholder"
-        );
-        assert!(
-            flow.post_count() >= 1,
-            "{sighup:?}: premise, the build tried to refresh seat a"
-        );
-        flow.set_script(ScriptedRefresh::Mint("tok-a-refreshed".into()));
-        rig.oauth.set_cooldown_clock_for_tests(now + 3600);
+    // Arrange
+    let dir = tempfile::tempdir().unwrap();
+    let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
+    let creds = dir.path().join("routectl").join("credentials.json");
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    write_pool_credentials_at(&creds, &[("anthropic#b", "tok-b")], now);
+    expire_seat_a(&creds, now);
+    let flow = Arc::new(ScriptedRefreshFlow::new(ScriptedRefresh::Transient));
+    let rig = Rig::scripted(dir.path(), &pool_only_config_text(), Arc::clone(&flow)).await;
+    rig.oauth.set_cooldown_clock_for_tests(now);
+    assert_eq!(
+        rig.seat("claude#seat_a"),
+        (Some(UnusableCause::Unreadable), false),
+        "premise: seat a is a placeholder"
+    );
+    assert!(
+        flow.post_count() >= 1,
+        "premise: the build tried to refresh seat a"
+    );
+    flow.set_script(ScriptedRefresh::Mint("tok-a-refreshed".into()));
+    rig.oauth.set_cooldown_clock_for_tests(now + 3600);
 
-        // Act
-        let outcome = rig.sighup(sighup).await;
+    // Act
+    let outcome = rig.sighup().await;
 
-        // Assert
-        assert_eq!(outcome, expected, "{sighup:?}");
-        assert_eq!(rig.seat("claude#seat_a"), expected_a, "{sighup:?}");
-        assert_eq!(
-            rig.seat("claude#seat_b"),
-            (None, true),
-            "{sighup:?}: a seat built throughout is untouched"
-        );
-    }
+    // Assert
+    assert_eq!(outcome, Ok(()));
+    assert_eq!(rig.seat("claude#seat_a"), (None, true));
+    assert_eq!(
+        rig.seat("claude#seat_b"),
+        (None, true),
+        "a seat built throughout is untouched"
+    );
 }
 
 /// Add seat `a` to the credentials file at `creds` with an access token that

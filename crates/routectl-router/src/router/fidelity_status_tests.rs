@@ -500,14 +500,14 @@ fn without_an_override_the_same_fixture_is_unblocked() {
     );
 }
 
-/// A catalog-scoped learned negative is a different namespace and produces no
-/// row at all.
+/// A non-field learned negative is a different namespace and produces no row
+/// at all.
 ///
 /// The filter's control: a surface that reported every learned negative as a
 /// field verdict would attribute pre-flight gates to catalog capabilities that
 /// have none.
 #[test]
-fn a_catalog_scoped_negative_produces_no_fidelity_row() {
+fn a_non_field_negative_produces_no_fidelity_row() {
     let router = bare_router();
     plant_verdict(&router, "web_search".to_string());
 

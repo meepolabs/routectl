@@ -545,8 +545,25 @@ fn overlay_soft_defect_warns(events: &[routectl_testkit::CapturedEvent]) -> usiz
         .count()
 }
 
+/// A config whose `glm` model reads an env key that is never set, behind an
+/// alias that routes it, so the router build fails after the config and
+/// overlay load succeed.
+fn unbuildable_config_text() -> String {
+    format!(
+        "version = {CURRENT_CONFIG_VERSION}\n\
+         [server]\nhost = \"127.0.0.1\"\nport = 0\n\n\
+         [providers.compat]\nkind = \"openai-compat\"\nbase_url = \"http://127.0.0.1:1/v1\"\n\
+         api_key_ref = \"env://{UNSET_KEY_ENV}\"\n\n\
+         [models.glm]\nprovider = \"compat\"\nupstream = \"glm-4.6\"\n\n\
+         [aliases]\nfast = \"glm\"\n"
+    )
+}
+
+const UNSET_KEY_ENV: &str = "ROUTECTL_SOFT_DEFECT_UNSET_TEST_KEY";
+
 /// Soft overlay defects are logged on the reload that installs a new overlay
-/// revision, and NOT again on a later reload that re-reads the same revision.
+/// revision, and NOT on a reload rejected before it installs one, nor again on
+/// a later reload that re-reads the same revision.
 /// `#[serial]`: the loader reads the ambient `overlay_default_path()`.
 #[tokio::test]
 #[serial_test::serial]
@@ -556,12 +573,10 @@ async fn config_reload_logs_overlay_soft_defects_only_when_the_overlay_revision_
     // below-sentinel wm cell.
     let dir = tempfile::tempdir().unwrap();
     let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
+    let _unset = ScopedEnv::unset(UNSET_KEY_ENV);
     let cfg_path = dir.path().join("config.toml");
-    std::fs::write(
-        &cfg_path,
-        format!("version = {CURRENT_CONFIG_VERSION}\n[server]\nhost = \"127.0.0.1\"\nport = 0\n"),
-    )
-    .unwrap();
+    let buildable_config_text =
+        format!("version = {CURRENT_CONFIG_VERSION}\n[server]\nhost = \"127.0.0.1\"\nport = 0\n");
     let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::new());
     let mut config = Config::default();
     let _usage_dir = isolate_usage_db(&mut config);
@@ -581,7 +596,22 @@ async fn config_reload_logs_overlay_soft_defects_only_when_the_overlay_revision_
     )
     .unwrap();
 
+    // Act 0: a reload whose router build fails, over the overlay at revision 1.
+    std::fs::write(&cfg_path, unbuildable_config_text()).unwrap();
+    let (rejected_result, rejected_events) =
+        routectl_testkit::with_capture(Box::pin(handle_config_reload(
+            Some(&cfg_path),
+            &config,
+            secrets.clone(),
+            &swap,
+            &usage,
+            ReloadTrigger::CatalogOverlay,
+            &mut never_shutdown(),
+        )))
+        .await;
+
     // Act 1: the reload that installs overlay revision 1.
+    std::fs::write(&cfg_path, buildable_config_text).unwrap();
     let (changed_result, changed_events) =
         routectl_testkit::with_capture(Box::pin(handle_config_reload(
             Some(&cfg_path),
@@ -615,6 +645,17 @@ async fn config_reload_logs_overlay_soft_defects_only_when_the_overlay_revision_
         .expect("a successful reload returns its config");
 
     // Assert
+    assert_eq!(
+        rejected_result.err(),
+        Some(ReloadFailure::RouterBuildFailed),
+        "test premise: the first reload's router build fails"
+    );
+    assert_eq!(
+        overlay_soft_defect_warns(&rejected_events),
+        0,
+        "a rejected reload must not log the candidate overlay's soft defects: \
+         {rejected_events:?}"
+    );
     assert_eq!(
         overlay_soft_defect_warns(&changed_events),
         1,

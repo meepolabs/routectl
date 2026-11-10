@@ -128,8 +128,9 @@ pub(crate) fn admit_capability_boundary(
                 .cloned()
                 .map(|survivor| router.with_restated_value(survivor))
                 .collect();
-            // No markers: the transition this batch settles prunes every one,
-            // since a beta key is catalog-scoped.
+            // Unreachable while the revision stamps are frozen: no reload moves
+            // the boundary. Not a model for seed-clear handling; the boot
+            // restatement carries seed-clear markers.
             let batch = boundary_batch(&owned, &[], now_ms, catalog_version, overlay_revision);
             // Admission only -- non-blocking, so no lock is held across I/O. The
             // registry installs the pending generation itself, inside this same

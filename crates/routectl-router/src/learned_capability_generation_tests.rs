@@ -341,8 +341,14 @@ fn the_boundary_cut_excludes_observations_between_snapshot_and_submit() {
     );
     // The sibling may have written before the cut took the guard, so the
     // survivors hold the field entry and at most that write.
-    assert!(survivors.contains(&field_key("thinking.enabled.display")));
-    assert!(survivors.len() <= resident_before + 1);
+    let field = field_key("thinking.enabled.display");
+    let mut survivors = survivors;
+    survivors.sort();
+    assert!(
+        survivors == [field.clone()] || survivors == [field, "web_search".to_string()],
+        "survivors must be the field entry, plus the sibling's write if it won the race: \
+         {survivors:?}",
+    );
     assert_eq!(reg.snapshot().len(), resident_before + 1);
 }
 
