@@ -19,10 +19,13 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use super::chain::{dispatch_target_for_seat, into_one_dispatch_target};
 use super::{DispatchTarget, Router};
 use crate::config::{Config, ProviderEntry};
+use crate::learned_capability::LearnedRegistryEntry;
+use crate::override_registry::{OverrideRegistry, OverrideVerdict};
 use crate::resolved::ResolvedModel;
 use crate::state_key::StateKey;
 
@@ -92,7 +95,77 @@ impl LearnedLaneProjection {
     }
 }
 
+/// The learned output ceiling acting on each configured model: the lowest
+/// resident `max_tokens` ceiling across the lanes the model dispatches to
+/// (unlapsed, at or above the clamp floor every clamp honors), skipping a lane where a `[capability.overrides]`
+/// `force_supported` cell masks `max_tokens` for that model, as the
+/// pre-flight does. It is the resident ceiling; whether a given request is
+/// clamped still depends on the pre-flight's per-request gates.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LearnedFills {
+    by_model: BTreeMap<String, u32>,
+}
+
+impl LearnedFills {
+    /// Resolve the learned ceilings `entries` hold at `now` for the models
+    /// of `config`, over the lanes of `lanes`.
+    #[must_use]
+    pub fn resolve(
+        config: &Config,
+        lanes: &LearnedLaneProjection,
+        entries: &[LearnedRegistryEntry],
+        now: Instant,
+    ) -> Self {
+        let Some(key) = super::field_repair::max_tokens_capability_key() else {
+            return Self::default();
+        };
+        let overrides = OverrideRegistry::build(config);
+        let mut by_model: BTreeMap<String, u32> = BTreeMap::new();
+        for lane in lanes.lanes() {
+            let Some(ceiling) =
+                super::field_repair::learned_output_ceiling(entries, lane.lane.as_lane_key(), now)
+            else {
+                continue;
+            };
+            for nickname in &lane.nicknames {
+                let masked = overrides.resolve(
+                    lane.lane.provider_entry(),
+                    nickname,
+                    &key,
+                    lane.provider_kind,
+                ) == Some(OverrideVerdict::ForceSupported);
+                if masked {
+                    continue;
+                }
+                by_model
+                    .entry(nickname.clone())
+                    .and_modify(|lowest| *lowest = (*lowest).min(ceiling))
+                    .or_insert(ceiling);
+            }
+        }
+        Self { by_model }
+    }
+
+    /// The learned ceiling acting on `nickname`, if any.
+    #[must_use]
+    pub fn for_model(&self, nickname: &str) -> Option<u32> {
+        self.by_model.get(nickname).copied()
+    }
+}
+
 impl Router {
+    /// The learned output ceiling acting on each of this router's models,
+    /// read from its resident registry over its own dispatch lanes.
+    #[must_use]
+    pub fn learned_fills(&self) -> LearnedFills {
+        LearnedFills::resolve(
+            &self.config,
+            &self.learned_lane_projection(),
+            &self.learned_capability_snapshot(),
+            Instant::now(),
+        )
+    }
+
     /// The learned lanes this router's installed models dispatch to, read off
     /// the dispatch targets chain expansion would build for them. Read-only:
     /// no seat order is computed and no routing state moves.

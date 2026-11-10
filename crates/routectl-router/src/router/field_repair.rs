@@ -643,15 +643,12 @@ pub(in crate::router) const MIN_LEARNED_OUTPUT_CEILING: u32 = 4096;
 /// Reads registry rows as the read-only surfaces receive them, with each
 /// row's value attached; a row without one names no ceiling.
 #[must_use]
-pub fn learned_output_ceiling(
+pub(super) fn learned_output_ceiling(
     entries: &[crate::learned_capability::LearnedRegistryEntry],
     lane: &str,
     now: Instant,
 ) -> Option<u32> {
-    let row = FIELD_REPAIRS
-        .iter()
-        .find(|row| matches!(row.surface, FieldSurface::MaxTokens))?;
-    let key = crate::field_capability::field_capability_key(row.path)?;
+    let key = max_tokens_capability_key()?;
     entries
         .iter()
         .filter(|entry| entry.state_key == lane && entry.feature_key == key)
@@ -674,6 +671,14 @@ pub fn learned_output_ceiling(
             _ => None,
         })
         .min()
+}
+
+/// The capability key a learned `max_tokens` verdict is stored under.
+pub(super) fn max_tokens_capability_key() -> Option<String> {
+    let row = FIELD_REPAIRS
+        .iter()
+        .find(|row| matches!(row.surface, FieldSurface::MaxTokens))?;
+    crate::field_capability::field_capability_key(row.path)
 }
 
 /// The `max_tokens` the request's egress sends: the client's value; else,

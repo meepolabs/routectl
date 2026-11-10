@@ -46,7 +46,7 @@ fn a_bucket_token_returns_a_series_at_the_resolved_width() {
     seed_ledger(&path, &[now_ms - 3_600_000, now_ms]);
     let body = r#"{"window":"today","group_by":"model","bucket":"hour"}"#;
     let (spec, bucket) = spec_from_body(body.as_bytes(), now).expect("body is in vocabulary");
-    let pricer = state_with_ledger(path.clone()).pricer();
+    let pricer = state_with_ledger(path.clone()).pricer().pin();
 
     // Act
     let panel = build_panel(&path, spec, bucket, &pricer, now.to_utc().to_rfc3339(), now);

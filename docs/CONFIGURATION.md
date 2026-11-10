@@ -3175,14 +3175,27 @@ gives a field wins:
 3. **`refreshed`**: the table `routectl prices refresh` wrote into the
    config folder.
 4. **`shipped`**: the table shipped with the release.
-5. **`derived`**: for the Anthropic family only (`anthropic-api`, or
-   `bedrock` with an Anthropic model id), the 1-hour cache-write price
-   is twice the effective input price, when a refreshed or shipped row
-   was found and no source above gives it.
+5. **`derived`**: for the Anthropic family only, the 1-hour cache-write
+   price is twice the effective input price, when no source above gives
+   it and the refreshed or shipped row came from the table's `anthropic`
+   provider (or the target is `bedrock` with an Anthropic model id). An
+   `anthropic-api` gateway priced from another table provider's row
+   (OpenRouter, MiniMax) gets no derived figure.
 6. **`unknown`**: shown as unknown, never as zero.
 
 A managed-subscription (`oauth://`) provider resolves through the same
 order; it is still billed by seat, and the figure is its API-equivalent.
+A model on a `[pools]` entry prices through the pool's first member, the
+provider entry its usage rows bill under, so a `[registry]` row scoped to
+that member applies and one scoped to the pool name does not.
+
+The table provider for a target is chosen from the target's base URL:
+the table providers whose `api_host` has the same origin (scheme, host,
+port) are ranked by the longest common path prefix, then by how many path
+segments they share in any position, then by whether they list the
+upstream id; a tie on all three is unknown. A loopback base URL never
+matches. With no origin match, `anthropic-api`, `openai-responses`,
+`gemini` and `bedrock` fall back to the vendor's own table provider.
 A usage row whose provider entry was since renamed or removed prices a
 first-party upstream (Anthropic, OpenAI, Google, Bedrock) through the
 provider kind recorded with the row.
@@ -3292,10 +3305,18 @@ routectl prices refresh --from https://mirror.example/api.json
   variables apply.
 - A missing config folder is created owner-only (`0700`).
 - A source over 32 MiB is refused, whether a URL or a file.
-- A source that is not valid JSON, or holds no usable price, exits
-  non-zero and leaves the previous `prices.json` exactly as it was. A good
-  one is written to a temp file beside it, flushed, and renamed into place.
-- The command prints the model and provider counts and the table date.
+- A source that is not valid JSON, repeats a provider or a model, is over
+  100000 rows or providers, or holds no usable price, exits non-zero and
+  leaves the previous `prices.json` exactly as it was. A good one is
+  written owner-only to a temp file beside it, flushed, and renamed into
+  place.
+- A single row is never a reason to refuse the table: a provider or model
+  id that is empty, too long or not printable ASCII is skipped (that
+  model stays unknown and the id is never printed), and a provider `api`
+  URL that is not a usable http(s) URL leaves the provider reachable only
+  through the first-party fallback.
+- The command prints the model and provider counts and the table date,
+  and how many source rows were skipped when any were.
   The fetched URL is logged at INFO without userinfo, query or fragment.
 
 To keep prices current, schedule the command yourself. A daily cron entry:
@@ -3399,10 +3420,14 @@ Four sections are printed:
   `key=value(source)`:
   - `context_window` comes only from `[models.X] context_window`
     (`model-config`); unset renders `none`.
-  - `fill` is the `max_tokens` sent when a client omits one: `model-config`
-    for `[models.X] max_output_tokens`, else `default` (64000) on an
-    egress that must send `max_tokens`; `none` when the egress forwards an
-    omitted limit as omitted. A learned ceiling can lower it at dispatch.
+  - `fill` is the `max_tokens` sent when a client omits one, on an egress
+    that must send `max_tokens`: `model-config` for `[models.X]
+    max_output_tokens`, else `default` (64000). `none` when the egress
+    forwards an omitted limit as omitted, even with `max_output_tokens`
+    set (that value then only sizes the window-gate reserve). With no
+    running router this view cannot see a learned ceiling, so it never
+    shows `learned`; its header says so, and `routectl doctor` and the
+    status config panel show a learned ceiling lowering the fill.
   - each price names its source: `model-config` (`[models.X.pricing]`),
     `registry` (a matching `[registry]` row), `refreshed` or `shipped`
     (followed by `:YYYY-MM-DD`, the table date), or `derived` (the
@@ -4469,9 +4494,14 @@ dashboard query, so a table `routectl prices refresh` writes while the
 daemon runs prices the next query with no restart; a copy that fails
 validation keeps the previous table. The dollar column has three states:
 
-- `$X.XX` -- an API-key provider whose upstream resolved a price for at
-  least one dimension. A dimension with no price counts as `$0` on this
-  figure, as it always has. Reasoning is billed by the provider kind
+- `$X.XX` -- an API-key provider whose upstream resolved a price for
+  every dimension the row used. When any price on the row came from a
+  price table (`refreshed`, `shipped` or `derived`), a dimension with
+  nonzero usage and no price makes the row `n/a` instead: a table that
+  lists an input price but no cache-read price says nothing about cache
+  reads being free. A row a `[registry]` entry prices keeps counting a
+  dimension the entry leaves unset as `$0`, as written. Reasoning is
+  billed by the provider kind
   **persisted with the row**, never by what the provider is configured as
   now, so re-kinding a provider in place cannot reprice history.
 - `n/a (subscription)` -- a managed-OAuth provider (its
@@ -4481,7 +4511,8 @@ validation keeps the previous table. The dollar column has three states:
 - `n/a` -- an API-key provider whose upstream no source prices: no
   `[models.X.pricing]`, no matching `[registry]` row, and no table row
   (the tables do not list it, the provider's host is ambiguous, or the
-  provider entry is gone and the row carries no persisted provider kind).
+  provider entry is gone and the row carries no persisted provider kind);
+  or a table-priced row that used a dimension the table does not price.
   Never shown as `$0`.
 
 **Subscription-equivalent value.** Where the effective rates cover every
@@ -4844,8 +4875,8 @@ The battery sections, in render order:
 | Managed secrets (`secrets`) | Managed secret files not referenced by any provider surface as a WARN. The scan is a read-only directory diff; a stored secret is NEVER auto-deleted. |
 | Provider reachability (`probe`) | One finding per provider through the SAME probe seam `provider probe` uses, so the two surfaces never diverge on status, detail, or remediation. |
 | Capability (`capability`) | The learned-capability findings NOT absorbed by the capability matrix panel below: a WARN when the config layer could not be parsed (so the panel is honestly degraded rather than silently empty). Never emits a FAIL, so it can never flip the exit code. |
-| Cost pricing (`pricing`) | One row per configured model listing its five prices (input, output, cache read, cache write 5m, cache write 1h), each with the source that gave it: `model-config`, `registry`, `refreshed`, `shipped`, `derived` or `unknown`, resolved as in [Model prices](#model-prices-modelsxpricing) and as `routectl usage` prices. An unknown price reads `unknown`, never `$0`; a known zero reads `$0.00`. The row ends with the date of each price table read (`none` for an absent one). A model no source prices reads unpriced, and a `[registry]` row that sets no price says it prices nothing. A managed subscription (`oauth://`) row is billed by seat; its prices are the basis of the API-equivalent value, and it adds whether that value is complete or which dimensions it lacks. The CLI reads `prices.json` once per run and `/status/doctor` uses the running daemon's. Nothing from a price table but its prices and date is shown. Never FAILs, so it can never move the exit code. |
-| Model knobs (`knobs`) | One row per configured model naming the outbound `max_output_tokens` ceiling it sends and WHERE it comes from: `model-config` when `[models.X] max_output_tokens` is set, `learned` when a ceiling learned from an upstream refusal on one of its lanes lowers that value (or the egress baseline), else `default` (the baseline the Anthropic-shape egresses send, or unset where the egress forwards caller omission untouched). Every row names the model's `(kind, upstream)`. Never FAILs, so it can never move the exit code. |
+| Cost pricing (`pricing`) | One row per configured model listing its five prices (input, output, cache read, cache write 5m, cache write 1h), each with the source that gave it: `model-config`, `registry`, `refreshed`, `shipped`, `derived` or `unknown`, resolved as in [Model prices](#model-prices-modelsxpricing) and as `routectl usage` prices. An unknown price reads `unknown`, never `$0`; a known zero reads `$0.00`. The row ends with the date of each price table read (`none` for an absent one). A model no source prices reads unpriced. A model on a pool is priced through the pool's first member, as usage bills it. A managed subscription (`oauth://`) row is billed by seat; its prices are the basis of the API-equivalent value, and it adds whether that value is complete or which dimensions it lacks. The CLI reads `prices.json` once per run and `/status/doctor` uses the running daemon's. Nothing from a price table but its prices and date is shown. Never FAILs, so it can never move the exit code. |
+| Model knobs (`knobs`) | One row per configured model naming the `max_tokens` fill its egress sends when the caller omits one and WHERE it comes from, in the same `model-config`, `learned`, `default` vocabulary `config show --effective` and the status config panel use: `model-config` when `[models.X] max_output_tokens` is set, `learned` when the resident ceiling learned from an upstream refusal on one of its lanes lowers that value (or the egress baseline) and no `force_supported` override masks `max_tokens` for the model, else `default` (the Anthropic-shape egress baseline). An egress that forwards caller omission untouched has no fill and reads `unset`, whatever `max_output_tokens` says. The learned value is the resident ceiling; whether a given request is clamped still depends on the pre-flight's per-request gates. Every row names the model's `(kind, upstream)`. Never FAILs, so it can never move the exit code. |
 | Resolved tuning (`tuning`) | One PASS row per `[providers.X]` entry (pool members included), named `provider <id>`, then one per `[models.X]` entry that sets its own `stream_first_byte_timeout_ms`, named `model <nickname>` (one row per seat, named `model <nickname>#<member>`, for a model on a pool). The detail lists `circuit_failures`, `circuit_cooldown_ms`, `rpm_limit`, `request_timeout_ms` and `stream_first_byte_timeout_ms` as `key=value(source)`, the same cells and tier tokens (`model`, `provider`, `pool`, `global`, `default`) `config show --effective` prints; a breaker turned off renders `off`, an unlimited RPM or absent timeout `none`. Read from the config alone. Never WARNs or FAILs, so it can never move the exit code. |
 
 Two structured panels render after the sections:

@@ -309,3 +309,40 @@ fn the_ceiling_tokens_are_documented_with_their_spelling() {
         "the `within_ceiling` row names the floor the clamp enforces",
     );
 }
+
+/// The router's learned fills read the resident ceiling for each model on the
+/// lane, unless a `force_supported` override masks `max_tokens` for the
+/// model or its provider, as the pre-flight does.
+#[test]
+fn learned_fills_report_the_resident_ceiling_unless_force_supported_masks_it() {
+    let rows = [
+        ("no override", None, Some(STORED_CEILING)),
+        ("model-tier mask", Some("p0:m0"), None),
+        ("provider-tier mask", Some("p0"), None),
+    ];
+    for (name, mask, expected) in rows {
+        let mut config = chain_config(ALIAS, 1, ANTHROPIC);
+        if let Some(spec) = mask {
+            config.capability.overrides.insert(
+                spec.to_string(),
+                crate::config::OverrideEntry {
+                    unsupported: Vec::new(),
+                    force_supported: vec![
+                        crate::field_capability::field_capability_key(CEILING_ROW_PATH)
+                            .expect("qualified path"),
+                    ],
+                },
+            );
+        }
+        let (router, _seen) = install(config, 1, Answer::ServeImmediately);
+        plant_ceiling_eligible(
+            &router,
+            "m0",
+            Some(crate::VerdictValue::Ceiling(STORED_CEILING)),
+        );
+
+        let fills = router.learned_fills();
+
+        assert_eq!(fills.for_model("m0"), expected, "{name}");
+    }
+}

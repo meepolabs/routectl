@@ -491,7 +491,7 @@ async fn a_valid_body_replaces_the_previous_table_with_the_canonical_form() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn a_refresh_into_a_missing_config_folder_creates_it_owner_only() {
+async fn a_refresh_into_a_missing_config_folder_creates_it_and_the_table_owner_only() {
     use std::os::unix::fs::PermissionsExt as _;
     let root = tempfile::tempdir().expect("tempdir");
     let config_dir = root.path().join("absent").join("routectl");
@@ -503,12 +503,17 @@ async fn a_refresh_into_a_missing_config_folder_creates_it_owner_only() {
         .expect("refresh");
 
     assert!(config_dir.join(PRICES_FILE).is_file());
-    let mode = std::fs::metadata(&config_dir)
-        .expect("config folder")
-        .permissions()
-        .mode()
-        & 0o777;
-    assert_eq!(mode, 0o700, "config folder mode {mode:o}");
+    let mode_of = |path: &std::path::Path| {
+        std::fs::metadata(path)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777
+    };
+    let folder = mode_of(&config_dir);
+    assert_eq!(folder, 0o700, "config folder mode {folder:o}");
+    let file = mode_of(&config_dir.join(PRICES_FILE));
+    assert_eq!(file, 0o600, "table file mode {file:o}");
 }
 
 #[test]
@@ -599,6 +604,49 @@ async fn output_and_logs_carry_counts_and_the_date_never_an_id() {
         for line in &lines {
             assert!(!line.contains(id.as_str()), "{id} logged: {line}");
         }
+    }
+}
+
+/// A source row whose id the table rules skip is counted on the summary
+/// line, never named; the table is still written. The control is the same
+/// source without that row, whose line carries no skip clause.
+#[tokio::test]
+async fn skipped_source_rows_are_counted_on_the_summary_line() {
+    let skipped_id = "glm\u{7F}5";
+    let rows = [
+        (
+            "with an unusable id",
+            true,
+            "; 1 source rows skipped for an unusable id",
+        ),
+        ("control", false, ""),
+    ];
+    for (name, with_bad_row, suffix) in rows {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut models = serde_json::json!({ "kept": { "cost": { "input": 1.0 } } });
+        if with_bad_row {
+            models[skipped_id] = serde_json::json!({ "cost": { "input": 2.0 } });
+        }
+        let source = dir.path().join("api.json");
+        std::fs::write(
+            &source,
+            serde_json::to_vec(&serde_json::json!({ "acme": { "models": models } })).unwrap(),
+        )
+        .unwrap();
+
+        let summary = refresh_into(dir.path(), source.to_str(), date())
+            .await
+            .expect(name);
+
+        assert_eq!(
+            summary.to_string(),
+            format!("prices refreshed: 1 models from 1 providers, table dated 2026-11-09{suffix}"),
+            "{name}"
+        );
+        assert!(
+            dir.path().join(PRICES_FILE).exists(),
+            "{name}: the table is written"
+        );
     }
 }
 

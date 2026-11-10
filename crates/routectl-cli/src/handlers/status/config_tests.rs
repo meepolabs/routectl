@@ -699,9 +699,9 @@ fn model_wire_carries_window_fill_and_each_price_with_its_source() {
 
     let glm = wire_model(&json, "glm");
     assert!(glm["context_window"].is_null());
-    assert_eq!(
-        glm["fill"],
-        serde_json::json!({ "tokens": 9000, "source": "model-config" })
+    assert!(
+        glm["fill"].is_null(),
+        "an egress that never sends max_tokens has no fill, configured or not"
     );
     assert_eq!(glm["prices"][0]["source"], "refreshed");
 }

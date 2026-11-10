@@ -9,13 +9,12 @@ use routectl_router::{
 use routectl_testkit::ScopedEnv;
 
 use crate::commands::parse_error_redaction::redact_config_load_error;
-use crate::commands::pricing::PriceSnapshot;
 use routectl_router::prices::shipped_table;
 
 use super::gather::{
-    derive_knob_rows, derive_pricing_rows, derive_tuning_rows, gather_capability_matrix,
-    gather_context, gather_context_no_network, gather_orphan_seats, gather_orphan_secrets,
-    gather_secret_checks, sanitize_store_open_error,
+    derive_knob_rows, derive_pricing_rows, gather_capability_matrix, gather_context,
+    gather_context_no_network, gather_orphan_seats, gather_orphan_secrets, gather_secret_checks,
+    sanitize_store_open_error,
 };
 use super::matrix::build_capability_matrix_panel;
 use super::sections::{
@@ -56,9 +55,14 @@ pub(super) fn ctx(
     let capability = CapabilityInputs {
         panel_unavailable: None,
     };
-    let pricing = derive_pricing_rows(&config, &PriceSnapshot::from_tables(None, shipped_table()));
-    let knobs = derive_knob_rows(&config, &CapabilityMatrixSource::Unavailable("no_data"));
-    let tuning = derive_tuning_rows(&config);
+    let view = routectl_router::derive_effective_view(&config, None, shipped_table());
+    let pricing = derive_pricing_rows(&config, &view);
+    let knobs = derive_knob_rows(
+        &config,
+        &view,
+        &CapabilityMatrixSource::Unavailable("no_data"),
+    );
+    let tuning = view.tuning;
     DoctorContext {
         config,
         raw_config: raw_config.map(str::to_string),

@@ -67,7 +67,7 @@ use crate::server::AppState;
 use crate::server::capability_rebuild::WarmReport;
 use crate::server::status_gate::STATUS_MAX_INFLIGHT;
 use daemon_meta::DaemonMetaHandle;
-use router_view::{QueryPricer, StatusRouterHandle};
+use router_view::{StatusRouterHandle, UnpinnedPricer};
 
 /// Capacity for the blocking panel builders, sized to [`STATUS_MAX_INFLIGHT`].
 ///
@@ -218,10 +218,10 @@ impl StatusState {
         }
     }
 
-    /// A pricer over the live config and the price tables as they are now:
-    /// one snapshot of each for the caller's whole request.
-    pub fn pricer(&self) -> QueryPricer {
-        self.router.pricer(&self.prices)
+    /// A pricer over the live config, its price tables read when the
+    /// caller pins it: one snapshot of each for the caller's whole request.
+    pub fn pricer(&self) -> UnpinnedPricer {
+        self.router.pricer(Arc::clone(&self.prices))
     }
 
     /// Record the boot capability warm's report. A post-construction setter
@@ -705,6 +705,45 @@ mod tests {
                 assert!(
                     !production.contains(token.as_str()),
                     "forbidden token `{token}` present in status source {name}"
+                );
+            }
+        }
+    }
+
+    /// The price book is read (a stat, and a reparse when the file changed)
+    /// only inside each builder's blocking closure: the async side of a
+    /// config, doctor or query build hands the book or an unpinned pricer
+    /// into `guard_panel` and never reads it. Each file's text before its
+    /// `guard_panel(` call must name no book read; the reads after it are the
+    /// positive control.
+    #[test]
+    fn the_price_book_is_read_only_inside_the_blocking_builder() {
+        let reads = [
+            format!("{}{}", ".current", "()"),
+            format!("{}{}", ".pin", "()"),
+            format!("{}{}", "PriceSnapshot::", "pin"),
+        ];
+        let builders = [
+            ("config.rs", include_str!("config.rs")),
+            ("query.rs", include_str!("query.rs")),
+            ("doctor.rs", include_str!("doctor.rs")),
+        ];
+        for (name, src) in builders {
+            let production = production_source::production_source(src);
+            let split = production
+                .find(&format!("{}{}", "guard_panel", "("))
+                .unwrap_or_else(|| panic!("{name} builds under guard_panel"));
+            let (before, after) = production.split_at(split);
+            for read in &reads {
+                assert!(
+                    !before.contains(read.as_str()),
+                    "{name} reads the price book (`{read}`) before the blocking builder"
+                );
+            }
+            if name != "doctor.rs" {
+                assert!(
+                    reads.iter().any(|read| after.contains(read.as_str())),
+                    "control: {name} reads the book inside its builder"
                 );
             }
         }

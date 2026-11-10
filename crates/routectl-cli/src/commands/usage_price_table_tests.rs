@@ -266,25 +266,57 @@ fn a_known_zero_price_keeps_the_equivalent_complete() {
     assert_eq!(incomplete, RowCost::Subscription(None));
 }
 
+/// The priced arm is complete-or-absent when its rates come from a price
+/// table: the shipped row prices input and output but not cache reads, so a
+/// row that read from cache is unpriced, never charged $0 for those reads.
+/// The same row with no cache reads is priced. A `[registry]` row that sets
+/// no cache-read price keeps counting the reads at $0, as written.
 #[test]
-fn the_priced_arm_prices_a_dimension_with_no_rate_at_zero() {
-    // The same row and tables as the incomplete control above, on an API-key
-    // provider: the priced arm keeps its long-standing semantics, so the
-    // unpriced cache-read dimension contributes $0 and the row is priced.
-    let config = table_config("env://ANTH_KEY");
-    let (_dir, _path, db) = temp_db();
-    insert_table_row(
-        &db,
-        "r",
-        TABLE_PROVIDER,
-        TABLE_UPSTREAM,
-        Some("anthropic-api"),
-        Some(500),
-    );
+fn a_table_priced_row_with_a_used_unpriced_dimension_is_unpriced() {
+    // Arrange
+    let shipped_only = tables(None, Some(shipped_rows()));
+    let mut registry_config = table_config("env://ANTH_KEY");
+    registry_config
+        .registry
+        .insert(TABLE_UPSTREAM.to_string(), registry_row());
+    let rows: [(&str, Config, Option<i64>, RowCost); 3] = [
+        (
+            "shipped row, cache reads, no cache-read price",
+            table_config("env://ANTH_KEY"),
+            Some(500),
+            RowCost::Unpriced,
+        ),
+        (
+            "shipped row, no cache reads",
+            table_config("env://ANTH_KEY"),
+            None,
+            RowCost::Priced(SHIPPED_USD),
+        ),
+        (
+            "registry row, cache reads, no cache-read price",
+            registry_config,
+            Some(500),
+            RowCost::Priced(2.0),
+        ),
+    ];
 
-    let verdict = table_verdict(&db, &config, &tables(Some(refreshed_rows()), None));
+    for (name, config, cache_read, expected) in rows {
+        let (_dir, _path, db) = temp_db();
+        insert_table_row(
+            &db,
+            "r",
+            TABLE_PROVIDER,
+            TABLE_UPSTREAM,
+            Some("anthropic-api"),
+            cache_read,
+        );
 
-    assert_eq!(verdict, RowCost::Priced(REFRESHED_USD));
+        // Act
+        let verdict = table_verdict(&db, &config, &shipped_only);
+
+        // Assert
+        assert_eq!(verdict, expected, "{name}");
+    }
 }
 
 #[test]

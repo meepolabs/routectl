@@ -26,7 +26,8 @@ use routectl_router::{
 use routectl_usage::{AggRow, RowCost};
 
 use crate::commands::doctor::{
-    ParkedSeat, ResidentLearned, SeatFix, ServedInputs, UnusableSeat, unusable_seat_fix,
+    ParkedSeat, ResidentLearned, SeatFix, ServedInputs, ServedPrices, UnusableSeat,
+    unusable_seat_fix,
 };
 use crate::commands::pricing::PriceSnapshot;
 use crate::commands::usage::cost_for_row;
@@ -54,19 +55,39 @@ impl StatusRouterHandle {
         }
     }
 
-    /// Pin ONE immutable config snapshot and ONE price-table snapshot from
-    /// `prices`, and hand back an owned pricer over both.
+    /// Pin ONE immutable config snapshot and hand back an owned pricer source
+    /// over it and `prices`.
     ///
     /// Owned (not borrowed) so the whole grouped query can be priced on a
     /// blocking worker against a single snapshot: a router hot-swap or a new
     /// price table mid-query can never make two rows of one result price
-    /// against different rate tables. The book is read here, per call, so a
-    /// table renamed into the config folder prices the next query with no
-    /// router rebuild.
-    pub fn pricer(&self, prices: &PriceBook) -> QueryPricer {
-        QueryPricer {
+    /// against different rate tables. The book is read once, by
+    /// [`UnpinnedPricer::pin`] on that worker, so a table renamed into the
+    /// config folder prices the next query with no router rebuild and a
+    /// reparse never runs on an async worker.
+    pub fn pricer(&self, prices: Arc<PriceBook>) -> UnpinnedPricer {
+        UnpinnedPricer {
             router: self.inner.load_full(),
-            prices: PriceSnapshot::pin(prices),
+            book: prices,
+        }
+    }
+}
+
+/// A pinned router snapshot and the price book its rows will price against,
+/// before the book is read. Only [`Self::pin`] turns it into a pricer.
+pub struct UnpinnedPricer {
+    router: Arc<Router>,
+    book: Arc<PriceBook>,
+}
+
+impl UnpinnedPricer {
+    /// Read the book once (a stat, and a reparse when the file changed) and
+    /// pin the tables every row of the result prices against. Call it on the
+    /// blocking worker that prices the rows.
+    pub fn pin(self) -> QueryPricer {
+        QueryPricer {
+            prices: PriceSnapshot::pin(&self.book),
+            router: self.router,
         }
     }
 }
@@ -190,7 +211,8 @@ impl StatusRouterView {
     /// daemon accepted, read out of memory, never re-read from disk.
     ///
     /// Model prices resolve against the `refreshed` and `shipped` tables the
-    /// caller pinned for this read.
+    /// caller pinned for this read. Each model's fill is lowered by the
+    /// learned ceiling resident in this router, the same rule doctor applies.
     ///
     /// The raw `Config` is read only inside this method; the panel receives
     /// the already-derived, secret-free [`EffectiveView`].
@@ -200,6 +222,7 @@ impl StatusRouterView {
         shipped: Option<&PriceTable>,
     ) -> EffectiveView {
         derive_effective_view(&self.router.config, refreshed, shipped)
+            .with_learned_fills(&self.router.learned_fills())
     }
 
     /// The served doctor gather's inputs, owned so the gather can run on a
@@ -214,14 +237,15 @@ impl StatusRouterView {
     /// panel uses, which changes no gate state.
     ///
     /// The pricing section resolves against one snapshot of `prices`, the
-    /// book the daemon's cost reads use, pinned here.
+    /// book the daemon's cost reads use, pinned by the gather on its
+    /// blocking worker.
     ///
     /// The returned value's fields are private to the doctor module: a panel
     /// holding it can pass it to the gather and nothing else.
     pub(crate) fn served_doctor_inputs(
         &self,
         warm: WarmReport,
-        prices: &PriceBook,
+        prices: Arc<PriceBook>,
     ) -> ServedInputs {
         let entries = self.router.learned_capability_snapshot();
         let seed_clears = self.router.learned_seed_clear_snapshot();
@@ -236,7 +260,7 @@ impl StatusRouterView {
             Arc::clone(&self.router.config),
             learned,
             warm,
-            PriceSnapshot::pin(prices),
+            ServedPrices::Book(prices),
         )
         .with_parked_seats(parked)
         .with_unusable_seats(unusable)
@@ -302,8 +326,10 @@ mod tests {
         let _fidelity: FidelitySnapshot = view.fidelity_snapshot();
         let _wire_check: WireCheckSnapshot = view.wire_check_snapshot();
         let _effective: EffectiveView = view.effective_view(None, None);
-        let book = PriceBook::new(std::path::PathBuf::from("absent-prices.json"));
-        let _served: ServedInputs = view.served_doctor_inputs(WarmReport::not_run(), &book);
+        let book = Arc::new(PriceBook::new(std::path::PathBuf::from(
+            "absent-prices.json",
+        )));
+        let _served: ServedInputs = view.served_doctor_inputs(WarmReport::not_run(), book);
     }
 
     #[test]

@@ -19,7 +19,7 @@ use axum::extract::State;
 use serde::Serialize;
 
 use routectl_router::class_policy::ConfigFailureClass;
-use routectl_router::prices::{PriceSource, PriceTable, shipped_table};
+use routectl_router::prices::{PriceSource, shipped_table};
 use routectl_router::{
     ActivationEntry, ActivationState, ActivationStatus, AliasChain, ClassPolicyCell,
     ClassPolicySource, EffectiveView, ModelCell, OverrideRow, OverrideVerdict, PriceTableDates,
@@ -149,7 +149,7 @@ struct ModelCellWire {
 #[derive(Debug, Clone, Serialize)]
 struct FillWire {
     tokens: u32,
-    /// `model-config` or `default`.
+    /// `model-config`, `learned` or `default`.
     source: &'static str,
 }
 
@@ -390,12 +390,6 @@ fn build_panel(
     }
 }
 
-/// The refreshed price table the panel's prices resolve against: the status
-/// state's price book as it is now, read once per panel build.
-fn refreshed_prices(state: &StatusState) -> Option<Arc<PriceTable>> {
-    state.prices.current()
-}
-
 pub(super) async fn build(state: &StatusState) -> Panel<ConfigPanel> {
     // Read order is load-bearing. ONE clock read anchors both the `as_of` and
     // the source strip's config-load age, so a request crossing a second
@@ -423,7 +417,7 @@ pub(super) async fn build(state: &StatusState) -> Panel<ConfigPanel> {
     let as_of = utc_rfc3339(now);
     let daemon = state.daemon_meta.snapshot(now.timestamp_millis());
     let view = state.router.view();
-    let refreshed = refreshed_prices(state);
+    let book = Arc::clone(&state.prices);
     let activation = state.activation.load_full();
     let config_path = state
         .config_path
@@ -434,6 +428,9 @@ pub(super) async fn build(state: &StatusState) -> Panel<ConfigPanel> {
         SCHEMA_VERSION,
         codes::CONFIG_UNAVAILABLE,
         move || {
+            // Read once per build, here on the blocking worker: a changed
+            // file reparses off the async runtime.
+            let refreshed = book.current();
             let effective = view.effective_view(refreshed.as_deref(), shipped_table());
             let dto = build_panel(effective, &activation, config_path.as_deref(), daemon);
             Panel::available(SCHEMA_VERSION, as_of, dto)

@@ -581,8 +581,8 @@ fn reasoning_structure(provider_kind: Option<&str>) -> ReasoningStructure {
 /// rate -- computed through the SAME rate resolution and token math a priced
 /// row goes through, so the two can never disagree on reasoning structure,
 /// cache-read basis, or persisted-kind keying. That equivalent is
-/// complete-or-absent (see [`rates_cover_used_dimensions`]); the priced arm's
-/// semantics are unchanged by it.
+/// complete-or-absent (see [`rates_cover_used_dimensions`]), and so is a
+/// priced row whose rates come from a price table (see `priced_usd`).
 ///
 /// Rates resolve through `routectl_router::prices::effective_pricing` against
 /// `prices`, field by field: `[models.X.pricing]` on the served model, then a
@@ -617,8 +617,13 @@ pub(crate) fn cost_for_row(config: &Config, prices: &PriceSnapshot, row: &AggRow
 }
 
 /// The real dollar cost of one non-subscription row, or `None` when no usable
-/// price exists. A dimension whose rate is absent contributes `0` here, which
-/// is `cost_usd`'s long-standing semantics.
+/// price exists.
+///
+/// A row with any rate from a price table (refreshed, shipped or derived) is
+/// complete-or-absent: a dimension it used with no rate leaves the row
+/// unpriced, since a table gap is not a statement that the dimension is free.
+/// A row a `[registry]` entry prices (or only `[models.X.pricing]`) counts an
+/// absent rate as `0`, as the operator wrote it.
 fn priced_usd(
     config: &Config,
     prices: &PriceSnapshot,
@@ -626,6 +631,9 @@ fn priced_usd(
     provider: &str,
 ) -> Option<f64> {
     let resolved = resolve_row_rates(config, prices, row, provider)?;
+    if resolved.from_table && !rates_cover_used_dimensions(&resolved, row) {
+        return None;
+    }
     price_row(&resolved.rates, row)
 }
 
@@ -633,10 +641,11 @@ fn priced_usd(
 /// resolution and token math a priced row uses, wrapped in the
 /// complete-or-absent rule.
 ///
-/// The completeness wrapper exists only on this arm. A subscription operator's
-/// workload runs at a high cache-hit rate, so a figure that silently dropped an
-/// unpriced cache dimension would understate the value by most of its
-/// magnitude -- worse than absent for exactly the workload this number serves.
+/// The completeness wrapper applies here whatever priced the row. A
+/// subscription operator's workload runs at a high cache-hit rate, so a figure
+/// that silently dropped an unpriced cache dimension would understate the value
+/// by most of its magnitude -- worse than absent for exactly the workload this
+/// number serves.
 fn equivalent_usd(
     config: &Config,
     prices: &PriceSnapshot,
@@ -660,6 +669,8 @@ struct RowRates {
     /// and therefore a separately billed dimension. False when they are already
     /// inside output, where a reasoning rate would double-charge.
     reasoning_billed: bool,
+    /// Whether any rate came from a price table layer.
+    from_table: bool,
 }
 
 /// Resolve the rate table for one row and settle its reasoning structure.
@@ -678,7 +689,8 @@ fn resolve_row_rates(
         upstream: row.key.upstream.as_deref()?,
         persisted_kind: row.key.provider_kind.as_deref(),
     };
-    let (pricing, _) = effective_pricing(config, &subject, prices.refreshed(), prices.shipped())?;
+    let (pricing, sources) =
+        effective_pricing(config, &subject, prices.refreshed(), prices.shipped())?;
     let mut rates = rates_from_pricing(&pricing);
     let mut reasoning_billed = false;
     match reasoning_structure(row.key.provider_kind.as_deref()) {
@@ -696,6 +708,7 @@ fn resolve_row_rates(
     Some(RowRates {
         rates,
         reasoning_billed,
+        from_table: sources.any_from_table(),
     })
 }
 

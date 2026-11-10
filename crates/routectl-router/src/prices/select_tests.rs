@@ -1,26 +1,63 @@
-//! Provider selection: origin match with longest path prefix, loopback,
-//! ambiguity, first-party fallback, exact upstream lookup, and pools.
+//! Provider selection: origin match ranked by path prefix, shared segments
+//! and upstream listing, loopback, ambiguity, first-party fallback, exact
+//! upstream lookup, and pools.
 
 use serde_json::{Value, json};
 
 use super::prices_test_support::{bytes, table};
 use super::select::HostMatch;
+use super::shipped::SHIPPED_JSON;
 use super::*;
 
 /// A provider row whose one model `m` costs `input` per Mtok, so each row
 /// identifies which provider answered.
 fn provider(id: &str, api_host: Option<&str>, input: f64) -> Value {
-    let mut row = json!({ "id": id, "models": [{ "id": "m", "input": input }] });
+    provider_listing(id, api_host, input, &[])
+}
+
+/// [`provider`] that also lists each of `extra` at the same `input` price.
+fn provider_listing(id: &str, api_host: Option<&str>, input: f64, extra: &[&str]) -> Value {
+    let models: Vec<Value> = std::iter::once("m")
+        .chain(extra.iter().copied())
+        .map(|model| json!({ "id": model, "input": input }))
+        .collect();
+    let mut row = json!({ "id": id, "models": models });
     if let Some(host) = api_host {
         row["api_host"] = json!(host);
     }
     row
 }
 
+/// The `api_host` the shipped table lists for provider `id`, so a fixture
+/// built on it moves with every shipped-table regeneration.
+fn shipped_host(id: &str) -> String {
+    let shipped: Value = serde_json::from_str(SHIPPED_JSON).expect("shipped table is JSON");
+    shipped["providers"]
+        .as_array()
+        .expect("providers array")
+        .iter()
+        .find(|p| p["id"] == id)
+        .and_then(|p| p["api_host"].as_str())
+        .unwrap_or_else(|| panic!("the shipped table lists {id} with an api_host"))
+        .to_owned()
+}
+
+/// A model only the `opencode` table provider lists.
+const ONLY_OPENCODE: &str = "only-opencode";
+
+/// The operator-facing OpenCode Go base URL, whose path shares no prefix
+/// with either OpenCode table host.
+const OPENCODE_GO_BASE: &str = "https://opencode.ai/zen/go/v1";
+
 fn selection_table() -> PriceTable {
     parse_and_validate(&bytes(&table(json!([
-        provider("opencode", Some("https://opencode.ai/zen/v1"), 1.0),
-        provider("opencode-go", Some("https://opencode.ai/zen/go/v1"), 2.0),
+        provider_listing(
+            "opencode",
+            Some(&shipped_host("opencode")),
+            1.0,
+            &[ONLY_OPENCODE]
+        ),
+        provider("opencode-go", Some(&shipped_host("opencode-go")), 2.0),
         provider("ollama-cloud", Some("https://ollama.com/v1"), 3.0),
         provider("lmstudio", Some("http://127.0.0.1:1234/v1"), 4.0),
         provider("local-name", Some("http://localhost:8080/v1"), 12.0),
@@ -44,27 +81,28 @@ fn selection_table() -> PriceTable {
 }
 
 fn input_for(kind: &str, base_url: Option<&str>) -> Option<f64> {
+    input_for_model(kind, base_url, "m")
+}
+
+fn input_for_model(kind: &str, base_url: Option<&str>, upstream: &str) -> Option<f64> {
     selection_table()
-        .price_for_target(kind, base_url, "m")
-        .and_then(|p| p.input_per_mtok)
+        .price_for_target(kind, base_url, upstream)
+        .and_then(|row| row.prices.input_per_mtok)
 }
 
 #[test]
 fn origin_match_selects_by_host_and_longest_path_prefix() {
+    let opencode_go_host = shipped_host("opencode-go");
+    let opencode_host = shipped_host("opencode");
     let rows = [
         (
-            "opencode-go by longest prefix",
-            "https://opencode.ai/zen/go/v1",
+            "opencode-go by its own host path",
+            opencode_go_host.as_str(),
             Some(2.0),
         ),
         (
-            "opencode-go deeper path",
-            "https://opencode.ai/zen/go/v1/chat",
-            Some(2.0),
-        ),
-        (
-            "opencode by its own path",
-            "https://opencode.ai/zen/v1",
+            "opencode by its own host path",
+            opencode_host.as_str(),
             Some(1.0),
         ),
         ("ollama-cloud by host", "https://ollama.com/v1", Some(3.0)),
@@ -95,6 +133,55 @@ fn origin_match_selects_by_host_and_longest_path_prefix() {
     }
 }
 
+/// With no common path prefix, the provider sharing more path segments in
+/// any position wins; with those tied too, the one listing the upstream
+/// wins; with all three tied, selection is unknown. Hosts come from the
+/// shipped table, so the rows move with it.
+#[test]
+fn same_origin_ties_break_by_shared_segments_then_upstream_listing() {
+    let target = format::ApiBase::parse(OPENCODE_GO_BASE).expect("base parses");
+    let host = |id: &str| format::ApiBase::parse(&shipped_host(id)).expect("host parses");
+    assert!(
+        [host("opencode"), host("opencode-go")]
+            .iter()
+            .all(|api| api.origin == target.origin && api.segments[0] != target.segments[0]),
+        "premise: both shipped hosts share the origin and no path prefix"
+    );
+    let rows = [
+        (
+            "more shared segments selects opencode-go",
+            OPENCODE_GO_BASE,
+            "m",
+            Some(2.0),
+        ),
+        (
+            "deeper path still shares more with opencode-go",
+            "https://opencode.ai/zen/go/v1/chat",
+            "m",
+            Some(2.0),
+        ),
+        (
+            "segments tie, only opencode lists the upstream",
+            "https://opencode.ai/zen/v1",
+            ONLY_OPENCODE,
+            Some(1.0),
+        ),
+        (
+            "segments tie and both list the upstream",
+            "https://opencode.ai/zen/v1",
+            "m",
+            None,
+        ),
+    ];
+    for (name, base, upstream, expected) in rows {
+        assert_eq!(
+            input_for_model("openai-compat", Some(base), upstream),
+            expected,
+            "{name}"
+        );
+    }
+}
+
 #[test]
 fn a_loopback_base_url_never_matches_a_table_host() {
     let t = selection_table();
@@ -109,7 +196,7 @@ fn a_loopback_base_url_never_matches_a_table_host() {
     for (name, base) in rows {
         let parsed = format::ApiBase::parse(base).expect("base parses");
         assert!(
-            t.match_host(&parsed).is_one(),
+            t.match_host(&parsed, "m").is_one(),
             "{name}: positive control, the origin alone would match a table row"
         );
         assert_eq!(input_for("openai-compat", Some(base)), None, "{name}");
@@ -229,7 +316,7 @@ fn config_targets_select_through_their_egress_base_url_and_pools_through_a_membe
     for (name, target, expected) in rows {
         assert_eq!(
             t.price_for(&config, target, "m")
-                .and_then(|p| p.input_per_mtok),
+                .and_then(|row| row.prices.input_per_mtok),
             expected,
             "{name}"
         );

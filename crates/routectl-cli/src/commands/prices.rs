@@ -14,7 +14,7 @@
 //! them is ever printed or logged: output carries counts and the table date.
 
 use std::fmt;
-use std::io::{Read, Write as _};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -143,6 +143,8 @@ pub struct RefreshSummary {
     pub providers: usize,
     /// Model rows in the written table.
     pub models: usize,
+    /// Source rows left out because their provider or model id was unusable.
+    pub skipped: usize,
     /// The table date.
     pub generated_at: TableDate,
 }
@@ -152,6 +154,7 @@ impl RefreshSummary {
         Self {
             providers: table.provider_count(),
             models: table.model_count(),
+            skipped: table.skipped_row_count(),
             generated_at: table.generated_at(),
         }
     }
@@ -163,7 +166,15 @@ impl fmt::Display for RefreshSummary {
             f,
             "prices refreshed: {} models from {} providers, table dated {}",
             self.models, self.providers, self.generated_at
-        )
+        )?;
+        if self.skipped > 0 {
+            write!(
+                f,
+                "; {} source rows skipped for an unusable id",
+                self.skipped
+            )?;
+        }
+        Ok(())
     }
 }
 
@@ -419,39 +430,23 @@ pub fn read_bounded(reader: impl Read, limit: usize) -> Result<Vec<u8>, BoundedR
     Ok(out)
 }
 
-/// Replace `path` with `bytes`: a temp file in the same directory, fsync,
-/// rename over `path`, fsync the directory. A named parent directory is
-/// created when missing and held at `0o700`, like routectl's other
-/// config-folder writers. A failure before the rename leaves any previous
-/// file untouched and removes the temp file.
+/// Replace `path` with `bytes` through routectl's shared owner-only atomic
+/// writer: a temp file in the same directory, fsync, rename over `path`, then
+/// a best-effort directory fsync. The parent directory is created when
+/// missing and held at `0o700`, like routectl's other config-folder writers.
+/// A failure before the rename leaves any previous file untouched and removes
+/// the temp file.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), PricesError> {
-    let fail = |stage, source| PricesError::Write {
+    routectl_auth::atomic_write::write_0600_atomic_with_policy(
+        path,
+        bytes,
+        routectl_auth::atomic_write::FsyncPolicy::BestEffort,
+    )
+    .map_err(|reason| PricesError::Write {
         path: path.display().to_string(),
-        stage,
-        source,
-    };
-    let parent = match path.parent().filter(|p| !p.as_os_str().is_empty()) {
-        Some(parent) => {
-            routectl_auth::atomic_write::ensure_dir_0700(parent)
-                .map_err(|reason| fail("create directory", std::io::Error::other(reason)))?;
-            parent
-        }
-        None => Path::new("."),
-    };
-    let mut tmp = tempfile::Builder::new()
-        .prefix(".prices.tmp.")
-        .tempfile_in(parent)
-        .map_err(|e| fail("create temp file", e))?;
-    tmp.write_all(bytes)
-        .map_err(|e| fail("write temp file", e))?;
-    tmp.as_file()
-        .sync_all()
-        .map_err(|e| fail("fsync temp file", e))?;
-    tmp.persist(path).map_err(|e| fail("rename", e.error))?;
-    if let Err(e) = std::fs::File::open(parent).and_then(|dir| dir.sync_all()) {
-        tracing::warn!(error = %e, "prices refresh: directory fsync failed after rename");
-    }
-    Ok(())
+        stage: "atomic write",
+        source: std::io::Error::other(reason),
+    })
 }
 
 #[cfg(test)]

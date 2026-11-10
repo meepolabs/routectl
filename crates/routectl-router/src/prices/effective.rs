@@ -8,18 +8,19 @@
 //!    leaves unset stays unknown, and neither the tables nor the derived
 //!    figure fill it.
 //! 3. The refreshed table, then the shipped table, each selected for the
-//!    target as [`PriceTable::price_for`] describes.
-//! 4. A derived `cache_write_1h` for the Anthropic family (an `anthropic-api`
-//!    target, or a `bedrock` target whose upstream is an Anthropic model):
-//!    twice the effective input price, only when a refreshed or shipped row
-//!    was selected and no source above gives the field.
+//!    target as the module's provider selection describes.
+//! 4. A derived `cache_write_1h` for the Anthropic family: twice the
+//!    effective input price, only when a refreshed or shipped row was
+//!    selected from the `anthropic` table provider (or for a `bedrock` target
+//!    whose upstream is an Anthropic model) and no source above gives the
+//!    field. A gateway priced from another table provider gets no derived
+//!    figure, whatever its kind.
 //! 5. Unknown.
 
 use routectl_core::provider_kind::config as kind;
 use routectl_providers::anthropic_family::{AnthropicFamily, anthropic_family};
 
-use super::PriceTable;
-use super::select::provider_entry_for_target;
+use super::{PriceTable, SelectedRow};
 use crate::config::{Config, PricingConfig};
 
 /// Anthropic bills a 1-hour cache write at twice the base input price.
@@ -44,6 +45,12 @@ pub enum PriceSource {
 }
 
 impl PriceSource {
+    /// Whether this source is a price table layer: `refreshed`, `shipped`,
+    /// or `derived` from one of them.
+    pub const fn is_table(self) -> bool {
+        matches!(self, Self::Refreshed | Self::Shipped | Self::Derived)
+    }
+
     /// The fixed token for this source.
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -73,13 +80,34 @@ pub struct PriceSources {
 }
 
 impl PriceSources {
-    pub(crate) const UNKNOWN: Self = Self {
+    /// Every field unknown.
+    pub const UNKNOWN: Self = Self {
         input: PriceSource::Unknown,
         output: PriceSource::Unknown,
         cache_read: PriceSource::Unknown,
         cache_write_5m: PriceSource::Unknown,
         cache_write_1h: PriceSource::Unknown,
     };
+
+    /// Whether every field is unknown.
+    pub fn is_unknown(&self) -> bool {
+        *self == Self::UNKNOWN
+    }
+
+    /// Whether any field came from a price table layer (`refreshed`,
+    /// `shipped` or `derived`). A `[registry]` row wins whole, so a row it
+    /// prices never answers true.
+    pub fn any_from_table(&self) -> bool {
+        [
+            self.input,
+            self.output,
+            self.cache_read,
+            self.cache_write_5m,
+            self.cache_write_1h,
+        ]
+        .into_iter()
+        .any(PriceSource::is_table)
+    }
 }
 
 /// The served target a price is looked up for.
@@ -127,9 +155,14 @@ pub fn effective_pricing(
         tables
             .refreshed
             .as_ref()
-            .map(|p| (p, PriceSource::Refreshed)),
+            .map(|row| (&row.prices, PriceSource::Refreshed)),
     );
-    layers.extend(tables.shipped.as_ref().map(|p| (p, PriceSource::Shipped)));
+    layers.extend(
+        tables
+            .shipped
+            .as_ref()
+            .map(|row| (&row.prices, PriceSource::Shipped)),
+    );
 
     let mut pricing = PricingConfig::default();
     let mut sources = PriceSources::UNKNOWN;
@@ -143,11 +176,11 @@ pub fn effective_pricing(
         }
     }
 
-    if tables.has_row() && is_anthropic_family(tables.kind, subject.upstream) {
+    if tables.derives_1h_write(subject.upstream) {
         derive_1h_write(&mut pricing, &mut sources);
     }
 
-    if registry.is_none() && sources == PriceSources::UNKNOWN {
+    if registry.is_none() && sources.is_unknown() {
         return None;
     }
     Some((pricing, sources))
@@ -166,22 +199,22 @@ fn model_pricing<'a>(config: &'a Config, subject: &PriceSubject<'_>) -> Option<&
 /// The table rows selected for a subject and the provider kind that
 /// selected them.
 #[derive(Default)]
-struct TableRows<'a> {
-    kind: Option<&'a str>,
-    refreshed: Option<PricingConfig>,
-    shipped: Option<PricingConfig>,
+struct TableRows<'t> {
+    kind: Option<&'t str>,
+    refreshed: Option<SelectedRow<'t>>,
+    shipped: Option<SelectedRow<'t>>,
 }
 
-impl<'a> TableRows<'a> {
+impl<'t> TableRows<'t> {
     fn select(
-        config: &'a Config,
-        subject: &PriceSubject<'a>,
-        refreshed: Option<&PriceTable>,
-        shipped: Option<&PriceTable>,
+        config: &'t Config,
+        subject: &PriceSubject<'t>,
+        refreshed: Option<&'t PriceTable>,
+        shipped: Option<&'t PriceTable>,
     ) -> Self {
-        match provider_entry_for_target(config, subject.provider) {
-            Some(entry) => {
-                let lookup = |table: &PriceTable| {
+        match config.provider_entry_for_target(subject.provider) {
+            Some((_, entry)) => {
+                let lookup = |table: &'t PriceTable| {
                     table.price_for(config, subject.provider, subject.upstream)
                 };
                 Self {
@@ -195,7 +228,7 @@ impl<'a> TableRows<'a> {
                     return Self::default();
                 };
                 let lookup =
-                    |table: &PriceTable| table.price_for_target(kind, None, subject.upstream);
+                    |table: &'t PriceTable| table.price_for_target(kind, None, subject.upstream);
                 Self {
                     kind: Some(kind),
                     refreshed: refreshed.and_then(lookup),
@@ -205,18 +238,26 @@ impl<'a> TableRows<'a> {
         }
     }
 
-    const fn has_row(&self) -> bool {
-        self.refreshed.is_some() || self.shipped.is_some()
+    /// Whether a derived 1-hour write applies: a selected row sits under the
+    /// `anthropic` table provider, or the target is Bedrock serving an
+    /// Anthropic model.
+    fn derives_1h_write(&self, upstream: &str) -> bool {
+        let rows = [self.refreshed.as_ref(), self.shipped.as_ref()];
+        if rows.iter().all(Option::is_none) {
+            return false;
+        }
+        let anthropic_row = rows
+            .iter()
+            .flatten()
+            .any(|row| row.provider == ANTHROPIC_TABLE_PROVIDER);
+        let bedrock_anthropic =
+            self.kind == Some(kind::BEDROCK) && anthropic_family(upstream) == AnthropicFamily::Yes;
+        anthropic_row || bedrock_anthropic
     }
 }
 
-fn is_anthropic_family(provider_kind: Option<&str>, upstream: &str) -> bool {
-    match provider_kind {
-        Some(kind::ANTHROPIC_API) => true,
-        Some(kind::BEDROCK) => anthropic_family(upstream) == AnthropicFamily::Yes,
-        _ => false,
-    }
-}
+/// The table provider whose rows carry Anthropic's first-party prices.
+const ANTHROPIC_TABLE_PROVIDER: &str = "anthropic";
 
 fn derive_1h_write(pricing: &mut PricingConfig, sources: &mut PriceSources) {
     if pricing.cache_write_1h_per_mtok.is_some() {

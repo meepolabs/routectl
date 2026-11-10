@@ -127,53 +127,50 @@ fn row_count_bound_admits_the_limit_and_refuses_one_more() {
 }
 
 #[test]
-fn id_length_bounds_refuse_empty_and_overlong_ids() {
+fn an_empty_or_overlong_id_skips_its_rows_and_keeps_the_table() {
     let provider_rows = [
-        ("provider at limit", "p".repeat(MAX_PROVIDER_ID_BYTES), true),
+        ("provider at limit", "p".repeat(MAX_PROVIDER_ID_BYTES), 0),
         (
             "provider over limit",
             "p".repeat(MAX_PROVIDER_ID_BYTES + 1),
-            false,
+            1,
         ),
-        ("provider empty", String::new(), false),
+        ("provider empty", String::new(), 1),
     ];
-    for (name, id, ok) in provider_rows {
-        let doc = table(json!([{ "id": id, "models": [priced_model("m")] }]));
-        let result = parse(&doc);
-        if ok {
-            assert!(result.is_ok(), "{name}");
-        } else {
-            assert_eq!(
-                result.err(),
-                Some(PriceTableError::ProviderIdLength {
-                    limit: MAX_PROVIDER_ID_BYTES
-                }),
-                "{name}"
-            );
-        }
+    for (name, id, skipped) in provider_rows {
+        let doc = table(json!([
+            { "id": "acme", "models": [priced_model("kept")] },
+            { "id": id, "models": [priced_model("m")] },
+        ]));
+        let t = parse(&doc).expect(name);
+        assert_eq!(t.skipped_row_count(), skipped, "{name}");
+        assert_eq!(t.provider_count(), 2 - skipped, "{name}");
+        assert!(
+            acme_prices(&t, "kept").is_some(),
+            "{name}: the table is kept"
+        );
     }
     let model_rows = [
-        ("model at limit", "m".repeat(MAX_MODEL_ID_BYTES), true),
-        (
-            "model over limit",
-            "m".repeat(MAX_MODEL_ID_BYTES + 1),
-            false,
-        ),
-        ("model empty", String::new(), false),
+        ("model at limit", "m".repeat(MAX_MODEL_ID_BYTES), 0),
+        ("model over limit", "m".repeat(MAX_MODEL_ID_BYTES + 1), 1),
+        ("model empty", String::new(), 1),
     ];
-    for (name, id, ok) in model_rows {
-        let result = parse(&one_provider(json!([priced_model(&id)])));
-        if ok {
-            assert!(result.is_ok(), "{name}");
-        } else {
-            assert_eq!(
-                result.err(),
-                Some(PriceTableError::ModelIdLength {
-                    limit: MAX_MODEL_ID_BYTES
-                }),
-                "{name}"
-            );
-        }
+    for (name, id, skipped) in model_rows {
+        let t = parse(&one_provider(json!([
+            priced_model("kept"),
+            priced_model(&id)
+        ])))
+        .expect(name);
+        assert_eq!(t.skipped_row_count(), skipped, "{name}");
+        assert_eq!(
+            acme_prices(&t, &id).is_some(),
+            skipped == 0,
+            "{name}: a skipped row stays unknown"
+        );
+        assert!(
+            acme_prices(&t, "kept").is_some(),
+            "{name}: the table is kept"
+        );
     }
 }
 
@@ -321,8 +318,12 @@ fn generated_at_parses_only_as_a_calendar_date() {
     }
 }
 
+/// An `api_host` the shared origin normalizer withholds leaves the provider
+/// in the table with no origin, so it is reachable only through the
+/// first-party fallback; the table is kept. The control is the same provider
+/// with a usable host, selected by origin.
 #[test]
-fn an_api_host_the_origin_normalizer_withholds_is_refused() {
+fn an_api_host_the_origin_normalizer_withholds_drops_only_the_origin() {
     let rows = [
         ("whole-url placeholder", "${GATEWAY_BASE_URL}/v1"),
         (
@@ -333,13 +334,24 @@ fn an_api_host_the_origin_normalizer_withholds_is_refused() {
         ("double userinfo", "https://a@b@host.example/v1"),
         ("not a url", "opencode.ai/zen"),
     ];
+    let lookup = |host: &str| {
+        let doc = table(json!([
+            { "id": "anthropic", "api_host": host, "models": [priced_model("m")] },
+        ]));
+        let t = parse(&doc).expect("the table is kept");
+        (
+            t.price_for_target("openai-compat", Some("https://host.example/v1"), "m")
+                .is_some(),
+            t.price_for_target("anthropic-api", None, "m").is_some(),
+        )
+    };
+    assert_eq!(
+        lookup("https://host.example/v1"),
+        (true, true),
+        "control: a usable host matches by origin"
+    );
     for (name, host) in rows {
-        let doc = table(json!([{ "id": "acme", "api_host": host, "models": [priced_model("m")] }]));
-        assert_eq!(
-            parse(&doc).err(),
-            Some(PriceTableError::InvalidApiHost),
-            "{name}"
-        );
+        assert_eq!(lookup(host), (false, true), "{name}");
     }
 }
 
@@ -367,6 +379,7 @@ fn no_download_string_renders_through_debug_display_or_errors() {
     let failures = [
         one_provider(json!([priced_model(PLANTED), priced_model(PLANTED)])),
         table(json!([{ "id": PLANTED, "api_host": format!("ftp://{PLANTED}"), "models": [] }])),
+        one_provider(json!([priced_model(&format!("{PLANTED}\u{7F}"))])),
         json!({ "schema_version": 1, "generated_at": PLANTED, "providers": [] }),
         json!({ "schema_version": 1, "generated_at": "2026-11-01", "providers": PLANTED }),
     ];

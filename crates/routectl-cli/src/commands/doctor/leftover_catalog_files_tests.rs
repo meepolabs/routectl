@@ -230,7 +230,7 @@ async fn both_gathers_look_in_the_config_folder() {
                     now_ms: 1_000,
                 },
                 WarmReport::not_run(),
-                PriceSnapshot::default(),
+                super::ServedPrices::Pinned(PriceSnapshot::default()),
             )))
         } else {
             GatherSources::Disk

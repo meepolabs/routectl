@@ -339,8 +339,8 @@ mod doctor_agreement {
             &config_path,
             GatherSources::Served(Box::new(view.served_doctor_inputs(
                 WarmReport::not_run(),
-                &routectl_router::prices::PriceBook::new(std::path::PathBuf::from(
-                    "absent-prices.json",
+                std::sync::Arc::new(routectl_router::prices::PriceBook::new(
+                    std::path::PathBuf::from("absent-prices.json"),
                 )),
             ))),
             &[],

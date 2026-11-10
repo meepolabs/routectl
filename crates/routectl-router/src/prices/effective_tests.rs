@@ -435,6 +435,55 @@ fn a_supplied_1h_write_is_never_replaced_by_the_derived_figure() {
     }
 }
 
+/// An `anthropic-api` gateway is matched by its host, so its row may come
+/// from a table provider that is not Anthropic (OpenRouter's host here, as
+/// the shipped table lists it). Only a row under the `anthropic` table
+/// provider carries the derived 1-hour write; the control is the same
+/// gateway host listed under that id.
+#[test]
+fn an_anthropic_api_gateway_priced_from_another_table_provider_gets_no_derived_write() {
+    const GATEWAY: &str = r#"
+[providers.router]
+kind = "anthropic-api"
+api_key_ref = "env://R"
+base_url = "https://openrouter.ai/api/v1"
+"#;
+    let config: Config = toml::from_str(GATEWAY).expect("config parses");
+    let rows = [
+        ("openrouter table provider", "openrouter", None),
+        (
+            "anthropic table provider on the same host",
+            "anthropic",
+            Some((10.0, PriceSource::Derived)),
+        ),
+    ];
+    for (name, table_provider, expected) in rows {
+        let shipped = parse_and_validate(&bytes(&table(json!([{
+            "id": table_provider,
+            "api_host": "https://openrouter.ai/api/v1",
+            "models": [model_row(UPSTREAM, &input_only(5.0))],
+        }]))))
+        .expect("fixture table parses");
+
+        let (pricing, sources) =
+            effective_pricing(&config, &subject("router", UPSTREAM), None, Some(&shipped))
+                .expect(name);
+
+        assert_eq!(
+            pricing.input_per_mtok,
+            Some(5.0),
+            "{name}: the row is selected"
+        );
+        assert_eq!(
+            pricing
+                .cache_write_1h_per_mtok
+                .map(|value| (value, sources.cache_write_1h)),
+            expected,
+            "{name}"
+        );
+    }
+}
+
 /// The derived figure needs a refreshed or shipped basis: a model-config
 /// input alone, or a registry row, derives nothing.
 #[test]

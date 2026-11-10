@@ -99,7 +99,6 @@ pub use fidelity_status::{
     seed_distinct_fidelity_counters_for_tests,
 };
 pub(crate) use field_repair::FieldRepairTable;
-pub use field_repair::learned_output_ceiling;
 pub(crate) use field_repair::negative_recovers_only_by_recheck;
 pub(crate) use field_repair::value_slot_for_capability_key as value_slot_for_capability;
 #[cfg(any(test, feature = "test-utils"))]
@@ -111,7 +110,7 @@ pub use field_verdict_observability::{
     ActingFieldVerdict, FieldRepairCounters, LaneBudgetExhaustions, LaneLossyRepairs,
     acting_field_verdicts,
 };
-pub use learned_lanes::{LearnedLaneProjection, ResolvedLearnedLane};
+pub use learned_lanes::{LearnedFills, LearnedLaneProjection, ResolvedLearnedLane};
 pub use opening_lookup::OpeningLane;
 use opening_lookup::wire_upstream;
 pub use outcome_rule::class_debits;

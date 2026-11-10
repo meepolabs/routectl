@@ -4,11 +4,11 @@ use routectl_auth::oauth::types::TokenRecord;
 use routectl_core::sanitize_for_log_with_cap;
 use routectl_router::{
     ActivationEntry, ActivationStatus, CONFIG_VERSION_REMEDIATION, CURRENT_CONFIG_VERSION,
-    ConfigVersionError, Finding, PricingConfig, Status, TuningRow, UnresolvedReason,
-    compute_activation, preflight_config_version,
+    ConfigVersionError, FillSource, Finding, PriceTableDates, PricingConfig, Status, TuningRow,
+    UnresolvedReason, compute_activation, preflight_config_version,
 };
 
-use routectl_router::prices::{PriceSource, PriceSources, TableDate};
+use routectl_router::prices::{PriceSources, TableDate};
 
 use crate::commands::config::MAX_REPORTED_LINE_CHARS;
 use crate::commands::config_effective::{tuning_cells, tuning_kind};
@@ -21,7 +21,7 @@ use crate::server::reload_failure::ReloadFailureSnapshot;
 
 use super::gather::{SecretCheck, SecretPresence};
 use super::served::{SeatFix, parked_seat_finding, unusable_seat_finding};
-use super::{DoctorContext, KnobRow, LegacyFolder, OutputCeilingSource, PricingRow, TableDates};
+use super::{DoctorContext, KnobRow, LegacyFolder, PricingRow};
 
 /// Probe section: one finding per configured provider, mapped from its
 /// read-only reachability outcome through the shared `probe_finding` seam so
@@ -742,25 +742,19 @@ pub(super) fn pricing_finding(row: &PricingRow) -> Finding {
         safe(&row.provider_kind),
         safe(&row.upstream)
     );
-    let unpriced = (PricingConfig::default(), UNKNOWN_SOURCES);
-    let (pricing, sources) = row.resolved.as_ref().unwrap_or(&unpriced);
-    let fields = render_price_fields(pricing, sources);
+    let fields = render_price_fields(&row.pricing, &row.sources);
     let tables = render_table_dates(row.tables);
+    let unpriced = row.sources.is_unknown();
     let detail = if row.subscription {
         format!(
             "billed by subscription; no per-token rate applies -- {selector}; API-equivalent \
              prices: {fields}; {}; {tables}",
-            render_equivalence_clause(&row.nickname, row.resolved.as_ref())
+            render_equivalence_clause(&row.nickname, &row.pricing, unpriced)
         )
-    } else if row.resolved.is_none() {
+    } else if unpriced {
         format!(
             "unpriced: no source prices it -- {selector}; {fields}; usage reports no cost for \
              it; {tables}"
-        )
-    } else if *sources == UNKNOWN_SOURCES {
-        format!(
-            "a [registry] row matches but sets no price, so it prices nothing -- {selector}; \
-             {fields}; {tables}"
         )
     } else {
         format!("priced -- {selector}; {fields}; {tables}")
@@ -773,14 +767,6 @@ pub(super) fn pricing_finding(row: &PricingRow) -> Finding {
         remediation: None,
     }
 }
-
-const UNKNOWN_SOURCES: PriceSources = PriceSources {
-    input: PriceSource::Unknown,
-    output: PriceSource::Unknown,
-    cache_read: PriceSource::Unknown,
-    cache_write_5m: PriceSource::Unknown,
-    cache_write_1h: PriceSource::Unknown,
-};
 
 /// The five prices in a fixed order, each `<field> <value> (<source>)`. An
 /// unknown price reads `unknown`, never `$0`; a known zero reads `$0.00`.
@@ -811,7 +797,7 @@ fn render_price_fields(pricing: &PricingConfig, sources: &PriceSources) -> Strin
 }
 
 /// The date of each price table layer, or `none` for an absent layer.
-fn render_table_dates(tables: TableDates) -> String {
+fn render_table_dates(tables: PriceTableDates) -> String {
     let date = |d: Option<TableDate>| d.map_or_else(|| "none".to_string(), |d| d.to_string());
     format!(
         "price tables: refreshed {}, shipped {}",
@@ -823,16 +809,13 @@ fn render_table_dates(tables: TableDates) -> String {
 /// The subscription row's equivalence clause: the usage report's
 /// API-equivalent value is complete-or-absent, so this says whether every
 /// price resolves, which ones do not, or that none does.
-fn render_equivalence_clause(
-    nickname: &str,
-    resolved: Option<&(PricingConfig, PriceSources)>,
-) -> String {
+fn render_equivalence_clause(nickname: &str, pricing: &PricingConfig, unpriced: bool) -> String {
     let fix = format!("set them in [models.{}.pricing]", safe(nickname));
-    let Some((pricing, _)) = resolved else {
+    if unpriced {
         return format!(
             "usage reports NO API-equivalent value: no source prices this upstream; {fix}"
         );
-    };
+    }
     let missing = missing_equivalence_dimensions(pricing);
     if missing.is_empty() {
         "usage values it at API-equivalent rates; every price resolves".to_string()
@@ -879,39 +862,40 @@ pub(super) fn section_knobs(ctx: &DoctorContext) -> Vec<Finding> {
 }
 
 /// Pure mapping of one resolved [`KnobRow`] to its finding. The detail leads
-/// with `max_output_tokens <value> (<source>)`, the source one of
-/// `model-config`, `learned` or `default`, then names the model's kind and
-/// upstream.
+/// with `max_output_tokens <value> (<source>)`, the source a
+/// [`FillSource`] token, then names the model's kind and upstream.
 fn knob_finding(row: &KnobRow) -> Finding {
     let selector = format!(
         "kind {} upstream {}",
         safe(&row.provider_kind),
         safe(&row.upstream)
     );
-    let detail = match row.source {
-        OutputCeilingSource::ModelConfig(ceiling) => format!(
-            "max_output_tokens {ceiling} (model-config) -- {selector}; a ceiling learned from an \
-             upstream refusal can lower it"
+    let detail = match row.fill {
+        None => format!(
+            "max_output_tokens unset -- {selector}; the egress forwards an omitted limit \
+             untouched"
         ),
-        OutputCeilingSource::Learned { ceiling, lowers } => {
-            let lowers = lowers.map_or_else(
-                || "a larger client limit".to_string(),
-                |base| format!("{base}"),
+        Some(fill) => {
+            let lead = format!(
+                "max_output_tokens {} ({})",
+                fill.tokens,
+                fill.source.as_str()
             );
-            format!(
-                "max_output_tokens {ceiling} (learned) -- {selector}; learned from an upstream \
-                 refusal, it lowers {lowers} until it decays"
-            )
+            let tail = match (fill.source, row.lowers) {
+                (FillSource::Learned, lowers) => format!(
+                    "learned from an upstream refusal, it lowers {} until it decays",
+                    lowers.map_or_else(|| "the fill".to_string(), |base| base.to_string())
+                ),
+                (FillSource::ModelConfig, _) => {
+                    "a ceiling learned from an upstream refusal can lower it".to_string()
+                }
+                (FillSource::Default, _) => "the egress sends this baseline when the caller \
+                     omits a limit; set `max_output_tokens` on the model for one whose ceiling \
+                     is lower"
+                    .to_string(),
+            };
+            format!("{lead} -- {selector}; {tail}")
         }
-        OutputCeilingSource::Default { fill: Some(fill) } => format!(
-            "max_output_tokens {fill} (default) -- {selector}; the egress sends this baseline \
-             when the caller omits a limit; set `max_output_tokens` on the model for one whose \
-             ceiling is lower"
-        ),
-        OutputCeilingSource::Default { fill: None } => format!(
-            "max_output_tokens unset (default) -- {selector}; the egress forwards an omitted \
-             limit untouched"
-        ),
     };
     Finding {
         section: "knobs",

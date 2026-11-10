@@ -223,7 +223,7 @@ async fn a_served_version_finding_reads_the_accepted_config_not_the_disk_file() 
         Arc::new(accepted),
         learned(Vec::new()),
         warm(WarmOutcome::Replayed),
-        PriceSnapshot::default(),
+        ServedPrices::Pinned(PriceSnapshot::default()),
     );
     let version_finding = |findings: Vec<Finding>| {
         findings

@@ -35,16 +35,22 @@
 //!
 //! # Validation
 //!
-//! [`parse_and_validate`] and [`from_models_dev`] share one rule set: input
-//! over [`MAX_INPUT_BYTES`] is refused; more than 100000 source model entries
-//! (counted while parsing, priced or not) or 100000 providers, a provider id
-//! empty or over 128 bytes, a model id empty or over 512 bytes, any id byte
-//! outside printable ASCII `0x21..=0x7E`, a duplicate provider, a duplicate
-//! (provider, model) row, an `api_host` that does not normalize to an origin,
-//! a `generated_at` that is not a calendar date, and a table with no priced
-//! model are all malformed. A price that is not finite, is negative or
-//! exceeds 10000 $/Mtok is dropped to `None` (unknown, never zero); a known
-//! `0` is kept.
+//! [`parse_and_validate`] and [`from_models_dev`] share one rule set. The
+//! structure fails closed: input over [`MAX_INPUT_BYTES`], a `schema_version`
+//! other than 1, malformed JSON, more than 100000 source model entries
+//! (counted while parsing, priced or not) or 100000 providers, a duplicate
+//! provider, a duplicate (provider, model) row, a `generated_at` that is not
+//! a calendar date, and a table with no priced model are all refused.
+//!
+//! One row is never worth refusing a table for, so a newer writer's rows
+//! stay readable: a provider or model id that is empty, over its byte bound
+//! (128 for a provider, 512 for a model) or holds a byte outside printable
+//! ASCII `0x21..=0x7E` is skipped and counted (a skipped provider's rows
+//! all count), so its prices stay unknown and the id is never rendered; an
+//! `api_host` that does not normalize to an origin leaves its provider
+//! reachable only through the first-party fallback. A price that is not
+//! finite, is negative or exceeds 10000 $/Mtok is dropped to `None`
+//! (unknown, never zero); a known `0` is kept.
 //!
 //! # No download string is rendered
 //!
@@ -56,12 +62,14 @@
 //!
 //! # Provider selection
 //!
-//! [`PriceTable::price_for`] picks the table provider for a config target:
+//! `PriceTable::price_for` picks the table provider for a config target:
 //!
 //! 1. The normalized origin of the target's egress base URL against each
 //!    provider's `api_host`; a loopback base URL never matches. Several
-//!    providers on one origin are split by the longest common path prefix,
-//!    and a tie is unknown.
+//!    providers on one origin are ranked by the longest common path prefix,
+//!    then by how many path segments they share in any position, then by
+//!    whether the provider lists the exact upstream id; a tie on all three
+//!    is unknown.
 //! 2. With no origin match, a first-party fallback for the kinds with a fixed
 //!    vendor: anthropic-api -> `anthropic`, openai-responses -> `openai`,
 //!    gemini -> `google`, bedrock -> `amazon-bedrock`.
@@ -106,7 +114,6 @@ pub use book::PriceBook;
 pub use effective::{PriceSource, PriceSources, PriceSubject, effective_pricing};
 pub use format::TableDate;
 pub use models_dev::from_models_dev;
-pub(crate) use select::provider_entry_for_target;
 pub use shipped::shipped_table;
 pub use validate::{MAX_INPUT_BYTES, parse_and_validate};
 
@@ -117,6 +124,8 @@ pub struct PriceTable {
     generated_at: TableDate,
     /// Sorted by id; ids are unique.
     providers: Vec<ProviderPrices>,
+    /// Source rows left out because their provider or model id was unusable.
+    skipped_rows: usize,
 }
 
 /// One table provider. Fields stay private to the module: the id and
@@ -126,6 +135,14 @@ struct ProviderPrices {
     id: String,
     api: Option<format::ApiBase>,
     models: BTreeMap<String, PricingConfig>,
+}
+
+/// One table row picked for a target: the prices and the id of the table
+/// provider that holds them.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SelectedRow<'a> {
+    pub(crate) provider: &'a str,
+    pub(crate) prices: PricingConfig,
 }
 
 impl PriceTable {
@@ -144,24 +161,26 @@ impl PriceTable {
         self.providers.iter().map(|p| p.models.len()).sum()
     }
 
+    /// How many source rows validation skipped because their provider or
+    /// model id was empty, over its byte bound or outside printable ASCII.
+    /// Always 0 for a table read back from its own canonical bytes.
+    pub const fn skipped_row_count(&self) -> usize {
+        self.skipped_rows
+    }
+
     /// Prices for `upstream` served through `provider` (a `[providers]` key
     /// or a `[pools]` key) under `config`, selected as the module docs
-    /// describe. `None` when no provider is selected or the selected provider
-    /// has no row for the exact upstream id. A returned field left `None` is
-    /// an unknown price.
-    ///
-    /// A usage row passes the provider entry that served the request, never
-    /// the pool it was routed through: a pool resolves to its first member,
-    /// which may not be the member that answered. A row whose provider entry
-    /// no longer exists in `config` uses [`Self::price_for_target`] with the
-    /// kind and base URL it recorded.
-    pub fn price_for(
+    /// describe, with the id of the table provider that answered. `None`
+    /// when no provider is selected or the selected provider has no row for
+    /// the exact upstream id. A returned field left `None` is an unknown
+    /// price; the provider id is a lookup result and is never rendered.
+    pub(crate) fn price_for(
         &self,
         config: &Config,
         provider: &str,
         upstream: &str,
-    ) -> Option<PricingConfig> {
-        let entry = select::provider_entry_for_target(config, provider)?;
+    ) -> Option<SelectedRow<'_>> {
+        let (_, entry) = config.provider_entry_for_target(provider)?;
         let base_url = entry.classifiable_egress_base_url();
         self.price_for_target(entry.kind_str(), base_url.as_deref(), upstream)
     }
@@ -172,16 +191,17 @@ impl PriceTable {
     /// usage row whose provider entry no longer exists in the config; pass
     /// `None` for `base_url` when none was recorded, which leaves only the
     /// first-party fallback.
-    pub fn price_for_target(
+    pub(crate) fn price_for_target(
         &self,
         kind: &str,
         base_url: Option<&str>,
         upstream: &str,
-    ) -> Option<PricingConfig> {
-        self.select_provider(kind, base_url)?
-            .models
-            .get(upstream)
-            .cloned()
+    ) -> Option<SelectedRow<'_>> {
+        let provider = self.select_provider(kind, base_url, upstream)?;
+        provider.models.get(upstream).map(|prices| SelectedRow {
+            provider: provider.id.as_str(),
+            prices: prices.clone(),
+        })
     }
 
     /// The table serialized in the canonical format: pretty-printed, sorted,
@@ -241,39 +261,18 @@ pub enum PriceTableError {
         /// The row bound.
         limit: usize,
     },
-    /// A provider id is empty or longer than the bound.
-    #[error("price table provider id is empty or longer than {limit} bytes")]
-    ProviderIdLength {
-        /// The byte bound.
-        limit: usize,
-    },
-    /// A model id is empty or longer than the bound.
-    #[error("price table model id is empty or longer than {limit} bytes")]
-    ModelIdLength {
-        /// The byte bound.
-        limit: usize,
-    },
     /// The table lists more providers than the bound allows.
     #[error("price table has more than {limit} providers")]
     TooManyProviders {
         /// The provider bound.
         limit: usize,
     },
-    /// A provider id holds a byte outside printable ASCII `0x21..=0x7E`.
-    #[error("price table provider id holds a byte outside printable ASCII")]
-    ProviderIdCharset,
-    /// A model id holds a byte outside printable ASCII `0x21..=0x7E`.
-    #[error("price table model id holds a byte outside printable ASCII")]
-    ModelIdCharset,
     /// Two providers share an id.
     #[error("price table lists a provider twice")]
     DuplicateProvider,
     /// One provider lists a model id twice.
     #[error("price table lists a (provider, model) row twice")]
     DuplicateModel,
-    /// A provider's `api_host` does not normalize to an http(s) origin.
-    #[error("price table api_host is not a usable http(s) URL")]
-    InvalidApiHost,
     /// No model carries any admitted price.
     #[error("price table has no priced model")]
     NoPricedModels,
@@ -297,6 +296,9 @@ mod bounds_tests;
 #[cfg(test)]
 #[path = "effective_tests.rs"]
 mod effective_tests;
+#[cfg(test)]
+#[path = "isolation_tests.rs"]
+mod isolation_tests;
 #[cfg(test)]
 #[path = "models_dev_tests.rs"]
 mod models_dev_tests;

@@ -184,32 +184,38 @@ impl Config {
             .map_or_else(SeatSelection::default, |pool| pool.seat_selection)
     }
 
-    /// The catalog-selector provider kind for a `[models.X] provider` value,
-    /// or `""` when the value names neither a provider entry nor a pool with a
-    /// resolvable member.
+    /// The `[providers]` entry a `[models.X] provider` value resolves to, with
+    /// its key: the entry itself, or for a pool the first member naming an
+    /// entry. `None` when the value names neither.
     ///
     /// `[models.X] provider` resolves against providers and POOLS in one
     /// namespace, so a bare `config.providers.get(...)` lookup misses for every
-    /// pool-backed model -- and an empty kind matches no price-table row and
+    /// pool-backed model -- and a missed entry matches no price-table row and
     /// no per-kind cache rules, silently blanking that model's pricing. A pool
-    /// therefore answers with a MEMBER's kind: `validate_pools` rejects a pool
-    /// whose members disagree on `kind_str()`, so the first resolvable member
-    /// is representative of the whole pool.
-    ///
-    /// Provider entries are consulted first, which is unambiguous because the
-    /// same validator rejects a name held by both a provider entry and a pool.
+    /// therefore answers with a MEMBER: `validate_pools` rejects a pool whose
+    /// members disagree on `kind_str()`, so the first resolvable member stands
+    /// for the whole pool, and a usage row served through the pool bills under
+    /// that member's key. Provider entries are consulted first, which is
+    /// unambiguous because the same validator rejects a name held by both a
+    /// provider entry and a pool.
+    #[must_use]
+    pub fn provider_entry_for_target(&self, name: &str) -> Option<(&str, &ProviderEntry)> {
+        if let Some((key, entry)) = self.providers.get_key_value(name) {
+            return Some((key.as_str(), entry));
+        }
+        self.pools.get(name)?.members.iter().find_map(|member| {
+            self.providers
+                .get_key_value(member)
+                .map(|(key, entry)| (key.as_str(), entry))
+        })
+    }
+
+    /// The provider kind for a `[models.X] provider` value, read through
+    /// [`Self::provider_entry_for_target`], or `""` when the value names
+    /// neither a provider entry nor a pool with a resolvable member.
     #[must_use]
     pub fn provider_kind_for_target(&self, name: &str) -> &'static str {
-        if let Some(entry) = self.providers.get(name) {
-            return entry.kind_str();
-        }
-        self.pools
-            .get(name)
-            .and_then(|pool| {
-                pool.members
-                    .iter()
-                    .find_map(|member| self.providers.get(member))
-            })
-            .map_or("", ProviderEntry::kind_str)
+        self.provider_entry_for_target(name)
+            .map_or("", |(_, entry)| entry.kind_str())
     }
 }

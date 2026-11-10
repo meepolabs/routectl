@@ -38,30 +38,33 @@ pub(super) const fn check_size(bytes: &[u8]) -> Result<(), PriceTableError> {
 /// Applies every per-row rule to a raw table and builds the sorted,
 /// sanitized form. The row and provider counts are bounded earlier, while
 /// the raw table is deserialized.
+///
+/// Structure fails closed: a bad date, a duplicate provider or (provider,
+/// model) row, and a table with no priced model refuse the whole table. A
+/// single row a newer writer might shape differently does not: a provider
+/// or model id that is empty, over its byte bound or outside printable
+/// ASCII is skipped and counted (its prices stay unknown and the id is never
+/// rendered), and an `api_host` that does not normalize leaves that provider
+/// reachable only through the first-party fallback.
 pub(super) fn validate(raw: RawTable) -> Result<PriceTable, PriceTableError> {
     let generated_at = TableDate::parse(&raw.generated_at).ok_or(PriceTableError::InvalidDate)?;
     let mut seen = BTreeSet::new();
+    let mut skipped_rows = 0usize;
     let mut providers = Vec::with_capacity(raw.providers.len());
     for provider in raw.providers {
-        if !id_within(&provider.id, MAX_PROVIDER_ID_BYTES) {
-            return Err(PriceTableError::ProviderIdLength {
-                limit: MAX_PROVIDER_ID_BYTES,
-            });
-        }
-        if !id_charset_ok(&provider.id) {
-            return Err(PriceTableError::ProviderIdCharset);
+        if !id_usable(&provider.id, MAX_PROVIDER_ID_BYTES) {
+            skipped_rows = skipped_rows.saturating_add(provider.models.len());
+            continue;
         }
         if !seen.insert(provider.id.clone()) {
             return Err(PriceTableError::DuplicateProvider);
         }
-        let api = match provider.api_host {
-            Some(host) => Some(ApiBase::parse(&host).ok_or(PriceTableError::InvalidApiHost)?),
-            None => None,
-        };
+        let (models, skipped) = validate_models(provider.models)?;
+        skipped_rows = skipped_rows.saturating_add(skipped);
         providers.push(ProviderPrices {
             id: provider.id,
-            api,
-            models: validate_models(provider.models)?,
+            api: provider.api_host.as_deref().and_then(ApiBase::parse),
+            models,
         });
     }
     if !providers
@@ -75,21 +78,20 @@ pub(super) fn validate(raw: RawTable) -> Result<PriceTable, PriceTableError> {
     Ok(PriceTable {
         generated_at,
         providers,
+        skipped_rows,
     })
 }
 
+/// The provider's usable rows and how many were skipped for their id.
 fn validate_models(
     models: Vec<RawModel>,
-) -> Result<BTreeMap<String, PricingConfig>, PriceTableError> {
+) -> Result<(BTreeMap<String, PricingConfig>, usize), PriceTableError> {
     let mut out = BTreeMap::new();
+    let mut skipped = 0usize;
     for model in models {
-        if !id_within(&model.id, MAX_MODEL_ID_BYTES) {
-            return Err(PriceTableError::ModelIdLength {
-                limit: MAX_MODEL_ID_BYTES,
-            });
-        }
-        if !id_charset_ok(&model.id) {
-            return Err(PriceTableError::ModelIdCharset);
+        if !id_usable(&model.id, MAX_MODEL_ID_BYTES) {
+            skipped += 1;
+            continue;
         }
         let prices = PricingConfig {
             input_per_mtok: model.input.and_then(admit_price),
@@ -102,7 +104,13 @@ fn validate_models(
             return Err(PriceTableError::DuplicateModel);
         }
     }
-    Ok(out)
+    Ok((out, skipped))
+}
+
+/// Whether `id` can key a lookup: non-empty, within `limit` bytes, and
+/// printable ASCII only.
+fn id_usable(id: &str, limit: usize) -> bool {
+    id_within(id, limit) && id_charset_ok(id)
 }
 
 const fn id_within(id: &str, limit: usize) -> bool {

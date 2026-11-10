@@ -52,7 +52,8 @@ pub fn show_effective(
 fn render_model_facts(cells: &[ModelCell], dates: &PriceTableDates) {
     println!(
         "\nmodel facts (prices: [models.X.pricing] > [registry] > refreshed > shipped; \
-         {}):",
+         {}; fill: model-config or default, `routectl doctor` shows a learned ceiling \
+         lowering it):",
         table_dates_text(dates)
     );
     if cells.is_empty() {

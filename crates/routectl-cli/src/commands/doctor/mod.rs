@@ -67,11 +67,11 @@ use crate::config_folder::LegacyConfigDir;
 use crate::server::reload_failure::ReloadFailureSnapshot;
 use routectl_auth::oauth::types::TokenRecord;
 use routectl_core::ProbeOutcome;
-use routectl_router::prices::{PriceSources, TableDate};
+use routectl_router::prices::PriceSources;
 use routectl_router::{
-    BetaSeedScope, Config, DoctorPanels, DoctorReport, Finding, LearnedRegistryEntry,
-    MatrixReplaySummary, MatrixWarm, PricingConfig, SeedClearMarker, Status, TuningRow,
-    WouldTrimPanel, overall_exit,
+    BetaSeedScope, Config, DoctorPanels, DoctorReport, FillCeiling, Finding, LearnedRegistryEntry,
+    MatrixReplaySummary, MatrixWarm, PriceTableDates, PricingConfig, SeedClearMarker, Status,
+    TuningRow, WouldTrimPanel, overall_exit,
 };
 
 use self::gather::{SecretCheck, gather_context};
@@ -84,7 +84,7 @@ use self::sections::{
 
 pub(crate) use self::gather::gather_context_no_network;
 pub(crate) use self::served::{
-    GatherSources, ParkedSeat, ResidentLearned, SeatFix, ServedInputs, UnusableSeat,
+    GatherSources, ParkedSeat, ResidentLearned, SeatFix, ServedInputs, ServedPrices, UnusableSeat,
     unusable_seat_fix,
 };
 
@@ -452,51 +452,33 @@ enum LegacyFolder {
     },
 }
 
-/// Where one configured model's outbound `max_output_tokens` ceiling comes
-/// from, and what it resolves to.
+/// One configured model's output fill: the `max_tokens` its egress sends when
+/// the caller omits one, and where it comes from.
 ///
-/// Read off the same `[models.X] max_output_tokens` field the factory stamps
-/// and the learned ceiling the field pre-flight clamps to, so the diagnostic
-/// can never name a ceiling the served router would not apply.
+/// Read off the router's effective view (the configured or default fill the
+/// factory stamps) lowered by the learned ceiling resident for the model, so
+/// the diagnostic names the fill the pre-flight would clamp to. The learned
+/// value is the resident ceiling; whether a given request is clamped still
+/// depends on the pre-flight's per-request gates.
 struct KnobRow {
     /// The `[models.<nickname>]` key.
     nickname: String,
     /// The referenced provider's kind token (empty when the provider is
     /// unknown to the config).
     provider_kind: String,
-    /// The upstream model id the ceiling was resolved for.
+    /// The upstream model id the fill was resolved for.
     upstream: String,
-    /// The resolved ceiling and the layer that supplied it.
-    source: OutputCeilingSource,
+    /// The fill and its source; `None` when the egress forwards an omitted
+    /// limit as omitted.
+    fill: Option<FillCeiling>,
+    /// For a `learned` fill, the value it lowers.
+    lowers: Option<u32>,
 }
 
-/// The three states a [`KnobRow`] can report: a learned ceiling below what
-/// the egress would otherwise send, else the model's configured value, else
-/// the egress default.
-#[derive(Debug, PartialEq, Eq)]
-enum OutputCeilingSource {
-    /// `[models.X] max_output_tokens` sets the ceiling.
-    ModelConfig(u32),
-    /// A ceiling learned from an upstream refusal on one of the model's lanes
-    /// lowers what would otherwise be sent.
-    Learned {
-        /// The learned ceiling.
-        ceiling: u32,
-        /// The value it lowers: the configured ceiling, else the egress
-        /// default; `None` on an egress that sends no limit of its own, where
-        /// it lowers only a larger client value.
-        lowers: Option<u32>,
-    },
-    /// No ceiling is configured or learned: `fill` is the baseline the
-    /// egress sends when the caller omits one, `None` for an egress that
-    /// forwards the omission untouched.
-    Default { fill: Option<u32> },
-}
-
-/// One configured model's effective prices, resolved per field through
-/// `routectl_router::prices::effective_pricing`, the same resolution the
-/// usage report prices rows with, so the diagnostic can never claim a source
-/// the bill does not use.
+/// One configured model's effective prices, read off the router's effective
+/// view, which resolves them through `routectl_router::prices::effective_pricing`
+/// the way the usage report prices rows, so the diagnostic can never claim a
+/// source the bill does not use.
 struct PricingRow {
     /// The `[models.<nickname>]` key.
     nickname: String,
@@ -510,19 +492,12 @@ struct PricingRow {
     /// Whether the provider bills by managed subscription rather than per
     /// token. Classified before any price decides anything.
     subscription: bool,
-    /// The effective prices and the source of each field; `None` when no
-    /// source prices any field.
-    resolved: Option<(PricingConfig, PriceSources)>,
+    /// The effective prices; a field left `None` is unknown.
+    pricing: PricingConfig,
+    /// The source of each field of [`Self::pricing`].
+    sources: PriceSources,
     /// The dates of the price tables the resolution read.
-    tables: TableDates,
-}
-
-/// The generation date of each price table layer a pricing row was resolved
-/// against; `None` when that layer is absent.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct TableDates {
-    refreshed: Option<TableDate>,
-    shipped: Option<TableDate>,
+    tables: PriceTableDates,
 }
 
 /// The capability section's input: whether the config parsed. The section

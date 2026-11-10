@@ -7,7 +7,9 @@ use std::time::{Duration, Instant};
 
 use routectl_core::capability::{EvidenceSource, FailurePhase, SignalTier, Verdict};
 use routectl_router::prices::{PriceTable, parse_and_validate};
-use routectl_router::{ModelEntry, PricingConfig, ProviderEntry, RegistryEntry, VerdictValue};
+use routectl_router::{
+    ModelEntry, PricingConfig, ProviderEntry, RegistryEntry, VerdictValue, derive_effective_view,
+};
 use routectl_testkit::ScopedEnv;
 use serde_json::{Value, json};
 
@@ -113,7 +115,8 @@ fn pricing_detail(findings: &[Finding], nickname: &str) -> String {
 
 fn pricing_context(cfg: Config, prices: &PriceSnapshot) -> DoctorContext {
     let mut context = super::tests::ctx(cfg, None, Vec::new(), Vec::new());
-    context.pricing = derive_pricing_rows(&context.config, prices);
+    let view = derive_effective_view(&context.config, prices.refreshed(), prices.shipped());
+    context.pricing = derive_pricing_rows(&context.config, &view);
     context
 }
 
@@ -172,6 +175,55 @@ fn each_pricing_row_names_a_source_per_price_and_the_table_dates() {
 
 /// An absent table layer reads `none` in the dates, and its prices fall to
 /// the next layer.
+/// A pool-backed model prices through its first member's entry, the key a
+/// usage row served through the pool bills under: a `[registry]` row scoped
+/// to that member prices it, one scoped to the pool name does not.
+#[test]
+fn a_pool_model_prices_through_its_first_member_entry() {
+    let rows = [
+        (
+            "registry scoped to the first member",
+            "seat-a",
+            "input $4.50 (registry)",
+        ),
+        (
+            "registry scoped to the pool name",
+            "seats",
+            "input unknown (unknown)",
+        ),
+    ];
+    for (name, scope, expected) in rows {
+        let mut cfg = Config::default();
+        for seat in ["seat-a", "seat-b"] {
+            cfg.providers.insert(
+                seat.to_string(),
+                ProviderEntry::openai_compat("https://pool.invalid/v1", "env://POOL_KEY"),
+            );
+        }
+        cfg.pools.insert(
+            "seats".to_string(),
+            routectl_router::PoolEntry::new(vec!["seat-a".to_string(), "seat-b".to_string()]),
+        );
+        cfg.models
+            .insert("pooled".to_string(), ModelEntry::new("seats", "pool-model"));
+        cfg.registry.insert(
+            "pool-model".to_string(),
+            RegistryEntry {
+                pricing: Some(PricingConfig {
+                    input_per_mtok: Some(4.5),
+                    ..Default::default()
+                }),
+                provider: Some(scope.to_string()),
+            },
+        );
+
+        let findings = section_pricing(&pricing_context(cfg, &PriceSnapshot::default()));
+
+        let detail = pricing_detail(&findings, "pooled");
+        assert!(detail.contains(expected), "{name}: {detail}");
+    }
+}
+
 #[test]
 fn an_absent_refreshed_table_reads_none_and_the_shipped_prices_apply() {
     let shipped = snapshot().shipped();
@@ -368,6 +420,20 @@ fn knob_config() -> Config {
         "vendor".to_string(),
         ProviderEntry::openai_compat("https://example.invalid/v1", "env://VENDOR_KEY"),
     );
+    cfg.providers.insert(
+        "masked".to_string(),
+        ProviderEntry::anthropic_api("env://MASKED_KEY"),
+    );
+    let max_tokens_key = format!("{}{}max_tokens", "fie", "ld:");
+    for spec in ["anth:masked-model", "masked"] {
+        cfg.capability.overrides.insert(
+            spec.to_string(),
+            routectl_router::OverrideEntry {
+                unsupported: Vec::new(),
+                force_supported: vec![max_tokens_key.clone()],
+            },
+        );
+    }
     let models = [
         ("configured", "anth", "up-configured", Some(32_000)),
         (
@@ -387,6 +453,14 @@ fn knob_config() -> Config {
         ("learned-lapsed", "anth", "up-lapsed", None),
         ("default-fills", "anth", "up-default", None),
         ("default-forwards", "vendor", "up-vendor", None),
+        (
+            "configured-forwards",
+            "vendor",
+            "up-vendor-configured",
+            Some(32_000),
+        ),
+        ("masked-model", "anth", "up-masked-model", None),
+        ("masked-provider", "masked", "up-masked-provider", None),
     ];
     for (nickname, provider, upstream, ceiling) in models {
         let entry = ModelEntry::new(provider, upstream);
@@ -399,15 +473,13 @@ fn knob_config() -> Config {
     cfg
 }
 
-/// Each knobs row names the ceiling the model sends and its source:
+/// Each knobs row names the fill the model's egress sends and its source:
 /// `model-config` for the configured value, `learned` where a resident
-/// learned ceiling lowers what would otherwise go out, else `default` with
-/// the egress baseline, or unset on an egress that forwards an omitted limit.
-/// A learned ceiling that would not lower the value, sits below the clamp
-/// floor, or has lapsed does not apply, as at dispatch.
-///
-/// Mutation check: drop the `Learned` arm of `output_ceiling_source` -> red
-/// on both learned rows.
+/// learned ceiling lowers it, else `default` with the egress baseline, or
+/// unset on an egress that forwards an omitted limit, even with a configured
+/// value. A learned ceiling that would not lower the value, sits below the
+/// clamp floor, has lapsed, or is masked by a `force_supported` override on
+/// `max_tokens` (model or provider tier) does not apply, as at dispatch.
 #[test]
 fn each_knobs_row_names_model_config_learned_or_default() {
     // Arrange
@@ -420,6 +492,8 @@ fn each_knobs_row_names_model_config_learned_or_default() {
         learned_ceiling("anth#up-lowers-default", 8_192, now, live),
         learned_ceiling("anth#up-below-floor", 2_048, now, live),
         learned_ceiling("anth#up-lapsed", 8_192, now, lapsed),
+        learned_ceiling("anth#up-masked-model", 8_192, now, live),
+        learned_ceiling("masked#up-masked-provider", 8_192, now, live),
     ];
     let source = CapabilityMatrixSource::Available {
         entries,
@@ -447,10 +521,14 @@ fn each_knobs_row_names_model_config_learned_or_default() {
         ("learned-below-floor", "max_output_tokens 64000 (default)"),
         ("learned-lapsed", "max_output_tokens 64000 (default)"),
         ("default-fills", "max_output_tokens 64000 (default)"),
-        ("default-forwards", "max_output_tokens unset (default)"),
+        ("default-forwards", "max_output_tokens unset --"),
+        ("configured-forwards", "max_output_tokens unset --"),
+        ("masked-model", "max_output_tokens 64000 (default)"),
+        ("masked-provider", "max_output_tokens 64000 (default)"),
     ];
     let mut context = super::tests::ctx(knob_config(), None, Vec::new(), Vec::new());
-    context.knobs = derive_knob_rows(&context.config, &source);
+    let view = derive_effective_view(&context.config, None, None);
+    context.knobs = derive_knob_rows(&context.config, &view, &source);
 
     // Act
     let findings = section_knobs(&context);

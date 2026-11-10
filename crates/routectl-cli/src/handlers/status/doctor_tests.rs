@@ -698,8 +698,8 @@ async fn a_served_gather_reads_the_resident_registry_not_the_ledger() {
         &config_path,
         GatherSources::Served(Box::new(view.served_doctor_inputs(
             warm,
-            &routectl_router::prices::PriceBook::new(std::path::PathBuf::from(
-                "absent-prices.json",
+            std::sync::Arc::new(routectl_router::prices::PriceBook::new(
+                std::path::PathBuf::from("absent-prices.json"),
             )),
         ))),
         &[],

@@ -292,7 +292,8 @@ async fn build(
     now: DateTime<Local>,
 ) -> Panel<QueryResult> {
     let db_path = state.usage_db_path.clone();
-    // ONE pinned config and price-table snapshot for the whole request.
+    // ONE pinned config snapshot for the whole request; its price tables are
+    // pinned once on the blocking worker.
     let pricer = state.pricer();
     // Stamped before the blocking read so a lock wait cannot skew the
     // freshness marker.
@@ -301,7 +302,7 @@ async fn build(
         &state.builder_capacity,
         SCHEMA_VERSION,
         codes::DB_UNAVAILABLE,
-        move || build_panel(&db_path, spec, bucket, &pricer, as_of, now),
+        move || build_panel(&db_path, spec, bucket, &pricer.pin(), as_of, now),
     )
     .await;
     if bucket.is_some() {

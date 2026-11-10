@@ -39,8 +39,8 @@ use crate::config::{
 use crate::override_registry::{OverrideRegistry, OverrideRow};
 use crate::prices::{
     PriceSource, PriceSources, PriceSubject, PriceTable, TableDate, effective_pricing,
-    provider_entry_for_target,
 };
+use crate::router::LearnedFills;
 use crate::seat_pool::seat_state_key;
 
 /// The effective facts a single `[models.X]` entry resolves to, tagged with
@@ -63,9 +63,12 @@ pub struct ModelCell {
     /// operator configured none (the window gate keeps the model and
     /// `/v1/models` omits it).
     pub context_window: Option<u32>,
-    /// The `max_tokens` sent when a client omits one, before any learned
-    /// ceiling lowers it at dispatch. `None` when nothing is configured and
-    /// the model's egress forwards an omitted limit as omitted.
+    /// The `max_tokens` the model's egress sends when a client omits one.
+    /// `None` when the egress forwards an omitted limit as omitted, whatever
+    /// `max_output_tokens` says (that value then only sizes the window-gate
+    /// reserve). A pure derivation has no learned layer, so this is the
+    /// configured or default fill until [`EffectiveView::with_learned_fills`]
+    /// lowers it.
     pub fill: Option<FillCeiling>,
     /// The effective per-million-token prices; a field left `None` is unknown.
     pub pricing: PricingConfig,
@@ -106,12 +109,31 @@ pub struct FillCeiling {
     pub source: FillSource,
 }
 
+impl FillCeiling {
+    /// This fill lowered to `learned` when that ceiling is below it, the rule
+    /// the dispatch clamp applies; unchanged otherwise.
+    #[must_use]
+    pub const fn lowered_by(self, learned: Option<u32>) -> Self {
+        match learned {
+            Some(tokens) if tokens < self.tokens => Self {
+                tokens,
+                source: FillSource::Learned,
+            },
+            _ => self,
+        }
+    }
+}
+
 /// Where a [`FillCeiling`] came from. Each variant renders as one fixed token
-/// through [`Self::as_str`].
+/// through [`Self::as_str`]; this is the one vocabulary every surface that
+/// names a fill source uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FillSource {
     /// `[models.X] max_output_tokens`.
     ModelConfig,
+    /// A ceiling learned from an upstream refusal, below what would
+    /// otherwise be sent.
+    Learned,
     /// The built-in fill of an egress that must send `max_tokens`.
     Default,
 }
@@ -121,6 +143,7 @@ impl FillSource {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::ModelConfig => "model-config",
+            Self::Learned => "learned",
             Self::Default => "default",
         }
     }
@@ -586,9 +609,14 @@ pub fn derive_effective_view(
         .iter()
         .map(|(nickname, entry)| {
             let provider_kind = config.provider_kind_for_target(&entry.provider);
+            // A pool prices through the member entry usage rows bill under,
+            // so a `[registry]` row scoped to that entry applies here too.
+            let billed_provider = config
+                .provider_entry_for_target(&entry.provider)
+                .map_or(entry.provider.as_str(), |(key, _)| key);
             let subject = PriceSubject {
                 model: Some(nickname),
-                provider: &entry.provider,
+                provider: billed_provider,
                 upstream: &entry.upstream,
                 persisted_kind: None,
             };
@@ -666,21 +694,41 @@ pub fn derive_effective_view(
     }
 }
 
-/// The configured `max_output_tokens`, else the built-in default when the
-/// model's egress must send `max_tokens`, else `None`. A pool is read through
-/// its first member, as price selection reads it.
-fn fill_ceiling(config: &Config, entry: &ModelEntry) -> Option<FillCeiling> {
-    if let Some(tokens) = entry.max_output_tokens.filter(|tokens| *tokens > 0) {
-        return Some(FillCeiling {
+/// The `max_tokens` a model's egress sends when the client omits one: none
+/// when the egress forwards an omitted limit as omitted, else the configured
+/// `max_output_tokens`, else the built-in default. A pool is read through
+/// its first member. A learned ceiling is not applied here; see
+/// [`FillCeiling::lowered_by`].
+#[must_use]
+pub fn fill_ceiling(config: &Config, entry: &ModelEntry) -> Option<FillCeiling> {
+    let (_, provider) = config.provider_entry_for_target(&entry.provider)?;
+    if !routectl_providers::anthropic_api::egress_fills_max_tokens(provider.egress_kind()) {
+        return None;
+    }
+    Some(entry.max_output_tokens.filter(|tokens| *tokens > 0).map_or(
+        FillCeiling {
+            tokens: routectl_providers::anthropic_api::DEFAULT_MAX_OUTPUT_TOKENS,
+            source: FillSource::Default,
+        },
+        |tokens| FillCeiling {
             tokens,
             source: FillSource::ModelConfig,
-        });
+        },
+    ))
+}
+
+impl EffectiveView {
+    /// This view with each model's fill lowered by the learned ceiling
+    /// `learned` holds for it, for a surface that reads a learned layer.
+    #[must_use]
+    pub fn with_learned_fills(mut self, learned: &LearnedFills) -> Self {
+        for cell in &mut self.models {
+            cell.fill = cell
+                .fill
+                .map(|fill| fill.lowered_by(learned.for_model(&cell.nickname)));
+        }
+        self
     }
-    let egress = provider_entry_for_target(config, &entry.provider)?.egress_kind();
-    routectl_providers::anthropic_api::egress_fills_max_tokens(egress).then_some(FillCeiling {
-        tokens: routectl_providers::anthropic_api::DEFAULT_MAX_OUTPUT_TOKENS,
-        source: FillSource::Default,
-    })
 }
 
 #[cfg(test)]

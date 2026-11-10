@@ -160,7 +160,7 @@ fn a_real_models_dev_slice_converts_and_selects_as_designed() {
     let price = |kind: &str, base: Option<&str>, model: &str| {
         converted
             .price_for_target(kind, base, model)
-            .and_then(|p| p.input_per_mtok)
+            .and_then(|row| row.prices.input_per_mtok)
     };
     assert_eq!(
         price(
@@ -191,7 +191,7 @@ fn a_real_models_dev_slice_converts_and_selects_as_designed() {
     assert_eq!(
         converted
             .price_for_target("anthropic-api", None, "claude-sonnet-4-6")
-            .and_then(|p| p.cache_write_5m_per_mtok),
+            .and_then(|row| row.prices.cache_write_5m_per_mtok),
         Some(3.75)
     );
     assert_eq!(

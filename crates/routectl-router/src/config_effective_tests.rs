@@ -917,8 +917,9 @@ fn a_pool_rpm_limit_leaves_member_provider_cells_unset_and_shows_on_their_tuning
 }
 
 /// One config with a model per fill and window shape: a configured fill and
-/// window, an Anthropic-shape egress with neither, a pass-through egress with
-/// neither, and an Anthropic-shape pool.
+/// window on a pass-through egress, a configured fill on an Anthropic-shape
+/// egress, an Anthropic-shape egress with neither, a pass-through egress
+/// with neither, and an Anthropic-shape pool.
 fn facts_config() -> Config {
     toml::from_str(
         r#"
@@ -950,6 +951,11 @@ max_output_tokens = 12000
 provider = "anthropic"
 upstream = "claude-opus-4-8"
 
+[models.opus-capped]
+provider = "anthropic"
+upstream = "claude-opus-4-8"
+max_output_tokens = 16000
+
 [models.plain]
 provider = "compat"
 upstream = "glm-5"
@@ -977,12 +983,17 @@ fn model_window_and_fill_carry_their_source() {
         tokens: routectl_providers::anthropic_api::DEFAULT_MAX_OUTPUT_TOKENS,
         source: FillSource::Default,
     });
-    let rows: [(&str, Option<u32>, Option<FillCeiling>); 4] = [
+    let rows: [(&str, Option<u32>, Option<FillCeiling>); 5] = [
         (
-            "configured",
+            "configured on an egress that never fills",
             Some(200_000),
+            None,
+        ),
+        (
+            "opus-capped",
+            None,
             Some(FillCeiling {
-                tokens: 12_000,
+                tokens: 16_000,
                 source: FillSource::ModelConfig,
             }),
         ),
@@ -990,7 +1001,8 @@ fn model_window_and_fill_carry_their_source() {
         ("plain", None, None),
         ("pooled", None, default_fill),
     ];
-    for (nickname, window, fill) in rows {
+    for (name, window, fill) in rows {
+        let nickname = name.split(' ').next().unwrap_or(name);
         let cell = model(&view, nickname);
         assert_eq!(cell.context_window, window, "{nickname} window");
         assert_eq!(cell.fill, fill, "{nickname} fill");
@@ -1000,7 +1012,34 @@ fn model_window_and_fill_carry_their_source() {
 #[test]
 fn fill_source_tokens_are_fixed() {
     assert_eq!(FillSource::ModelConfig.as_str(), "model-config");
+    assert_eq!(FillSource::Learned.as_str(), "learned");
     assert_eq!(FillSource::Default.as_str(), "default");
+}
+
+/// A learned ceiling lowers a fill only when it is below it; the source then
+/// reads `learned`. A model whose egress has no fill stays unfilled.
+#[test]
+fn a_learned_ceiling_lowers_a_fill_only_when_below_it() {
+    let base = FillCeiling {
+        tokens: 16_000,
+        source: FillSource::ModelConfig,
+    };
+    let rows = [
+        ("no learned ceiling", None, base),
+        ("learned above", Some(20_000), base),
+        ("learned equal", Some(16_000), base),
+        (
+            "learned below",
+            Some(8_192),
+            FillCeiling {
+                tokens: 8_192,
+                source: FillSource::Learned,
+            },
+        ),
+    ];
+    for (name, learned, expected) in rows {
+        assert_eq!(base.lowered_by(learned), expected, "{name}");
+    }
 }
 
 fn dated_table(date: &str, input: f64) -> PriceTable {
@@ -1063,6 +1102,39 @@ fn model_prices_carry_each_field_source_and_the_view_carries_table_dates() {
         PriceSource::Unknown,
     ] {
         assert_eq!(view.price_tables.date_for(source), None, "{source:?}");
+    }
+}
+
+/// A pool-backed model prices through its first member's entry name, the
+/// key a usage row served through the pool bills under, so a `[registry]`
+/// row scoped to that member applies; one scoped to the pool name does not
+/// match a billed row and does not apply here either.
+#[test]
+fn a_pool_model_prices_through_its_first_member_entry() {
+    let rows = [
+        ("registry scoped to the first member", "seat-a", Some(7.0)),
+        ("registry scoped to the pool name", "seats", None),
+    ];
+    for (name, scope, expected) in rows {
+        let mut config = facts_config();
+        config.registry.insert(
+            "claude-opus-4-8".to_string(),
+            crate::config::RegistryEntry {
+                pricing: Some(PricingConfig {
+                    input_per_mtok: Some(7.0),
+                    ..PricingConfig::default()
+                }),
+                provider: Some(scope.to_string()),
+            },
+        );
+
+        let view = derive_effective_view(&config, None, None);
+
+        assert_eq!(
+            model(&view, "pooled").pricing.input_per_mtok,
+            expected,
+            "{name}"
+        );
     }
 }
 

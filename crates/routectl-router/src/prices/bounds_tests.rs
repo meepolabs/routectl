@@ -1,5 +1,6 @@
-//! Bounds enforced while a table is parsed: the id byte set, the row and
-//! provider counts on both input formats, and the schema version probe.
+//! Bounds enforced while a table is parsed: the id byte set (a row skipped,
+//! the table kept), the row and provider counts on both input formats, and
+//! the schema version probe.
 
 use std::fmt::Write as _;
 
@@ -30,33 +31,70 @@ const REFUSED_IDS: &[(&str, &str)] = &[
     ("latin letter with accent", "caf\u{E9}"),
 ];
 
+/// A table holding `anchor` (a priced provider every row keeps) plus
+/// `extra`, so a skipped row leaves a table that still parses.
+fn with_anchor(extra: Value) -> Value {
+    table(json!([
+        { "id": "anchor", "models": [priced_model("kept")] },
+        extra,
+    ]))
+}
+
+/// Whether the anchor provider's row survived validation.
+fn kept(t: &PriceTable) -> bool {
+    t.provider("anchor")
+        .is_some_and(|p| p.models.contains_key("kept"))
+}
+
 #[test]
-fn provider_ids_outside_printable_ascii_are_refused() {
+fn a_provider_id_outside_printable_ascii_skips_its_rows_and_keeps_the_table() {
     for (name, id) in ACCEPTED_IDS {
-        let doc = table(json!([{ "id": id, "models": [priced_model("m")] }]));
-        assert!(parse_and_validate(&bytes(&doc)).is_ok(), "{name}");
+        let doc = with_anchor(json!({ "id": id, "models": [priced_model("m")] }));
+        let t = parse_and_validate(&bytes(&doc)).expect(name);
+        assert_eq!(
+            (t.provider_count(), t.skipped_row_count()),
+            (2, 0),
+            "{name}"
+        );
     }
     for (name, id) in REFUSED_IDS {
-        let doc = table(json!([{ "id": id, "models": [priced_model("m")] }]));
-        assert_eq!(
-            parse_and_validate(&bytes(&doc)).err(),
-            Some(PriceTableError::ProviderIdCharset),
-            "{name}"
+        let doc =
+            with_anchor(json!({ "id": id, "models": [priced_model("m"), priced_model("n")] }));
+        let t = parse_and_validate(&bytes(&doc)).expect(name);
+        assert!(kept(&t), "{name}: the anchor row stays");
+        assert_eq!(t.provider_count(), 1, "{name}: the provider is left out");
+        assert_eq!(t.skipped_row_count(), 2, "{name}: both its rows count");
+    }
+}
+
+#[test]
+fn a_model_id_outside_printable_ascii_skips_the_row_and_keeps_the_table() {
+    for (name, id) in ACCEPTED_IDS {
+        let doc = one_provider(json!([priced_model(id)]));
+        let t = parse_and_validate(&bytes(&doc)).expect(name);
+        assert_eq!((t.model_count(), t.skipped_row_count()), (1, 0), "{name}");
+    }
+    for (name, id) in REFUSED_IDS {
+        let doc = one_provider(json!([priced_model("anchor"), priced_model(id)]));
+        let t = parse_and_validate(&bytes(&doc)).expect(name);
+        assert_eq!(t.model_count(), 1, "{name}: only the anchor row stays");
+        assert_eq!(t.skipped_row_count(), 1, "{name}");
+        assert!(
+            !String::from_utf8(t.to_canonical_json().expect("serializes"))
+                .expect("utf8")
+                .contains(id),
+            "{name}: the skipped id is not written back"
         );
     }
 }
 
 #[test]
-fn model_ids_outside_printable_ascii_are_refused() {
-    for (name, id) in ACCEPTED_IDS {
-        let doc = one_provider(json!([priced_model(id)]));
-        assert!(parse_and_validate(&bytes(&doc)).is_ok(), "{name}");
-    }
+fn a_table_whose_only_priced_row_is_skipped_has_no_priced_model() {
     for (name, id) in REFUSED_IDS {
-        let doc = one_provider(json!([priced_model("anchor"), priced_model(id)]));
+        let doc = one_provider(json!([priced_model(id)]));
         assert_eq!(
             parse_and_validate(&bytes(&doc)).err(),
-            Some(PriceTableError::ModelIdCharset),
+            Some(PriceTableError::NoPricedModels),
             "{name}"
         );
     }
@@ -67,36 +105,24 @@ fn models_dev_ids_obey_the_same_byte_set() {
     let cost = json!({ "cost": { "input": 1 } });
     for (name, id) in ACCEPTED_IDS {
         let source = json!({ *id: { "models": { *id: cost.clone() } } });
-        let bytes = serde_json::to_vec(&source).expect("json");
-        assert!(from_models_dev(&bytes, date()).is_ok(), "{name}");
+        let t = from_models_dev(&serde_json::to_vec(&source).expect("json"), date()).expect(name);
+        assert_eq!(t.skipped_row_count(), 0, "{name}");
     }
     for (name, id) in REFUSED_IDS {
-        let provider = json!({ *id: { "models": { "m": cost.clone() } } });
-        let model = json!({ "p": { "models": { "m": cost.clone(), *id: cost.clone() } } });
-        let refused = |source: &Value| {
-            from_models_dev(&serde_json::to_vec(source).expect("json"), date()).err()
+        let provider = json!({
+            "anchor": { "models": { "kept": cost.clone() } },
+            *id: { "models": { "m": cost.clone() } },
+        });
+        let model = json!({ "anchor": { "models": { "kept": cost.clone(), *id: cost.clone() } } });
+        let convert = |source: &Value| {
+            from_models_dev(&serde_json::to_vec(source).expect("json"), date()).expect(name)
         };
-        assert_eq!(
-            refused(&provider),
-            Some(PriceTableError::ProviderIdCharset),
-            "provider {name}"
-        );
-        assert_eq!(
-            refused(&model),
-            Some(PriceTableError::ModelIdCharset),
-            "model {name}"
-        );
-    }
-}
-
-#[test]
-fn charset_errors_carry_no_input_text() {
-    for err in [
-        PriceTableError::ProviderIdCharset,
-        PriceTableError::ModelIdCharset,
-    ] {
-        let text = format!("{err} {err:?}");
-        assert!(text.is_ascii() && !text.contains("glm"), "{text}");
+        for (what, source) in [("provider", &provider), ("model", &model)] {
+            let t = convert(source);
+            assert!(kept(&t), "{what} {name}: the anchor row stays");
+            assert_eq!(t.model_count(), 1, "{what} {name}");
+            assert_eq!(t.skipped_row_count(), 1, "{what} {name}");
+        }
     }
 }
 

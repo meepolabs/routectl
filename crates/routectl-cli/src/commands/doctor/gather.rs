@@ -9,12 +9,11 @@ use routectl_auth::oauth::types::{TokenRecord, seat_key, unix_now};
 use routectl_auth::{OAuthError, OAuthStore};
 use routectl_auth::{SecretRef, SecretScheme, default_secret_dir};
 use routectl_core::ProbeOutcome;
-use routectl_router::prices::{PriceSubject, effective_pricing};
 use routectl_router::{
-    BetaSeedScope, CapabilityEventRow, CapabilityRebuildSummary, Config, FROZEN_CATALOG_VERSION,
-    FROZEN_OVERLAY_REVISION, LearnedCapabilityRegistry, LearnedLaneProjection, MatrixReplaySummary,
-    ProviderEntry, ReplayTombstone, StateKey, TuningRow, derive_effective_view,
-    learned_output_ceiling, rebuild_capabilities_with_values,
+    BetaSeedScope, CapabilityEventRow, CapabilityRebuildSummary, Config, EffectiveView,
+    FROZEN_CATALOG_VERSION, FROZEN_OVERLAY_REVISION, FillSource, LearnedCapabilityRegistry,
+    LearnedFills, LearnedLaneProjection, MatrixReplaySummary, ProviderEntry, ReplayTombstone,
+    StateKey, derive_effective_view, rebuild_capabilities_with_values,
 };
 
 use crate::commands::doctor_panels::compute_would_trim_panel;
@@ -30,8 +29,7 @@ use crate::server::ledger_reader::{
 use super::served::{GatherSources, GatheredLayers, served_layers};
 use super::{
     CapabilityInputs, CapabilityMatrixSource, DoctorContext, KnobRow, LEFTOVER_CATALOG_FILES,
-    LEGACY_FOLDER_NAME_CAP, LegacyFolder, MatrixOrigin, OutputCeilingSource, PricingRow,
-    TableDates,
+    LEGACY_FOLDER_NAME_CAP, LegacyFolder, MatrixOrigin, PricingRow,
 };
 
 /// The network doctor gather: the no-network context PLUS one upstream
@@ -92,9 +90,10 @@ pub async fn gather_context_no_network(
         prices,
     } = layers;
 
-    let pricing = derive_pricing_rows(&config, &prices);
-    let knobs = derive_knob_rows(&config, &capability_matrix);
-    let tuning = derive_tuning_rows(&config);
+    let view = derive_effective_view(&config, prices.refreshed(), prices.shipped());
+    let pricing = derive_pricing_rows(&config, &view);
+    let knobs = derive_knob_rows(&config, &view, &capability_matrix);
+    let tuning = view.tuning;
     let capability = CapabilityInputs {
         panel_unavailable: config_parse_error,
     };
@@ -247,122 +246,66 @@ pub(super) fn disk_layers(config_path: &Path) -> GatheredLayers {
     }
 }
 
-/// One knob row per `[models.X]` entry, naming where its outbound
-/// `max_output_tokens` ceiling comes from: a learned ceiling that lowers what
-/// would otherwise be sent, else the entry's own value, else the egress
-/// default. The configured value is the field the factory stamps; the learned
-/// one is read off `learned`, the same learned layer the capability matrix
-/// shows, never a second read of the store.
-pub(super) fn derive_knob_rows(config: &Config, learned: &CapabilityMatrixSource) -> Vec<KnobRow> {
-    let lanes = LearnedLaneProjection::from_config(config);
-    config
-        .models
+/// One knob row per `[models.X]` entry, naming the `max_tokens` its egress
+/// sends when the caller omits one: the view's configured or default fill,
+/// lowered by the learned ceiling resident for the model. The learned layer
+/// is `learned`, the same one the capability matrix shows, never a second
+/// read of the store.
+pub(super) fn derive_knob_rows(
+    config: &Config,
+    view: &EffectiveView,
+    learned: &CapabilityMatrixSource,
+) -> Vec<KnobRow> {
+    let learned = learned_fills(config, learned);
+    view.models
         .iter()
-        .map(|(nickname, entry)| KnobRow {
-            nickname: nickname.clone(),
-            provider_kind: config.provider_kind_for_target(&entry.provider).to_string(),
-            upstream: entry.upstream.clone(),
-            source: output_ceiling_source(
-                entry.max_output_tokens,
-                egress_fills(config, &entry.provider),
-                model_learned_ceiling(&lanes, nickname, learned),
-            ),
+        .map(|cell| {
+            let fill = cell
+                .fill
+                .map(|fill| fill.lowered_by(learned.for_model(&cell.nickname)));
+            let lowers = cell
+                .fill
+                .filter(|_| fill.is_some_and(|f| f.source == FillSource::Learned))
+                .map(|base| base.tokens);
+            KnobRow {
+                nickname: cell.nickname.clone(),
+                provider_kind: cell.provider_kind.clone(),
+                upstream: cell.upstream.clone(),
+                fill,
+                lowers,
+            }
         })
         .collect()
 }
 
-/// The ceiling one model sends and where it comes from. A learned ceiling
-/// wins only where it lowers the value that would otherwise go out, the rule
-/// the dispatch clamp applies.
-pub(super) fn output_ceiling_source(
-    configured: Option<u32>,
-    egress_fills: bool,
-    learned: Option<u32>,
-) -> OutputCeilingSource {
-    let fill = egress_fills.then_some(routectl_providers::anthropic_api::DEFAULT_MAX_OUTPUT_TOKENS);
-    let base = configured.or(fill);
-    match learned {
-        Some(ceiling) if base.is_none_or(|base| ceiling < base) => OutputCeilingSource::Learned {
-            ceiling,
-            lowers: base,
-        },
-        _ => configured.map_or(
-            OutputCeilingSource::Default { fill },
-            OutputCeilingSource::ModelConfig,
-        ),
-    }
-}
-
-/// Whether the egress of the `[providers]` entry or `[pools]` key `target`
-/// (a pool through its first member naming an entry) fills an omitted
-/// `max_tokens`.
-fn egress_fills(config: &Config, target: &str) -> bool {
-    config
-        .providers
-        .get(target)
-        .or_else(|| {
-            config
-                .pools
-                .get(target)?
-                .members
-                .iter()
-                .find_map(|member| config.providers.get(member))
-        })
-        .is_some_and(|entry| {
-            routectl_providers::anthropic_api::egress_fills_max_tokens(entry.egress_kind())
-        })
-}
-
-/// The lowest learned output ceiling across the lanes `nickname` dispatches
-/// to, from the resident entries of `learned`.
-fn model_learned_ceiling(
-    lanes: &LearnedLaneProjection,
-    nickname: &str,
-    learned: &CapabilityMatrixSource,
-) -> Option<u32> {
+/// The learned ceilings resident in `learned` for the models of `config`.
+fn learned_fills(config: &Config, learned: &CapabilityMatrixSource) -> LearnedFills {
     let CapabilityMatrixSource::Available { entries, now, .. } = learned else {
-        return None;
+        return LearnedFills::default();
     };
-    lanes
-        .lanes()
-        .iter()
-        .filter(|lane| lane.nicknames.iter().any(|n| n == nickname))
-        .filter_map(|lane| learned_output_ceiling(entries, lane.lane.as_lane_key(), *now))
-        .min()
+    let lanes = LearnedLaneProjection::from_config(config);
+    LearnedFills::resolve(config, &lanes, entries, *now)
 }
 
-/// One pricing row per `[models.X]` entry, each price resolved field by field
-/// through `effective_pricing` against `prices`, the tables the usage report
-/// reads.
+/// One pricing row per model cell of `view`, whose prices resolve through
+/// `effective_pricing` against the tables the usage report reads.
 ///
 /// A managed-OAuth provider is classified as a subscription BEFORE any price
 /// decides anything, matching the order the usage report classifies a row in:
 /// a subscription is billed by seat, so its resolved prices are only the
 /// basis of its API-equivalent value, never its bill.
-pub(super) fn derive_pricing_rows(config: &Config, prices: &PriceSnapshot) -> Vec<PricingRow> {
-    let tables = TableDates {
-        refreshed: prices.refreshed().map(|table| table.generated_at()),
-        shipped: prices.shipped().map(|table| table.generated_at()),
-    };
-    config
-        .models
+pub(super) fn derive_pricing_rows(config: &Config, view: &EffectiveView) -> Vec<PricingRow> {
+    view.models
         .iter()
-        .map(|(nickname, entry)| {
-            let subject = PriceSubject {
-                model: Some(nickname),
-                provider: &entry.provider,
-                upstream: &entry.upstream,
-                persisted_kind: None,
-            };
-            PricingRow {
-                nickname: nickname.clone(),
-                provider: entry.provider.clone(),
-                provider_kind: config.provider_kind_for_target(&entry.provider).to_string(),
-                upstream: entry.upstream.clone(),
-                subscription: is_subscription(config, &entry.provider),
-                resolved: effective_pricing(config, &subject, prices.refreshed(), prices.shipped()),
-                tables,
-            }
+        .map(|cell| PricingRow {
+            nickname: cell.nickname.clone(),
+            provider: cell.provider.clone(),
+            provider_kind: cell.provider_kind.clone(),
+            upstream: cell.upstream.clone(),
+            subscription: is_subscription(config, &cell.provider),
+            pricing: cell.pricing.clone(),
+            sources: cell.price_sources,
+            tables: view.price_tables,
         })
         .collect()
 }
@@ -479,12 +422,6 @@ pub(super) const fn replay_summary(
         skipped_unknown: summary.skipped_unknown,
         skipped_namespace: summary.skipped_namespace,
     }
-}
-
-/// The resolved tuning table, through the same [`derive_effective_view`] path
-/// `config show --effective` renders.
-pub(super) fn derive_tuning_rows(config: &Config) -> Vec<TuningRow> {
-    derive_effective_view(config, None, None).tuning
 }
 
 /// Probe every configured provider read-only through the shared `probe_all`

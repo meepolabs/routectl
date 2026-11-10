@@ -1,10 +1,11 @@
 //! Provider selection: which table provider prices a config target.
 
+use std::collections::BTreeSet;
+
 use routectl_core::provider_kind::config as kind;
 
 use super::format::ApiBase;
 use super::{PriceTable, ProviderPrices};
-use crate::config::{Config, ProviderEntry};
 use crate::field_verdict::loopback_target_suppresses_minting;
 
 /// The table provider a kind falls back to when no `api_host` matches: the
@@ -24,15 +25,16 @@ pub(super) enum HostMatch<'a> {
 }
 
 impl PriceTable {
-    /// The table provider for a target of `kind` egressing to `base_url`, or
-    /// `None` when selection is unknown.
+    /// The table provider for a target of `kind` egressing to `base_url`,
+    /// looked up for `upstream`, or `None` when selection is unknown.
     pub(super) fn select_provider(
         &self,
         kind: &str,
         base_url: Option<&str>,
+        upstream: &str,
     ) -> Option<&ProviderPrices> {
         if let Some(target) = base_url.and_then(remote_base) {
-            match self.match_host(&target) {
+            match self.match_host(&target, upstream) {
                 HostMatch::One(provider) => return Some(provider),
                 HostMatch::Ambiguous => return None,
                 HostMatch::None => {}
@@ -44,19 +46,27 @@ impl PriceTable {
             .and_then(|(_, id)| self.provider(id))
     }
 
-    pub(super) fn match_host(&self, target: &ApiBase) -> HostMatch<'_> {
-        let mut best: Option<(usize, &ProviderPrices)> = None;
+    /// The same-origin provider that best fits `target`, ranked by the
+    /// longest common path prefix, then the count of path segments both
+    /// share in any position, then whether it lists `upstream`. Ambiguous
+    /// only when the best candidates tie on all three.
+    pub(super) fn match_host(&self, target: &ApiBase, upstream: &str) -> HostMatch<'_> {
+        let mut best: Option<(PathFit, &ProviderPrices)> = None;
         let mut tied = false;
         for provider in &self.providers {
             let Some(api) = provider.api.as_ref().filter(|a| a.origin == target.origin) else {
                 continue;
             };
-            let shared = common_prefix(&api.segments, &target.segments);
+            let fit = PathFit {
+                prefix: common_prefix(&api.segments, &target.segments),
+                shared: shared_segments(&api.segments, &target.segments),
+                lists_upstream: provider.models.contains_key(upstream),
+            };
             match best {
-                Some((len, _)) if shared < len => {}
-                Some((len, _)) if shared == len => tied = true,
+                Some((top, _)) if fit < top => {}
+                Some((top, _)) if fit == top => tied = true,
                 _ => {
-                    best = Some((shared, provider));
+                    best = Some((fit, provider));
                     tied = false;
                 }
             }
@@ -67,6 +77,15 @@ impl PriceTable {
             None => HostMatch::None,
         }
     }
+}
+
+/// How closely one same-origin provider's API path fits a target's, ordered
+/// field by field.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct PathFit {
+    prefix: usize,
+    shared: usize,
+    lists_upstream: bool,
 }
 
 /// The comparable form of a target base URL; `None` for a loopback or local
@@ -83,16 +102,9 @@ fn common_prefix(a: &[String], b: &[String]) -> usize {
     a.iter().zip(b).take_while(|(x, y)| x == y).count()
 }
 
-/// The provider entry a `[providers]` or `[pools]` key resolves to: the entry
-/// itself, or a pool's first member naming an entry (the member
-/// `Config::provider_kind_for_target` reads).
-pub fn provider_entry_for_target<'a>(config: &'a Config, name: &str) -> Option<&'a ProviderEntry> {
-    config.providers.get(name).or_else(|| {
-        config
-            .pools
-            .get(name)?
-            .members
-            .iter()
-            .find_map(|member| config.providers.get(member))
-    })
+/// How many distinct segments of `target` also appear anywhere in `api`.
+fn shared_segments(api: &[String], target: &[String]) -> usize {
+    let api: BTreeSet<&str> = api.iter().map(String::as_str).collect();
+    let target: BTreeSet<&str> = target.iter().map(String::as_str).collect();
+    api.intersection(&target).count()
 }

@@ -14,6 +14,8 @@ use routectl_core::{EligibilityReason, UpstreamReason};
 use routectl_router::runtime_state::UnusableCause;
 use routectl_router::{Config, Finding, LearnedRegistryEntry, MatrixWarm, SeedClearMarker, Status};
 
+use routectl_router::prices::PriceBook;
+
 use crate::commands::pricing::PriceSnapshot;
 use crate::commands::seat_report::safe;
 use crate::server::capability_rebuild::{WarmOutcome, WarmReport};
@@ -39,10 +41,30 @@ pub struct ServedInputs {
     config: Arc<Config>,
     learned: ResidentLearned,
     warm: WarmReport,
-    prices: PriceSnapshot,
+    prices: ServedPrices,
     reload_failure: Option<ReloadFailureSnapshot>,
     parked_seats: Vec<ParkedSeat>,
     unusable_seats: Vec<UnusableSeat>,
+}
+
+/// The price tables a served gather prices against.
+pub enum ServedPrices {
+    /// The daemon's price book, read once when the gather runs, on the
+    /// gather's blocking worker.
+    Book(Arc<PriceBook>),
+    /// Tables already pinned.
+    #[cfg(test)]
+    Pinned(PriceSnapshot),
+}
+
+impl ServedPrices {
+    fn pin(self) -> PriceSnapshot {
+        match self {
+            Self::Book(book) => PriceSnapshot::pin(&book),
+            #[cfg(test)]
+            Self::Pinned(snapshot) => snapshot,
+        }
+    }
 }
 
 /// One dispatch seat whose credential the running daemon has parked: the
@@ -205,12 +227,13 @@ pub struct ResidentLearned {
 }
 
 impl ServedInputs {
-    /// `prices` are the tables the daemon's own cost reads use, pinned once.
+    /// `prices` are the tables the daemon's own cost reads use, pinned once
+    /// by the gather.
     pub const fn new(
         config: Arc<Config>,
         learned: ResidentLearned,
         warm: WarmReport,
-        prices: PriceSnapshot,
+        prices: ServedPrices,
     ) -> Self {
         Self {
             config,
@@ -347,7 +370,7 @@ pub(super) fn served_layers(inputs: Box<ServedInputs>) -> GatheredLayers {
         reload_failure,
         parked_seats,
         unusable_seats,
-        prices,
+        prices: prices.pin(),
     }
 }
 
