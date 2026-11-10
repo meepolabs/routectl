@@ -278,7 +278,7 @@ license.
 - `src/capability.rs` -- shared capability-key vocabulary (`WEB_SEARCH`,
   `COMPUTER_USE`, `STRUCTURED_OUTPUT`, `PROMPT_CACHING`, `THINKING`,
   `REASONING_REPLAY`, `FORCED_TOOL_CHOICE`, `WELL_KNOWN_CAPABILITY_KEYS`) so the router's `feature_keys.rs` pre-filter
-  and the catalog's capability priors key off identical strings; open-ended,
+  and the learned-capability registry key off identical strings; open-ended,
   documents only the well-known subset. Also the versioned, internal
   evidence-class tokens
   written verbatim to the capability ledger and read back open-set-tolerant on
@@ -297,7 +297,8 @@ license.
   versioned, internal `as_str` token and an open-set-tolerant parse that never panics on an
   unknown token: `FailurePhase` (`"f1"`/`"f2"`/`"f3"`, `parse` -> `Option`),
   `EvidenceSource` (`"live"`/`"probe"`, `parse` -> `Option`), and `Verdict`
-  (`Assumed(bool)`->`"assumed"`, `VerifiedWorking`->`"verified"`,
+  (`Assumed(bool)`->`"assumed"`, minted by nothing and kept so older ledger
+  rows read back, `VerifiedWorking`->`"verified"`,
   `LearnedBroken(FailurePhase)`->`"broken"`, `SuspectIgnored`->`"suspect"`,
   `Cleared`->`"cleared"` (a probe-settled negative removed on warm rebuild),
   `Unknown`->`"unknown"`; `broken_phase` exposes the phase of a learned
@@ -602,7 +603,7 @@ license.
   echoes upstream bytes), and `warn_body_cap` (one-WARN emitter with a fixed,
   drift-proof field set). Module docs carry the workspace-wide per-lane
   redirect-policy table (every client pins `Policy::none()`, including the
-  `routectl-cli` catalog-import fetch client), plus
+  `routectl-cli` `prices refresh` fetch client), plus
   `redirect_not_followed_error` / `REDIRECT_NOT_FOLLOWED_MESSAGE`, the shared
   3xx -> upstream-502 mapping every lane's status gate calls before its
   success path; `in_band_error_status` / `IN_BAND_ERROR_DEFAULT_STATUS`
@@ -1665,7 +1666,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   immutability invariant); growth types are `#[non_exhaustive]`. The
   bare-vs-seat-labeled `oauth://<id>` parse is factored into
   `oauth_id_from_api_key_ref` (crate-public), shared with
-  `router/chain.rs`'s `first_target_oauth_id`
+  `router/chain.rs`'s discovery-time `context_window_for`
 - `src/alloc_probe.rs` -- TEST-ONLY (`#[cfg(test)]`) `#[global_allocator]`
   installed by `lib.rs`: `ProbeAllocator` forwards to `System` and tallies
   allocations in THREAD-LOCAL cells, so `count_allocs(f) -> (T, u64)` can
@@ -1721,12 +1722,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   plus `Config::seat_selection_for(name)` -- the
   ONE resolution of a dispatch target's in-force strategy (a pool's own, else
   its claiming pool's, else the `fill-first` default for a standalone provider)
-  -- and `Config::provider_kind_for_target(name)` -- the ONE
-  provider-or-pool-aware kind resolution for a `[models.X] provider` value
-  (provider entry's own `kind_str`, else a member's; `validate_pools` rejects a
-  mixed-kind pool, so the first resolvable member is representative), used by
-  every catalog-selector read so a pool-backed model does not resolve an empty
-  kind and miss its catalog cell
+  -- and `Config::provider_entry_for_target(name)` /
+  `provider_kind_for_target(name)` -- the ONE provider-or-pool-aware
+  resolution of a `[models.X] provider` value to its `[providers]` entry (or a
+  pool's first resolvable member) and its kind, read by the price-table and
+  model-facts paths
 - `src/config/tuning.rs` -- the ONE precedence for the tiered tuning keys
   (`circuit_failures`, `circuit_cooldown_ms`, `rpm_limit`, `request_timeout_ms`,
   `stream_first_byte_timeout_ms`): `resolve_tuning(config, entry, model_ms)`
@@ -1751,8 +1751,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   the `CONFIG_PROVIDER_KINDS` slice + `is_config_provider_kind` predicate name
   the whole `kind = "..."` vocabulary under the build's feature set (welded to
   the `kind_str()` discriminants by a drift test), for callers that must bound
-  a kind string against what a config can DECLARE rather than what the baked
-  catalog carries;
+  a kind string against what a config can DECLARE;
   `api_key_ref()` exposes the primary key ref, `None` for Bedrock, so the
   usage CLI can detect `oauth://` subscription providers;
   `classifiable_egress_base_url()` is the base URL an entry actually egresses
@@ -1781,7 +1780,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   is `#[serde(default)]` (empty) so the mantle lane may omit it (validation
   still requires it non-empty on the standard lane); `ModelEntry`
   (`reported_model: Option<String>` response model-label echo override,
-  `visible_routectl_provider: bool` default true); `AliasValue`, `ServerAuth`,
+  `visible_routectl_provider: bool` default true, and the model facts
+  `context_window` / `max_output_tokens` / `pricing: Option<PricingConfig>`); `AliasValue`, `ServerAuth`,
   `RegistryEntry`/`PricingConfig` pricing table; `CacheConfig` (global
   `[cache]`: `auto_emit_top_level_breakpoint: bool`, default true;
   `k_gated_emission: bool`, default FALSE -- the hot-reloadable switch for
@@ -1853,8 +1853,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   (`RetiredCapabilityKeysError`), then the
   removed `[fidelity] paid_probe_daily_caps` key, naming no successor
   (`RemovedPaidProbeCapsError`), then the removed per-model keys in
-  `RETIRED_MODEL_KNOBS` (`supports_adaptive_thinking`, `effort_levels`,
-  `max_thinking_budget`, `max_output_tokens`), ONE `RetiredModelKnobsError`
+  `RETIRED_MODEL_KNOBS` (`effort_levels`, `max_thinking_budget`,
+  `supports_adaptive_thinking`), ONE `RetiredModelKnobsError`
   holding every `models.<nick>.<key>` path sorted, one line each naming its
   replacement and ending "delete the key", with no version or migrate
   wording (`RawConfigPreflightError::RetiredModelKnobs`). The four
@@ -1911,15 +1911,15 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   dots. The schema IS the key registry: a struct rename auto-updates it, no
   drift surface
 - `src/config_effective.rs` -- PURE effective-view derivation
-  `derive_effective_view(&Config, &CatalogOverlay) -> EffectiveView{models,
-  classes, capabilities, aliases, providers, tuning}` over the SAME lookups
-  `apply_catalog_overlay` uses
-  (`lookup_baked_with_overrides` + `lookup_overlay_cell` + `merge`) -- no
-  `build_resolved_models`, no secret resolution, no network. `ModelCell`
-  carries the merged `EffectiveRow` (source: baked/import/user/disabled) per
-  config-referenced `(provider_kind, upstream)`, the kind resolved through
-  `Config::provider_kind_for_target` so a pool-backed model reads a member's
-  kind rather than missing its catalog cell; `ClassPolicyCell` tags each
+  `derive_effective_view(&Config, refreshed, shipped: Option<&PriceTable>) ->
+  EffectiveView{models, classes, capabilities, aliases, providers, tuning,
+  price_tables}` -- no `build_resolved_models`, no secret resolution, no file
+  read, no network. `ModelCell` carries each `[models.X]` entry's facts: its
+  configured context window, its output fill (`fill_ceiling` ->
+  `FillCeiling { tokens, source: FillSource }`, `lowered_by` applying a
+  learned ceiling) and its per-field prices with their sources via
+  `prices::effective_pricing`; `PriceTableDates` dates the two tables the
+  view was derived against; `ClassPolicyCell` tags each
   failure class `ClassPolicySource::{Config, BakedDefault}` via
   `resolved_class`; `AliasChain` flattens each `[aliases]` entry into its
   ORDERED fallback chain via `AliasValue::nicknames` (Single -> one element,
@@ -1975,7 +1975,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   cfg(`openai-responses`) `installation_id` submodule) and re-exports the
   crate-facing surface (`build_provider`, `build_provider_with_options`,
   `build_resolved_models`, `build_resolved_models_reported`,
-  `pool_member_refusals`, `ResolvedModelBuild`, `apply_catalog_overlay`,
+  `pool_member_refusals`, `ResolvedModelBuild`,
   `BuildOptions` (`strict_translation`, `normalize_tools`,
   `mint_installation_id`; `config check` builds with minting off), the
   `validate_*` family,
@@ -2005,14 +2005,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `build_resolved_models_reported` returning the sanitized `PoolReport` set;
   `pool_member_refusals` runs the same member walk alone for `config check`. A bare `oauth://<provider>` on a plain provider
   entry resolves to that account's DEFAULT seat only -- no `list_seats`
-  enumeration on either path; `apply_catalog_overlay`
-  runs the two-layer catalog merge once at chain-build/load time and stamps
-  the result onto each `ResolvedModel::effective_row`, so the dispatch path
-  never re-runs the merge per request, and is ALSO the output-ceiling fill site
-  (a model whose `max_output_tokens` is still the `0` sentinel takes the
-  merged row's confirmed ceiling via `output_ceiling_tokens`, making the
-  dispatch precedence catalog > egress baseline, lowered by a learned ceiling,
-  with no routectl-providers change); calls the row-reading `validate_*`
+  enumeration on either path; each `[models.X]` entry's configured
+  `max_output_tokens` / `context_window` is copied onto its `ResolvedModel`
+  as built; calls the row-reading `validate_*`
   guards from `validate.rs` at construction time; the `AnthropicApi` arm, when
   `bedrock_mantle` is `Some` (cfg `bedrock`), derives `base_url` from
   `mantle::mantle_anthropic_base(region)`, resolves the AWS credential via
@@ -2215,33 +2210,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `effective_tests.rs`
 - `src/prices/prices_test_support.rs` -- shared table builders for the price-table
   tests
-- `src/cost_gate.rs` -- PURE break-even cost gate consuming
-  `catalog::CatalogRow`; advisory-only (no live mutation, no reuse estimator,
-  no dispatch wiring). `break_even_k(row, &PrefixReductionCandidate{d,
-  c_after, c})` returns the minimum reuse count `K*` (None when `d == 0`);
-  branches on `row.auto_cacher` -- write-premium `K* = (c_after*wm)/(d*rm)`,
-  auto-cacher `K* = (c_after*(1-rm))/(d*rm)`. `evaluate(row, &candidate, k) ->
-  GateDecision` applies guards in order, each KEEP-ing: `d==0 || c_after==0`
-  -> `Keep{NoCandidate}`, `(c-d) < min_prefix_tokens` ->
-  `Keep{BelowMinPrefix}`, else the branch inequality `k*d*rm > one_time_tax`
-  -> `Break{delta_tokens}` or `Keep{NetNegative}`. Trust-gating is no longer
-  this module's concern: a row's provenance lives on the two-layer merge
-  result (`catalog::EffectiveRow`), and callers decide whether to invoke
-  `evaluate`/`break_even_k` at all -- a `Disabled`/`Missing` merge result
-  never reaches this module (`KeepReason::InsufficientData` still exists as a
-  variant callers may use for that gate). `GateDecision` (`#[non_exhaustive]`:
-  `Keep{KeepReason}` / `Break{delta_tokens}` / reserved
-  `FreeBreak{delta_tokens, reason}` for a later eviction-guard phase) has
-  `strategy_str()` returning stable append-only ledger tokens
-  (`cost_gate:keep` / `cost_gate:break` / `cost_gate:free_break`).
-  `KeepReason` and `PrefixReductionCandidate` are also `#[non_exhaustive]`;
-  `f32` row multipliers are widened to `f64` for the arithmetic.
-  `emission_break_even_k(row) -> Option<f64>` is the separate EMISSION-side
-  sibling: it prices placing a breakpoint over 1 write + `K` reads, so it
-  needs no candidate and no token counts -- `K* = (wm-1)/(1-rm)` (~0.278 at
-  wm=1.25/rm=0.1, ~1.11 at wm=2.0), and `None` means NEVER SUPPRESS
-  (`row.auto_cacher`, `wm <= 1.0`, or a degenerate `rm >= 1.0`). Imports ONLY
-  the pricing row + std -- no Config/Router/provider/async
+- `src/cost_gate.rs` -- PURE break-even cost gate over per-provider-kind
+  `CacheRules` (`cache_rules(kind)`, `None` = unpriced, `UNPRICED_TTL_SECONDS`):
+  `break_even_k` / `evaluate` -> `GateDecision` for a
+  `PrefixReductionCandidate`, and the emission-side `emission_break_even_k`;
+  advisory only, the arithmetic and branches in its `//!` doc
 - `src/context_trim.rs` -- advisory steady-state trimmer
   (`propose_steady_state_trim`, near-lossless marks) plus the whole-request
   token estimates: `estimate_total_tokens` (persisted floor) and
@@ -2478,12 +2451,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   (one `SeatTarget` per usable pool member, shared by Arc across every model
   naming that pool, `None` when `provider` names a plain `[providers]` entry);
   `reported_model: Option<String>` (per-model response-echo override);
-  `context_window_tokens()` -- THE shared read of the overlay-corrected
-  catalog window (`Some(0)` degrades to `None`), consumed by both the
-  proactive window gate and `/v1/models` discovery;
-  `output_ceiling_tokens()` -- the ceiling sibling, delegating to
-  `EffectiveRow::output_ceiling_tokens` so the factory's unset-config fill and
-  the doctor `knobs` section read one function
+  `context_window_tokens()` -- THE shared read of the configured
+  `[models.X] context_window` (`Some(0)` degrades to `None`), consumed by both
+  the proactive window gate and `/v1/models` discovery
 - `src/router/mod.rs` -- the `Router` type family + construction/lifecycle
   plus submodule wiring; the dispatch retry state machine itself lives in
   `dispatch.rs`. Holds the `Router` struct (providers map, per-`[models.X]`
@@ -2495,7 +2465,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   map, learned-capability
   + override + k-sample registries) and the `RouterOptions` / `DispatchMeta` / `Dispatched` /
   `DispatchedStream` / `RouterMetrics` / `DispatchTarget` types with their
-  non-dispatch impls (`DispatchTarget.capability_prior`, the metric counters,
+  non-dispatch impls (the metric counters,
   `DispatchMeta::for_alias`/`mark_target`; `DispatchMeta` carries the additive
   capability ride-alongs `learned_capabilities` / `capability_observations` /
   `cleared_capabilities` plus the `replay_degradations` reasoning-replay
@@ -2543,9 +2513,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `beta_reading_with_generation` (THE one guarded act-side read for both beta
   flags and request feature keys: acting negative with its phase / probe
   admitted / verified positive / none, plus the effective generation, under one
-  guard) / `clear_learned_capability` (catalog-scoped work
-  from a superseded Router is refused as `Stale` and emits no event or metric; a
-  catalog-independent observation is always accepted into the live store);
+  guard) / `clear_learned_capability` (catalog-scoped work from a superseded
+  Router would be refused as `Stale`; no key is catalog-scoped, so every
+  observation is accepted into the live store);
   `acting_negative_with_generation` and `is_verified_working_or_false` are
   test-only (`cfg(test)`),
   per-event `persistence_generation` on `CapabilityLearnEvent` /
@@ -2569,13 +2539,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   state_key -> provider-kind resolution, shared by restatement and the operator
   purge surface so the two cannot compute different registry keys; resolves
   through `override_identity_for` and yields an empty, inert kind for an
-  unresolvable key rather than guessing) +
-  `install_catalog_overlay` (the
-  single writer of the RETAINED accepted overlay and its revision stamp), the
-  `catalog_version` / `overlay_revision` / `catalog_overlay` getters,
-  `catalog_filled_output_ceilings` (the startup-provenance read: every
-  nickname whose resolved cell confirms a ceiling, off the INSTALLED table so a
-  pool-backed model is not silently omitted) and
+  unresolvable key rather than guessing) + the
+  `catalog_version` / `overlay_revision` getters (always the frozen
+  `capability_rebuild` stamps) and
   `rebuild_learned_from_ledger` (the boot warm-rebuild seam: delegates to
   `capability_rebuild::rebuild_capabilities_into` over the PRIVATE learned
   registry so it stays encapsulated, then calls the private
@@ -2699,16 +2665,16 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   keyless) -- so `record_would_trim`'s consult, its shadow-misfire recording,
   and `Router::record_k_sample`'s write cannot drift apart, and the model
   dimension is the served nickname on all three. `record_would_trim` therefore
-  never takes the upstream wire id at all: pricing arrives pre-resolved as an
-  `EffectiveRow`. `may_suppress(estimate)` is the shared `Confidence::Calibrated` gate
+  never takes the upstream wire id at all: its economics are the served provider
+  kind's `cost_gate::cache_rules`. `may_suppress(estimate)` is the shared `Confidence::Calibrated` gate
   (a `Low` estimate has its `k_floor` clamped to 0.0, so no caller may compare
   the number without it). `Router::k_emission_suppressed(plan, target,
   session_key)` is the K-gated emission consult built on the same two helpers:
   called once per chain entry above the attempt loop, it short-circuits
   (`[cache] k_gated_emission` off -> caller breakpoints -> global auto-emit off
   -> keyless -> no nickname) before allocating anything, then compares the
-  Calibrated `k_floor` against `cost_gate::emission_break_even_k` for the
-  target's priced row and returns a `k_suppressed: bool` that
+  Calibrated `k_floor` against `cost_gate::emission_break_even_k` over the
+  target's provider-kind `CacheRules` and returns a `k_suppressed: bool` that
   `apply_auto_cache_placement` checks immediately after `shared_skip_reason`,
   withholding BOTH markers as `auto_skipped:k_below_break_even`. No new store:
   suppression is sticky because a suppressed session observes no reuse.
@@ -3284,9 +3250,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `context_window_for` -- the public discovery read backing `/v1/models`
   `context_length`: alias-then-nickname resolution, FIRST chain entry,
   `ResolvedModel::context_window_tokens`, no `default` fallback and never
-  `dispatch_chain` (no metrics or rotation perturbation) -- and its sibling
-  `first_target_oauth_id`, backing the discovery-time credential check in
-  `handlers/models.rs`. Tallies each target the capability and window filters
+  `dispatch_chain` (no metrics or rotation perturbation), omitting the window
+  when the caller's `oauth_activated` predicate refuses the first target's
+  `oauth://` id (read by the private `oauth_id_of`). Tallies each target the capability and window filters
   drop into the request's `SkipCounts` (`tally_filter_drops`, the reason raised
   to the target's own state reason by `higher_reason`), counts a degraded pool
   dispatch (`count_pool_degradation`), and answers a chain with zero targets
@@ -3410,7 +3376,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   the chain-expansion constructors build) or
   `LearnedLaneProjection::from_config` (the factory's static resolution
   walk, for doctor, which holds no router);
-  `Router::projection_targets` also feeds `status_targets`
+  `Router::projection_targets` also feeds `status_targets`. `LearnedFills`
+  (`resolve(config, lanes, entries, now)`, `for_model`) is the lowest
+  resident learned output ceiling per model over those lanes (skipping a
+  `force_supported` mask), read by `Router::learned_fills` for the status
+  config panel and by doctor's knobs rows
 - `src/router/local_refusal.rs` -- the counting functions behind
   `rc_request_refused_local_total{lane,reason}`: `Router::count_local_refusal`
   / `count_refusal_error` / `count_egress_refusal` (attempt ingress dialect x
@@ -3558,18 +3528,16 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `withheld_betas_for_target`: per-target withheld client beta set
 - `src/router/feature_filter.rs` -- capability pre-filter + strip-interceptor
   application: `filter_chain_by_features` (alias-chain pre-filter with the
-  prior/learned soft-drop tail: prior-demoted targets sort ahead of
-  learned-demoted ones), `unsupported_feature_for_target` (gathers each
+  learned soft-drop tail), `unsupported_feature_for_target` (gathers each
   feature's inputs and maps the `capability_precedence` seam's `Resolution`
   onto route-away source, strip keys and admissions: `resolve_operator` runs
   over every feature before any claiming learned read, so an override drop,
   `force_supported`, the kill switch or a pinned beta key never claims a
-  re-probe slot; `resolve_open` decides the learned and prior tiers; a learned
-  tail outranks a prior tail and drops the strip set),
+  re-probe slot; `resolve_open` decides the learned and seed tiers),
   `beta_pinned_for_target`, `override_forces_supported`,
   `apply_strip_interceptor` (the pre-dispatch strip hook -> `StripDecision`),
   the `FilterSource`/`StripDecision` enums, and the
-  `catalog_capabilities`/`emit_feature_unsupported` helpers. Ahead of the
+  `emit_feature_unsupported` helper. Ahead of the
   claiming pass, `refuse_if_excluded_everywhere` (Complete and Stream only)
   fails the request with `CapabilityUnsupportedEverywhere` when a non-field
   feature is `hard_exclusion_eligible` on every target, read through the
@@ -3589,8 +3557,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/router/field_verdict_observability.rs` -- derives the currently ACTING
   field verdicts out of a `learned_capabilities()` snapshot, for live
   visibility rather than routing: `acting_field_verdicts(entries)` keeps only
-  rows inside the field namespace (`capability_key_is_catalog_scoped` is
-  `false`), still `Verdict::LearnedBroken` (not cleared), and excludes the one
+  rows inside the field namespace (`capability_key_is_field_verdict`), still `Verdict::LearnedBroken` (not cleared), and excludes the one
   (phase, source) combination the learned-capability registry's own routing
   decision (`LearnedEntry::acting_decision`) treats as advisory-only -- an F3
   negative sourced from live traffic, which awaits a probe rather than
@@ -4172,7 +4139,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   from the caller, so no caller can address a key the learn path never minted.
   That kind is also the registry key's kind half, so a purge clears the current
   owner's version only; another kind's stray version is left to the owner sweep.
-  Learned entries only: never the override registry, never a baked prior.
+  Learned entries only: never the override registry.
   `finalize_learned_capability_purge` also drops the purged key's resident
   canary/quorum state (`FieldCanaryRegistry::reset`, see `src/field_canary.rs`)
   when the removed key is field-namespace, the same reset a probe-settled
@@ -4382,7 +4349,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   chain filter pass (called from `chain::dispatch_chain_for_request`
   immediately after `filter_chain_by_features`, so the ordering makes "last
   surviving target" mean last after the hard capability drops):
-  `filter_chain_by_window` skips a target whose confirmed
+  `filter_chain_by_window` skips a target whose configured
   window (read via `ResolvedModel::context_window_tokens`, the accessor
   `/v1/models` discovery shares) clearly cannot hold
   `context_trim::estimate_total_tokens`
@@ -4393,14 +4360,15 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   compares the raw estimate byte-identically), keyed on the integer
   `exceeds_window(estimate, reserve, window)` predicate: skip when the
   estimate plus the output reserve (`output_reserve`: the request's
-  `max_tokens`, else the target's resolved output ceiling, else 0) plus the
+  `max_tokens`, else the target's configured `max_output_tokens`, else the
+  egress default fill where the egress must send one, else 0) plus the
   fixed `HEADROOM_TOKENS` (1024, absolute rather than a window fraction,
   deliberately not an operator knob) exceeds the total window. Under the
   `[window_gate]` kill switch, whose OFF path
   returns before any estimate exists. Never empties the chain and has NO
   empty-chain error path (the deliberate contract difference from
-  `feature_filter`): a chain of one, an unconfirmed / `Disabled` / `Missing`
-  window, and an all-overflowing chain each keep their targets. Owns the
+  `feature_filter`): a chain of one, a target with no configured window,
+  and an all-overflowing chain each keep their targets. Owns the
   `SkipWarnThrottle` per-process last-WARN-epoch stamp
   (`SKIP_WARN_INTERVAL_SECS`) bounding the skip WARN to one line per interval
   across requests, while `RouterMetrics::window_gate_skips_total` stays the
@@ -4536,7 +4504,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `RecordedLearnedEntry::into_entry` returns the surface row
   (`LearnedRegistryEntry`, whose `value` is the one value slot); `generation` / `advance_generation` /
   `commit_boundary_transition` (promotes the pending generation, or advances,
-  plus the catalog-scoped prune under one acquisition), the `*_in_generation`
+  plus the catalog-scoped prune, a no-op since no key is catalog-scoped, under
+  one acquisition), the `*_in_generation`
   entry points returning `GenerationOutcome::{Applied{value,generation}, Stale}`
   -- `Applied` carries the EFFECTIVE persistence generation chosen under the SAME
   guard as the read or mutation, so an event's stamp cannot drift from the state
@@ -4652,7 +4621,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   (verdict, phase, source) via `acting_decision`: `Verified` and acting
   F3+Live -> `Allow` (F3+Live is advisory-only, visible in the snapshot but
   routes nothing); acting F1/F2 and F3+Probe -> `RouteAway`.
-  `is_verified_working` answers the filter's prior-pass mask query. Expiry is
+  `is_verified_working` answers whether a resident verified positive owns a
+  key. Expiry is
   lazy and gates single-flight probe admission; `record_probe_outcome` clears
   the entry on a probe success, refreshes it with a capped exponential backoff
   on a reject, and releases the in-flight slot on any other outcome.
@@ -4716,10 +4686,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   capability key
 - `src/field_capability.rs` -- sole owner of the envelope-field capability
   namespace (crate-internal): `field_capability_key` mints a bounded key from a
-  qualified dotted path, `capability_key_is_catalog_scoped` classifies any key
-  (default catalog-scoped; only the field namespace is carved out) and is
-  called from BOTH invalidation layers -- `Router::carry_over_learned_from`
-  in memory and `capability_rebuild::should_replay` on cold boot
+  qualified dotted path, `capability_key_is_field_verdict` is the namespace
+  test, and `capability_key_is_catalog_scoped` (asked only by the generation
+  and revision boundary paths in `learned_capability` and
+  `capability_rebuild::should_replay`) answers `false` for every key
 - `src/field_verdict.rs` -- the envelope-field verdict lifecycle layered over
   the learned registry, the concrete sibling of `learned_replay` rather than a
   generic over both (the two identities share no field, and only this one
@@ -5084,11 +5054,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   class), and `SkipRevision` for a post-tombstone straggler whose revision
   differs from the boundary's AND whose key
   `field_capability::capability_key_is_catalog_scoped` classifies as
-  catalog-scoped (post-tombstone survival is deliberately NOT unconditional;
-  an envelope-field verdict is catalog-independent and replays under a
-  superseded revision, matching the same predicate's use at
-  `Router::carry_over_learned_from` so a verdict surviving a reload also
-  survives the next restart). `rebuild_capabilities_into(reader, registry,
+  catalog-scoped -- no key is, so `SkipRevision` is never returned and every
+  post-tombstone row replays whatever revision it carries. The frozen stamps
+  every event and tombstone carries are `FROZEN_CATALOG_VERSION` /
+  `FROZEN_OVERLAY_REVISION` (root re-exports). `rebuild_capabilities_into(reader, registry,
   providers)` -- `providers` is the current `[providers]` table the owner
   check holds each lane-keyed row to -- replays
   survivors oldest-first (same-instant rows tie-break by rowid, so
@@ -5255,22 +5224,21 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
 - `src/capability_display.rs` -- the panel-only display tokens a read-only
   surface renders for a capability cell: `FORCED_SUPPORTED` /
   `FORCED_UNSUPPORTED` / `VERDICT_MIXED` / `VERDICT_UNREPRESENTABLE` and the
-  source tags `SOURCE_{PIN, REPRESENTABILITY, OVERRIDE, LIVE, PROBE, SEED,
-  PRIOR}`, which `capability_precedence::resolve_display` picks among. A
+  source tags `SOURCE_{PIN, REPRESENTABILITY, OVERRIDE, LIVE, PROBE, SEED}`, which `capability_precedence::resolve_display` picks among. A
   sibling table test pins each tier's display projection
 - `src/capability_precedence.rs` -- the one pure precedence resolution for a
   `(target, capability)` cell. The tier order `pin > representability >
-  override > learned > seed > prior` lives once, in the private `PRECEDENCE`
+  override > learned > seed` lives once, in the private `PRECEDENCE`
   list; the dispatch stages and the display mode both walk it, `Layer`'s
   `Ord` is its position there, and a const assertion keeps the operator
   tiers leading it. Staged so a decided cell
   never reaches the claiming learned read: `resolve_operator(pinned,
   override_verdict, CellContext) -> Stage { Decided(Resolution) |
   Open(OpenCell) }`, then `resolve_open(learned: Option<LearnedInput>, seed,
-  prior, OpenCell) -> Resolution`. `Resolution` has two axes, `Wire { Send |
+  OpenCell) -> Resolution`. `Resolution` has two axes, `Wire { Send |
   Withhold | Strip }` and `Routing { Keep | Tail | Drop }`, plus `layer`
   (`Layer::as_str`: `pin` / `representability` / `override` / `learned` /
-  `seed` / `prior`), `supported`, `as_str` (the `ACTION_*` tokens) and
+  `seed`), `supported`, `as_str` (the `ACTION_*` tokens) and
   `hard_exclusion_eligible`. A pin decides a beta key outright (send) and on
   a feature key only rules out strip. `LearnedInput::{from_reading,
   from_entry}` adapt a dispatch read or a snapshot entry;
@@ -5283,7 +5251,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   next tier with an opinion), and picks the signal a read-only surface shows
   (`Resolution::display_{layer, verdict, supported, source}`: the strongest
   tier HOLDING a signal, so an advisory or uncorroborated learned negative,
-  or any learned / prior signal with the kill switch off, still shows while
+  or any learned signal with the kill switch off, still shows while
   the action comes from the deciding tier). Pure: no probe admission, no
   `in_flight`, no metric
 - `src/capability_vocab.rs` -- map-on-read for the persisted capability-event
@@ -6123,7 +6091,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `run` calls `config_folder::refuse_stranded_config` before dispatch unless
   `--config` / `ROUTECTL_CONFIG` names the file; `main` wraps `run` (which dispatches
   `serve` / `init` / `login` / `logout` / `refresh` / `whoami` / `doctor` /
-  `test` / `config` / `provider` / `usage` subcommands) and on an error routes
+  `test` / `config` / `provider` / `usage` / `prices` subcommands; the hidden
+  `catalog` command takes any arguments and only prints a removal pointer to
+  `prices refresh` and `[models.X.pricing]`, exiting 2, before config
+  resolution) and on an error routes
   the message through
   `commands::parse_error_redaction::redact_config_load_error` (fail-safe strip
   of config-load path/value leaks; non-config errors pass through unchanged)
@@ -6165,7 +6136,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   process-global slot: a test binary runs cases concurrently, so a global one-shot is
   claimed by whichever daemon boots first
 - `src/server/serve.rs` -- listener bind + serve loop: `serve` (bind then
-  serve) / `serve_on_listener` / `serve_on_listener_with_overlay` boot path,
+  serve) / `serve_on_listener` / `serve_on_listener_with_secrets` boot path,
   `build_axum_router` route wiring (every registered path is classified by
   the `PUBLIC_ROUTES` / `AUTH_GATED_ROUTES` test-only inventory consts, which
   `serve_tests.rs` enforces against a scan of the crate's registered path
@@ -6191,12 +6162,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   enqueue through -- the learned-capability warm (`capability_rebuild` -- see
   its module doc for the writer-ordering exception). Router construction is
   delegated to `router_build`. Boot seeds the initial activation inventory and
-  spawns the reload pipeline (both owned by the `reload` submodule).
-  `log_catalog_filled_output_ceilings` emits ONE aggregate startup line naming
-  the models whose output ceiling came from the catalog (exact count, list
-  bounded by `MAX_LISTED_FILLED_CEILINGS`, every nickname through
-  `sanitize_for_log`) -- here rather than inside `apply_catalog_overlay`, which
-  also runs on every reload and in many unit tests. A
+  spawns the reload pipeline (both owned by the `reload` submodule). A
   forwarded (pure-proxy) egress is an explicit `[providers.X]
   credential_source = "forwarded"` block -- no zero-config synthetic-egress
   injection
@@ -6282,7 +6248,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   land between snapshot and submit and be lost by both. `AdmittedBoundary::settle`
   then runs with the guard RELEASED (a lock is never held across SQLite),
   selecting the receipt against the shutdown signal, and only on commit runs
-  `commit_boundary_transition` (generation advance + catalog-scoped prune) as one
+  `commit_boundary_transition` (generation advance + the no-op catalog-scoped
+  prune) as one
   transition, then the deferred retune and owner sweep. `BoundaryOutcomeReport::{Committed{survivors,generation,pruned},
   Failed(BatchCommit), Abandoned}`; `Abandoned` is shutdown winning, which
   publishes nothing and must not resume serving. Load-bearing because the cold-boot read starts at the
@@ -6313,8 +6280,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   tombstone), restates survivors on a stale-revision tombstone, or fails
   closed. `restate_survivors_past_new_boundary` (revision mismatch) replays
   the slice after the STALE tombstone into a scratch registry under this
-  boot's revision (`should_replay` drops catalog-scoped rows, keeps
-  catalog-independent ones, each survivor carrying its replayed value via
+  boot's revision (`should_replay` keeps every row, since no key is
+  catalog-scoped, each survivor carrying its replayed value via
   `ReplayedFieldValues::attach`), commits `capability_boundary::boundary_batch`
   (fresh tombstone + restatements) atomically, and only on commit replays
   the same rows into the live registry; on failure (the slice read via
@@ -6367,37 +6334,30 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   the persisted `capability` is already normalized; the persisted
   `provider_kind` (empty for NULL) is carried into the replay row for the
   owner check. Tests in the `#[path]`-included `ledger_reader_tests.rs`
-- `src/server/router_build.rs` -- Router construction from a parsed config +
-  catalog overlay: `build_router_from_config_with_overlay` (the shared build
-  path reused by boot and every hot-reload -- runs the whole shared
-  `collect_config_validation` suite and returns its first error BEFORE any
-  construction, so a programmatic caller reaching this builder directly can
-  never build a Router whose invalid config sits inert, then emits each
+- `src/server/router_build.rs` -- Router construction from a parsed config:
+  `build_router_from_config` (the shared build path reused by boot and every
+  hot-reload -- runs the whole shared `collect_config_validation` suite and
+  returns its first error BEFORE any construction, then emits each
   advisory-warning category on its own log line, runs the build-path-only
-  `[mitm]` validator, and installs resolved models + the retained overlay via
-  `Router::install_catalog_overlay`, which stamps its revision too) and the
-  `#[cfg(test)]` empty-overlay wrapper `build_router_from_config`. Split out
-  of `serve` so the `reload` coordinator depends on this builder directly,
-  keeping the serve <-> reload edge one-way; both re-exported at `server::`
-  paths from `mod.rs`
+  `[mitm]` validator, and installs the resolved models). Split out of `serve`
+  so the `reload` coordinator depends on this builder directly, keeping the
+  serve <-> reload edge one-way; re-exported at a `server::` path from `mod.rs`
 - `src/server/reload.rs` -- config/credential/seat reload + activation
   coordinator, owning the `spawn_blocking` hot-reload boundary.
   `spawn_reload_pipeline` wires the file-watch task + SIGHUP trigger
   (`register_sighup` installs the handler before serving; the generic
   `fan_out_reload_triggers` loop forwards each delivery, cfg(unix)) +
   `run_reload_coordinator`, which drains
-  a `ReloadRequest` channel and fans each config / overlay request through
-  `apply_config_reload` (on `Ok(Some(..))` advance the config + overlay pair,
+  a `ReloadRequest` channel and fans each config request through
+  `apply_config_reload` (on `Ok(Some(..))` advance the config,
   stamp the load, recompute activation; on `Err(ReloadFailure)` record the
   class via `DaemonMeta::record_reload_failure`; a shutdown-abandoned boundary
   returns `Ok(None)` and records nothing) into `handle_config_reload` (re-read
-  config.toml + overlay via `read_parse_validate_config` off a
+  config.toml via `read_parse_validate_config` off a
   `spawn_blocking` worker, rebuild the live `Router` behind `ArcSwap`, carry
   over per-nickname runtime state, flip the usage capture gate, enqueue one
-  capability replay-boundary tombstone stamped the new revision when the
-  reload advanced the catalog version or overlay revision (the hot-reload
-  counterpart to the boot seam in `capability_rebuild.rs`, best-effort via
-  `try_send_capability_event`), and emit the restart-required diff via
+  capability replay-boundary tombstone when the two routers' revision stamps
+  differ (unreachable while the stamps are frozen), and emit the restart-required diff via
   `config_classify::collect_restart_required_changes` --
   bind/listener-auth/body-limit, the three `[log]` knobs, `usage.db_path`, and
   `[mitm]` all restart-required since their listeners/state are startup-only;
@@ -6405,8 +6365,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   (`[reduction] enabled`, `[cache] k_gated_emission`), single-sourcing the
   message text through a local macro so every arm is byte-identical)
   or `handle_credentials_reload` -> `rebuild_router_for_seat_change`
-  (seat-set-gated rebuild off the unchanged config + the coordinator's current
-  overlay, which the replacement Router both merges and retains);
+  (seat-set-gated rebuild off the unchanged config);
   a credentials reload lifts only the OAuth seat parks whose stored record
   `reload_from_disk` reports changed (`lift_oauth_credential_parks`, so a
   routine self-refresh lifts nothing), and an accepted config reload lifts
@@ -6487,8 +6446,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   server sidecar: `isolate_usage_db` (points a config's usage DB at a tempdir),
   `drain_usage_writer_strict` (awaits a writer's full drain), the async
   `live_usage_writer` (one start-and-drain settle cycle on the db before
-  returning a fresh writer), `begin_writer_drain` / `WriterDrain`,
-  `overlay_at_revision`, and `never_shutdown` (a shutdown receiver that never
+  returning a fresh writer), `begin_writer_drain` / `WriterDrain`, and
+  `never_shutdown` (a shutdown receiver that never
   fires, for reload tests whose subject is not the shutdown race)
 - `src/server/router_publish.rs` -- `publish_router`, the publication step every
   reload path shares. STAMPS the replacement's probe incarnation and retires the
@@ -6509,8 +6468,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   metrics and the `stream_evidence_settle` counter, and flushes once more at
   shutdown so a session shorter than one interval still surfaces its totals
 - `src/server/reload_failure.rs` -- `ReloadFailure`, the closed path-free
-  class a rejected config / overlay reload returns and the daemon records
-  (`config_load_failed`, `overlay_load_failed`, `loader_panicked`,
+  class a rejected config reload returns and the daemon records
+  (`config_load_failed`, `loader_panicked`,
   `router_build_failed`, `boundary_not_admitted`, `boundary_not_durable`), and
   `ReloadFailureSnapshot` (class + age) the served doctor renders. Never the
   loader's error text
@@ -6520,15 +6479,14 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `src/server/config_load.rs` -- effective-config load/parse/validate,
   re-exported at `server::` paths from `mod.rs`. The shared config loader
   splits into `parse_config_only` (one `routectl_router::preflight_raw_config`
-  call + typed parse, NO overlay; sidecar `config_load_preflight_tests.rs` pins
+  call + typed parse; sidecar `config_load_preflight_tests.rs` pins
   each refusal class to the driver's own message and proves a refused reload
-  candidate never replaces the published router) and `load_overlay_default` (overlay only);
-  `load_effective_config_unvalidated` composes both, `load_effective_config`
-  adds the fail-fast `validate_effective_config` gate, while `doctor` calls
-  each independently so its capability panel degrades the two layers
-  separately. `read_parse_validate_config` is the synchronous hot-reload loader,
-  running the same steps as `load_effective_config` one at a time so a
-  rejection returns `ReloadFailure::{ConfigLoadFailed, OverlayLoadFailed}`;
+  candidate never replaces the published router);
+  `load_effective_config_unvalidated` wraps it, `load_effective_config`
+  adds the fail-fast `validate_effective_config` gate.
+  `read_parse_validate_config` is the synchronous hot-reload loader over
+  `load_effective_config`, so a rejection returns
+  `ReloadFailure::ConfigLoadFailed`;
   `warn_if_config_world_readable` (unix) WARNs on group/world-readable configs
   carrying secrets; `compute_max_body_bytes` maps the zero-means-default
   body-limit knob
@@ -6675,9 +6633,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `src/handlers/models.rs` -- `GET /v1/models` listing aliases + `[models]`
   keys (skips `default`, skips `selectable=false`), each entry emitted through
   the private `ModelListEntry` serialize struct carrying `context_length` read
-  off the resolved table via `Router::context_window_for` (omitted when the
-  window is unconfirmed, or per `is_oauth_credential_unresolved`'s
-  `Router::first_target_oauth_id`/`ActivationState` cross-check); on the forwarded
+  off the resolved table via `Router::context_window_for` (omitted when no
+  `context_window` is configured, or when the first target's `oauth://`
+  credential is not activated per `is_oauth_activated`); on the forwarded
   (pure-proxy) lane (`forwarded_proxy_target`:
   `Router::has_forwarded_provider` AND the request arrived via the MITM
   reinject leg carrying a captured client bearer AND the forwarded provider's
@@ -7144,18 +7102,20 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   router-side read -- see
   `routectl-router/src/router/fidelity_status.rs`), `wire_check_snapshot()`
   (the live wire check's counters and findings ring, read-only),
-  `effective_view()` (runs
-  `derive_effective_view` against the live config AND the overlay retained on
-  the pinned Router, INTERNALLY, so panels never touch raw `Config` and one
-  derivation can never pair mismatched config / overlay generations), and
-  `served_doctor_inputs(warm)` (an OWNED `commands::doctor::ServedInputs`:
-  the pinned Router's config + overlay as one generation pair, the resident
+  `effective_view(refreshed, shipped)` (runs `derive_effective_view` against
+  the pinned Router's config and the caller-pinned price tables, then
+  `with_learned_fills` from the router's resident learned ceilings,
+  INTERNALLY, so panels never touch raw `Config`), and
+  `served_doctor_inputs(warm, prices)` (an OWNED
+  `commands::doctor::ServedInputs`: the pinned Router's config, the price
+  book the doctor pricing section pins, the resident
   learned snapshot and seed-clear markers with clock anchors taken after the
   read, the boot `WarmReport`, and the credential-parked and unusable seats
   read through the same non-mutating `status_targets` path `route_targets` uses; its fields are private to
-  the doctor module), plus `pricer(&PriceBook)` -> `QueryPricer`, an OWNED
-  `'static` pricing facade over one pinned router snapshot and one pinned
-  `PriceSnapshot` (the book is read per call, so a renamed-in `prices.json`
+  the doctor module), plus `StatusRouterHandle::pricer(Arc<PriceBook>)` ->
+  `UnpinnedPricer`, whose `pin()` (on the blocking worker) yields
+  `QueryPricer`, an OWNED `'static` pricing facade over one pinned router
+  snapshot and one pinned `PriceSnapshot` (the book is read per pin, so a renamed-in `prices.json`
   prices the next query with no Router rebuild) whose only method costs an
   `AggRow` through `commands::usage::cost_for_row` (so `/status/query` and the
   CLI usage report price a row through one function, and a hot-swap or a new
@@ -7168,8 +7128,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `src/handlers/status/daemon_meta.rs` -- read-only facade over the
   process-level daemon facts the config panel's source strip needs.
   `DaemonMeta` (built once at bind, `stamp_config_loaded()` called at
-  bootstrap and by the reload coordinator after every successful config /
-  overlay reload) holds the bound `listen_addr` plus an atomic last-load
+  bootstrap and by the reload coordinator after every successful config
+  reload) holds the bound `listen_addr` plus an atomic last-load
   epoch-ms; `DaemonMetaHandle` keeps the `Arc` PRIVATE and exposes only
   `snapshot(now_ms) -> DaemonMetaSnapshot{listen_addr, version,
   config_loaded_age_ms}`, so a panel can read the facts but never reach the
@@ -7339,13 +7299,14 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   and a lexical guard in `mod.rs` refuses that type's name in every status source
 - `src/handlers/status/config.rs` -- `/status/config`. Renders the
   provenance-annotated EFFECTIVE (live, in-effect) config view: snapshots the
-  router through the read-only facade and folds its config together with the
-  catalog overlay RETAINED on that same router (the generation the daemon
-  accepted at the last boot / reload -- read from memory, never re-read from
-  disk per request, so the panel cannot render a rejected file and a corrupt
-  one cannot take it down) via `view.effective_view() -> EffectiveView`. Maps to a purpose-built
-  `ConfigPanel` DTO (model cells with `source` token
-  baked/import/user/disabled/missing + economics; class-policy cells with
+  router through the read-only facade (the config generation the daemon
+  accepted at the last boot / reload, read from memory, never re-read from
+  disk per request) and derives the view via
+  `view.effective_view(refreshed, shipped) -> EffectiveView` against the
+  shared price book's current table and the shipped table, read on the
+  blocking worker. Maps to a purpose-built `ConfigPanel` DTO
+  (`SCHEMA_VERSION` 5; model cells carrying the model facts -- context
+  window, fill and per-field prices with sources; class-policy cells with
   kebab class + `config`/`baked-default` source + `debits_breaker` read from
   the router's public `class_debits` so the transient-health set is never
   restated on the wire; capability cells with
@@ -7364,9 +7325,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   (`activation.load_full()` once, each `ActivationEntry` mapped to
   provider_id/provider_kind/status/reason/referenced_by_aliases). Raw `Config`
   is NEVER imported or serialized (the forbidden-import seam test enforces
-  it). An overlay load/parse failure is routed through the shared
-  `redact_config_load_error`, logged, and collapsed to a `config_unavailable`
-  code -- no path/value reaches the wire
+  it). A build failure collapses to the `config_unavailable` code through
+  `guard_panel` -- no path/value reaches the wire
 - `src/handlers/status/config_tests.rs` -- `#[path]` sidecar coverage of the
   config panel, including the guard that scans the whole of `config.rs` for
   `build`'s daemon-stamp-before-router-view read order
@@ -7374,8 +7334,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   Runs only the no-network doctor sections via
   `commands::doctor::gather_context_no_network(config_path,
   GatherSources::Served(..), &legacy_dirs)` (inputs from the facade's
-  `served_doctor_inputs(*state.warm_report())`, so a poll parses no config,
-  loads no overlay file and replays no ledger; `legacy_dirs` are the old
+  `served_doctor_inputs(*state.warm_report(), prices)`, so a poll parses no
+  config and replays no ledger; `legacy_dirs` are the old
   folders `StatusState` carries) +
   `build_report_no_network(&ctx)` (never
   `gather_probe_results`/`section_probe`); the async gather runs
@@ -7638,7 +7598,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   a version mismatch or a malformed panel never partially renders config
   vocabulary. Renders a source strip (config path, load age, resolved
   alias/provider counts, listen address, version) above the reference tables
-  for aliases + their ordered chains, models + their winning catalog layer,
+  for aliases + their ordered chains, models + their facts (window, output
+  fill and prices with sources, in a detail row),
   the configured ROUTING providers (id / kind / configured endpoint origin /
   auth token / credential-ref scheme / rate limit, where `rpmLimitCell` is the
   ONE formatter for the three non-interchangeable RPM states -- null-checked
@@ -7910,7 +7871,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 
 - `src/commands/mod.rs` -- groups CLI subcommand entry points (init, test,
   prompt_size, config, provider add, provider probe, doctor, login,
-  logout, refresh, whoami, usage, catalog, catalog_import; `serve` lives in
+  logout, refresh, whoami, usage, prices, rc; `serve` lives in
   `crate::server`)
 - `src/commands/config.rs` -- `routectl config check/show/example` (secret
   resolution, alias chain validation, the shared `collect_config_validation`
@@ -7988,7 +7949,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `src/commands/config_effective.rs` -- `routectl config show --effective`
   render layer over `routectl_router::derive_effective_view`: the plain
   redacted dump (unchanged), then provenance-annotated sections for the
-  layered surfaces -- per-model catalog cells, per-class retry policy, the
+  layered surfaces -- per-model facts (context window, output fill and each
+  price field with its source and table date), per-class retry policy, the
   resolved tuning table (`tuning_cells` / `tuning_kind`, shared with doctor's
   tuning section) and capability cells. No generic per-key provenance tree
 - `src/commands/edit_pipeline.rs` -- building blocks shared by the
@@ -8174,8 +8136,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   models); `resolve_cell(meta, capability, &CellSources) -> LaneCell` gathers
   every tier's inputs (`operator_pins_capability` per nickname,
   `OverrideRegistry::resolve`, `LearnedInput::from_entry`,
-  `beta_seed_state_for_key` over the snapshot's seed-clear markers, the
-  caller's prior lookup, `CellContext::for_lane`) and runs the router's
+  `beta_seed_state_for_key` over the snapshot's seed-clear markers,
+  `CellContext::for_lane`) and runs the router's
   `resolve_display` once per nickname. `LaneCell::{shown, layer, action,
   overrode_layer, nicknames_agree}` give the lane-wide view, each `None` when
   the nicknames disagree. `resolve_entries(&CellSources) -> Vec<ResolvedEntry>`
@@ -8207,27 +8169,15 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   provider build, no network), sharing the router's
   `ALIAS_MAX_RECURSION_DEPTH`. Runs the same cheap config guards as `test`.
   OPTIONAL fourth section -- the advisory cache-break economics projection --
-  is emitted ONLY when `--hypothetical-d <TOKENS>` is supplied (no-flag output
-  stays byte-identical): `resolve_target` reuses the alias resolution to get
-  `(provider_kind = kind_str(), model = upstream)` offline,
-  `build_economics(total_tokens, target, &ProjectionArgs)` resolves the
-  two-layer catalog merge itself via `catalog::resolve_effective_row`
-  (the same entry the router's chain-build pass and `pricing::effective_pricing`
-  use, since this offline
-  command has no resolved-target chain to ride a precomputed `EffectiveRow`
-  on) and calls the `cost_gate` (`break_even_k` / `evaluate`), and
-  `print_economics` renders the resolved cell, its `trust_label` (`priced` /
-  `unpriced (NEEDS-LIVE-PROBE)` -- named for the merge result, not a per-row
-  `verified` flag, which is gone), the break-even K* (suppressed -> `KEEP
-  (insufficient data)` for an unpriced/sentinel cell), and -- when
-  `--hypothetical-k <COUNT>` given -- the KEEP/BREAK verdict with its stable
-  `strategy_str()` ledger token. Flags: `--hypothetical-d` (u64, turns the
-  section on), `--hypothetical-k` (f64), `--c-after` (u64, defaults to C),
-  `--ttl-tier` (`5m`|`1h`, default `5m`). C = the report's TOTAL approx-token
-  count (the command has no separate cacheable-prefix slice).
-  `EconomicsProjection`/`Report` are `PartialEq` (not `Eq`: the projection
-  carries `f64`). Still offline-only -- no router.rs / context_reduction.rs
-  touch
+  emitted only when `--hypothetical-d <TOKENS>` or `--steady-state` (the real
+  `propose_steady_state_trim` candidate; the two conflict) is supplied:
+  `resolve_target` gets `(provider_kind, upstream)` offline,
+  `build_economics` / `build_steady_state_economics` price the candidate in
+  `price_candidate` against the kind's `cost_gate::cache_rules` (`None` ->
+  unpriced, verdict `KEEP (insufficient data)`) via `break_even_k` /
+  `evaluate`, and `render_economics` prints the rules, K* and, with
+  `--hypothetical-k`, the KEEP/BREAK verdict with its `strategy_str()` token.
+  `--c-after` defaults to C, the report's TOTAL approx-token count
 - `src/commands/login.rs` -- `routectl login <provider> [--label <name>]
   [--yes]` runs the OAuth 2.0 PKCE flow (anthropic, codex), persists tokens via
   `OAuthStore`; `--label` registers an additional seat without overwriting the
@@ -8354,8 +8304,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `AppState.prices` shares with the status surface. The rest are
   `pub(super)` (visible across the `commands` tree, nowhere else).
   `rates_from_pricing(&PricingConfig) -> Rates` is the ONE carry
-  onto the usage leaf's rate struct, shared by the usage report and the probe
-  cost estimate; it lives CLI-side because `Rates` belongs to `routectl-usage`,
+  onto the usage leaf's rate struct, read by the usage report; it lives CLI-side because `Rates` belongs to `routectl-usage`,
   a zero-dep leaf the router must not depend on, and both units are already
   per-million, so it is a field-for-field carry with `reasoning_per_mtok` left
   unset for the caller that knows a row's reasoning structure.
@@ -8363,11 +8312,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   (`api_key_ref` starts `oauth://`; `auth_kind` deliberately not consulted).
   `target` may be a provider entry OR a pool -- `[models.X] provider` resolves
   against both in one namespace -- and a pool answers from its members, so a
-  pooled model is not misreported as unpriced. Checked FIRST by every cost
-  surface -- `usage::cost_for_row`,
-  `doctor::gather::pricing_row_source`, `probe::capabilities::probe_rates` --
-  before any rate lookup, so no surface can render a per-token figure for
-  traffic that bills by seat.
+  pooled model is not misreported as unpriced. Checked FIRST by
+  `usage::cost_for_row` and doctor's `derive_pricing_rows` before any price
+  decides anything, so neither renders a per-token figure for traffic that
+  bills by seat.
   `rate_covers(Option<f64>)` is the one completeness predicate (a present,
   non-negative rate; a known `0` counts). `missing_equivalence_dimensions(&PricingConfig) -> Vec<&'static str>` is the
   DIAGNOSTIC half of the equivalent's complete-or-absent gate: the same
@@ -8375,7 +8323,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   the token counts, returning the labels (`input`, `output`, `cache read`, `cache
   write 5m`, `cache write 1h`) that do not resolve. Reasoning is not among them --
   a disjoint-reasoning row bills thinking at the OUTPUT rate. Consumed by
-  `doctor::gather::equivalence_basis`
+  doctor's `render_equivalence_clause` (`sections.rs`)
 - `src/commands/usage.rs` -- `routectl usage` read surface over the usage DB
   (read-only). Calendar windows (`--today`/`--this-week` (Monday-start ISO
   week)/`--this-month`/`--all`) and ad-hoc `--since D [--until E]` ranges
@@ -8488,7 +8436,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `src/commands/prices.rs` -- `routectl prices refresh [--from <url|file>]`:
   the only network path for prices. Its own reqwest client (no default
   headers, no cookie store, redirects off with a 3xx rendering only the
-  stripped Location, 5 s connect / 15 s total, userinfo removed from the URL)
+  Location's `scheme://host[:port]`, 5 s connect / 15 s total, userinfo removed from the URL)
   or a bounded file read (metadata length plus `take(limit + 1)`), both capped
   at `prices::MAX_INPUT_BYTES`; converts through `prices::from_models_dev`,
   then writes `<config_dir>/prices.json` by same-directory temp, fsync,
@@ -8517,29 +8465,21 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   UNSTABLE pre-1.0), and returns `overall_exit`
 - `src/commands/doctor/mod.rs` -- `routectl doctor` entry (`run`) + report
   assembly. Read-only posture: a doctor run mutates nothing
-  (config/credentials/overlay/usage DB byte-identical). The aggregator is a
+  (config/credentials/usage DB byte-identical). The aggregator is a
   FIXED ordered `SECTIONS` sequence of pure `fn(&DoctorContext) ->
   Vec<Finding>` producers (`inventory`, `version`, `config`, `auth`, `pools`,
-  `seats`, `secrets`, `probe`, `capability`, `freshness`, `pricing`, `knobs`,
-  `tuning`) -- one
+  `seats`, `secrets`, `probe`, `capability`, `pricing`, `knobs`, `tuning`) -- one
   extension point per
   new section (producer + `section_title`); `NO_NETWORK_SECTIONS` is that list
   MINUS `probe` for the offline status surface. `DoctorContext` (plus the
-  per-layer `CapabilityInputs`/`CapabilityConfig`/`PriorCell` types and the
-  `CapabilityMatrixSource` availability tri-state -- `Available { entries,
-  now, now_ms } | Empty | Unavailable(class)`, consumed by the capability
-  matrix panel, plus the `FreshnessInputs` bundle -- baked catalog stamp,
-  freshest overlay `verified_at`, staleness hint, pinned `today_epoch_day`,
-  last successful import, plus a reserved `Option<ImportResult>` for the
-  future durable import outcome that renders nothing today, plus the
-  `Option<Vec<PricingRow>>` rate-source rows -- `None` when the overlay could
-  not be loaded -- and their four-state
-  `PricingRowSource{Subscription(EquivalenceBasis),Registry,Catalog,Unpriced}`
-  whose subscription arm carries the API-equivalence tri-state
-  `EquivalenceBasis{Complete,Incomplete{missing},Unresolved}`, plus the
-  `Option<Vec<KnobRow>>` output-ceiling attribution rows -- also `None` when
-  the overlay could not be loaded -- and their two-state
-  `OutputCeilingSource{Catalog,Default}`) holds every
+  `CapabilityInputs` config-unavailable line, the `CapabilityMatrixSource`
+  availability tri-state -- `Available { entries, now, now_ms } | Empty |
+  Unavailable(class)`, consumed by the capability matrix panel -- the
+  `PricingRow`s (resolved prices, their `PriceSources` and the
+  `PriceTableDates`, plus the subscription class), the `KnobRow`s (the
+  model's `FillCeiling`, lowered by a resident learned ceiling), the leftover
+  catalog files present in the config folder (`LEFTOVER_CATALOG_FILES`) and the
+  legacy folders) holds every
   read-only input, gathered once. `build_report`/`build_report_no_network` run
   the producers over a context, flatten, and deterministically sort (section,
   name, status) via `build_report_over` into `DoctorReport { schema_version,
@@ -8559,7 +8499,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   every lane a configured model dispatches to (a pooled model one lane per
   member entry), each carrying the nicknames that map to it and its provider
   kind, then every learned key the config no longer maps as a `routed: false`
-  row. Learned entries join on `state_key == lane`; priors and overrides
+  row. Learned entries join on `state_key == lane`; overrides
   resolve through the lane's nicknames (`provider:nickname` before bare
   `provider`, via `OverrideRegistry::resolve`). Columns are the well-known
   keys then every observed other key, uncapped (an override naming a beta flag
@@ -8572,11 +8512,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   cell's verdict is `mixed` with no lane-wide source, layer or age, when they
   disagree on the action it is `mixed`, and either way the cell lists each
   nickname's verdict, layer, `overrode_layer` and action. A cell carries its
-  shown layer (`pin` / `representability` / `override` / `learned` / `seed` /
-  `prior`) and `overrode_layer` (`Resolution::overridden`, the tier the
+  shown layer (`pin` / `representability` / `override` / `learned` / `seed`)
+  and `overrode_layer` (`Resolution::overridden`, the tier the
   winner beat). It then layers on
-  the display-only age and stale flag (a prior-layer cell is stale when any
-  nickname on the lane has a stale prior), and the
+  the display-only age and stale flag (only a verified learned cell past the
+  `[capability] staleness_hint_days` hint is stale), and the
   learned entry's epoch-ms timestamps mapped through the reader's pinned
   `now`/`now_ms` anchor pair, and its `value` via `lane_cell::encoded_value`.
   The shipped beta seed is its own layer: its
@@ -8594,9 +8534,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `src/commands/doctor/served.rs` -- the served gather's inputs.
   `GatherSources::{Disk, Served(Box<ServedInputs>)}` selects the layers;
   `ServedInputs` (built only by the status facade's `served_doctor_inputs`)
-  carries the daemon's config + overlay generation pair, the resident learned
-  snapshot (`ResidentLearned`, pinned `now` / `now_ms`), and the boot
-  `WarmReport`; `with_reload_failure` attaches the daemon meta's last rejected
+  carries the daemon's accepted config, the resident learned
+  snapshot (`ResidentLearned`, pinned `now` / `now_ms`), the boot
+  `WarmReport`, and `ServedPrices` (the daemon's `PriceBook`, pinned once on
+  the gather's worker); `with_reload_failure` attaches the daemon meta's last rejected
   reload (set at `handlers/status/doctor.rs`, `None` from the disk layers),
   which the config section renders as one `reload` Warn finding naming the
   class and age; `with_parked_seats` attaches the daemon's credential-parked
@@ -8617,34 +8558,22 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   or the replay
 - `src/commands/doctor/gather.rs` -- doctor data collection.
   `derive_tuning_rows(config)` reads the effective view's tuning rows.
-  `derive_knob_rows(config, overlay)` resolves one `KnobRow` per `[models.X]`
-  entry: the resolved cell's ceiling through the shared
-  `EffectiveRow::output_ceiling_tokens` accessor the factory's fill reads, else
-  `Default`. Same overlay gating as pricing -- an unreadable overlay leaves
-  `knobs: None`, since the overlay both corrects and disables baked ceilings.
-  `derive_pricing_rows(config, overlay)` resolves one `PricingRow` per
-  `[models.X]` entry through the shared `effective_pricing` boundary (with
-  `pricing::is_subscription` deciding the row's CLASS before the rates decide
-  anything), so the diagnostic can never claim a source the bill does not use; it
-  is called ONLY when the overlay actually loaded -- an unreadable overlay leaves
-  `pricing: None` (the overlay is the rate CORRECTION channel, so a baked figure
-  could name a rate the bill does not use). A subscription row still resolves
-  rates, for `equivalence_basis` alone: it folds the `effective_pricing` result
-  and `pricing::missing_equivalence_dimensions` into the `EquivalenceBasis`
-  tri-state, which is what the row's second clause reports (why the usage
-  report's `equivalent_cost_usd` reads absent) and never its price.
+  `derive_pricing_rows(config, view)` maps each `ModelCell` of the effective
+  view (derived once per gather against the pinned price tables) to a
+  `PricingRow`, with `pricing::is_subscription` deciding the row's class before
+  any price does; `derive_knob_rows(config, view, matrix)` maps each cell's
+  `fill` to a `KnobRow`, lowered by the learned ceilings `LearnedFills`
+  resolves from the same capability matrix source the panel shows.
   `gather_context_no_network(config_path, sources, legacy_dirs)` is the SINGLE shared
-  gather body; `sources` (`served.rs`) picks the config / overlay / learned
-  layers: `Disk` -> `disk_layers` (per-layer
-  `server::parse_config_only` + `server::load_overlay_default` so the
-  capability panel degrades one layer without the other, plus the read-only
-  ledger replay: `rebuild_capabilities_with_values`, each
+  gather body; `sources` (`served.rs`) picks the config / learned / price
+  layers: `Disk` -> `disk_layers` (`server::parse_config_only`, the default
+  price book pinned once, plus the read-only ledger replay: `rebuild_capabilities_with_values`, each
   `owned_recorded_snapshot` row given its replayed value before
   `into_entry`; pinned by the `#[path]`-included `gather_value_tests.rs`),
   `Served` -> the daemon's accepted state; then the raw-bytes read for
   the validation findings, then on both paths auth, secret checks, orphan
-  scan, would-trim panel, the freshness inputs and `gather_legacy_folder` per
-  old folder, where a folder holding the config in use reads as `Absent`; the
+  scan, would-trim panel, `gather_leftover_catalog_files` over the config
+  folder, and `gather_legacy_folder` per old folder, where a folder holding the config in use reads as `Absent`; the
   version preflight that never stamps the file is applied in `sections.rs`
   from `accepted_config_version`); `gather_context(config_path, legacy_dirs)` =
   that body PLUS one `gather_probe_results` `probe_all` pass (the only
@@ -8667,28 +8596,19 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   ref naming it -- in a pooled config, that pool member's own pinned ref. It
   then reports the stored seat keys no ref reaches -- seat key only, never
   token material or a storage path, and nothing is refreshed or removed.
-  `build_capability_inputs` resolves the config-derived capability inputs
-  (`derive_prior_cells` -- one prior per model whose
-  `EffectiveRow::Present` carries capability data, retaining its `verified_at`
-  so the matrix panel flags staleness; NO stale-filter at derivation); a
-  config parse error -> a redacted "panel unavailable" (via
-  `parse_error_redaction`), an unreadable overlay -> priors absent while the
-  matrix panel's learned + override cells still render.
+  A config parse error becomes the capability section's redacted "panel
+  unavailable" line (via `parse_error_redaction`).
   `gather_capability_matrix` builds the `CapabilityMatrixSource` tri-state: an
   unparseable config -> `Unavailable("config_unavailable")`, else it resolves
-  this run's replay boundary (baked `CATALOG_VERSION` + the loaded overlay
-  revision) via `server::ledger_reader::classify_boundary`, reads the slice
+  this run's replay boundary (the frozen `FROZEN_CATALOG_VERSION` /
+  `FROZEN_OVERLAY_REVISION` stamps) via `server::ledger_reader::classify_boundary`, reads the slice
   through the typed `try_read_events` (a failed read ->
   `Unavailable("open_failed" | "query_failed")`), and replays only a slice
   that was read, through `SliceReader` into a bare, config-sized
   `LearnedCapabilityRegistry` bounded by the doctor's `beta_seed` input
   (`Available`, or honest `Empty` when nothing stays resident), both carrying
   the `MatrixReplaySummary` tally and the replay's seed-clear markers -- never
-  a silent empty. Read-only throughout (usage DB byte-identical).
-  `freshest_overlay_verified_at` walks the same `derive_effective_view` path
-  for the freshest OVERLAY-sourced (import/user, never baked) `verified_at`;
-  the freshness inputs also pin `today_epoch_day` and load the last successful
-  import via `load_last_import`
+  a silent empty. Read-only throughout (usage DB byte-identical)
 - `src/commands/doctor/sections.rs` -- the fixed `section_*` producers plus
   their `*_finding`/`*_remediation` helpers, each a pure mapping of the
   gathered `DoctorContext` to findings: inventory via `compute_activation`
@@ -8701,11 +8621,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `Pass` only when both halves are empty; short-circuited to one `Warn`
   "validation skipped" + the secret checks when the typed load failed, so a
   broken file never emits a spurious validation `Pass`) + the leak-safe
-  secret-presence scan + one `catalog overlay` Warn per
-  `DoctorContext::overlay_soft_defects` entry (gathered by
-  `routectl_router::overlay_soft_defects` off whichever overlay the gather
-  holds -- the disk file for the CLI, the router's own overlay when served --
-  selector `sanitize_for_log`-filtered), auth (no seats/expired -> WARN, store-open error ->
+  secret-presence scan + the served `reload` Warn (`reload_failure_finding`)
+  + one informational `leftover catalog files` Pass
+  (`leftover_catalog_files_finding`) naming the old catalog files still in the
+  config folder, absent when none is, auth (no seats/expired -> WARN, store-open error ->
   FAIL, plus the served gather's parked and unusable seat findings; a login
   remediation names `oauth_login_command`, `--label` and shell-quoting
   included), pools
@@ -8723,36 +8642,18 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   (orphan managed file -> WARN, never auto-deleted), probe via the shared
   `probe_finding` seam, and `capability` -- reduced to the config-unavailable
   degradation line, so a config that loads emits no finding there (the
-  override / prior / learned cells are on the capability matrix panel); it
+  override / seed / learned cells are on the capability matrix panel); it
   NEVER emits a `Fail`, so it never flips the exit code.
-  `section_freshness`/`freshness_findings` map the `FreshnessInputs` to three
-  findings-shaped rows (baked catalog version + snapshot date; overlay
-  verification age via `epoch_day_age`/`is_stale_days` past the staleness
-  hint, honest "no overlay verified stamp" when running on baked defaults;
-  last SUCCESSFUL import date/age/counts, honest "no successful import
-  recorded" when the sidecar is missing), all `Pass`/`Warn`, NEVER `Fail`.
-  `section_pricing`/`pricing_finding` map the gathered `PricingRow`s to one
-  informational `Pass` per configured model naming WHERE its cost rates come
-  from -- an operator `[registry]` row, the baked catalog (the auto-fill), a
-  managed subscription (classified before the rates decide anything), or unpriced --
-  each detail naming the resolved selector (provider, kind, upstream) and, for
-  the two priced states, the per-Mtok rates at two decimals like every other
-  money surface, with an unset dimension rendered `unset` rather than `$0` and
-  a winning row that sets NEITHER rate saying it prices nothing (reachable only
-  from an empty operator `[registry]` row). A subscription row appends the
-  API-equivalence clause via `render_equivalence_basis`/`basis_layer` -- complete
-  via a layer, incomplete NAMING the rateless dimensions, or nothing resolved --
-  which is the only surface that explains an absent `equivalent_cost_usd`; the
-  catalog leaves cache rates unset by construction, so a catalog basis always
-  reads incomplete. A `pricing: None` context (overlay
-  unreadable) collapses the section to the single `pricing_unavailable` Warn
-  instead. NEVER `Fail`, so it can never move the exit code.
-  `section_knobs`/`knob_finding` are the ceiling sibling of that pair: one
-  informational `Pass` per configured model naming whether its outbound
-  `max_output_tokens` came from `[models.X]` (`model-config`), a ceiling
-  learned from an upstream refusal (`learned`) or the egress baseline
-  (`default`), each detail naming the resolved figure and the model's kind and
-  upstream. NEVER `Fail`.
+  `section_pricing`/`pricing_finding` map each `PricingRow` to one
+  informational `Pass` naming the selector (provider, kind, upstream), each of
+  the five prices with its source token (`render_price_fields`, an unknown
+  price reading `unknown`, never `$0`) and the price table dates; a
+  subscription row adds the API-equivalence clause
+  (`render_equivalence_clause`), an unpriced row says usage reports no cost.
+  `section_knobs`/`knob_finding` are the fill sibling: one informational
+  `Pass` per configured model naming its `max_output_tokens` and the
+  `FillSource` (`model-config` / `learned` / `default`), or that the egress
+  forwards an omitted limit untouched. Neither section can `Fail`.
   `section_tuning`/`tuning_finding`: one informational `Pass` per tuning row.
   `legacy_folder_finding` adds one config-section `legacy folder` Warn per old
   folder that still holds files or could not be listed, naming it only by its
@@ -8765,7 +8666,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `summary: PASS n WARN n FAIL n` line via `render_summary`)
 - `src/commands/text_table.rs` -- `render_table`, the shared plain-text
   aligner (column 0 left, the rest right, two-space gutter, trailing spaces
-  trimmed) used by `doctor_panels.rs`'s capability matrix grid
+  trimmed) used by `doctor_panels.rs`'s capability matrix grid and the
+  `routectl usage` report
 - `src/commands/doctor_panels.rs` -- doctor's read-only would-trim opportunity
   panel, kept apart from the aggregator so the compute/map/render seam is
   unit-testable against a temp DB. `compute_would_trim_panel(config, now) ->
@@ -8899,11 +8801,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   an operator payload extra, against a wiremock upstream that refuses it, and
   asserts the count is re-sent once without the extra and served
 - `tests/status_poll_log_invariance.rs` -- real-binary log-volume guard: boots
-  a hermetic child daemon over a soft-defect catalog overlay and unmappable
-  ledger rows, polls `/status` and `/status/doctor` repeatedly, and asserts
-  the WARN/ERROR, field-verdict, rebuild-skip and overlay-defect line counts
-  do not grow with the poll count; then corrupts the overlay and asserts the
-  doctor reports the rejected reload while still rendering the served overlay
+  a hermetic child daemon over unmappable ledger rows plus a leftover
+  soft-defect catalog overlay file the daemon no longer reads, polls `/status`
+  and `/status/doctor` repeatedly, and asserts the WARN/ERROR, field-verdict,
+  rebuild-skip and overlay-defect line counts do not grow with the poll count;
+  then corrupts the config and asserts the doctor reports the rejected reload
+  while still rendering the served state
 - `src/server/preflight_daemon_tests.rs` -- ASSEMBLED-DAEMON verification (a
   `cfg(test)` sidecar declared from `serve.rs`; see item 4 relocation): a real
   `serve_on_listener` daemon, real HTTP inference traffic over loopback, and the
