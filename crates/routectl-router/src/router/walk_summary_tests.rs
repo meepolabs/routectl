@@ -31,10 +31,11 @@ const SHARED_ORIGIN: &str = "https://zq7sentinel.example.test";
 const OTHER_ORIGIN: &str = "https://other.example.test";
 const MESSAGE: &str = "walk summary";
 const TARGET: &str = "routectl_router::router::walk_state";
-const FIELDS: [&str; 8] = [
+const FIELDS: [&str; 9] = [
     "surface",
     "attempts",
     "retries",
+    "request_caused",
     "excluded_endpoint",
     "excluded_model",
     "excluded_target",
@@ -140,6 +141,12 @@ fn seated(nickname: &str, member: &str, seat: &Arc<Seat>) -> Arc<ResolvedModel> 
 }
 
 fn router(head: Head, max_attempts: u32) -> Router {
+    router_over(head, max_attempts, &["first", "sibling", "other"])
+}
+
+/// [`router`] with the alias naming `chain` (a subset of the three models,
+/// in order).
+fn router_over(head: Head, max_attempts: u32, chain: &[&str]) -> Router {
     let mut config = Config::default();
     config.retry.max_attempts = max_attempts;
     config.retry.initial_backoff_ms = 0;
@@ -155,7 +162,7 @@ fn router(head: Head, max_attempts: u32) -> Router {
         .insert("other-seat".into(), entry(OTHER_ORIGIN));
     config.aliases.insert(
         ALIAS.into(),
-        AliasValue::Chain(vec!["first".into(), "sibling".into(), "other".into()]),
+        AliasValue::Chain(chain.iter().map(|name| (*name).into()).collect()),
     );
     let models = BTreeMap::from([
         (
@@ -233,21 +240,21 @@ fn fields_of(event: &CapturedEvent) -> Vec<(&str, &str)> {
 /// read from the wrong tally fails a row.
 #[tokio::test]
 async fn a_walk_that_took_a_detour_logs_one_summary_with_the_exact_fields() {
-    type Row = (&'static str, Head, u32, Surface, [&'static str; 8]);
+    type Row = (&'static str, Head, u32, Surface, [&'static str; 9]);
     let rows: [Row; 4] = [
         (
             "generic 400 skips the sibling on its origin",
             Head::BadRequest,
             3,
             Surface::Complete,
-            ["complete", "2", "0", "1", "0", "0", "0", "none"],
+            ["complete", "2", "0", "1", "1", "0", "0", "0", "none"],
         ),
         (
             "the same walk on a stream",
             Head::BadRequest,
             3,
             Surface::Stream,
-            ["stream", "2", "0", "1", "0", "0", "0", "none"],
+            ["stream", "2", "0", "1", "1", "0", "0", "0", "none"],
         ),
         (
             "recognized 429 names its recognizer",
@@ -258,6 +265,7 @@ async fn a_walk_that_took_a_detour_logs_one_summary_with_the_exact_fields() {
                 "complete",
                 "2",
                 "0",
+                "1",
                 "1",
                 "0",
                 "0",
@@ -270,7 +278,7 @@ async fn a_walk_that_took_a_detour_logs_one_summary_with_the_exact_fields() {
             Head::ServerError,
             2,
             Surface::Complete,
-            ["complete", "3", "1", "0", "0", "0", "0", "none"],
+            ["complete", "3", "1", "0", "0", "0", "0", "0", "none"],
         ),
     ];
     for (name, head, max_attempts, surface, expected) in rows {
@@ -371,5 +379,31 @@ async fn the_summary_carries_no_upstream_request_credential_or_endpoint_text() {
             closed,
             "{name} = {value} is neither a count nor a closed token"
         );
+    }
+}
+
+/// A walk whose only detour is a failure the request caused still logs the
+/// summary, carrying the count: a generic 400 on `first` with `other`, on
+/// another origin, next in the chain skips nothing, retries nothing and
+/// recognizes nothing.
+///
+/// Mutation check: drop the request-caused clause from `took_detours` -> red
+/// (no summary is logged).
+#[tokio::test]
+async fn walk_summary_line_carries_request_caused() {
+    for surface in [Surface::Complete, Surface::Stream] {
+        let router = router_over(Head::BadRequest, 3, &["first", "other"]);
+
+        let events = walk(&router, surface).await;
+
+        let found = summaries(&events);
+        assert_eq!(found.len(), 1, "{surface:?}: {events:#?}");
+        let surface_token = match surface {
+            Surface::Complete => "complete",
+            Surface::Stream => "stream",
+        };
+        let expected = [surface_token, "2", "0", "1", "0", "0", "0", "0", "none"];
+        let want: Vec<(&str, &str)> = FIELDS.into_iter().zip(expected).collect();
+        assert_eq!(fields_of(found[0]), want, "{surface:?}");
     }
 }

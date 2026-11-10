@@ -21,7 +21,7 @@ use routectl_core::failure_class::{ClassifiedFailure, FailureClass};
 use routectl_core::wire_check::{IngressDialect, WireTap};
 use routectl_core::{
     ChatRequest, EligibilityReason, Error, Provider, RefusalReason, RequestObservation, Result,
-    TranslationReport, UpstreamReason, sanitize_for_log,
+    TranslationReport, UpstreamReason, WalkCounts, sanitize_for_log,
 };
 
 use crate::capability_matcher::names_requested_capability;
@@ -270,7 +270,8 @@ impl Router {
     /// there.
     ///
     /// `walk` is the request's walk state on `surface`; its summary line is
-    /// logged here, once, when the walk took a detour.
+    /// logged here, once, when the walk took a detour, and its counts are
+    /// stamped on `observation`.
     pub(super) fn finish_dispatch(
         &self,
         meta: &DispatchMeta,
@@ -284,6 +285,7 @@ impl Router {
         self.metrics.record_repairs_per_request(spent);
         if let Some(observation) = observation {
             observation.set_field_repairs(u64::from(spent));
+            observation.set_walk_counts(walk_counts(walk));
         }
         emit_replay_degradation(meta);
         emit_field_repair(meta);
@@ -1366,6 +1368,18 @@ fn log_walk_on(target: &DispatchTarget, has_next: bool, err: &Error) {
             "chain exhausted; no fallback target available; request will fail",
         );
     }
+}
+
+/// The walk's counts as the request observation records them.
+fn walk_counts(walk: &RequestWalk) -> WalkCounts {
+    let excluded = walk.excluded_by();
+    WalkCounts::new(
+        u64::from(walk.request_caused()),
+        u64::from(excluded.endpoint),
+        u64::from(excluded.model),
+        u64::from(excluded.target),
+        u64::from(excluded.probe_run),
+    )
 }
 
 /// Count a target the gate refused before any attempt as one skip under the

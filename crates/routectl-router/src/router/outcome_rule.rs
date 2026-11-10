@@ -226,11 +226,17 @@ impl Disposition {
     }
 
     /// Record on the request's walk what this disposition spends and
-    /// excludes: a same-target retry, the exclusions, and the recognized
-    /// pattern.
+    /// excludes: a same-target retry, the exclusions, the recognized
+    /// pattern, and a failure the request caused. An endpoint or model scope
+    /// is the request's own doing (a native request rejection or a
+    /// recognized pattern of that scope); this is the one place that rule
+    /// is applied.
     pub(super) fn record_on(&self, walk: &mut RequestWalk) {
         if matches!(self.same_target, SameProvider::Retry { .. }) {
             walk.spend_retry();
+        }
+        if matches!(self.scope, FailureScope::Endpoint | FailureScope::Model) {
+            walk.count_request_caused();
         }
         for exclusion in &self.exclusions {
             walk.exclude(exclusion.clone());

@@ -870,3 +870,31 @@ fn a_reset_hint_floors_the_retry_or_parks_the_seat() {
         assert_eq!(disposition.breaker, breaker, "{name}");
     }
 }
+
+/// Recording a disposition counts a failure the request caused exactly when
+/// its scope is the endpoint or the model; a target- or account-scoped
+/// failure is the seat's, not the request's.
+#[test]
+fn record_on_counts_a_request_caused_failure_only_for_endpoint_or_model_scope() {
+    let rows = [
+        ("target", FailureScope::Target, 0),
+        ("account", FailureScope::Account, 0),
+        ("endpoint", FailureScope::Endpoint, 1),
+        ("model", FailureScope::Model, 1),
+    ];
+    for (name, scope, expected) in rows {
+        let disposition = Disposition {
+            scope,
+            breaker: BreakerOutcome::None,
+            same_target: SameProvider::No,
+            exclusions: Vec::new(),
+            recognized: None,
+            next: Next::Walk,
+        };
+        let mut walk = RequestWalk::new();
+
+        disposition.record_on(&mut walk);
+
+        assert_eq!(walk.request_caused(), expected, "{name}");
+    }
+}

@@ -270,6 +270,7 @@ pub(super) struct RequestWalk {
     exclusions: Vec<Exclusion>,
     recognized: Option<ScopeRow>,
     excluded_by: ExcludedBy,
+    request_caused: u32,
 }
 
 impl RequestWalk {
@@ -291,17 +292,24 @@ impl RequestWalk {
         self.excluded_by
     }
 
+    /// Upstream failures the request itself caused (endpoint or model scope).
+    pub(super) const fn request_caused(&self) -> u32 {
+        self.request_caused
+    }
+
     #[cfg(test)]
     pub(super) fn exclusions(&self) -> &[Exclusion] {
         &self.exclusions
     }
 
     /// Whether the walk retried a target, passed over one an exclusion
-    /// covered, or recognized an upstream pattern.
+    /// covered, recognized an upstream pattern, or met a failure the request
+    /// caused.
     fn took_detours(&self) -> bool {
         self.retries_used > 0
             || self.excluded_by != ExcludedBy::default()
             || self.recognized.is_some()
+            || self.request_caused > 0
     }
 
     /// Log the walk's one summary line, when it took a detour. Counts and
@@ -317,6 +325,7 @@ impl RequestWalk {
             surface = surface.as_str(),
             attempts,
             retries = self.retries_used(),
+            request_caused = self.request_caused(),
             excluded_endpoint = excluded.endpoint,
             excluded_model = excluded.model,
             excluded_target = excluded.target,
@@ -329,6 +338,11 @@ impl RequestWalk {
     /// Record a same-target retry the walk is about to make.
     pub(super) const fn spend_retry(&mut self) {
         self.retries_used = self.retries_used.saturating_add(1);
+    }
+
+    /// Record an upstream failure the request itself caused.
+    pub(super) const fn count_request_caused(&mut self) {
+        self.request_caused = self.request_caused.saturating_add(1);
     }
 
     /// Record a recognized upstream pattern.

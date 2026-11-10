@@ -8,8 +8,9 @@
 //! Also pinned here: the request-wide retry budget (`max_attempts = N` is at
 //! most N - 1 same-target retries per client request, shared across the walk,
 //! and neither a repair resend nor an auth refresh spends it), what a walk
-//! that excluded every target returns, and that an excluded target takes no
-//! rate-limit token, no half-open slot and no skip tally.
+//! that excluded every target returns, that an excluded target takes no
+//! rate-limit token, no half-open slot and no skip tally, and the walk counts
+//! a request stamps on its observation.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -22,7 +23,7 @@ use parking_lot::Mutex;
 use routectl_core::schema::ForwardedBearer;
 use routectl_core::{
     ChatChunk, ChatRequest, ChatResponse, Error, Provider, RequestObservation, Result, ScopeRow,
-    SkipCounts, TokenCount,
+    SkipCounts, TokenCount, WalkCounts,
 };
 use serde_json::{Value, json};
 
@@ -74,6 +75,8 @@ enum Failure {
     Unauthorized,
     /// A 400 refusing the test-only field, which the learner repairs.
     RefusedField,
+    /// A 501: the upstream cannot count tokens.
+    NotImplemented,
 }
 
 impl Failure {
@@ -113,6 +116,7 @@ impl Failure {
                 "invalid_request_error",
                 &format!("{TEST_UNSUPPORTED_PATH}: Extra inputs are not permitted"),
             ),
+            Self::NotImplemented => anthropic_error(501, "api_error", "not implemented"),
         }
     }
 }
@@ -431,6 +435,7 @@ fn failing(failure: Failure) -> &'static [Step] {
         Failure::Server => &[Step::Fail(Failure::Server)],
         Failure::Unauthorized => &[Step::Fail(Failure::Unauthorized)],
         Failure::RefusedField => &[Step::Fail(Failure::RefusedField)],
+        Failure::NotImplemented => &[Step::Fail(Failure::NotImplemented)],
     }
 }
 
@@ -1120,4 +1125,164 @@ async fn an_excluded_target_takes_no_rpm_token_no_probe_slot_and_no_skip() {
     assert!(!gate.half_open_probe_in_flight);
     assert_eq!(gate.circuit, CircuitPhase::HalfOpenReady);
     assert_eq!(gate.rpm_available.map(f64::floor), Some(1.0));
+}
+
+// ---------------------------------------------------------------------------
+// Walk counts on the request observation
+// ---------------------------------------------------------------------------
+
+/// Three single-seat models: `a` and `b` on origin X, `c` on origin Y.
+const SHORT_CHAIN: [(&str, &str); 3] = [("a", ORIGIN_X), ("b", ORIGIN_X), ("c", ORIGIN_Y)];
+
+/// The short chain on `lane`, each target answering its script, with no
+/// same-target retry.
+fn short_chain(scripts: [&'static [Step]; 3], lane: Lane) -> (Router, Vec<Arc<Seat>>) {
+    let mut config = Config::default();
+    config.retry.max_attempts = 1;
+    for (nickname, origin) in SHORT_CHAIN {
+        config.providers.insert(
+            format!("{nickname}-seat"),
+            entry(lane, origin, quiet_breaker()),
+        );
+    }
+    config.aliases.insert(
+        ALIAS.into(),
+        AliasValue::Chain(SHORT_CHAIN.iter().map(|(n, _)| (*n).into()).collect()),
+    );
+    let seats: Vec<Arc<Seat>> = scripts.iter().map(|script| Seat::new(script)).collect();
+    let models = SHORT_CHAIN
+        .iter()
+        .zip(&seats)
+        .map(|(&(nickname, _), seat)| {
+            let model = ResolvedModel::new(
+                nickname,
+                format!("{nickname}-seat"),
+                provider(seat),
+                format!("claude-{nickname}"),
+            );
+            (nickname.to_owned(), Arc::new(model))
+        })
+        .collect();
+    let mut router = Router::new(Arc::new(config));
+    router.install_resolved_models(models);
+    (router, seats)
+}
+
+/// The surface a walk-count row dispatches on.
+#[derive(Clone, Copy, Debug)]
+enum CountSurface {
+    Complete,
+    CountTokens,
+}
+
+/// Run one request on `surface` with an observation attached; the served
+/// model and the walk counts the observation recorded.
+async fn observed_walk(router: &Router, surface: CountSurface) -> (Option<String>, WalkCounts) {
+    let observation = RequestObservation::new();
+    let mut req = request();
+    req.routectl_internal.observation = Some(observation.clone());
+    let served = match surface {
+        CountSurface::Complete => {
+            let dispatched = router
+                .complete_with_options(req, RouterOptions::new())
+                .await;
+            assert!(dispatched.result.is_ok(), "{:?}", dispatched.result.err());
+            dispatched.meta.served_model
+        }
+        CountSurface::CountTokens => {
+            let counted = router.count_tokens_with_meta(req).await;
+            assert!(counted.result.is_ok(), "{:?}", counted.result.err());
+            counted.meta.served_model
+        }
+    };
+    (served, observation.snapshot().walk)
+}
+
+/// A generic 400 on `a` is the request's own failure: it counts once, and its
+/// endpoint exclusion passes over `b` on the same origin, so `c` serves.
+///
+/// Mutation check: delete the `set_walk_counts` call in `finish_dispatch` ->
+/// red (the snapshot reads all zeros).
+#[tokio::test]
+async fn a_generic_400_on_origin_x_counts_one_request_caused_failure_and_excludes_the_sibling_endpoint()
+ {
+    let (router, seats) = short_chain(
+        [failing(Failure::BadRequest), SERVE, SERVE],
+        Lane::Anthropic,
+    );
+
+    let (served, walk) = observed_walk(&router, CountSurface::Complete).await;
+
+    assert_eq!(served.as_deref(), Some("c"));
+    assert_eq!(
+        seats.iter().map(|seat| seat.calls()).collect::<Vec<_>>(),
+        vec![1, 0, 1]
+    );
+    assert_eq!(walk, WalkCounts::new(1, 1, 0, 0, 0));
+}
+
+/// A 400 the classifier lifts to an unsupported feature is scoped to its
+/// `[models]` entry and still counts as caused by the request: `b`, another
+/// entry on the same origin, serves, and nothing was passed over.
+///
+/// Mutation check: drop `Model` from the request-caused bump in
+/// `Disposition::record_on` -> red (the count reads 0).
+#[tokio::test]
+async fn a_feature_unsupported_400_counts_under_model_scope() {
+    let (router, _seats) = short_chain(
+        [failing(Failure::FeatureUnsupported), SERVE, SERVE],
+        Lane::OpenaiCompat,
+    );
+
+    let (served, walk) = observed_walk(&router, CountSurface::Complete).await;
+
+    assert_eq!(served.as_deref(), Some("b"));
+    assert_eq!(walk, WalkCounts::new(1, 0, 0, 0, 0));
+}
+
+/// Only a failure the request caused counts. A target-scoped 5xx or 429
+/// counts nothing; the recognized bare 429, endpoint-scoped, counts one and
+/// passes over `b`; a token count's 501 walks on without a failure decision
+/// and counts nothing.
+#[tokio::test]
+async fn only_an_endpoint_or_model_scoped_failure_counts_as_request_caused() {
+    let rows = [
+        (
+            "target-scoped 500",
+            Failure::Server,
+            CountSurface::Complete,
+            "b",
+            WalkCounts::new(0, 0, 0, 0, 0),
+        ),
+        (
+            "unrecognized 429",
+            Failure::RateLimit,
+            CountSurface::Complete,
+            "b",
+            WalkCounts::new(0, 0, 0, 0, 0),
+        ),
+        (
+            "recognized bare 429",
+            Failure::RecognizedRateLimit,
+            CountSurface::Complete,
+            "c",
+            WalkCounts::new(1, 1, 0, 0, 0),
+        ),
+        (
+            "count_tokens 501 walks without a debit",
+            Failure::NotImplemented,
+            CountSurface::CountTokens,
+            "b",
+            WalkCounts::new(0, 0, 0, 0, 0),
+        ),
+    ];
+    for (name, failure, surface, served_by, expected) in rows {
+        let (router, seats) = short_chain([failing(failure), SERVE, SERVE], Lane::Anthropic);
+
+        let (served, walk) = observed_walk(&router, surface).await;
+
+        assert_eq!(served.as_deref(), Some(served_by), "{name}");
+        assert_eq!(seats[0].calls(), 1, "{name}: the head failed once");
+        assert_eq!(walk, expected, "{name}");
+    }
 }

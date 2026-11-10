@@ -439,15 +439,19 @@ fn the_same_exclusion_is_held_once() {
 }
 
 #[test]
-fn retries_and_recognition_accumulate_across_the_walk() {
+fn retries_recognition_and_request_caused_failures_accumulate_across_the_walk() {
     let mut walk = RequestWalk::new();
 
     walk.spend_retry();
     walk.spend_retry();
     walk.recognize(ScopeRow::AnthropicBareRateLimit);
+    for _ in 0..3 {
+        walk.count_request_caused();
+    }
 
     assert_eq!(walk.retries_used(), 2);
     assert_eq!(walk.recognized(), Some(ScopeRow::AnthropicBareRateLimit));
+    assert_eq!(walk.request_caused(), 3);
 }
 
 /// A provider that only lets a dispatch target be expanded; nothing here

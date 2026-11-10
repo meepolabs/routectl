@@ -103,7 +103,8 @@ The default `info` log is meant to be read, so the levels follow one rule set:
    per-request counts. What happened on the way (a capability demotion, a
    cloak decision, a content-filter finish, an opaque SSE block) logs at
    DEBUG; a failure an operator can act on stays WARN or ERROR. A request
-   whose walk retried or skipped targets adds one
+   whose walk retried or skipped targets, or met an upstream failure the
+   request itself caused, adds one
    [`walk summary`](#walk-summary-info-line) line with the counts.
 
 What an operator now needs a debug filter (or a counter) to see is listed in
@@ -1615,8 +1616,8 @@ walk, so its per-attempt lines carry the same text on every surface; the
 ## Walk summary INFO line
 
 A request whose walk retried a target, passed over a target an earlier
-failure excluded, or recognized an upstream failure pattern logs one INFO
-line when the walk ends (a stream's at its commit or exhaustion), on every
+failure excluded, recognized an upstream failure pattern, or met an upstream
+failure the request itself caused logs one INFO line when the walk ends (a stream's at its commit or exhaustion), on every
 surface. A walk with none of these logs nothing, so a first-try success
 stays at the one [`request finished`](#request-finished-info) line. Every
 field is a count or a closed token: never the upstream body or a hash of it,
@@ -1624,7 +1625,7 @@ a header, an account id, or an endpoint.
 
 | Level | Target | Message | Fields | When |
 |---|---|---|---|---|
-| INFO | `routectl_router::router::walk_state` | `walk summary` | `surface`, `attempts`, `retries`, `excluded_endpoint`, `excluded_model`, `excluded_target`, `excluded_probe_run`, `recognizer` | Once per request whose walk took one of the detours above. `surface` is `complete`, `stream` or `count_tokens`; `attempts` is the upstream calls the walk made; `retries` is the same-target retries it spent. Each `excluded_*` counts the targets the walk skipped because an exclusion covered them, under the scope of the first covering exclusion: `endpoint` (a failure scoped to the upstream origin, such as a generic 400), `model` (an unsupported feature or exceeded window on that `[models]` entry), `target` (the seat that failed, named again later in the chain) and `probe_run` (targets outside the run of seats an availability probe started in). `recognizer` is the token of the most recent recognized upstream pattern (`anthropic-bare-rate-limit`), or `none`. |
+| INFO | `routectl_router::router::walk_state` | `walk summary` | `surface`, `attempts`, `retries`, `request_caused`, `excluded_endpoint`, `excluded_model`, `excluded_target`, `excluded_probe_run`, `recognizer` | Once per request whose walk took one of the detours above. `surface` is `complete`, `stream` or `count_tokens`; `attempts` is the upstream calls the walk made; `retries` is the same-target retries it spent. `request_caused` counts the upstream failures the request itself caused: those scoped to the endpoint or the model (a native 400 or 422, or a recognized pattern of that scope such as `anthropic-bare-rate-limit`); a failure scoped to the seat alone (a 5xx, an unrecognized 429) or to its credential never counts. Each `excluded_*` counts the targets the walk skipped because an exclusion covered them, under the scope of the first covering exclusion: `endpoint` (a failure scoped to the upstream origin, such as a generic 400), `model` (an unsupported feature or exceeded window on that `[models]` entry), `target` (the seat that failed, named again later in the chain) and `probe_run` (targets outside the run of seats an availability probe started in). `recognizer` is the token of the most recent recognized upstream pattern (`anthropic-bare-rate-limit`), or `none`. |
 
 ## Circuit-breaker transition INFO lines
 
