@@ -8006,6 +8006,13 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   price field with its source and table date), per-class retry policy, the
   resolved tuning table (`tuning_cells` / `tuning_kind`, shared with doctor's
   tuning section) and capability cells. No generic per-key provenance tree
+- `src/commands/config_settings.rs` -- the settings block of `config show
+  --effective`: every scalar leaf of the redacted config tree (the one
+  `config show` prints, via `config::redacted_config`) tagged `(file)` when
+  the parsed raw TOML holds its key path, else `(default)`, plus the closed
+  `CODE_DEFAULTS` table of `Option` keys printed with their in-code default.
+  The sidecar's census over the config JSON Schema fails on an `Option` key
+  with no classification
 - `src/commands/edit_pipeline.rs` -- building blocks shared by the
   config.toml-mutating commands (`config set/unset`, `provider add`, the login
   auto-surface, `init`): `preflight`, one call to

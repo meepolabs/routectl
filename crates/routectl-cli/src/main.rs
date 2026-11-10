@@ -633,9 +633,11 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             ConfigCmd::Show { effective } => {
                 let config = load_config(cli.config.as_deref())?;
                 let result = if effective {
+                    let raw = std::fs::read_to_string(resolve_config_path(cli.config.as_deref()))?;
                     let prices = commands::pricing::default_price_book();
                     commands::config_effective::show_effective(
                         &config,
+                        &raw,
                         prices.current().as_deref(),
                         routectl_router::prices::shipped_table(),
                     )

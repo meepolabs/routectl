@@ -3,7 +3,7 @@
 use routectl_auth::{OAuthStore, SecretRef, SecretScheme, SecretStore};
 use routectl_core::{Error, Result, sanitize_for_log_with_cap};
 use routectl_router::{
-    Config, ProviderEntry, collect_config_validation, locate_dotted_path, resolve_model_provider,
+    Config, collect_config_validation, locate_dotted_path, resolve_model_provider,
 };
 
 use crate::commands::config_member_build::{OfflineCheckStore, member_build_errors};
@@ -306,7 +306,7 @@ fn oauth_auth_selector_warnings(config: &Config, raw_text: Option<&str>) -> Vec<
 
 /// Collect the secret-ref PARSE errors across every provider entry: the
 /// store-independent half of [`check`]'s secret-ref pass. Each entry's
-/// [`secret_uris`](ProviderEntry::secret_uris) are run through
+/// [`secret_uris`](routectl_router::ProviderEntry::secret_uris) are run through
 /// `SecretRef::parse`; an unrecognized scheme is an error. Secret
 /// RESOLUTION (which needs the async store and yields warnings, not errors)
 /// stays in [`check`]. Kept sync and store-free so the full config-check
@@ -347,11 +347,7 @@ pub fn show(config: &Config) -> Result<()> {
 /// The exact text `show` prints, so the redaction boundary is testable without
 /// capturing stdout.
 fn render_show(config: &Config) -> Result<String> {
-    let mut redacted = config.clone();
-    for entry in redacted.providers.values_mut() {
-        redact_entry(entry);
-    }
-    let body = toml::to_string_pretty(&redacted)
+    let body = toml::to_string_pretty(&redacted_config(config))
         .map_err(|e| Error::Internal(format!("serialize: {e}")))?;
     Ok(format!(
         "# Secrets are redacted and each provider base_url is reduced to its origin \
@@ -360,8 +356,14 @@ fn render_show(config: &Config) -> Result<String> {
     ))
 }
 
-fn redact_entry(entry: &mut ProviderEntry) {
-    entry.redact_secrets();
+/// `config` with every provider secret redacted: the tree `config show`
+/// prints. Any surface that prints config values starts from this copy.
+pub(crate) fn redacted_config(config: &Config) -> Config {
+    let mut redacted = config.clone();
+    for entry in redacted.providers.values_mut() {
+        entry.redact_secrets();
+    }
+    redacted
 }
 
 /// Prefix `message` with `(line N): ` when the config text is available and

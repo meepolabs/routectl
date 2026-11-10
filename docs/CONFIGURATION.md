@@ -3404,20 +3404,34 @@ path, query, or embedded `user:pass@` credential. That reduction means
 the output is NOT round-trippable back into a config file, which the
 dump says in a leading `#` comment -- your own `config.toml` remains the
 authoritative source for verbatim `base_url` values.
-Adding `--effective` appends a provenance-annotated view of the
-surfaces where MORE THAN ONE LAYER can supply a value -- so you can see
-which layer actually won without cross-referencing the price tables and
-the retry defaults by hand. Every other config field is
-trivially whatever `config.toml` says, so it is not re-annotated (that
-would be noise).
+Adding `--effective` appends a provenance-annotated view: every setting
+with whether `config.toml` set it or the default in code applies, then
+the surfaces where MORE THAN ONE LAYER can supply a value -- so you can
+see which layer actually won without cross-referencing the price tables
+and the retry defaults by hand.
 
 The derivation is pure: it runs the same price precedence usage cost
 uses, over the loaded config, `prices.json` in the config folder and the
 table shipped with the release. It resolves no secrets, builds no provider, and makes no
 network call, so it is safe to run against any config.
 
-Four sections are printed:
+Five sections are printed:
 
+- **settings** -- one row per setting, sorted by its dotted key path,
+  as `path=value(source)`. `source` is `file` when `config.toml` writes
+  the key (as a `[section]` key, a dotted key or an inline table: all
+  three read alike) and `default` when the value is the one in code.
+  Values come from the same redacted tree as the plain dump, so a
+  `base_url` prints only its origin and a `literal:` key ref prints its
+  sentinel. An array prints as one row. A key that has no value until
+  you set one is not printed unless its default is a fixed value in
+  code: `[retry] max_honored_retry_after_ms`, the three `[log]` knobs,
+  and on each entry of the matching kind `max_thinking_entry_bytes`
+  (`anthropic-api`) and `codex_version` (`openai-responses`). The five
+  tiered tuning keys an entry leaves unset resolve in **resolved
+  tuning** below; the rest of these keys mean off, or that the value
+  comes from another table or section (for example a model's prices
+  under **model facts**).
 - **model facts** -- a header naming the refreshed and shipped table
   dates (`none` when that table is absent), then one row per
   `[models.X]` entry with `context_window`, `fill` and the five price

@@ -413,6 +413,8 @@ list with more narrative.
 
 - **`routectl doctor` warns when capability learning is off.** With `[capability] enabled = false` the `capability` section carries one WARN `learning` saying nothing is learned and no learned verdict or limit is applied; the daemon's `/status/doctor` panel and the dashboard doctor tab show it too. It is never a FAIL, so the exit code is unchanged. The doctor's remediation for an `oauth://` ref naming a provider this build cannot log in to now names the provider entry and token, in the same words the status unusable-seat fix uses.
 
+- **`routectl config show --effective` prints every setting with where it came from.** A new `settings` section lists each setting as `path=value(file)` when `config.toml` writes it (as a section key, dotted key or inline table) or `path=value(default)` when the value is the one in code, including the fixed in-code defaults of keys that are otherwise unset. Values are redacted exactly as in `config show`: a `base_url` prints only its origin.
+
 ### Changed
 
 - **The compiled Codex client version is now 0.167.0 (was 0.145.0).** Without a `codex_version` override, ChatGPT-OAuth Responses requests send `codex_cli_rs/0.167.0` in the User-Agent and `0.167.0` in the `version` header, and Codex login and refresh send the same User-Agent; a configured `codex_version` still wins. `gpt-6-luna` on the ChatGPT-OAuth lane has not been verified with this version. See [docs/CONFIGURATION.md](docs/CONFIGURATION.md).

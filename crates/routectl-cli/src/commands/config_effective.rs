@@ -5,6 +5,8 @@
 //! `--effective` additionally renders the surfaces where more than one layer
 //! competes for a value, tagging each with the layer that won:
 //!
+//!   - settings (every scalar key, `(file)` when `config.toml` sets it,
+//!     `(default)` when the value is the one in code),
 //!   - model facts (context window, output fill and each price field, tagged
 //!     with a fixed source token and, for a table price, the table date),
 //!   - retry class policy (baked class default vs `[retry.classes.<class>]`),
@@ -20,6 +22,8 @@
 use routectl_core::Result;
 use std::fmt::Display;
 
+use super::config_settings::redacted_settings_lines;
+
 use routectl_router::prices::{PriceSource, PriceTable};
 use routectl_router::{
     BreakerThreshold, ClassPolicyCell, ClassPolicySource, Config, ModelCell, OverrideRow,
@@ -28,22 +32,39 @@ use routectl_router::{
 };
 
 /// Print the plain redacted config dump, then the provenance-annotated
-/// effective view (model facts + retry class policy +
-/// resolved tuning + capability cells). `refreshed` and `shipped` are the
-/// price tables the model prices resolve against.
+/// effective view (settings + model facts + retry class policy +
+/// resolved tuning + capability cells). `raw_text` is the config file the
+/// config was loaded from; `refreshed` and `shipped` are the price tables
+/// the model prices resolve against.
 pub fn show_effective(
     config: &Config,
+    raw_text: &str,
     refreshed: Option<&PriceTable>,
     shipped: Option<&PriceTable>,
 ) -> Result<()> {
     super::config::show(config)?;
 
+    println!("effective view -- provenance-annotated");
+    render_settings(config, raw_text)?;
     let view = derive_effective_view(config, refreshed, shipped);
-    println!("effective view -- provenance-annotated (layered surfaces only)");
     render_model_facts(&view.models, &view.price_tables);
     render_class_cells(&view.classes);
     render_tuning_cells(&view.tuning);
     render_capability_cells(&view.capabilities);
+    Ok(())
+}
+
+/// Render every scalar setting of the redacted config tagged `(file)` or
+/// `(default)`.
+fn render_settings(config: &Config, raw_text: &str) -> Result<()> {
+    let lines = redacted_settings_lines(config, raw_text)?;
+    println!(
+        "\nsettings (file: config.toml sets it; default: the value in code; the five \
+         tiered keys an entry leaves unset resolve under resolved tuning):"
+    );
+    for line in lines {
+        println!("{line}");
+    }
     Ok(())
 }
 

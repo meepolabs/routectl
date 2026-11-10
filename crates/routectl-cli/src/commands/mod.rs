@@ -9,6 +9,7 @@ pub mod config;
 pub mod config_edit;
 pub mod config_effective;
 pub mod config_member_build;
+mod config_settings;
 pub mod doctor;
 pub mod doctor_panels;
 pub mod edit_pipeline;
