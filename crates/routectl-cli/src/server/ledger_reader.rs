@@ -70,8 +70,8 @@ pub(crate) enum BoundaryOutcome {
     /// An otherwise-readable ledger carrying no tombstone at all.
     NoTombstone,
     /// A tombstone stamped a revision other than the target's. Carries that
-    /// stale tombstone's rowid: the rows after it are where the
-    /// catalog-independent verdicts a new boundary must restate are read from.
+    /// stale tombstone's rowid: the rows after it are where the verdicts a
+    /// new boundary must restate are read from.
     RevisionMismatch {
         /// Ledger rowid of the stale-revision tombstone.
         stale_rowid: i64,

@@ -12,22 +12,20 @@
 //! reaction to that classification -- replay-or-enqueue -- and nothing else.
 //!
 //! The warm runs ONLY at the initial bootstrap, never on a hot-reload:
-//! `Router::carry_over_learned_from` already carries (or deliberately clears)
-//! the live registry across a reload, so re-running the rebuild there would
-//! clobber that decision.
+//! `Router::carry_over_learned_from` already carries the live registry
+//! across a reload, so re-running the rebuild there would clobber it.
 //!
 //! # Fail-closed boundary
 //!
 //! A tombstone row marks the correctness boundary: only a tombstone whose
 //! stamped revision matches this boot's catalog / overlay revision replays
-//! the post-boundary slice. A tombstone stamped a DIFFERENT revision moves
-//! the boundary the same way a revision-changing reload does: the slice after
-//! the stale tombstone is replayed through `should_replay` against this
-//! boot's revision (catalog-scoped rows of another revision drop,
-//! catalog-independent rows survive), and the survivors are restated past a
-//! fresh tombstone in one atomic batch built by
-//! `capability_boundary::boundary_batch`, the same builder the reload
-//! uses. Every other outcome fails closed -- replay nothing AND commit exactly
+//! the post-boundary slice directly. The revision stamps are frozen, so a
+//! tombstone stamped a DIFFERENT revision can only be one written before they
+//! were: the slice after it is replayed through `should_replay`, which keeps
+//! every verdict whatever revision it carries, and those verdicts are restated
+//! past a fresh tombstone in one atomic batch built by
+//! `capability_boundary::boundary_batch`. Every other outcome fails closed --
+//! replay nothing AND commit exactly
 //! one fresh tombstone stamped this boot's revision so this session's later
 //! events sit after a valid boundary:
 //!   * no ledger yet (`Cold`), or an unreadable / version-too-new ledger;
@@ -166,7 +164,7 @@ pub(crate) fn warm_capability_registry_from_ledger(
                 catalog_version,
                 overlay_revision,
                 "capability tombstone revision differs from this boot; \
-                 restating catalog-independent verdicts past a fresh tombstone"
+                 restating learned verdicts past a fresh tombstone"
             );
             restate_survivors_past_new_boundary(db_path, router, usage, stale_rowid)
         }
@@ -223,14 +221,13 @@ fn fail_closed_outcome(
 }
 
 /// Move the replay boundary from a stale-revision tombstone to this boot's
-/// revision WITHOUT evicting the verdicts that survive a revision change.
+/// revision WITHOUT dropping any verdict.
 ///
 /// The slice after the stale tombstone is read once and replayed into a
-/// scratch registry under a boundary descriptor stamped THIS boot's revision,
-/// so `should_replay` drops catalog-scoped rows of any other revision and
-/// keeps the catalog-independent ones. Every entry the scratch replay leaves
-/// resident is restated, after a fresh tombstone, in one acknowledged atomic
-/// batch.
+/// scratch registry under a boundary descriptor stamped THIS boot's revision;
+/// `should_replay` keeps every verdict whatever revision it carries. Every
+/// entry the scratch replay leaves resident is restated, after a fresh
+/// tombstone, in one acknowledged atomic batch.
 ///
 /// The live registry is populated only once that batch commits, by replaying
 /// the same rows into it. On any failure -- the slice read or the batch

@@ -545,6 +545,8 @@ fn overlay_soft_defect_warns(events: &[routectl_testkit::CapturedEvent]) -> usiz
         .count()
 }
 
+const UNSET_KEY_ENV: &str = "ROUTECTL_SOFT_DEFECT_UNSET_TEST_KEY";
+
 /// A config whose `glm` model reads an env key that is never set, behind an
 /// alias that routes it, so the router build fails after the config and
 /// overlay load succeed.
@@ -558,8 +560,6 @@ fn unbuildable_config_text() -> String {
          [aliases]\nfast = \"glm\"\n"
     )
 }
-
-const UNSET_KEY_ENV: &str = "ROUTECTL_SOFT_DEFECT_UNSET_TEST_KEY";
 
 /// Soft overlay defects are logged on the reload that installs a new overlay
 /// revision, and NOT on a reload rejected before it installs one, nor again on
@@ -1313,9 +1313,10 @@ async fn config_reload_overlay_revision_change_enqueues_no_tombstone() {
 }
 
 /// A reload that leaves the catalog version and overlay revision unchanged
-/// (here: no overlay file, config identical) must enqueue NO tombstone -- the
-/// replay boundary only advances on a real revision change. `#[serial]`: the
-/// loader reads the ambient `overlay_default_path()`.
+/// (here: no overlay file, config identical) must enqueue NO tombstone: the
+/// revision stamps are frozen, so no reload moves the replay boundary.
+/// `#[serial]`: the test sets the process-global `XDG_CONFIG_HOME` the loader's
+/// `overlay_default_path()` reads.
 #[tokio::test]
 #[serial_test::serial]
 async fn config_reload_without_revision_change_enqueues_no_tombstone() {

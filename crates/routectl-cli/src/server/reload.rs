@@ -745,17 +745,19 @@ pub(super) async fn handle_config_reload(
         previous_router.catalog_overlay().revision != new_overlay.revision;
 
     // Moving the boundary makes every row before the new tombstone invisible
-    // to every later boot, so the surviving catalog-independent verdicts must
-    // be re-appended past it BEFORE the replacement router is published --
-    // otherwise they act for this process's life and vanish at the next
-    // restart.
+    // to every later boot, so the carried verdicts must be re-appended past it
+    // BEFORE the replacement router is published -- otherwise they act for
+    // this process's life and vanish at the next restart.
     //
     // Three phases, in this order for a reason. The cut (snapshot + admit) runs
     // under the registry guard so no observation can land between the two and
     // be lost by both. The wait then runs with the guard RELEASED -- a lock is
     // never held across SQLite. Only a committed batch advances the generation,
-    // evicts the catalog-scoped entries, and publishes; every failure leaves
+    // runs the (no-op) catalog-scoped prune, and publishes; every failure leaves
     // generation, registry and published Router untouched.
+    //
+    // Unreachable while the revision stamps are frozen: both routers report
+    // the same constants, so `revision_changed` is always false here.
     if revision_changed {
         let boundary_router = Arc::new(new_router);
         let Ok(admitted) =

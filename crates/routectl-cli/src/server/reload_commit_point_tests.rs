@@ -111,6 +111,11 @@ async fn a_committed_config_reload_marks_a_logged_out_seat_and_lifts_only_edited
         UpstreamReason::CredentialExpired,
         Instant::now() + Duration::from_hours(1),
     ));
+    assert_eq!(
+        account_state(&live, ENTRY_MODEL).0,
+        Some(UpstreamReason::CredentialExpired),
+        "premise: the edited entry is parked before the reload"
+    );
     let generation = live
         .admit_for_credential_tests(MEMBER_A)
         .expect("a healthy seat admits");

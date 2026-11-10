@@ -2930,31 +2930,16 @@ impl Router {
     }
 
     /// Carry the previous Router's learned-capability registry into this
-    /// freshly-built Router during a hot-reload -- in full when the catalog
-    /// version AND the overlay revision are both unchanged, and narrowed to
-    /// the catalog-independent entries when either changed.
+    /// freshly-built Router during a hot-reload.
     ///
-    /// Most learned negatives are inferences about how a target priced or
-    /// rejected a capability under the catalog / overlay in force when they
-    /// were learned. If either the baked catalog version or the overlay
-    /// revision changed, that pricing / capability truth is now fresher than
-    /// anything the registry holds, so clear-on-change wins for them: they
-    /// are dropped and re-learned from live traffic. Restart-re-probe is the
-    /// accepted model.
+    /// The catalog version and overlay revision are frozen constants, so both
+    /// are always unchanged across a reload and the revision-changed arm below
+    /// is unreachable while they stay frozen. No key is catalog-scoped either,
+    /// so even that arm's boundary prune would remove nothing.
     ///
-    /// A wire-shape verdict is the exception, and the exception is the
-    /// predicate's, not this site's: an upstream that rejected a request by
-    /// naming a field of its own request envelope stated a fact about that
-    /// lane's accepted shape, which no catalog revision can make stale. Such
-    /// an entry therefore rides across a revision change. The cold-boot
-    /// replay honors the same predicate, so an entry that survives a reload
-    /// survives the next restart too -- carrying it here alone would only
-    /// move the loss to the next boot, where its symptom is a warning that
-    /// quietly stops appearing.
-    ///
-    /// When both revisions are unchanged, every entry rides across at full
-    /// fidelity (decay windows, backoff counters intact) so a config-only
-    /// reload does not un-learn a valid negative. The one exception is the
+    /// Every entry rides across at full fidelity (decay windows, backoff
+    /// counters intact) so a config-only reload does not un-learn a valid
+    /// negative. The one exception is the
     /// in-flight probe slot: a probe outstanding against the pre-swap Router
     /// can never clear a slot copied onto the new one, so it is carried
     /// across as free and the next matching request re-admits a probe
@@ -2984,11 +2969,10 @@ impl Router {
         // value-equality check and silently drop those writes.
         //
         // Nothing is copied here, and the only removal is the owner sweep,
-        // which runs here only on a config-only reload. On a revision change the catalog-scoped eviction belongs to
-        // the boundary transition (`advance_generation` +
-        // `prune_catalog_scoped`), which runs only after the boundary batch is
-        // durable -- pruning now would discard entries that a failed boundary
-        // must leave untouched.
+        // which runs here only on a config-only reload. On a revision change
+        // the boundary transition (`advance_generation` + the no-op
+        // `prune_catalog_scoped`) runs only after the boundary batch is
+        // durable.
         self.learned_capabilities = Arc::clone(&previous.learned_capabilities);
         // The facade holds its own Arc; rebuilt on the shared registry, with
         // the in-flight single-flight admissions carried across so an
@@ -3022,6 +3006,8 @@ impl Router {
         self.registry_generation =
             std::sync::atomic::AtomicU64::new(self.learned_capabilities.generation());
         if catalog_changed || overlay_changed {
+            // Unreachable while the revision stamps are frozen.
+            //
             // Retuning AND the owner sweep are DEFERRED to the boundary commit.
             // A revision-changing reload may still fail or be abandoned, and the
             // previous router stays live in that case -- applying the new tempo

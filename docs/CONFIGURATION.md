@@ -5025,8 +5025,9 @@ Two structured panels render after the sections:
   `replay` reports the rows read, replayed, and skipped by reason
   (`skipped_vocab`, `skipped_owner`, `skipped_revision`, `skipped_lane`,
   `skipped_unknown`; `skipped_revision` is always 0, since no verdict is
-  dropped for its catalog or overlay revision). On a `bedrock` lane every flag the shipped beta seed
-  withholds appears as a `beta:<flag>` column even with no learned row: the
+  dropped for its catalog or overlay revision). On a `bedrock` lane every
+  flag the shipped beta seed withholds appears as a `beta:<flag>` column
+  even with no learned row: the
   cell reads `broken` from layer `seed` with action `withhold` (the seed acts
   even with `[capability] enabled = false`), or `cleared` with action
   `allow` once a successful re-probe or `routectl capability purge` lifted

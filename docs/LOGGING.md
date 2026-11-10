@@ -2198,18 +2198,20 @@ generation older than the newest committed boundary (`event_generation` /
 `boundary_generation`). Only a reload boundary advances that generation, so
 this line is no longer emitted either.
 
-At boot, an acknowledged write commits the fail-closed boundary when the
-ledger's tombstone is missing or stamped a different revision. A ledger
-whose newest tombstone carries another revision (one written before the
-stamps were fixed) has every verdict past it restated after a fresh
-tombstone, so nothing is dropped:
+At boot, an acknowledged write commits a fresh boundary when the ledger's
+tombstone is missing or stamped a different revision. A ledger whose newest
+tombstone carries another revision (one written before the stamps were
+fixed) has every verdict past it restated after a fresh tombstone, so no
+verdict is dropped for its revision:
 
 | Level | Message | Meaning |
 |---|---|---|
-| INFO | `committed fresh capability tombstone at boot (fail-closed replay boundary)` | This boot's boundary is durable. Verdicts learned this session sort after it and replay on the next boot. |
-| ERROR | `capability boot tombstone NOT committed; verdicts learned this session may not survive a restart` | The boundary write failed. Boot continues (it never fails on the usage subsystem), but the consequence is named: this session's verdicts may sit before a stale boundary and be invisible to later boots. |
+| INFO | `capability tombstone revision differs from this boot; restating learned verdicts past a fresh tombstone` | The newest tombstone carries another revision. Every verdict past it is replayed and restated after a fresh tombstone in one atomic batch. `catalog_version` and `overlay_revision` are this boot's stamps. |
+| INFO | `committed fresh capability tombstone at boot with survivor restatements` | The fresh tombstone and every restatement are durable; `restated_survivors` counts the verdicts restated. The registry is then warmed from the same rows. |
+| INFO | `committed fresh capability tombstone at boot (fail-closed replay boundary)` | No usable tombstone (a cold or unreadable ledger, or none written yet): this boot's fail-closed boundary is durable. Nothing replayed. Verdicts learned this session sort after it and replay on the next boot. |
+| ERROR | `capability boot tombstone NOT committed; verdicts learned this session may not survive a restart` | The fail-closed boundary write for a cold, unreadable or tombstone-less ledger failed. Boot continues (it never fails on the usage subsystem), but the consequence is named: this session's verdicts may sit before a stale boundary and be invisible to later boots. |
 
-A reload writes no boundary and emits neither line.
+A reload writes no boundary and emits none of these lines.
 
 ### `invalidation` (WARN)
 
@@ -2275,7 +2277,7 @@ K-estimator and calibration warm caps are DEBUG).
 
 The skip tallies are deliberately separate, because they answer different
 questions and only their combination distinguishes an empty verdict
-history from a fully evicted one:
+history from a fully skipped one:
 
 | Field | Type | Meaning |
 |---|---|---|

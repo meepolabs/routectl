@@ -209,7 +209,8 @@ pub struct MatrixReplaySummary {
     pub skipped_vocab: usize,
     /// Rows skipped because their provider entry no longer owns the lane.
     pub skipped_owner: usize,
-    /// Catalog-scoped rows skipped for a catalog / overlay revision change.
+    /// Catalog-scoped rows skipped for their catalog / overlay revision.
+    /// Always 0: no key is catalog-scoped.
     pub skipped_revision: usize,
     /// Field rows skipped because their key is not a learned lane.
     pub skipped_lane: usize,

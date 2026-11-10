@@ -206,13 +206,10 @@ pub trait CapabilityLedgerReader: Send + Sync {
 }
 
 /// Whether one event survives the replay boundary. The single pure owner of
-/// "which events survive": the rebuild loop is oblivious. Post-tombstone
-/// survival is deliberately NOT unconditional -- a catalog-scoped straggler
-/// carrying a revision other than the boundary's is skipped -- so no caller
-/// may assume an import clears everything after the tombstone. The two skip
-/// variants are distinct because they answer different operator questions: a
-/// boundary skip is ordinary bookkeeping, while a revision skip is an
-/// eviction the rebuild tally reports.
+/// "which events survive": the rebuild loop is oblivious. `SkipRevision` is
+/// kept for a catalog-scoped straggler carrying a revision other than the
+/// boundary's, but no key is catalog-scoped, so it is never returned and every
+/// post-tombstone event replays whatever revision it carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReplayDecision {
     Replay,
@@ -224,17 +221,11 @@ pub enum ReplayDecision {
     SkipRevision,
 }
 
-/// Pure replay-boundary rule. Skips rows at or before the tombstone rowid,
-/// and post-tombstone stragglers whose stamped revision differs from the
-/// boundary's (an old router can append stale-revision events after a
-/// tombstone during a reload swap).
+/// Pure replay-boundary rule. Skips rows at or before the tombstone rowid.
 ///
 /// The rowid boundary is unconditional; the revision comparison applies only
-/// to catalog-scoped keys. A wire-shape fact an upstream stated about its
-/// request envelope does not depend on the catalog at all, so evicting it on
-/// a revision change would discard a still-true fact -- and because the
-/// in-memory carry-over honors the same predicate, a verdict that survives a
-/// reload survives the next restart too.
+/// to catalog-scoped keys, and no key is catalog-scoped, so no row is skipped
+/// for the revision it carries.
 pub fn should_replay(event: &CapabilityEventRow, tombstone: &ReplayTombstone) -> ReplayDecision {
     if event.rowid <= tombstone.rowid {
         return ReplayDecision::SkipBoundary;
@@ -271,10 +262,8 @@ pub struct CapabilityRebuildSummary {
     /// recognized.
     pub skipped_unknown: usize,
     /// Catalog-scoped events skipped because their stamped catalog / overlay
-    /// revision is not the replay boundary's -- an eviction, distinct from
-    /// both the rowid-boundary skip (ordinary bookkeeping, not counted) and
-    /// `skipped_unknown` (an unrecognized TOKEN). Without it an operator
-    /// cannot tell an empty history from a fully evicted one.
+    /// revision is not the replay boundary's. Always 0: no key is
+    /// catalog-scoped. Kept so the tally's field set is unchanged.
     pub skipped_revision: usize,
     /// Events skipped whole before decoding because their vocabulary version
     /// is unknown to this build or a vocabulary step retires one of their

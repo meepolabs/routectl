@@ -910,11 +910,11 @@ impl BoundaryReceipt {
 #[must_use = "a StaleReceipt must not be silently ignored"]
 pub enum BoundarySettlement {
     /// The receipt matched: the generation was promoted and the catalog-scoped
-    /// entries pruned.
+    /// prune ran (a no-op: no key is catalog-scoped).
     Applied {
         /// The generation now active.
         generation: u64,
-        /// Catalog-scoped entries evicted by the transition.
+        /// Entries the catalog-scoped prune removed; always 0.
         pruned: usize,
     },
     /// The receipt did not match the pending slot. Nothing changed.
@@ -3547,8 +3547,9 @@ impl LearnedCapabilityRegistry {
         self.entries.try_read().map(|entries| entries.len())
     }
 
-    /// Advance the generation and evict the catalog-scoped entries as ONE
-    /// transition, returning `(new_generation, pruned)`.
+    /// Advance the generation and run the catalog-scoped prune as ONE
+    /// transition, returning `(new_generation, pruned)`. The prune removes
+    /// nothing: no key is catalog-scoped.
     ///
     /// Paired under a single lock acquisition so there is no window in which the
     /// generation has advanced but the stale entries are still readable, nor one

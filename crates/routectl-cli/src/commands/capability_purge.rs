@@ -206,8 +206,10 @@ pub async fn run(config: &Config, lane: &str, capability: &str) -> i32 {
 
 /// The lines a success envelope renders, or `None` when it carries no
 /// `purged` verdict. A seed lift is told apart from a learned purge because
-/// the two leave different things behind: a lifted seed returns at the next
-/// catalog or overlay revision change, a purged observation does not.
+/// the two leave different things behind: a lifted seed stays lifted until the
+/// upstream rejects the flag again on that lane, or the lane's provider entry
+/// is removed or changes kind, while a purged observation leaves no entry
+/// until live traffic teaches it again.
 fn success_lines(body: &serde_json::Value, capability: &str, lane: &str) -> Option<Vec<String>> {
     let purged = body["purged"].as_bool()?;
     let lines = if !purged {
@@ -220,9 +222,9 @@ fn success_lines(body: &serde_json::Value, capability: &str, lane: &str) -> Opti
                 "lifted the shipped seed for `{capability}` on `{lane}`: the flag is sent again"
             ),
             format!(
-                "note: a rejection the upstream names is learned again, and a catalog or \
-                 overlay revision change restores the seed. To make the decision durable, \
-                 set it under {OVERRIDE_TABLE} in your config."
+                "note: the lift lasts until the upstream rejects the flag again on this \
+                 lane, or the lane's provider entry is removed or changes kind. To make the \
+                 decision durable, set it under {OVERRIDE_TABLE} in your config."
             ),
         ]
     } else {

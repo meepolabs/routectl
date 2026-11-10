@@ -1,5 +1,9 @@
 //! The capability replay boundary a revision-changing reload must commit.
 //!
+//! Unreachable from a reload while the capability revision stamps are frozen:
+//! no reload changes them, so none commits this boundary. The boot restate of
+//! a ledger whose tombstone carries another revision reuses `boundary_batch`.
+//!
 //! # Why a reload has to WRITE to preserve state
 //!
 //! The cold-boot replayer reads only rows appended after the newest
@@ -7,10 +11,10 @@
 //! row before the new tombstone becomes invisible to every later boot,
 //! whatever the replay predicate would have decided about it.
 //!
-//! That makes "carry the catalog-independent entries across the reload" a
-//! half-measure on its own. The in-memory registry keeps them, so they act for
-//! the rest of the process's life -- and then vanish at the next restart, when
-//! the replayer starts after a tombstone their original rows sit before. The
+//! That makes "carry the entries across the reload" a half-measure on its
+//! own. The in-memory registry keeps them, so they act for the rest of the
+//! process's life -- and then vanish at the next restart, when the replayer
+//! starts after a tombstone their original rows sit before. The
 //! symptom is a verdict that survives every reload and disappears at a restart
 //! weeks later: a warning that quietly stops appearing.
 //!
@@ -18,7 +22,7 @@
 //! boundary therefore commits one batch:
 //!
 //! 1. the new tombstone, stamped this reload's revision, then
-//! 2. a restatement of every carried catalog-independent entry.
+//! 2. a restatement of every carried entry.
 //!
 //! # Why the batch must be atomic and acknowledged
 //!
@@ -62,14 +66,16 @@ use routectl_usage::{BatchCommit, BatchReceipt, CapabilityEvent, UsageHandle};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum BoundaryOutcomeReport {
     /// The tombstone and every survivor restatement are durable, the
-    /// generation advanced, the catalog-scoped entries were evicted, and the
-    /// entries the replacement config does not own were swept.
+    /// generation advanced, and the entries the replacement config does not
+    /// own were swept. The catalog-scoped prune is a no-op: no key is
+    /// catalog-scoped.
     Committed {
-        /// Number of catalog-independent entries restated past the boundary.
+        /// Number of entries restated past the boundary.
         survivors: usize,
         /// The generation now active on the shared registry.
         generation: u64,
-        /// Catalog-scoped entries evicted by the transition.
+        /// Entries the catalog-scoped prune removed; always 0, since no key
+        /// is catalog-scoped.
         pruned: usize,
     },
     /// Nothing durable was written; the caller must keep the previous router
@@ -97,7 +103,7 @@ pub(crate) struct AdmittedBoundary {
     receipt: routectl_router::BoundaryReceipt,
 }
 
-/// Take the boundary cut: snapshot the catalog-independent survivors and ADMIT
+/// Take the boundary cut: snapshot the carried survivors and ADMIT
 /// the atomic tombstone-plus-restatement batch, with observations excluded for
 /// the duration.
 ///
@@ -337,7 +343,8 @@ impl AdmittedBoundary {
     }
 
     /// Await the writer's definitive outcome, then -- only on commit -- advance
-    /// the generation and evict the catalog-scoped entries as one transition.
+    /// the generation and run the catalog-scoped prune as one transition. The
+    /// prune is a no-op: no key is catalog-scoped.
     ///
     /// `shutdown` is selected against the wait: if it fires first the receipt is
     /// dropped, nothing is published, and the caller must not resume serving.
@@ -365,8 +372,9 @@ impl AdmittedBoundary {
         match outcome {
             BatchCommit::Committed { .. } => {
                 // Promotes the pending generation (so the events stamped with it
-                // remain valid) and evicts the catalog-scoped entries as one
-                // transition.
+                // remain valid) and runs the catalog-scoped prune as one
+                // transition; the prune removes nothing, since no key is
+                // catalog-scoped.
                 let routectl_router::BoundarySettlement::Applied { generation, pruned } =
                     self.registry.commit_boundary_transition(&self.receipt)
                 else {

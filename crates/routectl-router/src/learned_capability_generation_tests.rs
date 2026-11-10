@@ -328,7 +328,7 @@ fn the_boundary_cut_excludes_observations_between_snapshot_and_submit() {
         },
         |_| false,
     );
-    let (survivors, resident_at_submit) = match cut {
+    let (mut survivors, resident_at_submit) = match cut {
         BoundaryCut::Rejected { outcome } => outcome,
         _ => panic!("expected Rejected for a not-admitted cut"),
     };
@@ -342,7 +342,6 @@ fn the_boundary_cut_excludes_observations_between_snapshot_and_submit() {
     // The sibling may have written before the cut took the guard, so the
     // survivors hold the field entry and at most that write.
     let field = field_key("thinking.enabled.display");
-    let mut survivors = survivors;
     survivors.sort();
     assert!(
         survivors == [field.clone()] || survivors == [field, "web_search".to_string()],

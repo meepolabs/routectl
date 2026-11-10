@@ -1730,16 +1730,10 @@ async fn wait_for_learned_negative(
 /// replacement Router, so the same resident entry spans the reload and nothing
 /// is copied.
 ///
-/// Overlay isolation is load-bearing for the carry-over assertion:
-/// `carry_over_learned_from` CLEARS the learned registry whenever the catalog
-/// overlay revision changes across a reload. A reload re-reads the overlay from
-/// the process-global `XDG_CONFIG_HOME` path, while the test-only boot installs
-/// an empty overlay (revision 0). Pinning `XDG_CONFIG_HOME` at an isolated
-/// empty tree makes every reload resolve the same missing-file overlay
-/// (revision 0 as well), so boot and reload share a revision and the flip
-/// carries the registry over rather than invalidating it. Without the pin, a
-/// sibling test toggling `XDG_CONFIG_HOME` mid-run flips the resolved overlay
-/// revision under this test and the carry-over is silently cleared.
+/// A reload re-reads the overlay from the process-global `XDG_CONFIG_HOME`
+/// path, while the test-only boot installs an empty overlay. Pinning
+/// `XDG_CONFIG_HOME` at an isolated empty tree keeps the reload's overlay read
+/// hermetic: it never picks up a real or sibling test's overlay file.
 /// `serial_test::serial` is non-negotiable: this test mutates the
 /// process-global `XDG_CONFIG_HOME`, so a sibling test reading or writing it in
 /// parallel would see -- or stomp -- the pinned value.
@@ -1747,8 +1741,7 @@ async fn wait_for_learned_negative(
 #[serial_test::serial]
 async fn capability_kill_switch_flips_off_and_registry_carries_over_reload() {
     // Pin XDG at an isolated empty tree so every reload's overlay read resolves
-    // to the same revision-0 (missing) overlay the boot installed -- otherwise
-    // an overlay-revision change across the flip clears the learned registry.
+    // to the same missing overlay the boot installed.
     let xdg = tempfile::tempdir().unwrap();
     let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", xdg.path());
 
