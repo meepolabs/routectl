@@ -1244,6 +1244,10 @@ license.
   `client_metadata` under `x-codex-installation-id` on the ChatgptOauth lane
   only (the resolved id wins over any request-carried `client_metadata` value,
   which a non-object value is replaced by)
+- `src/openai_responses/empty_optional.rs` -- `EmptyOptionalFilter`: removes
+  a returned function call's top-level `""` arguments that the called tool's
+  schema lists in `properties` but not `required` (codex lane, applied by
+  `response.rs`)
 - `src/openai_responses/response.rs` -- Responses response -> canonical
   (output walk, finish_reason from status, usage); stamps
   `lane_format_tag(auth_kind)` on every emitted reasoning detail; carries the

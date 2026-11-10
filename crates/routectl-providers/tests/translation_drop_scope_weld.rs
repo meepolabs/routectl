@@ -53,8 +53,9 @@ use marker::{SURFACES, census, expect, holds_task_id, production_files};
 
 /// Files the drop sweeps read: the canonical-request-to-wire-body path of each
 /// surface, plus the two files whose already-authored markers record a
-/// response-side non-loss and the provider entry that counts a response-side
-/// drop the client's dialect forces. Content-pinned. A file here is IN the census's
+/// response-side non-loss, the provider entry that counts a response-side
+/// drop the client's dialect forces, and the response translator with the
+/// codex-lane argument filter it applies. Content-pinned. A file here is IN the census's
 /// population; it is not a claim that the file carries a marker, because most
 /// arms on this path lose nothing.
 const INSCOPE_FILES: &[&str] = &[
@@ -78,10 +79,12 @@ const INSCOPE_FILES: &[&str] = &[
     "openai_compat/wire_lift/tool_result.rs",
     "openai_compat/wire_lift/tool_use.rs",
     "openai_compat/wire_lift/tools.rs",
+    "openai_responses/empty_optional.rs",
     "openai_responses/extras.rs",
     "openai_responses/messages.rs",
     "openai_responses/mod.rs",
     "openai_responses/request.rs",
+    "openai_responses/response.rs",
     "openai_responses/system.rs",
     "openai_responses/tools.rs",
 ];
@@ -161,11 +164,6 @@ const EXPECTED_OUT_OF_SCOPE: &[(&str, &str)] = &[
         "openai_responses/quota_headers.rs",
         "parses the upstream quota response-header family; deliberately tolerant because it runs \
          on an already-successful response",
-    ),
-    (
-        "openai_responses/response.rs",
-        "translates the upstream response into canonical shape, so a loss here costs model \
-         output rather than request content",
     ),
     (
         "openai_responses/response_types.rs",

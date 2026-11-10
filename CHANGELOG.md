@@ -771,6 +771,8 @@ list with more narrative.
 
 - **openai-responses no longer hands a non-Responses client an output item its dialect cannot carry.** In a complete response, an upstream item routectl does not model (for example `custom_tool_call`) is removed for Anthropic and Chat Completions clients and counted once per request as the `output_item_unrepresentable` drop class, which also reaches the request's usage row. The finish reason is unchanged. A Responses client keeps the item. See [docs/LOGGING.md](docs/LOGGING.md).
 
+- **chatgpt-oauth drops empty optional arguments from returned tool calls (complete responses).** When the model fills an optional argument with `""`, that argument is removed before the call reaches the client: only a top-level argument named in the tool's `properties` and absent from its `required`. A tool whose schema has no `properties`, a required argument, and any non-empty value are untouched, and a call with nothing to remove keeps its arguments byte for byte. Counted once per request as the `codex_empty_optional_dropped` drop class. Only the `chatgpt-oauth` auth surface is affected. See [docs/PROVIDER-QUIRKS.md](docs/PROVIDER-QUIRKS.md).
+
 - **openai-compat streams keep held think bytes, and complete responses echo `system_fingerprint`.** Think bytes the stream is holding are sent before a transport error or a tool-call id error. A complete response's upstream `system_fingerprint` reaches the client. A user message split around a tool result copies only `role` and `name` onto each part.
 
 - **A Converse tool call with an empty argument delta closes with `{}` exactly once.** The client never receives an empty arguments string.

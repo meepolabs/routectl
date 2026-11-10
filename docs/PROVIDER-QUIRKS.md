@@ -423,6 +423,8 @@ The `openai-responses` provider in `chatgpt-oauth` mode **mimics the codex CLI c
 
 **Refresh tracing**: the OAuth refresh path emits `tracing::debug!` lines tagged with `refresh_token_sha8` (8 hex chars from `sha256(token)[..4]`) so operators can correlate a 401 across logs without ever surfacing a token VALUE. The response leg adds `new_refresh_token_present` and `expires_in`; on failure, `tracing::error!` carries `status`, `error_kind` (`refresh_expired` / `token_endpoint` / `network` / `other`), and `prior_refresh_token_sha8` (the same correlation tag as the pre-POST event). The failure path deliberately does NOT echo any portion of the upstream response body: token-endpoint error envelopes can echo the submitted refresh_token, and logging the body verbatim would defeat the bearer-redaction contract. Non-refresh error paths still carry the truncated body in the human-readable error returned to the caller.
 
+**Empty optional arguments**: the chatgpt-oauth model sometimes fills an optional tool argument it has no value for with `""` (a file reader's page range, say), which a client validating against its own schema rejects. On complete responses routectl removes such an argument from the returned call when it is top-level, its value is exactly `""`, the tool's schema lists it in `properties`, and not in `required`; everything else, including a tool with no `properties` object, passes through unchanged. Counted as `codex_empty_optional_dropped` (see [LOGGING.md](LOGGING.md)). The `api-key` and `bedrock-mantle` surfaces are not filtered.
+
 For the full header-by-header contract, the upstream source-of-truth
 pin, and the maintenance protocol for tracking codex releases, see
 [WIRE-GOTCHAS.md](WIRE-GOTCHAS.md) "chatgpt-oauth client-identity

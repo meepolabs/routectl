@@ -65,6 +65,7 @@ pub(crate) mod auth;
 mod breakpoint_blocks;
 pub use breakpoint_blocks::{BreakpointBlock, breakpoint_blocks};
 pub(crate) mod cookies;
+mod empty_optional;
 pub(crate) mod extras;
 pub use extras::breakpoint_text_digest;
 #[cfg(feature = "bedrock")]
@@ -184,9 +185,7 @@ impl Provider for OpenAiResponsesProvider {
     }
 
     fn normalize_response(&self, raw: Value) -> Result<ChatResponse> {
-        let typed: response_types::ResponsesResponse = serde_json::from_value(raw)
-            .map_err(|e| Error::normalize_response(&self.cfg.id, e.to_string()))?;
-        response::translate(&self.cfg.id, self.cfg.auth_kind, typed)
+        response::translate(&self.cfg.id, self.cfg.auth_kind, self.typed_response(raw)?)
     }
 
     fn replay_lane(&self) -> ReplayScheme {
@@ -414,7 +413,12 @@ impl Provider for OpenAiResponsesProvider {
             return Err(err);
         }
 
-        let mut chat_resp = self.normalize_response(raw_body)?;
+        let mut chat_resp = response::translate_for_request(
+            &self.cfg.id,
+            self.cfg.auth_kind,
+            self.typed_response(raw_body)?,
+            &req,
+        )?;
         gate_unmodeled_output_items(&req, &mut chat_resp);
         chat_resp.routectl_provider = Some(self.cfg.id.clone());
         chat_resp.upstream_meta = match (upstream_meta, chat_resp.upstream_meta.take()) {
@@ -635,6 +639,13 @@ impl Provider for OpenAiResponsesProvider {
     }
 }
 
+impl OpenAiResponsesProvider {
+    fn typed_response(&self, raw: Value) -> Result<response_types::ResponsesResponse> {
+        serde_json::from_value(raw)
+            .map_err(|e| Error::normalize_response(&self.cfg.id, e.to_string()))
+    }
+}
+
 /// Remove the parts `normalize_response` keeps for unmodeled upstream output
 /// items unless the client speaks Responses, the only dialect with a shape to
 /// carry one. A refusal part is modeled everywhere and stays. The loss is
@@ -794,3 +805,7 @@ mod wire_tap_tests;
 #[cfg(test)]
 #[path = "output_item_gate_tests.rs"]
 mod output_item_gate_tests;
+
+#[cfg(test)]
+#[path = "empty_optional_complete_tests.rs"]
+mod empty_optional_complete_tests;

@@ -23,15 +23,17 @@
 
 use chrono::Utc;
 use serde_json::{Value, json};
+use std::borrow::Cow;
 use std::time::Duration;
 use uuid::Uuid;
 
 use routectl_core::{
-    ChatResponse, Choice, ContentPart, Error, KnownContentPart, Message, MessageContent,
-    ReasoningDetail, ReasoningDetailKind, ResponsesEnvelope, Result, Role, UpstreamMeta, Usage,
-    sanitize_for_log,
+    ChatRequest, ChatResponse, Choice, ContentPart, Error, KnownContentPart, Message,
+    MessageContent, ReasoningDetail, ReasoningDetailKind, ResponsesEnvelope, Result, Role,
+    UpstreamMeta, Usage, sanitize_for_log,
 };
 
+use super::empty_optional::EmptyOptionalFilter;
 use super::response_types::{
     IncompleteDetails, ReasoningContent, ReasoningSummary, ResponseOutputItem,
     ResponsesOutputContent, ResponsesResponse, ResponsesUsage,
@@ -49,6 +51,77 @@ pub fn translate(
     auth_kind: AuthKind,
     body: ResponsesResponse,
 ) -> Result<ChatResponse> {
+    translate_filtered(provider_id, auth_kind, body, None)
+}
+
+/// [`translate`] for the response to `req`. On the codex lane, a function
+/// call's empty optional arguments (see the `empty_optional` module) are
+/// removed against the tools `req` declared, and the removal is counted once
+/// per client request and declared on the response leg. Synchronous: the
+/// observation scope it opens must never span an `.await`.
+pub fn translate_for_request(
+    provider_id: &str,
+    auth_kind: AuthKind,
+    body: ResponsesResponse,
+    req: &ChatRequest,
+) -> Result<ChatResponse> {
+    if !auth_kind.is_codex_lane() {
+        return translate(provider_id, auth_kind, body);
+    }
+    let tools = req.tools.as_deref().unwrap_or_default();
+    let mut filter = EmptyOptionalFilter::from_tools(tools);
+    let resp = translate_filtered(provider_id, auth_kind, body, Some(&mut filter))?;
+    report_empty_optionals_removed(provider_id, req, filter.removed());
+    Ok(resp)
+}
+
+fn report_empty_optionals_removed(
+    provider_id: &str,
+    req: &ChatRequest,
+    removed: &[(String, usize)],
+) {
+    if removed.is_empty() {
+        return;
+    }
+    let per_tool: Vec<String> = removed
+        .iter()
+        .map(|(name, count)| format!("{name}:{count}"))
+        .collect();
+    tracing::debug!(
+        provider = provider_id,
+        lane = super::LANE,
+        removed = %sanitize_for_log(&per_tool.join(",")),
+        calls = removed.len(),
+        "openai-responses: dropping empty optional function call arguments"
+    );
+    let _observation = crate::translation_drop_metrics::ObservationScope::enter_slot(
+        req.routectl_internal.observation.as_ref(),
+    );
+    // TRANSLATION-DROP: lane=openai-responses class=codex_empty_optional_dropped test=two_empty_optionals_in_one_response_count_once
+    crate::translation_drop_metrics::record_translation_drop(
+        super::LANE,
+        "codex_empty_optional_dropped",
+    );
+    // Records only on a tap that compares the response leg: a Responses
+    // client, whose output carries the call's arguments string as rewritten.
+    crate::wire_declare::declare_response(
+        crate::wire_declare::tap(req),
+        routectl_core::wire_check::EditSite::DialectFieldStrip,
+        EMPTY_OPTIONAL_ARGUMENTS_PATH,
+        routectl_core::wire_check::EditKind::Rewrite,
+    );
+}
+
+/// Where a Responses client's body carries the arguments a codex-lane call
+/// had its empty optionals removed from.
+pub const EMPTY_OPTIONAL_ARGUMENTS_PATH: &str = "/output/*/arguments";
+
+fn translate_filtered(
+    provider_id: &str,
+    auth_kind: AuthKind,
+    body: ResponsesResponse,
+    filter: Option<&mut EmptyOptionalFilter<'_>>,
+) -> Result<ChatResponse> {
     let status = body.status.clone();
     let incomplete_reason = body
         .incomplete_details
@@ -56,7 +129,7 @@ pub fn translate(
         .and_then(|d: &IncompleteDetails| d.reason.clone());
 
     let (text, reasoning_details, tool_calls, parts, has_function_call) =
-        walk_output(provider_id, auth_kind, &body.output)?;
+        walk_output(provider_id, auth_kind, &body.output, filter)?;
 
     let finish_reason = map_finish_reason(
         status.as_deref(),
@@ -132,6 +205,7 @@ fn walk_output(
     provider_id: &str,
     auth_kind: AuthKind,
     output: &[ResponseOutputItem],
+    mut filter: Option<&mut EmptyOptionalFilter<'_>>,
 ) -> Result<(
     String,
     Vec<ReasoningDetail>,
@@ -275,6 +349,11 @@ fn walk_output(
             } => {
                 has_function_call = true;
                 let arguments = zero_arg_as_empty_object(arguments);
+                let arguments = match filter.as_deref_mut() {
+                    Some(filter) => filter.apply(name, arguments),
+                    None => Cow::Borrowed(arguments),
+                };
+                let arguments = arguments.as_ref();
                 tool_calls.push(json!({
                     "id": call_id,
                     "type": "function",

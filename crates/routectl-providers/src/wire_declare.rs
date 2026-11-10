@@ -108,7 +108,6 @@ pub fn declare(tap: &WireTap, site: EditSite, path: impl Into<Cow<'static, str>>
 /// Declare one response-body edit on a tap that checks the response; see
 /// [`declare`] for how a refused pattern is handled.
 #[cfg(any(feature = "openai-compat", feature = "openai-responses"))]
-#[cfg_attr(not(feature = "openai-compat"), allow(dead_code))]
 pub fn declare_response(tap: Option<&WireTap>, site: EditSite, path: &'static str, kind: EditKind) {
     let Some(tap) = tap.filter(|tap| tap.checks_response()) else {
         return;
