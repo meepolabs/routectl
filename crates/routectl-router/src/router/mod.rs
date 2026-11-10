@@ -340,10 +340,8 @@ pub struct Router {
     /// `&self`, so it is held behind an `Arc` and shared, never cloned per
     /// request. Constructed from the `[capability]` decay / inferred-window
     /// knobs; the kill switch is NOT read here (the act / learn sites gate
-    /// on it). Carried across a hot-reload by `carry_over_learned_from`,
-    /// but ONLY when the catalog version and overlay revision are both
-    /// unchanged -- either bump invalidates every learned negative because
-    /// the fresher pricing / capability truth must win.
+    /// on it). Attached across every hot-reload by `carry_over_learned_from`:
+    /// the replacement Router shares this registry rather than copying it.
     learned_capabilities: Arc<crate::learned_capability::LearnedCapabilityRegistry>,
     /// Reasoning-replay lifecycle over `learned_capabilities`: per-pair
     /// single-flight admission plus the two-phase learn the dispatch repair
@@ -568,8 +566,8 @@ struct RouterMetrics {
     /// Bumped when a probe outcome is settled as a same-capability
     /// rejection (later act / learn wiring).
     probe_failures_total: AtomicU64,
-    /// Learned registries dropped on a hot-reload because the catalog
-    /// version or overlay revision changed. Bumped by
+    /// Reloads that crossed a capability revision boundary. Stays 0 while
+    /// the ledger revision stamps are frozen; bumped by
     /// `carry_over_learned_from`.
     invalidations_total: AtomicU64,
     /// Requests whose chain survived only via the de-prioritized learned
@@ -2705,10 +2703,11 @@ impl Router {
     /// atomic (`&self` increments), so Arc-sharing needs no further
     /// synchronization.
     ///
-    /// Call this BEFORE `carry_over_learned_from` at every reload site: that
-    /// call bumps `invalidations_total` on a catalog/overlay change, and
-    /// that increment must land on the shared storage, not a value this
-    /// Router is about to discard.
+    /// Call this BEFORE `carry_over_learned_from` at every reload site: any
+    /// counter that call bumps must land on the shared storage, not a value
+    /// this Router is about to discard. (`invalidations_total` stays 0 while
+    /// the ledger revision stamps are frozen; the learned registry is attached
+    /// across every reload.)
     pub fn carry_over_metrics_from(&mut self, previous: &Self) {
         self.metrics = Arc::clone(&previous.metrics);
         self.wire_check = Arc::clone(&previous.wire_check);

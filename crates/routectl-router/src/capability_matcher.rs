@@ -110,7 +110,7 @@ const OPENAI_PARAM_TRANSLATIONS: &[(&str, &str)] = &[("response_format", STRUCTU
 const OPENAI_PARAMLESS_ROUTE_AWAY: &[&str] = &["unsupported_country_region_territory"];
 
 /// A learned capability key. Feature keys are open-namespace strings
-/// shared with the catalog prior and the alias-chain pre-filter.
+/// shared with operator overrides and the alias-chain pre-filter.
 type FeatureKey = String;
 
 /// Capability key for assistant-message prefill. Open-namespace key (not

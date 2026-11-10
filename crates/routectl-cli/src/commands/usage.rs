@@ -33,6 +33,7 @@ use routectl_usage::{
 use crate::commands::pricing::{
     PriceSnapshot, default_price_book, is_subscription, rate_covers, rates_from_pricing,
 };
+use crate::commands::text_table::render_table;
 
 /// Parsed `routectl usage` arguments, already validated by clap.
 #[derive(Debug, Clone)]
@@ -416,8 +417,8 @@ fn parse_local_date_end(s: &str) -> Result<i64, UsageError> {
 /// formatter renders. Cost is intentionally tri-state: `priced_total_usd`
 /// is the summed dollar cost of API-key rows that had a price;
 /// `any_subscription` flags that managed-OAuth rows contributed (no $);
-/// `any_unpriced` flags API-key rows that NEITHER the `[registry]` table nor
-/// the baked catalog prices. `equivalent_total_usd` is a FOURTH, separate
+/// `any_unpriced` flags API-key rows that no price source (`[models.X.pricing]`,
+/// `[registry]`, or a price table) prices. `equivalent_total_usd` is a FOURTH, separate
 /// channel: what the subscription rows would have cost at API rates.
 #[derive(Debug, Clone)]
 pub struct DisplayRow {
@@ -1547,38 +1548,6 @@ fn render_suppressed_sessions(report: &WindowReport) -> String {
     }
     out.push_str(SUPPRESSED_SESSIONS_SCOPE_NOTE);
     out.push_str(SUPPRESSED_SESSIONS_VALIDITY_NOTE);
-    out
-}
-
-/// Left-align column 0, right-align the rest, padded to the widest cell in
-/// each column. ASCII spaces only.
-fn render_table(rows: &[Vec<String>]) -> String {
-    if rows.is_empty() {
-        return String::new();
-    }
-    let cols = rows.iter().map(std::vec::Vec::len).max().unwrap_or(0);
-    let mut widths = vec![0usize; cols];
-    for row in rows {
-        for (i, cell) in row.iter().enumerate() {
-            widths[i] = widths[i].max(cell.len());
-        }
-    }
-    let mut out = String::new();
-    for row in rows {
-        let mut line = String::new();
-        for (i, cell) in row.iter().enumerate() {
-            if i > 0 {
-                line.push_str("  ");
-            }
-            if i == 0 {
-                line.push_str(&format!("{cell:<width$}", width = widths[i]));
-            } else {
-                line.push_str(&format!("{cell:>width$}", width = widths[i]));
-            }
-        }
-        out.push_str(line.trim_end());
-        out.push('\n');
-    }
     out
 }
 

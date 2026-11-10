@@ -604,7 +604,7 @@ async fn output_and_logs_carry_counts_and_the_date_never_an_id() {
 
 #[test]
 fn source_selection_reads_urls_by_scheme_and_everything_else_as_a_file() {
-    let rows: [(&str, Option<&str>, Option<Source>); 5] = [
+    let rows: [(&str, Option<&str>, Option<Source>); 6] = [
         ("default", None, Some(Source::Url(url(DEFAULT_SOURCE_URL)))),
         (
             "https url",
@@ -622,6 +622,11 @@ fn source_selection_reads_urls_by_scheme_and_everything_else_as_a_file() {
             Some(Source::File(PathBuf::from("api.json"))),
         ),
         ("http url without host", Some("http://"), None),
+        (
+            "name shorter than a scheme",
+            Some("ht"),
+            Some(Source::File(PathBuf::from("ht"))),
+        ),
     ];
     for (name, from, expected) in rows {
         assert_eq!(Source::parse(from).ok(), expected, "{name}");

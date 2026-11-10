@@ -182,8 +182,8 @@ fn named_force(name: Option<&Value>) -> Option<ToolChoiceForce<'_>> {
 
 /// The capability key for a built-in tool `type`: the type with its date
 /// suffix stripped ([`strip_date_suffix`]), except that the bare `computer`
-/// type keys as [`COMPUTER_USE`], the name operator overrides, `essential`
-/// lists and catalog priors already use. Every other type, including
+/// type keys as [`COMPUTER_USE`], the name operator overrides and `essential`
+/// lists already use. Every other type, including
 /// `computer_toolset`, keys as itself.
 pub fn canonical_tool_key(tool_type: &str) -> &str {
     match strip_date_suffix(tool_type) {

@@ -48,7 +48,7 @@
 //! # Scope
 //!
 //! Learned entries only. The purge drops one observation the daemon made; it
-//! never edits an operator override or invents a catalog prior. Persistence
+//! never edits or invents an operator override. Persistence
 //! across relearning is the capability override configuration's job (see
 //! CONFIGURATION.md, "Capability intelligence"), and this route deliberately
 //! does not offer a competing runtime store -- a second place for the same

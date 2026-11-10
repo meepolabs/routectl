@@ -830,7 +830,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
-        Cmd::Catalog { .. } => exit_catalog_removed(),
+        // `run` exits on this variant before resolving any config.
+        Cmd::Catalog { .. } => unreachable!("handled before config resolution"),
         Cmd::Prices {
             action: PricesCmd::Refresh { from },
         } => match commands::prices::run(from.as_deref()).await {

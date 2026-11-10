@@ -1,6 +1,6 @@
 //! `routectl provider probe [<name>]` -- a read-only reachability report.
 //!
-//! A probe run mutates NOTHING: config, credentials, catalog overlay, and
+//! A probe run mutates NOTHING: config, credentials, price table, and
 //! usage DB are all byte-identical afterward. The shared orchestration
 //! (`probe_all`) is the one place the per-credential branch logic lives,
 //! reused by the doctor aggregator so both surfaces classify a provider the

@@ -31,6 +31,9 @@ use super::vocabulary::{codes, provenance};
 use super::{Panel, StatusState, guard_panel, utc_rfc3339};
 
 /// Wire-shape version of the config panel payload.
+///
+/// At 4 each model dropped `economics` and gained `context_window`, `fill`
+/// and `prices`. At 5 each model dropped `source` and `verified_at`.
 pub const SCHEMA_VERSION: u32 = 5;
 
 /// The provenance-annotated effective view plus the activation inventory. Every

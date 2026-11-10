@@ -122,8 +122,8 @@ fn parse_config_only_accepts_the_clean_control() {
 /// A clean candidate run last through the same harness must swap, so the
 /// pointer-identity assertions above it can observe a swap when one happens.
 ///
-/// `#[serial]`: the loader re-reads the ambient `catalog_overlay.json` via
-/// `routectl_router::overlay_default_path()`, so XDG is pinned per test.
+/// `#[serial]`: the test pins the process-wide `XDG_CONFIG_HOME` so nothing
+/// the reload builds can read the operator's config folder.
 #[tokio::test]
 #[serial_test::serial]
 async fn a_reload_refused_by_any_raw_class_keeps_the_published_router() {

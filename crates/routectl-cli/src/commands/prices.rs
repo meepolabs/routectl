@@ -183,8 +183,11 @@ impl Source {
         let Some(from) = from else {
             return Self::url(DEFAULT_SOURCE_URL);
         };
-        let lower = from.get(..8).unwrap_or(from).to_ascii_lowercase();
-        if lower.starts_with("http://") || lower.starts_with("https://") {
+        let is_url = ["http://", "https://"].iter().any(|scheme| {
+            from.get(..scheme.len())
+                .is_some_and(|head| head.eq_ignore_ascii_case(scheme))
+        });
+        if is_url {
             Self::url(from)
         } else {
             Ok(Self::File(PathBuf::from(from)))

@@ -3,7 +3,7 @@
 //! The counterpart to the probe-settled clear in [`super::capability_cleared`],
 //! reached from an operator control path rather than from live traffic. Scope is
 //! LEARNED entries only: a purge never edits, shadows, or invents an operator
-//! override or a catalog prior, because a learned negative is an observation the
+//! override, because a learned negative is an observation the
 //! daemon made and dropping it says nothing about operator intent. An operator
 //! who wants the decision to persist across relearning writes it in the
 //! capability override configuration, which this path never touches.

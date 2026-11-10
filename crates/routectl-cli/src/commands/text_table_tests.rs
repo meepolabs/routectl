@@ -14,11 +14,23 @@ fn renders_nothing_for_no_rows() {
 
 #[test]
 fn left_aligns_first_column_and_right_aligns_the_rest() {
-    let table = rows(&[&["lane", "n", "cost"], &["a", "12", "3"]]);
+    let cases: &[(&str, &[&[&str]], &str)] = &[
+        (
+            "cells narrower and wider than their header",
+            &[&["lane", "n", "cost"], &["a", "12", "3"]],
+            "lane   n  cost\na     12     3\n",
+        ),
+        (
+            "short label and count under wide headers",
+            &[&["provider", "reqs", "in"], &["paid", "1", "7"]],
+            "provider  reqs  in\npaid         1   7\n",
+        ),
+    ];
+    for (name, cells, expected) in cases {
+        let out = render_table(&rows(cells));
 
-    let out = render_table(&table);
-
-    assert_eq!(out, "lane   n  cost\na     12     3\n");
+        assert_eq!(out, *expected, "{name}");
+    }
 }
 
 #[test]

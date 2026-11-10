@@ -159,7 +159,7 @@
       oauth_missing: { title: 'oauth_missing - no OAuth credential on file' },
       oauth_expired: { title: 'oauth_expired - OAuth token expired, no refresh available' },
       oauth_store_unavailable: { title: 'oauth_store_unavailable - no OAuth store to probe (HOME or XDG absent)' },
-      not_cataloged: { title: 'not_cataloged - own-credential provider has no baked catalog rows yet' },
+      not_cataloged: { title: 'not_cataloged - no provider kind this build can configure uses this credential' },
       unknown: { title: 'unknown - an activation state this build does not recognize' }
     },
     // Health last-settled-outcome tokens.

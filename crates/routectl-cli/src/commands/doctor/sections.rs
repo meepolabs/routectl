@@ -300,7 +300,7 @@ fn legacy_entries_detail(display: &str, names: &[String], more: usize, has_confi
     detail
 }
 
-/// The daemon refused its last config / overlay reload and still serves the
+/// The daemon refused its last config reload and still serves the
 /// config it loaded before. Names only the closed class and the age: the
 /// loader's own error can carry config values and paths, and the CLI doctor,
 /// which reads the files itself, is where the operator sees it.
@@ -315,7 +315,7 @@ fn reload_failure_finding(failure: ReloadFailureSnapshot) -> Finding {
             format_age(failure.age_ms),
         ),
         remediation: Some(
-            "run `routectl doctor` to see why the on-disk config or catalog overlay was refused, \
+            "run `routectl config check` to see why the on-disk config was refused, \
              fix it, and save it again to trigger a reload"
                 .to_string(),
         ),

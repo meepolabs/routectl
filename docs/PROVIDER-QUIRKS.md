@@ -344,7 +344,7 @@ Converse only a client value is ever clamped. The same ceiling applies on
 N, which is the maximum allowed number of output tokens for <model>`.
 There it can also lower the `max_tokens` routectl fills in for a client
 that sent none (see
-[the output ceiling](CONFIGURATION.md#output-ceiling-max_tokens-fill));
+[the output ceiling](CONFIGURATION.md#context-window-and-output-ceiling));
 lowering that fill is lossless, since the client asked for no particular
 limit. On a Bedrock Mantle sub-lane field repair acts only on the rows
 a refusal captured on that sub-lane grounds: this ceiling on the Anthropic

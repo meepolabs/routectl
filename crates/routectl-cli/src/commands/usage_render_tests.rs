@@ -821,36 +821,6 @@ fn render_hit_pct_column_dash_when_provider_does_not_report_cache() {
 }
 
 #[test]
-fn render_table_left_aligns_key_and_right_aligns_numeric() {
-    // Arrange: a short label ("paid") under a wider header ("provider") forces
-    // padding so alignment direction is observable.
-    let (_dir, _path, db) = temp_db();
-    paid_row(&db, "a1", Some(7), Some(9));
-    let report = report_all(&db, &cost_config(), Some(GroupDim::Provider), false);
-
-    // Act
-    let out = render_report(&report);
-    let data_line = out
-        .lines()
-        .find(|l| l.trim_start().starts_with("paid"))
-        .expect("data row");
-
-    // Assert: column 0 is left-aligned -- the short label sits at the line start
-    // and is right-padded to the "provider" width (so trailing spaces follow).
-    assert!(data_line.starts_with("paid"));
-    assert!(
-        data_line.starts_with("paid    "),
-        "column 0 should be left-aligned and padded: {data_line:?}"
-    );
-    // Numeric column is right-aligned: the reqs value (1) renders flush against
-    // the header width "reqs" (4) -- i.e. preceded by padding, not trailing.
-    assert!(
-        data_line.contains("   1 "),
-        "reqs cell should be right-justified: {data_line:?}"
-    );
-}
-
-#[test]
 fn render_total_row_hit_pct_mirrors_footer_in_mixed_window() {
     // Arrange: a mixed-provider window with one cache-reporting group and one
     // that does NOT report cache. The TOTAL row's hit% must mirror the footer

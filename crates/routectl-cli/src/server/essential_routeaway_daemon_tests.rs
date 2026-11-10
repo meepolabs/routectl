@@ -38,8 +38,7 @@ const ALIAS: &str = "route";
 const ALIAS_B_FIRST: &str = "route-b-first";
 const PROVIDER: &str = "p";
 const REGION: &str = "us-east-1";
-/// Synthetic Anthropic-family ids: count_tokens admits the seats, and no
-/// baked catalog prior matches them.
+/// Synthetic Anthropic-family ids, so count_tokens admits the seats.
 const LANE_A_ID: &str = "anthropic.lane-a";
 const LANE_B_ID: &str = "anthropic.lane-b";
 const INVOKE_PATH: &str = "/invoke$";

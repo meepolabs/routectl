@@ -10,17 +10,15 @@ use routectl_testkit::{CapturedEvent, capture_events};
 use serde_json::json;
 use tempfile::TempDir;
 
-use super::super::prices_test_support::{bytes, priced_model};
+use super::super::prices_test_support::{bytes, priced_model, table};
 use super::*;
 
 /// A canonical table dated `date` whose one provider id carries `marker`,
 /// so a test can tell copies apart and prove the marker never reaches a log.
 fn table_bytes(date: &str, marker: &str) -> Vec<u8> {
-    bytes(&json!({
-        "schema_version": 1,
-        "generated_at": date,
-        "providers": [{ "id": marker, "models": [priced_model("m")] }],
-    }))
+    let mut fixture = table(json!([{ "id": marker, "models": [priced_model("m")] }]));
+    fixture["generated_at"] = json!(date);
+    bytes(&fixture)
 }
 
 const MALFORMED: &[u8] = br#"{"schema_version":1,"generated_at":"secret-marker-text""#;
@@ -146,7 +144,6 @@ fn a_malformed_copy_keeps_the_last_good_table_and_warns_once_with_its_date() {
     assert_eq!(warned[0].field("retained_table"), Some("2026-11-01"));
     let rendered = format!("{events:?}");
     assert!(!rendered.contains("secret-marker-text"), "{rendered}");
-    assert!(!rendered.contains("acme"), "{rendered}");
 }
 
 #[test]

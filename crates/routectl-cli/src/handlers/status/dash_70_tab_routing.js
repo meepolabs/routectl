@@ -170,7 +170,7 @@
       prov.textContent = provider;
     } else {
       prov.classList.add('mag-zero');
-      prov.textContent = 'no catalog row';
+      prov.textContent = 'no model entry';
     }
     step.appendChild(n);
     step.appendChild(name);

@@ -190,11 +190,11 @@ impl Config {
     ///
     /// `[models.X] provider` resolves against providers and POOLS in one
     /// namespace, so a bare `config.providers.get(...)` lookup misses for every
-    /// pool-backed model -- and an empty kind identifies no catalog cell at
-    /// all, silently blanking that model's pricing, context window, and output
-    /// ceiling. A pool therefore answers with a MEMBER's kind: `validate_pools`
-    /// rejects a pool whose members disagree on `kind_str()`, so the first
-    /// resolvable member is representative of the whole pool.
+    /// pool-backed model -- and an empty kind matches no price-table row and
+    /// no per-kind cache rules, silently blanking that model's pricing. A pool
+    /// therefore answers with a MEMBER's kind: `validate_pools` rejects a pool
+    /// whose members disagree on `kind_str()`, so the first resolvable member
+    /// is representative of the whole pool.
     ///
     /// Provider entries are consulted first, which is unambiguous because the
     /// same validator rejects a name held by both a provider entry and a pool.
