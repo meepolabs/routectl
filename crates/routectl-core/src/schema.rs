@@ -255,8 +255,8 @@ pub struct ResponsesNamespaces {
     /// Bare name of every flattened member -> the namespace it came from.
     /// A member whose name collides is absent.
     pub members: std::collections::BTreeMap<String, String>,
-    /// Flattened members that carry no name (hosted tools), verbatim.
-    pub unnamed_members: Vec<Value>,
+    /// Flattened members that carry no name (hosted tools).
+    pub unnamed_members: Vec<ResponsesUnnamedMember>,
     /// Containers from the top-level `tools` array, in inbound order. The
     /// `additional_tools` input item carries its own containers and is
     /// replayed whole, so none of its containers appear here.
@@ -264,6 +264,21 @@ pub struct ResponsesNamespaces {
     /// Members left unflattened because their name clashed with a flat
     /// tool or with a member of another container.
     pub collisions: Vec<ResponsesNamespaceCollision>,
+}
+
+/// A flattened member with no name (a hosted tool). A flat tool may be
+/// value-identical to it, so it is identified by its place among the
+/// value-identical entries of `ChatRequest.tools`, not by value alone. Not
+/// by raw index either: the router's capability strip removes tools by
+/// type, which shifts indices but keeps the relative order of identical
+/// values (it removes all of them or none).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResponsesUnnamedMember {
+    /// How many `ToolDef::Other` entries equal to `raw` precede this member
+    /// in `ChatRequest.tools`.
+    pub occurrence: usize,
+    /// The member as the client sent it.
+    pub raw: Value,
 }
 
 /// One top-level `tools[]` namespace container, verbatim, with its index
@@ -526,8 +541,11 @@ pub struct RoutectlInternal {
     pub responses_cache_breakpoints: Vec<ResponsesCacheBreakpoint>,
 
     /// Namespace containers the OpenAI Responses ingress flattened into
-    /// `ChatRequest.tools`. Only the Responses egress reads it; empty for
-    /// library consumers and for every non-Responses ingress.
+    /// `ChatRequest.tools`. Read by the Responses egress (to send the
+    /// containers back) and by the Responses ingress's response render (to
+    /// stamp `namespace` on returned calls to a member), so any context that
+    /// renders a response for this request must carry it. Empty for library
+    /// consumers and for every non-Responses ingress.
     pub responses_namespaces: ResponsesNamespaces,
 
     /// INBOUND per-conversation key captured by EVERY ingress dialect from

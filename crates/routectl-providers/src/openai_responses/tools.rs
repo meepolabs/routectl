@@ -71,18 +71,46 @@ impl<'a> InlineDeclarations<'a> {
     }
 }
 
-/// Whether `td` is a member the Responses ingress flattened out of a
-/// namespace container. Its container is sent instead (spliced back here
-/// when it came from the top-level `tools`, replayed inside the
-/// `additional_tools` item otherwise), so the member is never declared on
-/// its own.
-fn is_flattened_member(namespaces: &ResponsesNamespaces, td: &ToolDef) -> bool {
-    match td {
-        ToolDef::Custom(c) => namespaces.members.contains_key(&c.name),
-        ToolDef::Other(v) => match v.get("name").and_then(Value::as_str) {
-            Some(name) => namespaces.members.contains_key(name),
-            None => namespaces.unnamed_members.contains(v),
-        },
+/// Which entries of `tools` are members the Responses ingress flattened out
+/// of a namespace container. Their container is sent instead (spliced back
+/// here when it came from the top-level `tools`, replayed inside the
+/// `additional_tools` item otherwise), so a member is never declared on its
+/// own. A named member is found by name: a flat tool of the same name was a
+/// collision at ingress and was never flattened. An unnamed member is found
+/// by its occurrence among value-identical entries, so a flat copy of it is
+/// still declared.
+fn flattened_members(namespaces: &ResponsesNamespaces, tools: &[ToolDef]) -> Vec<bool> {
+    let mut seen: Vec<(&Value, usize)> = Vec::new();
+    tools
+        .iter()
+        .map(|td| match td {
+            ToolDef::Custom(c) => namespaces.members.contains_key(&c.name),
+            ToolDef::Other(v) => match v.get("name").and_then(Value::as_str) {
+                Some(name) => namespaces.members.contains_key(name),
+                None if namespaces.unnamed_members.is_empty() => false,
+                None => {
+                    let occurrence = next_occurrence(&mut seen, v);
+                    namespaces
+                        .unnamed_members
+                        .iter()
+                        .any(|m| m.occurrence == occurrence && m.raw == *v)
+                }
+            },
+        })
+        .collect()
+}
+
+/// The count of `v` seen before this call, then counts this one.
+fn next_occurrence<'a>(seen: &mut Vec<(&'a Value, usize)>, v: &'a Value) -> usize {
+    match seen.iter_mut().find(|(seen_value, _)| *seen_value == v) {
+        Some((_, count)) => {
+            *count += 1;
+            *count - 1
+        }
+        None => {
+            seen.push((v, 1));
+            0
+        }
     }
 }
 
@@ -110,9 +138,12 @@ pub(super) fn translate_tools(req: &ChatRequest) -> Vec<ResponsesTool> {
     let tools = req.tools.as_deref().unwrap_or_default();
     let inline = InlineDeclarations::collect(req);
     let mut out: Vec<ResponsesTool> = Vec::with_capacity(tools.len());
+    let flattened = flattened_members(namespaces, tools);
     let declared = tools
         .iter()
-        .filter(|td| !inline.declares(td) && !is_flattened_member(namespaces, td));
+        .zip(flattened)
+        .filter(|(td, is_member)| !is_member && !inline.declares(td))
+        .map(|(td, _)| td);
     for td in declared {
         match td {
             ToolDef::Custom(c) => {

@@ -1,8 +1,15 @@
-//! Transport-internal carrier for raw upstream SSE bytes that don't fit
-//! the canonical `ChunkDelta` shape. Used by the Anthropic-API egress to
-//! preserve unknown `content_block` types verbatim through the canonical
-//! pipeline so the matching Anthropic ingress can re-emit them
-//! byte-for-byte. Skip-serialized; never on the wire.
+//! Transport-internal carrier for upstream stream events that don't fit
+//! the canonical `ChunkDelta` shape. An egress captures them so the
+//! ingress of the same dialect can re-emit them; every other ingress
+//! ignores them. Skip-serialized; never on the wire.
+//!
+//! Two envelope families ride here:
+//! - Anthropic-API `content_block` start / delta / stop events for an
+//!   unknown block or delta type, as raw upstream bytes, so the Anthropic
+//!   ingress re-emits them byte-for-byte.
+//! - OpenAI Responses output items of an unmodeled type, as one parsed
+//!   JSON value per finished item, so the Responses ingress re-emits each
+//!   as its own output item.
 //!
 //! Mirrors the `#[non_exhaustive]` precedent at
 //! `crate::schema::RoutectlInternal` so future variants ship without
@@ -12,18 +19,14 @@
 //!
 //! ## Naming choice
 //!
-//! Variant names mirror Anthropic-API SSE event names (`content_block_start`,
-//! `content_block_delta`, `content_block_stop`) because Anthropic-API is the
-//! first and only producer today. The abstraction is transport-neutral:
-//! a future provider that emits opaque events with the same envelope shape
-//! (start / delta / stop with a type tag and raw bytes) reuses the same
-//! variants. A future provider with a fundamentally different envelope
-//! (e.g. atomic event payloads) would add a new `#[non_exhaustive]` variant.
+//! Each variant is named after the upstream event it carries:
+//! `ContentBlock*` after the Anthropic-API SSE events, `OutputItem` after
+//! the Responses output item. A provider with the same envelope shape
+//! reuses a variant; one with a different envelope adds a new variant.
 
-/// One opaque SSE event captured from an Anthropic upstream. Mirrors
-/// the SSE envelope shape (start / delta / stop) but carries the raw
-/// upstream-wire bytes verbatim so the matching ingress can re-emit
-/// them without re-serialization.
+/// One opaque upstream stream event: an Anthropic-API content-block event
+/// as raw bytes (start / delta / stop), or a whole Responses output item as
+/// JSON.
 ///
 /// `#[non_exhaustive]` so future variants ship without breaking
 /// downstream library consumers that match on this enum.

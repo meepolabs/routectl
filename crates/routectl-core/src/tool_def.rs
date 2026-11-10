@@ -186,7 +186,7 @@ impl CustomTool {
 
 /// `type` tag of a Responses tool container that groups member declarations
 /// under one namespace name (`{type: "namespace", name, tools: [...]}`).
-pub const RESPONSES_NAMESPACE_TYPE: &str = "namespace";
+const RESPONSES_NAMESPACE_TYPE: &str = "namespace";
 
 /// If `v` is a Responses namespace container with a string `name` and an
 /// array `tools`, its name and the entries declared directly inside it.

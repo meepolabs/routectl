@@ -406,3 +406,85 @@ fn a_collision_is_noted_on_the_request_observation_slot() {
         "the pair is already noted on the slot"
     );
 }
+
+/// The `tools` array a same-dialect Responses egress sends for `req`.
+fn responses_egress_tools(req: &ChatRequest) -> Value {
+    use routectl_core::Provider;
+    use routectl_providers::openai_responses::{OpenAiResponsesConfig, OpenAiResponsesProvider};
+
+    let body = OpenAiResponsesProvider::new(OpenAiResponsesConfig::new(
+        "openai-responses:test",
+        "literal:test",
+    ))
+    .normalize_request(req)
+    .expect("responses egress normalize");
+    body.get("tools").cloned().unwrap_or(Value::Null)
+}
+
+#[test]
+fn same_dialect_replay_suppresses_exactly_the_flattened_members() {
+    let hosted = json!({"type": "web_search"});
+    let rows = [
+        (
+            "flat unnamed hosted tool value-identical to a nested one",
+            vec![
+                hosted.clone(),
+                json!({"type": "namespace", "name": "ns_one", "tools": [hosted.clone(), function("one_fn")]}),
+            ],
+        ),
+        (
+            "nested unnamed member declared before a value-identical flat one",
+            vec![
+                json!({"type": "namespace", "name": "ns_one", "tools": [hosted.clone(), function("one_fn")]}),
+                hosted.clone(),
+            ],
+        ),
+        (
+            "nested unnamed member with no flat copy",
+            vec![
+                function("flat_fn"),
+                json!({"type": "namespace", "name": "ns_one", "tools": [hosted.clone()]}),
+            ],
+        ),
+        (
+            "flat named tool sharing a member's name",
+            vec![
+                function("shared"),
+                json!({"type": "namespace", "name": "ns_one", "tools": [function("shared"), function("one_only")]}),
+            ],
+        ),
+    ];
+    for (name, tools) in rows {
+        // Arrange
+        let req = parse(body_with(Carrier::TopLevel, tools.clone()));
+
+        // Act
+        let sent = responses_egress_tools(&req);
+
+        // Assert
+        assert_eq!(sent, Value::Array(tools), "{name}");
+    }
+}
+
+#[test]
+fn member_provenance_survives_a_type_strip_before_the_egress() {
+    // Arrange: the router's capability strip removes every tool of one type,
+    // which shifts the canonical index of each later tool.
+    let hosted = json!({"type": "web_search"});
+    let stripped = json!({"type": "stripped_kind"});
+    let container = json!({"type": "namespace", "name": "ns_one", "tools": [hosted.clone()]});
+    let mut req = parse(body_with(
+        Carrier::TopLevel,
+        vec![stripped.clone(), hosted.clone(), container.clone()],
+    ));
+    req.tools
+        .as_mut()
+        .expect("tools")
+        .retain(|t| !matches!(t, ToolDef::Other(v) if *v == stripped));
+
+    // Act
+    let sent = responses_egress_tools(&req);
+
+    // Assert
+    assert_eq!(sent, json!([hosted, container]));
+}

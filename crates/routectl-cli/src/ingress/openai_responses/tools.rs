@@ -25,6 +25,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use routectl_core::schema::{
     ResponsesNamespaceCollision, ResponsesNamespaceContainer, ResponsesNamespaces,
+    ResponsesUnnamedMember,
 };
 use routectl_core::tool_def::responses_namespace_members;
 use routectl_core::{ChatRequest, CustomTool, ToolDef, sanitize_for_log};
@@ -220,11 +221,21 @@ fn resolve(slots: Vec<Slot<'_>>, namespaces: &mut ResponsesNamespaces) -> Option
             Some(name) => {
                 namespaces.members.insert(name, member.namespace.to_owned());
             }
-            None => namespaces.unnamed_members.push(member.raw.clone()),
+            None => namespaces.unnamed_members.push(ResponsesUnnamedMember {
+                occurrence: count_identical_others(&tools, member.raw),
+                raw: member.raw.clone(),
+            }),
         }
         tools.push(member.def);
     }
     if tools.is_empty() { None } else { Some(tools) }
+}
+
+fn count_identical_others(tools: &[ToolDef], raw: &Value) -> usize {
+    tools
+        .iter()
+        .filter(|t| matches!(t, ToolDef::Other(v) if v == raw))
+        .count()
 }
 
 fn report_collisions(collisions: &[ResponsesNamespaceCollision]) {

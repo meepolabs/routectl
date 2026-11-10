@@ -10,7 +10,8 @@ use routectl_core::{
     BEDROCK_MANTLE, CODEX_OAUTH, ChatRequest, ContentPart, CustomTool, KnownContentPart, Message,
     MessageContent, ReasoningConfig, ReasoningDetail, ReasoningDetailKind, RefusalReason,
     ResponsesPassthroughItem, Role, SystemBlock, SystemContent, ToolDef,
-    cache_control::CacheControl, schema::ResponsesNamespaceContainer,
+    cache_control::CacheControl,
+    schema::{ResponsesNamespaceContainer, ResponsesUnnamedMember},
 };
 use routectl_testkit::CapturedEvent;
 
@@ -491,7 +492,10 @@ fn req_with_top_level_namespace() -> (ChatRequest, Value) {
         .into_iter()
         .map(|(k, v)| (k.to_owned(), v.to_owned()))
         .collect();
-    ns.unnamed_members = vec![container["tools"][2].clone()];
+    ns.unnamed_members = vec![ResponsesUnnamedMember {
+        occurrence: 0,
+        raw: container["tools"][2].clone(),
+    }];
     ns.containers = vec![ResponsesNamespaceContainer {
         index: 1,
         raw: container.clone(),
