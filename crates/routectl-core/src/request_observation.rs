@@ -100,6 +100,56 @@ impl SkipCounts {
     }
 }
 
+/// How one request's dispatch walk went: targets an upstream failure of the
+/// request itself caused it to leave, and targets it passed over because an
+/// earlier failure excluded them, one count per exclusion scope.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct WalkCounts {
+    /// Targets left because an upstream failure of this request ended them.
+    pub request_caused: u64,
+    /// Targets skipped because an earlier failure excluded their endpoint.
+    pub excluded_endpoint: u64,
+    /// Targets skipped because an earlier failure excluded their model.
+    pub excluded_model: u64,
+    /// Targets skipped because an earlier failure excluded the target itself.
+    pub excluded_target: u64,
+    /// Targets skipped because an earlier failure excluded them for the
+    /// rest of a probe run.
+    pub excluded_probe_run: u64,
+}
+
+impl WalkCounts {
+    /// Counts from every field, in declaration order.
+    ///
+    /// ```
+    /// use routectl_core::WalkCounts;
+    ///
+    /// let walk = WalkCounts::new(1, 2, 3, 4, 5);
+    /// assert_eq!(walk.request_caused, 1);
+    /// assert_eq!(walk.excluded_endpoint, 2);
+    /// assert_eq!(walk.excluded_model, 3);
+    /// assert_eq!(walk.excluded_target, 4);
+    /// assert_eq!(walk.excluded_probe_run, 5);
+    /// ```
+    #[must_use]
+    pub const fn new(
+        request_caused: u64,
+        excluded_endpoint: u64,
+        excluded_model: u64,
+        excluded_target: u64,
+        excluded_probe_run: u64,
+    ) -> Self {
+        Self {
+            request_caused,
+            excluded_endpoint,
+            excluded_model,
+            excluded_target,
+            excluded_probe_run,
+        }
+    }
+}
+
 /// Point-in-time copy of a [`RequestObservation`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
@@ -116,6 +166,8 @@ pub struct ObservationSnapshot {
     pub missing_terminals: u64,
     /// Targets skipped without an attempt, by reason.
     pub skips: SkipCounts,
+    /// The dispatch walk's counts, as last stamped.
+    pub walk: WalkCounts,
     /// The last target dispatched to, if any.
     pub last_target: Option<ServedIdentity>,
     /// Whether the request is routectl's own probe traffic.
@@ -131,6 +183,7 @@ struct State {
     translation_drops: BTreeSet<(&'static str, &'static str)>,
     lanes_seen: BTreeSet<&'static str>,
     skips: SkipCounts,
+    walk: WalkCounts,
     last_target: Option<ServedIdentity>,
     probe: bool,
 }
@@ -193,6 +246,11 @@ impl RequestObservation {
         self.with_state(|s| s.skips.add(reason));
     }
 
+    /// Stamp the dispatch walk's counts; replaces any earlier value.
+    pub fn set_walk_counts(&self, walk: WalkCounts) {
+        self.with_state(|s| s.walk = walk);
+    }
+
     /// Record the target currently being dispatched; the last call wins.
     pub fn set_last_target(&self, identity: ServedIdentity) {
         self.with_state(|s| s.last_target = Some(identity));
@@ -213,6 +271,7 @@ impl RequestObservation {
             field_repairs: s.field_repairs,
             missing_terminals: s.missing_terminals,
             skips: s.skips,
+            walk: s.walk,
             last_target: s.last_target.clone(),
             probe: s.probe,
         })

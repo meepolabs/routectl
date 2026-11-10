@@ -97,7 +97,7 @@ pub use reasoning_format::{
 pub use reasoning_ingest::normalize_reasoning_detail_payloads;
 pub use refusal_reason::RefusalReason;
 pub use request_observation::{
-    ObservationSnapshot, RequestObservation, ServedIdentity, SkipCounts,
+    ObservationSnapshot, RequestObservation, ServedIdentity, SkipCounts, WalkCounts,
 };
 pub use reserved::is_canonical_request_key;
 pub use safe_token::{MAX_SAFE_TOKEN_LEN, is_safe_token};

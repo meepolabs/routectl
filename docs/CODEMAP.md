@@ -67,7 +67,9 @@ license.
 - `src/request_observation.rs` -- `RequestObservation`: the content-free
   per-request observation slot shared across fallback hops (+ `ServedIdentity`);
   `add_skip` tallies a locally ineligible target into `SkipCounts` (one count
-  per `EligibilityReason`); `snapshot` returns an `ObservationSnapshot`
+  per `EligibilityReason`); `set_walk_counts` stamps the dispatch walk's
+  `WalkCounts` (request-caused exits and exclusion skips per scope; built via
+  `WalkCounts::new`); `snapshot` returns an `ObservationSnapshot`
 - `src/config_dir.rs` -- the shared routectl config-folder rule: pure
   `config_dir_from` (absolute `XDG_CONFIG_HOME`, else absolute home +
   `.config`, joined with `routectl`; empty or relative counts as unset; on

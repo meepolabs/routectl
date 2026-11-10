@@ -1,4 +1,4 @@
-use super::{ObservationSnapshot, RequestObservation, ServedIdentity, SkipCounts};
+use super::{ObservationSnapshot, RequestObservation, ServedIdentity, SkipCounts, WalkCounts};
 use crate::EligibilityReason;
 
 fn identity(model: &str) -> ServedIdentity {
@@ -230,4 +230,26 @@ fn snapshot_recovers_from_a_poisoned_lock() {
     slot.add_local_refusal();
 
     assert_eq!(slot.snapshot().local_refusals, 2);
+}
+
+#[test]
+fn a_fresh_observation_snapshots_zero_walk_counts() {
+    let walk = RequestObservation::new().snapshot().walk;
+
+    assert_eq!(walk, WalkCounts::new(0, 0, 0, 0, 0));
+}
+
+#[test]
+fn set_walk_counts_replaces_the_earlier_stamp_and_is_visible_through_every_clone() {
+    let kept = RequestObservation::new();
+    let riding = kept.clone();
+    let sibling = riding.clone();
+
+    riding.set_walk_counts(WalkCounts::new(9, 9, 9, 9, 9));
+    sibling.set_walk_counts(WalkCounts::new(1, 2, 3, 4, 5));
+
+    let expected = WalkCounts::new(1, 2, 3, 4, 5);
+    for (name, slot) in [("kept", &kept), ("riding", &riding), ("sibling", &sibling)] {
+        assert_eq!(slot.snapshot().walk, expected, "{name}");
+    }
 }

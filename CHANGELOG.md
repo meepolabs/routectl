@@ -407,6 +407,8 @@ list with more narrative.
 
 - **`[models.X.pricing]` sets per-model prices, field by field.** Each of `input_per_mtok`, `output_per_mtok`, `cache_read_per_mtok`, `cache_write_5m_per_mtok` and `cache_write_1h_per_mtok` is optional; a non-finite or negative value is refused at load naming the dotted key. Library callers get `prices::effective_pricing`, which resolves each field from `[models.X.pricing]`, then a matching `[registry]` row (taken whole), then the refreshed and shipped price tables, then a derived Anthropic-family 1-hour cache-write price, and names each field's source (`PriceSource`, `PriceSources`, `PriceSubject`). See [docs/CONFIGURATION.md](docs/CONFIGURATION.md#model-prices-modelsxpricing).
 
+- **Internal:** routectl-core's request observation gains the dispatch walk's counts: `WalkCounts` (non-exhaustive; `request_caused`, `excluded_endpoint`, `excluded_model`, `excluded_target`, `excluded_probe_run`; built with `WalkCounts::new`), the stamp-style `RequestObservation::set_walk_counts` (the last call wins) and `ObservationSnapshot::walk`. No change for `routectl` binary users.
+
 ### Changed
 
 - **The compiled Codex client version is now 0.167.0 (was 0.145.0).** Without a `codex_version` override, ChatGPT-OAuth Responses requests send `codex_cli_rs/0.167.0` in the User-Agent and `0.167.0` in the `version` header, and Codex login and refresh send the same User-Agent; a configured `codex_version` still wins. `gpt-6-luna` on the ChatGPT-OAuth lane has not been verified with this version. See [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
