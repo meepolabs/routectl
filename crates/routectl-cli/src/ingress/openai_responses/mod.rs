@@ -133,6 +133,10 @@ pub struct ResponsesStreamState {
     /// Accumulated reasoning details (summary / text / encrypted),
     /// replayed into the completed body's `reasoning` items.
     reasoning_accumulator: Vec<routectl_core::ReasoningDetail>,
+    /// Upstream output items the canonical chunk does not model, each with
+    /// the `output_index` it streamed at, in arrival order. The completed
+    /// body holds each at that same index.
+    carried_items: Vec<(u64, Value)>,
     /// Bare tool name -> the namespace the client declared it in, stamped
     /// onto each returned `function_call` item.
     tool_namespaces: BTreeMap<String, String>,

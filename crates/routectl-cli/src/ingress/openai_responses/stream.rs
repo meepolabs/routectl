@@ -50,7 +50,7 @@ use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
 use routectl_core::{
-    ChatChunk, ChatResponse, ChunkDelta, Message, MessageContent, ReasoningDetail,
+    ChatChunk, ChatResponse, ChunkDelta, Message, MessageContent, OpaqueSseEvent, ReasoningDetail,
     ReasoningDetailKind, ResponsesEnvelope, Result, Role, UpstreamMeta, Usage, UsageDelta,
     is_responses_family, schema::Choice,
 };
@@ -124,6 +124,9 @@ pub(super) fn render_chunk_declared(
     capture_identity(&chunk, state);
     ensure_created(state, &mut events);
 
+    for opaque in &chunk.opaque_events {
+        emit_opaque_event(opaque, state, &mut events);
+    }
     if let Some(choice) = chunk.choices.first() {
         emit_delta_events(&choice.delta, state, &mut events, edits);
         if let Some(fr) = choice.finish_reason.as_deref() {
@@ -516,6 +519,43 @@ fn tool_call_value(buf: &ToolCallBuffer) -> Value {
 }
 
 // ---------------------------------------------------------------------------
+// Carried output items (whole upstream items the canonical chunk does not model)
+// ---------------------------------------------------------------------------
+
+fn emit_opaque_event(
+    event: &OpaqueSseEvent,
+    state: &mut ResponsesStreamState,
+    events: &mut Vec<SseEvent>,
+) {
+    match event {
+        OpaqueSseEvent::OutputItem { item } => emit_carried_item(item, state, events),
+        _ => tracing::debug!(
+            "openai-responses ingress: skipping an opaque event with no Responses rendering"
+        ),
+    }
+}
+
+/// Emit one finished upstream item as its own output item. The item is
+/// already final, so `added` and `done` both carry it whole.
+fn emit_carried_item(item: &Value, state: &mut ResponsesStreamState, events: &mut Vec<SseEvent>) {
+    close_open_item(state, events);
+    let output_index = alloc_output_index(state);
+    push_event(
+        state,
+        events,
+        "response.output_item.added",
+        json!({"output_index": output_index, "item": item}),
+    );
+    push_event(
+        state,
+        events,
+        "response.output_item.done",
+        json!({"output_index": output_index, "item": item}),
+    );
+    state.carried_items.push((output_index, item.clone()));
+}
+
+// ---------------------------------------------------------------------------
 // Item close (emit the *.done bracket for the open text/reasoning item)
 // ---------------------------------------------------------------------------
 
@@ -716,7 +756,19 @@ fn completed_output(state: &ResponsesStreamState) -> Vec<Value> {
         .position(|item| item.get("type").and_then(Value::as_str) == Some("message"))
         .map_or(output.len(), |index| index + 1);
     output.splice(after_first_message..after_first_message, later_items);
+    insert_carried_items(&mut output, &state.carried_items);
     output
+}
+
+/// Place each carried item at the `output_index` it streamed at. The
+/// accumulated message holds text only, never a `ContentPart::Other`, so
+/// the render above emits no copy of a carried item. Indices ascend, so
+/// each insert accounts for the ones before it.
+fn insert_carried_items(output: &mut Vec<Value>, carried: &[(u64, Value)]) {
+    for (output_index, item) in carried {
+        let at = usize::try_from(*output_index).map_or(output.len(), |i| i.min(output.len()));
+        output.insert(at, item.clone());
+    }
 }
 
 /// Reconstruct a canonical `ChatResponse` from the accumulated stream so

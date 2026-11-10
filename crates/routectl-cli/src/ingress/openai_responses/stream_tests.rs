@@ -1486,3 +1486,185 @@ fn a_streamed_call_to_a_flat_tool_carries_no_namespace() {
         "completed body: {output}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// carried output items
+// ---------------------------------------------------------------------------
+
+fn custom_call(call_id: &str, input: &str) -> Value {
+    json!({
+        "type": "custom_tool_call",
+        "id": format!("ctc_{call_id}"),
+        "call_id": call_id,
+        "name": "tool_freeform",
+        "input": input,
+        "status": "completed",
+    })
+}
+
+fn carried_chunk(item: Value) -> ChatChunk {
+    ChatChunk {
+        id: "resp_01".into(),
+        model: "gpt-5-codex".into(),
+        choices: vec![ChunkChoice {
+            index: 0,
+            delta: ChunkDelta::default(),
+            finish_reason: None,
+            matched_stop_sequence: None,
+        }],
+        usage: None,
+        opaque_events: vec![routectl_core::OpaqueSseEvent::OutputItem { item }],
+        upstream_meta: None,
+    }
+}
+
+/// `(event name, output_index, item type)` for every item-level bracket.
+fn item_brackets(events: &[SseEvent]) -> Vec<(String, u64, String)> {
+    events
+        .iter()
+        .filter(|e| {
+            matches!(
+                e.event.as_deref(),
+                Some("response.output_item.added" | "response.output_item.done")
+            )
+        })
+        .map(|e| {
+            let data: Value = serde_json::from_str(&e.data).expect("json");
+            (
+                e.event.clone().unwrap_or_default(),
+                data["output_index"].as_u64().expect("output_index"),
+                data["item"]["type"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
+            )
+        })
+        .collect()
+}
+
+fn bracket(name: &str, index: u64, kind: &str) -> (String, u64, String) {
+    (name.to_string(), index, kind.to_string())
+}
+
+#[test]
+fn a_carried_item_after_text_closes_the_message_and_takes_the_next_index() {
+    // Arrange
+    let mut state = fresh();
+    let item = custom_call("call_a", "ls -la");
+
+    // Act
+    let mut events = render(&mut state, text_chunk("running it"));
+    events.extend(render(&mut state, carried_chunk(item.clone())));
+    events.extend(render(&mut state, finish_chunk("stop", None)));
+    events.extend(render_eos_internal(&mut state));
+
+    // Assert
+    assert_eq!(
+        item_brackets(&events),
+        [
+            bracket("response.output_item.added", 0, "message"),
+            bracket("response.output_item.done", 0, "message"),
+            bracket("response.output_item.added", 1, "custom_tool_call"),
+            bracket("response.output_item.done", 1, "custom_tool_call"),
+        ]
+    );
+    let done = events_named(&events, "response.output_item.done");
+    assert_eq!(
+        done[1]["item"], item,
+        "the done item is the upstream's, whole"
+    );
+    let output = data_of(&events, "response.completed")["response"]["output"].clone();
+    assert_eq!(output.as_array().map(Vec::len), Some(2), "{output}");
+    assert_eq!(output[0]["type"], "message");
+    assert_eq!(output[1], item, "{output}");
+}
+
+#[test]
+fn two_carried_items_take_dense_indices_in_arrival_order() {
+    // Arrange
+    let mut state = fresh();
+    let first = custom_call("call_a", "pwd");
+    let second = custom_call("call_b", "date");
+
+    // Act
+    let mut events = render(&mut state, text_chunk("two steps"));
+    events.extend(render(&mut state, carried_chunk(first.clone())));
+    events.extend(render(&mut state, carried_chunk(second.clone())));
+    events.extend(render_eos_internal(&mut state));
+
+    // Assert
+    let added: Vec<(u64, Value)> = events_named(&events, "response.output_item.added")
+        .into_iter()
+        .map(|d| {
+            (
+                d["output_index"].as_u64().expect("index"),
+                d["item"].clone(),
+            )
+        })
+        .filter(|(_, item)| item["type"] == "custom_tool_call")
+        .collect();
+    assert_eq!(added, [(1, first.clone()), (2, second.clone())]);
+    let output = data_of(&events, "response.completed")["response"]["output"].clone();
+    assert_eq!(output.as_array().map(Vec::len), Some(3), "{output}");
+    assert_eq!(output[1], first, "{output}");
+    assert_eq!(output[2], second, "{output}");
+}
+
+#[test]
+fn a_carried_item_keeps_its_index_ahead_of_flushed_function_calls() {
+    // Arrange
+    let mut state = fresh();
+    let item = custom_call("call_a", "ls");
+
+    // Act
+    let mut events = render(&mut state, text_chunk("both kinds"));
+    events.extend(render(&mut state, carried_chunk(item.clone())));
+    events.extend(render(&mut state, tool_chunk(0, "call_f", "lookup", "{}")));
+    events.extend(render(&mut state, finish_chunk("tool_calls", None)));
+    events.extend(render_eos_internal(&mut state));
+
+    // Assert
+    let added: Vec<(u64, String)> = item_brackets(&events)
+        .into_iter()
+        .filter(|(name, _, _)| name == "response.output_item.added")
+        .map(|(_, index, kind)| (index, kind))
+        .collect();
+    assert_eq!(
+        added,
+        [
+            (0, "message".to_string()),
+            (1, "custom_tool_call".to_string()),
+            (2, "function_call".to_string()),
+        ]
+    );
+    let output = data_of(&events, "response.completed")["response"]["output"].clone();
+    let kinds: Vec<&str> = output
+        .as_array()
+        .expect("output")
+        .iter()
+        .filter_map(|i| i["type"].as_str())
+        .collect();
+    assert_eq!(kinds, ["message", "custom_tool_call", "function_call"]);
+}
+
+#[test]
+fn a_carried_item_before_any_text_sits_ahead_of_the_message() {
+    // Arrange
+    let mut state = fresh();
+    let item = custom_call("call_a", "ls");
+
+    // Act
+    let mut events = render(&mut state, carried_chunk(item.clone()));
+    events.extend(render(&mut state, text_chunk("after")));
+    events.extend(render_eos_internal(&mut state));
+
+    // Assert
+    let output = data_of(&events, "response.completed")["response"]["output"].clone();
+    assert_eq!(output[0], item, "{output}");
+    assert_eq!(output[1]["type"], "message", "{output}");
+    let message_added = events_named(&events, "response.output_item.added")
+        .into_iter()
+        .find(|d| d["item"]["type"] == "message")
+        .expect("message added");
+    assert_eq!(message_added["output_index"], 1);
+}

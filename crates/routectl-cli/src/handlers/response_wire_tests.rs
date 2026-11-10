@@ -1425,3 +1425,114 @@ async fn the_declared_responses_status_rebuild_explains_only_its_own_change() {
         }
     }
 }
+
+/// The upstream's stream for a message followed by a freeform custom tool
+/// call, an output item the canonical chunk does not model.
+fn responses_message_then_custom_call_stream() -> (String, Value) {
+    let call = json!({"type": "custom_tool_call", "id": "ctc_1", "call_id": "call_1",
+                      "name": "tool_freeform", "input": "ls -la", "status": "completed"});
+    let mut done = responses_body();
+    done["output"]
+        .as_array_mut()
+        .expect("output")
+        .push(call.clone());
+    let mut created = responses_body();
+    created["status"] = json!("in_progress");
+    created["output"] = json!([]);
+    let message = json!({"type": "message", "id": "m1", "role": "assistant",
+                         "status": "completed", "content": []});
+    let pending_call = json!({"type": "custom_tool_call", "id": "ctc_1", "call_id": "call_1",
+                              "name": "tool_freeform", "input": "", "status": "in_progress"});
+    let frames = [
+        json!({"type": "response.created", "response": created}),
+        json!({"type": "response.output_item.added", "output_index": 0, "item": message}),
+        json!({"type": "response.content_part.added", "output_index": 0, "content_index": 0,
+               "part": {"type": "output_text", "text": "", "annotations": []}}),
+        json!({"type": "response.output_text.delta", "output_index": 0, "content_index": 0,
+               "delta": "ok"}),
+        json!({"type": "response.output_item.added", "output_index": 1, "item": pending_call}),
+        json!({"type": "response.custom_tool_call_input.delta", "output_index": 1,
+               "item_id": "ctc_1", "delta": "ls -la"}),
+        json!({"type": "response.output_item.done", "output_index": 1, "item": call}),
+        json!({"type": "response.completed", "response": done}),
+    ];
+    let mut wire = String::new();
+    for frame in frames {
+        let event = frame["type"].as_str().expect("type").to_string();
+        wire.push_str(&format!("event: {event}\ndata: {frame}\n\n"));
+    }
+    (wire, call)
+}
+
+/// `(output_index, item)` of every client event named `event`.
+fn client_items(client: &[u8], event: &str) -> Vec<(u64, Value)> {
+    String::from_utf8_lossy(client)
+        .split("\n\n")
+        .filter_map(|block| block.lines().find_map(|l| l.strip_prefix("data: ")))
+        .filter_map(|data| serde_json::from_str::<Value>(data).ok())
+        .filter(|data| data["type"] == event)
+        .map(|data| {
+            (
+                data["output_index"].as_u64().unwrap_or(u64::MAX),
+                data["item"].clone(),
+            )
+        })
+        .collect()
+}
+
+/// A streamed unmodeled output item reaches a Responses client as its own
+/// item, at the index the upstream gave it, in the stream and in the
+/// completed body, so the check finds nothing missing at `/output/1`.
+#[tokio::test]
+async fn a_streamed_custom_tool_call_reaches_the_responses_client_at_its_index() {
+    // Arrange
+    let (body, call) = responses_message_then_custom_call_stream();
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(Dialect::Responses.upstream_path()))
+        .respond_with(sse(body))
+        .mount(&server)
+        .await;
+    let router = router(Dialect::Responses, &server.uri(), CHECK_EVERY).await;
+    let swap = Arc::new(arc_swap::ArcSwap::from_pointee(router));
+
+    // Act
+    let client = send(Dialect::Responses, &swap, true, Render::AsShipped).await;
+    let snapshot = swap.load().wire_check_snapshot();
+
+    // Assert
+    let wire = String::from_utf8_lossy(&client).to_string();
+    for event in ["response.output_item.added", "response.output_item.done"] {
+        let carried: Vec<_> = client_items(&client, event)
+            .into_iter()
+            .filter(|(_, item)| item["type"] == "custom_tool_call")
+            .collect();
+        assert_eq!(carried, [(1, call.clone())], "{event}: {wire}");
+    }
+    let completed = String::from_utf8_lossy(&client)
+        .split("\n\n")
+        .filter_map(|block| block.lines().find_map(|l| l.strip_prefix("data: ")))
+        .filter_map(|data| serde_json::from_str::<Value>(data).ok())
+        .find(|data| data["type"] == "response.completed")
+        .expect("response.completed");
+    let output = completed["response"]["output"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(output.len(), 2, "{wire}");
+    assert_eq!(output[0]["type"], "message", "{wire}");
+    assert_eq!(output[1]["type"], "custom_tool_call", "{wire}");
+    assert_eq!(output[1], call, "{wire}");
+    let findings = response_findings(&snapshot);
+    assert!(
+        !findings
+            .iter()
+            .any(|(path, _)| path.starts_with("/output/1")),
+        "{findings:?}"
+    );
+    assert_eq!(findings, Vec::<(String, &str)>::new(), "{wire}");
+    assert_eq!(
+        outcomes(&snapshot),
+        [(Dialect::Responses.lane(), CheckOutcome::Clean, 2)]
+    );
+}
