@@ -570,8 +570,120 @@ fn capability_section_emits_no_finding_for_a_loaded_config() {
     assert!(findings.is_empty(), "{findings:?}");
 }
 
+/// A loaded config with capability learning switched off yields exactly one
+/// Warn saying nothing is learned or applied; the default (enabled) config
+/// yields none. Neither moves the exit code.
+///
+/// Mutation check: drop the disabled arm of `section_capability` -> the
+/// `disabled` row goes red.
 #[test]
-fn schema_version_is_twenty_nine() {
+fn capability_disabled_yields_one_warn_saying_nothing_is_learned_or_applied() {
+    let rows: [(&str, Option<bool>, usize); 3] = [
+        ("disabled", Some(false), 1),
+        ("explicitly enabled", Some(true), 0),
+        ("default enabled", None, 0),
+    ];
+    for (name, enabled, expected) in rows {
+        // Arrange
+        let mut config = Config::default();
+        if let Some(enabled) = enabled {
+            config.capability.enabled = enabled;
+        }
+        let context = ctx(
+            config,
+            Some(&current_version_stamp()),
+            Vec::new(),
+            Vec::new(),
+        );
+
+        // Act
+        let findings = section_capability(&context);
+
+        // Assert
+        assert_eq!(findings.len(), expected, "{name}: {findings:?}");
+        for finding in &findings {
+            assert_eq!(finding.section, "capability", "{name}");
+            assert_eq!(finding.name, "learning", "{name}");
+            assert_eq!(finding.status, Status::Warn, "{name}");
+            assert!(
+                finding.detail.contains("nothing is learned")
+                    && finding
+                        .detail
+                        .contains("no learned verdict or limit is applied"),
+                "{name}: {}",
+                finding.detail
+            );
+            assert!(finding.remediation.is_some(), "{name}");
+        }
+        assert_eq!(overall_exit(&findings), 0, "{name}");
+    }
+}
+
+/// The full report carries the capability-off Warn and still exits 0.
+#[test]
+fn a_report_with_capability_learning_off_exits_zero() {
+    let mut config = Config::default();
+    config.capability.enabled = false;
+    let context = ctx(
+        config,
+        Some(&current_version_stamp()),
+        Vec::new(),
+        Vec::new(),
+    );
+
+    let report = build_report(&context);
+
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|f| f.section == "capability" && f.name == "learning" && f.status == Status::Warn),
+        "{:?}",
+        report.findings
+    );
+    assert_eq!(overall_exit(&report.findings), 0);
+}
+
+/// The doctor `config` remediation for an `oauth://` ref naming a provider
+/// this build cannot log in to is the same sentence the served seat fix
+/// gives for that entry and provider.
+///
+/// Mutation check: restore the fixed "correct the provider id" text in the
+/// `UnknownOauthProvider` arm of `secret_finding` -> red here.
+#[test]
+fn unknown_oauth_provider_remediation_matches_the_served_seat_fix() {
+    // Arrange
+    let cfg: Config = toml::from_str(
+        "version = 3\n\
+         [providers.gamma]\n\
+         kind = \"anthropic-api\"\n\
+         api_key_ref = \"oauth://made-up\"\n",
+    )
+    .expect("unknown-provider fixture parses");
+    let checks = gather_secret_checks(&cfg, &[("anthropic", LocalProbe::Present)]);
+
+    // Act
+    let finding = secret_finding(&checks[0]);
+    let served = SeatFix::of(&cfg, "gamma");
+
+    // Assert
+    assert_eq!(finding.status, Status::Warn);
+    assert!(
+        matches!(served, SeatFix::UnknownProvider { .. }),
+        "{served:?}"
+    );
+    assert_eq!(finding.remediation, Some(served.remediation()));
+    assert_eq!(
+        finding.remediation.as_deref(),
+        Some(
+            "correct the unknown oauth provider `made-up` of provider entry `gamma`, then reload \
+             the config"
+        )
+    );
+}
+
+#[test]
+fn schema_version_is_thirty() {
     assert_eq!(SCHEMA_VERSION, 30);
 
     let context = ctx(

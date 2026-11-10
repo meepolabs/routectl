@@ -271,7 +271,9 @@ pub(crate) use self::served::{
 /// v29 -> v30: observation block gains the five walk fields. Additive, served
 /// panel only: the `/status/doctor` `observation` block gains
 /// `request_caused_failures`, `excluded_endpoint`, `excluded_model`,
-/// `excluded_target` and `excluded_probe_run`; the report itself is unchanged.
+/// `excluded_target` and `excluded_probe_run`. The `capability` section gains
+/// one Warn `learning` finding when `[capability] enabled = false`, saying
+/// nothing is learned or applied; it never Fails, so the exit code is unmoved.
 pub(crate) const SCHEMA_VERSION: u32 = 30;
 
 /// A section-producer: pure mapping of the read-only [`DoctorContext`] to a

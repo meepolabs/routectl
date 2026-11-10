@@ -188,7 +188,7 @@ impl SeatFix {
     }
 }
 
-fn unknown_provider_sentence(entry: &str, provider: &str) -> String {
+pub(super) fn unknown_provider_sentence(entry: &str, provider: &str) -> String {
     format!(
         "correct the unknown oauth provider `{}` of provider entry `{}`, then reload the config",
         safe(provider),

@@ -866,6 +866,60 @@ async fn served_findings(meta: Arc<DaemonMeta>) -> Vec<Value> {
         .clone()
 }
 
+fn capability_learning_findings(findings: &[Value]) -> Vec<&Value> {
+    findings
+        .iter()
+        .filter(|f| f["section"] == "capability" && f["name"] == "learning")
+        .collect()
+}
+
+/// The served `/status/doctor` panel, which the dashboard doctor tab renders,
+/// carries the capability-off Warn when the daemon's accepted config switches
+/// learning off, and none when it leaves the default on.
+///
+/// Mutation check: drop the disabled arm of `section_capability` -> red here.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn served_doctor_panel_carries_the_capability_disabled_warn() {
+    let dir = tempfile::tempdir().unwrap();
+    let _xdg = routectl_testkit::ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
+    let config_path = dir.path().join("config.toml");
+    std::fs::write(
+        &config_path,
+        format!("version = {}\n", routectl_router::CURRENT_CONFIG_VERSION),
+    )
+    .unwrap();
+    let rows: [(&str, bool, usize); 2] = [("disabled", false, 1), ("default", true, 0)];
+    for (name, enabled, expected) in rows {
+        let mut config = Config::default();
+        config.capability.enabled = enabled;
+        let router = Router::new(Arc::new(config));
+        let app_state = AppState::for_test(Arc::new(ArcSwap::from_pointee(router)));
+        let state = Arc::new(StatusState::from_app(
+            &app_state,
+            Some(config_path.clone()),
+            DaemonMeta::for_test(),
+        ));
+
+        let json = doctor_json(&state).await;
+
+        let findings = json["data"]["report"]["findings"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{name}: findings array: {json}"));
+        let learning = capability_learning_findings(findings);
+        assert_eq!(learning.len(), expected, "{name}: {findings:?}");
+        for finding in learning {
+            assert_eq!(finding["status"], "Warn", "{name}");
+            assert!(
+                finding["detail"]
+                    .as_str()
+                    .is_some_and(|d| d.contains("nothing is learned")),
+                "{name}: {finding}"
+            );
+        }
+    }
+}
+
 fn reload_findings(findings: &[Value]) -> Vec<&Value> {
     findings
         .iter()

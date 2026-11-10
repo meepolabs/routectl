@@ -1,5 +1,7 @@
 //! Doctor section producers.
 
+use std::fmt::Write as _;
+
 use routectl_auth::oauth::types::TokenRecord;
 use routectl_core::sanitize_for_log_with_cap;
 use routectl_router::{
@@ -20,7 +22,9 @@ use crate::commands::seat_report::{
 use crate::server::reload_failure::ReloadFailureSnapshot;
 
 use super::gather::{SecretCheck, SecretPresence};
-use super::served::{SeatFix, parked_seat_finding, unusable_seat_finding};
+use super::served::{
+    SeatFix, parked_seat_finding, unknown_provider_sentence, unusable_seat_finding,
+};
 use super::{DoctorContext, KnobRow, LegacyFolder, PricingRow};
 
 /// Probe section: one finding per configured provider, mapped from its
@@ -291,7 +295,7 @@ fn legacy_entries_detail(display: &str, names: &[String], more: usize, has_confi
         .join(", ");
     let mut detail = format!("{display} still holds {listed}");
     if more > 0 {
-        detail.push_str(&format!(" and {more} more"));
+        let _ = write!(detail, " and {more} more");
     }
     detail.push_str("; routectl does not read them");
     if has_config {
@@ -386,7 +390,7 @@ pub(super) fn secret_finding(check: &SecretCheck) -> Finding {
         SecretPresence::UnknownOauthProvider => (
             Status::Warn,
             "oauth provider is not recognized by this build".to_string(),
-            Some("correct the provider id in this oauth:// reference".to_string()),
+            Some(unknown_oauth_provider_remediation(check)),
         ),
         SecretPresence::Unreadable => (
             Status::Warn,
@@ -415,6 +419,13 @@ fn missing_remediation(check: &SecretCheck) -> String {
         "file://" => "create the secret file this provider references".to_string(),
         _ => "provide a resolvable secret reference for this provider".to_string(),
     }
+}
+
+fn unknown_oauth_provider_remediation(check: &SecretCheck) -> String {
+    check.oauth_id.as_deref().map_or_else(
+        || "correct the provider id in this oauth:// reference".to_string(),
+        |provider| unknown_provider_sentence(&check.provider, provider),
+    )
 }
 
 fn check_login_remediation(check: &SecretCheck) -> String {
@@ -682,14 +693,30 @@ fn seat_provider(seat_key: &str) -> &str {
 
 /// Capability section: the config-derived findings NOT absorbed by the
 /// capability matrix panel. The operator override cells and the runtime-only
-/// learned line are structured cells on the matrix panel; only the
-/// config-unavailable degradation line remains a finding here, so a config
-/// that loads yields no findings. The section NEVER emits
-/// a `Fail`, so it can never flip the doctor exit code.
+/// learned line are structured cells on the matrix panel; what remains here
+/// is the config-unavailable degradation line, or, for a config that loads,
+/// one line when `[capability] enabled = false` switches learning off. The
+/// section NEVER emits a `Fail`, so it can never flip the doctor exit code.
 pub(super) fn section_capability(ctx: &DoctorContext) -> Vec<Finding> {
     match ctx.capability.panel_unavailable.as_deref() {
-        None => Vec::new(),
         Some(redacted) => vec![capability_unavailable(redacted)],
+        None if !ctx.config.capability.enabled => vec![capability_learning_off()],
+        None => Vec::new(),
+    }
+}
+
+fn capability_learning_off() -> Finding {
+    Finding {
+        section: "capability",
+        name: "learning".to_string(),
+        status: Status::Warn,
+        detail: "capability learning is off ([capability] enabled = false): nothing is learned, \
+                 and no learned verdict or limit is applied"
+            .to_string(),
+        remediation: Some(
+            "set `[capability] enabled = true` to learn and apply capability verdicts again"
+                .to_string(),
+        ),
     }
 }
 
