@@ -5,7 +5,7 @@
 //! the writer failed to bind would show here.
 
 use super::*;
-use routectl_core::{EligibilityReason, Message, MessageContent, Role};
+use routectl_core::{EligibilityReason, Message, MessageContent, Role, WalkCounts};
 use routectl_usage::{CHANNEL_CAPACITY, UsageWriter};
 
 const ROW_ID: &str = "observed-row";
@@ -368,5 +368,56 @@ fn the_skip_columns_are_named_for_exactly_the_eligibility_tokens() {
             "{suffix} names a reason"
         );
     }
+    drop(dir);
+}
+
+const WALK_COLUMNS: &str = "request_caused_failures, excluded_endpoint, excluded_model, \
+     excluded_target, excluded_probe_run";
+
+/// The five walk columns of the one persisted row, in [`WALK_COLUMNS`] order.
+fn read_walk(db_path: &std::path::Path) -> [Option<i64>; 5] {
+    let conn = rusqlite::Connection::open(db_path).expect("read open");
+    conn.query_row(
+        &format!("SELECT {WALK_COLUMNS} FROM requests WHERE request_id = ?1"),
+        [ROW_ID],
+        |r| Ok([r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?]),
+    )
+    .expect("exactly one persisted row")
+}
+
+#[test]
+fn each_walk_count_on_the_slot_persists_in_its_own_column_only() {
+    let rows: [(&str, WalkCounts); 5] = [
+        ("request_caused", WalkCounts::new(3, 0, 0, 0, 0)),
+        ("excluded_endpoint", WalkCounts::new(0, 3, 0, 0, 0)),
+        ("excluded_model", WalkCounts::new(0, 0, 3, 0, 0)),
+        ("excluded_target", WalkCounts::new(0, 0, 0, 3, 0)),
+        ("excluded_probe_run", WalkCounts::new(0, 0, 0, 0, 3)),
+    ];
+    for (column, (name, walk)) in rows.into_iter().enumerate() {
+        // Arrange
+        let rig = rig();
+        rig.slot.set_walk_counts(walk);
+        let db_path = rig.db_path.clone();
+
+        // Act
+        let dir = rig.persist_keeping_dir(finalize_ok);
+
+        // Assert
+        let mut expected = [Some(0); 5];
+        expected[column] = Some(3);
+        assert_eq!(read_walk(&db_path), expected, "{name}");
+        drop(dir);
+    }
+}
+
+#[test]
+fn an_unstamped_walk_persists_zero_walk_counts_not_null() {
+    let rig = rig();
+    let db_path = rig.db_path.clone();
+
+    let dir = rig.persist_keeping_dir(finalize_ok);
+
+    assert_eq!(read_walk(&db_path), [Some(0); 5]);
     drop(dir);
 }

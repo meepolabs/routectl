@@ -6272,6 +6272,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `src/server/observation_lifecycle_daemon_tests.rs` -- assembled-daemon
   abnormal-exit rows (`client_disconnect` vs `cancelled`) and a ledger gap
   read back across a restart; declared from `server/mod.rs`
+- `src/server/walk_counts_daemon_tests.rs` -- assembled-daemon walk counts
+  on the ledger row: a seeded schema-19 file migrated at boot, a generic
+  400, an unsupported-feature 400, a token count and a request refused
+  before the walk, every row read back after a restart on the migrated
+  file; declared from `server/mod.rs`
 - `src/server/capability_boundary.rs` -- the replay boundary a
   revision-changing reload must commit BEFORE it publishes the replacement
   router, in two phases. `admit_capability_boundary(usage, router) ->

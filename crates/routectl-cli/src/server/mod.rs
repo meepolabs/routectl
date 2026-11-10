@@ -250,3 +250,7 @@ mod observation_lifecycle_daemon_tests;
 #[cfg(test)]
 #[path = "failure_scope_daemon_tests.rs"]
 mod failure_scope_daemon_tests;
+
+#[cfg(test)]
+#[path = "walk_counts_daemon_tests.rs"]
+mod walk_counts_daemon_tests;

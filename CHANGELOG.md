@@ -409,6 +409,8 @@ list with more narrative.
 
 - **Internal:** routectl-core's request observation gains the dispatch walk's counts: `WalkCounts` (non-exhaustive; `request_caused`, `excluded_endpoint`, `excluded_model`, `excluded_target`, `excluded_probe_run`; built with `WalkCounts::new`), the stamp-style `RequestObservation::set_walk_counts` (the last call wins) and `ObservationSnapshot::walk`. No change for `routectl` binary users.
 
+- **Every usage row records how its dispatch walk went.** The five walk-count columns are now filled from the request: `request_caused_failures` counts failed attempts the request itself caused (a failure scoped to the endpoint or the model), and `excluded_endpoint`, `excluded_model`, `excluded_target` and `excluded_probe_run` count the targets an earlier failure's exclusion passed over. A token count records its own walk; a request refused before any target is tried records 0 in all five.
+
 ### Changed
 
 - **The compiled Codex client version is now 0.167.0 (was 0.145.0).** Without a `codex_version` override, ChatGPT-OAuth Responses requests send `codex_cli_rs/0.167.0` in the User-Agent and `0.167.0` in the `version` header, and Codex login and refresh send the same User-Agent; a configured `codex_version` still wins. `gpt-6-luna` on the ChatGPT-OAuth lane has not been verified with this version. See [docs/CONFIGURATION.md](docs/CONFIGURATION.md).

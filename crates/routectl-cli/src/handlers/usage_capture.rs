@@ -1258,7 +1258,7 @@ impl UsageCapture {
     }
 
     /// Copy the request's observation into the row: the five counts, the six
-    /// skip counts and the probe flag always; the served identity only when
+    /// skip counts, the five walk counts and the probe flag always; the served identity only when
     /// `observe_meta` never ran (a dispatch dropped mid-flight), so a row
     /// still names the last target tried.
     fn stamp_observation(&mut self, snapshot: ObservationSnapshot) {
@@ -1273,6 +1273,11 @@ impl UsageCapture {
         self.record.skip_rate_limited = snapshot.skips.rate_limited;
         self.record.skip_capability = snapshot.skips.capability;
         self.record.skip_context_window = snapshot.skips.context_window;
+        self.record.request_caused_failures = snapshot.walk.request_caused;
+        self.record.excluded_endpoint = snapshot.walk.excluded_endpoint;
+        self.record.excluded_model = snapshot.walk.excluded_model;
+        self.record.excluded_target = snapshot.walk.excluded_target;
+        self.record.excluded_probe_run = snapshot.walk.excluded_probe_run;
         self.record.probe = snapshot.probe;
         if !self.meta_observed
             && let Some(target) = snapshot.last_target
