@@ -16,6 +16,7 @@ use std::time::Instant;
 
 use arc_swap::ArcSwap;
 use routectl_core::EligibilityReason;
+use routectl_router::prices::PriceBook;
 use routectl_router::router::RouteTargetStatus;
 use routectl_router::wire_check_state::WireCheckSnapshot;
 use routectl_router::{
@@ -27,6 +28,7 @@ use routectl_usage::{AggRow, RowCost};
 use crate::commands::doctor::{
     ParkedSeat, ResidentLearned, SeatFix, ServedInputs, UnusableSeat, unusable_seat_fix,
 };
+use crate::commands::pricing::PriceSnapshot;
 use crate::commands::usage::cost_for_row;
 use crate::lane_cell::{CellSources, LearnedSnapshot, ResolvedEntry, resolve_entries};
 use crate::server::capability_rebuild::WarmReport;
@@ -52,15 +54,19 @@ impl StatusRouterHandle {
         }
     }
 
-    /// Pin ONE immutable config snapshot and hand back an owned pricer over it.
+    /// Pin ONE immutable config snapshot and ONE price-table snapshot from
+    /// `prices`, and hand back an owned pricer over both.
     ///
     /// Owned (not borrowed) so the whole grouped query can be priced on a
-    /// blocking worker against a single snapshot: a router hot-swap mid-query
-    /// can never make two rows of one result price against different rate
-    /// tables.
-    pub fn pricer(&self) -> QueryPricer {
+    /// blocking worker against a single snapshot: a router hot-swap or a new
+    /// price table mid-query can never make two rows of one result price
+    /// against different rate tables. The book is read here, per call, so a
+    /// table renamed into the config folder prices the next query with no
+    /// router rebuild.
+    pub fn pricer(&self, prices: &PriceBook) -> QueryPricer {
         QueryPricer {
             router: self.inner.load_full(),
+            prices: PriceSnapshot::pin(prices),
         }
     }
 }
@@ -70,16 +76,15 @@ impl StatusRouterHandle {
 /// nothing else -- it can never reach dispatch or raw config through it.
 pub struct QueryPricer {
     router: Arc<Router>,
+    prices: PriceSnapshot,
 }
 
 impl QueryPricer {
     /// The cost verdict for one fine-grained aggregate row, resolved against
-    /// the pinned snapshot through the same function the CLI usage report uses.
-    /// The catalog overlay comes off the SAME pinned router the config does, so
-    /// one query can never price against a config generation and a foreign
-    /// overlay generation.
+    /// the pinned config and price tables through the same function the CLI
+    /// usage report uses.
     pub fn price(&self, row: &AggRow) -> RowCost {
-        cost_for_row(&self.router.config, self.router.catalog_overlay(), row)
+        cost_for_row(&self.router.config, &self.prices, row)
     }
 }
 

@@ -930,8 +930,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     db,
                     k_calibration,
                 };
-                if let Err(e) = commands::usage::run(&loaded.config, &loaded.catalog_overlay, &args)
-                {
+                if let Err(e) = commands::usage::run(&loaded.config, &args) {
                     eprintln!("error: {e}");
                     std::process::exit(1);
                 }

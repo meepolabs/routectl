@@ -19,8 +19,9 @@
 //!     the same way instead of escaping as a fourth regime.
 //!
 //! Cost is resolved through the read-only router facade's pricer, which pins
-//! ONE config snapshot for the whole request: a hot-swap mid-query can never
-//! make two rows of one result price against different rate tables.
+//! ONE config snapshot and ONE price-table snapshot for the whole request: a
+//! hot-swap or a new price table mid-query can never make two rows of one
+//! result price against different rate tables.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -291,8 +292,8 @@ async fn build(
     now: DateTime<Local>,
 ) -> Panel<QueryResult> {
     let db_path = state.usage_db_path.clone();
-    // ONE pinned config snapshot for the whole request's pricing.
-    let pricer = state.router.pricer();
+    // ONE pinned config and price-table snapshot for the whole request.
+    let pricer = state.pricer();
     // Stamped before the blocking read so a lock wait cannot skew the
     // freshness marker.
     let as_of = now_utc_rfc3339();

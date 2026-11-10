@@ -46,6 +46,7 @@ use axum::routing::{any, get};
 use axum::{Json, Router as AxumRouter};
 use parking_lot::Mutex;
 use routectl_router::ActivationState;
+use routectl_router::prices::PriceBook;
 use serde::Serialize;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError as TryAcquire};
 
@@ -66,7 +67,7 @@ use crate::server::AppState;
 use crate::server::capability_rebuild::WarmReport;
 use crate::server::status_gate::STATUS_MAX_INFLIGHT;
 use daemon_meta::DaemonMetaHandle;
-use router_view::StatusRouterHandle;
+use router_view::{QueryPricer, StatusRouterHandle};
 
 /// Capacity for the blocking panel builders, sized to [`STATUS_MAX_INFLIGHT`].
 ///
@@ -147,6 +148,9 @@ pub struct StatusState {
     pub usage_db_path: PathBuf,
     /// Resolved config-file path, when serving from a real on-disk config.
     pub config_path: Option<PathBuf>,
+    /// The refreshed price table file, shared with [`AppState`]. Read once per
+    /// priced request through [`Self::pricer`].
+    pub prices: Arc<PriceBook>,
     /// Process-level daemon facts (bound address, binary version, last
     /// config-load instant, last rejected reload, seat driver health) behind
     /// a read-only facade, read by the config, doctor and health panels.
@@ -201,6 +205,7 @@ impl StatusState {
             activation: app.activation.clone(),
             usage_db_path,
             config_path,
+            prices: Arc::clone(&app.prices),
             daemon_meta: DaemonMetaHandle::new(daemon_meta),
             observability: PanelObservability::default(),
             builder_capacity: BuilderCapacity::default(),
@@ -211,6 +216,12 @@ impl StatusState {
             #[cfg(test)]
             test_hooks: test_hooks::StatusTestHooks::default(),
         }
+    }
+
+    /// A pricer over the live config and the price tables as they are now:
+    /// one snapshot of each for the caller's whole request.
+    pub fn pricer(&self) -> QueryPricer {
+        self.router.pricer(&self.prices)
     }
 
     /// Record the boot capability warm's report. A post-construction setter

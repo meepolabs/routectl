@@ -23,7 +23,7 @@ pub mod logout;
 pub mod opening_accuracy;
 pub mod parse_error_redaction;
 pub mod prices;
-pub(crate) mod pricing;
+pub mod pricing;
 pub mod probe;
 pub mod prompt_size;
 pub mod provider_add;

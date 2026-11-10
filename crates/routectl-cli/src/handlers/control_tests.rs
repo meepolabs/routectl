@@ -117,6 +117,9 @@ impl Fixture {
                 crate::server::confirmation_advance::ConfirmationTracker::new(),
             ),
             context_anchors: std::sync::Arc::default(),
+            prices: std::sync::Arc::new(routectl_router::prices::PriceBook::new(
+                crate::test_usage_dir::usage_dir().join("prices.json"),
+            )),
         });
         let app = axum::Router::new()
             .route(PURGE_PATH, post(purge_capability))

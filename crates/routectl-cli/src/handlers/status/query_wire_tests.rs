@@ -367,7 +367,7 @@ async fn the_pricer_resolves_against_one_pinned_snapshot() {
     seed_ledger(&path, &[Local::now().timestamp_millis()]);
     let state = state_with_ledger(path.clone());
 
-    let pricer = state.router.pricer();
+    let pricer = state.pricer();
     let db = open_readonly_fastfail(&path).expect("open seeded ledger");
     let spec = parse_spec(VALID_BODY.as_bytes(), Local::now()).unwrap();
 

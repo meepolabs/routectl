@@ -6349,7 +6349,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   handler reads (`Router` behind `ArcSwap` for lockless hot-swap, plus the
   sibling usage handle, activation inventory, MITM seam nonce, the
   compiled-pin drift guard, and the daemon-owned `context_anchors`
-  `ContextAnchorStore`, kept across hot reload and cold on restart), the
+  `ContextAnchorStore`, kept across hot reload and cold on restart, and the
+  `prices` `Arc<PriceBook>` over `<config_dir>/prices.json` that the status
+  surface's pricer reads per query, outside the Router), the
   `check_bind_safety` loopback guard, the per-concern submodule declarations,
   and the `server::` re-exports callers use. Unit tests are paired
   per-concern: the `#[path]`-included hub sidecar `tests.rs` keeps only the
@@ -7356,11 +7358,14 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   learned snapshot and seed-clear markers with clock anchors taken after the
   read, the boot `WarmReport`, and the credential-parked and unusable seats
   read through the same non-mutating `status_targets` path `route_targets` uses; its fields are private to
-  the doctor module), plus `pricer()` -> `QueryPricer`, an OWNED `'static`
-  pricing facade over one pinned snapshot whose only method costs an `AggRow`
-  through `commands::usage::cost_for_row` (so `/status/query` and the CLI usage
-  report price a row through one function, and a hot-swap mid-query cannot make
-  two rows of one result price against different rate tables). Rust module
+  the doctor module), plus `pricer(&PriceBook)` -> `QueryPricer`, an OWNED
+  `'static` pricing facade over one pinned router snapshot and one pinned
+  `PriceSnapshot` (the book is read per call, so a renamed-in `prices.json`
+  prices the next query with no Router rebuild) whose only method costs an
+  `AggRow` through `commands::usage::cost_for_row` (so `/status/query` and the
+  CLI usage report price a row through one function, and a hot-swap or a new
+  table mid-query cannot make two rows of one result price against different
+  rate tables). `StatusState::pricer()` pairs it with the shared book. Rust module
   privacy makes the raw `Router` unreachable
   from the sibling panel modules -- a panel cannot obtain a `&Router`, call
   `.complete`/`.stream`/dispatch, or read `.config`; the `mod.rs`
@@ -8557,8 +8562,14 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   terminal-ness, `CI`, the `ROUTECTL_NO_STALENESS_HINT` kill switch,
   `[capability] staleness_hint_days`) at `doctor`, `catalog list`, and `config
   show` (non-JSON verbs only; never `serve`, `--json`, or an empty overlay)
-- `src/commands/pricing.rs` -- the CLI's shared cost-pricing seams, all
-  `pub(super)` (visible across the `commands` tree, nowhere else). `rates_from_pricing(&PricingConfig) -> Rates` is the ONE carry
+- `src/commands/pricing.rs` -- the CLI's shared cost-pricing seams.
+  `PriceSnapshot` (`pin(&PriceBook)` = the book's current refreshed table plus
+  `shipped_table()`; `from_tables` for tests) is the price-table pair one cost
+  read resolves against, and `default_price_book()` is the `PriceBook` over
+  `<config_dir>/prices.json` that `routectl usage` pins once per run and
+  `AppState.prices` shares with the status surface. The rest are
+  `pub(super)` (visible across the `commands` tree, nowhere else).
+  `rates_from_pricing(&PricingConfig) -> Rates` is the ONE carry
   onto the usage leaf's rate struct, shared by the usage report and the probe
   cost estimate; it lives CLI-side because `Rates` belongs to `routectl-usage`,
   a zero-dep leaf the router must not depend on, and both units are already
@@ -8573,9 +8584,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `doctor::gather::pricing_row_source`, `probe::capabilities::probe_rates` --
   before any rate lookup, so no surface can render a per-token figure for
   traffic that bills by seat.
-  `missing_equivalence_dimensions(&PricingConfig) -> Vec<&'static str>` is the
+  `rate_covers(Option<f64>)` is the one completeness predicate (a present,
+  non-negative rate; a known `0` counts). `missing_equivalence_dimensions(&PricingConfig) -> Vec<&'static str>` is the
   DIAGNOSTIC half of the equivalent's complete-or-absent gate: the same
-  strictly-positive-rate rule `usage::rates_cover_used_dimensions` applies, minus
+  `rate_covers` rule `usage::rates_cover_used_dimensions` applies, minus
   the token counts, returning the labels (`input`, `output`, `cache read`, `cache
   write 5m`, `cache write 1h`) that do not resolve. Reasoning is not among them --
   a disjoint-reasoning row bills thinking at the OUTPUT rate. Consumed by
@@ -8589,14 +8601,17 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   model|provider|alias` (or a single total), and bifurcates cost: a provider
   whose `[providers.X] api_key_ref` starts `oauth://` is subscription (`n/a
   (subscription)`, no $), an API-key provider prices its summed tokens via
-  `routectl_router::effective_pricing` -> `rates_from_pricing` ->
+  `routectl_router::prices::effective_pricing` -> `rates_from_pricing` ->
   `estimate_cost_tokens` (`$X.XX` or `n/a` when unpriced) through
-  `cost_for_row(config, overlay, row)`, which yields the usage crate's
+  `cost_for_row(config, &PriceSnapshot, row)`, which yields the usage crate's
   `RowCost` tri-state and is shared with `/status/query`'s pricing closure so
-  the two surfaces can never disagree about what a row costs. An `[registry]`
-  row wins whole; in its absence the row's baked catalog rates fill in, keyed
-  by the PERSISTED `provider_kind` (a kindless row fills from no cell and
-  stays `Unpriced`). Reasoning tokens are
+  the two surfaces can never disagree about what a row costs. The
+  `PriceSubject` is the row's served model, served provider entry (never a
+  pool) and upstream, with the PERSISTED `provider_kind` selecting a
+  first-party table provider only when that entry is gone from config; per
+  field `[models.X.pricing]` > `[registry]` (whole) > refreshed > shipped >
+  unknown, and no price at all stays `Unpriced`. `run(config, args)` pins
+  one snapshot from `default_price_book()` per process. Reasoning tokens are
   priced from the row's PERSISTED `provider_kind` (disjoint for `gemini`,
   subsumed in the output count for every other kind), never from current
   config, so re-kinding a provider in place cannot reprice history; a row whose
@@ -8606,8 +8621,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   (token math) are called by `priced_usd` and by `equivalent_usd` alike, so an
   API-equivalent figure and a real price can never disagree on basis. The
   subscription arm alone wraps that body in `rates_cover_used_dimensions`
-  (complete-or-absent: any dimension with a nonzero count and no strictly
-  positive rate withholds the whole figure), yielding
+  (complete-or-absent: any dimension with a nonzero count and no rate per
+  `pricing::rate_covers` withholds the whole figure; a known `0` is a price), yielding
   `RowCost::Subscription(Option<f64>)`; the priced arm's missing-rate-contributes-zero
   semantics are deliberately untouched, `cost_usd` being a forever contract.
   `Acc` accumulates the equivalent in its own `equivalent_usd` /
@@ -9167,6 +9182,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `tests/hot_reload.rs` -- file-watch hot-reload integration tests;
   boots `serve_on_listener` against a tempdir-rooted config.toml +
   credentials.json and polls for the live `Router` swap
+- `tests/prices_no_network.rs` -- real-binary start-up network proof, alone in
+  its binary: boots a hermetic `serve` whose child env points every proxy
+  variable at a recording loopback listener and whose one provider is a second
+  recorder, prices one `/status/query`, and asserts neither recorder saw a
+  connection; the control runs `prices refresh` under the same env and asserts
+  exactly one `CONNECT`
 - `tests/serve_shutdown.rs` -- real-binary signal integration tests (graceful
   SIGTERM shutdown, SIGHUP reload-trigger log line); signals and reaps a
   hermetic child process; also boots the shipped example

@@ -64,6 +64,9 @@ fn forwarded_app_state() -> (Arc<AppState>, tempfile::TempDir) {
             routectl_cli::server::confirmation_advance::ConfirmationTracker::new(),
         ),
         context_anchors: std::sync::Arc::default(),
+        prices: std::sync::Arc::new(routectl_router::prices::PriceBook::new(
+            dir.path().join("prices.json"),
+        )),
     });
     (state, dir)
 }

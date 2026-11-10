@@ -3209,21 +3209,20 @@ the dotted `models.<nick>.pricing.<field>` path; a known `0` is kept.
 
 The optional `[registry]` table supplies per-upstream prices so usage
 rows can carry a cost estimate. It is the **authority**, not the only
-source: where `[registry]` is silent, the baked catalog's own rates fill
-in, so a common upstream is priced out of the box without any
-`[registry]` entry at all. The precedence is:
+source: where `[registry]` is silent, the refreshed and shipped price
+tables fill in, so a common upstream is priced out of the box without any
+`[registry]` entry at all. The precedence is in [Model
+prices](#model-prices-modelsxpricing):
 
 - A matching `[registry]` row wins **whole and verbatim** -- never merged
-  per field with the catalog, so a dimension you deliberately left unset
-  stays unset rather than being backfilled.
-- Otherwise the two-layer catalog (baked rates, corrected by the catalog
-  overlay) fills in for the `(provider kind, upstream)` pair, but ONLY
-  from a cell that carries real rates: an entry the overlay disabled, an
-  ambiguous catch-all cell that prices nothing, or a subject whose
-  provider kind is unknown all stay **unpriced**, never priced at zero.
+  per field with the tables, so a dimension you deliberately left unset
+  stays unset rather than being backfilled. Only `[models.X.pricing]`
+  ranks above it.
+- Otherwise the tables fill in, and an upstream they do not list stays
+  **unpriced**, never priced at zero.
 - A managed-subscription provider (`api_key_ref` starting `oauth://`) is
-  checked before either layer: it is billed by seat, so no per-token rate
-  applies and none is looked up.
+  billed by seat, so its usage carries no dollar cost; the same prices
+  give its API-equivalent value.
 
 `routectl doctor`'s **Cost pricing** section names which of these
 resolved for every configured model, so you can see whether a figure came
@@ -4600,26 +4599,29 @@ dimension; omit `--by` for a single total row. `--detail` adds extra
 columns: the 5m/1h cache-write split, p95 (nearest-rank) and max
 latency, total wall-time (summed `latency_ms`), and server-tool counts.
 
-**Cost.** Cost is derived at read time from the effective pricing for
-each row: a matching `[registry]` row wins whole, and where `[registry]`
-is silent the baked catalog's own rates fill in (see [Pricing
-registry](#pricing-registry-registrypatternpricing)). The dollar column
-has three states:
+**Cost.** Cost is derived at read time from the effective prices for
+each row, field by field, in the order [Model
+prices](#model-prices-modelsxpricing) gives: `[models.X.pricing]`, a
+matching `[registry]` row (whole), the refreshed table, the shipped
+table. The tables are read once per `routectl usage` run and once per
+dashboard query, so a table `routectl prices refresh` writes while the
+daemon runs prices the next query with no restart; a copy that fails
+validation keeps the previous table. The dollar column has three states:
 
-- `$X.XX` -- an API-key provider whose upstream resolved a price, either
-  from a matching `[registry]` row or from the catalog. The catalog side
-  is keyed by the provider kind **persisted with the row**, never by what
-  the provider is configured as now, so re-kinding a provider in place
-  cannot reprice history.
+- `$X.XX` -- an API-key provider whose upstream resolved a price for at
+  least one dimension. A dimension with no price counts as `$0` on this
+  figure, as it always has. Reasoning is billed by the provider kind
+  **persisted with the row**, never by what the provider is configured as
+  now, so re-kinding a provider in place cannot reprice history.
 - `n/a (subscription)` -- a managed-OAuth provider (its
   `[providers.X] api_key_ref` starts with `oauth://`). Subscription usage
   has no per-token dollar cost; the **quota line** under the table is the
   real spend signal.
-- `n/a` -- an API-key provider whose upstream neither `[registry]` nor the
-  catalog prices: no `[registry]` row matches AND the catalog has no cell
-  with real rates for it (the entry is overlay-disabled, its only matching
-  cell is an ambiguous catch-all, or the row carries no persisted provider
-  kind to key the catalog on).
+- `n/a` -- an API-key provider whose upstream no source prices: no
+  `[models.X.pricing]`, no matching `[registry]` row, and no table row
+  (the tables do not list it, the provider's host is ambiguous, or the
+  provider entry is gone and the row carries no persisted provider kind).
+  Never shown as `$0`.
 
 **Subscription-equivalent value.** Where the effective rates cover every
 dimension a subscription row actually used, the cell also reports what
@@ -4630,13 +4632,11 @@ is current replacement value.
 
 The equivalent is **complete or absent**: if any dimension with a nonzero
 count on the row (input, output, separately-billed reasoning, billed cache
-reads, either cache-write bucket) lacks a positive rate, the cell falls
-back to the plain `n/a (subscription)` / `+sub` string instead of showing
-a partial figure. The baked catalog never fills cache rates, so
-cache-active subscription traffic reads as absent until a `[registry]` row
-supplies complete rates -- cache read plus both cache-write buckets,
-alongside input and output. A `[registry]` row on an `oauth://` provider,
-which used to be inert config, is exactly what makes it resolve. A group
+reads, either cache-write bucket) has no price, the cell falls back to the
+plain `n/a (subscription)` / `+sub` string instead of showing a partial
+figure. A known `$0` price counts as a price: that dimension adds nothing
+and the figure stays complete. A model no source prices shows no
+equivalent, never `~$0.00`. A group
 whose subscription rows recorded no tokens at all resolves a measured
 `~$0.00`: nothing was used, so nothing is the honest equivalent.
 

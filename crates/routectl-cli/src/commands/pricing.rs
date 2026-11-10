@@ -1,16 +1,65 @@
-//! The CLI's shared cost-pricing seams: the one conversion from router
-//! pricing to the usage leaf's `Rates`, the one managed-subscription
-//! predicate every cost surface consults before looking a rate up, and the
-//! dimension-completeness rule an API-equivalent value is gated on.
+//! The CLI's shared cost-pricing seams: the pinned price tables a cost read
+//! resolves against, the one conversion from router pricing to the usage
+//! leaf's `Rates`, the one managed-subscription predicate every cost surface
+//! consults before looking a rate up, and the rate-coverage rule an
+//! API-equivalent value is gated on.
 //!
 //! Lives CLI-side because `Rates` belongs to `routectl-usage`, a zero-dep
-//! leaf the router must not depend on: the router owns the per-token ->
-//! per-million conversion and the registry-vs-catalog precedence
-//! (`routectl_router::effective_pricing`), and this module carries the last
-//! step onto the leaf's own struct.
+//! leaf the router must not depend on: the router owns the per-field price
+//! precedence (`routectl_router::prices::effective_pricing`), and this module
+//! carries the last step onto the leaf's own struct.
 
+use std::sync::Arc;
+
+use routectl_router::prices::{PriceBook, PriceTable, shipped_table};
+
+use crate::commands::prices::PRICES_FILE;
 use routectl_router::{Config, PricingConfig};
 use routectl_usage::Rates;
+
+/// The book over `prices.json` in the shared config folder, the file
+/// `routectl prices refresh` writes. Nothing is read until a snapshot is
+/// pinned from it.
+pub fn default_price_book() -> PriceBook {
+    PriceBook::new(routectl_core::config_dir::config_dir_or_relative().join(PRICES_FILE))
+}
+
+/// The price tables one cost read resolves against: the refreshed table the
+/// book held when the snapshot was pinned, and the shipped table.
+///
+/// Pinned once per read (a `routectl usage` run, one `/status/query`
+/// request), so every row of one result prices against the same tables even
+/// when a new `prices.json` is renamed in mid-read; the next read sees it.
+#[derive(Debug, Clone, Default)]
+pub struct PriceSnapshot {
+    refreshed: Option<Arc<PriceTable>>,
+    shipped: Option<&'static PriceTable>,
+}
+
+impl PriceSnapshot {
+    /// The book's current table plus the shipped table.
+    pub fn pin(book: &PriceBook) -> Self {
+        Self::from_tables(book.current(), shipped_table())
+    }
+
+    /// A snapshot over explicit tables; `None` leaves that layer empty.
+    pub const fn from_tables(
+        refreshed: Option<Arc<PriceTable>>,
+        shipped: Option<&'static PriceTable>,
+    ) -> Self {
+        Self { refreshed, shipped }
+    }
+
+    /// The refreshed table layer.
+    pub fn refreshed(&self) -> Option<&PriceTable> {
+        self.refreshed.as_deref()
+    }
+
+    /// The shipped table layer.
+    pub const fn shipped(&self) -> Option<&'static PriceTable> {
+        self.shipped
+    }
+}
 
 /// True iff `target` bills as a managed-OAuth subscription rather than per
 /// token.
@@ -52,22 +101,22 @@ pub(super) fn is_subscription(config: &Config, target: &str) -> bool {
     })
 }
 
+/// Whether a resolved rate counts toward a complete API-equivalent value: a
+/// rate is present and not negative. A known `0` counts (a free dimension is
+/// priced at nothing, which is a fact), while an absent rate never does.
+pub(super) fn rate_covers(rate: Option<f64>) -> bool {
+    rate.is_some_and(|r| r >= 0.0)
+}
+
 /// The rate dimensions an API-equivalent value needs priced, in the order a
-/// diagnostic names them: `(label, resolved rate)` pairs of the ones that do
-/// NOT price.
+/// diagnostic names them: the labels of the ones [`rate_covers`] refuses.
 ///
-/// Same positivity rule the usage report's complete-or-absent equivalent
-/// applies -- a dimension counts as priced only at a strictly positive rate --
+/// The usage report's complete-or-absent equivalent applies the same rule,
 /// minus the token counts. A diagnostic has no usage to weigh, so it asks which
 /// dimensions RESOLVE at all rather than which of the used ones did.
 ///
 /// Reasoning is not its own dimension: a disjoint-reasoning row bills thinking
 /// tokens at the OUTPUT rate, so the output entry already covers it.
-///
-/// The three cache dimensions are `[registry]`-only by construction -- the
-/// catalog conversion leaves them unset rather than deriving them from
-/// unconfirmed multipliers -- so a catalog-basis subject always reports them
-/// missing.
 pub(super) fn missing_equivalence_dimensions(pricing: &PricingConfig) -> Vec<&'static str> {
     [
         ("input", pricing.input_per_mtok),
@@ -77,7 +126,7 @@ pub(super) fn missing_equivalence_dimensions(pricing: &PricingConfig) -> Vec<&'s
         ("cache write 1h", pricing.cache_write_1h_per_mtok),
     ]
     .into_iter()
-    .filter(|(_, rate)| !rate.is_some_and(|r| r > 0.0))
+    .filter(|(_, rate)| !rate_covers(*rate))
     .map(|(label, _)| label)
     .collect()
 }

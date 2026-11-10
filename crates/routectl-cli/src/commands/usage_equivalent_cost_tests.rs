@@ -142,7 +142,7 @@ fn equiv_agg_row(db: &UsageDb) -> AggRow {
 
 /// The verdict for the seeded ledger's one fine row under `config`.
 fn equiv_verdict(db: &UsageDb, config: &Config) -> RowCost {
-    cost_for_row(config, &no_overlay(), &equiv_agg_row(db))
+    cost_for_row(config, &no_prices(), &equiv_agg_row(db))
 }
 
 // --- the weld -----------------------------------------------------------
@@ -176,10 +176,9 @@ fn a_subscription_equivalent_equals_what_the_same_row_would_cost_priced() {
 
 #[test]
 fn an_operator_registry_row_is_the_equivalence_basis_for_a_subscription_row() {
-    // A `[registry]` row on an oauth provider was dead config before the
-    // equivalent existed. It is the operator's declared API price, so it is
-    // exactly what their subscription usage is valued at -- and it wins whole
-    // over the baked catalog, as it does on the priced arm.
+    // A `[registry]` row on an oauth provider is the operator's declared API
+    // price, so it is exactly what their subscription usage is valued at --
+    // and it wins whole over the price tables, as it does on the priced arm.
     let (_dir, _path, db) = temp_db();
     seed_equiv_ledger(&db);
     let halved = PricingConfig {
@@ -201,8 +200,8 @@ fn an_operator_registry_row_is_the_equivalence_basis_for_a_subscription_row() {
 #[test]
 fn a_cache_active_row_without_a_cache_read_rate_reads_absent_not_base_only() {
     // Arrange: the SAME cache-active ledger, priced by rates that cover the
-    // base dimensions but not cache reads -- the exact shape catalog-only
-    // pricing has, since the catalog never fills cache rates.
+    // base dimensions but not cache reads -- the shape a table row with no
+    // cache prices has.
     let (_dir, _path, db) = temp_db();
     seed_equiv_ledger(&db);
     let no_cache_read = PricingConfig {
@@ -254,10 +253,10 @@ fn each_cache_write_bucket_alone_can_withhold_the_equivalent() {
 }
 
 #[test]
-fn a_rate_of_zero_on_a_used_dimension_withholds_the_equivalent() {
-    // `Some(0.0)` is reserved for a genuine free tier on the priced arm, where
-    // it is a real dollar figure. As an EQUIVALENCE basis a zero rate values
-    // real usage at nothing, which is a fabricated figure, not a measured one.
+fn a_known_zero_rate_on_a_used_dimension_keeps_the_equivalent() {
+    // `Some(0.0)` is a known price: the dimension is free, so the figure is
+    // complete and that dimension contributes nothing. Presence decides
+    // completeness, never the sign of the rate.
     let (_dir, _path, db) = temp_db();
     seed_equiv_ledger(&db);
     let free_cache_reads = PricingConfig {
@@ -267,14 +266,19 @@ fn a_rate_of_zero_on_a_used_dimension_withholds_the_equivalent() {
 
     let verdict = equiv_verdict(&db, &equiv_config_subscription(free_cache_reads));
 
-    assert_eq!(verdict, RowCost::Subscription(None));
+    // $28.35 less the $0.60 the cache reads cost at $0.30.
+    assert_eq!(
+        verdict,
+        RowCost::Subscription(Some(EQUIV_COMPLETE_USD - 0.60))
+    );
 }
 
 #[test]
 fn a_negative_rate_on_a_used_dimension_withholds_the_equivalent() {
-    // The completeness test demands STRICTLY POSITIVE rates, not merely
-    // nonzero: a negative rate would otherwise credit real usage back and
-    // understate the equivalent below its base-token value.
+    // A negative rate is not a price: it would credit real usage back and
+    // understate the equivalent below its base-token value. Config refuses
+    // one in `[models.X.pricing]` and the tables drop one; this pins the rule
+    // for any path that still carries one.
     let (_dir, _path, db) = temp_db();
     seed_equiv_ledger(&db);
     let credited_cache_reads = PricingConfig {
@@ -330,37 +334,39 @@ fn the_priced_arm_keeps_its_none_rate_contributes_zero_semantics() {
 }
 
 #[test]
-fn a_kindless_subscription_row_resolves_no_equivalent() {
-    // Arrange: no `[registry]` row anywhere, so rates could only come from the
-    // baked catalog -- which is keyed on the PERSISTED kind. The kindless row
-    // identifies no cell; its sibling, recorded with a kind, is the positive
-    // control proving the catalog path does resolve for this fixture.
+fn a_kindless_subscription_row_on_a_removed_provider_resolves_no_equivalent() {
+    // Arrange: the serving entry is gone from config and no `[registry]` row
+    // exists, so only the kind persisted with a row can select a table
+    // provider. The kinded sibling is the positive control proving the table
+    // path resolves for this fixture.
     let (_dir, _path, db) = temp_db();
-    let mut config = catalog_fill_config();
+    insert_table_row(&db, "kindless", TABLE_PROVIDER, TABLE_UPSTREAM, None, None);
+    insert_table_row(
+        &db,
+        "kinded",
+        TABLE_PROVIDER,
+        TABLE_UPSTREAM,
+        Some("anthropic-api"),
+        None,
+    );
+    let mut config = Config::default();
     config.providers.insert(
-        UNPRICED_PROVIDER.to_string(),
+        "still-here".to_string(),
         ProviderEntry::anthropic_api("oauth://anthropic"),
     );
-    insert_catalog_row(&db, "kindless", 1_000, None);
-    insert_catalog_row(&db, "kinded", 2_000, Some("anthropic-api"));
 
     // Act
-    let bounds = window_bounds(WindowFlag::All, fixed_now());
-    let verdicts: Vec<RowCost> = aggregate(&db, bounds.from_ms, bounds.to_ms)
+    let verdicts: Vec<RowCost> = aggregate(&db, 0, i64::MAX)
         .expect("aggregate")
         .iter()
-        .map(|row| cost_for_row(&config, &no_overlay(), row))
+        .map(|row| cost_for_row(&config, &both_tables(), row))
         .collect();
-    let report = catalog_fill_report(&db, &config);
-    let row = find(&report, UNPRICED_PROVIDER);
 
-    // Assert: one row resolved, one did not, and the group carries the
-    // resolvable row's value alone with the subscription markers intact.
-    assert!(verdicts.contains(&RowCost::Subscription(None)));
-    assert!(verdicts.contains(&RowCost::Subscription(Some(CATALOG_FILL_USD))));
-    assert!(row.any_subscription);
-    assert_eq!(row.priced_total_usd, None);
-    assert_eq!(row.equivalent_total_usd, Some(CATALOG_FILL_USD));
+    // Assert: a removed provider is not a subscription any more, so the kinded
+    // row prices and the kindless one does not.
+    assert_eq!(verdicts.len(), 2);
+    assert!(verdicts.contains(&RowCost::Unpriced));
+    assert!(verdicts.contains(&RowCost::Priced(REFRESHED_USD)));
 }
 
 // --- rollup + render ----------------------------------------------------
@@ -379,8 +385,8 @@ fn a_mixed_group_never_folds_notional_value_into_real_spend() {
         "sub-dark".to_string(),
         ProviderEntry::anthropic_api("oauth://anthropic"),
     );
-    // The dark row's upstream carries no `[registry]` row and its kind matches
-    // no baked cell, so no rate resolves for it at all. The subscription row
+    // The dark row's upstream carries no `[registry]` row and no price table
+    // is loaded, so no rate resolves for it at all. The subscription row
     // carries HALF the priced row's tokens, so the two channels hold distinct
     // figures -- a cell that copied one channel into the other would show up.
     for (provider, upstream, request_id, tokens) in [
@@ -405,7 +411,7 @@ fn a_mixed_group_never_folds_notional_value_into_real_spend() {
     let report = build_window_report(
         &db,
         &config,
-        &no_overlay(),
+        &no_prices(),
         "t".into(),
         window_bounds(WindowFlag::All, fixed_now()),
         Some(GroupDim::Alias),

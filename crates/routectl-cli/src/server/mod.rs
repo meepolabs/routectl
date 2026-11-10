@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use routectl_core::{Error, Result};
+use routectl_router::prices::PriceBook;
 use routectl_router::{ActivationState, Router};
 use routectl_usage::UsageHandle;
 
@@ -125,6 +126,12 @@ pub struct AppState {
     /// generation of the Router that served it. In memory only: a restart
     /// starts cold.
     pub context_anchors: Arc<crate::ingress::anthropic::context_anchor::ContextAnchorStore>,
+    /// The refreshed price table file (`prices.json` in the config folder).
+    ///
+    /// A SIBLING of `router`: nothing in routing reads a price, so a new table
+    /// is picked up by the next cost read with no Router rebuild, and a Router
+    /// hot-swap leaves the book's last good table in place.
+    pub prices: Arc<PriceBook>,
 }
 
 impl AppState {
@@ -156,6 +163,9 @@ impl AppState {
             purge_settlements: Arc::new(purge_settlement::SettlementTracker::new().0),
             confirmation_advances: Arc::new(confirmation_advance::ConfirmationTracker::new()),
             context_anchors: Arc::default(),
+            prices: Arc::new(PriceBook::new(
+                crate::test_usage_dir::usage_dir().join("prices.json"),
+            )),
         })
     }
 }

@@ -659,6 +659,7 @@ async fn serve_inner(
         purge_settlements: Arc::clone(&purge_settlements),
         confirmation_advances: Arc::clone(&confirmation_advances),
         context_anchors: Arc::default(),
+        prices: Arc::new(crate::commands::pricing::default_price_book()),
     });
 
     // Wire the file-watch + SIGHUP reload coordinator. Shutdown is

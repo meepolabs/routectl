@@ -2,9 +2,9 @@
 //!
 //! Reads the local SQLite usage DB (never writes it), rolls the
 //! finest-grained aggregate rows up to a display dimension, derives cost
-//! at query time from the `[registry]` pricing table (falling back to the
-//! baked catalog's own rates for an upstream the operator has not priced),
-//! and prints an ASCII report. Subscription providers (managed-OAuth,
+//! at query time from the effective per-field prices (`[models.X.pricing]`,
+//! `[registry]`, then the refreshed and shipped price tables), and prints an
+//! ASCII report. Subscription providers (managed-OAuth,
 //! `api_key_ref` starting `oauth://`) carry no per-token dollar cost; their
 //! dollar column reads `n/a (subscription)` and the quota line is the real
 //! spend signal.
@@ -19,7 +19,8 @@ use std::path::PathBuf;
 
 use chrono::{DateTime, Datelike, Local, LocalResult, NaiveDate, NaiveDateTime, TimeZone};
 
-use routectl_router::{CatalogOverlay, Config, effective_pricing};
+use routectl_router::Config;
+use routectl_router::prices::{PriceSubject, effective_pricing};
 use routectl_usage::{
     AggRow, BucketSpec, CacheDecisionSummary, GroupKey, KCalibration,
     NearLosslessAttributionSummary, OpenError, QueryError, QuotaSnapshot, Rates, ReductionSummary,
@@ -29,7 +30,9 @@ use routectl_usage::{
     reduction_summary, shadow_misfire_summary, suppressed_sessions, ttfbs, would_trim_summary,
 };
 
-use crate::commands::pricing::{is_subscription, rates_from_pricing};
+use crate::commands::pricing::{
+    PriceSnapshot, default_price_book, is_subscription, rate_covers, rates_from_pricing,
+};
 
 /// Parsed `routectl usage` arguments, already validated by clap.
 #[derive(Debug, Clone)]
@@ -580,13 +583,13 @@ fn reasoning_structure(provider_kind: Option<&str>) -> ReasoningStructure {
 /// complete-or-absent (see [`rates_cover_used_dimensions`]); the priced arm's
 /// semantics are unchanged by it.
 ///
-/// Rates resolve through `routectl_router::effective_pricing`: an operator
-/// `[registry]` row wins whole, and only in its absence do the row's baked
-/// catalog rates fill in. The catalog side is keyed by the kind PERSISTED with
-/// the row, never by what the provider is configured as now -- re-kinding a
-/// provider must not reprice history -- so a row with no persisted kind fills
-/// from no catalog cell and stays `Unpriced` (or, on the subscription arm,
-/// carries no equivalent).
+/// Rates resolve through `routectl_router::prices::effective_pricing` against
+/// `prices`, field by field: `[models.X.pricing]` on the served model, then a
+/// matching `[registry]` row (whole), then the refreshed and shipped tables.
+/// The subject is the served `[providers]` entry the row recorded (never a
+/// pool), and the row's persisted kind selects a first-party table provider
+/// when that entry no longer exists. No price for any field leaves the row
+/// `Unpriced` (or, on the subscription arm, with no equivalent), never `$0`.
 ///
 /// Reasoning is priced from the row's PERSISTED `provider_kind`, so a provider
 /// whose kind an operator later changed keeps each era priced by what it was.
@@ -599,14 +602,14 @@ fn reasoning_structure(provider_kind: Option<&str>) -> ReasoningStructure {
 /// Returns the usage crate's `RowCost` verdict, which is also what the grouped
 /// query layer's pricing closure must yield -- so the CLI report and the
 /// `/status/query` endpoint price a row through exactly one function.
-pub(crate) fn cost_for_row(config: &Config, overlay: &CatalogOverlay, row: &AggRow) -> RowCost {
+pub(crate) fn cost_for_row(config: &Config, prices: &PriceSnapshot, row: &AggRow) -> RowCost {
     let Some(provider) = row.key.provider.as_deref() else {
         return RowCost::Unpriced;
     };
     if is_subscription(config, provider) {
-        return RowCost::Subscription(equivalent_usd(config, overlay, row, provider));
+        return RowCost::Subscription(equivalent_usd(config, prices, row, provider));
     }
-    match priced_usd(config, overlay, row, provider) {
+    match priced_usd(config, prices, row, provider) {
         Some(usd) => RowCost::Priced(usd),
         None => RowCost::Unpriced,
     }
@@ -617,11 +620,11 @@ pub(crate) fn cost_for_row(config: &Config, overlay: &CatalogOverlay, row: &AggR
 /// is `cost_usd`'s long-standing semantics.
 fn priced_usd(
     config: &Config,
-    overlay: &CatalogOverlay,
+    prices: &PriceSnapshot,
     row: &AggRow,
     provider: &str,
 ) -> Option<f64> {
-    let resolved = resolve_row_rates(config, overlay, row, provider)?;
+    let resolved = resolve_row_rates(config, prices, row, provider)?;
     price_row(&resolved.rates, row)
 }
 
@@ -630,17 +633,16 @@ fn priced_usd(
 /// complete-or-absent rule.
 ///
 /// The completeness wrapper exists only on this arm. A subscription operator's
-/// workload runs at a high cache-hit rate, and the baked catalog deliberately
-/// never fills cache rates, so a base-token-only figure would understate the
-/// value by most of its magnitude -- worse than absent for exactly the workload
-/// this number serves.
+/// workload runs at a high cache-hit rate, so a figure that silently dropped an
+/// unpriced cache dimension would understate the value by most of its
+/// magnitude -- worse than absent for exactly the workload this number serves.
 fn equivalent_usd(
     config: &Config,
-    overlay: &CatalogOverlay,
+    prices: &PriceSnapshot,
     row: &AggRow,
     provider: &str,
 ) -> Option<f64> {
-    let resolved = resolve_row_rates(config, overlay, row, provider)?;
+    let resolved = resolve_row_rates(config, prices, row, provider)?;
     if !rates_cover_used_dimensions(&resolved, row) {
         return None;
     }
@@ -665,18 +667,17 @@ struct RowRates {
 /// reasoning tokens.
 fn resolve_row_rates(
     config: &Config,
-    overlay: &CatalogOverlay,
+    prices: &PriceSnapshot,
     row: &AggRow,
     provider: &str,
 ) -> Option<RowRates> {
-    let upstream = row.key.upstream.as_deref()?;
-    let (pricing, _) = effective_pricing(
-        config,
-        overlay,
-        row.key.provider_kind.as_deref().unwrap_or_default(),
-        upstream,
+    let subject = PriceSubject {
+        model: row.key.model.as_deref(),
         provider,
-    )?;
+        upstream: row.key.upstream.as_deref()?,
+        persisted_kind: row.key.provider_kind.as_deref(),
+    };
+    let (pricing, _) = effective_pricing(config, &subject, prices.refreshed(), prices.shipped())?;
     let mut rates = rates_from_pricing(&pricing);
     let mut reasoning_billed = false;
     match reasoning_structure(row.key.provider_kind.as_deref()) {
@@ -716,13 +717,14 @@ fn price_row(rates: &Rates, row: &AggRow) -> Option<f64> {
     .map(|b| b.total_usd)
 }
 
-/// Whether every dimension this row actually USED resolved a strictly positive
-/// rate -- the complete-or-absent test for an API-equivalent value.
+/// Whether every dimension this row actually USED resolved a rate -- the
+/// complete-or-absent test for an API-equivalent value.
 ///
 /// A dimension with a zero count is irrelevant (it contributes nothing either
-/// way). A dimension with a nonzero count and no positive rate makes the whole
-/// figure a partial one, and a partial equivalent misstates value rather than
-/// approximating it. Reasoning counts as a dimension only when it bills
+/// way). A dimension with a nonzero count and no rate makes the whole figure a
+/// partial one, and a partial equivalent misstates value rather than
+/// approximating it. Presence decides, per [`rate_covers`]: a known `0` rate
+/// prices its dimension at nothing and keeps the figure complete. Reasoning counts as a dimension only when it bills
 /// separately; cache reads are weighed as the BILLED volume, never the peak.
 fn rates_cover_used_dimensions(resolved: &RowRates, row: &AggRow) -> bool {
     let rates = &resolved.rates;
@@ -743,7 +745,7 @@ fn rates_cover_used_dimensions(resolved: &RowRates, row: &AggRow) -> bool {
         (row.cache_write_1h, rates.cache_write_1h_per_mtok),
     ]
     .into_iter()
-    .all(|(tokens, rate)| tokens == 0 || rate.is_some_and(|r| r > 0.0))
+    .all(|(tokens, rate)| tokens == 0 || rate_covers(rate))
 }
 
 /// Per-group time-to-first-token percentiles: label -> (p50, p95) in ms,
@@ -860,7 +862,7 @@ impl Acc {
 pub fn build_window_report(
     db: &UsageDb,
     config: &Config,
-    overlay: &CatalogOverlay,
+    prices: &PriceSnapshot,
     title: String,
     bounds: WindowBounds,
     by: Option<GroupDim>,
@@ -873,7 +875,7 @@ pub fn build_window_report(
     let mut total = Acc::default();
     for row in &rows {
         let label = group_label(&row.key, dim);
-        let cost = cost_for_row(config, overlay, row);
+        let cost = cost_for_row(config, prices, row);
         groups.entry(label).or_default().add(row, cost);
         total.add(row, cost);
     }
@@ -1677,11 +1679,10 @@ pub fn render_k_calibration(cal: &KCalibration) -> String {
 ///
 /// When `--k-calibration` is set, emits only the calibration report over all
 /// history and returns immediately (window/by/detail flags are ignored).
-pub fn run(
-    config: &Config,
-    overlay: &CatalogOverlay,
-    args: &UsageArgs,
-) -> Result<(), Box<dyn std::error::Error>> {
+///
+/// The price tables are read once, here, so every block of one run prices
+/// against the same snapshot.
+pub fn run(config: &Config, args: &UsageArgs) -> Result<(), Box<dyn std::error::Error>> {
     let db_path = args
         .db
         .clone()
@@ -1707,8 +1708,9 @@ pub fn run(
         Err(e) => return Err(Box::new(e)),
     };
 
+    let prices = PriceSnapshot::pin(&default_price_book());
     let now = Local::now();
-    let output = build_output(&db, config, overlay, args, now)?;
+    let output = build_output(&db, config, &prices, args, now)?;
     print!("{output}");
     Ok(())
 }
@@ -1719,7 +1721,7 @@ pub fn run(
 pub fn build_output(
     db: &UsageDb,
     config: &Config,
-    overlay: &CatalogOverlay,
+    prices: &PriceSnapshot,
     args: &UsageArgs,
     now: DateTime<Local>,
 ) -> Result<String, UsageError> {
@@ -1727,7 +1729,7 @@ pub fn build_output(
         let cal = k_calibration_summary(db)?;
         return Ok(render_k_calibration(&cal));
     }
-    let blocks = build_blocks(db, config, overlay, args, now)?;
+    let blocks = build_blocks(db, config, prices, args, now)?;
     Ok(blocks.join("\n"))
 }
 
@@ -1738,11 +1740,11 @@ pub fn build_output(
 pub fn build_blocks(
     db: &UsageDb,
     config: &Config,
-    overlay: &CatalogOverlay,
+    prices: &PriceSnapshot,
     args: &UsageArgs,
     now: DateTime<Local>,
 ) -> Result<Vec<String>, UsageError> {
-    let mut blocks = build_window_blocks(db, config, overlay, args, now)?;
+    let mut blocks = build_window_blocks(db, config, prices, args, now)?;
     // Keep the legend out of the block count: append it to the last block so a
     // multi-window summary still yields exactly one block per window.
     if let Some(last) = blocks.last_mut() {
@@ -1756,7 +1758,7 @@ pub fn build_blocks(
 fn build_window_blocks(
     db: &UsageDb,
     config: &Config,
-    overlay: &CatalogOverlay,
+    prices: &PriceSnapshot,
     args: &UsageArgs,
     now: DateTime<Local>,
 ) -> Result<Vec<String>, UsageError> {
@@ -1766,7 +1768,7 @@ fn build_window_blocks(
             Some(until) => format!("== {since} .. {until} =="),
             None => format!("== since {since} =="),
         };
-        let report = build_window_report(db, config, overlay, title, bounds, args.by, args.detail)?;
+        let report = build_window_report(db, config, prices, title, bounds, args.by, args.detail)?;
         return Ok(vec![render_report(&report)]);
     }
 
@@ -1783,7 +1785,7 @@ fn build_window_blocks(
             let report = build_window_report(
                 db,
                 config,
-                overlay,
+                prices,
                 title.to_string(),
                 bounds,
                 args.by,
@@ -1796,7 +1798,7 @@ fn build_window_blocks(
 
     let title = window_title(args.window);
     let bounds = window_bounds(args.window, now);
-    let report = build_window_report(db, config, overlay, title, bounds, args.by, args.detail)?;
+    let report = build_window_report(db, config, prices, title, bounds, args.by, args.detail)?;
     Ok(vec![render_report(&report)])
 }
 
