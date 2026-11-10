@@ -599,7 +599,10 @@ mod removed_paid_probe_caps_preflight_tests {
 }
 
 mod retired_model_knobs_preflight_tests {
-    use super::{CURRENT_CONFIG_VERSION, RETIRED_MODEL_KNOBS, preflight_retired_model_knobs};
+    use super::{
+        CURRENT_CONFIG_VERSION, RETIRED_MODEL_KNOBS, preflight_retired_model_knobs,
+        retired_model_knob_message,
+    };
 
     fn current_with(body: &str) -> String {
         format!("version = {CURRENT_CONFIG_VERSION}\n{body}")
@@ -731,6 +734,54 @@ mod retired_model_knobs_preflight_tests {
         assert_eq!(
             preflight_retired_model_knobs("[models.m\neffort_levels = = 1\n"),
             Ok(())
+        );
+    }
+
+    /// The path lookup words each removed key exactly as the raw preflight
+    /// words the same key found in a file.
+    #[test]
+    fn the_path_lookup_matches_the_preflight_line_for_each_removed_key() {
+        for (knob, _) in RETIRED_MODEL_KNOBS {
+            let preflight_line =
+                preflight_retired_model_knobs(&current_with(&format!("[models.m]\n{knob} = 1\n")))
+                    .expect_err("refused")
+                    .to_string();
+
+            assert_eq!(
+                retired_model_knob_message(&format!("models.m.{knob}")),
+                Some(preflight_line),
+                "{knob}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_path_lookup_ignores_every_other_path() {
+        let rows = [
+            ("a live model key", "models.m.upstream"),
+            ("a token limit", "models.m.max_output_tokens"),
+            ("a removed name outside models", "providers.p.effort_levels"),
+            ("a removed name as the nickname", "models.effort_levels"),
+            (
+                "a removed name one level deeper",
+                "models.m.pricing.effort_levels",
+            ),
+            ("an empty nickname", "models..effort_levels"),
+        ];
+
+        for (row, path) in rows {
+            assert_eq!(retired_model_knob_message(path), None, "row `{row}`");
+        }
+    }
+
+    #[test]
+    fn the_path_lookup_never_echoes_a_control_byte() {
+        let msg = retired_model_knob_message("models.m\u{1b}\r\n.effort_levels")
+            .expect("a removed key under any nickname");
+
+        assert!(
+            msg.starts_with("`models.m???.effort_levels` is no longer"),
+            "{msg:?}"
         );
     }
 }

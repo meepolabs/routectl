@@ -18,9 +18,9 @@
 //!   3. Parse the snapshot to `prev` for the diff classifiers.
 //!   4. Scalar type inference on the raw value (bool / int / float / string).
 //!   5. Apply the edit to a candidate document and run the SAME gate the
-//!      reload path runs (`parse_config` + `collect_config_validation`);
-//!      any failure renders via the shared report machinery and writes
-//!      nothing.
+//!      reload path runs (the raw preflight again, on the candidate, then
+//!      `parse_config` + `collect_config_validation`); any failure renders
+//!      via the shared report machinery and writes nothing.
 //!   6. Classify the diff: a high-consequence (egress-defining) change
 //!      prompts for confirmation BEFORE the lock is acquired (`--yes`
 //!      bypasses; a non-interactive run without it declines); restart-required
@@ -40,7 +40,8 @@ use std::path::Path;
 
 use routectl_core::{Error, Result};
 use routectl_router::{
-    EditOutcome, PathError, PathShape, edit_config_toml, parse_config, validate_config_path,
+    EditOutcome, PathError, PathShape, edit_config_toml, parse_config, retired_model_knob_message,
+    validate_config_path,
 };
 use toml_edit::{DocumentMut, Item, Table};
 
@@ -102,7 +103,7 @@ pub fn run(config_path: &Path, dotted_path: &str, kind: EditKind, yes: bool) -> 
 
     preflight(&snapshot_text)?;
 
-    let shape = validate_config_path(dotted_path).map_err(render_path_error)?;
+    let shape = validate_config_path(dotted_path).map_err(|e| render_path_error(dotted_path, e))?;
     if matches!(shape, PathShape::Table) && matches!(kind, EditKind::Set(_)) {
         return Err(Error::Config(format!(
             "`{dotted_path}` names a table, not a scalar value; set a leaf key beneath it"
@@ -188,8 +189,14 @@ pub fn run(config_path: &Path, dotted_path: &str, kind: EditKind, yes: bool) -> 
 }
 
 /// Map a schema path-validation failure to a user error, giving array
-/// targets the hand-edit-only message this version's scope calls for.
-fn render_path_error(err: PathError) -> Error {
+/// targets the hand-edit-only message this version's scope calls for, and a
+/// removed per-model key the preflight's wording that names its replacement.
+fn render_path_error(dotted_path: &str, err: PathError) -> Error {
+    if matches!(err, PathError::UnknownSegment { .. })
+        && let Some(message) = retired_model_knob_message(dotted_path)
+    {
+        return Error::Config(message);
+    }
     match err {
         PathError::ArrayTarget { segment } => Error::Config(format!(
             "cannot set array `{segment}`: array values are hand-edit-only in this version"
@@ -422,6 +429,122 @@ default = \"gpt\"
         let dir = tempfile::tempdir().unwrap();
         let path = write_config(dir.path(), &current_base());
         set(&path, "models.gpt.upstream", "gpt-4.1").expect("control: a live model key applies");
+    }
+
+    /// An edit whose result the loader would refuse is refused before any
+    /// byte is written, with the loader's own message. Neither row's
+    /// candidate trips the typed parse or the validator suite, so only the
+    /// raw preflight inside the gate can refuse it.
+    #[test]
+    fn an_edit_the_loader_would_refuse_is_refused_and_writes_nothing() {
+        let previous = (CURRENT_CONFIG_VERSION - 1).to_string();
+        let rows: [(&str, EditKind, String); 2] = [
+            (
+                "set version to the previous version",
+                EditKind::Set(previous.clone()),
+                current_base().replace(
+                    &format!("version = {CURRENT_CONFIG_VERSION}"),
+                    &format!("version = {previous}"),
+                ),
+            ),
+            (
+                "unset version",
+                EditKind::Unset,
+                current_base().replace(&format!("version = {CURRENT_CONFIG_VERSION}\n"), ""),
+            ),
+        ];
+
+        for (row, kind, candidate) in rows {
+            // Arrange
+            let dir = tempfile::tempdir().unwrap();
+            let path = write_config(dir.path(), &current_base());
+            let before = std::fs::read(&path).unwrap();
+            let loader_message = routectl_router::preflight_raw_config(&candidate)
+                .expect_err(&format!(
+                    "row `{row}`: the loader must refuse the candidate"
+                ))
+                .to_string();
+
+            // Act
+            let result = run(&path, "version", kind, true);
+
+            // Assert
+            assert!(result.is_err(), "row `{row}`: expected a refusal");
+            assert_eq!(
+                std::fs::read(&path).unwrap(),
+                before,
+                "row `{row}`: the file must be byte-identical"
+            );
+            assert_eq!(
+                gate(&candidate).map(|_| ()),
+                Err(vec![loader_message]),
+                "row `{row}`: the gate refuses with the loader's message"
+            );
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_config(dir.path(), &current_base());
+        set(&path, "version", &CURRENT_CONFIG_VERSION.to_string())
+            .expect("control: setting the current version is accepted");
+        set(&path, "server.port", "9999").expect("control: a valid edit still writes");
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("port = 9999"),
+            "the control edit must land on disk"
+        );
+    }
+
+    /// A removed per-model key is refused with the line the loader prints
+    /// for it, naming what now decides the behavior. An unknown key that was
+    /// never a model setting keeps the generic unknown-key text and its
+    /// siblings.
+    #[test]
+    fn a_removed_model_key_names_its_replacement() {
+        let rows = [
+            (
+                "effort_levels",
+                "refused effort levels are learned per lane",
+            ),
+            (
+                "max_thinking_budget",
+                "client thinking budgets are forwarded",
+            ),
+            (
+                "supports_adaptive_thinking",
+                "client thinking is forwarded; effort alone adds no thinking",
+            ),
+        ];
+
+        for (knob, replacement) in rows {
+            let dir = tempfile::tempdir().unwrap();
+            let path = write_config(dir.path(), &current_base());
+
+            let err = set(&path, &format!("models.gpt.{knob}"), "1")
+                .expect_err(&format!("{knob}: a removed key must be refused"));
+
+            assert_eq!(
+                err.to_string(),
+                format!(
+                    "config: `models.gpt.{knob}` is no longer a model setting: {replacement}; \
+                     delete the key"
+                ),
+                "{knob}"
+            );
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_config(dir.path(), &current_base());
+        let err = set(&path, "models.gpt.no_such_knob", "1").expect_err("unknown key refused");
+        let shown = err.to_string();
+        assert!(
+            shown.starts_with("config: unknown config key `no_such_knob`; valid keys here: "),
+            "{shown}"
+        );
+        assert!(
+            shown.contains("upstream"),
+            "the siblings are listed: {shown}"
+        );
     }
 
     /// The per-model token limits are settable, and a zero for either is

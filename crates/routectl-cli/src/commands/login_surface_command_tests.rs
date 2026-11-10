@@ -309,6 +309,57 @@ fn an_unwritable_skip_says_nothing_was_written_exactly_once() {
     }
 }
 
+/// The whole printed line for each unwritable class, so a change to any
+/// clause of it (the refusal, the remediation, the closing sentence) shows.
+#[test]
+fn each_unwritable_skip_prints_its_whole_line() {
+    let at =
+        |version: &str| base().replace(&format!("version = {CURRENT_CONFIG_VERSION}"), version);
+    let previous = CURRENT_CONFIG_VERSION - 1;
+    let remediation = "Move the old file aside, run `routectl init` to write a new one, and see \
+                       docs/CONFIGURATION.md for the current schema. Nothing was written.";
+    let rows = [
+        (
+            "previous version",
+            at(&format!("version = {previous}")),
+            format!(
+                "config: config version {previous} is no longer supported; \
+                 v{CURRENT_CONFIG_VERSION} required. {remediation}"
+            ),
+        ),
+        (
+            "missing version",
+            at(""),
+            format!(
+                "config: config version missing; v{CURRENT_CONFIG_VERSION} required. \
+                 {remediation}"
+            ),
+        ),
+        (
+            "retired capability key",
+            format!("{}[bedrock]\n", base()),
+            "config: `bedrock` was retired in config version 5; remove it by hand. Nothing was \
+             written."
+                .to_string(),
+        ),
+    ];
+
+    for (row, body, expected) in rows {
+        // Arrange
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write_config(dir.path(), &body);
+
+        // Act
+        let outcome = surface(&path, "anthropic", None, true).expect("a skip is not an error");
+
+        // Assert
+        let SurfaceOutcome::Skipped(reason @ SkipReason::Unwritable { .. }) = &outcome else {
+            panic!("row `{row}`: expected an unwritable skip, got {outcome:?}");
+        };
+        assert_eq!(skip_line(reason), expected, "row `{row}`");
+    }
+}
+
 /// A removed-key refusal is its own sentence: the preflight's wording, one
 /// period, then "Nothing was written".
 #[test]

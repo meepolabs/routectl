@@ -444,11 +444,36 @@ fn render_retired_model_knobs(paths: &[String]) -> String {
                 .iter()
                 .find(|(knob, _)| path.rsplit('.').next() == Some(*knob))
                 .map_or("", |(_, replacement)| *replacement);
-            let path = message_safe_key(path);
-            format!("`{path}` is no longer a model setting: {replacement}; delete the key")
+            retired_model_knob_line(path, replacement)
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn retired_model_knob_line(path: &str, replacement: &str) -> String {
+    let path = message_safe_key(path);
+    format!("`{path}` is no longer a model setting: {replacement}; delete the key")
+}
+
+/// The refusal line for a dotted `models.<nick>.<key>` path whose key is a
+/// removed per-model setting, worded exactly as the raw-config preflight
+/// words it, so an editing command names what now decides the behavior
+/// instead of a generic unknown-key error. `None` for any other path.
+pub fn retired_model_knob_message(dotted_path: &str) -> Option<String> {
+    let mut segments = dotted_path.split('.');
+    let (Some("models"), Some(nick), Some(key), None) = (
+        segments.next(),
+        segments.next(),
+        segments.next(),
+        segments.next(),
+    ) else {
+        return None;
+    };
+    if nick.is_empty() {
+        return None;
+    }
+    let (_, replacement) = RETIRED_MODEL_KNOBS.iter().find(|(knob, _)| *knob == key)?;
+    Some(retired_model_knob_line(dotted_path, replacement))
 }
 
 /// Read the RAW TOML text and collect every removed per-model key (see
