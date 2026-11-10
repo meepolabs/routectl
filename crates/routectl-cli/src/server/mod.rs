@@ -139,6 +139,10 @@ impl AppState {
     /// once the channel closes), which is all a non-usage handler test
     /// needs. The detached writer opens its DB after this returns, so the
     /// dir is a reaped per-process one rather than a scoped guard.
+    ///
+    /// That dropped writer is exempt from the strict drain the usage tests
+    /// run: nothing reads its ledger, and its non-blocking `Drop` is the
+    /// fallback that stands in for an explicit shutdown.
     #[cfg(test)]
     pub fn for_test(router: Arc<ArcSwap<Router>>) -> Arc<Self> {
         let dir = crate::test_usage_dir::usage_dir();
@@ -201,7 +205,7 @@ pub(crate) fn is_loopback(host: &str) -> bool {
 }
 
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 
 #[cfg(test)]
 #[path = "tests.rs"]

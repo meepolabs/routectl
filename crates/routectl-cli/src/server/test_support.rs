@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use routectl_router::Config;
-use routectl_usage::{CHANNEL_CAPACITY, UsageHandle, UsageWriter};
+use routectl_usage::{CHANNEL_CAPACITY, ShutdownOutcome, UsageHandle, UsageWriter};
 use tokio::sync::watch;
 
 /// Point a config's usage DB at a per-test tempdir so server tests
@@ -24,11 +24,17 @@ pub(super) fn isolate_usage_db(config: &mut Config) -> tempfile::TempDir {
 ///
 /// `UsageWriter::shutdown` blocks, so it runs on the blocking pool rather than
 /// a runtime worker. Every `UsageHandle` clone must be dropped first: a live
-/// handle keeps the channel open and the drain waits out its full deadline.
-pub(super) async fn drain_usage_writer_strict(writer: UsageWriter) {
-    tokio::task::spawn_blocking(move || writer.shutdown())
+/// handle keeps the channel open, the drain waits out its full deadline, and
+/// the timed-out outcome fails the assertion here.
+pub async fn drain_usage_writer_strict(writer: UsageWriter) {
+    let outcome = tokio::task::spawn_blocking(move || writer.shutdown())
         .await
         .expect("the usage writer drain must not panic");
+    assert_eq!(
+        outcome,
+        ShutdownOutcome::Drained,
+        "the usage writer must drain every queued row before its deadline"
+    );
 }
 
 /// A shutdown receiver that never fires, for reload tests whose subject is not
@@ -151,4 +157,22 @@ async fn drain_usage_writer_strict_persists_a_queued_row_before_returning() {
         .collect::<Result<_, _>>()
         .expect("request ids");
     assert_eq!(ids, vec!["drained-row".to_string()]);
+}
+
+/// A drain that ends any way but Drained fails the helper: a producer handle
+/// still alive keeps the channel open, so the drain runs out its deadline.
+#[tokio::test]
+#[should_panic(expected = "must drain every queued row")]
+async fn drain_usage_writer_strict_fails_when_a_retained_handle_times_the_drain_out() {
+    // Arrange: the producer handle is held across the drain.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (handle, writer) =
+        UsageWriter::start(dir.path().join("usage.db"), CHANNEL_CAPACITY, 0, true);
+    let writer = writer.with_drain_deadline(Duration::from_millis(50));
+
+    // Act
+    drain_usage_writer_strict(writer).await;
+
+    // Assert: unreachable once the helper refuses the timed-out drain.
+    drop(handle);
 }

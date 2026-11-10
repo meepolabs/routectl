@@ -202,12 +202,29 @@ fn an_injected_failure_after_the_first_alter_rolls_back_columns_and_both_stamps(
     );
 }
 
+/// Insert one capability event, so a step that touched that table's rows
+/// would change its count.
+fn insert_capability_event(conn: &Connection) {
+    conn.execute_batch(
+        "INSERT INTO capability_events (ts, lane_key, capability, verdict, phase, source, \
+         tier, catalog_version, overlay_revision) \
+         VALUES (1, 'lane', 'tools', 'broken', 'f1', 'live', 'inferred', 1, 1)",
+    )
+    .expect("capability event");
+}
+
 #[test]
 fn downgrade_20_to_19_restamps_only_and_a_frozen_v19_insert_then_v20_reopen_keeps_the_row() {
     // Arrange
     let (_dir, path) = temp_db_path();
     fresh_with_rows(&path);
+    insert_capability_event(&Connection::open(&path).expect("reopen"));
     let before = file_state(&path);
+    assert_eq!(
+        before.capability_events,
+        Some(1),
+        "the seeded capability event"
+    );
     let fresh_columns = requests_column_names(&Connection::open(&path).expect("reopen"));
 
     // Act: step down, then a v19 binary writes one row.

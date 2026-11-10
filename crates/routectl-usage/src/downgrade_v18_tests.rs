@@ -115,6 +115,7 @@ pub(super) struct FileState {
     pub(super) schema: Vec<(String, String, Option<String>)>,
     pub(super) requests: i64,
     pub(super) ledger_gaps: Option<i64>,
+    pub(super) capability_events: Option<i64>,
 }
 
 pub(super) fn file_state(path: &std::path::Path) -> FileState {
@@ -132,6 +133,7 @@ pub(super) fn file_state(path: &std::path::Path) -> FileState {
         schema,
         requests: count(&conn, "requests").expect("requests"),
         ledger_gaps: count(&conn, "ledger_gaps"),
+        capability_events: count(&conn, "capability_events"),
     }
 }
 

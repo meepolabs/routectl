@@ -251,6 +251,7 @@ fn rival_writer_committing_later(path: &Path, statements: &str) -> JoinHandle<In
 }
 
 const PREMISE: &str = "premise: the purge must start while the rival still holds the lock";
+const WAITED: &str = "the purge must not return before the rival commits";
 
 #[test]
 fn purge_waits_for_a_concurrent_writer_instead_of_failing() {
@@ -265,10 +266,12 @@ fn purge_waits_for_a_concurrent_writer_instead_of_failing() {
     // Act
     let started = Instant::now();
     let outcome = purge_legacy_capability_observations(db.conn());
+    let returned_at = Instant::now();
     let committed_at = committer.join().expect("committer thread");
 
     // Assert
     assert!(started < committed_at, "{PREMISE}");
+    assert!(returned_at >= committed_at, "{WAITED}");
     assert_eq!(
         outcome.expect("purge must wait out the rival writer"),
         Some(usize::try_from(expected_deleted).expect("count"))
@@ -294,10 +297,12 @@ fn purge_skips_when_a_concurrent_writer_records_the_marker_first() {
     // Act
     let started = Instant::now();
     let outcome = purge_legacy_capability_observations(db.conn());
+    let returned_at = Instant::now();
     let committed_at = committer.join().expect("committer thread");
 
     // Assert
     assert!(started < committed_at, "{PREMISE}");
+    assert!(returned_at >= committed_at, "{WAITED}");
     assert_eq!(outcome.expect("purge must see the rival's marker"), None);
     assert_eq!(class_counts(db.conn()), before);
     assert_eq!(marker_value(db.conn()), Some("rival".to_string()));

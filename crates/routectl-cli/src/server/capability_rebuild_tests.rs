@@ -1021,7 +1021,7 @@ async fn warm_report_on_a_matching_tombstone_is_replayed_with_the_logged_tally()
     // Act
     let (report, events) = warm_reporting_off_runtime(&ledger, &router, &handle);
     drop(handle);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 
     // Assert
     assert_eq!(report.outcome, WarmOutcome::Replayed);
@@ -1045,7 +1045,7 @@ async fn warm_report_on_a_committed_restatement_is_restated_with_the_logged_tall
     // Act
     let (report, events) = warm_reporting_off_runtime(&ledger, &router, &handle);
     drop(handle);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 
     // Assert
     assert_eq!(report.outcome, WarmOutcome::Restated);
@@ -1075,7 +1075,7 @@ async fn warm_report_is_restate_failed_when_the_boundary_batch_is_rejected() {
     // Act
     let (report, _) = warm_reporting_off_runtime(&ledger, &router, &handle);
     drop(handle);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 
     // Assert
     assert_eq!(
@@ -1098,7 +1098,7 @@ async fn warm_report_is_restate_failed_when_the_stale_slice_is_unreadable() {
     // Act
     let (report, _) = warm_reporting_off_runtime(&ledger, &router, &handle);
     drop(handle);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 
     // Assert
     assert_eq!(
@@ -1144,7 +1144,7 @@ async fn warm_report_names_each_fail_closed_outcome() {
         // Act
         let (report, _) = warm_reporting_off_runtime(&ledger, &router, &handle);
         drop(handle);
-        writer.shutdown();
+        drain_usage_writer_strict(writer).await;
 
         // Assert
         assert_eq!(report, WarmReport::without_replay(expected), "case {token}");

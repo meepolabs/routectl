@@ -15,6 +15,8 @@ use routectl_router::{
     ReplayTombstone, Router,
 };
 use routectl_usage::{CHANNEL_CAPACITY, UsageWriter};
+
+use crate::server::test_support::drain_usage_writer_strict;
 use std::future::Future;
 use std::time::Instant;
 use tower::ServiceExt;
@@ -176,10 +178,14 @@ impl Fixture {
 
     /// Flush the writer and count the persisted `cleared` rows. Consumes the
     /// fixture: the writer's shutdown is what makes the rows readable, so
-    /// counting twice would be counting after a closed channel.
-    fn persisted_cleared_rows(self) -> i64 {
+    /// counting twice would be counting after a closed channel. Every handle
+    /// clone is dropped first so the shutdown drains rather than waiting on a
+    /// live sender.
+    async fn persisted_cleared_rows(self) -> i64 {
         drop(self.app);
-        self.writer.shutdown();
+        drop(self.usage);
+        drop(self.router);
+        drain_usage_writer_strict(self.writer).await;
         let db = routectl_usage::open(&self.ledger).expect("open ledger for read");
         db.conn()
             .query_row(
@@ -569,7 +575,7 @@ async fn a_successful_purge_commits_durably_before_it_reports_or_finalizes() {
         "the entry is removed from memory only after the clear committed",
     );
     assert_eq!(
-        fixture.persisted_cleared_rows(),
+        fixture.persisted_cleared_rows().await,
         1,
         "and exactly one cleared row is durable, so a warm rebuild cannot resurrect it",
     );
@@ -603,7 +609,7 @@ async fn a_repeat_purge_after_a_successful_one_is_a_clean_absent_no_op() {
         "and reports that it removed nothing",
     );
     assert_eq!(
-        fixture.persisted_cleared_rows(),
+        fixture.persisted_cleared_rows().await,
         1,
         "at most ONE clear is durable across the retry: a second row would claim the operator \
          removed something that was already gone",
@@ -761,7 +767,7 @@ async fn a_purge_persists_exactly_one_cleared_settlement_row() {
     // Assert
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
-        fixture.persisted_cleared_rows(),
+        fixture.persisted_cleared_rows().await,
         1,
         "a removal must reach the ledger as exactly one cleared row, or the \
          warm rebuild resurrects the negative on the next boot"
@@ -796,7 +802,7 @@ async fn an_absent_key_is_a_clean_no_op_that_persists_nothing() {
         "the no-op must leave the unrelated resident entry alone"
     );
     assert_eq!(
-        fixture.persisted_cleared_rows(),
+        fixture.persisted_cleared_rows().await,
         0,
         "a no-op must not write a settlement for an entry that never existed"
     );
@@ -820,7 +826,7 @@ async fn a_non_loopback_peer_is_refused_and_mutates_nothing() {
         "a refused caller must not have purged anything"
     );
     assert_eq!(
-        fixture.persisted_cleared_rows(),
+        fixture.persisted_cleared_rows().await,
         0,
         "a refused caller must not have written to the ledger"
     );
@@ -890,7 +896,7 @@ async fn every_out_of_vocabulary_body_is_refused_without_mutating() {
         "no refused request may have purged anything"
     );
     assert_eq!(
-        fixture.persisted_cleared_rows(),
+        fixture.persisted_cleared_rows().await,
         0,
         "no refused request may have written to the ledger"
     );
@@ -1067,7 +1073,7 @@ async fn a_browser_simple_cross_origin_request_is_refused_before_mutating() {
         "no simple cross-origin request may have purged anything"
     );
     assert_eq!(
-        fixture.persisted_cleared_rows(),
+        fixture.persisted_cleared_rows().await,
         0,
         "no simple cross-origin request may have written to the ledger"
     );
@@ -1303,7 +1309,7 @@ async fn a_present_foreign_host_is_rejected_before_mutating() {
         "no foreign-Host request may have purged anything"
     );
     assert_eq!(
-        fixture.persisted_cleared_rows(),
+        fixture.persisted_cleared_rows().await,
         0,
         "no foreign-Host request may have written to the ledger"
     );
@@ -1472,7 +1478,7 @@ async fn an_h2_shaped_request_with_a_foreign_authority_is_rejected() {
         "no foreign-authority request may have purged anything"
     );
     assert_eq!(
-        fixture.persisted_cleared_rows(),
+        fixture.persisted_cleared_rows().await,
         0,
         "no foreign-authority request may have written to the ledger"
     );
@@ -1648,7 +1654,7 @@ async fn a_present_non_utf8_host_fails_closed() {
         "no unreadable-Host request may have purged anything"
     );
     assert_eq!(
-        fixture.persisted_cleared_rows(),
+        fixture.persisted_cleared_rows().await,
         0,
         "no unreadable-Host request may have written to the ledger"
     );
@@ -1706,7 +1712,7 @@ async fn a_hostile_duplicate_host_is_rejected_whichever_position_it_holds() {
         "no duplicate-Host request carrying a hostile value may have purged"
     );
     assert_eq!(
-        fixture.persisted_cleared_rows(),
+        fixture.persisted_cleared_rows().await,
         0,
         "no such request may have written to the ledger"
     );
@@ -1850,7 +1856,7 @@ async fn bracket_trailing_junk_authorities_are_rejected_without_mutating() {
         "no malformed-authority request may have purged anything"
     );
     assert_eq!(
-        fixture.persisted_cleared_rows(),
+        fixture.persisted_cleared_rows().await,
         0,
         "no malformed-authority request may have written to the ledger"
     );
@@ -1890,7 +1896,7 @@ async fn bracket_trailing_junk_uri_authorities_are_rejected_without_mutating() {
     }
 
     assert!(fixture.resident(LANE, WEB_SEARCH));
-    assert_eq!(fixture.persisted_cleared_rows(), 0);
+    assert_eq!(fixture.persisted_cleared_rows().await, 0);
 }
 
 /// The control route's authority refusal names the CLAIM SITE from the same
@@ -1963,7 +1969,7 @@ async fn an_authority_refusal_names_the_claim_site_without_the_value() {
     }
 
     assert!(fixture.resident(LANE, WEB_SEARCH));
-    assert_eq!(fixture.persisted_cleared_rows(), 0);
+    assert_eq!(fixture.persisted_cleared_rows().await, 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -2031,7 +2037,7 @@ async fn a_busy_first_attempt_retries_against_the_settled_boundary_and_succeeds(
     );
     assert_eq!(body["purged"].as_bool(), Some(true));
     assert_eq!(
-        fixture.persisted_cleared_rows(),
+        fixture.persisted_cleared_rows().await,
         1,
         "and exactly ONE clear is durable across the retry -- a retried reservation must not \\
          clear twice",
@@ -2115,7 +2121,7 @@ async fn a_purge_through_a_superseded_router_succeeds_first_time() {
     assert_eq!(status, StatusCode::OK, "body {body}");
     assert_eq!(body["purged"].as_bool(), Some(true));
     assert!(!fixture.resident(LANE, WEB_SEARCH));
-    assert_eq!(fixture.persisted_cleared_rows(), 1);
+    assert_eq!(fixture.persisted_cleared_rows().await, 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -2227,11 +2233,11 @@ impl Fixture {
     /// Stop the writer and read back every `cleared` row. Every handle clone
     /// is dropped first so the shutdown drains rather than waiting on a live
     /// sender.
-    fn cleared_rows(self) -> Vec<ClearedRow> {
+    async fn cleared_rows(self) -> Vec<ClearedRow> {
         drop(self.app);
         drop(self.usage);
         drop(self.router);
-        self.writer.shutdown();
+        drain_usage_writer_strict(self.writer).await;
         let db = routectl_usage::open(&self.ledger).expect("open ledger for read");
         let mut stmt = db
             .conn()
@@ -2283,7 +2289,7 @@ async fn a_seed_lift_commits_one_cleared_row_and_survives_a_restart() {
     assert_eq!(body["generation"].as_u64(), Some(generation));
     assert!(fixture.seed_cleared("fx-seeded"));
     assert!(!fixture.resident(BEDROCK_LANE, &beta("fx-seeded")));
-    let rows = fixture.cleared_rows();
+    let rows = fixture.cleared_rows().await;
     assert_eq!(
         rows,
         vec![(
@@ -2331,7 +2337,7 @@ async fn a_repeat_seed_lift_is_absent_and_writes_nothing() {
     assert_eq!(second, StatusCode::OK);
     assert_eq!(body["purged"].as_bool(), Some(false));
     assert!(body.get("seed_lifted").is_none(), "body was {body}");
-    assert_eq!(fixture.cleared_rows().len(), 1);
+    assert_eq!(fixture.cleared_rows().await.len(), 1);
 }
 
 #[tokio::test]
@@ -2355,7 +2361,7 @@ async fn an_unseeded_beta_with_nothing_resident_is_absent_and_writes_nothing() {
             .seed_clear_snapshot()
             .is_empty()
     );
-    assert!(fixture.cleared_rows().is_empty());
+    assert!(fixture.cleared_rows().await.is_empty());
 }
 
 /// Builds a fixture whose writer cannot commit, plus the channel capacity to
@@ -2380,7 +2386,7 @@ async fn a_seed_lift_on_an_unrouted_upstream_is_absent_and_writes_nothing() {
             .seed_clear_snapshot()
             .is_empty()
     );
-    assert!(fixture.cleared_rows().is_empty());
+    assert!(fixture.cleared_rows().await.is_empty());
 }
 
 #[tokio::test]
@@ -2484,5 +2490,5 @@ async fn purging_a_resident_seeded_negative_is_a_learned_purge_that_also_marks()
     assert!(body.get("seed_lifted").is_none(), "a learned purge: {body}");
     assert!(!fixture.resident(BEDROCK_LANE, &beta("fx-seeded")));
     assert!(fixture.seed_cleared("fx-seeded"));
-    assert_eq!(fixture.cleared_rows().len(), 1);
+    assert_eq!(fixture.cleared_rows().await.len(), 1);
 }

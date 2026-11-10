@@ -23,6 +23,8 @@ use routectl_core::{
 };
 use routectl_usage::{CHANNEL_CAPACITY, UsageHandle, UsageWriter};
 
+use crate::server::test_support::drain_usage_writer_strict;
+
 /// A throwaway usage handle for guard construction. The tests assert on
 /// the in-memory `record` before `finalize`, so the writer is never
 /// drained -- it only has to exist so `UsageCapture::new` has a handle.
@@ -314,8 +316,9 @@ async fn fully_cached_prompt_records_the_whole_cache_inclusive_total() {
     cap.observe_response(&resp);
     cap.finalize(Outcome::Ok);
     assert!(wait_persisted(&handle, 1), "row not persisted");
+    drop(cap);
     drop(handle);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 
     // Assert: the persisted evidence total is the FULL prompt. Sourcing it
     // from the cache-exclusive `input_tokens` column would store 0 here --
@@ -351,8 +354,9 @@ async fn streaming_fully_cached_prompt_records_the_whole_cache_inclusive_total()
     cap.observe_chunk(&chunk);
     cap.finalize(Outcome::Ok);
     assert!(wait_persisted(&handle, 1), "row not persisted");
+    drop(cap);
     drop(handle);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 
     // Assert: parity with the non-streaming path.
     let (_, prompt) = persisted_evidence_pair(&path);
@@ -371,8 +375,9 @@ async fn success_with_an_unreported_prompt_total_records_no_evidence() {
     cap.observe_response(&resp);
     cap.finalize(Outcome::Ok);
     assert!(wait_persisted(&handle, 1), "row not persisted");
+    drop(cap);
     drop(handle);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 
     // Assert: refused rather than stored -- a 0 denominator is a data bug,
     // not evidence.
@@ -390,8 +395,9 @@ async fn non_success_outcome_records_no_evidence_even_with_a_reported_total() {
     cap.observe_response(&resp);
     cap.finalize(Outcome::UpstreamError);
     assert!(wait_persisted(&handle, 1), "row not persisted");
+    drop(cap);
     drop(handle);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 
     // Assert: a failed request pairs no trustworthy estimate with an actual.
     let (_, prompt) = persisted_evidence_pair(&path);
@@ -412,8 +418,9 @@ async fn both_evidence_values_round_trip_to_the_ledger_together() {
     cap.observe_response(&resp);
     cap.finalize(Outcome::Ok);
     assert!(wait_persisted(&handle, 1), "row not persisted");
+    drop(cap);
     drop(handle);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 
     // Assert: raw numerator and denominator, both intact, neither averaged.
     assert_eq!(persisted_evidence_pair(&path), (Some(9_500), Some(10_000)));
@@ -435,8 +442,9 @@ async fn a_non_success_outcome_persists_neither_half_of_a_populated_pair() {
     cap.observe_response(&resp);
     cap.finalize(Outcome::UpstreamError);
     assert!(wait_persisted(&handle, 1), "row not persisted");
+    drop(cap);
     drop(handle);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 
     // Assert: refused as a UNIT. A stored estimate with a NULL actual would
     // put the two columns in different populations, so an estimate-side
@@ -458,8 +466,9 @@ async fn a_zero_prompt_total_persists_neither_half_of_a_populated_pair() {
     cap.observe_response(&resp);
     cap.finalize(Outcome::Ok);
     assert!(wait_persisted(&handle, 1), "row not persisted");
+    drop(cap);
     drop(handle);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 
     // Assert
     assert_eq!(persisted_evidence_pair(&path), (None, None));
@@ -511,9 +520,11 @@ async fn finalize_then_drop_still_one_row() {
 
     // Assert: the Drop guard does NOT emit a second row.
     assert!(wait_persisted(&handle, 1), "row not persisted");
-    writer.shutdown();
+    let counters = std::sync::Arc::clone(handle.counters());
+    drop(handle);
+    drain_usage_writer_strict(writer).await;
     assert_eq!(
-        handle.counters().persisted(),
+        counters.persisted(),
         1,
         "finalize-then-drop must persist exactly one row"
     );
@@ -821,7 +832,7 @@ fn cleared_event(capability_key: &str) -> routectl_router::router::CapabilityCle
 /// DB (plus the owning tempdir the caller must keep alive) for row assertions.
 /// Shuts the writer down (dropping the handle first) so every enqueued row has
 /// flushed before the read.
-fn drain_and_open(
+async fn drain_and_open(
     meta: &routectl_router::DispatchMeta,
     catalog: u32,
     overlay: u64,
@@ -854,7 +865,7 @@ fn drain_and_open(
     );
     drop(cap);
     drop(handle);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
     let conn = rusqlite::Connection::open(&db_path).expect("read db");
     (conn, dir)
 }
@@ -880,7 +891,7 @@ async fn observe_meta_drains_each_capability_event_to_one_row() {
     );
     drop(cap);
     drop(handle);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 }
 
 #[tokio::test]
@@ -902,7 +913,7 @@ async fn observe_meta_empty_capability_events_enqueues_nothing() {
     assert_eq!(handle.counters().capability_events_enqueued(), 0);
     drop(cap);
     drop(handle);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 }
 
 /// A reasoning-replay learn event shaped exactly as the router's replay
@@ -936,7 +947,7 @@ async fn observe_meta_drains_a_replay_negative_without_a_schema_change() {
     meta.learned_capabilities = vec![replay_learn_event()];
 
     // Act: the drain runs over the shipped `learned_capabilities` seam.
-    let (conn, _dir) = drain_and_open(&meta, 7, 3, 1);
+    let (conn, _dir) = drain_and_open(&meta, 7, 3, 1).await;
 
     // Assert: one `broken` row on the existing columns -- open-set tokens
     // and normalized keys only. The row carries NO body and NO blob: the
@@ -999,7 +1010,7 @@ async fn observe_meta_learned_negative_maps_to_broken_row() {
     )];
 
     // Act
-    let (conn, _dir) = drain_and_open(&meta, 7, 3, 1);
+    let (conn, _dir) = drain_and_open(&meta, 7, 3, 1).await;
 
     // Assert: a `broken` row -- phase / tier from the event, live source, no
     // evidence class / upstream token, revisions stamped from the boundary.
@@ -1058,7 +1069,7 @@ async fn observe_meta_verified_observation_maps_to_verified_row() {
     )];
 
     // Act
-    let (conn, _dir) = drain_and_open(&meta, 1, 1, 1);
+    let (conn, _dir) = drain_and_open(&meta, 1, 1, 1).await;
 
     // Assert: a `verified` row -- phase f3, the pinned evidence-class token.
     let (verdict, phase, source, ec): (String, String, String, Option<String>) = conn
@@ -1085,7 +1096,7 @@ async fn observe_meta_suspect_observation_maps_to_suspect_row() {
     )];
 
     // Act
-    let (conn, _dir) = drain_and_open(&meta, 1, 1, 1);
+    let (conn, _dir) = drain_and_open(&meta, 1, 1, 1).await;
 
     // Assert: a `suspect` row -- phase f3, the pinned evidence-class token.
     let (verdict, phase, ec): (String, String, Option<String>) = conn
@@ -1107,7 +1118,7 @@ async fn observe_meta_probe_clear_maps_to_cleared_row() {
     meta.cleared_capabilities = vec![cleared_event("web_search")];
 
     // Act
-    let (conn, _dir) = drain_and_open(&meta, 2, 5, 1);
+    let (conn, _dir) = drain_and_open(&meta, 2, 5, 1).await;
 
     // Assert: a `cleared` row keyed on (lane, capability), live source, no
     // evidence class -- the replayer removes the resident negative by key.
@@ -1157,7 +1168,7 @@ async fn the_free_drain_persists_rows_for_a_surface_that_records_no_usage_row() 
         "the free drain must enqueue the capability row",
     );
     drop(handle);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 
     // Assert -- the same row shape the capture route writes, boundary stamps
     // included (a rebuild filters on them).
@@ -1472,9 +1483,11 @@ async fn unfinalized_drop_emits_single_cancelled_row_with_null_resolved_class() 
 
     // Assert: exactly one row, outcome cancelled, resolved_class NULL.
     assert!(wait_persisted(&handle, 1), "row not persisted");
-    writer.shutdown();
+    let counters = std::sync::Arc::clone(handle.counters());
+    drop(handle);
+    drain_usage_writer_strict(writer).await;
     assert_eq!(
-        handle.counters().persisted(),
+        counters.persisted(),
         1,
         "an unfinalized Drop must emit exactly one row"
     );
@@ -1893,8 +1906,9 @@ async fn reduction_decision_and_counters_round_trip_on_the_success_path() {
     cap.observe_response(&resp);
     cap.finalize(Outcome::Ok);
     assert!(wait_persisted(&handle, 1), "row not persisted");
+    drop(cap);
     drop(handle);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 
     // Assert
     assert_eq!(
@@ -1923,8 +1937,9 @@ async fn reduction_decision_and_counters_round_trip_on_the_all_failed_path() {
     cap.observe_error(&Error::upstream("p", 503, ""));
     cap.finalize(Outcome::UpstreamError);
     assert!(wait_persisted(&handle, 1), "row not persisted");
+    drop(cap);
     drop(handle);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 
     // Assert: unaffected by the calibration refusal on the same row.
     assert_eq!(
@@ -1952,8 +1967,9 @@ async fn streaming_reduction_observation_matches_the_completion_path() {
     cap.observe_chunk(&chunk);
     cap.finalize(Outcome::Ok);
     assert!(wait_persisted(&handle, 1), "row not persisted");
+    drop(cap);
     drop(handle);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 
     // Assert: parity with the completion path -- the observation comes from
     // the dispatch meta, so the egress shape cannot perturb it.
@@ -2134,8 +2150,9 @@ async fn cache_decisions_round_trip_on_the_success_path() {
     cap.observe_response(&resp);
     cap.finalize(Outcome::Ok);
     assert!(wait_persisted(&handle, 1), "row not persisted");
+    drop(cap);
     drop(handle);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 
     // Assert
     assert_eq!(
@@ -2163,8 +2180,9 @@ async fn a_skipped_front_marker_persists_its_token_rather_than_null() {
     cap.observe_response(&resp);
     cap.finalize(Outcome::Ok);
     assert!(wait_persisted(&handle, 1), "row not persisted");
+    drop(cap);
     drop(handle);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 
     // Assert
     assert_eq!(
@@ -2190,8 +2208,9 @@ async fn cache_decisions_round_trip_on_the_all_failed_path() {
     cap.observe_error(&Error::upstream("p", 503, ""));
     cap.finalize(Outcome::UpstreamError);
     assert!(wait_persisted(&handle, 1), "row not persisted");
+    drop(cap);
     drop(handle);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 
     // Assert
     assert_eq!(
@@ -2216,8 +2235,9 @@ async fn streaming_cache_decision_observation_matches_the_completion_path() {
     cap.observe_chunk(&chunk);
     cap.finalize(Outcome::Ok);
     assert!(wait_persisted(&handle, 1), "row not persisted");
+    drop(cap);
     drop(handle);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 
     // Assert: parity with the completion path -- the observation comes from
     // the dispatch meta, so the egress shape cannot perturb it.
@@ -2420,8 +2440,9 @@ async fn a_real_dispatch_persists_the_strategy_tokens_and_epoch_code_it_produced
     cap.observe_response(&resp);
     cap.finalize(Outcome::Ok);
     assert!(wait_persisted(&handle, 1), "row not persisted");
+    drop(cap);
     drop(handle);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
 
     // Assert: the persisted row carries the tokens the ROUTER decided -- the
     // same triple, read back out of SQLite rather than out of the meta.
@@ -2466,7 +2487,7 @@ fn observe_quota_maps_non_empty_extras_into_json_object() {
 /// Deliberately does NOT wait for a count: the unstamped case must persist
 /// nothing, so any wait would just burn its deadline. The writer shutdown
 /// flushes whatever was enqueued before the read.
-fn drain_and_count(meta: &routectl_router::DispatchMeta) -> i64 {
+async fn drain_and_count(meta: &routectl_router::DispatchMeta) -> i64 {
     let dir = tempfile::tempdir().expect("usage tempdir");
     let db_path = dir.path().join("usage.db");
     let (handle, writer) = routectl_usage::UsageWriter::start(
@@ -2490,7 +2511,7 @@ fn drain_and_count(meta: &routectl_router::DispatchMeta) -> i64 {
     cap.observe_meta(meta, 7, 1);
     drop(cap);
     drop(handle);
-    writer.shutdown();
+    drain_usage_writer_strict(writer).await;
     let conn = rusqlite::Connection::open(&db_path).expect("read db");
     conn.query_row("SELECT COUNT(*) FROM capability_events", [], |r| r.get(0))
         .expect("count")
@@ -2523,7 +2544,8 @@ async fn an_unstamped_capability_ride_along_is_never_persisted() {
     // The `debug_assert` fires in a debug build; catching it lets one test cover
     // both profiles, then the fail-closed assertion below holds in both.
     let persisted =
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drain_and_count(&meta)));
+        futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(drain_and_count(&meta)))
+            .await;
     if let Ok(rows) = persisted {
         assert_eq!(
             rows, 0,
@@ -2544,7 +2566,7 @@ async fn an_empty_capability_ride_along_at_generation_zero_is_fine() {
     assert!(meta.learned_capabilities.is_empty());
 
     assert_eq!(
-        drain_and_count(&meta),
+        drain_and_count(&meta).await,
         0,
         "an empty ride-along persists nothing and raises nothing",
     );
@@ -2561,7 +2583,7 @@ async fn a_stamped_capability_ride_along_drains() {
     )];
 
     assert_eq!(
-        drain_and_count(&meta),
+        drain_and_count(&meta).await,
         1,
         "a stamped ride-along persists its row",
     );
