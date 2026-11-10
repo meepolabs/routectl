@@ -1102,7 +1102,7 @@ impl Router {
             attempt_req,
             target.provider_kind,
             target.nickname.as_deref().unwrap_or(model),
-            &target.model.effective_row,
+            target.model.context_window_tokens(),
             meta,
         );
     }

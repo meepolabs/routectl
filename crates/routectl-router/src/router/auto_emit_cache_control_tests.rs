@@ -105,7 +105,6 @@ fn rig(
     global_enabled: bool,
     fail_first: usize,
 ) -> (Router, Arc<ParkingMutex<Vec<ChatRequest>>>) {
-    let provider_kind = entry.kind_str();
     let mut config = Config {
         cache: CacheConfig {
             auto_emit_top_level_breakpoint: global_enabled,
@@ -129,22 +128,8 @@ fn rig(
         fail_first,
         seen: AtomicUsize::new(0),
     });
-    // Mirror `factory::apply_catalog_overlay` (empty overlay, no
-    // `[cache_pricing]` overrides): this test rig builds `ResolvedModel`
-    // directly instead of through the factory, so it must stamp
-    // `effective_row` itself the same way -- `record_would_trim` now
-    // reads the precomputed merge off the resolved target rather than
-    // re-resolving `(provider_kind, upstream)` at dispatch time.
-    let baked = crate::catalog::lookup_baked_with_overrides(
-        provider_kind,
-        "upstream-model",
-        None,
-        &BTreeMap::new(),
-    );
-    let effective_row = crate::catalog::merge(baked.as_ref(), None);
     let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
-    let resolved =
-        ResolvedModel::new("m", "p", provider, "upstream-model").with_effective_row(effective_row);
+    let resolved = ResolvedModel::new("m", "p", provider, "upstream-model");
     models.insert("m".into(), Arc::new(resolved));
     router.install_resolved_models(models);
     (router, captured)
@@ -431,8 +416,8 @@ fn long_tool_request() -> ChatRequest {
 #[tokio::test]
 async fn would_trim_recorded_for_long_request() {
     // A long request with a would-cut candidate records the freed-token
-    // count `d` and a finite break-even K* (anthropic catch-all is a
-    // verified write-premium row).
+    // count `d` and a finite break-even K* (anthropic-api has
+    // write-premium cache rules).
     let (router, _captured) = rig(anthropic_entry(), true, 0);
     let dispatched = router
         .complete_with_options(long_tool_request(), RouterOptions::new())
@@ -448,7 +433,7 @@ async fn would_trim_recorded_for_long_request() {
     );
     assert!(
         dispatched.meta.would_trim_break_even_k.is_some(),
-        "a verified write-premium row must yield a finite break-even K*",
+        "write-premium cache rules must yield a finite break-even K*",
     );
 }
 
@@ -466,12 +451,10 @@ async fn would_trim_records_nothing_for_short_request() {
 }
 
 #[tokio::test]
-async fn would_trim_provider_catch_all_row_prices_normally_via_baked_match() {
-    // An openai-compat target with no specific cell resolves to the
-    // provider's `"*"` catch-all -- a REAL baked-table match (tier 2), so
-    // it prices normally. K* suppression is reserved for a `Disabled` /
-    // `Missing` merge result (see
-    // `record_would_trim_folds_missing_baked_row_to_no_break_even`).
+async fn would_trim_auto_cacher_kind_prices_from_its_cache_rules() {
+    // An openai-compat target prices from its kind's cache rules like any
+    // other kind that has them. A kind with none records no K* (see
+    // `record_would_trim_records_no_break_even_for_a_kind_without_cache_rules`).
     let (router, _captured) = rig(openai_entry(), true, 0);
     let dispatched = router
         .complete_with_options(long_tool_request(), RouterOptions::new())
@@ -483,11 +466,11 @@ async fn would_trim_provider_catch_all_row_prices_normally_via_baked_match() {
     assert_eq!(
         dispatched.meta.would_trim_tokens,
         Some(plan.candidate.d),
-        "the catch-all row must record the freed-token count",
+        "the openai-compat target must record the freed-token count",
     );
     assert!(
         dispatched.meta.would_trim_break_even_k.is_some(),
-        "a baked-matched provider catch-all prices",
+        "an openai-compat target prices",
     );
 }
 
@@ -618,35 +601,21 @@ fn near_lossless_attribution_request() -> ChatRequest {
     }
 }
 
-/// Variant of [`rig`] that also installs a `[cache_pricing]` override
-/// table, for exercising `would_trim_context_fraction` against a known
-/// (non-`None`) context window.
-fn rig_with_cache_pricing_override(
+/// Variant of [`rig`] whose resolved model carries a configured
+/// `[models.X] context_window`, for exercising `would_trim_context_fraction`.
+fn rig_with_context_window(
     entry: ProviderEntry,
-    cache_pricing: BTreeMap<String, crate::catalog::CachePricingOverride>,
+    context_window: u32,
 ) -> (Router, Arc<ParkingMutex<Vec<ChatRequest>>>) {
-    let provider_kind = entry.kind_str();
     let mut config = Config {
         cache: CacheConfig {
             auto_emit_top_level_breakpoint: true,
             normalize_tools: true,
             k_gated_emission: false,
         },
-        cache_pricing,
         ..Config::default()
     };
     config.providers.insert("p".into(), entry);
-
-    // Mirror `factory::apply_catalog_overlay` (empty overlay, but the
-    // SAME `[cache_pricing]` overrides `config` carries) -- see the
-    // matching note on `rig` above.
-    let baked = crate::catalog::lookup_baked_with_overrides(
-        provider_kind,
-        "upstream-model",
-        None,
-        &config.cache_pricing,
-    );
-    let effective_row = crate::catalog::merge(baked.as_ref(), None);
 
     let mut router = Router::new(Arc::new(config));
     let captured: Arc<ParkingMutex<Vec<ChatRequest>>> = Arc::new(ParkingMutex::new(Vec::new()));
@@ -657,8 +626,8 @@ fn rig_with_cache_pricing_override(
         seen: AtomicUsize::new(0),
     });
     let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
-    let resolved =
-        ResolvedModel::new("m", "p", provider, "upstream-model").with_effective_row(effective_row);
+    let resolved = ResolvedModel::new("m", "p", provider, "upstream-model")
+        .with_context_window(context_window);
     models.insert("m".into(), Arc::new(resolved));
     router.install_resolved_models(models);
     (router, captured)
@@ -739,10 +708,9 @@ async fn near_lossless_pass_does_not_mutate_outbound_request() {
 }
 
 #[tokio::test]
-async fn would_trim_context_fraction_is_none_when_window_unknown() {
-    // The anthropic-api "*" catch-all row has no confirmed context
-    // window (`max_context_tokens: None`), so `context_fraction` must
-    // fail closed to `None` rather than guess.
+async fn would_trim_context_fraction_is_none_without_a_configured_window() {
+    // No `[models.X] context_window`, so `context_fraction` must fail
+    // closed to `None` rather than guess.
     let (router, _captured) = rig(anthropic_entry(), true, 0);
     let dispatched = router
         .complete_with_options(long_tool_request(), RouterOptions::new())
@@ -752,17 +720,10 @@ async fn would_trim_context_fraction_is_none_when_window_unknown() {
 }
 
 #[tokio::test]
-async fn would_trim_context_fraction_is_some_when_window_known() {
-    // An operator override on the context window turns
-    // `context_fraction` into a computed `Some(fraction)`.
-    let overrides = BTreeMap::from([(
-        "anthropic-api:*".to_string(),
-        crate::catalog::CachePricingOverride {
-            max_context_tokens: Some(1_000_000),
-            ..Default::default()
-        },
-    )]);
-    let (router, captured) = rig_with_cache_pricing_override(anthropic_entry(), overrides);
+async fn would_trim_context_fraction_uses_the_configured_window() {
+    // A configured `[models.X] context_window` turns `context_fraction`
+    // into a computed `Some(fraction)` over that window.
+    let (router, captured) = rig_with_context_window(anthropic_entry(), 1_000_000);
     let dispatched = router
         .complete_with_options(long_tool_request(), RouterOptions::new())
         .await;
@@ -2494,158 +2455,4 @@ mod converse_front_only {
             "an opted-in-but-unsupported wire records the skip, not auto_emitted",
         );
     }
-}
-
-// -----------------------------------------------------------------
-// Overlay end-to-end: a REAL on-disk overlay round-trip, merged via
-// the REAL `factory::apply_catalog_overlay` (not a hand-built
-// `EffectiveRow`), dispatched through the REAL Router -- proving the
-// seam this module's `record_would_trim` reads (`ResolvedModel::
-// effective_row`) actually changes behavior when a loader-shaped
-// overlay is present, not just that the pure `merge` unit resolves
-// correctly in isolation.
-// -----------------------------------------------------------------
-
-/// Save `cells` to a tempfile then load it straight back, so the
-/// returned `CatalogOverlay` came from a REAL disk round-trip (the
-/// same `catalog_overlay::save` / `load` pair the config loader and
-/// the (future) migrator use), not an in-memory struct literal.
-fn overlay_from_disk(
-    cells: BTreeMap<String, Option<crate::catalog_overlay::OverlayCell>>,
-) -> crate::catalog_overlay::CatalogOverlay {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("catalog_overlay.json");
-    crate::catalog_overlay::save(&path, 0, cells).expect("save");
-    crate::catalog_overlay::load(&path).expect("load")
-}
-
-/// Build a router exactly like `rig`, except the resolved model's
-/// `effective_row` is stamped by the REAL `factory::apply_catalog_overlay`
-/// post-pass (the same call `build_router_from_config_with_overlay`
-/// makes) instead of a hand-rolled merge -- so `overlay` must carry
-/// through `[models.m]` / `[providers.p]` resolution exactly as
-/// production config would.
-fn rig_with_overlay(
-    entry: ProviderEntry,
-    overlay: crate::catalog_overlay::CatalogOverlay,
-) -> (Router, Arc<ParkingMutex<Vec<ChatRequest>>>) {
-    let mut config = Config {
-        cache: CacheConfig {
-            auto_emit_top_level_breakpoint: true,
-            normalize_tools: true,
-            k_gated_emission: false,
-        },
-        retry: RetryPolicy {
-            initial_backoff_ms: 0,
-            ..Default::default()
-        },
-        ..Config::default()
-    };
-    config.providers.insert("p".into(), entry);
-    config.models.insert(
-        "m".into(),
-        crate::config::ModelEntry::new("p", "upstream-model"),
-    );
-    let config = Arc::new(config);
-
-    let mut router = Router::new(config.clone());
-    let captured: Arc<ParkingMutex<Vec<ChatRequest>>> = Arc::new(ParkingMutex::new(Vec::new()));
-    let provider: Arc<dyn Provider> = Arc::new(CapturingProvider {
-        id: "cap".into(),
-        captured: captured.clone(),
-        fail_first: 0,
-        seen: AtomicUsize::new(0),
-    });
-    let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
-    models.insert(
-        "m".into(),
-        Arc::new(ResolvedModel::new("m", "p", provider, "upstream-model")),
-    );
-    let models = crate::factory::apply_catalog_overlay(models, &config, &overlay);
-    router.install_resolved_models(models);
-    (router, captured)
-}
-
-#[tokio::test]
-async fn overlay_override_through_real_load_path_changes_would_trim_pricing() {
-    // Arrange: baseline (no overlay) vs. an overlay cell overriding the
-    // anthropic-api catch-all's `wm`, round-tripped through disk.
-    let (baseline_router, _c) = rig(anthropic_entry(), true, 0);
-    let baseline = baseline_router
-        .complete_with_options(long_tool_request(), RouterOptions::new())
-        .await;
-    baseline.result.expect("ok");
-    let baseline_k = baseline
-        .meta
-        .would_trim_break_even_k
-        .expect("baseline (baked catch-all) must price");
-
-    let mut cells = BTreeMap::new();
-    cells.insert(
-        "anthropic-api:*".to_string(),
-        Some(crate::catalog_overlay::OverlayCell {
-            source: crate::catalog_overlay::OverlaySource::User,
-            verified_at: "2026-07-01".to_string(),
-            wm: Some(9.5),
-            rm: None,
-            ttl_seconds: None,
-            min_prefix_tokens: None,
-            max_context_tokens: None,
-            max_output_tokens: None,
-            input_cost_per_token: None,
-            output_cost_per_token: None,
-            capabilities: None,
-        }),
-    );
-    let overlay = overlay_from_disk(cells);
-
-    // Act: dispatch the IDENTICAL request through the overlay-stamped
-    // router.
-    let (router, _captured) = rig_with_overlay(anthropic_entry(), overlay);
-    let dispatched = router
-        .complete_with_options(long_tool_request(), RouterOptions::new())
-        .await;
-    dispatched.result.expect("ok");
-    let overridden_k = dispatched
-        .meta
-        .would_trim_break_even_k
-        .expect("overlay-priced target must still price");
-
-    // Assert: the overlay's wm actually moved the priced outcome --
-    // this fails if `record_would_trim` ever falls back to the baked
-    // row instead of reading `ResolvedModel::effective_row`.
-    assert_ne!(
-        baseline_k, overridden_k,
-        "an overlay cell overriding a baked field must change the priced break-even K* \
-             through the real load -> merge -> dispatch path",
-    );
-}
-
-#[tokio::test]
-async fn overlay_null_disable_through_real_load_path_folds_to_conservative_sentinel() {
-    // Arrange: a null overlay cell (JSON `null`, round-tripped through
-    // disk) for the same selector the baseline test prices normally.
-    let mut cells = BTreeMap::new();
-    cells.insert("anthropic-api:*".to_string(), None);
-    let overlay = overlay_from_disk(cells);
-
-    // Act
-    let (router, _captured) = rig_with_overlay(anthropic_entry(), overlay);
-    let dispatched = router
-        .complete_with_options(long_tool_request(), RouterOptions::new())
-        .await;
-    dispatched.result.expect("ok");
-
-    // Assert: disabled folds to the SAME conservative sentinel as a
-    // catalog miss -- no break-even K -- while the freed-token count
-    // (independent of pricing trust) still records.
-    assert_eq!(
-        dispatched.meta.would_trim_break_even_k, None,
-        "a null-disabled overlay cell must fold to the conservative sentinel \
-             through the real load -> merge -> dispatch path",
-    );
-    assert!(
-        dispatched.meta.would_trim_tokens.is_some(),
-        "the freed-token count records regardless of pricing trust",
-    );
 }

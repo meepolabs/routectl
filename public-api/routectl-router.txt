@@ -12672,6 +12672,65 @@ impl<T> typenum::type_operators::Same for routectl_router::catalog::CachePricing
 pub type routectl_router::catalog::CachePricingSelector::Output = T
 impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::catalog::CachePricingSelector where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
 pub fn routectl_router::catalog::CachePricingSelector::into_shared(self) -> Shared
+pub struct routectl_router::CacheRules
+pub routectl_router::CacheRules::auto_cacher: bool
+pub routectl_router::CacheRules::min_prefix_tokens: u32
+pub routectl_router::CacheRules::rm: f64
+pub routectl_router::CacheRules::ttl_seconds: u32
+pub routectl_router::CacheRules::wm: f64
+impl core::clone::Clone for routectl_router::CacheRules
+pub fn routectl_router::CacheRules::clone(&self) -> routectl_router::CacheRules
+impl core::cmp::PartialEq for routectl_router::CacheRules
+pub fn routectl_router::CacheRules::eq(&self, &routectl_router::CacheRules) -> bool
+impl core::fmt::Debug for routectl_router::CacheRules
+pub fn routectl_router::CacheRules::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for routectl_router::CacheRules
+impl core::marker::StructuralPartialEq for routectl_router::CacheRules
+impl core::marker::Freeze for routectl_router::CacheRules
+impl core::marker::Send for routectl_router::CacheRules
+impl core::marker::Sync for routectl_router::CacheRules
+impl core::marker::Unpin for routectl_router::CacheRules
+impl core::marker::UnsafeUnpin for routectl_router::CacheRules
+impl core::panic::unwind_safe::RefUnwindSafe for routectl_router::CacheRules
+impl core::panic::unwind_safe::UnwindSafe for routectl_router::CacheRules
+impl<T, U> core::convert::Into<U> for routectl_router::CacheRules where U: core::convert::From<T>
+pub fn routectl_router::CacheRules::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for routectl_router::CacheRules where U: core::convert::Into<T>
+pub type routectl_router::CacheRules::Error = core::convert::Infallible
+pub fn routectl_router::CacheRules::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for routectl_router::CacheRules where U: core::convert::TryFrom<T>
+pub type routectl_router::CacheRules::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn routectl_router::CacheRules::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for routectl_router::CacheRules where T: core::clone::Clone
+pub type routectl_router::CacheRules::Owned = T
+pub fn routectl_router::CacheRules::clone_into(&self, &mut T)
+pub fn routectl_router::CacheRules::to_owned(&self) -> T
+impl<T> axum_core::extract::from_ref::FromRef<T> for routectl_router::CacheRules where T: core::clone::Clone
+pub fn routectl_router::CacheRules::from_ref(&T) -> T
+impl<T> core::any::Any for routectl_router::CacheRules where T: 'static + ?core::marker::Sized
+pub fn routectl_router::CacheRules::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for routectl_router::CacheRules where T: ?core::marker::Sized
+pub fn routectl_router::CacheRules::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for routectl_router::CacheRules where T: ?core::marker::Sized
+pub fn routectl_router::CacheRules::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for routectl_router::CacheRules where T: core::clone::Clone
+pub unsafe fn routectl_router::CacheRules::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for routectl_router::CacheRules
+pub fn routectl_router::CacheRules::from(T) -> T
+impl<T> dyn_clone::DynClone for routectl_router::CacheRules where T: core::clone::Clone
+pub fn routectl_router::CacheRules::__clone_box(&self, dyn_clone::sealed::Private) -> *mut ()
+impl<T> either::into_either::IntoEither for routectl_router::CacheRules
+impl<T> outref::AsOut<T> for routectl_router::CacheRules where T: core::marker::Copy
+pub fn routectl_router::CacheRules::as_out(&mut self) -> outref::Out<'_, T>
+impl<T> tower_http::follow_redirect::policy::PolicyExt for routectl_router::CacheRules where T: ?core::marker::Sized
+pub fn routectl_router::CacheRules::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn routectl_router::CacheRules::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for routectl_router::CacheRules
+impl<T> tracing::instrument::WithSubscriber for routectl_router::CacheRules
+impl<T> typenum::type_operators::Same for routectl_router::CacheRules
+pub type routectl_router::CacheRules::Output = T
+impl<Unshared, Shared> aws_smithy_runtime_api::shared::IntoShared<Shared> for routectl_router::CacheRules where Shared: aws_smithy_runtime_api::shared::FromUnshared<Unshared>
+pub fn routectl_router::CacheRules::into_shared(self) -> Shared
 #[non_exhaustive] pub struct routectl_router::CalibrationConfig
 pub routectl_router::CalibrationConfig::enabled: bool
 impl core::clone::Clone for routectl_router::CalibrationConfig
@@ -20108,12 +20167,13 @@ pub fn routectl_router::beta_flag_of(&str) -> core::option::Option<&str>
 pub fn routectl_router::beta_override_key(&str) -> alloc::string::String
 pub fn routectl_router::beta_seed_state(routectl_router::BetaSeedScope, &str, &str, impl core::ops::function::FnOnce() -> bool) -> core::option::Option<routectl_router::SeedCell>
 pub fn routectl_router::beta_seed_state_for_key(routectl_router::BetaSeedScope, &str, &str, impl core::ops::function::FnOnce() -> bool) -> core::option::Option<routectl_router::SeedCell>
-pub fn routectl_router::break_even_k(&routectl_router::catalog::CatalogRow, &routectl_router::PrefixReductionCandidate) -> core::option::Option<f64>
+pub fn routectl_router::break_even_k(&routectl_router::CacheRules, &routectl_router::PrefixReductionCandidate) -> core::option::Option<f64>
 pub fn routectl_router::build_import_candidate(routectl_router::CandidateOrigin, &serde_json::value::Value, &serde_json::value::Value, &str) -> routectl_router::ImportCandidate
 pub async fn routectl_router::build_provider(&str, &routectl_router::ProviderEntry, alloc::sync::Arc<dyn routectl_auth::store::SecretStore>) -> routectl_core::error::Result<alloc::sync::Arc<dyn routectl_core::provider::Provider>>
 pub async fn routectl_router::build_provider_with_options(&str, &routectl_router::ProviderEntry, alloc::sync::Arc<dyn routectl_auth::store::SecretStore>, routectl_router::BuildOptions) -> routectl_core::error::Result<alloc::sync::Arc<dyn routectl_core::provider::Provider>>
 pub async fn routectl_router::build_resolved_models(&routectl_router::config::Config, alloc::sync::Arc<dyn routectl_auth::store::SecretStore>, routectl_router::BuildOptions) -> routectl_core::error::Result<(alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::sync::Arc<routectl_router::ResolvedModel>>, alloc::vec::Vec<(alloc::string::String, alloc::string::String)>)>
 pub async fn routectl_router::build_resolved_models_reported(&routectl_router::config::Config, alloc::sync::Arc<dyn routectl_auth::store::SecretStore>, routectl_router::BuildOptions) -> routectl_core::error::Result<routectl_router::ResolvedModelBuild>
+pub fn routectl_router::cache_rules(&str) -> core::option::Option<routectl_router::CacheRules>
 pub fn routectl_router::candidate_shrink_counts(&routectl_router::ImportCandidate) -> routectl_router::ShrinkCounts
 pub fn routectl_router::capability_key_is_beta(&str) -> bool
 pub fn routectl_router::capability_key_is_field_verdict(&str) -> bool
@@ -20142,7 +20202,7 @@ pub const fn routectl_router::escalate(routectl_router::ImpactClass, routectl_ro
 pub fn routectl_router::estimate_meter_tokens(&routectl_core::schema::ChatRequest) -> u64
 pub fn routectl_router::estimate_request(&routectl_core::schema::ChatRequest) -> routectl_router::RequestEstimate
 pub fn routectl_router::estimate_total_tokens(&routectl_core::schema::ChatRequest) -> u64
-pub fn routectl_router::evaluate(&routectl_router::catalog::CatalogRow, &routectl_router::PrefixReductionCandidate, f64) -> routectl_router::GateDecision
+pub fn routectl_router::evaluate(&routectl_router::CacheRules, &routectl_router::PrefixReductionCandidate, f64) -> routectl_router::GateDecision
 pub fn routectl_router::is_cataloged_provider_kind(&str) -> bool
 pub fn routectl_router::is_config_provider_kind(&str) -> bool
 pub fn routectl_router::is_import_cell(&routectl_router::CatalogOverlay, &str) -> bool

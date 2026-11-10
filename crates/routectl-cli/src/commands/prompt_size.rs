@@ -19,10 +19,10 @@ use routectl_core::context_reduction::{ReductionOutcome, apply_json_minify};
 use routectl_core::schema::Role;
 use routectl_core::{ChatRequest, Error, RefusalReason, Result, scan_volatile};
 use routectl_router::{
-    ALIAS_MAX_RECURSION_DEPTH, AliasPattern, AliasValue, CachePricingOverride, CatalogOverlay,
-    Config, EffectiveRow, GateDecision, KeepReason, PrefixReductionCandidate, TrimConfig,
-    break_even_k, collect_config_validation, evaluate, propose_steady_state_trim,
-    resolve_effective_row,
+    ALIAS_MAX_RECURSION_DEPTH, AliasPattern, AliasValue, CachePricingOverride, CacheRules,
+    CatalogOverlay, CatalogRow, Config, EffectiveRow, GateDecision, KeepReason,
+    PrefixReductionCandidate, TrimConfig, break_even_k, collect_config_validation, evaluate,
+    propose_steady_state_trim, resolve_effective_row,
 };
 
 /// Rough bytes-to-tokens divisor. Matches `context_reduction.rs`'s
@@ -296,14 +296,14 @@ fn price_candidate(
         ),
         None => (None, None, EffectiveRow::Missing),
     };
-    let row = effective.priced();
+    let row = effective.priced().map(rules_of_row);
 
     // `Disabled` / `Missing` carry no trusted multipliers, so a live
     // break-even number is meaningless; suppress it and let the verdict
     // carry the "insufficient data" message instead.
-    let break_even = row.and_then(|r| break_even_k(r, &candidate));
+    let break_even = row.and_then(|r| break_even_k(&r, &candidate));
     let verdict = args.hypothetical_k.map(|k| match row {
-        Some(r) => evaluate(r, &candidate, k),
+        Some(r) => evaluate(&r, &candidate, k),
         None => GateDecision::Keep {
             reason: KeepReason::InsufficientData,
         },
@@ -318,6 +318,17 @@ fn price_candidate(
         candidate,
         verdict,
         steady_state_would_trim: would_trim,
+    }
+}
+
+/// The cache economics of a resolved row, in the cost gate's terms.
+fn rules_of_row(row: &CatalogRow) -> CacheRules {
+    CacheRules {
+        wm: f64::from(row.wm),
+        rm: f64::from(row.rm),
+        ttl_seconds: row.ttl_seconds,
+        min_prefix_tokens: row.min_prefix_tokens,
+        auto_cacher: row.auto_cacher,
     }
 }
 
@@ -1145,7 +1156,7 @@ fast = "sonnet"
         // the looked-up row + candidate (wiring matches the math).
         let row = lookup("anthropic-api", "claude-opus-4-8", Some("5m"));
         let candidate = PrefixReductionCandidate::new(50_000, 200_000, 200_000);
-        let expected = break_even_k(&row, &candidate).expect("d > 0");
+        let expected = break_even_k(&rules_of_row(&row), &candidate).expect("d > 0");
         assert_eq!(economics.break_even_k, Some(expected));
         // Sanity-anchor on the doc's worked result (K* == 50 at 5m).
         assert!((economics.break_even_k.unwrap() - 50.0).abs() < 1e-4);
@@ -1415,7 +1426,7 @@ fast = "sonnet"
         let row = lookup("anthropic-api", "claude-opus-4-8", Some("1h"));
         assert_eq!(row.wm, 2.0, "1h tier should resolve the wm=2.0 row");
         let candidate = PrefixReductionCandidate::new(50_000, 200_000, 200_000);
-        let expected = break_even_k(&row, &candidate).expect("d > 0");
+        let expected = break_even_k(&rules_of_row(&row), &candidate).expect("d > 0");
         assert_eq!(economics.break_even_k, Some(expected));
         // Sanity-anchor: (200000 * 2.0) / (50000 * 0.10) == 80 at the 1h tier.
         assert!((economics.break_even_k.unwrap() - 80.0).abs() < 1e-4);

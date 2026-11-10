@@ -173,7 +173,10 @@ pub use context_trim::{
     estimate_request, estimate_total_tokens, near_lossless_candidate, propose_steady_state_trim,
     trimmed_prefix_fingerprint,
 };
-pub use cost_gate::{GateDecision, KeepReason, PrefixReductionCandidate, break_even_k, evaluate};
+pub use cost_gate::{
+    CacheRules, GateDecision, KeepReason, PrefixReductionCandidate, break_even_k, cache_rules,
+    evaluate,
+};
 pub use doctor::{
     CapabilityMatrixPanel, DoctorPanels, DoctorReport, Finding, MatrixAvailability, MatrixCell,
     MatrixLane, MatrixNicknameAction, MatrixReplaySummary, MatrixSource, MatrixWarm, ProbeOutcome,

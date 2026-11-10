@@ -1321,13 +1321,12 @@ mod tests {
 
     #[test]
     fn candidate_feeds_evaluate_matching_gate_math() {
-        // Arrange: a verified anthropic row + a real plan.
-        use crate::catalog::lookup;
-        use crate::cost_gate::{GateDecision, break_even_k, evaluate};
+        // Arrange: the anthropic-api cache rules + a real plan.
+        use crate::cost_gate::{GateDecision, break_even_k, cache_rules, evaluate};
         let req = long_conversation(8, 12_000);
         let params = SteadyStateTrimParams::default();
         let plan = propose_steady_state_trim(&req, &params).expect("plan");
-        let row = lookup("anthropic-api", "claude-opus-4-8", Some("5m"));
+        let row = cache_rules("anthropic-api").expect("anthropic-api has cache rules");
 
         // Act: compute K* for the candidate, then evaluate just above it.
         let k_star = break_even_k(&row, &plan.candidate).expect("d > 0");
@@ -2018,8 +2017,7 @@ mod tests {
     fn near_lossless_candidate_prices_through_unchanged_gate() {
         // Arrange: a big dedup pair (meaningful d) plus distinct bulky filler
         // so the total prefix c is large and c-d stays above min_prefix.
-        use crate::catalog::lookup;
-        use crate::cost_gate::{GateDecision, break_even_k, evaluate};
+        use crate::cost_gate::{GateDecision, break_even_k, cache_rules, evaluate};
 
         let dup = json!(payload_of_tokens(12_000));
         let mut messages = vec![user_msg("head one"), assistant_msg("head two")];
@@ -2043,7 +2041,7 @@ mod tests {
         let out = collect_near_lossless_marks(&req, 2, scan_end);
         assert!(!out.marks.is_empty(), "fixture must produce a dedup mark");
         let candidate = near_lossless_candidate(&req, &out.marks).expect("candidate");
-        let row = lookup("anthropic-api", "claude-opus-4-8", Some("5m"));
+        let row = cache_rules("anthropic-api").expect("anthropic-api has cache rules");
 
         // Act: the candidate must price through the UNCHANGED gate.
         let k_star = break_even_k(&row, &candidate).expect("d > 0");

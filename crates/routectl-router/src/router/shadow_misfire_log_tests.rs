@@ -17,12 +17,6 @@ const PROVIDER_KIND: &str = "anthropic-api";
 const SERVED_MODEL: &str = "pt-opus-4-8";
 const UPSTREAM: &str = "claude-opus-4-8";
 
-fn effective_row_for(provider_kind: &str, model: &str) -> EffectiveRow {
-    use crate::catalog::{lookup_baked_with_overrides, merge};
-    let baked = lookup_baked_with_overrides(provider_kind, model, None, &BTreeMap::new());
-    merge(baked.as_ref(), None)
-}
-
 fn payload_of_tokens(tokens: usize) -> String {
     "x".repeat(tokens * 4)
 }
@@ -101,14 +95,7 @@ fn triggering_req(head: &str) -> ChatRequest {
 
 fn record(router: &Router, req: &ChatRequest) {
     let mut meta = DispatchMeta::for_alias(SERVED_MODEL);
-    let effective = effective_row_for(PROVIDER_KIND, UPSTREAM);
-    router.record_would_trim(
-        req,
-        Some(PROVIDER_KIND),
-        SERVED_MODEL,
-        &effective,
-        &mut meta,
-    );
+    router.record_would_trim(req, Some(PROVIDER_KIND), SERVED_MODEL, None, &mut meta);
     assert_eq!(
         meta.would_trim_shadow_misfire,
         Some(1),
@@ -186,12 +173,11 @@ fn shadow_misfire_debug_hashes_session_key_instead_of_logging_it_raw() {
 /// triple lands on the Misfire branch rather than FirstSeen.
 fn record_first_seen(router: &Router) {
     let mut meta = DispatchMeta::for_alias(SERVED_MODEL);
-    let effective = effective_row_for(PROVIDER_KIND, UPSTREAM);
     router.record_would_trim(
         &triggering_req("original head"),
         Some(PROVIDER_KIND),
         SERVED_MODEL,
-        &effective,
+        None,
         &mut meta,
     );
     assert_eq!(

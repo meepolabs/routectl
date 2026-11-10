@@ -19,19 +19,8 @@ const PROVIDER_KIND: &str = "anthropic-api";
 /// the query must match.
 const SERVED_MODEL: &str = "pt-opus-4-8";
 /// Upstream wire id -- what the buggy query keyed on. Distinct from the
-/// nickname AND a VERIFIED pricing cell, so pricing (break_even) resolves
-/// on it exactly as it does in production.
+/// nickname.
 const UPSTREAM: &str = "claude-opus-4-8";
-
-/// Build the `EffectiveRow` `record_would_trim` now expects to be handed
-/// (mirroring `factory::apply_catalog_overlay`'s chain-build-time merge,
-/// with no overlay cell -- these regression tests exercise the baked
-/// layer only).
-fn effective_row_for(provider_kind: &str, model: &str) -> EffectiveRow {
-    use crate::catalog::{lookup_baked_with_overrides, merge};
-    let baked = lookup_baked_with_overrides(provider_kind, model, None, &BTreeMap::new());
-    merge(baked.as_ref(), None)
-}
 
 /// A bulky payload of roughly `tokens` tokens (4 bytes/token estimate).
 fn payload_of_tokens(tokens: usize) -> String {
@@ -190,20 +179,13 @@ fn record_would_trim_queries_k_store_under_served_model_not_upstream() {
         "the upstream triple is unpopulated -- a query there is always Cold",
     );
 
-    // Act: drive the would-trim query path with the upstream wire id AND
-    // the served nickname threaded separately, mirroring the two dispatch
-    // call sites (pricing keys on upstream; K keys on the served model).
-    let effective = effective_row_for(PROVIDER_KIND, UPSTREAM);
-    router.record_would_trim(
-        &req,
-        Some(PROVIDER_KIND),
-        SERVED_MODEL,
-        &effective,
-        &mut meta,
-    );
+    // Act: drive the would-trim query path with the request carrying the
+    // upstream wire id and the served nickname threaded separately (K keys
+    // on the served model).
+    router.record_would_trim(&req, Some(PROVIDER_KIND), SERVED_MODEL, None, &mut meta);
 
-    // Assert: pricing resolved on the verified upstream cell (sanity that
-    // the query block was reached), AND the K query hit the calibrated
+    // Assert: the provider kind's cache rules priced K* (sanity that the
+    // query block was reached), AND the K query hit the calibrated
     // served-model window, so the floor is persisted. Before the fix the
     // query keyed on UPSTREAM, missed the store, stayed Cold, and left
     // would_trim_k_floor None.
@@ -240,7 +222,6 @@ fn shadow_store_and_k_store_key_identically_under_an_alias() {
     record_calibrated_samples(&router);
     let req = triggering_req();
     let mut meta = DispatchMeta::for_alias(SERVED_MODEL);
-    let effective = effective_row_for(PROVIDER_KIND, UPSTREAM);
     assert!(
         router.shadow_store.is_empty(),
         "a fresh router holds no shadow entries",
@@ -248,13 +229,7 @@ fn shadow_store_and_k_store_key_identically_under_an_alias() {
 
     // Act: one dispatch, which both reads the estimator and records into the
     // shadow monitor.
-    router.record_would_trim(
-        &req,
-        Some(PROVIDER_KIND),
-        SERVED_MODEL,
-        &effective,
-        &mut meta,
-    );
+    router.record_would_trim(&req, Some(PROVIDER_KIND), SERVED_MODEL, None, &mut meta);
 
     // Assert: the shadow entry is addressable by the SAME triple the K window
     // lives under, and nothing exists under the upstream-keyed triple. Probing
@@ -287,26 +262,15 @@ fn shadow_store_and_k_store_key_identically_under_an_alias() {
 }
 
 #[test]
-fn record_would_trim_folds_missing_baked_row_to_no_break_even() {
-    // Arrange: a provider_kind that names no baked cell at all -- not
-    // even a provider catch-all (every routectl-shipped provider kind
-    // carries one). The two-layer merge resolves `Missing`, which
-    // folds to the SAME conservative sentinel behavior as `Disabled`:
-    // no break-even K, even though the freed-token count still
-    // records.
+fn record_would_trim_records_no_break_even_for_a_kind_without_cache_rules() {
+    // Arrange: a provider_kind with no cache rules: no break-even K,
+    // even though the freed-token count still records.
     const UNKNOWN_KIND: &str = "totally-unknown-kind";
     let router = Router::new(Arc::new(Config::default()));
     let req = triggering_req();
     let mut meta = DispatchMeta::for_alias(SERVED_MODEL);
 
-    let effective = effective_row_for(UNKNOWN_KIND, UPSTREAM);
-    router.record_would_trim(
-        &req,
-        Some(UNKNOWN_KIND),
-        SERVED_MODEL,
-        &effective,
-        &mut meta,
-    );
+    router.record_would_trim(&req, Some(UNKNOWN_KIND), SERVED_MODEL, None, &mut meta);
 
     assert!(
         meta.would_trim_tokens.is_some(),
@@ -314,7 +278,7 @@ fn record_would_trim_folds_missing_baked_row_to_no_break_even() {
     );
     assert_eq!(
         meta.would_trim_break_even_k, None,
-        "a Missing catalog row must record K* = None",
+        "a kind without cache rules must record K* = None",
     );
 }
 

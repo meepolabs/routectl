@@ -6,15 +6,14 @@
 //! every branch of the gate fails toward EMIT -- so most of these tests are
 //! "this situation must NOT suppress".
 //!
-//! The pricing row is the baked `anthropic-api` cell for `upstream-model`
-//! (`wm = 1.25`, `rm = 0.1`, `auto_cacher = false`), whose emission
-//! break-even is `(1.25 - 1) / (1 - 0.1) = 0.278`. Tests derive `K*` from
-//! [`emission_break_even_k`] rather than hardcoding it, so a catalog
-//! re-price cannot silently invalidate the comparison they assert.
+//! The target's provider kind is `anthropic-api`, whose cache rules
+//! (`wm = 1.25`, `rm = 0.1`, `auto_cacher = false`) give an emission
+//! break-even of `(1.25 - 1) / (1 - 0.1) = 0.278`. Tests derive `K*` from
+//! [`emission_break_even_k`] over [`cache_rules`] rather than hardcoding it,
+//! except the one test that pins the constant itself.
 
 use super::*;
 
-use crate::catalog::{CatalogRow, EffectiveRow, Source};
 use crate::config::{CacheConfig, ProviderEntry};
 use crate::k_estimator::Confidence;
 use crate::resolved::ResolvedModel;
@@ -33,7 +32,7 @@ const PROVIDER_KIND: &str = "anthropic-api";
 /// Served nickname -- the label the sample write and this consult both key
 /// their model dimension on.
 const NICKNAME: &str = "m";
-/// Upstream wire id -- keys pricing, never the K triple.
+/// Upstream wire id -- never part of the K triple.
 const UPSTREAM: &str = "upstream-model";
 
 /// Captures every dispatched request; fails the first `fail_first` attempts
@@ -113,46 +112,18 @@ impl Provider for CapturingProvider {
     }
 }
 
-/// The baked effective row for `(anthropic-api, upstream-model)`, mirroring
-/// `factory::apply_catalog_overlay` (empty overlay, no `[cache_pricing]`).
-fn baked_row() -> EffectiveRow {
-    let baked = crate::catalog::lookup_baked_with_overrides(
-        PROVIDER_KIND,
-        UPSTREAM,
-        None,
-        &BTreeMap::new(),
-    );
-    crate::catalog::merge(baked.as_ref(), None)
-}
-
-/// The emission break-even `K*` of the fixture's pricing row.
+/// The emission break-even `K*` of the fixture's provider kind.
 fn k_star() -> f64 {
-    emission_break_even_k(
-        baked_row()
-            .priced()
-            .expect("baked anthropic cell is priced"),
-    )
-    .expect("the fixture row carries a write premium")
+    emission_break_even_k(&cache_rules(PROVIDER_KIND).expect("anthropic-api has cache rules"))
+        .expect("anthropic-api carries a write premium")
 }
 
-/// Wrap `row` as a `Present` merge result, so a test can price against a
-/// hand-built row (e.g. one flagged `auto_cacher`).
-fn present(row: CatalogRow) -> EffectiveRow {
-    EffectiveRow::Present {
-        row,
-        source: Source::Baked,
-        verified_at: "fixture".to_string(),
-    }
-}
-
-/// A router with one anthropic-api provider and one resolved model on the
-/// given effective row. `k_gated` drives the new kill switch; `global_emit`
-/// drives the global auto-emit master switch; `fail_first` drives
-/// multi-attempt idempotence.
+/// A router with one anthropic-api provider and one resolved model.
+/// `k_gated` drives the kill switch; `global_emit` drives the global
+/// auto-emit master switch; `fail_first` drives multi-attempt idempotence.
 fn rig(
     k_gated: bool,
     global_emit: bool,
-    effective_row: EffectiveRow,
     fail_first: usize,
 ) -> (Router, Arc<ParkingMutex<Vec<ChatRequest>>>) {
     let mut config = Config {
@@ -183,9 +154,7 @@ fn rig(
     let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
     models.insert(
         NICKNAME.into(),
-        Arc::new(
-            ResolvedModel::new(NICKNAME, "p", provider, UPSTREAM).with_effective_row(effective_row),
-        ),
+        Arc::new(ResolvedModel::new(NICKNAME, "p", provider, UPSTREAM)),
     );
     router.install_resolved_models(models);
     (router, captured)
@@ -254,20 +223,20 @@ fn front_marker(req: &ChatRequest) -> Option<CacheControl> {
     blocks.iter().rev().find_map(|b| b.cache_control.clone())
 }
 
-/// A target on the fixture row, as the chain expansion would produce it
+/// A target of `provider_kind`, as the chain expansion would produce it
 /// (nickname set, provider kind stamped). Used by the tests that drive the
 /// gate predicate directly rather than through a dispatch.
-fn target_on(row: EffectiveRow) -> DispatchTarget {
+fn target_on(provider_kind: Option<&'static str>) -> DispatchTarget {
     let provider: Arc<dyn Provider> = Arc::new(CapturingProvider {
         id: "cap".into(),
         captured: Arc::new(ParkingMutex::new(Vec::new())),
         fail_first: 0,
         seen: AtomicUsize::new(0),
     });
-    let mut target = into_one_dispatch_target(Arc::new(
-        ResolvedModel::new(NICKNAME, "p", provider, UPSTREAM).with_effective_row(row),
-    ));
-    target.provider_kind = Some(PROVIDER_KIND);
+    let mut target = into_one_dispatch_target(Arc::new(ResolvedModel::new(
+        NICKNAME, "p", provider, UPSTREAM,
+    )));
+    target.provider_kind = provider_kind;
     target
 }
 
@@ -281,7 +250,7 @@ fn eligible_plan(req: &ChatRequest) -> AutoCacheRequestPlan {
 
 #[tokio::test]
 async fn calibrated_low_k_session_withholds_both_markers_and_records_the_token() {
-    let (router, captured) = rig(true, true, baked_row(), 0);
+    let (router, captured) = rig(true, true, 0);
     record_samples(&router, 12, false);
 
     let dispatched = router
@@ -312,7 +281,7 @@ async fn calibrated_low_k_session_withholds_both_markers_and_records_the_token()
 async fn streaming_dispatch_suppresses_at_the_same_seam() {
     // The gate is wired at BOTH dispatch sites; a streaming request under
     // the same evidence must reach the same verdict.
-    let (router, captured) = rig(true, true, baked_row(), 0);
+    let (router, captured) = rig(true, true, 0);
     record_samples(&router, 12, false);
 
     let dispatched = router
@@ -335,7 +304,7 @@ async fn streaming_dispatch_suppresses_at_the_same_seam() {
 #[tokio::test]
 async fn calibrated_high_k_session_emits_bytes_identical_to_the_switch_off_run() {
     // The control run has the switch OFF, so its bytes ARE the baseline bytes.
-    let (control, control_captured) = rig(false, true, baked_row(), 0);
+    let (control, control_captured) = rig(false, true, 0);
     control
         .complete_with_options(req_with_session(Some(SESSION)), RouterOptions::new())
         .await
@@ -344,7 +313,7 @@ async fn calibrated_high_k_session_emits_bytes_identical_to_the_switch_off_run()
     let expected = serde_json::to_vec(control_captured.lock().first().expect("control dispatched"))
         .expect("serialize control");
 
-    let (router, captured) = rig(true, true, baked_row(), 0);
+    let (router, captured) = rig(true, true, 0);
     record_samples(&router, 12, true);
     let dispatched = router
         .complete_with_options(req_with_session(Some(SESSION)), RouterOptions::new())
@@ -372,7 +341,7 @@ async fn low_confidence_thin_sample_window_still_emits() {
     // Three all-miss samples sit below CALIBRATED_MIN_TRIALS, so the
     // estimator force-clamps k_floor to 0.0 -- numerically below K*, which a
     // bare compare would read as evidence of no reuse.
-    let (router, captured) = rig(true, true, baked_row(), 0);
+    let (router, captured) = rig(true, true, 0);
     record_samples(&router, 3, false);
 
     let estimate = router.k_estimator.estimate(
@@ -405,7 +374,7 @@ async fn low_confidence_thin_sample_window_still_emits() {
 
 #[tokio::test]
 async fn cold_estimator_emits() {
-    let (router, captured) = rig(true, true, baked_row(), 0);
+    let (router, captured) = rig(true, true, 0);
 
     let dispatched = router
         .complete_with_options(req_with_session(Some(SESSION)), RouterOptions::new())
@@ -425,7 +394,7 @@ async fn cold_estimator_emits() {
 async fn keyless_request_emits_even_with_a_low_window_recorded() {
     // The window exists under SESSION, but this request carries no session
     // key, so no triple identifies it and no evidence can apply.
-    let (router, captured) = rig(true, true, baked_row(), 0);
+    let (router, captured) = rig(true, true, 0);
     record_samples(&router, 12, false);
 
     let dispatched = router
@@ -447,12 +416,12 @@ fn a_target_with_no_nickname_never_suppresses() {
     // The sample write skips a nickname-less target entirely, so its window
     // is permanently cold; the gate must short-circuit rather than key the
     // read on some fallback label.
-    let (router, _captured) = rig(true, true, baked_row(), 0);
+    let (router, _captured) = rig(true, true, 0);
     record_samples(&router, 12, false);
 
     let req = req_with_session(Some(SESSION));
     let plan = eligible_plan(&req);
-    let mut target = target_on(baked_row());
+    let mut target = target_on(Some(PROVIDER_KIND));
     target.nickname = None;
 
     assert!(!router.k_emission_suppressed(&plan, &target, Some(SESSION)));
@@ -463,7 +432,7 @@ fn a_target_with_no_nickname_never_suppresses() {
 
 #[tokio::test]
 async fn switch_off_emits_the_baseline_markers_with_a_calibrated_low_window_present() {
-    let (router, captured) = rig(false, true, baked_row(), 0);
+    let (router, captured) = rig(false, true, 0);
     record_samples(&router, 12, false);
 
     // Guard: the evidence that WOULD suppress is present and calibrated.
@@ -492,7 +461,7 @@ async fn switch_off_emits_the_baseline_markers_with_a_calibrated_low_window_pres
 async fn same_target_retries_are_byte_identical_under_suppression() {
     // One consult per chain entry, above the retry loop: the second attempt
     // re-sends the bytes the first prepared.
-    let (router, captured) = rig(true, true, baked_row(), 1);
+    let (router, captured) = rig(true, true, 1);
     record_samples(&router, 12, false);
 
     router
@@ -561,16 +530,11 @@ async fn a_fallback_target_re_evaluates_suppression_from_its_own_consult() {
     let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
     models.insert(
         SUPPRESSED.into(),
-        Arc::new(
-            ResolvedModel::new(SUPPRESSED, "p", prov_first, UPSTREAM)
-                .with_effective_row(baked_row()),
-        ),
+        Arc::new(ResolvedModel::new(SUPPRESSED, "p", prov_first, UPSTREAM)),
     );
     models.insert(
         LIVE.into(),
-        Arc::new(
-            ResolvedModel::new(LIVE, "p", prov_second, UPSTREAM).with_effective_row(baked_row()),
-        ),
+        Arc::new(ResolvedModel::new(LIVE, "p", prov_second, UPSTREAM)),
     );
 
     let mut router = Router::new(Arc::new(config));
@@ -607,64 +571,67 @@ async fn a_fallback_target_re_evaluates_suppression_from_its_own_consult() {
     assert_eq!(up_second.cache_control, Some(CacheControl::ephemeral_5m()));
 }
 
-// ---- 8. An auto-cacher row never suppresses ----
+// ---- 8. Only a write-premium provider kind suppresses ----
 
 #[test]
-fn an_auto_cacher_row_never_suppresses_however_low_the_window() {
-    // A provider that caches for free must never have a marker withheld on
-    // economic grounds. Asserted against the ECONOMICS (the row's
-    // `auto_cacher` flag) rather than against the baseline per-provider
-    // defaults, which could change without changing the economics. The
-    // `auto_cacher` rows in the shipped catalog carry `wm > 1.0`, so a
-    // write-premium check alone would not cover them.
-    let (router, _captured) = rig(true, true, baked_row(), 0);
+fn suppression_follows_the_provider_kind_cache_rules() {
+    // Same calibrated all-miss window, same plan, same nickname: only the
+    // target's provider kind varies. A write-premium kind suppresses; an
+    // auto-cacher (including openai-responses, whose wm is above 1.0), a
+    // kind without cache rules, and a target with no kind never do.
+    let (router, _captured) = rig(true, true, 0);
     record_samples(&router, 12, false);
 
     let req = req_with_session(Some(SESSION));
     let plan = eligible_plan(&req);
 
-    let mut priced = baked_row().priced().expect("baked cell is priced").clone();
-    assert!(
-        priced.wm > 1.0,
-        "the control row must carry a write premium",
-    );
-
-    // Control: the identical row, not an auto-cacher, DOES suppress.
-    assert!(
-        router.k_emission_suppressed(&plan, &target_on(present(priced.clone())), Some(SESSION)),
-        "the control must suppress, or the auto-cacher assertion proves nothing",
-    );
-
-    priced.auto_cacher = true;
-    assert!(
-        !router.k_emission_suppressed(&plan, &target_on(present(priced)), Some(SESSION)),
-        "an auto-cacher row must never suppress",
-    );
+    let cases: [(&str, Option<&'static str>, bool); 7] = [
+        ("anthropic-api", Some("anthropic-api"), true),
+        ("bedrock", Some("bedrock"), true),
+        ("openai-compat", Some("openai-compat"), false),
+        ("openai-responses", Some("openai-responses"), false),
+        ("gemini", Some("gemini"), false),
+        ("unknown kind", Some("some-future-kind"), false),
+        ("no kind", None, false),
+    ];
+    for (label, provider_kind, expected) in cases {
+        // The window is keyed by provider kind, so each row gets its own.
+        if let Some(provider_kind) = provider_kind {
+            let base = SystemTime::now();
+            for i in 0..12u64 {
+                router.record_k_sample(
+                    Some(SESSION),
+                    provider_kind,
+                    NICKNAME,
+                    0,
+                    base - Duration::from_secs(12 - i),
+                );
+            }
+        }
+        assert_eq!(
+            router.k_emission_suppressed(&plan, &target_on(provider_kind), Some(SESSION)),
+            expected,
+            "{label}",
+        );
+    }
 }
 
 #[test]
-fn an_untrusted_merge_result_never_suppresses() {
-    // `Disabled` / `Missing` carry no trusted multipliers, so there is no
-    // honest K* to compare against -- the conservative answer is to emit.
-    let (router, _captured) = rig(true, true, baked_row(), 0);
-    record_samples(&router, 12, false);
+fn anthropic_api_break_even_comes_from_its_cache_rules() {
+    // (wm - 1) / (1 - rm) over the anthropic-api constants.
+    assert!((k_star() - 0.25 / 0.9).abs() < 1e-12, "K* was {}", k_star());
+}
 
-    let req = req_with_session(Some(SESSION));
-    let plan = eligible_plan(&req);
-
-    for row in [EffectiveRow::Disabled, EffectiveRow::Missing] {
-        assert!(
-            !router.k_emission_suppressed(&plan, &target_on(row), Some(SESSION)),
-            "an untrusted pricing cell must never suppress",
-        );
-    }
+#[test]
+fn k_gated_emission_defaults_off() {
+    assert!(!Config::default().cache.k_gated_emission);
 }
 
 // ---- 9. Suppression sits below caller_supplied and global_disabled ----
 
 #[tokio::test]
 async fn caller_supplied_outranks_suppression() {
-    let (router, captured) = rig(true, true, baked_row(), 0);
+    let (router, captured) = rig(true, true, 0);
     record_samples(&router, 12, false);
 
     let mut req = req_with_session(Some(SESSION));
@@ -692,7 +659,7 @@ async fn caller_supplied_outranks_suppression() {
 
 #[tokio::test]
 async fn global_disabled_outranks_suppression() {
-    let (router, _captured) = rig(true, false, baked_row(), 0);
+    let (router, _captured) = rig(true, false, 0);
     record_samples(&router, 12, false);
 
     let dispatched = router
@@ -761,21 +728,21 @@ fn the_ineligible_path_allocates_nothing_before_any_key_is_built() {
     // built only once the target is eligible. The measurement is
     // thread-confined (see `crate::alloc_probe`) so a parallel test's
     // allocations cannot land in the tally.
-    let (router, _captured) = rig(true, true, baked_row(), 0);
+    let (router, _captured) = rig(true, true, 0);
     record_samples(&router, 12, false);
 
     let req = req_with_session(Some(SESSION));
-    let target = target_on(baked_row());
+    let target = target_on(Some(PROVIDER_KIND));
     let eligible = eligible_plan(&req);
 
     let mut caller = AutoCacheRequestPlan::build(&req, true);
     caller.has_caller_breakpoints = true;
     let global_off = AutoCacheRequestPlan::build(&req, false);
 
-    let mut no_nickname = target_on(baked_row());
+    let mut no_nickname = target_on(Some(PROVIDER_KIND));
     no_nickname.nickname = None;
 
-    let (off_router, _) = rig(false, true, baked_row(), 0);
+    let (off_router, _) = rig(false, true, 0);
 
     for (label, router, plan, target, session) in [
         ("switch off", &off_router, &eligible, &target, Some(SESSION)),
@@ -829,7 +796,7 @@ fn the_consult_reads_the_triple_the_sample_write_wrote() {
     // the served NICKNAME; a consult that keyed the model dimension on the
     // upstream wire id would read a permanently-cold triple and never
     // suppress.
-    let (router, _captured) = rig(true, true, baked_row(), 0);
+    let (router, _captured) = rig(true, true, 0);
     record_samples(&router, 12, false);
 
     let derived = k_query_key(Some(SESSION), Some(PROVIDER_KIND), NICKNAME);
@@ -854,7 +821,11 @@ fn the_consult_reads_the_triple_the_sample_write_wrote() {
 
     let req = req_with_session(Some(SESSION));
     assert!(
-        router.k_emission_suppressed(&eligible_plan(&req), &target_on(baked_row()), Some(SESSION)),
+        router.k_emission_suppressed(
+            &eligible_plan(&req),
+            &target_on(Some(PROVIDER_KIND)),
+            Some(SESSION)
+        ),
         "the consult must read the nickname-keyed window the write created",
     );
 }
@@ -887,7 +858,7 @@ fn an_all_miss_calibrated_window_keeps_k_floor_below_the_break_even() {
     // which drives the Wilson lower bound (and with it `k_floor`) toward zero
     // and KEEPS the session suppressed. If a future estimator change lifted
     // an all-miss floor above K*, suppression would silently stop latching.
-    let (router, _captured) = rig(true, true, baked_row(), 0);
+    let (router, _captured) = rig(true, true, 0);
     let k_star = k_star();
 
     for extra in [0u64, 8, 20] {

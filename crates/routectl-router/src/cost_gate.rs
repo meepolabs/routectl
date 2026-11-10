@@ -1,7 +1,7 @@
 //! Pure break-even COST GATE for prompt-cache prefix reduction.
 //!
 //! This module answers a single question with arithmetic only: given a
-//! tier-correct [`CatalogRow`] and a proposed prefix edit, is breaking
+//! provider kind's [`CacheRules`] and a proposed prefix edit, is breaking
 //! the warm cache net-positive in dollars, or should the original prefix be
 //! kept? It is advisory-only: nothing here mutates a request,
 //! estimates the reuse count `K`, or touches the dispatch path. The caller
@@ -14,32 +14,89 @@
 //! Breaking is therefore worth it only when the read savings over the
 //! assumed future reuses exceed the one-time re-write / re-send tax.
 //!
-//! Two branches keyed on [`CatalogRow::auto_cacher`]:
+//! Two branches keyed on [`CacheRules::auto_cacher`]:
 //! - WRITE-PREMIUM providers (`auto_cacher == false`, e.g. Anthropic /
-//!   Bedrock / Qwen-explicit) pay a real write tax on the re-warm, so
+//!   Bedrock) pay a real write tax on the re-warm, so
 //!   BREAK iff `k * d * rm > c_after * wm`.
-//! - AUTO-CACHER providers (`auto_cacher == true`, e.g. OpenAI / DeepSeek /
-//!   Gemini-implicit) have free writes (`wm ~= 1.0`); the only one-time cost
-//!   is re-sending the disturbed suffix at miss price instead of a cheap
-//!   read, so BREAK iff `k * d * rm > c_after * (1 - rm)`.
+//! - AUTO-CACHER providers (`auto_cacher == true`, e.g. OpenAI-compatible
+//!   and Responses upstreams) have free writes; the only one-time cost is
+//!   re-sending the disturbed suffix at miss price instead of a cheap read,
+//!   so BREAK iff `k * d * rm > c_after * (1 - rm)`.
 //!
 //! Every doubt resolves to KEEP: no candidate, or a post-cut prefix below
 //! the cacheable floor, force KEEP before the branch inequality is even
-//! consulted. TRUST is no longer this module's concern: a row's
-//! provenance lives on the two-layer merge result
-//! ([`crate::catalog::EffectiveRow`]), and callers gate whether to invoke
-//! [`evaluate`] / [`break_even_k`] at all -- a `Disabled` / `Missing` merge
-//! result never reaches this module.
+//! consulted. A provider kind with no rules ([`cache_rules`] returns `None`)
+//! never reaches [`evaluate`] / [`break_even_k`]: callers treat it as
+//! unpriced.
 //!
 //! A separate, simpler question lives here too:
 //! [`emission_break_even_k`] prices PLACING a breakpoint (1 write + `K`
 //! reads) rather than editing a warm prefix, so it needs no candidate and no
 //! token counts -- see its own docs.
 //!
-//! Purity: depends only on [`crate::catalog::CatalogRow`] and std. The
-//! `f32` row multipliers are widened to `f64` for the arithmetic.
+//! Purity: depends only on `routectl-core`'s provider-kind vocabulary and
+//! std. Rules are per provider kind, not per model: nothing here reads a
+//! price.
 
-use crate::catalog::CatalogRow;
+use routectl_core::provider_kind::config as kind;
+
+/// Prompt-cache economics of one provider kind, as multipliers of the base
+/// input price.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CacheRules {
+    /// Cache-write multiplier.
+    pub wm: f64,
+    /// Cache-read multiplier.
+    pub rm: f64,
+    /// How long a written prefix stays warm, in seconds.
+    pub ttl_seconds: u32,
+    /// Smallest prefix the provider caches, in tokens.
+    pub min_prefix_tokens: u32,
+    /// The provider caches on its own with no write premium, so a marker
+    /// is never withheld on economic grounds.
+    pub auto_cacher: bool,
+}
+
+const WRITE_PREMIUM_5M: CacheRules = CacheRules {
+    wm: 1.25,
+    rm: 0.1,
+    ttl_seconds: 300,
+    min_prefix_tokens: 4096,
+    auto_cacher: false,
+};
+
+const OPENAI_COMPAT_RULES: CacheRules = CacheRules {
+    wm: 1.0,
+    rm: 0.1,
+    ttl_seconds: 300,
+    min_prefix_tokens: 4096,
+    auto_cacher: true,
+};
+
+const OPENAI_RESPONSES_RULES: CacheRules = CacheRules {
+    wm: 1.25,
+    rm: 0.1,
+    ttl_seconds: 86_400,
+    min_prefix_tokens: 1024,
+    auto_cacher: true,
+};
+
+/// The TTL window to measure reuse over when a provider kind has no
+/// [`CacheRules`]: the shortest window any kind uses.
+pub const UNPRICED_TTL_SECONDS: u32 = 300;
+
+/// The cache rules for a `[providers.X] kind`, or `None` when the kind has
+/// none (Gemini, or a kind this build does not know), which every caller
+/// treats as unpriced.
+#[must_use]
+pub fn cache_rules(provider_kind: &str) -> Option<CacheRules> {
+    match provider_kind {
+        kind::ANTHROPIC_API | kind::BEDROCK => Some(WRITE_PREMIUM_5M),
+        kind::OPENAI_COMPAT => Some(OPENAI_COMPAT_RULES),
+        kind::OPENAI_RESPONSES => Some(OPENAI_RESPONSES_RULES),
+        _ => None,
+    }
+}
 
 /// A proposed prefix reduction handed to the gate. Immutable; the gate never
 /// mutates it. Token counts are in prefix tokens.
@@ -80,11 +137,10 @@ pub enum KeepReason {
     /// provider's cacheable floor, so the remainder re-bills at full input
     /// price every request. A hard KEEP.
     BelowMinPrefix,
-    /// No trusted row to price against: the two-layer merge resolved
-    /// `Disabled` or `Missing` ([`crate::catalog::EffectiveRow`]). This
-    /// module no longer derives this itself (a redesign removed the per-row
-    /// `verified` flag) -- CALLERS construct this variant directly when
-    /// they choose not to invoke [`evaluate`] at all.
+    /// No cache rules to price against: [`cache_rules`] returned `None` for
+    /// the target's provider kind. This module never derives it itself;
+    /// CALLERS construct this variant directly when they choose not to
+    /// invoke [`evaluate`] at all.
     InsufficientData,
     /// There is nothing to remove (`d == 0` or `c_after == 0`).
     NoCandidate,
@@ -137,34 +193,22 @@ impl GateDecision {
 /// (within the TTL window) at which breaking the cache turns net-positive.
 ///
 /// Returns `None` when there is nothing to remove (`d == 0`), which would
-/// otherwise divide by zero. Branch on [`CatalogRow::auto_cacher`]:
+/// otherwise divide by zero. Branch on [`CacheRules::auto_cacher`]:
 /// - write-premium: `K* = (c_after * wm) / (d * rm)`.
 /// - auto-cacher:   `K* = (c_after * (1 - rm)) / (d * rm)`.
-///
-/// Arithmetic is in `f64` (the `f32` row fields are widened) to avoid
-/// precision loss on the deep DeepSeek read multipliers.
 #[must_use]
-pub fn break_even_k(row: &CatalogRow, candidate: &PrefixReductionCandidate) -> Option<f64> {
+pub fn break_even_k(rules: &CacheRules, candidate: &PrefixReductionCandidate) -> Option<f64> {
     if candidate.d == 0 {
         return None;
     }
     // A non-positive read multiplier means reads are free, so no finite
     // break-even reuse count exists; return None rather than dividing by
     // zero (which would yield inf).
-    if row.rm as f64 <= 0.0 {
+    if rules.rm <= 0.0 {
         return None;
     }
-    let c_after = candidate.c_after as f64;
-    let d = candidate.d as f64;
-    let wm = row.wm as f64;
-    let rm = row.rm as f64;
-    let read_savings_per_reuse = d * rm;
-    let one_time_cost = if row.auto_cacher {
-        c_after * (1.0 - rm)
-    } else {
-        c_after * wm
-    };
-    Some(one_time_cost / read_savings_per_reuse)
+    let read_savings_per_reuse = candidate.d as f64 * rules.rm;
+    Some(one_time_cost(rules, candidate.c_after) / read_savings_per_reuse)
 }
 
 /// Emission-side break-even reuse count `K*`: the minimum per-turn prefix
@@ -178,7 +222,7 @@ pub fn break_even_k(row: &CatalogRow, candidate: &PrefixReductionCandidate) -> O
 /// ```
 ///
 /// The base input price `C` cancels, so this needs no token counts and no
-/// [`PrefixReductionCandidate`] -- it is a per-row constant. It is a
+/// [`PrefixReductionCandidate`] -- it is a per-kind constant. It is a
 /// deliberately separate function from [`break_even_k`], which prices a
 /// prefix EDIT and requires a candidate that has no emission-side analogue.
 ///
@@ -187,66 +231,42 @@ pub fn break_even_k(row: &CatalogRow, candidate: &PrefixReductionCandidate) -> O
 /// - `wm <= 1.0`: writes carry no premium, so `K*` would be zero or
 ///   negative.
 /// - `rm >= 1.0`: a read costs at least a fresh miss, which would make the
-///   denominator zero or negative. Degenerate row data; the conservative
-///   answer is to keep emitting.
-/// - [`CatalogRow::auto_cacher`]: a provider that caches for free must never
+///   denominator zero or negative.
+/// - [`CacheRules::auto_cacher`]: a provider that caches for free must never
 ///   have a marker withheld on economic grounds. This is checked
-///   explicitly rather than inferred from `wm`, so the gate's correctness
-///   rests on the economics rather than on a distant, changeable
-///   provider-kind default -- the baked auto-cacher rows in fact carry a
+///   explicitly rather than inferred from `wm`: the Responses rules carry a
 ///   `wm` above `1.0`.
-///
-/// Arithmetic is in `f64` (the `f32` row fields are widened).
 #[must_use]
-pub fn emission_break_even_k(row: &CatalogRow) -> Option<f64> {
-    if row.auto_cacher {
+pub fn emission_break_even_k(rules: &CacheRules) -> Option<f64> {
+    if rules.auto_cacher || rules.wm <= 1.0 || rules.rm >= 1.0 {
         return None;
     }
-    let wm = f64::from(row.wm);
-    let rm = f64::from(row.rm);
-    if wm <= 1.0 || rm >= 1.0 {
-        return None;
-    }
-    Some((wm - 1.0) / (1.0 - rm))
+    Some((rules.wm - 1.0) / (1.0 - rules.rm))
 }
 
 /// Decide KEEP vs BREAK for a candidate at an assumed reuse count `k`.
 ///
 /// Guards run in order, each short-circuiting to KEEP:
 /// 1. `d == 0` or `c_after == 0` -> `Keep { NoCandidate }`.
-/// 2. `(c - d) < row.min_prefix_tokens` -> `Keep { BelowMinPrefix }`.
+/// 2. `(c - d) < rules.min_prefix_tokens` -> `Keep { BelowMinPrefix }`.
 /// 3. otherwise the branch inequality: BREAK iff `k * d * rm` beats the
 ///    one-time tax (write-premium: `c_after * wm`; auto-cacher:
 ///    `c_after * (1 - rm)`).
-///
-/// Trust-gating moved OUT of this function: callers decide whether
-/// `row` is trustworthy enough to price (i.e. whether the two-layer merge
-/// resolved `Present`) BEFORE calling `evaluate` at all; a `Disabled` /
-/// `Missing` merge result should never reach here.
 #[must_use]
-pub fn evaluate(row: &CatalogRow, candidate: &PrefixReductionCandidate, k: f64) -> GateDecision {
+pub fn evaluate(rules: &CacheRules, candidate: &PrefixReductionCandidate, k: f64) -> GateDecision {
     if candidate.d == 0 || candidate.c_after == 0 {
         return GateDecision::Keep {
             reason: KeepReason::NoCandidate,
         };
     }
-    if candidate.c.saturating_sub(candidate.d) < u64::from(row.min_prefix_tokens) {
+    if candidate.c.saturating_sub(candidate.d) < u64::from(rules.min_prefix_tokens) {
         return GateDecision::Keep {
             reason: KeepReason::BelowMinPrefix,
         };
     }
 
-    let c_after = candidate.c_after as f64;
-    let d = candidate.d as f64;
-    let wm = row.wm as f64;
-    let rm = row.rm as f64;
-    let read_savings = k * d * rm;
-    let one_time_cost = if row.auto_cacher {
-        c_after * (1.0 - rm)
-    } else {
-        c_after * wm
-    };
-    if read_savings > one_time_cost {
+    let read_savings = k * candidate.d as f64 * rules.rm;
+    if read_savings > one_time_cost(rules, candidate.c_after) {
         GateDecision::Break {
             delta_tokens: candidate.d,
         }
@@ -257,10 +277,21 @@ pub fn evaluate(row: &CatalogRow, candidate: &PrefixReductionCandidate, k: f64) 
     }
 }
 
+/// The one-time tax of breaking a warm prefix whose disturbed suffix is
+/// `c_after` tokens: a re-write at `wm`, or for an auto-cacher a re-send at
+/// miss price instead of a read.
+fn one_time_cost(rules: &CacheRules, c_after: u64) -> f64 {
+    let c_after = c_after as f64;
+    if rules.auto_cacher {
+        c_after * (1.0 - rules.rm)
+    } else {
+        c_after * rules.wm
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::catalog::{CatalogRow, lookup};
 
     // The doc's worked-result scenario, reused as the K* oracle:
     // 200k cached prefix, drop 50k oldest-first, so c_after == c == 200k.
@@ -272,411 +303,291 @@ mod tests {
         PrefixReductionCandidate::new(D, C_AFTER, C)
     }
 
-    // -- break_even_k oracle, lookup-driven where the row is reachable -----
+    fn rules_for(provider_kind: &str) -> CacheRules {
+        cache_rules(provider_kind).expect("kind carries cache rules")
+    }
+
+    /// Write-premium rules with arbitrary multipliers, for pinning the
+    /// formulas independently of any shipped constant.
+    fn write_premium(wm: f64, rm: f64) -> CacheRules {
+        CacheRules {
+            wm,
+            rm,
+            ttl_seconds: 300,
+            min_prefix_tokens: 1,
+            auto_cacher: false,
+        }
+    }
+
+    // -- cache_rules: the per-kind constants ---------------------------------
 
     #[test]
-    fn break_even_k_anthropic_5m_is_fifty() {
-        // Arrange: write-premium row, wm=1.25, rm=0.10, auto_cacher=false.
-        let row = lookup("anthropic-api", "claude-opus-4-8", Some("5m"));
-        assert!(!row.auto_cacher, "anthropic must be write-premium");
-
-        // Act
-        let k_star = break_even_k(&row, &scenario()).expect("d > 0");
-
-        // Assert: (200000 * 1.25) / (50000 * 0.10) == 50. The f32 row
-        // multipliers widen to f64, so allow a small float tolerance.
-        assert!((k_star - 50.0).abs() < 1e-4, "K* was {k_star}");
+    fn cache_rules_per_provider_kind_match_the_shipped_constants() {
+        // Each row restates the economics the provider's catch-all cache row
+        // carried before rules became per-kind constants.
+        let cases: [(&str, Option<CacheRules>); 5] = [
+            (
+                "anthropic-api",
+                Some(CacheRules {
+                    wm: 1.25,
+                    rm: 0.1,
+                    ttl_seconds: 300,
+                    min_prefix_tokens: 4096,
+                    auto_cacher: false,
+                }),
+            ),
+            (
+                "bedrock",
+                Some(CacheRules {
+                    wm: 1.25,
+                    rm: 0.1,
+                    ttl_seconds: 300,
+                    min_prefix_tokens: 4096,
+                    auto_cacher: false,
+                }),
+            ),
+            (
+                "openai-compat",
+                Some(CacheRules {
+                    wm: 1.0,
+                    rm: 0.1,
+                    ttl_seconds: 300,
+                    min_prefix_tokens: 4096,
+                    auto_cacher: true,
+                }),
+            ),
+            (
+                "openai-responses",
+                Some(CacheRules {
+                    wm: 1.25,
+                    rm: 0.1,
+                    ttl_seconds: 86_400,
+                    min_prefix_tokens: 1024,
+                    auto_cacher: true,
+                }),
+            ),
+            ("gemini", None),
+        ];
+        for (provider_kind, expected) in cases {
+            assert_eq!(
+                cache_rules(provider_kind),
+                expected,
+                "cache rules for {provider_kind}",
+            );
+        }
     }
 
     #[test]
-    fn break_even_k_anthropic_1h_is_eighty() {
-        // Arrange: the 1h tier flows a distinct row (wm=2.0) -- pins that the
-        // tier-correct row reaches the math.
-        let row = lookup("anthropic-api", "claude-opus-4-8", Some("1h"));
-        assert_eq!(row.wm, 2.0);
-
-        // Act
-        let k_star = break_even_k(&row, &scenario()).expect("d > 0");
-
-        // Assert: (200000 * 2.0) / (50000 * 0.10) == 80.
-        assert!((k_star - 80.0).abs() < 1e-4, "K* was {k_star}");
+    fn cache_rules_none_for_an_unknown_kind() {
+        assert_eq!(cache_rules("some-future-kind"), None);
+        assert_eq!(cache_rules(""), None);
     }
 
-    #[test]
-    fn break_even_k_openai_auto_cacher_is_thirty_six() {
-        // Arrange: auto-cacher row (the one-time cost ignores `wm` for
-        // auto-cachers -- see `break_even_k`), rm=0.10.
-        let row = lookup("openai-responses", "gpt-5.5", None);
-        assert!(row.auto_cacher, "openai-responses must be an auto-cacher");
-
-        // Act
-        let k_star = break_even_k(&row, &scenario()).expect("d > 0");
-
-        // Assert: (200000 * (1 - 0.10)) / (50000 * 0.10) == 36.
-        assert!((k_star - 36.0).abs() < 1e-4, "K* was {k_star}");
-    }
+    // -- break_even_k --------------------------------------------------------
 
     #[test]
-    fn break_even_k_deepseek_pro_is_about_four_seventy_six() {
-        // Arrange: deepest read multiplier (rm = 1/120, the generated
-        // catalog's exact ratio -- see `catalog_codegen`), auto-cacher.
-        let row = lookup("openai-compat", "deepseek-v4-pro", None);
-        assert!(row.auto_cacher);
-
-        // Act
-        let k_star = break_even_k(&row, &scenario()).expect("d > 0");
-
-        // Assert: computed from the row's ACTUAL rm. (200000 * (1 - rm)) /
-        // (50000 * rm), which for rm = 1/120 reduces to 200000 * 119 / 50000
-        // = 476 exactly (up to f32 rounding of rm itself).
-        let rm = row.rm as f64;
-        let expected = (C_AFTER as f64 * (1.0 - rm)) / (D as f64 * rm);
-        assert!((k_star - expected).abs() < 1e-6, "K* was {k_star}");
-        assert!(
-            (475.9..476.1).contains(&k_star),
-            "K* {k_star} should land near 476 for rm=1/120",
-        );
+    fn break_even_k_per_provider_kind() {
+        // write-premium: (200000 * 1.25) / (50000 * 0.10) == 50.
+        // auto-cacher:   (200000 * (1 - 0.10)) / (50000 * 0.10) == 36.
+        let cases = [
+            ("anthropic-api", 50.0),
+            ("bedrock", 50.0),
+            ("openai-compat", 36.0),
+            ("openai-responses", 36.0),
+        ];
+        for (provider_kind, expected) in cases {
+            let k_star = break_even_k(&rules_for(provider_kind), &scenario()).expect("d > 0");
+            assert!(
+                (k_star - expected).abs() < 1e-9,
+                "{provider_kind}: K* was {k_star}, expected {expected}",
+            );
+        }
     }
 
     #[test]
     fn break_even_k_returns_none_when_nothing_removed() {
-        // Arrange: a real baked row but d == 0.
-        let row = lookup("anthropic-api", "claude-opus-4-8", Some("5m"));
         let candidate = PrefixReductionCandidate::new(0, C_AFTER, C);
-
-        // Act / Assert: no break-even, no divide-by-zero.
-        assert_eq!(break_even_k(&row, &candidate), None);
+        assert_eq!(break_even_k(&rules_for("anthropic-api"), &candidate), None);
     }
 
     #[test]
-    fn break_even_k_pure_row_write_premium_matches_formula() {
-        // A direct sentinel construction exercises the pure math without a
-        // table lookup (the sentinel is write-premium, wm=2.0, rm=0.10).
-        let row = CatalogRow::sentinel();
-        assert!(!row.auto_cacher);
+    fn break_even_k_returns_none_when_reads_are_free() {
+        assert_eq!(break_even_k(&write_premium(1.25, 0.0), &scenario()), None);
+    }
 
-        let k_star = break_even_k(&row, &scenario()).expect("d > 0");
-
+    #[test]
+    fn break_even_k_write_premium_scales_with_wm() {
         // (200000 * 2.0) / (50000 * 0.10) == 80.
-        assert!((k_star - 80.0).abs() < 1e-4, "K* was {k_star}");
-    }
-
-    // -- emission_break_even_k: the per-row constant ------------------------
-
-    #[test]
-    fn emission_break_even_k_anthropic_5m_is_about_zero_point_two_eight() {
-        // Arrange: wm=1.25, rm=0.10.
-        let row = lookup("anthropic-api", "claude-opus-4-8", Some("5m"));
-        assert_eq!(row.wm, 1.25);
-
-        // Act
-        let k_star = emission_break_even_k(&row).expect("wm > 1.0");
-
-        // Assert: (1.25 - 1) / (1 - 0.10) == 0.2777...
-        assert!((k_star - 0.277_777_8).abs() < 1e-4, "K* was {k_star}");
-    }
-
-    #[test]
-    fn emission_break_even_k_anthropic_1h_is_about_one_point_one_one() {
-        // Arrange: the 1h tier row carries the doubled write premium.
-        let row = lookup("anthropic-api", "claude-opus-4-8", Some("1h"));
-        assert_eq!(row.wm, 2.0);
-
-        // Act
-        let k_star = emission_break_even_k(&row).expect("wm > 1.0");
-
-        // Assert: (2.0 - 1) / (1 - 0.10) == 1.111...
-        assert!((k_star - 1.111_111_1).abs() < 1e-4, "K* was {k_star}");
-    }
-
-    #[test]
-    fn emission_break_even_k_real_auto_cacher_row_never_suppresses() {
-        // Arrange: a REAL baked auto-cacher row. It carries wm=1.25, so the
-        // wm guard alone would NOT cover it -- `auto_cacher` is checked in
-        // its own right.
-        let row = lookup("openai-responses", "gpt-5.5", None);
-        assert!(row.auto_cacher, "openai-responses must be an auto-cacher");
-        assert!(row.wm > 1.0, "row wm was {} -- test premise gone", row.wm);
-
-        // Act / Assert: None == never suppress.
-        assert_eq!(emission_break_even_k(&row), None);
-    }
-
-    #[test]
-    fn emission_break_even_k_no_write_premium_never_suppresses() {
-        // Arrange: `wm == 1.0` on an explicit-breakpoint row -- no write
-        // premium to recover, independent of the auto-cacher guard.
-        use crate::catalog::CachePricingOverride;
-        let ov = CachePricingOverride {
-            wm: Some(1.0),
-            override_acknowledges_cost_risk: true,
-            ..Default::default()
-        };
-        let row = CatalogRow::sentinel()
-            .with_overrides(&ov)
-            .expect("accepted with ack");
-        assert!(!row.auto_cacher, "must be write-premium");
-
-        // Act / Assert: None == never suppress.
-        assert_eq!(emission_break_even_k(&row), None);
-    }
-
-    #[test]
-    fn emission_break_even_k_none_when_write_premium_below_one() {
-        // A wm strictly BELOW 1.0 (a write cheaper than a miss) is also
-        // never-suppress, not a negative break-even.
-        use crate::catalog::CachePricingOverride;
-        let ov = CachePricingOverride {
-            wm: Some(0.5),
-            override_acknowledges_cost_risk: true,
-            ..Default::default()
-        };
-        let row = CatalogRow::sentinel()
-            .with_overrides(&ov)
-            .expect("accepted with ack");
-
-        assert_eq!(emission_break_even_k(&row), None);
-    }
-
-    #[test]
-    fn emission_break_even_k_none_on_degenerate_read_multiplier() {
-        // rm >= 1.0 zeroes or inverts the denominator; the conservative
-        // answer is never-suppress rather than inf / a negative K*.
-        use crate::catalog::CachePricingOverride;
-        let ov = CachePricingOverride {
-            wm: Some(1.25),
-            rm: Some(1.0),
-            override_acknowledges_cost_risk: true,
-            ..Default::default()
-        };
-        let row = CatalogRow::sentinel()
-            .with_overrides(&ov)
-            .expect("accepted with ack");
-        assert!(!row.auto_cacher, "must reach the rm guard, not auto_cacher");
-
-        assert_eq!(emission_break_even_k(&row), None);
-    }
-
-    #[test]
-    fn emission_break_even_k_ignores_the_edit_side_candidate_shape() {
-        // The emission constant depends on the row alone: the 5m row's K*
-        // is unchanged by any prefix-edit sizing, which is exactly why it
-        // needs no `PrefixReductionCandidate`.
-        let row = lookup("anthropic-api", "claude-opus-4-8", Some("5m"));
-        let emission = emission_break_even_k(&row).expect("wm > 1.0");
-        let edit = break_even_k(&row, &scenario()).expect("d > 0");
-
-        assert!(
-            emission < edit,
-            "emission K* {emission} must be far below the edit-side K* {edit}",
-        );
-    }
-
-    // -- evaluate verdicts: write-premium branch ---------------------------
-
-    #[test]
-    fn evaluate_write_premium_breaks_above_break_even_k() {
-        // Arrange: K* == 50 for this anthropic 5m row.
-        let row = lookup("anthropic-api", "claude-opus-4-8", Some("5m"));
-
-        // Act: k just above the threshold.
-        let decision = evaluate(&row, &scenario(), 50.0001);
-
-        // Assert
-        assert_eq!(decision, GateDecision::Break { delta_tokens: D });
-    }
-
-    #[test]
-    fn evaluate_write_premium_keeps_below_break_even_k() {
-        // Arrange: same row, K* == 50.
-        let row = lookup("anthropic-api", "claude-opus-4-8", Some("5m"));
-
-        // Act: k just below the threshold (also the doc's K=30 -> KEEP).
-        let decision = evaluate(&row, &scenario(), 49.9999);
-
-        // Assert
-        assert_eq!(
-            decision,
-            GateDecision::Keep {
-                reason: KeepReason::NetNegative
-            }
-        );
-    }
-
-    // -- evaluate verdicts: auto-cacher branch + branch-split proof --------
-
-    #[test]
-    fn evaluate_auto_cacher_breaks_above_its_lower_threshold() {
-        // Arrange: openai auto-cacher, K* == 36.
-        let row = lookup("openai-responses", "gpt-5.5", None);
-
-        // Act
-        let decision = evaluate(&row, &scenario(), 36.0001);
-
-        // Assert
-        assert_eq!(decision, GateDecision::Break { delta_tokens: D });
-    }
-
-    #[test]
-    fn evaluate_auto_cacher_keeps_below_its_threshold() {
-        // Arrange: openai auto-cacher, K* == 36.
-        let row = lookup("openai-responses", "gpt-5.5", None);
-
-        // Act: k just below the threshold.
-        let decision = evaluate(&row, &scenario(), 35.9999);
-
-        // Assert
-        assert_eq!(
-            decision,
-            GateDecision::Keep {
-                reason: KeepReason::NetNegative
-            }
-        );
-    }
-
-    #[test]
-    fn auto_cacher_threshold_is_lower_than_write_premium_at_same_rm() {
-        // Both rows share rm=0.10; the only difference is the write premium.
-        // The auto-cacher (tau_eff = (1-rm)/rm = 9) must break at a strictly
-        // lower K than the write-premium row (tau = wm/rm = 12.5). This is
-        // the branch split made observable.
-        let write_premium = lookup("anthropic-api", "claude-opus-4-8", Some("5m"));
-        let auto_cacher = lookup("openai-responses", "gpt-5.5", None);
-        assert_eq!(write_premium.rm, auto_cacher.rm, "same rm by construction");
-
-        let k_wp = break_even_k(&write_premium, &scenario()).expect("d > 0");
-        let k_ac = break_even_k(&auto_cacher, &scenario()).expect("d > 0");
-
-        assert!(
-            k_ac < k_wp,
-            "auto-cacher K* {k_ac} must be below write-premium K* {k_wp}",
-        );
+        let k_star = break_even_k(&write_premium(2.0, 0.1), &scenario()).expect("d > 0");
+        assert!((k_star - 80.0).abs() < 1e-9, "K* was {k_star}");
     }
 
     #[test]
     fn break_even_k_mid_prefix_cut_uses_c_after_not_c() {
-        // Arrange: a mid-prefix cut where the disturbed suffix that must
-        // re-write (c_after) is far smaller than the total cached prefix (c).
-        // Write-premium anthropic 5m row (wm=1.25, rm=0.10).
-        let row = lookup("anthropic-api", "claude-opus-4-8", Some("5m"));
+        // K* = (c_after * wm) / (d * rm) = (50000 * 1.25) / (10000 * 0.10)
+        // = 62.5. Proves the formula uses c_after (the re-write cost), not
+        // the full prefix c.
         let candidate = PrefixReductionCandidate::new(10_000, 50_000, 200_000);
+        let k_star = break_even_k(&rules_for("anthropic-api"), &candidate).expect("d > 0");
+        assert!((k_star - 62.5).abs() < 1e-9, "K* was {k_star}");
+    }
 
-        // Act
-        let k_star = break_even_k(&row, &candidate).expect("d > 0");
+    #[test]
+    fn auto_cacher_threshold_is_lower_than_write_premium_at_same_rm() {
+        // Same rm and wm; the only difference is the auto_cacher flag. The
+        // auto-cacher (tau_eff = (1-rm)/rm = 9) must break at a strictly
+        // lower K than the write-premium kind (tau = wm/rm = 12.5).
+        let wp = rules_for("anthropic-api");
+        let ac = rules_for("openai-responses");
+        assert_eq!((wp.wm, wp.rm), (ac.wm, ac.rm), "same multipliers");
 
-        // Assert: K* = (c_after * wm) / (d * rm) = (50000 * 1.25) /
-        // (10000 * 0.10) = 62.5. Proves the formula uses c_after (the
-        // re-write cost), not the full prefix c.
-        assert!((k_star - 62.5).abs() < 1e-4, "K* was {k_star}");
+        let k_wp = break_even_k(&wp, &scenario()).expect("d > 0");
+        let k_ac = break_even_k(&ac, &scenario()).expect("d > 0");
+        assert!(k_ac < k_wp, "auto-cacher K* {k_ac} must be below {k_wp}");
+    }
+
+    // -- emission_break_even_k -----------------------------------------------
+
+    #[test]
+    fn emission_break_even_k_per_provider_kind() {
+        // Write-premium kinds: (1.25 - 1) / (1 - 0.10) == 0.2777...
+        // Auto-cachers never suppress, including openai-responses whose wm
+        // is above 1.0, so the auto_cacher flag (not wm) decides it.
+        let cases = [
+            ("anthropic-api", Some(0.25 / 0.9)),
+            ("bedrock", Some(0.25 / 0.9)),
+            ("openai-compat", None),
+            ("openai-responses", None),
+        ];
+        for (provider_kind, expected) in cases {
+            let got = emission_break_even_k(&rules_for(provider_kind));
+            match (got, expected) {
+                (Some(g), Some(e)) => {
+                    assert!((g - e).abs() < 1e-12, "{provider_kind}: K* was {g}");
+                }
+                _ => assert_eq!(got, expected, "{provider_kind}"),
+            }
+        }
+    }
+
+    #[test]
+    fn emission_break_even_k_never_suppresses_without_a_finite_break_even() {
+        let cases = [
+            ("no write premium", write_premium(1.0, 0.1)),
+            ("write cheaper than a miss", write_premium(0.5, 0.1)),
+            ("read costs a full miss", write_premium(1.25, 1.0)),
+        ];
+        for (label, rules) in cases {
+            assert_eq!(emission_break_even_k(&rules), None, "{label}");
+        }
+    }
+
+    #[test]
+    fn emission_break_even_k_is_far_below_the_edit_side_k() {
+        let rules = rules_for("anthropic-api");
+        let emission = emission_break_even_k(&rules).expect("wm > 1.0");
+        let edit = break_even_k(&rules, &scenario()).expect("d > 0");
+        assert!(emission < edit, "emission K* {emission} vs edit K* {edit}");
+    }
+
+    // -- evaluate ------------------------------------------------------------
+
+    #[test]
+    fn evaluate_breaks_above_and_keeps_below_the_break_even_k() {
+        let net_negative = GateDecision::Keep {
+            reason: KeepReason::NetNegative,
+        };
+        let brk = GateDecision::Break { delta_tokens: D };
+        let cases = [
+            ("write-premium above", "anthropic-api", 50.0001, brk.clone()),
+            (
+                "write-premium below",
+                "anthropic-api",
+                49.9999,
+                net_negative.clone(),
+            ),
+            ("auto-cacher above", "openai-responses", 36.0001, brk),
+            (
+                "auto-cacher below",
+                "openai-responses",
+                35.9999,
+                net_negative,
+            ),
+        ];
+        for (label, provider_kind, k, expected) in cases {
+            assert_eq!(
+                evaluate(&rules_for(provider_kind), &scenario(), k),
+                expected,
+                "{label}",
+            );
+        }
     }
 
     #[test]
     fn evaluate_at_exact_break_even_k_keeps_net_negative() {
-        // Arrange: a row with f32-exact multipliers (wm=1.0, rm=0.125) and a
-        // candidate (c_after=50_000, d=8_000) chosen so K* is EXACTLY 50.0
-        // with no float drift: (50_000 * 1.0) / (8_000 * 0.125) == 50.0.
-        // Built off the sentinel via overrides.
-        use crate::catalog::CachePricingOverride;
-        let ov = CachePricingOverride {
-            wm: Some(1.0),
-            rm: Some(0.125),
-            min_prefix_tokens: Some(1),
-            override_acknowledges_cost_risk: true,
-            ..Default::default()
-        };
-        let row = CatalogRow::sentinel()
-            .with_overrides(&ov)
-            .expect("accepted with ack");
-        assert!(!row.auto_cacher, "must be write-premium");
+        // f64-exact multipliers (wm=1.0, rm=0.125) and a candidate chosen so
+        // K* is EXACTLY 50.0: (50_000 * 1.0) / (8_000 * 0.125) == 50.0. The
+        // contract is strict `>`, so a tie is not a Break.
+        let rules = write_premium(1.0, 0.125);
         let candidate = PrefixReductionCandidate::new(8_000, 50_000, 200_000);
-        let k_star = break_even_k(&row, &candidate).expect("d > 0");
-        assert_eq!(k_star, 50.0, "K* must be exactly 50.0, was {k_star}");
+        assert_eq!(break_even_k(&rules, &candidate), Some(50.0));
 
-        // Act: k EXACTLY at the threshold. The contract is strict `>`, so a
-        // tie is not a Break.
-        let decision = evaluate(&row, &candidate, 50.0);
-
-        // Assert
         assert_eq!(
-            decision,
+            evaluate(&rules, &candidate, 50.0),
             GateDecision::Keep {
                 reason: KeepReason::NetNegative
             }
         );
     }
 
-    // -- guard tests -------------------------------------------------------
-
     #[test]
-    fn evaluate_no_longer_gates_on_row_trust_internally() {
-        // The per-row `verified` flag is gone; `evaluate` prices ANY
-        // row handed to it -- trust-gating (whether to call `evaluate` at
-        // all) moved to the caller, which reads the two-layer merge result
-        // (`crate::catalog::EffectiveRow`) before ever reaching this
-        // module. A sentinel row now runs the normal branch inequality
-        // instead of an internal guard.
-        let row = CatalogRow::sentinel();
-        let decision = evaluate(&row, &scenario(), 1_000_000.0);
-        assert_eq!(decision, GateDecision::Break { delta_tokens: D });
-    }
-
-    #[test]
-    fn insufficient_data_is_caller_constructed_not_evaluate_derived() {
-        // `KeepReason::InsufficientData` still exists as a variant callers
-        // construct directly (see `routectl-cli`'s `prompt_size` and the
-        // router's `EffectiveRow` fold) -- pin that it round-trips through
-        // `GateDecision` / `strategy_str` like any other reason.
-        let decision = GateDecision::Keep {
-            reason: KeepReason::InsufficientData,
-        };
-        assert_eq!(decision.strategy_str(), "cost_gate:keep");
-    }
-
-    #[test]
-    fn evaluate_zero_delta_keeps_no_candidate() {
-        let row = lookup("anthropic-api", "claude-opus-4-8", Some("5m"));
-        let candidate = PrefixReductionCandidate::new(0, C_AFTER, C);
-        let decision = evaluate(&row, &candidate, 1_000.0);
-        assert_eq!(
-            decision,
-            GateDecision::Keep {
-                reason: KeepReason::NoCandidate
-            }
-        );
-    }
-
-    #[test]
-    fn evaluate_zero_c_after_keeps_no_candidate() {
-        let row = lookup("anthropic-api", "claude-opus-4-8", Some("5m"));
-        let candidate = PrefixReductionCandidate::new(D, 0, C);
-        let decision = evaluate(&row, &candidate, 1_000.0);
-        assert_eq!(
-            decision,
-            GateDecision::Keep {
-                reason: KeepReason::NoCandidate
-            }
-        );
+    fn evaluate_keeps_no_candidate_when_nothing_to_remove() {
+        let rules = rules_for("anthropic-api");
+        let cases = [
+            ("d == 0", PrefixReductionCandidate::new(0, C_AFTER, C)),
+            ("c_after == 0", PrefixReductionCandidate::new(D, 0, C)),
+        ];
+        for (label, candidate) in cases {
+            assert_eq!(
+                evaluate(&rules, &candidate, 1_000_000.0),
+                GateDecision::Keep {
+                    reason: KeepReason::NoCandidate
+                },
+                "{label}",
+            );
+        }
     }
 
     #[test]
     fn evaluate_below_min_prefix_keeps_even_with_favorable_k() {
-        // Arrange: the Opus 4.8 row has min_prefix_tokens = 1024. Cut so the
-        // remaining prefix (c - d) falls below that floor.
-        let row = lookup("anthropic-api", "claude-opus-4-8", Some("5m"));
-        assert_eq!(row.min_prefix_tokens, 1024);
-        // c = 1500, d = 1000 -> remaining 500 < 1024. c_after non-zero.
-        let candidate = PrefixReductionCandidate::new(1_000, 1_500, 1_500);
+        // The anthropic-api floor is 4096 tokens: c = 5000, d = 1000 leaves
+        // 4000 below it, while c = 6000 leaves 5000 above it (control).
+        let rules = rules_for("anthropic-api");
+        let below = PrefixReductionCandidate::new(1_000, 5_000, 5_000);
+        let above = PrefixReductionCandidate::new(1_000, 5_000, 6_000);
 
-        // Act: a hugely favorable k must still lose to the hard KEEP.
-        let decision = evaluate(&row, &candidate, 1_000_000.0);
-
-        // Assert
         assert_eq!(
-            decision,
+            evaluate(&rules, &below, 1_000_000.0),
             GateDecision::Keep {
                 reason: KeepReason::BelowMinPrefix
             }
         );
+        assert_eq!(
+            evaluate(&rules, &above, 1_000_000.0),
+            GateDecision::Break {
+                delta_tokens: 1_000
+            }
+        );
+    }
+
+    #[test]
+    fn insufficient_data_is_caller_constructed_not_evaluate_derived() {
+        // Callers construct `InsufficientData` when a kind has no rules; pin
+        // that it round-trips through `strategy_str` like any other reason.
+        let decision = GateDecision::Keep {
+            reason: KeepReason::InsufficientData,
+        };
+        assert_eq!(decision.strategy_str(), "cost_gate:keep");
     }
 
     // -- strategy_str token stability --------------------------------------

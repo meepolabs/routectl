@@ -14,13 +14,6 @@ const PROVIDER_KIND: &str = "anthropic-api";
 const SERVED_MODEL: &str = "pt-opus-4-8";
 const UPSTREAM: &str = "claude-opus-4-8";
 
-/// The merged `EffectiveRow` a chain-build hands `record_would_trim`.
-fn effective_row_for(provider_kind: &str, model: &str) -> EffectiveRow {
-    use crate::catalog::{lookup_baked_with_overrides, merge};
-    let baked = lookup_baked_with_overrides(provider_kind, model, None, &BTreeMap::new());
-    merge(baked.as_ref(), None)
-}
-
 /// A one-turn request far below any plausible trim trigger.
 fn tiny_req() -> ChatRequest {
     ChatRequest {
@@ -46,16 +39,9 @@ fn calibration_estimate_is_stamped_below_the_trim_trigger() {
     let router = Router::new(Arc::new(Config::default()));
     let req = tiny_req();
     let mut meta = DispatchMeta::for_alias(SERVED_MODEL);
-    let effective = effective_row_for(PROVIDER_KIND, UPSTREAM);
 
     // Act
-    router.record_would_trim(
-        &req,
-        Some(PROVIDER_KIND),
-        SERVED_MODEL,
-        &effective,
-        &mut meta,
-    );
+    router.record_would_trim(&req, Some(PROVIDER_KIND), SERVED_MODEL, None, &mut meta);
 
     // Assert: the trim advisories all declined (proving the early return was
     // taken) while the calibration estimate still landed, carrying exactly
@@ -78,7 +64,6 @@ fn calibration_estimate_is_the_last_dispatched_attempts_estimate() {
     // carrying a materially larger payload -- the shape a chain walk that
     // falls forward produces.
     let router = Router::new(Arc::new(Config::default()));
-    let effective = effective_row_for(PROVIDER_KIND, UPSTREAM);
     let mut meta = DispatchMeta::for_alias(SERVED_MODEL);
     let first = tiny_req();
     let mut second = tiny_req();
@@ -96,13 +81,7 @@ fn calibration_estimate_is_the_last_dispatched_attempts_estimate() {
 
     // Act
     for req in [&first, &second] {
-        router.record_would_trim(
-            req,
-            Some(PROVIDER_KIND),
-            SERVED_MODEL,
-            &effective,
-            &mut meta,
-        );
+        router.record_would_trim(req, Some(PROVIDER_KIND), SERVED_MODEL, None, &mut meta);
     }
 
     // Assert: last-writer-wins, so the value describes the attempt whose

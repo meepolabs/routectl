@@ -16,13 +16,14 @@ use routectl_core::{
     sanitize_for_log, scan_caller_prefix_advisory,
 };
 
-use crate::catalog::{CatalogRow, EffectiveRow};
 use crate::config::{ResolvedTuning, RetryPolicy};
 use crate::context_trim::{
     SteadyStateTrimParams, collect_near_lossless_marks, estimate_total_tokens,
     near_lossless_candidate, propose_steady_state_trim, trimmed_prefix_fingerprint,
 };
-use crate::cost_gate::{break_even_k, emission_break_even_k};
+use crate::cost_gate::{
+    CacheRules, UNPRICED_TTL_SECONDS, break_even_k, cache_rules, emission_break_even_k,
+};
 
 use super::cache_plan::AutoCacheRequestPlan;
 use super::capability_observe::{EvidencePolicy, UntranslatedCapabilities};
@@ -556,7 +557,7 @@ impl Router {
     /// `params.trigger_tokens`. Below the trigger, records no would-trim
     /// advisory at all (every `would_trim_*` field stays `None`) and returns
     /// early. At or above it, runs TWO independent measurements against the
-    /// same resolved `(provider_kind, model)` pricing row:
+    /// same provider kind's [`CacheRules`]:
     ///
     /// 1. The shipped size-baseline plan (`propose_steady_state_trim`):
     ///    freed-token count `d`, break-even K*, `k_floor`, and the shadow
@@ -585,18 +586,15 @@ impl Router {
     /// into ONE helper -- invoked from `run_walk`, which every message
     /// surface shares -- so the dispatch paths cannot drift.
     ///
-    /// An unknown / unresolved-catalog target (e.g. `provider_kind` is
-    /// `None` for a legacy / direct-construction target, or the two-layer
-    /// merge resolves `Disabled` / `Missing`) records freed-token /
-    /// attribution counts but no break-even K*: a merge result other than
-    /// `Present` carries no trusted multipliers, so a break-even number
-    /// would be misleading. This matches the offline prompt-size advisory
-    /// convention (compute `break_even_k` only when the merge resolved
-    /// `Present`).
+    /// A target whose provider kind has no cache rules (`provider_kind` is
+    /// `None` for a direct-construction target, or [`cache_rules`] returns
+    /// `None`, as for Gemini) records freed-token / attribution counts but
+    /// no break-even K*: there are no multipliers to price against, so a
+    /// break-even number would be misleading.
     ///
     /// Additionally, when the size-baseline plan exists, consults the
     /// in-process [`crate::k_estimator::KEstimator`] over the request's
-    /// `inbound_session_key` and the SAME pricing row's `ttl_seconds` (which
+    /// `inbound_session_key` and the SAME rules' `ttl_seconds` (which
     /// bounds the age of the samples the estimate may count).
     /// The estimate's `k_floor` is stamped onto `meta.would_trim_k_floor` only
     /// for a `Calibrated` confidence (the only bound the cost gate may
@@ -615,9 +613,8 @@ impl Router {
     /// it is what makes the read triple byte-identical to the sample-write
     /// triple. Keying on the upstream wire id instead silently misses the store,
     /// holds every estimate at `Cold`, and leaves `would_trim_k_floor`
-    /// permanently `None`. Pricing needs the upstream id, but it is looked up at
-    /// chain-build time and arrives here already resolved as `effective`, so
-    /// this function never sees the wire id at all. When a target has no
+    /// permanently `None`. Cache rules are per provider kind, so this
+    /// function never needs the wire id at all. When a target has no
     /// nickname (`served_model` falls back to the wire id), no sample is ever
     /// recorded for that dispatch either, so the fallback never mis-keys a
     /// populated window.
@@ -626,7 +623,7 @@ impl Router {
         attempt_req: &ChatRequest,
         provider_kind: Option<&'static str>,
         served_model: &str,
-        effective: &EffectiveRow,
+        context_window: Option<u32>,
         meta: &mut DispatchMeta,
     ) {
         let params = self.config.trim.to_params();
@@ -641,25 +638,14 @@ impl Router {
             return;
         }
 
-        // The two-layer merge (baked catalog + overlay) is resolved
-        // once at chain-build time and rides the resolved target
-        // (`ResolvedModel::effective_row`, stamped by
-        // `factory::apply_catalog_overlay`) -- this dispatch-path function
-        // only reads the precomputed result, never re-runs
-        // `lookup_baked_with_overrides` + `merge` per request. `Present`
-        // prices normally; `Disabled` / `Missing` fold to the SAME
-        // conservative sentinel behavior (`row` below is `None`). Shared
-        // by both the size-baseline block below and the near-lossless
-        // pass, so the two measurements price against the identical
-        // resolved cell.
-        let row = effective.priced();
+        let rules = provider_kind.and_then(cache_rules);
 
         if let Some(plan) = propose_steady_state_trim(attempt_req, &params) {
             meta.would_trim_tokens = Some(plan.candidate.d);
-            let break_even = row.and_then(|r| break_even_k(r, &plan.candidate));
+            let break_even = rules.and_then(|r| break_even_k(&r, &plan.candidate));
             meta.would_trim_break_even_k = break_even;
 
-            // Consult the K estimator over the SAME row whose TTL priced K*:
+            // Consult the K estimator over the SAME rules whose TTL priced K*:
             // the estimator counts only samples younger than that TTL, so a
             // `k_floor` is measured over the same cache period `break_even`
             // is priced for and the two are comparable. The current sample
@@ -668,10 +654,9 @@ impl Router {
             // from the shared `k_query_key` derivation, which keys the model
             // dimension on `served_model` (the nickname), NOT the upstream
             // `model`, so this read matches the triple `record_k_sample`
-            // writes under. A `Disabled` / `Missing` cell has no row to read
-            // `ttl_seconds` from; the sentinel's TTL is the same conservative
-            // default used everywhere else a trusted row is unavailable.
-            let ttl_seconds = row.map_or(CatalogRow::sentinel().ttl_seconds, |r| r.ttl_seconds);
+            // writes under. A kind with no rules has no TTL of its own, so
+            // the window falls back to the shortest one any kind uses.
+            let ttl_seconds = rules.map_or(UNPRICED_TTL_SECONDS, |r| r.ttl_seconds);
             let k_key = k_query_key(
                 attempt_req.routectl_internal.inbound_session_key.as_deref(),
                 provider_kind,
@@ -736,7 +721,7 @@ impl Router {
             }
         }
 
-        record_near_lossless_marks(attempt_req, &params, row, meta);
+        record_near_lossless_marks(attempt_req, &params, rules, context_window, meta);
     }
 
     /// Should BOTH auto-cache markers be withheld from this target because
@@ -745,8 +730,8 @@ impl Router {
     /// Consulted ONCE per chain entry, immediately before
     /// `apply_auto_cache_placement` and above the same-target retry loop, so
     /// every retry of one target dispatches byte-identical bytes while a
-    /// fallback target re-evaluates against ITS own row and triple. The
-    /// verdict is per-(session, provider_kind, served nickname, priced row),
+    /// fallback target re-evaluates against ITS own rules and triple. The
+    /// verdict is per-(session, provider_kind, served nickname),
     /// which is why it is passed as an argument rather than stored on
     /// `AutoCacheRequestPlan` (whose facts are target-invariant).
     ///
@@ -768,9 +753,9 @@ impl Router {
     ///
     /// Only then is the K triple built and the estimator consulted. The
     /// numeric compare is additionally gated on `may_suppress` (Calibrated
-    /// only) and on the row having a finite emission break-even: an
-    /// auto-cacher, a premium-free row, or an untrusted (`Disabled` /
-    /// `Missing`) merge result never suppresses.
+    /// only) and on the provider kind's [`CacheRules`] having a finite
+    /// emission break-even: an auto-cacher, a premium-free kind, or a kind
+    /// with no rules (Gemini) never suppresses.
     pub(super) fn k_emission_suppressed(
         &self,
         plan: &AutoCacheRequestPlan,
@@ -788,16 +773,16 @@ impl Router {
             return false;
         };
 
-        let Some(row) = target.model.effective_row.priced() else {
+        let Some(rules) = target.provider_kind.and_then(cache_rules) else {
             return false;
         };
-        let Some(break_even) = emission_break_even_k(row) else {
+        let Some(break_even) = emission_break_even_k(&rules) else {
             return false;
         };
 
         let key = k_query_key(Some(session_key), target.provider_kind, served_model);
         let estimate = self.k_estimator.estimate(&key.query(
-            Duration::from_secs(u64::from(row.ttl_seconds)),
+            Duration::from_secs(u64::from(rules.ttl_seconds)),
             SystemTime::now(),
         ));
         may_suppress(&estimate) && estimate.k_floor < break_even
@@ -819,13 +804,13 @@ pub(super) const NEAR_LOSSLESS_RECORDER_VERSION: i64 = 1;
 /// zero-or-more-marks results as `Some(0)` (a measured zero), distinct from
 /// the caller's `None` (pass did not run, below trigger).
 ///
-/// `would_trim_context_fraction` is fail-closed: `None` whenever `row`'s
-/// context window is unknown, never a guessed value. `row` is `None` when
-/// the two-layer merge resolved `Disabled` / `Missing` -- context_fraction
-/// and break-even fold to the same `None` in that case.
+/// `would_trim_context_fraction` is fail-closed: `None` whenever the target
+/// has no configured `[models.X] context_window`, never a guessed value. It
+/// does not depend on `rules`.
 ///
 /// Prices the near-lossless candidate via the UNCHANGED `break_even_k` gate,
-/// present-row-only, mirroring the `would_trim_break_even_k` convention --
+/// only when the kind has rules, mirroring the `would_trim_break_even_k`
+/// convention --
 /// but only LOGS the result via `tracing::debug!`. There is no persisted
 /// column for it: unlike the shipped size-baseline plan, the near-lossless
 /// candidate has no DispatchMeta / UsageRecord economics field.
@@ -838,7 +823,8 @@ pub(super) const NEAR_LOSSLESS_RECORDER_VERSION: i64 = 1;
 fn record_near_lossless_marks(
     attempt_req: &ChatRequest,
     params: &SteadyStateTrimParams,
-    row: Option<&CatalogRow>,
+    rules: Option<CacheRules>,
+    context_window: Option<u32>,
     meta: &mut DispatchMeta,
 ) {
     let n = attempt_req.messages.len();
@@ -850,12 +836,11 @@ fn record_near_lossless_marks(
     meta.would_trim_supersession_tokens = Some(marks.supersession_tokens);
     meta.would_trim_path_units = Some(marks.path_units);
     meta.would_trim_path_extractable = Some(marks.path_extractable);
-    meta.would_trim_context_fraction = row
-        .and_then(|r| r.max_context_tokens)
-        .map(|window| estimate_total_tokens(attempt_req) as f64 / window as f64);
+    meta.would_trim_context_fraction =
+        context_window.map(|window| estimate_total_tokens(attempt_req) as f64 / window as f64);
 
     if let Some(candidate) = near_lossless_candidate(attempt_req, &marks.marks) {
-        let break_even = row.and_then(|r| break_even_k(r, &candidate));
+        let break_even = rules.and_then(|r| break_even_k(&r, &candidate));
         tracing::debug!(
             dedup_tokens = marks.dedup_tokens,
             supersession_tokens = marks.supersession_tokens,
@@ -949,7 +934,7 @@ pub(super) fn may_suppress(estimate: &crate::k_estimator::KEstimate) -> bool {
 
 /// Pure helper that selects the `would_trim_k_floor` value recorded by
 /// `Router::record_would_trim`. Returns `Some(estimate.k_floor)` only when
-/// `break_even` is a Present-row K* AND the estimator's confidence is
+/// `break_even` is a priced K* AND the estimator's confidence is
 /// `Calibrated`; every other case records `None`. The met/unmet/cold/
 /// unpriced verdict is derived downstream as a pure query over the numeric
 /// advisory columns (`would_trim_break_even_k`, `would_trim_k_floor`).
