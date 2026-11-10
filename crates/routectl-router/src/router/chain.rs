@@ -62,7 +62,8 @@ impl Router {
     }
 
     /// The context window in tokens routectl would report for the wire
-    /// model `model`, or `None` when its first target configures none.
+    /// model `model`, or `None` when its first target configures none or
+    /// names an OAuth credential `oauth_activated` does not confirm.
     /// Backs the `context_length` field on `GET /v1/models`.
     ///
     /// Resolution mirrors `dispatch_chain`'s first two steps only:
@@ -77,7 +78,17 @@ impl Router {
     /// served by a later chain target whose window differs from the one
     /// reported here. The reported figure is the first CONFIGURED target's,
     /// not a prediction of which target will serve -- discovery describes the
-    /// route's head, it does not simulate a dispatch.
+    /// route's head, it does not simulate a dispatch. The same holds for the
+    /// credential check: a first target with an unconfirmed OAuth credential
+    /// suppresses the window even when a later target would serve.
+    ///
+    /// `oauth_activated` is asked about the bare OAuth provider id (any
+    /// `#seat` label stripped) when the first target's provider
+    /// `api_key_ref` names one; an api-key or env-ref target never consults
+    /// it. The caller owns the live credential inventory, which is held
+    /// beside `Router` rather than inside it. A pool-backed model's
+    /// `provider_name` is the pool name rather than a `[providers]` key, so
+    /// the config lookup misses and the predicate is not consulted for it.
     ///
     /// No `default` catch-all fallback (unlike `dispatch_chain`): every id
     /// this method is asked about is a listed alias key or nickname (the
@@ -99,44 +110,31 @@ impl Router {
     /// metrics and rotates round-robin state, and a discovery read must not
     /// perturb routing.
     #[must_use]
-    pub fn context_window_for(&self, model: &str) -> Option<u32> {
+    pub fn context_window_for(
+        &self,
+        model: &str,
+        oauth_activated: impl Fn(&str) -> bool,
+    ) -> Option<u32> {
         let first = self.first_chain_target(model)?;
-        first.context_window_tokens()
+        let window = first.context_window_tokens()?;
+        match self.oauth_id_of(&first) {
+            Some(oauth_id) if !oauth_activated(oauth_id) => None,
+            _ => Some(window),
+        }
     }
 
-    /// The OAuth provider id the first chain target's `api_key_ref` names,
-    /// if it names one at all. Backs the discovery-time servability check:
-    /// the CLI handler pairs this with the live `ActivationState` (held
-    /// beside `Router`, never imported here) to decide whether
-    /// [`Self::context_window_for`]'s answer describes a route with an
-    /// actually-usable credential.
-    ///
-    /// Same resolution and FIRST-CONFIGURED-TARGET semantics as
-    /// [`Self::context_window_for`] (see its docs for the full rationale):
-    /// a model whose first target is oauth-broken but whose fallback
-    /// target is healthy still reports the first target's oauth id here,
-    /// so a caller suppressing on this can suppress a window that would in
-    /// fact be served by a later target. Discovery describes the route's
-    /// head, it does not simulate a dispatch.
-    ///
-    /// A pool-backed model's `provider_name` is the pool name rather than a
-    /// `[providers]` key (see `dispatch_target_for_seat`), so the config
-    /// lookup below misses and this returns `None` even when a seat's own
-    /// oauth credential is absent -- that per-seat case is a separate,
-    /// already-filed gap; this method closes the non-pooled case only.
-    #[must_use]
-    pub fn first_target_oauth_id(&self, model: &str) -> Option<String> {
-        let first = self.first_chain_target(model)?;
-        let provider_entry = self.config.providers.get(&first.provider_name)?;
-        let api_key_ref = provider_entry.api_key_ref()?;
-        crate::activation::oauth_id_from_api_key_ref(api_key_ref).map(str::to_string)
+    /// The bare OAuth provider id `target`'s provider `api_key_ref` names,
+    /// if it names one at all.
+    fn oauth_id_of(&self, target: &ResolvedModel) -> Option<&str> {
+        let provider_entry = self.config.providers.get(&target.provider_name)?;
+        crate::activation::oauth_id_from_api_key_ref(provider_entry.api_key_ref()?)
     }
 
-    /// Shared first-target resolution behind [`Self::context_window_for`]
-    /// and [`Self::first_target_oauth_id`]: exact-then-glob alias match,
-    /// else a direct `[models]` nickname, both read off the INSTALLED
-    /// resolved-model table (never `dispatch_chain`, which would perturb
-    /// pool round-robin state and metrics on a discovery read).
+    /// First-target resolution behind [`Self::context_window_for`]:
+    /// exact-then-glob alias match, else a direct `[models]` nickname, both
+    /// read off the INSTALLED resolved-model table (never `dispatch_chain`,
+    /// which would perturb pool round-robin state and metrics on a discovery
+    /// read).
     fn first_chain_target(&self, model: &str) -> Option<Arc<ResolvedModel>> {
         match self.resolve_v6_alias(model) {
             Ok(Some(chain)) => chain.into_iter().next(),

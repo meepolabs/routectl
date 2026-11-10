@@ -1535,6 +1535,10 @@ fn expired_learned_negative_admits_one_probe_through_filter() {
 // resolution rules around it: first chain entry, no `default` fallback,
 // and a zero window degrading to unknown on both surfaces.
 
+/// The credential predicate for fixtures on an api-key ref, which never
+/// consult it.
+const NO_OAUTH_ACTIVATED: fn(&str) -> bool = |_| false;
+
 /// A resolved model on provider `p` stamped from its `[models.X]` entry
 /// through the factory's own per-model stamp.
 fn stamped_model(nickname: &str, entry: &crate::config::ModelEntry) -> ResolvedModel {
@@ -1624,9 +1628,15 @@ fn context_window_for_reports_the_first_chain_targets_window() {
     // window, not the tail's, and not the largest in the chain.
     let router = router_with_window(&[("head", Some(200_000)), ("tail", Some(1_000_000))], &[]);
 
-    assert_eq!(router.context_window_for("chain"), Some(200_000));
+    assert_eq!(
+        router.context_window_for("chain", NO_OAUTH_ACTIVATED),
+        Some(200_000)
+    );
     // A direct `[models]` nickname resolves through the same accessor.
-    assert_eq!(router.context_window_for("tail"), Some(1_000_000));
+    assert_eq!(
+        router.context_window_for("tail", NO_OAUTH_ACTIVATED),
+        Some(1_000_000)
+    );
 }
 
 #[test]
@@ -1639,15 +1649,18 @@ fn context_window_for_is_none_for_an_unset_window_or_an_unlisted_id() {
         &[("default", AliasValue::Single("known".into()))],
     );
 
-    assert_eq!(router.context_window_for("unset"), None);
+    assert_eq!(router.context_window_for("unset", NO_OAUTH_ACTIVATED), None);
     assert_eq!(
-        router.context_window_for("not-a-configured-id"),
+        router.context_window_for("not-a-configured-id", NO_OAUTH_ACTIVATED),
         None,
         "the `default` catch-all must not answer for an unlisted id",
     );
     // Positive control: the fixture DOES report a window for a listed id, so
     // the two Nones above are about resolution, not a broken fixture.
-    assert_eq!(router.context_window_for("known"), Some(128_000));
+    assert_eq!(
+        router.context_window_for("known", NO_OAUTH_ACTIVATED),
+        Some(128_000)
+    );
 }
 
 #[test]
@@ -1664,8 +1677,8 @@ fn a_zero_window_degrades_to_unknown_on_discovery_and_keeps_the_gate_target() {
         &[],
     );
 
-    assert_eq!(router.context_window_for("chain"), None);
-    assert_eq!(router.context_window_for("zero"), None);
+    assert_eq!(router.context_window_for("chain", NO_OAUTH_ACTIVATED), None);
+    assert_eq!(router.context_window_for("zero", NO_OAUTH_ACTIVATED), None);
 
     let chain = router
         .dispatch_chain("chain", None)
@@ -1720,112 +1733,101 @@ fn context_window_for_is_none_for_a_configured_model_missing_from_the_installed_
     router.install_resolved_models(resolved);
 
     assert_eq!(
-        router.context_window_for("failed-to-build"),
+        router.context_window_for("failed-to-build", NO_OAUTH_ACTIVATED),
         None,
         "a config-only nickname has no dispatch target, so its window is unknown",
     );
     assert_eq!(
-        router.context_window_for("alias-to-failed"),
+        router.context_window_for("alias-to-failed", NO_OAUTH_ACTIVATED),
         None,
         "an alias whose whole chain failed to build reports no window either",
     );
     // Positive control: the read DOES answer for a model that is installed,
     // so the two Nones above are about the missing table entry rather than a
     // fixture that reports nothing at all.
-    assert_eq!(router.context_window_for("installed"), Some(128_000));
-}
-
-// ---- first_target_oauth_id: the oauth-id read backing enrichment suppression ----
-
-#[test]
-fn first_target_oauth_id_reports_the_bare_oauth_id() {
-    let mut config = Config::default();
-    config.providers.insert(
-        "p".into(),
-        ProviderEntry::anthropic_api("oauth://anthropic"),
-    );
-    config.models.insert(
-        "claude".into(),
-        crate::config::ModelEntry::new("p", "claude"),
-    );
-    let mut router = Router::new(Arc::new(config));
-    let mut resolved: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
-    resolved.insert(
-        "claude".into(),
-        Arc::new(ResolvedModel::new(
-            "claude",
-            "p",
-            make_provider("p"),
-            "claude",
-        )),
-    );
-    router.install_resolved_models(resolved);
-
     assert_eq!(
-        router.first_target_oauth_id("claude"),
-        Some("anthropic".to_string())
+        router.context_window_for("installed", NO_OAUTH_ACTIVATED),
+        Some(128_000)
     );
 }
 
-#[test]
-fn first_target_oauth_id_strips_a_seat_label_suffix() {
-    let mut config = Config::default();
-    config.providers.insert(
-        "p".into(),
-        ProviderEntry::anthropic_api("oauth://anthropic#work"),
-    );
-    config.models.insert(
-        "claude".into(),
-        crate::config::ModelEntry::new("p", "claude"),
-    );
-    let mut router = Router::new(Arc::new(config));
-    let mut resolved: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
-    resolved.insert(
-        "claude".into(),
-        Arc::new(ResolvedModel::new(
-            "claude",
-            "p",
-            make_provider("p"),
-            "claude",
-        )),
-    );
-    router.install_resolved_models(resolved);
+// ---- context_window_for: the oauth credential check backing enrichment suppression ----
 
-    assert_eq!(
-        router.first_target_oauth_id("claude"),
-        Some("anthropic".to_string()),
-        "a pool seat label after '#' must not leak into the reported oauth id",
-    );
-}
-
-#[test]
-fn first_target_oauth_id_is_none_for_an_api_key_or_env_ref() {
+/// A router with one installed model `claude` on provider `p`, whose
+/// `api_key_ref` is `api_key_ref`, configuring a 128k window.
+fn router_with_key_ref(api_key_ref: &str) -> Router {
     let mut config = Config::default();
     config
         .providers
-        .insert("p".into(), ProviderEntry::anthropic_api("literal:k"));
-    config.models.insert(
-        "claude".into(),
-        crate::config::ModelEntry::new("p", "claude"),
-    );
-    let mut router = Router::new(Arc::new(config));
+        .insert("p".into(), ProviderEntry::anthropic_api(api_key_ref));
+    let entry = windowed_entry("claude", Some(128_000));
     let mut resolved: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
-    resolved.insert(
-        "claude".into(),
-        Arc::new(ResolvedModel::new(
-            "claude",
-            "p",
-            make_provider("p"),
-            "claude",
-        )),
-    );
+    resolved.insert("claude".into(), Arc::new(stamped_model("claude", &entry)));
+    config.models.insert("claude".into(), entry);
+    let mut router = Router::new(Arc::new(config));
     router.install_resolved_models(resolved);
+    router
+}
 
-    assert_eq!(
-        router.first_target_oauth_id("claude"),
-        None,
-        "positive control: the same fixture with a non-oauth ref must not name an id",
-    );
+#[test]
+fn context_window_for_suppresses_a_first_target_whose_oauth_credential_is_unconfirmed() {
+    struct Row {
+        name: &'static str,
+        api_key_ref: &'static str,
+        activated: &'static [&'static str],
+        expected_window: Option<u32>,
+        expected_asked: &'static [&'static str],
+    }
+    let rows = [
+        Row {
+            name: "bare oauth ref, activated",
+            api_key_ref: "oauth://anthropic",
+            activated: &["anthropic"],
+            expected_window: Some(128_000),
+            expected_asked: &["anthropic"],
+        },
+        Row {
+            name: "bare oauth ref, not activated",
+            api_key_ref: "oauth://anthropic",
+            activated: &[],
+            expected_window: None,
+            expected_asked: &["anthropic"],
+        },
+        Row {
+            name: "seat-labeled oauth ref asks about the bare id",
+            api_key_ref: "oauth://anthropic#work",
+            activated: &["anthropic"],
+            expected_window: Some(128_000),
+            expected_asked: &["anthropic"],
+        },
+        Row {
+            name: "seat-labeled oauth ref, only the labeled id activated",
+            api_key_ref: "oauth://anthropic#work",
+            activated: &["anthropic#work"],
+            expected_window: None,
+            expected_asked: &["anthropic"],
+        },
+        Row {
+            name: "api-key ref never consults the predicate",
+            api_key_ref: "literal:k",
+            activated: &[],
+            expected_window: Some(128_000),
+            expected_asked: &[],
+        },
+    ];
+
+    for row in rows {
+        let router = router_with_key_ref(row.api_key_ref);
+        let asked = std::cell::RefCell::new(Vec::<String>::new());
+
+        let window = router.context_window_for("claude", |oauth_id| {
+            asked.borrow_mut().push(oauth_id.to_string());
+            row.activated.contains(&oauth_id)
+        });
+
+        assert_eq!(window, row.expected_window, "{}", row.name);
+        assert_eq!(asked.into_inner(), row.expected_asked, "{}", row.name);
+    }
 }
 
 /// Discovery and the gate read one configured window: a `[models.X]
@@ -1839,7 +1841,10 @@ fn the_gate_and_discovery_read_the_same_configured_window() {
         u32::try_from(crate::context_trim::estimate_total_tokens(&req) / 2).expect("fits u32");
     let router = router_with_window(&[("shrunk", Some(configured)), ("unconfirmed", None)], &[]);
 
-    assert_eq!(router.context_window_for("chain"), Some(configured));
+    assert_eq!(
+        router.context_window_for("chain", NO_OAUTH_ACTIVATED),
+        Some(configured)
+    );
     let chain = router
         .dispatch_chain("chain", None)
         .expect("chain resolves");

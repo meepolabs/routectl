@@ -6341,8 +6341,7 @@ pub async fn routectl_router::router::Router::complete_with_options(&self, route
 pub async fn routectl_router::router::Router::stream(&self, routectl_core::schema::ChatRequest) -> routectl_core::error::Result<futures_core::stream::BoxStream<'static, routectl_core::error::Result<routectl_core::schema::ChatChunk>>>
 pub async fn routectl_router::router::Router::stream_with_options(&self, routectl_core::schema::ChatRequest, routectl_router::router::RouterOptions) -> routectl_router::router::DispatchedStream
 impl routectl_router::router::Router
-pub fn routectl_router::router::Router::context_window_for(&self, &str) -> core::option::Option<u32>
-pub fn routectl_router::router::Router::first_target_oauth_id(&self, &str) -> core::option::Option<alloc::string::String>
+pub fn routectl_router::router::Router::context_window_for(&self, &str, impl core::ops::function::Fn(&str) -> bool) -> core::option::Option<u32>
 impl routectl_router::router::Router
 pub async fn routectl_router::router::Router::count_tokens(&self, routectl_core::schema::ChatRequest) -> routectl_core::error::Result<routectl_core::schema::TokenCount>
 pub async fn routectl_router::router::Router::count_tokens_with_meta(&self, routectl_core::schema::ChatRequest) -> routectl_router::router::CountedTokens
@@ -18642,8 +18641,7 @@ pub async fn routectl_router::router::Router::complete_with_options(&self, route
 pub async fn routectl_router::router::Router::stream(&self, routectl_core::schema::ChatRequest) -> routectl_core::error::Result<futures_core::stream::BoxStream<'static, routectl_core::error::Result<routectl_core::schema::ChatChunk>>>
 pub async fn routectl_router::router::Router::stream_with_options(&self, routectl_core::schema::ChatRequest, routectl_router::router::RouterOptions) -> routectl_router::router::DispatchedStream
 impl routectl_router::router::Router
-pub fn routectl_router::router::Router::context_window_for(&self, &str) -> core::option::Option<u32>
-pub fn routectl_router::router::Router::first_target_oauth_id(&self, &str) -> core::option::Option<alloc::string::String>
+pub fn routectl_router::router::Router::context_window_for(&self, &str, impl core::ops::function::Fn(&str) -> bool) -> core::option::Option<u32>
 impl routectl_router::router::Router
 pub async fn routectl_router::router::Router::count_tokens(&self, routectl_core::schema::ChatRequest) -> routectl_core::error::Result<routectl_core::schema::TokenCount>
 pub async fn routectl_router::router::Router::count_tokens_with_meta(&self, routectl_core::schema::ChatRequest) -> routectl_router::router::CountedTokens

@@ -104,11 +104,8 @@ fn local_models_list(router: &routectl_router::Router, activation: &ActivationSt
         if !seen.insert(id.to_string()) {
             return;
         }
-        let context_length = if is_oauth_credential_unresolved(router, activation, id) {
-            None
-        } else {
-            router.context_window_for(id)
-        };
+        let context_length =
+            router.context_window_for(id, |oauth_id| is_oauth_activated(activation, oauth_id));
         entries.push(ModelListEntry {
             id: id.to_string(),
             object: "model",
@@ -151,22 +148,13 @@ fn local_models_list(router: &routectl_router::Router, activation: &ActivationSt
     })
 }
 
-/// True when `id`'s first chain target names an oauth provider id that
-/// `activation` does not report as `Activated`. An api-key/env-ref target
-/// (no oauth id at all) is never suppressed. An oauth id with NO
-/// `activation` record -- a typo, or an id outside the tracked universe --
-/// IS suppressed: routectl cannot confirm the credential, and suppressing
-/// is the conservative default for an unconfirmed one.
-fn is_oauth_credential_unresolved(
-    router: &routectl_router::Router,
-    activation: &ActivationState,
-    id: &str,
-) -> bool {
-    let Some(oauth_id) = router.first_target_oauth_id(id) else {
-        return false;
-    };
-    !activation
-        .get(&oauth_id)
+/// True when `activation` reports `oauth_id` as `Activated`. An oauth id
+/// with NO `activation` record -- a typo, or an id outside the tracked
+/// universe -- is NOT activated: routectl cannot confirm the credential, and
+/// suppressing is the conservative default for an unconfirmed one.
+fn is_oauth_activated(activation: &ActivationState, oauth_id: &str) -> bool {
+    activation
+        .get(oauth_id)
         .is_some_and(|entry| entry.status.is_activated())
 }
 
