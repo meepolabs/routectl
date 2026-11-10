@@ -34,7 +34,8 @@ license.
 - `src/lib.rs` -- crate root; re-exports schema types, error type, Provider
   trait, log helpers, the canonical-key allowlist, `UpstreamReason`,
   `RefusalReason`, `EligibilityReason`, and the request-observation types
-  (incl. `SkipCounts`), and the upstream-text scrub (`scrub_upstream_text`,
+  (incl. `SkipCounts`, `WalkCounts`), the `[log]` knob resolvers
+  (`LogKnob`/`LogKnobSource`), and the upstream-text scrub (`scrub_upstream_text`,
   `names_aws_principal`); declares the `provider_kind`, `upstream_reason`,
   `refusal_reason` and `eligibility` modules
 - `src/schema.rs` -- canonical wire types: `ChatRequest`, `ChatResponse`,
@@ -64,12 +65,9 @@ license.
   closed `TranslationReason` (`HostedToolWithheld`, `TranslationRejected`)
   carrying only the date-stripped `TranslationKey`, never a label, URL or
   header; deduped, first-seen order; skipped for background probes
-- `src/request_observation.rs` -- `RequestObservation`: the content-free
-  per-request observation slot shared across fallback hops (+ `ServedIdentity`);
-  `add_skip` tallies a locally ineligible target into `SkipCounts` (one count
-  per `EligibilityReason`); `set_walk_counts` stamps the dispatch walk's
-  `WalkCounts` (request-caused exits and exclusion skips per scope; built via
-  `WalkCounts::new`); `snapshot` returns an `ObservationSnapshot`
+- `src/request_observation.rs` -- `RequestObservation`, the content-free
+  per-request observation slot shared across fallback hops: `ServedIdentity`,
+  `SkipCounts` (`add_skip`), `WalkCounts` (`set_walk_counts`), `snapshot`
 - `src/config_dir.rs` -- the shared routectl config-folder rule: pure
   `config_dir_from` (absolute `XDG_CONFIG_HOME`, else absolute home +
   `.config`, joined with `routectl`; empty or relative counts as unset; on
@@ -182,7 +180,7 @@ license.
 - `src/eligibility.rs` -- closed `EligibilityReason` (`credential_unusable`,
   `account_parked`, `breaker_open`, `rate_limited`, `capability`,
   `context_window`): why a target was locally ineligible, carried on
-  `Error::LocallyUnavailable`; frozen client-facing tokens via `as_str` /
+  `Error::LocallyUnavailable`; `ALL`, frozen client-facing tokens via `as_str` /
   `from_token`, `is_request_only` (the last two), and an explicit `priority`
   (credential unusable highest, context window lowest)
 - `src/refusal_reason.rs` -- `#[non_exhaustive] RefusalReason`: the closed
@@ -359,7 +357,8 @@ license.
   and their `body_trace_enabled` gate,
   prompt and credential-key redaction (`redact_error_body_text` for upstream
   error bodies), structural-summary extractor, `[log]`-block override
-  seeding
+  seeding and the per-knob resolvers (`resolve_trace_headers` & co., env >
+  config > default, returning `LogKnob`)
 - `src/parsed_error_body.rs` -- `ParsedErrorBody`: the single capped parse
   of an upstream error body carried on `Error::Upstream` (read via
   `Error::parsed_body`), plus its envelope / `error.*` accessors and
@@ -1803,8 +1802,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   is `#[serde(default)]` (empty) so the mantle lane may omit it (validation
   still requires it non-empty on the standard lane); `ModelEntry`
   (`reported_model: Option<String>` response model-label echo override,
-  `visible_routectl_provider: bool` default true, and the model facts
-  `context_window` / `max_output_tokens` / `pricing: Option<PricingConfig>`); `AliasValue`, `ServerAuth`,
+  `visible_routectl_provider: bool`, accepted with no effect, and the model facts
+  `context_window` / `max_output_tokens` / `pricing: Option<PricingConfig>`);
+  `ProviderEntry`/`ModelEntry`/`ServerAuth::redact_secrets` for display; `AliasValue`, `ServerAuth`,
   `RegistryEntry`/`PricingConfig` pricing table; `CacheConfig` (global
   `[cache]`: `auto_emit_top_level_breakpoint: bool`, default true;
   `k_gated_emission: bool`, default FALSE -- the hot-reloadable switch for
@@ -1884,7 +1884,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   non-version checks are crate-internal; only `preflight_config_version`
   stays public beside the driver. Unparseable TOML passes every check so the
   typed deserialize reports the real syntax error. Callers: the shared loader
-  (`parse_config_only`) and the CLI edit-pipeline `preflight`
+  (`parse_config_only`) and the CLI edit pipeline (`preflight` and the
+  candidate `gate`). `retired_model_knob_message` words one retired
+  `models.<nick>.<key>` path the way the preflight does
 - `src/config_error.rs` -- the single production `Config` parse funnel
   `parse_config(text) -> Result<Config, String>` (re-exported from the crate
   root; consumed by `serve`/hot-reload load and every CLI config load) plus
@@ -2113,7 +2115,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   never sanitized) and ERRORS when two openai-responses entries set DIFFERENT
   values (the codex identity is process-global; the error names both
   providers), with `resolved_codex_version(&Config)` returning the single
-  agreed value (None -> pinned) for the factory's `set_resolved`; the
+  agreed value (None -> pinned) for the factory's `set_resolved` and
+  `configured_codex_version` naming the entry that sets it; the
   cfg(`bedrock`) `validate_bedrock_invoke_model_family` walks `[models]` and
   JOINS each entry to its `[providers]` row (the model id lives at `[models.X]
   upstream`, not on the provider entry), rejecting a model whose `upstream`
@@ -2479,6 +2482,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   (one `SeatTarget` per usable pool member, shared by Arc across every model
   naming that pool, `None` when `provider` names a plain `[providers]` entry);
   `reported_model: Option<String>` (per-model response-echo override);
+  `visible_routectl_provider` (projected, no effect);
   `context_window_tokens()` -- THE shared read of the configured
   `[models.X] context_window` (`Some(0)` degrades to `None`), consumed by both
   the proactive window gate and `/v1/models` discovery
@@ -2624,7 +2628,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   request's `walk_state::RequestWalk`), credential park, the per-target
   `RequestWalk::admits` check (an excluded target is passed over before it is
   marked or gated), fallback, the last error and `DispatchMeta`
-  advancement. The per-attempt deadline is `tokio::time::timeout` around
+  advancement, and stamps the walk's `WalkCounts` on the request observation. The per-attempt deadline is `tokio::time::timeout` around
   `invoke`; expiry is the typed `DeadlineFired`, rendered by the adapter's
   `Deadline` as a status-0 upstream error. `CommitCtx` carries what a
   committed attempt hands the adapter, `Exhaustion` what a walk that
@@ -2655,7 +2659,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `dispatch_loop::run_walk` through its adapter, then calls
   `dispatch_loop::finish_dispatch`.
   `CompleteAdapter`: `request_timeout_ms` per attempt, then the
-  provider-stamp / relabel (`resolve_reported_model`) / evidence / quota
+  internal (never serialized) served-provider stamp / relabel (`resolve_reported_model`) / evidence / quota
   commit. `StreamAdapter`: the first-content timeout
   (`stream_first_content_timed_out`) per attempt, `invoke` through
   `stream_commit::try_stream_with_first_content` (first CONTENT, not
@@ -3552,7 +3556,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   through `compare_body`, `compare_stream` or `compare_traced_stream` (which
   also traces both stream documents), diffed with `Leg::Response`, or traced
   only, uncompared, for a trace-only check; declares the router's own
-  response edits (model relabel, provider attribution)
+  response edit (model relabel)
 - `src/router/beta_withhold.rs` -- `withhold_betas_on_chain`,
   `withheld_betas_for_target`: per-target withheld client beta set
 - `src/router/feature_filter.rs` -- capability pre-filter + strip-interceptor
@@ -4288,7 +4292,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   request-scoped `Exclusion`s, the recognized `ScopeRow`, `Next { Walk,
   Terminal }`; `Disposition::after_breaker` drops a retry once the seat's
   breaker reads open, `record_on` writes the retry, exclusions and row onto the
-  walk). The scope comes from a recognized `ScopeRow`, else a typed credential
+  walk and counts an endpoint- or model-scope failure as request-caused). The scope comes from a recognized `ScopeRow`, else a typed credential
   reason (account), else a native 400/422 (model when it names a model limit,
   else endpoint), else the target; only a retryable target-scoped failure on
   a completion retries the same target, under the request-wide class cap;
@@ -4362,7 +4366,7 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   otherwise it excludes its endpoint and the walk reaches only another origin)
 - `src/router/walk_state.rs` -- request-scoped walk state (`RequestWalk`:
   same-target retries spent, exclusions, the recognized scope row, skips per
-  scope) and `endpoint_key`, the one endpoint-identity derivation (normalized
+  scope, request-caused failures) and `endpoint_key`, the one endpoint-identity derivation (normalized
   origin of the provider entry's egress or forwarded base, else
   `provider:<name>`) and `RequestWalk::log_summary`, the INFO `walk summary`
   line; tests in `walk_state_tests.rs` and `walk_summary_tests.rs`
@@ -5612,28 +5616,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   a local SQLite DB. The hot path never blocks/awaits/panics; overflow,
   closed-channel and disabled-gate drops are counted, not surfaced.
 
-- `src/lib.rs` -- crate root; re-exports `UsageHandle` (+ the `#[doc(hidden)]`
-  test-introspection `UsageCounters`),
-  `UsageRecord`/`Outcome`/`Operation`/`Harness` (+ their parse errors),
-  `downgrade_to`/`SUPPORTED_TARGETS`/`DowngradeError`/`NotAdditiveReason`,
-  `observation_totals`/`ObservationTotals`,
-  `UsageWriter`/`ShutdownOutcome`/`CHANNEL_CAPACITY`,
-  `UsageDb`/`open`/`open_readonly`/`open_readonly_fastfail`/`OpenError`,
-  the read-side query surface
-  (`aggregate`/`ttfbs`/`latest_quota_by_seat`/`query`/`k_calibration_summary`/`near_lossless_attribution_summary`/`shadow_misfire_summary`/`would_trim_summary`/`read_reuse_samples_since`/`read_calibration_samples_since`
-  + the capability-ledger reads
-  `read_capability_events_after`/`latest_tombstone` + the row/summary types
-  `AggRow`/`GroupKey`/`QuotaSnapshot`/`QuerySpec`/`GroupDim`/`RowCost`/`QueryResult`/`QueryGroup`/`QueryMetrics`/`QueryTotals`/`CostStatus`/`KCalibration`/`NearLosslessAttributionSummary`/`ShadowMisfireSummary`/`WouldTrimSummary`/`ReuseSampleRow`/`CalibrationSampleRow`/`CapabilityEventRow`/`TombstoneRow`/`QueryError`),
-  `estimate_cost_tokens`/`CostBreakdown`/`Rates` (+ the `#[doc(hidden)]`
-  record-path `estimate_cost`), `CapabilityEvent` +
-  `insert_capability_event` (the append-only capability-ledger writer,
-  re-exported for synchronous inserts outside the writer task; today only
-  tests use it),
-  `MigrateError`, and the `SCHEMA_VERSION` constant; carries
-  `#![warn(missing_docs)]`. `prune`/`prune_capability_events`/`PruneOutcome`
-  and the `META_*` schema keys are crate-internal (not re-exported)
+- `src/lib.rs` -- crate root and public facade: the producer handle, record
+  types, writer (`UsageWriter`/`ShutdownOutcome`), DB opens, migrations and
+  downgrade, the read-side query surface and cost estimation; see its `pub use` list
 - `src/record.rs` -- `UsageRecord` (one field per WRITTEN capture column, the
-  v18 request-observation fields and the v19 per-reason skip counts included)
+  v18 request-observation fields, the v19 per-reason skip counts and the v20
+  walk counts included)
   and the closed `Outcome`,
   `Operation` and `Harness` enums with their `as_str`/`FromStr` wire tokens
 - `src/capability_event.rs` -- the unified `capability_events` ledger write
@@ -5910,197 +5898,27 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   their row types `CapabilityEventRow` (rowid + all columns as `Option` per
   the nullable-by-DDL schema) and `TombstoneRow`; holds a private
   tombstone-verdict literal mirroring `capability_event.rs`
-- `src/writer.rs` -- `UsageWriter`: opens the DB once at boot (degrades to a
-  no-op drain loop on open failure), runs the one-shot legacy capability purge
-  on a successful open (WARN and carry on if it fails), drains the bounded
-  channel on a dedicated thread via `blocking_recv`, bounded-deadline drain + join on `shutdown`,
-  which returns `ShutdownOutcome` (`Drained`/`TimedOut`/`Panicked`). The
-  channel carries a `WriterMessage`, an OPAQUE envelope over a crate-private
-  `WriterCommand` vocabulary -- nameable out-of-crate (test channel declarations
-  spell the item type) but neither constructible nor inspectable there, because a
-  crate able to build a variant could forge any write the actor performs,
-  including an acknowledged boundary batch that evicts routing state. The
-  commands are
-  (`Request(Box<UsageRecord>)` -> the
-  `requests` table, `CapabilityEvent(CapabilityEvent)` -> the
-  unified `capability_events` ledger (carrying the producing registry
-  GENERATION -- the writer drops an event older than the generation a boundary
-  batch has committed, since such an event predates the boundary and would
-  otherwise restore evicted state on the next boot; transient in-memory
-  sequencing, never a column), `CapabilityBatch(..)` -> the same ledger as ONE
-  acknowledged transaction via `commit_capability_batch`, which raises the
-  writer's `boundary_generation` only on a COMMITTED batch; the record is
-  boxed so the variants stay close in size), so one actor + one connection
-  serves every row kind with the command selecting the destination
-  table. The one-shot startup
-  prune
-  runs over `requests` (`retention::prune`), `capability_events`
-  (`retention::prune_capability_events`, tombstone-exempt) and `ledger_gaps`
-  (`retention::prune_ledger_gaps`)
-- `src/db.rs` -- `UsageDb` wrapper + `open`: connection setup (WAL, foreign
-  keys), the `INSERT OR IGNORE` write keyed on the UNIQUE `request_id`
-  (idempotency), schema-presence assertions.
-  `open_readonly`/`open_readonly_fastfail` open a non-creating, non-migrating
-  READ-ONLY view (WAL confirmed by reading the pragma, schema-version match
-  enforced -> `NoData`/`VersionTooOld`/`VersionTooNew`/`NotWal`). `open` runs
-  the migration ladder with IMMEDIATE transactions, so a write lock another
-  connection holds is waited out within the busy timeout. `meta`
-  rows under keys an older build wrote and this one no longer defines are inert:
-  nothing reads, rewrites or removes them (pinned by `src/legacy_meta_tests.rs`)
-- `src/schema.rs` -- `requests` table DDL (the capture columns + `request_id
-  UNIQUE` idempotency key + `outcome` CHECK), `meta` table, `SCHEMA_VERSION`;
-  v2 added the nullable `strategy TEXT` column (the per-request auto-cache
-  decision token) via the migrate-on-open ladder (`ALTER TABLE requests ADD
-  COLUMN strategy`, same end shape whether created fresh at v2 or migrated
-  from v1) -- WRITE-STOPPED as of 0.9.x: the column is retained in the DDL
-  but the writer no longer binds it, so rows written by this version onward
-  read NULL; v3 added the nullable `reduction_strategy TEXT` column (the
-  per-request context-reduction decision token) the same way (`ALTER TABLE
-  requests ADD COLUMN reduction_strategy`) -- also WRITE-STOPPED as of
-  0.9.x; v4 added the nullable
-  `selection_decision TEXT` column (the per-request seat-selection decision
-  token: birth_pick / sticky_stay / overflow_repin / defer_no_healthy /
-  keyless_fill_first) the same way (`ALTER TABLE requests ADD COLUMN
-  selection_decision`) -- also WRITE-STOPPED as of 0.9.x (none of the three
-  tokens is persisted any more; each is only partially visible in the trace
-  logs -- cache via `cache_auto_decision`, reduction only when bytes were
-  stripped, selection only on sticky birth/repin); v5 added the
-  steady-state would-trim
-  advisory pair
-  `would_trim_tokens` (the candidate freed-token count `d`) +
-  `would_trim_break_even_k` (the break-even reuse count K*) the same way
-  (`ALTER TABLE requests ADD COLUMN ...`); v6 added the nullable
-  `would_trim_k_floor REAL` (the per-session K estimator's lower confidence
-  bound, stamped only for a `Calibrated` estimate) the same way; v7 added
-  `would_trim_shadow_misfire INTEGER` (the shadow-misfire monitor: 0 = Stable,
-  1 = Misfire, NULL = FirstSeen or no session key) the same way; v8 plumbed
-  the near-lossless attribution set -- `would_trim_dedup_tokens` /
-  `would_trim_supersession_tokens` (per-heuristic freed-token counts), the
-  count-pair `would_trim_path_units` / `would_trim_path_extractable` (kept
-  unaveraged so the extractability rate reconstructs offline via SUM/SUM),
-  `would_trim_recorder_version` (NULL on pre-recorder rows, stamped by the
-  near-lossless recorder), the capped JSON `would_trim_raw_marks` (now
-  WRITE-STOPPED: retained in the DDL, no longer bound), and
-  `would_trim_context_fraction` (NULL when the pricing row's context window is
-  unknown) -- columns only, the recorder pass computes their values (same
-  `ALTER TABLE ... ADD COLUMN` discipline). v9 adds the separate append-only
-  `capability_learn_events` table (`CREATE_CAPABILITY_LEARN_EVENTS_TABLE`:
-  `ts`, `state_key`, `feature_key` (NORMALIZED), `provider_kind`,
-  `signal_tier` (CHECK-constrained to `self-identifying` / `inferred`),
-  `observations`, `upstream_status`, `remapped`, `request_features` JSON-array
-  TEXT) -- deliberately NOT a `requests` row (every reporting query treats
-  `requests` rows as requests), the versioned, internal landing pad for the
-  warm-rebuild replayer; carries no body / message / prompt column (log
-  hygiene). v10 (`SCHEMA_VERSION = 10`) is a forward-only, idempotent keyspace
-  invalidation: the v9 -> v10 step truncates `capability_learn_events`
-  (`DELETE FROM`) because the openai-compat learned-capability keyspace
-  changed from the `error.code` token to the canonical `/error/param`
-  capability, so any pre-change row would replay under a keyspace that no
-  longer exists (safe: nothing reads the table yet); v11 (`SCHEMA_VERSION =
-  11`) renames the learn-events `feature_key` column to `capability_key`
-  (`migrate_v10_to_v11` in migrate.rs: guarded `ALTER TABLE ... RENAME
-  COLUMN`, idempotent + fresh-DB-safe; same normalized-token contract); v12
-  (`SCHEMA_VERSION = 12`) adds the nullable `resolved_class TEXT` column to
-  `requests` (the canonical kebab failure-class token stamped by the CLI
-  capture for a dispatch-reached failure; NULL for a success, a pre-dispatch /
-  validation / local-gate row, and an `Unknown` class -- no backfill) via
-  `migrate_v11_to_v12` (guarded `ALTER TABLE requests ADD COLUMN
-  resolved_class`, one transaction with the version bump, same append-last
-  shape whether created fresh at v12 or migrated from v11). v13
-  (`SCHEMA_VERSION = 13`) adds the separate append-only `capability_events`
-  table (`CREATE_CAPABILITY_EVENTS_TABLE` +
-  `CREATE_CAPABILITY_EVENTS_TS_INDEX` on `ts`: `id INTEGER PRIMARY KEY` (an
-  explicit rowid alias SQLite preserves across VACUUM -- the insertion-order
-  boundary key the tombstone / replay-after / prune address via its rowid
-  alias), `ts` NOT NULL epoch-ms, nullable `lane_key` / `capability`
-  NORMALIZED keys (empty on a tombstone row), open-set `verdict` / `phase` /
-  `source` / `tier` tokens (tier persisted so live-vs-rebuild equivalence
-  distinguishes self-identifying from inferred), nullable `evidence_class`
-  (pinned observation tokens), nullable `upstream_token` (the
-  encoded value of a field verdict -- see `capability_event.rs`), and `catalog_version` /
-  `overlay_revision` boundary-revision stamps) via `migrate_v12_to_v13`
-  (mirrors the v8 -> v9 whole-new-table step: `CREATE TABLE / INDEX IF NOT
-  EXISTS` in one transaction with the version bump, fresh-create and
-  migrated-open both covered) -- the unified versioned, internal ledger the
-  warm-rebuild replayer reads on boot; carries no body / message / prompt
-  column (log hygiene). v14 (`SCHEMA_VERSION = 14`) appends the nullable
-  token-estimate calibration pair `calib_estimated_tokens` (routectl's own
-  byte-heuristic estimate of the dispatched payload, stamped for every
-  dispatched attempt) + `calib_prompt_tokens` (the upstream's CACHE-INCLUSIVE
-  prompt total, recorded only on a success and only when nonzero) via
-  `migrate_v13_to_v14` (guarded `ALTER TABLE requests ADD COLUMN ...`, one
-  transaction with the version bump, same append-last shape whether created
-  fresh at v14 or migrated from v13; no backfill). The pair is raw
-  numerator/denominator, never a stored ratio, and `calib_prompt_tokens` is
-  deliberately NOT derived from `input_tokens + cache_read + cache_write_*`:
-  `input_tokens` is the cache-EXCLUSIVE residual whose subtraction uses the
-  aggregate cache-creation total, which is not persisted -- a derivation runs
-  short on most cache-reusing rows. v15 (`SCHEMA_VERSION = 15`) appends the
-  nullable context-reduction outcome set -- `reduction_decision TEXT` (the
-  lossless-minifier outcome token for the TERMINAL dispatch target, drawn from
-  the SAME vocabulary the dispatch log emits: `applied`, `skipped:disabled`,
-  `skipped:no-tail`, `skipped:nothing-to-strip`, `skipped:unknown`) plus the
-  four effect counters `reduction_strings_compressed` /
-  `reduction_strings_skipped` / `reduction_strings_rejected` (skip and reject
-  kept separate: a skip is a permanent ceiling, a rejection is a fail-closed
-  invariant alarm signalling a minifier defect) / `reduction_bytes_saved`
-  (exact prepared-payload bytes
-  removed, never billed tokens; counters aggregate across fallback-entry
-  preparations, and a same-target network retry reuses the prepared request so
-  never re-counts) -- via `migrate_v14_to_v15` (guarded `ALTER TABLE requests
-  ADD COLUMN ...` x5, one transaction with the version bump, same append-last
-  shape whether created fresh at v15 or migrated from v14; no backfill). The
-  set is deliberately a NEW column rather than a revival of the write-stopped
-  v3 `reduction_strategy` (NULL there means write-stopped to existing readers),
-  and the token estimate stays derived on read (`bytes / 4`), never persisted,
-  so there is one source of truth. v16 (`SCHEMA_VERSION = 16`) appends the
-  nullable cache-breakpoint decision set -- `cache_front_decision TEXT` /
-  `cache_terminal_decision TEXT` (the per-region auto-cache injection decision
-  for the TERMINAL dispatch target, drawn from the SAME contract-frozen
-  vocabulary the `cache_auto_decision` log emits: `auto_emitted`,
-  `caller_supplied`, `volatile_vetoed`, `auto_skipped:global_disabled` /
-  `:provider_disabled` / `:no_capability` / `:breakpoint_cap` /
-  `:validation_rolled_back` / `:no_placement_region`; the two regions are
-  independent, so a front skip does not suppress a terminal emit) plus
-  `prefix_epoch_event INTEGER` (the prefix-rewrite detector's classification,
-  mirroring `would_trim_shadow_misfire`'s advisory shape: 0 = stable,
-  1 = rewritten, 2 = reseeded) -- via `migrate_v15_to_v16` (guarded `ALTER
-  TABLE requests ADD COLUMN ...` x3, one transaction with the version bump,
-  same append-last shape whether created fresh at v16 or migrated from v15; no
-  backfill). `prefix_epoch_event` is NULL whenever there was no comparable
-  prior prefix to classify against -- no session key, the session's first
-  turn, the first turn after a process restart, or the first turn after
-  eviction from the detector's bounded store -- so NULL is an absence of
-  evidence, never a measured `stable`. Deliberately NO per-marker OUTCOME
-  column: providers report cache-write tokens only in aggregate, so
-  per-breakpoint economic attribution would be fabricated; the economic
-  outcome stays with `cache_write_5m` / `cache_read`. v17 (`SCHEMA_VERSION =
-  17`) appends the nullable `capability_events` pair `provider_kind TEXT` /
-  `vocab_version INTEGER` (NULL vocabulary = legacy v1) via
-  `migrate_v16_to_v17` (guarded `ALTER TABLE capability_events ADD COLUMN`
-  x2, one transaction with the version bump, no backfill); strictly additive,
-  so `downgrade.rs` can hand the file back to a v16 binary. v18
-  (`SCHEMA_VERSION = 18`) appends the eight nullable request-observation
-  columns to `requests` and creates `ledger_gaps` +
-  `CREATE_LEDGER_GAPS_TS_INDEX` via `migrate_v17_to_v18`; also additive. v19
-  (`SCHEMA_VERSION = 19`) appends the six nullable `skip_<reason>` count
-  columns (`V19_REQUESTS_COLUMNS`, one per eligibility reason token) to
-  `requests` via `migrate_v18_to_v19`; also additive. v20
-  (`SCHEMA_VERSION = 20`) appends the five nullable walk-count columns
-  (`V20_REQUESTS_COLUMNS`: `request_caused_failures` and one `excluded_<scope>`
-  per exclusion scope) to `requests` via `migrate_v19_to_v20`; also additive
+- `src/writer.rs` -- `UsageWriter`, the single writer thread: opens the DB at
+  boot (no-op drain on failure), drains the opaque `WriterMessage` channel into
+  `requests` / `capability_events`, records `ledger_gaps`, and `shutdown` ->
+  `ShutdownOutcome`; see its module doc
+- `src/db.rs` -- `UsageDb` + `open` (WAL, 0600, migration ladder under
+  IMMEDIATE transactions) and the non-migrating read-only opens
+  `open_readonly`/`open_readonly_fastfail`; `OpenError`
+- `src/schema.rs` -- the ledger DDL (`requests`, `capability_learn_events`,
+  `capability_events`, `ledger_gaps`, `meta`) and `SCHEMA_VERSION` (20); each
+  version's columns are commented in the DDL itself
 - `src/migrate.rs` -- forward-only schema migration / version stamping against
-  the `meta` table; also `purge_legacy_capability_observations(conn)`, a
+  the `meta` table (one `migrate_vN_to_vM` step per version, the appended-column
+  lists `V18`/`V19`/`V20_REQUESTS_COLUMNS`); also `purge_legacy_capability_observations(conn)`, a
   one-shot data step (no version bump) that deletes NULL-vocabulary
   non-tombstone `capability_events` rows below the latest tombstone's rowid,
   guarded by the `META_LEGACY_CAPABILITY_PURGE` marker (value = deleted count,
   marker and delete in one transaction); called from the writer's open, not
   from `db::open`
-- `src/downgrade.rs` -- offline re-stamp rollback: `downgrade_to(path,
-  target)` runs the additive `STEPS` (20 -> 19, 19 -> 18, 18 -> 17, 17 -> 16) down to a
-  target in
-  `SUPPORTED_TARGETS`; any refusal is a `DowngradeError` that leaves the file
-  untouched (the daemon must be stopped)
+- `src/downgrade.rs` -- offline re-stamp rollback: `downgrade_to(path, target)`
+  runs the additive `STEPS` (20 down to 16) to a target in `SUPPORTED_TARGETS`;
+  a refusal is a `DowngradeError` that leaves the file untouched
 - `src/retention.rs` -- `prune` (startup-only, best-effort) dropping
   `requests` rows older than the configured retention window, and
   `prune_capability_events` (same shape for the `capability_events` ledger)
@@ -6267,11 +6085,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `src/server/observation_lifecycle_daemon_tests.rs` -- assembled-daemon
   abnormal-exit rows (`client_disconnect` vs `cancelled`) and a ledger gap
   read back across a restart; declared from `server/mod.rs`
-- `src/server/walk_counts_daemon_tests.rs` -- assembled-daemon walk counts
-  on the ledger row: a seeded schema-19 file migrated at boot, a generic
-  400, an unsupported-feature 400, a token count and a request refused
-  before the walk, every row read back after a restart on the migrated
-  file; declared from `server/mod.rs`
+- `src/server/walk_counts_daemon_tests.rs` -- assembled-daemon walk counts on
+  the ledger row, over a schema-19 file migrated at boot and read back after a
+  restart; declared from `server/mod.rs`
 - `src/server/capability_boundary.rs` -- the replay boundary a
   revision-changing reload must commit BEFORE it publishes the replacement
   router, in two phases. `admit_capability_boundary(usage, router) ->
@@ -6479,7 +6295,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   purge-superseded, revision stamp, dropped swap)
 - `src/server/test_support.rs` -- `cfg(test)` helpers shared by more than one
   server sidecar: `isolate_usage_db` (points a config's usage DB at a tempdir),
-  `drain_usage_writer_strict` (awaits a writer's full drain), the async
+  `drain_usage_writer_strict` (asserts the drain ends `Drained`), the async
   `live_usage_writer` (one start-and-drain settle cycle on the db before
   returning a fresh writer), `begin_writer_drain` / `WriterDrain`, and
   `never_shutdown` (a shutdown receiver that never
@@ -6517,7 +6333,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   call + typed parse; sidecar `config_load_preflight_tests.rs` pins
   each refusal class to the driver's own message and proves a refused reload
   candidate never replaces the published router);
-  `load_effective_config_unvalidated` wraps it, `load_effective_config`
+  `load_effective_config_unvalidated` wraps it over ONE read, returning
+  `LoadedConfig { config, raw_text }`; `load_effective_config`
   adds the fail-fast `validate_effective_config` gate.
   `read_parse_validate_config` is the synchronous hot-reload loader over
   `load_effective_config`, so a rejection returns
@@ -6930,7 +6747,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   trace-summary line. Owns the outcome-mapping helpers
   (`outcome_for_dispatch_err`, `error_class_of`; a `LocallyUnavailable` is
   class `locally_unavailable`) and copies the observation's six skip counts
-  onto the row; also the auto-cache outcome
+  and five walk counts onto the row; `mark_body_delivered` stamps the 200; also the auto-cache outcome
   signal (`is_cache_thrash` + `emit_cache_outcome`: `cache_auto_outcome` at
   DEBUG when an auto-emitted breakpoint is created-and-read, WARN when
   created-without-read this request). Also owns `StreamStage` +
@@ -7002,7 +6819,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   handler is structurally incapable of mutation, of reaching a raw
   `Router`/`.config`/dispatch, or of touching the forwarding seam;
   `PanelObservability`/`PanelCounters` are the per-panel last-availability +
-  shed-count scaffold (minimal `record` hook now, read side wired later), with
+  shed-count scaffold (`record` logs each availability edge once: WARN into a
+  degraded source, DEBUG for an expected absence or a recovery), with
   `/status/query`'s two request modes on SEPARATE detectors (`status_query` /
   `status_query_series`) so a healthy aggregate poll cannot mask a consistently
   failing series poll.
@@ -7076,10 +6894,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   (measured on the sibling router-swap seam: the global shape failed every case at
   once). `cfg(test)` only, so no deployment can tap its own status events or force
   a panel to degrade; absence from the release binary is checked by symbol scan
-- `src/handlers/status/learned_seed.rs` -- `cfg(test)` fixtures shared by the
-  served doctor and health handler tests: a one-model config, a ledger holding a
-  boot tombstone and one learned ceiling row, and a router warmed from it through
-  the serve bootstrap's own warm, so a served panel can be asserted by value
+- `src/handlers/status/learned_seed.rs` -- `cfg(test)` fixtures for the served
+  doctor and health tests: a one-model config and a router warmed from a seeded
+  ledger through the serve bootstrap's own warm
 - `src/handlers/status/types.rs` -- `Panel<T>` envelope (snake_case
   `serde::Serialize`: `schema_version`/`as_of`/`data`/`unavailable`) with
   constructors enforcing available => `unavailable: None` and unavailable =>
@@ -7186,10 +7003,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `guard_panel`'s blocking worker, runs
   `aggregate`/`errors_by_class`/`latest_quota_by_seat`/`would_trim_summary`/`window_observation` over the
   `window_bounds` window, and maps to the aggregates-only `UsagePanel` DTO
-  (schema_version 4: per-`(alias,provider,model,upstream)` rollups + windowed
+  (schema_version 5: per-`(alias,provider,model,upstream)` rollups + windowed
   totals + one per-seat quota snapshot each (`seat` + `provider_kind`, per-row
   `ts_start_ms` freshness) + would-trim summary + the window's `observation`
-  block; per-group and totals
+  block with its walk counts; per-group and totals
   `errors_by_class` failure-class breakdown, `client_disconnect_total` +
   `cancelled_total` +
   reporting-only `cache_read_present` denominator; NEVER request
@@ -7356,7 +7173,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   derivation's ORIGIN reduction, never widened here)/`credential_ref_scheme`/
   `auth_token`/`rpm_limit`, the last serialized WITHOUT
   `skip_serializing_if` so an explicit `0` (immediately rate-limited) stays
-  distinct from an explicit `null` (unlimited) and from an absent field; a
+  distinct from an explicit `null` (not set on this entry) and from an absent field; a
   `source` strip with
   `config_path`/`loaded_age_ms`/`alias_count`/`provider_count`/`listen_addr`/`version`,
   counts from the same effective view and daemon facts from the
@@ -7642,8 +7459,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   the configured ROUTING providers (id / kind / configured endpoint origin /
   auth token / credential-ref scheme / rate limit, where `rpmLimitCell` is the
   ONE formatter for the three non-interchangeable RPM states -- null-checked
-  before any coercion so an explicit `0` reads "0 RPM" rather than
-  "unlimited", `null` reads "unlimited", and an absent field reads "unknown"),
+  before any coercion so an explicit `0` reads "0 RPM", `null` reads
+  "not set here", and an absent field reads "unknown"),
   credential activation (a footnote naming it the FIXED routectl-owned OAuth
   candidate universe rather than a slice of the routing set the strip counts),
   the capability overrides (default-closed disclosure),
@@ -7970,8 +7787,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `validation_report(...).errors` are both empty for it, so the shipped example
   cannot drift into failing the repo's own `config check`.
   `show` renders through `render_show` (a testable seam over the stdout
-  `println!`), which runs `ProviderEntry::redact_secrets` -- sentinelling
-  literal key refs AND reducing each `base_url` to its origin -- and prefixes
+  `println!`) over `redacted_config`, the one redacted copy every
+  config-printing surface starts from (`redact_secrets` on each provider, each
+  model and `[server.auth]`), and prefixes
   one `#` TOML comment declaring the dump NOT round-trippable, since operators
   paste this output into bug reports. There is deliberately no
   `--raw`/`--no-redact` escape hatch
@@ -7989,8 +7807,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `validate_config_path` (unknown segments error with siblings pre-mutation;
   `Table` targets allowed only for unset); scalar inference
   (bool/int/float/else string -- the re-parse gate backstops mistypes);
-  in-memory candidate gate (`parse_config` + `collect_config_validation`, full
-  diagnostic rendering, any failure writes nothing); high-consequence confirm
+  in-memory candidate gate (`edit_pipeline::gate`: raw preflight on the
+  candidate, `parse_config` + `collect_config_validation`, full
+  diagnostic rendering, any failure writes nothing); a retired per-model key
+  path is refused with the preflight's wording (`retired_model_knob_message`); high-consequence confirm
   BEFORE the lock (`collect_high_consequence_changes`, `--yes` bypass); then
   `edit_config_toml` (lock + revision check + atomic write). unset removes the
   key and recursively prunes now-empty parent tables (empty == absent);
@@ -7999,25 +7819,19 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   (surface/verb/path/restart_required/high_consequence); a no-op writes and
   logs nothing
 - `src/commands/config_effective.rs` -- `routectl config show --effective`
-  render layer over `routectl_router::derive_effective_view`: the plain
-  redacted dump (unchanged), then provenance-annotated sections for the
-  layered surfaces -- per-model facts (context window, output fill and each
-  price field with its source and table date), per-class retry policy, the
-  resolved tuning table (`tuning_cells` / `tuning_kind`, shared with doctor's
-  tuning section) and capability cells. No generic per-key provenance tree
+  over one `LoadedConfig`: the redacted dump, the settings block, then the
+  `derive_effective_view` sections (model facts, class policy, tuning
+  `tuning_cells` / `tuning_kind` shared with doctor, capability cells)
 - `src/commands/config_settings.rs` -- the settings block of `config show
-  --effective`: every scalar leaf of the redacted config tree (the one
-  `config show` prints, via `config::redacted_config`) tagged `(file)` when
-  the parsed raw TOML holds its key path, else `(default)`, plus the closed
-  `CODE_DEFAULTS` table of `Option` keys printed with their in-code default.
-  The sidecar's census over the config JSON Schema fails on an `Option` key
-  with no classification
+  --effective`: each scalar of `config::redacted_config` tagged `file` /
+  `default` / `env: <VAR>` / `from <path>`; `CODE_DEFAULTS` resolves unset keys
 - `src/commands/edit_pipeline.rs` -- building blocks shared by the
   config.toml-mutating commands (`config set/unset`, `provider add`, the login
   auto-surface, `init`): `preflight`, one call to
   `routectl_router::preflight_raw_config` (the same driver the loader runs;
-  refuses an out-of-range or missing `version`), the in-memory
-  `parse_config` + `collect_config_validation` gate plus its error rendering,
+  refuses an out-of-range or missing `version`), the in-memory `gate` (the
+  same preflight on the candidate, then `parse_config` +
+  `collect_config_validation`) plus its error rendering,
   the pre-lock high-consequence confirmation prompt (`--yes` bypasses; a
   non-TTY stdin declines without reading, so a silent pipe cannot hang any
   mutating command), and `parse_document` +
@@ -8455,7 +8269,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   calls -- it re-anchors an all-time window to the earliest row's local midnight
   (clamped never below the window's own lower bound), then widens the requested
   `hour`/`day` width by a whole multiple (i128 intermediates) until the count fits
-  the cap, so the grid always covers the window and never exceeds it
+  the cap, so the grid always covers the window and never exceeds it. The
+  footer carries the window's `walk:` line (`render_walk_line` over
+  `observation_totals`, marked a lower bound when the ledger recorded a gap)
 - `src/commands/usage_downgrade.rs` -- `routectl usage downgrade --to 19|18|17|16
   [--db P]`: the offline rollback over `routectl_usage::downgrade_to` (a v20
   file taken to 16 runs every step); prints the re-stamped path, exits 1 on
@@ -8704,10 +8520,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   seat's `routectl logout` hint carries `--label` rather than wiping the
   default), secrets
   (orphan managed file -> WARN, never auto-deleted), probe via the shared
-  `probe_finding` seam, and `capability` -- reduced to the config-unavailable
-  degradation line, so a config that loads emits no finding there (the
-  override / seed / learned cells are on the capability matrix panel); it
-  NEVER emits a `Fail`, so it never flips the exit code.
+  `probe_finding` seam, and `capability` -- the config-unavailable
+  degradation line, or for a config that loads one Warn `learning` finding when
+  `[capability] enabled = false` (the override / seed / learned cells are on
+  the capability matrix panel); it NEVER emits a `Fail`, so it never flips the
+  exit code.
   `section_pricing`/`pricing_finding` map each `PricingRow` to one
   informational `Pass` naming the selector (provider, kind, upstream), each of
   the five prices with its source token (`render_price_fields`, an unknown
@@ -9044,10 +8861,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `message_delta`) reach the usage ledger's `reasoning_tokens` column through
   a real server and mock anthropic-api upstream; a non-thinking response
   records none
-- `tests/served_provider_wire_absence.rs` -- no ingress (OpenAI chat
-  buffered and streamed, Anthropic Messages, Responses) puts
-  `routectl_provider` on the client body, while the usage ledger row for the
-  same request still records the served provider
+- `tests/served_provider_wire_absence.rs` -- no ingress puts
+  `routectl_provider` on the client body, while the ledger row still records
+  the served provider
 - `tests/gemini_ingress_extras_boundary.rs` -- HTTP ingress through the server
   to a mock Gemini upstream: which extras reach the upstream body and logs
 - `tests/contract_ingress.rs` -- request wire body -> canonical `ChatRequest`
