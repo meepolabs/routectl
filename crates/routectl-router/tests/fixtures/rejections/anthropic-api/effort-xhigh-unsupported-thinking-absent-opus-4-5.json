@@ -1,5 +1,5 @@
 {
-  "note": "Tier 1, captured on anthropic-api (2026-11-10, api.anthropic.com, Messages, OAuth seat, claude-opus-4-5): output_config.effort xhigh with no thinking object. Byte-identical message to the thinking disabled and thinking enabled (budget 1024) sends of the same day, so the effort refusal does not depend on the thinking shape on this model. routectl repaired it (field_repairs=1, retry 200). error.message is verbatim; the top-level request_id was dropped by hand. lifted_type is the error.type routectl lifts from the body.",
+  "note": "Tier 1, captured on anthropic-api (2026-11-10, claude-opus-4-5, Messages, OAuth seat): output_config.effort xhigh with no thinking object. Byte-identical message to the thinking disabled and thinking enabled (budget 1024) sends of the same day, so the effort refusal does not depend on the thinking shape on this model. routectl repaired it (field_repairs=1, retry 200). error.message is verbatim; the top-level request_id was dropped by hand.",
   "status": 400,
   "body": "{\"error\":{\"message\":\"This model does not support effort level 'xhigh'. Supported levels: high, low, medium.\",\"type\":\"invalid_request_error\"},\"type\":\"error\"}"
 }

@@ -1,0 +1,6 @@
+{
+  "note": "Tier 1, captured on anthropic-api (2026-11-10, api.anthropic.com, Messages, OAuth seat, claude-haiku-4-5): a Responses ingress tools[0] of type namespace (one nested function) forwarded untranslated to the Anthropic lane. The message is the tagged-union refusal listing every accepted tool type. error.message is verbatim; request_id dropped by hand. lifted_type is the error.type routectl lifts.",
+  "status": 400,
+  "lifted_type": "invalid_request_error",
+  "body": "{\"error\":{\"message\":\"tools.0: Input tag 'namespace' found using 'type' does not match any of the expected tags: 'bash_20250124', 'browser_toolset_20260801', 'code_execution_20250522', 'code_execution_20250825', 'code_execution_20260120', 'code_execution_20260521', 'computer_toolset_20260801', 'custom', 'memory_20250818', 'text_editor_20250124', 'text_editor_20250429', 'text_editor_20250728', 'tool_search_tool_bm25', 'tool_search_tool_bm25_20251119', 'tool_search_tool_regex', 'tool_search_tool_regex_20251119', 'web_fetch_20250910', 'web_fetch_20260209', 'web_fetch_20260309', 'web_fetch_20260318', 'web_search_20250305', 'web_search_20260209', 'web_search_20260318'\",\"type\":\"invalid_request_error\"},\"type\":\"error\"}"
+}

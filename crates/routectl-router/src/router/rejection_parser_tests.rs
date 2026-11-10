@@ -261,12 +261,12 @@ fn every_committed_rejection_fixture_resolves_to_a_row_or_is_reported_unresolved
             "anthropic-api/effort-xhigh-unsupported-sonnet-4-6",
             Outcome::Row(EFFORT_XHIGH, SelfIdentifying, InvalidValue),
         ),
-        // The envelope of the opus-4-5 row above, byte for byte, but its
-        // fixture has no effort capture record entry, so the sent level is
-        // unknown and no level row is named.
+        // The opus-4-5 refusal again, sent with no thinking object: the
+        // missing thinking shape does not keep the sent level's row from
+        // being named.
         (
             "anthropic-api/effort-xhigh-unsupported-thinking-absent-opus-4-5",
-            unresolved(EFFORT_PATH, SelfIdentifying, InvalidValue),
+            Outcome::Row(EFFORT_XHIGH, SelfIdentifying, InvalidValue),
         ),
         // Effort sent with thinking disabled: the thinking refusal wins and
         // the effort level is never named.
@@ -327,6 +327,12 @@ fn every_committed_rejection_fixture_resolves_to_a_row_or_is_reported_unresolved
         (
             "anthropic-api/tool-type-computer-unsupported-messages",
             Outcome::NotLocalized,
+        ),
+        // The tagged-union refusal's `tools.0:` prefix reads as the tools
+        // array, which has no row.
+        (
+            "anthropic-api/tool-type-namespace-unsupported-messages",
+            unresolved("tools[]", Inferred, InvalidValue),
         ),
         (
             "bedrock/beta-bag-key-extraneous-converse",
