@@ -1571,3 +1571,56 @@ auto_emit_per_block_breakpoints = true
         "but the egress still cannot carry a per-block marker",
     );
 }
+
+/// Every provider kind that can carry a `bedrock_mantle` block redacts its
+/// creds, not only the one the CLI fixture exercises.
+#[cfg(feature = "bedrock")]
+#[test]
+fn redact_secrets_redacts_mantle_creds_on_every_kind_that_carries_them() {
+    let mut kinds = vec!["openai-compat", "anthropic-api"];
+    if cfg!(feature = "openai-responses") {
+        kinds.push("openai-responses");
+    }
+    for kind in kinds {
+        let toml_text = format!(
+            "[providers.m]\nkind = \"{kind}\"\napi_key_ref = \"\"\n\
+             bedrock_mantle = {{ region = \"us-west-2\", creds = {{ kind = \"bearer-key\", \
+             key_ref = \"literal:sk-mantle-FAKE\" }} }}\n"
+        );
+        let mut cfg: Config = toml::from_str(&toml_text).expect("parse mantle lane");
+        let entry = cfg.providers.get_mut("m").expect("mantle provider");
+
+        entry.redact_secrets();
+
+        assert_eq!(
+            entry.secret_uris(),
+            vec!["literal:[REDACTED]"],
+            "kind `{kind}`"
+        );
+    }
+}
+
+/// A ref that is not an `env://`, `file://` or `oauth://` pointer is withheld:
+/// a bare value is most likely a key pasted into the ref field.
+#[test]
+fn redact_secrets_withholds_a_ref_off_the_pointer_schemes() {
+    let rows = [
+        ("bare value", "sk-bare-FAKE", "[REDACTED]"),
+        ("unknown scheme", "vault:sk-scheme-FAKE", "[REDACTED]"),
+        ("literal value", "literal:sk-lit-FAKE", "literal:[REDACTED]"),
+        ("env pointer", "env://KEY", "env://KEY"),
+        ("file pointer", "file:///k", "file:///k"),
+        (
+            "oauth pointer",
+            "oauth://anthropic#a",
+            "oauth://anthropic#a",
+        ),
+    ];
+    for (name, key_ref, expected) in rows {
+        let mut entry = ProviderEntry::openai_compat("https://example.com/v1", key_ref);
+
+        entry.redact_secrets();
+
+        assert_eq!(entry.secret_uris(), vec![expected], "row `{name}`");
+    }
+}

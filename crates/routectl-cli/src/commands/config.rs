@@ -346,7 +346,7 @@ pub fn show(config: &Config) -> Result<()> {
 
 /// The exact text `show` prints, so the redaction boundary is testable without
 /// capturing stdout.
-fn render_show(config: &Config) -> Result<String> {
+pub(crate) fn render_show(config: &Config) -> Result<String> {
     let body = toml::to_string_pretty(&redacted_config(config))
         .map_err(|e| Error::Internal(format!("serialize: {e}")))?;
     Ok(format!(
@@ -356,12 +356,18 @@ fn render_show(config: &Config) -> Result<String> {
     ))
 }
 
-/// `config` with every provider secret redacted: the tree `config show`
-/// prints. Any surface that prints config values starts from this copy.
+/// `config` with every credential-bearing value redacted: the tree `config
+/// show` prints. Any surface that prints config values starts from this copy.
 pub(crate) fn redacted_config(config: &Config) -> Config {
     let mut redacted = config.clone();
     for entry in redacted.providers.values_mut() {
         entry.redact_secrets();
+    }
+    for entry in redacted.models.values_mut() {
+        entry.redact_secrets();
+    }
+    if let Some(auth) = redacted.server.auth.as_mut() {
+        auth.redact_secrets();
     }
     redacted
 }

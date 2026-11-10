@@ -498,3 +498,119 @@ fn every_option_key_in_the_config_schema_has_a_known_unset_meaning() {
         "keys classified twice: {duplicated:?}"
     );
 }
+
+/// One credential-bearing field class: a fixture planting a distinct fake
+/// secret, and the redacted line each surface must still print (key name
+/// plus sentinel) so the absence is not vacuous.
+struct SecretRow {
+    name: &'static str,
+    raw: &'static str,
+    secrets: &'static [&'static str],
+    settings_line: &'static str,
+    show_line: &'static str,
+}
+
+const SECRET_ROWS: &[SecretRow] = &[
+    SecretRow {
+        name: "provider header_extras",
+        raw: "[providers.gw]\nkind = \"openai-compat\"\nbase_url = \"https://gw.example\"\n\
+              api_key_ref = \"env://K\"\n[providers.gw.header_extras]\n\
+              cf-aig-authorization = \"Bearer sk-header-FAKE\"\n",
+        secrets: &["sk-header-FAKE"],
+        settings_line: "  providers.gw.header_extras.cf-aig-authorization=\"[REDACTED]\"(file)",
+        show_line: "cf-aig-authorization = \"[REDACTED]\"",
+    },
+    SecretRow {
+        name: "model header_extras",
+        raw: "[models.m]\nprovider = \"gw\"\nupstream = \"u\"\n[models.m.header_extras]\n\
+              helicone-auth = \"Bearer sk-modelheader-FAKE\"\n",
+        secrets: &["sk-modelheader-FAKE"],
+        settings_line: "  models.m.header_extras.helicone-auth=\"[REDACTED]\"(file)",
+        show_line: "helicone-auth = \"[REDACTED]\"",
+    },
+    SecretRow {
+        name: "provider payload_extras nested string",
+        raw: "[providers.gw]\nkind = \"openai-compat\"\nbase_url = \"https://gw.example\"\n\
+              api_key_ref = \"env://K\"\n[providers.gw.payload_extras.metadata]\n\
+              api_token = \"sk-payload-FAKE\"\ntags = [\"sk-payload-array-FAKE\"]\n",
+        secrets: &["sk-payload-FAKE", "sk-payload-array-FAKE"],
+        settings_line: "  providers.gw.payload_extras.metadata.api_token=\"[REDACTED]\"(file)",
+        show_line: "api_token = \"[REDACTED]\"",
+    },
+    SecretRow {
+        name: "model payload_extras",
+        raw: "[models.m]\nprovider = \"gw\"\nupstream = \"u\"\n[models.m.payload_extras]\n\
+              user = \"sk-modelpayload-FAKE\"\n",
+        secrets: &["sk-modelpayload-FAKE"],
+        settings_line: "  models.m.payload_extras.user=\"[REDACTED]\"(file)",
+        show_line: "user = \"[REDACTED]\"",
+    },
+    SecretRow {
+        name: "model additional_request_fields",
+        raw: "[models.m]\nprovider = \"gw\"\nupstream = \"u\"\n\
+              [models.m.additional_request_fields]\nsession = \"sk-addfields-FAKE\"\n",
+        secrets: &["sk-addfields-FAKE"],
+        settings_line: "  models.m.additional_request_fields.session=\"[REDACTED]\"(file)",
+        show_line: "session = \"[REDACTED]\"",
+    },
+    SecretRow {
+        name: "mantle creds literal",
+        raw: "[providers.mantle]\nkind = \"openai-compat\"\napi_key_ref = \"\"\n\
+              [providers.mantle.bedrock_mantle]\nregion = \"us-west-2\"\n\
+              [providers.mantle.bedrock_mantle.creds]\nkind = \"bearer-key\"\n\
+              key_ref = \"literal:sk-mantle-FAKE\"\n",
+        secrets: &["sk-mantle-FAKE"],
+        settings_line: "  providers.mantle.bedrock_mantle.creds.key_ref=\"literal:[REDACTED]\"(file)",
+        show_line: "key_ref = \"literal:[REDACTED]\"",
+    },
+    SecretRow {
+        name: "server.auth.tokens literal",
+        raw: "[server.auth]\ntokens = [\"literal:sk-listener-FAKE\", \"env://LISTENER\"]\n",
+        secrets: &["sk-listener-FAKE"],
+        settings_line: "  server.auth.tokens=[\"literal:[REDACTED]\", \"env://LISTENER\"](file)",
+        show_line: "\"literal:[REDACTED]\",",
+    },
+    SecretRow {
+        name: "bare api_key_ref",
+        raw: "[providers.gw]\nkind = \"openai-compat\"\nbase_url = \"https://gw.example\"\n\
+              api_key_ref = \"sk-bare-FAKE\"\n",
+        secrets: &["sk-bare-FAKE"],
+        settings_line: "  providers.gw.api_key_ref=\"[REDACTED]\"(file)",
+        show_line: "api_key_ref = \"[REDACTED]\"",
+    },
+];
+
+#[test]
+fn no_credential_bearing_value_prints_from_show_or_the_settings_block() {
+    for row in SECRET_ROWS {
+        let config: Config = toml::from_str(row.raw).expect("fixture config parses");
+
+        let block = lines_for(row.raw).join("\n");
+        let shown = crate::commands::config::render_show(&config).expect("show renders");
+
+        assert!(
+            block.lines().any(|l| l == row.settings_line),
+            "row `{}`: `{}` missing; block:\n{block}",
+            row.name,
+            row.settings_line
+        );
+        assert!(
+            shown.lines().any(|l| l.trim() == row.show_line),
+            "row `{}`: `{}` missing; shown:\n{shown}",
+            row.name,
+            row.show_line
+        );
+        for secret in row.secrets {
+            assert!(
+                !block.contains(secret),
+                "row `{}`: `{secret}` reached the settings block:\n{block}",
+                row.name
+            );
+            assert!(
+                !shown.contains(secret),
+                "row `{}`: `{secret}` reached `config show`:\n{shown}",
+                row.name
+            );
+        }
+    }
+}

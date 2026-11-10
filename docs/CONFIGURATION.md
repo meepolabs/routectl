@@ -3397,10 +3397,23 @@ to `routectl prices refresh` and `[models.X.pricing]` and exits 2.
 
 ## Inspecting the effective config (`config show --effective`)
 
-`routectl config show` dumps `config.toml` with secrets redacted: inline
-`literal:` key references become sentinels, and every provider
-`base_url` is reduced to its ORIGIN (`scheme://host:port`), dropping any
-path, query, or embedded `user:pass@` credential. That reduction means
+`routectl config show` dumps `config.toml` with secrets redacted:
+
+- every secret reference (`api_key_ref`, `account_id_ref`, the
+  `creds` refs of a `bedrock` entry or a `bedrock_mantle` block, and each
+  `[server.auth] tokens` entry) prints as written only when it is an
+  `env://`, `file://` or `oauth://` pointer; a `literal:` value prints as
+  `literal:[REDACTED]` and any other value as `[REDACTED]`;
+- every `header_extras` value, on providers and models, prints as
+  `[REDACTED]` (header names still print);
+- every string inside `payload_extras` (providers and models) and a
+  model's `additional_request_fields`, at any depth, prints as
+  `[REDACTED]` (keys, numbers and booleans still print);
+- every provider `base_url` is reduced to its ORIGIN
+  (`scheme://host:port`), dropping any path, query, or embedded
+  `user:pass@` credential.
+
+That reduction means
 the output is NOT round-trippable back into a config file, which the
 dump says in a leading `#` comment -- your own `config.toml` remains the
 authoritative source for verbatim `base_url` values.
@@ -3421,9 +3434,9 @@ Five sections are printed:
   as `path=value(source)`. `source` is `file` when `config.toml` writes
   the key (as a `[section]` key, a dotted key or an inline table: all
   three read alike) and `default` when the value is the one in code.
-  Values come from the same redacted tree as the plain dump, so a
-  `base_url` prints only its origin and a `literal:` key ref prints its
-  sentinel. An array prints as one row. A key that has no value until
+  Values come from the same redacted tree as the plain dump, so every
+  value redacted there (listed above) prints its sentinel here too and a
+  `base_url` prints only its origin. An array prints as one row. A key that has no value until
   you set one is not printed unless its default is a fixed value in
   code: `[retry] max_honored_retry_after_ms`, the three `[log]` knobs,
   and on each entry of the matching kind `max_thinking_entry_bytes`
@@ -5089,11 +5102,10 @@ warning.
 `oauth://` references remain as opaque URIs (they are non-secret
 pointers, not credential values); defaults are filled in; layered
 overlays NOT yet applied
-(those compose per request, not at startup). Key references need no
-redaction here -- a config carrying an inline `literal:` secret is
-rejected at validation before this view is ever produced -- but
-`base_url` DOES get reduced to its origin, because a `base_url` may
-legitimately carry a credential and is not rejected for it. Useful when
+(those compose per request, not at startup). Credential-bearing values
+are redacted and `base_url` is reduced to its origin, as listed under
+[Inspecting the effective config](#inspecting-the-effective-config-config-show---effective).
+Useful when
 chasing
 "why is my model picking provider Y instead of Z" without flipping
 trace logging.

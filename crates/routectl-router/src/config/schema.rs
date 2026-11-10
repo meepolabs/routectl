@@ -993,6 +993,34 @@ impl ModelEntry {
             pricing: None,
         }
     }
+    /// Redact every credential-bearing value in this entry, in place, for
+    /// display: each `header_extras` value and every string leaf of
+    /// `payload_extras` and `additional_request_fields` becomes `[REDACTED]`.
+    /// Names every field, so a new one fails to compile here until someone
+    /// decides whether it carries a secret.
+    pub fn redact_secrets(&mut self) {
+        let Self {
+            header_extras,
+            payload_extras,
+            additional_request_fields,
+            provider: _,
+            upstream: _,
+            selectable: _,
+            reasoning_dialect: _,
+            history_reasoning: _,
+            stream_first_byte_timeout_ms: _,
+            reported_model: _,
+            visible_routectl_provider: _,
+            context_window: _,
+            max_output_tokens: _,
+            pricing: _,
+        } = self;
+        redact_extras(header_extras, payload_extras);
+        if let Some(fields) = additional_request_fields {
+            redact_json_strings(fields);
+        }
+    }
+
     /// Set the reasoning dialect that governs how thinking is expressed on the wire.
     pub const fn with_reasoning_dialect(mut self, d: ReasoningDialect) -> Self {
         self.reasoning_dialect = Some(d);
@@ -1222,6 +1250,16 @@ pub struct ServerAuth {
     /// "no auth required" (loopback dev default).
     #[serde(default)]
     pub tokens: Vec<String>,
+}
+
+impl ServerAuth {
+    /// Redact each listener token ref for display, the way a provider key
+    /// ref is redacted.
+    pub fn redact_secrets(&mut self) {
+        for token in &mut self.tokens {
+            *token = redact_literal_secret(token);
+        }
+    }
 }
 
 fn default_host() -> String {
@@ -2686,40 +2724,102 @@ impl ProviderEntry {
         self
     }
 
-    /// Redact any inline literal secrets in this entry's key references, and
-    /// reduce `base_url` to its origin, in place, so the entry is safe to
-    /// serialize into diagnostics.
+    /// Redact every credential-bearing value in this entry, in place, so the
+    /// entry is safe to serialize into diagnostics: key refs that are not
+    /// `env://` / `file://` / `oauth://` pointers become sentinels (including
+    /// the bedrock-mantle and Bedrock creds), every `header_extras` value and
+    /// every string leaf of `payload_extras` becomes `[REDACTED]`, and
+    /// `base_url` is reduced to its origin.
     ///
-    /// The output is NOT round-trippable back into a config file: `base_url`
-    /// loses its path, query, and any embedded credential (reduced to its
-    /// origin), and a literal key ref becomes a sentinel. Every arm binds
-    /// `base_url` explicitly rather than through `..` so a new variant, or a new
-    /// URL-bearing field on an existing one, fails to compile here instead of
-    /// silently shipping the raw value.
+    /// The output is NOT round-trippable back into a config file. Every arm
+    /// names every field of its variant (non-secret ones as `_`), so a new
+    /// variant or field fails to compile here until someone decides whether
+    /// it carries a secret.
     pub fn redact_secrets(&mut self) {
         match self {
             Self::OpenaiCompat {
-                api_key_ref,
                 base_url,
-                ..
-            }
-            | Self::AnthropicApi {
                 api_key_ref,
-                base_url,
-                ..
+                header_extras,
+                payload_extras,
+                #[cfg(feature = "bedrock")]
+                bedrock_mantle,
+                user_agent: _,
+                cache_capability: _,
+                auto_emit_top_level_breakpoint: _,
+                auto_emit_per_block_breakpoints: _,
+                reduction_enabled: _,
+                runtime: _,
             } => {
                 *api_key_ref = redact_literal_secret(api_key_ref);
                 *base_url = redact_base_url(base_url);
+                redact_extras(header_extras, payload_extras);
+                #[cfg(feature = "bedrock")]
+                redact_mantle(bedrock_mantle.as_mut());
+            }
+            Self::AnthropicApi {
+                api_key_ref,
+                base_url,
+                header_extras,
+                payload_extras,
+                #[cfg(feature = "bedrock")]
+                bedrock_mantle,
+                anthropic_version: _,
+                auth_kind: _,
+                credential_source: _,
+                user_agent: _,
+                forward_client_headers: _,
+                context_management: _,
+                max_thinking_entry_bytes: _,
+                cache_capability: _,
+                auto_emit_top_level_breakpoint: _,
+                auto_emit_per_block_breakpoints: _,
+                reduction_enabled: _,
+                cloak: _,
+                runtime: _,
+            } => {
+                *api_key_ref = redact_literal_secret(api_key_ref);
+                *base_url = redact_base_url(base_url);
+                redact_extras(header_extras, payload_extras);
+                #[cfg(feature = "bedrock")]
+                redact_mantle(bedrock_mantle.as_mut());
             }
             // Carries no `base_url` at all: the region derives the endpoint.
             #[cfg(feature = "bedrock")]
-            Self::Bedrock { creds, .. } => creds.redact(),
+            Self::Bedrock {
+                creds,
+                header_extras,
+                payload_extras,
+                region: _,
+                api_shape: _,
+                user_agent: _,
+                anthropic_beta: _,
+                cache_capability: _,
+                auto_emit_top_level_breakpoint: _,
+                auto_emit_per_block_breakpoints: _,
+                reduction_enabled: _,
+                runtime: _,
+            } => {
+                creds.redact();
+                redact_extras(header_extras, payload_extras);
+            }
             #[cfg(feature = "openai-responses")]
             Self::OpenaiResponses {
                 api_key_ref,
                 account_id_ref,
                 base_url,
-                ..
+                header_extras,
+                payload_extras,
+                #[cfg(feature = "bedrock")]
+                bedrock_mantle,
+                auth_kind: _,
+                user_agent: _,
+                codex_version: _,
+                cache_capability: _,
+                auto_emit_top_level_breakpoint: _,
+                auto_emit_per_block_breakpoints: _,
+                reduction_enabled: _,
+                runtime: _,
             } => {
                 *api_key_ref = redact_literal_secret(api_key_ref);
                 if let Some(a) = account_id_ref {
@@ -2730,15 +2830,28 @@ impl ProviderEntry {
                 if let Some(url) = base_url {
                     *url = redact_base_url(url);
                 }
+                redact_extras(header_extras, payload_extras);
+                #[cfg(feature = "bedrock")]
+                redact_mantle(bedrock_mantle.as_mut());
             }
             #[cfg(feature = "gemini")]
             Self::Gemini {
                 api_key_ref,
                 base_url,
-                ..
+                header_extras,
+                payload_extras,
+                user_agent: _,
+                auth_mode: _,
+                cloud_project_id: _,
+                cache_capability: _,
+                auto_emit_top_level_breakpoint: _,
+                auto_emit_per_block_breakpoints: _,
+                reduction_enabled: _,
+                runtime: _,
             } => {
                 *api_key_ref = redact_literal_secret(api_key_ref);
                 *base_url = redact_base_url(base_url);
+                redact_extras(header_extras, payload_extras);
             }
         }
     }
@@ -2805,8 +2918,8 @@ impl ProviderEntry {
 
 #[cfg(feature = "bedrock")]
 impl BedrockCredsConfig {
-    /// Replace literal-prefixed secret values with `literal:[REDACTED]`.
-    /// Other URI schemes are already non-secret pointers.
+    /// Replace every ref that is not an `env://`, `file://` or `oauth://`
+    /// pointer with a sentinel (`literal:[REDACTED]` for a `literal:` value).
     pub fn redact(&mut self) {
         match self {
             Self::BearerKey { key_ref } => {
@@ -2851,15 +2964,54 @@ impl BedrockCredsConfig {
     }
 }
 
+/// What a redacted credential-bearing value prints as.
+const REDACTED: &str = "[REDACTED]";
+
+/// A secret ref as it may be displayed: an `env://`, `file://` or `oauth://`
+/// pointer and an empty slot print as written; a `literal:` value keeps only
+/// its scheme; anything else (a bare value is most likely a pasted key) is
+/// withheld whole.
 fn redact_literal_secret(uri: &str) -> String {
-    if let Some(rest) = uri.strip_prefix("literal:") {
-        if rest.is_empty() {
-            "literal:".into()
-        } else {
-            "literal:[REDACTED]".into()
-        }
-    } else {
-        uri.to_string()
+    if uri.is_empty() {
+        return String::new();
+    }
+    match routectl_auth::SecretScheme::classify(uri) {
+        Some(
+            routectl_auth::SecretScheme::Env
+            | routectl_auth::SecretScheme::File
+            | routectl_auth::SecretScheme::OAuth,
+        ) => uri.to_string(),
+        Some(routectl_auth::SecretScheme::Literal) if uri == "literal:" => uri.to_string(),
+        Some(routectl_auth::SecretScheme::Literal) => format!("literal:{REDACTED}"),
+        _ => REDACTED.to_string(),
+    }
+}
+
+/// Replace every header value with the sentinel (names stay) and every
+/// string leaf of the payload extras, at any depth, with the sentinel (keys
+/// and non-string scalars stay).
+fn redact_extras(header_extras: &mut BTreeMap<String, String>, payload_extras: &mut Option<Value>) {
+    for value in header_extras.values_mut() {
+        *value = REDACTED.to_string();
+    }
+    if let Some(payload) = payload_extras {
+        redact_json_strings(payload);
+    }
+}
+
+fn redact_json_strings(value: &mut Value) {
+    match value {
+        Value::String(s) => *s = REDACTED.to_string(),
+        Value::Array(items) => items.iter_mut().for_each(redact_json_strings),
+        Value::Object(map) => map.values_mut().for_each(redact_json_strings),
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
+}
+
+#[cfg(feature = "bedrock")]
+fn redact_mantle(mantle: Option<&mut BedrockMantleConfig>) {
+    if let Some(BedrockMantleConfig { creds, region: _ }) = mantle {
+        creds.redact();
     }
 }
 
