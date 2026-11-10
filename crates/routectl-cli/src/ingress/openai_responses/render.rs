@@ -24,12 +24,17 @@
 //! message:
 //!
 //! ```text
+//! reasoning_details    -> `reasoning` item(s) grouped by id
 //! assistant text       -> `message` item with `output_text` blocks
 //! refusal part         -> `refusal` block on the message item
-//! forward-compat Other -> re-emitted `{type, ...extras}` block
+//! forward-compat Other -> top-level `{type, ...extras}` output item
 //! tool_calls           -> one `function_call` item each
-//! reasoning_details    -> `reasoning` item(s) grouped by id
 //! ```
+//!
+//! A forward-compat Other is an upstream output item the egress did not
+//! model (e.g. `custom_tool_call`), so it goes back to the top level where
+//! the upstream had it: a client's message content type set is closed,
+//! while its output item set tolerates unknown types.
 //!
 //! `usage` inverts `translate_usage`:
 //!
@@ -162,8 +167,8 @@ pub(super) fn declare_status_rebuild(finish_reason: Option<&str>, edits: &mut Re
 // ---------------------------------------------------------------------------
 
 /// Build the `output[]` array from a canonical assistant `Message`.
-/// Arrival order mirrors the egress walk: reasoning items first, then a
-/// message item (text + refusal + forward-compat blocks), then one
+/// Order: reasoning items, then a message item (text + refusal blocks),
+/// then one top-level item per forward-compat Other part, then one
 /// function_call item per tool_call. The message item carries
 /// `message_item_id` when the upstream supplied one.
 fn build_output(
@@ -182,6 +187,7 @@ fn build_output(
         output.push(message_item);
     }
 
+    output.extend(build_unmodeled_items(&msg.content));
     output.extend(build_function_call_items(msg));
 
     output
@@ -207,7 +213,7 @@ pub(super) fn declare_message_item_status(output_index: usize, edits: &mut Respo
 /// renderable content (a pure tool-call or pure-reasoning turn emits no
 /// message item). Plain text becomes an `output_text` block; a
 /// `refusal` Other or the canonical `msg.refusal` string become a
-/// `refusal` block; any other Other is re-emitted verbatim.
+/// `refusal` block; any other Other is left to [`build_unmodeled_items`].
 fn build_message_item(
     content: &MessageContent,
     refusal: Option<&str>,
@@ -247,7 +253,7 @@ fn build_content_blocks(content: &MessageContent) -> Vec<Value> {
 
 /// Translate one canonical `ContentPart` into a Responses message content
 /// block. Text -> `output_text`; the `refusal` Other -> `refusal`; any
-/// other Other -> verbatim `{type, ...extras}` (forward-compat); ToolUse
+/// other Other is skipped here (it renders as a top-level item); ToolUse
 /// parts are skipped here (they surface as `function_call` output items,
 /// matching how the egress parsed function_call into both tool_calls and
 /// a ToolUse part -- the renderer uses tool_calls as the source of truth
@@ -265,10 +271,25 @@ fn content_block_from_part(part: &ContentPart) -> Option<Value> {
                 .unwrap_or_default();
             Some(json!({"type": "refusal", "refusal": refusal}))
         }
-        ContentPart::Other {
-            type_tag, extras, ..
-        } => Some(other_block(type_tag, extras)),
+        ContentPart::Other { .. } => None,
     }
+}
+
+/// Every non-`refusal` `ContentPart::Other`, in arrival order, as a
+/// top-level output item.
+fn build_unmodeled_items(content: &MessageContent) -> Vec<Value> {
+    let MessageContent::Parts(parts) = content else {
+        return Vec::new();
+    };
+    parts
+        .iter()
+        .filter_map(|part| match part {
+            ContentPart::Other {
+                type_tag, extras, ..
+            } if type_tag != "refusal" => Some(other_item(type_tag, extras)),
+            _ => None,
+        })
+        .collect()
 }
 
 /// `output_text` content block. `annotations` is required by the
@@ -279,10 +300,10 @@ pub(super) fn output_text_block(text: &str) -> Value {
     json!({"type": "output_text", "text": text, "annotations": []})
 }
 
-/// Re-emit a forward-compat `ContentPart::Other` as a Responses block,
-/// lifting the `type_tag` back onto `type` and spreading the verbatim
+/// Re-emit a forward-compat `ContentPart::Other` as a Responses output
+/// item, lifting the `type_tag` back onto `type` and spreading the verbatim
 /// extras. Inverse of the egress `split_other_value`.
-fn other_block(type_tag: &str, extras: &Map<String, Value>) -> Value {
+fn other_item(type_tag: &str, extras: &Map<String, Value>) -> Value {
     let mut obj = extras.clone();
     obj.insert("type".into(), Value::String(type_tag.to_string()));
     Value::Object(obj)

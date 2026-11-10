@@ -759,6 +759,8 @@ list with more narrative.
 
 ### Fixed
 
+- **Unmodeled Responses output items arrive as top-level items on complete responses.** An output item routectl does not model (for example a `custom_tool_call`) now renders as its own entry in `output[]`, after the message and before the function calls, with its fields as the upstream sent them, instead of as a block inside the message content. A `refusal` stays a block on the message.
+
 - **openai-compat streams keep held think bytes, and complete responses echo `system_fingerprint`.** Think bytes the stream is holding are sent before a transport error or a tool-call id error. A complete response's upstream `system_fingerprint` reaches the client. A user message split around a tool result copies only `role` and `name` onto each part.
 
 - **A Converse tool call with an empty argument delta closes with `{}` exactly once.** The client never receives an empty arguments string.

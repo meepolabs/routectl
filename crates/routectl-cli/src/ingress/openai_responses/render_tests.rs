@@ -603,35 +603,100 @@ fn refusal_part_renders_refusal_content_block() {
     let v = render(msg, Some("stop"));
 
     // Assert
-    let blocks = output(&v)[0]["content"].as_array().unwrap();
+    let items = output(&v);
+    assert_eq!(items.len(), 1, "a refusal is never lifted to the top level");
+    let blocks = items[0]["content"].as_array().unwrap();
     assert_eq!(blocks.len(), 1);
     assert_eq!(blocks[0]["type"], "refusal");
     assert_eq!(blocks[0]["refusal"], "cannot help");
 }
 
-#[test]
-fn forward_compat_other_part_re_emits_type_tag_and_extras() {
-    // A future content block preserved as ContentPart::Other must be
-    // re-emitted with its type tag and verbatim extra fields.
-    // Arrange
+fn custom_tool_call_part() -> ContentPart {
     let mut extras = serde_json::Map::new();
-    extras.insert("foo".into(), json!("bar"));
-    extras.insert("count".into(), json!(3));
-    let msg = assistant_message(MessageContent::Parts(vec![ContentPart::Other {
-        type_tag: "future_block".into(),
+    extras.insert("call_id".into(), json!("call_custom_1"));
+    extras.insert("name".into(), json!("apply_patch"));
+    extras.insert("input".into(), json!("*** Begin Patch\n*** End Patch"));
+    extras.insert("status".into(), json!("completed"));
+    ContentPart::Other {
+        type_tag: "custom_tool_call".into(),
         cache_control: None,
         extras,
-    }]));
+    }
+}
+
+#[test]
+fn unmodeled_other_part_renders_as_top_level_item_with_fields_verbatim() {
+    // Arrange
+    let msg = assistant_message(MessageContent::Parts(vec![
+        text_part("patching"),
+        custom_tool_call_part(),
+    ]));
 
     // Act
     let v = render(msg, Some("stop"));
 
     // Assert
-    let blocks = output(&v)[0]["content"].as_array().unwrap();
+    let items = output(&v);
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0]["type"], "message");
+    let blocks = items[0]["content"].as_array().unwrap();
     assert_eq!(blocks.len(), 1);
-    assert_eq!(blocks[0]["type"], "future_block");
-    assert_eq!(blocks[0]["foo"], "bar");
-    assert_eq!(blocks[0]["count"], 3);
+    assert_eq!(blocks[0]["type"], "output_text");
+    assert_eq!(
+        items[1],
+        json!({
+            "type": "custom_tool_call",
+            "call_id": "call_custom_1",
+            "name": "apply_patch",
+            "input": "*** Begin Patch\n*** End Patch",
+            "status": "completed",
+        })
+    );
+}
+
+#[test]
+fn unmodeled_other_part_without_message_text_renders_alone() {
+    // Arrange
+    let msg = assistant_message(MessageContent::Parts(vec![custom_tool_call_part()]));
+
+    // Act
+    let v = render(msg, Some("stop"));
+
+    // Assert
+    let items = output(&v);
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["type"], "custom_tool_call");
+}
+
+#[test]
+fn output_order_is_reasoning_message_unmodeled_item_function_call() {
+    // Arrange
+    let mut msg = assistant_message(MessageContent::Parts(vec![
+        custom_tool_call_part(),
+        text_part("done"),
+    ]));
+    msg.reasoning_details = vec![responses_detail(
+        ReasoningDetailKind::Summary,
+        "rs_1",
+        json!({"text": "plan"}),
+    )];
+    msg.tool_calls = Some(vec![json!({
+        "id": "call_1", "type": "function",
+        "function": {"name": "f", "arguments": "{}"}
+    })]);
+
+    // Act
+    let v = render(msg, Some("tool_calls"));
+
+    // Assert
+    let types: Vec<&str> = output(&v)
+        .iter()
+        .map(|item| item["type"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        types,
+        ["reasoning", "message", "custom_tool_call", "function_call"]
+    );
 }
 
 #[test]
