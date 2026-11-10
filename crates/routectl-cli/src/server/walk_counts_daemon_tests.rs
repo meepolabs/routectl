@@ -5,7 +5,8 @@
 //!
 //! The ledger starts as a seeded schema-19 file. The first daemon migrates
 //! it and serves four known requests; a second daemon then boots on the
-//! migrated file, and every row is read again.
+//! migrated file, and every row is read again. That second daemon serves
+//! with its config on disk, so its doctor builds the configured report.
 //!
 //! - `walk`: A (origin X) -> B (origin X) -> C (origin Y). A answers a
 //!   generic 400, which excludes origin X, so B is passed over and C serves.
@@ -27,7 +28,7 @@ use serde_json::{Value, json};
 use wiremock::matchers::{body_partial_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use super::observation_reconcile_daemon_tests::{Daemon, usage_dir};
+use super::observation_reconcile_daemon_tests::{Daemon, WAIT, usage_dir};
 
 const WALK_ALIAS: &str = "walk";
 const FEATURE_ALIAS: &str = "feature";
@@ -278,12 +279,104 @@ fn scenario_config(origins: &Origins, usage_db: &std::path::Path) -> Config {
     config
 }
 
-async fn boot(config: &Config) -> Daemon {
+async fn scenario_router(config: &Config) -> Router {
     let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::new());
-    let router: Router = super::build_router_from_config(Arc::new(config.clone()), secrets)
+    super::build_router_from_config(Arc::new(config.clone()), secrets)
         .await
-        .expect("build router");
-    Daemon::spawn(config.clone(), router).await
+        .expect("build router")
+}
+
+async fn boot(config: &Config) -> Daemon {
+    Daemon::spawn(config.clone(), scenario_router(config).await).await
+}
+
+/// A daemon serving with its config file on disk, the branch on which
+/// `/status/doctor` builds its report.
+pub(super) struct ConfiguredDaemon {
+    pub(super) base_url: String,
+    pub(super) usage_db: std::path::PathBuf,
+    handle: tokio::task::JoinHandle<()>,
+}
+
+impl ConfiguredDaemon {
+    async fn spawn(config: &Config, config_path: std::path::PathBuf) -> Self {
+        let router = scenario_router(config).await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback");
+        let base_url = format!("http://{}", listener.local_addr().expect("read addr"));
+        let served = Arc::new(config.clone());
+        let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::new());
+        let handle = tokio::spawn(async move {
+            super::serve::serve_on_listener_with_injected_router(
+                served,
+                listener,
+                Some(config_path),
+                Some(secrets),
+                super::serve::DaemonTestSeams {
+                    injected_router: Some(router),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("the daemon serves");
+        });
+        let daemon = Self {
+            base_url,
+            usage_db: config.usage.db_path.clone(),
+            handle,
+        };
+        daemon.await_health().await;
+        daemon
+    }
+
+    async fn await_health(&self) {
+        let deadline = tokio::time::Instant::now() + WAIT;
+        loop {
+            if reqwest::get(format!("{}/health", self.base_url))
+                .await
+                .is_ok_and(|r| r.status().is_success())
+            {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the daemon never answered /health"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    }
+
+    /// GET a status path; it must answer 200 with a JSON body.
+    async fn get_json(&self, status_path: &str) -> Value {
+        assert!(!self.handle.is_finished(), "the daemon exited mid-test");
+        let response = reqwest::get(format!("{}{status_path}", self.base_url))
+            .await
+            .expect("the daemon answers");
+        assert_eq!(response.status().as_u16(), 200, "{status_path}");
+        response.json().await.expect("status body parses")
+    }
+
+    pub(super) async fn shutdown(self) {
+        self.handle.abort();
+        let _ = self.handle.await;
+    }
+}
+
+/// The config file the restarted daemon is handed: the same ledger path its
+/// in-memory config carries.
+fn write_config_file(dir: &std::path::Path, usage_db: &std::path::Path) -> std::path::PathBuf {
+    let config_path = dir.join("config.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            "version = {}\n[usage]\ndb_path = \"{}\"\n",
+            routectl_router::CURRENT_CONFIG_VERSION,
+            usage_db.display(),
+        ),
+    )
+    .expect("write the config file");
+    config_path
 }
 
 fn message_body(alias: &str) -> Value {
@@ -321,13 +414,15 @@ async fn send_count(daemon: &Daemon, request_id: &str) -> u16 {
 /// The scenario's ledger after the restart.
 pub(super) struct WalkLedger {
     /// The daemon booted on the migrated file, still serving.
-    pub(super) restarted: Daemon,
+    pub(super) restarted: ConfiguredDaemon,
     /// Each served request's row as the first daemon left it.
     pub(super) before_restart: BTreeMap<&'static str, WalkRow>,
     /// The status each served request drew, keyed like `before_restart`.
     pub(super) statuses: BTreeMap<&'static str, u16>,
     /// The ledger's schema version once the first daemon had booted.
     pub(super) migrated_version: i64,
+    /// The config both daemons served.
+    pub(super) config: Config,
     _origins: Origins,
     _dir: tempfile::TempDir,
 }
@@ -377,12 +472,14 @@ pub(super) async fn walk_ledger() -> WalkLedger {
     }
     first.shutdown().await;
 
-    let restarted = boot(&config).await;
+    let restarted =
+        ConfiguredDaemon::spawn(&config, write_config_file(dir.path(), &usage_db)).await;
     WalkLedger {
         restarted,
         before_restart,
         statuses,
         migrated_version,
+        config,
         _origins: origins,
         _dir: dir,
     }
@@ -477,6 +574,112 @@ async fn every_walk_row_reads_the_same_after_a_restart_on_the_migrated_file() {
     assert_eq!(ledger.row(SEEDED_ID).counts, [None; 5], "a pre-v20 row");
     for id in SERVED_IDS {
         assert_eq!(ledger.row(id), ledger.before_restart[id], "{id}");
+    }
+    ledger.restarted.shutdown().await;
+}
+
+/// The five walk counts summed over every row the restarted daemon's file
+/// holds, a NULL count adding 0.
+fn ledger_walk_totals(ledger: &WalkLedger) -> [i64; 5] {
+    let mut totals = [0_i64; 5];
+    for id in SERVED_IDS.into_iter().chain([SEEDED_ID]) {
+        for (total, count) in totals.iter_mut().zip(ledger.row(id).counts) {
+            *total += count.unwrap_or(0);
+        }
+    }
+    totals
+}
+
+/// The five walk fields of a status panel's `observation` block, in
+/// [`WALK_COLUMNS`] order.
+fn observation_walk(panel: &Value) -> [i64; 5] {
+    let observation = &panel["data"]["observation"];
+    let mut fields = WALK_COLUMNS.split(", ").map(|name| {
+        observation[name]
+            .as_i64()
+            .unwrap_or_else(|| panic!("observation.{name} is an integer: {panel}"))
+    });
+    std::array::from_fn(|_| fields.next().expect("five walk fields"))
+}
+
+/// The line `routectl usage` prints for a window whose walk counts are
+/// `totals` and whose ledger recorded no gap.
+fn walk_line(totals: [i64; 5]) -> String {
+    let [caused, endpoint, model, target, probe_run] = totals;
+    format!(
+        "walk: request-caused failures={caused}  |  excluded endpoint={endpoint} \
+         model={model} target={target} probe-run={probe_run}"
+    )
+}
+
+/// Every window block `routectl usage` prints over `usage_db`, rendered
+/// from the file as the command reads it.
+fn usage_cli_output(config: &Config, usage_db: &std::path::Path) -> String {
+    let db = routectl_usage::open_readonly(usage_db).expect("read-only open");
+    let args = crate::commands::usage::UsageArgs {
+        window: crate::commands::usage::WindowFlag::None,
+        since: None,
+        until: None,
+        by: None,
+        detail: false,
+        db: Some(usage_db.to_path_buf()),
+        k_calibration: false,
+    };
+    crate::commands::usage::build_output(
+        &db,
+        config,
+        &crate::commands::pricing::PriceSnapshot::default(),
+        &args,
+        chrono::Local::now(),
+    )
+    .expect("the usage report builds")
+}
+
+/// After the restart on the migrated file, the window totals of the ledger
+/// rows read back unchanged from `routectl usage` (every window block),
+/// `/status/usage` (today and all time) and the served `/status/doctor`
+/// (today). The totals are pinned to the scenario's figures first, so the
+/// comparison cannot pass on an all-zero ledger.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial]
+async fn walk_counts_match_across_usage_cli_status_usage_and_status_doctor() {
+    // Arrange
+    let xdg = tempfile::tempdir().expect("config home tempdir");
+    let _xdg = routectl_testkit::ScopedEnv::set("XDG_CONFIG_HOME", xdg.path());
+    let _no_config = routectl_testkit::ScopedEnv::unset("ROUTECTL_CONFIG");
+    let ledger = walk_ledger().await;
+    let expected = ledger_walk_totals(&ledger);
+    assert_eq!(
+        expected,
+        [3, 1, 1, 0, 0],
+        "premise: the scenario's rows sum to three request-caused failures, \
+         one endpoint and one model exclusion"
+    );
+
+    // Act
+    let cli = usage_cli_output(&ledger.config, &ledger.restarted.usage_db);
+    let usage_today = ledger
+        .restarted
+        .get_json("/status/usage?window=today")
+        .await;
+    let usage_all = ledger.restarted.get_json("/status/usage?window=all").await;
+    let doctor = ledger.restarted.get_json("/status/doctor").await;
+
+    // Assert
+    let cli_walk_lines: Vec<&str> = cli.lines().filter(|l| l.starts_with("walk:")).collect();
+    assert_eq!(
+        cli_walk_lines,
+        vec![walk_line(expected).as_str(); 4],
+        "one walk line per window block: {cli}"
+    );
+    for (surface, panel, schema) in [
+        ("/status/usage?window=today", &usage_today, 5),
+        ("/status/usage?window=all", &usage_all, 5),
+        ("/status/doctor", &doctor, 30),
+    ] {
+        assert_eq!(panel["schema_version"], schema, "{surface}: {panel}");
+        assert_eq!(observation_walk(panel), expected, "{surface}");
+        assert_eq!(panel["data"]["observation"]["complete"], true, "{surface}");
     }
     ledger.restarted.shutdown().await;
 }
