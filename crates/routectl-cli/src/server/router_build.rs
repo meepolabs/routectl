@@ -97,8 +97,6 @@ pub async fn build_router_from_config(
     // is installed: a degraded pool is invisible to config alone, so the read
     // side has to be handed the build's own observation.
     router.install_pool_reports(built.pool_reports);
-    let resolved_models =
-        routectl_router::apply_catalog_overlay(resolved_models, &config, &Default::default());
     router.install_resolved_models(resolved_models);
 
     // Provider build failures are normally non-fatal (an operator

@@ -763,10 +763,10 @@ fn default_mitm_host() -> String {
 /// contributes nothing to a derived cost. Cost is computed at query time,
 /// never persisted, so a corrected price retroactively fixes historical rows.
 ///
-/// A `[registry]` row wins WHOLE over the baked catalog's own rates, which fill in only
-/// when no row prices an upstream: this struct has no explicitly-unpriced
-/// sentinel, so a per-field fill could not tell a deliberate omission from
-/// an absent value. A `[models.X.pricing]` block instead fills field by
+/// A `[registry]` row wins WHOLE over the refreshed and shipped price tables,
+/// which fill in only when no row prices an upstream: this struct has no
+/// explicitly-unpriced sentinel, so a per-field fill could not tell a
+/// deliberate omission from an absent value. A `[models.X.pricing]` block instead fills field by
 /// field over the other sources.
 ///
 /// `Eq` is deliberately NOT derived: `f64` is not `Eq`.
@@ -1848,11 +1848,6 @@ pub struct BedrockMantleConfig {
 /// The vocabulary [`ProviderEntry::kind_str`] draws from, listed in variant
 /// order, gated by the same `cfg`s -- a kind the build cannot construct is
 /// also a kind no config can name.
-///
-/// Distinct from `catalog::is_cataloged_provider_kind`, which answers the
-/// narrower "does the BAKED catalog carry rows for this kind?". A kind can be
-/// configurable with zero baked rows (today `gemini`); catalog lookups still
-/// serve overlay cells keyed on it.
 pub const CONFIG_PROVIDER_KINDS: &[&str] = &[
     kind::OPENAI_COMPAT,
     kind::ANTHROPIC_API,

@@ -135,10 +135,10 @@ tr.exp-row { cursor: pointer; }
   background: var(--pill-neutral-bg);
   color: var(--pill-neutral-fg);
 }
-.circuit-closed, .reach-reachable, .status-Pass, .learned-verified, .src-user {
+.circuit-closed, .reach-reachable, .status-Pass, .learned-verified {
   background: var(--pill-ok-bg); color: var(--pill-ok-fg);
 }
-.circuit-open, .reach-degraded, .status-Fail, .verdict-route-away, .learned-broken, .src-missing {
+.circuit-open, .reach-degraded, .status-Fail, .verdict-route-away, .learned-broken {
   background: var(--pill-err-bg); color: var(--pill-err-fg);
 }
 .circuit-half_open_ready, .status-Warn {
@@ -152,20 +152,16 @@ tr.exp-row { cursor: pointer; }
 .elig-rate_limited {
   background: var(--pill-warn-bg); color: var(--pill-warn-fg);
 }
-.verdict-force-supported, .tier-self-identifying, .src-import {
+.verdict-force-supported, .tier-self-identifying {
   background: var(--pill-info-bg); color: var(--pill-info-fg);
 }
 /* Categorical (non-state) distinctions resolve inside the accent + second
-   data hue + neutral set. A provenance or catalog layer is not a state, so
-   it never earns a hue of its own. */
+   data hue + neutral set. A provenance is not a state, so it never earns a hue of its own. */
 .prov-override {
   background: var(--pill-accent-bg); color: var(--pill-accent-fg);
 }
-.tier-inferred, .src-baked, .prov-learned {
+.tier-inferred, .prov-learned {
   background: var(--pill-neutral-bg); color: var(--pill-neutral-fg);
-}
-.src-disabled {
-  background: var(--pill-neutral-bg); color: var(--faint);
 }
 /* Quota STATUS / OVERAGE token colors. These values pass through from the
    upstream ratelimit headers, so an unrecognized value keeps the neutral

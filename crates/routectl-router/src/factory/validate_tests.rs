@@ -1726,37 +1726,6 @@ mod collect_config_validation_tests {
     }
 
     #[test]
-    fn rejects_non_finite_cache_pricing_wm() {
-        let validation = collect_config_validation(&parse("[cache_pricing.\"m\"]\nwm = inf\n"));
-        assert!(
-            has_finite_error(&validation),
-            "inf cache_pricing.wm must be rejected: {:?}",
-            validation.errors
-        );
-    }
-
-    #[test]
-    fn rejects_non_finite_cache_pricing_rm() {
-        let validation = collect_config_validation(&parse("[cache_pricing.\"m\"]\nrm = inf\n"));
-        assert!(
-            has_finite_error(&validation),
-            "inf cache_pricing.rm must be rejected: {:?}",
-            validation.errors
-        );
-    }
-
-    #[test]
-    fn rejects_non_finite_cache_pricing_storage_rent() {
-        let validation =
-            collect_config_validation(&parse("[cache_pricing.\"m\"]\nstorage_rent = nan\n"));
-        assert!(
-            has_finite_error(&validation),
-            "nan cache_pricing.storage_rent must be rejected: {:?}",
-            validation.errors
-        );
-    }
-
-    #[test]
     fn rejects_empty_base_url_openai_compat() {
         let validation = collect_config_validation(&parse(
             "[providers.p]\nkind = \"openai-compat\"\nbase_url = \"\"\napi_key_ref = \"literal:k\"\n",
@@ -1826,18 +1795,13 @@ mod collect_config_validation_tests {
     /// (float leaves; integers are out of scope) must be registered in
     /// `validate_float_fields`' covered set. A future f64/f32 leaf added
     /// to the config without registering it here fails this test.
-    const COVERED_FLOAT_LEAVES: [&str; 11] = [
+    const COVERED_FLOAT_LEAVES: [&str; 6] = [
         "RetryPolicy.backoff_multiplier",
         "PricingConfig.input_per_mtok",
         "PricingConfig.output_per_mtok",
         "PricingConfig.cache_read_per_mtok",
         "PricingConfig.cache_write_5m_per_mtok",
         "PricingConfig.cache_write_1h_per_mtok",
-        "CachePricingOverride.wm",
-        "CachePricingOverride.rm",
-        "CachePricingOverride.storage_rent",
-        "CachePricingOverride.input_cost_per_token",
-        "CachePricingOverride.output_cost_per_token",
     ];
 
     fn committed_schema() -> serde_json::Value {

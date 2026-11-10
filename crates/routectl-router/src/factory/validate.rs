@@ -1298,27 +1298,6 @@ fn validate_float_fields(config: &Config) -> Result<()> {
         }
     }
 
-    for (key, override_entry) in &config.cache_pricing {
-        let leaves: [(&str, Option<f32>); 5] = [
-            ("wm", override_entry.wm),
-            ("rm", override_entry.rm),
-            ("storage_rent", override_entry.storage_rent),
-            ("input_cost_per_token", override_entry.input_cost_per_token),
-            (
-                "output_cost_per_token",
-                override_entry.output_cost_per_token,
-            ),
-        ];
-        for (field, value) in leaves {
-            let Some(v) = value else { continue };
-            if !v.is_finite() {
-                return Err(Error::Config(format!(
-                    "cache_pricing.`{key}`.{field} is `{v}`; must be a finite number"
-                )));
-            }
-        }
-    }
-
     Ok(())
 }
 
@@ -1863,9 +1842,6 @@ pub fn collect_config_validation(config: &Config) -> ConfigValidation {
     #[cfg(feature = "bedrock")]
     if let Err(e) = super::validate_region::validate_aws_regions(config) {
         errors.push(bare_validation_message(e));
-    }
-    if let Err(e) = crate::catalog::validate_overrides(&config.cache_pricing) {
-        errors.push(e);
     }
     if let Err(e) = crate::override_registry::validate_capability_overrides(config) {
         errors.push(e);

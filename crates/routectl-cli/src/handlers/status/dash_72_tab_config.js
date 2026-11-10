@@ -53,8 +53,8 @@
   function defaultConfigEmpty() {
     return emptyCard('Running on the default configuration',
       'No providers, aliases, or models are configured yet. Name one under [providers] and ' +
-      'its endpoint and limits appear here; add an alias and its resolved chain, its targets, ' +
-      'and the catalog rows behind them appear too.',
+      'its endpoint and limits appear here; add an alias and its resolved chain and its ' +
+      'targets appear too.',
       ['current state', 'defaults in effect']);
   }
 
@@ -159,13 +159,12 @@
     return note;
   }
 
-  // One row per `[models.X]` entry with the catalog layer that won it. The
-  // model facts (window, output fill, prices, each with its source) sit in the
-  // detail row: they are reference figures an operator opens, not a reading to
+  // One row per `[models.X]` entry. The model facts (window, output fill,
+  // prices, each with its source) sit in the detail row: they are reference figures an operator opens, not a reading to
   // scan.
   function modelSection(models) {
     var tbl = mkTable('Configured models',
-      [R('model'), C('provider'), C('upstream'), C('catalog layer')], true);
+      [R('model'), C('provider'), C('upstream')], true);
     models.forEach(function (m) { modelRow(tbl, m); });
     return card('Models', 'what each name dispatches to, and where its facts come from',
       tableScroll(tbl));
@@ -174,12 +173,11 @@
   function modelRow(tbl, m) {
     var prices = Array.isArray(m.prices) ? m.prices : [];
     xrow(tbl, m.nickname,
-      [m.nickname, m.provider, m.upstream, tokLabeled('src', 'src', m.source)],
+      [m.nickname, m.provider, m.upstream],
       presentPairs([
         ['provider kind', m.provider_kind],
         ['context window', windowText(m.context_window)],
-        ['output fill', fillText(m.fill)],
-        ['verified at', m.verified_at]
+        ['output fill', fillText(m.fill)]
       ]).concat(prices.map(pricePair)));
   }
 
@@ -205,7 +203,7 @@
     return [label, String(p.per_mtok) + ' (' + source + ')'];
   }
 
-  // A model with no catalog row behind it carries none of these figures, and a
+  // A model with nothing configured carries none of these figures, and a
   // grid of five dashes is indistinguishable from an expander that failed to
   // open. Dropping the absent pairs lets `buildDefList` say so explicitly.
   function presentPairs(pairs) {

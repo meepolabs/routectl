@@ -211,115 +211,6 @@
       },
       "type": "object"
     },
-    "CachePricingOverride": {
-      "additionalProperties": false,
-      "description": "Field-level operator override for one `(provider_kind, model_glob)`\ncell, deserialized from a LEGACY `[cache_pricing]` TOML entry (since\nretired). Every field is optional; an omitted field inherits the\nbaked-in value (see\n[`CatalogRow::with_overrides`]).\n\n`Eq` is deliberately NOT derived: the multipliers are `f32`.\n`#[serde(deny_unknown_fields)]` rejects typos at config-load time.",
-      "properties": {
-        "auto_cacher": {
-          "description": "Auto-cacher override. `None` inherits the baked value.",
-          "type": [
-            "boolean",
-            "null"
-          ]
-        },
-        "has_storage_rent": {
-          "description": "Storage-rent-charging override. `None` inherits the baked value.",
-          "type": [
-            "boolean",
-            "null"
-          ]
-        },
-        "input_cost_per_token": {
-          "description": "Operator-supplied base input price in dollars per token. `Some` wins\nover the baked rate (or the baked `None`); `None` inherits the baked\nvalue unchanged. Set this when the baked table has no rate for a cell,\nor its rate is wrong for a negotiated / self-hosted price.",
-          "format": "float",
-          "type": [
-            "number",
-            "null"
-          ]
-        },
-        "max_context_tokens": {
-          "description": "Operator-supplied context window in tokens. `Some` wins over the\nbaked window (or the baked `None`); `None` inherits the baked value\nunchanged. Set this when the baked table's `None` for a cell is\nwrong -- e.g. the operator has confirmed the vendor's real window.",
-          "format": "uint32",
-          "minimum": 0,
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "max_output_tokens": {
-          "description": "Operator-supplied output-token ceiling. `Some` wins over the baked\nceiling (or the baked `None`); `None` inherits the baked value\nunchanged. `Some(0)` is rejected -- `None` is how a ceiling is left\nunconfirmed.",
-          "format": "uint32",
-          "minimum": 0,
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "min_prefix_tokens": {
-          "description": "Minimum-cacheable-prefix override, in tokens. `None` inherits the baked value.",
-          "format": "uint32",
-          "minimum": 0,
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "output_cost_per_token": {
-          "description": "Operator-supplied base output price in dollars per token. Same\nprecedence as [`Self::input_cost_per_token`].",
-          "format": "float",
-          "type": [
-            "number",
-            "null"
-          ]
-        },
-        "override_acknowledges_cost_risk": {
-          "default": false,
-          "description": "Operator's explicit acknowledgement that a below-sentinel `wm` is\nintended. Required when `wm` is set below the sentinel; otherwise\nthe merge is rejected.",
-          "type": "boolean"
-        },
-        "rm": {
-          "description": "Read multiplier override. `None` inherits the baked value.",
-          "format": "float",
-          "type": [
-            "number",
-            "null"
-          ]
-        },
-        "storage_rent": {
-          "description": "Per-hour storage-rent multiplier override. `None` inherits the baked value.",
-          "format": "float",
-          "type": [
-            "number",
-            "null"
-          ]
-        },
-        "ttl_seconds": {
-          "description": "Cache time-to-live override, in seconds. `None` inherits the baked value.",
-          "format": "uint32",
-          "minimum": 0,
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "verified_at": {
-          "description": "Operator-supplied verification date (`\"YYYY-MM-DD\"`). Format-\nvalidated but no longer stamped onto the merged row (provenance\nlives on [`EffectiveRow`], not on [`CatalogRow`]). Retained so the\nlegacy-config migration can read it when building an overlay\ncandidate from an existing `[cache_pricing]` entry.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "wm": {
-          "description": "Write multiplier override. `None` inherits the baked value.",
-          "format": "float",
-          "type": [
-            "number",
-            "null"
-          ]
-        }
-      },
-      "type": "object"
-    },
     "CalibrationConfig": {
       "additionalProperties": false,
       "description": "Operator-facing `[calibration]` config block. Accepted so existing\nconfigs keep loading; it has no effect.\n\nThe learned per-lane correction of the router's token estimate always\napplies. A lane produces no correction until it has accumulated real\nevidence, and every refusal path (thin evidence, stale evidence, an\nout-of-band reduced ratio) falls back to the uncorrected estimate, so\nthere is nothing for a switch to protect.",
@@ -849,7 +740,7 @@
     },
     "PricingConfig": {
       "additionalProperties": false,
-      "description": "Per-million-token pricing for a `[registry.*]` or `[models.X]` entry. All fields\nare USD per million tokens -- the CANONICAL operator-facing price unit\nthroughout routectl -- and all are optional: routectl ships no price\ndefaults, so any field left unset means \"this dimension is unpriced\" and\ncontributes nothing to a derived cost. Cost is computed at query time,\nnever persisted, so a corrected price retroactively fixes historical rows.\n\nA `[registry]` row wins WHOLE over the baked catalog's own rates, which fill in only\nwhen no row prices an upstream: this struct has no explicitly-unpriced\nsentinel, so a per-field fill could not tell a deliberate omission from\nan absent value. A `[models.X.pricing]` block instead fills field by\nfield over the other sources.\n\n`Eq` is deliberately NOT derived: `f64` is not `Eq`.",
+      "description": "Per-million-token pricing for a `[registry.*]` or `[models.X]` entry. All fields\nare USD per million tokens -- the CANONICAL operator-facing price unit\nthroughout routectl -- and all are optional: routectl ships no price\ndefaults, so any field left unset means \"this dimension is unpriced\" and\ncontributes nothing to a derived cost. Cost is computed at query time,\nnever persisted, so a corrected price retroactively fixes historical rows.\n\nA `[registry]` row wins WHOLE over the refreshed and shipped price tables,\nwhich fill in only when no row prices an upstream: this struct has no\nexplicitly-unpriced sentinel, so a per-field fill could not tell a\ndeliberate omission from an absent value. A `[models.X.pricing]` block instead fills field by\nfield over the other sources.\n\n`Eq` is deliberately NOT derived: `f64` is not `Eq`.",
       "properties": {
         "cache_read_per_mtok": {
           "description": "USD per million tokens read from the prompt cache. `None` leaves it unpriced.",
@@ -2076,11 +1967,9 @@
       "description": "Operator-facing `[cache]` block. Controls the dispatch-path\nauto-emission of a top-level Anthropic `cache_control` breakpoint.\nA missing block keeps the default: auto-emit enabled."
     },
     "cache_pricing": {
-      "additionalProperties": {
-        "$ref": "#/$defs/CachePricingOverride"
-      },
+      "additionalProperties": true,
       "default": {},
-      "description": "RETIRED `[cache_pricing]` table. Cache pricing lives in the catalog\noverlay (`crate::catalog_overlay`); this field is parsed only so a\nnon-empty table is refused by name\n([`crate::config::validate_cache_pricing_retired`]) instead of\nsurfacing as an unknown-key error. An empty or omitted table is the\nonly accepted form.",
+      "description": "RETIRED `[cache_pricing]` table, kept as raw TOML. Prices live under\n`[models.X.pricing]`; this field is parsed only so a non-empty table,\nwhatever its entries hold, is refused by name\n([`crate::config::validate_cache_pricing_retired`]) instead of\nsurfacing as an unknown-key error. An empty or omitted table is the\nonly accepted form.",
       "type": "object"
     },
     "calibration": {

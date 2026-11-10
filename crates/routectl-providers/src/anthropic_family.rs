@@ -38,10 +38,8 @@
 //!     config at startup.
 //!
 //! The routing-prefix set is MEASURED, not guessed: it is the set of
-//! regional prefixes appearing on Anthropic Bedrock ids this binary
-//! already recognizes elsewhere. Re-derive with
-//! `grep -rhoE '"[a-z-]+\.anthropic\.' crates/routectl-router/catalog_data/*.json | sort -u`.
-//! Widening it needs that kind of evidence -- an invented prefix is a
+//! regional prefixes on Anthropic Bedrock ids in the LiteLLM and models.dev
+//! price catalogs when it was set. Widening it needs that kind of evidence -- an invented prefix is a
 //! fabricated constraint, and a missing one rejects a working config.
 //!
 //! This module holds no provider types and carries no feature gate, so

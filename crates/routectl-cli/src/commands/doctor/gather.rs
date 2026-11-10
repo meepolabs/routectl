@@ -484,9 +484,7 @@ pub(super) const fn replay_summary(
 /// The resolved tuning table, through the same [`derive_effective_view`] path
 /// `config show --effective` renders.
 pub(super) fn derive_tuning_rows(config: &Config) -> Vec<TuningRow> {
-    // The tuning rows read the config alone, so any overlay yields the same
-    // rows; the empty one keeps this section independent of overlay loading.
-    derive_effective_view(config, &Default::default(), None, None).tuning
+    derive_effective_view(config, None, None).tuning
 }
 
 /// Probe every configured provider read-only through the shared `probe_all`

@@ -250,8 +250,7 @@ async fn both_gathers_look_in_the_config_folder() {
 
 /// A leftover overlay file is not read: one that no longer parses leaves the
 /// version finding passing and names the file only as a leftover. The
-/// premise row proves the fixture is the kind of file the old overlay loader
-/// refused.
+/// premise row proves the fixture is not even valid JSON.
 #[tokio::test]
 #[serial_test::serial]
 async fn a_corrupt_leftover_overlay_does_not_fail_the_disk_gather() {
@@ -263,8 +262,9 @@ async fn a_corrupt_leftover_overlay_does_not_fail_the_disk_gather() {
     let overlay = cfg_dir.join("catalog_overlay.json");
     std::fs::write(&overlay, b"{ not json").expect("write overlay");
     assert!(
-        routectl_router::load_catalog_overlay(&overlay).is_err(),
-        "premise: the overlay loader refuses this file"
+        serde_json::from_slice::<serde_json::Value>(&std::fs::read(&overlay).expect("read"))
+            .is_err(),
+        "premise: the file is not valid JSON"
     );
     let config_path = cfg_dir.join("config.toml");
     std::fs::write(&config_path, current_version_stamp()).expect("write config");

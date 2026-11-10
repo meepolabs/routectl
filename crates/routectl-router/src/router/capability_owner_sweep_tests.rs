@@ -157,11 +157,7 @@ struct Ledger(Vec<CapabilityEventRow>);
 
 impl CapabilityLedgerReader for Ledger {
     fn tombstone(&self) -> Option<ReplayTombstone> {
-        Some(ReplayTombstone::new(
-            0,
-            crate::catalog_baked::CATALOG_VERSION,
-            0,
-        ))
+        Some(ReplayTombstone::new(0, crate::FROZEN_CATALOG_VERSION, 0))
     }
 
     fn read_events(&self) -> Vec<CapabilityEventRow> {
@@ -183,7 +179,7 @@ fn persisted(rowid: i64, lane: &str, kind: &str) -> CapabilityEventRow {
         "web_search".to_string(),
         lane.to_string(),
         kind.to_string(),
-        crate::catalog_baked::CATALOG_VERSION,
+        crate::FROZEN_CATALOG_VERSION,
         0,
     )
     .with_vocab_version(Some(crate::capability_vocab::CURRENT_VOCAB_VERSION))

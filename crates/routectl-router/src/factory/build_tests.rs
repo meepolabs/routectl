@@ -743,171 +743,12 @@ mod build_resolved_models_tests {
     }
 
     // -------------------------------------------------------------------
-    // apply_catalog_overlay: the post-pass that stamps each resolved
-    // model's precomputed EffectiveRow.
-    // -------------------------------------------------------------------
-
-    #[tokio::test]
-    async fn a_pool_backed_model_gets_the_same_catalog_row_as_a_standalone_one() {
-        // The defect this pins: the catalog selector resolved a model's provider
-        // kind by looking its `provider` value up in `[providers]`, which for a
-        // pool-backed model names the POOL and always misses. An empty kind
-        // matches no catalog row, so capability priors, pricing, and the context
-        // window went silently absent for exactly the models a pool serves --
-        // no error, no warning, just a Missing row.
-        //
-        // Differential rather than absolute: one config, two models on the same
-        // upstream, one routed at a pool and one at a plain provider entry. The
-        // baked table can change without touching this test, and an assertion
-        // on a specific row would then pin the table instead of the selector.
-        let store: Arc<dyn SecretStore> = Arc::new(SeatEnumerationSpy::default());
-        let mut cfg = pooled_config("anthropic-pool", &["anthropic-a"], &["pooled"]);
-        cfg.providers
-            .insert("anthropic-solo".into(), oauth_member("anthropic-solo"));
-        cfg.models.insert(
-            "pooled".into(),
-            ModelEntry::new("anthropic-pool", "claude-opus-4-7"),
-        );
-        cfg.models.insert(
-            "standalone".into(),
-            ModelEntry::new("anthropic-solo", "claude-opus-4-7"),
-        );
-
-        let (models, failed) = build_resolved_models(&cfg, store, BuildOptions::default())
-            .await
-            .expect("both models build");
-        assert!(failed.is_empty(), "expected no failures: {failed:?}");
-
-        let stamped = apply_catalog_overlay(models, &cfg, &CatalogOverlay::default());
-        let pooled = &stamped.get("pooled").expect("pooled entry").effective_row;
-        let standalone = &stamped
-            .get("standalone")
-            .expect("standalone entry")
-            .effective_row;
-
-        assert_eq!(
-            pooled, standalone,
-            "a pool-backed model must resolve the SAME catalog row as the \
-             equivalent standalone model -- the pool name is not a provider kind"
-        );
-        // And that shared row must be a real one: two Missing rows would also
-        // compare equal, which is precisely the defective state.
-        assert!(
-            matches!(pooled, crate::catalog::EffectiveRow::Present { .. }),
-            "the shared row must be Present, not a matching pair of Missing: {pooled:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn apply_catalog_overlay_stamps_baked_row_when_no_overlay_cell_matches() {
-        let store: Arc<dyn SecretStore> = Arc::new(MemoryStore);
-        let cfg = config_with_models(
-            vec![(
-                "anthropic",
-                ProviderEntry::anthropic_api(crate::test_secret::file_ref("k")),
-            )],
-            vec![("haiku", ModelEntry::new("anthropic", "claude-haiku-4-5"))],
-        );
-        let (models, failed) = build_resolved_models(&cfg, store, BuildOptions::default())
-            .await
-            .expect("ok");
-        assert!(failed.is_empty());
-
-        let stamped = apply_catalog_overlay(models, &cfg, &CatalogOverlay::default());
-        let haiku = stamped.get("haiku").expect("haiku entry");
-        match &haiku.effective_row {
-            crate::catalog::EffectiveRow::Present { source, .. } => {
-                assert_eq!(*source, crate::catalog::Source::Baked);
-            }
-            other => panic!("expected Present/Baked, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn apply_catalog_overlay_overrides_a_baked_field() {
-        let store: Arc<dyn SecretStore> = Arc::new(MemoryStore);
-        let cfg = config_with_models(
-            vec![(
-                "anthropic",
-                ProviderEntry::anthropic_api(crate::test_secret::file_ref("k")),
-            )],
-            vec![("haiku", ModelEntry::new("anthropic", "claude-haiku-4-5"))],
-        );
-        let (models, _) = build_resolved_models(&cfg, store, BuildOptions::default())
-            .await
-            .expect("ok");
-
-        let mut cells = BTreeMap::new();
-        cells.insert(
-            "anthropic-api:claude-haiku-4-5*".to_string(),
-            Some(crate::catalog_overlay::OverlayCell {
-                source: crate::catalog_overlay::OverlaySource::User,
-                verified_at: "2026-07-01".to_string(),
-                wm: Some(9.5),
-                rm: None,
-                ttl_seconds: None,
-                min_prefix_tokens: None,
-                max_context_tokens: None,
-                max_output_tokens: None,
-                input_cost_per_token: None,
-                output_cost_per_token: None,
-                capabilities: None,
-            }),
-        );
-        let overlay = CatalogOverlay {
-            schema_version: crate::catalog_overlay::CATALOG_OVERLAY_SCHEMA_VERSION,
-            revision: 1,
-            cells,
-        };
-
-        let stamped = apply_catalog_overlay(models, &cfg, &overlay);
-        let haiku = stamped.get("haiku").expect("haiku entry");
-        let row = haiku
-            .effective_row
-            .priced()
-            .expect("overlay cell resolves Present");
-        assert_eq!(row.wm, 9.5, "the overlay's wm must win over the baked row");
-    }
-
-    #[tokio::test]
-    async fn apply_catalog_overlay_null_cell_disables_the_target() {
-        let store: Arc<dyn SecretStore> = Arc::new(MemoryStore);
-        let cfg = config_with_models(
-            vec![(
-                "anthropic",
-                ProviderEntry::anthropic_api(crate::test_secret::file_ref("k")),
-            )],
-            vec![("haiku", ModelEntry::new("anthropic", "claude-haiku-4-5"))],
-        );
-        let (models, _) = build_resolved_models(&cfg, store, BuildOptions::default())
-            .await
-            .expect("ok");
-
-        let mut cells = BTreeMap::new();
-        cells.insert("anthropic-api:claude-haiku-4-5*".to_string(), None);
-        let overlay = CatalogOverlay {
-            schema_version: crate::catalog_overlay::CATALOG_OVERLAY_SCHEMA_VERSION,
-            revision: 1,
-            cells,
-        };
-
-        let stamped = apply_catalog_overlay(models, &cfg, &overlay);
-        let haiku = stamped.get("haiku").expect("haiku entry");
-        assert_eq!(haiku.effective_row, crate::catalog::EffectiveRow::Disabled);
-        assert!(
-            haiku.effective_row.priced().is_none(),
-            "a null-disabled cell must fold to the conservative sentinel behavior"
-        );
-    }
-
-    // -------------------------------------------------------------------
     // Window and output ceiling: stamped from `[models.X]` only.
     // -------------------------------------------------------------------
 
-    /// One anthropic-api provider plus one model on `upstream`, built through
-    /// the real factory and then stamped by the catalog pass the daemon runs,
-    /// so each assertion covers both stages.
-    async fn stamped_one_model(nickname: &str, entry: ModelEntry) -> Arc<ResolvedModel> {
+    /// One anthropic-api provider plus one model, built through the real
+    /// factory.
+    async fn built_one_model(nickname: &str, entry: ModelEntry) -> Arc<ResolvedModel> {
         let store: Arc<dyn SecretStore> = Arc::new(MemoryStore);
         let cfg = config_with_models(
             vec![(
@@ -920,41 +761,25 @@ mod build_resolved_models_tests {
             .await
             .expect("the model builds");
         assert!(failed.is_empty(), "expected no failures: {failed:?}");
-        apply_catalog_overlay(models, &cfg, &CatalogOverlay::default())
-            .get(nickname)
-            .cloned()
-            .expect("the stamped entry")
+        models.get(nickname).cloned().expect("the built entry")
     }
 
-    /// A Claude upstream whose baked catalog row confirms both a window and
-    /// an output ceiling, asserted so the "unset" rows below would show a
-    /// catalog figure if the stamp still read one.
-    const CATALOGED_UPSTREAM: &str = "claude-opus-4-6";
+    /// A Claude upstream with well-known published window and ceiling
+    /// figures, so the "unset" row below shows no figure is inferred from
+    /// the upstream id.
+    const KNOWN_UPSTREAM: &str = "claude-opus-4-6";
 
     /// The configured window and ceiling reach the resolved model, and an
-    /// entry that sets neither stays unset even on an upstream the catalog
-    /// has figures for.
+    /// entry that sets neither stays unset.
     ///
     /// Mutation check: drop the `max_output_tokens` stamp from
     /// `apply_model_knobs` -> red on the "configured" row.
     #[tokio::test]
     async fn window_and_ceiling_come_from_the_model_entry_only() {
-        let row = crate::catalog::resolve_effective_row(
-            "anthropic-api",
-            CATALOGED_UPSTREAM,
-            None,
-            &BTreeMap::new(),
-            &CatalogOverlay::default(),
-        );
-        assert!(
-            row.output_ceiling_tokens().is_some()
-                && row.priced().and_then(|r| r.max_context_tokens).is_some(),
-            "premise: the catalog has both figures for this upstream"
-        );
         let rows = [
             (
                 "configured",
-                ModelEntry::new("anthropic", CATALOGED_UPSTREAM)
+                ModelEntry::new("anthropic", KNOWN_UPSTREAM)
                     .with_context_window(150_000)
                     .with_max_output_tokens(12_000),
                 12_000,
@@ -962,14 +787,14 @@ mod build_resolved_models_tests {
             ),
             (
                 "unset",
-                ModelEntry::new("anthropic", CATALOGED_UPSTREAM),
+                ModelEntry::new("anthropic", KNOWN_UPSTREAM),
                 0,
                 None,
             ),
         ];
 
         for (name, entry, ceiling, window) in rows {
-            let model = stamped_one_model("opus", entry).await;
+            let model = built_one_model("opus", entry).await;
 
             assert_eq!(model.max_output_tokens, ceiling, "{name}");
             assert_eq!(model.context_window_tokens(), window, "{name}");
@@ -984,7 +809,7 @@ mod build_resolved_models_tests {
         let mut cfg = pooled_config("anthropic-pool", &["anthropic-a"], &["pooled"]);
         cfg.models.insert(
             "pooled".into(),
-            ModelEntry::new("anthropic-pool", CATALOGED_UPSTREAM)
+            ModelEntry::new("anthropic-pool", KNOWN_UPSTREAM)
                 .with_context_window(100_000)
                 .with_max_output_tokens(8_000),
         );

@@ -463,19 +463,6 @@ pub struct Router {
     /// (operator pin, override, learned verdict) decides the flag. Always
     /// [`crate::beta_seed::BEDROCK_BETA_SEED`] outside tests.
     beta_seed: &'static [&'static str],
-    /// The catalog overlay this Router's resolved-model table was merged
-    /// against -- the generation the daemon ACCEPTED at the last successful
-    /// boot or reload. Empty (revision 0) until `install_catalog_overlay`
-    /// records one, which is its only writer.
-    ///
-    /// Retained (rather than re-read from disk by each reader) so a caller
-    /// asking "what catalog truth is IN EFFECT" gets the accepted
-    /// generation and not whatever currently sits on disk -- an overlay an
-    /// operator edited but the daemon REJECTED is by definition not in
-    /// effect, and a corrupt file on disk must not make the in-effect
-    /// answer unavailable. Costs one refcount: every build path already
-    /// holds the overlay behind an `Arc`.
-    catalog_overlay: Arc<crate::catalog_overlay::CatalogOverlay>,
     /// Lock-free router-side observability counters. Carried over on a
     /// hot-reload rebuild by `carry_over_metrics_from`, which shares this
     /// `Arc` rather than resetting it: unlike `round_robin`, these counters
@@ -2254,7 +2241,6 @@ impl Router {
             override_registry,
             beta_seed: crate::beta_seed::BEDROCK_BETA_SEED,
             pool_reports: Vec::new(),
-            catalog_overlay: Arc::default(),
             metrics: Arc::new(RouterMetrics::default()),
             wire_check: Arc::default(),
             edit_rejected_warned: learn_revert::edit_rejected_warned(),
@@ -2821,21 +2807,6 @@ impl Router {
             })
     }
 
-    /// Install the catalog overlay this Router's resolved-model table was
-    /// merged against. Called by the CLI builder immediately after the
-    /// resolved models are merged with the overlay, so a reader asking what
-    /// catalog truth is in effect reads the ACCEPTED generation out of memory
-    /// instead of re-reading the file.
-    ///
-    /// The overlay's revision does not reach the capability revision stamps:
-    /// those are frozen (see [`Router::overlay_revision`]).
-    pub fn install_catalog_overlay(
-        &mut self,
-        overlay: Arc<crate::catalog_overlay::CatalogOverlay>,
-    ) {
-        self.catalog_overlay = overlay;
-    }
-
     /// The catalog version capability events and tombstones are stamped with:
     /// always [`crate::FROZEN_CATALOG_VERSION`]. Read at the boot warm-rebuild
     /// seam to stamp a fresh capability-event tombstone, and by the unified
@@ -2846,20 +2817,11 @@ impl Router {
     }
 
     /// The overlay revision capability events and tombstones are stamped with:
-    /// always [`crate::FROZEN_OVERLAY_REVISION`], whatever overlay is
-    /// installed. Read alongside [`Router::catalog_version`] at the same
+    /// always [`crate::FROZEN_OVERLAY_REVISION`]. Read alongside [`Router::catalog_version`] at the same
     /// boundary.
     #[allow(clippy::unused_self)]
     pub const fn overlay_revision(&self) -> u64 {
         crate::capability_rebuild::FROZEN_OVERLAY_REVISION
-    }
-
-    /// The catalog overlay generation this Router was built against -- the
-    /// one the daemon ACCEPTED, never a fresher file on disk. Read by the
-    /// status read side to derive the in-effect config view without a disk
-    /// read; the private field's own doc carries the full rationale.
-    pub fn catalog_overlay(&self) -> &crate::catalog_overlay::CatalogOverlay {
-        &self.catalog_overlay
     }
 
     /// Replay a capability-event ledger slice into the private learned

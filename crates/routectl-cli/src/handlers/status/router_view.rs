@@ -199,7 +199,7 @@ impl StatusRouterView {
         refreshed: Option<&PriceTable>,
         shipped: Option<&PriceTable>,
     ) -> EffectiveView {
-        derive_effective_view(&self.router.config, &Default::default(), refreshed, shipped)
+        derive_effective_view(&self.router.config, refreshed, shipped)
     }
 
     /// The served doctor gather's inputs, owned so the gather can run on a

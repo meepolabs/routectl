@@ -1408,15 +1408,21 @@ mod tests {
     }
 
     /// The config tab reads the model facts the panel sends and nothing from
-    /// the catalog economics block the panel no longer carries.
+    /// the catalog fields the panel no longer carries.
     ///
     /// Mutation check: drop the `prices` read from `modelRow`, or read
-    /// `m.economics` again -> red.
+    /// `m.economics`, `m.source` or `m.verified_at` again -> red.
     #[test]
     fn config_model_row_reads_the_model_facts() {
         let body = function_body("modelRow");
         for field in ["m.context_window", "m.fill", "m.prices"] {
             assert!(body.contains(field), "`modelRow` must render `{field}`");
+        }
+        for retired in ["m.source", "m.verified_at"] {
+            assert!(
+                !body.contains(retired),
+                "`modelRow` must not read the retired `{retired}`"
+            );
         }
         assert!(
             !strip_js_comments(&script()).contains("economics"),

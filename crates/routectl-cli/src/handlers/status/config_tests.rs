@@ -6,8 +6,7 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use routectl_router::config::{AliasValue, PricingConfig};
 use routectl_router::prices::{PriceSources, parse_and_validate};
-use routectl_router::{CatalogRow, Config, Router, TuningSource, derive_effective_view};
-use routectl_testkit::ScopedEnv;
+use routectl_router::{Config, Router, TuningSource, derive_effective_view};
 use serde_json::Value;
 use std::path::PathBuf;
 use tower::ServiceExt;
@@ -25,7 +24,7 @@ fn sample_daemon() -> DaemonMetaSnapshot {
 /// Build the wire DTO through the SAME derivation the handler uses, so a
 /// config-shaped assertion exercises the real path end to end.
 fn panel_from_config(config: &Config) -> ConfigPanel {
-    let effective = derive_effective_view(config, &Default::default(), None, None);
+    let effective = derive_effective_view(config, None, None);
     build_panel(
         effective,
         &ActivationState::default(),
@@ -48,17 +47,12 @@ fn test_state() -> Arc<StatusState> {
     ))
 }
 
-fn present_model(nickname: &str, source: Source) -> ModelCell {
+fn configured_model(nickname: &str) -> ModelCell {
     ModelCell {
         nickname: nickname.to_string(),
         provider: "anthropic".to_string(),
         provider_kind: "anthropic-api".to_string(),
         upstream: "claude-opus-4-8".to_string(),
-        row: EffectiveRow::Present {
-            row: CatalogRow::sentinel(),
-            source,
-            verified_at: "2026-07-01".to_string(),
-        },
         context_window: None,
         fill: None,
         pricing: PricingConfig::default(),
@@ -74,13 +68,6 @@ fn unknown_sources() -> PriceSources {
         cache_write_5m: PriceSource::Unknown,
         cache_write_1h: PriceSource::Unknown,
     }
-}
-
-#[test]
-fn source_tokens_pin_every_catalog_layer() {
-    assert_eq!(source_token(Source::Baked), "baked");
-    assert_eq!(source_token(Source::Import), "import");
-    assert_eq!(source_token(Source::User), "user");
 }
 
 #[test]
@@ -110,13 +97,12 @@ fn capability_tokens_reuse_the_routing_filter_vocabulary() {
 fn build_panel_maps_every_effective_surface_with_provenance() {
     let effective = EffectiveView {
         models: vec![
-            present_model("opus", Source::User),
+            configured_model("opus"),
             ModelCell {
                 nickname: "ghost".to_string(),
                 provider: "ghost".to_string(),
                 provider_kind: String::new(),
                 upstream: "nope".to_string(),
-                row: EffectiveRow::Missing,
                 context_window: None,
                 fill: None,
                 pricing: PricingConfig::default(),
@@ -143,11 +129,10 @@ fn build_panel_maps_every_effective_surface_with_provenance() {
 
     let panel = build_panel(effective, &activation, None, sample_daemon());
 
-    let opus = &panel.models[0];
-    assert_eq!(opus.source, "user");
-    assert_eq!(opus.verified_at.as_deref(), Some("2026-07-01"));
-    assert_eq!(panel.models[1].source, "missing");
-    assert_eq!(panel.models[1].verified_at, None);
+    assert_eq!(panel.models[0].nickname, "opus");
+    assert_eq!(panel.models[0].provider_kind, "anthropic-api");
+    assert_eq!(panel.models[1].nickname, "ghost");
+    assert_eq!(panel.models[1].provider_kind, "");
 
     assert_eq!(panel.classes[0].class, "rate-limited");
     assert_eq!(panel.classes[0].retry_cap, 7);
@@ -215,7 +200,7 @@ fn source_object_carries_every_declared_field() {
         AliasValue::Chain(vec!["small".to_string()]),
     );
 
-    let effective = derive_effective_view(&config, &Default::default(), None, None);
+    let effective = derive_effective_view(&config, None, None);
     let panel = build_panel(
         effective,
         &ActivationState::default(),
@@ -401,7 +386,7 @@ rpm_limit = 40
         provider_json(&config, "seat-b")["rpm_limit"],
         Value::from(15)
     );
-    let effective = derive_effective_view(&config, &Default::default(), None, None);
+    let effective = derive_effective_view(&config, None, None);
     let seat_a = effective
         .tuning
         .iter()
@@ -409,7 +394,7 @@ rpm_limit = 40
         .expect("seat-a tuning row");
     assert_eq!(seat_a.tuning.rpm_limit.value, Some(40));
     assert_eq!(seat_a.tuning.rpm_limit.source, TuningSource::Pool);
-    assert_eq!(SCHEMA_VERSION, 4);
+    assert_eq!(SCHEMA_VERSION, 5);
 }
 
 /// Every declared provider field reaches the wire, and the endpoint is the
@@ -514,74 +499,6 @@ fn provider_count_matches_the_rendered_rows() {
     let panel = panel_from_config(&config_with_three_rpm_states());
     assert_eq!(panel.source.provider_count, panel.providers.len());
     assert_eq!(panel.providers.len(), 3);
-}
-
-/// A leftover `catalog_overlay.json` in the config folder is not read: a
-/// router built through the daemon's own builder beside a VALID overlay file
-/// carrying a user cell renders that model without the cell's provenance.
-/// The premise row proves the fixture is a file the old overlay loader
-/// accepted with that very cell, so the absence below is not vacuous.
-///
-/// `#[serial]` per the `ScopedEnv` contract.
-#[tokio::test]
-#[serial_test::serial]
-async fn a_leftover_overlay_file_never_reaches_the_panel() {
-    // Arrange: an isolated config dir holding a valid leftover overlay.
-    let dir = tempfile::tempdir().unwrap();
-    let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
-    let config_dir = dir.path().join("routectl");
-    std::fs::create_dir_all(&config_dir).unwrap();
-    let leftover = config_dir.join("catalog_overlay.json");
-    std::fs::write(
-        &leftover,
-        br#"{"schema_version":1,"revision":2,"cells":{"anthropic-api:claude-opus-4-8*":
-                 {"source":"user","verified_at":"2026-07-01","wm":9.5}}}"#,
-    )
-    .unwrap();
-    let premise = routectl_router::load_catalog_overlay(&leftover)
-        .expect("premise: the old overlay loader accepts this file");
-    assert!(premise.cells.contains_key("anthropic-api:claude-opus-4-8*"));
-
-    let config: Config = toml::from_str(
-        r#"
-version = 2
-
-[providers.anthropic]
-kind = "anthropic-api"
-api_key_ref = "env://ACCEPTED_KEY"
-base_url = "https://accepted.example/v1"
-
-[models.opus]
-provider = "anthropic"
-upstream = "claude-opus-4-8"
-"#,
-    )
-    .expect("valid config");
-    let router = crate::server::build_router_from_config(
-        Arc::new(config),
-        Arc::new(routectl_auth::MemoryStore::new()),
-    )
-    .await
-    .expect("router builds");
-    let app = AppState::for_test(Arc::new(ArcSwap::from_pointee(router)));
-    let state = Arc::new(StatusState::from_app(&app, None, DaemonMeta::for_test()));
-
-    // Act
-    let panel = build(&state).await;
-
-    // Assert
-    assert!(panel.unavailable.is_none(), "{:?}", panel.unavailable);
-    let data = panel.data.expect("the panel must carry data");
-    let opus = data
-        .models
-        .iter()
-        .find(|m| m.nickname == "opus")
-        .expect("the configured model reaches the wire");
-    assert_ne!(
-        opus.source, "user",
-        "the leftover overlay cell must not render"
-    );
-    assert_ne!(opus.verified_at.as_deref(), Some("2026-07-01"));
 }
 
 /// A read that lands mid-reload must skew CONSERVATIVELY: the source strip
@@ -735,12 +652,7 @@ max_output_tokens = 9000
     };
     let refreshed = table("2026-11-05", 5.0);
     let shipped = table("2026-10-01", 4.0);
-    let effective = derive_effective_view(
-        &config,
-        &Default::default(),
-        Some(&refreshed),
-        Some(&shipped),
-    );
+    let effective = derive_effective_view(&config, Some(&refreshed), Some(&shipped));
     let panel = build_panel(
         effective,
         &ActivationState::default(),

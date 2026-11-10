@@ -309,8 +309,5 @@ mod select_tests;
 #[path = "shipped_tests.rs"]
 mod shipped_tests;
 #[cfg(test)]
-#[path = "slice_weld_tests.rs"]
-mod slice_weld_tests;
-#[cfg(test)]
 #[path = "validate_tests.rs"]
 mod validate_tests;

@@ -644,10 +644,6 @@ mod capability_precedence_walk_tests;
 mod feature_filter_read_tests;
 
 #[cfg(test)]
-#[path = "catalog_capability_equivalence_tests.rs"]
-mod catalog_capability_equivalence_tests;
-
-#[cfg(test)]
 #[path = "computer_tool_key_tests.rs"]
 mod computer_tool_key_tests;
 

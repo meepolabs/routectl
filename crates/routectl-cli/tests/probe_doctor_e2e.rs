@@ -257,7 +257,7 @@ fn seed_usage_db(xdg: &Path) -> PathBuf {
 /// Seed the usage ledger with a matched boot tombstone plus three
 /// post-boundary capability events across two lanes: a verified live
 /// positive, a probe negative, and a live negative the config override
-/// overrules. Stamped at the current instant and the baked catalog version /
+/// overrules. Stamped at the current instant and the frozen catalog version /
 /// overlay revision 0, so the doctor's read-only replay resolves the boundary
 /// and admits every row. Mirrors the persistence lifecycle suite's seeding.
 fn seed_capability_ledger(xdg: &Path) -> PathBuf {
@@ -265,7 +265,7 @@ fn seed_capability_ledger(xdg: &Path) -> PathBuf {
     std::fs::create_dir_all(&dir).expect("create routectl config dir");
     let path = dir.join("usage.db");
     let db = routectl_usage::open(&path).expect("create + migrate usage db");
-    let cat = i64::from(routectl_router::CATALOG_VERSION);
+    let cat = i64::from(routectl_router::FROZEN_CATALOG_VERSION);
     let ts = i64::try_from(
         SystemTime::now()
             .duration_since(UNIX_EPOCH)

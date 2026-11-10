@@ -2,20 +2,17 @@
 //! backs `config show --effective`.
 //!
 //! Several surfaces have more than one layer competing for a value, so only
-//! those carry provenance: a model's catalog cell (the compiled-in baked
-//! table vs an operator overlay), a model's facts (context window, output
-//! fill and per-field prices, each tagged with its source), a retry class's
+//! those carry provenance: a model's facts (context window, output fill and
+//! per-field prices, each tagged with its source), a retry class's
 //! policy (the baked class default vs a `[retry.classes.<class>]` leaf), and
 //! a capability cell (the config-derived override layer, tagged with the
 //! source that set it). Every other config field is trivially the value in
 //! `config.toml`; annotating it would be noise.
 //!
-//! The derivation is a PURE function over the config, the catalog overlay
-//! and the price tables it is handed. It runs the SAME `(provider_kind,
-//! upstream)` catalog lookups the router's chain-build merge runs and the
-//! same price precedence usage cost resolves through, so an operator
-//! inspecting the view sees exactly the cells dispatch and cost read -- with
-//! no secret resolution, no provider construction, no file read, and no
+//! The derivation is a PURE function over the config and the price tables it
+//! is handed. It runs the same price precedence usage cost resolves through,
+//! so an operator inspecting the view sees exactly the cells cost reads --
+//! with no secret resolution, no provider construction, no file read, and no
 //! network.
 //!
 //! The capability layer carries only the config-derived override cells (the
@@ -33,8 +30,6 @@ use routectl_providers::gemini::GeminiAuthMode;
 #[cfg(feature = "openai-responses")]
 use routectl_providers::openai_responses::AuthKind as OpenaiResponsesAuthKind;
 
-use crate::catalog::{EffectiveRow, resolve_effective_row};
-use crate::catalog_overlay::CatalogOverlay;
 use crate::class_policy::ConfigFailureClass;
 #[cfg(feature = "bedrock")]
 use crate::config::BedrockCredsConfig;
@@ -48,8 +43,8 @@ use crate::prices::{
 };
 use crate::seat_pool::seat_state_key;
 
-/// The catalog cell a single `[models.X]` entry resolves to, tagged with the
-/// `(provider_kind, upstream)` selector it was looked up under.
+/// The effective facts a single `[models.X]` entry resolves to, tagged with
+/// the `(provider_kind, upstream)` it targets.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModelCell {
     /// The `[models.<nickname>]` key.
@@ -57,15 +52,13 @@ pub struct ModelCell {
     /// The `provider` this model references. May name a `[providers]` entry
     /// or a `[pools]` block -- both live in one namespace.
     pub provider: String,
-    /// The kind token the catalog cell was looked up under: the referenced
-    /// provider entry's own kind, or for a pool-backed model a member's kind
-    /// (see [`Config::provider_kind_for_target`]). Empty when the reference
-    /// resolves to neither -- the same fallback the chain-build merge uses.
+    /// The kind token of the target: the referenced provider entry's own
+    /// kind, or for a pool-backed model a member's kind (see
+    /// [`Config::provider_kind_for_target`]). Empty when the reference
+    /// resolves to neither.
     pub provider_kind: String,
     /// The upstream model id forwarded to the provider.
     pub upstream: String,
-    /// The merged catalog row and its winning-layer provenance.
-    pub row: EffectiveRow,
     /// `[models.X] context_window`, the one window source; `None` when the
     /// operator configured none (the window gate keeps the model and
     /// `/v1/models` omits it).
@@ -578,16 +571,13 @@ const ALL_CONFIG_CLASSES: [ConfigFailureClass; 10] = [
     ConfigFailureClass::FeatureUnsupported,
 ];
 
-/// Derive the provenance-annotated effective view from a parsed config, its
-/// catalog overlay, and the refreshed and shipped price tables (either may be
-/// absent). Pure: the catalog rows come from the same lookups the router
-/// stamps onto `ResolvedModel::effective_row` at chain-build; the prices from
-/// [`effective_pricing`]; the class rows from
+/// Derive the provenance-annotated effective view from a parsed config and
+/// the refreshed and shipped price tables (either may be absent). Pure: the
+/// prices come from [`effective_pricing`]; the class rows from
 /// [`crate::config::RetryPolicy::resolved_class`].
 #[must_use]
 pub fn derive_effective_view(
     config: &Config,
-    overlay: &CatalogOverlay,
     refreshed: Option<&PriceTable>,
     shipped: Option<&PriceTable>,
 ) -> EffectiveView {
@@ -609,13 +599,6 @@ pub fn derive_effective_view(
                 provider: entry.provider.clone(),
                 provider_kind: provider_kind.to_string(),
                 upstream: entry.upstream.clone(),
-                row: resolve_effective_row(
-                    provider_kind,
-                    &entry.upstream,
-                    None,
-                    &config.cache_pricing,
-                    overlay,
-                ),
                 context_window: entry.context_window.filter(|tokens| *tokens > 0),
                 fill: fill_ceiling(config, entry),
                 pricing,

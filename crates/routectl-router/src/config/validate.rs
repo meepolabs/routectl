@@ -133,16 +133,17 @@ pub fn preflight_config_version(raw_toml: &str) -> Result<u32, ConfigVersionErro
 
 /// At `version >= CURRENT_CONFIG_VERSION`, a non-empty legacy
 /// `[cache_pricing]` table is a startup-time misconfiguration, not
-/// silently-ignored data: cache pricing lives in the catalog overlay, so a
+/// silently-ignored data: prices live under `[models.X.pricing]`, so a
 /// non-empty table at the current version means the file was hand-edited
 /// back into an inconsistent state (or authored fresh from a stale
-/// example). The message tells the operator to delete the table.
+/// example). The message points at `[models.X.pricing]` and tells the
+/// operator to delete the table.
 pub fn validate_cache_pricing_retired(config: &Config) -> Result<(), String> {
     if config.version >= CURRENT_CONFIG_VERSION && !config.cache_pricing.is_empty() {
         return Err(format!(
             "config version {} carries a non-empty [cache_pricing] table ({} entries), but \
-             [cache_pricing] is retired as of version {CURRENT_CONFIG_VERSION} -- cache pricing \
-             lives in the catalog overlay; remove the [cache_pricing] table by hand",
+             [cache_pricing] is retired as of version {CURRENT_CONFIG_VERSION} -- set prices \
+             under [models.X.pricing]; remove the [cache_pricing] table by hand",
             config.version,
             config.cache_pricing.len(),
         ));

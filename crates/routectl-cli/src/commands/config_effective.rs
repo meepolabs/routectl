@@ -5,7 +5,6 @@
 //! `--effective` additionally renders the surfaces where more than one layer
 //! competes for a value, tagging each with the layer that won:
 //!
-//!   - model catalog cells (baked table vs operator overlay),
 //!   - model facts (context window, output fill and each price field, tagged
 //!     with a fixed source token and, for a table price, the table date),
 //!   - retry class policy (baked class default vs `[retry.classes.<class>]`),
@@ -15,7 +14,7 @@
 //!     source that set it).
 //!
 //! The derivation lives router-side ([`routectl_router::derive_effective_view`])
-//! and is pure over the config, the overlay and the price tables; this module
+//! and is pure over the config and the price tables; this module
 //! is render-only.
 
 use routectl_core::Result;
@@ -23,13 +22,13 @@ use std::fmt::Display;
 
 use routectl_router::prices::{PriceSource, PriceTable};
 use routectl_router::{
-    BreakerThreshold, ClassPolicyCell, ClassPolicySource, Config, EffectiveRow, ModelCell,
-    OverrideRow, OverrideVerdict, PriceTableDates, Resolved, ResolvedTuning, Source, TuningRow,
-    TuningTargetKind, derive_effective_view,
+    BreakerThreshold, ClassPolicyCell, ClassPolicySource, Config, ModelCell, OverrideRow,
+    OverrideVerdict, PriceTableDates, Resolved, ResolvedTuning, TuningRow, TuningTargetKind,
+    derive_effective_view,
 };
 
 /// Print the plain redacted config dump, then the provenance-annotated
-/// effective view (catalog cells + model facts + retry class policy +
+/// effective view (model facts + retry class policy +
 /// resolved tuning + capability cells). `refreshed` and `shipped` are the
 /// price tables the model prices resolve against.
 pub fn show_effective(
@@ -39,55 +38,13 @@ pub fn show_effective(
 ) -> Result<()> {
     super::config::show(config)?;
 
-    let view = derive_effective_view(config, &Default::default(), refreshed, shipped);
+    let view = derive_effective_view(config, refreshed, shipped);
     println!("effective view -- provenance-annotated (layered surfaces only)");
-    render_model_cells(&view.models);
     render_model_facts(&view.models, &view.price_tables);
     render_class_cells(&view.classes);
     render_tuning_cells(&view.tuning);
     render_capability_cells(&view.capabilities);
     Ok(())
-}
-
-/// Render one line per `[models.X]` entry: its `(provider_kind, upstream)`
-/// selector, the winning layer, and the merged cache multipliers.
-fn render_model_cells(cells: &[ModelCell]) {
-    println!("\nmodel catalog cells (baked table + overlay merge):");
-    if cells.is_empty() {
-        println!("  (no [models] entries)");
-        return;
-    }
-    for cell in cells {
-        let selector = format!("{}/{}", cell.provider_kind, cell.upstream);
-        match &cell.row {
-            EffectiveRow::Present {
-                row,
-                source,
-                verified_at,
-            } => {
-                println!(
-                    "  {nickname:<20} {selector:<44} source={source:<13} \
-                     verified={verified_at:<11} wm={wm} rm={rm}",
-                    nickname = cell.nickname,
-                    source = source_tag(*source),
-                    wm = row.wm,
-                    rm = row.rm,
-                );
-            }
-            EffectiveRow::Disabled => {
-                println!(
-                    "  {nickname:<20} {selector:<44} source=disabled",
-                    nickname = cell.nickname,
-                );
-            }
-            EffectiveRow::Missing => {
-                println!(
-                    "  {nickname:<20} {selector:<44} source=missing (no catalog row)",
-                    nickname = cell.nickname,
-                );
-            }
-        }
-    }
 }
 
 /// Render the price-table dates, then one line per `[models.X]` entry with
@@ -290,15 +247,6 @@ const fn verdict_tag(verdict: OverrideVerdict) -> &'static str {
     }
 }
 
-/// The grep-friendly tag for a catalog cell's winning layer.
-const fn source_tag(source: Source) -> &'static str {
-    match source {
-        Source::Baked => "baked",
-        Source::Import => "import",
-        Source::User => "user",
-    }
-}
-
 /// The grep-friendly tag for a class policy's winning layer.
 const fn class_source_tag(source: ClassPolicySource) -> &'static str {
     match source {
@@ -393,7 +341,7 @@ upstream = "u"
     }
 
     fn rendered_lines() -> Vec<String> {
-        let view = derive_effective_view(&every_tier_config(), &Default::default(), None, None);
+        let view = derive_effective_view(&every_tier_config(), None, None);
         view.tuning.iter().map(tuning_line).collect()
     }
 
@@ -468,7 +416,7 @@ api_key_ref = "env://K"
 "#,
         )
         .expect("valid config");
-        let view = derive_effective_view(&config, &Default::default(), None, None);
+        let view = derive_effective_view(&config, None, None);
 
         let line = tuning_line(&view.tuning[0]);
 
@@ -533,7 +481,7 @@ upstream = "glm-5"
     }
 
     fn facts_lines(refreshed: Option<&PriceTable>, shipped: Option<&PriceTable>) -> Vec<String> {
-        let view = derive_effective_view(&priced_config(), &Default::default(), refreshed, shipped);
+        let view = derive_effective_view(&priced_config(), refreshed, shipped);
         view.models
             .iter()
             .map(|cell| model_facts_line(cell, &view.price_tables))
@@ -597,7 +545,7 @@ upstream = "glm-5"
             .get_mut("opus")
             .expect("opus")
             .max_output_tokens = None;
-        let view = derive_effective_view(&config, &Default::default(), None, None);
+        let view = derive_effective_view(&config, None, None);
 
         let opus = view
             .models
@@ -625,8 +573,7 @@ upstream = "glm-5"
             ),
         ];
         for (name, refreshed, expected) in rows {
-            let view =
-                derive_effective_view(&priced_config(), &Default::default(), refreshed, None);
+            let view = derive_effective_view(&priced_config(), refreshed, None);
             assert_eq!(table_dates_text(&view.price_tables), expected, "{name}");
         }
     }

@@ -3230,42 +3230,33 @@ async fn render_checked_stream_task_records_one_k_sample_on_eos_and_none_on_erro
     );
 }
 
-/// A degenerate `[cache_pricing]` override (rm <= 0.0) must fail the
-/// server bootstrap, surfaced as a config error rather than silently going
-/// inert. Drives the real `build_router_from_config` startup path.
+/// A non-empty `[cache_pricing]` table at the current config version fails
+/// the server bootstrap, pointing at `[models.X.pricing]`. Drives the real
+/// `build_router_from_config` startup path.
 #[tokio::test]
-async fn bootstrap_rejects_degenerate_cache_pricing_override() {
+async fn bootstrap_refuses_a_nonempty_cache_pricing_table() {
     use routectl_auth::{MemoryStore, SecretStore};
-    use routectl_router::{CachePricingOverride, Config};
-    use std::collections::BTreeMap;
+    use routectl_router::{CURRENT_CONFIG_VERSION, Config};
     use std::sync::Arc;
 
-    // Arrange: a minimal config carrying one degenerate override.
-    let mut cache_pricing = BTreeMap::new();
-    cache_pricing.insert(
-        "openai-compat:grok-*".to_string(),
-        CachePricingOverride {
-            rm: Some(0.0),
-            ..Default::default()
-        },
-    );
-    let config = Arc::new(Config {
-        cache_pricing,
-        ..Default::default()
-    });
+    // Arrange: a current-version config carrying one legacy entry.
+    let config: Config = toml::from_str(&format!(
+        "version = {CURRENT_CONFIG_VERSION}\n[cache_pricing.\"openai-compat:grok-*\"]\nrm = 0.0\n"
+    ))
+    .expect("the raw table parses");
     let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::new());
 
     // Act
-    let result = crate::server::build_router_from_config(config, secrets).await;
+    let result = crate::server::build_router_from_config(Arc::new(config), secrets).await;
 
-    // Assert: startup fails, naming the offending selector. `Router` is not
-    // `Debug`, so match the Result rather than calling `expect_err`.
+    // Assert: `Router` is not `Debug`, so match the Result rather than
+    // calling `expect_err`.
     let msg = match result {
-        Ok(_) => panic!("degenerate override must fail bootstrap"),
+        Ok(_) => panic!("a non-empty [cache_pricing] table must fail bootstrap"),
         Err(e) => e.to_string(),
     };
-    assert!(msg.contains("openai-compat:grok-*"), "msg: {msg}");
-    assert!(msg.contains("rm must be > 0.0"), "msg: {msg}");
+    assert!(msg.contains("[cache_pricing]"), "msg: {msg}");
+    assert!(msg.contains("[models.X.pricing]"), "msg: {msg}");
 }
 
 // ============ stream_response inversion: grace-gated commit (b') =======

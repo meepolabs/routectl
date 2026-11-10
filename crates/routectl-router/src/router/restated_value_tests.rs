@@ -26,11 +26,7 @@ struct Ledger(Vec<CapabilityEventRow>);
 
 impl CapabilityLedgerReader for Ledger {
     fn tombstone(&self) -> Option<ReplayTombstone> {
-        Some(ReplayTombstone::new(
-            0,
-            crate::catalog_baked::CATALOG_VERSION,
-            0,
-        ))
+        Some(ReplayTombstone::new(0, crate::FROZEN_CATALOG_VERSION, 0))
     }
 
     fn read_events(&self) -> Vec<CapabilityEventRow> {
@@ -54,7 +50,7 @@ fn broken(rowid: i64, capability: &str, token: Option<String>) -> CapabilityEven
         capability.to_string(),
         LANE.to_string(),
         KIND.to_string(),
-        crate::catalog_baked::CATALOG_VERSION,
+        crate::FROZEN_CATALOG_VERSION,
         0,
     )
     .with_vocab_version(Some(crate::capability_vocab::CURRENT_VOCAB_VERSION))

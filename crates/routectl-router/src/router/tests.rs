@@ -6,15 +6,6 @@ use crate::config::{ProviderEntry, RetryPolicy};
 use routectl_core::capability::EvidenceSource;
 use std::collections::BTreeMap;
 
-/// An otherwise-empty overlay stamped at `revision`, for the carry-over
-/// tests that turn on a revision CHANGE and not on any cell content.
-fn overlay_at_revision(revision: u64) -> Arc<crate::catalog_overlay::CatalogOverlay> {
-    Arc::new(crate::catalog_overlay::CatalogOverlay {
-        revision,
-        ..Default::default()
-    })
-}
-
 /// Build a Router with one openai-compat provider `p1` carrying the given
 /// runtime-policy timeouts.
 fn build_router_with_provider_timeouts(
@@ -1501,18 +1492,16 @@ fn resident_feature_keys(router: &Router) -> Vec<String> {
     keys
 }
 
-/// The capability revision stamps are frozen, so a reload that installs an
-/// overlay at another revision is a config-only reload: no invalidation, no
-/// warning, and every learned entry rides across.
+/// The capability revision stamps are frozen, so every reload is a
+/// config-only reload: no invalidation, no warning, and every learned entry
+/// rides across.
 #[test]
-fn an_overlay_revision_change_across_reload_neither_invalidates_nor_warns() {
+fn a_reload_under_frozen_revision_stamps_neither_invalidates_nor_warns() {
     // Arrange
     let config = Arc::new(Config::default());
-    let mut before = Router::new(config.clone());
-    before.install_catalog_overlay(overlay_at_revision(3));
+    let before = Router::new(config.clone());
     observe_negatives_on(&before, &["web_search"], std::time::Instant::now());
     let mut after = Router::new(config);
-    after.install_catalog_overlay(overlay_at_revision(4));
 
     // Act
     let events = routectl_testkit::capture_events(|| {

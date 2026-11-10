@@ -7,7 +7,7 @@
 //! walks the fallback chain on `5xx`/`429`/timeout errors.
 //!
 //! Beyond dispatch, the crate owns the configuration schema and its
-//! validation, the prompt-cache pricing catalog and its operator overlay,
+//! validation, the model price tables,
 //! the OAuth activation inventory, and the `doctor` report shapes.
 
 /// Test-only global allocator: lets a test assert that a hot-path predicate
@@ -31,15 +31,6 @@ pub(crate) mod capability_precedence;
 pub(crate) mod capability_rebuild;
 pub(crate) mod capability_strip;
 pub(crate) mod capability_vocab;
-pub mod catalog;
-pub(crate) mod catalog_baked;
-#[doc(hidden)]
-pub mod catalog_codegen;
-pub(crate) mod catalog_codegen_selectors;
-pub(crate) mod catalog_import;
-pub(crate) mod catalog_import_state;
-pub(crate) mod catalog_overlay;
-pub(crate) mod catalog_state;
 pub mod class_policy;
 pub mod config;
 pub(crate) mod config_effective;
@@ -67,7 +58,6 @@ pub(crate) mod log_hash;
 pub(crate) mod override_registry;
 pub mod pool_build;
 pub mod prices;
-pub mod pricing;
 pub(crate) mod probe_scheduler;
 pub(crate) mod quota;
 pub(crate) mod resolved;
@@ -114,36 +104,6 @@ pub use capability_rebuild::{
     rebuild_capabilities_with_values,
 };
 pub use capability_vocab::CURRENT_VOCAB_VERSION;
-pub use catalog::{
-    BakedPricingRow, CachePricingOverride, CachePricingSelector, CatalogRow, EffectiveRow, Source,
-    baked_table_rows, epoch_day_age, is_cataloged_provider_kind, is_stale_days,
-    is_stale_days_today, is_stale_today, lookup, lookup_baked_with_overrides, lookup_overlay_cell,
-    lookup_with_overrides, merge, resolve_effective_row, stale_after_days, today_epoch_day,
-    validate_overrides,
-};
-pub use catalog_baked::{CATALOG_SNAPSHOT_DATE, CATALOG_VERSION};
-pub use catalog_import::{
-    CandidateOrigin, DiffRow, ExistingCell, ImportCandidate, ImportDiff, ShrinkCounts,
-    ShrinkVerdict, ShrunkFamily, ShrunkSource, SkipKind, SkippedSelector, baked_row_map,
-    baked_shrink_counts, build_import_candidate, candidate_shrink_counts,
-    diff_has_no_effective_change, diff_overlay, is_import_cell, shrink_guard,
-};
-pub use catalog_import_state::{
-    CatalogImportState, CatalogImportStateError, default_path as catalog_import_state_default_path,
-    load_baseline as load_catalog_import_baseline, load_last_import,
-    persist_baseline as persist_catalog_import_baseline,
-};
-pub use catalog_overlay::{
-    CATALOG_OVERLAY_SCHEMA_VERSION, CatalogOverlay, OverlayCell, OverlayError, OverlaySoftDefect,
-    OverlaySource, default_path as overlay_default_path, load as load_catalog_overlay,
-    log_overlay_soft_defects, overlay_revision, overlay_soft_defects, save as save_catalog_overlay,
-    with_overlay_write_lock,
-};
-pub use catalog_state::{
-    ImpactClass, ImpactField, check_drift_and_persist_state, classify_field,
-    default_path as catalog_state_default_path, escalate,
-    selector_key as catalog_state_selector_key,
-};
 pub use config::{
     AliasValue, BreakerThreshold, CONFIG_PROVIDER_KINDS, CONFIG_VERSION_REMEDIATION,
     CURRENT_CONFIG_VERSION, CacheCapability, CacheConfig, CalibrationConfig, CapabilityConfig,
@@ -194,7 +154,7 @@ pub use factory::validate_provider_bedrock_mantle;
 pub use factory::validate_provider_openai_mantle;
 pub use factory::{
     BuildOptions, ConfigValidation, MAX_POOL_MEMBERS, ModelProviderTarget, ResolvedModelBuild,
-    apply_catalog_overlay, build_provider, build_provider_with_options, build_resolved_models,
+    build_provider, build_provider_with_options, build_resolved_models,
     build_resolved_models_reported, class_policy_warnings, cloudcode_host_warnings,
     cloudcode_model_warnings, codex_identity_warnings, collect_config_validation,
     per_block_breakpoint_warnings, pool_member_refusals, resolve_model_provider,
@@ -221,7 +181,6 @@ pub use override_registry::{
     OverrideRegistry, OverrideRow, OverrideVerdict, validate_capability_overrides,
 };
 pub use pool_build::{PoolPlaceholder, PoolReport};
-pub use pricing::{PricingSource, effective_pricing};
 pub use probe_scheduler::ProbeSchedulerSnapshot;
 pub use resolved::ResolvedModel;
 pub use router::{

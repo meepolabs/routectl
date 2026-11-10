@@ -8,9 +8,8 @@
 //! three concerns and nothing else -- it is a write primitive, NOT a
 //! mutation-DTO layer and NOT a validator:
 //!
-//!   1. Sibling advisory lock (`config.toml.lock`, mirroring
-//!      [`crate::catalog_overlay::with_overlay_write_lock`]) so two
-//!      cooperative routectl processes serialize rather than clobber.
+//!   1. Sibling advisory lock (`config.toml.lock`) so two cooperative
+//!      routectl processes serialize rather than clobber.
 //!   2. Base-bytes revision check: the caller snapshots the raw file bytes
 //!      when it first reads the config; this primitive re-reads under the
 //!      lock and refuses ([`ConfigWriteError::Conflict`], NO write, no retry
@@ -193,11 +192,10 @@ where
     }
 }
 
-/// Temp-file-then-rename write, mirroring `catalog_overlay`'s writer
-/// discipline (fsync before rename), but preserving the ORIGINAL file's
-/// permission bits instead of forcing `0o600` -- `config.toml` is
-/// operator-owned and its existing mode is deliberate, not a default a
-/// routectl writer should override.
+/// Temp-file-then-rename write (fsync before rename), preserving the
+/// ORIGINAL file's permission bits instead of forcing `0o600` --
+/// `config.toml` is operator-owned and its existing mode is deliberate, not
+/// a default a routectl writer should override.
 ///
 /// Also fsyncs the PARENT DIRECTORY after the rename: `rename` is atomic
 /// for concurrent readers, but the rename itself is not durable across a
@@ -680,7 +678,7 @@ mod tests {
     // Concurrency: a second writer blocks on the advisory lock until the
     // first releases it. The holder returns Unchanged (no write) so the
     // waiter's snapshot stays valid and the test isolates lock behavior
-    // from the conflict path. Mirrors catalog_overlay's lock-blocking test.
+    // from the conflict path.
     // -----------------------------------------------------------------------
 
     #[test]

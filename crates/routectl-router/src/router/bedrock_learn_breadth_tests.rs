@@ -23,9 +23,9 @@ use routectl_core::capability::{FailurePhase, SignalTier};
 use routectl_core::{ChatChunk, ChatResponse, ChunkChoice, ChunkDelta, Provider, Result, ToolDef};
 use serde_json::{Value, json};
 
+use crate::capability_rebuild::FROZEN_CATALOG_VERSION;
 use crate::capability_rebuild::{CapabilityEventRow, CapabilityLedgerReader, ReplayTombstone};
 use crate::capability_vocab::CURRENT_VOCAB_VERSION;
-use crate::catalog_baked::CATALOG_VERSION;
 use crate::config::Config;
 use crate::resolved::ResolvedModel;
 use crate::router::RouterOptions;
@@ -491,7 +491,7 @@ struct Ledger(Vec<CapabilityEventRow>);
 
 impl CapabilityLedgerReader for Ledger {
     fn tombstone(&self) -> Option<ReplayTombstone> {
-        Some(ReplayTombstone::new(0, CATALOG_VERSION, 0))
+        Some(ReplayTombstone::new(0, FROZEN_CATALOG_VERSION, 0))
     }
 
     fn read_events(&self) -> Vec<CapabilityEventRow> {
@@ -516,7 +516,7 @@ fn persisted_rows(meta: &DispatchMeta) -> Vec<CapabilityEventRow> {
                 event.capability_key.clone(),
                 event.state_key.clone(),
                 event.provider_kind.clone(),
-                CATALOG_VERSION,
+                FROZEN_CATALOG_VERSION,
                 0,
             )
             .with_vocab_version(Some(CURRENT_VOCAB_VERSION))

@@ -161,9 +161,9 @@ async fn health_returns_ok() {
 // GET /v1/models
 // ---------------------------------------------------------------------------
 
-/// An upstream id the baked catalog has a context window for, which
+/// An upstream id with a well-known published context window, which
 /// `/v1/models` must never report: the window comes from config only.
-const CATALOGED_UPSTREAM: &str = "claude-sonnet-4-6";
+const KNOWN_UPSTREAM: &str = "claude-sonnet-4-6";
 
 /// The `[models.X] context_window` the windowed fixtures configure.
 const CONFIGURED_WINDOW: u32 = 150_000;
@@ -308,11 +308,11 @@ async fn models_reports_the_configured_context_window_and_omits_an_unset_one() {
     let mut models = BTreeMap::new();
     models.insert(
         "known-window".to_string(),
-        ModelEntry::new("anthropic", CATALOGED_UPSTREAM).with_context_window(CONFIGURED_WINDOW),
+        ModelEntry::new("anthropic", KNOWN_UPSTREAM).with_context_window(CONFIGURED_WINDOW),
     );
     models.insert(
         "unknown-window".to_string(),
-        ModelEntry::new("anthropic", CATALOGED_UPSTREAM),
+        ModelEntry::new("anthropic", KNOWN_UPSTREAM),
     );
     let mut aliases = BTreeMap::new();
     aliases.insert(
@@ -336,12 +336,6 @@ async fn models_reports_the_configured_context_window_and_omits_an_unset_one() {
         .await
         .unwrap();
 
-    assert!(
-        routectl_router::lookup("anthropic-api", CATALOGED_UPSTREAM, None)
-            .max_context_tokens
-            .is_some(),
-        "premise: the catalog has a window the unset model must not report"
-    );
     assert_eq!(
         context_length_of(&body, "known-window"),
         Some(CONFIGURED_WINDOW),
@@ -397,11 +391,11 @@ async fn models_lists_an_unservable_entry_without_a_context_length() {
     let mut models = BTreeMap::new();
     models.insert(
         "servable".to_string(),
-        ModelEntry::new("healthy", CATALOGED_UPSTREAM).with_context_window(CONFIGURED_WINDOW),
+        ModelEntry::new("healthy", KNOWN_UPSTREAM).with_context_window(CONFIGURED_WINDOW),
     );
     models.insert(
         "unservable".to_string(),
-        ModelEntry::new("unresolvable", CATALOGED_UPSTREAM).with_context_window(CONFIGURED_WINDOW),
+        ModelEntry::new("unresolvable", KNOWN_UPSTREAM).with_context_window(CONFIGURED_WINDOW),
     );
 
     let config = Arc::new(Config {

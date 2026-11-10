@@ -237,24 +237,20 @@ mod config_version_tests {
         );
     }
 
+    fn one_entry_table() -> toml::Table {
+        toml::from_str("\"openai-compat:grok-*\" = { wm = 1.5 }\n").expect("table parses")
+    }
+
+    fn parse_current(body: &str) -> Config {
+        toml::from_str(&format!("version = {CURRENT_CONFIG_VERSION}\n{body}"))
+            .expect("fixture must parse as Config")
+    }
+
     #[test]
     fn validate_cache_pricing_retired_allows_nonempty_at_v1() {
-        let mut config = Config {
-            version: 1,
-            ..Config::default()
-        };
-        config.cache_pricing.insert(
-            "openai-compat:grok-*".to_string(),
-            crate::catalog::CachePricingOverride::default(),
-        );
-
-        assert!(validate_cache_pricing_retired(&config).is_ok());
-    }
-
-    #[test]
-    fn validate_cache_pricing_retired_allows_empty_at_current_version() {
         let config = Config {
-            version: CURRENT_CONFIG_VERSION,
+            version: 1,
+            cache_pricing: one_entry_table(),
             ..Config::default()
         };
 
@@ -262,26 +258,46 @@ mod config_version_tests {
     }
 
     #[test]
-    fn validate_cache_pricing_retired_rejects_nonempty_at_current_version() {
-        let mut config = Config {
-            version: CURRENT_CONFIG_VERSION,
-            ..Config::default()
-        };
-        config.cache_pricing.insert(
-            "openai-compat:grok-*".to_string(),
-            crate::catalog::CachePricingOverride::default(),
-        );
+    fn validate_cache_pricing_retired_allows_empty_or_omitted_at_current_version() {
+        for (name, body) in [("omitted", ""), ("empty table", "[cache_pricing]\n")] {
+            let config = parse_current(body);
 
-        let err = validate_cache_pricing_retired(&config).expect_err("must reject");
-        assert!(
-            err.contains("remove the [cache_pricing] table by hand"),
-            "err: {err}"
-        );
-        assert!(
-            !err.contains("migrate"),
-            "err names a removed command: {err}"
-        );
-        assert!(err.contains('1'), "err should name the entry count: {err}");
+            assert!(
+                validate_cache_pricing_retired(&config).is_ok(),
+                "{name} must load"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_cache_pricing_retired_rejects_any_nonempty_shape_at_current_version() {
+        for (name, body) in [
+            (
+                "legacy override cell",
+                "[cache_pricing.\"openai-compat:grok-*\"]\nwm = 1.5\nrm = 0.1\n",
+            ),
+            (
+                "cell with unknown field",
+                "[cache_pricing.\"m\"]\nnot_a_field = true\n",
+            ),
+            ("empty cell", "[cache_pricing.\"m\"]\n"),
+            ("scalar entry", "[cache_pricing]\nm = 1\n"),
+            ("string entry", "[cache_pricing]\nm = \"x\"\n"),
+            ("array entry", "[cache_pricing]\nm = [1, 2]\n"),
+        ] {
+            let config = parse_current(body);
+
+            let err = validate_cache_pricing_retired(&config)
+                .expect_err(&format!("{name} must be refused"));
+
+            assert!(err.contains("[models.X.pricing]"), "{name}: {err}");
+            assert!(
+                err.contains("remove the [cache_pricing] table by hand"),
+                "{name}: {err}"
+            );
+            assert!(!err.contains("catalog"), "{name}: {err}");
+            assert!(err.contains("(1 entries)"), "{name}: {err}");
+        }
     }
 }
 

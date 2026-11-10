@@ -127,13 +127,6 @@
       override: { label: 'override', title: 'override - a [capability.overrides.<spec>] entry' },
       learned: { label: 'learned', title: 'learned - a non-expired acting negative in the learned registry' }
     },
-    src: {
-      user: { label: 'user', title: 'user - operator catalog layer' },
-      import: { label: 'import', title: 'import - imported catalog layer' },
-      baked: { label: 'baked', title: 'baked - built-in catalog layer' },
-      disabled: { label: 'disabled', title: 'disabled - row present but disabled' },
-      missing: { label: 'missing', title: 'missing - no catalog row resolved' }
-    },
     tier: {
       'self-identifying': { label: 'self-identifying', title: 'the upstream declared the capability itself' },
       inferred: { label: 'inferred', title: 'inferred from observed behavior' }

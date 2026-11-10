@@ -19,11 +19,6 @@ bedrock = ["routectl-providers/bedrock"]
 # Forward the providers crate's `gemini` feature so the router can
 # build GeminiProvider instances when this is enabled.
 "gemini" = ["routectl-providers/gemini"]
-# Compiles in the vendored catalog snapshots and the render pipeline that
-# regenerates `catalog_baked.rs` from them (the `gen_catalog` bin and its
-# drift-guard test). Off by default so the runtime binary does not carry
-# the multi-megabyte snapshot text.
-gen-catalog = []
 # Exposes the fidelity-status fixture constructor
 # (`FieldVerdictStatusSpec` + `FieldVerdictStatus::from_spec_for_tests`) for the
 # cross-crate renderer tests in routectl-cli, and nothing else. Enabled as a
@@ -46,10 +41,6 @@ live-integration = []
 # enabled via `--features routectl-router/dhat` by
 # scripts/bench.sh --profile heap.
 dhat = ["dep:dhat"]
-
-[[bin]]
-name = "gen_catalog"
-required-features = ["gen-catalog"]
 
 [dependencies]
 routectl-core.workspace = true

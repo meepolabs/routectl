@@ -22,8 +22,8 @@ use routectl_router::class_policy::ConfigFailureClass;
 use routectl_router::prices::{PriceSource, PriceTable, shipped_table};
 use routectl_router::{
     ActivationEntry, ActivationState, ActivationStatus, AliasChain, ClassPolicyCell,
-    ClassPolicySource, EffectiveRow, EffectiveView, ModelCell, OverrideRow, OverrideVerdict,
-    PriceTableDates, ProviderCell, Source, class_debits,
+    ClassPolicySource, EffectiveView, ModelCell, OverrideRow, OverrideVerdict, PriceTableDates,
+    ProviderCell, class_debits,
 };
 
 use super::daemon_meta::DaemonMetaSnapshot;
@@ -31,14 +31,14 @@ use super::vocabulary::{codes, provenance};
 use super::{Panel, StatusState, guard_panel, utc_rfc3339};
 
 /// Wire-shape version of the config panel payload.
-pub const SCHEMA_VERSION: u32 = 4;
+pub const SCHEMA_VERSION: u32 = 5;
 
 /// The provenance-annotated effective view plus the activation inventory. Every
 /// field is a display-safe projection: model facts and capability verdicts
 /// carry no secrets, and the activation entries carry only discriminants.
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct ConfigPanel {
-    /// One entry per `[models.X]` table, with its winning catalog layer.
+    /// One entry per `[models.X]` table, with its model facts.
     models: Vec<ModelCellWire>,
     /// One entry per operator-nameable failure class, with its winning layer.
     classes: Vec<ClassPolicyWire>,
@@ -127,17 +127,13 @@ struct SourceWire {
     version: &'static str,
 }
 
-/// One `[models.X]` entry's effective catalog cell and model facts.
+/// One `[models.X]` entry's effective model facts.
 #[derive(Debug, Clone, Serialize)]
 struct ModelCellWire {
     nickname: String,
     provider: String,
     provider_kind: String,
     upstream: String,
-    /// Winning layer token: `baked` / `import` / `user` for a present row,
-    /// or `disabled` / `missing`.
-    source: &'static str,
-    verified_at: Option<String>,
     /// `[models.X] context_window`; `null` when none is configured.
     context_window: Option<u32>,
     /// The output fill and its source; `null` when none applies.
@@ -215,15 +211,6 @@ struct ActivationWire {
     referenced_by_aliases: bool,
 }
 
-/// The winning catalog-layer token for a present row.
-const fn source_token(source: Source) -> &'static str {
-    match source {
-        Source::Baked => "baked",
-        Source::Import => "import",
-        Source::User => "user",
-    }
-}
-
 /// The winning class-policy-layer token.
 const fn class_source_token(source: ClassPolicySource) -> &'static str {
     match source {
@@ -255,15 +242,6 @@ const fn verdict_token(verdict: OverrideVerdict) -> &'static str {
 
 fn map_model(cell: ModelCell, dates: &PriceTableDates) -> ModelCellWire {
     let prices = map_prices(&cell, dates);
-    let (source, verified_at) = match cell.row {
-        EffectiveRow::Present {
-            source,
-            verified_at,
-            ..
-        } => (source_token(source), Some(verified_at)),
-        EffectiveRow::Disabled => ("disabled", None),
-        EffectiveRow::Missing => ("missing", None),
-    };
     let fill = cell.fill.map(|fill| FillWire {
         tokens: fill.tokens,
         source: fill.source.as_str(),
@@ -274,8 +252,6 @@ fn map_model(cell: ModelCell, dates: &PriceTableDates) -> ModelCellWire {
         provider: cell.provider,
         provider_kind: cell.provider_kind,
         upstream: cell.upstream,
-        source,
-        verified_at,
         context_window: cell.context_window,
         fill,
     }

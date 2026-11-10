@@ -68,7 +68,6 @@ const EXPECTED_SEED_MARKERS: &[(&str, &str, SeedTag)] = &[
     (PROVIDERS, "openai_responses/mod.rs", AcceptanceSeed),
     (PROVIDERS, "openai_responses/request.rs", AcceptanceSeed),
     (PROVIDERS, "tool_id.rs", AcceptanceSeed),
-    (ROUTER, "catalog.rs", AcceptanceSeed),
     (ROUTER, "config/schema.rs", AcceptanceSeed),
 ];
 

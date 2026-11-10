@@ -7,8 +7,6 @@ use super::validate::{
     validate_managed_oauth_credentials,
 };
 use super::warnings::warn_context_management_needs_preserve;
-use crate::catalog::resolve_effective_row;
-use crate::catalog_overlay::CatalogOverlay;
 #[cfg(feature = "bedrock")]
 use crate::config::{BedrockApiShapeConfig, BedrockCredsConfig};
 use crate::config::{Config, CredentialSource, PoolEntry, ProviderEntry};
@@ -1676,82 +1674,6 @@ fn pool_reports(
             })
         })
         .collect()
-}
-
-/// Stamp each resolved model's precomputed [`crate::catalog::EffectiveRow`]
-/// (the two-layer catalog merge for that model's `(provider_kind, upstream)`
-/// selector) onto the table [`build_resolved_models`] returned.
-///
-/// Deliberately a POST-pass over the already-built map rather than folded
-/// into `build_resolved_models`'s own loop: threading `overlay` through that
-/// function's signature would force every existing call site -- including
-/// the many tests across this crate and `routectl-cli` that build a
-/// resolved table without caring about the overlay -- to pass one.
-/// Chaining this on after the fact keeps `build_resolved_models` itself
-/// overlay-agnostic; only the callers that need the merge (the server's
-/// shared config loader) call this too.
-///
-/// The two-layer merge runs HERE, once, at chain-build/load time -- not
-/// per dispatch, and through the shared `catalog::resolve_effective_row` so
-/// this pass and the cost-fill boundary can never resolve one selector to
-/// different rows. `Router::record_would_trim` reads
-/// `ResolvedModel::effective_row` directly instead of re-resolving.
-/// `tier` is fixed to `None` (the 5m default), matching the ONE tier the
-/// dispatch-path pricing call has ever priced against.
-///
-/// The stamped row never supplies a model's output ceiling or context
-/// window: both come from `[models.X]` alone, stamped by
-/// `build_resolved_models`, so a catalog figure cannot truncate a response
-/// or steer the window gate.
-#[must_use]
-pub fn apply_catalog_overlay(
-    models: BTreeMap<String, Arc<ResolvedModel>>,
-    config: &Config,
-    overlay: &CatalogOverlay,
-) -> BTreeMap<String, Arc<ResolvedModel>> {
-    models
-        .into_iter()
-        .map(|(nickname, model)| {
-            let provider_kind = resolved_provider_kind(&model, config);
-            let effective_row = resolve_effective_row(
-                provider_kind,
-                &model.upstream,
-                None,
-                &config.cache_pricing,
-                overlay,
-            );
-            let stamped = (*model).clone().with_effective_row(effective_row);
-            (nickname, Arc::new(stamped))
-        })
-        .collect()
-}
-
-/// The catalog-selector provider kind of a resolved model.
-///
-/// A POOL-backed model's `provider_name` is the pool, which is not a
-/// `[providers]` entry -- looking it up there always misses, and an empty kind
-/// silently disables the catalog row for that model (no capability priors, no
-/// pricing, no context window). So a model with compiled seats reads the kind
-/// off a SEAT's own member entry instead. Validation rejects a mixed-kind pool,
-/// so every member answers the same kind and the first usable seat is
-/// representative.
-///
-/// Falls back to the `[models.X] provider` lookup for a non-pooled model, which
-/// is where that lookup is correct.
-fn resolved_provider_kind(model: &ResolvedModel, config: &Config) -> &'static str {
-    if let Some(seats) = model.seats.as_ref()
-        && let Some(kind) = seats
-            .first()
-            .and_then(|seat| config.providers.get(&seat.provider_name))
-            .map(ProviderEntry::kind_str)
-    {
-        return kind;
-    }
-    config
-        .models
-        .get(&model.nickname)
-        .and_then(|entry| config.providers.get(&entry.provider))
-        .map_or("", ProviderEntry::kind_str)
 }
 
 /// Clone a provider entry's `CloakConfig` and stamp the global

@@ -212,14 +212,15 @@ pub struct Config {
     #[serde(default)]
     pub wire_check: WireCheckConfig,
 
-    /// RETIRED `[cache_pricing]` table. Cache pricing lives in the catalog
-    /// overlay (`crate::catalog_overlay`); this field is parsed only so a
-    /// non-empty table is refused by name
+    /// RETIRED `[cache_pricing]` table, kept as raw TOML. Prices live under
+    /// `[models.X.pricing]`; this field is parsed only so a non-empty table,
+    /// whatever its entries hold, is refused by name
     /// ([`crate::config::validate_cache_pricing_retired`]) instead of
     /// surfacing as an unknown-key error. An empty or omitted table is the
     /// only accepted form.
     #[serde(default)]
-    pub cache_pricing: BTreeMap<String, crate::catalog::CachePricingOverride>,
+    #[schemars(with = "BTreeMap<String, serde_json::Value>")]
+    pub cache_pricing: toml::Table,
 
     /// Optional `[mitm]` block for the MITM front-proxy (TLS-terminating
     /// local listener that fronts a first-party upstream, e.g. Claude

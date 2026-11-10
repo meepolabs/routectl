@@ -495,12 +495,11 @@ fn polling_status_neither_grows_the_log_nor_rereads_disk_state() {
     std::fs::create_dir_all(&dir).expect("mkdir config dir");
     let config = write_config(&dir, port);
     let overlay = write_overlay(&dir);
-    let premise = routectl_router::load_catalog_overlay(&overlay)
-        .expect("premise: the old overlay loader accepts the leftover");
+    let premise: Value = serde_json::from_slice(&std::fs::read(&overlay).expect("read overlay"))
+        .expect("premise: the leftover is well-formed JSON");
     assert_eq!(
-        routectl_router::overlay_soft_defects(&premise).len(),
-        1,
-        "premise: the leftover carries the soft defect a read would log"
+        premise["cells"][DEFECT_SELECTOR]["wm"], 1.0,
+        "premise: the leftover carries the below-sentinel cell"
     );
     let ledger = seed_ledger(&dir);
     for path in [&config, &overlay, &ledger] {
