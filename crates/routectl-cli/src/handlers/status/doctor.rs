@@ -11,13 +11,12 @@
 //! not from a fresh probe.
 //!
 //! The gather runs over the daemon's SERVED state
-//! ([`GatherSources::Served`]): the config and catalog overlay the running
-//! router accepted and its resident learned registry, read through the
-//! read-only facade. A poll parses no config file, loads no overlay file, and
-//! replays no ledger. What disk I/O remains (the raw config bytes for the
-//! validation findings, the credential-store probe) runs inside the
-//! `spawn_blocking` builder [`guard_panel`] wraps it in, driven to completion
-//! with a runtime handle.
+//! ([`GatherSources::Served`]): the config the running router accepted and
+//! its resident learned registry, read through the read-only facade. A poll
+//! parses no config file and replays no ledger. What disk I/O remains (the
+//! raw config bytes for the validation findings, the credential-store probe,
+//! the leftover catalog file check) runs inside the `spawn_blocking` builder
+//! [`guard_panel`] wraps it in, driven to completion with a runtime handle.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -62,7 +61,8 @@ use crate::commands::usage::{WindowBounds, WindowFlag, window_bounds};
 /// capability matrix carries no `prior` layer or `assumed` verdict. At 28 the
 /// embedded report's `pricing` rows name a source per price plus the price
 /// table dates, and its `knobs` rows name `model-config`, `learned` or
-/// `default`.
+/// `default`. At 29 the embedded report drops its `freshness` section and its
+/// `catalog overlay` findings and gains the `leftover catalog files` finding.
 pub const DOCTOR_SCHEMA_VERSION: u32 = SCHEMA_VERSION;
 
 /// The no-network doctor report plus the circuit-derived reachability summary,

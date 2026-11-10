@@ -1,11 +1,11 @@
 //! Doctor section producers.
 
 use routectl_auth::oauth::types::TokenRecord;
-use routectl_core::{sanitize_for_log, sanitize_for_log_with_cap};
+use routectl_core::sanitize_for_log_with_cap;
 use routectl_router::{
     ActivationEntry, ActivationStatus, CONFIG_VERSION_REMEDIATION, CURRENT_CONFIG_VERSION,
-    ConfigVersionError, Finding, OverlaySoftDefect, PricingConfig, Status, TuningRow,
-    UnresolvedReason, compute_activation, epoch_day_age, is_stale_days, preflight_config_version,
+    ConfigVersionError, Finding, PricingConfig, Status, TuningRow, UnresolvedReason,
+    compute_activation, preflight_config_version,
 };
 
 use routectl_router::prices::{PriceSource, PriceSources, TableDate};
@@ -21,10 +21,7 @@ use crate::server::reload_failure::ReloadFailureSnapshot;
 
 use super::gather::{SecretCheck, SecretPresence};
 use super::served::{SeatFix, parked_seat_finding, unusable_seat_finding};
-use super::{
-    DoctorContext, FreshnessInputs, KnobRow, LegacyFolder, OutputCeilingSource, PricingRow,
-    TableDates,
-};
+use super::{DoctorContext, KnobRow, LegacyFolder, OutputCeilingSource, PricingRow, TableDates};
 
 /// Probe section: one finding per configured provider, mapped from its
 /// read-only reachability outcome through the shared `probe_finding` seam so
@@ -188,11 +185,7 @@ pub(super) fn section_config(ctx: &DoctorContext) -> Vec<Finding> {
         .reload_failure
         .map(reload_failure_finding)
         .into_iter()
-        .chain(
-            ctx.overlay_soft_defects
-                .iter()
-                .map(overlay_soft_defect_finding),
-        )
+        .chain(leftover_catalog_files_finding(&ctx.leftover_catalog_files))
         .collect();
     findings.extend(ctx.legacy_folders.iter().filter_map(legacy_folder_finding));
     if ctx.config_load_error.is_some() {
@@ -329,26 +322,27 @@ fn reload_failure_finding(failure: ReloadFailureSnapshot) -> Finding {
     }
 }
 
-/// A soft cell-value defect the overlay loader accepted. The selector is a
-/// row key from a hand-editable file, so it is control-char-filtered before
-/// it reaches the one-line human render.
-fn overlay_soft_defect_finding(defect: &OverlaySoftDefect) -> Finding {
-    Finding {
+/// The catalog files still in the config folder that routectl no longer
+/// reads; `None` when there are none. Informational: a leftover file changes
+/// nothing, so the finding is a Pass and never moves the exit code.
+fn leftover_catalog_files_finding(present: &[&str]) -> Option<Finding> {
+    if present.is_empty() {
+        return None;
+    }
+    Some(Finding {
         section: "config",
-        name: "catalog overlay".to_string(),
-        status: Status::Warn,
+        name: "leftover catalog files".to_string(),
+        status: Status::Pass,
         detail: format!(
-            "catalog overlay cell {}: `{}` is below its sentinel value",
-            sanitize_for_log(&defect.selector),
-            defect.field,
+            "the config folder still holds {}; routectl no longer reads them",
+            present.join(", ")
         ),
         remediation: Some(
-            "accepted as an intentional operator override; a too-cheap write multiplier can \
-             make a cache break look falsely profitable, so raise or remove the cell value if \
-             the override is not intended"
+            "prices now come from `routectl prices refresh` and `[models.X.pricing]`; \
+             remove these files when you no longer need them"
                 .to_string(),
         ),
-    }
+    })
 }
 
 const MS_PER_SEC: i64 = 1_000;
@@ -718,142 +712,6 @@ fn capability_unavailable(redacted: &str) -> Finding {
         remediation: Some(
             "resolve the config error reported above, then re-run `routectl doctor`".to_string(),
         ),
-    }
-}
-
-/// Freshness section: three findings-shaped rows describing how current the
-/// catalog data backing this install is. Every row is `Pass` or `Warn` --
-/// NEVER `Fail`, so it can never flip the doctor exit code. Staleness is
-/// advisory: an old overlay or import is a WARN, never an error.
-pub(super) fn section_freshness(ctx: &DoctorContext) -> Vec<Finding> {
-    freshness_findings(&ctx.freshness)
-}
-
-/// Pure mapping of the gathered [`FreshnessInputs`] to the three freshness
-/// rows. The reserved `import_result` field is intentionally not read: no
-/// durable import RESULT exists yet, so it renders nothing.
-pub(super) fn freshness_findings(f: &FreshnessInputs) -> Vec<Finding> {
-    vec![
-        baked_catalog_finding(f),
-        overlay_age_finding(f),
-        last_import_finding(f),
-    ]
-}
-
-/// Row 1: the compiled-in baked catalog version and its snapshot date.
-/// Informational `Pass` -- the baked table is always present, and the
-/// separate startup staleness WARN owns the "baked snapshot is old" signal.
-fn baked_catalog_finding(f: &FreshnessInputs) -> Finding {
-    Finding {
-        section: "freshness",
-        name: "baked catalog".to_string(),
-        status: Status::Pass,
-        detail: format!(
-            "baked catalog v{} snapshot {}",
-            f.catalog_version, f.snapshot_date
-        ),
-        remediation: None,
-    }
-}
-
-/// Row 2: the freshest overlay verification stamp and its age. WARN when the
-/// stamp is stale past the operator's staleness hint or does not parse;
-/// PASS when fresh; an honest PASS when no overlay verification exists (the
-/// operator is running on baked defaults).
-fn overlay_age_finding(f: &FreshnessInputs) -> Finding {
-    let Some(verified_at) = &f.overlay_verified_at else {
-        return Finding {
-            section: "freshness",
-            name: "overlay".to_string(),
-            status: Status::Pass,
-            detail: "no overlay verified stamp present; running on the baked catalog".to_string(),
-            remediation: None,
-        };
-    };
-    let threshold = staleness_threshold_days(f.staleness_hint_days);
-    match epoch_day_age(verified_at, f.today_epoch_day) {
-        None => Finding {
-            section: "freshness",
-            name: "overlay".to_string(),
-            status: Status::Warn,
-            detail: "overlay verified stamp could not be parsed".to_string(),
-            remediation: Some(
-                "run `routectl catalog import` to refresh the catalog overlay".to_string(),
-            ),
-        },
-        Some(age) if is_stale_days(verified_at, f.today_epoch_day, threshold) => Finding {
-            section: "freshness",
-            name: "overlay".to_string(),
-            status: Status::Warn,
-            detail: format!(
-                "overlay verified {age} days ago (stale past {} days)",
-                f.staleness_hint_days
-            ),
-            remediation: Some(
-                "run `routectl catalog import` to refresh the catalog overlay".to_string(),
-            ),
-        },
-        Some(age) => Finding {
-            section: "freshness",
-            name: "overlay".to_string(),
-            status: Status::Pass,
-            detail: format!("overlay verified {age} days ago"),
-            remediation: None,
-        },
-    }
-}
-
-/// Row 3: the LAST SUCCESSFUL import's date, age, and row counts. WARN when
-/// that import is stale past the operator's hint; PASS when fresh; an honest
-/// PASS when no import has ever been recorded (`catalog_import_state.json`
-/// missing or unreadable). Named "last successful import" on purpose: the
-/// sidecar records only successes, so this is never a failed-attempt result.
-fn last_import_finding(f: &FreshnessInputs) -> Finding {
-    let Some(state) = &f.last_import else {
-        return Finding {
-            section: "freshness",
-            name: "last successful import".to_string(),
-            status: Status::Pass,
-            detail: "no successful import recorded".to_string(),
-            remediation: None,
-        };
-    };
-    let rows: usize = state.per_source_counts.values().sum();
-    let sources = state.per_source_counts.len();
-    let threshold = staleness_threshold_days(f.staleness_hint_days);
-    let counts = format!("{rows} rows across {sources} sources");
-    match epoch_day_age(&state.last_import_date, f.today_epoch_day) {
-        Some(age) if is_stale_days(&state.last_import_date, f.today_epoch_day, threshold) => {
-            Finding {
-                section: "freshness",
-                name: "last successful import".to_string(),
-                status: Status::Warn,
-                detail: format!(
-                    "last successful import {} ({age} days ago, stale past {} days): {counts}",
-                    state.last_import_date, f.staleness_hint_days
-                ),
-                remediation: Some(
-                    "run `routectl catalog import` to refresh the catalog".to_string(),
-                ),
-            }
-        }
-        Some(age) => Finding {
-            section: "freshness",
-            name: "last successful import".to_string(),
-            status: Status::Pass,
-            detail: format!(
-                "last successful import {} ({age} days ago): {counts}",
-                state.last_import_date
-            ),
-            remediation: None,
-        },
-        None => Finding {
-            section: "freshness",
-            name: "last successful import".to_string(),
-            status: Status::Pass,
-            detail: format!("last successful import recorded (undated stamp): {counts}"),
-            remediation: None,
-        },
     }
 }
 

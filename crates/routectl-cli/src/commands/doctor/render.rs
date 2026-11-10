@@ -76,7 +76,6 @@ fn section_title(key: &str) -> &'static str {
         "secrets" => "Managed secrets",
         "probe" => "Provider reachability",
         "capability" => "Capability",
-        "freshness" => "Catalog freshness",
         "pricing" => "Cost pricing",
         "knobs" => "Model knobs",
         "tuning" => "Resolved tuning",

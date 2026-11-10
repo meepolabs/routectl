@@ -11,12 +11,10 @@ use routectl_auth::{SecretRef, SecretScheme, default_secret_dir};
 use routectl_core::ProbeOutcome;
 use routectl_router::prices::{PriceSubject, effective_pricing};
 use routectl_router::{
-    BetaSeedScope, CATALOG_VERSION, CapabilityEventRow, CapabilityRebuildSummary, CatalogOverlay,
-    Config, EffectiveRow, FROZEN_CATALOG_VERSION, FROZEN_OVERLAY_REVISION,
-    LearnedCapabilityRegistry, LearnedLaneProjection, MatrixReplaySummary, ProviderEntry,
-    ReplayTombstone, Source, StateKey, TuningRow, catalog_import_state_default_path,
-    derive_effective_view, learned_output_ceiling, load_last_import,
-    rebuild_capabilities_with_values, today_epoch_day,
+    BetaSeedScope, CapabilityEventRow, CapabilityRebuildSummary, CatalogOverlay, Config,
+    FROZEN_CATALOG_VERSION, FROZEN_OVERLAY_REVISION, LearnedCapabilityRegistry,
+    LearnedLaneProjection, MatrixReplaySummary, ProviderEntry, ReplayTombstone, StateKey,
+    TuningRow, derive_effective_view, learned_output_ceiling, rebuild_capabilities_with_values,
 };
 
 use crate::commands::doctor_panels::compute_would_trim_panel;
@@ -31,7 +29,7 @@ use crate::server::ledger_reader::{
 
 use super::served::{GatherSources, GatheredLayers, served_layers};
 use super::{
-    CapabilityInputs, CapabilityMatrixSource, DoctorContext, FreshnessInputs, KnobRow,
+    CapabilityInputs, CapabilityMatrixSource, DoctorContext, KnobRow, LEFTOVER_CATALOG_FILES,
     LEGACY_FOLDER_NAME_CAP, LegacyFolder, MatrixOrigin, OutputCeilingSource, PricingRow,
     TableDates,
 };
@@ -56,11 +54,11 @@ pub(super) async fn gather_context(
 /// Gather every read-only input the no-network sections draw from, WITHOUT
 /// any upstream dial: `probe_results` is left empty and
 /// [`gather_probe_results`] (the only caller of `CompositeStore`/`probe_all`)
-/// is never reached. Everything else -- the config/overlay layers, auth via
+/// is never reached. Everything else -- the config layer, auth via
 /// `probe_local` (no network, no refresh), secret presence checks, the orphan
 /// scan, and the would-trim panel -- is retained.
 ///
-/// `sources` decides where the config, overlay, and learned layer come from:
+/// `sources` decides where the config and learned layer come from:
 /// [`GatherSources::Disk`] loads them through [`disk_layers`];
 /// [`GatherSources::Served`] takes a running daemon's accepted state as-is.
 /// The raw config bytes are read from `config_path` either way, for the
@@ -86,7 +84,6 @@ pub async fn gather_context_no_network(
         config_parse_error,
         config_load_error,
         accepted_config_version,
-        overlay,
         capability_matrix,
         matrix_origin,
         reload_failure,
@@ -95,25 +92,9 @@ pub async fn gather_context_no_network(
         prices,
     } = layers;
 
-    let overlay_verified_at = overlay
-        .as_ref()
-        .and_then(|overlay| freshest_overlay_verified_at(&config, overlay));
-    let freshness = FreshnessInputs {
-        catalog_version: CATALOG_VERSION,
-        snapshot_date: routectl_router::CATALOG_SNAPSHOT_DATE,
-        overlay_verified_at,
-        staleness_hint_days: config.capability.staleness_hint_days,
-        today_epoch_day: today_epoch_day(),
-        last_import: load_last_import(&catalog_import_state_default_path()),
-        import_result: None,
-    };
     let pricing = derive_pricing_rows(&config, &prices);
     let knobs = derive_knob_rows(&config, &capability_matrix);
     let tuning = derive_tuning_rows(&config);
-    let overlay_soft_defects = overlay
-        .as_ref()
-        .map(routectl_router::overlay_soft_defects)
-        .unwrap_or_default();
     let capability = CapabilityInputs {
         panel_unavailable: config_parse_error,
     };
@@ -128,6 +109,8 @@ pub async fn gather_context_no_network(
         .map(|legacy| gather_legacy_folder(legacy, config_path))
         .filter(|folder| *folder != LegacyFolder::Absent)
         .collect();
+    let leftover_catalog_files =
+        gather_leftover_catalog_files(&routectl_core::config_dir::config_dir_or_relative());
 
     DoctorContext {
         config,
@@ -148,16 +131,25 @@ pub async fn gather_context_no_network(
         capability_matrix,
         matrix_origin,
         beta_seed: routectl_router::shipped_beta_seed_scope(),
-        freshness,
         pricing,
         knobs,
         tuning,
         reload_failure,
         parked_seats,
         unusable_seats,
-        overlay_soft_defects,
+        leftover_catalog_files,
         legacy_folders,
     }
+}
+
+/// The [`LEFTOVER_CATALOG_FILES`] that exist in `config_dir`, in list order.
+/// Any directory entry counts, a dangling symlink included: the operator
+/// removes it the same way.
+pub(super) fn gather_leftover_catalog_files(config_dir: &Path) -> Vec<&'static str> {
+    LEFTOVER_CATALOG_FILES
+        .into_iter()
+        .filter(|name| config_dir.join(name).symlink_metadata().is_ok())
+        .collect()
 }
 
 /// List what the old config folder `legacy` still holds. A folder that holds
@@ -224,28 +216,16 @@ fn same_dir(a: &Path, b: &Path) -> bool {
     }
 }
 
-/// The on-disk layers: a read-only, per-layer load of the config and the
-/// catalog overlay, plus a read-only ledger replay for the learned matrix.
-///
-/// The config and the overlay load independently so the capability panel can
-/// degrade one without the other. The version section keeps its coupled
-/// "config could not be loaded" semantics -- a config parse error wins, else
-/// an overlay error -- so a present-but-broken config still never reports
-/// all-Pass. On a config failure the other sections run against defaults.
+/// The on-disk layers: a read-only load of the config plus a read-only ledger
+/// replay for the learned matrix. A config parse error is the version
+/// section's "config could not be loaded" Fail, so a present-but-broken config
+/// never reports all-Pass; the other sections then run against defaults.
 pub(super) fn disk_layers(config_path: &Path) -> GatheredLayers {
-    let config_layer = crate::server::parse_config_only(config_path);
-    let overlay_layer = crate::server::load_overlay_default();
-
-    let (config, config_parse_error) = match config_layer {
+    let (config, config_parse_error) = match crate::server::parse_config_only(config_path) {
         Ok(config) => (config, None),
         Err(e) => (Config::default(), Some(redact_config_load_error(&e))),
     };
-    let config_load_error = config_parse_error.clone().or_else(|| {
-        overlay_layer
-            .as_ref()
-            .err()
-            .map(|e| redact_config_load_error(e))
-    });
+    let config_load_error = config_parse_error.clone();
 
     let capability_matrix = gather_capability_matrix(
         &config,
@@ -258,7 +238,6 @@ pub(super) fn disk_layers(config_path: &Path) -> GatheredLayers {
         config_parse_error,
         config_load_error,
         accepted_config_version: None,
-        overlay: overlay_layer.ok(),
         capability_matrix,
         matrix_origin: MatrixOrigin::LedgerReplay,
         reload_failure: None,
@@ -508,31 +487,6 @@ pub(super) fn derive_tuning_rows(config: &Config) -> Vec<TuningRow> {
     // The tuning rows read the config alone, so any overlay yields the same
     // rows; the empty one keeps this section independent of overlay loading.
     derive_effective_view(config, &CatalogOverlay::default(), None, None).tuning
-}
-
-/// The freshest `verified_at` among the effective view's OVERLAY-sourced
-/// cells (import / user, never baked), through [`derive_effective_view`]. Baked cells are
-/// excluded on purpose: their stamp is the table-wide snapshot date already
-/// shown in the baked row, so counting them would mask "running on baked
-/// defaults" as a fresh overlay. `YYYY-MM-DD` stamps are zero-padded, so the
-/// lexicographic max is the chronological max. `None` when no configured
-/// model resolves to an overlay-verified cell.
-pub(super) fn freshest_overlay_verified_at(
-    config: &Config,
-    overlay: &CatalogOverlay,
-) -> Option<String> {
-    derive_effective_view(config, overlay, None, None)
-        .models
-        .into_iter()
-        .filter_map(|cell| match cell.row {
-            EffectiveRow::Present {
-                source,
-                verified_at,
-                ..
-            } if source != Source::Baked => Some(verified_at),
-            _ => None,
-        })
-        .max()
 }
 
 /// Probe every configured provider read-only through the shared `probe_all`

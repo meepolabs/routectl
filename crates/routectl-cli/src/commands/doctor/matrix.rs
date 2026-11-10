@@ -105,7 +105,7 @@ pub(super) fn build_capability_matrix_panel(ctx: &DoctorContext) -> CapabilityMa
         learned,
         beta_seed: ctx.beta_seed,
     };
-    let threshold = staleness_threshold_days(ctx.freshness.staleness_hint_days);
+    let threshold = staleness_threshold_days(ctx.config.capability.staleness_hint_days);
 
     let lanes = lanes_meta
         .iter()

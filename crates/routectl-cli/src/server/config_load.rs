@@ -144,8 +144,6 @@ pub fn parse_config_only(path: &Path) -> Result<Config, String> {
 
 /// Load the default catalog overlay independently of any config parse
 /// (fail-closed per `routectl_router::load_catalog_overlay`'s matrix).
-/// Doctor loads this layer separately so an unreadable overlay degrades the
-/// capability priors without tainting the config-derived override rows.
 pub fn load_overlay_default() -> Result<CatalogOverlay, String> {
     let overlay_path = routectl_router::overlay_default_path();
     routectl_router::load_catalog_overlay(&overlay_path)

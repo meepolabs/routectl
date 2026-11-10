@@ -7,7 +7,9 @@
 use std::time::{Duration, Instant};
 
 use routectl_core::capability::FailurePhase;
-use routectl_router::{BetaSeedScope, CATALOG_VERSION, CapabilityMatrixPanel, beta_capability_key};
+use routectl_router::{
+    BetaSeedScope, CapabilityMatrixPanel, FROZEN_CATALOG_VERSION, beta_capability_key,
+};
 use routectl_usage::CapabilityEvent;
 
 use super::gather::gather_capability_matrix;
@@ -178,7 +180,7 @@ fn cleared_row(flag: &str) -> CapabilityEvent {
         tier: String::new(),
         evidence_class: None,
         upstream_token: None,
-        catalog_version: i64::from(CATALOG_VERSION),
+        catalog_version: i64::from(FROZEN_CATALOG_VERSION),
         overlay_revision: 0,
         provider_kind: Some(SEED_KIND.to_string()),
         vocab_version: Some(routectl_router::CURRENT_VOCAB_VERSION),

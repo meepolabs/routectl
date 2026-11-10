@@ -448,14 +448,21 @@ fn finding<'a>(report: &'a Value, name: &str) -> Option<&'a Value> {
     findings(report).iter().find(|f| f["name"] == name)
 }
 
-fn assert_overlay_defect_finding(report: &Value) {
-    let defect = finding(report, "catalog overlay")
-        .unwrap_or_else(|| panic!("the served overlay's soft defect must be a finding: {report}"));
+/// The doctor no longer reads the overlay: its soft defect is not a finding,
+/// and the file is named only as a leftover the daemon's doctor does not read.
+fn assert_overlay_is_only_a_leftover_file(report: &Value) {
     assert!(
-        defect["detail"]
+        finding(report, "catalog overlay").is_none(),
+        "the doctor must not report overlay cells: {report}"
+    );
+    let leftover = finding(report, "leftover catalog files")
+        .unwrap_or_else(|| panic!("the overlay file must be named as a leftover: {report}"));
+    assert_eq!(leftover["status"], "Pass", "{leftover}");
+    assert!(
+        leftover["detail"]
             .as_str()
-            .is_some_and(|d| d.contains(DEFECT_SELECTOR)),
-        "the soft-defect finding must name its cell: {defect}"
+            .is_some_and(|d| d.contains("catalog_overlay.json")),
+        "the leftover finding must name the overlay file: {leftover}"
     );
 }
 
@@ -552,7 +559,7 @@ fn assert_polls_leave_the_log_flat(daemon: &mut Daemon) -> Counts {
         matrix["warm"]["summary"]["skipped_vocab"], UNMAPPABLE_ROWS,
         "the boot warm must have read the seeded rows: {matrix}"
     );
-    assert_overlay_defect_finding(&report);
+    assert_overlay_is_only_a_leftover_file(&report);
     assert_no_overlay_load_error(&report);
     after_33
 }
@@ -597,7 +604,7 @@ fn assert_a_rejected_reload_keeps_the_served_overlay(
         "the reload finding must name the overlay class: {reload}"
     );
     for report in [&rejected, &report] {
-        assert_overlay_defect_finding(report);
+        assert_overlay_is_only_a_leftover_file(report);
         assert_no_overlay_load_error(report);
         assert_eq!(report["panels"]["capability_matrix"]["source"], "resident");
     }

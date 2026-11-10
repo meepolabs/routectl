@@ -191,7 +191,7 @@ async fn build_panel_data_emits_the_field_verdict_snapshot_log() {
 #[test]
 fn no_config_path_yields_unavailable_panel() {
     let panel = Panel::<DoctorPanel>::unavailable(DOCTOR_SCHEMA_VERSION, codes::NO_CONFIG_PATH);
-    assert_eq!(panel.schema_version, 28);
+    assert_eq!(panel.schema_version, 29);
     assert_eq!(panel.unavailable.as_deref(), Some("no_config_path"));
     assert!(panel.data.is_none());
 }
@@ -280,12 +280,12 @@ async fn handler_returns_report_with_no_probe_section() {
     let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
     let json: Value = serde_json::from_slice(&bytes).unwrap();
 
-    assert_eq!(json["schema_version"], 28);
+    assert_eq!(json["schema_version"], 29);
     assert!(json["unavailable"].is_null());
     let as_of = json["as_of"].as_str().expect("as_of present");
     assert!(chrono::DateTime::parse_from_rfc3339(as_of).is_ok());
 
-    assert_eq!(json["data"]["report"]["schema_version"], 28);
+    assert_eq!(json["data"]["report"]["schema_version"], 29);
     let findings = json["data"]["report"]["findings"].as_array().unwrap();
     assert!(
         !findings.is_empty(),
@@ -312,15 +312,21 @@ async fn handler_returns_report_with_no_probe_section() {
     }
 }
 
-/// The `/status/doctor` panel embeds the no-network doctor report, which
-/// carries the catalog-freshness section. The freshness rows must surface
-/// on this JSON surface exactly as they do on the CLI `doctor` output --
-/// the baked-catalog row is present unconditionally (no overlay, no import
-/// needed), so a status consumer sees the same catalog-freshness signal.
+/// The `/status/doctor` panel embeds the no-network doctor report, so the
+/// leftover catalog files line reaches the JSON surface exactly as on the CLI:
+/// a Pass finding naming the file, never a freshness section.
+///
+/// Mutation check: drop the leftover finding from `section_config` -> red
+/// here.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn doctor_panel_embeds_catalog_freshness_rows() {
+#[serial_test::serial]
+async fn doctor_panel_names_leftover_catalog_files_and_no_freshness_rows() {
     let dir = tempfile::tempdir().unwrap();
-    let config_path = dir.path().join("config.toml");
+    let _xdg = routectl_testkit::ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
+    let cfg_dir = dir.path().join("routectl");
+    std::fs::create_dir_all(&cfg_dir).unwrap();
+    std::fs::write(cfg_dir.join("catalog_state.json"), b"{}").unwrap();
+    let config_path = cfg_dir.join("config.toml");
     std::fs::write(
         &config_path,
         format!("version = {}\n", routectl_router::CURRENT_CONFIG_VERSION),
@@ -346,15 +352,21 @@ async fn doctor_panel_embeds_catalog_freshness_rows() {
     let findings = json["data"]["report"]["findings"]
         .as_array()
         .expect("findings array");
+    let leftover = findings
+        .iter()
+        .find(|f| f["name"] == "leftover catalog files")
+        .unwrap_or_else(|| panic!("the leftover line must reach the panel: {json}"));
+    assert_eq!(leftover["section"], "config");
+    assert_eq!(leftover["status"], "Pass");
     assert!(
-        findings.iter().any(|f| f["section"] == "freshness"),
-        "status doctor panel must embed the catalog-freshness section"
+        leftover["detail"]
+            .as_str()
+            .is_some_and(|d| d.contains("catalog_state.json")),
+        "{leftover}"
     );
     assert!(
-        findings
-            .iter()
-            .any(|f| { f["section"] == "freshness" && f["name"] == "baked catalog" }),
-        "the baked-catalog freshness row must be present unconditionally"
+        findings.iter().all(|f| f["section"] != "freshness"),
+        "the freshness section is gone: {json}"
     );
 }
 

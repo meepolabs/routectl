@@ -4,8 +4,7 @@ use std::path::PathBuf;
 use routectl_auth::{OAuthError, OAuthStore};
 use routectl_providers::anthropic_api::AuthKind;
 use routectl_router::{
-    AliasValue, CONFIG_VERSION_REMEDIATION, CURRENT_CONFIG_VERSION, CatalogImportState, ModelEntry,
-    ProviderEntry,
+    AliasValue, CONFIG_VERSION_REMEDIATION, CURRENT_CONFIG_VERSION, ModelEntry, ProviderEntry,
 };
 use routectl_testkit::ScopedEnv;
 
@@ -20,9 +19,8 @@ use super::gather::{
 };
 use super::matrix::build_capability_matrix_panel;
 use super::sections::{
-    freshness_findings, secret_finding, section_auth, section_capability, section_config,
-    section_probe, section_seat_orphans, section_seat_pools, section_secret_orphans,
-    section_version,
+    secret_finding, section_auth, section_capability, section_config, section_probe,
+    section_seat_orphans, section_seat_pools, section_secret_orphans, section_version,
 };
 use super::*;
 
@@ -80,35 +78,16 @@ pub(super) fn ctx(
         capability_matrix: CapabilityMatrixSource::Unavailable("no_data"),
         matrix_origin: MatrixOrigin::LedgerReplay,
         beta_seed: routectl_router::BetaSeedScope::EMPTY,
-        freshness: sample_freshness(),
         pricing,
         knobs,
         tuning,
         reload_failure: None,
         parked_seats: Vec::new(),
         unusable_seats: Vec::new(),
-        overlay_soft_defects: Vec::new(),
+        leftover_catalog_files: Vec::new(),
         legacy_folders: Vec::new(),
     }
 }
-
-/// A minimal all-honest-missing freshness input: no overlay verification and
-/// no recorded import, pinned to a fixed "today" so age assertions are
-/// deterministic. Individual freshness tests override the fields they probe.
-fn sample_freshness() -> FreshnessInputs {
-    FreshnessInputs {
-        catalog_version: routectl_router::CATALOG_VERSION,
-        snapshot_date: routectl_router::CATALOG_SNAPSHOT_DATE,
-        overlay_verified_at: None,
-        staleness_hint_days: 14,
-        today_epoch_day: FRESHNESS_TODAY,
-        last_import: None,
-        import_result: None,
-    }
-}
-
-/// A fixed "today" epoch-day (2026-07-11) for deterministic freshness ages.
-const FRESHNESS_TODAY: i64 = 20_645;
 
 /// A config whose alias table reaches an `oauth://anthropic`-backed
 /// provider, so the anthropic inventory entry is `referenced_by_aliases`.
@@ -588,8 +567,8 @@ fn capability_section_emits_no_finding_for_a_loaded_config() {
 }
 
 #[test]
-fn schema_version_is_twenty_eight() {
-    assert_eq!(SCHEMA_VERSION, 28);
+fn schema_version_is_twenty_nine() {
+    assert_eq!(SCHEMA_VERSION, 29);
 
     let context = ctx(
         config_with_overrides(),
@@ -598,7 +577,7 @@ fn schema_version_is_twenty_eight() {
         Vec::new(),
     );
     let report = build_report(&context);
-    assert_eq!(report.schema_version, 28);
+    assert_eq!(report.schema_version, 29);
 
     // JSON mode carries the structured capability matrix panel; the
     // superseded override / prior / learned finding text is gone.
@@ -2431,14 +2410,13 @@ fn rendered_report_leaks_neither_a_config_secret_nor_a_store_path() {
         capability_matrix: CapabilityMatrixSource::Unavailable("config_unavailable"),
         matrix_origin: MatrixOrigin::LedgerReplay,
         beta_seed: routectl_router::BetaSeedScope::EMPTY,
-        freshness: sample_freshness(),
         pricing: Vec::new(),
         knobs: Vec::new(),
         tuning: Vec::new(),
         reload_failure: None,
         parked_seats: Vec::new(),
         unusable_seats: Vec::new(),
-        overlay_soft_defects: Vec::new(),
+        leftover_catalog_files: Vec::new(),
         legacy_folders: Vec::new(),
     };
     let report = build_report(&context);
@@ -2603,7 +2581,7 @@ fn build_report_no_network_matches_network_minus_probe() {
     let network = build_report(&context);
     let no_net = build_report_no_network(&context);
 
-    assert_eq!(no_net.schema_version, 28);
+    assert_eq!(no_net.schema_version, 29);
     assert!(
         no_net.findings.iter().all(|f| f.section != "probe"),
         "no-network report must have no probe rows"
@@ -2662,7 +2640,7 @@ async fn network_and_no_network_gather_agree_outside_probe() {
 /// unparseable-config case is `Unavailable` with a path-free class token.
 mod capability_matrix {
     use super::*;
-    use routectl_router::CATALOG_VERSION;
+    use routectl_router::FROZEN_CATALOG_VERSION;
     use routectl_usage::open;
     use rusqlite::params;
     use tempfile::TempDir;
@@ -2803,7 +2781,7 @@ mod capability_matrix {
         let tmp = TempDir::new().expect("tempdir");
         let ledger = tmp.path().join("usage.db");
         let db = open(&ledger).expect("open ledger");
-        seed_tombstone(db.conn(), 100, i64::from(CATALOG_VERSION), 0);
+        seed_tombstone(db.conn(), 100, i64::from(FROZEN_CATALOG_VERSION), 0);
         drop(db);
         let config = config_at(&ledger);
 
@@ -2824,7 +2802,7 @@ mod capability_matrix {
         // Tombstone stamped an overlay revision other than the frozen one, as a
         // ledger written by an earlier build can be until the daemon's next
         // boot restates past it.
-        seed_tombstone(db.conn(), 100, i64::from(CATALOG_VERSION), 7);
+        seed_tombstone(db.conn(), 100, i64::from(FROZEN_CATALOG_VERSION), 7);
         drop(db);
         let config = config_at(&ledger);
 
@@ -2846,13 +2824,13 @@ mod capability_matrix {
         let ledger = tmp.path().join("usage.db");
         let db = open(&ledger).expect("open ledger");
         let far_future = i64::MAX / 2;
-        seed_tombstone(db.conn(), 100, i64::from(CATALOG_VERSION), 0);
+        seed_tombstone(db.conn(), 100, i64::from(FROZEN_CATALOG_VERSION), 0);
         seed_broken(
             db.conn(),
             far_future,
             "gpt-nick#upstream",
             "web_search",
-            i64::from(CATALOG_VERSION),
+            i64::from(FROZEN_CATALOG_VERSION),
             0,
         );
         drop(db);
@@ -2891,13 +2869,13 @@ mod capability_matrix {
         let tmp = TempDir::new().expect("tempdir");
         let ledger = tmp.path().join("usage.db");
         let db = open(&ledger).expect("open ledger");
-        seed_tombstone(db.conn(), 100, i64::from(CATALOG_VERSION), 0);
+        seed_tombstone(db.conn(), 100, i64::from(FROZEN_CATALOG_VERSION), 0);
         seed_broken(
             db.conn(),
             200,
             "gpt-nick#upstream",
             "web_search",
-            i64::from(CATALOG_VERSION),
+            i64::from(FROZEN_CATALOG_VERSION),
             0,
         );
         drop(db);
@@ -2915,171 +2893,6 @@ mod capability_matrix {
             "the read-only matrix gather must not mutate the usage db"
         );
     }
-}
-
-// ---------------------------------------------------------------------------
-// Freshness section: three findings-shaped rows, honest missing, no Fail.
-// ---------------------------------------------------------------------------
-
-fn import_state(date: &str) -> CatalogImportState {
-    let mut per_source_counts = BTreeMap::new();
-    per_source_counts.insert("anthropic-api".to_string(), 7);
-    per_source_counts.insert("openai".to_string(), 5);
-    CatalogImportState {
-        schema_version: 1,
-        last_import_date: date.to_string(),
-        per_source_counts,
-        per_family_counts: BTreeMap::new(),
-        source_hashes: BTreeMap::new(),
-    }
-}
-
-#[test]
-fn freshness_renders_three_rows_with_both_honest_missing_lines() {
-    let findings = freshness_findings(&sample_freshness());
-    assert_eq!(findings.len(), 3, "freshness renders exactly three rows");
-
-    let baked = find(&findings, "freshness", "baked catalog");
-    assert!(baked.detail.contains("baked catalog v"));
-    assert!(
-        baked
-            .detail
-            .contains(routectl_router::CATALOG_SNAPSHOT_DATE)
-    );
-    assert_eq!(baked.status, Status::Pass);
-
-    let overlay = find(&findings, "freshness", "overlay");
-    assert_eq!(overlay.status, Status::Pass);
-    assert!(
-        overlay.detail.contains("no overlay verified stamp"),
-        "absent overlay stamp must render honestly: {}",
-        overlay.detail
-    );
-
-    let import = find(&findings, "freshness", "last successful import");
-    assert_eq!(import.status, Status::Pass);
-    assert_eq!(import.detail, "no successful import recorded");
-}
-
-#[test]
-fn freshness_never_says_result_only_last_successful_import() {
-    let mut f = sample_freshness();
-    f.last_import = Some(import_state("2026-07-01"));
-    let findings = freshness_findings(&f);
-    for finding in &findings {
-        assert!(
-            !finding.detail.to_lowercase().contains("result"),
-            "freshness must never say 'result': {}",
-            finding.detail
-        );
-    }
-    let import = find(&findings, "freshness", "last successful import");
-    assert!(import.name.contains("last successful import"));
-    assert!(import.detail.contains("12 rows across 2 sources"));
-    assert!(import.detail.contains("10 days ago"));
-}
-
-#[test]
-fn freshness_overlay_and_import_warn_when_stale_past_hint() {
-    let mut f = sample_freshness();
-    f.staleness_hint_days = 14;
-    // 30 days before the pinned today: stale past the 14-day hint.
-    f.overlay_verified_at = Some("2026-06-11".to_string());
-    f.last_import = Some(import_state("2026-06-11"));
-
-    let findings = freshness_findings(&f);
-    let overlay = find(&findings, "freshness", "overlay");
-    assert_eq!(overlay.status, Status::Warn);
-    assert!(overlay.detail.contains("stale past 14 days"));
-    assert!(overlay.remediation.is_some());
-
-    let import = find(&findings, "freshness", "last successful import");
-    assert_eq!(import.status, Status::Warn);
-    assert!(import.remediation.is_some());
-}
-
-#[test]
-fn freshness_fresh_overlay_and_import_pass() {
-    let mut f = sample_freshness();
-    f.overlay_verified_at = Some("2026-07-05".to_string());
-    f.last_import = Some(import_state("2026-07-05"));
-
-    let findings = freshness_findings(&f);
-    assert_eq!(find(&findings, "freshness", "overlay").status, Status::Pass);
-    assert_eq!(
-        find(&findings, "freshness", "last successful import").status,
-        Status::Pass
-    );
-}
-
-#[test]
-fn freshness_future_stamp_ages_clamp_to_zero() {
-    let mut f = sample_freshness();
-    // A post-dated stamp (skewed clock) must read as 0 days, never negative.
-    f.overlay_verified_at = Some("2026-08-11".to_string());
-    f.last_import = Some(import_state("2026-08-11"));
-
-    let findings = freshness_findings(&f);
-    let overlay = find(&findings, "freshness", "overlay");
-    assert_eq!(overlay.status, Status::Pass);
-    assert!(overlay.detail.contains("0 days ago"), "{}", overlay.detail);
-
-    let import = find(&findings, "freshness", "last successful import");
-    assert!(import.detail.contains("0 days ago"), "{}", import.detail);
-    assert!(
-        !import.detail.contains("-1 days"),
-        "no negative age: {}",
-        import.detail
-    );
-}
-
-#[test]
-fn freshness_never_emits_fail() {
-    // Exercise every branch: missing, fresh, stale, malformed.
-    for overlay in [
-        None,
-        Some("2026-07-05".to_string()),
-        Some("2026-01-01".to_string()),
-        Some("not-a-date".to_string()),
-    ] {
-        for import in [None, Some(import_state("2026-01-01"))] {
-            let mut f = sample_freshness();
-            f.overlay_verified_at = overlay.clone();
-            f.last_import = import;
-            for finding in freshness_findings(&f) {
-                assert_ne!(
-                    finding.status,
-                    Status::Fail,
-                    "freshness must never emit Fail: {}",
-                    finding.detail
-                );
-            }
-        }
-    }
-}
-
-#[test]
-fn freshness_registered_in_both_section_lists_and_render_title() {
-    assert!(
-        SECTIONS.iter().any(|(k, _)| *k == "freshness"),
-        "freshness must be in SECTIONS (CLI doctor)"
-    );
-    assert!(
-        NO_NETWORK_SECTIONS.iter().any(|(k, _)| *k == "freshness"),
-        "freshness must be in NO_NETWORK_SECTIONS (offline status doctor)"
-    );
-    let context = ctx(
-        Config::default(),
-        Some(&current_version_stamp()),
-        Vec::new(),
-        Vec::new(),
-    );
-    let report = build_report(&context);
-    let text = render_human(&report).join("\n");
-    assert!(
-        text.contains("Catalog freshness"),
-        "freshness section title must render: {text}"
-    );
 }
 
 /// The capability matrix panel: lane-by-capability grid assembled from the
@@ -3417,7 +3230,7 @@ mod seeded_matrix_surfaces {
 
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use routectl_router::CATALOG_VERSION;
+    use routectl_router::FROZEN_CATALOG_VERSION;
     use routectl_usage::{CapabilityEvent, insert_capability_event, open};
     use serde_json::Value;
     use tempfile::TempDir;
@@ -3484,7 +3297,7 @@ mod seeded_matrix_surfaces {
             tier: tier.to_string(),
             evidence_class: evidence.map(str::to_string),
             upstream_token: None,
-            catalog_version: i64::from(CATALOG_VERSION),
+            catalog_version: i64::from(FROZEN_CATALOG_VERSION),
             overlay_revision: 0,
             provider_kind: Some("openai-compat".to_string()),
             vocab_version: Some(routectl_router::CURRENT_VOCAB_VERSION),
@@ -3516,7 +3329,7 @@ mod seeded_matrix_surfaces {
         let ledger = tmp.path().join("usage.db");
         let db = open(&ledger).expect("open ledger");
         let ts = now_ms();
-        let cat = i64::from(CATALOG_VERSION);
+        let cat = i64::from(FROZEN_CATALOG_VERSION);
         let insert = |e: &CapabilityEvent| {
             insert_capability_event(db.conn(), e).expect("insert capability event");
         };
@@ -3693,137 +3506,4 @@ mod seeded_matrix_surfaces {
         assert_eq!(unavailable_avail["state"], Value::from("unavailable"));
         assert_eq!(unavailable_avail["code"], Value::from("revision_mismatch"));
     }
-}
-
-/// The `config` findings naming a catalog overlay soft defect, in report
-/// order.
-pub(super) fn overlay_defect_findings(findings: &[Finding]) -> Vec<&Finding> {
-    findings
-        .iter()
-        .filter(|f| f.section == "config" && f.name == "catalog overlay")
-        .collect()
-}
-
-/// An overlay with two below-sentinel `wm` cells and one clean cell, or the
-/// clean cell alone.
-pub(super) fn soft_defect_overlay_json(with_defects: bool) -> serde_json::Value {
-    let mut cells = serde_json::json!({
-        "openai-compat:clean-*": {"source": "user", "verified_at": "2026-07-01", "wm": 9.5}
-    });
-    if with_defects {
-        cells["openai-compat:cheap-a*"] =
-            serde_json::json!({"source": "user", "verified_at": "2026-07-01", "wm": 1.0});
-        cells["openai-compat:cheap-b*"] =
-            serde_json::json!({"source": "user", "verified_at": "2026-07-01", "wm": 0.5});
-    }
-    serde_json::json!({"schema_version": 1, "revision": 1, "cells": cells})
-}
-
-/// The CLI doctor reads soft defects off the overlay it loads from disk: one
-/// Warn finding per defect naming its selector and field, and none for a
-/// clean overlay.
-///
-/// Mutation check: drop the `.chain(..overlay_soft_defect_finding)` from
-/// `section_config` -> the `below_sentinel` row goes red.
-#[tokio::test]
-#[serial_test::serial]
-async fn a_disk_gather_renders_one_warn_per_overlay_soft_defect() {
-    let rows: [(&str, bool, &[&str]); 2] = [
-        (
-            "below_sentinel",
-            true,
-            &["openai-compat:cheap-a*", "openai-compat:cheap-b*"],
-        ),
-        ("clean", false, &[]),
-    ];
-
-    for (name, with_defects, expected) in rows {
-        // Arrange
-        let tmp = tempfile::tempdir().unwrap();
-        let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", tmp.path());
-        let cfg_dir = tmp.path().join("routectl");
-        std::fs::create_dir_all(&cfg_dir).unwrap();
-        let config_path = cfg_dir.join("config.toml");
-        std::fs::write(&config_path, current_version_stamp()).unwrap();
-        std::fs::write(
-            cfg_dir.join("catalog_overlay.json"),
-            soft_defect_overlay_json(with_defects).to_string(),
-        )
-        .unwrap();
-
-        // Act
-        let context = gather_context_no_network(&config_path, GatherSources::Disk, &[]).await;
-        let report = build_report_no_network(&context);
-
-        // Assert
-        let found = overlay_defect_findings(&report.findings);
-        assert_eq!(found.len(), expected.len(), "row {name}: {found:?}");
-        for (finding, selector) in found.iter().zip(expected) {
-            assert_eq!(finding.status, Status::Warn, "row {name}");
-            assert!(
-                finding.detail.contains(selector) && finding.detail.contains("`wm`"),
-                "row {name}: {finding:?}"
-            );
-            assert!(
-                finding
-                    .remediation
-                    .as_deref()
-                    .is_some_and(|r| r.contains("intentional operator override")),
-                "row {name}: {finding:?}"
-            );
-        }
-    }
-}
-
-/// A selector is raw text from a hand-editable file. On the human render a
-/// newline plus an ANSI sequence in it would forge a whole finding line, so
-/// it is control-char-filtered. The raw selector is asserted to CONTAIN those
-/// bytes first (the positive control), so a green assertion means the
-/// sanitizer stripped them rather than the fixture never carrying them.
-///
-/// Mutation check: format `defect.selector` unsanitized in
-/// `overlay_soft_defect_finding` -> red here.
-#[test]
-fn a_hostile_overlay_selector_renders_sanitized_on_the_human_report() {
-    // Arrange
-    let hostile = "opus\n\u{1b}[31m  PASS forged: all clear".to_string();
-    assert!(
-        hostile.contains('\n') && hostile.contains('\u{1b}'),
-        "positive control: the fixture must carry the bytes being filtered"
-    );
-    let context = DoctorContext {
-        overlay_soft_defects: vec![routectl_router::OverlaySoftDefect {
-            selector: hostile,
-            field: "wm",
-        }],
-        ..ctx(
-            Config::default(),
-            Some(&current_version_stamp()),
-            Vec::new(),
-            Vec::new(),
-        )
-    };
-
-    // Act
-    let lines = render_human(&build_report(&context));
-
-    // Assert
-    let defect_lines: Vec<&String> = lines
-        .iter()
-        .filter(|l| l.contains("catalog overlay cell"))
-        .collect();
-    assert_eq!(defect_lines.len(), 1, "{lines:?}");
-    let line = defect_lines[0];
-    assert!(
-        !line.contains('\n') && !line.contains('\u{1b}'),
-        "the line must carry no newline or ANSI escape: {line:?}"
-    );
-    assert!(
-        line.starts_with("  WARN catalog overlay: ") && line.contains("opus"),
-        "the sanitized selector must still identify the cell: {line:?}"
-    );
-    assert!(
-        !lines.iter().any(|l| l.starts_with("  PASS forged")),
-        "the selector must not forge a finding line: {lines:?}"
-    );
 }

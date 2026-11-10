@@ -7,8 +7,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use routectl_core::capability::{EvidenceSource, FailurePhase, SignalTier, Verdict};
 use routectl_router::{
-    CATALOG_VERSION, CapabilityMatrixPanel, LearnedRegistryEntry, MatrixAvailability, MatrixCell,
-    MatrixLane, MatrixSource, ModelEntry, PoolEntry, ProviderEntry,
+    CapabilityMatrixPanel, FROZEN_CATALOG_VERSION, LearnedRegistryEntry, MatrixAvailability,
+    MatrixCell, MatrixLane, MatrixSource, ModelEntry, PoolEntry, ProviderEntry,
 };
 use routectl_usage::{CapabilityEvent, insert_capability_event, open};
 use rusqlite::params;
@@ -74,22 +74,13 @@ pub(super) fn context(config: Config, source: CapabilityMatrixSource) -> DoctorC
         capability_matrix: source,
         matrix_origin: MatrixOrigin::LedgerReplay,
         beta_seed: routectl_router::BetaSeedScope::EMPTY,
-        freshness: FreshnessInputs {
-            catalog_version: CATALOG_VERSION,
-            snapshot_date: routectl_router::CATALOG_SNAPSHOT_DATE,
-            overlay_verified_at: None,
-            staleness_hint_days: 14,
-            today_epoch_day: 20_000,
-            last_import: None,
-            import_result: None,
-        },
         pricing: Vec::new(),
         knobs: Vec::new(),
         tuning: Vec::new(),
         reload_failure: None,
         parked_seats: Vec::new(),
         unusable_seats: Vec::new(),
-        overlay_soft_defects: Vec::new(),
+        leftover_catalog_files: Vec::new(),
         legacy_folders: Vec::new(),
     }
 }
@@ -667,7 +658,7 @@ fn event(lane: &str, kind: Option<&str>, vocab: Option<i64>) -> CapabilityEvent 
         tier: "self-identifying".to_string(),
         evidence_class: None,
         upstream_token: None,
-        catalog_version: i64::from(CATALOG_VERSION),
+        catalog_version: i64::from(FROZEN_CATALOG_VERSION),
         overlay_revision: 0,
         provider_kind: kind.map(str::to_string),
         vocab_version: vocab,
@@ -682,7 +673,7 @@ pub(super) fn seeded_ledger(events: &[CapabilityEvent]) -> (TempDir, std::path::
     let db = open(&path).expect("open ledger");
     insert_capability_event(
         db.conn(),
-        &CapabilityEvent::tombstone(now_ms(), i64::from(CATALOG_VERSION), 0),
+        &CapabilityEvent::tombstone(now_ms(), i64::from(FROZEN_CATALOG_VERSION), 0),
     )
     .expect("tombstone");
     for e in events {

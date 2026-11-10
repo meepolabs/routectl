@@ -4,7 +4,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use routectl_router::{CatalogOverlay, TuningTargetKind, resolve_tuning};
+use routectl_router::{TuningTargetKind, resolve_tuning};
 use routectl_testkit::ScopedEnv;
 
 use crate::server::capability_rebuild::{WarmOutcome, WarmReport};
@@ -161,7 +161,6 @@ async fn the_served_no_network_report_carries_the_tuning_section() {
     let config_path = tmp.path().join("config.toml");
     let inputs = ServedInputs::new(
         Arc::new(every_tier_config()),
-        CatalogOverlay::default(),
         ResidentLearned {
             entries: Vec::new(),
             seed_clears: Vec::new(),

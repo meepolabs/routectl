@@ -41,8 +41,8 @@ mod serve;
 pub mod status_gate;
 mod warm_open;
 
+pub(crate) use config_load::parse_config_only;
 pub use config_load::{LoadedConfig, load_effective_config, load_effective_config_unvalidated};
-pub(crate) use config_load::{load_overlay_default, parse_config_only};
 pub(crate) use router_build::build_router_from_config_with_overlay;
 pub use secrets::CompositeStore;
 pub use serve::{

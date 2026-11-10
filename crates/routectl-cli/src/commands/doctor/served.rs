@@ -1,9 +1,8 @@
 //! The served doctor gather's inputs: what a running daemon hands the doctor in
 //! place of a disk load.
 //!
-//! A served gather reads no catalog overlay file, parses no config file, and
-//! replays no ledger. The config and overlay are the generation the daemon
-//! accepted, the learned layer is the daemon's resident registry, and the boot
+//! A served gather parses no config file and replays no ledger. The config is
+//! the generation the daemon accepted, the learned layer is the daemon's resident registry, and the boot
 //! warm's report says how that registry was filled.
 
 use std::sync::Arc;
@@ -13,9 +12,7 @@ use routectl_auth::SecretRef;
 use routectl_auth::oauth::known_provider_ids;
 use routectl_core::{EligibilityReason, UpstreamReason};
 use routectl_router::runtime_state::UnusableCause;
-use routectl_router::{
-    CatalogOverlay, Config, Finding, LearnedRegistryEntry, MatrixWarm, SeedClearMarker, Status,
-};
+use routectl_router::{Config, Finding, LearnedRegistryEntry, MatrixWarm, SeedClearMarker, Status};
 
 use crate::commands::pricing::PriceSnapshot;
 use crate::commands::seat_report::safe;
@@ -26,10 +23,9 @@ use super::gather::{replay_summary, scheme_label};
 use super::sections::{oauth_login_command, oauth_login_remediation};
 use super::{CapabilityMatrixSource, MatrixOrigin};
 
-/// Where the no-network gather takes its config, overlay, and learned layer
-/// from.
+/// Where the no-network gather takes its config and learned layer from.
 pub enum GatherSources {
-    /// Load config and overlay from disk and replay the usage ledger
+    /// Load config from disk and replay the usage ledger
     /// read-only (the CLI `doctor`).
     Disk,
     /// A running daemon's in-memory state (`/status/doctor`).
@@ -41,7 +37,6 @@ pub enum GatherSources {
 /// the value to the gather, never read the config out of it.
 pub struct ServedInputs {
     config: Arc<Config>,
-    overlay: CatalogOverlay,
     learned: ResidentLearned,
     warm: WarmReport,
     prices: PriceSnapshot,
@@ -210,19 +205,15 @@ pub struct ResidentLearned {
 }
 
 impl ServedInputs {
-    /// `config` and `overlay` must come from the same router, so one gather
-    /// never pairs a config generation with a foreign overlay generation.
     /// `prices` are the tables the daemon's own cost reads use, pinned once.
     pub const fn new(
         config: Arc<Config>,
-        overlay: CatalogOverlay,
         learned: ResidentLearned,
         warm: WarmReport,
         prices: PriceSnapshot,
     ) -> Self {
         Self {
             config,
-            overlay,
             learned,
             warm,
             prices,
@@ -313,13 +304,12 @@ pub(super) struct GatheredLayers {
     pub(super) config: Config,
     /// The already-redacted config parse error.
     pub(super) config_parse_error: Option<String>,
-    /// The already-redacted config-or-overlay load error.
+    /// The already-redacted config load error.
     pub(super) config_load_error: Option<String>,
     /// The schema version of a config the daemon already accepted; `None`
     /// when the config came from disk and its version must be read off the
     /// raw file.
     pub(super) accepted_config_version: Option<u32>,
-    pub(super) overlay: Option<CatalogOverlay>,
     pub(super) capability_matrix: CapabilityMatrixSource,
     pub(super) matrix_origin: MatrixOrigin,
     /// The daemon's last rejected reload; always `None` from disk.
@@ -335,12 +325,11 @@ pub(super) struct GatheredLayers {
     pub(super) prices: PriceSnapshot,
 }
 
-/// The served layers. The daemon accepted this config and overlay, so neither
-/// carries a load error.
+/// The served layers. The daemon accepted this config, so it carries no load
+/// error.
 pub(super) fn served_layers(inputs: Box<ServedInputs>) -> GatheredLayers {
     let ServedInputs {
         config,
-        overlay,
         learned,
         warm,
         prices,
@@ -353,7 +342,6 @@ pub(super) fn served_layers(inputs: Box<ServedInputs>) -> GatheredLayers {
         config: Arc::unwrap_or_clone(config),
         config_parse_error: None,
         config_load_error: None,
-        overlay: Some(overlay),
         capability_matrix: resident_matrix(learned, &warm),
         matrix_origin: MatrixOrigin::Resident(matrix_warm(&warm)),
         reload_failure,

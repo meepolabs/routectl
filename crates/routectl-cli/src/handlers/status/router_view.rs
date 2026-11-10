@@ -212,9 +212,8 @@ impl StatusRouterView {
     /// The served doctor gather's inputs, owned so the gather can run on a
     /// blocking worker.
     ///
-    /// The config and the catalog overlay come off this one pinned router, so
-    /// the doctor never pairs a config generation with a foreign overlay
-    /// generation, and neither is re-read from disk. The learned layer is the
+    /// The config comes off this one pinned router and is not re-read from
+    /// disk. The learned layer is the
     /// resident registry, read once; its clock anchors are taken after that
     /// read, so every entry's instants lie at or before them. `warm` is the
     /// boot warm that filled the registry. The credential-parked and unusable
@@ -242,7 +241,6 @@ impl StatusRouterView {
         let (parked, unusable) = self.credential_marked_seats();
         ServedInputs::new(
             Arc::clone(&self.router.config),
-            self.router.catalog_overlay().clone(),
             learned,
             warm,
             PriceSnapshot::pin(prices),

@@ -1,8 +1,8 @@
 //! Doctor command entry + report assembly.
 //!
 //! `routectl doctor` -- a read-only health report. A doctor run mutates
-//! NOTHING: config, credentials, catalog overlay, and usage DB are all
-//! byte-identical afterward. It loads config through the unvalidated,
+//! NOTHING: config, credentials, and usage DB are all byte-identical
+//! afterward. It loads config through the unvalidated,
 //! never-migrating loader, reads the raw config bytes for a schema-version
 //! preflight that never stamps the file, and probes the OAuth store with
 //! read-only calls only.
@@ -54,6 +54,10 @@ mod tuning_section_tests;
 #[path = "price_fill_section_tests.rs"]
 mod price_fill_section_tests;
 
+#[cfg(test)]
+#[path = "leftover_catalog_files_tests.rs"]
+mod leftover_catalog_files_tests;
+
 use std::path::Path;
 use std::time::Instant;
 
@@ -65,16 +69,16 @@ use routectl_auth::oauth::types::TokenRecord;
 use routectl_core::ProbeOutcome;
 use routectl_router::prices::{PriceSources, TableDate};
 use routectl_router::{
-    BetaSeedScope, CatalogImportState, Config, DoctorPanels, DoctorReport, Finding,
-    LearnedRegistryEntry, MatrixReplaySummary, MatrixWarm, OverlaySoftDefect, PricingConfig,
-    SeedClearMarker, Status, TuningRow, WouldTrimPanel, overall_exit,
+    BetaSeedScope, Config, DoctorPanels, DoctorReport, Finding, LearnedRegistryEntry,
+    MatrixReplaySummary, MatrixWarm, PricingConfig, SeedClearMarker, Status, TuningRow,
+    WouldTrimPanel, overall_exit,
 };
 
 use self::gather::{SecretCheck, gather_context};
 use self::render::render_human;
 use self::sections::{
-    section_auth, section_capability, section_config, section_freshness, section_inventory,
-    section_knobs, section_pricing, section_probe, section_seat_orphans, section_seat_pools,
+    section_auth, section_capability, section_config, section_inventory, section_knobs,
+    section_pricing, section_probe, section_seat_orphans, section_seat_pools,
     section_secret_orphans, section_tuning, section_version,
 };
 
@@ -254,7 +258,16 @@ pub(crate) use self::served::{
 /// catalog overlay are gone. A subscription row keeps its API-equivalence
 /// clause. A `knobs` row names `model-config`, `learned` or `default` and the
 /// value that source resolves.
-pub(crate) const SCHEMA_VERSION: u32 = 28;
+///
+/// v28 -> v29: the `freshness` section leaves the report (no baked catalog,
+/// overlay verified or last successful import rows), and so do the `config`
+/// section's `catalog overlay` soft-defect findings: doctor no longer reads
+/// the catalog overlay or the import record. The `config` section gains one
+/// Pass `leftover catalog files` finding naming which of
+/// `catalog_overlay.json`, `catalog_overlay.json.lock`, `catalog_state.json`
+/// and `catalog_import_state.json` are still in the config folder, absent
+/// when none is.
+pub(crate) const SCHEMA_VERSION: u32 = 29;
 
 /// A section-producer: pure mapping of the read-only [`DoctorContext`] to a
 /// section's findings.
@@ -275,7 +288,6 @@ const SECTIONS: &[(&str, SectionFn)] = &[
     ("secrets", section_secret_orphans),
     ("probe", section_probe),
     ("capability", section_capability),
-    ("freshness", section_freshness),
     ("pricing", section_pricing),
     ("knobs", section_knobs),
     ("tuning", section_tuning),
@@ -299,7 +311,6 @@ const NO_NETWORK_SECTIONS: &[(&str, SectionFn)] = &[
     ("seats", section_seat_orphans),
     ("secrets", section_secret_orphans),
     ("capability", section_capability),
-    ("freshness", section_freshness),
     ("pricing", section_pricing),
     ("knobs", section_knobs),
     ("tuning", section_tuning),
@@ -312,7 +323,7 @@ pub(crate) struct DoctorContext {
     raw_config: Option<String>,
     /// Set when the read-only typed load failed for a reason the raw-bytes
     /// version preflight does not catch (TOML syntax error, unknown field,
-    /// legacy key, overlay failure). The version section surfaces it as a
+    /// legacy key). The version section surfaces it as a
     /// Fail so a present-but-broken config never reports all-Pass. Already
     /// redacted at gather time (see
     /// [`crate::commands::parse_error_redaction::redact_config_load_error`])
@@ -369,10 +380,6 @@ pub(crate) struct DoctorContext {
     /// scope the router withholds by and the replay registry bounds its
     /// seed-clear markers with.
     beta_seed: BetaSeedScope,
-    /// The freshness section's read-only inputs: baked catalog stamp, the
-    /// freshest overlay verification, and the last SUCCESSFUL import. Purely
-    /// additive to the context; gathered once like every other input.
-    freshness: FreshnessInputs,
     /// The pricing section's rows: one per configured model, resolved once at
     /// gather time against one pinned pair of price tables so the section
     /// producer stays a pure mapping.
@@ -383,8 +390,7 @@ pub(crate) struct DoctorContext {
     knobs: Vec<KnobRow>,
     /// The tuning section's rows: one per `[providers.X]` entry, then one per
     /// model with its own first-content timeout, each cell carrying the tier
-    /// that supplied it. Read from the config alone, so an unloadable catalog
-    /// overlay leaves them intact.
+    /// that supplied it. Read from the config alone.
     tuning: Vec<TuningRow>,
     /// The running daemon's last rejected config / overlay reload, as a closed
     /// class and an age. Only a served gather sets it; the CLI reads the files
@@ -396,17 +402,24 @@ pub(crate) struct DoctorContext {
     /// The running daemon's unusable seats. The mark lives only in daemon
     /// memory, so only a served gather sets any; the CLI reports none.
     unusable_seats: Vec<UnusableSeat>,
-    /// Every soft cell-value defect of the overlay this gather holds: the
-    /// on-disk overlay for the CLI, the router's own overlay when served.
-    /// Read off the overlay itself, so a hand edit that kept the revision
-    /// still shows here.
-    overlay_soft_defects: Vec<OverlaySoftDefect>,
+    /// The [`LEFTOVER_CATALOG_FILES`] present in the config folder, in that
+    /// order. routectl no longer reads any of them.
+    leftover_catalog_files: Vec<&'static str>,
     /// What each folder routectl used before the shared config folder still
     /// holds, one row per candidate that is not [`LegacyFolder::Absent`], in
     /// candidate order. routectl never reads them, so anything left there is
     /// residue the operator may still expect to be in use.
     legacy_folders: Vec<LegacyFolder>,
 }
+
+/// Files earlier releases kept in the config folder for the model catalog.
+/// Nothing reads them now; doctor names the ones still present.
+const LEFTOVER_CATALOG_FILES: [&str; 4] = [
+    "catalog_overlay.json",
+    "catalog_overlay.json.lock",
+    "catalog_state.json",
+    "catalog_import_state.json",
+];
 
 /// The most entry names a [`LegacyFolder::Entries`] carries; the rest are
 /// counted in `more`.
@@ -577,55 +590,6 @@ enum CapabilityMatrixSource {
     /// `query_failed` / an open-error class such as `version_too_new`, or a
     /// failed boot warm's `unreadable` / `restate_failed`).
     Unavailable(&'static str),
-}
-
-/// The freshness section's read-only inputs. All ages are computed against
-/// `today_epoch_day` (pinned once at gather time) so the three rows share a
-/// single clock, and every age is epoch-day-clamped at zero.
-struct FreshnessInputs {
-    /// The compiled-in baked catalog version.
-    catalog_version: u32,
-    /// The whole baked table's snapshot date (`YYYY-MM-DD`).
-    snapshot_date: &'static str,
-    /// The freshest `verified_at` (`YYYY-MM-DD`) among the effective view's
-    /// OVERLAY-sourced cells (import / user, never baked). `None` when no
-    /// configured model resolves to an overlay-verified cell -- the operator
-    /// is running on baked defaults, rendered as an honest "no overlay
-    /// verified stamp".
-    overlay_verified_at: Option<String>,
-    /// The operator's display-only staleness horizon in days
-    /// (`[capability].staleness_hint_days`), the threshold both age rows warn
-    /// past.
-    staleness_hint_days: u64,
-    /// Today's epoch-day, pinned once so all rows age against one clock.
-    today_epoch_day: i64,
-    /// The last SUCCESSFUL import's persisted state, or `None` when no import
-    /// has been recorded (missing / unreadable sidecar).
-    last_import: Option<CatalogImportState>,
-    /// Reserved for the future durable import RESULT (timestamp, version,
-    /// outcome token, error detail) the import channel will persist. No such
-    /// state exists today, so this is always `None` and the section renders
-    /// nothing for it; the row lands here when the persistence does.
-    #[allow(dead_code)]
-    import_result: Option<ImportResult>,
-}
-
-/// Reserved shape for the future durable import RESULT. Distinct from
-/// [`CatalogImportState`], which records ONLY successful imports: this will
-/// carry the outcome of the LAST attempt (success or failure) once the
-/// import channel persists it. Never constructed today -- reserved so the
-/// freshness section grows the row without a context reshuffle.
-#[allow(dead_code)]
-struct ImportResult {
-    /// When the attempt ran.
-    at_unix: u64,
-    /// The catalog version the attempt targeted.
-    catalog_version: u32,
-    /// The versioned, internal outcome token vocabulary
-    /// (`ok`/`signature_invalid`/`schema_mismatch`/`io_error`).
-    outcome: &'static str,
-    /// Operator-facing error detail on a failed attempt.
-    detail: Option<String>,
 }
 
 /// Run the doctor aggregator against `config_path` and render the report.

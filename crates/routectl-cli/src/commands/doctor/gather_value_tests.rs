@@ -41,7 +41,7 @@ fn broken(capability: &str, token: &str) -> CapabilityEvent {
         tier: "self-identifying".to_string(),
         evidence_class: None,
         upstream_token: Some(token.to_string()),
-        catalog_version: i64::from(routectl_router::CATALOG_VERSION),
+        catalog_version: i64::from(routectl_router::FROZEN_CATALOG_VERSION),
         overlay_revision: 0,
         provider_kind: Some("openai-compat".to_string()),
         vocab_version: Some(CURRENT_VOCAB_VERSION),

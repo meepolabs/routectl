@@ -229,8 +229,7 @@ fn seed_credentials(xdg: &Path, provider: &str) -> PathBuf {
     path
 }
 
-/// Seed a valid, current-schema catalog overlay at the default path so both
-/// commands read it (they load through the effective-config loader) and the
+/// Seed a valid, current-schema catalog overlay at the default path so the
 /// byte-identical assertion over it is non-vacuous.
 fn seed_overlay(xdg: &Path) -> PathBuf {
     let dir = routectl_dir(xdg);
@@ -592,22 +591,22 @@ fn doctor_json_is_valid_and_carries_schema_version() {
 
 // ---------------------------------------------------------------------
 // The doctor binary surfaces the read-only capability-matrix panel AND the
-// catalog-freshness rows in BOTH renders, driven by a real seeded ledger.
-// The unit modules pin the panel/section shapes; this pins that the wired
-// binary loads the config, resolves the boundary from the seeded overlay
-// revision, replays the ledger, and emits both on stdout.
+// leftover catalog files line in BOTH renders, driven by a real seeded ledger
+// and a leftover overlay file. The unit modules pin the panel/section shapes;
+// this pins that the wired binary loads the config, replays the ledger, looks
+// in the config folder, and emits both on stdout.
 // ---------------------------------------------------------------------
 
 #[test]
-fn doctor_binary_renders_seeded_capability_matrix_and_freshness() {
+fn doctor_binary_renders_seeded_capability_matrix_and_leftover_files() {
     let xdg = tempfile::tempdir().unwrap();
     seed_overlay(xdg.path());
     seed_capability_ledger(xdg.path());
     let config = write_config(xdg.path(), &capability_config());
 
     // Human render: the replayed matrix state line, the seeded verdict tokens
-    // (an override cell overruling the seeded negative), and the freshness
-    // section with its always-present baked-catalog row.
+    // (an override cell overruling the seeded negative), and the leftover
+    // overlay file named as no longer read.
     let human = run_bounded(xdg.path(), &config, &["doctor"]);
     assert!(
         human.stdout.contains("capability matrix:")
@@ -627,13 +626,20 @@ fn doctor_binary_renders_seeded_capability_matrix_and_freshness() {
         );
     }
     assert!(
-        human.stdout.contains("Catalog freshness") && human.stdout.contains("baked catalog v"),
-        "doctor human render must carry the catalog-freshness rows:\n{}",
+        human.stdout.contains(
+            "PASS leftover catalog files: the config folder still holds catalog_overlay.json;"
+        ),
+        "doctor human render must name the leftover overlay file:\n{}",
+        human.context()
+    );
+    assert!(
+        !human.stdout.contains("Catalog freshness"),
+        "the catalog freshness section is gone:\n{}",
         human.context()
     );
 
     // JSON render: the panel is Available with the seeded cells, and the
-    // findings carry the freshness section.
+    // findings carry the leftover line and no freshness section.
     let json = run_bounded(xdg.path(), &config, &["doctor", "--json"]);
     let value = parse_json(&json);
 
@@ -672,8 +678,15 @@ fn doctor_binary_renders_seeded_capability_matrix_and_freshness() {
     assert!(
         findings
             .iter()
-            .any(|f| f["section"] == serde_json::json!("freshness")),
-        "doctor --json findings must carry the catalog-freshness section:\n{}",
+            .any(|f| f["name"] == serde_json::json!("leftover catalog files")),
+        "doctor --json findings must carry the leftover catalog files line:\n{}",
+        json.context()
+    );
+    assert!(
+        findings
+            .iter()
+            .all(|f| f["section"] != serde_json::json!("freshness")),
+        "doctor --json findings must carry no freshness section:\n{}",
         json.context()
     );
 }
