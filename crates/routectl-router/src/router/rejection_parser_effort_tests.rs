@@ -267,6 +267,15 @@ mod effort_templates {
                     LOW | MEDIUM | HIGH | MAX,
                 ),
             ),
+            (
+                "anthropic-api/effort-xhigh-unsupported-thinking-absent-opus-4-5",
+                effort(
+                    SelfIdentifying,
+                    InvalidValue,
+                    Some("xhigh"),
+                    LOW | MEDIUM | HIGH,
+                ),
+            ),
             // Refuses the field itself and lists nothing.
             (
                 "bedrock/effort-extra-input-invoke-opus-4-5",

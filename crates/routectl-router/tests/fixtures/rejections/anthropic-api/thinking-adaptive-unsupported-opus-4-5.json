@@ -1,0 +1,6 @@
+{
+  "note": "Tier 1, captured on anthropic-api (2026-11-10, api.anthropic.com, Messages, OAuth seat, claude-opus-4-5): thinking.type adaptive with output_config.effort xhigh. The thinking check runs before the effort check, so this envelope names adaptive thinking, not the effort level. error.message is verbatim; the top-level request_id was dropped by hand. lifted_type is the error.type routectl lifts from the body.",
+  "status": 400,
+  "lifted_type": "invalid_request_error",
+  "body": "{\"error\":{\"message\":\"adaptive thinking is not supported on this model\",\"type\":\"invalid_request_error\"},\"type\":\"error\"}"
+}

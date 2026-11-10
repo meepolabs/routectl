@@ -1,0 +1,6 @@
+{
+  "note": "Tier 1, captured on anthropic-api (2026-11-10, api.anthropic.com, Messages, OAuth seat, claude-haiku-4-5): a ~300k-token prompt sent without the context-1m beta; rejected before generation, billed nothing. error.message is verbatim; the top-level request_id was dropped by hand. lifted_type is the error.type routectl lifts from the body.",
+  "status": 400,
+  "lifted_type": "invalid_request_error",
+  "body": "{\"error\":{\"message\":\"prompt is too long: 300042 tokens > 200000 maximum\",\"type\":\"invalid_request_error\"},\"type\":\"error\"}"
+}

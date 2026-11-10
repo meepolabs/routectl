@@ -219,6 +219,10 @@ fn every_committed_rejection_fixture_resolves_to_a_row_or_is_reported_unresolved
         ),
         ("anthropic-api/beta-two-flags-mantle", Outcome::NotLocalized),
         (
+            "anthropic-api/context-window-exceeded-messages",
+            Outcome::NotLocalized,
+        ),
+        (
             "anthropic-api/count-tokens-thinking-adaptive-display-enum",
             unresolved("thinking.adaptive.display", SelfIdentifying, InvalidValue),
         ),
@@ -257,6 +261,13 @@ fn every_committed_rejection_fixture_resolves_to_a_row_or_is_reported_unresolved
             "anthropic-api/effort-xhigh-unsupported-sonnet-4-6",
             Outcome::Row(EFFORT_XHIGH, SelfIdentifying, InvalidValue),
         ),
+        // The envelope of the opus-4-5 row above, byte for byte, but its
+        // fixture has no effort capture record entry, so the sent level is
+        // unknown and no level row is named.
+        (
+            "anthropic-api/effort-xhigh-unsupported-thinking-absent-opus-4-5",
+            unresolved(EFFORT_PATH, SelfIdentifying, InvalidValue),
+        ),
         // Effort sent with thinking disabled: the thinking refusal wins and
         // the effort level is never named.
         (
@@ -272,12 +283,42 @@ fn every_committed_rejection_fixture_resolves_to_a_row_or_is_reported_unresolved
             Outcome::Row(MAX_TOKENS_PATH, SelfIdentifying, InvalidValue),
         ),
         (
+            "anthropic-api/model-not-found-oauth-mythos-5-1",
+            Outcome::NotLocalized,
+        ),
+        (
+            "anthropic-api/oauth-token-invalid-anthropic",
+            Outcome::NotLocalized,
+        ),
+        // The adaptive thinking refusal names no wire path, on the native
+        // endpoint and on Mantle alike.
+        (
+            "anthropic-api/thinking-adaptive-unsupported-opus-4-5",
+            Outcome::NotLocalized,
+        ),
+        (
             "anthropic-api/thinking-display-enum",
             Outcome::Row(DISPLAY_PATH, SelfIdentifying, InvalidValue),
         ),
         (
+            "anthropic-api/thinking-display-enum-mantle",
+            Outcome::Row(DISPLAY_PATH, SelfIdentifying, InvalidValue),
+        ),
+        (
+            "anthropic-api/thinking-type-adaptive-unsupported-mantle",
+            Outcome::NotLocalized,
+        ),
+        (
             "anthropic-api/thinking-type-disabled-unsupported",
             Outcome::Row(THINKING_DISABLED_PATH, SelfIdentifying, UnsupportedField),
+        ),
+        (
+            "anthropic-api/thinking-type-disabled-unsupported-mantle",
+            Outcome::Row(THINKING_DISABLED_PATH, SelfIdentifying, UnsupportedField),
+        ),
+        (
+            "anthropic-api/thinking-type-enabled-unsupported-mantle",
+            Outcome::Row("thinking.type.enabled", SelfIdentifying, UnsupportedField),
         ),
         // Names a refused tool type in prose, with the model id and a
         // model-specific list of accepted types around it; no wire path. The
@@ -300,6 +341,10 @@ fn every_committed_rejection_fixture_resolves_to_a_row_or_is_reported_unresolved
             Outcome::NotLocalized,
         ),
         ("bedrock/beta-redact-thinking-invoke", Outcome::NotLocalized),
+        (
+            "bedrock/data-retention-mode-unavailable-invoke",
+            Outcome::NotLocalized,
+        ),
         (
             "bedrock/effort-extra-input-invoke-opus-4-5",
             Outcome::Row(EFFORT_XHIGH, SelfIdentifying, UnsupportedField),
@@ -326,6 +371,8 @@ fn every_committed_rejection_fixture_resolves_to_a_row_or_is_reported_unresolved
             "bedrock/effort-xhigh-unsupported-invoke-sonnet-4-6",
             Outcome::Row(EFFORT_XHIGH, SelfIdentifying, InvalidValue),
         ),
+        ("bedrock/input-too-long-converse", Outcome::NotLocalized),
+        ("bedrock/input-too-long-invoke", Outcome::NotLocalized),
         (
             "bedrock/max-tokens-above-model-limit",
             Outcome::Row(MAX_TOKENS_PATH, SelfIdentifying, InvalidValue),
@@ -334,6 +381,7 @@ fn every_committed_rejection_fixture_resolves_to_a_row_or_is_reported_unresolved
             "bedrock/max-tokens-above-model-limit-invoke",
             Outcome::Row(MAX_TOKENS_PATH, SelfIdentifying, InvalidValue),
         ),
+        ("bedrock/model-end-of-life-converse", Outcome::NotLocalized),
         (
             "bedrock/temperature-field-unsupported",
             Outcome::Row(TEMPERATURE_PATH, SelfIdentifying, UnsupportedField),

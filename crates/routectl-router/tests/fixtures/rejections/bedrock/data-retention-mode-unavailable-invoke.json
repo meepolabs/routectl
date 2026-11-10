@@ -1,0 +1,6 @@
+{
+  "note": "Tier 1, captured on bedrock (2026-11-10, Invoke, us-west-2, us.anthropic.claude-fable-5-1): a plain request to a model the account cannot use under its default data retention mode; a model-access refusal returned as 400, not 403. The message is verbatim; the body is the flat {\"message\":...} shape bedrock-runtime returns. lifted_type is the x-amzn-errortype routectl lifts, when present.",
+  "status": 400,
+  "lifted_type": "ValidationException",
+  "body": "{\"message\":\"data retention mode 'default' is not available for this model\"}"
+}

@@ -1,0 +1,6 @@
+{
+  "note": "Tier 1, captured on bedrock (2026-11-10, Converse, us-west-2, cohere.command-r-plus-v1:0): a plain request to a retired model version; 404. The message is verbatim; the body is the flat {\"message\":...} shape bedrock-runtime returns. lifted_type is the x-amzn-errortype routectl lifts, when present.",
+  "status": 404,
+  "lifted_type": "ResourceNotFoundException",
+  "body": "{\"message\":\"This model version has reached the end of its life. Please refer to the AWS documentation for more details.\"}"
+}

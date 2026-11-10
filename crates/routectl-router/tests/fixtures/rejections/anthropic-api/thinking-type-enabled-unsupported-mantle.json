@@ -1,0 +1,6 @@
+{
+  "note": "Tier 1, captured on anthropic-api (2026-11-10, Bedrock Mantle anthropic-api lane, us-east-1, anthropic.claude-sonnet-5): thinking.type enabled sent to a model that takes only adaptive thinking. The repaired retry with thinking.type adaptive returned 200 (direct probe, same day). error.message is verbatim; the top-level request_id was dropped by hand (the scrub gate refuses it). lifted_type is the error.type routectl lifts from the body.",
+  "status": 400,
+  "lifted_type": "invalid_request_error",
+  "body": "{\"error\":{\"message\":\"\\\"thinking.type.enabled\\\" is not supported for this model. Use \\\"thinking.type.adaptive\\\" and \\\"output_config.effort\\\" to control thinking behavior.\",\"type\":\"invalid_request_error\"},\"type\":\"error\"}"
+}

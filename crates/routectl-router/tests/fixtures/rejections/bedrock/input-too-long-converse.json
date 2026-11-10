@@ -1,0 +1,6 @@
+{
+  "note": "Tier 1, captured on bedrock (2026-11-10, Converse, us-west-2, us.anthropic.claude-haiku-4-5-20251001-v1:0): the same ~300k-token prompt on Converse; the Converse body wraps the model's message in 'The model returned the following errors:'. The message is verbatim; the body is the flat {\"message\":...} shape bedrock-runtime returns. lifted_type is the x-amzn-errortype routectl lifts, when present.",
+  "status": 400,
+  "lifted_type": "ValidationException",
+  "body": "{\"message\":\"The model returned the following errors: prompt is too long: 300027 tokens > 200000 maximum\"}"
+}

@@ -1,0 +1,5 @@
+{
+  "note": "Tier 1, captured on anthropic-api (2026-11-10, api.anthropic.com, Messages, OAuth bearer lane): a well-formed but invalid sk-ant-oat01 token (junk, never issued). This is the invalid-token class; an expired or revoked real token was not captured (no seat was let lapse). With a non-OAuth junk value the same endpoint answers 401 'invalid x-api-key'. error.message is verbatim; request_id dropped by hand. lifted_type is the error.type routectl lifts.",
+  "status": 401,
+  "body": "{\"error\":{\"message\":\"OAuth access token is invalid.\",\"type\":\"authentication_error\"},\"type\":\"error\"}"
+}

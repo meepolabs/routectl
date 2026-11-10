@@ -1,0 +1,6 @@
+{
+  "note": "Tier 1, captured on anthropic-api (2026-11-10, api.anthropic.com, Messages, OAuth seat, claude-mythos-5-1): a plain request for a model the seat cannot reach; returned as 404 not_found_error naming the model, not as 403. error.message is verbatim; the top-level request_id was dropped by hand. lifted_type is the error.type routectl lifts from the body.",
+  "status": 404,
+  "lifted_type": "not_found_error",
+  "body": "{\"error\":{\"message\":\"model: claude-mythos-5-1\",\"type\":\"not_found_error\"},\"type\":\"error\"}"
+}
