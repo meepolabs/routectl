@@ -223,10 +223,6 @@ enum Cmd {
         /// Defaults to C (the oldest-first conservative case).
         #[arg(long = "c-after")]
         c_after: Option<u64>,
-        /// OPTIONAL cache TTL tier to price (Anthropic / Bedrock differ;
-        /// other providers ignore it). One of `5m` or `1h`.
-        #[arg(long = "ttl-tier", value_parser = ["5m", "1h"], default_value = "5m")]
-        ttl_tier: String,
     },
     /// Summarize recorded usage from the local usage DB (read-only).
     ///
@@ -846,23 +842,15 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             steady_state,
             hypothetical_k,
             c_after,
-            ttl_tier,
         } => {
-            let loaded = load_config_with_overlay(cli.config.as_deref())?;
+            let config = load_config(cli.config.as_deref())?;
             let projection = commands::prompt_size::ProjectionArgs {
                 hypothetical_d,
                 hypothetical_k,
                 c_after,
-                ttl_tier: &ttl_tier,
                 steady_state,
             };
-            if let Err(e) = commands::prompt_size::run(
-                loaded.config,
-                &loaded.catalog_overlay,
-                &alias,
-                &request,
-                projection,
-            ) {
+            if let Err(e) = commands::prompt_size::run(config, &alias, &request, projection) {
                 eprintln!("error: {e}");
                 std::process::exit(1);
             }
@@ -1049,7 +1037,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 /// cold start and reload treat a config the same way.
 ///
 /// Discards the loaded catalog overlay for callers that never consult it.
-/// `Cmd::Serve`, `Cmd::PromptSize`, and `Cmd::Catalog`'s `list` verb -- the
+/// `Cmd::Serve` and `Cmd::Catalog`'s `list` verb -- the
 /// callers that DO need the overlay (list renders the two-layer merge) --
 /// use [`load_config_with_overlay`] instead.
 fn load_config(
@@ -1059,9 +1047,7 @@ fn load_config(
 }
 
 /// Cold-start config + catalog-overlay load, via the SAME shared loader
-/// [`load_config`] wraps. `Cmd::Serve` threads both into the Router build;
-/// `Cmd::PromptSize` threads both into the offline economics projection so
-/// it prices through the real overlay instead of an implicit empty one.
+/// [`load_config`] wraps. `Cmd::Serve` threads both into the Router build.
 fn load_config_with_overlay(
     explicit: Option<&std::path::Path>,
 ) -> Result<server::LoadedConfig, Box<dyn std::error::Error>> {
@@ -1368,6 +1354,34 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// `prompt-size` prices from per-provider-kind cache rules, which have a
+    /// single TTL, so the TTL-tier flag is gone: clap rejects it as an
+    /// unknown argument while the same command line without it parses.
+    #[test]
+    fn prompt_size_rejects_the_removed_ttl_tier_flag() {
+        let base: &[&str] = &[
+            "routectl",
+            "prompt-size",
+            "--alias",
+            "heavy",
+            "--request",
+            "fixture.json",
+            "--hypothetical-d",
+            "50000",
+        ];
+        assert!(
+            Cli::try_parse_from(base).is_ok(),
+            "the base command line must parse without the flag"
+        );
+
+        let argv: Vec<&str> = base.iter().copied().chain(["--ttl-tier", "1h"]).collect();
+        let err = Cli::try_parse_from(&argv)
+            .err()
+            .unwrap_or_else(|| panic!("{argv:?} parsed but must be rejected"));
+
+        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 
     /// The post-add / post-init capability-probe flags were removed outright,

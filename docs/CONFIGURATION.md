@@ -3114,20 +3114,25 @@ When you pass `--hypothetical-d` (or `--steady-state`), the report gains
 a fourth section: an ADVISORY projection of whether breaking a warm
 prompt-cache to apply a proposed prefix cut would be net-positive. It is
 offline-only and never mutates a request, resolves a secret, or touches
-the network -- it is advice, computed from the baked
-per-`(provider_kind, model, tier)` cache pricing table.
+the network -- it is advice, computed from fixed cache rules per
+`[providers.X] kind` (the same rules the would-trim advisory and the
+K-gate read): `anthropic-api` and `bedrock` write at 1.25x and read at
+0.1x with a 5-minute TTL and a 4096-token floor; `openai-compat` caches
+automatically (1.0x / 0.1x, 5 minutes, 4096 tokens); `openai-responses`
+caches automatically (0.1x reads, 24 hours, 1024 tokens); `gemini` has no
+rules. The model, the catalog and any per-model prices play no part.
 
 ```sh
-# Just the break-even threshold K* for a 50k-token cut, 5m tier:
+# Just the break-even threshold K* for a 50k-token cut:
 routectl prompt-size --alias heavy --request ./fixture.json \
   --hypothetical-d 50000
 
 # Price the REAL steady-state trim candidate instead of a hypothetical cut:
 routectl prompt-size --alias heavy --request ./fixture.json --steady-state
 
-# Plus a keep/break verdict at an assumed reuse count, 1h tier:
+# Plus a keep/break verdict at an assumed reuse count:
 routectl prompt-size --alias heavy --request ./fixture.json \
-  --hypothetical-d 50000 --hypothetical-k 60 --ttl-tier 1h
+  --hypothetical-d 50000 --hypothetical-k 60
 ```
 
 - `--hypothetical-d <TOKENS>` -- the size of the proposed cache-prefix
@@ -3145,18 +3150,18 @@ routectl prompt-size --alias heavy --request ./fixture.json \
   is printed.
 - `--c-after <TOKENS>` -- cached tokens at/after the edit point that must
   re-write. Defaults to C (the oldest-first conservative case).
-- `--ttl-tier <5m|1h>` -- the cache TTL tier to price (Anthropic /
-  Bedrock differ; other providers ignore it). Defaults to `5m`.
 
 C (the total cacheable prefix tokens) is taken from the report's TOTAL
 approx-token count; the command does not distinguish a separate
 cacheable-prefix slice, so the whole prompt-token footprint is the
-conservative C. The projection prints the resolved provider kind /
-model / tier, the pricing cell's trust label (`verified` or
-`unverified (NEEDS-LIVE-PROBE)`), the break-even K*, and -- when
-`--hypothetical-k` is supplied -- the verdict. An unverified / sentinel
-cell shows no live K* and a `KEEP (insufficient data)` verdict, because
-its multipliers are not trusted for a live decision.
+conservative C. The projection prints the resolved provider kind and
+model, the `cache rules:` line it priced with (write and read
+multipliers, TTL, prefix floor, and `(auto-cached)` for a provider that
+caches on its own), the break-even K*, and -- when `--hypothetical-k` is
+supplied -- the verdict. A target with no rules (a `gemini` provider, or
+an alias that does not resolve offline) prints `cache rules: unpriced
+(no cache rules for this target)`, `break-even K*: n/a (insufficient
+data)` and a `KEEP (insufficient data)` verdict.
 
 ## Model prices (`[models.X.pricing]`)
 

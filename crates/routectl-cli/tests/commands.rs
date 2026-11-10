@@ -1306,23 +1306,20 @@ async fn test_command_rejects_each_centralized_bad_config() {
 #[test]
 fn prompt_size_rejects_each_centralized_bad_config() {
     use routectl_cli::commands::prompt_size::{self, ProjectionArgs};
-    use routectl_router::CatalogOverlay;
     use std::path::Path;
 
     // Validation runs before the request fixture is read, so a
     // non-existent path never matters -- the bad config fails first.
     let missing = Path::new("/nonexistent/request.json");
-    let overlay = CatalogOverlay::default();
     let projection = ProjectionArgs {
         hypothetical_d: None,
         hypothetical_k: None,
         c_after: None,
-        ttl_tier: "5m",
         steady_state: false,
     };
 
     for (name, config) in bad_config_fixtures() {
-        match prompt_size::run(config, &overlay, "fast", missing, projection) {
+        match prompt_size::run(config, "fast", missing, projection) {
             Err(routectl_core::Error::Config(_)) => {}
             Ok(()) => panic!("prompt-size must reject `{name}` before reading the fixture"),
             Err(other) => panic!("expected Config error for `{name}`, got: {other:?}"),
