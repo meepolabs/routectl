@@ -54,6 +54,7 @@ fn the_no_config_branch_still_emits_the_fidelity_snapshot() {
 use super::*;
 use crate::commands::doctor::GatherSources;
 use crate::handlers::status::DaemonMeta;
+use crate::handlers::status::learned_seed::{self, served_fixture_config};
 use crate::server::AppState;
 use crate::server::reload_failure::ReloadFailure;
 use arc_swap::ArcSwap;
@@ -194,25 +195,6 @@ fn no_config_path_yields_unavailable_panel() {
     assert_eq!(panel.schema_version, 30);
     assert_eq!(panel.unavailable.as_deref(), Some("no_config_path"));
     assert!(panel.data.is_none());
-}
-
-/// Pins the panel constant to `DoctorReport`'s own schema version, so a
-/// future report bump that is not mirrored here (the unavailable/None paths
-/// carry the constant, the success path carries `report.schema_version`)
-/// fails loudly instead of letting the two envelope versions drift.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn panel_constant_tracks_the_no_network_report_schema_version() {
-    let dir = tempfile::tempdir().unwrap();
-    let config_path = dir.path().join("config.toml");
-    std::fs::write(
-        &config_path,
-        format!("version = {}\n", routectl_router::CURRENT_CONFIG_VERSION),
-    )
-    .unwrap();
-
-    let ctx = gather_context_no_network(&config_path, GatherSources::Disk, &[]).await;
-    let report = build_report_no_network(&ctx);
-    assert_eq!(report.schema_version, DOCTOR_SCHEMA_VERSION);
 }
 
 /// Whether `src` defines `DOCTOR_SCHEMA_VERSION` as the doctor report's own
@@ -658,24 +640,6 @@ async fn doctor_json(state: &Arc<StatusState>) -> Value {
     serde_json::from_slice(&bytes).unwrap()
 }
 
-/// A config whose one model resolves to lane `anthropic#claude-sonnet-4-5`,
-/// with its usage ledger pointed at `db_path`.
-fn served_fixture_config(db_path: &std::path::Path) -> String {
-    format!(
-        "version = {}\n\
-         [usage]\n\
-         db_path = \"{}\"\n\
-         [providers.anthropic]\n\
-         kind = \"anthropic-api\"\n\
-         api_key_ref = \"env://SERVED_FIXTURE_KEY\"\n\
-         [models.sonnet]\n\
-         provider = \"anthropic\"\n\
-         upstream = \"claude-sonnet-4-5\"\n",
-        routectl_router::CURRENT_CONFIG_VERSION,
-        db_path.display(),
-    )
-}
-
 fn matrix_availability(ctx: &crate::commands::doctor::DoctorContext) -> MatrixAvailability {
     build_report_no_network(ctx)
         .panels
@@ -769,6 +733,50 @@ async fn a_served_panel_is_resident_and_carries_the_boot_warm() {
     assert_eq!(matrix["source"], Value::from("resident"), "{json}");
     assert_eq!(matrix["warm"]["outcome"], Value::from("not_run"), "{json}");
     assert!(matrix["replay"].is_null(), "{json}");
+}
+
+/// A learned value seeded into the ledger reaches the served `/status/doctor`
+/// matrix cell after a boot warm: the cell carries the persisted token, not
+/// just the key.
+///
+/// Mutation check: drop the ceiling row from `seed_learned_ceiling` -> red
+/// here.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn served_doctor_handler_reports_the_seeded_learned_value() {
+    // Arrange
+    let dir = tempfile::tempdir().unwrap();
+    let _xdg = routectl_testkit::ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
+    let config_path = dir.path().join("config.toml");
+    let db_path = dir.path().join("usage.db");
+    std::fs::write(&config_path, served_fixture_config(&db_path)).unwrap();
+    learned_seed::seed_learned_ceiling(&db_path);
+    let (router, warm) = learned_seed::warmed_router(&config_path, &db_path);
+    let app = AppState::for_test(Arc::new(ArcSwap::from_pointee(router)));
+    let state = Arc::new(
+        StatusState::from_app(&app, Some(config_path), DaemonMeta::for_test())
+            .with_warm_report(warm),
+    );
+
+    // Act
+    let json = doctor_json(&state).await;
+
+    // Assert
+    let matrix = &json["data"]["report"]["panels"]["capability_matrix"];
+    let ceiling = learned_seed::ceiling_key();
+    let column = matrix["columns"]
+        .as_array()
+        .and_then(|columns| columns.iter().position(|c| *c == ceiling.as_str()));
+    let cell = matrix["lanes"]
+        .as_array()
+        .and_then(|lanes| lanes.iter().find(|l| l["lane"] == learned_seed::LANE))
+        .zip(column)
+        .map_or(Value::Null, |(lane, at)| lane["cells"][at].clone());
+    assert_eq!(
+        cell["value"],
+        Value::from(learned_seed::CEILING_TOKEN),
+        "{matrix}"
+    );
 }
 
 /// An unreadable boot warm reaches the wire with its failure class beside the

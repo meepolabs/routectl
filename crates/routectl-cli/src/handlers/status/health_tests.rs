@@ -3,6 +3,7 @@
 use super::super::vocabulary;
 use super::*;
 use crate::handlers::status::DaemonMeta;
+use crate::handlers::status::learned_seed;
 use crate::server::AppState;
 use arc_swap::ArcSwap;
 use axum::body::{Body, to_bytes};
@@ -709,6 +710,64 @@ async fn handler_returns_available_panel_with_rfc3339_as_of() {
     );
     assert!(json["data"]["targets"].is_array());
     assert!(json["data"]["learned_negatives"].is_array());
+}
+
+/// A learned value seeded into the ledger reaches the served `/status/health`
+/// learned row after a boot warm: the row carries the persisted token, not
+/// just the key.
+///
+/// Mutation check: drop the ceiling row from `seed_learned_ceiling` -> red
+/// here.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn served_health_handler_reports_the_seeded_learned_value() {
+    // Arrange
+    let dir = tempfile::tempdir().unwrap();
+    let _xdg = routectl_testkit::ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
+    let config_path = dir.path().join("config.toml");
+    let db_path = dir.path().join("usage.db");
+    std::fs::write(&config_path, learned_seed::served_fixture_config(&db_path)).unwrap();
+    learned_seed::seed_learned_ceiling(&db_path);
+    let (router, _warm) = learned_seed::warmed_router(&config_path, &db_path);
+    let app = AppState::for_test(Arc::new(ArcSwap::from_pointee(router)));
+    let state = Arc::new(StatusState::from_app(
+        &app,
+        Some(config_path),
+        DaemonMeta::for_test(),
+    ));
+
+    // Act
+    let resp = super::super::status_router()
+        .with_state(state)
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/status/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let json: Value = serde_json::from_slice(&bytes).unwrap();
+
+    // Assert
+    let ceiling = learned_seed::ceiling_key();
+    let row = json["data"]["learned_negatives"]
+        .as_array()
+        .and_then(|rows| {
+            rows.iter().find(|row| {
+                row["state_key"] == learned_seed::LANE && row["capability_key"] == ceiling.as_str()
+            })
+        })
+        .cloned()
+        .unwrap_or(Value::Null);
+    assert_eq!(
+        row["value"],
+        Value::from(learned_seed::CEILING_TOKEN),
+        "{json}"
+    );
 }
 
 #[test]

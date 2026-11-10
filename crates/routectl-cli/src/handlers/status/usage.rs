@@ -1772,17 +1772,19 @@ mod tests {
         // cache when the collection starts.
         let db = open_readonly_fastfail(&path).expect("open ledger read-only");
         let started = Instant::now();
-        let panel = collect(
+        let collected = collect(
             &db,
             "all",
             ALL_TIME,
             LedgerHealth::default(),
             started + Duration::from_millis(USAGE_BUDGET_MS),
-        )
-        .expect("the panel must answer inside its budget");
+        );
         let elapsed = started.elapsed();
 
         println!("{ROWS} rows: usage panel collected in {elapsed:?} (budget {USAGE_BUDGET_MS}ms)");
+        let panel = collected.unwrap_or_else(|code| {
+            panic!("the panel must answer inside its budget: {code} after {elapsed:?}")
+        });
         assert_eq!(panel.totals.requests, ROWS as i64);
     }
 }

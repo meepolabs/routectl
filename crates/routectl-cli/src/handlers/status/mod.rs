@@ -23,6 +23,8 @@ mod doctor;
 mod fidelity_log;
 mod field_verdict_log;
 mod health;
+#[cfg(test)]
+mod learned_seed;
 mod page;
 #[cfg(test)]
 mod production_source;

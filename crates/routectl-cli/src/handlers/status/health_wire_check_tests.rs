@@ -1,7 +1,7 @@
 //! The health panel's wire-check section, end to end over a live router: a
-//! loss found on a real dispatch renders by lane and class, never by value, the
-//! panel's existing fields serialize exactly as before, and building the
-//! panel reads the wire-check state without changing it.
+//! loss found on a real dispatch renders by lane and class, never by value,
+//! the panel's existing fields keep their order with the section last, and
+//! building the panel reads the wire-check state without changing it.
 
 use super::*;
 
@@ -126,8 +126,10 @@ struct PanelWithoutWireCheck<'a> {
     learned_negatives: &'a Vec<LearnedNegative>,
 }
 
+/// The panel's existing fields serialize in their established order, and the
+/// wire-check section is appended after all of them.
 #[test]
-fn the_existing_panel_fields_serialize_byte_for_byte_as_before() {
+fn existing_fields_keep_their_order_with_the_wire_check_section_last() {
     let swap = router_with(Arc::new(DropsMetadata));
     let (_app, status) = status_over(&swap);
     let state = swap.load();

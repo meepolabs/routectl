@@ -7076,6 +7076,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   (measured on the sibling router-swap seam: the global shape failed every case at
   once). `cfg(test)` only, so no deployment can tap its own status events or force
   a panel to degrade; absence from the release binary is checked by symbol scan
+- `src/handlers/status/learned_seed.rs` -- `cfg(test)` fixtures shared by the
+  served doctor and health handler tests: a one-model config, a ledger holding a
+  boot tombstone and one learned ceiling row, and a router warmed from it through
+  the serve bootstrap's own warm, so a served panel can be asserted by value
 - `src/handlers/status/types.rs` -- `Panel<T>` envelope (snake_case
   `serde::Serialize`: `schema_version`/`as_of`/`data`/`unavailable`) with
   constructors enforcing available => `unavailable: None` and unavailable =>
