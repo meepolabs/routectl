@@ -47,7 +47,7 @@ pub use capability_event::{
     CapabilityEvent, insert_capability_event, insert_capability_events_atomic,
 };
 pub use cost::{CostBreakdown, Rates, estimate_cost, estimate_cost_tokens};
-pub use db::{OpenError, UsageDb, open, open_readonly, open_readonly_fastfail, open_rw};
+pub use db::{OpenError, UsageDb, open, open_readonly, open_readonly_fastfail};
 pub use downgrade::{DowngradeError, NotAdditiveReason, SUPPORTED_TARGETS, downgrade_to};
 pub use handle::{UsageCounters, UsageHandle};
 pub use migrate::MigrateError;
@@ -72,4 +72,4 @@ pub use schema::SCHEMA_VERSION;
 pub use writer::CapabilityEventWrite;
 #[doc(hidden)]
 pub use writer::WriterMessage;
-pub use writer::{CHANNEL_CAPACITY, UsageWriter};
+pub use writer::{CHANNEL_CAPACITY, ShutdownOutcome, UsageWriter};

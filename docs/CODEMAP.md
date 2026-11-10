@@ -5617,8 +5617,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `UsageRecord`/`Outcome`/`Operation`/`Harness` (+ their parse errors),
   `downgrade_to`/`SUPPORTED_TARGETS`/`DowngradeError`/`NotAdditiveReason`,
   `observation_totals`/`ObservationTotals`,
-  `UsageWriter`/`CHANNEL_CAPACITY`,
-  `UsageDb`/`open`/`open_readonly`/`open_readonly_fastfail`/`open_rw`/`OpenError`,
+  `UsageWriter`/`ShutdownOutcome`/`CHANNEL_CAPACITY`,
+  `UsageDb`/`open`/`open_readonly`/`open_readonly_fastfail`/`OpenError`,
   the read-side query surface
   (`aggregate`/`ttfbs`/`latest_quota_by_seat`/`query`/`k_calibration_summary`/`near_lossless_attribution_summary`/`shadow_misfire_summary`/`would_trim_summary`/`read_reuse_samples_since`/`read_calibration_samples_since`
   + the capability-ledger reads
@@ -5913,7 +5913,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `src/writer.rs` -- `UsageWriter`: opens the DB once at boot (degrades to a
   no-op drain loop on open failure), runs the one-shot legacy capability purge
   on a successful open (WARN and carry on if it fails), drains the bounded
-  channel on a dedicated thread via `blocking_recv`, bounded-deadline drain + join on `shutdown`. The
+  channel on a dedicated thread via `blocking_recv`, bounded-deadline drain + join on `shutdown`,
+  which returns `ShutdownOutcome` (`Drained`/`TimedOut`/`Panicked`). The
   channel carries a `WriterMessage`, an OPAQUE envelope over a crate-private
   `WriterCommand` vocabulary -- nameable out-of-crate (test channel declarations
   spell the item type) but neither constructible nor inspectable there, because a
@@ -5941,15 +5942,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   (idempotency), schema-presence assertions.
   `open_readonly`/`open_readonly_fastfail` open a non-creating, non-migrating
   READ-ONLY view (WAL confirmed by reading the pragma, schema-version match
-  enforced -> `NoData`/`VersionTooOld`/`VersionTooNew`/`NotWal`). `open_rw` is
-  the READ-WRITE non-migrating sibling (a thin variant of
-  `open_readonly_with_timeout` reusing
-  `verify_readable_version`/`ensure_requests_table`): `SQLITE_OPEN_READ_WRITE`
-  without `CREATE`, so a missing file is still `NoData` and a mismatched
-  schema still errors -- the connection may `INSERT` but never creates or
-  migrates, so a one-shot process can attach to the daemon's existing WAL
-  database instead of forking a second unmigrated one (no production caller
-  today). `meta`
+  enforced -> `NoData`/`VersionTooOld`/`VersionTooNew`/`NotWal`). `open` runs
+  the migration ladder with IMMEDIATE transactions, so a write lock another
+  connection holds is waited out within the busy timeout. `meta`
   rows under keys an older build wrote and this one no longer defines are inert:
   nothing reads, rewrites or removes them (pinned by `src/legacy_meta_tests.rs`)
 - `src/schema.rs` -- `requests` table DDL (the capture columns + `request_id

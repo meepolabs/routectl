@@ -133,6 +133,21 @@ pub const CHANNEL_CAPACITY: usize = 2048;
 /// hanging daemon shutdown.
 const SHUTDOWN_DRAIN_DEADLINE: Duration = Duration::from_secs(5);
 
+/// How [`UsageWriter::shutdown`] ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShutdownOutcome {
+    /// The consumer thread finished: every queued row was handled before the
+    /// drain deadline. A writer that never had a consumer thread (the degraded
+    /// form built when the thread could not be spawned) also reports this,
+    /// because it has nothing to drain.
+    Drained,
+    /// The drain deadline passed first. The consumer thread is left detached;
+    /// any row it had not handled yet may never be written.
+    TimedOut,
+    /// The consumer thread panicked. Rows still queued were lost.
+    Panicked,
+}
+
 /// Log an ERROR about write failures at most this often (every Nth
 /// error), in addition to the always-logged degraded-state transition.
 const WRITE_ERROR_LOG_INTERVAL: u64 = 1024;
@@ -145,9 +160,14 @@ const WRITE_ERROR_LOG_INTERVAL: u64 = 1024;
 /// `shutdown` and `Drop` then no-op.
 pub struct UsageWriter {
     sender: Option<mpsc::Sender<WriterMessage>>,
+    /// Observes the channel after `sender` is dropped, without keeping it open,
+    /// so a timed-out drain can say whether producers were still attached and
+    /// how many messages it left queued.
+    queue_view: Option<mpsc::WeakSender<WriterMessage>>,
     done: Option<std::sync::mpsc::Receiver<()>>,
     join: Option<std::thread::JoinHandle<()>>,
     counters: Arc<UsageCounters>,
+    drain_deadline: Duration,
 }
 
 impl UsageWriter {
@@ -190,9 +210,11 @@ impl UsageWriter {
             // close the channel from its side and `shutdown` waits on the drain
             // signal alone.
             sender: None,
+            queue_view: None,
             done: Some(done_rx),
             join: Some(join),
             counters,
+            drain_deadline: SHUTDOWN_DRAIN_DEADLINE,
         }
     }
 
@@ -239,10 +261,12 @@ impl UsageWriter {
 
         let handle = UsageHandle::new(tx.clone(), enabled, Arc::clone(&counters));
         let writer = Self {
+            queue_view: Some(tx.downgrade()),
             sender: Some(tx),
             done: Some(done_rx),
             join: Some(join),
             counters,
+            drain_deadline: SHUTDOWN_DRAIN_DEADLINE,
         };
         (handle, writer)
     }
@@ -262,9 +286,11 @@ impl UsageWriter {
         let handle = UsageHandle::new(sender, enabled, Arc::clone(&counters));
         let writer = Self {
             sender: None,
+            queue_view: None,
             done: None,
             join: None,
             counters,
+            drain_deadline: SHUTDOWN_DRAIN_DEADLINE,
         };
         (handle, writer)
     }
@@ -275,8 +301,18 @@ impl UsageWriter {
         &self.counters
     }
 
+    /// Replace the drain deadline, so a test that holds a producer handle on
+    /// purpose need not wait out the production deadline.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn with_drain_deadline(mut self, deadline: Duration) -> Self {
+        self.drain_deadline = deadline;
+        self
+    }
+
     /// Close the channel, drain queued rows under a bounded deadline, and
-    /// join the consumer thread.
+    /// join the consumer thread, returning how the drain ended.
     ///
     /// Dropping the sender lets the consumer's `blocking_recv` return
     /// `None` once the queue empties, so a healthy DB drains fully. If the
@@ -291,20 +327,19 @@ impl UsageWriter {
     /// on an async runtime worker, or it can stall that worker for the full
     /// deadline. (`Drop` is non-blocking and is the safe fallback if an
     /// explicit shutdown was missed.)
-    pub fn shutdown(mut self) {
-        self.shutdown_inner();
-    }
-
-    fn shutdown_inner(&mut self) {
-        // Drop the sender so the consumer's recv loop can terminate.
+    ///
+    /// The drain finishes only once every producer handle is dropped too: a
+    /// [`UsageHandle`] still alive keeps the channel open, and the drain then
+    /// waits out its deadline and reports [`ShutdownOutcome::TimedOut`].
+    pub fn shutdown(mut self) -> ShutdownOutcome {
         self.sender.take();
         // A degraded writer (no thread) has nothing to drain or join.
         let Some(done) = self.done.take() else {
-            return;
+            return ShutdownOutcome::Drained;
         };
         let persisted_before = self.counters.persisted();
 
-        match done.recv_timeout(SHUTDOWN_DRAIN_DEADLINE) {
+        match done.recv_timeout(self.drain_deadline) {
             Ok(()) => {
                 self.join_once();
                 tracing::info!(
@@ -312,26 +347,59 @@ impl UsageWriter {
                     flushed = self.counters.persisted() - persisted_before,
                     "usage writer drained and stopped"
                 );
+                ShutdownOutcome::Drained
             }
-            Err(RecvTimeoutError::Disconnected) => {
-                // The thread ended without signalling done -- it panicked.
-                // Join now (instant: it is already gone) to surface the
-                // panic payload instead of silently abandoning it.
-                if let Some(Err(_)) = self.join.take().map(std::thread::JoinHandle::join) {
-                    tracing::error!(
-                        target: "routectl_usage::writer",
-                        "usage writer thread panicked during drain"
-                    );
-                }
-            }
+            Err(RecvTimeoutError::Disconnected) => self.join_after_lost_done_signal(),
             Err(RecvTimeoutError::Timeout) => {
-                tracing::warn!(
-                    target: "routectl_usage::writer",
-                    deadline_secs = SHUTDOWN_DRAIN_DEADLINE.as_secs(),
-                    flushed = self.counters.persisted() - persisted_before,
-                    "usage writer drain deadline exceeded -- abandoning queued rows"
-                );
+                self.warn_drain_timed_out(self.counters.persisted() - persisted_before);
+                ShutdownOutcome::TimedOut
             }
+        }
+    }
+
+    /// The thread ended without signalling done, which only a panic does.
+    /// Joining is instant (the thread is gone) and surfaces the panic instead
+    /// of silently abandoning it.
+    fn join_after_lost_done_signal(&mut self) -> ShutdownOutcome {
+        match self.join.take().map(std::thread::JoinHandle::join) {
+            Some(Err(_)) => {
+                tracing::error!(
+                    target: "routectl_usage::writer",
+                    "usage writer thread panicked during drain"
+                );
+                ShutdownOutcome::Panicked
+            }
+            Some(Ok(())) | None => ShutdownOutcome::Drained,
+        }
+    }
+
+    /// Say why the drain ran out of time. Producers still attached with
+    /// nothing queued abandon no row; queued messages are counted when a
+    /// producer is still attached, because only a live sender can read the
+    /// queue depth.
+    fn warn_drain_timed_out(&self, flushed: u64) {
+        let deadline_ms = u64::try_from(self.drain_deadline.as_millis()).unwrap_or(u64::MAX);
+        let live_sender = self.queue_view.as_ref().and_then(mpsc::WeakSender::upgrade);
+        match live_sender.map(|tx| tx.max_capacity() - tx.capacity()) {
+            Some(0) => tracing::warn!(
+                target: "routectl_usage::writer",
+                deadline_ms,
+                flushed,
+                "usage writer drain deadline exceeded -- senders still open, queue empty"
+            ),
+            Some(abandoned) => tracing::warn!(
+                target: "routectl_usage::writer",
+                deadline_ms,
+                flushed,
+                abandoned,
+                "usage writer drain deadline exceeded -- queued rows abandoned"
+            ),
+            None => tracing::warn!(
+                target: "routectl_usage::writer",
+                deadline_ms,
+                flushed,
+                "usage writer drain deadline exceeded -- queued rows abandoned, count unknown"
+            ),
         }
     }
 
@@ -1971,9 +2039,11 @@ mod tests {
         for i in 0..n {
             handle.try_send(record(&format!("drain-{i}")));
         }
-        writer.shutdown();
+        drop(handle);
+        let outcome = writer.shutdown();
 
         // Assert: a healthy DB drains every queued row before stopping.
+        assert_eq!(outcome, ShutdownOutcome::Drained);
         assert_eq!(row_count(&path), n as i64);
     }
 

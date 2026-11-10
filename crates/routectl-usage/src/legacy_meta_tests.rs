@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::{UsageRecord, UsageWriter, earliest_ts_start, open, open_readonly, open_rw};
+use crate::{UsageRecord, UsageWriter, earliest_ts_start, open, open_readonly};
 
 /// `(key, value)` rows an older build could have left in `meta`. The second is
 /// the exact shape the removed paid-probe reservation codec wrote:
@@ -68,7 +68,6 @@ fn a_legacy_meta_row_does_not_block_open_write_or_read() {
 
     // Act: every open mode, then a write through the production writer.
     open(&path).expect("migrating open");
-    open_rw(&path).expect("read-write open");
     let (handle, writer) = UsageWriter::start(path.clone(), 4, 0, true);
     handle.try_send(UsageRecord {
         ts_start: 1_000,

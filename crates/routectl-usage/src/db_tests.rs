@@ -153,6 +153,48 @@ fn open_sets_busy_timeout() {
     assert_eq!(timeout, BUSY_TIMEOUT_MS as i64);
 }
 
+/// A daemon starting while its predecessor still writes finds the write lock
+/// taken. The pending migration step must wait for it inside the busy timeout
+/// rather than fail and leave the writer degraded.
+#[test]
+fn open_waits_out_a_write_lock_released_inside_the_busy_timeout_during_a_pending_migration() {
+    // Arrange: a v19 file, and a second connection holding its write lock.
+    const HOLD: std::time::Duration = std::time::Duration::from_millis(300);
+    let (_dir, path) = temp_db_path();
+    drop(open(&path).expect("seed db"));
+    crate::downgrade_to(&path, 19).expect("restamp v19");
+    let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+    let holder_path = path.clone();
+    let holder = std::thread::spawn(move || {
+        let conn = Connection::open(&holder_path).expect("holder open");
+        conn.execute_batch(
+            "BEGIN IMMEDIATE;
+             INSERT INTO ledger_gaps (ts_ms, cause, dropped) VALUES (1, 'queue_full', 1);",
+        )
+        .expect("take the write lock");
+        locked_tx
+            .send(std::time::Instant::now())
+            .expect("signal lock held");
+        std::thread::sleep(HOLD);
+        conn.execute_batch("COMMIT")
+            .expect("release the write lock");
+    });
+    let locked_at = locked_rx.recv().expect("lock held");
+
+    // Act
+    let opened = open(&path);
+    let elapsed = locked_at.elapsed();
+    holder.join().expect("holder thread");
+
+    // Assert
+    let db = opened.expect("open must wait for the lock, not fail");
+    assert_eq!(user_version(db.conn()), 20);
+    assert!(
+        elapsed >= HOLD,
+        "open returned after {elapsed:?}, before the {HOLD:?} hold released the lock"
+    );
+}
+
 #[test]
 fn open_creates_missing_parent_dir() {
     // Arrange
@@ -2597,125 +2639,6 @@ fn open_readonly_sets_busy_timeout() {
 
     // Assert
     assert_eq!(timeout, BUSY_TIMEOUT_MS as i64);
-}
-
-// --- open_rw: read-write, non-migrating, never-creating ----------------
-
-#[test]
-fn open_rw_on_nonexistent_path_returns_no_data_and_creates_nothing() {
-    // Arrange: a path that does not exist.
-    let dir = TempDir::new().expect("tempdir");
-    let path = dir.path().join("absent.db");
-
-    // Act
-    let result = open_rw(&path);
-
-    // Assert: NoData, and the file was NOT created (never `CREATE`).
-    assert!(matches!(result, Err(OpenError::NoData { .. })));
-    assert!(!path.exists(), "open_rw must not create the file");
-}
-
-#[test]
-fn open_rw_rejects_older_schema_without_migrating() {
-    // Arrange: seed a fully-migrated DB, then roll user_version back to
-    // simulate a DB that predates this binary. A non-migrating writer must
-    // refuse rather than mutate the schema out from under a daemon.
-    let (_dir, path) = temp_db_path();
-    let db = open(&path).expect("seed db");
-    db.conn()
-        .execute_batch(&format!("PRAGMA user_version = {}", SCHEMA_VERSION - 1))
-        .expect("roll version back");
-    drop(db);
-
-    // Act
-    let result = open_rw(&path);
-
-    // Assert: fails closed, and the on-disk version is untouched (no migrate).
-    assert!(matches!(result, Err(OpenError::VersionTooOld { .. })));
-    let conn = Connection::open(&path).expect("reopen");
-    assert_eq!(
-        user_version(&conn),
-        SCHEMA_VERSION - 1,
-        "open_rw must never run the migration ladder"
-    );
-}
-
-#[test]
-fn open_rw_rejects_newer_schema() {
-    // Arrange: seed a normal DB, then bump user_version above support.
-    let (_dir, path) = temp_db_path();
-    let db = open(&path).expect("seed db");
-    db.conn()
-        .execute_batch(&format!("PRAGMA user_version = {}", SCHEMA_VERSION + 1))
-        .expect("bump version");
-    drop(db);
-
-    // Act + Assert
-    assert!(matches!(
-        open_rw(&path),
-        Err(OpenError::VersionTooNew { .. })
-    ));
-}
-
-#[test]
-fn open_rw_accepts_matching_schema_and_can_insert() {
-    // Arrange: a fully-migrated WAL DB at the current schema.
-    let (_dir, path) = temp_db_path();
-    drop(open(&path).expect("seed db"));
-
-    // Act: open read-write, non-migrating.
-    let db = open_rw(&path).expect("open rw on a matching-schema db");
-
-    // Assert: the connection may actually write (not a read-only handle).
-    let inserted = crate::capability_event::insert_capability_event(
-        db.conn(),
-        &crate::CapabilityEvent::tombstone(1, 1, 0),
-    )
-    .expect("insert must succeed on a read-write connection");
-    assert_eq!(inserted, 1);
-}
-
-#[test]
-fn open_rw_sets_busy_timeout() {
-    // Arrange
-    let (_dir, path) = temp_db_path();
-    drop(open(&path).expect("seed db"));
-
-    // Act
-    let db = open_rw(&path).expect("open rw");
-    let timeout: i64 = db
-        .conn()
-        .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
-        .expect("read busy_timeout");
-
-    // Assert
-    assert_eq!(timeout, BUSY_TIMEOUT_MS as i64);
-}
-
-#[test]
-fn open_rw_rejects_a_non_wal_database() {
-    // Arrange: a fully-migrated DB forced out of WAL journal mode.
-    let (_dir, path) = temp_db_path();
-    drop(open(&path).expect("seed db"));
-    {
-        let conn = Connection::open(&path).expect("raw open");
-        let mode: String = conn
-            .pragma_update_and_check(None, "journal_mode", "DELETE", |row| row.get(0))
-            .expect("switch journal mode");
-        assert_eq!(mode.to_ascii_lowercase(), "delete");
-    }
-
-    // Act
-    let err = match open_rw(&path) {
-        Err(err) => err,
-        Ok(_) => panic!("non-WAL db must be rejected"),
-    };
-
-    // Assert: fails closed on the journal-mode contract.
-    assert!(
-        matches!(err, OpenError::NotWal { .. }),
-        "expected NotWal, got {err:?}"
-    );
 }
 
 #[test]

@@ -8,7 +8,7 @@ use axum::Router as AxumRouter;
 use routectl_auth::{MemoryStore, SecretRef, SecretStore};
 use routectl_core::{Error, Result};
 use routectl_router::{ActivationState, Config};
-use routectl_usage::{CHANNEL_CAPACITY, UsageHandle, UsageWriter};
+use routectl_usage::{CHANNEL_CAPACITY, ShutdownOutcome, UsageHandle, UsageWriter};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 
@@ -760,14 +760,26 @@ const PURGE_SETTLEMENT_DEADLINE: std::time::Duration = std::time::Duration::from
 
 /// Flush queued usage rows on graceful shutdown. `UsageWriter::shutdown`
 /// blocks up to ~5s draining and joining the writer thread, so it must
-/// not run on a runtime worker -- dispatch it via `spawn_blocking`. A
-/// `JoinError` (the blocking task panicked or was cancelled) is logged,
-/// never propagated as a panic.
+/// not run on a runtime worker -- dispatch it via `spawn_blocking`. The
+/// closing line names how the drain ended; a `JoinError` (the blocking task
+/// panicked or was cancelled) is logged, never propagated as a panic.
 pub(super) async fn drain_usage_writer(usage_writer: UsageWriter) {
     tracing::info!("draining usage writer before shutdown");
     match tokio::task::spawn_blocking(move || usage_writer.shutdown()).await {
-        Ok(()) => tracing::info!("usage writer drained"),
+        Ok(outcome) => log_usage_drain_outcome(outcome),
         Err(e) => tracing::error!(error = %e, "usage writer drain task failed"),
+    }
+}
+
+fn log_usage_drain_outcome(outcome: ShutdownOutcome) {
+    match outcome {
+        ShutdownOutcome::Drained => tracing::info!("usage writer drained"),
+        ShutdownOutcome::TimedOut => {
+            tracing::warn!("usage writer stopped at its drain deadline; queued rows may be lost");
+        }
+        ShutdownOutcome::Panicked => {
+            tracing::error!("usage writer panicked while draining; queued rows were lost");
+        }
     }
 }
 
@@ -1258,6 +1270,10 @@ fn build_axum_router(
 #[cfg(test)]
 #[path = "serve_tests.rs"]
 mod serve_tests;
+
+#[cfg(test)]
+#[path = "serve_drain_tests.rs"]
+mod serve_drain_tests;
 
 /// ASSEMBLED-DAEMON verification of the pre-flight pipeline.
 ///
