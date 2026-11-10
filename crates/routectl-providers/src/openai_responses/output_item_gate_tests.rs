@@ -8,7 +8,6 @@
 
 use std::sync::Arc;
 
-use routectl_core::wire_check::{EditKind, EditSite, IngressDialect, Leg, WireTap};
 use routectl_core::{
     ChatRequest, ChatResponse, ContentPart, Message, MessageContent, Provider, RequestObservation,
     RequestProvenance, Role, StaticToken, TokenSource,
@@ -234,34 +233,6 @@ async fn a_refusal_stays_for_a_non_responses_client_and_counts_nothing() {
     assert_eq!(type_tags(&resp), vec!["refusal".to_string()]);
     assert_eq!(census() - before, 0);
     assert_eq!(slot.snapshot().translation_drops, 0);
-}
-
-#[tokio::test]
-async fn the_drop_is_declared_on_a_response_checking_tap() {
-    // Arrange
-    let slot = RequestObservation::new();
-    let tap = WireTap::checking_response(IngressDialect::Anthropic);
-    let mut req = request(RequestProvenance::AnthropicIngress, &slot);
-    req.routectl_internal.wire_tap = Some(tap.clone());
-
-    // Act
-    complete_against(upstream(text_with_unmodeled_items(1)), req).await;
-
-    // Assert
-    let edits: Vec<(EditSite, String, EditKind)> = tap
-        .take_response()
-        .edits(Leg::Response)
-        .iter()
-        .map(|e| (e.site(), e.path().to_string(), e.kind()))
-        .collect();
-    assert!(
-        edits.contains(&(
-            EditSite::DialectFieldStrip,
-            "/output/*".to_string(),
-            EditKind::Remove
-        )),
-        "{edits:?}"
-    );
 }
 
 #[traced_test]

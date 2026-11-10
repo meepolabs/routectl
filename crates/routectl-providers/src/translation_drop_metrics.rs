@@ -135,6 +135,8 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::marker::PhantomData;
+use std::rc::Rc;
 #[cfg(not(test))]
 use std::sync::{Mutex, OnceLock};
 
@@ -187,9 +189,14 @@ thread_local! {
 /// installed for the guard's lifetime. Open it as the first statement of a
 /// lane's synchronous request entry and let it drop at the end of that call;
 /// it must never be held across an `.await`.
+///
+/// The guard is `!Send`: it restores the thread-local of the thread that
+/// opened it, so a scope held across an `.await` or a stream yield inside a
+/// `Send` future fails to compile instead of restoring another worker's slot.
 #[must_use = "the scope ends as soon as the guard is dropped"]
 pub(crate) struct ObservationScope {
     previous: Option<RequestObservation>,
+    _thread_bound: PhantomData<Rc<()>>,
 }
 
 impl ObservationScope {
@@ -212,7 +219,10 @@ impl ObservationScope {
     pub(crate) fn enter_slot(slot: Option<&RequestObservation>) -> Self {
         let slot = slot.cloned();
         let previous = ACTIVE_OBSERVATION.with_borrow_mut(|active| std::mem::replace(active, slot));
-        Self { previous }
+        Self {
+            previous,
+            _thread_bound: PhantomData,
+        }
     }
 }
 
@@ -735,6 +745,46 @@ mod tests {
             .expect("the drop must be recorded on its own counter");
         assert_eq!(policy.action_count, 1);
         assert_eq!(drop.drop_count, 1);
+    }
+
+    /// Rust has no negative trait bound, so `!Send` is read through autoref
+    /// method resolution: the inherent method is a candidate only when
+    /// `T: Send`, otherwise resolution falls through to the trait impl.
+    mod send_probe {
+        use std::marker::PhantomData;
+
+        pub struct Probe<T>(pub PhantomData<T>);
+
+        pub trait SendAbsent {
+            fn probe_is_send(&self) -> bool;
+        }
+
+        impl<T> SendAbsent for &Probe<T> {
+            fn probe_is_send(&self) -> bool {
+                false
+            }
+        }
+
+        impl<T: Send> Probe<T> {
+            pub fn probe_is_send(&self) -> bool {
+                true
+            }
+        }
+    }
+
+    macro_rules! is_send {
+        ($t:ty) => {{ (&send_probe::Probe::<$t>(std::marker::PhantomData)).probe_is_send() }};
+    }
+
+    #[test]
+    fn an_observation_scope_cannot_cross_threads() {
+        use send_probe::SendAbsent as _;
+
+        assert!(
+            is_send!(RequestObservation),
+            "the probe must detect a type that is Send"
+        );
+        assert!(!is_send!(ObservationScope));
     }
 
     #[test]

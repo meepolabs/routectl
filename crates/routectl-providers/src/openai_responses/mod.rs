@@ -637,8 +637,11 @@ impl Provider for OpenAiResponsesProvider {
 
 /// Remove the parts `normalize_response` keeps for unmodeled upstream output
 /// items unless the client speaks Responses, the only dialect with a shape to
-/// carry one. A refusal part is modeled everywhere and stays. Synchronous: the
-/// observation scope it opens must never span an `.await`.
+/// carry one. A refusal part is modeled everywhere and stays. The loss is
+/// census-only (counted and logged): it reaches only a translation lane, whose
+/// tap never compares the response leg, so a response-leg declaration here
+/// would be unreachable. Synchronous: the observation scope it opens must
+/// never span an `.await`.
 fn gate_unmodeled_output_items(req: &ChatRequest, resp: &mut ChatResponse) {
     if req.routectl_internal.provenance == routectl_core::RequestProvenance::ResponsesIngress {
         return;
@@ -661,12 +664,6 @@ fn gate_unmodeled_output_items(req: &ChatRequest, resp: &mut ChatResponse) {
     );
     // TRANSLATION-DROP: lane=openai-responses class=output_item_unrepresentable test=a_non_responses_client_loses_the_unmodeled_item_and_counts_it_once
     crate::translation_drop_metrics::record_translation_drop(LANE, "output_item_unrepresentable");
-    crate::wire_declare::declare_response(
-        crate::wire_declare::tap(req),
-        routectl_core::wire_check::EditSite::DialectFieldStrip,
-        "/output/*",
-        routectl_core::wire_check::EditKind::Remove,
-    );
 }
 
 /// Drop every non-refusal `ContentPart::Other`, naming each in `dropped`; what
