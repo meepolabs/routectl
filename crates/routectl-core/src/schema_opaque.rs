@@ -54,4 +54,12 @@ pub enum OpaqueSseEvent {
         /// Block index as reported by the upstream stream.
         upstream_index: u32,
     },
+    /// One complete OpenAI Responses output item of a type the canonical
+    /// chunk does not model (e.g. `custom_tool_call`), carried whole so a
+    /// Responses ingress can re-emit it as its own output item. Atomic:
+    /// one event per item, never split into start / delta / stop.
+    OutputItem {
+        /// The item JSON as the upstream finalized it.
+        item: serde_json::Value,
+    },
 }

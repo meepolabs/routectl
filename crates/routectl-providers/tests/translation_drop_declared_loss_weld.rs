@@ -343,13 +343,6 @@ const EXPECTED_UNMARKED_LOSS_LOGS: &[(&str, &str, &str, &str)] = &[
         "response-side streaming: skips an unknown upstream event kind at DEBUG, a forward-compat \
          tolerance on the response path",
     ),
-    (
-        "openai_responses/sse.rs",
-        "handle_item_added",
-        "output_item.added beyond cap",
-        "response-side streaming: the bounded-growth cap on distinct output indices, which \
-         protects the accumulator rather than losing caller content",
-    ),
 ];
 
 /// Loss-declaring log COUNT per symbol that direction one resolves. Pinned
@@ -492,6 +485,8 @@ const EXPECTED_RESOLVED_LOG_COUNTS: &[(&str, &str, usize)] = &[
     ("openai_responses/messages.rs", "unknown_content_part", 1),
     ("openai_responses/messages.rs", "walk_assistant_part", 3),
     ("openai_responses/mod.rs", "gate_unmodeled_output_items", 1),
+    ("openai_responses/sse.rs", "drop_unrepresentable_item", 1),
+    ("openai_responses/sse.rs", "skip_item_beyond_cap", 2),
     (
         "openai_responses/request.rs",
         "log_dropped_cache_control",

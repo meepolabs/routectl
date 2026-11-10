@@ -15,6 +15,10 @@
 //! - `ToolUse`  -- function_call item; argument deltas stream
 //!   through, or, when no delta carried them, the final arguments from
 //!   `function_call_arguments.done` / `output_item.done` are emitted once
+//! - `Passthrough` -- any other item type (e.g. `custom_tool_call`); the
+//!   whole item rides one `OpaqueSseEvent::OutputItem` chunk, emitted at
+//!   `output_item.done` (or flushed at completion when no done event came),
+//!   and only for a client whose dialect can carry it
 //!
 //! Indices (`call_index`, `detail_index`) are assigned dense (0, 1, 2,
 //! ...) per stream via `next_call_index` / `next_detail_index`
@@ -30,8 +34,9 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use routectl_core::{
-    ChatChunk, Error, ReasoningDetail, ReasoningDetailKind, ResponsesEnvelope, Result, Role,
-    UpstreamMeta, UsageInputSource,
+    ChatChunk, Error, OpaqueSseEvent, ReasoningDetail, ReasoningDetailKind, RequestObservation,
+    RequestProvenance, ResponsesEnvelope, Result, Role, UpstreamMeta, UsageInputSource,
+    sanitize_for_log,
     schema::{ChunkChoice, ChunkDelta, UsageDelta},
 };
 
@@ -39,6 +44,7 @@ use routectl_core::{
 const BLOCK_TAG_TEXT: &str = "text";
 const BLOCK_TAG_REASONING: &str = "reasoning";
 const BLOCK_TAG_TOOL_USE: &str = "tool_use";
+const BLOCK_TAG_PASSTHROUGH: &str = "passthrough";
 
 /// Per-stream cap on the number of distinct `output_index` entries
 /// the openai-responses SSE state machine's block map will hold.
@@ -94,6 +100,9 @@ enum BlockState {
         finalized: bool,
         zero_arg_deferred: bool,
     },
+    /// An output item of a type this parser does not model, held as the
+    /// item.added payload until its done event (or completion) settles it.
+    Passthrough { item: Value },
 }
 
 impl BlockState {
@@ -104,6 +113,7 @@ impl BlockState {
             Self::Text { .. } => BLOCK_TAG_TEXT,
             Self::Reasoning { .. } => BLOCK_TAG_REASONING,
             Self::ToolUse { .. } => BLOCK_TAG_TOOL_USE,
+            Self::Passthrough { .. } => BLOCK_TAG_PASSTHROUGH,
         }
     }
 }
@@ -145,13 +155,31 @@ pub struct ResponsesStreamState {
     /// stamped on every emitted detail, so the streaming path and the
     /// non-streaming path agree tag-for-tag on the same lane.
     auth_kind: AuthKind,
+    /// Ingress dialect of the client this stream answers. Decides whether
+    /// a passthrough item is emitted or dropped.
+    provenance: RequestProvenance,
+    /// The client request's observation slot, installed only around the
+    /// synchronous drop count so the loss reaches that request's usage row.
+    observation: Option<RequestObservation>,
+    /// Set once this stream counted an output item it could not deliver,
+    /// so the class counts once per stream even with no observation slot.
+    unrepresentable_counted: bool,
+    /// Set once an item.added past the block cap was WARNed; later ones
+    /// log at DEBUG so an over-producing upstream cannot flood the log.
+    cap_warned: bool,
 }
 
 impl ResponsesStreamState {
     #[must_use]
-    pub(crate) fn new(auth_kind: AuthKind) -> Self {
+    pub(crate) fn new(
+        auth_kind: AuthKind,
+        provenance: RequestProvenance,
+        observation: Option<RequestObservation>,
+    ) -> Self {
         Self {
             auth_kind,
+            provenance,
+            observation,
             ..Self::default()
         }
     }
@@ -184,6 +212,9 @@ impl ResponsesStreamState {
             "response.function_call_arguments.done" => {
                 Ok(self.handle_function_call_args_done(provider_id, &event))
             }
+            // The item's own done event carries the whole input; the
+            // incremental preview is not forwarded.
+            "response.custom_tool_call_input.delta" => Ok(Vec::new()),
             "response.output_item.done" => Ok(self.handle_item_done(provider_id, &event)),
             "response.completed" => self.handle_completed(provider_id, &event),
             "response.incomplete" => self.handle_incomplete(provider_id, &event),
@@ -288,15 +319,9 @@ impl ResponsesStreamState {
         // 1-5: optional reasoning + message + N tool calls). An
         // adversarial upstream could stream thousands of distinct
         // `output_index` values to grow the blocks map unboundedly.
-        // Skip past the cap with a debug log; the stream remains
-        // usable for items below the cap.
+        // The stream remains usable for items below the cap.
         if !self.blocks.contains_key(&idx) && self.blocks.len() >= MAX_OUTPUT_BLOCKS {
-            tracing::debug!(
-                provider = provider_id,
-                output_index = idx,
-                cap = MAX_OUTPUT_BLOCKS,
-                "openai-responses: output_item.added beyond cap; skipping"
-            );
+            self.skip_item_beyond_cap(provider_id, idx, item_type);
             return Vec::new();
         }
 
@@ -352,11 +377,8 @@ impl ResponsesStreamState {
                 // above (pre-cap) so this branch does not duplicate it.
             }
             _ => {
-                tracing::debug!(
-                    provider = provider_id,
-                    item_type = item_type,
-                    "openai-responses: unknown output item type at item.added"
-                );
+                self.blocks
+                    .insert(idx, BlockState::Passthrough { item: item.clone() });
             }
         }
         Vec::new()
@@ -572,6 +594,9 @@ impl ResponsesStreamState {
         let Some(idx) = event.output_index else {
             return Vec::new();
         };
+        if matches!(self.blocks.get(&idx), Some(BlockState::Passthrough { .. })) {
+            return self.settle_passthrough(provider_id, idx, event.item.as_ref());
+        }
         let mut chunks = Vec::new();
         if matches!(self.blocks.get(&idx), Some(BlockState::ToolUse { .. })) {
             let final_args = match event.item.as_ref().and_then(|v| v.get("arguments")) {
@@ -646,6 +671,7 @@ impl ResponsesStreamState {
                 ));
             }
         };
+        let unsettled_items = self.flush_unsettled_passthrough(provider_id, &resp_value);
         let resp: ResponsesResponse = serde_json::from_value(resp_value).unwrap_or_default_resp();
 
         // `has_function_call` decides whether a `completed` status
@@ -709,6 +735,7 @@ impl ResponsesStreamState {
         }
 
         let mut chunks = self.flush_deferred_zero_arg_calls(provider_id);
+        chunks.extend(unsettled_items);
         chunks.push(ChatChunk {
             id: self.response_id.clone(),
             model: self.model.clone(),
@@ -747,6 +774,106 @@ impl ResponsesStreamState {
             .into_iter()
             .filter_map(|idx| self.finalize_tool_arguments(provider_id, idx, ""))
             .collect()
+    }
+
+    /// Settle the passthrough block at `idx`: emit the finalized item when
+    /// the client's dialect can carry it, otherwise count the loss. The block
+    /// leaves the map here, so a later completion never settles it twice.
+    fn settle_passthrough(
+        &mut self,
+        provider_id: &str,
+        idx: u32,
+        final_item: Option<&Value>,
+    ) -> Vec<ChatChunk> {
+        let Some(BlockState::Passthrough { item: added }) = self.blocks.remove(&idx) else {
+            return Vec::new();
+        };
+        let item = final_item
+            .filter(|v| same_item_type(v, &added))
+            .cloned()
+            .unwrap_or(added);
+        if !super::client_carries_unmodeled_items(self.provenance) {
+            self.drop_unrepresentable_item(provider_id, idx, item_type_of(&item));
+            return Vec::new();
+        }
+        vec![self.output_item_chunk(item)]
+    }
+
+    /// Settle, in output order, every passthrough block that got no
+    /// `output_item.done`, preferring the completed body's copy of the item
+    /// at the same `output_index` over the item.added payload.
+    fn flush_unsettled_passthrough(&mut self, provider_id: &str, body: &Value) -> Vec<ChatChunk> {
+        let mut unsettled: Vec<u32> = self
+            .blocks
+            .iter()
+            .filter_map(|(idx, block)| {
+                matches!(block, BlockState::Passthrough { .. }).then_some(*idx)
+            })
+            .collect();
+        unsettled.sort_unstable();
+        let body_output = body.get("output").and_then(Value::as_array);
+        unsettled
+            .into_iter()
+            .flat_map(|idx| {
+                let body_item = body_output.and_then(|items| items.get(idx as usize));
+                self.settle_passthrough(provider_id, idx, body_item)
+            })
+            .collect()
+    }
+
+    /// An item.added past [`MAX_OUTPUT_BLOCKS`] is never tracked, so the
+    /// client never receives it, whatever its dialect.
+    fn skip_item_beyond_cap(&mut self, provider_id: &str, idx: u32, item_type: &str) {
+        if std::mem::replace(&mut self.cap_warned, true) {
+            tracing::debug!(
+                provider = provider_id,
+                output_index = idx,
+                item_type = %sanitize_for_log(item_type),
+                "openai-responses: output_item.added beyond cap; skipping"
+            );
+        } else {
+            tracing::warn!(
+                provider = provider_id,
+                output_index = idx,
+                cap = MAX_OUTPUT_BLOCKS,
+                item_type = %sanitize_for_log(item_type),
+                "openai-responses: output_item.added beyond cap; skipping"
+            );
+        }
+        if std::mem::replace(&mut self.unrepresentable_counted, true) {
+            return;
+        }
+        let _observation = crate::translation_drop_metrics::ObservationScope::enter_slot(
+            self.observation.as_ref(),
+        );
+        // TRANSLATION-DROP: lane=openai-responses class=output_item_unrepresentable test=an_item_past_the_block_cap_is_counted_and_warned
+        crate::translation_drop_metrics::record_translation_drop(
+            super::LANE,
+            "output_item_unrepresentable",
+        );
+    }
+
+    /// A finalized unmodeled item for a client whose dialect has no shape
+    /// for it. The loss is census-only: this reaches only a translation lane,
+    /// whose tap never compares the response leg.
+    fn drop_unrepresentable_item(&mut self, provider_id: &str, idx: u32, item_type: &str) {
+        tracing::warn!(
+            provider = provider_id,
+            output_index = idx,
+            item_type = %sanitize_for_log(item_type),
+            "openai-responses: dropping unmodeled output item the client dialect cannot carry"
+        );
+        if std::mem::replace(&mut self.unrepresentable_counted, true) {
+            return;
+        }
+        let _observation = crate::translation_drop_metrics::ObservationScope::enter_slot(
+            self.observation.as_ref(),
+        );
+        // TRANSLATION-DROP: lane=openai-responses class=output_item_unrepresentable test=a_non_responses_client_loses_the_streamed_item_and_counts_it_once
+        crate::translation_drop_metrics::record_translation_drop(
+            super::LANE,
+            "output_item_unrepresentable",
+        );
     }
 
     fn handle_incomplete(
@@ -908,6 +1035,22 @@ impl ResponsesStreamState {
         }
     }
 
+    fn output_item_chunk(&self, item: Value) -> ChatChunk {
+        ChatChunk {
+            id: self.response_id.clone(),
+            model: self.model.clone(),
+            choices: vec![ChunkChoice {
+                index: 0,
+                delta: ChunkDelta::default(),
+                finish_reason: None,
+                matched_stop_sequence: None,
+            }],
+            usage: None,
+            opaque_events: vec![OpaqueSseEvent::OutputItem { item }],
+            upstream_meta: None,
+        }
+    }
+
     fn tool_delta_chunk(
         &self,
         call_id: String,
@@ -954,6 +1097,16 @@ const fn json_type_name(v: &Value) -> &'static str {
         Value::Array(_) => "array",
         Value::Object(_) => "object",
     }
+}
+
+fn item_type_of(item: &Value) -> &str {
+    item.get("type").and_then(Value::as_str).unwrap_or("")
+}
+
+/// Whether `candidate` is an item of the same type as `held`, so a done event
+/// or completed body copy can replace the held item.added payload.
+fn same_item_type(candidate: &Value, held: &Value) -> bool {
+    candidate.is_object() && item_type_of(candidate) == item_type_of(held)
 }
 
 /// Return the upstream-stable id when non-empty, otherwise mint a fresh
@@ -1022,3 +1175,7 @@ mod tests;
 #[cfg(test)]
 #[path = "sse_tool_args_tests.rs"]
 mod tool_args_tests;
+
+#[cfg(test)]
+#[path = "sse_passthrough_tests.rs"]
+mod passthrough_tests;

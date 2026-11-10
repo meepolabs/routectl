@@ -504,10 +504,11 @@ impl Provider for OpenAiResponsesProvider {
         let event_stream = byte_stream.eventsource();
         let response_tap = crate::wire_declare::response_tap(&req);
         let observation = req.routectl_internal.observation.clone();
+        let provenance = req.routectl_internal.provenance;
 
         let stream = async_stream::stream! {
             let mut pending_upstream_meta = upstream_meta;
-            let mut state = sse::ResponsesStreamState::new(auth_kind);
+            let mut state = sse::ResponsesStreamState::new(auth_kind, provenance, observation.clone());
             let mut completion = StreamCompletion::new(PROVIDER_KIND, sse::is_terminal_event)
                 .with_observation(observation);
             futures::pin_mut!(event_stream);
@@ -654,7 +655,7 @@ impl OpenAiResponsesProvider {
 /// would be unreachable. Synchronous: the observation scope it opens must
 /// never span an `.await`.
 fn gate_unmodeled_output_items(req: &ChatRequest, resp: &mut ChatResponse) {
-    if req.routectl_internal.provenance == routectl_core::RequestProvenance::ResponsesIngress {
+    if client_carries_unmodeled_items(req.routectl_internal.provenance) {
         return;
     }
     let mut dropped: Vec<String> = Vec::new();
@@ -675,6 +676,12 @@ fn gate_unmodeled_output_items(req: &ChatRequest, resp: &mut ChatResponse) {
     );
     // TRANSLATION-DROP: lane=openai-responses class=output_item_unrepresentable test=a_non_responses_client_loses_the_unmodeled_item_and_counts_it_once
     crate::translation_drop_metrics::record_translation_drop(LANE, "output_item_unrepresentable");
+}
+
+/// Whether the client's dialect has a shape for an upstream output item this
+/// lane does not model. Only a Responses client does.
+pub(super) fn client_carries_unmodeled_items(provenance: routectl_core::RequestProvenance) -> bool {
+    provenance == routectl_core::RequestProvenance::ResponsesIngress
 }
 
 /// Drop every non-refusal `ContentPart::Other`, naming each in `dropped`; what
