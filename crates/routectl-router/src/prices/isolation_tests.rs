@@ -1,15 +1,23 @@
 //! Routing and the providers never read a price: no source file under the
 //! router's dispatch module or the providers crate names the price module,
-//! the shipped table, or the price book.
+//! the shipped table, the price book, the effective-price resolvers, the
+//! `[registry]` price lookup, or a model's pricing block.
 
 use std::path::{Path, PathBuf};
 
-/// The tokens a file reaching price state would have to name.
-fn forbidden_tokens() -> [String; 3] {
+/// The tokens a file reaching price state would have to name. Each is
+/// assembled from parts so this file does not name it whole.
+fn forbidden_tokens() -> [String; 9] {
     [
         format!("{}{}", "prices", "::"),
+        format!("{}{}", "crate::", "prices"),
         format!("{}{}", "shipped", "_table"),
         format!("{}{}", "Price", "Book"),
+        format!("{}{}", "pricing", "_for"),
+        format!("{}{}", "Pricing", "Config"),
+        format!("{}{}", "effective", "_pricing"),
+        format!("{}{}", "derive_effective", "_view"),
+        format!("{}{}", ".", "pricing"),
     ]
 }
 
@@ -68,11 +76,21 @@ fn routing_and_providers_name_no_price_state() {
 /// the scan's own list, so a weakened list fails this test.
 #[test]
 fn the_scan_finds_each_forbidden_token() {
-    for token in ["prices::", "shipped_table", "PriceBook"] {
+    for token in [
+        "prices::",
+        "crate::prices",
+        "shipped_table",
+        "PriceBook",
+        "pricing_for",
+        "PricingConfig",
+        "effective_pricing",
+        "derive_effective_view",
+        ".pricing",
+    ] {
         let dir = tempfile::tempdir().expect("temp dir");
         let nested = dir.path().join("nested");
         std::fs::create_dir(&nested).expect("nested dir");
-        std::fs::write(nested.join("planted.rs"), format!("use crate::{token}x;\n"))
+        std::fs::write(nested.join("planted.rs"), format!("let _ = {token};\n"))
             .expect("plant file");
         std::fs::write(dir.path().join("clean.rs"), "fn f() {}\n").expect("clean file");
 

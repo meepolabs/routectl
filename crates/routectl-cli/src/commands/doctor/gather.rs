@@ -273,6 +273,11 @@ pub(super) fn derive_knob_rows(
                 upstream: cell.upstream.clone(),
                 fill,
                 lowers,
+                configured: config
+                    .models
+                    .get(&cell.nickname)
+                    .and_then(|entry| entry.max_output_tokens)
+                    .filter(|tokens| *tokens > 0),
             }
         })
         .collect()
@@ -305,9 +310,19 @@ pub(super) fn derive_pricing_rows(config: &Config, view: &EffectiveView) -> Vec<
             subscription: is_subscription(config, &cell.provider),
             pricing: cell.pricing.clone(),
             sources: cell.price_sources,
+            registry_matched: registry_matches(config, &cell.provider, &cell.upstream),
             tables: view.price_tables,
         })
         .collect()
+}
+
+/// Whether a `[registry]` row matches `upstream` served through `provider`,
+/// keyed on the entry a pool bills under, as the effective view resolves it.
+fn registry_matches(config: &Config, provider: &str, upstream: &str) -> bool {
+    let billed = config
+        .provider_entry_for_target(provider)
+        .map_or(provider, |(key, _)| key);
+    config.pricing_for(upstream, billed).is_some()
 }
 
 /// Rebuild the learned-capability matrix read-only from the usage ledger for

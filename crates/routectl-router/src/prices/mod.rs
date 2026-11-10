@@ -67,9 +67,8 @@
 //! 1. The normalized origin of the target's egress base URL against each
 //!    provider's `api_host`; a loopback base URL never matches. Several
 //!    providers on one origin are ranked by the longest common path prefix,
-//!    then by how many path segments they share in any position, then by
-//!    whether the provider lists the exact upstream id; a tie on all three
-//!    is unknown.
+//!    then by how many path segments they share in any position; a tie on
+//!    both is unknown, whichever provider lists the upstream id.
 //! 2. With no origin match, a first-party fallback for the kinds with a fixed
 //!    vendor: anthropic-api -> `anthropic`, openai-responses -> `openai`,
 //!    gemini -> `google`, bedrock -> `amazon-bedrock`.
@@ -197,7 +196,7 @@ impl PriceTable {
         base_url: Option<&str>,
         upstream: &str,
     ) -> Option<SelectedRow<'_>> {
-        let provider = self.select_provider(kind, base_url, upstream)?;
+        let provider = self.select_provider(kind, base_url)?;
         provider.models.get(upstream).map(|prices| SelectedRow {
             provider: provider.id.as_str(),
             prices: prices.clone(),

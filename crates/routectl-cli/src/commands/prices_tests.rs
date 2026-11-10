@@ -528,6 +528,34 @@ fn a_write_into_an_unusable_directory_fails_without_a_temp_file() {
     assert_eq!(std::fs::read_dir(dir.path()).expect("list").count(), 1);
 }
 
+/// A failed directory fsync after the rename is reported as a WARN with the
+/// error kind; a successful one logs nothing.
+#[test]
+fn a_failed_directory_fsync_warns_with_its_error_kind() {
+    let rows = [
+        (
+            "fsync failed",
+            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+            Some("PermissionDenied"),
+        ),
+        ("fsync succeeded", Ok(()), None),
+    ];
+    for (name, result, expected) in rows {
+        let events = routectl_testkit::capture_events(|| warn_on_parent_sync_failure(result));
+
+        let warned: Vec<_> = events
+            .iter()
+            .filter(|e| e.level == tracing::Level::WARN)
+            .collect();
+        assert_eq!(
+            warned.first().and_then(|e| e.field("io_error")),
+            expected,
+            "{name}: {events:?}"
+        );
+        assert_eq!(warned.len(), usize::from(expected.is_some()), "{name}");
+    }
+}
+
 fn assert_fetch_line_is_stripped(name: &str, lines: &[String]) {
     let fetch_line = lines
         .iter()

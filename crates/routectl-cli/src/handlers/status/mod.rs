@@ -749,6 +749,76 @@ mod tests {
         }
     }
 
+    /// The span of `UnpinnedPricer::pin`'s body in `production`: from the
+    /// opening brace after its signature to the matching close.
+    fn unpinned_pin_body(production: &str) -> std::ops::Range<usize> {
+        let imp = production
+            .find(&format!("{}{}", "impl Unpinned", "Pricer {"))
+            .expect("router_view defines the unpinned pricer");
+        let sig = imp
+            + production[imp..]
+                .find(&format!("{}{}", "pub fn pin", "(self)"))
+                .expect("the unpinned pricer has a pin method");
+        let open = sig + production[sig..].find('{').expect("pin has a body");
+        let mut depth = 0usize;
+        for (offset, ch) in production[open..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return open..open + offset + 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("pin body is unterminated");
+    }
+
+    /// Each book read in `production` that falls outside `body`.
+    fn book_reads_outside(production: &str, body: &std::ops::Range<usize>) -> Vec<String> {
+        let reads = [
+            format!("{}{}", ".current", "()"),
+            format!("{}{}", ".pin", "()"),
+            format!("{}{}", "PriceSnapshot::", "pin"),
+        ];
+        reads
+            .iter()
+            .flat_map(|read| {
+                production
+                    .match_indices(read.as_str())
+                    .filter(|(idx, _)| !body.contains(idx))
+                    .map(|(idx, _)| format!("{read} at byte {idx}"))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    /// The query pricer reads the book only inside `UnpinnedPricer::pin`, the
+    /// one call the query builder makes on its blocking worker. Controls: the
+    /// pin body itself reads the book, and a read planted outside it is found.
+    #[test]
+    fn the_query_pricer_reads_the_book_only_inside_unpinned_pin() {
+        let production = production_source::production_source(include_str!("router_view.rs"));
+        let body = unpinned_pin_body(production);
+
+        assert_eq!(book_reads_outside(production, &body), Vec::<String>::new());
+        assert!(
+            production[body.clone()].contains(&format!("{}{}", "PriceSnapshot::", "pin")),
+            "control: the pin body reads the book"
+        );
+        let planted = format!(
+            "{production}\nfn stray(b: &PriceBook) {{ {}{}(b); }}\n",
+            "PriceSnapshot::", "pin"
+        );
+        assert_eq!(
+            book_reads_outside(&planted, &unpinned_pin_body(&planted)).len(),
+            1,
+            "control: a read outside the pin body is found"
+        );
+    }
+
     /// The builder permit is released on the NON-success exits too, so a panel
     /// that fails repeatedly cannot leak capacity a poll at a time until the
     /// status surface wedges.

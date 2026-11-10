@@ -1,12 +1,14 @@
 //! Capability-key vocabulary shared across routectl-core consumers.
 //!
 //! Single namespace source for the well-known capability keys: the
-//! router's `feature_keys.rs` (alias-chain pre-filter) and the catalog's
-//! capability priors both key off these same strings, so a learned
-//! negative and a catalog-declared capability meet on identical keys.
-//! The vocabulary is open-ended -- the catalog map and
-//! `derive_feature_keys` both accept arbitrary string keys -- this
-//! module documents only the well-known subset.
+//! router's `feature_keys.rs` (alias-chain pre-filter), its learned
+//! verdicts and the operator's `[capability.overrides]` cells all key off
+//! these same strings, so a learned negative and an override meet on
+//! identical keys. Verdicts are learned from upstream evidence or set by
+//! an override; `Assumed` is never minted and only reads back from older
+//! ledger rows. The vocabulary is open-ended (`derive_feature_keys`
+//! accepts arbitrary string keys); this module documents only the
+//! well-known subset.
 
 /// Feature key for web-search tool use.
 pub const WEB_SEARCH: &str = "web_search";

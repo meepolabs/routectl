@@ -25,16 +25,15 @@ pub(super) enum HostMatch<'a> {
 }
 
 impl PriceTable {
-    /// The table provider for a target of `kind` egressing to `base_url`,
-    /// looked up for `upstream`, or `None` when selection is unknown.
+    /// The table provider for a target of `kind` egressing to `base_url`, or
+    /// `None` when selection is unknown.
     pub(super) fn select_provider(
         &self,
         kind: &str,
         base_url: Option<&str>,
-        upstream: &str,
     ) -> Option<&ProviderPrices> {
         if let Some(target) = base_url.and_then(remote_base) {
-            match self.match_host(&target, upstream) {
+            match self.match_host(&target) {
                 HostMatch::One(provider) => return Some(provider),
                 HostMatch::Ambiguous => return None,
                 HostMatch::None => {}
@@ -48,9 +47,10 @@ impl PriceTable {
 
     /// The same-origin provider that best fits `target`, ranked by the
     /// longest common path prefix, then the count of path segments both
-    /// share in any position, then whether it lists `upstream`. Ambiguous
-    /// only when the best candidates tie on all three.
-    pub(super) fn match_host(&self, target: &ApiBase, upstream: &str) -> HostMatch<'_> {
+    /// share in any position. Ambiguous when the best candidates tie on
+    /// both: which provider lists the upstream never breaks a tie, since
+    /// same-host providers can bill one model under different regimes.
+    pub(super) fn match_host(&self, target: &ApiBase) -> HostMatch<'_> {
         let mut best: Option<(PathFit, &ProviderPrices)> = None;
         let mut tied = false;
         for provider in &self.providers {
@@ -60,7 +60,6 @@ impl PriceTable {
             let fit = PathFit {
                 prefix: common_prefix(&api.segments, &target.segments),
                 shared: shared_segments(&api.segments, &target.segments),
-                lists_upstream: provider.models.contains_key(upstream),
             };
             match best {
                 Some((top, _)) if fit < top => {}
@@ -85,7 +84,6 @@ impl PriceTable {
 struct PathFit {
     prefix: usize,
     shared: usize,
-    lists_upstream: bool,
 }
 
 /// The comparable form of a target base URL; `None` for a loopback or local

@@ -392,7 +392,7 @@ pub(crate) struct DoctorContext {
     /// model with its own first-content timeout, each cell carrying the tier
     /// that supplied it. Read from the config alone.
     tuning: Vec<TuningRow>,
-    /// The running daemon's last rejected config / overlay reload, as a closed
+    /// The running daemon's last rejected config reload, as a closed
     /// class and an age. Only a served gather sets it; the CLI reads the files
     /// itself, so their errors render directly.
     reload_failure: Option<ReloadFailureSnapshot>,
@@ -456,10 +456,12 @@ enum LegacyFolder {
 /// the caller omits one, and where it comes from.
 ///
 /// Read off the router's effective view (the configured or default fill the
-/// factory stamps) lowered by the learned ceiling resident for the model, so
-/// the diagnostic names the fill the pre-flight would clamp to. The learned
-/// value is the resident ceiling; whether a given request is clamped still
-/// depends on the pre-flight's per-request gates.
+/// factory stamps) lowered by the learned ceiling that would apply to the
+/// model, so the diagnostic names the fill the pre-flight would clamp to. A
+/// learned value shows only with capability learning enabled, on a lane whose
+/// kind field repair admits, and with no `force_supported` override masking
+/// `max_tokens`. The pre-flight's per-request gates (writer health, verdict
+/// quorum) are not reflected, so a given request may still go unclamped.
 struct KnobRow {
     /// The `[models.<nickname>]` key.
     nickname: String,
@@ -469,10 +471,14 @@ struct KnobRow {
     /// The upstream model id the fill was resolved for.
     upstream: String,
     /// The fill and its source; `None` when the egress forwards an omitted
-    /// limit as omitted.
+    /// limit as omitted. A pool-backed model reads the egress of its first
+    /// resolvable member for the whole pool, even when members differ in
+    /// egress (Bedrock Invoke and Converse share one kind).
     fill: Option<FillCeiling>,
     /// For a `learned` fill, the value it lowers.
     lowers: Option<u32>,
+    /// The model's configured `max_output_tokens`, when set and nonzero.
+    configured: Option<u32>,
 }
 
 /// One configured model's effective prices, read off the router's effective
@@ -496,6 +502,9 @@ struct PricingRow {
     pricing: PricingConfig,
     /// The source of each field of [`Self::pricing`].
     sources: PriceSources,
+    /// Whether a `[registry]` row matched, which wins whole even when it
+    /// prices nothing.
+    registry_matched: bool,
     /// The dates of the price tables the resolution read.
     tables: PriceTableDates,
 }

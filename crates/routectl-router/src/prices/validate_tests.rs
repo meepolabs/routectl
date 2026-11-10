@@ -190,6 +190,32 @@ fn duplicate_rows_are_refused() {
             ])),
             PriceTableError::DuplicateProvider,
         ),
+        (
+            "duplicate unusable provider id",
+            table(json!([
+                { "id": "acme", "models": [priced_model("m")] },
+                { "id": "", "models": [priced_model("m")] },
+                { "id": "", "models": [priced_model("n")] },
+            ])),
+            PriceTableError::DuplicateProvider,
+        ),
+        (
+            "duplicate unusable model id",
+            one_provider(json!([
+                priced_model("kept"),
+                priced_model(""),
+                priced_model("")
+            ])),
+            PriceTableError::DuplicateModel,
+        ),
+        (
+            "duplicate model under an unusable provider",
+            table(json!([
+                { "id": "acme", "models": [priced_model("m")] },
+                { "id": "", "models": [priced_model("n"), priced_model("n")] },
+            ])),
+            PriceTableError::DuplicateModel,
+        ),
     ];
     for (name, doc, expected) in rows {
         assert_eq!(parse(&doc).err(), Some(expected), "{name}");

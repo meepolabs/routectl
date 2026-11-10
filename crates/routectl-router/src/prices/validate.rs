@@ -40,7 +40,8 @@ pub(super) const fn check_size(bytes: &[u8]) -> Result<(), PriceTableError> {
 /// the raw table is deserialized.
 ///
 /// Structure fails closed: a bad date, a duplicate provider or (provider,
-/// model) row, and a table with no priced model refuse the whole table. A
+/// model) row (usable or not), and a table with no priced model refuse the
+/// whole table. A
 /// single row a newer writer might shape differently does not: a provider
 /// or model id that is empty, over its byte bound or outside printable
 /// ASCII is skipped and counted (its prices stay unknown and the id is never
@@ -52,14 +53,15 @@ pub(super) fn validate(raw: RawTable) -> Result<PriceTable, PriceTableError> {
     let mut skipped_rows = 0usize;
     let mut providers = Vec::with_capacity(raw.providers.len());
     for provider in raw.providers {
-        if !id_usable(&provider.id, MAX_PROVIDER_ID_BYTES) {
-            skipped_rows = skipped_rows.saturating_add(provider.models.len());
-            continue;
-        }
         if !seen.insert(provider.id.clone()) {
             return Err(PriceTableError::DuplicateProvider);
         }
+        let row_count = provider.models.len();
         let (models, skipped) = validate_models(provider.models)?;
+        if !id_usable(&provider.id, MAX_PROVIDER_ID_BYTES) {
+            skipped_rows = skipped_rows.saturating_add(row_count);
+            continue;
+        }
         skipped_rows = skipped_rows.saturating_add(skipped);
         providers.push(ProviderPrices {
             id: provider.id,
@@ -88,7 +90,11 @@ fn validate_models(
 ) -> Result<(BTreeMap<String, PricingConfig>, usize), PriceTableError> {
     let mut out = BTreeMap::new();
     let mut skipped = 0usize;
+    let mut seen = BTreeSet::new();
     for model in models {
+        if !seen.insert(model.id.clone()) {
+            return Err(PriceTableError::DuplicateModel);
+        }
         if !id_usable(&model.id, MAX_MODEL_ID_BYTES) {
             skipped += 1;
             continue;
@@ -100,9 +106,7 @@ fn validate_models(
             cache_write_5m_per_mtok: model.cache_write_5m.and_then(admit_price),
             cache_write_1h_per_mtok: model.cache_write_1h.and_then(admit_price),
         };
-        if out.insert(model.id, prices).is_some() {
-            return Err(PriceTableError::DuplicateModel);
-        }
+        out.insert(model.id, prices);
     }
     Ok((out, skipped))
 }

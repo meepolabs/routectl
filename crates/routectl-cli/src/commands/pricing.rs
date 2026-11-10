@@ -11,7 +11,7 @@
 
 use std::sync::Arc;
 
-use routectl_router::prices::{PriceBook, PriceTable, shipped_table};
+use routectl_router::prices::{PriceBook, PriceSource, PriceSources, PriceTable, shipped_table};
 
 use crate::commands::prices::PRICES_FILE;
 use routectl_router::{Config, PricingConfig};
@@ -106,6 +106,22 @@ pub(super) fn is_subscription(config: &Config, target: &str) -> bool {
 /// priced at nothing, which is a fact), while an absent rate never does.
 pub(super) fn rate_covers(rate: Option<f64>) -> bool {
     rate.is_some_and(|r| r >= 0.0)
+}
+
+/// Whether a priced row resolved from `sources` is complete-or-absent: a
+/// dimension it used with no rate leaves it unpriced. True for every row
+/// except one a `[registry]` row prices, which counts an absent rate as `0`
+/// as the operator wrote it. A table gap or a partial `[models.X.pricing]`
+/// block is not a statement that the dimension is free.
+pub(super) fn is_complete_or_absent(sources: &PriceSources) -> bool {
+    ![
+        sources.input,
+        sources.output,
+        sources.cache_read,
+        sources.cache_write_5m,
+        sources.cache_write_1h,
+    ]
+    .contains(&PriceSource::Registry)
 }
 
 /// The rate dimensions an API-equivalent value needs priced, in the order a

@@ -292,6 +292,88 @@ fn a_subscription_row_keeps_its_equivalence_clause() {
     );
 }
 
+/// A non-subscription priced row whose rates do not come from a whole
+/// `[registry]` row names the dimensions usage reports as unpriced; a
+/// `[registry]` row keeps counting them at $0, so it carries no clause. A
+/// matching `[registry]` row that prices nothing is named as the reason the
+/// model is unpriced.
+#[test]
+fn a_priced_row_names_the_dimensions_usage_reports_as_unpriced() {
+    // Arrange
+    let shipped = table(
+        SHIPPED_DATE,
+        json!({ "id": "anthropic", "models": [
+            { "id": "claude-partial", "input": 1.0, "output": 5.0 },
+        ]}),
+    );
+    let prices = PriceSnapshot::from_tables(None, Some(Box::leak(Box::new(shipped))));
+    let mut cfg = Config::default();
+    cfg.providers.insert(
+        "anth".to_string(),
+        ProviderEntry::anthropic_api("env://ANTH_KEY"),
+    );
+    for (nickname, upstream) in [
+        ("shipped-partial", "claude-partial"),
+        ("registry-partial", "operator-priced"),
+        ("registry-empty", "operator-empty"),
+    ] {
+        cfg.models
+            .insert(nickname.to_string(), ModelEntry::new("anth", upstream));
+    }
+    for (upstream, pricing) in [
+        (
+            "operator-priced",
+            PricingConfig {
+                input_per_mtok: Some(1.5),
+                ..Default::default()
+            },
+        ),
+        ("operator-empty", PricingConfig::default()),
+    ] {
+        cfg.registry.insert(
+            upstream.to_string(),
+            RegistryEntry {
+                pricing: Some(pricing),
+                provider: None,
+            },
+        );
+    }
+    let clause = "usage reports no cost for traffic that uses unpriced dimensions";
+    let rows: [(&str, &str, Option<&str>); 3] = [
+        (
+            "shipped-partial",
+            "priced -- ",
+            Some(
+                "usage reports no cost for traffic that uses unpriced dimensions (cache read, \
+                 cache write 5m); set them in [models.shipped-partial.pricing]",
+            ),
+        ),
+        ("registry-partial", "priced -- ", None),
+        (
+            "registry-empty",
+            "unpriced: the matching [registry] row prices nothing -- ",
+            None,
+        ),
+    ];
+
+    // Act
+    let findings = section_pricing(&pricing_context(cfg, &prices));
+
+    // Assert
+    for (nickname, lead, expected_clause) in rows {
+        let detail = pricing_detail(&findings, nickname);
+        assert!(detail.starts_with(lead), "{nickname}: {detail}");
+        match expected_clause {
+            Some(expected) => assert!(detail.contains(expected), "{nickname}: {detail}"),
+            None => assert!(!detail.contains(clause), "{nickname}: {detail}"),
+        }
+    }
+    assert!(
+        pricing_detail(&findings, "shipped-partial").contains("cache write 1h $2.00 (derived)"),
+        "premise: the derived 1h write resolves and is not named"
+    );
+}
+
 /// A table provider id distinct from every config string.
 const FOREIGN_PROVIDER: &str = "zz-foreign-provider";
 /// A table API path segment no config string carries.
@@ -475,9 +557,9 @@ fn knob_config() -> Config {
 
 /// Each knobs row names the fill the model's egress sends and its source:
 /// `model-config` for the configured value, `learned` where a resident
-/// learned ceiling lowers it, else `default` with the egress baseline, or
-/// unset on an egress that forwards an omitted limit, even with a configured
-/// value. A learned ceiling that would not lower the value, sits below the
+/// learned ceiling lowers it, else `default` with the egress baseline. On an
+/// egress that forwards an omitted limit it reads unset, or names a
+/// configured value as sizing the window-gate reserve. A learned ceiling that would not lower the value, sits below the
 /// clamp floor, has lapsed, or is masked by a `force_supported` override on
 /// `max_tokens` (model or provider tier) does not apply, as at dispatch.
 #[test]
@@ -522,7 +604,12 @@ fn each_knobs_row_names_model_config_learned_or_default() {
         ("learned-lapsed", "max_output_tokens 64000 (default)"),
         ("default-fills", "max_output_tokens 64000 (default)"),
         ("default-forwards", "max_output_tokens unset --"),
-        ("configured-forwards", "max_output_tokens unset --"),
+        (
+            "configured-forwards",
+            "max_output_tokens 32000 (model-config) -- kind openai-compat upstream \
+             up-vendor-configured; the egress forwards an omitted limit as omitted; this value \
+             sizes the window-gate reserve",
+        ),
         ("masked-model", "max_output_tokens 64000 (default)"),
         ("masked-provider", "max_output_tokens 64000 (default)"),
     ];

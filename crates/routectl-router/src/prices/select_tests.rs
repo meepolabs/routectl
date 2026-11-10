@@ -1,5 +1,5 @@
-//! Provider selection: origin match ranked by path prefix, shared segments
-//! and upstream listing, loopback, ambiguity, first-party fallback, exact
+//! Provider selection: origin match ranked by path prefix and shared
+//! segments, loopback, ambiguity, first-party fallback, exact
 //! upstream lookup, and pools.
 
 use serde_json::{Value, json};
@@ -134,11 +134,11 @@ fn origin_match_selects_by_host_and_longest_path_prefix() {
 }
 
 /// With no common path prefix, the provider sharing more path segments in
-/// any position wins; with those tied too, the one listing the upstream
-/// wins; with all three tied, selection is unknown. Hosts come from the
-/// shipped table, so the rows move with it.
+/// any position wins; with those tied too, selection is unknown even when
+/// only one provider lists the upstream. Hosts come from the shipped table,
+/// so the rows move with it.
 #[test]
-fn same_origin_ties_break_by_shared_segments_then_upstream_listing() {
+fn same_origin_ties_break_by_shared_segments_only() {
     let target = format::ApiBase::parse(OPENCODE_GO_BASE).expect("base parses");
     let host = |id: &str| format::ApiBase::parse(&shipped_host(id)).expect("host parses");
     assert!(
@@ -164,7 +164,7 @@ fn same_origin_ties_break_by_shared_segments_then_upstream_listing() {
             "segments tie, only opencode lists the upstream",
             "https://opencode.ai/zen/v1",
             ONLY_OPENCODE,
-            Some(1.0),
+            None,
         ),
         (
             "segments tie and both list the upstream",
@@ -178,6 +178,50 @@ fn same_origin_ties_break_by_shared_segments_then_upstream_listing() {
             input_for_model("openai-compat", Some(base), upstream),
             expected,
             "{name}"
+        );
+    }
+}
+
+/// A pay-as-you-go host shared with a coding plan: only the plan lists the
+/// upstream, and that listing must not price the traffic from the plan's
+/// rows. Runs against the shipped table itself, for every upstream the plan
+/// alone lists, so the rows move with each regeneration.
+#[test]
+fn a_shared_pay_as_you_go_and_plan_host_is_unknown_for_a_plan_only_model() {
+    const BASE: &str = "https://api.minimax.io/anthropic";
+    let shipped = shipped::shipped_table().expect("shipped table parses");
+    let target = format::ApiBase::parse(BASE).expect("base parses");
+    let plan = shipped
+        .provider("minimax-coding-plan")
+        .expect("plan listed");
+    let payg = shipped.provider("minimax").expect("pay-as-you-go listed");
+    assert_eq!(
+        shipped_host("minimax"),
+        shipped_host("minimax-coding-plan"),
+        "premise: both providers share one api_host"
+    );
+    assert!(
+        format::ApiBase::parse(&shipped_host("minimax")).is_some_and(|h| h.origin == target.origin),
+        "premise: the target is on that origin"
+    );
+    let plan_only: Vec<&str> = plan
+        .models
+        .keys()
+        .filter(|id| !payg.models.contains_key(*id))
+        .map(String::as_str)
+        .collect();
+    assert!(
+        plan_only.iter().any(|id| id.ends_with("-Flash-Preview")),
+        "premise: the plan alone lists the flash preview: {plan_only:?}"
+    );
+
+    for upstream in plan_only {
+        let selected = shipped.price_for_target("anthropic-api", Some(BASE), upstream);
+
+        assert!(
+            selected.is_none(),
+            "{upstream}: selected {:?}",
+            selected.map(|r| r.provider)
         );
     }
 }
@@ -196,7 +240,7 @@ fn a_loopback_base_url_never_matches_a_table_host() {
     for (name, base) in rows {
         let parsed = format::ApiBase::parse(base).expect("base parses");
         assert!(
-            t.match_host(&parsed, "m").is_one(),
+            t.match_host(&parsed).is_one(),
             "{name}: positive control, the origin alone would match a table row"
         );
         assert_eq!(input_for("openai-compat", Some(base)), None, "{name}");

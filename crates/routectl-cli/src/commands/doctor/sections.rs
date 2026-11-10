@@ -12,7 +12,7 @@ use routectl_router::prices::{PriceSources, TableDate};
 
 use crate::commands::config::MAX_REPORTED_LINE_CHARS;
 use crate::commands::config_effective::{tuning_cells, tuning_kind};
-use crate::commands::pricing::missing_equivalence_dimensions;
+use crate::commands::pricing::{is_complete_or_absent, missing_equivalence_dimensions};
 use crate::commands::probe::{login_id_for, probe_finding};
 use crate::commands::seat_report::{
     PoolHealth, PoolRow, describe_pool, describe_row, pool_rows, safe, stored_seat_pool_rows,
@@ -751,13 +751,21 @@ pub(super) fn pricing_finding(row: &PricingRow) -> Finding {
              prices: {fields}; {}; {tables}",
             render_equivalence_clause(&row.nickname, &row.pricing, unpriced)
         )
+    } else if unpriced && row.registry_matched {
+        format!(
+            "unpriced: the matching [registry] row prices nothing -- {selector}; {fields}; \
+             usage reports no cost for it; {tables}"
+        )
     } else if unpriced {
         format!(
             "unpriced: no source prices it -- {selector}; {fields}; usage reports no cost for \
              it; {tables}"
         )
     } else {
-        format!("priced -- {selector}; {fields}; {tables}")
+        match render_unpriced_dimensions_clause(&row.nickname, &row.pricing, &row.sources) {
+            Some(clause) => format!("priced -- {selector}; {fields}; {clause}; {tables}"),
+            None => format!("priced -- {selector}; {fields}; {tables}"),
+        }
     };
     Finding {
         section: "pricing",
@@ -828,6 +836,29 @@ fn render_equivalence_clause(nickname: &str, pricing: &PricingConfig, unpriced: 
     }
 }
 
+/// The priced row's missing-dimensions clause: usage is complete-or-absent
+/// for a row a `[registry]` row does not price, so this names the dimensions
+/// whose traffic usage reports as unpriced. `None` when every price resolves
+/// or a `[registry]` row prices the row.
+fn render_unpriced_dimensions_clause(
+    nickname: &str,
+    pricing: &PricingConfig,
+    sources: &PriceSources,
+) -> Option<String> {
+    if !is_complete_or_absent(sources) {
+        return None;
+    }
+    let missing = missing_equivalence_dimensions(pricing);
+    (!missing.is_empty()).then(|| {
+        format!(
+            "usage reports no cost for traffic that uses unpriced dimensions ({}); set them in \
+             [models.{}.pricing]",
+            missing.join(", "),
+            safe(nickname)
+        )
+    })
+}
+
 /// One per-million price as money: at least two decimals, up to four so a
 /// sub-cent price is not rounded away, or `unknown` when no source gives it.
 fn render_rate(per_mtok: Option<f64>) -> String {
@@ -871,10 +902,23 @@ fn knob_finding(row: &KnobRow) -> Finding {
         safe(&row.upstream)
     );
     let detail = match row.fill {
-        None => format!(
-            "max_output_tokens unset -- {selector}; the egress forwards an omitted limit \
-             untouched"
-        ),
+        None => match row.configured {
+            None => format!(
+                "max_output_tokens unset -- {selector}; the egress forwards an omitted limit \
+                 untouched"
+            ),
+            Some(tokens) => {
+                let uses = if row.provider_kind == routectl_core::provider_kind::config::BEDROCK {
+                    "the window-gate reserve and the limit Converse sends with legacy thinking"
+                } else {
+                    "the window-gate reserve"
+                };
+                format!(
+                    "max_output_tokens {tokens} (model-config) -- {selector}; the egress \
+                     forwards an omitted limit as omitted; this value sizes {uses}"
+                )
+            }
+        },
         Some(fill) => {
             let lead = format!(
                 "max_output_tokens {} ({})",

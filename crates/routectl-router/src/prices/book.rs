@@ -18,7 +18,8 @@ use super::{MAX_INPUT_BYTES, PriceTable, PriceTableError, parse_and_validate};
 /// table renamed into place is visible on the next read with no restart.
 /// A present file that cannot be read or parsed keeps the last good table
 /// and logs one WARN per distinct file state, naming only the retained
-/// table's date. An absent file is no table and no WARN.
+/// table's date. An accepted table that skipped rows logs one INFO per
+/// file state with the skipped count. An absent file is no table and no WARN.
 ///
 /// The book reads only its own path. It is shared across tasks by
 /// reference; no lock is held while the file is read or parsed.
@@ -126,7 +127,10 @@ impl PriceBook {
         if state.seen != Some(stamp) {
             state.seen = Some(stamp);
             match outcome {
-                Ok(table) => state.table = Some(Arc::new(table)),
+                Ok(table) => {
+                    note_skipped_rows(&table);
+                    state.table = Some(Arc::new(table));
+                }
                 Err(refusal) => warn_refused(state.table.as_deref(), &refusal),
             }
         }
@@ -136,6 +140,19 @@ impl PriceBook {
     #[cfg(test)]
     fn parse_count(&self) -> usize {
         self.parses.load(Ordering::Relaxed)
+    }
+}
+
+/// One INFO per accepted file state that skipped rows: the count and the
+/// table's date only, never a skipped id.
+fn note_skipped_rows(table: &PriceTable) {
+    let skipped = table.skipped_row_count();
+    if skipped > 0 {
+        tracing::info!(
+            table = %table.generated_at(),
+            skipped_rows = skipped,
+            "price table rows with unusable ids skipped; their prices stay unknown"
+        );
     }
 }
 

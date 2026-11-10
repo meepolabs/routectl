@@ -435,7 +435,9 @@ pub fn read_bounded(reader: impl Read, limit: usize) -> Result<Vec<u8>, BoundedR
 /// a best-effort directory fsync. The parent directory is created when
 /// missing and held at `0o700`, like routectl's other config-folder writers.
 /// A failure before the rename leaves any previous file untouched and removes
-/// the temp file.
+/// the temp file. A directory fsync that fails after the rename logs a WARN
+/// and still succeeds: the new table is in place, only its durability across
+/// a crash is unconfirmed.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), PricesError> {
     routectl_auth::atomic_write::write_0600_atomic_with_policy(
         path,
@@ -446,7 +448,24 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), PricesError> {
         path: path.display().to_string(),
         stage: "atomic write",
         source: std::io::Error::other(reason),
-    })
+    })?;
+    // The shared writer discards its best-effort directory fsync result, so
+    // the directory is synced again here to observe it.
+    if let Some(parent) = path.parent() {
+        warn_on_parent_sync_failure(std::fs::File::open(parent).and_then(|d| d.sync_all()));
+    }
+    Ok(())
+}
+
+/// WARN with the error kind alone (no path) when the directory fsync after a
+/// table write failed.
+fn warn_on_parent_sync_failure(result: std::io::Result<()>) {
+    if let Err(e) = result {
+        tracing::warn!(
+            io_error = ?e.kind(),
+            "price table written but its directory fsync failed; the write may not survive a crash"
+        );
+    }
 }
 
 #[cfg(test)]

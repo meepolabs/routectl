@@ -1009,6 +1009,56 @@ fn model_window_and_fill_carry_their_source() {
     }
 }
 
+/// A pool's fill is read through its first resolvable member: Invoke and
+/// Converse share the `bedrock` kind, so a pool may mix the two shapes, and
+/// member order alone decides whether the pool's row reads the Invoke
+/// baseline or no fill.
+#[cfg(feature = "bedrock")]
+#[test]
+fn a_mixed_shape_bedrock_pool_reads_its_fill_through_the_first_member() {
+    let config = |members: &str| -> Config {
+        toml::from_str(&format!(
+            r#"
+version = 2
+
+[providers.invoke]
+kind = "bedrock"
+region = "us-east-1"
+[providers.invoke.creds]
+kind = "default-chain"
+
+[providers.converse]
+kind = "bedrock"
+region = "us-east-1"
+api_shape = "converse"
+[providers.converse.creds]
+kind = "default-chain"
+
+[pools.mixed]
+members = {members}
+
+[models.pooled]
+provider = "mixed"
+upstream = "anthropic.claude-opus-4-8"
+"#
+        ))
+        .expect("valid config")
+    };
+    let default_fill = Some(FillCeiling {
+        tokens: routectl_providers::anthropic_api::DEFAULT_MAX_OUTPUT_TOKENS,
+        source: FillSource::Default,
+    });
+    let rows = [
+        ("invoke first", r#"["invoke", "converse"]"#, default_fill),
+        ("converse first", r#"["converse", "invoke"]"#, None),
+    ];
+    for (name, members, expected) in rows {
+        let view = derive_effective_view(&config(members), None, None);
+
+        assert_eq!(model(&view, "pooled").fill, expected, "{name}");
+    }
+}
+
 #[test]
 fn fill_source_tokens_are_fixed() {
     assert_eq!(FillSource::ModelConfig.as_str(), "model-config");

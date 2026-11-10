@@ -697,8 +697,10 @@ pub fn derive_effective_view(
 /// The `max_tokens` a model's egress sends when the client omits one: none
 /// when the egress forwards an omitted limit as omitted, else the configured
 /// `max_output_tokens`, else the built-in default. A pool is read through
-/// its first member. A learned ceiling is not applied here; see
-/// [`FillCeiling::lowered_by`].
+/// its first resolvable member alone: members agree on kind, not on egress,
+/// so a `bedrock` pool mixing Invoke and Converse members reports the first
+/// member's egress for the whole pool. A learned ceiling is not applied
+/// here; see [`FillCeiling::lowered_by`].
 #[must_use]
 pub fn fill_ceiling(config: &Config, entry: &ModelEntry) -> Option<FillCeiling> {
     let (_, provider) = config.provider_entry_for_target(&entry.provider)?;

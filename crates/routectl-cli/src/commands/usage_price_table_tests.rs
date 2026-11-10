@@ -266,41 +266,90 @@ fn a_known_zero_price_keeps_the_equivalent_complete() {
     assert_eq!(incomplete, RowCost::Subscription(None));
 }
 
-/// The priced arm is complete-or-absent when its rates come from a price
-/// table: the shipped row prices input and output but not cache reads, so a
-/// row that read from cache is unpriced, never charged $0 for those reads.
-/// The same row with no cache reads is priced. A `[registry]` row that sets
-/// no cache-read price keeps counting the reads at $0, as written.
+/// `[models.sonnet.pricing]` setting only `input` and `output`, so a
+/// cache-read price stays unset.
+fn model_pricing(config: &mut Config, input: Option<f64>, output: Option<f64>) {
+    config.models.get_mut(TABLE_MODEL).unwrap().pricing = Some(PricingConfig {
+        input_per_mtok: input,
+        output_per_mtok: output,
+        ..Default::default()
+    });
+}
+
+/// The priced arm is complete-or-absent unless a whole `[registry]` row
+/// prices it: a row that read from cache with no cache-read price is
+/// unpriced, never charged $0 for those reads, whether the rates came from a
+/// table, from `[models.X.pricing]`, or from both. The same rows with no
+/// cache reads are priced. A `[registry]` row that sets no cache-read price
+/// keeps counting the reads at $0, as written.
 #[test]
-fn a_table_priced_row_with_a_used_unpriced_dimension_is_unpriced() {
-    // Arrange
-    let shipped_only = tables(None, Some(shipped_rows()));
-    let mut registry_config = table_config("env://ANTH_KEY");
-    registry_config
-        .registry
-        .insert(TABLE_UPSTREAM.to_string(), registry_row());
-    let rows: [(&str, Config, Option<i64>, RowCost); 3] = [
-        (
-            "shipped row, cache reads, no cache-read price",
-            table_config("env://ANTH_KEY"),
-            Some(500),
-            RowCost::Unpriced,
-        ),
-        (
-            "shipped row, no cache reads",
-            table_config("env://ANTH_KEY"),
-            None,
-            RowCost::Priced(SHIPPED_USD),
-        ),
-        (
-            "registry row, cache reads, no cache-read price",
-            registry_config,
-            Some(500),
-            RowCost::Priced(2.0),
-        ),
+fn a_row_with_a_used_unpriced_dimension_is_unpriced_unless_registry_prices_it() {
+    struct Row {
+        name: &'static str,
+        configure: fn(&mut Config),
+        prices: fn() -> PriceSnapshot,
+        cache_read: Option<i64>,
+        expected: RowCost,
+    }
+    let shipped_only = || tables(None, Some(shipped_rows()));
+    let rows = [
+        Row {
+            name: "shipped row, cache reads, no cache-read price",
+            configure: |_| {},
+            prices: shipped_only,
+            cache_read: Some(500),
+            expected: RowCost::Unpriced,
+        },
+        Row {
+            name: "shipped row, no cache reads",
+            configure: |_| {},
+            prices: shipped_only,
+            cache_read: None,
+            expected: RowCost::Priced(SHIPPED_USD),
+        },
+        Row {
+            name: "model-config only, cache reads, no cache-read price",
+            configure: |c| model_pricing(c, Some(4.0), Some(6.0)),
+            prices: no_prices,
+            cache_read: Some(500),
+            expected: RowCost::Unpriced,
+        },
+        Row {
+            name: "model-config only, no cache reads",
+            configure: |c| model_pricing(c, Some(4.0), Some(6.0)),
+            prices: no_prices,
+            cache_read: None,
+            expected: RowCost::Priced(10.0),
+        },
+        Row {
+            name: "model-config input plus shipped output, cache reads",
+            configure: |c| model_pricing(c, Some(4.0), None),
+            prices: shipped_only,
+            cache_read: Some(500),
+            expected: RowCost::Unpriced,
+        },
+        Row {
+            name: "model-config input plus shipped output, no cache reads",
+            configure: |c| model_pricing(c, Some(4.0), None),
+            prices: shipped_only,
+            cache_read: None,
+            expected: RowCost::Priced(6.0),
+        },
+        Row {
+            name: "registry row, cache reads, no cache-read price",
+            configure: |c| {
+                c.registry
+                    .insert(TABLE_UPSTREAM.to_string(), registry_row());
+            },
+            prices: shipped_only,
+            cache_read: Some(500),
+            expected: RowCost::Priced(2.0),
+        },
     ];
 
-    for (name, config, cache_read, expected) in rows {
+    for row in rows {
+        let mut config = table_config("env://ANTH_KEY");
+        (row.configure)(&mut config);
         let (_dir, _path, db) = temp_db();
         insert_table_row(
             &db,
@@ -308,14 +357,14 @@ fn a_table_priced_row_with_a_used_unpriced_dimension_is_unpriced() {
             TABLE_PROVIDER,
             TABLE_UPSTREAM,
             Some("anthropic-api"),
-            cache_read,
+            row.cache_read,
         );
 
         // Act
-        let verdict = table_verdict(&db, &config, &shipped_only);
+        let verdict = table_verdict(&db, &config, &(row.prices)());
 
         // Assert
-        assert_eq!(verdict, expected, "{name}");
+        assert_eq!(verdict, row.expected, "{}", row.name);
     }
 }
 

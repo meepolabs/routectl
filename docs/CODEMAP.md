@@ -1917,7 +1917,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   read, no network. `ModelCell` carries each `[models.X]` entry's facts: its
   configured context window, its output fill (`fill_ceiling` ->
   `FillCeiling { tokens, source: FillSource }`, `lowered_by` applying a
-  learned ceiling) and its per-field prices with their sources via
+  learned ceiling; a pool reads its first resolvable member's egress, so a
+  mixed Invoke / Converse `bedrock` pool follows member order) and its per-field prices with their sources via
   `prices::effective_pricing`; `PriceTableDates` dates the two tables the
   view was derived against; `ClassPolicyCell` tags each
   failure class `ClassPolicySource::{Config, BakedDefault}` via
@@ -2184,21 +2185,25 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   do not edit by hand): the JSON Schema for the `config.toml` surface, for
   editor autocomplete / validation. Regenerate via `cargo run --bin
   gen_schema`; pinned by the `schema_gen` golden test
-- `src/prices/mod.rs` -- `PriceTable` (`price_for`, `generated_at`,
+- `src/prices/mod.rs` -- `PriceTable` (`generated_at`, `skipped_row_count`,
   `to_canonical_json`), `PriceTableError`; the usage-cost price table module,
   format and rules in its `//!` doc
 - `src/prices/format.rs` -- canonical on-disk serde shapes, `TableDate`, the
   normalized provider API base
 - `src/prices/validate.rs` -- `parse_and_validate` and the bounds every table
-  passes
+  passes; duplicate provider and (provider, model) ids are refused before the
+  unusable-id skip
 - `src/prices/book.rs` -- `PriceBook`: the refreshed `prices.json`, re-read
   when its mtime or length changes, last good table kept on a refused copy
-  with one WARN naming its date. Tests in `book_tests.rs`
+  with one WARN naming its date; an accepted copy that skipped rows logs one
+  INFO with the count. Tests in `book_tests.rs`
 - `src/prices/bounded.rs` -- the row and provider counts enforced while a
   table is deserialized, and the bounded canonical-format seeds
 - `src/prices/models_dev.rs` -- `from_models_dev`: models.dev `api.json` to the
   canonical table
-- `src/prices/select.rs` -- provider selection for a config target
+- `src/prices/select.rs` -- provider selection for a config target: origin
+  match ranked by common path prefix, then shared segments; a remaining tie
+  is unknown (which provider lists the upstream never breaks it)
 - `src/prices/shipped.rs` -- `shipped_table()`: the release table embedded with
   `include_str!`, parsed once. Tests in `shipped_tests.rs`
 - `src/prices_shipped.json` -- the shipped price table, output of
@@ -2498,9 +2503,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   IS the publication. A revision-changing reload defers it to
   `apply_capability_tuning` at publication, after the boundary has committed,
   because a failed or abandoned boundary leaves the previous Router live and it
-  must keep the settings it was serving under. Evicts no catalog-scoped entry
-  either way: that eviction is the boundary transition's job, so a failed
-  boundary leaves the store untouched. The one removal is the owner sweep
+  must keep the settings it was serving under. Evicts nothing either way;
+  the boundary transition's catalog-scoped prune is a no-op. The one removal is the owner sweep
   (`capability_owner_sweep.rs`), which runs here only on a config-only
   reload; a revision-changing reload defers it to the boundary commit. The
   invalidation WARN + counter still fire),
@@ -3378,8 +3382,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   walk, for doctor, which holds no router);
   `Router::projection_targets` also feeds `status_targets`. `LearnedFills`
   (`resolve(config, lanes, entries, now)`, `for_model`) is the lowest
-  resident learned output ceiling per model over those lanes (skipping a
-  `force_supported` mask), read by `Router::learned_fills` for the status
+  resident learned output ceiling per model over those lanes that would be
+  applied (empty with capability learning disabled; skipping a lane whose
+  kind field repair does not admit and a `force_supported` mask; per-request
+  gates not applied), read by `Router::learned_fills` for the status
   config panel and by doctor's knobs rows
 - `src/router/local_refusal.rs` -- the counting functions behind
   `rc_request_refused_local_total{lane,reason}`: `Router::count_local_refusal`
@@ -3533,7 +3539,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   onto route-away source, strip keys and admissions: `resolve_operator` runs
   over every feature before any claiming learned read, so an override drop,
   `force_supported`, the kill switch or a pinned beta key never claims a
-  re-probe slot; `resolve_open` decides the learned and seed tiers),
+  re-probe slot; `resolve_open` decides the learned tier; the seed is
+  passed as None here; `beta_withhold` supplies it),
   `beta_pinned_for_target`, `override_forces_supported`,
   `apply_strip_interceptor` (the pre-dispatch strip hook -> `StripDecision`),
   the `FilterSource`/`StripDecision` enums, and the
@@ -4546,10 +4553,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `entries`, outside both caps, bounded instead by the installed
   `BetaSeedScope` (`set_seed_scope`; only a seeded cell is marked): a seeded
   `beta:` key's replayed `cleared` row (`replay_cleared`), probe-success clear
-  or finalized purge records one, an acting learned negative lifts it,
-  `commit_boundary_transition` prunes them with the catalog-scoped entries, and
-  the reload owner sweep drops unowned ones. A revision-bump boot restates the
-  surviving ones as `cleared` rows past its fresh tombstone. A path needing
+  or finalized purge records one, an acting learned negative lifts it, and
+  the reload owner sweep drops unowned ones; `commit_boundary_transition`'s
+  catalog-scoped prune of them is a no-op, and a revision-bump boot's
+  restatement of the surviving ones as `cleared` rows past its fresh tombstone
+  is unreachable while the revision stamps are frozen. A path needing
   only a subset still takes what it needs in that sequence, including
   `effective_persistence_generation`, the hand-rolled `Debug` (which SNAPSHOTS all
   four values in order and drops every guard before formatting -- reading them
@@ -6091,7 +6099,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `run` calls `config_folder::refuse_stranded_config` before dispatch unless
   `--config` / `ROUTECTL_CONFIG` names the file; `main` wraps `run` (which dispatches
   `serve` / `init` / `login` / `logout` / `refresh` / `whoami` / `doctor` /
-  `test` / `config` / `provider` / `usage` / `prices` subcommands; the hidden
+  `test` / `config` / `provider` / `usage` / `prices` / `rc` / `capability`
+  subcommands; the hidden
   `catalog` command takes any arguments and only prints a removal pointer to
   `prices refresh` and `[models.X.pricing]`, exiting 2, before config
   resolution) and on an error routes
@@ -6355,9 +6364,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   returns `Ok(None)` and records nothing) into `handle_config_reload` (re-read
   config.toml via `read_parse_validate_config` off a
   `spawn_blocking` worker, rebuild the live `Router` behind `ArcSwap`, carry
-  over per-nickname runtime state, flip the usage capture gate, enqueue one
-  capability replay-boundary tombstone when the two routers' revision stamps
-  differ (unreachable while the stamps are frozen), and emit the restart-required diff via
+  over per-nickname runtime state, flip the usage capture gate, commit one
+  capability replay boundary when the routers' revision stamps differ
+  (unreachable while the stamps are frozen), and emit the restart-required diff via
   `config_classify::collect_restart_required_changes` --
   bind/listener-auth/body-limit, the three `[log]` knobs, `usage.db_path`, and
   `[mitm]` all restart-required since their listeners/state are startup-only;
@@ -8323,7 +8332,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   the token counts, returning the labels (`input`, `output`, `cache read`, `cache
   write 5m`, `cache write 1h`) that do not resolve. Reasoning is not among them --
   a disjoint-reasoning row bills thinking at the OUTPUT rate. Consumed by
-  doctor's `render_equivalence_clause` (`sections.rs`)
+  doctor's `render_equivalence_clause` and `render_unpriced_dimensions_clause`
+  (`sections.rs`). `is_complete_or_absent(&PriceSources)` is the one rule for
+  which priced rows are complete-or-absent: every row no `[registry]` row
+  prices
 - `src/commands/usage.rs` -- `routectl usage` read surface over the usage DB
   (read-only). Calendar windows (`--today`/`--this-week` (Monday-start ISO
   week)/`--this-month`/`--all`) and ad-hoc `--since D [--until E]` ranges
@@ -8355,8 +8367,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   subscription arm alone wraps that body in `rates_cover_used_dimensions`
   (complete-or-absent: any dimension with a nonzero count and no rate per
   `pricing::rate_covers` withholds the whole figure; a known `0` is a price), yielding
-  `RowCost::Subscription(Option<f64>)`; the priced arm's missing-rate-contributes-zero
-  semantics are deliberately untouched, `cost_usd` being a forever contract.
+  `RowCost::Subscription(Option<f64>)`. The priced arm applies the same gate
+  unless a `[registry]` row prices the row (`pricing::is_complete_or_absent`);
+  a `[registry]`-priced row keeps counting a missing rate as zero.
   `Acc` accumulates the equivalent in its own `equivalent_usd` /
   `any_equivalent` pair, a non-finite per-row product reading absent before it
   can poison the sum, and `cost_cell` renders both channels in one cell
@@ -8440,7 +8453,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   or a bounded file read (metadata length plus `take(limit + 1)`), both capped
   at `prices::MAX_INPUT_BYTES`; converts through `prices::from_models_dev`,
   then writes `<config_dir>/prices.json` by same-directory temp, fsync,
-  rename, dir fsync. Logs the URL without userinfo, query or fragment; output
+  rename, dir fsync (a failed dir fsync logs a WARN with its error kind). Logs the URL without userinfo, query or fragment; output
   is counts and the table date. Tests in `prices_tests.rs`
 - `src/commands/probe/mod.rs` -- `routectl provider probe [<name>]`: the
   read-only, free-only reachability report. `probe_all(config, store,
@@ -8561,7 +8574,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `derive_pricing_rows(config, view)` maps each `ModelCell` of the effective
   view (derived once per gather against the pinned price tables) to a
   `PricingRow`, with `pricing::is_subscription` deciding the row's class before
-  any price does; `derive_knob_rows(config, view, matrix)` maps each cell's
+  any price does, and records whether a `[registry]` row matched;
+  `derive_knob_rows(config, view, matrix)` maps each cell's
   `fill` to a `KnobRow`, lowered by the learned ceilings `LearnedFills`
   resolves from the same capability matrix source the panel shows.
   `gather_context_no_network(config_path, sources, legacy_dirs)` is the SINGLE shared
@@ -8649,11 +8663,16 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   the five prices with its source token (`render_price_fields`, an unknown
   price reading `unknown`, never `$0`) and the price table dates; a
   subscription row adds the API-equivalence clause
-  (`render_equivalence_clause`), an unpriced row says usage reports no cost.
+  (`render_equivalence_clause`), a priced row no `[registry]` row prices names
+  its unpriced dimensions (`render_unpriced_dimensions_clause`), and an
+  unpriced row says usage reports no cost, naming a matching `[registry]` row
+  that prices nothing.
   `section_knobs`/`knob_finding` are the fill sibling: one informational
   `Pass` per configured model naming its `max_output_tokens` and the
   `FillSource` (`model-config` / `learned` / `default`), or that the egress
-  forwards an omitted limit untouched. Neither section can `Fail`.
+  forwards an omitted limit, naming a configured value as sizing the
+  window-gate reserve (and Converse's legacy-thinking fill on `bedrock`).
+  Neither section can `Fail`.
   `section_tuning`/`tuning_finding`: one informational `Pass` per tuning row.
   `legacy_folder_finding` adds one config-section `legacy folder` Warn per old
   folder that still holds files or could not be listed, naming it only by its

@@ -1,5 +1,6 @@
 //! The refreshed table file: reparse only on a changed stat, pickup of a
-//! renamed-in copy, last-good retention and its WARN.
+//! renamed-in copy, last-good retention and its WARN, and the skipped-row
+//! INFO.
 
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
@@ -276,4 +277,44 @@ fn concurrent_readers_share_one_table() {
 fn the_book_is_shareable_across_tasks() {
     fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<PriceBook>();
+}
+
+fn skip_notes(events: &[CapturedEvent]) -> Vec<&CapturedEvent> {
+    events
+        .iter()
+        .filter(|e| e.level == tracing::Level::INFO && e.field("skipped_rows").is_some())
+        .collect()
+}
+
+/// An accepted table that skipped rows logs the count once per file state,
+/// never a skipped id; a table that skipped none logs nothing.
+#[test]
+fn skipped_rows_log_their_count_once_per_file_state() {
+    let dir = Dir::new();
+    let unusable_model = "secret marker model";
+    let mut skipping = table(json!([{
+        "id": "acme",
+        "models": [priced_model("m"), priced_model(unusable_model), priced_model("")],
+    }]));
+    skipping["generated_at"] = json!("2026-11-02");
+    dir.rename_in(&table_bytes("2026-11-01", "acme"), 1_000);
+    let book = PriceBook::new(&dir.file);
+
+    let clean = capture_events(|| {
+        book.current().expect("clean table");
+    });
+    let events = capture_events(|| {
+        dir.rename_in(&bytes(&skipping), 2_000);
+        for _ in 0..3 {
+            book.current().expect("skipping table");
+        }
+    });
+
+    assert!(skip_notes(&clean).is_empty(), "{clean:?}");
+    let noted = skip_notes(&events);
+    assert_eq!(noted.len(), 1, "{events:?}");
+    assert_eq!(noted[0].field("skipped_rows"), Some("2"));
+    assert_eq!(noted[0].field("table"), Some("2026-11-02"));
+    let rendered = format!("{events:?}");
+    assert!(!rendered.contains(unusable_model), "{rendered}");
 }

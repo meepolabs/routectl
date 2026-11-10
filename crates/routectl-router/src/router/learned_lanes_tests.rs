@@ -150,3 +150,78 @@ async fn every_status_target_carries_the_lane_dispatch_mints_for_it() {
         .collect();
     assert_eq!(pooled, ["m1#seat-up", "m2#seat-up"]);
 }
+
+/// A resident, unlapsed learned `max_tokens` ceiling of `ceiling` on `lane`.
+fn learned_ceiling(lane: &str, ceiling: u32, now: Instant) -> LearnedRegistryEntry {
+    use routectl_core::capability::{EvidenceSource, FailurePhase, SignalTier, Verdict};
+    LearnedRegistryEntry {
+        state_key: lane.to_string(),
+        feature_key: super::super::field_repair::max_tokens_capability_key()
+            .expect("max_tokens has a capability key"),
+        verdict: Verdict::LearnedBroken(FailurePhase::F1),
+        signal_tier: SignalTier::SelfIdentifying,
+        observations: 1,
+        first_seen: now,
+        last_seen: now,
+        expires_at: now + std::time::Duration::from_hours(1),
+        evidence_class: None,
+        phase: FailurePhase::F1,
+        source: EvidenceSource::Live,
+        recheck_owned: false,
+        value: Some(crate::field_verdict_value::VerdictValue::Ceiling(ceiling)),
+    }
+}
+
+/// The learned fill shows only what would be applied: none with capability
+/// learning disabled, none on a lane whose kind field repair does not admit.
+/// The positive control is the same ceiling on an admitted lane with
+/// learning enabled.
+#[test]
+fn learned_fills_show_only_a_ceiling_the_pre_flight_could_apply() {
+    struct Row {
+        name: &'static str,
+        provider: fn() -> ProviderEntry,
+        enabled: bool,
+        expected: Option<u32>,
+    }
+    let rows = [
+        Row {
+            name: "admitted kind, learning enabled",
+            provider: entry,
+            enabled: true,
+            expected: Some(8_192),
+        },
+        Row {
+            name: "capability learning disabled",
+            provider: entry,
+            enabled: false,
+            expected: None,
+        },
+        #[cfg(feature = "gemini")]
+        Row {
+            name: "kind not admitted to field repair",
+            provider: || ProviderEntry::gemini(crate::test_secret::file_ref("k")),
+            enabled: true,
+            expected: None,
+        },
+    ];
+    for row in rows {
+        // Arrange
+        let now = Instant::now();
+        let mut config = Config::default();
+        config.capability.enabled = row.enabled;
+        config.providers.insert("p".to_string(), (row.provider)());
+        config
+            .models
+            .insert("alpha".to_string(), ModelEntry::new("p", "up"));
+        let lanes = LearnedLaneProjection::from_config(&config);
+        assert_eq!(lanes.lanes().len(), 1, "{}: premise, one lane", row.name);
+        let entries = [learned_ceiling("p#up", 8_192, now)];
+
+        // Act
+        let fills = LearnedFills::resolve(&config, &lanes, &entries, now);
+
+        // Assert
+        assert_eq!(fills.for_model("alpha"), row.expected, "{}", row.name);
+    }
+}

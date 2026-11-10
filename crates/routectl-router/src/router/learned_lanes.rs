@@ -95,12 +95,14 @@ impl LearnedLaneProjection {
     }
 }
 
-/// The learned output ceiling acting on each configured model: the lowest
-/// resident `max_tokens` ceiling across the lanes the model dispatches to
-/// (unlapsed, at or above the clamp floor every clamp honors), skipping a lane where a `[capability.overrides]`
-/// `force_supported` cell masks `max_tokens` for that model, as the
-/// pre-flight does. It is the resident ceiling; whether a given request is
-/// clamped still depends on the pre-flight's per-request gates.
+/// The learned output ceiling that would act on each configured model: the
+/// lowest resident `max_tokens` ceiling across the lanes the model dispatches
+/// to (unlapsed, at or above the clamp floor every clamp honors). Empty when
+/// capability learning is disabled; a lane whose kind field repair does not
+/// admit, or where a `[capability.overrides]` `force_supported` cell masks
+/// `max_tokens` for that model, is skipped, as the pre-flight does. The
+/// pre-flight's per-request gates (writer health, verdict quorum) are not
+/// applied, so a given request may still go unclamped.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LearnedFills {
     by_model: BTreeMap<String, u32>,
@@ -116,12 +118,18 @@ impl LearnedFills {
         entries: &[LearnedRegistryEntry],
         now: Instant,
     ) -> Self {
+        if !config.capability.enabled {
+            return Self::default();
+        }
         let Some(key) = super::field_repair::max_tokens_capability_key() else {
             return Self::default();
         };
         let overrides = OverrideRegistry::build(config);
         let mut by_model: BTreeMap<String, u32> = BTreeMap::new();
         for lane in lanes.lanes() {
+            if !super::field_repair::field_repair_admits_kind(lane.provider_kind) {
+                continue;
+            }
             let Some(ceiling) =
                 super::field_repair::learned_output_ceiling(entries, lane.lane.as_lane_key(), now)
             else {
