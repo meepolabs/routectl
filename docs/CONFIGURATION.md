@@ -3460,7 +3460,9 @@ Four sections are printed:
   same values dispatch runs under, from the same resolver. The
   `/status/config` provider rows keep each entry's own configured
   `rpm_limit`, so a cap a member inherits from its pool shows here (and
-  in `routectl doctor`), not there.
+  in `routectl doctor`), not there. An entry that sets none carries
+  `null` there, which the dashboard reads as "not set here": a pool or
+  default may still apply, so it is not a claim that no cap runs.
 - **capability cells** -- one row per config-derived capability
   override, with its verdict and `source=override`.
 

@@ -286,7 +286,8 @@ fn activation_wire_carries_the_contract_fields() {
 }
 
 /// The three-provider fixture the RPM contract is stated over: an
-/// immediately-throttled entry, an unlimited one, and a capped one.
+/// immediately-throttled entry, one that sets no cap of its own, and a
+/// capped one.
 fn config_with_three_rpm_states() -> Config {
     toml::from_str(
         r#"
@@ -298,10 +299,10 @@ api_key_ref = "env://THROTTLED_KEY"
 base_url = "https://throttled.example/v1"
 rpm_limit = 0
 
-[providers.unlimited]
+[providers.unset]
 kind = "anthropic-api"
-api_key_ref = "env://UNLIMITED_KEY"
-base_url = "https://unlimited.example:8443/v1"
+api_key_ref = "env://UNSET_KEY"
+base_url = "https://unset.example:8443/v1"
 
 [providers.capped]
 kind = "openai-compat"
@@ -327,12 +328,12 @@ fn provider_json(config: &Config, id: &str) -> Value {
 
 /// The RPM field's three states must be DISTINGUISHABLE on the wire, not
 /// merely distinguishable in Rust. An immediately-throttled provider
-/// carries an explicit numeric `0`; an unlimited one carries an explicit
-/// `null`. Skipping the absent case (a `skip_serializing_if`) would
-/// collapse "unlimited" into "the field never arrived", which the client
-/// reports as a different word -- so the key is always present.
+/// carries an explicit numeric `0`; one that sets no cap of its own carries
+/// an explicit `null`. Skipping the absent case (a `skip_serializing_if`)
+/// would collapse "not set here" into "the field never arrived", which the
+/// client reports as a different word -- so the key is always present.
 #[test]
-fn zero_rpm_reaches_the_wire_as_an_explicit_zero_and_unlimited_as_null() {
+fn zero_rpm_reaches_the_wire_as_an_explicit_zero_and_unset_as_null() {
     let config = config_with_three_rpm_states();
 
     let throttled = provider_json(&config, "throttled");
@@ -342,12 +343,12 @@ fn zero_rpm_reaches_the_wire_as_an_explicit_zero_and_unlimited_as_null() {
         "a zero cap must reach the wire as an explicit numeric 0"
     );
 
-    let unlimited = provider_json(&config, "unlimited");
+    let unset = provider_json(&config, "unset");
     assert!(
-        unlimited.as_object().unwrap().contains_key("rpm_limit"),
-        "the unlimited case must carry the key explicitly, never omit it"
+        unset.as_object().unwrap().contains_key("rpm_limit"),
+        "the unset case must carry the key explicitly, never omit it"
     );
-    assert_eq!(unlimited["rpm_limit"], Value::Null);
+    assert_eq!(unset["rpm_limit"], Value::Null);
 
     assert_eq!(
         provider_json(&config, "capped")["rpm_limit"],
@@ -358,7 +359,7 @@ fn zero_rpm_reaches_the_wire_as_an_explicit_zero_and_unlimited_as_null() {
 /// The wire's `rpm_limit` is the provider entry's OWN configured cap, so a
 /// pool's `rpm_limit` leaves an unset member at `null`; the inherited value
 /// is visible on the member's resolved tuning row instead, sourced `pool`.
-/// The panel's shape and meaning are unchanged, so its version stays 3.
+/// The panel's shape and meaning are unchanged, so its version does not move.
 #[test]
 fn a_pool_rpm_limit_leaves_member_provider_rows_null() {
     let config: Config = toml::from_str(
@@ -402,8 +403,8 @@ rpm_limit = 40
 #[test]
 fn provider_wire_carries_the_contract_fields_and_only_the_origin() {
     let config = config_with_three_rpm_states();
-    let unlimited = provider_json(&config, "unlimited");
-    let obj = unlimited.as_object().unwrap();
+    let unset = provider_json(&config, "unset");
+    let obj = unset.as_object().unwrap();
     for key in [
         "provider_id",
         "provider_kind",
@@ -414,13 +415,10 @@ fn provider_wire_carries_the_contract_fields_and_only_the_origin() {
     ] {
         assert!(obj.contains_key(key), "provider row must carry `{key}`");
     }
-    assert_eq!(unlimited["provider_kind"], "anthropic-api");
-    assert_eq!(
-        unlimited["endpoint_origin"],
-        "https://unlimited.example:8443"
-    );
-    assert_eq!(unlimited["credential_ref_scheme"], "env");
-    assert_eq!(unlimited["auth_token"], "api-key");
+    assert_eq!(unset["provider_kind"], "anthropic-api");
+    assert_eq!(unset["endpoint_origin"], "https://unset.example:8443");
+    assert_eq!(unset["credential_ref_scheme"], "env");
+    assert_eq!(unset["auth_token"], "api-key");
 
     // The variant with no auth discriminant reports absence rather than a
     // spanning token, and its ref contributes the scheme only.

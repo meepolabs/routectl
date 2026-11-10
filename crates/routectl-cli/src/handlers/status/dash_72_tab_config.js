@@ -244,7 +244,8 @@
     note.className = 'footnote';
     note.textContent = 'Endpoints are the CONFIGURED origin (scheme, host, port); a kind that ' +
       'derives its endpoint at startup shows none. A rate limit of 0 RPM means requests are ' +
-      'throttled immediately, which is not the same as unlimited.';
+      'throttled immediately. A limit not set here may still come from a pool or default; ' +
+      'config show --effective shows the resolved value and its source.';
     return note;
   }
 
@@ -261,14 +262,16 @@
   // The rate limit, whose THREE states are not interchangeable and whose
   // null-check ORDER is the whole correctness of the cell:
   //
-  //   absent field -> 'unknown'   the payload never carried a reading
-  //   null         -> 'unlimited' no cap is configured
-  //   a number     -> '<n> RPM'   INCLUDING 0, which seeds a zero-capacity
-  //                               bucket and therefore means immediately
-  //                               rate-limited
+  //   absent field -> 'unknown'      the payload never carried a reading
+  //   null         -> 'not set here' this entry sets no cap of its own; a
+  //                                  pool or default may still apply, so
+  //                                  the cell never claims no cap at all
+  //   a number     -> '<n> RPM'      INCLUDING 0, which seeds a
+  //                                  zero-capacity bucket and therefore
+  //                                  means immediately rate-limited
   //
   // The checks run BEFORE any numeric coercion for that last reason. A
-  // truthiness test (`rpm ? n : 'unlimited'`) reports a throttled provider as
+  // truthiness test (`rpm ? n : 'not set here'`) reports a throttled provider as
   // unrestricted because 0 is falsy; running the value through `num0` first
   // reports an absent field as '0 RPM' because it coerces non-finite to 0.
   // Both misreports are one helper call away, so this is the ONE place the
@@ -280,7 +283,11 @@
   // that weighting.
   function rpmLimitCell(rpm) {
     if (rpm === undefined) { return faintFigure('unknown'); }
-    if (rpm === null) { return faintFigure('unlimited'); }
+    if (rpm === null) {
+      var unset = faintFigure('not set here');
+      unset.title = 'a pool or default may apply; config show --effective shows the resolved value';
+      return unset;
+    }
     var x = Number(rpm);
     if (!isFinite(x)) { return faintFigure('unknown'); }
     var cell = figure(String(Math.floor(x)), 'RPM', null);

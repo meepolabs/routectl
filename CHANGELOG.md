@@ -985,6 +985,8 @@ list with more narrative.
 
 - **`routectl config set` / `unset` refuse an edit whose result the loader would refuse.** The raw-config checks the loader runs (schema version, removed and retired keys) now also run on the edited candidate, so setting `version` out of range or unsetting it is refused with the loader's message and the file is left unchanged; the login config edit runs the same checks. `config set` on a removed per-model key now prints the loader's line for that key, naming what replaced it, instead of a generic unknown-key error.
 
+- **The dashboard Config tab reads a provider with no `rpm_limit` of its own as "not set here", not "unlimited".** A pool or default may still cap that entry, so the cell no longer claims no cap runs; its tooltip points at `config show --effective` for the resolved value and its source. `/status/config` is unchanged: the field still carries an explicit `null` and the panel stays at schema 5.
+
 ### Security
 
 - **The fixture scrub gate (`scripts/scrub-fixture.sh --check`) catches more credential and task-id shapes.** A vendor key after a percent-encoded boundary (`%22`, `%3D`, `%20`) is now refused like one after a JSON escape; OpenAI keys carrying the `T3BlbkFJ` infix and `sk-None-` keys are refused as `provider-key`; a vendor `req_` id under a JSON `request_id` key is refused as the new `upstream-request-id` class in raw, JSON-escaped, pretty-printed, percent-encoded and percent-encoded JSON-escaped bodies, while the `request-id` response header and the uuid `request_id` in `meta.json` stay accepted; and the scratch task-id class matches case-insensitively, still accepting all-hex slugs.

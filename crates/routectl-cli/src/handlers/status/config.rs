@@ -94,13 +94,15 @@ struct ProviderWire {
     /// auth discriminant. A closed vocabulary from the router's single
     /// extraction point, never an operator-supplied value.
     auth_token: Option<String>,
-    /// The configured requests-per-minute cap. Three states reach the client,
-    /// none interchangeable: a positive number is a live limit, an explicit
-    /// `0` means IMMEDIATELY rate-limited (it seeds a zero-capacity bucket),
-    /// and an explicit `null` means unlimited.
+    /// This entry's OWN configured requests-per-minute cap. Three states reach
+    /// the client, none interchangeable: a positive number is a cap set here,
+    /// an explicit `0` means IMMEDIATELY rate-limited (it seeds a
+    /// zero-capacity bucket), and an explicit `null` means not set here; a
+    /// pool or default may apply. The resolved value and its tier are
+    /// `config show --effective`'s and doctor's to report, not this field's.
     ///
     /// Deliberately NOT `skip_serializing_if = "Option::is_none"`: skipping
-    /// would make "unlimited" indistinguishable from "the field never
+    /// would make "not set here" indistinguishable from "the field never
     /// arrived", and the renderer reports those as different words. The field
     /// is therefore ALWAYS present on this wire, `null` included.
     rpm_limit: Option<u32>,

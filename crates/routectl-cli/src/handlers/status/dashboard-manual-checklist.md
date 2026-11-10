@@ -100,9 +100,11 @@ banner, no retry signal -- silently mislabeled data.
 - Config's routing-provider table must distinguish all three rate-limit
   states. Serve a config with one provider at `rpm_limit = 0`, one with no
   `rpm_limit`, and one with a positive cap; the rows must read **0 RPM**
-  (at attention weight, not faint), **unlimited**, and **`<n>` RPM**. A `0`
-  reading as "unlimited" tells an operator a throttled provider is
-  unrestricted, which is the misreport this column exists to prevent.
+  (at attention weight, not faint), **not set here** (faint, its tooltip
+  saying a pool or default may apply), and **`<n>` RPM**. A `0` reading as
+  "not set here" tells an operator a throttled provider is unrestricted,
+  which is the misreport this column exists to prevent; an unset cap reading
+  as no cap at all hides one a pool or default still applies.
 - Config's default-state card must not contradict the tables under it. Serve
   a config naming ONLY providers -- no aliases, no models -- and confirm the
   "Running on the default configuration" card is ABSENT while the provider
