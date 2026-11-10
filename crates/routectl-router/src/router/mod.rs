@@ -2063,13 +2063,6 @@ struct DispatchTarget {
     /// requested alias; `Some(non-empty)` overrides it. Does not
     /// affect `DispatchMeta` accounting.
     reported_model: Option<String>,
-    /// Whether the response `routectl_provider` field is exposed to the
-    /// client for the served target. Threaded from
-    /// `ResolvedModel.visible_routectl_provider`. `true` (the default)
-    /// stamps the served provider name; `false` suppresses it. Chain
-    /// semantics: the served target's value wins. Does not affect
-    /// `DispatchMeta` accounting.
-    visible_routectl_provider: bool,
     /// Per-status failure-class remap for this target's provider, adapted
     /// ONCE at chain expansion from the operator's
     /// `[providers.X.class_overrides]` config table (`ConfigFailureClass`

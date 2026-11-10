@@ -1924,7 +1924,7 @@ mod tests {
     }
 
     #[test]
-    fn render_response_serializes_canonical_to_wire() {
+    fn render_response_serializes_canonical_to_wire_without_provider_stamp() {
         let resp = ChatResponse {
             id: "chatcmpl-1".into(),
             model: "gpt-4o".into(),
@@ -1937,7 +1937,7 @@ mod tests {
         };
         let v = OpenAiIngress.render_response_value(resp).unwrap();
         assert_eq!(v["id"], "chatcmpl-1");
-        assert_eq!(v["routectl_provider"], "test");
+        assert!(v.get("routectl_provider").is_none(), "{v}");
         // Suppress unused-import warnings.
         let _ = MessageContent::Text(String::new());
     }

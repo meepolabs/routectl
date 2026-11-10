@@ -162,8 +162,6 @@ pub enum EditSite {
     ResponseEnvelopeStamp,
     /// Response: the upstream model id replaced by the client-visible label.
     ResponseModelRelabel,
-    /// Response: the serving provider's name added to a complete body.
-    ProviderAttributionAdd,
     /// Response: the reserved `upstream_meta` top-level member withheld from
     /// an Anthropic client.
     AnthropicResponseExtrasStrip,
@@ -184,7 +182,7 @@ pub enum EditSite {
 
 impl EditSite {
     /// Every site, in declaration order.
-    pub const ALL: [Self; 50] = [
+    pub const ALL: [Self; 49] = [
         Self::ModelRename,
         Self::OperatorPayloadExtras,
         Self::ContextReduction,
@@ -229,7 +227,6 @@ impl EditSite {
         Self::ReasoningContentLift,
         Self::ResponseEnvelopeStamp,
         Self::ResponseModelRelabel,
-        Self::ProviderAttributionAdd,
         Self::AnthropicResponseExtrasStrip,
         Self::AnthropicStreamUsageFill,
         Self::ResponsesStatusRewrite,
@@ -284,7 +281,6 @@ impl EditSite {
             Self::ReasoningContentLift => "reasoning_content_lift",
             Self::ResponseEnvelopeStamp => "response_envelope_stamp",
             Self::ResponseModelRelabel => "response_model_relabel",
-            Self::ProviderAttributionAdd => "provider_attribution_add",
             Self::AnthropicResponseExtrasStrip => "anthropic_response_extras_strip",
             Self::AnthropicStreamUsageFill => "anthropic_stream_usage_fill",
             Self::ResponsesStatusRewrite => "responses_status_rewrite",

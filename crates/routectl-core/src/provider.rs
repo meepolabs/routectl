@@ -44,7 +44,7 @@ pub enum ProbeOutcome {
 #[async_trait]
 pub trait Provider: Send + Sync {
     /// Stable provider id, e.g. "openai-compat:deepseek". Used in errors
-    /// and `routectl_provider` response field.
+    /// and the internal served-provider stamp.
     fn id(&self) -> &str;
 
     /// Map a routectl-shape request to the provider's wire format.

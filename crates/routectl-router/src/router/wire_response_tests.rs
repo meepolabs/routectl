@@ -184,9 +184,7 @@ async fn an_admitted_fidelity_attempt_carries_its_check_and_records_a_clean_resp
         .meta
         .response_check
         .expect("an admitted fidelity attempt carries one");
-    let mut body = client_body();
-    body["routectl_provider"] = json!("p0");
-    check.compare_body(&serde_json::to_vec(&body).expect("json"), &[]);
+    check.compare_body(&serde_json::to_vec(&client_body()).expect("json"), &[]);
 
     let snapshot = router.wire_check_snapshot();
     assert_eq!(response_outcomes(&snapshot), [(CheckOutcome::Clean, 2)]);
@@ -216,12 +214,12 @@ async fn a_dropped_upstream_key_is_counted_on_the_response_leg_named_by_path() {
 }
 
 #[tokio::test]
-async fn the_router_declares_its_model_relabel_and_provider_attribution() {
-    let rows: [(&str, Option<&str>); 2] = [
-        ("relabel without attribution", None),
-        ("relabel with attribution", Some("p0")),
+async fn the_router_declares_its_model_relabel_and_no_provider_attribution() {
+    let rows: [(&str, Option<&str>, bool); 2] = [
+        ("relabelled body is clean", None, true),
+        ("an added provider key is a finding", Some("p0"), false),
     ];
-    for (name, provider) in rows {
+    for (name, provider, expect_clean) in rows {
         let router = router("anthropic-api", CHECK_EVERY);
         let dispatched = Box::pin(router.complete_with_options(
             request(IngressDialect::Anthropic, false),
@@ -235,11 +233,11 @@ async fn the_router_declares_its_model_relabel_and_provider_attribution() {
         let check = dispatched.meta.response_check.expect("carried");
         check.compare_body(&serde_json::to_vec(&body).expect("json"), &[]);
 
-        assert!(
-            router.wire_check_snapshot().findings.is_empty(),
-            "{name}: {:?}",
-            router.wire_check_snapshot().findings
-        );
+        let findings = router.wire_check_snapshot().findings;
+        assert_eq!(findings.is_empty(), expect_clean, "{name}: {findings:?}");
+        if !expect_clean {
+            assert_eq!(findings[0].path.as_str(), "/routectl_provider", "{name}");
+        }
     }
 }
 

@@ -9038,6 +9038,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `message_delta`) reach the usage ledger's `reasoning_tokens` column through
   a real server and mock anthropic-api upstream; a non-thinking response
   records none
+- `tests/served_provider_wire_absence.rs` -- no ingress (OpenAI chat
+  buffered and streamed, Anthropic Messages, Responses) puts
+  `routectl_provider` on the client body, while the usage ledger row for the
+  same request still records the served provider
 - `tests/gemini_ingress_extras_boundary.rs` -- HTTP ingress through the server
   to a mock Gemini upstream: which extras reach the upstream body and logs
 - `tests/contract_ingress.rs` -- request wire body -> canonical `ChatRequest`

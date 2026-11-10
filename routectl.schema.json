@@ -633,7 +633,7 @@
         },
         "visible_routectl_provider": {
           "default": true,
-          "description": "Whether the response `routectl_provider` field is exposed to the\nclient for this model. `true` (the default) stamps the served\nupstream provider name onto the response; `false` suppresses it\n(serde drops the absent field). Does not affect internal\naccounting / observability, which key off\n`DispatchMeta.served_provider` / `served_upstream`.",
+          "description": "Accepted with no effect. Responses never carry a `routectl_provider`\nfield; the served provider is reported through usage records, logs\nand status instead.",
           "type": "boolean"
         }
       },

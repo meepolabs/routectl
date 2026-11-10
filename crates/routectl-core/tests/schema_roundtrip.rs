@@ -634,3 +634,41 @@ fn chatresponse_upstream_meta_round_trip_drops_to_none() {
     assert_eq!(restored.id, "resp-1");
     assert!(restored.upstream_meta.is_none());
 }
+
+// ---------------------------------------------------------------------------
+// ChatResponse.routectl_provider: the served-provider stamp is internal.
+// Deserialization still accepts it; serialization never emits it.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn chatresponse_routectl_provider_renders_without_the_key() {
+    // Arrange
+    let resp = ChatResponse {
+        id: "resp-1".into(),
+        routectl_provider: Some("test".into()),
+        ..Default::default()
+    };
+
+    // Act
+    let serialized = serde_json::to_value(&resp).unwrap();
+
+    // Assert
+    assert_eq!(serialized["id"], "resp-1");
+    assert!(
+        serialized.get("routectl_provider").is_none(),
+        "routectl_provider must never reach the wire: {serialized}"
+    );
+}
+
+#[test]
+fn chatresponse_routectl_provider_still_deserializes() {
+    // Arrange
+    let input = json!({"id": "resp-1", "choices": [], "routectl_provider": "test"});
+
+    // Act
+    let resp: ChatResponse = serde_json::from_value(input).unwrap();
+
+    // Assert
+    assert_eq!(resp.routectl_provider.as_deref(), Some("test"));
+    assert!(resp.extras.get("routectl_provider").is_none());
+}

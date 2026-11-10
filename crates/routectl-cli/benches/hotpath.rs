@@ -418,17 +418,10 @@ fn install_tap(req: &mut ChatRequest, state: &WireCheckState, config: &WireCheck
 
 /// Every response edit the router declares on a served complete body.
 fn declare_response_edits(tap: &WireTap) {
-    for (site, kind) in [
-        (EditSite::ProviderAttributionAdd, EditKind::Add),
-        (EditSite::ResponseModelRelabel, EditKind::Rewrite),
-        (EditSite::ResponseModelRelabel, EditKind::Add),
-    ] {
-        let path = if site == EditSite::ProviderAttributionAdd {
-            "/routectl_provider"
-        } else {
-            "/model"
-        };
-        tap.declare_response(DeclaredEdit::new(site, path, kind).expect("response edit pattern"));
+    for kind in [EditKind::Rewrite, EditKind::Add] {
+        let edit = DeclaredEdit::new(EditSite::ResponseModelRelabel, "/model", kind)
+            .expect("response edit pattern");
+        tap.declare_response(edit);
     }
 }
 

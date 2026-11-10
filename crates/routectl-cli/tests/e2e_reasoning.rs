@@ -107,7 +107,7 @@ async fn deepseek_reasoning_content_lifts_to_reasoning_details_via_server() {
         resp["choices"][0]["message"]["content"],
         "Final answer: 42."
     );
-    assert_eq!(resp["routectl_provider"], "deepseek");
+    assert!(resp.get("routectl_provider").is_none(), "{resp}");
 
     let details = resp["choices"][0]["message"]["reasoning_details"]
         .as_array()

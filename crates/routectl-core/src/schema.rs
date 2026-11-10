@@ -997,8 +997,10 @@ pub struct ChatResponse {
     /// Token usage tallies, when the upstream reported them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<Usage>,
-    /// Which configured provider answered (routectl-specific extension; clients ignore).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Which configured provider answered. Internal only: never serialized
+    /// onto a client response (usage, logs and status carry the served
+    /// provider instead). Still accepted when deserializing.
+    #[serde(default, skip_serializing)]
     pub routectl_provider: Option<String>,
     /// Forward-compat catchall for response top-level fields that
     /// canonical doesn't model. Mirrors the request-side

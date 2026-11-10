@@ -637,7 +637,7 @@ semantics in the [field-assignment table](#field-assignment-table).
 | `max_output_tokens`            | `[models.X]`        | Option<u32>, `0` refused; `max_tokens` sent when the client omits it (anthropic-api, bedrock-invoke), else 64000 |
 | `pricing`                      | `[models.X]`        | Option<table>, per-Mtok prices, each field optional; non-finite or negative refused; per-field precedence in [Model prices](#model-prices-modelsxpricing) |
 | `reported_model`               | `[models.X]`        | Option<String>, default None (-> echo client's requested alias); override for the response `model` label |
-| `visible_routectl_provider`    | `[models.X]`        | bool, default true; set false to drop the `routectl_provider` field from the client response (opaque proxy) |
+| `visible_routectl_provider`    | `[models.X]`        | bool; accepted with no effect (responses never carry a `routectl_provider` field) |
 | `header_extras`                | BOTH                | model wins on key collision; `anthropic-beta` comma-unions (see below) |
 | `payload_extras`               | BOTH                | deep recursive merge; model wins on leaf collision                     |
 | `base_url`, `api_key_ref`, etc.| `[providers.X]`     | provider-only                                                          |
@@ -2516,31 +2516,18 @@ reported_model = "fast-chat"
 This affects only the client-visible `model` field. Internal accounting
 and observability (usage capture, pricing) key off the served model and
 upstream recorded in dispatch metadata, not the response `model` field,
-and are unchanged. The `routectl_provider` field remains the intentional
-transparency channel naming the provider that answered; it is unaffected
-by `reported_model`.
+and are unchanged. The provider that answered is reported through the
+usage ledger, the request logs and the status surfaces, never on the
+response body.
 
-#### `visible_routectl_provider` (bool, default true) -- response `routectl_provider` field
+#### `visible_routectl_provider` (bool) -- accepted, no effect
 
-`routectl_provider` is a routectl response extension naming the provider
-that actually answered (e.g. `"anthropic-api"`, `"openai-compat:deepseek"`).
-It is the intentional transparency channel and is emitted by default on the
-OpenAI dialect (the Anthropic dialect omits it). For an opaque-proxy or
-white-label deployment that must not disclose its backend, set:
-
-```toml
-[models.fast]
-provider                  = "deepseek"
-upstream                  = "deepseek-v3"
-visible_routectl_provider = false   # drop routectl_provider from responses
-```
-
-When false, the router clears `routectl_provider` from the client response
-(the served model's flag decides, so a fallback chain has one stable
-contract). This affects only the client-visible field: internal usage and
-cost accounting key off the dispatch record, not this field, and are
-unaffected. There is no streaming concern -- streamed chunks never carry
-`routectl_provider`.
+Client responses never carry a `routectl_provider` field, on any ingress
+dialect or streaming mode. The key is still parsed so an existing config
+keeps loading, but neither value changes the response. To see which
+provider served a request, read the `provider` column of the usage ledger
+(`routectl usage`), the request's finished log line, or the status
+dashboard.
 
 Two other per-model overrides live on `[models.X]`:
 

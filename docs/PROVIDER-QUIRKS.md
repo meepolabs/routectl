@@ -800,7 +800,7 @@ upstream = "deepseek-ai/deepseek-v4-flash"
 deepseek-flash = ["ds-go", "ds-or", "ds-nim"]   # primary -> fallback -> fallback
 ```
 
-Each model's `history_reasoning` config applies independently -- the chain just picks who answers. The `routectl_provider` field on every response tells you which one actually answered.
+Each model's `history_reasoning` config applies independently -- the chain just picks who answers. The usage ledger's `provider` column (`routectl usage`) and the request's finished log line tell you which one actually answered.
 
 ## DeepSeek /anthropic and similar: context_management beta emulation
 

@@ -86,11 +86,9 @@ pub struct ResolvedModel {
     /// stamp time. Projected from `[models.X] reported_model`. Does
     /// not affect internal accounting / observability.
     pub reported_model: Option<String>,
-    /// Whether the response `routectl_provider` field is exposed to the
-    /// client for this model. `true` (the default) stamps the served
-    /// provider name onto the response; `false` suppresses it. Projected
-    /// from `[models.X] visible_routectl_provider`. Does not affect
-    /// internal accounting / observability.
+    /// Projected from `[models.X] visible_routectl_provider`. Accepted
+    /// with no effect: responses never carry a `routectl_provider` field,
+    /// and the served provider is always recorded internally.
     pub visible_routectl_provider: bool,
     /// Source `SecretRef` used to resolve this model's primary auth
     /// credential at provider-build time. Retained on the resolved
@@ -197,8 +195,8 @@ impl ResolvedModel {
         self
     }
 
-    /// Set whether the response `routectl_provider` field is exposed to
-    /// the client for this model. Defaults to `true`.
+    /// Set the projected `visible_routectl_provider` value. It has no
+    /// effect on dispatch or on the response. Defaults to `true`.
     pub const fn with_visible_routectl_provider(mut self, b: bool) -> Self {
         self.visible_routectl_provider = b;
         self

@@ -41,7 +41,7 @@ use super::stream_commit::{
 };
 use super::stream_evidence::StreamEvidence;
 use super::walk_state::RequestWalk;
-use super::wire_response::{declare_model_relabel, declare_provider_attribution};
+use super::wire_response::declare_model_relabel;
 use super::{DispatchMeta, DispatchTarget, Dispatched, DispatchedStream, Router, RouterOptions};
 
 /// The one provider kind whose egress can represent the
@@ -112,22 +112,10 @@ impl SurfaceAdapter for CompleteAdapter {
             meta,
             ..
         } = ctx;
-        // Stamp the served upstream provider name only when the served
-        // target opts in (`visible_routectl_provider`, default true). When
-        // suppressed, leave the field None so serde's skip_serializing_if
-        // drops it from the response. Internal accounting keys off
-        // `DispatchMeta.served_provider` / `served_upstream`, not this
-        // client-visible field, so suppression does not affect usage capture.
-        // Authoritative gate: every concrete provider pre-stamps
-        // `routectl_provider` with its own id before returning, so
-        // suppression MUST clear the field, not merely skip setting it --
-        // otherwise the provider's value leaks through.
-        if target.visible_routectl_provider {
-            resp.routectl_provider = Some(target.provider_name.clone());
-            declare_provider_attribution(wire_tap);
-        } else {
-            resp.routectl_provider = None;
-        }
+        // Internal served-provider stamp: never serialized to the client.
+        // Overwrites the provider's own pre-stamp so a chain records the
+        // configured provider name that actually served.
+        resp.routectl_provider = Some(target.provider_name.clone());
         // Client-visible label: the serving target's `reported_model`
         // override when set (and non-empty), else the client's requested
         // alias. Internal accounting keys off `DispatchMeta`, not this field.

@@ -614,7 +614,6 @@ pub(super) fn into_one_dispatch_target(m: Arc<ResolvedModel>) -> DispatchTarget 
         history_reasoning: m.history_reasoning,
         max_output_tokens: m.max_output_tokens,
         reported_model: m.reported_model.clone(),
-        visible_routectl_provider: m.visible_routectl_provider,
         model: m,
         class_overrides: BTreeMap::new(),
     }
@@ -675,7 +674,6 @@ pub(super) fn dispatch_target_for_seat(
         history_reasoning: m.history_reasoning,
         max_output_tokens: m.max_output_tokens,
         reported_model: m.reported_model.clone(),
-        visible_routectl_provider: m.visible_routectl_provider,
         model: m.clone(),
         class_overrides: BTreeMap::new(),
     }

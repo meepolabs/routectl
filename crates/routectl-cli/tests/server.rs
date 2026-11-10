@@ -589,10 +589,9 @@ async fn fallback_to_second_provider_on_503() {
     assert_eq!(resp.status(), 200);
     let body: Value = resp.json().await.unwrap();
     assert_eq!(body["choices"][0]["message"]["content"], "fallback answer");
-    // routectl_provider extension should identify which provider answered.
-    assert_eq!(
-        body["routectl_provider"], "second",
-        "expected second provider but got: {body}"
+    assert!(
+        body.get("routectl_provider").is_none(),
+        "the served provider never reaches the client body: {body}"
     );
 }
 
@@ -696,9 +695,9 @@ async fn chat_completions_unknown_model_routes_to_default_alias() {
         body["choices"][0]["message"]["content"],
         "Hello from default"
     );
-    assert_eq!(
-        body["routectl_provider"], "mock-provider",
-        "unknown model must reach the configured default alias destination"
+    assert!(
+        body.get("routectl_provider").is_none(),
+        "the served provider never reaches the client body: {body}"
     );
 }
 

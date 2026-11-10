@@ -109,35 +109,6 @@ fn reported_model_survives_config_resolved_dispatch_relay() {
 }
 
 #[test]
-fn visible_routectl_provider_survives_config_resolved_dispatch_relay() {
-    // Structural-relay sanity check mirroring
-    // `reported_model_survives_config_resolved_dispatch_relay`: a
-    // configured `visible_routectl_provider=false` rides the 4-hop
-    // relay (ModelEntry -> ResolvedModel -> DispatchTarget) including
-    // the seat-pinned dispatch path. The end-to-end BEHAVIOR coverage
-    // lives in `visible_routectl_provider_false_suppresses_field`.
-    let entry =
-        crate::config::ModelEntry::new("p1", "wire-model").with_visible_routectl_provider(false);
-    assert!(!entry.visible_routectl_provider);
-
-    let p: Arc<dyn Provider> = Arc::new(CountedProvider {
-        id: "p1".into(),
-        calls: AtomicUsize::new(0),
-    });
-    let resolved = ResolvedModel::new("m1", "p1", p.clone(), "wire-model")
-        .with_visible_routectl_provider(entry.visible_routectl_provider);
-    assert!(!resolved.visible_routectl_provider);
-
-    let m = Arc::new(resolved);
-    let direct = into_one_dispatch_target(m.clone());
-    assert!(!direct.visible_routectl_provider);
-
-    let seat = crate::seat_pool::SeatTarget::new("seat-a".to_string(), p.clone(), None, false);
-    let via_seat = dispatch_target_for_seat(&m, &seat, None);
-    assert!(!via_seat.visible_routectl_provider);
-}
-
-#[test]
 fn seat_dispatch_target_carries_provider_kind() {
     // A seat-backed target must classify errors against the seat
     // provider's OWN kind, not the union table. `provider_kind` is
@@ -250,189 +221,87 @@ fn expand_chain_to_targets_leaves_class_overrides_empty_with_no_provider_config(
     assert!(targets[0].class_overrides.is_empty());
 }
 
-#[test]
-fn visible_routectl_provider_defaults_true_across_relay() {
-    // DEFAULT-TRUE guard: a model built without the override carries
-    // `visible_routectl_provider=true` all the way to the dispatch
-    // target, keeping existing consumers (which assert a present
-    // `routectl_provider`) green.
-    let entry = crate::config::ModelEntry::new("p1", "wire-model");
-    assert!(entry.visible_routectl_provider);
-    let p: Arc<dyn Provider> = Arc::new(CountedProvider {
-        id: "p1".into(),
-        calls: AtomicUsize::new(0),
-    });
-    let m = Arc::new(ResolvedModel::new("m1", "p1", p, "wire-model"));
-    assert!(m.visible_routectl_provider);
-    assert!(into_one_dispatch_target(m).visible_routectl_provider);
+/// Provider that pre-stamps `routectl_provider` with its own id, as every
+/// concrete provider does, so a test can tell the router's stamp apart.
+struct PrestampProvider {
+    id: String,
 }
 
-#[tokio::test]
-async fn visible_routectl_provider_false_suppresses_field() {
-    // SUPPRESS: a model with visible_routectl_provider=false yields a
-    // response with NO `routectl_provider` (left None -> serde's
-    // skip_serializing_if drops the field).
-    let p: Arc<dyn Provider> = Arc::new(CountedProvider {
-        id: "anthropic".into(),
-        calls: AtomicUsize::new(0),
-    });
-    let cfg = Arc::new(Config::default());
-    let mut router = Router::new(cfg);
-    let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
-    models.insert(
-        "haiku".to_string(),
-        Arc::new(
-            ResolvedModel::new("haiku", "anthropic", p, "claude-haiku-4-5")
-                .with_visible_routectl_provider(false),
-        ),
-    );
-    router.install_resolved_models(models);
-
-    let req = ChatRequest {
-        model: "haiku".into(),
-        messages: vec![].into(),
-        ..Default::default()
-    };
-    let resp = router.complete(req).await.expect("ok");
-    assert!(
-        resp.routectl_provider.is_none(),
-        "suppressed model must leave routectl_provider unset"
-    );
-    // The skip_serializing_if drops the absent field from the wire.
-    let body = serde_json::to_value(&resp).expect("serialize");
-    assert!(
-        body.get("routectl_provider").is_none(),
-        "routectl_provider must be absent from the serialized body"
-    );
-}
-
-#[tokio::test]
-async fn suppressed_provider_clears_prestamped_field() {
-    // LEAK GUARD: concrete providers pre-stamp `routectl_provider`
-    // with their own id before returning. CountedProvider returns
-    // None and so cannot exercise the suppression gate's clearing
-    // behavior. This provider returns Some("leaked-provider"); with
-    // visible_routectl_provider=false the gate MUST clear it to None,
-    // and the field MUST be absent from the serialized OpenAI body.
-    struct PrestampProvider {
-        id: String,
+#[async_trait]
+impl Provider for PrestampProvider {
+    fn id(&self) -> &str {
+        &self.id
     }
-    #[async_trait]
-    impl Provider for PrestampProvider {
-        fn id(&self) -> &str {
-            &self.id
-        }
-        fn normalize_request(&self, _: &ChatRequest) -> Result<serde_json::Value> {
-            Ok(serde_json::json!({}))
-        }
-        fn normalize_response(&self, _: serde_json::Value) -> Result<ChatResponse> {
-            Err(Error::normalize_response(&self.id, "unused"))
-        }
-        async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
-            Ok(ChatResponse {
-                id: format!("ok-{}", self.id),
-                model: req.model,
-                created: 0,
-                choices: vec![Choice {
-                    logprobs: None,
-                    index: 0,
-                    message: Message {
-                        refusal: None,
-                        role: routectl_core::Role::Assistant,
-                        content: routectl_core::MessageContent::Text("ok".into()),
-                        reasoning: None,
-                        reasoning_details: vec![],
-                        name: None,
-                        tool_call_id: None,
-                        tool_calls: None,
-                    },
-                    finish_reason: Some("stop".into()),
-                    matched_stop_sequence: None,
-                }],
-                usage: Some(routectl_core::Usage::default()),
-                // Pre-stamp, mirroring every concrete provider.
-                routectl_provider: Some("leaked-provider".into()),
-                extras: Default::default(),
-                upstream_meta: None,
-            })
-        }
-        async fn stream(&self, _: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
-            unreachable!()
-        }
+    fn normalize_request(&self, _: &ChatRequest) -> Result<serde_json::Value> {
+        Ok(serde_json::json!({}))
     }
-
-    let p: Arc<dyn Provider> = Arc::new(PrestampProvider {
-        id: "anthropic".into(),
-    });
-    let cfg = Arc::new(Config::default());
-    let mut router = Router::new(cfg);
-    let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
-    models.insert(
-        "haiku".to_string(),
-        Arc::new(
-            ResolvedModel::new("haiku", "anthropic", p, "claude-haiku-4-5")
-                .with_visible_routectl_provider(false),
-        ),
-    );
-    router.install_resolved_models(models);
-
-    let req = ChatRequest {
-        model: "haiku".into(),
-        messages: vec![].into(),
-        ..Default::default()
-    };
-    let resp = router.complete(req).await.expect("ok");
-    assert!(
-        resp.routectl_provider.is_none(),
-        "suppression must clear the provider's pre-stamped routectl_provider"
-    );
-    let body = serde_json::to_value(&resp).expect("serialize");
-    assert!(
-        body.get("routectl_provider").is_none(),
-        "pre-stamped routectl_provider must be absent from the serialized body"
-    );
+    fn normalize_response(&self, _: serde_json::Value) -> Result<ChatResponse> {
+        Err(Error::normalize_response(&self.id, "unused"))
+    }
+    async fn complete(&self, req: ChatRequest) -> Result<ChatResponse> {
+        Ok(ChatResponse {
+            id: "ok".into(),
+            model: req.model,
+            choices: vec![],
+            usage: Some(routectl_core::Usage::default()),
+            routectl_provider: Some(self.id.clone()),
+            ..Default::default()
+        })
+    }
+    async fn stream(&self, _: ChatRequest) -> Result<BoxStream<'static, Result<ChatChunk>>> {
+        unreachable!()
+    }
 }
 
 #[tokio::test]
-async fn suppressed_provider_still_records_dispatch_meta() {
-    // ACCOUNTING GUARD: suppressing the client-visible field must NOT
-    // affect internal accounting -- DispatchMeta still records
-    // served_provider / served_upstream on the suppressed model.
-    let p: Arc<dyn Provider> = Arc::new(CountedProvider {
-        id: "anthropic".into(),
-        calls: AtomicUsize::new(0),
-    });
-    let cfg = Arc::new(Config::default());
-    let mut router = Router::new(cfg);
-    let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
-    models.insert(
-        "haiku".to_string(),
-        Arc::new(
-            ResolvedModel::new("haiku", "anthropic", p, "claude-haiku-4-5")
-                .with_visible_routectl_provider(false),
-        ),
-    );
-    router.install_resolved_models(models);
+async fn visible_routectl_provider_has_no_effect_on_wire_body_or_stamp() {
+    let mut observed = Vec::new();
+    for visible in [true, false] {
+        // Arrange
+        let p: Arc<dyn Provider> = Arc::new(PrestampProvider {
+            id: "provider-own-id".into(),
+        });
+        let mut router = Router::new(Arc::new(Config::default()));
+        let mut models: BTreeMap<String, Arc<ResolvedModel>> = BTreeMap::new();
+        models.insert(
+            "haiku".to_string(),
+            Arc::new(
+                ResolvedModel::new("haiku", "anthropic", p, "claude-haiku-4-5")
+                    .with_visible_routectl_provider(visible),
+            ),
+        );
+        router.install_resolved_models(models);
+        let req = ChatRequest {
+            model: "haiku".into(),
+            messages: vec![].into(),
+            ..Default::default()
+        };
 
-    let req = ChatRequest {
-        model: "haiku".into(),
-        messages: vec![].into(),
-        ..Default::default()
-    };
-    let dispatched = router
-        .complete_with_options(req, RouterOptions::default())
-        .await;
-    dispatched.result.expect("ok");
-    assert_eq!(
-        dispatched.meta.served_provider.as_deref(),
-        Some("anthropic"),
-        "served_provider must still be recorded when the field is suppressed"
-    );
-    assert_eq!(
-        dispatched.meta.served_upstream.as_deref(),
-        Some("claude-haiku-4-5"),
-        "served_upstream must still be recorded when the field is suppressed"
-    );
+        // Act
+        let dispatched = router
+            .complete_with_options(req, RouterOptions::default())
+            .await;
+        let resp = dispatched.result.expect("ok");
+
+        // Assert
+        let body = serde_json::to_value(&resp).expect("serialize");
+        assert_eq!(
+            resp.routectl_provider.as_deref(),
+            Some("anthropic"),
+            "visible={visible}: the router stamps the configured served provider"
+        );
+        assert_eq!(
+            dispatched.meta.served_provider.as_deref(),
+            Some("anthropic"),
+            "visible={visible}"
+        );
+        assert!(
+            body.get("routectl_provider").is_none(),
+            "visible={visible}: {body}"
+        );
+        observed.push((body, resp.routectl_provider));
+    }
+    assert_eq!(observed[0], observed[1]);
 }
 
 /// Minimal streaming-capable provider for the seat-path end-to-end

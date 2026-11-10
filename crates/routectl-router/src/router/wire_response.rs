@@ -320,17 +320,6 @@ pub(super) fn declare_model_relabel(tap: Option<&WireTap>) {
     declare_response(tap, EditSite::ResponseModelRelabel, "/model", EditKind::Add);
 }
 
-/// Declare, on a response-checking tap, the serving provider's name added
-/// to a complete body.
-pub(super) fn declare_provider_attribution(tap: Option<&WireTap>) {
-    declare_response(
-        tap,
-        EditSite::ProviderAttributionAdd,
-        "/routectl_provider",
-        EditKind::Add,
-    );
-}
-
 fn declare_response(tap: Option<&WireTap>, site: EditSite, path: &'static str, kind: EditKind) {
     let Some(tap) = tap.filter(|tap| tap.checks_response()) else {
         return;
