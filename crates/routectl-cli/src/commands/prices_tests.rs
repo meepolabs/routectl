@@ -530,6 +530,7 @@ fn a_write_into_an_unusable_directory_fails_without_a_temp_file() {
 
 /// A failed directory fsync after the rename is reported as a WARN with the
 /// error kind; a successful one logs nothing.
+#[cfg(unix)]
 #[test]
 fn a_failed_directory_fsync_warns_with_its_error_kind() {
     let rows = [
@@ -554,6 +555,59 @@ fn a_failed_directory_fsync_warns_with_its_error_kind() {
         );
         assert_eq!(warned.len(), usize::from(expected.is_some()), "{name}");
     }
+}
+
+/// A table write syncs its directory after the rename and WARNs when that
+/// fails, while the table itself is still written.
+#[cfg(unix)]
+#[test]
+fn a_table_write_warns_when_its_directory_fsync_fails() {
+    let rows: [(&str, std::io::Result<()>, bool); 2] = [
+        (
+            "fsync failed",
+            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+            true,
+        ),
+        ("fsync succeeded", Ok(()), false),
+    ];
+    for (name, outcome, expect_warn) in rows {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(PRICES_FILE);
+        let mut synced = None;
+
+        let events = routectl_testkit::capture_events(|| {
+            write_then_sync_parent(&path, b"{}", |parent| {
+                synced = Some(parent.to_path_buf());
+                outcome
+            })
+            .expect("the write succeeds whatever the directory fsync returns");
+        });
+
+        assert_eq!(synced.as_deref(), Some(dir.path()), "{name}: synced dir");
+        assert_eq!(std::fs::read(&path).expect("table"), b"{}", "{name}");
+        let warned = events.iter().any(|e| {
+            e.level == tracing::Level::WARN && e.field("io_error") == Some("PermissionDenied")
+        });
+        assert_eq!(warned, expect_warn, "{name}: {events:?}");
+    }
+}
+
+/// The real directory fsync after a table write succeeds on a writable
+/// directory, so a normal refresh logs no WARN.
+#[test]
+fn a_table_write_into_a_writable_directory_logs_no_warn() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join(PRICES_FILE);
+
+    let events = routectl_testkit::capture_events(|| {
+        write_atomic(&path, b"{}").expect("write");
+    });
+
+    assert_eq!(std::fs::read(&path).expect("table"), b"{}");
+    assert!(
+        events.iter().all(|e| e.level != tracing::Level::WARN),
+        "{events:?}"
+    );
 }
 
 fn assert_fetch_line_is_stripped(name: &str, lines: &[String]) {

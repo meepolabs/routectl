@@ -2423,9 +2423,11 @@ the model's limit from a refusal that named it (see
 [PROVIDER-QUIRKS.md](PROVIDER-QUIRKS.md#bedrock-any-region)), a value
 above that ceiling is lowered to it before the request is sent, whether
 it came from the client or, on `anthropic-api` and `bedrock-invoke`,
-from this chain. `bedrock-converse` sends no `maxTokens` the client did
-not send, so there only a client value is lowered: with none, nothing
-is capped and no limit appears on the wire. A value at or below the
+from this chain. On `bedrock-converse` a learned ceiling lowers only a
+client value. With none, Converse sends no `maxTokens` unless the shipped
+thinking is the legacy `enabled` shape, where it sends this chain's value
+(`max_output_tokens`, else `64000`) uncapped by any learned ceiling;
+otherwise no limit appears on the wire. A value at or below the
 ceiling ships unchanged: a learned ceiling never raises a limit. The
 ceiling recovers by decay only: it lapses after
 [`decay_hours`](#learned-capability-tempo-capability) and the next
@@ -2451,9 +2453,11 @@ at `ceiling - 1`. Every other standard effort level (`minimal` through
 unaffected.
 
 Only the Anthropic-shape egresses (`anthropic-api` and `bedrock-invoke`)
-send this value as `max_tokens`. `bedrock-converse` reads it only to size
-the legacy thinking budget and still sends no `maxTokens` the client did
-not send. The other egresses (`openai-compat`, `openai-responses`)
+send this value as `max_tokens` whenever the caller omits one.
+`bedrock-converse` uses it to size the legacy thinking budget and, under
+legacy `enabled` thinking only, sends it as `maxTokens` when the caller
+omitted one (Claude requires `max_tokens` above the budget); otherwise it
+sends no `maxTokens` the client did not send. The other egresses (`openai-compat`, `openai-responses`)
 forward a caller-supplied `max_tokens` under their own wire name
 (`openai-responses` emits it as `max_output_tokens`) and forward caller
 omission cleanly without injection (good-translator principle: do not
@@ -3192,8 +3196,9 @@ that member applies and one scoped to the pool name does not.
 The table provider for a target is chosen from the target's base URL:
 the table providers whose `api_host` has the same origin (scheme, host,
 port) are ranked by the longest common path prefix, then by how many path
-segments they share in any position, then by whether they list the
-upstream id; a tie on all three is unknown. A loopback base URL never
+segments they share in any position; a tie on both is unknown (whether a
+provider lists the upstream id never breaks it). An operator whose target
+host ties this way prices it through `[models.X.pricing]`. A loopback base URL never
 matches. With no origin match, `anthropic-api`, `openai-responses`,
 `gemini` and `bedrock` fall back to the vendor's own table provider.
 A usage row whose provider entry was since renamed or removed prices a
@@ -4495,12 +4500,14 @@ daemon runs prices the next query with no restart; a copy that fails
 validation keeps the previous table. The dollar column has three states:
 
 - `$X.XX` -- an API-key provider whose upstream resolved a price for
-  every dimension the row used. When any price on the row came from a
-  price table (`refreshed`, `shipped` or `derived`), a dimension with
-  nonzero usage and no price makes the row `n/a` instead: a table that
-  lists an input price but no cache-read price says nothing about cache
-  reads being free. A row a `[registry]` entry prices keeps counting a
-  dimension the entry leaves unset as `$0`, as written. Reasoning is
+  every dimension the row used. Unless the row's rates come from a whole
+  `[registry]` row, a dimension with nonzero usage and no price makes the
+  row `n/a` instead, whether the rates come from a price table
+  (`refreshed`, `shipped` or `derived`) or from a partial
+  `[models.X.pricing]` block: a source that lists an input price but no
+  cache-read price says nothing about cache reads being free. A row a
+  `[registry]` entry prices keeps counting a dimension the entry leaves
+  unset as `$0`, as written. Reasoning is
   billed by the provider kind
   **persisted with the row**, never by what the provider is configured as
   now, so re-kinding a provider in place cannot reprice history.
@@ -4512,8 +4519,8 @@ validation keeps the previous table. The dollar column has three states:
   `[models.X.pricing]`, no matching `[registry]` row, and no table row
   (the tables do not list it, the provider's host is ambiguous, or the
   provider entry is gone and the row carries no persisted provider kind);
-  or a table-priced row that used a dimension the table does not price.
-  Never shown as `$0`.
+  or a priced row whose rates do not come from a whole `[registry]` row
+  and that used a dimension with no rate. Never shown as `$0`.
 
 **Subscription-equivalent value.** Where the effective rates cover every
 dimension a subscription row actually used, the cell also reports what
@@ -4876,7 +4883,7 @@ The battery sections, in render order:
 | Provider reachability (`probe`) | One finding per provider through the SAME probe seam `provider probe` uses, so the two surfaces never diverge on status, detail, or remediation. |
 | Capability (`capability`) | The learned-capability findings NOT absorbed by the capability matrix panel below: a WARN when the config layer could not be parsed (so the panel is honestly degraded rather than silently empty). Never emits a FAIL, so it can never flip the exit code. |
 | Cost pricing (`pricing`) | One row per configured model listing its five prices (input, output, cache read, cache write 5m, cache write 1h), each with the source that gave it: `model-config`, `registry`, `refreshed`, `shipped`, `derived` or `unknown`, resolved as in [Model prices](#model-prices-modelsxpricing) and as `routectl usage` prices. An unknown price reads `unknown`, never `$0`; a known zero reads `$0.00`. The row ends with the date of each price table read (`none` for an absent one). A model no source prices reads unpriced. A model on a pool is priced through the pool's first member, as usage bills it. A managed subscription (`oauth://`) row is billed by seat; its prices are the basis of the API-equivalent value, and it adds whether that value is complete or which dimensions it lacks. The CLI reads `prices.json` once per run and `/status/doctor` uses the running daemon's. Nothing from a price table but its prices and date is shown. Never FAILs, so it can never move the exit code. |
-| Model knobs (`knobs`) | One row per configured model naming the `max_tokens` fill its egress sends when the caller omits one and WHERE it comes from, in the same `model-config`, `learned`, `default` vocabulary `config show --effective` and the status config panel use: `model-config` when `[models.X] max_output_tokens` is set, `learned` when the resident ceiling learned from an upstream refusal on one of its lanes lowers that value (or the egress baseline) and no `force_supported` override masks `max_tokens` for the model, else `default` (the Anthropic-shape egress baseline). An egress that forwards caller omission untouched has no fill and reads `unset`, whatever `max_output_tokens` says. The learned value is the resident ceiling; whether a given request is clamped still depends on the pre-flight's per-request gates. Every row names the model's `(kind, upstream)`. Never FAILs, so it can never move the exit code. |
+| Model knobs (`knobs`) | One row per configured model naming the `max_tokens` fill its egress sends when the caller omits one and WHERE it comes from, in the same `model-config`, `learned`, `default` vocabulary `config show --effective` and the status config panel use: `model-config` when `[models.X] max_output_tokens` is set, `learned` when the resident ceiling learned from an upstream refusal on one of its lanes lowers that value (or the egress baseline), else `default` (the Anthropic-shape egress baseline). A learned value is shown only when capability learning is enabled, the lane's kind is one field repair admits, and no `force_supported` override masks `max_tokens` for the model. An egress that forwards caller omission untouched has no fill: with `max_output_tokens` unset the row reads `unset`; with it set the row names the value as `model-config` and says it sizes the window-gate reserve (on `bedrock`, also the limit Converse sends under legacy `enabled` thinking), not a fill. The learned value is the resident ceiling; the pre-flight's per-request gates (writer health, verdict quorum) are not reflected, so a given request may still go unclamped. Every row names the model's `(kind, upstream)`. Never FAILs, so it can never move the exit code. |
 | Resolved tuning (`tuning`) | One PASS row per `[providers.X]` entry (pool members included), named `provider <id>`, then one per `[models.X]` entry that sets its own `stream_first_byte_timeout_ms`, named `model <nickname>` (one row per seat, named `model <nickname>#<member>`, for a model on a pool). The detail lists `circuit_failures`, `circuit_cooldown_ms`, `rpm_limit`, `request_timeout_ms` and `stream_first_byte_timeout_ms` as `key=value(source)`, the same cells and tier tokens (`model`, `provider`, `pool`, `global`, `default`) `config show --effective` prints; a breaker turned off renders `off`, an unlimited RPM or absent timeout `none`. Read from the config alone. Never WARNs or FAILs, so it can never move the exit code. |
 
 Two structured panels render after the sections:

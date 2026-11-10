@@ -435,10 +435,22 @@ pub fn read_bounded(reader: impl Read, limit: usize) -> Result<Vec<u8>, BoundedR
 /// a best-effort directory fsync. The parent directory is created when
 /// missing and held at `0o700`, like routectl's other config-folder writers.
 /// A failure before the rename leaves any previous file untouched and removes
-/// the temp file. A directory fsync that fails after the rename logs a WARN
-/// and still succeeds: the new table is in place, only its durability across
-/// a crash is unconfirmed.
+/// the temp file. On Unix, a directory fsync that fails after the rename logs
+/// a WARN and still succeeds: the new table is in place, only its durability
+/// across a crash is unconfirmed.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), PricesError> {
+    write_then_sync_parent(path, bytes, |dir| {
+        std::fs::File::open(dir).and_then(|d| d.sync_all())
+    })
+}
+
+/// [`write_atomic`] with the directory fsync it observes supplied by the
+/// caller.
+fn write_then_sync_parent(
+    path: &Path,
+    bytes: &[u8],
+    sync_dir: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> Result<(), PricesError> {
     routectl_auth::atomic_write::write_0600_atomic_with_policy(
         path,
         bytes,
@@ -450,15 +462,20 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), PricesError> {
         source: std::io::Error::other(reason),
     })?;
     // The shared writer discards its best-effort directory fsync result, so
-    // the directory is synced again here to observe it.
+    // the directory is synced again here to observe it. A Windows directory
+    // handle cannot be flushed this way, so there the attempt always fails.
+    #[cfg(unix)]
     if let Some(parent) = path.parent() {
-        warn_on_parent_sync_failure(std::fs::File::open(parent).and_then(|d| d.sync_all()));
+        warn_on_parent_sync_failure(sync_dir(parent));
     }
+    #[cfg(not(unix))]
+    let _ = sync_dir;
     Ok(())
 }
 
 /// WARN with the error kind alone (no path) when the directory fsync after a
 /// table write failed.
+#[cfg(unix)]
 fn warn_on_parent_sync_failure(result: std::io::Result<()>) {
     if let Err(e) = result {
         tracing::warn!(

@@ -8453,7 +8453,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   or a bounded file read (metadata length plus `take(limit + 1)`), both capped
   at `prices::MAX_INPUT_BYTES`; converts through `prices::from_models_dev`,
   then writes `<config_dir>/prices.json` by same-directory temp, fsync,
-  rename, dir fsync (a failed dir fsync logs a WARN with its error kind). Logs the URL without userinfo, query or fragment; output
+  rename, dir fsync (on Unix a failed dir fsync logs a WARN with its error kind). Logs the URL without userinfo, query or fragment; output
   is counts and the table date. Tests in `prices_tests.rs`
 - `src/commands/probe/mod.rs` -- `routectl provider probe [<name>]`: the
   read-only, free-only reachability report. `probe_all(config, store,
