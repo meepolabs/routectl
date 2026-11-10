@@ -14,7 +14,8 @@ use serde::Serialize;
 #[derive(Debug, Clone, Serialize)]
 pub struct Panel<T> {
     /// Wire-shape version for this panel's `data` DTO. Bumped by the owning
-    /// panel when its payload changes in a non-additive way.
+    /// panel on any payload change, an added field included; `/status/query`
+    /// instead keeps it across additive changes (see its `SCHEMA_VERSION`).
     pub schema_version: u32,
     /// RFC3339-UTC instant the underlying data was read. `None` on an
     /// unavailable panel.

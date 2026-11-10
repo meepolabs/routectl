@@ -380,16 +380,25 @@ impl PanelCounters {
         }
     }
 
-    /// Log a single availability edge. Transitions are DEBUG (a panel going
-    /// unavailable is graceful degradation, not a failure -- a fresh-install
-    /// missing usage DB must not warn every poll). Only the fixed reason
-    /// `code` is logged, never a path, secret, or raw error.
+    /// Log a single availability edge. An edge into a degraded source (busy,
+    /// unreadable, timed out, wrong schema, a failed build) is WARN; an edge
+    /// into an expected absence (no usage DB yet, no config path bound) and
+    /// every edge back to available are DEBUG, so a fresh install stays quiet.
+    /// Only the fixed reason `code` is logged, never a path, secret, or raw
+    /// error.
     fn log_transition(&self, now: Availability, code: Option<&str>) {
+        let code = code.unwrap_or("unknown");
         match now {
-            Availability::Unavailable => tracing::debug!(
+            Availability::Unavailable if is_expected_absence(code) => tracing::debug!(
                 target: OBSERVABILITY_TARGET,
                 panel = self.name,
-                code = code.unwrap_or("unknown"),
+                code,
+                "status panel became unavailable",
+            ),
+            Availability::Unavailable => tracing::warn!(
+                target: OBSERVABILITY_TARGET,
+                panel = self.name,
+                code,
                 "status panel became unavailable",
             ),
             Availability::Available => tracing::debug!(
@@ -400,6 +409,16 @@ impl PanelCounters {
             Availability::Unknown => {}
         }
     }
+}
+
+/// Whether an unavailable `code` names data that does not exist yet rather
+/// than a source that failed. Any other code, including one added later, is a
+/// degradation an operator should see.
+fn is_expected_absence(code: &str) -> bool {
+    matches!(
+        code,
+        vocabulary::codes::NO_DATA | vocabulary::codes::NO_CONFIG_PATH
+    )
 }
 
 /// Panic-isolation wrapper every panel builder runs through. A status panel
@@ -718,11 +737,7 @@ mod tests {
     /// positive control.
     #[test]
     fn the_price_book_is_read_only_inside_the_blocking_builder() {
-        let reads = [
-            format!("{}{}", ".current", "()"),
-            format!("{}{}", ".pin", "()"),
-            format!("{}{}", "PriceSnapshot::", "pin"),
-        ];
+        let reads = book_read_tokens();
         let builders = [
             ("config.rs", include_str!("config.rs")),
             ("query.rs", include_str!("query.rs")),
@@ -747,6 +762,18 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The price-book read forms the guards scan for: a method call on the
+    /// book (`.current()`), on an unpinned pricer (`.pin()`), and the
+    /// path-qualified calls that take the book as an argument.
+    fn book_read_tokens() -> [String; 4] {
+        [
+            format!("{}{}", ".current", "()"),
+            format!("{}{}", ".pin", "()"),
+            format!("{}{}", "PriceSnapshot::", "pin"),
+            format!("{}{}", "PriceBook::", "current"),
+        ]
     }
 
     /// The span of `UnpinnedPricer::pin`'s body in `production`: from the
@@ -778,11 +805,7 @@ mod tests {
 
     /// Each book read in `production` that falls outside `body`.
     fn book_reads_outside(production: &str, body: &std::ops::Range<usize>) -> Vec<String> {
-        let reads = [
-            format!("{}{}", ".current", "()"),
-            format!("{}{}", ".pin", "()"),
-            format!("{}{}", "PriceSnapshot::", "pin"),
-        ];
+        let reads = book_read_tokens();
         reads
             .iter()
             .flat_map(|read| {
@@ -796,8 +819,8 @@ mod tests {
     }
 
     /// The query pricer reads the book only inside `UnpinnedPricer::pin`, the
-    /// one call the query builder makes on its blocking worker. Controls: the
-    /// pin body itself reads the book, and a read planted outside it is found.
+    /// one call the query builder makes on its blocking worker. Control: the
+    /// pin body itself reads the book.
     #[test]
     fn the_query_pricer_reads_the_book_only_inside_unpinned_pin() {
         let production = production_source::production_source(include_str!("router_view.rs"));
@@ -808,15 +831,38 @@ mod tests {
             production[body.clone()].contains(&format!("{}{}", "PriceSnapshot::", "pin")),
             "control: the pin body reads the book"
         );
-        let planted = format!(
-            "{production}\nfn stray(b: &PriceBook) {{ {}{}(b); }}\n",
-            "PriceSnapshot::", "pin"
-        );
-        assert_eq!(
-            book_reads_outside(&planted, &unpinned_pin_body(&planted)).len(),
-            1,
-            "control: a read outside the pin body is found"
-        );
+    }
+
+    /// Each read form the query-pricer guard scans for is found when planted
+    /// outside `UnpinnedPricer::pin`, once per plant.
+    #[test]
+    fn a_book_read_planted_outside_unpinned_pin_is_found_in_every_form() {
+        let production = production_source::production_source(include_str!("router_view.rs"));
+        let rows = [
+            (
+                "method_current",
+                format!("let _ = b.{}{};", "current", "()"),
+            ),
+            ("method_pin", format!("let _ = p.{}{};", "pin", "()")),
+            (
+                "snapshot_pin_path",
+                format!("let _ = {}{}(b);", "PriceSnapshot::", "pin"),
+            ),
+            (
+                "book_current_path",
+                format!("let _ = {}{}(&b);", "PriceBook::", "current"),
+            ),
+        ];
+        for (name, read) in rows {
+            let planted = format!(
+                "{production}\nfn stray(b: Arc<PriceBook>, p: UnpinnedPricer) {{ {read} }}\n"
+            );
+            assert_eq!(
+                book_reads_outside(&planted, &unpinned_pin_body(&planted)).len(),
+                1,
+                "{name}: a planted read outside the pin body is found"
+            );
+        }
     }
 
     /// The builder permit is released on the NON-success exits too, so a panel
@@ -877,6 +923,86 @@ mod tests {
             assert_eq!(ok.data, Some(1));
         }
         assert_eq!(capacity.available_permits(), all);
+    }
+
+    /// The status-target events `record` emits for `panel`.
+    fn transition_events(
+        counters: &PanelCounters,
+        panel: &Panel<u32>,
+    ) -> Vec<routectl_testkit::CapturedEvent> {
+        routectl_testkit::capture_events(|| counters.record(panel))
+            .into_iter()
+            .filter(|event| event.target == OBSERVABILITY_TARGET)
+            .collect()
+    }
+
+    /// An availability edge logs once at a level set by its code: a degraded
+    /// source is WARN, an expected absence and a recovery are DEBUG. A second
+    /// identical poll is not an edge and logs nothing.
+    #[test]
+    fn a_panel_edge_logs_once_at_the_level_its_code_names() {
+        use tracing::Level;
+        use vocabulary::codes;
+        struct Row {
+            name: &'static str,
+            prior: Option<Panel<u32>>,
+            panel: Panel<u32>,
+            level: Level,
+        }
+        let first = |name, code: &str, level| Row {
+            name,
+            prior: None,
+            panel: Panel::unavailable(1, code),
+            level,
+        };
+        let available = || Panel::available(1, now_utc_rfc3339(), 7_u32);
+        let rows = [
+            first("db_busy", codes::DB_BUSY, Level::WARN),
+            first("db_unavailable", codes::DB_UNAVAILABLE, Level::WARN),
+            first("query_timeout", codes::QUERY_TIMEOUT, Level::WARN),
+            first("config_unavailable", codes::CONFIG_UNAVAILABLE, Level::WARN),
+            first("doctor_unavailable", codes::DOCTOR_UNAVAILABLE, Level::WARN),
+            first("schema_mismatch", codes::SCHEMA_MISMATCH, Level::WARN),
+            first("no_data", codes::NO_DATA, Level::DEBUG),
+            first("no_config_path", codes::NO_CONFIG_PATH, Level::DEBUG),
+            Row {
+                name: "first_available",
+                prior: None,
+                panel: available(),
+                level: Level::DEBUG,
+            },
+            Row {
+                name: "recovered_from_db_busy",
+                prior: Some(Panel::unavailable(1, codes::DB_BUSY)),
+                panel: available(),
+                level: Level::DEBUG,
+            },
+        ];
+        for Row {
+            name,
+            prior,
+            panel,
+            level,
+        } in rows
+        {
+            let counters = PanelCounters::new("usage");
+            if let Some(prior) = prior {
+                counters.record(&prior);
+            }
+
+            let edge = transition_events(&counters, &panel);
+            let repeat = transition_events(&counters, &panel);
+
+            assert_eq!(edge.len(), 1, "{name}: one line on the edge");
+            assert_eq!(edge[0].level, level, "{name}: level");
+            assert_eq!(edge[0].field("panel"), Some("usage"), "{name}: panel");
+            assert_eq!(
+                edge[0].field("code"),
+                panel.unavailable.as_deref(),
+                "{name}: code"
+            );
+            assert!(repeat.is_empty(), "{name}: a repeat poll logs nothing");
+        }
     }
 
     #[test]

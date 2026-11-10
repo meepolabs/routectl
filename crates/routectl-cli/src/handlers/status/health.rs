@@ -31,7 +31,9 @@ use super::{Panel, StatusState, guard_panel, now_utc_rfc3339};
 use crate::lane_cell::{ResolvedEntry, lapse_deadline_ms};
 use crate::server::seat_driver::SeatDriverHealthSnapshot;
 
-/// Wire-shape version of the health panel payload.
+/// Wire-shape version of the health panel payload. Any change to the payload,
+/// an added field included, bumps it, and the dashboard's expected version
+/// moves with it in the same change.
 ///
 /// 9: each target carries `account` and `eligibility`, and the panel gained
 /// `pools` and `seat_driver`.
