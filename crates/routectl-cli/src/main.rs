@@ -314,8 +314,8 @@ enum UsageCmd {
     /// version stepped over is accepted; no column, row or table is changed,
     /// and opening the file with this binary migrates it forward again.
     Downgrade {
-        /// The schema version to stamp: 18, 17 (steps through 18), or 16
-        /// (steps through 18 and 17).
+        /// The schema version to stamp: 19, 18 (steps through 19), 17 (steps
+        /// through 19 and 18), or 16 (steps through 19, 18 and 17).
         #[arg(
             long,
             value_parser = clap::value_parser!(i64).range(
@@ -1599,11 +1599,11 @@ mod tests {
         }
     }
 
-    /// `usage downgrade` takes `--to 18`, `--to 17` or `--to 16` and nothing else, and the
-    /// report flags do not mix with it.
+    /// `usage downgrade` takes `--to 19`, `--to 18`, `--to 17` or `--to 16` and
+    /// nothing else, and the report flags do not mix with it.
     #[test]
     fn usage_downgrade_parses_only_the_supported_targets() {
-        for target in [18_i64, 17, 16] {
+        for target in [19_i64, 18, 17, 16] {
             let value = target.to_string();
             let parsed = Cli::try_parse_from(["routectl", "usage", "downgrade", "--to", &value])
                 .expect("parses");
@@ -1620,7 +1620,7 @@ mod tests {
         }
         for argv in [
             ["routectl", "usage", "downgrade", "--to", "15"].as_slice(),
-            ["routectl", "usage", "downgrade", "--to", "19"].as_slice(),
+            ["routectl", "usage", "downgrade", "--to", "20"].as_slice(),
             ["routectl", "usage", "downgrade"].as_slice(),
             ["routectl", "usage", "--today", "downgrade", "--to", "16"].as_slice(),
         ] {

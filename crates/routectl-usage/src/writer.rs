@@ -1017,12 +1017,17 @@ fn insert_record(conn: &Connection, r: &UsageRecord) -> Result<usize, rusqlite::
             r.skip_rate_limited,
             r.skip_capability,
             r.skip_context_window,
+            r.request_caused_failures,
+            r.excluded_endpoint,
+            r.excluded_model,
+            r.excluded_target,
+            r.excluded_probe_run,
         ],
     )
 }
 
 /// The bound `INSERT OR IGNORE`. Column order mirrors `record.rs` /
-/// `schema.rs` exactly; `?1..?77` positions match the params list above.
+/// `schema.rs` exactly; `?1..?82` positions match the params list above.
 /// The DDL's four write-stopped legacy columns are absent from this list on
 /// purpose -- an omitted nullable column stores NULL. That
 /// includes `reduction_strategy`: the current context-reduction outcome
@@ -1066,7 +1071,9 @@ INSERT OR IGNORE INTO requests (
     operation, probe, harness,
     wire_losses, translation_drops, local_refusals, field_repairs, missing_terminals,
     skip_credential_unusable, skip_account_parked, skip_breaker_open,
-    skip_rate_limited, skip_capability, skip_context_window
+    skip_rate_limited, skip_capability, skip_context_window,
+    request_caused_failures, excluded_endpoint, excluded_model,
+    excluded_target, excluded_probe_run
 ) VALUES (
     ?1, ?2, ?3, ?4, ?5, ?6,
     ?7, ?8, ?9, ?10, ?11, ?12,
@@ -1103,7 +1110,9 @@ INSERT OR IGNORE INTO requests (
     ?64, ?65, ?66,
     ?67, ?68, ?69, ?70, ?71,
     ?72, ?73, ?74,
-    ?75, ?76, ?77
+    ?75, ?76, ?77,
+    ?78, ?79, ?80,
+    ?81, ?82
 )";
 
 #[cfg(test)]
@@ -1196,6 +1205,11 @@ mod tests {
             skip_rate_limited: 0,
             skip_capability: 0,
             skip_context_window: 0,
+            request_caused_failures: 0,
+            excluded_endpoint: 0,
+            excluded_model: 0,
+            excluded_target: 0,
+            excluded_probe_run: 0,
         }
     }
 
@@ -1790,6 +1804,92 @@ mod tests {
                 .expect("missing_terminals");
             assert_eq!(
                 missing_terminals, 9,
+                "{request_id}: an earlier column shifted"
+            );
+        }
+    }
+
+    /// The v20 walk-count columns, read back in column order; `None` is NULL.
+    type WalkRow = [Option<i64>; 5];
+
+    fn walk_row(conn: &Connection, request_id: &str) -> WalkRow {
+        conn.query_row(
+            "SELECT request_caused_failures, excluded_endpoint, excluded_model, \
+             excluded_target, excluded_probe_run \
+             FROM requests WHERE request_id = ?1",
+            [request_id],
+            |r| Ok([r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?]),
+        )
+        .expect("row")
+    }
+
+    /// The all-default row pins that a record with nothing counted persists
+    /// 0s, never NULL (NULL is reserved for rows written before the columns
+    /// existed). Each other row carries a non-zero value in exactly one walk
+    /// field, so a bind landing in the wrong column, or not at all, fails the
+    /// row that names it.
+    #[tokio::test]
+    async fn the_writer_binds_zero_not_null_for_a_default_record() {
+        // Arrange
+        type Setter = fn(&mut UsageRecord);
+        let some = |v: [i64; 5]| v.map(Some);
+        let cases: [(&str, Setter, WalkRow); 6] = [
+            ("walk-default", |_| {}, some([0, 0, 0, 0, 0])),
+            (
+                "walk-request-caused",
+                |r| r.request_caused_failures = 31,
+                some([31, 0, 0, 0, 0]),
+            ),
+            (
+                "walk-excluded-endpoint",
+                |r| r.excluded_endpoint = 32,
+                some([0, 32, 0, 0, 0]),
+            ),
+            (
+                "walk-excluded-model",
+                |r| r.excluded_model = 33,
+                some([0, 0, 33, 0, 0]),
+            ),
+            (
+                "walk-excluded-target",
+                |r| r.excluded_target = 34,
+                some([0, 0, 0, 34, 0]),
+            ),
+            (
+                "walk-excluded-probe-run",
+                |r| r.excluded_probe_run = 35,
+                some([0, 0, 0, 0, 35]),
+            ),
+        ];
+        let (_dir, path) = temp_path();
+        let (handle, writer) = UsageWriter::start(path.clone(), CHANNEL_CAPACITY, 0, true);
+
+        // Act
+        for (request_id, set, _) in &cases {
+            let mut rec = record(request_id);
+            rec.skip_context_window = 9;
+            set(&mut rec);
+            handle.try_send(rec);
+        }
+        assert!(
+            wait_persisted(handle.counters(), cases.len() as u64),
+            "rows not persisted"
+        );
+        writer.shutdown();
+
+        // Assert
+        let conn = Connection::open(&path).expect("read");
+        for (request_id, _, want) in &cases {
+            assert_eq!(&walk_row(&conn, request_id), want, "{request_id}");
+            let skip_context_window: i64 = conn
+                .query_row(
+                    "SELECT skip_context_window FROM requests WHERE request_id = ?1",
+                    [request_id],
+                    |r| r.get(0),
+                )
+                .expect("skip_context_window");
+            assert_eq!(
+                skip_context_window, 9,
                 "{request_id}: an earlier column shifted"
             );
         }

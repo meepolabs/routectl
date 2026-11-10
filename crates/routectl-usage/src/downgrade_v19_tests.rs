@@ -18,12 +18,12 @@ use crate::schema::{
 /// [`V17_INSERT_COLUMNS`] they are the column list a v18 writer's `INSERT`
 /// names. A v18 binary handed a downgraded file writes through exactly that
 /// list.
-const V18_INSERT_TAIL: &str = "\
+pub(super) const V18_INSERT_TAIL: &str = "\
     operation, probe, harness,
     wire_losses, translation_drops, local_refusals, field_repairs, missing_terminals";
 
 /// The six v19 skip-count columns, frozen as text in physical order.
-const V19_SKIP_COLUMNS: [&str; 6] = [
+pub(super) const V19_SKIP_COLUMNS: [&str; 6] = [
     "skip_credential_unusable",
     "skip_account_parked",
     "skip_breaker_open",
@@ -78,7 +78,12 @@ fn v19_tail() -> Vec<String> {
 /// A WAL file stamped `version` whose `requests` is created by
 /// `requests_ddl` then extended by `added_columns`, with the current
 /// `ledger_gaps` and `capability_events`.
-fn file_from(path: &std::path::Path, version: i64, requests_ddl: &str, added_columns: &[&str]) {
+pub(super) fn file_from(
+    path: &std::path::Path,
+    version: i64,
+    requests_ddl: &str,
+    added_columns: &[&str],
+) {
     let conn = Connection::open(path).expect("raw open");
     conn.pragma_update(None, "journal_mode", "WAL")
         .expect("wal");
@@ -99,19 +104,28 @@ fn file_from(path: &std::path::Path, version: i64, requests_ddl: &str, added_col
     .expect("stamp");
 }
 
+/// A v19 file as the rollback path leaves it: a fresh current file with rows,
+/// stepped down to 19, so `requests` still carries the trailing v20 columns.
+pub(super) fn fresh_v19_with_rows(path: &std::path::Path) {
+    fresh_with_rows(path);
+    downgrade_to(path, 19).expect("step the fresh file down to 19");
+}
+
 #[test]
-fn the_fresh_schema_is_v19_with_the_six_skip_columns_last() {
+fn the_fresh_schema_carries_the_six_skip_columns_after_the_v18_set() {
     // Arrange + Act
     let (_dir, path) = temp_db_path();
     let db = open(&path).expect("open fresh");
 
     // Assert
-    assert_eq!(SCHEMA_VERSION, 19);
-    assert_eq!(user_version(db.conn()), 19);
-    assert_eq!(meta_version(db.conn()), "19");
     let columns = requests_column_names(db.conn());
+    let start = columns
+        .iter()
+        .position(|c| c == "missing_terminals")
+        .expect("the v18 set ends with missing_terminals")
+        + 1;
     assert_eq!(
-        &columns[columns.len() - V19_SKIP_COLUMNS.len()..],
+        &columns[start..start + V19_SKIP_COLUMNS.len()],
         V19_SKIP_COLUMNS
     );
 }
@@ -143,12 +157,12 @@ fn a_v18_file_with_rows_migrates_to_v19_with_old_rows_null_and_new_rows_zero() {
     );
     drop(handle);
     writer.shutdown();
-    let db = open(&path).expect("reopen at v19");
+    let db = open(&path).expect("reopen at the current version");
 
-    // Assert: stamped 19, the fresh column list, the old row NULL in every
-    // skip column, the new row 0 except where it counted.
-    assert_eq!(user_version(db.conn()), 19);
-    assert_eq!(meta_version(db.conn()), "19");
+    // Assert: stamped current, the fresh column list, the old row NULL in
+    // every skip column, the new row 0 except where it counted.
+    assert_eq!(user_version(db.conn()), SCHEMA_VERSION);
+    assert_eq!(meta_version(db.conn()), SCHEMA_VERSION.to_string());
     assert_eq!(requests_column_names(db.conn()), fresh_columns);
     assert_eq!(skip_counts(db.conn(), "v18-row"), vec![None; 6]);
     assert_eq!(
@@ -158,17 +172,17 @@ fn a_v18_file_with_rows_migrates_to_v19_with_old_rows_null_and_new_rows_zero() {
     drop(db);
 
     // Assert: reopening is idempotent.
-    let again = open(&path).expect("reopen at v19");
-    assert_eq!(user_version(again.conn()), 19);
+    let again = open(&path).expect("reopen at the current version");
+    assert_eq!(user_version(again.conn()), SCHEMA_VERSION);
     assert_eq!(requests_column_names(again.conn()), fresh_columns);
     assert_eq!(count(again.conn(), "requests"), Some(2));
 }
 
 #[test]
-fn downgrades_a_fresh_v19_db_to_18_keeping_every_column_and_row() {
+fn downgrades_a_v19_db_to_18_keeping_every_column_and_row() {
     // Arrange
     let (_dir, path) = temp_db_path();
-    fresh_with_rows(&path);
+    fresh_v19_with_rows(&path);
     let before = file_state(&path);
 
     // Act
@@ -187,7 +201,7 @@ fn downgrades_a_fresh_v19_db_to_18_keeping_every_column_and_row() {
 fn a_v18_writer_inserts_into_a_downgraded_file_and_reopening_re_stamps_it() {
     // Arrange: a downgraded file a v18 binary then wrote to.
     let (_dir, path) = temp_db_path();
-    fresh_with_rows(&path);
+    fresh_v19_with_rows(&path);
     let fresh_columns = requests_column_names(&Connection::open(&path).expect("reopen"));
     downgrade_to(&path, 18).expect("downgrade");
     insert_as_v18_writer(&Connection::open(&path).expect("reopen"), "v18-row");
@@ -195,10 +209,10 @@ fn a_v18_writer_inserts_into_a_downgraded_file_and_reopening_re_stamps_it() {
     // Act: the current binary opens it again.
     let db = open(&path).expect("re-upgrade");
 
-    // Assert: v19 again with the same column list (nothing re-added), both
-    // rows present, and the v18-written row NULL in every skip column.
-    assert_eq!(user_version(db.conn()), 19);
-    assert_eq!(meta_version(db.conn()), "19");
+    // Assert: current again with the same column list (nothing re-added),
+    // both rows present, and the v18-written row NULL in every skip column.
+    assert_eq!(user_version(db.conn()), SCHEMA_VERSION);
+    assert_eq!(meta_version(db.conn()), SCHEMA_VERSION.to_string());
     assert_eq!(requests_column_names(db.conn()), fresh_columns);
     assert_eq!(count(db.conn(), "requests"), Some(2));
     assert_eq!(skip_counts(db.conn(), "v18-row"), vec![None; 6]);
@@ -211,7 +225,7 @@ fn downgrades_a_v19_file_through_every_step() {
     for target in [18, 17, 16] {
         // Arrange
         let (_dir, path) = temp_db_path();
-        fresh_with_rows(&path);
+        fresh_v19_with_rows(&path);
         let before = file_state(&path);
 
         // Act
@@ -363,7 +377,12 @@ fn the_exact_additive_v19_shape_is_accepted_by_the_shape_fixture() {
     let tail: Vec<&str> = tail.iter().map(String::as_str).collect();
     let through_v18 = requests_ddl_through_v18();
     let cases: &[(&str, i64, &str, &[&str])] = &[
-        ("the real v19 DDL", 19, CREATE_REQUESTS_TABLE, &[]),
+        (
+            "the current DDL, trailing v20 columns included",
+            19,
+            CREATE_REQUESTS_TABLE,
+            &[],
+        ),
         ("v18 DDL plus the appended tail", 19, &through_v18, &tail),
         ("stamped 18 with the appended tail", 18, &through_v18, &tail),
         ("stamped 18 without the tail", 18, &through_v18, &[]),
@@ -378,7 +397,7 @@ fn the_exact_additive_v19_shape_is_accepted_by_the_shape_fixture() {
 }
 
 #[test]
-fn refuses_while_another_connection_has_a_v19_file_open() {
+fn refuses_while_another_connection_has_the_file_open_on_the_way_to_18() {
     // Arrange: an idle writer connection and an idle read-only viewer.
     type Holder = fn(&std::path::Path) -> Box<dyn std::any::Any>;
     let holders: &[(&str, Holder)] = &[
@@ -398,7 +417,7 @@ fn refuses_while_another_connection_has_a_v19_file_open() {
         // Act
         let result = downgrade_to(&path, 18);
 
-        // Assert: refused busy, and the file is still v19 and unchanged.
+        // Assert: refused busy, and the file is unchanged.
         assert!(
             matches!(result, Err(DowngradeError::InUse)),
             "{name}: {result:?}"
@@ -412,7 +431,7 @@ fn refuses_while_another_connection_has_a_v19_file_open() {
 fn refuses_a_v19_file_whose_meta_mirror_disagrees() {
     // Arrange
     let (_dir, path) = temp_db_path();
-    fresh_with_rows(&path);
+    fresh_v19_with_rows(&path);
     Connection::open(&path)
         .expect("reopen")
         .execute_batch("UPDATE meta SET value = '18' WHERE key = 'schema_version'")
@@ -482,9 +501,7 @@ fn v18_to_v19_failure_after_the_first_alter_leaves_the_file_at_v18() {
         crate::migrate::migrate_to_current(&conn, 0).expect("retry"),
         SCHEMA_VERSION
     );
-    let columns = requests_column_names(&conn);
-    assert_eq!(
-        &columns[columns.len() - V19_SKIP_COLUMNS.len()..],
-        V19_SKIP_COLUMNS
-    );
+    let (_fresh_dir, fresh_path) = temp_db_path();
+    let fresh_columns = requests_column_names(open(&fresh_path).expect("fresh").conn());
+    assert_eq!(requests_column_names(&conn), fresh_columns);
 }

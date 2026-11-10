@@ -3,8 +3,9 @@
 //! One column per `UsageRecord` field (see `record.rs`) for every WRITTEN
 //! column, with matching null-ability: `Option<T>` fields are NULLable;
 //! non-`Option` fields are NOT NULL, except the v18 request-observation
-//! columns and the v19 skip counts, which are non-`Option` in the record but
-//! NULLable on disk so rows written before them need no rewrite. The DDL additionally retains four
+//! columns, the v19 skip counts and the v20 walk counts, which are
+//! non-`Option` in the record but NULLable on disk so rows written before
+//! them need no rewrite. The DDL additionally retains four
 //! intentionally write-stopped legacy columns (`strategy`,
 //! `reduction_strategy`, `selection_decision`, `would_trim_raw_marks`) that
 //! have no `UsageRecord` field, so old databases keep opening and historical
@@ -15,7 +16,7 @@
 /// Current on-disk schema version. The migrate-on-open ladder advances a
 /// freshly-created or older DB to this version. Bump alongside a new
 /// migration step in `migrate.rs`.
-pub const SCHEMA_VERSION: i64 = 19;
+pub const SCHEMA_VERSION: i64 = 20;
 
 /// `meta` key holding the DB creation timestamp (epoch ms).
 pub const META_CREATED_AT_MS: &str = "created_at_ms";
@@ -332,7 +333,25 @@ CREATE TABLE IF NOT EXISTS requests (
     skip_breaker_open INTEGER,
     skip_rate_limited INTEGER,
     skip_capability INTEGER,
-    skip_context_window INTEGER
+    skip_context_window INTEGER,
+
+    -- WALK COUNTS (v20): per client request, how many failed attempts the
+    -- request itself caused (a failure scoped to the endpoint or the model),
+    -- and how many targets the walk passed over because an earlier failure's
+    -- exclusion covered them, one count per exclusion scope
+    -- (`excluded_<scope>`).
+    --
+    -- Nullable with no default and no CHECK, like the v19 counts: the writer
+    -- always binds a value (0 included), so NULL marks a row written before
+    -- this version and reads as 0. Appended last so these columns land in the
+    -- same ordinal position whether the DB was created fresh at v20 or
+    -- migrated from v19 via `ALTER TABLE ... ADD COLUMN` (which always
+    -- appends). No backfill.
+    request_caused_failures INTEGER,
+    excluded_endpoint INTEGER,
+    excluded_model INTEGER,
+    excluded_target INTEGER,
+    excluded_probe_run INTEGER
 )";
 
 /// Index over `ts_start` for time-range scans (the dominant query

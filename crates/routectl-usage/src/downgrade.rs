@@ -1,4 +1,4 @@
-//! Offline schema downgrade: v19 -> v18 -> v17 -> v16.
+//! Offline schema downgrade: v20 -> v19 -> v18 -> v17 -> v16.
 //!
 //! A binary refuses a file stamped with a newer schema version than it
 //! understands (`VersionTooNew`), so rolling a host back to an earlier binary
@@ -6,8 +6,12 @@
 //! strictly additive forward step, so every downgrade is a re-stamp, never a
 //! rewrite:
 //!
+//! - 20 -> 19: v20 appended five nullable walk-count columns to `requests`,
+//!   which a v19 binary never names.
 //! - 19 -> 18: v19 appended six nullable skip-count columns to `requests`,
-//!   which a v18 binary never names.
+//!   which a v18 binary never names. A file stamped 19 may still carry the
+//!   five v20 columns, so this step accepts `requests` either without them or
+//!   followed by exactly them.
 //! - 18 -> 17: v18 appended eight nullable `requests` columns and created
 //!   `ledger_gaps` with its covering `idx_ledger_gaps_ts_ms` index. A v17
 //!   binary names every `requests` column it writes and never touches
@@ -16,8 +20,9 @@
 //!   the gap index is tolerated, not verified, because no older binary
 //!   reads or depends on it. A file stamped 18 may still carry the six v19
 //!   columns (a v19 file stepped down, or one a v18 binary then wrote to),
-//!   so this step accepts `requests` either without them or followed by
-//!   exactly them; a v17 binary never names them either.
+//!   and after them the five v20 columns, so this step accepts `requests`
+//!   ending after the v18, the v19 or the v20 set; a v17 binary never names
+//!   either.
 //! - 17 -> 16: v17 appended two nullable `capability_events` columns, which a
 //!   v16 binary never names.
 //!
@@ -52,7 +57,7 @@ use std::time::Duration;
 
 use rusqlite::{Connection, ErrorCode, OpenFlags, TransactionBehavior};
 
-use crate::migrate::{V18_REQUESTS_COLUMNS, V19_REQUESTS_COLUMNS};
+use crate::migrate::{V18_REQUESTS_COLUMNS, V19_REQUESTS_COLUMNS, V20_REQUESTS_COLUMNS};
 use crate::schema::META_SCHEMA_VERSION;
 
 /// One downgrade step: the version it accepts and the shape check that must
@@ -65,6 +70,10 @@ struct Step {
 /// Every downgrade step, newest first. A downgrade runs a contiguous run of
 /// them, starting at the file's version, until it reaches the target.
 const STEPS: &[Step] = &[
+    Step {
+        from: 20,
+        verify_shape: verify_additive_v20,
+    },
     Step {
         from: 19,
         verify_shape: verify_additive_v19,
@@ -323,8 +332,9 @@ pub enum DowngradeError {
 /// Stamp the usage DB at `path` down to schema version `target`, so a binary
 /// built for that version opens it.
 ///
-/// Runs every step from the file's version down to `target` -- 19 -> 18,
-/// then 18 -> 17, then 17 -> 16, stopping at `target` -- in one transaction. Each step checks
+/// Runs every step from the file's version down to `target` -- 20 -> 19,
+/// then 19 -> 18, then 18 -> 17, then 17 -> 16, stopping at `target` -- in
+/// one transaction. Each step checks
 /// its tables are exactly the earlier shape plus the additive set the forward
 /// step appended, then re-stamps `PRAGMA user_version` and
 /// `meta.schema_version` one version lower; no column, row or table is
@@ -443,6 +453,15 @@ fn requests_through_v19() -> Vec<FrozenColumn> {
         .collect()
 }
 
+/// The `requests` columns through v20: the v19 shape followed by the five v20
+/// walk-count columns (plain nullable, no default).
+fn requests_through_v20() -> Vec<FrozenColumn> {
+    requests_through_v19()
+        .into_iter()
+        .chain(appended(V20_REQUESTS_COLUMNS))
+        .collect()
+}
+
 /// A forward step's `(name, declared type)` set as frozen records: every
 /// appended column is nullable, has no default and is not part of a key.
 fn appended(
@@ -453,20 +472,35 @@ fn appended(
         .map(|&(name, declared_type)| (name, declared_type, false, 0))
 }
 
+/// The 20 -> 19 shape check: `requests` is exactly the v19 shape followed by
+/// the five v20 columns.
+fn verify_additive_v20(conn: &Connection) -> Result<(), DowngradeError> {
+    verify_table(conn, "requests", &[&requests_through_v20()])
+}
+
 /// The 19 -> 18 shape check: `requests` is exactly the v18 shape followed by
-/// the six v19 columns.
+/// the six v19 columns, optionally followed by exactly the five v20 columns.
 fn verify_additive_v19(conn: &Connection) -> Result<(), DowngradeError> {
-    verify_table(conn, "requests", &[&requests_through_v19()])
+    verify_table(
+        conn,
+        "requests",
+        &[&requests_through_v19(), &requests_through_v20()],
+    )
 }
 
 /// The 18 -> 17 shape check: `requests` is the frozen v17 column list
 /// followed by exactly the eight v18 columns, optionally followed by exactly
-/// the six v19 columns, and `ledger_gaps` is exactly its v18 shape.
+/// the six v19 columns and then optionally by exactly the five v20 columns,
+/// and `ledger_gaps` is exactly its v18 shape.
 fn verify_additive_v18(conn: &Connection) -> Result<(), DowngradeError> {
     verify_table(
         conn,
         "requests",
-        &[&requests_through_v18(), &requests_through_v19()],
+        &[
+            &requests_through_v18(),
+            &requests_through_v19(),
+            &requests_through_v20(),
+        ],
     )?;
     verify_table(conn, "ledger_gaps", &[V18_LEDGER_GAPS_COLUMNS])
 }
@@ -581,3 +615,7 @@ mod v18_tests;
 #[cfg(test)]
 #[path = "downgrade_v19_tests.rs"]
 mod v19_tests;
+
+#[cfg(test)]
+#[path = "downgrade_v20_tests.rs"]
+mod v20_tests;

@@ -1082,6 +1082,11 @@ fn sample_usage_record(request_id: &str) -> routectl_usage::UsageRecord {
         skip_rate_limited: 0,
         skip_capability: 0,
         skip_context_window: 0,
+        request_caused_failures: 0,
+        excluded_endpoint: 0,
+        excluded_model: 0,
+        excluded_target: 0,
+        excluded_probe_run: 0,
     }
 }
 

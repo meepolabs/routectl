@@ -465,6 +465,21 @@ pub struct UsageRecord {
     /// Targets skipped because the request did not fit their context window.
     pub skip_context_window: u64,
 
+    // WALK COUNTS
+    // Non-`Option` for the same reason as the counts above: NULL marks only
+    // rows written before the columns existed.
+    /// Failed attempts the request itself caused: failures scoped to the
+    /// endpoint or the model rather than to the target.
+    pub request_caused_failures: u64,
+    /// Targets passed over because an endpoint-scoped exclusion covered them.
+    pub excluded_endpoint: u64,
+    /// Targets passed over because a model-scoped exclusion covered them.
+    pub excluded_model: u64,
+    /// Targets passed over because a target-scoped exclusion covered them.
+    pub excluded_target: u64,
+    /// Targets passed over because a probe-run exclusion covered them.
+    pub excluded_probe_run: u64,
+
     // TIMING
     /// End-to-end request latency, milliseconds.
     pub latency_ms: i64,
@@ -713,6 +728,11 @@ mod tests {
             skip_rate_limited: 9,
             skip_capability: 10,
             skip_context_window: 11,
+            request_caused_failures: 12,
+            excluded_endpoint: 13,
+            excluded_model: 14,
+            excluded_target: 15,
+            excluded_probe_run: 16,
             latency_ms: 1000,
             ttfb_ms: Some(120),
             input_tokens: Some(100),
@@ -801,6 +821,11 @@ mod tests {
             skip_rate_limited: 0,
             skip_capability: 0,
             skip_context_window: 0,
+            request_caused_failures: 0,
+            excluded_endpoint: 0,
+            excluded_model: 0,
+            excluded_target: 0,
+            excluded_probe_run: 0,
             latency_ms: 0,
             ttfb_ms: None,
             input_tokens: None,

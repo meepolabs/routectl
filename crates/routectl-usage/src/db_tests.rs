@@ -2334,7 +2334,7 @@ fn a_v1_db_climbs_the_whole_ladder_to_the_fresh_v18_shape() {
     assert_eq!(operation, None);
 }
 
-/// Pins the physical `requests` DDL shape: 81 columns, in this exact
+/// Pins the physical `requests` DDL shape: 86 columns, in this exact
 /// order, with this exact null-ability. The set intentionally EXCEEDS the
 /// `UsageRecord` field set by four write-stopped legacy columns
 /// (`strategy`, `reduction_strategy`, `selection_decision`,
@@ -2346,8 +2346,9 @@ fn requests_columns_match_physical_schema() {
     // Arrange: (column name, expected NOT NULL). Written columns mirror
     // record.rs -- non-Option fields are NOT NULL, Option<T> fields are
     // NULLable; the four retained write-stopped columns are NULLable, and
-    // so are the v18 request-observation columns (NULL on pre-v18 rows) and
-    // the v19 skip counts (NULL on pre-v19 rows).
+    // so are the v18 request-observation columns (NULL on pre-v18 rows), the
+    // v19 skip counts (NULL on pre-v19 rows) and the v20 walk counts (NULL on
+    // pre-v20 rows).
     let expected: &[(&str, bool)] = &[
         ("ts_start", true),
         ("ts_end", true),
@@ -2430,6 +2431,11 @@ fn requests_columns_match_physical_schema() {
         ("skip_rate_limited", false),
         ("skip_capability", false),
         ("skip_context_window", false),
+        ("request_caused_failures", false),
+        ("excluded_endpoint", false),
+        ("excluded_model", false),
+        ("excluded_target", false),
+        ("excluded_probe_run", false),
     ];
 
     let (_dir, path) = temp_db_path();

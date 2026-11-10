@@ -6090,7 +6090,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `CREATE_LEDGER_GAPS_TS_INDEX` via `migrate_v17_to_v18`; also additive. v19
   (`SCHEMA_VERSION = 19`) appends the six nullable `skip_<reason>` count
   columns (`V19_REQUESTS_COLUMNS`, one per eligibility reason token) to
-  `requests` via `migrate_v18_to_v19`; also additive
+  `requests` via `migrate_v18_to_v19`; also additive. v20
+  (`SCHEMA_VERSION = 20`) appends the five nullable walk-count columns
+  (`V20_REQUESTS_COLUMNS`: `request_caused_failures` and one `excluded_<scope>`
+  per exclusion scope) to `requests` via `migrate_v19_to_v20`; also additive
 - `src/migrate.rs` -- forward-only schema migration / version stamping against
   the `meta` table; also `purge_legacy_capability_observations(conn)`, a
   one-shot data step (no version bump) that deletes NULL-vocabulary
@@ -6099,7 +6102,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   marker and delete in one transaction); called from the writer's open, not
   from `db::open`
 - `src/downgrade.rs` -- offline re-stamp rollback: `downgrade_to(path,
-  target)` runs the additive `STEPS` (19 -> 18, 18 -> 17, 17 -> 16) down to a
+  target)` runs the additive `STEPS` (20 -> 19, 19 -> 18, 18 -> 17, 17 -> 16) down to a
   target in
   `SUPPORTED_TARGETS`; any refusal is a `DowngradeError` that leaves the file
   untouched (the daemon must be stopped)
@@ -8442,8 +8445,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   (clamped never below the window's own lower bound), then widens the requested
   `hour`/`day` width by a whole multiple (i128 intermediates) until the count fits
   the cap, so the grid always covers the window and never exceeds it
-- `src/commands/usage_downgrade.rs` -- `routectl usage downgrade --to 18|17|16
-  [--db P]`: the offline rollback over `routectl_usage::downgrade_to` (a v19
+- `src/commands/usage_downgrade.rs` -- `routectl usage downgrade --to 19|18|17|16
+  [--db P]`: the offline rollback over `routectl_usage::downgrade_to` (a v20
   file taken to 16 runs every step); prints the re-stamped path, exits 1 on
   refusal
 - `src/commands/opening_accuracy/mod.rs` -- `routectl usage

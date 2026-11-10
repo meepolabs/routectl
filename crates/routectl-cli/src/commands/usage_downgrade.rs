@@ -1,4 +1,4 @@
-//! `routectl usage downgrade --to 18|17|16`: hand the usage DB back to an earlier
+//! `routectl usage downgrade --to 19|18|17|16`: hand the usage DB back to an earlier
 //! binary.
 //!
 //! Offline only. The usage crate's `downgrade_to` refuses while any other
