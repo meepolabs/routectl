@@ -123,13 +123,13 @@ pub type SecretCaptureResult<T> = std::result::Result<T, SecretCaptureError>;
 /// # Errors
 ///
 /// [`SecretCaptureError::DirResolution`] when neither `XDG_CONFIG_HOME`
-/// nor `HOME` is set non-empty.
+/// nor `HOME` is an absolute path.
 pub fn default_secret_dir() -> SecretCaptureResult<PathBuf> {
     routectl_core::config_dir::config_dir()
         .map(|dir| dir.join("secrets"))
         .ok_or_else(|| {
             SecretCaptureError::DirResolution(
-                "neither XDG_CONFIG_HOME nor HOME is set non-empty".into(),
+                "neither XDG_CONFIG_HOME nor HOME is an absolute path".into(),
             )
         })
 }
@@ -739,18 +739,23 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn default_secret_dir_errors_when_home_is_empty_and_xdg_unset() {
-        // Arrange
-        let _xdg = routectl_testkit::ScopedEnv::unset("XDG_CONFIG_HOME");
-        let _home = routectl_testkit::ScopedEnv::set("HOME", "");
+    fn default_secret_dir_errors_when_xdg_unset_and_home_is_not_absolute() {
+        for (row, home) in [("empty HOME", ""), ("relative HOME", "relative/home")] {
+            // Arrange
+            let _xdg = routectl_testkit::ScopedEnv::unset("XDG_CONFIG_HOME");
+            let _home = routectl_testkit::ScopedEnv::set("HOME", home);
 
-        // Act
-        let result = default_secret_dir();
+            // Act
+            let result = default_secret_dir();
 
-        // Assert
-        assert!(
-            matches!(result, Err(SecretCaptureError::DirResolution(_))),
-            "an empty HOME must not resolve a relative secrets dir, got {result:?}"
-        );
+            // Assert
+            match result {
+                Err(SecretCaptureError::DirResolution(message)) => assert_eq!(
+                    message, "neither XDG_CONFIG_HOME nor HOME is an absolute path",
+                    "{row}: no-folder message"
+                ),
+                other => panic!("{row}: must not resolve a secrets dir, got {other:?}"),
+            }
+        }
     }
 }

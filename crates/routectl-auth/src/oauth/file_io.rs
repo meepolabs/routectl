@@ -49,13 +49,13 @@ use crate::oauth::{OAuthError, OAuthResult};
 
 /// Default path: `$XDG_CONFIG_HOME/routectl/credentials.json`, falling
 /// back to `~/.config/routectl/credentials.json`. Returns an error if
-/// neither `XDG_CONFIG_HOME` nor `HOME` is set non-empty (rare; an unset
-/// or empty HOME on Linux indicates a broken environment).
+/// neither `XDG_CONFIG_HOME` nor `HOME` is an absolute path (rare; an
+/// unset, empty, or relative HOME on Linux indicates a broken environment).
 pub fn default_path() -> OAuthResult<PathBuf> {
     routectl_core::config_dir::config_dir()
         .map(|dir| dir.join("credentials.json"))
         .ok_or_else(|| {
-            OAuthError::Internal("neither XDG_CONFIG_HOME nor HOME is set non-empty".into())
+            OAuthError::Internal("neither XDG_CONFIG_HOME nor HOME is an absolute path".into())
         })
 }
 

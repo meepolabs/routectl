@@ -48,7 +48,7 @@ pub use store::{DefinitiveCause, LocalProbe, OAuthStore, OpenOutcome, RefreshOut
 ///
 /// # Errors
 ///
-/// Fails when neither `XDG_CONFIG_HOME` nor `HOME` is set non-empty.
+/// Fails when neither `XDG_CONFIG_HOME` nor `HOME` is an absolute path.
 pub fn credentials_default_path() -> OAuthResult<std::path::PathBuf> {
     file_io::default_path()
 }
