@@ -587,14 +587,18 @@
   }
 
   // Written cache volume is the write total, which spans every cache lifetime
-  // and both ledger eras. The per-lifetime fields cover older rows only.
+  // and both ledger eras. The per-lifetime fields cover older rows only. With
+  // no row reporting a write the total is null, never zero: a provider that
+  // sent no write field has not been observed writing nothing, and magSpan
+  // renders the null as the faint "-".
   function cacheWritten(m) {
-    return num0(m.cache_write_tokens);
+    return num0(m.cache_write_present) > 0 ? num0(m.cache_write_tokens) : null;
   }
 
   // How many times over the window read back what it wrote. Undefined without
   // a write, so it says so instead of dividing by zero.
   function cacheAmplification(read, written) {
+    if (written === null) { return 'no cache write reported'; }
     if (written <= 0) {
       return read > 0 ? 'read from an earlier window' : 'nothing written to cache yet';
     }
@@ -611,10 +615,16 @@
       sparkArea(bucketSamples(series, function (m) { return m.cache_hit_pct; }), gap));
   }
 
+  // The cost note says why a figure is partial or absent, so it wraps rather
+  // than truncating, and carries its full text as a title as well.
   function costTile(t, series, gap) {
+    var text = costNote(t);
+    var note = subNote(text, false);
+    note.classList.add('kpi-sub-wrap');
+    note.title = text;
     return kpiTile('Est. cost',
       costFigure(t),
-      subNote(costNote(t), false),
+      note,
       sparkArea(bucketSamples(series, function (m) { return m.cost_usd; }), gap));
   }
 

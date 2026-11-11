@@ -1457,6 +1457,43 @@ mod tests {
         }
     }
 
+    /// An unreported cache write and an observed zero stay distinct on the
+    /// page: `cacheWritten` yields null when no row in the group reported a
+    /// write (which `magSpan` draws as the faint "-") and the total otherwise
+    /// (an observed zero draws as "0"). The figure needs the presence count in
+    /// the adapter's vocabulary, and no render path may read the write total
+    /// around `cacheWritten`. A text scan only: the rendered "-" against "0" is
+    /// on the manual checklist.
+    ///
+    /// Mutation check: drop `cache_write_present` from `QUERY_METRICS`, make
+    /// `cacheWritten` return the total unconditionally, or render
+    /// `m.cache_write_tokens` directly in a tab -> red.
+    #[test]
+    fn cache_written_is_absent_without_a_reported_write() {
+        assert!(
+            string_array("QUERY_METRICS").contains(&"cache_write_present".to_string()),
+            "QUERY_METRICS must carry `cache_write_present`"
+        );
+        let body = function_body("cacheWritten");
+        for needle in ["m.cache_write_present", "null"] {
+            assert!(
+                body.contains(needle),
+                "`cacheWritten` must gate the total on presence (`{needle}`): {body}"
+            );
+        }
+        let absent = function_body("magSpan");
+        assert!(
+            absent.contains("n === null") && absent.contains("'-'"),
+            "`magSpan` must draw a null figure as \"-\": {absent}"
+        );
+        let code = strip_js_comments(&script());
+        let reads = code.matches(".cache_write_tokens").count();
+        assert_eq!(
+            reads, 1,
+            "the write total is read only inside `cacheWritten`, found {reads} reads"
+        );
+    }
+
     /// The eligibility reasons the shared target-phase rule treats as needing
     /// attention must be tokens the server emits; a renamed or misspelled
     /// token would file a dead login back under "not observed yet".

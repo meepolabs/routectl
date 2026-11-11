@@ -1,5 +1,6 @@
 /* ---- tables (scroll INSIDE the card; the page never scrolls sideways) ---- */
 .tablewrap {
+  container-type: inline-size;
   overflow-x: auto;
   margin: 0 calc(-1 * var(--sp-5));
   padding: 0 var(--sp-5);
@@ -84,16 +85,26 @@ tr.exp-row { cursor: pointer; }
   color: var(--faint);
   font-style: italic;
 }
+/* A column fits one label and its value side by side; a pair still wider than
+   its column drops the value under the label rather than running into the
+   next column. White-space is reset because a table cell (an expanded detail
+   row) would otherwise hand down its no-wrap. Inside a table the list is
+   capped at the scroller's visible width (the detail cell spans the whole
+   table, which can be wider), so the pairs stack instead of scrolling away. */
+.tablewrap .deflist { max-width: calc(100cqi - 2 * var(--sp-4) - 2px); }
 .deflist {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr));
   gap: var(--sp-2) var(--sp-5);
   margin: 0;
+  white-space: normal;
 }
 .deflist .def {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
-  gap: var(--sp-3);
+  column-gap: var(--sp-3);
+  min-width: 0;
   border-bottom: 1px dotted var(--border);
   padding-bottom: 2px;
 }
@@ -105,6 +116,8 @@ tr.exp-row { cursor: pointer; }
 }
 .deflist dd {
   margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
   color: var(--fg);
@@ -548,6 +561,7 @@ td.num .unit, th.num .unit {
   white-space: nowrap;
   min-height: 1.4em;
 }
+.kpi-sub-wrap { white-space: normal; }
 /* The tile's trend bleeds to the tile edges: it is a backdrop to the figure,
    not a chart of its own. */
 .kpi > .spark {

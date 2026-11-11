@@ -121,6 +121,17 @@ banner, no retry signal -- silently mislabeled data.
   table date, output with `(model-config)`, and the 1h write `(derived)`; the
   second reads `not configured`, `not filled`, and `unknown` for every price it
   has no row for, never `0`. No provider id or host from the table appears.
+- The cache write figure keeps an unreported write apart from a zero. In a
+  ledger copy, give one model only rows whose provider sent no write field
+  (`cache_write_tokens` NULL) and another a row that reported `0`. On Usage,
+  CACHE READ / WRITE reads a faint `-` on the write side for the first and
+  `0` for the second; scoped to a provider with no reported write, the
+  Overview WRITE tile reads `-` and its note says no cache write was reported.
+- Expanded Config model rows stay readable at 1440, 1024, 390 and 390 at 200%
+  text: no label runs into another pair's value, nothing is cut off at the
+  row edge, and a pair too wide for its column drops the value under its
+  label. The Overview EST. COST note wraps instead of truncating, and
+  hovering it shows the full sentence.
 
 ## 5. Doctor tab capability surface
 

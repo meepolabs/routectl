@@ -17,6 +17,7 @@
     'reasoning_tokens',
     'cache_read_billed',
     'cache_write_tokens',
+    'cache_write_present',
     'server_tool_calls',
     'stream_count',
     'client_disconnect_total',
