@@ -175,6 +175,12 @@ const EXPECTED_OUT_OF_SCOPE: &[(&str, &str)] = &[
          note this differs from the converse response types, which preserve via `Other(Value)`",
     ),
     (
+        "openai_responses/sse_carriage.rs",
+        "response-side streaming: copies the stream events and event members the canonical \
+         chunk has no slot for onto the chunk of that event, for a Responses client only; it \
+         never removes anything the parser emits",
+    ),
+    (
         "openai_responses/types.rs",
         "serialize-only request wire structs; serde omits absent optionals, and the choice to \
          leave one absent is made by the builders in scope. The reasoning struct's \

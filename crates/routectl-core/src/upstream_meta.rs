@@ -557,12 +557,14 @@ pub struct ResponsesItemMembers {
     pub message: BTreeMap<String, Map<String, Value>>,
     /// `function_call` item members, keyed by the item `call_id`.
     pub function_call: BTreeMap<String, Map<String, Value>>,
+    /// `reasoning` item members, keyed by the item `id`.
+    pub reasoning: BTreeMap<String, Map<String, Value>>,
 }
 
 impl ResponsesItemMembers {
     /// True when no item carries a member.
     pub fn is_empty(&self) -> bool {
-        self.message.is_empty() && self.function_call.is_empty()
+        self.message.is_empty() && self.function_call.is_empty() && self.reasoning.is_empty()
     }
 
     /// Unite two sets of item members, `self` winning an item both carry.
@@ -572,9 +574,12 @@ impl ResponsesItemMembers {
         message.extend(self.message);
         let mut function_call = other.function_call;
         function_call.extend(self.function_call);
+        let mut reasoning = other.reasoning;
+        reasoning.extend(self.reasoning);
         Self {
             message,
             function_call,
+            reasoning,
         }
     }
 }

@@ -1332,6 +1332,11 @@ license.
   `is_terminal_event`
   (completed / incomplete / failed / cancelled) is the lane's
   `StreamCompletion` predicate for both `complete()` and `stream()`
+- `src/openai_responses/sse_carriage.rs` -- for a Responses client only,
+  carries an unmodeled stream event whole (`OpaqueSseEvent::UnknownEvent`)
+  and the unmodeled members of a modeled event (`KnownEventExtras`, managed
+  keys stripped) on that event's own chunk; every `output_item.added`
+  carries its item identity so the ingress can map upstream indexes
 - `src/openai_responses/quota_headers.rs` -- tolerant parser for the
   `x-codex-*` quota response-header family (`parse_codex_quota` ->
   `CodexQuota`; None when absent, non-UTF8 values skipped, only
@@ -7763,6 +7768,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   accumulator, for each upstream message item id; re-emits each
   `OpaqueSseEvent::OutputItem` as its own output item and stamps buffered
   calls' namespaces
+- `src/ingress/openai_responses/stream_carriage.rs` -- re-emits carried
+  Responses upstream events in order, re-stamping `sequence_number`,
+  `output_index` and `item_id` to the items the render synthesized, and
+  merges carried event members into the render's own events (render
+  members win); an event it cannot place is withheld, declared and counted
+  (`unknown_member_withheld`, lane openai-responses)
 
 ### proxy
 

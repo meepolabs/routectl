@@ -129,6 +129,8 @@ pub enum ResponseOutputItem {
         /// item.
         #[allow(dead_code)]
         status: Option<String>,
+        /// The item's members outside [`REASONING_ITEM_KEYS`].
+        members: Map<String, Value>,
     },
     FunctionCall {
         /// Type-checks `id` as a string on a `function_call` item.
@@ -187,6 +189,7 @@ impl<'de> Deserialize<'de> for ResponseOutputItem {
                 })
             }
             "reasoning" => {
+                let members = item_members(&value, REASONING_ITEM_KEYS);
                 let r: ReasoningItemPayload =
                     serde_json::from_value(value).map_err(serde::de::Error::custom)?;
                 Ok(Self::Reasoning {
@@ -195,6 +198,7 @@ impl<'de> Deserialize<'de> for ResponseOutputItem {
                     content: r.content,
                     encrypted_content: r.encrypted_content,
                     status: r.status,
+                    members,
                 })
             }
             "function_call" => {
@@ -218,6 +222,11 @@ impl<'de> Deserialize<'de> for ResponseOutputItem {
 /// The `message` item members the Responses render writes itself: its
 /// `status` is the render's own item lifecycle.
 pub(super) const MESSAGE_ITEM_KEYS: &[&str] = &["type", "id", "role", "status", "content"];
+
+/// The `reasoning` item members the Responses render writes itself. The
+/// item's `status` is not among them, so it is carried.
+pub(super) const REASONING_ITEM_KEYS: &[&str] =
+    &["type", "id", "summary", "content", "encrypted_content"];
 
 /// The `function_call` item members the Responses render writes itself:
 /// `namespace` is stamped from the client's own tool declarations. The
@@ -420,7 +429,8 @@ impl ResponsesUsage {
 /// that the wire value has the right primitive shape, and this struct
 /// deserializes EVERY event on the stream. Removing one would let a
 /// wrong-typed value for that key (e.g. `"item_id": 7`) parse where it
-/// currently errors. Deserialize-only -- nothing here is re-emitted.
+/// currently errors. Deserialize-only: what a Responses client gets back
+/// is read from `raw`, never re-serialized from these fields.
 #[derive(Debug, Default, Deserialize)]
 pub struct ResponsesStreamEvent {
     #[serde(rename = "type", default)]
@@ -466,6 +476,12 @@ pub struct ResponsesStreamEvent {
     pub(crate) arguments: Option<String>,
     #[serde(default)]
     pub(crate) response: Option<Value>,
+    /// The event's JSON text as the upstream sent it, kept by
+    /// `sse::parse_data_line` so an event of an unmodeled type, or the
+    /// unmodeled members of a modeled one, can reach a Responses client.
+    /// Parsed only for such a client.
+    #[serde(skip)]
+    pub(crate) raw: Option<Box<str>>,
 }
 
 #[cfg(test)]

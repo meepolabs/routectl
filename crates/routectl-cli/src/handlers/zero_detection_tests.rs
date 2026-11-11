@@ -64,7 +64,12 @@ const ANTHROPIC_TO_RESPONSES: &str = "anthropic->openai-responses";
 const CHAT_TO_RESPONSES: &str = "chat->openai-responses";
 
 /// Findings the check correctly reports that no declaration explains.
-const KNOWN_UNDECLARED: &[KnownUndeclared] = &[];
+const KNOWN_UNDECLARED: &[KnownUndeclared] = &[KnownUndeclared {
+    lane: "responses->openai-responses",
+    leg: Leg::Response,
+    path: "/output/0/content",
+    reason: "the Responses render omits an empty reasoning `content` array the upstream sent",
+}];
 
 /// The client dialect a case speaks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1059,6 +1064,34 @@ fn responses_cases() -> Vec<Case> {
             responses_provider,
         ),
         case(
+            "responses/unmodeled-members-stream",
+            Ingress::Responses,
+            json!({"model": ALIAS, "stream": true, "input": input}),
+            responses_stream_with_unmodeled_members(),
+            responses_provider,
+        ),
+        case(
+            "responses/unknown-event-stream",
+            Ingress::Responses,
+            json!({"model": ALIAS, "stream": true, "input": input}),
+            responses_stream_with_unknown_event(),
+            responses_provider,
+        ),
+        case(
+            "responses/reasoning-item-members",
+            Ingress::Responses,
+            json!({"model": ALIAS, "input": input}),
+            responses_stream_with_reasoning_members(),
+            responses_provider,
+        ),
+        case(
+            "responses/reasoning-item-members-stream",
+            Ingress::Responses,
+            json!({"model": ALIAS, "stream": true, "input": input}),
+            responses_stream_with_reasoning_members(),
+            responses_provider,
+        ),
+        case(
             "responses/item-members",
             Ingress::Responses,
             json!({"model": ALIAS, "input": input}),
@@ -1178,8 +1211,7 @@ fn responses_stream_with_unmodeled_members() -> ResponseTemplate {
     responses_stream_of(done)
 }
 
-/// The same answer for a streaming client, whose terminal event does not
-/// carry top-level members yet: usage members only.
+/// The same answer with its usage members only.
 fn responses_stream_with_unmodeled_usage() -> ResponseTemplate {
     responses_stream_of(responses_document_with_unmodeled_usage())
 }
@@ -1254,6 +1286,111 @@ fn responses_stream_with_item_members() -> ResponseTemplate {
             event(
                 "response.output_item.done",
                 json!({"output_index": 1, "item": call("completed", "{}")}),
+            ),
+            event("response.completed", json!({"response": done})),
+        ],
+        false,
+    ))
+}
+
+/// The committed parallel-call capture: a reasoning item, then five calls
+/// whose arguments arrive only on their done events.
+const PARALLEL_CALLS_CAPTURE: &str = include_str!(
+    "../../../routectl-providers/tests/fixtures/openai_responses/args_done_only_parallel_calls.jsonl"
+);
+
+/// An event type no Responses parser models.
+const UNKNOWN_EVENT: &str = "response.audit.note";
+
+/// The parallel-call capture's events, with one event of an unmodeled type
+/// after the first call's arguments, naming that call by index and item id,
+/// and the `created_at` a real upstream stamps.
+fn parallel_calls_with_unknown_event() -> Vec<Value> {
+    let mut events = Vec::new();
+    for line in PARALLEL_CALLS_CAPTURE
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+    {
+        let mut event: Value = serde_json::from_str(line).expect("capture line");
+        if let Some(response) = event.get_mut("response") {
+            response["created_at"] = json!(RESPONSES_CREATED_AT);
+        }
+        let after_first_args =
+            event["type"] == "response.function_call_arguments.done" && event["output_index"] == 1;
+        events.push(event);
+        if after_first_args {
+            events.push(json!({"type": UNKNOWN_EVENT, "sequence_number": 1000,
+                               "output_index": 1, "item_id": "fc_fixture_1",
+                               "note": "caf\u{e9}"}));
+        }
+    }
+    events
+}
+
+/// [`parallel_calls_with_unknown_event`] as an SSE answer, each event sent
+/// under its own `type` as its event name.
+fn responses_stream_with_unknown_event() -> ResponseTemplate {
+    let events = parallel_calls_with_unknown_event();
+    let names: Vec<String> = events
+        .iter()
+        .map(|event| event["type"].as_str().expect("type").to_owned())
+        .collect();
+    let frames: Vec<(Option<&str>, Value)> = names
+        .iter()
+        .zip(events)
+        .map(|(name, event)| (Some(name.as_str()), event))
+        .collect();
+    sse_response(sse(&frames, false))
+}
+
+/// A Responses answer whose reasoning output item carries members no
+/// typed field models, beside a text message.
+fn responses_stream_with_reasoning_members() -> ResponseTemplate {
+    let reasoning = |status: &str| {
+        json!({"type": "reasoning", "id": "rs_1", "status": status,
+               "summary": [{"type": "summary_text", "text": "plan"}],
+               "metadata": {"turn_id": "turn-sentinel"},
+               "internal_chat_message_metadata_passthrough": {"k": "caf\u{e9}"}})
+    };
+    let message = json!({"type": "message", "id": "m1", "role": "assistant",
+                         "status": "completed",
+                         "content": [{"type": "output_text", "text": "ok", "annotations": []}]});
+    let mut done = responses_document();
+    done["output"] = json!([reasoning("completed"), message]);
+    let mut created = done.clone();
+    created["status"] = json!("in_progress");
+    created["output"] = json!([]);
+    let event = |kind: &'static str, mut body: Value| {
+        body["type"] = json!(kind);
+        (Some(kind), body)
+    };
+    sse_response(sse(
+        &[
+            event("response.created", json!({"response": created})),
+            event(
+                "response.output_item.added",
+                json!({"output_index": 0, "item": reasoning("in_progress")}),
+            ),
+            event(
+                "response.reasoning_summary_text.delta",
+                json!({"output_index": 0, "summary_index": 0, "delta": "plan"}),
+            ),
+            event(
+                "response.output_item.done",
+                json!({"output_index": 0, "item": reasoning("completed")}),
+            ),
+            event(
+                "response.output_item.added",
+                json!({"output_index": 1, "item": {"type": "message", "id": "m1",
+                       "role": "assistant", "status": "in_progress", "content": []}}),
+            ),
+            event(
+                "response.output_text.delta",
+                json!({"output_index": 1, "content_index": 0, "delta": "ok"}),
+            ),
+            event(
+                "response.output_item.done",
+                json!({"output_index": 1, "item": done["output"][1].clone()}),
             ),
             event("response.completed", json!({"response": done})),
         ],
@@ -2707,6 +2844,135 @@ async fn only_an_anthropic_client_receives_unmodeled_stream_members_and_events()
             "diagnostics",
             "usage_note",
         ] {
+            assert_eq!(text.contains(member), expected, "{row}: {member}: {text}");
+        }
+    }
+}
+
+/// The `data:` payloads of an SSE body, in order.
+fn event_payloads(body: &[u8]) -> Vec<Value> {
+    String::from_utf8_lossy(body)
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .filter_map(|data| serde_json::from_str(data).ok())
+        .collect()
+}
+
+/// A Responses stream client gets the upstream's unknown event in place,
+/// re-stamped to the item the render synthesized for the call it names,
+/// and every event's `sequence_number` stays dense and monotonic.
+#[tokio::test]
+async fn a_responses_stream_carries_an_unknown_event_with_dense_sequence_numbers() {
+    // Arrange
+    let input = json!([{"type": "message", "role": "user",
+                        "content": [{"type": "input_text", "text": "hi"}]}]);
+    let probe = case(
+        "responses/unknown-event-order",
+        Ingress::Responses,
+        json!({"model": ALIAS, "stream": true, "input": input}),
+        responses_stream_with_unknown_event(),
+        responses_provider,
+    );
+
+    // Act
+    let (_swap, client) = serve(&probe).await;
+
+    // Assert
+    let payloads = event_payloads(&client);
+    let sequence: Vec<u64> = payloads
+        .iter()
+        .map(|p| p["sequence_number"].as_u64().expect("sequence_number"))
+        .collect();
+    let dense: Vec<u64> = (0..sequence.len() as u64).collect();
+    assert_eq!(sequence, dense, "{payloads:#?}");
+    let notes: Vec<&Value> = payloads
+        .iter()
+        .filter(|p| p["type"] == UNKNOWN_EVENT)
+        .collect();
+    assert_eq!(notes.len(), 1, "{payloads:#?}");
+    let first_call = payloads
+        .iter()
+        .find(|p| {
+            p["type"] == "response.output_item.added" && p["item"]["call_id"] == "call_fixture_1"
+        })
+        .expect("first call added");
+    assert_eq!(notes[0]["output_index"], first_call["output_index"]);
+    assert_eq!(notes[0]["item_id"], "fc_fixture_1");
+    assert_eq!(notes[0]["note"], "caf\u{e9}");
+    let position = |pred: &dyn Fn(&Value) -> bool| payloads.iter().position(pred).expect("event");
+    let note_at = position(&|p| p["type"] == UNKNOWN_EVENT);
+    let first_call_added = position(&|p| {
+        p["type"] == "response.output_item.added" && p["item"]["call_id"] == "call_fixture_1"
+    });
+    let second_call_added = position(&|p| {
+        p["type"] == "response.output_item.added" && p["item"]["call_id"] == "call_fixture_2"
+    });
+    assert!(
+        first_call_added < note_at && note_at < second_call_added,
+        "{payloads:#?}"
+    );
+}
+
+/// A mock upstream answer.
+type Upstream = fn() -> ResponseTemplate;
+
+/// A client of another dialect served by openai-responses never receives
+/// an unknown stream event, a streamed top-level member or a reasoning
+/// item member. Positive control: a Responses stream client gets all three.
+#[tokio::test]
+async fn only_a_responses_client_receives_unknown_events_and_streamed_members() {
+    let hi = json!([{"role": "user", "content": "hi"}]);
+    let input = json!([{"type": "message", "role": "user",
+                        "content": [{"type": "input_text", "text": "hi"}]}]);
+    // (row, ingress, request body, carried expected)
+    let rows = [
+        (
+            "anthropic stream client",
+            Ingress::Anthropic,
+            json!({"model": ALIAS, "max_tokens": 16, "stream": true, "messages": hi}),
+            false,
+        ),
+        (
+            "chat stream client",
+            Ingress::Chat,
+            json!({"model": ALIAS, "stream": true, "messages": hi}),
+            false,
+        ),
+        (
+            "anthropic client",
+            Ingress::Anthropic,
+            json!({"model": ALIAS, "max_tokens": 16, "messages": hi}),
+            false,
+        ),
+        (
+            "chat client",
+            Ingress::Chat,
+            json!({"model": ALIAS, "messages": hi}),
+            false,
+        ),
+        (
+            "responses stream client",
+            Ingress::Responses,
+            json!({"model": ALIAS, "stream": true, "input": input}),
+            true,
+        ),
+    ];
+    // (upstream, member that must reach a Responses client only)
+    let answers: [(Upstream, &str); 3] = [
+        (responses_stream_with_unknown_event, UNKNOWN_EVENT),
+        (responses_stream_with_unmodeled_members, "service_tier"),
+        (responses_stream_with_reasoning_members, "turn-sentinel"),
+    ];
+    for (upstream, member) in answers {
+        for (row, ingress, body, expected) in rows.clone() {
+            // Arrange
+            let probe = case(row, ingress, body, upstream(), responses_provider);
+
+            // Act
+            let (_swap, client) = serve(&probe).await;
+
+            // Assert
+            let text = String::from_utf8_lossy(&client);
             assert_eq!(text.contains(member), expected, "{row}: {member}: {text}");
         }
     }

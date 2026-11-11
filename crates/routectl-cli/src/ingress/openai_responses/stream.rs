@@ -63,6 +63,10 @@ use super::render::{
     declare_message_item_status, declare_status_rebuild, function_call_item, message_item,
     output_text_block, render_responses_response_declared, stamp_namespace,
     status_from_finish_reason, with_function_call_members, with_message_members,
+    with_reasoning_members, with_response_members,
+};
+use super::stream_carriage::{
+    merge_held_members, note_opened, replay_carried, replay_held, withhold_unplaced,
 };
 use super::{OpenOutputItem, ResponsesStreamState, ToolCallBuffer};
 
@@ -125,10 +129,17 @@ pub(super) fn render_chunk_declared(
 
     capture_identity(&chunk, state);
     capture_item_members(&chunk, state);
+    let (members, others): (Vec<_>, Vec<_>) = carried_events(&chunk)
+        .partition(|event| matches!(event, OpaqueSseEvent::KnownEventExtras { .. }));
+    // Members of the event this chunk stands for are held before the
+    // render's own events for it go out, so they merge into them.
+    for event in members {
+        replay_carried(event, state, &mut events, edits);
+    }
     ensure_created(state, &mut events);
 
-    for opaque in &chunk.opaque_events {
-        emit_opaque_event(opaque, state, &mut events);
+    for opaque in others {
+        emit_opaque_event(opaque, state, &mut events, edits);
     }
     let usage = renderable_usage(&chunk);
     if let Some(choice) = chunk.choices.first() {
@@ -147,6 +158,19 @@ pub(super) fn render_chunk_declared(
     }
 
     Ok(events)
+}
+
+/// The chunk's opaque events, less the carried events and members of a
+/// chunk not parsed from a Responses body, which this render never emits.
+fn carried_events(chunk: &ChatChunk) -> impl Iterator<Item = &OpaqueSseEvent> {
+    let renders = renders_unknowns(IngressDialect::Responses, chunk.upstream_meta.as_ref());
+    chunk.opaque_events.iter().filter(move |event| {
+        renders
+            || !matches!(
+                event,
+                OpaqueSseEvent::KnownEventExtras { .. } | OpaqueSseEvent::UnknownEvent { .. }
+            )
+    })
 }
 
 /// The chunk's usage as this render may emit it: the upstream usage
@@ -206,6 +230,12 @@ fn capture_item_members(chunk: &ChatChunk, state: &mut ResponsesStreamState) {
         .item_members
         .clone()
         .merge(std::mem::take(&mut state.done_item_members));
+    for (key, value) in &envelope.extras {
+        state
+            .response_members
+            .entry(key.clone())
+            .or_insert_with(|| value.clone());
+    }
 }
 
 /// The members of each finished item: those its `output_item.done`
@@ -244,7 +274,7 @@ fn emit_delta_events(
     }
 
     for d in &delta.reasoning_details {
-        emit_reasoning_detail(d, state, events);
+        emit_reasoning_detail(d, state, events, edits);
     }
 
     if let Some(tcs) = delta.tool_calls.as_ref() {
@@ -338,6 +368,8 @@ fn ensure_text_item(
         message_item(item_id.as_deref(), "in_progress", Vec::new()),
         &state.added_item_members,
     );
+    note_opened(&added, output_index, &mut state.carried);
+    let opened = added.clone();
     state.open = Some(OpenOutputItem::Text {
         output_index,
         item_id,
@@ -362,6 +394,7 @@ fn ensure_text_item(
             "part": output_text_block(""),
         }),
     );
+    replay_held(&opened, state, events, edits);
     output_index
 }
 
@@ -373,6 +406,7 @@ fn emit_reasoning_detail(
     d: &ReasoningDetail,
     state: &mut ResponsesStreamState,
     events: &mut Vec<SseEvent>,
+    edits: &mut ResponseEdits,
 ) {
     // Every detail rides into the completed body via the accumulator
     // (the non-stream renderer filters to the Responses format when
@@ -388,7 +422,7 @@ fn emit_reasoning_detail(
         return;
     }
 
-    let output_index = ensure_reasoning_item(d.id.clone(), state, events);
+    let output_index = ensure_reasoning_item(d.id.clone(), state, events, edits);
     let event_name = match d.kind {
         ReasoningDetailKind::Summary => "response.reasoning_summary_text.delta",
         ReasoningDetailKind::Text => "response.reasoning_text.delta",
@@ -453,6 +487,7 @@ fn ensure_reasoning_item(
     detail_id: Option<String>,
     state: &mut ResponsesStreamState,
     events: &mut Vec<SseEvent>,
+    edits: &mut ResponseEdits,
 ) -> u64 {
     if let Some(OpenOutputItem::Reasoning {
         output_index,
@@ -477,15 +512,18 @@ fn ensure_reasoning_item(
         item.insert("id".into(), Value::String(id));
     }
     item.insert("summary".into(), Value::Array(Vec::new()));
+    let item = with_reasoning_members(Value::Object(item), &state.added_item_members);
+    note_opened(&item, output_index, &mut state.carried);
     push_event(
         state,
         events,
         "response.output_item.added",
         json!({
             "output_index": output_index,
-            "item": Value::Object(item),
+            "item": item.clone(),
         }),
     );
+    replay_held(&item, state, events, edits);
     output_index
 }
 
@@ -529,7 +567,11 @@ fn buffer_tool_call(tc: &Value, state: &mut ResponsesStreamState) {
 /// Emit the full lifecycle for every buffered function-call item:
 /// `output_item.added` -> `function_call_arguments.delta` ->
 /// `function_call_arguments.done` -> `output_item.done`.
-fn flush_tool_calls(state: &mut ResponsesStreamState, events: &mut Vec<SseEvent>) {
+fn flush_tool_calls(
+    state: &mut ResponsesStreamState,
+    events: &mut Vec<SseEvent>,
+    edits: &mut ResponseEdits,
+) {
     let buffers = std::mem::take(&mut state.tool_buffers);
     for buf in buffers
         .into_iter()
@@ -544,12 +586,14 @@ fn flush_tool_calls(state: &mut ResponsesStreamState, events: &mut Vec<SseEvent>
             ),
             &state.added_item_members,
         );
+        note_opened(&item, output_index, &mut state.carried);
         push_event(
             state,
             events,
             "response.output_item.added",
-            json!({"output_index": output_index, "item": item}),
+            json!({"output_index": output_index, "item": item.clone()}),
         );
+        replay_held(&item, state, events, edits);
         if !buf.arguments.is_empty() {
             push_event(
                 state,
@@ -598,9 +642,13 @@ fn emit_opaque_event(
     event: &OpaqueSseEvent,
     state: &mut ResponsesStreamState,
     events: &mut Vec<SseEvent>,
+    edits: &mut ResponseEdits,
 ) {
     match event {
-        OpaqueSseEvent::OutputItem { item } => emit_carried_item(item, state, events),
+        OpaqueSseEvent::OutputItem { item } => emit_carried_item(item, state, events, edits),
+        OpaqueSseEvent::KnownEventExtras { .. } | OpaqueSseEvent::UnknownEvent { .. } => {
+            replay_carried(event, state, events, edits);
+        }
         _ => tracing::debug!(
             "openai-responses ingress: skipping an opaque event with no Responses rendering"
         ),
@@ -609,15 +657,22 @@ fn emit_opaque_event(
 
 /// Emit one finished upstream item as its own output item. The item is
 /// already final, so `added` and `done` both carry it whole.
-fn emit_carried_item(item: &Value, state: &mut ResponsesStreamState, events: &mut Vec<SseEvent>) {
+fn emit_carried_item(
+    item: &Value,
+    state: &mut ResponsesStreamState,
+    events: &mut Vec<SseEvent>,
+    edits: &mut ResponseEdits,
+) {
     close_open_item(state, events);
     let output_index = alloc_output_index(state);
+    note_opened(item, output_index, &mut state.carried);
     push_event(
         state,
         events,
         "response.output_item.added",
         json!({"output_index": output_index, "item": item}),
     );
+    replay_held(item, state, events, edits);
     push_event(
         state,
         events,
@@ -687,7 +742,10 @@ fn close_open_item(state: &mut ResponsesStreamState, events: &mut Vec<SseEvent>)
                 "response.output_item.done",
                 json!({
                     "output_index": output_index,
-                    "item": reasoning_done_item(detail_id, &state.reasoning_accumulator),
+                    "item": with_reasoning_members(
+                        reasoning_done_item(detail_id, &state.reasoning_accumulator),
+                        &finished_item_members(state),
+                    ),
                 }),
             );
         }
@@ -771,7 +829,17 @@ fn stash_finish(fr: &str, usage: Option<UsageDelta>, state: &mut ResponsesStream
 // render_eos -- terminal response.completed
 // ---------------------------------------------------------------------------
 
+#[cfg(test)]
 pub(super) fn render_eos_internal(state: &mut ResponsesStreamState) -> Vec<SseEvent> {
+    render_eos_declared(state, &mut ResponseEdits::default())
+}
+
+/// Render the end of the stream, declaring into `edits` every carried
+/// upstream event or member it withholds.
+pub(super) fn render_eos_declared(
+    state: &mut ResponsesStreamState,
+    edits: &mut ResponseEdits,
+) -> Vec<SseEvent> {
     if state.finished {
         return Vec::new();
     }
@@ -782,7 +850,7 @@ pub(super) fn render_eos_internal(state: &mut ResponsesStreamState) -> Vec<SseEv
 
     close_open_item(state, &mut events);
     let finished_output = completed_output(state);
-    flush_tool_calls(state, &mut events);
+    flush_tool_calls(state, &mut events, edits);
 
     let finish_reason = state.pending_finish_reason.clone();
     let (status, incomplete_details) = status_from_finish_reason(finish_reason.as_deref());
@@ -790,6 +858,7 @@ pub(super) fn render_eos_internal(state: &mut ResponsesStreamState) -> Vec<SseEv
     if let (Some(obj), Some(details)) = (body.as_object_mut(), incomplete_details) {
         obj.insert("incomplete_details".into(), details);
     }
+    let body = with_response_members(body, &state.response_members);
     // A "failed" status is delivered via the distinct `response.failed`
     // event -- real Responses SDKs and the egress reader key off the event
     // NAME, so `response.completed(status=failed)` is non-conformant. The
@@ -801,6 +870,7 @@ pub(super) fn render_eos_internal(state: &mut ResponsesStreamState) -> Vec<SseEv
         "response.completed"
     };
     push_response_event(state, &mut events, event_name, body);
+    withhold_unplaced(&mut state.carried, edits);
     state.finished = true;
     events
 }
@@ -1027,8 +1097,11 @@ fn usage_from_delta(u: &UsageDelta) -> Usage {
     }
 }
 
-/// Push an event whose `data` is `{type, sequence_number, ...extras}`.
-fn push_event(
+/// Push an event whose `data` is `{type, sequence_number, ...extras}`,
+/// with any members a Responses upstream carried for this event and item
+/// merged after the render's own. `type` and `sequence_number` are always
+/// the render's: the sequence stays dense across carried events.
+pub(super) fn push_event(
     state: &mut ResponsesStreamState,
     events: &mut Vec<SseEvent>,
     event_name: &str,
@@ -1040,6 +1113,7 @@ fn push_event(
         .expect("push_event extras must be a JSON object");
     obj.insert("type".into(), Value::String(event_name.into()));
     obj.insert("sequence_number".into(), json!(seq));
+    merge_held_members(&mut state.carried, event_name, obj);
     match serde_json::to_string(&extras) {
         Ok(json) => events.push(SseEvent::named(event_name, json)),
         Err(e) => tracing::error!(

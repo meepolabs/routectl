@@ -31,7 +31,7 @@ use std::collections::BTreeMap;
 use axum::http::HeaderMap;
 use routectl_core::wire_check::IngressDialect;
 use routectl_core::{ChatChunk, ChatRequest, ChatResponse, ResponsesItemMembers, Result};
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use super::{
     ErrorEnvelopeShape, IngressAdapter, IngressStreamState, RenderContext, ResponseEdits, SseEvent,
@@ -49,6 +49,7 @@ mod parse_carrier_tests;
 mod parse_tests;
 mod render;
 mod stream;
+mod stream_carriage;
 pub(crate) mod tools;
 
 use parse::translate_request;
@@ -152,6 +153,12 @@ pub struct ResponsesStreamState {
     /// Bare tool name -> the namespace the client declared it in, stamped
     /// onto each returned `function_call` item.
     tool_namespaces: BTreeMap<String, String>,
+    /// Unmodeled top-level members of the upstream's terminal response,
+    /// emitted on the `response.completed` body.
+    response_members: Map<String, Value>,
+    /// Upstream events and event members carried from a Responses upstream,
+    /// held until the item or event they belong to is emitted.
+    carried: stream_carriage::CarriedState,
 }
 
 /// One open Responses output item, tagged with the canonical channel
@@ -280,7 +287,15 @@ impl IngressAdapter for ResponsesIngress {
     }
 
     fn render_eos(&self, state: &mut dyn IngressStreamState) -> Vec<SseEvent> {
-        stream::render_eos_internal(stream::state_mut(state))
+        self.render_eos_declared(state, &mut ResponseEdits::default())
+    }
+
+    fn render_eos_declared(
+        &self,
+        state: &mut dyn IngressStreamState,
+        edits: &mut ResponseEdits,
+    ) -> Vec<SseEvent> {
+        stream::render_eos_declared(stream::state_mut(state), edits)
     }
 
     fn render_error_eos(

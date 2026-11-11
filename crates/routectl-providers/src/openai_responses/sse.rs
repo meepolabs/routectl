@@ -63,8 +63,8 @@ pub(super) const MAX_OUTPUT_BLOCKS: usize = 4096;
 use super::empty_optional::EmptyOptionalFilter;
 use super::response::{cache_details, map_finish_reason, upstream_error_from_failed};
 use super::response_types::{
-    FUNCTION_CALL_ITEM_KEYS, MESSAGE_ITEM_KEYS, ResponsesResponse, ResponsesStreamEvent,
-    item_members,
+    FUNCTION_CALL_ITEM_KEYS, MESSAGE_ITEM_KEYS, REASONING_ITEM_KEYS, ResponsesResponse,
+    ResponsesStreamEvent, item_members,
 };
 use super::{AuthKind, lane_format_tag};
 
@@ -230,11 +230,12 @@ impl ResponsesStreamState {
         event: ResponsesStreamEvent,
     ) -> Result<Vec<ChatChunk>> {
         let kind = event.kind.clone();
+        let carried = self.event_carriage(&kind, &event);
         let result = self.dispatch_event(provider_id, &kind, event);
         if is_terminal_event(&kind) {
             self.report_removed_empty_optionals(provider_id);
         }
-        result
+        result.map(|chunks| self.attach_carriage(chunks, carried))
     }
 
     /// Count, log and declare the empty optional arguments this stream
@@ -287,11 +288,15 @@ impl ResponsesStreamState {
                 // Forward compat: a new event kind ships without a
                 // rebuild. DEBUG (not WARN) because OpenAI adds new
                 // event kinds frequently and WARN would flood the log.
-                tracing::debug!(
-                    provider = provider_id,
-                    event_type = other,
-                    "openai-responses: skipping unknown stream event"
-                );
+                // A Responses client gets an unknown event itself, through
+                // the carriage `parse_event` attaches.
+                if !(self.carries_unmodeled() && carriage::is_carried_whole(other)) {
+                    tracing::debug!(
+                        provider = provider_id,
+                        event_type = %sanitize_for_log(other),
+                        "openai-responses: skipping unknown stream event"
+                    );
+                }
                 Ok(Vec::new())
             }
         }
@@ -754,7 +759,9 @@ impl ResponsesStreamState {
         }
         if matches!(
             self.blocks.get(&idx),
-            Some(BlockState::Text { .. } | BlockState::ToolUse { .. })
+            Some(
+                BlockState::Text { .. } | BlockState::ToolUse { .. } | BlockState::Reasoning { .. }
+            )
         ) && let Some(item) = event.item.as_ref()
         {
             chunks.extend(self.item_members_chunk(item, ItemEvent::Done));
@@ -763,11 +770,11 @@ impl ResponsesStreamState {
         chunks
     }
 
-    /// The chunk carrying the unmodeled members a `message` or
-    /// `function_call` item has on this item event, keyed by the identity
-    /// the Responses render emits the item under. `None` for any other
-    /// item, an item with no such member, or a client of another dialect,
-    /// which has nowhere to put them.
+    /// The chunk carrying the unmodeled members a `message`,
+    /// `function_call` or `reasoning` item has on this item event, keyed by
+    /// the identity the Responses render emits the item under. `None` for
+    /// any other item, an item with no such member, or a client of another
+    /// dialect, which has nowhere to put them.
     fn item_members_chunk(&self, item: &Value, event: ItemEvent) -> Option<ChatChunk> {
         if !super::client_carries_unmodeled_items(self.provenance) {
             return None;
@@ -789,6 +796,11 @@ impl ResponsesStreamState {
                 &mut by_item.function_call,
                 identity("call_id"),
                 item_members(item, FUNCTION_CALL_ITEM_KEYS),
+            ),
+            "reasoning" => (
+                &mut by_item.reasoning,
+                identity("id"),
+                item_members(item, REASONING_ITEM_KEYS),
             ),
             _ => return None,
         };
@@ -830,7 +842,8 @@ impl ResponsesStreamState {
             }
         };
         let unsettled_items = self.flush_unsettled_passthrough(provider_id, &resp_value);
-        let resp = ResponsesResponse::deserialize(&resp_value).unwrap_or_default_resp();
+        let mut resp = ResponsesResponse::deserialize(&resp_value).unwrap_or_default_resp();
+        let response_members = std::mem::take(&mut resp.extras);
 
         // `has_function_call` decides whether a `completed` status
         // maps to `tool_calls` (when present) or `stop` (when absent).
@@ -901,14 +914,33 @@ impl ResponsesStreamState {
                 finish_reason,
                 matched_stop_sequence: None,
             }],
-            upstream_meta: usage_delta.as_ref().map(|_| {
-                UpstreamMeta::from_usage_input_source(UsageInputSource::ExplicitFinal)
-                    .with_wire_dialect(IngressDialect::Responses)
-            }),
+            upstream_meta: self.completed_meta(usage_delta.is_some(), response_members),
             usage: usage_delta,
             opaque_events: Vec::new(),
         });
         Ok(chunks)
+    }
+
+    /// The terminal chunk's carrier: the usage provenance when it carries
+    /// usage, and the completed body's unmodeled top-level members for a
+    /// client of this dialect.
+    fn completed_meta(
+        &self,
+        has_usage: bool,
+        response_members: serde_json::Map<String, Value>,
+    ) -> Option<UpstreamMeta> {
+        let usage_meta = has_usage
+            .then(|| UpstreamMeta::from_usage_input_source(UsageInputSource::ExplicitFinal));
+        let members_meta = (self.carries_unmodeled() && !response_members.is_empty()).then(|| {
+            let mut envelope = ResponsesEnvelope::default();
+            envelope.extras = response_members;
+            UpstreamMeta::from_responses_envelope(envelope)
+        });
+        let meta = match (usage_meta, members_meta) {
+            (Some(usage), Some(members)) => usage.merge(members),
+            (usage, members) => usage.or(members)?,
+        };
+        Some(meta.with_wire_dialect(IngressDialect::Responses))
     }
 
     /// Settle, in output order, every call no done event settled. The
@@ -1345,11 +1377,13 @@ pub fn is_terminal_event(kind: &str) -> bool {
 /// condition (codex itself returns a Stream error in this case at
 /// `codex-rs/codex-api/src/sse/responses.rs:473-479`).
 pub fn parse_data_line(provider_id: &str, data: &str) -> Result<ResponsesStreamEvent> {
-    serde_json::from_str(data).map_err(|e| {
+    let mut event: ResponsesStreamEvent = serde_json::from_str(data).map_err(|e| {
         Error::Streaming(format!(
             "openai-responses provider `{provider_id}`: bad SSE json: {e}"
         ))
-    })
+    })?;
+    event.raw = Some(data.into());
+    Ok(event)
 }
 
 /// Extension trait for `serde_json::Result<ResponsesResponse>` so the
@@ -1377,9 +1411,16 @@ impl UnwrapOrDefaultResp for serde_json::Result<ResponsesResponse> {
     }
 }
 
+#[path = "sse_carriage.rs"]
+mod carriage;
+
 #[cfg(test)]
 #[path = "sse_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "sse_carriage_tests.rs"]
+mod carriage_tests;
 
 #[cfg(test)]
 #[path = "sse_tool_args_tests.rs"]

@@ -806,7 +806,7 @@ fn translate_usage_without_members_carries_nothing() {
 #[test]
 fn translate_carries_message_and_function_call_item_members_by_identity() {
     // Arrange: the item shapes a Responses upstream sends, one value
-    // non-ASCII; a reasoning item's members are not this carrier's.
+    // non-ASCII; a reasoning item's members ride its own map.
     let body = json!({
         "id": "resp_01", "status": "completed", "model": "m",
         "output": [
@@ -839,4 +839,31 @@ fn translate_carries_message_and_function_call_item_members_by_identity() {
     assert_eq!(members.message.len(), 1);
     assert_eq!(members.function_call.len(), 1);
     assert!(envelope.added_item_members.is_empty());
+}
+
+#[test]
+fn translate_carries_reasoning_item_members_by_item_id() {
+    // Arrange: the reasoning item members a codex backend stamps.
+    let body = json!({
+        "id": "resp_01", "status": "completed", "model": "m",
+        "output": [
+            {"type": "reasoning", "id": "rs_1", "status": "completed", "summary": [],
+             "encrypted_content": "enc", "metadata": {"turn_id": "t"},
+             "internal_chat_message_metadata_passthrough": {"k": "caf\u{e9}"}}
+        ]
+    });
+
+    // Act
+    let resp = parse(body);
+
+    // Assert
+    let envelope = resp
+        .upstream_meta
+        .and_then(|meta| meta.openai_responses)
+        .expect("envelope");
+    assert_eq!(
+        Value::Object(envelope.item_members.reasoning["rs_1"].clone()),
+        json!({"status": "completed", "metadata": {"turn_id": "t"},
+               "internal_chat_message_metadata_passthrough": {"k": "caf\u{e9}"}})
+    );
 }

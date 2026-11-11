@@ -144,6 +144,15 @@ pub(super) fn render_responses_response_declared(
     Ok(Value::Object(body))
 }
 
+/// Add the upstream response's unmodeled top-level `members` to `body`, a
+/// rendered `response` object, after its own members.
+pub(super) fn with_response_members(mut body: Value, members: &Map<String, Value>) -> Value {
+    if let Some(obj) = body.as_object_mut() {
+        merge_unreserved(obj, members, RESERVED_TOP_LEVEL);
+    }
+    body
+}
+
 /// Top-level names this render owns, whether or not it emits them.
 const RESERVED_TOP_LEVEL: &[&str] = &[
     "object",
@@ -174,6 +183,10 @@ const RESERVED_MESSAGE_ITEM: &[&str] = &["type", "id", "role", "status", "conten
 /// them. The upstream item's `id` and `status` are not among them: the
 /// render writes neither, so they come back as carried members.
 const RESERVED_FUNCTION_CALL_ITEM: &[&str] = &["type", "call_id", "name", "arguments", "namespace"];
+
+/// `reasoning` item names this render owns, whether or not it emits them.
+/// The upstream item's `status` is not among them: the render writes none.
+const RESERVED_REASONING_ITEM: &[&str] = &["type", "id", "summary", "content", "encrypted_content"];
 
 const INPUT_TOKENS_DETAILS: &str = "input_tokens_details";
 const OUTPUT_TOKENS_DETAILS: &str = "output_tokens_details";
@@ -268,7 +281,11 @@ fn build_output(
 ) -> Vec<Value> {
     let mut output: Vec<Value> = Vec::new();
 
-    output.extend(build_reasoning_items(&msg.reasoning_details));
+    output.extend(
+        build_reasoning_items(&msg.reasoning_details)
+            .into_iter()
+            .map(|item| with_reasoning_members(item, item_members)),
+    );
 
     if let Some(message_item) =
         build_message_item(&msg.content, msg.refusal.as_deref(), message_item_id)
@@ -310,6 +327,14 @@ pub(super) fn with_function_call_members(
         .unwrap_or_default();
     let members = item_members.function_call.get(call_id);
     with_members(item, members, RESERVED_FUNCTION_CALL_ITEM)
+}
+
+/// `item`, a `reasoning` output item, with the members `item_members`
+/// carries for its `id` added after its own.
+pub(super) fn with_reasoning_members(item: Value, item_members: &ResponsesItemMembers) -> Value {
+    let id = item.get("id").and_then(Value::as_str).unwrap_or_default();
+    let members = item_members.reasoning.get(id);
+    with_members(item, members, RESERVED_REASONING_ITEM)
 }
 
 fn with_members(mut item: Value, members: Option<&Map<String, Value>>, reserved: &[&str]) -> Value {

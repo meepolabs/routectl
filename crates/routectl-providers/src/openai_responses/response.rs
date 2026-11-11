@@ -239,9 +239,10 @@ fn complete_meta(
     meta.with_wire_dialect(IngressDialect::Responses)
 }
 
-/// The unmodeled members of every `message` and `function_call` output
-/// item that has any, keyed by the identity the render emits the item
-/// under: a message by its `id`, a call by its `call_id`.
+/// The unmodeled members of every `message`, `function_call` and
+/// `reasoning` output item that has any, keyed by the identity the render
+/// emits the item under: a message or reasoning item by its `id`, a call by
+/// its `call_id`.
 fn output_item_members(output: &[ResponseOutputItem]) -> ResponsesItemMembers {
     let mut item_members = ResponsesItemMembers::default();
     for item in output {
@@ -252,6 +253,9 @@ fn output_item_members(output: &[ResponseOutputItem]) -> ResponsesItemMembers {
             ResponseOutputItem::FunctionCall {
                 call_id, members, ..
             } => (&mut item_members.function_call, call_id, members),
+            ResponseOutputItem::Reasoning { id, members, .. } => {
+                (&mut item_members.reasoning, id, members)
+            }
             _ => continue,
         };
         if !members.is_empty() {
