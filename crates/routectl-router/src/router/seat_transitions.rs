@@ -60,51 +60,23 @@ impl Router {
 
     /// Log that `account` became unusable for `cause`.
     pub(super) fn log_seat_unusable(&self, account: &str, cause: UnusableCause) {
-        let seats = self.seats_on_account(account);
-        if seats.is_empty() {
-            tracing::warn!(
-                event = "seat_unusable",
-                account = %sanitize_for_log(account),
-                cause = cause.as_str(),
-                "seat credential unusable; its models refuse until it recovers",
-            );
-        }
-        for seat in seats {
-            tracing::warn!(
-                event = "seat_unusable",
-                pool = %sanitize_for_log(&seat.pool),
-                member = %sanitize_for_log(&seat.member),
-                account = %sanitize_for_log(account),
-                cause = cause.as_str(),
-                eligible = seat.eligible,
-                configured = seat.configured,
-                "seat credential unusable; its models refuse until it recovers",
-            );
-        }
+        self.log_seat_transition(SeatTransition::Unusable, account, cause);
     }
 
     /// Log that `account`'s unusable mark for `cause` was cleared.
     pub(super) fn log_seat_recovered(&self, account: &str, cause: UnusableCause) {
+        self.log_seat_transition(SeatTransition::Recovered, account, cause);
+    }
+
+    /// One `kind` line per pool seat on `account`, or one line naming the
+    /// account alone when no pool holds it.
+    fn log_seat_transition(&self, kind: SeatTransition, account: &str, cause: UnusableCause) {
         let seats = self.seats_on_account(account);
         if seats.is_empty() {
-            tracing::info!(
-                event = "seat_recovered",
-                account = %sanitize_for_log(account),
-                cause = cause.as_str(),
-                "seat credential recovered",
-            );
+            emit_seat_transition(kind, account, cause, None);
         }
-        for seat in seats {
-            tracing::info!(
-                event = "seat_recovered",
-                pool = %sanitize_for_log(&seat.pool),
-                member = %sanitize_for_log(&seat.member),
-                account = %sanitize_for_log(account),
-                cause = cause.as_str(),
-                eligible = seat.eligible,
-                configured = seat.configured,
-                "seat credential recovered",
-            );
+        for seat in &seats {
+            emit_seat_transition(kind, account, cause, Some(seat));
         }
     }
 
@@ -115,6 +87,74 @@ impl Router {
                 self.log_seat_recovered(&reset.account, cause);
             }
         }
+    }
+}
+
+/// Which seat-transition line to emit: `Unusable` logs at WARN,
+/// `Recovered` at INFO, each with its own `event` token and message.
+#[derive(Clone, Copy)]
+enum SeatTransition {
+    Unusable,
+    Recovered,
+}
+
+impl SeatTransition {
+    const fn event(self) -> &'static str {
+        match self {
+            Self::Unusable => "seat_unusable",
+            Self::Recovered => "seat_recovered",
+        }
+    }
+
+    const fn message(self) -> &'static str {
+        match self {
+            Self::Unusable => "seat credential unusable; its models refuse until it recovers",
+            Self::Recovered => "seat credential recovered",
+        }
+    }
+}
+
+/// Emit one `kind` line for `account`, with the pool seat's name and live
+/// counts when `seat` is given.
+fn emit_seat_transition(
+    kind: SeatTransition,
+    account: &str,
+    cause: UnusableCause,
+    seat: Option<&SeatOnAccount>,
+) {
+    let account = sanitize_for_log(account);
+    let event = kind.event();
+    let message = kind.message();
+    let cause = cause.as_str();
+    // `tracing` fixes an event's level per callsite, so each level is its own
+    // macro invocation over the same field list.
+    macro_rules! emit {
+        ($level:expr) => {
+            match seat {
+                None => tracing::event!(
+                    $level,
+                    event,
+                    account = %account,
+                    cause,
+                    "{message}",
+                ),
+                Some(seat) => tracing::event!(
+                    $level,
+                    event,
+                    pool = %sanitize_for_log(&seat.pool),
+                    member = %sanitize_for_log(&seat.member),
+                    account = %account,
+                    cause,
+                    eligible = seat.eligible,
+                    configured = seat.configured,
+                    "{message}",
+                ),
+            }
+        };
+    }
+    match kind {
+        SeatTransition::Unusable => emit!(tracing::Level::WARN),
+        SeatTransition::Recovered => emit!(tracing::Level::INFO),
     }
 }
 

@@ -792,6 +792,8 @@ list with more narrative.
 
 - **`routectl_edit_rejected` warns once per path pattern, and the never-emitted `dead_override_key` WARN is gone.** Rejected paths that differ only in an array index (`/messages/0/x`, `/messages/7/x`) share one warning, which names the first concrete path seen, so client-chosen indices no longer fill the 1024-entry dedup set. The override-key reachability check could never fire because capability-key normalization is idempotent; it and its `docs/LOGGING.md` sections are removed.
 
+- **A capability every lane refuses logs one WARN, and the reload-shutdown WARNs carry `event`.** The router's `event=hard_exclusion` line is now the only WARN for the refusal; the ingress `capability unsupported on every lane; refused before dispatch` WARN is gone (the client 400 and the usage row are unchanged). The two shutdown lines on `routectl_cli::server::reload_shutdown` gain `event=reload_task_join_failed` and `event=reload_task_deadline_exceeded`; their messages and levels are unchanged.
+
 ### Deprecated
 
 - **`[retry] retry_on_429`, `retry_on_5xx` and `retry_on_network`.** Each still parses and still sets the retry cap of its classes, below any `[retry.classes.<class>] retry` leaf, so behavior is unchanged; each one set now logs one advisory config warning at load and in `routectl config check` naming its replacement: `[retry.classes.rate-limited] retry` for `retry_on_429`, `server-error` and `overloaded` for `retry_on_5xx`, `timeout` and `network-error` for `retry_on_network`. The class table is now the documented retry surface, with `max_attempts` as the cap of the five retrying classes. See [docs/CONFIGURATION.md](docs/CONFIGURATION.md#per-class-retry-and-fallback-policy-retryclasses).

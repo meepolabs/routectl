@@ -644,7 +644,7 @@ async fn shutdown_during_a_sweep_stops_the_driver_within_the_shutdown_bound() {
     assert!(
         !events
             .iter()
-            .any(|event| event.message.contains("did not stop within deadline")),
+            .any(|event| event.field("event") == Some("reload_task_deadline_exceeded")),
         "the driver stopped on its own, not by abort"
     );
     dropped_rx.await.expect("the in-flight refresh was dropped");

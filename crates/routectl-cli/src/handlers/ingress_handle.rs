@@ -1260,15 +1260,6 @@ fn capability_unsupported_message(capability: &str) -> String {
     )
 }
 
-/// The lane keys of a capability refusal as one log-safe field value.
-fn sanitized_lane_list(lanes: &[Box<str>]) -> String {
-    lanes
-        .iter()
-        .map(|lane| routectl_core::sanitize_for_log(lane))
-        .collect::<Vec<_>>()
-        .join(",")
-}
-
 fn sse_to_axum(ev: SseEvent) -> Event {
     let mut e = Event::default().data(ev.data);
     if let Some(name) = ev.event {
@@ -1472,13 +1463,9 @@ pub(crate) fn map_error(shape: ErrorEnvelopeShape, e: Error) -> Response {
             local_refusal_message(detail, "upstream error")
         }
         // The lanes name configured providers (routing topology), so only
-        // the capability key reaches the client.
-        Error::CapabilityUnsupportedEverywhere { capability, lanes } => {
-            tracing::warn!(
-                capability = %routectl_core::sanitize_for_log(capability),
-                lanes = %sanitized_lane_list(lanes),
-                "capability unsupported on every lane; refused before dispatch"
-            );
+        // the capability key reaches the client. The router already logged
+        // this refusal at WARN with its lanes, so nothing is logged here.
+        Error::CapabilityUnsupportedEverywhere { capability, .. } => {
             capability_unsupported_message(capability)
         }
         // A local routing decision: the fixed message carries only the reason

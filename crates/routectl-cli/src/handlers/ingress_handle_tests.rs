@@ -5911,9 +5911,9 @@ fn capability_refusal() -> Error {
 }
 
 /// Every ingress dialect renders a capability every lane refuses as a 400
-/// `invalid_request_error` naming the capability, while the refusing lanes
-/// reach only the server-side WARN (the positive control that the fixture
-/// would surface them).
+/// `invalid_request_error` naming the capability, without the refusing lanes
+/// the error carries, and logs nothing at WARN: the router's own refusal line
+/// is the one WARN for it.
 #[tokio::test]
 async fn map_error_capability_unsupported_everywhere_names_only_the_capability() {
     use crate::ingress::IngressAdapter;
@@ -5921,6 +5921,10 @@ async fn map_error_capability_unsupported_everywhere_names_only_the_capability()
     use crate::ingress::openai::OpenAiIngress;
     use crate::ingress::openai_responses::ResponsesIngress;
 
+    let carried = format!("{:?}", capability_refusal());
+    for lane in REFUSED_LANES {
+        assert!(carried.contains(lane), "premise: the error carries {lane}");
+    }
     let dialects: [(&str, ErrorEnvelopeShape); 3] = [
         ("anthropic", AnthropicIngress.error_envelope_shape()),
         ("chat", OpenAiIngress.error_envelope_shape()),
@@ -5957,20 +5961,11 @@ async fn map_error_capability_unsupported_everywhere_names_only_the_capability()
                 );
             }
         }
-        let warn = events
+        let warns = events
             .iter()
-            .find(|e| e.level == tracing::Level::WARN)
-            .expect("the refusal logs a WARN");
-        assert_eq!(
-            warn.field("capability"),
-            Some(REFUSED_CAPABILITY),
-            "{dialect}"
-        );
-        assert_eq!(
-            warn.field("lanes"),
-            Some(REFUSED_LANES.join(",").as_str()),
-            "{dialect}"
-        );
+            .filter(|e| e.level <= tracing::Level::WARN)
+            .count();
+        assert_eq!(warns, 0, "{dialect}: {events:?}");
     }
 }
 

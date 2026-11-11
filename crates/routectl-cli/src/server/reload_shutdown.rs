@@ -39,10 +39,15 @@ pub(super) async fn await_reload_tasks(handles: Vec<tokio::task::JoinHandle<()>>
         match tokio::time::timeout(RELOAD_TASK_SHUTDOWN_DEADLINE, &mut handle).await {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
-                tracing::warn!(error = %e, "reload task join failed during shutdown");
+                tracing::warn!(
+                    event = "reload_task_join_failed",
+                    error = %e,
+                    "reload task join failed during shutdown",
+                );
             }
             Err(_) => {
                 tracing::warn!(
+                    event = "reload_task_deadline_exceeded",
                     deadline_secs = RELOAD_TASK_SHUTDOWN_DEADLINE.as_secs(),
                     "reload task did not stop within deadline; cancelling it",
                 );

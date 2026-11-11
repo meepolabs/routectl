@@ -591,12 +591,35 @@ async fn a_capability_every_lane_refuses_outright_is_answered_without_dialing() 
     assert_eq!(chain.learned_rows().await, learned);
 
     // Act
-    let (complete, complete_body) = chain.messages(&forced_tool_choice_request()).await;
+    let ((complete, complete_body), complete_events) =
+        routectl_testkit::with_capture(chain.messages(&forced_tool_choice_request())).await;
     let mut streamed = forced_tool_choice_request();
     streamed["stream"] = json!(true);
-    let (stream, stream_body) = chain.messages(&streamed).await;
+    let ((stream, stream_body), stream_events) =
+        routectl_testkit::with_capture(chain.messages(&streamed)).await;
 
     // Assert
+    for (surface, events) in [("complete", &complete_events), ("stream", &stream_events)] {
+        let warns: Vec<_> = events
+            .iter()
+            .filter(|event| event.level <= tracing::Level::WARN)
+            .collect();
+        assert_eq!(
+            warns.len(),
+            1,
+            "{surface}: one refusal, one WARN: {warns:?}"
+        );
+        assert_eq!(
+            warns[0].field("event"),
+            Some("hard_exclusion"),
+            "{surface}: {warns:?}"
+        );
+        assert_eq!(
+            warns[0].field("surface"),
+            Some(surface),
+            "{surface}: {warns:?}"
+        );
+    }
     assert_eq!(complete, 400, "{complete_body}");
     assert!(
         is_typed_refusal(&complete_body, "forced_tool_choice"),

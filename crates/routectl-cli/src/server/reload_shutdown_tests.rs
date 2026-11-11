@@ -140,11 +140,26 @@ async fn a_stalled_reload_task_is_cancelled_so_it_releases_the_accounting_handle
 
     // Act: the barrier, then the drain -- the serve loop's own order.
     let waited_at = std::time::Instant::now();
-    await_reload_tasks(vec![task]).await;
+    let ((), events) = routectl_testkit::with_capture(await_reload_tasks(vec![task])).await;
     let barrier_wait = waited_at.elapsed();
 
     // Assert: released by the time the barrier returned, exactly.
     assert_dropped(&mut dropped, "a cancelled task's accounting handle");
+    let warns: Vec<_> = events
+        .iter()
+        .filter(|event| event.level == tracing::Level::WARN)
+        .collect();
+    assert_eq!(
+        warns.len(),
+        1,
+        "one WARN for the cancelled task: {events:?}"
+    );
+    assert_eq!(
+        warns[0].field("event"),
+        Some("reload_task_deadline_exceeded"),
+        "{events:?}"
+    );
+    assert_eq!(warns[0].field("deadline_secs"), Some("2"), "{events:?}");
     assert!(
         barrier_wait >= RELOAD_TASK_SHUTDOWN_DEADLINE,
         "the premise: the stalled task must have forced the barrier's deadline, \
@@ -233,5 +248,31 @@ async fn a_stalled_task_holding_the_router_releases_it_at_the_barrier() {
         Arc::strong_count(&router_swap),
         1,
         "a task surviving the barrier would keep the published Router alive",
+    );
+}
+
+/// A reload-side task that panicked is joined and logged with its own `event`
+/// token, distinct from the deadline line.
+#[tokio::test]
+async fn a_panicked_reload_task_logs_one_join_failed_warn() {
+    // Arrange
+    let task = tokio::spawn(async { panic!("reload task panicked on purpose") });
+    while !task.is_finished() {
+        tokio::task::yield_now().await;
+    }
+
+    // Act
+    let ((), events) = routectl_testkit::with_capture(await_reload_tasks(vec![task])).await;
+
+    // Assert
+    let warns: Vec<_> = events
+        .iter()
+        .filter(|event| event.level == tracing::Level::WARN)
+        .collect();
+    assert_eq!(warns.len(), 1, "{events:?}");
+    assert_eq!(
+        warns[0].field("event"),
+        Some("reload_task_join_failed"),
+        "{events:?}"
     );
 }
