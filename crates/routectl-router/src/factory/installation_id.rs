@@ -19,10 +19,10 @@ const INSTALLATION_ID_FILE: &str = "installation_id";
 
 /// Read the persistent installation-id under routectl's config dir,
 /// creating it when `may_mint` and it is absent or invalid. Returns `None`
-/// on any I/O failure, or when no valid id exists and minting is not
-/// allowed (the header is then omitted).
+/// when no config folder resolves, on any I/O failure, or when no valid id
+/// exists and minting is not allowed (the header is then omitted).
 pub(super) fn resolve_installation_id(may_mint: bool) -> Option<String> {
-    let config_dir = crate::config::routectl_config_dir();
+    let config_dir = routectl_core::config_dir::config_dir()?;
     if may_mint {
         resolve_installation_id_in(&config_dir)
     } else {

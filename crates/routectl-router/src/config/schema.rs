@@ -614,7 +614,9 @@ pub struct UsageConfig {
     /// SQLite database path for persisted usage rows. Defaults to
     /// `<config-dir>/routectl/usage.db` with the user config dir
     /// resolved from `XDG_CONFIG_HOME` or `HOME` -- no literal `~`
-    /// ever reaches SQLite.
+    /// ever reaches SQLite. With neither variable an absolute path the
+    /// default is empty, and every command that opens the database
+    /// refuses it until this key is set.
     #[serde(default = "default_usage_db_path")]
     pub db_path: PathBuf,
     /// Rows older than this many days are pruned on daemon startup.
@@ -637,20 +639,17 @@ const fn default_retention_days() -> u32 {
     90
 }
 
-/// Resolve routectl's own config dir through the shared core rule
-/// ([`routectl_core::config_dir::config_dir_or_relative`]): an absolute
-/// `XDG_CONFIG_HOME`, else an absolute `$HOME/.config`, joined with
-/// `routectl`. The result is `~`-free, so callers can hand a child path
-/// straight to SQLite or a file writer, but it is absolute only when one
-/// of those variables is: with neither absolute it is the relative
-/// `.config/routectl`, resolved against the working directory.
-pub fn routectl_config_dir() -> PathBuf {
-    routectl_core::config_dir::config_dir_or_relative()
+/// `name` inside the routectl config folder
+/// ([`routectl_core::config_dir::config_dir`]), or an empty path when no
+/// folder resolves. The empty path is never joined onto: whoever consumes
+/// the default refuses it, naming the key, instead of resolving it against
+/// the working directory.
+fn config_folder_child(name: &str) -> PathBuf {
+    routectl_core::config_dir::config_dir().map_or_else(PathBuf::new, |dir| dir.join(name))
 }
 
-/// Resolve the default usage-db path under `routectl_config_dir()`.
 fn default_usage_db_path() -> PathBuf {
-    routectl_config_dir().join("usage.db")
+    config_folder_child("usage.db")
 }
 
 /// Which credential a provider egress authenticates with. `own` (the
@@ -707,8 +706,10 @@ pub struct MitmConfig {
     #[serde(default = "default_mitm_listen_port")]
     pub listen_port: u16,
     /// Directory holding the locally-generated MITM CA + leaf
-    /// certificates. Defaults under `routectl_config_dir()`, alongside
-    /// the usage db and `config.toml`.
+    /// certificates. Defaults to `mitm-certs` in the routectl config
+    /// folder, alongside the usage db and `config.toml`. With no config
+    /// folder the default is empty, and every command that loads the CA
+    /// refuses it until this key is set.
     #[serde(default = "default_mitm_cert_dir")]
     pub cert_dir: PathBuf,
     /// TLS SNI / `Host` header the proxy expects from the client and
@@ -749,7 +750,7 @@ const fn default_mitm_listen_port() -> u16 {
 }
 
 fn default_mitm_cert_dir() -> PathBuf {
-    routectl_config_dir().join("mitm-certs")
+    config_folder_child("mitm-certs")
 }
 
 fn default_mitm_host() -> String {

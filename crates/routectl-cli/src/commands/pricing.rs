@@ -20,9 +20,14 @@ use routectl_usage::Rates;
 
 /// The book over `prices.json` in the shared config folder, the file
 /// `routectl prices refresh` writes. Nothing is read until a snapshot is
-/// pinned from it.
+/// pinned from it. With no config folder the book's path is empty, which
+/// opens as not found, so the book never holds a refreshed table.
 pub fn default_price_book() -> PriceBook {
-    PriceBook::new(routectl_core::config_dir::config_dir_or_relative().join(PRICES_FILE))
+    PriceBook::new(
+        routectl_core::config_dir::config_dir()
+            .map(|dir| dir.join(PRICES_FILE))
+            .unwrap_or_default(),
+    )
 }
 
 /// The price tables one cost read resolves against: the refreshed table the

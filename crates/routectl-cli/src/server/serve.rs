@@ -242,6 +242,8 @@ async fn serve_inner(
     #[cfg(test)] seams: DaemonTestSeams,
     #[cfg(not(test))] _seams: Option<()>,
 ) -> Result<()> {
+    crate::derived_path::require_serve_paths(&config).map_err(|e| Error::Config(e.to_string()))?;
+
     // Composite resolver: oauth:// refs flow through OAuthStore (the
     // routectl-managed credentials.json), everything else through
     // MemoryStore. Built ONCE up here so the same `Arc<dyn

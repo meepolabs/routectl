@@ -2943,7 +2943,11 @@ retention_days = 90                     # prune rows older than this; default 90
 - `db_path` -- the SQLite database file. The default resolves the user
   config dir from `XDG_CONFIG_HOME` (else `$HOME/.config`), so no
   literal `~` ever reaches SQLite; each variable is used only when it is
-  an absolute path (an empty or relative value counts as unset). **Restart-required**: the writer
+  an absolute path (an empty or relative value counts as unset). With
+  neither absolute the default is empty, never a path under the working
+  directory: `serve`, `usage` and `usage downgrade` then refuse with
+  `no config folder for usage.db_path: set HOME, or set usage.db_path`
+  (`usage --db` needs no folder). **Restart-required**: the writer
   opens the database at startup and holds the handle, so a `db_path`
   change is classified restart-required and is reported as
   `usage.db_path` on hot-reload rather than taking effect live.
@@ -3075,7 +3079,9 @@ tested_cc_version = "2.1.143"
   certificates. Defaults under the same user config dir as `usage.db`
   and `config.toml` (`XDG_CONFIG_HOME` else `$HOME/.config`, each used
   only when it is an absolute path; an empty or relative value counts as
-  unset).
+  unset). With no config folder the default is empty, and `serve` and
+  `rc` refuse with `no config folder for mitm.cert_dir: set HOME, or set
+  mitm.cert_dir` until the key is set.
 - `mitm_host` -- the TLS SNI / `Host` header the proxy expects from the
   client and presents to the upstream. Must be EXACTLY
   `api.anthropic.com` (a subdomain like `evil.api.anthropic.com` is

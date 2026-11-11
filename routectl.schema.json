@@ -503,7 +503,7 @@
       "properties": {
         "cert_dir": {
           "default": "~/.config/routectl/mitm-certs",
-          "description": "Directory holding the locally-generated MITM CA + leaf\ncertificates. Defaults under `routectl_config_dir()`, alongside\nthe usage db and `config.toml`.",
+          "description": "Directory holding the locally-generated MITM CA + leaf\ncertificates. Defaults to `mitm-certs` in the routectl config\nfolder, alongside the usage db and `config.toml`. With no config\nfolder the default is empty, and every command that loads the CA\nrefuses it until this key is set.",
           "type": "string"
         },
         "listen_port": {
@@ -1897,7 +1897,7 @@
       "properties": {
         "db_path": {
           "default": "~/.config/routectl/usage.db",
-          "description": "SQLite database path for persisted usage rows. Defaults to\n`<config-dir>/routectl/usage.db` with the user config dir\nresolved from `XDG_CONFIG_HOME` or `HOME` -- no literal `~`\never reaches SQLite.",
+          "description": "SQLite database path for persisted usage rows. Defaults to\n`<config-dir>/routectl/usage.db` with the user config dir\nresolved from `XDG_CONFIG_HOME` or `HOME` -- no literal `~`\never reaches SQLite. With neither variable an absolute path the\ndefault is empty, and every command that opens the database\nrefuses it until this key is set.",
           "type": "string"
         },
         "enabled": {

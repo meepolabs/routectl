@@ -15,6 +15,7 @@ static ALLOC_PROBE: alloc_probe::ProbeAllocator = alloc_probe::ProbeAllocator;
 pub mod commands;
 pub(crate) mod config_classify;
 pub mod config_folder;
+pub mod derived_path;
 #[doc(hidden)]
 pub mod handlers;
 pub mod ingress;

@@ -1717,10 +1717,7 @@ pub fn render_k_calibration(cal: &KCalibration) -> String {
 /// The price tables are read once, here, so every block of one run prices
 /// against the same snapshot.
 pub fn run(config: &Config, args: &UsageArgs) -> Result<(), Box<dyn std::error::Error>> {
-    let db_path = args
-        .db
-        .clone()
-        .unwrap_or_else(|| config.usage.db_path.clone());
+    let db_path = crate::derived_path::usage_db_path(args.db.clone(), config)?;
 
     let db = match open_readonly(&db_path) {
         Ok(db) => db,

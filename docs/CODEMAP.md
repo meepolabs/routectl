@@ -5518,6 +5518,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   over one temp XDG config dir (mint then adopt): the same id reaches the
   egress wire on both boots, and boot 2 leaves the persisted file's content
   and mtime untouched (adoption is read-only)
+- `tests/config_folder_defaults.rs` -- single-test binary: with
+  `XDG_CONFIG_HOME` and `HOME` unset, relative or empty, the `[usage]
+  db_path` and `[mitm] cert_dir` defaults are empty paths (never relative to
+  the cwd); an absolute `XDG_CONFIG_HOME` is the positive control
 - `tests/cloak_relocation_refusal_fallback.rs` -- a cloak relocation refusal
   on the own-OAuth seat falls back with the pristine canonical request and
   leaves that seat's breaker closed, also under a status-400 remap to a
@@ -8149,6 +8153,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   unless `--config` / `ROUTECTL_CONFIG` names the file. `ConfigFolderError`
   (`Stranded` / `Inspect`) texts name both paths and say routectl moved
   nothing
+- `src/derived_path.rs` -- the refusal of an empty config-folder default
+  (`[usage] db_path`, `[mitm] cert_dir`) where the path is consumed:
+  `require_serve_paths` (serve start, before the usage writer and CA),
+  `usage_db_path(explicit, &Config)` (the usage commands; `--db` wins),
+  `require_mitm_cert_dir` (`rc`). `NoConfigFolder { key }` renders
+  `no config folder for <key>: set HOME, or set <key>`
 - `src/lane_cell.rs` -- the one `(learned lane, capability)` cell builder for
   the read-only surfaces (the doctor capability matrix and the `/status/health`
   learned rows). `lane_metas(&Config, entries)` builds the
@@ -8944,6 +8954,13 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   old folder; `served_doctor_names_a_file_left_in_the_appdata_folder` pins
   that a running `serve` lists a file left in `$APPDATA/routectl` on its
   served doctor panel
+- `tests/derived_path_refusal.rs` -- real-binary pins, with `HOME` and
+  `XDG_CONFIG_HOME` removed and an empty cwd: `serve`, the usage commands
+  and `rc env` refuse an empty `usage.db_path` / `mitm.cert_dir` by key and
+  create nothing under the cwd, setting the keys (or `--db`) proceeds,
+  `prices refresh` errors without writing, and files planted under a
+  cwd-relative `.config/routectl` are ignored by `config show --effective`
+  and `doctor`
 - `tests/commands.rs` -- `test` / `config` / `login` subcommand integration
   tests
 - `tests/provider_add.rs` -- integration floor for `provider add`: drives the

@@ -759,10 +759,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         } => {
             let db_path = match db {
                 Some(path) => path,
-                None => load_config_unvalidated(cli.config.as_deref())?
-                    .usage
-                    .db_path
-                    .clone(),
+                None => routectl_cli::derived_path::usage_db_path(
+                    None,
+                    &load_config_unvalidated(cli.config.as_deref())?,
+                )?,
             };
             match commands::usage_downgrade::run(&db_path, to) {
                 Ok(message) => println!("{message}"),
@@ -799,7 +799,13 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 commands::usage::WindowFlag::None
             };
             if opening_accuracy {
-                let db_path = db.unwrap_or_else(|| config.usage.db_path.clone());
+                let db_path = match routectl_cli::derived_path::usage_db_path(db, &config) {
+                    Ok(path) => path,
+                    Err(e) => {
+                        eprintln!("error: {e}");
+                        std::process::exit(commands::opening_accuracy::ERROR_EXIT_CODE);
+                    }
+                };
                 match commands::opening_accuracy::run(
                     &db_path,
                     window,
@@ -846,6 +852,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         },
         Cmd::Rc { action } => {
             let config = load_config(cli.config.as_deref())?;
+            routectl_cli::derived_path::require_mitm_cert_dir(&config)?;
             let result = match action {
                 RcCmd::Env => commands::rc::env(&config),
                 RcCmd::RegenCa => commands::rc::regen_ca(&config),

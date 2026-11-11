@@ -19,7 +19,6 @@ pub(crate) use schema::default_anthropic_base;
 pub(crate) use schema::default_gemini_base;
 #[cfg(feature = "openai-responses")]
 pub(crate) use schema::default_responses_base;
-pub(crate) use schema::routectl_config_dir;
 pub use schema::{
     AliasValue, CANARY_INTERVAL, CONFIG_PROVIDER_KINDS, CacheCapability, CacheConfig,
     CalibrationConfig, CapabilityConfig, CredentialSource, ENVELOPE_QUORUM, FidelityConfig,

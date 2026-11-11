@@ -116,6 +116,9 @@ pub enum PricesError {
     /// The source is not a usable price table.
     #[error("the source is not a usable price table: {0}")]
     Table(#[from] PriceTableError),
+    /// No config folder resolved, so there is nowhere to write the table.
+    #[error("no config folder for prices.json: set HOME, or set XDG_CONFIG_HOME")]
+    NoConfigFolder,
     /// The current date could not be turned into a table date.
     #[error("could not determine today's date")]
     Date,
@@ -251,7 +254,7 @@ pub fn build_client(timeouts: Timeouts) -> Result<reqwest::Client, PricesError> 
 /// `routectl prices refresh`: refresh into the shared config folder, dated
 /// today (UTC).
 pub async fn run(from: Option<&str>) -> Result<RefreshSummary, PricesError> {
-    let config_dir = routectl_core::config_dir::config_dir_or_relative();
+    let config_dir = routectl_core::config_dir::config_dir().ok_or(PricesError::NoConfigFolder)?;
     refresh_into(&config_dir, from, today()?).await
 }
 

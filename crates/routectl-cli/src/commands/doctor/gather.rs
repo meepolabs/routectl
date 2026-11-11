@@ -112,8 +112,9 @@ pub async fn gather_context_no_network(
         .map(|legacy| gather_legacy_folder(legacy, config_path))
         .filter(|folder| *folder != LegacyFolder::Absent)
         .collect();
-    let leftover_catalog_files =
-        gather_leftover_catalog_files(&routectl_core::config_dir::config_dir_or_relative());
+    let leftover_catalog_files = routectl_core::config_dir::config_dir()
+        .map(|dir| gather_leftover_catalog_files(&dir))
+        .unwrap_or_default();
 
     DoctorContext {
         config,
