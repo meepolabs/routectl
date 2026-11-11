@@ -1015,6 +1015,9 @@ mod tests {
                 client_disconnect_total: 0,
                 client_disconnect_pre_dispatch: 0,
                 cancelled_total: 0,
+                cache_write_tokens: 0,
+                cache_write_present: 0,
+                cache_write_lifetimes: None,
             }],
             vec![(
                 GroupKey {

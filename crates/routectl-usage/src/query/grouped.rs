@@ -22,6 +22,7 @@ use serde::Serialize;
 use crate::db::UsageDb;
 
 use super::aggregate::{QUERY_AGG_SQL, SERIES_AGG_SQL, map_fine_row, map_fine_row_bucketed};
+use super::cache_lifetimes::{LifetimeWindow, attach, read_lifetimes};
 use super::deadline::DeadlineGuard;
 use super::{AggRow, GroupKey, QueryError};
 
@@ -189,6 +190,12 @@ pub struct QueryMetrics {
     pub cache_write_5m: i64,
     /// Summed 1-hour cache-write tokens.
     pub cache_write_1h: i64,
+    /// Summed cache-write tokens across both ledger eras (see
+    /// [`AggRow::cache_write_tokens`]).
+    pub cache_write_tokens: i64,
+    /// Count of requests reporting a cache-write value, a reported zero
+    /// included.
+    pub cache_write_present: i64,
     /// Total server-tool invocations.
     pub server_tool_calls: i64,
     /// Count of streaming requests.
@@ -267,7 +274,10 @@ pub struct QueryResult {
 /// connection is left as it was found.
 ///
 /// `price` is called once per FINE row -- while `upstream` is still known --
-/// and its verdict is folded into the coarse group the row belongs to.
+/// and its verdict is folded into the coarse group the row belongs to. Every
+/// row it sees carries its per-lifetime cache writes
+/// ([`AggRow::cache_write_lifetimes`] is `Some`); on the series path those are
+/// the writes of that row's bucket alone.
 pub fn query(
     db: &UsageDb,
     spec: &QuerySpec,
@@ -361,6 +371,7 @@ fn fold_groups(
     price: &impl Fn(&AggRow) -> RowCost,
     groups: &mut BTreeMap<String, GroupAcc>,
 ) -> Result<(), QueryError> {
+    let mut lifetimes = read_lifetimes(tx, &lifetime_window(spec), None)?;
     let mut stmt = tx.prepare(QUERY_AGG_SQL)?;
     let rows = stmt.query_map(
         rusqlite::params![
@@ -372,7 +383,8 @@ fn fold_groups(
         map_fine_row,
     )?;
     for row in rows {
-        let fine = row?;
+        let mut fine = row?;
+        attach(&mut fine.agg, 0, &mut lifetimes);
         let cost = price(&fine.agg);
         let label = group_label(&fine.agg.key, spec.group_by);
         groups.entry(label).or_default().add(&fine, cost);
@@ -397,6 +409,7 @@ fn fold_groups_and_buckets(
     groups: &mut BTreeMap<String, GroupAcc>,
     buckets: &mut BTreeMap<i64, GroupAcc>,
 ) -> Result<(), QueryError> {
+    let mut lifetimes = read_lifetimes(tx, &lifetime_window(spec), Some(bucket.width_ms))?;
     let mut stmt = tx.prepare(SERIES_AGG_SQL)?;
     let rows = stmt.query_map(
         rusqlite::params![
@@ -409,16 +422,27 @@ fn fold_groups_and_buckets(
         map_fine_row_bucketed,
     )?;
     for row in rows {
-        let (fine, bucket_ix) = row?;
+        let (mut fine, bucket_ix) = row?;
         if bucket_ix < 0 || bucket_ix >= bucket.count as i64 {
             return Err(QueryError::InvalidBucket);
         }
+        attach(&mut fine.agg, bucket_ix, &mut lifetimes);
         let cost = price(&fine.agg);
         let label = group_label(&fine.agg.key, spec.group_by);
         groups.entry(label).or_default().add(&fine, cost);
         buckets.entry(bucket_ix).or_default().add(&fine, cost);
     }
     Ok(())
+}
+
+/// The window and filters of `spec`, as the lifetime read binds them.
+fn lifetime_window(spec: &QuerySpec) -> LifetimeWindow<'_> {
+    LifetimeWindow {
+        from_ms: spec.from_ms,
+        to_ms: spec.to_ms,
+        alias_filter: spec.alias_filter.as_deref(),
+        provider_filter: spec.provider_filter.as_deref(),
+    }
 }
 
 /// Resolve the per-bucket accumulators into a dense series: one entry per
@@ -485,6 +509,8 @@ struct GroupAcc {
     cache_read_billed: i64,
     cache_write_5m: i64,
     cache_write_1h: i64,
+    cache_write_tokens: i64,
+    cache_write_present: i64,
     server_tool_calls: i64,
     stream_count: i64,
     client_disconnect_total: i64,
@@ -525,6 +551,8 @@ impl GroupAcc {
         self.cache_read_billed += agg.cache_read_billed;
         self.cache_write_5m += agg.cache_write_5m;
         self.cache_write_1h += agg.cache_write_1h;
+        self.cache_write_tokens += agg.cache_write_tokens;
+        self.cache_write_present += agg.cache_write_present;
         self.server_tool_calls += agg.server_tool_calls;
         self.stream_count += agg.stream_count;
         self.client_disconnect_total += agg.client_disconnect_total;
@@ -578,6 +606,8 @@ impl GroupAcc {
         self.cache_read_billed += other.cache_read_billed;
         self.cache_write_5m += other.cache_write_5m;
         self.cache_write_1h += other.cache_write_1h;
+        self.cache_write_tokens += other.cache_write_tokens;
+        self.cache_write_present += other.cache_write_present;
         self.server_tool_calls += other.server_tool_calls;
         self.stream_count += other.stream_count;
         self.client_disconnect_total += other.client_disconnect_total;
@@ -617,6 +647,8 @@ impl GroupAcc {
             cache_read_billed: self.cache_read_billed,
             cache_write_5m: self.cache_write_5m,
             cache_write_1h: self.cache_write_1h,
+            cache_write_tokens: self.cache_write_tokens,
+            cache_write_present: self.cache_write_present,
             server_tool_calls: self.server_tool_calls,
             stream_count: self.stream_count,
             client_disconnect_total: self.client_disconnect_total,

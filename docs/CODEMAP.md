@@ -5811,6 +5811,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   vocabulary, absent `Option`s serialize as explicit `null` (never skipped,
   `series` included), and `CostStatus` renames to the same lowercase tokens
   `as_str` returns
+- `src/query/cache_lifetimes.rs` -- per-lifetime cache-write sums for pricing:
+  `aggregate_with_cache_lifetimes` (the aggregate plus each fine row's
+  `CacheWriteLifetimes`: tokens per lifetime seconds, unknown remainder, invalid
+  split flag) and the crate-internal grouped `json_each` read `query` merges
+  into its fine rows (bucketed on the series path); legacy 5m/1h columns merge
+  as 300/3600. The unpriced `aggregate` never runs it
 - `src/query/would_trim.rs` -- would-trim + K-calibration read queries;
   exports `would_trim_summary`, `shadow_misfire_summary`,
   `near_lossless_attribution_summary`, `k_calibration_summary`,

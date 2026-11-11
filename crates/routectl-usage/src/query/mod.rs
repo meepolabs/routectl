@@ -19,6 +19,19 @@ macro_rules! inference_rows {
     };
 }
 
+/// One row's cache-write total across both ledger eras: `cache_write_tokens`
+/// when the row has it; otherwise NULL when neither legacy per-tier column was
+/// reported; otherwise the legacy 5-minute plus 1-hour columns. The eras never
+/// overlap on one row, so this never counts a write twice. Every reader sums
+/// writes through this one expression, so no reader can see only one era.
+macro_rules! cache_write_total_expr {
+    () => {
+        "(CASE WHEN cache_write_tokens IS NOT NULL THEN cache_write_tokens
+            WHEN cache_write_5m IS NULL AND cache_write_1h IS NULL THEN NULL
+            ELSE COALESCE(cache_write_5m, 0) + COALESCE(cache_write_1h, 0) END)"
+    };
+}
+
 const _: () = assert!(
     const_str_eq(
         count_tokens_operation!(),
@@ -44,6 +57,7 @@ const fn const_str_eq(a: &str, b: &str) -> bool {
 
 mod aggregate;
 mod cache_decision;
+mod cache_lifetimes;
 mod calibration;
 mod capability;
 mod deadline;
@@ -61,6 +75,7 @@ pub use cache_decision::{
     CacheDecisionSummary, SUPPRESSED_SESSION_CAP, SuppressedSessionRow, SuppressedSessions,
     cache_decision_summary, suppressed_sessions,
 };
+pub use cache_lifetimes::{CacheWriteLifetimes, aggregate_with_cache_lifetimes};
 pub use calibration::{CalibrationSampleRow, read_calibration_samples_since};
 pub use capability::{
     CapabilityEventRow, TombstoneRow, latest_tombstone, read_capability_events_after,
@@ -254,6 +269,17 @@ pub struct AggRow {
     /// drop to a client hangup. Excluded from `errors` -- see that field's
     /// note.
     pub cancelled_total: i64,
+    /// Summed cache-write tokens over the group, across both ledger eras: a
+    /// row's write total, or for a row written before that column existed its
+    /// 5-minute plus 1-hour columns. Rows reporting no write add 0.
+    pub cache_write_tokens: i64,
+    /// Count of rows reporting a cache-write value in either era. A reported
+    /// zero counts; a row reporting nothing does not.
+    pub cache_write_present: i64,
+    /// The group's cache writes per lifetime. `None` from
+    /// [`aggregate`], which reads no split; always `Some` from
+    /// [`aggregate_with_cache_lifetimes`] and on the rows [`query`] prices.
+    pub cache_write_lifetimes: Option<CacheWriteLifetimes>,
 }
 
 #[cfg(test)]

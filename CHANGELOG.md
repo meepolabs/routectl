@@ -417,6 +417,8 @@ list with more narrative.
 
 - **Responses and openai-compat usage carries cache writes.** An OpenAI Responses upstream's `input_tokens_details.cache_write_tokens` becomes the request's cache-write total, and detail members whose name carries a lifetime (`cache_write_1h_tokens`) become its per-lifetime split; an openai-compat upstream's `prompt_tokens_details.cache_write_tokens` becomes the write total with no lifetime. Both apply to complete and streamed responses alike. An upstream that reports no write field records no write, never 0, and `prompt_cache_miss_tokens` is never read as a write.
 
+- **Internal:** the routectl-usage library sums cache writes across both ledger eras. `AggRow` gains `cache_write_tokens`, `cache_write_present` and `cache_write_lifetimes`, and `QueryMetrics` gains `cache_write_tokens` and `cache_write_present`. The new `aggregate_with_cache_lifetimes` and `CacheWriteLifetimes` give each row its writes per lifetime in seconds, the unknown remainder and an invalid-split flag. `query` passes the same per-lifetime figures to its pricing closure. The cache-hit fraction counts writes from both eras in its prompt total, and because `QueryMetrics` is the `/status/query` metrics object, that payload carries the two new fields.
+
 ### Changed
 
 - **The compiled Codex client version is now 0.167.0 (was 0.145.0).** Without a `codex_version` override, ChatGPT-OAuth Responses requests send `codex_cli_rs/0.167.0` in the User-Agent and `0.167.0` in the `version` header, and Codex login and refresh send the same User-Agent; a configured `codex_version` still wins. `gpt-6-luna` on the ChatGPT-OAuth lane has not been verified with this version. See [docs/CONFIGURATION.md](docs/CONFIGURATION.md).

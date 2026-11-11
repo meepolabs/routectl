@@ -100,7 +100,9 @@ const SHARED: [&str; 13] = [
 /// `QueryMetrics` tokens with NO panel counterpart. They cannot diverge
 /// BETWEEN the paths because only one path computes them; their correctness
 /// rests on the query path's own tests.
-const QUERY_ONLY: [&str; 12] = [
+const QUERY_ONLY: [&str; 14] = [
+    "cache_write_tokens",
+    "cache_write_present",
     "fallback_served",
     "ttft_p50_ms",
     "ttft_p95_ms",

@@ -1,6 +1,6 @@
 //! Aggregate + breakdown queries.
 
-use rusqlite::Row;
+use rusqlite::{Connection, Row};
 
 use crate::db::UsageDb;
 
@@ -57,7 +57,8 @@ pub struct QuotaSnapshot {
 /// coalesce these partitions back together after pricing.
 macro_rules! agg_base_columns {
     () => {
-        "    COALESCE(model, requested_model) AS model, provider, upstream, alias,
+        concat!(
+            "    COALESCE(model, requested_model) AS model, provider, upstream, alias,
     provider_kind,
     COUNT(*)                                            AS requests,
     SUM(CASE WHEN outcome = 'ok' THEN 1 ELSE 0 END)     AS ok,
@@ -96,7 +97,14 @@ macro_rules! agg_base_columns {
                                                          AS client_disconnect_total,
     SUM(CASE WHEN outcome = 'client_disconnect' AND r.model IS NULL
         THEN 1 ELSE 0 END)                              AS client_disconnect_pre_dispatch,
-    SUM(CASE WHEN outcome = 'cancelled' THEN 1 ELSE 0 END) AS cancelled_total"
+    SUM(CASE WHEN outcome = 'cancelled' THEN 1 ELSE 0 END) AS cancelled_total,
+    COALESCE(SUM(",
+            cache_write_total_expr!(),
+            "), 0)                                  AS cache_write_tokens,
+    COUNT(",
+            cache_write_total_expr!(),
+            ")                                      AS cache_write_present"
+        )
     };
 }
 
@@ -109,7 +117,7 @@ macro_rules! agg_group_by {
     };
 }
 
-const AGG_SQL: &str = concat!(
+pub(super) const AGG_SQL: &str = concat!(
     "SELECT\n",
     agg_base_columns!(),
     "\nFROM requests AS r
@@ -147,8 +155,11 @@ macro_rules! tok_s_eligible {
 /// per-row cache-hit fraction.
 macro_rules! cache_prompt_total {
     () => {
-        "(COALESCE(input_tokens, 0) + cache_read
-            + COALESCE(cache_write_5m, 0) + COALESCE(cache_write_1h, 0))"
+        concat!(
+            "(COALESCE(input_tokens, 0) + cache_read + COALESCE(",
+            cache_write_total_expr!(),
+            ", 0))"
+        )
     };
 }
 
@@ -306,8 +317,21 @@ pub(super) struct FineRow {
 /// `(model, provider, upstream, alias, provider_kind)`. Rows outside
 /// `[from_ms, to_ms)` are excluded. The caller prices each row from its
 /// PERSISTED `provider_kind` and then rolls the partitions up for display.
+///
+/// Reads no per-lifetime cache-write split: every row's
+/// `cache_write_lifetimes` is `None`. A caller that prices cache writes reads
+/// [`aggregate_with_cache_lifetimes`](super::aggregate_with_cache_lifetimes).
 pub fn aggregate(db: &UsageDb, from_ms: i64, to_ms: i64) -> Result<Vec<AggRow>, QueryError> {
-    let mut stmt = db.conn().prepare(AGG_SQL)?;
+    aggregate_in(db.conn(), from_ms, to_ms)
+}
+
+/// [`aggregate`] on a caller-held connection or transaction.
+pub(super) fn aggregate_in(
+    conn: &Connection,
+    from_ms: i64,
+    to_ms: i64,
+) -> Result<Vec<AggRow>, QueryError> {
+    let mut stmt = conn.prepare(AGG_SQL)?;
     let rows = stmt
         .query_map([from_ms, to_ms], map_agg_row)?
         .collect::<Result<Vec<_>, _>>()?;
@@ -319,18 +343,18 @@ pub fn aggregate(db: &UsageDb, from_ms: i64, to_ms: i64) -> Result<Vec<AggRow>, 
 pub(super) fn map_fine_row(row: &Row) -> rusqlite::Result<FineRow> {
     Ok(FineRow {
         agg: map_agg_row(row)?,
-        ttfb_max: row.get(30)?,
-        ttft_sum: row.get(31)?,
-        ttft_count: row.get(32)?,
-        latency_sum: row.get(33)?,
-        latency_max: row.get(34)?,
-        input_tokens_max: row.get(35)?,
-        input_tokens_present: row.get(36)?,
-        tok_s_sum: row.get(37)?,
-        tok_s_count: row.get(38)?,
-        cache_hit_sum: row.get(39)?,
-        cache_hit_count: row.get(40)?,
-        fallback_served: row.get(41)?,
+        ttfb_max: row.get(32)?,
+        ttft_sum: row.get(33)?,
+        ttft_count: row.get(34)?,
+        latency_sum: row.get(35)?,
+        latency_max: row.get(36)?,
+        input_tokens_max: row.get(37)?,
+        input_tokens_present: row.get(38)?,
+        tok_s_sum: row.get(39)?,
+        tok_s_count: row.get(40)?,
+        cache_hit_sum: row.get(41)?,
+        cache_hit_count: row.get(42)?,
+        fallback_served: row.get(43)?,
     })
 }
 
@@ -340,7 +364,7 @@ pub(super) fn map_fine_row(row: &Row) -> rusqlite::Result<FineRow> {
 /// index is read here.
 pub(super) fn map_fine_row_bucketed(row: &Row) -> rusqlite::Result<(FineRow, i64)> {
     let fine = map_fine_row(row)?;
-    let bucket = row.get(42)?;
+    let bucket = row.get(44)?;
     Ok((fine, bucket))
 }
 
@@ -401,6 +425,9 @@ fn map_agg_row(row: &Row) -> rusqlite::Result<AggRow> {
         client_disconnect_total: row.get(27)?,
         client_disconnect_pre_dispatch: row.get(28)?,
         cancelled_total: row.get(29)?,
+        cache_write_tokens: row.get(30)?,
+        cache_write_present: row.get(31)?,
+        cache_write_lifetimes: None,
     })
 }
 
