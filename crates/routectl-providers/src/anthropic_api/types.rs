@@ -13,6 +13,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value};
 
 use routectl_core::CacheControl;
+use routectl_core::schema::CacheCreation;
 
 // ---------------------------------------------------------------------------
 // Request body
@@ -532,7 +533,7 @@ pub struct AnthropicUsage {
     #[serde(default)]
     pub(crate) cache_creation_input_tokens: Option<u32>,
     #[serde(default)]
-    pub(crate) cache_creation: Option<AnthropicCacheCreation>,
+    pub(crate) cache_creation: Option<CacheCreation>,
     /// Server-side tool invocation counts (e.g. `web_search_requests`).
     /// Pulled out of the flatten-extras catchall so the egress
     /// normalizer can lift it onto the typed canonical
@@ -570,14 +571,6 @@ pub struct AnthropicOutputTokensDetails {
     /// The thinking share of `output_tokens`, already counted there.
     #[serde(default)]
     pub(crate) thinking_tokens: Option<u32>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct AnthropicCacheCreation {
-    #[serde(default)]
-    pub(crate) ephemeral_5m_input_tokens: Option<u32>,
-    #[serde(default)]
-    pub(crate) ephemeral_1h_input_tokens: Option<u32>,
 }
 
 // ---------------------------------------------------------------------------
@@ -627,7 +620,7 @@ pub struct SseDeltaUsage {
     #[serde(default)]
     pub(crate) cache_read_input_tokens: Option<u32>,
     #[serde(default)]
-    pub(crate) cache_creation: Option<AnthropicCacheCreation>,
+    pub(crate) cache_creation: Option<CacheCreation>,
     /// Server-side tool invocation counts streamed on
     /// `message_delta.usage`. Opaque JSON lifted onto the canonical
     /// chunk usage's `server_tool_use` field.
@@ -800,6 +793,7 @@ mod tests {
         assert_eq!(u.cache_creation_input_tokens, Some(1024));
         assert_eq!(u.cache_read_input_tokens, Some(4096));
         let cc = u.cache_creation.as_ref().unwrap();
-        assert_eq!(cc.ephemeral_5m_input_tokens, Some(512));
+        assert_eq!(cc.get(300), Some(512));
+        assert_eq!(cc.get(3600), Some(512));
     }
 }

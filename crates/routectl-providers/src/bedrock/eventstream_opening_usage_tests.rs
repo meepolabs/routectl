@@ -131,3 +131,24 @@ async fn an_invoke_opening_is_from_the_vendor_endpoint() {
         .expect("opening carried");
     assert!(opening.from_vendor_endpoint);
 }
+
+#[tokio::test]
+async fn an_invoke_total_only_delta_matching_the_opener_split_keeps_it() {
+    // Arrange
+    const OPENER_2523: &str = r#"{"type":"message_start","message":{"id":"msg_bdr","type":"message","role":"assistant","content":[],"model":"claude-opus-4-8","usage":{"input_tokens":2,"output_tokens":1,"cache_creation_input_tokens":2523,"cache_read_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":2523}}}}"#;
+    const TOTAL_ONLY_DELTA: &str = r#"{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":2,"cache_creation_input_tokens":2523,"cache_read_input_tokens":0,"output_tokens":7}}"#;
+
+    // Act
+    let chunks = decode(&[OPENER_2523, TEXT_START, TEXT_DELTA, TOTAL_ONLY_DELTA]).await;
+
+    // Assert
+    let usage = chunks
+        .last()
+        .and_then(|c| c.usage.as_ref())
+        .expect("terminal usage");
+    assert_eq!(usage.cache_creation_input_tokens, Some(2523));
+    assert_eq!(
+        usage.cache_creation,
+        Some(CacheCreation::from_lifetimes([(300, 2523)]))
+    );
+}

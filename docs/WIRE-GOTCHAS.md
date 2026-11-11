@@ -685,6 +685,23 @@ Surfaces: [openai-compat](#openai-compat-surface) -
   its backend's measurement. Client usage and ledger accounting read
   `usage` unchanged.
 
+- **The closing `message_delta` may restate the cache-write total without
+  its lifetime split.** `message_start` carries
+  `cache_creation_input_tokens` and the per-lifetime `cache_creation`
+  object; the closing delta can repeat the total with no `cache_creation`
+  (Anthropic's documented streaming sample does), or with an empty one.
+  The stream merge in `anthropic_api/sse.rs` (`message_delta` arm) decides
+  the split in order: the delta's own non-empty split wins; otherwise, when
+  the delta states a write total as an input report, the opener's split is
+  kept only if it sums to that total, and otherwise no split is reported
+  (the whole total is unknown lifetime, never guessed); a delta stating no
+  write total merges per lifetime over the opener with the placeholder
+  rule. Lifetimes are parsed from the member names, so
+  `ephemeral_30m_input_tokens` reaches the canonical usage and a
+  same-format client as 1800 seconds. Pinned by
+  `message_delta_cache_creation_merge_follows_the_stated_total` and
+  `anthropic_same_format_stream_delivers_cache_lifetimes_on_start_and_delta`.
+
 ## Bedrock surface
 
 - **Converse forwards what its wire types can hold.** A value the
@@ -895,6 +912,13 @@ Surfaces: [openai-compat](#openai-compat-surface) -
   `crates/routectl-providers/src/bedrock/converse/response.rs` for both
   the complete and the stream path; pinned by
   `cache_detail_ttls_split_by_parsed_lifetime_identically_on_complete_and_stream`.
+
+- **InvokeModel streams share the Anthropic cache-write merge.** The
+  eventstream `chunk` frames carry Anthropic SSE events into the same
+  `SseState`, so a closing delta that restates the write total keeps the
+  opener's lifetime split exactly when it sums to that total (see the
+  *Anthropic API surface* entry); pinned by
+  `an_invoke_total_only_delta_matching_the_opener_split_keeps_it`.
 
 ## OpenAI Responses surface
 

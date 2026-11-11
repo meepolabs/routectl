@@ -4,6 +4,7 @@
 //! parser (the translated lane, where the opening carrier actually exists),
 //! so the positive control is that the rendered opener DID carry it.
 
+use super::anthropic::AnthropicIngress;
 use super::openai::OpenAiIngress;
 use super::openai_responses::ResponsesIngress;
 use super::{IngressAdapter, SseEvent, StreamRequestContext};
@@ -194,4 +195,80 @@ fn responses_reports_exact_usage_only_on_completion() {
     assert_eq!(usage["input_tokens_details"]["cached_tokens"], CACHE_READ);
     assert_eq!(usage["output_tokens"], OUTPUT);
     assert_eq!(usage["total_tokens"], PROMPT_TOTAL + OUTPUT);
+}
+
+/// A same-format `/v1/messages` stream: the real Anthropic parser feeds the
+/// Anthropic ingress. The closing `message_delta.usage` shapes follow
+/// Anthropic's documented streaming samples (output only, as in "Basic
+/// streaming request"; input, both cache totals and output, as in
+/// "Streaming request with web search tool use"; both at
+/// <https://platform.claude.com/docs/en/build-with-claude/streaming>), plus
+/// the same delta carrying its own `cache_creation` object.
+fn same_format_cache_lifetime_events(delta_usage: &str) -> Vec<String> {
+    vec![
+        r#"{"type":"message_start","message":{"id":"msg_ttl","type":"message","role":"assistant","content":[],"model":"claude-opus-4-8","usage":{"input_tokens":2,"output_tokens":1,"cache_creation_input_tokens":2523,"cache_read_input_tokens":0,"cache_creation":{"ephemeral_30m_input_tokens":2523,"ephemeral_1h_input_tokens":0}}}}"#
+            .to_string(),
+        r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#
+            .to_string(),
+        r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}"#
+            .to_string(),
+        r#"{"type":"content_block_stop","index":0}"#.to_string(),
+        format!(
+            r#"{{"type":"message_delta","delta":{{"stop_reason":"end_turn","stop_sequence":null}},"usage":{delta_usage}}}"#
+        ),
+        r#"{"type":"message_stop"}"#.to_string(),
+    ]
+}
+
+#[test]
+fn anthropic_same_format_stream_delivers_cache_lifetimes_on_start_and_delta() {
+    let rows = [
+        ("output-only delta", r#"{"output_tokens":7}"#),
+        (
+            "total-only delta",
+            r#"{"input_tokens":2,"cache_creation_input_tokens":2523,"cache_read_input_tokens":0,"output_tokens":7}"#,
+        ),
+        (
+            "delta with its own split",
+            r#"{"input_tokens":2,"cache_creation_input_tokens":2523,"cache_read_input_tokens":0,"output_tokens":7,"cache_creation":{"ephemeral_30m_input_tokens":2523,"ephemeral_1h_input_tokens":0}}"#,
+        ),
+    ];
+    for (name, delta_usage) in rows {
+        // Arrange
+        let mut parser = SseState::default();
+        let chunks: Vec<ChatChunk> = same_format_cache_lifetime_events(delta_usage)
+            .iter()
+            .filter_map(|event| parser.parse_event("test", event).expect("event parses"))
+            .collect();
+
+        // Act
+        let frames = render_all(&AnthropicIngress, chunks);
+
+        // Assert
+        let events: Vec<&SseEvent> = frames.iter().flatten().collect();
+        let usage_of = |event_name: &str| -> Value {
+            let event = events
+                .iter()
+                .find(|e| e.event.as_deref() == Some(event_name))
+                .unwrap_or_else(|| panic!("{name}: {event_name} rendered"));
+            let body = json_of(event);
+            if event_name == "message_start" {
+                body["message"]["usage"].clone()
+            } else {
+                body["usage"].clone()
+            }
+        };
+        for event_name in ["message_start", "message_delta"] {
+            let usage = usage_of(event_name);
+            assert_eq!(
+                usage["cache_creation"],
+                serde_json::json!({"ephemeral_30m_input_tokens": 2523, "ephemeral_1h_input_tokens": 0}),
+                "{name}: {event_name} usage {usage}"
+            );
+            assert_eq!(
+                usage["cache_creation_input_tokens"], 2523,
+                "{name}: {event_name}"
+            );
+        }
+    }
 }

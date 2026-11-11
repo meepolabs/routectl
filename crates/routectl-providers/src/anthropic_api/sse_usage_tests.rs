@@ -481,3 +481,130 @@ fn message_delta_with_zero_thinking_tokens_reports_zero() {
 
     assert_eq!(usage.reasoning_tokens, Some(0));
 }
+
+/// Drive `message_start` with `opener_usage` and a closing `message_delta`
+/// with `delta_usage`, returning the closing chunk's usage.
+fn merged_usage(opener_usage: &str, delta_usage: &str) -> routectl_core::schema::UsageDelta {
+    let mut state = SseState::default();
+    let start = format!(
+        r#"{{"type":"message_start","message":{{"id":"msg_01","type":"message","role":"assistant","content":[],"model":"claude-opus-4-8","stop_reason":null,"stop_sequence":null,"usage":{opener_usage}}}}}"#
+    );
+    let _ = state.parse_event("test", &start).unwrap();
+    let delta = format!(
+        r#"{{"type":"message_delta","delta":{{"stop_reason":"end_turn","stop_sequence":null}},"usage":{delta_usage}}}"#
+    );
+    state
+        .parse_event("test", &delta)
+        .unwrap()
+        .expect("closing chunk")
+        .usage
+        .expect("usage")
+}
+
+/// One stream-merge case: the opener and closing delta usage objects and
+/// the split and write total the closing chunk must carry.
+struct MergeRow {
+    name: &'static str,
+    opener: &'static str,
+    delta: &'static str,
+    split: Option<CacheCreation>,
+    total: Option<u32>,
+}
+
+/// How the closing delta's cache-write split merges with the opener's.
+///
+/// The total-only delta rows follow the closing `message_delta.usage`
+/// shape of Anthropic's documented streaming sample (input, both cache
+/// totals and output, no `cache_creation` object; "Streaming request with
+/// web search tool use" at
+/// <https://platform.claude.com/docs/en/build-with-claude/streaming>).
+/// Their counts (2 input, 2523 written at 5m, 0 at 1h, 7 output) come from
+/// the committed claude-code capture
+/// `crates/routectl-cli/tests/fixtures/driver/anthropic-api/plain-turn-01__claude-code__anthropic-api/upstream_response.json`.
+#[test]
+fn message_delta_cache_creation_merge_follows_the_stated_total() {
+    const OPENER_2523: &str = r#"{"input_tokens":2,"output_tokens":1,"cache_creation_input_tokens":2523,"cache_read_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":2523}}"#;
+    const TOTAL_ONLY_2523: &str = r#"{"input_tokens":2,"cache_creation_input_tokens":2523,"cache_read_input_tokens":0,"output_tokens":7}"#;
+    let rows = [
+        MergeRow {
+            name: "delta split overrides the opener split",
+            opener: r#"{"input_tokens":2,"output_tokens":1,"cache_creation_input_tokens":10,"cache_creation":{"ephemeral_5m_input_tokens":5,"ephemeral_1h_input_tokens":5}}"#,
+            delta: r#"{"input_tokens":2,"cache_creation_input_tokens":10,"output_tokens":7,"cache_creation":{"ephemeral_5m_input_tokens":10,"ephemeral_1h_input_tokens":0}}"#,
+            split: Some(CacheCreation::from_lifetimes([(300, 10), (3600, 0)])),
+            total: Some(10),
+        },
+        MergeRow {
+            name: "total-only delta matching the opener split keeps it",
+            opener: OPENER_2523,
+            delta: TOTAL_ONLY_2523,
+            split: Some(CacheCreation::from_lifetimes([(300, 2523)])),
+            total: Some(2523),
+        },
+        MergeRow {
+            name: "total-only delta contradicting the opener split drops it",
+            opener: r#"{"input_tokens":2,"output_tokens":1,"cache_creation_input_tokens":2000,"cache_creation":{"ephemeral_5m_input_tokens":2000}}"#,
+            delta: TOTAL_ONLY_2523,
+            split: None,
+            total: Some(2523),
+        },
+        MergeRow {
+            name: "delta with no write total merges per lifetime",
+            opener: r#"{"input_tokens":0,"output_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":50,"ephemeral_1h_input_tokens":100}}"#,
+            delta: r#"{"output_tokens":5,"cache_creation":{"ephemeral_5m_input_tokens":75}}"#,
+            split: Some(CacheCreation::from_lifetimes([(300, 75), (3600, 100)])),
+            total: None,
+        },
+        MergeRow {
+            name: "placeholder-zero delta keeps the opener split and total",
+            opener: OPENER_2523,
+            delta: r#"{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":7}"#,
+            split: Some(CacheCreation::from_lifetimes([(300, 2523)])),
+            total: Some(2523),
+        },
+        MergeRow {
+            name: "empty delta split object counts as no split",
+            opener: OPENER_2523,
+            delta: r#"{"input_tokens":2,"cache_creation_input_tokens":2523,"cache_read_input_tokens":0,"output_tokens":7,"cache_creation":{}}"#,
+            split: Some(CacheCreation::from_lifetimes([(300, 2523)])),
+            total: Some(2523),
+        },
+    ];
+
+    for row in rows {
+        // Act
+        let usage = merged_usage(row.opener, row.delta);
+
+        // Assert
+        assert_eq!(usage.cache_creation, row.split, "{}: split", row.name);
+        assert_eq!(
+            usage.cache_creation_input_tokens, row.total,
+            "{}: total",
+            row.name
+        );
+    }
+}
+
+/// A lifetime other than 5m / 1h survives the stream merge as data, both
+/// when the delta restates it and through the per-lifetime fallback.
+#[test]
+fn message_delta_carries_a_thirty_minute_lifetime() {
+    const OPENER: &str = r#"{"input_tokens":2,"output_tokens":1,"cache_creation_input_tokens":640,"cache_creation":{"ephemeral_30m_input_tokens":640}}"#;
+    let rows = [
+        (
+            "delta restates the 30m split",
+            r#"{"input_tokens":2,"cache_creation_input_tokens":640,"output_tokens":7,"cache_creation":{"ephemeral_30m_input_tokens":640}}"#,
+        ),
+        ("output-only delta", r#"{"output_tokens":7}"#),
+    ];
+    for (name, delta) in rows {
+        // Act
+        let usage = merged_usage(OPENER, delta);
+
+        // Assert
+        assert_eq!(
+            usage.cache_creation,
+            Some(CacheCreation::from_lifetimes([(1800, 640)])),
+            "{name}"
+        );
+    }
+}

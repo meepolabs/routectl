@@ -16,7 +16,7 @@ use routectl_core::{
     schema::{CacheCreation, ChunkChoice, ChunkDelta, UsageDelta},
 };
 
-use super::response::{core_cache_creation, map_stop_reason};
+use super::response::map_stop_reason;
 use super::sse_opaque::{MAX_OPAQUE_BYTES_PER_BLOCK, MAX_OPAQUE_DELTAS_PER_BLOCK, OpaqueCapture};
 use super::types::SseEvent;
 
@@ -304,7 +304,7 @@ impl SseState {
                         input_tokens: u.input_tokens,
                         cache_creation_input_tokens: u.cache_creation_input_tokens,
                         cache_read_input_tokens: u.cache_read_input_tokens,
-                        cache_creation: u.cache_creation.as_ref().map(core_cache_creation),
+                        cache_creation: u.cache_creation.clone(),
                     });
                 }
                 // Opening role chunk: an OpenAI-Chat stream opens with
@@ -641,36 +641,48 @@ impl SseState {
                         (None, Some(c)) => Some(c),
                         (None, None) => None,
                     };
-                    // Per-TTL merge via the placeholder rule so a delta with
-                    // partial/empty `cache_creation` doesn't wholesale-
-                    // replace the richer message_start object.
-                    let delta_cc = usage.as_ref().and_then(|u| u.cache_creation.as_ref());
-                    let cap_cc = cap.and_then(|c| c.cache_creation.as_ref());
-                    let cache_creation_5m = pick_placeholder(
-                        delta_cc.and_then(|c| c.ephemeral_5m_input_tokens),
-                        cap_cc.and_then(|c| c.get(300)),
-                    );
-                    let cache_creation_1h = pick_placeholder(
-                        delta_cc.and_then(|c| c.ephemeral_1h_input_tokens),
-                        cap_cc.and_then(|c| c.get(3600)),
-                    );
+                    // A delta that states its own write total decides the
+                    // split: its own non-empty split, else the opener's when
+                    // that sums to the stated total, else none (the whole
+                    // total is unknown lifetime). A delta stating no total
+                    // falls back per lifetime through the placeholder rule,
+                    // so a partial or empty delta object cannot wholesale-
+                    // replace the opener's. An empty object is no split.
+                    let delta_cc = usage
+                        .as_ref()
+                        .and_then(|u| u.cache_creation.as_ref())
+                        .filter(|c| !c.is_empty());
+                    let cap_cc = cap
+                        .and_then(|c| c.cache_creation.as_ref())
+                        .filter(|c| !c.is_empty());
                     let delta_states_cache_writes = reports_input
                         && usage
                             .as_ref()
                             .is_some_and(|u| u.cache_creation_input_tokens.is_some());
                     let cache_creation = if delta_states_cache_writes {
-                        // The delta's own write count is authoritative, so
-                        // its breakdown is too; a copied one could
-                        // contradict it.
-                        delta_cc.map(core_cache_creation)
-                    } else if cache_creation_5m.is_some() || cache_creation_1h.is_some() {
-                        Some(CacheCreation::from_lifetimes(
-                            [(300, cache_creation_5m), (3600, cache_creation_1h)]
-                                .into_iter()
-                                .filter_map(|(seconds, tokens)| Some((seconds, tokens?))),
-                        ))
+                        delta_cc
+                            .or_else(|| {
+                                cap_cc.filter(|c| {
+                                    cache_creation_input_tokens
+                                        .is_some_and(|total| c.total() == u64::from(total))
+                                })
+                            })
+                            .cloned()
                     } else {
-                        None
+                        let lifetimes: std::collections::BTreeSet<u32> = delta_cc
+                            .into_iter()
+                            .chain(cap_cc)
+                            .flat_map(|c| c.iter().map(|(seconds, _)| seconds))
+                            .collect();
+                        (!lifetimes.is_empty()).then(|| {
+                            CacheCreation::from_lifetimes(lifetimes.into_iter().map(|seconds| {
+                                let picked = pick_placeholder(
+                                    delta_cc.and_then(|c| c.get(seconds)),
+                                    cap_cc.and_then(|c| c.get(seconds)),
+                                );
+                                (seconds, picked.unwrap_or(0))
+                            }))
+                        })
                     };
                     // Explicit only when the delta states the uncached input
                     // itself and nothing positive came from the opener; an

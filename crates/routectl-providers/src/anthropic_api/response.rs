@@ -17,13 +17,12 @@ use std::collections::HashMap;
 use tracing::debug;
 use uuid::Uuid;
 
-use routectl_core::schema::CacheCreation;
 use routectl_core::{
     ChatResponse, Choice, ContentPart, Error, KnownContentPart, Message, MessageContent,
     ReasoningDetail, ReasoningDetailKind, Result, Role, Usage, sanitize_for_log,
 };
 
-use super::types::{AnthropicCacheCreation, AnthropicResponse, AnthropicUsage, ContentBlock};
+use super::types::{AnthropicResponse, AnthropicUsage, ContentBlock};
 
 /// Map Anthropic stop_reason to OpenAI finish_reason.
 pub fn map_stop_reason(stop_reason: Option<&str>) -> Option<String> {
@@ -241,22 +240,10 @@ fn translate_usage(u: &AnthropicUsage) -> Usage {
         reasoning_tokens: u.thinking_tokens(),
         cache_creation_input_tokens: u.cache_creation_input_tokens,
         cache_read_input_tokens: u.cache_read_input_tokens,
-        cache_creation: u.cache_creation.as_ref().map(core_cache_creation),
+        cache_creation: u.cache_creation.clone(),
         server_tool_use: u.server_tool_use.clone(),
         extras: u.extras.clone(),
     }
-}
-
-/// The wire's fixed 5m / 1h breakdown as the canonical lifetime map.
-pub(super) fn core_cache_creation(c: &AnthropicCacheCreation) -> CacheCreation {
-    CacheCreation::from_lifetimes(
-        [
-            (300, c.ephemeral_5m_input_tokens),
-            (3600, c.ephemeral_1h_input_tokens),
-        ]
-        .into_iter()
-        .filter_map(|(seconds, tokens)| Some((seconds, tokens?))),
-    )
 }
 
 /// Restore the client's original tool names on a normalized response.
