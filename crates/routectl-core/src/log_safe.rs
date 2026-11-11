@@ -1256,8 +1256,10 @@ pub fn body_trace_enabled() -> bool {
 /// 2xx success body (direction 3 success path). Fires AFTER the body
 /// parses but BEFORE routectl normalizes it, so operators see the wire
 /// shape the upstream actually returned -- not routectl's post-processed
-/// form. Honors `ROUTECTL_LOG_REDACT_PROMPTS=1`. 4xx/5xx error bodies
-/// are covered by [`debug_upstream_error_body`].
+/// form. Honors `ROUTECTL_LOG_REDACT_PROMPTS=1`. Every string leaf and
+/// key is then scrubbed with [`crate::scrub_upstream_value`] before the
+/// cap, so the line is faithful except for the scrub's replacements.
+/// 4xx/5xx error bodies are covered by [`debug_upstream_error_body`].
 pub fn trace_upstream_success_body(
     provider_kind: &str,
     provider_id: &str,
@@ -1266,7 +1268,8 @@ pub fn trace_upstream_success_body(
     if !body_trace_enabled() {
         return;
     }
-    let safe = redact_prompts_in(body);
+    let mut safe = redact_prompts_in(body);
+    crate::scrub_upstream_value(&mut safe);
     let truncated = truncate_json_for_log(&safe, trace_body_cap());
     tracing::trace!(
         provider_kind,
@@ -1623,8 +1626,10 @@ pub fn trace_outgoing_headers(provider_kind: &str, id: &str, headers: &serde_jso
 /// (`set-cookie` session credentials, an `authorization` echo, the
 /// `x-amz-security-token` STS credential) are redacted via
 /// `redact_header_values` before emission so a response header cannot
-/// leak a replayable secret into the log. Non-secret headers (rate-limit
-/// metadata, `x-amz-date`, ...) round-trip verbatim. See
+/// leak a replayable secret into the log. Every name and value is then
+/// scrubbed with [`crate::scrub_upstream_value`], so a credential an
+/// upstream echoes under any other header name is redacted too. Non-secret
+/// headers (rate-limit metadata, `x-amz-date`, ...) round-trip verbatim. See
 /// [`trace_ingress_headers`] for the single-line rationale. `headers`
 /// is the LAST field on the line.
 pub fn trace_upstream_response_headers(provider_kind: &str, id: &str, headers: &serde_json::Value) {
@@ -1636,6 +1641,7 @@ pub fn trace_upstream_response_headers(provider_kind: &str, id: &str, headers: &
     }
     let mut redacted = headers.clone();
     redact_header_values(&mut redacted);
+    crate::scrub_upstream_value(&mut redacted);
     tracing::trace!(
         message = HDR_MSG_UPSTREAM,
         provider_kind,
@@ -2139,15 +2145,20 @@ pub fn debug_upstream_error_body(provider_kind: &str, provider_id: &str, status:
 /// concern is handled by serialization on this path. The JSON test is the
 /// shared [`read_error_json_body`] one, so a JSON-looking body that cannot
 /// be redacted renders its fixed marker here too. Non-JSON bodies fall
-/// back to the HTML-collapse + control-char-strip path.
-fn clean_upstream_error_body(body: &str) -> String {
+/// back to the HTML-collapse + control-char-strip path. Both paths scrub
+/// upstream-authored text ([`crate::scrub_upstream_value`] on the parsed
+/// leaves, [`crate::scrub_upstream_text`] on the whole text) before any cap.
+pub(crate) fn clean_upstream_error_body(body: &str) -> String {
     match read_error_json_body(body) {
         ErrorJsonBody::Parsed(parsed) => {
-            truncate_json_for_log(&redact_prompts_in(&parsed), MAX_DEBUG_BODY_BYTES)
+            let mut safe = redact_prompts_in(&parsed);
+            crate::scrub_upstream_value(&mut safe);
+            truncate_json_for_log(&safe, MAX_DEBUG_BODY_BYTES)
         }
         ErrorJsonBody::Unreadable(marker) => marker,
         ErrorJsonBody::NotJson => {
-            let collapsed = sanitize_upstream_body_with_cap(body, MAX_DEBUG_BODY_BYTES);
+            let scrubbed = crate::scrub_upstream_text(body);
+            let collapsed = sanitize_upstream_body_with_cap(&scrubbed, MAX_DEBUG_BODY_BYTES);
             // Strip control chars (CR, LF, ANSI escapes) that
             // sanitize_upstream_body_with_cap does NOT remove -- it only
             // HTML-collapses + length-caps. Without this step a

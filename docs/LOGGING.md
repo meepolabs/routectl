@@ -337,6 +337,23 @@ ROUTECTL_LOG=routectl=trace ROUTECTL_LOG_REDACT_PROMPTS=1 \
   ./routectl serve 2>/tmp/triage.log
 ```
 
+Upstream-authored text. Independent of the knob, text an upstream wrote
+is scrubbed before it reaches a log line: AWS ARNs (plain or
+percent-encoded), account ids after the word `account`, vendor
+credentials keyed on their prefix (`sk-proj-`, `AKIA`, and so on), URL
+userinfo (`https://user:pass@host`), the token after `Bearer `, and the
+value of a credential-named key (`'authorization_token': '...'`) render
+as `[redacted]`. This covers every rendering of a core error (`%err` and
+`?err` fields, including the router's `chain exhausted`, retry and
+fallback lines: the `Upstream` body and the free text of `Streaming`,
+`Auth` and `NormalizeResponse`), the DEBUG `upstream error body` line,
+and the opt-in TRACE `upstream success body` and `upstream response
+headers` lines. The complete text is scrubbed first (every string leaf
+and key of a parsed JSON body), and only then control-filtered and
+capped, so a cap never cuts a credential short of its rule. The error
+values themselves keep the raw text for classification; only their
+renderings are scrubbed.
+
 ### Reasoning-replay degradation WARN
 
 When a request carries reasoning-replay artifacts onto a lane that
@@ -932,6 +949,10 @@ Operator grep cheat sheet:
 | `"structural summary"`             | 1 + 2 (request-side only) | `direction=ingress\|outgoing` |
 | `"stream summary"` `direction=upstream` | provider-side stream end | `chunks=`, `finish_reason=` |
 | `"stream summary"` `direction=egress`   | ingress-side stream end  | `chunks=`, `finish_reason=` |
+
+The `"upstream success body"` line and the `upstream response headers`
+line are faithful to the wire except for the upstream-text scrub's
+`[redacted]` replacements (see "Redaction").
 
 The `"structural summary"` line fires on every REQUEST-side body
 (directions 1 and 2 only -- response bodies are not summarized). It

@@ -323,3 +323,32 @@ fn debug_upstream_error_body_redacts_bom_prefixed_json() {
     assert!(!logged.contains(SENTINEL), "{logged}");
     assert!(logged.contains("bad"), "{logged}");
 }
+
+#[test]
+fn upstream_success_body_trace_scrubs_string_leaves() {
+    let planted = "sk-proj-PlantedSuccessKey0123456789abcdef";
+    let body = json!({
+        "id": "resp_1",
+        "model": "m",
+        "system_fingerprint": format!("fp {planted} max_tokens is too large"),
+    });
+
+    let events = routectl_testkit::capture_events(|| {
+        crate::trace_upstream_success_body("kind", "prov", &body);
+    });
+
+    let event = events
+        .iter()
+        .find(|e| e.message == "upstream success body")
+        .expect("TRACE upstream success body event");
+    let traced = event.field("body").expect("body field");
+    assert!(!traced.contains("PlantedSuccessKey"), "{traced}");
+    assert!(traced.contains("[redacted]"), "{traced}");
+    assert!(traced.contains("max_tokens is too large"), "{traced}");
+    assert!(
+        body["system_fingerprint"]
+            .as_str()
+            .unwrap()
+            .contains(planted)
+    );
+}

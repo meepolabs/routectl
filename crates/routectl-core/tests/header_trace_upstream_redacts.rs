@@ -86,3 +86,29 @@ fn upstream_emit_redacts_set_cookie_and_security_token() {
         "non-secret upstream header was redacted: {headers}"
     );
 }
+
+#[test]
+fn upstream_emit_scrubs_a_credential_echoed_under_any_header_name() {
+    // SAFETY: every test in this binary sets the same value before the
+    // toggle's OnceLock is first read, so concurrent writes agree.
+    unsafe { std::env::set_var("ROUTECTL_TRACE_HEADERS", "1") };
+    assert!(header_trace_enabled(), "toggle must freeze to true");
+    let planted = "sk-proj-PlantedHeaderKey0123456789abcdef";
+    let upstream_headers = headers_to_json([
+        ("x-debug-echo", format!("rejected {planted}").as_bytes()),
+        ("x-request-id", b"req-visible-42".as_slice()),
+    ]);
+
+    let events = capture_events(|| {
+        trace_upstream_response_headers("openai-compat", "prov-1", &upstream_headers);
+    });
+
+    let event = events
+        .iter()
+        .find(|e| e.message == HDR_MSG_UPSTREAM)
+        .unwrap_or_else(|| panic!("no upstream-headers event captured: {events:#?}"));
+    let headers = event.field("headers").expect("headers field");
+    assert!(!headers.contains("PlantedHeaderKey"), "{headers}");
+    assert!(headers.contains("rejected [redacted]"), "{headers}");
+    assert!(headers.contains("req-visible-42"), "{headers}");
+}

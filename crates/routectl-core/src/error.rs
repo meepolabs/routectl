@@ -11,6 +11,7 @@ use thiserror::Error;
 
 use crate::{
     EligibilityReason, ParsedErrorBody, RefusalReason, ScopeRow, UpstreamBody, UpstreamReason,
+    scrub_upstream_text, scrub_upstream_value,
 };
 
 /// Convenience alias defaulting the error type to [`enum@Error`].
@@ -29,6 +30,11 @@ const _: () = assert!(std::mem::size_of::<Error>() <= 128);
 /// The HTTP boundary maps each variant to a status and a client-safe
 /// body; operator detail stays in logs.
 ///
+/// Upstream-authored text (the [`Error::Upstream`] body and the free text
+/// of [`Error::Streaming`], [`Error::Auth`] and [`Error::NormalizeResponse`])
+/// renders through [`crate::scrub_upstream_text`] in both Display and Debug;
+/// the carried fields stay raw for the classifiers that read them.
+///
 /// `Debug` is hand-written (not derived) so the [`Error::Upstream`] `body`
 /// -- which can now carry a request-fault envelope up to
 /// [`crate::MAX_ERROR_BODY_BYTES`] -- renders as a bounded excerpt with a
@@ -39,13 +45,17 @@ pub enum Error {
     /// An upstream provider returned an HTTP error. Carries the operator
     /// detail plus structured classifiers (`retry_after`, `upstream_type`,
     /// `upstream_code`) consumed by the router and surfaced to callers.
-    #[error("provider `{provider}`: upstream HTTP {status}: {body}")]
+    #[error(
+        "provider `{provider}`: upstream HTTP {status}: {}",
+        scrub_upstream_text(.body)
+    )]
     Upstream {
         /// Provider that produced the error.
         provider: String,
         /// Upstream HTTP status code.
         status: u16,
-        /// Operator-facing detail from the upstream response.
+        /// Operator-facing detail from the upstream response, carried raw;
+        /// the Display and Debug renderings scrub it.
         body: String,
         /// Optional reset hint parsed from the upstream response (e.g.
         /// a `Retry-After` header). Consumed structurally by the router
@@ -81,7 +91,11 @@ pub enum Error {
 
     /// Upstream response could not be normalized back to canonical shape
     /// for the named provider.
-    #[error("provider `{0}`: response normalization failed: {1}")]
+    #[error(
+        "provider `{}`: response normalization failed: {}",
+        .0,
+        scrub_upstream_text(.1)
+    )]
     NormalizeResponse(String, String),
 
     /// The named provider is not configured.
@@ -93,7 +107,7 @@ pub enum Error {
     UnknownAlias(String),
 
     /// Authentication failed or credentials were missing.
-    #[error("auth: {0}")]
+    #[error("auth: {}", scrub_upstream_text(.0))]
     Auth(String),
 
     /// A credential is known to be unusable with exact evidence of why, and
@@ -169,7 +183,7 @@ pub enum Error {
     },
 
     /// A streaming (SSE) transport or framing failure.
-    #[error("streaming: {0}")]
+    #[error("streaming: {}", scrub_upstream_text(.0))]
     Streaming(String),
 
     /// The provider does not implement an optional `Provider` trait
@@ -225,7 +239,10 @@ pub enum Error {
 
 /// Hand-written `Debug` for [`enum@Error`]. Identical to the derived form
 /// for every variant and every field EXCEPT [`Error::LocalRefusal`]'s
-/// `detail`, which renders through [`crate::sanitize_detail_for_log`], and
+/// `detail`, which renders through [`crate::sanitize_detail_for_log`], the
+/// upstream-authored text of [`Error::Streaming`], [`Error::Auth`] and
+/// [`Error::NormalizeResponse`], which renders through
+/// [`crate::scrub_upstream_text`] (as their Display does), and
 /// [`Error::Upstream`]'s `body`:
 /// that renders as a `body_excerpt` (capped at [`crate::MAX_LOG_BODY_EXCERPT`]
 /// chars) plus a `body_len` total-byte marker, so a request-fault envelope
@@ -272,11 +289,14 @@ impl fmt::Debug for Error {
             Self::NormalizeResponse(a, b) => f
                 .debug_tuple("NormalizeResponse")
                 .field(a)
-                .field(b)
+                .field(&scrub_upstream_text(b))
                 .finish(),
             Self::UnknownProvider(s) => f.debug_tuple("UnknownProvider").field(s).finish(),
             Self::UnknownAlias(s) => f.debug_tuple("UnknownAlias").field(s).finish(),
-            Self::Auth(s) => f.debug_tuple("Auth").field(s).finish(),
+            Self::Auth(s) => f
+                .debug_tuple("Auth")
+                .field(&scrub_upstream_text(s))
+                .finish(),
             Self::Credential {
                 detail,
                 reason,
@@ -304,7 +324,10 @@ impl fmt::Debug for Error {
                 .field("detail", &crate::sanitize_detail_for_log(detail))
                 .field("reason", &reason.as_str())
                 .finish(),
-            Self::Streaming(s) => f.debug_tuple("Streaming").field(s).finish(),
+            Self::Streaming(s) => f
+                .debug_tuple("Streaming")
+                .field(&scrub_upstream_text(s))
+                .finish(),
             Self::NotImplemented(a, b) => {
                 f.debug_tuple("NotImplemented").field(a).field(b).finish()
             }
@@ -418,10 +441,13 @@ impl fmt::Debug for UpstreamExtras {
 /// An upstream error envelope can echo request fields back, so a body that
 /// opens like JSON is redacted the way a traced body is (credential-named
 /// keys and reasoning artifacts always, prompt content under
-/// `ROUTECTL_LOG_REDACT_PROMPTS`) before excerpting. One that cannot be
+/// `ROUTECTL_LOG_REDACT_PROMPTS`) and then scrubbed with
+/// [`crate::scrub_upstream_value`] before excerpting. One that cannot be
 /// redacted -- over [`crate::MAX_ERROR_BODY_BYTES`] (never parsed) or not
 /// parseable (e.g. truncated) -- renders as a fixed marker, never a raw
-/// prefix. Any other body is excerpted as-is. The shape test and marker
+/// prefix. Any other body is scrubbed whole with
+/// [`crate::scrub_upstream_text`], then excerpted, so the cap never cuts a
+/// credential short of its rule. The shape test and marker
 /// are shared with [`crate::redact_error_body_text`].
 fn body_debug_excerpt(body: &str) -> String {
     body_debug_excerpt_with_flag(body, crate::log_safe::redact_enabled())
@@ -430,10 +456,11 @@ fn body_debug_excerpt(body: &str) -> String {
 fn body_debug_excerpt_with_flag(body: &str, redact_prompts: bool) -> String {
     use crate::log_safe::ErrorJsonBody;
     match crate::log_safe::read_error_json_body(body) {
-        ErrorJsonBody::NotJson => excerpt_chars(body),
+        ErrorJsonBody::NotJson => excerpt_chars(&scrub_upstream_text(body)),
         ErrorJsonBody::Unreadable(marker) => marker,
         ErrorJsonBody::Parsed(mut value) => {
             crate::log_safe::redact_in_place(&mut value, redact_prompts);
+            scrub_upstream_value(&mut value);
             excerpt_chars(&value.to_string())
         }
     }

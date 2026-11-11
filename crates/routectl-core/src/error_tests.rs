@@ -115,7 +115,10 @@ fn upstream_debug_redacts_credential_echoed_in_json_body() {
     assert!(!rendered.contains("SENTINEL-ECHOED-TOKEN"), "{rendered}");
     assert!(rendered.contains("invalid_request_error"), "{rendered}");
     assert!(rendered.contains("bad mcp server"), "{rendered}");
-    assert!(rendered.contains("<redacted len=21>"), "{rendered}");
+    assert!(
+        rendered.contains(r#"\"authorization_token\":\"[redacted]\""#),
+        "{rendered}"
+    );
 }
 
 /// An oversized JSON body is still capped after redaction, on a char
@@ -304,7 +307,7 @@ fn parsed_body_is_none_off_the_upstream_variant() {
     );
 }
 
-/// The body itself renders (Display raw, Debug as a redacted excerpt),
+/// The body itself renders (Display scrubbed, Debug as a redacted excerpt),
 /// so the planted key appears exactly once per rendering; a rendered
 /// parse would add a second occurrence or a `ParsedErrorBody` marker.
 #[test]
@@ -515,4 +518,128 @@ fn upstream_debug_renders_the_scope_row_token_only_when_carried() {
     );
     assert!(unset.contains("scope_row: None"), "{unset}");
     assert!(!unset.contains("anthropic-bare-rate-limit"), "{unset}");
+}
+
+/// Kept verbatim by every scrubbed rendering: the positive control.
+const SCRUB_SENTINEL: &str = "max_tokens is too large";
+
+/// Upstream-authored text planting one value per scrub rule, around the
+/// sentinel.
+fn planted_upstream_text() -> String {
+    [
+        "assumed arn:aws:iam::123456789012:role/planted-plain-role;",
+        "encoded arn%3aaws%3asts%3a%3a111122223333%3aassumed-role%2fplanted-enc-role;",
+        "account\u{a0}210987654321 is suspended;",
+        "key sk-proj-PlantedProjKey0123456789abcdef rejected;",
+        "fetch https://u:p@host/v1 failed;",
+        "echo {'authorization_token': 'X'};",
+        SCRUB_SENTINEL,
+    ]
+    .join(" ")
+}
+
+/// Substrings that must not survive any rendering of the planted text.
+const PLANTED_VALUES: [&str; 8] = [
+    "planted-plain-role",
+    "123456789012",
+    "planted-enc-role",
+    "111122223333",
+    "210987654321",
+    "PlantedProjKey",
+    "u:p@",
+    "'X'",
+];
+
+fn assert_scrubbed(row: &str, rendered: &str) {
+    for planted in PLANTED_VALUES {
+        assert!(
+            !rendered.contains(planted),
+            "{row}: planted {planted:?} survived: {rendered}"
+        );
+    }
+    assert!(
+        rendered.contains(SCRUB_SENTINEL),
+        "{row}: sentinel lost: {rendered}"
+    );
+}
+
+#[test]
+fn upstream_authored_text_renders_scrubbed_in_every_error_rendering() {
+    let text = planted_upstream_text();
+    let json_body = serde_json::json!({"error": {"message": text}}).to_string();
+    let upstream_text = Error::upstream("prov", 400, text.as_str());
+    let upstream_json = Error::upstream("prov", 400, json_body.as_str());
+    let streaming = Error::Streaming(text.clone());
+    let auth = Error::Auth(text.clone());
+    let normalize = Error::normalize_response("prov", text.as_str());
+
+    let rows = [
+        ("upstream text body display", upstream_text.to_string()),
+        ("upstream text body debug", format!("{upstream_text:?}")),
+        ("upstream json body display", upstream_json.to_string()),
+        ("upstream json body debug", format!("{upstream_json:?}")),
+        ("streaming display", streaming.to_string()),
+        ("streaming debug", format!("{streaming:?}")),
+        ("auth display", auth.to_string()),
+        ("auth debug", format!("{auth:?}")),
+        ("normalize response display", normalize.to_string()),
+        ("normalize response debug", format!("{normalize:?}")),
+        (
+            "clean text error body",
+            crate::log_safe::clean_upstream_error_body(&text),
+        ),
+        (
+            "clean json error body",
+            crate::log_safe::clean_upstream_error_body(&json_body),
+        ),
+    ];
+
+    for (row, rendered) in rows {
+        assert_scrubbed(row, &rendered);
+    }
+}
+
+/// The text scrub runs on the whole body before the excerpt cap: a
+/// credential straddling the cap is redacted whole, never cut into a prefix
+/// shorter than its rule's floor (12 of the 16 body chars `sk-proj-` needs
+/// fall inside the cap here).
+#[test]
+fn upstream_debug_redacts_a_credential_straddling_the_excerpt_cap() {
+    let token = format!("sk-proj-{}", "A".repeat(40));
+    let lead = ".".repeat(crate::MAX_LOG_BODY_EXCERPT - "sk-proj-".len() - 12);
+    let body = format!("{lead}{token} tail");
+    let err = Error::upstream("prov", 400, body.as_str());
+
+    let rendered = format!("{err:?}");
+
+    assert!(!rendered.contains("sk-proj-"), "{rendered}");
+    assert!(!rendered.contains("AAAA"), "{rendered}");
+    assert!(rendered.contains("[redacted]"), "{rendered}");
+}
+
+/// Only the renderings scrub: the carried body, its parse and the free text
+/// of the other variants stay exactly as the upstream sent them, for the
+/// classifiers that read them.
+#[test]
+fn scrubbed_renderings_leave_the_carried_text_raw() {
+    let text = planted_upstream_text();
+    let json_body = serde_json::json!({"error": {"message": text}}).to_string();
+    let upstream = Error::upstream("prov", 400, json_body.as_str());
+    let streaming = Error::Streaming(text.clone());
+
+    let _ = (upstream.to_string(), format!("{upstream:?}"));
+    let _ = (streaming.to_string(), format!("{streaming:?}"));
+
+    let Error::Upstream { body, .. } = &upstream else {
+        panic!("expected Upstream, got {upstream:?}");
+    };
+    assert_eq!(body, &json_body);
+    assert_eq!(
+        upstream.parsed_body().and_then(|p| p.error_message()),
+        Some(text.as_str())
+    );
+    let Error::Streaming(carried) = &streaming else {
+        panic!("expected Streaming");
+    };
+    assert_eq!(carried, &text);
 }
