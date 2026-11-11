@@ -1275,12 +1275,18 @@ fn withhold_mantle_client_metadata(body: &mut Value, req: &ChatRequest) {
 /// URL the upstream would fetch under the operator's AWS identity, unless it
 /// is `https` or `data`. Walks the final body, so a block copied verbatim
 /// and a nested `tool_result` are checked like a translated one; top-level
-/// `tools` are never walked.
+/// `tools` are never walked, and in `messages` only a `tool_use` part's
+/// `input` is skipped.
 #[cfg(feature = "bedrock")]
 fn refuse_unforwardable_mantle_media(id: &str, body: &Value) -> Result<()> {
-    for member in ["system", "messages"] {
+    use crate::mantle::MediaWalkRoot;
+
+    for (member, walk_root) in [
+        ("system", MediaWalkRoot::Content),
+        ("messages", MediaWalkRoot::AnthropicMessages),
+    ] {
         if let Some(value) = body.get(member) {
-            crate::mantle::refuse_unforwardable_media_urls(id, value, member)?;
+            crate::mantle::refuse_unforwardable_media_urls(id, walk_root, value, member)?;
         }
     }
     Ok(())

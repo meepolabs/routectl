@@ -114,12 +114,40 @@ pub(crate) fn is_forwardable_media_url(url: &str) -> bool {
 }
 
 /// Responses `input` item kinds whose `tools` member holds tool
-/// definitions, which the media-URL walker does not descend into. Mantle
-/// does not fetch from tool definitions today; if it enables image
-/// generation, the image generation tool's `input_image_mask.image_url` is
-/// the member to revisit.
+/// definitions, which the media-URL walker does not descend into on a
+/// direct element of `input`. Mantle does not fetch from tool definitions
+/// today; if it enables image generation, the image generation tool's
+/// `input_image_mask.image_url` is the member to revisit.
 #[cfg(feature = "bedrock")]
-const TOOL_DECLARING_ITEM_KINDS: [&str; 2] = ["additional_tools", "tool_search_output"];
+const TOOL_DECLARING_ITEM_KINDS: [&str; 3] =
+    ["additional_tools", "tool_search_output", "mcp_list_tools"];
+
+/// Which request member a media-URL walk starts at. It decides the only
+/// positions whose subtree the walker leaves unwalked.
+#[cfg(feature = "bedrock")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MediaWalkRoot {
+    /// Anthropic Messages `messages`: the `input` of a `tool_use` content
+    /// part (`messages[i].content[j]`) holds client tool arguments.
+    AnthropicMessages,
+    /// Responses `input`: the `tools` of a direct `input[i]` item whose
+    /// `type` is a tool-declaring kind holds tool definitions.
+    ResponsesInput,
+    /// Content with no tool position (Anthropic `system`, Chat Completions
+    /// `messages`): every member is walked.
+    Content,
+}
+
+/// Where a value sits relative to the walk root, as far as a skip needs.
+#[cfg(feature = "bedrock")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Slot {
+    Root,
+    RootItem,
+    ItemContent,
+    ContentPart,
+    Nested,
+}
 
 /// `source.type` values whose payload is not a URL, so the `source` rule
 /// skips a `url` member beside them. A `file`-typed object's own bare `url`
@@ -158,15 +186,17 @@ const MAX_RENDERED_KEY_LEN: usize = 64;
 /// one the upstream does not fetch.
 ///
 /// It never descends into string values (function-call `arguments` are
-/// JSON-encoded strings), the `tools` member of an object whose `type` is
-/// `additional_tools` or `tool_search_output` (tool definitions, schemas
-/// included), or the `input` member of an object whose `type` is
-/// `tool_use` (client-authored tool arguments on Anthropic shapes). The
-/// skips are positional: a member named `tools`, `input_schema` or
-/// `parameters` on any other object is walked like any member. Server tool
-/// inputs (`server_tool_use`, `mcp_tool_use`) are walked. Callers pass only
-/// the request members that carry content, so a body's top-level `tools`
-/// never reaches the walker.
+/// JSON-encoded strings). The only other unwalked subtrees are positional,
+/// chosen by `walk_root`: on [`MediaWalkRoot::ResponsesInput`], the `tools`
+/// of a direct `input[i]` item whose `type` is `additional_tools`,
+/// `tool_search_output` or `mcp_list_tools` (tool definitions, schemas
+/// included); on [`MediaWalkRoot::AnthropicMessages`], the `input` of a
+/// `tool_use` part at `messages[i].content[j]` (client tool arguments).
+/// `type` matches exactly. The same object at any other depth, a member
+/// named `tools`, `input_schema` or `parameters` anywhere else, and server
+/// tool inputs (`server_tool_use`, `mcp_tool_use`) are walked. Callers pass
+/// only the request members that carry content, so a body's top-level
+/// `tools` never reaches the walker.
 ///
 /// `path` names `root` in the refusal message. The message names the
 /// field, its position and the accepted scheme class, never the URL; an
@@ -175,10 +205,11 @@ const MAX_RENDERED_KEY_LEN: usize = 64;
 #[cfg(feature = "bedrock")]
 pub(crate) fn refuse_unforwardable_media_urls(
     provider_id: &str,
+    walk_root: MediaWalkRoot,
     root: &serde_json::Value,
     path: &str,
 ) -> routectl_core::Result<()> {
-    match find_unforwardable_media_url(root, path) {
+    match find_unforwardable_media_url(walk_root, Slot::Root, root, path) {
         None => Ok(()),
         Some((field, at)) => Err(routectl_core::Error::normalize_request(
             provider_id,
@@ -191,20 +222,24 @@ pub(crate) fn refuse_unforwardable_media_urls(
     }
 }
 
-/// The first refused media member under `value`, as its rendered field name
-/// and the rendered path of the object holding it.
+/// The first refused media member under `value`, which sits at `slot`, as
+/// its rendered field name and the rendered path of the object holding it.
 #[cfg(feature = "bedrock")]
 fn find_unforwardable_media_url<'v>(
+    walk_root: MediaWalkRoot,
+    slot: Slot,
     value: &'v serde_json::Value,
     path: &str,
 ) -> Option<(&'v str, String)> {
     use serde_json::Value;
 
     match value {
-        Value::Array(items) => items
-            .iter()
-            .enumerate()
-            .find_map(|(i, item)| find_unforwardable_media_url(item, &format!("{path}[{i}]"))),
+        Value::Array(items) => {
+            let item_slot = element_slot(slot);
+            items.iter().enumerate().find_map(|(i, item)| {
+                find_unforwardable_media_url(walk_root, item_slot, item, &format!("{path}[{i}]"))
+            })
+        }
         Value::Object(members) => {
             if let Some(field) = refused_media_member(members) {
                 return Some((field, path.to_owned()));
@@ -212,22 +247,48 @@ fn find_unforwardable_media_url<'v>(
             let kind = members.get("type").and_then(Value::as_str);
             members
                 .iter()
-                .filter(|(key, _)| !is_unwalked_member(kind, key))
+                .filter(|(key, _)| !is_unwalked_member(walk_root, slot, kind, key))
                 .find_map(|(key, child)| {
-                    find_unforwardable_media_url(child, &format!("{path}.{}", render_key(key)))
+                    find_unforwardable_media_url(
+                        walk_root,
+                        member_slot(slot, key),
+                        child,
+                        &format!("{path}.{}", render_key(key)),
+                    )
                 })
         }
         Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => None,
     }
 }
 
-/// Whether the member `key` of an object whose `type` is `kind` holds tool
-/// definitions or client tool arguments rather than content.
+/// The slot of an element of an array at `slot`.
 #[cfg(feature = "bedrock")]
-fn is_unwalked_member(kind: Option<&str>, key: &str) -> bool {
-    match kind {
-        Some("tool_use") => key == "input",
-        Some(kind) if TOOL_DECLARING_ITEM_KINDS.contains(&kind) => key == "tools",
+const fn element_slot(slot: Slot) -> Slot {
+    match slot {
+        Slot::Root => Slot::RootItem,
+        Slot::ItemContent => Slot::ContentPart,
+        Slot::RootItem | Slot::ContentPart | Slot::Nested => Slot::Nested,
+    }
+}
+
+/// The slot of the member `key` of an object at `slot`.
+#[cfg(feature = "bedrock")]
+fn member_slot(slot: Slot, key: &str) -> Slot {
+    match slot {
+        Slot::RootItem if key == "content" => Slot::ItemContent,
+        _ => Slot::Nested,
+    }
+}
+
+/// Whether the member `key` of an object at `slot` whose `type` is `kind`
+/// holds tool definitions or client tool arguments rather than content.
+#[cfg(feature = "bedrock")]
+fn is_unwalked_member(walk_root: MediaWalkRoot, slot: Slot, kind: Option<&str>, key: &str) -> bool {
+    match (walk_root, slot, kind) {
+        (MediaWalkRoot::ResponsesInput, Slot::RootItem, Some(kind)) => {
+            key == "tools" && TOOL_DECLARING_ITEM_KINDS.contains(&kind)
+        }
+        (MediaWalkRoot::AnthropicMessages, Slot::ContentPart, Some("tool_use")) => key == "input",
         _ => false,
     }
 }
@@ -476,13 +537,23 @@ mod tests {
     mod media_walk {
         use serde_json::{Value, json};
 
-        use super::super::refuse_unforwardable_media_urls;
+        use super::super::{MediaWalkRoot, refuse_unforwardable_media_urls};
 
         const S3: &str = "s3://planted-bucket-zq7/secret-key-path-k3.png";
         const HTTPS: &str = "https://example.com/a.png";
 
+        const WALK_ROOTS: [MediaWalkRoot; 3] = [
+            MediaWalkRoot::AnthropicMessages,
+            MediaWalkRoot::ResponsesInput,
+            MediaWalkRoot::Content,
+        ];
+
         fn refusal_message(root: &Value) -> Option<String> {
-            match refuse_unforwardable_media_urls("mantle:walk", root, "root") {
+            refusal_message_at(MediaWalkRoot::Content, root)
+        }
+
+        fn refusal_message_at(walk_root: MediaWalkRoot, root: &Value) -> Option<String> {
+            match refuse_unforwardable_media_urls("mantle:walk", walk_root, root, "root") {
                 Ok(()) => None,
                 Err(routectl_core::Error::NormalizeRequest(
                     _,
@@ -702,42 +773,196 @@ mod tests {
 
         #[test]
         fn walks_tool_named_members_outside_tool_positions() {
-            for (row, root, expected) in tool_named_member_rows(S3) {
-                let msg = refusal_message(&root).unwrap_or_else(|| panic!("{row}: must refuse"));
-                assert!(msg.contains(expected), "{row}: {msg}");
+            for walk_root in WALK_ROOTS {
+                for (row, root, expected) in tool_named_member_rows(S3) {
+                    let msg = refusal_message_at(walk_root, &root)
+                        .unwrap_or_else(|| panic!("{row} ({walk_root:?}): must refuse"));
+                    assert!(msg.contains(expected), "{row} ({walk_root:?}): {msg}");
+                }
             }
         }
 
         #[test]
         fn forwards_https_sources_in_tool_named_members() {
-            for (row, root, _) in tool_named_member_rows(HTTPS) {
-                assert_eq!(refusal_message(&root), None, "{row}: must pass");
+            for walk_root in WALK_ROOTS {
+                for (row, root, _) in tool_named_member_rows(HTTPS) {
+                    assert_eq!(
+                        refusal_message_at(walk_root, &root),
+                        None,
+                        "{row} ({walk_root:?}): must pass"
+                    );
+                }
+            }
+        }
+
+        /// A message whose single content part is `part`.
+        fn message_with_part(part: Value) -> Value {
+            json!([{"role": "user", "content": [part]}])
+        }
+
+        /// Tool-shaped objects outside the one position the walk root
+        /// skips, each with a url-type image source at `url`.
+        fn misplaced_tool_shape_rows(
+            url: &str,
+        ) -> Vec<(&'static str, MediaWalkRoot, Value, &'static str)> {
+            let search_output = json!({"type": "tool_search_output", "tools": [url_image(url)]});
+            vec![
+                (
+                    "tool_search_output as a content part (anthropic)",
+                    MediaWalkRoot::AnthropicMessages,
+                    message_with_part(search_output.clone()),
+                    "`source` at root[0].content[0].tools[0] ",
+                ),
+                (
+                    "tool_search_output as a content part (chat)",
+                    MediaWalkRoot::Content,
+                    message_with_part(search_output.clone()),
+                    "`source` at root[0].content[0].tools[0] ",
+                ),
+                (
+                    "tool_search_output in a part member (anthropic)",
+                    MediaWalkRoot::AnthropicMessages,
+                    message_with_part(json!({"type": "text", "text": "t", "meta": search_output})),
+                    "`source` at root[0].content[0].meta.tools[0] ",
+                ),
+                (
+                    "tool_search_output in a part member (chat)",
+                    MediaWalkRoot::Content,
+                    message_with_part(json!({"type": "text", "text": "t", "meta": search_output})),
+                    "`source` at root[0].content[0].meta.tools[0] ",
+                ),
+                (
+                    "tool_search_output inside a message input item",
+                    MediaWalkRoot::ResponsesInput,
+                    message_with_part(search_output.clone()),
+                    "`source` at root[0].content[0].tools[0] ",
+                ),
+                (
+                    "tool_search_output root item on the anthropic root",
+                    MediaWalkRoot::AnthropicMessages,
+                    json!([search_output]),
+                    "`source` at root[0].tools[0] ",
+                ),
+                (
+                    "additional_tools root item on the chat root",
+                    MediaWalkRoot::Content,
+                    json!([{"type": "additional_tools", "tools": [url_image(url)]}]),
+                    "`source` at root[0].tools[0] ",
+                ),
+                (
+                    "tool_search_output as the walk root itself",
+                    MediaWalkRoot::ResponsesInput,
+                    search_output,
+                    "`source` at root.tools[0] ",
+                ),
+                (
+                    "case-variant Tool_Search_Output root item",
+                    MediaWalkRoot::ResponsesInput,
+                    json!([{"type": "Tool_Search_Output", "tools": [url_image(url)]}]),
+                    "`source` at root[0].tools[0] ",
+                ),
+                (
+                    "tool_use nested in a tool_result part",
+                    MediaWalkRoot::AnthropicMessages,
+                    message_with_part(json!({
+                        "type": "tool_result",
+                        "content": [{"type": "tool_use", "input": url_image(url)}]
+                    })),
+                    "`source` at root[0].content[0].content[0].input ",
+                ),
+                (
+                    "tool_use in a part member",
+                    MediaWalkRoot::AnthropicMessages,
+                    message_with_part(json!({
+                        "type": "text",
+                        "text": "t",
+                        "meta": {"type": "tool_use", "input": url_image(url)}
+                    })),
+                    "`source` at root[0].content[0].meta.input ",
+                ),
+                (
+                    "tool_use as a root item",
+                    MediaWalkRoot::AnthropicMessages,
+                    json!([{"type": "tool_use", "input": url_image(url)}]),
+                    "`source` at root[0].input ",
+                ),
+                (
+                    "tool_use content part on the chat root",
+                    MediaWalkRoot::Content,
+                    message_with_part(json!({"type": "tool_use", "input": url_image(url)})),
+                    "`source` at root[0].content[0].input ",
+                ),
+                (
+                    "case-variant TOOL_USE content part",
+                    MediaWalkRoot::AnthropicMessages,
+                    message_with_part(json!({"type": "TOOL_USE", "input": url_image(url)})),
+                    "`source` at root[0].content[0].input ",
+                ),
+            ]
+        }
+
+        #[test]
+        fn walks_tool_shapes_outside_their_skipped_position() {
+            for (row, walk_root, root, expected) in misplaced_tool_shape_rows(S3) {
+                let msg = refusal_message_at(walk_root, &root)
+                    .unwrap_or_else(|| panic!("{row}: must refuse"));
+                assert!(msg.contains(expected), "{row}: {msg}");
+            }
+        }
+
+        #[test]
+        fn forwards_https_sources_in_misplaced_tool_shapes() {
+            for (row, walk_root, root, _) in misplaced_tool_shape_rows(HTTPS) {
+                assert_eq!(
+                    refusal_message_at(walk_root, &root),
+                    None,
+                    "{row}: must pass"
+                );
             }
         }
 
         #[test]
         fn never_descends_into_strings_tool_definitions_or_tool_use_input() {
-            let rows: Vec<(&str, Value)> = vec![
+            let schema_with_url_property = json!({
+                "name": "clone",
+                "input_schema": {"type": "object", "properties": {"repo_url": {"type": "string"}}}
+            });
+            let rows: Vec<(&str, MediaWalkRoot, Value)> = vec![
                 (
                     "string argument",
-                    json!({"type": "function_call", "arguments": json!({"image_url": S3}).to_string()}),
+                    MediaWalkRoot::ResponsesInput,
+                    json!([{"type": "function_call", "arguments": json!({"image_url": S3}).to_string()}]),
                 ),
                 (
                     "additional_tools item tools",
-                    json!({"type": "additional_tools", "role": "developer", "tools": [tool_definition(S3), url_image(S3)]}),
+                    MediaWalkRoot::ResponsesInput,
+                    json!([{"type": "additional_tools", "role": "developer", "tools": [tool_definition(S3), url_image(S3)]}]),
                 ),
                 (
                     "tool_search_output item tools",
-                    json!({"type": "tool_search_output", "tools": [tool_definition(S3), url_image(S3)]}),
+                    MediaWalkRoot::ResponsesInput,
+                    json!([{"type": "tool_search_output", "tools": [tool_definition(S3), url_image(S3)]}]),
                 ),
                 (
-                    "tool_use input",
-                    json!({"type": "tool_use", "id": "t1", "input": {"image_url": S3, "file_url": S3, "image": url_image(S3)}}),
+                    "mcp_list_tools item tools",
+                    MediaWalkRoot::ResponsesInput,
+                    json!([{"type": "mcp_list_tools", "server_label": "s", "tools": [schema_with_url_property, url_image(S3)]}]),
+                ),
+                (
+                    "tool_use content part input",
+                    MediaWalkRoot::AnthropicMessages,
+                    message_with_part(
+                        json!({"type": "tool_use", "id": "t1", "input": {"image_url": S3, "file_url": S3, "image": url_image(S3)}}),
+                    ),
                 ),
             ];
 
-            for (row, root) in rows {
-                assert_eq!(refusal_message(&root), None, "{row}: must not be walked");
+            for (row, walk_root, root) in rows {
+                assert_eq!(
+                    refusal_message_at(walk_root, &root),
+                    None,
+                    "{row}: must not be walked"
+                );
             }
         }
 

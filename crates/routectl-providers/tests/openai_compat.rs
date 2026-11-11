@@ -1858,6 +1858,21 @@ mod mantle {
         }
     }
 
+    /// An unmodeled `tool_search_output` block the content lift forwards
+    /// verbatim, whose `tools` carries a url-type image source.
+    fn nested_tool_search_output(url: &str) -> ContentPart {
+        let mut extras = serde_json::Map::new();
+        extras.insert(
+            "tools".into(),
+            json!([{"type": "image", "source": {"type": "url", "url": url}}]),
+        );
+        ContentPart::Other {
+            type_tag: "tool_search_output".into(),
+            cache_control: None,
+            extras,
+        }
+    }
+
     /// A user turn whose Anthropic `tool_result` carries a url image; the
     /// lift hoists that image into a user message after the tool message.
     fn tool_result_image_req(url: &str) -> ChatRequest {
@@ -1915,6 +1930,11 @@ mod mantle {
                 "empty image_url",
                 user_parts_req(image_url_part("")),
                 "`image_url` at messages[0].content[1] ",
+            ),
+            (
+                "tool_search_output block tools s3",
+                user_parts_req(nested_tool_search_output(&planted("s3"))),
+                "`source` at messages[0].content[1].tools[0] ",
             ),
         ]
     }
@@ -1990,6 +2010,10 @@ mod mantle {
             (
                 "verbatim url source https",
                 user_parts_req(verbatim_url_source_block("https://example.com/c.png")),
+            ),
+            (
+                "tool_search_output block tools https",
+                user_parts_req(nested_tool_search_output("https://example.com/d.png")),
             ),
         ];
 

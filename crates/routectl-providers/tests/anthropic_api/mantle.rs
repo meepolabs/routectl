@@ -534,6 +534,39 @@ fn tool_round_req(input: Value, result_part: ContentPart) -> ChatRequest {
     )
 }
 
+/// An unmodeled `tool_search_output` content part whose `tools` carries a
+/// url-type image source.
+fn nested_tool_search_output(url: &str) -> ContentPart {
+    let mut extras = serde_json::Map::new();
+    extras.insert(
+        "tools".into(),
+        json!([{"type": "image", "source": {"type": "url", "url": url}}]),
+    );
+    ContentPart::Other {
+        type_tag: "tool_search_output".into(),
+        cache_control: None,
+        extras,
+    }
+}
+
+/// A `tool_result` whose content holds a `tool_use` object, so the
+/// `tool_use` sits below a content part; its `input` carries a url-type
+/// image source.
+fn tool_use_in_tool_result(url: &str) -> ContentPart {
+    ContentPart::Known(KnownContentPart::ToolResult {
+        tool_use_id: "toolu_1".into(),
+        content: json!([{
+            "type": "tool_use",
+            "id": "toolu_9",
+            "name": "relay",
+            "input": {"type": "image", "source": {"type": "url", "url": url}}
+        }]),
+        is_error: None,
+        cache_control: None,
+        extras: serde_json::Map::new(),
+    })
+}
+
 fn text_part(text: &str) -> ContentPart {
     ContentPart::Known(KnownContentPart::Text {
         text: text.into(),
@@ -619,6 +652,16 @@ async fn mantle_lane_refuses_unforwardable_media_urls_on_messages_and_count_toke
             user_parts_req(image_url_part("")),
             "`source` at messages[0].content[1] ",
         ),
+        (
+            "tool_search_output content part tools s3",
+            user_parts_req(nested_tool_search_output(&planted("s3"))),
+            "`source` at messages[0].content[1].tools[0] ",
+        ),
+        (
+            "tool_use nested in a tool_result input s3",
+            tool_round_req(json!({}), tool_use_in_tool_result(&planted("s3"))),
+            "`source` at messages[2].content[0].content[0].content[0].input ",
+        ),
     ];
 
     for (row, req, field_at) in rows {
@@ -658,6 +701,17 @@ async fn mantle_lane_forwards_https_and_data_media_urls() {
         (
             "verbatim file block file_url https",
             user_parts_req(file_url_part("https://example.com/c.pdf")),
+        ),
+        (
+            "tool_search_output content part tools https",
+            user_parts_req(nested_tool_search_output("https://example.com/d.png")),
+        ),
+        (
+            "tool_use nested in a tool_result input https",
+            tool_round_req(
+                json!({}),
+                tool_use_in_tool_result("https://example.com/e.png"),
+            ),
         ),
     ];
 

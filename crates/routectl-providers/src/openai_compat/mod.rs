@@ -264,14 +264,18 @@ impl OpenAiCompatProvider {
     /// media URL the upstream would fetch under the operator's AWS identity,
     /// unless it is `https` or `data`. Walks the translated body, so a part
     /// forwarded verbatim and a tool-result image hoisted into a user turn
-    /// are checked like a translated one; top-level `tools` are never walked.
-    /// A no-op on the first-party lane.
+    /// are checked like a translated one; top-level `tools` are never walked
+    /// and nothing inside `messages` is skipped. A no-op on the first-party
+    /// lane.
     #[cfg(feature = "bedrock")]
     fn refuse_unforwardable_mantle_media(&self, body: &Value) -> Result<()> {
         match body.get("messages") {
-            Some(messages) if self.is_mantle() => {
-                crate::mantle::refuse_unforwardable_media_urls(&self.cfg.id, messages, "messages")
-            }
+            Some(messages) if self.is_mantle() => crate::mantle::refuse_unforwardable_media_urls(
+                &self.cfg.id,
+                crate::mantle::MediaWalkRoot::Content,
+                messages,
+                "messages",
+            ),
             _ => Ok(()),
         }
     }

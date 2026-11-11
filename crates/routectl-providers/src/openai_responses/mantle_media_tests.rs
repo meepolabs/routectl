@@ -211,6 +211,16 @@ fn part_parameters_item(url: &str) -> Value {
     })
 }
 
+/// A passthrough message whose content part is a `tool_search_output`
+/// object whose `tools` carries a url-type image source.
+fn nested_tool_search_output_item(url: &str) -> Value {
+    json!({
+        "type": "message",
+        "role": "user",
+        "content": [{"type": "tool_search_output", "tools": [url_image_block(url)]}]
+    })
+}
+
 async fn hit_count(server: &MockServer) -> usize {
     server.received_requests().await.unwrap().len()
 }
@@ -321,6 +331,10 @@ async fn mantle_refuses_non_forwardable_media_urls_without_an_upstream_call() {
             "passthrough part parameters carrying a url source",
             passthrough_request(part_parameters_item(&s3)),
         ),
+        (
+            "tool_search_output nested in a message content part",
+            passthrough_request(nested_tool_search_output_item(&s3)),
+        ),
     ];
 
     for (row, req) in rows {
@@ -374,6 +388,10 @@ async fn mantle_forwards_https_and_data_media_urls() {
         (
             "passthrough part parameters carrying an https source",
             passthrough_request(part_parameters_item("https://example.com/d.png")),
+        ),
+        (
+            "tool_search_output nested in a message content part with https",
+            passthrough_request(nested_tool_search_output_item("https://example.com/e.png")),
         ),
     ];
 
@@ -504,10 +522,19 @@ async fn mantle_does_not_inspect_tool_definitions_in_tool_declaring_input_items(
         "name": "fetch",
         "parameters": {"type": "object", "properties": {"image": url_image_block(&planted_s3())}}
     });
-    for kind in ["additional_tools", "tool_search_output"] {
+    let mcp_tool = json!({
+        "name": "clone",
+        "input_schema": {"type": "object", "properties": {"repo_url": {"type": "string"}}}
+    });
+    let items = [
+        json!({"type": "additional_tools", "tools": [tool.clone()]}),
+        json!({"type": "tool_search_output", "tools": [tool]}),
+        json!({"type": "mcp_list_tools", "server_label": "git", "tools": [mcp_tool]}),
+    ];
+    for item in items {
+        let kind = item["type"].clone();
         let server = mock_upstream().await;
         let provider = mantle_provider(&server.uri()).await;
-        let item = json!({"type": kind, "tools": [tool.clone()]});
 
         provider
             .complete(passthrough_request(item.clone()))

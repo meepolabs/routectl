@@ -12,10 +12,16 @@ use serde_json::Value;
 
 /// Refuse a Mantle Responses body whose `input` carries a media URL the
 /// upstream would fetch, unless it is `https` or `data`. Top-level `tools`
-/// sit outside `input` and are never walked.
+/// sit outside `input` and are never walked; inside `input`, only the
+/// `tools` of a direct tool-declaring item is skipped.
 pub(super) fn check_forwarded_media_urls(provider_id: &str, body: &Value) -> Result<()> {
     match body.get("input") {
-        Some(input) => crate::mantle::refuse_unforwardable_media_urls(provider_id, input, "input"),
+        Some(input) => crate::mantle::refuse_unforwardable_media_urls(
+            provider_id,
+            crate::mantle::MediaWalkRoot::ResponsesInput,
+            input,
+            "input",
+        ),
         None => Ok(()),
     }
 }
