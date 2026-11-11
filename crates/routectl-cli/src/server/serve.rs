@@ -18,7 +18,7 @@ use super::auth::{self, TokenSet};
 use super::config_load::compute_max_body_bytes;
 use super::reload::{ActivationTrigger, apply_activation, spawn_reload_pipeline};
 use super::reload_shutdown::await_reload_tasks;
-use super::router_build::build_router_from_config;
+use super::router_build::{build_router_from_config, log_advisory_warnings};
 use super::{
     AppState, CompositeStore, calibration_rebuild, capability_rebuild, check_bind_safety,
     k_rebuild, request_id, status_gate,
@@ -284,6 +284,7 @@ async fn serve_inner(
         let _ = _seams;
         build_router_from_config(config.clone(), secrets.clone()).await?
     };
+    log_advisory_warnings(&config);
     router.log_placeholder_seats();
 
     // Both security refuses below run BEFORE the ledger-reading warms and

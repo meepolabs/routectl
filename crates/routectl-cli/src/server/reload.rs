@@ -12,7 +12,6 @@ use routectl_router::{
 use routectl_usage::UsageHandle;
 use tokio::sync::{mpsc, watch};
 
-use super::build_router_from_config;
 use super::config_load::{LoadedConfig, read_parse_validate_config};
 use super::file_watch::{self, ReloadRequest, WatchTarget};
 #[cfg(test)]
@@ -24,6 +23,7 @@ use super::probe_driver::run_probe_driver;
 use super::reload_failure::ReloadFailure;
 use super::router_publish::publish_router;
 use super::seat_driver::{RefreshJob, run_seat_driver};
+use super::{build_router_from_config, log_advisory_warnings};
 
 #[cfg(test)]
 use super::CompositeStore;
@@ -772,6 +772,7 @@ pub(super) async fn handle_config_reload(
             k_gated_emission_after = k_gated_after,
         ),
     }
+    log_advisory_warnings(&new_config);
 
     let restart_required =
         crate::config_classify::collect_restart_required_changes(current_config, &new_config);

@@ -327,3 +327,42 @@ mod cloud_code {
         );
     }
 }
+
+#[test]
+fn auth_reserved_header_warnings_name_each_reserved_model_header() {
+    // Arrange: one row per reserved key, in mixed case, beside a plain
+    // header that must not be reported.
+    for reserved in ["Authorization", "x-api-key", "ANTHROPIC-VERSION"] {
+        let config = parse(&format!(
+            "version = 5\n\
+             [providers.p]\nkind = \"openai-compat\"\nbase_url = \"https://example.invalid\"\n\
+             api_key_ref = \"env://ROUTECTL_TEST_ABSENT\"\n\
+             [models.m]\nprovider = \"p\"\nupstream = \"u\"\n\
+             [models.m.header_extras]\n\"{reserved}\" = \"secret-value\"\nx-app = \"ok\"\n"
+        ));
+
+        // Act
+        let warnings = super::auth_reserved_header_warnings(&config);
+
+        // Assert
+        assert_eq!(warnings.len(), 1, "{reserved}: {warnings:?}");
+        assert!(
+            warnings[0].contains("[models.m.header_extras]") && warnings[0].contains(reserved),
+            "{reserved}: {warnings:?}"
+        );
+        assert!(!warnings[0].contains("secret-value"), "{warnings:?}");
+    }
+}
+
+#[test]
+fn auth_reserved_header_warnings_skip_a_config_without_reserved_model_headers() {
+    let config = parse(
+        "version = 5\n\
+         [providers.p]\nkind = \"openai-compat\"\nbase_url = \"https://example.invalid\"\n\
+         api_key_ref = \"env://ROUTECTL_TEST_ABSENT\"\n\
+         [models.m]\nprovider = \"p\"\nupstream = \"u\"\n\
+         [models.m.header_extras]\nhost = \"x\"\nx-app = \"ok\"\n",
+    );
+
+    assert!(super::auth_reserved_header_warnings(&config).is_empty());
+}

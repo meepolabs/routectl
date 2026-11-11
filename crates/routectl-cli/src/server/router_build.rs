@@ -22,6 +22,53 @@ fn sanitize_warning_for_log(warning: &str) -> String {
     sanitize_for_log_with_cap(warning, MAX_REPORTED_LINE_CHARS)
 }
 
+/// Log every advisory config finding at WARN, one line per finding, each
+/// named by its category so the line points at the surface to go look at.
+///
+/// Called once at serve startup and once per accepted config reload, never
+/// from the router build itself: the build also runs on every credentials
+/// seat-set change, which would repeat findings about a config that did not
+/// change.
+pub fn log_advisory_warnings(config: &Config) {
+    let categories: [(&str, Vec<String>); 6] = [
+        (
+            "class policy warning",
+            routectl_router::class_policy_warnings(config),
+        ),
+        (
+            "codex identity warning",
+            routectl_router::codex_identity_warnings(config),
+        ),
+        // `auto_emit_per_block_breakpoints` is inert on Bedrock Invoke (the
+        // knob gates the Converse cachePoint surface).
+        (
+            "per-block breakpoint warning",
+            routectl_router::per_block_breakpoint_warnings(config),
+        ),
+        // A cloud-code Gemini entry pinned to the production Cloud Code host
+        // keeps that pin, but the lane default is the daily host.
+        (
+            "cloud-code host warning",
+            routectl_router::cloudcode_host_warnings(config),
+        ),
+        // A cloud-code Gemini model entry pinning an upstream id Google has
+        // deprecated server-side still serves, but not what the id names.
+        (
+            "cloud-code model warning",
+            routectl_router::cloudcode_model_warnings(config),
+        ),
+        (
+            "auth-reserved header warning",
+            routectl_router::auth_reserved_header_warnings(config),
+        ),
+    ];
+    for (category, warnings) in categories {
+        for warning in warnings {
+            tracing::warn!(warning = %sanitize_warning_for_log(&warning), "{category}");
+        }
+    }
+}
+
 /// Build a `Router` from the parsed config + a shared
 /// `Arc<dyn SecretStore>`. The store is hoisted out of this function
 /// (the caller passes it in) so a hot-reload config change that
@@ -44,30 +91,6 @@ pub async fn build_router_from_config(
         .next()
     {
         return Err(Error::Config(first));
-    }
-
-    // The advisory findings, emitted per category so each startup log line
-    // names the surface an operator has to go look at.
-    for warning in routectl_router::class_policy_warnings(&config) {
-        tracing::warn!(warning = %sanitize_warning_for_log(&warning), "class policy warning");
-    }
-    for warning in routectl_router::codex_identity_warnings(&config) {
-        tracing::warn!(warning = %sanitize_warning_for_log(&warning), "codex identity warning");
-    }
-    // `auto_emit_per_block_breakpoints` is inert on Bedrock Invoke (the
-    // knob gates the Converse cachePoint surface).
-    for warning in routectl_router::per_block_breakpoint_warnings(&config) {
-        tracing::warn!(warning = %sanitize_warning_for_log(&warning), "per-block breakpoint warning");
-    }
-    // A cloud-code Gemini entry pinned to the production Cloud Code host
-    // keeps that pin, but the lane default is the daily host.
-    for warning in routectl_router::cloudcode_host_warnings(&config) {
-        tracing::warn!(warning = %sanitize_warning_for_log(&warning), "cloud-code host warning");
-    }
-    // A cloud-code Gemini model entry pinning an upstream id Google has
-    // deprecated server-side still serves, but not what the id names.
-    for warning in routectl_router::cloudcode_model_warnings(&config) {
-        tracing::warn!(warning = %sanitize_warning_for_log(&warning), "cloud-code model warning");
     }
 
     // Reject an incoherent `[mitm]` block (bad upstream_origin, a
@@ -141,3 +164,7 @@ pub async fn build_router_from_config(
 #[cfg(test)]
 #[path = "router_build_tests.rs"]
 mod router_build_tests;
+
+#[cfg(test)]
+#[path = "advisory_cadence_tests.rs"]
+mod advisory_cadence_tests;

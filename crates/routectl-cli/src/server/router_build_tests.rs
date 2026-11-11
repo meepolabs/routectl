@@ -86,10 +86,11 @@ async fn startup_warning_log_lines_strip_control_bytes_from_operator_keys() {
     );
 
     let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::new());
-    let (result, lines) = routectl_testkit::capture_lines(Box::pin(build_router_from_config(
-        Arc::new(config),
-        secrets,
-    )))
+    let config = Arc::new(config);
+    let (result, lines) = routectl_testkit::capture_lines(Box::pin(async {
+        log_advisory_warnings(&config);
+        build_router_from_config(config.clone(), secrets).await
+    }))
     .await;
     // `Router` is not `Debug`, so match rather than `expect`.
     if let Err(e) = result {
@@ -155,10 +156,11 @@ async fn no_captured_startup_line_carries_control_bytes_from_operator_keys() {
     }
 
     let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::new());
-    let (result, lines) = routectl_testkit::capture_lines(Box::pin(build_router_from_config(
-        Arc::new(config),
-        secrets,
-    )))
+    let config = Arc::new(config);
+    let (result, lines) = routectl_testkit::capture_lines(Box::pin(async {
+        log_advisory_warnings(&config);
+        build_router_from_config(config.clone(), secrets).await
+    }))
     .await;
     // `Router` is not `Debug`, so match rather than `expect`.
     if let Err(e) = result {

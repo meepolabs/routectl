@@ -225,10 +225,12 @@ fn operator_payload_extras(
 ///
 ///   1. Clone the provider entry's `header_extras` into a working map.
 ///   2. Iterate the model's `header_extras`. Auth-reserved keys
-///      (`authorization`, `x-api-key`, `anthropic-version`) WARN +
-///      drop; managed-reserved keys (`host`, `content-type`,
-///      `content-length`) DEBUG + drop. Other keys overwrite the
-///      provider's value on collision (model wins).
+///      (`authorization`, `x-api-key`, `anthropic-version`) and
+///      managed-reserved keys (`host`, `content-type`, `content-length`)
+///      DEBUG + drop; the auth-reserved WARN is the config advisory
+///      `auth_reserved_header_warnings` reports at startup and reload, not
+///      a per-request line. Other keys overwrite the provider's value on
+///      collision (model wins).
 ///   3. For every list-valued header in `LIST_VALUED_HEADERS` (today
 ///      just `anthropic-beta`), run a comma-split-union-rejoin post-
 ///      pass over the three sources in visit order: `req.anthropic_beta`
@@ -260,7 +262,7 @@ pub fn merge_header_extras(
     // buckets. Model wins on plain-key collision.
     for (k, v) in model_extras {
         if is_auth_reserved(k) {
-            tracing::warn!(
+            tracing::debug!(
                 provider = %routectl_core::sanitize_for_log(provider_name),
                 header = %routectl_core::sanitize_for_log(k),
                 "ignoring auth-reserved header from [models.X] header_extras",
@@ -458,7 +460,7 @@ fn deep_merge_value(dst: &mut Value, src: &Value, provider_name: &str, src_layer
     }
 }
 
-fn is_auth_reserved(name: &str) -> bool {
+pub fn is_auth_reserved(name: &str) -> bool {
     let lc = name.to_ascii_lowercase();
     AUTH_HEADERS.contains(&lc.as_str())
 }

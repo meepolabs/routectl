@@ -114,6 +114,7 @@ pub use learned_lanes::{LearnedFills, LearnedLaneProjection, ResolvedLearnedLane
 pub use opening_lookup::OpeningLane;
 use opening_lookup::wire_upstream;
 pub use outcome_rule::class_debits;
+pub(crate) use overlays::is_auth_reserved;
 pub use overlays::{merge_header_extras, merge_payload_extras};
 pub use probe_clear_ack::ProbeClearAcknowledgement;
 pub use probe_pass::ProbePassSummary;

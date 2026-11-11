@@ -406,6 +406,31 @@ pub fn codex_identity_warnings(config: &crate::config::Config) -> Vec<String> {
     }
 }
 
+/// Advisory (never fatal) load-time check on `[models.X] header_extras`:
+/// one line per auth-reserved key (`authorization`, `x-api-key`,
+/// `anthropic-version`, case-insensitive). The dispatch-layer merge drops
+/// such a key from every request, so the configured value never reaches
+/// the wire; the provider's own resolved auth header is what ships.
+pub fn auth_reserved_header_warnings(config: &crate::config::Config) -> Vec<String> {
+    config
+        .models
+        .iter()
+        .flat_map(|(nickname, model)| {
+            model
+                .header_extras
+                .keys()
+                .filter(|header| crate::router::is_auth_reserved(header))
+                .map(move |header| {
+                    format!(
+                        "[models.{nickname}.header_extras] {header} is auth-reserved and is \
+                         dropped from every request: configure credentials on the provider \
+                         (api_key_ref / auth_kind) instead"
+                    )
+                })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 #[path = "warnings_tests.rs"]
 mod warnings_tests;

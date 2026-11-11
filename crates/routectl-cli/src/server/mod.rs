@@ -43,7 +43,7 @@ mod warm_open;
 
 pub(crate) use config_load::parse_config_only;
 pub use config_load::{LoadedConfig, load_effective_config, load_effective_config_unvalidated};
-pub(crate) use router_build::build_router_from_config;
+pub(crate) use router_build::{build_router_from_config, log_advisory_warnings};
 pub use secrets::CompositeStore;
 pub use serve::{serve, serve_on_listener, serve_on_listener_with_secrets};
 
