@@ -681,6 +681,45 @@ fn migrate_v19_to_v20(conn: &Connection) -> Result<(), rusqlite::Error> {
     tx.commit()
 }
 
+/// The `requests` columns v21 appends, in physical order, with their declared
+/// types: the cache-write total and its per-lifetime JSON split. The DDL in
+/// `schema.rs` lists the same pair last.
+pub const V21_REQUESTS_COLUMNS: &[(&str, &str)] = &[
+    ("cache_write_tokens", "INTEGER"),
+    ("cache_write_lifetimes", "TEXT"),
+];
+
+/// Apply the v20 -> v21 step atomically: append the two nullable cache-write
+/// columns to `requests` (no default, no CHECK), bump `PRAGMA user_version`
+/// to 21, and update the human-readable `meta.schema_version` row, all in one
+/// transaction. Existing rows survive with both new columns NULL -- no
+/// backfill, no rewrite.
+///
+/// The step is strictly additive, so a v20 binary can be handed the file back
+/// after the version stamps are lowered: a v20 writer names its `requests`
+/// columns explicitly, so the two trailing columns are invisible to it.
+///
+/// A FRESH DB reaches this arm too, its `requests` already created from the
+/// current DDL; so does a downgraded-then-reopened file. Each `ADD COLUMN` is
+/// therefore guarded by `column_exists`.
+fn migrate_v20_to_v21(conn: &Connection) -> Result<(), rusqlite::Error> {
+    let tx = conn.unchecked_transaction()?;
+    for (column, declared_type) in V21_REQUESTS_COLUMNS {
+        if !column_exists(&tx, "requests", column)? {
+            tx.execute_batch(&format!(
+                "ALTER TABLE requests ADD COLUMN {column} {declared_type}"
+            ))?;
+        }
+    }
+    tx.execute_batch("PRAGMA user_version = 21")?;
+    tx.execute(
+        "INSERT INTO meta (key, value) VALUES (?1, ?2) \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        rusqlite::params![META_SCHEMA_VERSION, "21"],
+    )?;
+    tx.commit()
+}
+
 /// True if `table` already has a column named `column`. Used so the
 /// v1 -> v2 `ADD COLUMN` is safe on a fresh DB (whose `requests` was
 /// created from the current schema and already carries the column).
@@ -745,6 +784,7 @@ pub fn migrate_to_current(conn: &Connection, now_ms: i64) -> Result<i64, Migrate
             17 => migrate_v17_to_v18(conn)?,
             18 => migrate_v18_to_v19(conn)?,
             19 => migrate_v19_to_v20(conn)?,
+            20 => migrate_v20_to_v21(conn)?,
             other => unreachable!("no migration step from version {other}"),
         }
         version = read_user_version(conn)?;

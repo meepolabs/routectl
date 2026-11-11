@@ -14,7 +14,7 @@ use crate::db::open;
 use crate::schema::{CREATE_REQUESTS_TABLE, SCHEMA_VERSION};
 
 /// The five v20 walk-count columns, frozen as text in physical order.
-const V20_WALK_COLUMNS: [&str; 5] = [
+pub(super) const V20_WALK_COLUMNS: [&str; 5] = [
     "request_caused_failures",
     "excluded_endpoint",
     "excluded_model",
@@ -25,7 +25,7 @@ const V20_WALK_COLUMNS: [&str; 5] = [
 /// The column list a v19 writer's `INSERT` names: the v17 and v18 lists
 /// followed by the six skip counts. A v19 binary handed a downgraded file
 /// writes through exactly this list.
-fn v19_insert_columns() -> String {
+pub(super) fn v19_insert_columns() -> String {
     format!(
         "{V17_INSERT_COLUMNS},\n{V18_INSERT_TAIL},\n{}",
         V19_SKIP_COLUMNS.join(", ")
@@ -37,7 +37,7 @@ fn insert_as_v19_writer(conn: &Connection, request_id: &str) {
 }
 
 /// The five walk counts of one request row; `None` is a NULL column.
-fn walk_counts(conn: &Connection, request_id: &str) -> Vec<Option<i64>> {
+pub(super) fn walk_counts(conn: &Connection, request_id: &str) -> Vec<Option<i64>> {
     conn.query_row(
         &format!(
             "SELECT {} FROM requests WHERE request_id = ?1",
@@ -79,19 +79,27 @@ fn wait_persisted(writer: &crate::writer::UsageWriter, want: u64) {
     assert_eq!(writer.counters().persisted(), want, "rows persisted");
 }
 
+/// The five walk columns as they sit in a `requests` column list: the run
+/// that starts at the first of them.
+fn walk_run(columns: &[String]) -> &[String] {
+    let start = columns
+        .iter()
+        .position(|name| name == V20_WALK_COLUMNS[0])
+        .expect("the walk columns are present");
+    &columns[start..(start + V20_WALK_COLUMNS.len()).min(columns.len())]
+}
+
 #[test]
-fn the_fresh_schema_is_v20_with_the_five_walk_columns_last() {
+fn the_fresh_schema_carries_the_five_walk_columns_contiguously() {
     // Arrange + Act
     let (_dir, path) = temp_db_path();
     let db = open(&path).expect("open fresh");
 
     // Assert
-    assert_eq!(SCHEMA_VERSION, 20);
-    assert_eq!(user_version(db.conn()), 20);
-    assert_eq!(meta_version(db.conn()), "20");
-    let columns = requests_column_names(db.conn());
+    assert_eq!(user_version(db.conn()), SCHEMA_VERSION);
+    assert_eq!(meta_version(db.conn()), SCHEMA_VERSION.to_string());
     assert_eq!(
-        &columns[columns.len() - V20_WALK_COLUMNS.len()..],
+        walk_run(&requests_column_names(db.conn())),
         V20_WALK_COLUMNS
     );
 }
@@ -119,12 +127,12 @@ fn a_seeded_v19_ledger_migrates_to_v20_with_null_walk_columns_on_old_rows() {
     wait_persisted(&writer, 1);
     drop(handle);
     writer.shutdown();
-    let db = open(&path).expect("reopen at v20");
+    let db = open(&path).expect("reopen at the current version");
 
-    // Assert: stamped 20, the fresh column list, the old rows NULL in every
-    // walk column, the new row 0 except where it counted.
-    assert_eq!(user_version(db.conn()), 20);
-    assert_eq!(meta_version(db.conn()), "20");
+    // Assert: stamped current, the fresh column list, the old rows NULL in
+    // every walk column, the new row 0 except where it counted.
+    assert_eq!(user_version(db.conn()), SCHEMA_VERSION);
+    assert_eq!(meta_version(db.conn()), SCHEMA_VERSION.to_string());
     assert_eq!(requests_column_names(db.conn()), fresh_columns);
     for old in ["v19-row-a", "v19-row-b"] {
         assert_eq!(walk_counts(db.conn(), old), vec![None; 5], "{old}");
@@ -136,8 +144,8 @@ fn a_seeded_v19_ledger_migrates_to_v20_with_null_walk_columns_on_old_rows() {
     drop(db);
 
     // Assert: reopening is idempotent.
-    let again = open(&path).expect("reopen at v20");
-    assert_eq!(user_version(again.conn()), 20);
+    let again = open(&path).expect("reopen at the current version");
+    assert_eq!(user_version(again.conn()), SCHEMA_VERSION);
     assert_eq!(requests_column_names(again.conn()), fresh_columns);
     assert_eq!(count(again.conn(), "requests"), Some(3));
 }
@@ -195,16 +203,12 @@ fn an_injected_failure_after_the_first_alter_rolls_back_columns_and_both_stamps(
         crate::migrate::migrate_to_current(&conn, 0).expect("retry"),
         SCHEMA_VERSION
     );
-    let columns = requests_column_names(&conn);
-    assert_eq!(
-        &columns[columns.len() - V20_WALK_COLUMNS.len()..],
-        V20_WALK_COLUMNS
-    );
+    assert_eq!(walk_run(&requests_column_names(&conn)), V20_WALK_COLUMNS);
 }
 
 /// Insert one capability event, so a step that touched that table's rows
 /// would change its count.
-fn insert_capability_event(conn: &Connection) {
+pub(super) fn insert_capability_event(conn: &Connection) {
     conn.execute_batch(
         "INSERT INTO capability_events (ts, lane_key, capability, verdict, phase, source, \
          tier, catalog_version, overlay_revision) \
@@ -245,10 +249,10 @@ fn downgrade_20_to_19_restamps_only_and_a_frozen_v19_insert_then_v20_reopen_keep
     // Act: the current binary opens it again.
     let db = open(&path).expect("re-upgrade");
 
-    // Assert: v20 again with the same column list (nothing re-added), both
+    // Assert: current again with the same column list (nothing re-added), both
     // rows present, and the v19-written row NULL in every walk column.
-    assert_eq!(user_version(db.conn()), 20);
-    assert_eq!(meta_version(db.conn()), "20");
+    assert_eq!(user_version(db.conn()), SCHEMA_VERSION);
+    assert_eq!(meta_version(db.conn()), SCHEMA_VERSION.to_string());
     assert_eq!(requests_column_names(db.conn()), fresh_columns);
     assert_eq!(count(db.conn(), "requests"), Some(2));
     assert_eq!(walk_counts(db.conn(), "v19-row"), vec![None; 5]);

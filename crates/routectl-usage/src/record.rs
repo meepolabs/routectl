@@ -7,6 +7,8 @@
 //! are nullable only for rows written before v18), timestamps as
 //! epoch-millis UTC `i64`, JSON-text columns as `serde_json::Value`.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -499,10 +501,22 @@ pub struct UsageRecord {
     /// Cached prefix tokens re-read this turn (a per-turn snapshot, not a
     /// flow). `None` when not reported.
     pub cache_read: Option<u64>,
-    /// Tokens written to the 5-minute cache. `None` when not reported.
+    /// Tokens written to the 5-minute cache, on rows written before the
+    /// cache-write total and split below existed. New captures leave it
+    /// `None` and record writes in `cache_write_tokens` /
+    /// `cache_write_lifetimes`, so the two eras never overlap.
     pub cache_write_5m: Option<u64>,
-    /// Tokens written to the 1-hour cache. `None` when not reported.
+    /// Tokens written to the 1-hour cache, on rows written before the
+    /// cache-write total and split below existed; see `cache_write_5m`.
     pub cache_write_1h: Option<u64>,
+    /// Prompt-cache write total. `None` when the upstream reported no write
+    /// usage; `Some(0)` is an observed zero. When `None` while
+    /// `cache_write_lifetimes` is set, the split's sum is stored as the total.
+    pub cache_write_tokens: Option<u64>,
+    /// Per-lifetime cache-write split: lifetime in seconds -> tokens, zero
+    /// entries kept as reported. `None` (or empty) when no split was
+    /// reported. Tokens the split does not cover are an unknown lifetime.
+    pub cache_write_lifetimes: Option<BTreeMap<u32, u64>>,
     /// Server-tool invocation counts as a JSON map. `None` when no server
     /// tools were used.
     pub server_tool_use: Option<Value>,
@@ -742,6 +756,8 @@ mod tests {
             cache_read: Some(10),
             cache_write_5m: Some(5),
             cache_write_1h: Some(1),
+            cache_write_tokens: Some(6),
+            cache_write_lifetimes: Some(BTreeMap::from([(300, 5), (3600, 1)])),
             server_tool_use: Some(json!({"web_search": 2})),
             quota_claim: Some("claim-1".to_string()),
             quota_status: Some("active".to_string()),
@@ -835,6 +851,8 @@ mod tests {
             cache_read: None,
             cache_write_5m: None,
             cache_write_1h: None,
+            cache_write_tokens: None,
+            cache_write_lifetimes: None,
             server_tool_use: None,
             quota_claim: None,
             quota_status: None,

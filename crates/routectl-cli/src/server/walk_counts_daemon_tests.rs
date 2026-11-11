@@ -569,8 +569,15 @@ async fn every_walk_row_reads_the_same_after_a_restart_on_the_migrated_file() {
     let ledger = walk_ledger().await;
 
     // Assert
-    assert_eq!(ledger.migrated_version, 20, "the first boot migrates");
-    assert_eq!(user_version(&ledger.restarted.usage_db), 20);
+    assert_eq!(
+        ledger.migrated_version,
+        routectl_usage::SCHEMA_VERSION,
+        "the first boot migrates"
+    );
+    assert_eq!(
+        user_version(&ledger.restarted.usage_db),
+        routectl_usage::SCHEMA_VERSION
+    );
     assert_eq!(ledger.row(SEEDED_ID).counts, [None; 5], "a pre-v20 row");
     for id in SERVED_IDS {
         assert_eq!(ledger.row(id), ledger.before_restart[id], "{id}");

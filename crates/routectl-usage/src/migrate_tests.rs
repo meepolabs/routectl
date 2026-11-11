@@ -1,8 +1,17 @@
-//! Tests for the one-shot legacy capability-observation purge.
+//! Tests for the v20 -> v21 cache-write step and the one-shot legacy
+//! capability-observation purge.
 
 use super::*;
 use crate::db::open;
 use crate::downgrade::downgrade_to;
+use crate::record::UsageRecord;
+use crate::schema::{
+    CREATE_CAPABILITY_EVENTS_TABLE, CREATE_CAPABILITY_EVENTS_TS_INDEX,
+    CREATE_CAPABILITY_LEARN_EVENTS_TABLE, CREATE_LEDGER_GAPS_TABLE, CREATE_LEDGER_GAPS_TS_INDEX,
+    CREATE_META_TABLE, CREATE_REQUESTS_TABLE, CREATE_TS_START_INDEX,
+};
+use crate::writer::UsageWriter;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -359,4 +368,228 @@ fn a_recorded_purge_returns_without_taking_the_write_lock() {
     // Assert
     assert_eq!(outcome.expect("a recorded purge must not contend"), None);
     rival.execute_batch("ROLLBACK;").expect("rival rollback");
+}
+
+/// The `requests` DDL as v20 created it: the current DDL cut after its last
+/// v20 column, so the v21 pair is absent.
+fn requests_ddl_v20() -> String {
+    const LAST_V20_COLUMN: &str = "    excluded_probe_run INTEGER,";
+    let (head, tail) = CREATE_REQUESTS_TABLE
+        .split_once(LAST_V20_COLUMN)
+        .expect("the DDL still ends its v20 set with excluded_probe_run");
+    for (column, _) in V21_REQUESTS_COLUMNS {
+        assert!(tail.contains(column), "{column} must be in the v21 tail");
+    }
+    format!("{head}    excluded_probe_run INTEGER\n)")
+}
+
+/// A WAL file with every v20 table and index, stamped 20 in both places.
+fn v20_file(path: &Path) -> Connection {
+    let conn = Connection::open(path).expect("raw open");
+    conn.pragma_update(None, "journal_mode", "WAL")
+        .expect("wal");
+    for ddl in [
+        requests_ddl_v20().as_str(),
+        CREATE_TS_START_INDEX,
+        CREATE_CAPABILITY_LEARN_EVENTS_TABLE,
+        CREATE_CAPABILITY_EVENTS_TABLE,
+        CREATE_CAPABILITY_EVENTS_TS_INDEX,
+        CREATE_LEDGER_GAPS_TABLE,
+        CREATE_LEDGER_GAPS_TS_INDEX,
+        CREATE_META_TABLE,
+    ] {
+        conn.execute_batch(ddl).expect("v20 ddl");
+    }
+    conn.execute_batch(
+        "INSERT INTO meta (key, value) VALUES ('schema_version', '20');
+         PRAGMA user_version = 20;",
+    )
+    .expect("stamp v20");
+    conn
+}
+
+/// Insert a row as a v20 writer would: naming no v21 column, with a legacy
+/// 5-minute write.
+fn insert_as_v20_writer(conn: &Connection, request_id: &str, cache_write_5m: i64) {
+    conn.execute(
+        "INSERT INTO requests (ts_start, ts_end, request_id, ingress_dialect, \
+         requested_model, alias, stream, outcome, latency_ms, tool_count, msg_count, \
+         attempt_count, fallback_count, cache_write_5m, excluded_model) \
+         VALUES (1, 2, ?1, 'anthropic', 'm', 'a', 0, 'ok', 5, 0, 1, 1, 0, ?2, 0)",
+        rusqlite::params![request_id, cache_write_5m],
+    )
+    .expect("v20 insert");
+}
+
+fn requests_columns(conn: &Connection) -> Vec<String> {
+    let mut stmt = conn
+        .prepare("SELECT name FROM pragma_table_info('requests')")
+        .expect("prepare table_info");
+    stmt.query_map([], |r| r.get(0))
+        .expect("query table_info")
+        .collect::<Result<_, _>>()
+        .expect("names")
+}
+
+fn meta_version(conn: &Connection) -> String {
+    conn.query_row(
+        "SELECT value FROM meta WHERE key = ?1",
+        [META_SCHEMA_VERSION],
+        |r| r.get(0),
+    )
+    .expect("meta schema_version")
+}
+
+/// `(cache_write_5m, cache_write_tokens, cache_write_lifetimes)` of one row.
+type CacheWriteRow = (Option<i64>, Option<i64>, Option<String>);
+
+fn cache_write_row(conn: &Connection, request_id: &str) -> CacheWriteRow {
+    conn.query_row(
+        "SELECT cache_write_5m, cache_write_tokens, cache_write_lifetimes \
+         FROM requests WHERE request_id = ?1",
+        [request_id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )
+    .expect("cache write row")
+}
+
+fn wait_persisted(writer: &UsageWriter, want: u64) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while writer.counters().persisted() < want && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(writer.counters().persisted(), want, "rows persisted");
+}
+
+#[test]
+fn the_fresh_schema_ends_with_the_two_cache_write_columns() {
+    // Arrange + Act
+    let (_dir, path) = temp_db_path();
+    let db = open(&path).expect("open fresh");
+
+    // Assert
+    assert_eq!(SCHEMA_VERSION, 21);
+    assert_eq!(user_version(&path), 21);
+    assert_eq!(meta_version(db.conn()), "21");
+    let columns = requests_columns(db.conn());
+    let tail: Vec<&str> = V21_REQUESTS_COLUMNS.iter().map(|(name, _)| *name).collect();
+    assert_eq!(&columns[columns.len() - tail.len()..], tail.as_slice());
+}
+
+#[test]
+fn a_seeded_v20_ledger_migrates_to_v21_with_null_cache_write_columns_on_old_rows() {
+    // Arrange: a genuine v20 file holding two rows a v20 writer wrote.
+    let (_dir, path) = temp_db_path();
+    {
+        let conn = v20_file(&path);
+        insert_as_v20_writer(&conn, "v20-row-a", 11);
+        insert_as_v20_writer(&conn, "v20-row-b", 0);
+    }
+    let (_fresh_dir, fresh_path) = temp_db_path();
+    let fresh_columns = requests_columns(open(&fresh_path).expect("fresh").conn());
+
+    // Act: the production writer opens (and migrates) the file on its own
+    // thread, then writes a row carrying a split.
+    let (handle, writer) = UsageWriter::start(path.clone(), 4, 0, true);
+    handle.try_send(UsageRecord {
+        request_id: "v21-row".to_string(),
+        cache_write_tokens: Some(30),
+        cache_write_lifetimes: Some(BTreeMap::from([(300, 30)])),
+        ..UsageRecord::default()
+    });
+    wait_persisted(&writer, 1);
+    drop(handle);
+    writer.shutdown();
+    let db = open(&path).expect("reopen at v21");
+
+    // Assert: both stamps read 21, the fresh column list, the old rows keep
+    // their legacy write and read NULL in both new columns.
+    assert_eq!(user_version(&path), 21);
+    assert_eq!(meta_version(db.conn()), "21");
+    assert_eq!(requests_columns(db.conn()), fresh_columns);
+    assert_eq!(
+        cache_write_row(db.conn(), "v20-row-a"),
+        (Some(11), None, None)
+    );
+    assert_eq!(
+        cache_write_row(db.conn(), "v20-row-b"),
+        (Some(0), None, None)
+    );
+    assert_eq!(
+        cache_write_row(db.conn(), "v21-row"),
+        (None, Some(30), Some(r#"{"300":30}"#.to_string()))
+    );
+    drop(db);
+
+    // Assert: reopening a v21 file changes neither shape nor rows.
+    let again = open(&path).expect("reopen at v21");
+    assert_eq!(migrate_to_current(again.conn(), 0).expect("re-run"), 21);
+    assert_eq!(user_version(&path), 21);
+    assert_eq!(requests_columns(again.conn()), fresh_columns);
+    assert_eq!(
+        cache_write_row(again.conn(), "v20-row-a"),
+        (Some(11), None, None)
+    );
+    let rows: i64 = again
+        .conn()
+        .query_row("SELECT COUNT(*) FROM requests", [], |r| r.get(0))
+        .expect("count");
+    assert_eq!(rows, 3);
+}
+
+#[test]
+fn an_injected_failure_after_the_first_v21_alter_rolls_back_the_columns_and_both_stamps() {
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    // Arrange: a v20 file whose connection allows the first `ALTER TABLE
+    // requests` and denies every later one.
+    let (_dir, path) = temp_db_path();
+    let conn = v20_file(&path);
+    let columns_before = requests_columns(&conn);
+    let alters = Arc::new(AtomicUsize::new(0));
+    let seen = Arc::clone(&alters);
+    conn.authorizer(Some(move |ctx: AuthContext<'_>| match ctx.action {
+        AuthAction::AlterTable {
+            table_name: "requests",
+            ..
+        } => {
+            if seen.fetch_add(1, Ordering::SeqCst) == 0 {
+                Authorization::Allow
+            } else {
+                Authorization::Deny
+            }
+        }
+        _ => Authorization::Allow,
+    }))
+    .expect("install authorizer");
+
+    // Act
+    let result = migrate_to_current(&conn, 0);
+
+    // Assert: the step failed at the second ALTER, and nothing it did
+    // survived: not the first added column, not either version stamp.
+    assert!(
+        result.is_err(),
+        "the injected failure must surface: {result:?}"
+    );
+    assert_eq!(
+        alters.load(Ordering::SeqCst),
+        2,
+        "failed at the second ALTER"
+    );
+    assert_eq!(user_version(&path), 20);
+    assert_eq!(meta_version(&conn), "20");
+    assert_eq!(requests_columns(&conn), columns_before);
+
+    // Assert: once the fault is gone the same file migrates normally.
+    conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+        .expect("clear authorizer");
+    assert_eq!(migrate_to_current(&conn, 0).expect("retry"), 21);
+    let columns = requests_columns(&conn);
+    assert_eq!(
+        &columns[columns.len() - 2..],
+        ["cache_write_tokens", "cache_write_lifetimes"]
+    );
 }

@@ -5905,6 +5905,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   boot (no-op drain on failure), drains the opaque `WriterMessage` channel into
   `requests` / `capability_events`, records `ledger_gaps`, and `shutdown` ->
   `ShutdownOutcome`; see its module doc
+- `src/cache_writes.rs` -- `cache_write_columns(total, lifetimes) ->
+  CacheWriteColumns`, the one builder of the v21 `cache_write_tokens` /
+  `cache_write_lifetimes` bound values (a split with no total takes its sum;
+  canonical JSON keyed by decimal seconds in numeric order; a split above the
+  total is stored as reported); the writer binds only its output
 - `src/db.rs` -- `UsageDb` + `open` (WAL, 0600, migration ladder under
   IMMEDIATE transactions) and the non-migrating read-only opens
   `open_readonly`/`open_readonly_fastfail`; `OpenError`
@@ -5913,7 +5918,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   version's columns are commented in the DDL itself
 - `src/migrate.rs` -- forward-only schema migration / version stamping against
   the `meta` table (one `migrate_vN_to_vM` step per version, the appended-column
-  lists `V18`/`V19`/`V20_REQUESTS_COLUMNS`); also `purge_legacy_capability_observations(conn)`, a
+  lists `V18`/`V19`/`V20`/`V21_REQUESTS_COLUMNS`); also `purge_legacy_capability_observations(conn)`, a
   one-shot data step (no version bump) that deletes NULL-vocabulary
   non-tombstone `capability_events` rows below the latest tombstone's rowid,
   guarded by the `META_LEGACY_CAPABILITY_PURGE` marker (value = deleted count,

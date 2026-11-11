@@ -10,6 +10,7 @@ use std::path::Path;
 
 /// Every production file in `routectl-usage/src`, DECLARED.
 const USAGE_PRODUCTION_FILES: &[&str] = &[
+    "cache_writes.rs",
     "capability_ack.rs",
     "capability_batch.rs",
     "capability_event.rs",

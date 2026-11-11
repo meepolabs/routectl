@@ -16,7 +16,7 @@
 /// Current on-disk schema version. The migrate-on-open ladder advances a
 /// freshly-created or older DB to this version. Bump alongside a new
 /// migration step in `migrate.rs`.
-pub const SCHEMA_VERSION: i64 = 20;
+pub const SCHEMA_VERSION: i64 = 21;
 
 /// `meta` key holding the DB creation timestamp (epoch ms).
 pub const META_CREATED_AT_MS: &str = "created_at_ms";
@@ -351,7 +351,28 @@ CREATE TABLE IF NOT EXISTS requests (
     excluded_endpoint INTEGER,
     excluded_model INTEGER,
     excluded_target INTEGER,
-    excluded_probe_run INTEGER
+    excluded_probe_run INTEGER,
+
+    -- CACHE WRITES (v21): `cache_write_tokens` is the prompt-cache write
+    -- total (NULL = the upstream reported no write usage; 0 = an observed
+    -- zero). `cache_write_lifetimes` is the per-lifetime split as a JSON
+    -- object keyed by decimal lifetime seconds in ascending numeric order
+    -- (key 300 before 3600), zero entries kept as reported; NULL when no
+    -- split was reported. Tokens the
+    -- split does not cover are an unknown lifetime, derived on read and never
+    -- stored; a split summing above the total is stored as reported and the
+    -- row is unpriced. Both values come from `cache_writes::cache_write_columns`.
+    --
+    -- Rows written with these columns leave `cache_write_5m` /
+    -- `cache_write_1h` NULL, and older rows have these two NULL, so the two
+    -- eras are disjoint and a reader sums them without double counting.
+    --
+    -- Nullable with no default and no CHECK. Appended last so these columns
+    -- land in the same ordinal position whether the DB was created fresh at
+    -- v21 or migrated from v20 via `ALTER TABLE ... ADD COLUMN` (which always
+    -- appends). No backfill.
+    cache_write_tokens INTEGER,
+    cache_write_lifetimes TEXT
 )";
 
 /// Index over `ts_start` for time-range scans (the dominant query

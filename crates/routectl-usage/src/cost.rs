@@ -228,6 +228,8 @@ mod tests {
             cache_read,
             cache_write_5m,
             cache_write_1h,
+            cache_write_tokens: None,
+            cache_write_lifetimes: None,
             server_tool_use: None,
             quota_claim: None,
             quota_status: None,

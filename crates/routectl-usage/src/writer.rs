@@ -27,6 +27,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use rusqlite::Connection;
 use tokio::sync::mpsc;
 
+use crate::cache_writes::cache_write_columns;
 use crate::capability_event::{CapabilityEvent, insert_capability_event};
 use crate::db::{self, UsageDb};
 use crate::handle::{UsageCounters, UsageHandle};
@@ -1003,6 +1004,7 @@ fn json_text(value: &Option<serde_json::Value>) -> Option<String> {
 /// actually inserted (1 for a new row, 0 for an ignored duplicate).
 fn insert_record(conn: &Connection, r: &UsageRecord) -> Result<usize, rusqlite::Error> {
     let server_tool_use = json_text(&r.server_tool_use);
+    let cache_writes = cache_write_columns(r.cache_write_tokens, r.cache_write_lifetimes.as_ref());
     let quota_extras = json_text(&r.quota_extras);
     let extra = json_text(&r.extra);
     conn.execute(
@@ -1090,12 +1092,14 @@ fn insert_record(conn: &Connection, r: &UsageRecord) -> Result<usize, rusqlite::
             r.excluded_model,
             r.excluded_target,
             r.excluded_probe_run,
+            cache_writes.tokens,
+            cache_writes.lifetimes,
         ],
     )
 }
 
 /// The bound `INSERT OR IGNORE`. Column order mirrors `record.rs` /
-/// `schema.rs` exactly; `?1..?82` positions match the params list above.
+/// `schema.rs` exactly; `?1..?84` positions match the params list above.
 /// The DDL's four write-stopped legacy columns are absent from this list on
 /// purpose -- an omitted nullable column stores NULL. That
 /// includes `reduction_strategy`: the current context-reduction outcome
@@ -1141,7 +1145,8 @@ INSERT OR IGNORE INTO requests (
     skip_credential_unusable, skip_account_parked, skip_breaker_open,
     skip_rate_limited, skip_capability, skip_context_window,
     request_caused_failures, excluded_endpoint, excluded_model,
-    excluded_target, excluded_probe_run
+    excluded_target, excluded_probe_run,
+    cache_write_tokens, cache_write_lifetimes
 ) VALUES (
     ?1, ?2, ?3, ?4, ?5, ?6,
     ?7, ?8, ?9, ?10, ?11, ?12,
@@ -1180,7 +1185,8 @@ INSERT OR IGNORE INTO requests (
     ?72, ?73, ?74,
     ?75, ?76, ?77,
     ?78, ?79, ?80,
-    ?81, ?82
+    ?81, ?82,
+    ?83, ?84
 )";
 
 #[cfg(test)]
@@ -1230,6 +1236,8 @@ mod tests {
             cache_read: None,
             cache_write_5m: None,
             cache_write_1h: None,
+            cache_write_tokens: None,
+            cache_write_lifetimes: None,
             server_tool_use: None,
             quota_claim: None,
             quota_status: None,

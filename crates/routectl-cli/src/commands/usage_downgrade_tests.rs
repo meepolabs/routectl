@@ -11,7 +11,7 @@ fn user_version(path: &Path) -> i64 {
 
 #[test]
 fn downgrades_a_fresh_db_to_each_target_and_names_the_path() {
-    for target in [19_i64, 18, 17, 16] {
+    for target in [20_i64, 19, 18, 17, 16] {
         // Arrange: a fresh file at the current version.
         let dir = TempDir::new().expect("tempdir");
         let path = dir.path().join("usage.db");

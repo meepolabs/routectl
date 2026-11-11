@@ -158,11 +158,19 @@ fn open_sets_busy_timeout() {
 /// rather than fail and leave the writer degraded.
 #[test]
 fn open_waits_out_a_write_lock_released_inside_the_busy_timeout_during_a_pending_migration() {
-    // Arrange: a v19 file, and a second connection holding its write lock.
+    // Arrange: a file stamped one version back, so a migration step is
+    // pending, and a second connection holding its write lock.
     const HOLD: std::time::Duration = std::time::Duration::from_millis(300);
     let (_dir, path) = temp_db_path();
     drop(open(&path).expect("seed db"));
-    crate::downgrade_to(&path, 19).expect("restamp v19");
+    Connection::open(&path)
+        .expect("restamp open")
+        .execute_batch(&format!(
+            "UPDATE meta SET value = '{previous}' WHERE key = 'schema_version';
+             PRAGMA user_version = {previous};",
+            previous = SCHEMA_VERSION - 1
+        ))
+        .expect("restamp one version back");
     let (locked_tx, locked_rx) = std::sync::mpsc::channel();
     let holder_path = path.clone();
     let holder = std::thread::spawn(move || {
@@ -188,7 +196,7 @@ fn open_waits_out_a_write_lock_released_inside_the_busy_timeout_during_a_pending
 
     // Assert
     let db = opened.expect("open must wait for the lock, not fail");
-    assert_eq!(user_version(db.conn()), 20);
+    assert_eq!(user_version(db.conn()), SCHEMA_VERSION);
     assert!(
         elapsed >= HOLD,
         "open returned after {elapsed:?}, before the {HOLD:?} hold released the lock"
@@ -2376,7 +2384,7 @@ fn a_v1_db_climbs_the_whole_ladder_to_the_fresh_v18_shape() {
     assert_eq!(operation, None);
 }
 
-/// Pins the physical `requests` DDL shape: 86 columns, in this exact
+/// Pins the physical `requests` DDL shape: 88 columns, in this exact
 /// order, with this exact null-ability. The set intentionally EXCEEDS the
 /// `UsageRecord` field set by four write-stopped legacy columns
 /// (`strategy`, `reduction_strategy`, `selection_decision`,
@@ -2390,7 +2398,7 @@ fn requests_columns_match_physical_schema() {
     // NULLable; the four retained write-stopped columns are NULLable, and
     // so are the v18 request-observation columns (NULL on pre-v18 rows), the
     // v19 skip counts (NULL on pre-v19 rows) and the v20 walk counts (NULL on
-    // pre-v20 rows).
+    // pre-v20 rows). The v21 cache-write pair is `Option` in the record.
     let expected: &[(&str, bool)] = &[
         ("ts_start", true),
         ("ts_end", true),
@@ -2478,6 +2486,8 @@ fn requests_columns_match_physical_schema() {
         ("excluded_model", false),
         ("excluded_target", false),
         ("excluded_probe_run", false),
+        ("cache_write_tokens", false),
+        ("cache_write_lifetimes", false),
     ];
 
     let (_dir, path) = temp_db_path();
