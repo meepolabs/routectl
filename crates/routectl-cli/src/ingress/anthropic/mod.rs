@@ -404,6 +404,14 @@ impl IngressAdapter for AnthropicIngress {
     }
 
     fn render_eos(&self, state: &mut dyn IngressStreamState) -> Vec<SseEvent> {
+        self.render_eos_declared(state, &mut ResponseEdits::default())
+    }
+
+    fn render_eos_declared(
+        &self,
+        state: &mut dyn IngressStreamState,
+        edits: &mut ResponseEdits,
+    ) -> Vec<SseEvent> {
         let s = anthropic_state_mut(state);
         let mut events = Vec::new();
         if !s.finished {
@@ -423,16 +431,17 @@ impl IngressAdapter for AnthropicIngress {
             // Flush a deferred finish_reason (no usage chunk arrived).
             if let Some(fr) = s.pending_finish_reason.take() {
                 let matched = s.pending_matched_stop_sequence.take();
-                let carried = s.carried.take_delta_members();
+                let carried = s.carried.take_message_delta();
                 emit_message_delta(
                     Some(&fr),
                     matched.as_deref(),
                     None,
                     carried.as_ref(),
                     &mut events,
-                    &mut ResponseEdits::default(),
+                    edits,
                 );
             }
+            stream_carriage::withhold_start_members(&s.carried.take_late_start_members(), edits);
             emit_message_stop(s, &mut events);
         }
         events

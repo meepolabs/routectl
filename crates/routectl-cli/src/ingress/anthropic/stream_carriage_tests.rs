@@ -4,6 +4,7 @@
 
 use routectl_core::wire_check::EditKind;
 use routectl_core::{ChatChunk, ChunkChoice, ChunkDelta, OpaqueSseEvent, UsageDelta};
+use routectl_providers::anthropic_api::sse::SseState;
 use serde_json::{Map, Value, json};
 use serial_test::serial;
 
@@ -12,6 +13,7 @@ use crate::ingress::{IngressAdapter, ResponseEdits, SseEvent};
 
 use super::super::AnthropicStreamState;
 use super::super::stream::render_chunk_declared;
+use super::{MESSAGE_DELTA_DELTA_KEYS, MESSAGE_DELTA_KEYS};
 
 fn members(value: Value) -> Map<String, Value> {
     match value {
@@ -130,7 +132,8 @@ fn carried_tool_stream() -> Vec<ChatChunk> {
         closing(vec![extras(
             "message_delta",
             None,
-            json!({"stop_details": {"type": "x"}, "container": {"id": "cntr_1"}}),
+            json!({"delta": {"stop_details": {"type": "x"}, "container": {"id": "cntr_1"}},
+                   "context_management": {"applied_edits": [{"n": 1}]}}),
         )]),
     ]
 }
@@ -180,6 +183,15 @@ fn message_start_and_message_delta_take_their_carried_members() {
     assert_eq!(delta["delta"]["stop_details"]["type"], "x");
     assert_eq!(delta["delta"]["container"]["id"], "cntr_1");
     assert_eq!(delta["delta"]["stop_reason"], "tool_use");
+    assert_eq!(
+        delta["context_management"],
+        json!({"applied_edits": [{"n": 1}]}),
+        "top-level members stay at the top level"
+    );
+    assert!(
+        delta["delta"].get("context_management").is_none(),
+        "{delta}"
+    );
 }
 
 #[test]
@@ -298,7 +310,7 @@ fn a_render_member_wins_over_a_carried_member_of_the_same_name() {
         closing(vec![extras(
             "message_delta",
             None,
-            json!({"stop_reason": "refusal", "stop_details": {}}),
+            json!({"delta": {"stop_reason": "refusal", "stop_details": {}}}),
         )]),
     ];
 
@@ -313,39 +325,229 @@ fn a_render_member_wins_over_a_carried_member_of_the_same_name() {
     assert_eq!(delta["delta"]["stop_details"], json!({}));
 }
 
-#[test]
-#[serial(anthropic_unknown_member_withheld)]
-fn message_start_members_after_the_early_frame_are_withheld_declared_and_counted() {
-    // Arrange
-    let before = withheld_count();
+/// Render `chunks` after the warm-hold early frame already sent the
+/// stream's `message_start`.
+fn render_warm_held(chunks: Vec<ChatChunk>) -> (Vec<SseEvent>, ResponseEdits) {
     let mut state = AnthropicStreamState::default();
     let early = AnthropicIngress.early_frame(&mut state);
-    let chunks = vec![
-        role(vec![extras(
-            "message_start",
-            None,
-            json!({"container": {"id": "cntr_1"}, "context_management": {}}),
-        )]),
-        text("ok"),
-    ];
-
-    // Act
-    let (events, edits) = render_into(&mut state, chunks);
-
-    // Assert
     assert_eq!(early.len(), 1, "the early frame is the message_start");
+    let (events, edits) = render_into(&mut state, chunks);
     assert!(
         named(&events, "message_start").is_empty(),
         "no second message_start"
     );
-    assert!(!early[0].data.contains("container"), "{}", early[0].data);
-    let removed: Vec<&str> = edits
+    (events, edits)
+}
+
+fn removed_paths(edits: &ResponseEdits) -> Vec<&str> {
+    edits
         .as_slice()
         .iter()
         .filter(|e| e.kind() == EditKind::Remove)
         .map(|e| e.path())
-        .collect();
-    assert_eq!(removed, ["/container", "/context_management"]);
+        .collect()
+}
+
+fn closing_delta(events: &[SseEvent]) -> Value {
+    let deltas = named(events, "message_delta");
+    assert_eq!(deltas.len(), 1, "{events:?}");
+    payload(deltas[0])
+}
+
+#[test]
+#[serial(anthropic_unknown_member_withheld)]
+fn late_message_start_members_reach_the_client_on_the_closing_message_delta() {
+    // Arrange
+    let before = withheld_count();
+    let chunks = vec![
+        role(vec![extras(
+            "message_start",
+            None,
+            json!({"container": {"id": "cntr_1"}, "diagnostics": {"cache": "miss"}}),
+        )]),
+        text("ok"),
+        closing(Vec::new()),
+    ];
+
+    // Act
+    let (events, edits) = render_warm_held(chunks);
+
+    // Assert
+    let delta = closing_delta(&events);
+    assert_eq!(delta["container"], json!({"id": "cntr_1"}), "{delta}");
+    assert_eq!(delta["diagnostics"], json!({"cache": "miss"}), "{delta}");
+    assert_eq!(delta["delta"]["stop_reason"], "tool_use");
+    assert!(removed_paths(&edits).is_empty(), "{:?}", edits.as_slice());
+    assert_eq!(withheld_count(), before);
+}
+
+/// Upstream events through the Anthropic-API parser a same-dialect client
+/// gets, one chunk per event that produced one.
+fn parsed(events: &[Value]) -> Vec<ChatChunk> {
+    let mut state = SseState::default().with_unmodeled_carriage();
+    events
+        .iter()
+        .filter_map(|event| {
+            state
+                .parse_event("test", &event.to_string())
+                .expect("event parses")
+        })
+        .collect()
+}
+
+/// The warm-hold shape of a live stream: placeholder nulls on the
+/// `message_start`, the real values on the `message_delta`.
+#[test]
+#[serial(anthropic_unknown_member_withheld)]
+fn a_warm_held_stream_gives_the_client_the_message_delta_values_over_start_nulls() {
+    // Arrange
+    let upstream = [
+        json!({"type": "message_start", "message": {
+            "id": "msg_1", "type": "message", "role": "assistant", "model": "m",
+            "content": [], "stop_reason": null, "stop_sequence": null,
+            "usage": {"input_tokens": 3, "output_tokens": 0},
+            "container": null, "context_management": null}}),
+        json!({"type": "content_block_start", "index": 0,
+               "content_block": {"type": "text", "text": ""}}),
+        json!({"type": "content_block_delta", "index": 0,
+               "delta": {"type": "text_delta", "text": "ok"}}),
+        json!({"type": "content_block_stop", "index": 0}),
+        json!({"type": "message_delta",
+               "delta": {"stop_reason": "end_turn", "stop_sequence": null,
+                         "container": {"id": "cntr_1"}},
+               "context_management": {"applied_edits": [{"n": 1}]},
+               "usage": {"output_tokens": 1}}),
+        json!({"type": "message_stop"}),
+    ];
+
+    // Act
+    let (events, edits) = render_warm_held(parsed(&upstream));
+
+    // Assert
+    let delta = closing_delta(&events);
+    assert_eq!(
+        delta["delta"]["container"],
+        json!({"id": "cntr_1"}),
+        "{delta}"
+    );
+    assert!(
+        delta.get("container").is_none(),
+        "a start null restated in delta is superseded: {delta}"
+    );
+    assert_eq!(
+        delta["context_management"],
+        json!({"applied_edits": [{"n": 1}]}),
+        "{delta}"
+    );
+    assert!(removed_paths(&edits).is_empty(), "{:?}", edits.as_slice());
+}
+
+#[test]
+#[serial(anthropic_unknown_member_withheld)]
+fn the_message_delta_top_level_wins_over_a_late_start_member_and_the_render_over_both() {
+    // Arrange
+    let chunks = vec![
+        role(vec![extras(
+            "message_start",
+            None,
+            json!({"context_management": {"from": "start"}, "only_start": 1,
+                   "stop_reason": "start"}),
+        )]),
+        text("ok"),
+        closing(vec![extras(
+            "message_delta",
+            None,
+            json!({"context_management": {"from": "delta"}, "usage": {"output_tokens": 99},
+                   "delta": {"stop_reason": "refusal"}}),
+        )]),
+    ];
+
+    // Act
+    let (events, _) = render_warm_held(chunks);
+
+    // Assert
+    let delta = closing_delta(&events);
+    assert_eq!(
+        delta["context_management"],
+        json!({"from": "delta"}),
+        "{delta}"
+    );
+    assert_eq!(delta["only_start"], 1, "{delta}");
+    assert_eq!(delta["delta"]["stop_reason"], "tool_use", "{delta}");
+    assert!(delta.get("stop_reason").is_none(), "{delta}");
+    assert_eq!(delta["usage"]["output_tokens"], 1, "{delta}");
+}
+
+/// A carried top-level `type`, `delta` or `usage` never displaces the
+/// render's own, including a `usage` the render's `message_delta` omits.
+#[test]
+fn the_render_message_delta_keys_win_over_carried_top_level_members() {
+    // Arrange
+    let carried = |late: Value| {
+        vec![
+            role(vec![extras("message_start", None, late)]),
+            text("ok"),
+            with_delta(
+                ChunkDelta::default(),
+                vec![extras(
+                    "message_delta",
+                    None,
+                    json!({"type": "forged", "delta": "flat", "usage": {"output_tokens": 99},
+                           "kept": true}),
+                )],
+            ),
+            {
+                let mut finish = with_delta(ChunkDelta::default(), Vec::new());
+                finish.choices[0].finish_reason = Some("stop".into());
+                finish
+            },
+        ]
+    };
+    let rows = [
+        ("no late start members", json!({})),
+        (
+            "late start members of the same names",
+            json!({"type": "forged", "delta": "flat", "usage": {"output_tokens": 99}}),
+        ),
+    ];
+    for (row, late) in rows {
+        // Act
+        let (events, _) = render_warm_held(carried(late));
+
+        // Assert
+        let delta = closing_delta(&events);
+        assert_eq!(delta["type"], "message_delta", "{row}: {delta}");
+        assert_eq!(delta["delta"]["stop_reason"], "end_turn", "{row}: {delta}");
+        assert!(delta.get("usage").is_none(), "{row}: {delta}");
+        assert_eq!(delta["kept"], true, "{row}: {delta}");
+    }
+}
+
+#[test]
+#[serial(anthropic_unknown_member_withheld)]
+fn late_start_members_of_a_stream_with_no_message_delta_are_withheld_declared_and_counted() {
+    // Arrange
+    let before = withheld_count();
+    let mut state = AnthropicStreamState::default();
+    let _ = AnthropicIngress.early_frame(&mut state);
+    let mut edits = ResponseEdits::recording();
+    let chunk = role(vec![extras(
+        "message_start",
+        None,
+        json!({"container": {"id": "cntr_1"}, "context_management": {}}),
+    )]);
+
+    // Act
+    let mut events = render_chunk_declared(chunk, &mut state, &mut edits).expect("renders");
+    events.extend(AnthropicIngress.render_eos_declared(&mut state, &mut edits));
+
+    // Assert
+    assert!(named(&events, "message_delta").is_empty(), "{events:?}");
+    assert!(
+        !events.iter().any(|e| e.data.contains("cntr_1")),
+        "{events:?}"
+    );
+    assert_eq!(removed_paths(&edits), ["/container", "/context_management"]);
     assert_eq!(withheld_count(), before + 1);
 }
 
@@ -361,15 +563,42 @@ fn a_stream_with_no_start_members_after_the_early_frame_counts_nothing() {
     let (_, edits) = render_into(&mut state, vec![role(Vec::new()), text("ok")]);
 
     // Assert
-    assert!(
-        edits
-            .as_slice()
-            .iter()
-            .all(|e| e.kind() != EditKind::Remove),
-        "{:?}",
-        edits.as_slice()
-    );
+    assert!(removed_paths(&edits).is_empty(), "{:?}", edits.as_slice());
     assert_eq!(withheld_count(), before);
+}
+
+/// The reserved key lists are what `emit_message_delta` writes when every
+/// optional member is present.
+#[test]
+fn the_message_delta_reserved_keys_are_what_the_render_writes() {
+    // Arrange
+    let usage = UsageDelta {
+        prompt_tokens: Some(3),
+        completion_tokens: Some(1),
+        ..Default::default()
+    };
+    let mut events = Vec::new();
+
+    // Act
+    super::super::stream::emit_message_delta(
+        Some("stop"),
+        Some("END"),
+        Some(&usage),
+        None,
+        &mut events,
+        &mut ResponseEdits::default(),
+    );
+
+    // Assert
+    let delta = payload(&events[0]);
+    let keys = |value: &Value| -> std::collections::BTreeSet<String> {
+        value.as_object().expect("object").keys().cloned().collect()
+    };
+    let reserved = |list: &[&str]| -> std::collections::BTreeSet<String> {
+        list.iter().map(|k| (*k).to_owned()).collect()
+    };
+    assert_eq!(keys(&delta), reserved(MESSAGE_DELTA_KEYS));
+    assert_eq!(keys(&delta["delta"]), reserved(MESSAGE_DELTA_DELTA_KEYS));
 }
 
 #[test]

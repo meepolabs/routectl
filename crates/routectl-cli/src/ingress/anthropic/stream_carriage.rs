@@ -1,6 +1,7 @@
 //! Re-emission of what an Anthropic upstream sent beyond the canonical
-//! chunk: the unmodeled members of `message_start.message`,
-//! `message_delta.delta` and a known `content_block_start`, top-level events
+//! chunk: the unmodeled members of `message_start.message`, of a
+//! `message_delta` event and its `delta`, and of a known
+//! `content_block_start`; top-level events
 //! of a type no canonical field models, and deltas of an unknown type on a
 //! known block. The Anthropic-API egress carries each on the chunk of the
 //! event that carried it, only for a client of this dialect.
@@ -10,8 +11,11 @@
 //! is held until the render opens the block it stands for, which ties the
 //! upstream index to the render's index for the unknown deltas that follow.
 //! A `message_start` whose members arrive after the render already sent its
-//! own (the warm-hold early frame) cannot take them, and no later event may
-//! carry them, so they are withheld, declared and counted.
+//! own (the warm-hold early frame) cannot take them. They are held for the
+//! top level of the closing `message_delta`, the event that states
+//! top-level changes to the final message, under the render's own members
+//! and the upstream `message_delta`'s. A stream that closes with no
+//! `message_delta` withholds them, declared and counted.
 
 use serde_json::{Map, Value};
 
@@ -64,14 +68,51 @@ pub(super) struct CarriedState {
     bound: Option<(u32, usize)>,
     /// `message_delta.delta` members waiting for the render's
     /// `message_delta`.
-    delta_members: Option<Map<String, Value>>,
+    delta_members: Map<String, Value>,
+    /// Top-level `message_delta` members waiting for the render's
+    /// `message_delta`.
+    top_level_members: Map<String, Value>,
+    /// `message_start.message` members that arrived after the render sent
+    /// its `message_start`.
+    late_start_members: Map<String, Value>,
+}
+
+/// What the render's closing `message_delta` owes the upstream.
+#[derive(Debug, Default)]
+pub(super) struct MessageDeltaCarriage {
+    /// Members for the `delta` object.
+    pub(super) delta: Map<String, Value>,
+    /// Members for the event's top level.
+    pub(super) top_level: Map<String, Value>,
 }
 
 impl CarriedState {
-    /// The `message_delta.delta` members carried so far, for the render's
-    /// `message_delta`.
-    pub(super) const fn take_delta_members(&mut self) -> Option<Map<String, Value>> {
-        self.delta_members.take()
+    /// Everything carried for the closing `message_delta`: the upstream
+    /// `delta` members, and at the top level the upstream's own top-level
+    /// members over the late `message_start` members. A late member the
+    /// `delta` object restates, whether the render's own key or a carried
+    /// one, is superseded by it. None when nothing was carried.
+    pub(super) fn take_message_delta(&mut self) -> Option<MessageDeltaCarriage> {
+        let delta = std::mem::take(&mut self.delta_members);
+        let mut top_level = std::mem::take(&mut self.top_level_members);
+        for (key, value) in std::mem::take(&mut self.late_start_members) {
+            if !MESSAGE_DELTA_DELTA_KEYS.contains(&key.as_str()) && !delta.contains_key(&key) {
+                top_level.entry(key).or_insert(value);
+            }
+        }
+        (!delta.is_empty() || !top_level.is_empty())
+            .then_some(MessageDeltaCarriage { delta, top_level })
+    }
+
+    /// Hold `message_start` members that arrived after the render's own
+    /// `message_start` for the closing `message_delta`.
+    pub(super) fn hold_late_start_members(&mut self, members: &Map<String, Value>) {
+        merge_carried(&mut self.late_start_members, members);
+    }
+
+    /// The late `message_start` members no `message_delta` took.
+    pub(super) fn take_late_start_members(&mut self) -> Map<String, Value> {
+        std::mem::take(&mut self.late_start_members)
     }
 
     /// The first carried start of `block_type`, now owned by the block the
@@ -118,8 +159,25 @@ pub(super) fn merge_carried(target: &mut Map<String, Value>, carried: &Map<Strin
     }
 }
 
-/// The `message_start` the render already sent cannot take members that
-/// arrive later: declare each one removed and count the stream once.
+/// The top-level members of the render's `message_delta` event.
+pub(super) const MESSAGE_DELTA_KEYS: &[&str] = &["type", "delta", "usage"];
+
+/// The members of the render's `message_delta.delta`.
+pub(super) const MESSAGE_DELTA_DELTA_KEYS: &[&str] = &["stop_reason", "stop_sequence"];
+
+/// Add each carried top-level member to the render's `message_delta`
+/// `payload` that is not one of the render's own keys, whether or not this
+/// event wrote that key.
+pub(super) fn merge_top_level(payload: &mut Map<String, Value>, carried: &Map<String, Value>) {
+    for (key, value) in carried {
+        if !MESSAGE_DELTA_KEYS.contains(&key.as_str()) {
+            payload.entry(key.clone()).or_insert_with(|| value.clone());
+        }
+    }
+}
+
+/// Late `message_start` members the stream closed without a
+/// `message_delta` for: declare each one removed and count the stream once.
 pub(super) fn withhold_start_members(members: &Map<String, Value>, edits: &mut ResponseEdits) {
     if members.is_empty() {
         return;
@@ -133,7 +191,7 @@ pub(super) fn withhold_start_members(members: &Map<String, Value>, edits: &mut R
     }
     tracing::debug!(
         withheld = members.len(),
-        "anthropic ingress: message_start members arrived after the early message_start; withheld"
+        "anthropic ingress: late message_start members with no message_delta to carry them; withheld"
     );
     record_translation_drop(LANE, UNKNOWN_MEMBER_WITHHELD);
 }
@@ -154,10 +212,7 @@ pub(super) fn replay_carried(
                 open_carried_start(*index, members, state, events)
             }
             (CONTENT_BLOCK_STOP, Some(index)) => close_carried_block(*index, state, events),
-            (MESSAGE_DELTA, _) => {
-                let held = state.carried.delta_members.get_or_insert_with(Map::new);
-                merge_carried(held, members);
-            }
+            (MESSAGE_DELTA, _) => hold_message_delta_members(members, &mut state.carried),
             _ => {
                 tracing::debug!("anthropic ingress: carried members of an event it does not render")
             }
@@ -170,6 +225,22 @@ pub(super) fn replay_carried(
             delta,
         } => route_unknown_delta(*upstream_index, delta, state, events),
         _ => {}
+    }
+}
+
+/// Hold a carried `message_delta`'s members, shaped as the event: its
+/// top-level members, and its `delta` object's under `delta`.
+fn hold_message_delta_members(members: &Map<String, Value>, carried: &mut CarriedState) {
+    for (key, value) in members {
+        match (key.as_str(), value) {
+            ("delta", Value::Object(delta)) => merge_carried(&mut carried.delta_members, delta),
+            _ => {
+                carried
+                    .top_level_members
+                    .entry(key.clone())
+                    .or_insert_with(|| value.clone());
+            }
+        }
     }
 }
 

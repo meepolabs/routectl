@@ -538,6 +538,9 @@ fn anthropic_unmodeled_frames() -> Vec<(Option<&'static str>, Value)> {
                    "delta": {"stop_reason": "tool_use", "stop_sequence": null,
                              "stop_details": {"type": "tool"},
                              "container": {"id": "cntr_1", "expires_at": "2026-11-11T00:00:00Z"}},
+                   "context_management": {"applied_edits": [
+                       {"type": "clear_tool_uses_20250919", "cleared_tool_uses": 1}]},
+                   "server_note": {"n": 1},
                    "usage": {"input_tokens": 3, "output_tokens": 1}}),
         ),
         (Some("message_stop"), json!({"type": "message_stop"})),

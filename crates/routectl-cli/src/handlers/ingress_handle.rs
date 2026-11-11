@@ -1143,7 +1143,7 @@ async fn drive_stream<A: IngressAdapter>(
             }
         }
     }
-    for ev in adapter.render_eos(state.as_mut()) {
+    for ev in adapter.render_eos_declared(state.as_mut(), client_check.edits()) {
         client_check.observe(&ev);
         if tx.send(ev).await.is_err() {
             client_check.finish(StreamExit::Disconnect);

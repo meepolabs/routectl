@@ -1,6 +1,7 @@
 //! Anthropic Messages: `message_start` opens the message, content blocks
-//! fold by `index`, `message_delta` sets the stop fields and usage, and
-//! `message_stop` closes it.
+//! fold by `index`, `message_delta` sets the stop fields, usage and any
+//! other top-level member of the final message, and `message_stop` closes
+//! it.
 
 use std::collections::BTreeMap;
 
@@ -130,14 +131,20 @@ impl AnthropicFold {
         {
             return false;
         }
-        let Some(Value::Object(usage)) = body.remove("usage") else {
-            return true;
-        };
-        let Some(slot) = object_at(budget, &mut self.message, "usage") else {
-            return false;
-        };
-        usage
+        if let Some(Value::Object(usage)) = body.remove("usage") {
+            let Some(slot) = object_at(budget, &mut self.message, "usage") else {
+                return false;
+            };
+            if !usage
+                .into_iter()
+                .all(|(key, value)| insert(budget, slot, key, value))
+            {
+                return false;
+            }
+        }
+        body.remove("type");
+        std::mem::take(body)
             .into_iter()
-            .all(|(key, value)| insert(budget, slot, key, value))
+            .all(|(key, value)| insert(budget, &mut self.message, key, value))
     }
 }

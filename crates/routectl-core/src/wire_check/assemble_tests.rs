@@ -220,6 +220,34 @@ fn anthropic_tool_use_input_is_joined_and_parsed() {
 }
 
 #[test]
+fn anthropic_message_delta_top_level_members_fold_into_the_message() {
+    // Arrange
+    let closing = json!({"type":"message_delta",
+        "delta":{"stop_reason":"tool_use","stop_sequence":null},
+        "context_management":{"applied_edits":[{"type":"clear_tool_uses_20250919"}]},
+        "usage":{"output_tokens":10}});
+    let frames: Vec<_> = anthropic_tool_frames()
+        .into_iter()
+        .map(|(event, data)| match event.as_deref() {
+            Some("message_delta") => (event, closing.to_string()),
+            _ => (event, data),
+        })
+        .collect();
+
+    // Act
+    let document = complete(IngressDialect::Anthropic, &frames);
+
+    // Assert
+    assert_eq!(
+        document["context_management"],
+        json!({"applied_edits":[{"type":"clear_tool_uses_20250919"}]})
+    );
+    assert_eq!(document["type"], "message", "the event type stays out");
+    assert_eq!(document["stop_reason"], "tool_use");
+    assert_eq!(document["usage"]["output_tokens"], 10);
+}
+
+#[test]
 fn anthropic_unparseable_tool_input_is_kept_as_text() {
     let mut frames = anthropic_tool_frames();
     frames.retain(|(_, data)| !data.contains("\\\"rust\\\"}"));

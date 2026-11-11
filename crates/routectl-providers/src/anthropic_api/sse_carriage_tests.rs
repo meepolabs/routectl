@@ -42,6 +42,7 @@ fn carrying_stream() -> Vec<Value> {
         json!({"type": "message_delta",
                "delta": {"stop_reason": "tool_use", "stop_sequence": null,
                          "stop_details": {"type": "x"}, "container": {"id": "cntr_1"}},
+               "context_management": {"applied_edits": []}, "server_note": {"n": 2},
                "usage": {"output_tokens": 1}}),
         json!({"type": "message_stop"}),
     ]
@@ -131,8 +132,9 @@ fn each_unmodeled_member_and_event_rides_the_chunk_of_its_own_event() {
         ] => {
             assert_eq!(event_type, "message_delta");
             assert_eq!(
-                members.keys().collect::<Vec<_>>(),
-                ["container", "stop_details"]
+                Value::Object(members.clone()),
+                json!({"context_management": {"applied_edits": []}, "server_note": {"n": 2},
+                       "delta": {"container": {"id": "cntr_1"}, "stop_details": {"type": "x"}}})
             );
         }
         other => panic!("message_delta carriage: {other:?}"),
@@ -252,6 +254,23 @@ fn a_carried_event_over_the_cap_ends_the_stream_and_counts_once() {
 
     // Act
     let result = state.parse_event(PROVIDER, &event.to_string());
+
+    // Assert
+    assert!(matches!(result, Err(Error::Streaming(_))), "{result:?}");
+    assert_eq!(oversize_event_total(), before + 1);
+}
+
+#[test]
+fn message_start_members_over_the_cap_end_the_stream_rather_than_wait() {
+    // Arrange
+    let mut state = carrying();
+    let before = oversize_event_total();
+    let mut start = message_start();
+    start["message"]["container"] =
+        json!("x".repeat(super::super::sse_opaque::MAX_OPAQUE_BYTES_PER_BLOCK + 1));
+
+    // Act
+    let result = state.parse_event(PROVIDER, &start.to_string());
 
     // Assert
     assert!(matches!(result, Err(Error::Streaming(_))), "{result:?}");

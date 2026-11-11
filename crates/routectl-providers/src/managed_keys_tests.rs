@@ -517,6 +517,78 @@ fn literals_in_fn(source: &str, fn_name: &str) -> BTreeSet<String> {
     out
 }
 
+/// String literals in the array initializer of `const <const_name>` in
+/// `source`. `fn <reader>` must name that constant in its body: a list the
+/// predicate stopped reading would otherwise pass the scan.
+fn literals_in_const(source: &str, const_name: &str, reader: &str) -> BTreeSet<String> {
+    let file = syn::parse_file(source).expect("source parses");
+    let init = file
+        .items
+        .iter()
+        .find_map(|item| match item {
+            Item::Const(c) if c.ident == const_name => Some(&*c.expr),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("const {const_name} not found"));
+    let reader_body = file
+        .items
+        .iter()
+        .find_map(|item| match item {
+            Item::Fn(f) if f.sig.ident == reader => Some(&f.block),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("fn {reader} not found"));
+    assert!(
+        reader_body.stmts.iter().any(|stmt| match stmt {
+            Stmt::Expr(expr, _) => names_path(expr, const_name),
+            _ => false,
+        }),
+        "fn {reader} does not read {const_name}"
+    );
+    let mut out = BTreeSet::new();
+    str_literals_in_array(init, &mut out);
+    out
+}
+
+fn str_literals_in_array(expr: &Expr, out: &mut BTreeSet<String>) {
+    match expr {
+        Expr::Reference(r) => str_literals_in_array(&r.expr, out),
+        Expr::Array(a) => {
+            for elem in &a.elems {
+                str_literals_in_array(elem, out);
+            }
+        }
+        Expr::Lit(syn::ExprLit {
+            lit: syn::Lit::Str(s),
+            ..
+        }) => {
+            out.insert(s.value());
+        }
+        Expr::Path(p) => {
+            if let Some(ident) = p.path.get_ident()
+                && let Some(value) = resolve_key_const(&ident.to_string())
+            {
+                out.insert(value.to_owned());
+            }
+        }
+        _ => {}
+    }
+}
+
+fn names_path(expr: &Expr, name: &str) -> bool {
+    match expr {
+        Expr::Path(p) => p.path.is_ident(name),
+        Expr::MethodCall(m) => {
+            names_path(&m.receiver, name) || m.args.iter().any(|a| names_path(a, name))
+        }
+        Expr::Call(c) => c.args.iter().any(|a| names_path(a, name)),
+        Expr::Unary(u) => names_path(&u.expr, name),
+        Expr::Reference(r) => names_path(&r.expr, name),
+        Expr::Paren(p) => names_path(&p.expr, name),
+        _ => false,
+    }
+}
+
 fn literals_in_expr(expr: &Expr, out: &mut BTreeSet<String>) {
     match expr {
         Expr::Binary(b) => {
@@ -609,14 +681,18 @@ fn resolve_key_const(name: &str) -> Option<&'static str> {
 }
 
 /// The fewest literals the canonical-list scan may find. A lower count means
-/// the AST walk missed arms of `is_canonical_request_key`.
+/// the AST walk missed entries of `CANONICAL_REQUEST_KEYS`.
 const MIN_CANONICAL_KEYS: usize = 27;
 
 const CANONICAL_SOURCE: &str = include_str!("../../routectl-core/src/reserved.rs");
 
 #[test]
 fn universe_covers_the_canonical_list() {
-    let canonical = literals_in_fn(CANONICAL_SOURCE, "is_canonical_request_key");
+    let canonical = literals_in_const(
+        CANONICAL_SOURCE,
+        "CANONICAL_REQUEST_KEYS",
+        "is_canonical_request_key",
+    );
     assert!(
         canonical.len() >= MIN_CANONICAL_KEYS && canonical.contains("max_completion_tokens"),
         "canonical extraction found {canonical:?}"

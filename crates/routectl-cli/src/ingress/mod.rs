@@ -1059,6 +1059,16 @@ pub trait IngressAdapter: Send + Sync {
     /// the stream ended without an explicit stop event.
     fn render_eos(&self, state: &mut dyn IngressStreamState) -> Vec<SseEvent>;
 
+    /// [`Self::render_eos`], declaring into `edits` every response edit
+    /// the final events make on purpose. Same events either way.
+    fn render_eos_declared(
+        &self,
+        state: &mut dyn IngressStreamState,
+        _edits: &mut ResponseEdits,
+    ) -> Vec<SseEvent> {
+        self.render_eos(state)
+    }
+
     /// Final SSE events to emit when an upstream stream errored
     /// mid-stream. Returns dialect-specific TERMINAL ERROR events so
     /// SDK consumers see a clean failure rather than network

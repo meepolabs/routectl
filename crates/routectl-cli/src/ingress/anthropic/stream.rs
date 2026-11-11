@@ -7,7 +7,8 @@ use crate::ingress::{
 };
 
 use super::stream_carriage::{
-    complete_block_start, flush_unbound, merge_carried, take_start_members, withhold_start_members,
+    MessageDeltaCarriage, complete_block_start, flush_unbound, merge_carried, merge_top_level,
+    take_start_members,
 };
 use super::stream_edits::{
     declare_estimated_start_usage, declare_minted_start_id, declare_opening_carry,
@@ -126,7 +127,7 @@ fn render_chunk_events(
         emit_message_start(state, opening, start_members.as_ref(), &mut events);
         state.started = true;
     } else if let Some(members) = start_members.as_ref() {
-        withhold_start_members(members, edits);
+        state.carried.hold_late_start_members(members);
     }
 
     // Replay opaque SSE events FIRST. The egress attaches them at
@@ -151,7 +152,7 @@ fn render_chunk_events(
             if chunk.usage.is_some() {
                 // Inline usage: emit combined delta + stop now.
                 close_lingering_opaque_blocks(state, &mut events);
-                let carried = state.carried.take_delta_members();
+                let carried = state.carried.take_message_delta();
                 emit_message_delta(
                     Some(fr),
                     choice.matched_stop_sequence.as_deref(),
@@ -192,7 +193,7 @@ fn render_chunk_events(
             // Finalize the buffered finish_reason now that we have usage.
             let matched = state.pending_matched_stop_sequence.take();
             close_lingering_opaque_blocks(state, &mut events);
-            let carried = state.carried.take_delta_members();
+            let carried = state.carried.take_message_delta();
             emit_message_delta(
                 Some(&fr),
                 matched.as_deref(),
@@ -575,7 +576,7 @@ pub(super) fn emit_message_delta(
     finish_reason: Option<&str>,
     matched_stop_sequence: Option<&str>,
     usage: Option<&UsageDelta>,
-    carried: Option<&Map<String, Value>>,
+    carried: Option<&MessageDeltaCarriage>,
     events: &mut Vec<SseEvent>,
     edits: &mut ResponseEdits,
 ) {
@@ -600,7 +601,7 @@ pub(super) fn emit_message_delta(
     delta.insert("stop_reason".into(), stop_reason_value);
     delta.insert("stop_sequence".into(), stop_sequence_value);
     if let Some(carried) = carried {
-        merge_carried(&mut delta, carried);
+        merge_carried(&mut delta, &carried.delta);
     }
 
     let mut payload = Map::new();
@@ -650,6 +651,10 @@ pub(super) fn emit_message_delta(
         if !wire_usage.is_empty() {
             payload.insert("usage".into(), Value::Object(wire_usage));
         }
+    }
+
+    if let Some(carried) = carried {
+        merge_top_level(&mut payload, &carried.top_level);
     }
 
     events.push(SseEvent::named(

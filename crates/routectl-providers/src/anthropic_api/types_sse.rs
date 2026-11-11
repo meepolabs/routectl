@@ -59,6 +59,8 @@ pub enum SseEvent {
     MessageDelta {
         delta: SseMessageDelta,
         usage: Option<SseDeltaUsage>,
+        /// Every member of the event beside `type`, `delta` and `usage`.
+        extras: Map<String, Value>,
     },
     MessageStop,
     Ping,
@@ -158,7 +160,11 @@ impl<'de> Deserialize<'de> for SseEvent {
             },
             Known::ContentBlockDelta { index, delta } => Self::ContentBlockDelta { index, delta },
             Known::ContentBlockStop { index } => Self::ContentBlockStop { index },
-            Known::MessageDelta { delta, usage } => Self::MessageDelta { delta, usage },
+            Known::MessageDelta { delta, usage } => Self::MessageDelta {
+                delta,
+                usage,
+                extras: unmodeled(&v, MESSAGE_DELTA_EVENT_KEYS),
+            },
             Known::MessageStop => Self::MessageStop,
             Known::Ping => Self::Ping,
             Known::Error { error } => Self::Error { error },
@@ -270,6 +276,9 @@ impl<'de> Deserialize<'de> for SseContentBlockStart {
         })
     }
 }
+
+/// The members of a `message_delta` event the parser models.
+const MESSAGE_DELTA_EVENT_KEYS: &[&str] = &["type", "delta", "usage"];
 
 /// The members of a `text` block start the Anthropic stream render writes
 /// itself.

@@ -1,8 +1,8 @@
 //! Event-by-event carriage of what the canonical chunk cannot hold, for a
 //! client that speaks the Anthropic dialect: the unmodeled members of a
-//! `message_start.message`, a `message_delta.delta` and a known
-//! `content_block_start`, a top-level event of a type the parser does not
-//! model, and a delta of an unknown type on a block it does model.
+//! `message_start.message`, of a `message_delta` event and its `delta`, and
+//! of a known `content_block_start`; a top-level event of a type the parser
+//! does not model; and a delta of an unknown type on a block it does model.
 //!
 //! A known block's start and stop are always carried, members or not, so
 //! the ingress can tie a later unknown delta to the block it opened for that
@@ -34,6 +34,19 @@ pub(super) const MESSAGE_START_KEYS: &[&str] = &[
     "stop_sequence",
     "usage",
 ];
+
+/// The carried members of a `message_delta` event, shaped as the event:
+/// its unmodeled top-level members, with the unmodeled members of its
+/// `delta` object under `delta` when there are any.
+pub(super) fn message_delta_members(
+    mut top_level: Map<String, Value>,
+    delta: Map<String, Value>,
+) -> Map<String, Value> {
+    if !delta.is_empty() {
+        top_level.insert("delta".to_owned(), Value::Object(delta));
+    }
+    top_level
+}
 
 impl SseState {
     /// Carry the members of the `event_type` event beyond `reserved`.

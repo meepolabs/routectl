@@ -17,7 +17,7 @@ use routectl_core::{
 };
 
 use super::response::map_stop_reason;
-use super::sse_carriage::MESSAGE_START_KEYS;
+use super::sse_carriage::{MESSAGE_START_KEYS, message_delta_members};
 use super::sse_opaque::{MAX_OPAQUE_BYTES_PER_BLOCK, MAX_OPAQUE_DELTAS_PER_BLOCK, OpaqueCapture};
 use super::types::SseEvent;
 use super::types_sse::is_known_event_type;
@@ -579,8 +579,12 @@ impl SseState {
                 Ok(terminal_chunk)
             }
 
-            SseEvent::MessageDelta { mut delta, usage } => {
-                let members = std::mem::take(&mut delta.members);
+            SseEvent::MessageDelta {
+                mut delta,
+                usage,
+                extras,
+            } => {
+                let members = message_delta_members(extras, std::mem::take(&mut delta.members));
                 self.carry_event_members(provider_id, "message_delta", None, members, &[])?;
                 let finish_reason = map_stop_reason(delta.stop_reason.as_deref());
                 // Lift the matched stop sequence so the Anthropic ingress
