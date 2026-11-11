@@ -294,7 +294,7 @@ fn handle_invoke_frame(
                     tracing::warn!(
                         provider = %provider_id,
                         event_type = err_type,
-                        message = %routectl_core::sanitize_for_log(err_msg),
+                        message = %routectl_core::upstream_text_for_log(err_msg),
                         "bedrock in-stream auth/permission exception",
                     );
                 }
@@ -581,6 +581,41 @@ mod tests {
                 assert!(body.contains("slow"), "body: {body}");
             }
             other => panic!("expected Upstream, got {other:?}"),
+        }
+    }
+
+    /// The in-stream Anthropic auth error WARN scrubs a principal from the
+    /// error message and keeps the clean text beside it.
+    #[test]
+    fn in_stream_auth_error_warn_redacts_a_principal_and_keeps_clean_text() {
+        for err_type in ["authentication_error", "permission_error"] {
+            let inner = format!(
+                r#"{{"type":"error","error":{{"type":"{err_type}","message":"User: arn:aws:iam::123456789012:role/ops-role denied. SENTINEL-CLEAN-TEXT"}}}}"#
+            );
+            let b64 = base64::engine::general_purpose::STANDARD.encode(inner.as_bytes());
+            let payload = format!(r#"{{"bytes":"{b64}"}}"#);
+            let events = routectl_testkit::capture_events(|| {
+                let _ = handle("chunk", &payload);
+            });
+
+            // The explicit `message` field takes the event's message slot, so
+            // the whole rendered event is checked.
+            let warns: Vec<_> = events
+                .iter()
+                .filter(|e| e.level == tracing::Level::WARN)
+                .collect();
+            assert_eq!(warns.len(), 1, "{err_type}: {events:?}");
+            let message = std::iter::once(warns[0].message.as_str())
+                .chain(warns[0].fields.iter().map(|(_, v)| v.as_str()))
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert!(!message.contains("arn:aws"), "{err_type}: {message}");
+            assert!(!message.contains("123456789012"), "{err_type}: {message}");
+            assert!(message.contains("[redacted]"), "{err_type}: {message}");
+            assert!(
+                message.contains("SENTINEL-CLEAN-TEXT"),
+                "{err_type}: {message}"
+            );
         }
     }
 

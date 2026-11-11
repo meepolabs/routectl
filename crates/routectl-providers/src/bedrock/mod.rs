@@ -1035,9 +1035,12 @@ fn map_error_message(read: &UpstreamErrorRead) -> String {
 /// - **5xx** -> WARN, "upstream 5xx" (transient AWS issues)
 /// - other 4xx -> WARN, generic "upstream error"
 ///
-/// Body excerpt is bounded to keep log lines scannable. Never logs
-/// credential material because Bedrock error bodies don't contain any.
-/// The 403 action / principal-present fields come from the shared
+/// Body excerpt is bounded to keep log lines scannable. Bedrock error
+/// bodies can name principals (a role ARN, an account id) and echo
+/// request-supplied ARNs, so every excerpt is scrubbed with
+/// [`routectl_core::upstream_text_for_log`] over the complete text before
+/// it is filtered and capped. The 403 action / principal-present fields
+/// come from the shared
 /// `classify_bedrock_error` so the client and log paths stay aligned.
 ///
 /// On a cap trip (`hit_cap`) the `body` is a truncated prefix: the
@@ -1052,22 +1055,22 @@ fn log_bedrock_upstream_error(
     hit_cap: bool,
     detail: &AccessDeniedDetail,
 ) {
-    // sanitize_upstream_body_with_cap trims edges, collapses HTML pages to
-    // a short marker, and caps length. It does NOT filter mid-string control
-    // characters (\n, \r, ANSI escapes). sanitize_for_log applied next
-    // handles that separately. A 403 body names the principal ARN, account
-    // id and resource ARN, which prompt redaction does not touch, so its
-    // excerpt is the same access-denied string the DEBUG line carries.
+    // A 403 body names the principal ARN, account id and resource ARN,
+    // which prompt redaction does not touch, so its excerpt is the same
+    // access-denied string the DEBUG line carries. Any other body is trimmed
+    // and an HTML page collapsed to a marker; its bound is the shared
+    // error-body ceiling, far past the field cap, so the scrub sees every
+    // credential the logged prefix could show before the cap cuts it.
     let safe_excerpt = if status == 403 {
-        sanitize_for_log(&sanitized_debug_body(status, body.text(), detail))
+        routectl_core::upstream_text_for_log(&sanitized_debug_body(status, body.text(), detail))
     } else if hit_cap {
         crate::http_client::body_cap_exceeded_message()
     } else {
         let excerpt = routectl_core::sanitize_upstream_body_with_cap(
             &crate::aws_error::redacted_body_text(body),
-            routectl_core::MAX_LOG_BODY_EXCERPT,
+            routectl_core::MAX_ERROR_BODY_BYTES,
         );
-        sanitize_for_log(&excerpt)
+        routectl_core::upstream_text_for_log(&excerpt)
     };
     match status {
         401 => {
@@ -1158,6 +1161,10 @@ mod error_read_tests;
 #[cfg(test)]
 #[path = "access_denied_tests.rs"]
 mod access_denied_tests;
+
+#[cfg(test)]
+#[path = "upstream_error_log_tests.rs"]
+mod upstream_error_log_tests;
 
 #[cfg(test)]
 mod tests {

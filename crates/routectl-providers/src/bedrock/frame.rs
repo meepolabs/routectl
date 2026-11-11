@@ -222,7 +222,7 @@ pub fn exception_error(provider_id: &str, exception_type: &str, payload: &[u8]) 
         tracing::warn!(
             provider = %provider_id,
             event_type = %sanitize_for_log(exception_type),
-            message = %routectl_core::sanitize_for_log(&msg),
+            message = %routectl_core::upstream_text_for_log(raw),
             "bedrock in-stream auth/permission exception",
         );
     }
@@ -654,6 +654,37 @@ mod tests {
         match exception_error("test", "throttlingException", b"not json") {
             Error::Upstream { body, .. } => assert_eq!(body, "throttlingException"),
             other => panic!("expected Upstream, got {other:?}"),
+        }
+    }
+
+    /// The in-stream access-denied WARN scrubs a principal from the
+    /// payload message and keeps the clean text beside it.
+    #[test]
+    fn in_stream_auth_warn_redacts_a_principal_and_keeps_clean_text() {
+        let payload = br#"{"message":"User: arn:aws:iam::123456789012:role/ops-role cannot invoke. SENTINEL-CLEAN-TEXT"}"#;
+        for exception in ["accessDeniedException", "unauthorizedException"] {
+            let events = routectl_testkit::capture_events(|| {
+                let _ = exception_error("test", exception, payload);
+            });
+
+            // The explicit `message` field takes the event's message slot, so
+            // the whole rendered event is checked.
+            let warns: Vec<_> = events
+                .iter()
+                .filter(|e| e.level == tracing::Level::WARN)
+                .collect();
+            assert_eq!(warns.len(), 1, "{exception}: {events:?}");
+            let message = std::iter::once(warns[0].message.as_str())
+                .chain(warns[0].fields.iter().map(|(_, v)| v.as_str()))
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert!(!message.contains("arn:aws"), "{exception}: {message}");
+            assert!(!message.contains("123456789012"), "{exception}: {message}");
+            assert!(message.contains("[redacted]"), "{exception}: {message}");
+            assert!(
+                message.contains("SENTINEL-CLEAN-TEXT"),
+                "{exception}: {message}"
+            );
         }
     }
 

@@ -466,14 +466,16 @@ pub fn access_denied_message(detail: &AccessDeniedDetail, action: Option<String>
 
 /// True if `s` matches an IAM `service:Action` shape: a service segment
 /// of `[A-Za-z0-9._-]+`, a single colon, then an action segment of
-/// `[A-Za-z0-9*]+`. Pure char scan (no regex dependency, matching
-/// `extract_iam_action`'s rationale). An ARN fails because it has more
-/// than one colon and the resource segment carries `/`.
+/// `[A-Za-z0-9*]+`, with no run of 12 or more digits anywhere (an account
+/// id fits both segment charsets). Pure char scan (no regex dependency,
+/// matching `extract_iam_action`'s rationale). An ARN fails because it has
+/// more than one colon and the resource segment carries `/`.
 pub fn is_iam_action_shape(s: &str) -> bool {
     let Some((service, action)) = s.split_once(':') else {
         return false;
     };
-    !service.is_empty()
+    !has_account_id_run(s)
+        && !service.is_empty()
         && !action.is_empty()
         && service
             .chars()
@@ -893,6 +895,23 @@ mod tests {
         assert!(!is_iam_action_shape(":InvokeModel"));
         assert!(!is_iam_action_shape("bedrock:"));
         assert!(!is_iam_action_shape("svc:action/with/slash"));
+    }
+
+    #[test]
+    fn is_iam_action_shape_rejects_an_account_id_run_in_either_segment() {
+        let rows = [
+            ("action segment", "s3:123456789012"),
+            ("service segment", "123456789012:InvokeModel"),
+            ("run inside the action", "bedrock:Invoke123456789012Model"),
+        ];
+        for (name, token) in rows {
+            assert!(!is_iam_action_shape(token), "{name}: {token}");
+        }
+        assert!(is_iam_action_shape("bedrock:InvokeModel"));
+        assert!(
+            is_iam_action_shape("svc:Action12345678901"),
+            "11 digits stay"
+        );
     }
 
     #[test]
