@@ -817,6 +817,7 @@ fn planted_fixture() -> Vec<String> {
         "Authorization: Bearer OPAQUE1 was rejected",
         r#"{"password":"x\\","model":"m"}"#,
         "redirect_token=a://user:p&ssw0rd@host/x",
+        "api_key=https://x_token=://u,p4ss@h/x",
         "api_key=OPAQUE1,model=gpt-4o,max_tokens=5",
         "Config(api_key=OPAQUE1)",
     ]
@@ -1313,27 +1314,106 @@ fn a_credential_starting_inside_a_span_is_redacted_to_its_own_end() {
     }
 }
 
-/// The `auth-host` row is the single source for crossing the authority:
-/// no other rule matches inside it.
+/// The userinfo rule, probing inside the form value, carries the redaction
+/// past a delimiter the userinfo holds.
 #[test]
-fn a_form_value_holding_a_url_crosses_delimiters_inside_its_authority() {
+fn userinfo_inside_a_form_value_is_redacted_on_the_first_pass() {
     let rows = [
         (
             "userinfo holding an ampersand",
             "redirect_token=a://user:p&ssw0rd@host/x",
-            "redirect_token=[redacted]",
+            "redirect_token=[redacted]@host/x",
             "ssw0rd",
         ),
         (
-            "auth-host holding a comma",
-            "callback_token=https://cb,s3cr3tpart.example/x rejected",
-            "callback_token=[redacted] rejected",
-            "s3cr3tpart",
+            "userinfo holding a comma behind a nested key",
+            "api_key=https://x_token=://u,p4ss@h/x",
+            "api_key=[redacted]@h/x",
+            "p4ss",
         ),
     ];
     for (name, input, expected, planted) in rows {
         assert_redacts(name, input, planted);
         assert_eq!(scrub_upstream_text(input), expected, "{name}");
+    }
+}
+
+/// A URL with no path in a form value ends at the form delimiter like any
+/// other value, the same whether the value stands alone or nested.
+#[test]
+fn a_form_value_holding_a_url_keeps_the_text_after_it() {
+    let rows = [
+        (
+            "comma list",
+            "api_key=https://h.example.com,model=gpt-4o,max_tokens=5",
+            "api_key=[redacted],model=gpt-4o,max_tokens=5",
+        ),
+        (
+            "query string",
+            "?id_token=https://issuer.example.com&model=gpt-4o&max_tokens=5 rejected",
+            "?id_token=[redacted]&model=gpt-4o&max_tokens=5 rejected",
+        ),
+        (
+            "python repr",
+            "Config(authorization_endpoint=https://auth.example.com), retry=3",
+            "Config(authorization_endpoint=[redacted]), retry=3",
+        ),
+        (
+            "quoted set entry",
+            "{'redirect_token=https://h'} next",
+            "{'redirect_token=[redacted]'} next",
+        ),
+        (
+            "port before a comma",
+            "api_key=https://h.example.com:443,model=m",
+            "api_key=[redacted],model=m",
+        ),
+        (
+            "host holding a comma",
+            "x_token=://cb,s3cr3tpart.example/x",
+            "x_token=[redacted],s3cr3tpart.example/x",
+        ),
+        (
+            "host holding a comma behind a nested key",
+            "api_key=https://x_token=://cb,s3cr3tpart.example/x",
+            "api_key=[redacted],s3cr3tpart.example/x",
+        ),
+    ];
+    for (name, input, expected) in rows {
+        assert_eq!(scrub_upstream_text(input), expected, "{name}");
+    }
+}
+
+/// A name closing an ARN, session-token value or bearer token takes no
+/// value past that span's end, so the quotes and separators after it stay.
+/// One row per fencing span.
+#[test]
+fn a_name_closing_a_span_takes_no_value_past_it() {
+    let session = "A".repeat(20);
+    let rows = [
+        (
+            "arn closed by a credential-named key",
+            r#"{"Resource": "arn:aws:s3:::bucket/session_token=", "Other": "visible"}"#.to_owned(),
+            r#"{"Resource": "[redacted]", "Other": "visible"}"#.to_owned(),
+        ),
+        (
+            "bearer token closed by a credential-named key",
+            r#"Bearer abc123/xyzToken=", "model": "m"}"#.to_owned(),
+            r#"Bearer [redacted]", "model": "m"}"#.to_owned(),
+        ),
+        (
+            "arn closed by the bearer name",
+            "arn:aws:iam::123456789012:role/bearer abc12345 is denied".to_owned(),
+            "[redacted] abc12345 is denied".to_owned(),
+        ),
+        (
+            "session token closed by a credential-named key",
+            format!(r#"{{"h": "x-amz-security-token={session}/api_key=", "model": "m"}}"#),
+            r#"{"h": "x-amz-security-token=[redacted]", "model": "m"}"#.to_owned(),
+        ),
+    ];
+    for (name, input, expected) in &rows {
+        assert_eq!(scrub_upstream_text(input), *expected, "{name}");
     }
 }
 
@@ -1396,6 +1476,30 @@ fn a_long_bare_run_before_equals_is_not_a_key() {
         &format!("{longest}=OPAQUE1"),
         "OPAQUE1",
     );
+}
+
+/// A bare key longer than any judged key is judged by its tail, which holds
+/// its last dotted or hyphenated segment.
+#[test]
+fn a_long_bare_key_is_judged_by_its_last_segment() {
+    let rows = [
+        (
+            "underscore name",
+            format!("{}_api_key=OPAQUE1 next", "a".repeat(130)),
+        ),
+        (
+            "dotted path",
+            format!("{}.access_token=OPAQUE1 next", "seg.".repeat(40)),
+        ),
+        (
+            "hyphenated name",
+            format!("x-{}-password=OPAQUE1 next", "b".repeat(130)),
+        ),
+    ];
+    for (name, input) in &rows {
+        let expected = input.replace("OPAQUE1", "[redacted]");
+        assert_eq!(scrub_upstream_text(input), expected, "{name}");
+    }
 }
 
 #[test]
