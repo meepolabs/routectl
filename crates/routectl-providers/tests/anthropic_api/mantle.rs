@@ -902,26 +902,47 @@ fn custom_tool_req(
     req
 }
 
-/// A custom tool's carried member reaches Mantle, so the walker checks it:
-/// a non-https media URL in one is refused on both the messages and the
-/// count_tokens path, and the upstream is never called.
+/// `req` with its one custom tool's wire `type` set to `type_tag`.
+fn with_tool_type_tag(mut req: ChatRequest, type_tag: &str) -> ChatRequest {
+    if let Some(ToolDef::Custom(tool)) = req.tools.as_mut().and_then(|tools| tools.first_mut()) {
+        tool.type_tag = Some(type_tag.into());
+    }
+    req
+}
+
+/// A custom tool's carried member reaches Mantle, so the walker checks it,
+/// whether the tool omits `type` or names it `custom`: a non-https media URL
+/// in one is refused on both the messages and the count_tokens path, and the
+/// upstream is never called.
 #[tokio::test]
 async fn mantle_lane_refuses_unforwardable_media_urls_in_custom_tool_members() {
-    let req = custom_tool_req(
-        member("meta", url_image_value(&planted("s3"))),
-        json!({"type": "object"}),
-    );
-    let mock_server = media_upstream().await;
-    let provider = mantle_provider_bearer(&mock_server.uri()).await;
+    let s3_member = || {
+        custom_tool_req(
+            member("meta", url_image_value(&planted("s3"))),
+            json!({"type": "object"}),
+        )
+    };
+    let rows = [
+        ("custom tool without type", s3_member()),
+        (
+            "custom tool with type custom",
+            with_tool_type_tag(s3_member(), "custom"),
+        ),
+    ];
 
-    let complete = provider.complete(req.clone()).await.map(|_| ());
-    let count = provider.count_tokens(req).await.map(|_| ());
+    for (row, req) in rows {
+        let mock_server = media_upstream().await;
+        let provider = mantle_provider_bearer(&mock_server.uri()).await;
 
-    let field_at = "`source` at tools[0].meta ";
-    assert_media_refusal(complete, "custom tool member (messages)", field_at);
-    assert_media_refusal(count, "custom tool member (count_tokens)", field_at);
-    let received = mock_server.received_requests().await.unwrap();
-    assert!(received.is_empty(), "no upstream call");
+        let complete = provider.complete(req.clone()).await.map(|_| ());
+        let count = provider.count_tokens(req).await.map(|_| ());
+
+        let field_at = "`source` at tools[0].meta ";
+        assert_media_refusal(complete, &format!("{row} (messages)"), field_at);
+        assert_media_refusal(count, &format!("{row} (count_tokens)"), field_at);
+        let received = mock_server.received_requests().await.unwrap();
+        assert!(received.is_empty(), "{row}: no upstream call");
+    }
 }
 
 /// A request whose one tool is the server tool definition `tool`, which
@@ -933,8 +954,9 @@ fn server_tool_req(tool: Value) -> ChatRequest {
 }
 
 /// Controls for the custom-tool walk on Mantle: an https URL in a carried
-/// member passes, a schema naming an s3 image is a schema, not media, and a
-/// server tool definition is not a custom tool and is not walked.
+/// member passes, a schema naming an s3 image is a schema, not media,
+/// `input_examples` are sample tool arguments, not media, and a server tool
+/// definition is not a custom tool and is not walked.
 #[tokio::test]
 async fn mantle_lane_forwards_https_tool_members_and_unwalked_input_schema() {
     let rows = [
@@ -955,6 +977,16 @@ async fn mantle_lane_forwards_https_tool_members_and_unwalked_input_schema() {
             custom_tool_req(
                 serde_json::Map::new(),
                 json!({"type": "object", "properties": {"image": url_image_value(&planted("s3"))}}),
+            ),
+        ),
+        (
+            "http image_url inside input_examples",
+            custom_tool_req(
+                member(
+                    "input_examples",
+                    json!([{"input": {"image_url": planted("http")}}]),
+                ),
+                json!({"type": "object"}),
             ),
         ),
     ];

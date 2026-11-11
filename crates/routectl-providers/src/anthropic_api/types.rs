@@ -853,6 +853,103 @@ mod tests {
         assert_eq!(back, v);
     }
 
+    /// One block of each variant with every optional typed member set and
+    /// no carried members.
+    fn every_block_with_all_typed_members() -> Vec<(&'static str, ContentBlock)> {
+        let cc = || Some(CacheControl::ephemeral_5m());
+        let none = serde_json::Map::new;
+        vec![
+            (
+                "text",
+                ContentBlock::Text {
+                    text: "t".into(),
+                    cache_control: cc(),
+                    citations: Some(json!([])),
+                    extras: none(),
+                },
+            ),
+            (
+                "image",
+                ContentBlock::Image {
+                    source: json!({"type": "url", "url": "https://example.com/a.png"}),
+                    cache_control: cc(),
+                    extras: none(),
+                },
+            ),
+            (
+                "document",
+                ContentBlock::Document {
+                    source: json!({"type": "text", "data": "d"}),
+                    cache_control: cc(),
+                    title: Some("d".into()),
+                    citations: Some(json!({"enabled": true})),
+                    extras: none(),
+                },
+            ),
+            (
+                "thinking",
+                ContentBlock::Thinking {
+                    thinking: "t".into(),
+                    signature: "s".into(),
+                    cache_control: cc(),
+                    extras: none(),
+                },
+            ),
+            (
+                "redacted_thinking",
+                ContentBlock::RedactedThinking {
+                    data: "d".into(),
+                    cache_control: cc(),
+                    extras: none(),
+                },
+            ),
+            (
+                "tool_use",
+                ContentBlock::ToolUse {
+                    id: "toolu_1".into(),
+                    name: "n".into(),
+                    input: json!({}),
+                    cache_control: cc(),
+                    extras: none(),
+                },
+            ),
+            (
+                "tool_result",
+                ContentBlock::ToolResult {
+                    tool_use_id: "toolu_1".into(),
+                    content: json!("r"),
+                    cache_control: cc(),
+                    is_error: Some(false),
+                    extras: none(),
+                },
+            ),
+            (
+                "other",
+                ContentBlock::Other {
+                    type_tag: "server_tool_use".into(),
+                    cache_control: cc(),
+                    extras: none(),
+                },
+            ),
+        ]
+    }
+
+    #[test]
+    fn wire_keys_equal_the_members_each_block_serializes() {
+        for (row, block) in every_block_with_all_typed_members() {
+            let serialized = serde_json::to_value(&block).unwrap();
+            let written: std::collections::BTreeSet<&str> = serialized
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
+            let reserved: std::collections::BTreeSet<&str> =
+                block.wire_keys().iter().copied().collect();
+            assert_eq!(written, reserved, "{row}");
+        }
+    }
+
     #[test]
     fn anthropic_request_serializes_anthropic_beta_when_non_empty() {
         let req = AnthropicRequest {

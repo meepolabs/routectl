@@ -1283,8 +1283,9 @@ fn withhold_mantle_client_metadata(body: &mut Value, req: &ChatRequest) {
 /// identity, unless it is `https` or `data`. Walks the final body, so a
 /// block copied verbatim and a nested `tool_result` are checked like a
 /// translated one. The only skipped subtrees are a `tool_use` part's
-/// `input` in `messages` and a custom tool's `input_schema`; a tool of any
-/// other `type` is a server tool definition and is not walked.
+/// `input` in `messages` and a custom tool's `input_schema` and
+/// `input_examples`; a tool of any other `type` is a server tool definition
+/// and is not walked.
 #[cfg(feature = "bedrock")]
 fn refuse_unforwardable_mantle_media(id: &str, body: &Value) -> Result<()> {
     use crate::mantle::MediaWalkRoot;
@@ -1311,9 +1312,13 @@ fn refuse_unforwardable_mantle_media(id: &str, body: &Value) -> Result<()> {
     Ok(())
 }
 
+/// Members of a custom tool that hold a schema or sample tool arguments
+/// rather than content the upstream fetches.
+#[cfg(feature = "bedrock")]
+const CUSTOM_TOOL_UNWALKED_MEMBERS: [&str; 2] = ["input_schema", "input_examples"];
+
 /// A wire custom tool (no `type`, or `type: "custom"`) without its
-/// `input_schema`, the one member that holds a schema rather than content.
-/// `None` for any other tool.
+/// [`CUSTOM_TOOL_UNWALKED_MEMBERS`]. `None` for any other tool.
 #[cfg(feature = "bedrock")]
 fn custom_tool_members_outside_schema(tool: &Value) -> Option<Value> {
     let members = tool.as_object()?;
@@ -1324,7 +1329,7 @@ fn custom_tool_members_outside_schema(tool: &Value) -> Option<Value> {
     }
     let walked = members
         .iter()
-        .filter(|(key, _)| key.as_str() != "input_schema")
+        .filter(|(key, _)| !CUSTOM_TOOL_UNWALKED_MEMBERS.contains(&key.as_str()))
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect();
     Some(Value::Object(walked))
