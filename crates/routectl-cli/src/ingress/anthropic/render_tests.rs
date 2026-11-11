@@ -1127,3 +1127,132 @@ fn render_response_leaves_an_empty_encrypted_blob_unwrapped() {
     // Assert
     assert_eq!(data, "", "an empty blob must not become an envelope");
 }
+
+/// A response whose content is a text part and a tool_use part, each
+/// carrying `members`, stamped with `dialect`.
+fn response_with_part_members(
+    dialect: Option<routectl_core::wire_check::IngressDialect>,
+    members: &Value,
+) -> ChatResponse {
+    use routectl_core::{KnownContentPart, Role, UpstreamMeta, schema::Choice};
+    let extras = members.as_object().cloned().unwrap_or_default();
+    ChatResponse {
+        id: "msg_parts".into(),
+        model: "claude-opus-4-7".into(),
+        created: 0,
+        choices: vec![Choice {
+            logprobs: None,
+            index: 0,
+            message: Message {
+                refusal: None,
+                role: Role::Assistant,
+                content: MessageContent::Parts(vec![
+                    ContentPart::Known(KnownContentPart::Text {
+                        text: "looking".into(),
+                        citations: None,
+                        cache_control: None,
+                        extras: extras.clone(),
+                    }),
+                    ContentPart::Known(KnownContentPart::ToolUse {
+                        id: "toolu_1".into(),
+                        name: "lookup".into(),
+                        input: json!({"q": "rust"}),
+                        cache_control: None,
+                        extras,
+                    }),
+                ]),
+                reasoning: None,
+                reasoning_details: vec![],
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+                extras: serde_json::Map::new(),
+            },
+            finish_reason: Some("tool_calls".into()),
+            matched_stop_sequence: None,
+        }],
+        usage: None,
+        routectl_provider: None,
+        extras: Default::default(),
+        upstream_meta: dialect.map(|d| UpstreamMeta::default().with_wire_dialect(d)),
+    }
+}
+
+/// An Anthropic upstream's content block members come back on the same
+/// block, after its typed members.
+#[test]
+fn an_anthropic_upstream_gets_its_content_block_members_back() {
+    // Arrange
+    let resp = response_with_part_members(
+        Some(routectl_core::wire_check::IngressDialect::Anthropic),
+        &json!({"caller": {"type": "direct"}, "estimated_tokens": 12, "note": "caf\u{e9}"}),
+    );
+
+    // Act
+    let v = AnthropicIngress.render_response_value(resp).unwrap();
+
+    // Assert
+    assert_eq!(
+        v["content"],
+        json!([
+            {"type": "text", "text": "looking", "caller": {"type": "direct"},
+             "estimated_tokens": 12, "note": "caf\u{e9}"},
+            {"type": "tool_use", "id": "toolu_1", "name": "lookup", "input": {"q": "rust"},
+             "caller": {"type": "direct"}, "estimated_tokens": 12, "note": "caf\u{e9}"}
+        ])
+    );
+}
+
+/// A carried member named like a typed or managed block member never
+/// reaches the block, and the typed value stands.
+#[test]
+fn a_carried_member_named_like_a_typed_block_member_is_not_rendered() {
+    // Arrange
+    let resp = response_with_part_members(
+        Some(routectl_core::wire_check::IngressDialect::Anthropic),
+        &json!({"type": "forged", "name": "forged", "id": "forged",
+                "cache_control": {"type": "ephemeral"}, "citations": [], "caller": 1}),
+    );
+
+    // Act
+    let v = AnthropicIngress.render_response_value(resp).unwrap();
+
+    // Assert
+    assert_eq!(
+        v["content"],
+        json!([
+            {"type": "text", "text": "looking", "name": "forged", "id": "forged", "caller": 1},
+            {"type": "tool_use", "id": "toolu_1", "name": "lookup", "input": {"q": "rust"},
+             "citations": [], "caller": 1}
+        ])
+    );
+}
+
+/// Members carried from another dialect, or on an unstamped response, stay
+/// off the rendered blocks.
+#[test]
+fn content_block_members_from_another_dialect_or_unstamped_are_not_rendered() {
+    use routectl_core::wire_check::IngressDialect;
+    let rows = [
+        ("unstamped", None),
+        ("chat", Some(IngressDialect::Chat)),
+        ("responses", Some(IngressDialect::Responses)),
+    ];
+    for (row, dialect) in rows {
+        // Arrange
+        let resp = response_with_part_members(dialect, &json!({"caller": {"type": "direct"}}));
+
+        // Act
+        let v = AnthropicIngress.render_response_value(resp).unwrap();
+
+        // Assert
+        assert_eq!(
+            v["content"],
+            json!([
+                {"type": "text", "text": "looking"},
+                {"type": "tool_use", "id": "toolu_1", "name": "lookup", "input": {"q": "rust"}}
+            ]),
+            "{row}"
+        );
+    }
+}

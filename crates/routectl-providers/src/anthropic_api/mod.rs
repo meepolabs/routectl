@@ -399,7 +399,10 @@ impl Provider for AnthropicApiProvider {
             response::reverse_tool_names(&mut chat_resp, &result.tool_reverse);
         }
         chat_resp.routectl_provider = Some(self.cfg.id.clone());
-        chat_resp.upstream_meta = upstream_meta;
+        chat_resp.upstream_meta = match (upstream_meta, chat_resp.upstream_meta.take()) {
+            (Some(head), Some(body)) => Some(head.merge(body)),
+            (head, body) => head.or(body),
+        };
         // Context-management cache write. Extracts (tool_use_id, thinking)
         // pairs from the upstream content blocks and inserts them into the
         // shared thinking cache for re-injection on the next turn. The write

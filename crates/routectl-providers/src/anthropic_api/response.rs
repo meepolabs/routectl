@@ -17,6 +17,8 @@ use std::collections::HashMap;
 use tracing::debug;
 use uuid::Uuid;
 
+use routectl_core::upstream_meta::UpstreamMeta;
+use routectl_core::wire_check::IngressDialect;
 use routectl_core::{
     ChatResponse, Choice, ContentPart, Error, KnownContentPart, Message, MessageContent,
     ReasoningDetail, ReasoningDetailKind, Result, Role, Usage, sanitize_for_log,
@@ -89,20 +91,24 @@ pub(crate) fn walk_content_blocks(
                 detail_index += 1;
             }
             ContentBlock::Text {
-                text, citations, ..
+                text,
+                citations,
+                extras,
+                ..
             } => {
                 text_parts.push(text.clone());
                 parts.push(ContentPart::Known(KnownContentPart::Text {
                     text: text.clone(),
                     citations: citations.clone(),
                     cache_control: None,
-                    extras: serde_json::Map::new(),
+                    extras: extras.clone(),
                 }));
             }
             ContentBlock::ToolUse {
                 id: tool_id,
                 name,
                 input,
+                extras,
                 ..
             } => {
                 // Convert to OpenAI tool_call shape.
@@ -118,13 +124,13 @@ pub(crate) fn walk_content_blocks(
                     name: name.clone(),
                     input: input.clone(),
                     cache_control: None,
-                    extras: serde_json::Map::new(),
+                    extras: extras.clone(),
                 }));
             }
             ContentBlock::ToolResult { .. } => {
                 // Not expected in a response; skip.
             }
-            ContentBlock::Image { source, .. } => {
+            ContentBlock::Image { source, extras, .. } => {
                 debug!(
                     provider = id,
                     "image block in response dropped from flat-text output"
@@ -132,13 +138,14 @@ pub(crate) fn walk_content_blocks(
                 parts.push(ContentPart::Known(KnownContentPart::Image {
                     source: source.clone(),
                     cache_control: None,
-                    extras: serde_json::Map::new(),
+                    extras: extras.clone(),
                 }));
             }
             ContentBlock::Document {
                 source,
                 title,
                 citations,
+                extras,
                 ..
             } => {
                 debug!(
@@ -150,7 +157,7 @@ pub(crate) fn walk_content_blocks(
                     title: title.clone(),
                     citations: citations.clone(),
                     cache_control: None,
-                    extras: serde_json::Map::new(),
+                    extras: extras.clone(),
                 }));
             }
             ContentBlock::Other {
@@ -368,7 +375,7 @@ pub fn normalize(id: &str, raw: Value) -> Result<ChatResponse> {
         usage,
         routectl_provider: None,
         extras: resp.extras,
-        upstream_meta: None,
+        upstream_meta: Some(UpstreamMeta::default().with_wire_dialect(IngressDialect::Anthropic)),
     })
 }
 
@@ -968,3 +975,7 @@ mod tests {
 #[cfg(test)]
 #[path = "response_thinking_tokens_tests.rs"]
 mod thinking_tokens_tests;
+
+#[cfg(test)]
+#[path = "response_part_members_tests.rs"]
+mod part_members_tests;

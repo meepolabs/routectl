@@ -394,14 +394,14 @@ impl<'de> Deserialize<'de> for ContentBlock {
                 text: take_str(obj, "text").map_err(D::Error::custom)?,
                 cache_control,
                 citations: obj.remove("citations"),
-                extras: Map::new(),
+                extras: std::mem::take(obj),
             }),
             "image" => Ok(Self::Image {
                 source: obj
                     .remove("source")
                     .ok_or_else(|| D::Error::custom("image missing source"))?,
                 cache_control,
-                extras: Map::new(),
+                extras: std::mem::take(obj),
             }),
             "document" => {
                 let source = obj
@@ -416,19 +416,19 @@ impl<'de> Deserialize<'de> for ContentBlock {
                     cache_control,
                     title,
                     citations,
-                    extras: Map::new(),
+                    extras: std::mem::take(obj),
                 })
             }
             "thinking" => Ok(Self::Thinking {
                 thinking: take_str(obj, "thinking").map_err(D::Error::custom)?,
                 signature: take_str(obj, "signature").map_err(D::Error::custom)?,
                 cache_control,
-                extras: Map::new(),
+                extras: std::mem::take(obj),
             }),
             "redacted_thinking" => Ok(Self::RedactedThinking {
                 data: take_str(obj, "data").map_err(D::Error::custom)?,
                 cache_control,
-                extras: Map::new(),
+                extras: std::mem::take(obj),
             }),
             "tool_use" => Ok(Self::ToolUse {
                 id: take_str(obj, "id").map_err(D::Error::custom)?,
@@ -437,7 +437,7 @@ impl<'de> Deserialize<'de> for ContentBlock {
                     .remove("input")
                     .unwrap_or_else(|| Value::Object(Map::new())),
                 cache_control,
-                extras: Map::new(),
+                extras: std::mem::take(obj),
             }),
             "tool_result" => {
                 let tool_use_id = take_str(obj, "tool_use_id").map_err(D::Error::custom)?;
@@ -448,7 +448,7 @@ impl<'de> Deserialize<'de> for ContentBlock {
                     content,
                     cache_control,
                     is_error,
-                    extras: Map::new(),
+                    extras: std::mem::take(obj),
                 })
             }
             other => Ok(Self::Other {

@@ -1,7 +1,7 @@
 use serde_json::{Map, Value, json};
 
-use routectl_core::wire_check::{EditKind, EditSite};
-use routectl_core::{ChatResponse, ContentPart, Message, MessageContent};
+use routectl_core::wire_check::{EditKind, EditSite, IngressDialect};
+use routectl_core::{ChatResponse, ContentPart, Message, MessageContent, renders_unknowns};
 
 use crate::ingress::ResponseEdits;
 
@@ -22,10 +22,11 @@ pub(super) fn render_messages_response(resp: ChatResponse, edits: &mut ResponseE
     body.insert("role".into(), Value::String("assistant".into()));
     body.insert("model".into(), Value::String(resp.model));
 
+    let carries_unknowns = renders_unknowns(IngressDialect::Anthropic, resp.upstream_meta.as_ref());
     let content = resp
         .choices
         .first()
-        .map(|c| build_content_array(&c.message))
+        .map(|c| build_content_array(&c.message, carries_unknowns))
         .unwrap_or_default();
     body.insert("content".into(), Value::Array(content));
 
@@ -122,7 +123,9 @@ pub(super) fn render_messages_response(resp: ChatResponse, edits: &mut ResponseE
 /// Build the Anthropic `content[]` array from a canonical assistant
 /// `Message`. Order: thinking blocks (in detail-index order) first,
 /// then tool_use blocks (one per tool_call), then any text content.
-fn build_content_array(msg: &Message) -> Vec<Value> {
+/// `carries_unknowns` adds each typed part's carried members after its
+/// typed members.
+fn build_content_array(msg: &Message, carries_unknowns: bool) -> Vec<Value> {
     let mut blocks: Vec<Value> = Vec::new();
 
     // Thinking + redacted_thinking blocks from reasoning_details.
@@ -271,7 +274,11 @@ fn build_content_array(msg: &Message) -> Vec<Value> {
         MessageContent::Parts(parts) => {
             for p in parts {
                 if let Ok(v) = serde_json::to_value(p) {
-                    blocks.push(v);
+                    blocks.push(if carries_unknowns {
+                        with_carried_members(v, p)
+                    } else {
+                        v
+                    });
                 }
             }
         }
@@ -279,6 +286,18 @@ fn build_content_array(msg: &Message) -> Vec<Value> {
     }
 
     blocks
+}
+
+/// `block` with each member `part` carries added where `block` has no
+/// member of that name. A reserved name never reaches the block, even when
+/// its typed value is absent.
+fn with_carried_members(mut block: Value, part: &ContentPart) -> Value {
+    if let (ContentPart::Known(known), Value::Object(members)) = (part, &mut block) {
+        for (key, value) in known.forwardable_extras() {
+            members.entry(key.clone()).or_insert_with(|| value.clone());
+        }
+    }
+    block
 }
 
 /// Build an Anthropic `thinking` block, omitting the `signature` key

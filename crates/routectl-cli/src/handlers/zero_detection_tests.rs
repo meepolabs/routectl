@@ -265,6 +265,20 @@ fn anthropic_stream() -> ResponseTemplate {
     ))
 }
 
+/// A complete Anthropic answer whose tool_use block carries members the
+/// wire types do not model, as Claude Code's upstream sends them.
+fn anthropic_complete_with_part_members() -> ResponseTemplate {
+    ResponseTemplate::new(200).set_body_json(json!({
+        "id": "msg_1", "type": "message", "role": "assistant", "model": UPSTREAM,
+        "content": [{"type": "text", "text": "looking"},
+                    {"type": "tool_use", "id": "toolu_1", "name": "lookup",
+                     "input": {"q": "rust"}, "caller": {"type": "direct"},
+                     "estimated_tokens": 12}],
+        "stop_reason": "tool_use", "stop_sequence": null,
+        "usage": {"input_tokens": 3, "output_tokens": 1}
+    }))
+}
+
 fn anthropic_complete_without_stop_sequence() -> ResponseTemplate {
     ResponseTemplate::new(200).set_body_json(json!({
         "id": "msg_1", "type": "message", "role": "assistant", "model": UPSTREAM,
@@ -1247,6 +1261,13 @@ fn anthropic_cases() -> Vec<Case> {
             anthropic_provider,
         ),
         case(
+            "anthropic/response-part-members",
+            Ingress::Anthropic,
+            json!({"model": ALIAS, "max_tokens": 16, "messages": hi}),
+            anthropic_complete_with_part_members(),
+            anthropic_provider,
+        ),
+        case(
             "anthropic/stream",
             Ingress::Anthropic,
             json!({"model": ALIAS, "max_tokens": 16, "stream": true, "messages": hi}),
@@ -1349,6 +1370,13 @@ fn bedrock_invoke_cases() -> Vec<Case> {
             "bedrock-invoke/sub-level-unknowns",
             sub_level_unknowns_body(16),
         ),
+        Case {
+            upstream: anthropic_complete_with_part_members(),
+            ..invoke(
+                "bedrock-invoke/response-part-members",
+                json!({"model": ALIAS, "max_tokens": 16, "messages": hi}),
+            )
+        },
         Case {
             upstream: invoke_stream(),
             ..invoke(
@@ -2044,5 +2072,62 @@ async fn only_a_responses_client_receives_responses_output_item_members() {
         for member in ["final_answer", "turn-sentinel", "fc_1"] {
             assert_eq!(text.contains(member), expected, "{row}: {member}: {text}");
         }
+    }
+}
+
+/// A client of another dialect served by an Anthropic upstream never
+/// receives the members a response content block carries. Positive
+/// control: the same upstream answer gives an Anthropic client both.
+#[tokio::test]
+async fn only_an_anthropic_client_receives_response_content_block_members() {
+    let hi = json!([{"role": "user", "content": "hi"}]);
+    let input = json!([{"type": "message", "role": "user",
+                        "content": [{"type": "input_text", "text": "hi"}]}]);
+    // (row, ingress, request body, members expected)
+    let rows = [
+        (
+            "chat client",
+            Ingress::Chat,
+            json!({"model": ALIAS, "messages": hi}),
+            false,
+        ),
+        (
+            "responses client",
+            Ingress::Responses,
+            json!({"model": ALIAS, "input": input}),
+            false,
+        ),
+        (
+            "anthropic client",
+            Ingress::Anthropic,
+            json!({"model": ALIAS, "max_tokens": 16, "messages": hi}),
+            true,
+        ),
+    ];
+    for (row, ingress, body, expected) in rows {
+        // Arrange
+        let probe = case(
+            row,
+            ingress,
+            body,
+            anthropic_complete_with_part_members(),
+            anthropic_provider,
+        );
+
+        // Act
+        let (_swap, client) = serve(&probe).await;
+
+        // Assert
+        let text = String::from_utf8_lossy(&client);
+        assert!(
+            text.contains("toolu_1"),
+            "{row}: tool call rendered: {text}"
+        );
+        assert_eq!(text.contains("caller"), expected, "{row}: caller: {text}");
+        assert_eq!(
+            text.contains("estimated_tokens"),
+            expected,
+            "{row}: estimated_tokens: {text}"
+        );
     }
 }

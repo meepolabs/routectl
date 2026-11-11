@@ -58,10 +58,15 @@ async fn complete_populates_upstream_meta_from_unified_headers() {
     assert_eq!(quota.utilization.as_deref(), Some("0.42"));
     assert_eq!(quota.reset.as_deref(), Some("2026-06-09T12:00:00Z"));
     assert!(!quota.is_overage());
+    assert_eq!(
+        meta.wire_dialect,
+        Some(routectl_core::wire_check::IngressDialect::Anthropic),
+        "the head quota joins the body's dialect stamp instead of replacing it"
+    );
 }
 
 #[tokio::test]
-async fn complete_upstream_meta_is_none_without_unified_headers() {
+async fn complete_carries_no_quota_family_without_unified_headers() {
     // Arrange: a normal 200 with no unified family on the response.
     let mock_server = MockServer::start().await;
     let body = make_response_body();
@@ -77,9 +82,12 @@ async fn complete_upstream_meta_is_none_without_unified_headers() {
     let resp = provider.complete(req).await.unwrap();
 
     // Assert
+    let meta = resp
+        .upstream_meta
+        .expect("a parsed response carries its dialect");
     assert!(
-        resp.upstream_meta.is_none(),
-        "no unified family means no upstream_meta carrier"
+        !meta.has_quota_family(),
+        "no unified family means no quota on the carrier"
     );
 }
 
