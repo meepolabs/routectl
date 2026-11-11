@@ -17,9 +17,8 @@ use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use routectl_core::config_dir::config_dir_from;
-
 const CONFIG_FILE: &str = "config.toml";
+const APP_FOLDER: &str = "routectl";
 
 /// How doctor names the old Windows folder without printing a home path.
 pub const LEGACY_APPDATA_DISPLAY: &str = "%APPDATA%\\routectl";
@@ -35,40 +34,49 @@ pub struct LegacyConfigDir {
     pub display: &'static str,
 }
 
-/// `<base>/routectl` when `base` is absolute, by the shared folder rule's own
-/// test, so an empty or relative base counts as unset here exactly as it does
-/// there.
-fn app_folder_under(base: &Path) -> Option<PathBuf> {
-    config_dir_from(Some(base.as_os_str()), None)
+/// `<base>/<under..>/routectl` when `base` is an absolute path; an empty or
+/// relative base counts as unset.
+fn app_folder_under(base: Option<&OsStr>, under: &[&str]) -> Option<PathBuf> {
+    let base = Path::new(base?);
+    if !base.is_absolute() {
+        return None;
+    }
+    let mut folder = base.to_path_buf();
+    folder.extend(under);
+    folder.push(APP_FOLDER);
+    Some(folder)
 }
 
 /// Every old-folder candidate for these variable values, with no environment
 /// access, in checking order: `<appdata>/routectl` when `appdata` (`APPDATA`)
 /// is an absolute path, then `<home>/Library/Application Support/routectl`
-/// when `home` (`HOME`) is. An empty or relative value counts as unset.
-pub fn legacy_config_dirs(home: Option<&OsStr>, appdata: Option<&OsStr>) -> Vec<LegacyConfigDir> {
-    let appdata = appdata
-        .and_then(|appdata| app_folder_under(Path::new(appdata)))
-        .map(|path| LegacyConfigDir {
+/// when `home` (`HOME`) is. An empty or relative value counts as unset. A
+/// folder both variables name is listed once, under the first.
+pub fn legacy_config_dirs(appdata: Option<&OsStr>, home: Option<&OsStr>) -> Vec<LegacyConfigDir> {
+    let candidates = [
+        app_folder_under(appdata, &[]).map(|path| LegacyConfigDir {
             path,
             display: LEGACY_APPDATA_DISPLAY,
-        });
-    let library = home
-        .and_then(|home| {
-            app_folder_under(&Path::new(home).join("Library").join("Application Support"))
-        })
-        .map(|path| LegacyConfigDir {
+        }),
+        app_folder_under(home, &["Library", "Application Support"]).map(|path| LegacyConfigDir {
             path,
             display: LEGACY_LIBRARY_DISPLAY,
-        });
-    appdata.into_iter().chain(library).collect()
+        }),
+    ];
+    let mut dirs: Vec<LegacyConfigDir> = Vec::with_capacity(candidates.len());
+    for candidate in candidates.into_iter().flatten() {
+        if !dirs.iter().any(|dir| dir.path == candidate.path) {
+            dirs.push(candidate);
+        }
+    }
+    dirs
 }
 
-/// [`legacy_config_dirs`] over the process's `HOME` and `APPDATA`.
+/// [`legacy_config_dirs`] over the process's `APPDATA` and `HOME`.
 pub fn legacy_config_dirs_from_env() -> Vec<LegacyConfigDir> {
     legacy_config_dirs(
-        std::env::var_os("HOME").as_deref(),
         std::env::var_os("APPDATA").as_deref(),
+        std::env::var_os("HOME").as_deref(),
     )
 }
 
@@ -96,6 +104,11 @@ pub enum ConfigFolderError {
 }
 
 impl fmt::Display for ConfigFolderError {
+    #[expect(
+        clippy::unnecessary_debug_formatting,
+        reason = "the paths come from environment variables; Debug escapes control \
+                  characters and keeps non-ASCII names copyable"
+    )]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Stranded { old, new } => {
@@ -103,20 +116,15 @@ impl fmt::Display for ConfigFolderError {
                 let new_dir = new.parent().unwrap_or(new);
                 write!(
                     f,
-                    "the config is in the old folder: found {old}, but routectl now reads \
-                     {new}, which does not exist. routectl moved nothing. Move the files in \
-                     {old_dir} to {new_dir}, or pass --config \"{old}\"",
-                    old = old.display(),
-                    new = new.display(),
-                    old_dir = old_dir.display(),
-                    new_dir = new_dir.display(),
+                    "the config is in the old folder: found {old:?}, but routectl now reads \
+                     {new:?}, which does not exist. routectl moved nothing. Move the files in \
+                     {old_dir:?} to {new_dir:?}, or pass --config {old:?}",
                 )
             }
             Self::Inspect { path, source } => write!(
                 f,
-                "could not check {path} while looking for a config left in the old folder: \
+                "could not check {path:?} while looking for a config left in the old folder: \
                  {source}. routectl moved nothing. Fix the path, or pass --config",
-                path = path.display(),
             ),
             Self::NoFolder => f.write_str(
                 "could not resolve an absolute config folder; set HOME or pass --config",
@@ -134,12 +142,18 @@ impl std::error::Error for ConfigFolderError {
     }
 }
 
+/// Whether anything is at `path`, the path itself rather than what it links
+/// to: a link whose target is missing is still something the operator put
+/// there, so it is never read as absent.
 fn exists(path: &Path) -> Result<bool, ConfigFolderError> {
-    path.try_exists()
-        .map_err(|source| ConfigFolderError::Inspect {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(source) => Err(ConfigFolderError::Inspect {
             path: path.to_path_buf(),
             source,
-        })
+        }),
+    }
 }
 
 /// Refuse to run when the default config `new_cfg` does not exist and one

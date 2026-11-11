@@ -36,13 +36,13 @@ fn entries(names: &[&str], more: usize) -> LegacyFolder {
 }
 
 fn library_folder(home: &Path) -> LegacyConfigDir {
-    let mut dirs = legacy_config_dirs(Some(home.as_os_str()), None);
+    let mut dirs = legacy_config_dirs(None, Some(home.as_os_str()));
     assert_eq!(dirs.len(), 1, "home alone names one folder: {dirs:?}");
     dirs.remove(0)
 }
 
 fn appdata_folder(appdata: &Path) -> LegacyConfigDir {
-    let mut dirs = legacy_config_dirs(None, Some(appdata.as_os_str()));
+    let mut dirs = legacy_config_dirs(Some(appdata.as_os_str()), None);
     assert_eq!(dirs.len(), 1, "appdata alone names one folder: {dirs:?}");
     dirs.remove(0)
 }

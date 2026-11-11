@@ -981,7 +981,7 @@ async fn handler_lists_the_old_folders_the_state_carries() {
     )
     .unwrap();
     let appdata = dir.path().join("ad");
-    let legacy_dirs = crate::config_folder::legacy_config_dirs(None, Some(appdata.as_os_str()));
+    let legacy_dirs = crate::config_folder::legacy_config_dirs(Some(appdata.as_os_str()), None);
     std::fs::create_dir_all(appdata.join("routectl")).unwrap();
     std::fs::write(appdata.join("routectl").join("usage.db"), b"x").unwrap();
     let router = Router::new(Arc::new(Config::default()));

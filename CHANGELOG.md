@@ -1045,6 +1045,8 @@ list with more narrative.
 
 - **Owner-only secret and credential writes no longer try to flush the parent directory off unix.** The atomic writer behind OAuth credentials, captured secrets, the installation id and the prices table runs its post-rename directory fsync only on unix; on Windows a directory opened read-only cannot be flushed, so a strict write failed after the file was already in place. Unix durability and error behavior are unchanged.
 
+- **The old-folder refusal prints paths escaped and checks each folder once.** The refusal and its "could not check" variant print each path quoted, with control characters escaped and non-ASCII names kept as they are. When `APPDATA` names the same folder as `$HOME/Library/Application Support`, that folder is checked and reported once. A link at the new config path whose target is missing counts as present, so it no longer reports the old folder as stranded.
+
 ### Security
 
 - **The fixture scrub gate (`scripts/scrub-fixture.sh --check`) catches more credential and task-id shapes.** A vendor key after a percent-encoded boundary (`%22`, `%3D`, `%20`) is now refused like one after a JSON escape; OpenAI keys carrying the `T3BlbkFJ` infix and `sk-None-` keys are refused as `provider-key`; a vendor `req_` id under a JSON `request_id` key is refused as the new `upstream-request-id` class in raw, JSON-escaped, pretty-printed, percent-encoded and percent-encoded JSON-escaped bodies, while the `request-id` response header and the uuid `request_id` in `meta.json` stay accepted; and the scratch task-id class matches case-insensitively, still accepting all-hex slugs.

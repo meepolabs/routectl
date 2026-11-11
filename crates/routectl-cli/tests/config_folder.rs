@@ -515,7 +515,9 @@ impl Drop for Daemon {
 }
 
 impl Daemon {
-    fn await_serving(&mut self) {
+    /// Wait for `/health` to answer. `Err` carries the child's stderr when it
+    /// exited during startup.
+    fn await_serving(&mut self) -> Result<(), String> {
         let until = Instant::now() + READY_DEADLINE;
         while Instant::now() < until {
             if let Some(status) = self.child.try_wait().expect("poll child") {
@@ -523,15 +525,47 @@ impl Daemon {
                 if let Some(mut pipe) = self.child.stderr.take() {
                     let _ = pipe.read_to_string(&mut stderr);
                 }
-                panic!("the daemon exited during startup with {status}: {stderr}");
+                return Err(format!("exited during startup with {status}: {stderr}"));
             }
             if matches!(try_get(self.port, "/health"), Some((200, _))) {
-                return;
+                return Ok(());
             }
             std::thread::sleep(Duration::from_millis(20));
         }
         panic!("the daemon never began serving on port {}", self.port);
     }
+
+    /// Start `serve` from `command(port)` on a port that was free a moment
+    /// ago. The port is released before the child binds it, so another
+    /// process can take it in between; only that collision is retried, with
+    /// a fresh port, and any other startup failure fails the test.
+    fn serving_on_a_free_port(command: impl Fn(u16) -> Command) -> Self {
+        let mut collisions = Vec::new();
+        for _ in 0..BIND_ATTEMPTS {
+            let port = free_port();
+            let child = command(port)
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("spawn routectl serve");
+            let mut daemon = Self { child, port };
+            match daemon.await_serving() {
+                Ok(()) => return daemon,
+                Err(why) if is_bind_collision(&why) => collisions.push(why),
+                Err(why) => panic!("the daemon {why}"),
+            }
+        }
+        panic!("every port collided: {collisions:?}");
+    }
+}
+
+/// How many fresh ports [`Daemon::serving_on_a_free_port`] tries.
+const BIND_ATTEMPTS: usize = 5;
+
+/// Whether a startup failure is the listener's port being taken: the unix
+/// `EADDRINUSE` text, or the Windows `WSAEADDRINUSE` code.
+fn is_bind_collision(stderr: &str) -> bool {
+    stderr.contains("Address already in use") || stderr.contains("os error 10048")
 }
 
 /// One HTTP/1.0 GET over a plain socket: `(status, body)`, or `None` when the
@@ -550,7 +584,8 @@ fn try_get(port: u16, path: &str) -> Option<(u16, String)> {
     Some((status, body))
 }
 
-/// A loopback port the OS handed out as free a moment ago.
+/// A loopback port the OS handed out as free a moment ago; see
+/// [`Daemon::serving_on_a_free_port`] for the window this leaves.
 fn free_port() -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
     listener.local_addr().expect("bound address").port()
@@ -565,25 +600,21 @@ fn served_doctor_names_a_file_left_in_the_appdata_folder() {
     let appdata_dir = home.appdata().join("routectl");
     std::fs::create_dir_all(&appdata_dir).unwrap();
     std::fs::write(appdata_dir.join("usage.db"), b"x").unwrap();
-    let port = free_port();
-    let child = home
-        .command(&[
+    let daemon = Daemon::serving_on_a_free_port(|port| {
+        let mut command = home.command(&[
             "--config",
             home.new_config().to_str().unwrap(),
             "serve",
             "--port",
             &port.to_string(),
-        ])
-        .env("APPDATA", home.appdata())
-        .env("RUST_LOG", "error")
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn routectl serve");
-    let mut daemon = Daemon { child, port };
-    daemon.await_serving();
+        ]);
+        command
+            .env("APPDATA", home.appdata())
+            .env("RUST_LOG", "error");
+        command
+    });
 
-    let (status, body) = try_get(port, "/status/doctor").expect("/status/doctor answers");
+    let (status, body) = try_get(daemon.port, "/status/doctor").expect("/status/doctor answers");
 
     assert_eq!(status, 200, "{body}");
     let panel: Value = serde_json::from_str(&body).expect("doctor panel is JSON");
