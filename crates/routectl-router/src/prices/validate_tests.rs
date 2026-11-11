@@ -1,10 +1,14 @@
 //! The canonical parser: schema version, every bound, price admission, the
 //! date and what a table renders.
 
+use std::collections::BTreeMap;
+
 use serde_json::{Value, json};
 
 use super::prices_test_support::{bytes, one_provider, priced_model, table};
-use super::validate::{MAX_MODEL_ID_BYTES, MAX_PROVIDER_ID_BYTES, MAX_ROWS};
+use super::validate::{
+    MAX_CACHE_WRITE_LIFETIMES, MAX_MODEL_ID_BYTES, MAX_PROVIDER_ID_BYTES, MAX_ROWS,
+};
 use super::*;
 
 fn parse(value: &Value) -> Result<PriceTable, PriceTableError> {
@@ -488,4 +492,266 @@ fn canonical_api_host_drops_only_the_scheme_default_port() {
             "{name}: the written form selects the same provider"
         );
     }
+}
+
+/// One `acme` row `m` beside a priced anchor, so a row with no admitted
+/// price never empties the table.
+fn row_table(row: Value) -> Value {
+    one_provider(json!([priced_model("anchor"), row]))
+}
+
+type Rates = Result<BTreeMap<u32, f64>, PriceTableError>;
+
+fn cache_write_rates(doc: &Value) -> Rates {
+    let table = parse(doc)?;
+    Ok(acme_prices(&table, "m")
+        .expect("row kept")
+        .cache_write_rates())
+}
+
+#[test]
+fn a_cache_write_object_prices_its_lifetimes_beside_the_legacy_keys() {
+    let rows: [(&str, Value, Rates); 7] = [
+        (
+            "a 1800 second lifetime alone",
+            json!({ "id": "m", "cache_write": { "1800": 2.0 } }),
+            Ok(BTreeMap::from([(1800, 2.0)])),
+        ),
+        (
+            "a 300 second lifetime in the object alone",
+            json!({ "id": "m", "cache_write": { "300": 1.25 } }),
+            Ok(BTreeMap::from([(300, 1.25)])),
+        ),
+        (
+            "legacy keys and the object agree",
+            json!({ "id": "m", "cache_write_5m": 1.25, "cache_write_1h": 2.0,
+                    "cache_write": { "300": 1.25, "3600": 2.0, "1800": 1.5 } }),
+            Ok(BTreeMap::from([(300, 1.25), (1800, 1.5), (3600, 2.0)])),
+        ),
+        (
+            "the 5-minute legacy key disagrees with the object",
+            json!({ "id": "m", "cache_write_5m": 1.25, "cache_write": { "300": 1.5 } }),
+            Err(PriceTableError::CacheWriteAliasConflict),
+        ),
+        (
+            "the 1-hour legacy key disagrees with the object",
+            json!({ "id": "m", "cache_write_1h": 2.0, "cache_write": { "3600": 2.5 } }),
+            Err(PriceTableError::CacheWriteAliasConflict),
+        ),
+        (
+            "an out-of-range object price is unknown",
+            json!({ "id": "m", "input": 1.0,
+                    "cache_write": { "1800": -1.0, "7200": 20000.0, "60": 0.0 } }),
+            Ok(BTreeMap::from([(60, 0.0)])),
+        ),
+        (
+            "an empty object prices nothing",
+            json!({ "id": "m", "input": 1.0, "cache_write": {} }),
+            Ok(BTreeMap::new()),
+        ),
+    ];
+    for (name, row, expected) in rows {
+        assert_eq!(cache_write_rates(&row_table(row)), expected, "{name}");
+    }
+}
+
+/// The 300 and 3600 second lifetimes land in their legacy fields whichever
+/// spelling priced them, so a table compares equal across spellings.
+#[test]
+fn an_object_price_for_a_legacy_lifetime_fills_the_legacy_field() {
+    let parsed = parse(&row_table(
+        json!({ "id": "m", "cache_write": { "300": 1.25, "3600": 2.0 } }),
+    ))
+    .expect("valid");
+
+    let prices = acme_prices(&parsed, "m").expect("row");
+
+    assert_eq!(prices.cache_write_5m_per_mtok, Some(1.25));
+    assert_eq!(prices.cache_write_1h_per_mtok, Some(2.0));
+    assert_eq!(prices.cache_write_per_mtok, None);
+}
+
+#[test]
+fn a_cache_write_key_that_is_not_canonical_decimal_seconds_is_unknown() {
+    let rows = [
+        ("zero", "0"),
+        ("negative", "-5"),
+        ("fraction", "1.5"),
+        ("duration grammar", "5m"),
+        ("above u32", "4294967296"),
+        ("leading zero", "0300"),
+        ("plus sign", "+30"),
+        ("empty", ""),
+        ("padded", " 30"),
+    ];
+    let control = cache_write_rates(&row_table(
+        json!({ "id": "m", "input": 1.0, "cache_write": { "4294967295": 3.0 } }),
+    ));
+    assert_eq!(
+        control,
+        Ok(BTreeMap::from([(u32::MAX, 3.0)])),
+        "control: the largest u32 key prices its lifetime"
+    );
+    for (name, key) in rows {
+        let doc = row_table(json!({ "id": "m", "input": 1.0, "cache_write": { key: 3.0 } }));
+        assert_eq!(cache_write_rates(&doc), Ok(BTreeMap::new()), "{name}");
+    }
+}
+
+fn cache_write_entries(count: usize, key: impl Fn(usize) -> String) -> Value {
+    Value::Object((1..=count).map(|i| (key(i), json!(1.0))).collect())
+}
+
+#[test]
+fn a_cache_write_object_over_the_entry_cap_refuses_the_table() {
+    let at_cap = cache_write_entries(MAX_CACHE_WRITE_LIFETIMES, |i| i.to_string());
+    let rates = cache_write_rates(&row_table(json!({ "id": "m", "cache_write": at_cap })))
+        .expect("at the cap");
+    assert_eq!(rates.len(), MAX_CACHE_WRITE_LIFETIMES);
+
+    let rows = [
+        (
+            "valid keys",
+            cache_write_entries(MAX_CACHE_WRITE_LIFETIMES + 1, |i| i.to_string()),
+        ),
+        (
+            "keys that read as unknown",
+            cache_write_entries(MAX_CACHE_WRITE_LIFETIMES + 1, |i| format!("{i}m")),
+        ),
+        (
+            "far over the cap",
+            cache_write_entries(MAX_CACHE_WRITE_LIFETIMES * 64, |i| i.to_string()),
+        ),
+    ];
+    for (name, entries) in rows {
+        let doc = row_table(json!({ "id": "m", "input": 1.0, "cache_write": entries }));
+        assert_eq!(
+            parse(&doc).err(),
+            Some(PriceTableError::TooManyCacheWriteLifetimes {
+                limit: MAX_CACHE_WRITE_LIFETIMES
+            }),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn a_repeated_cache_write_key_fails_closed() {
+    let doc = br#"{"schema_version":1,"generated_at":"2026-11-01","providers":[{"id":"acme",
+        "models":[{"id":"m","cache_write":{"1800":1.0,"1800":2.0}}]}]}"#;
+
+    assert!(matches!(
+        parse_and_validate(doc),
+        Err(PriceTableError::Syntax { .. })
+    ));
+}
+
+#[test]
+fn canonical_json_writes_legacy_keys_and_only_other_lifetimes_in_the_object() {
+    let parsed = parse(&row_table(json!({
+        "id": "m", "input": 1.0,
+        "cache_write": { "300": 1.25, "3600": 2.0, "1800": 1.5 },
+    })))
+    .expect("valid");
+
+    let written = parsed.to_canonical_json().expect("serializes");
+    let doc: Value = serde_json::from_slice(&written).expect("json");
+    let row = &doc["providers"][0]["models"][1];
+
+    assert_eq!(row["id"], "m");
+    assert_eq!(row["cache_write_5m"], 1.25);
+    assert_eq!(row["cache_write_1h"], 2.0);
+    assert_eq!(row["cache_write"], json!({ "1800": 1.5 }));
+    assert!(
+        doc["providers"][0]["models"][0]
+            .get("cache_write")
+            .is_none(),
+        "a row with no other lifetime writes no object"
+    );
+    assert_eq!(parse_and_validate(&written).expect("reparses"), parsed);
+}
+
+/// The table as the base release reads it: derived `Deserialize` on the
+/// model row, unknown fields ignored at every level. Kept frozen so a newer
+/// writer's output is checked against what an installed older binary parses.
+#[derive(serde::Deserialize)]
+struct FrozenTable {
+    schema_version: u64,
+    providers: Vec<FrozenProvider>,
+}
+
+#[derive(serde::Deserialize)]
+struct FrozenProvider {
+    models: Vec<FrozenRawModel>,
+}
+
+#[derive(serde::Deserialize)]
+struct FrozenRawModel {
+    id: String,
+    #[serde(default)]
+    input: Option<f64>,
+    #[serde(default)]
+    output: Option<f64>,
+    #[serde(default)]
+    cache_read: Option<f64>,
+    #[serde(default)]
+    cache_write_5m: Option<f64>,
+    #[serde(default)]
+    cache_write_1h: Option<f64>,
+}
+
+#[test]
+fn written_bytes_parse_under_the_frozen_base_model_row() {
+    let parsed = parse(&row_table(json!({
+        "id": "m", "input": 1.0, "output": 2.0, "cache_read": 0.1,
+        "cache_write_5m": 1.25, "cache_write_1h": 2.0,
+        "cache_write": { "1800": 1.5 },
+    })))
+    .expect("valid");
+    let written = parsed.to_canonical_json().expect("serializes");
+    assert!(
+        String::from_utf8_lossy(&written).contains("\"cache_write\": {"),
+        "positive control: the written file carries the new object"
+    );
+
+    let old: FrozenTable = serde_json::from_slice(&written).expect("an older reader parses it");
+
+    assert_eq!(old.schema_version, 1);
+    let row = old.providers[0]
+        .models
+        .iter()
+        .find(|row| row.id == "m")
+        .expect("row");
+    assert_eq!(
+        (row.input, row.output, row.cache_read),
+        (Some(1.0), Some(2.0), Some(0.1))
+    );
+    assert_eq!(
+        (row.cache_write_5m, row.cache_write_1h),
+        (Some(1.25), Some(2.0))
+    );
+}
+
+#[test]
+fn an_old_format_file_parses_and_writes_back_unchanged() {
+    let old = parse(&one_provider(json!([{
+        "id": "m", "input": 1.5, "output": 3.0, "cache_read": 0.15,
+        "cache_write_5m": 1.875, "cache_write_1h": 3.0
+    }])))
+    .expect("valid")
+    .to_canonical_json()
+    .expect("serializes");
+    assert!(
+        !String::from_utf8_lossy(&old).contains("\"cache_write\""),
+        "the fixture is in the old format"
+    );
+
+    let reparsed = parse_and_validate(&old).expect("old format parses");
+
+    assert_eq!(reparsed.to_canonical_json().expect("serializes"), old);
+    let prices = acme_prices(&reparsed, "m").expect("row");
+    assert_eq!(
+        prices.cache_write_rates(),
+        BTreeMap::from([(300, 1.875), (3600, 3.0)])
+    );
 }

@@ -3341,6 +3341,16 @@ routectl prices refresh --from https://mirror.example/api.json
   model stays unknown and the id is never printed), and a provider `api`
   URL that is not a usable http(s) URL leaves the provider reachable only
   through the first-party fallback.
+- Cache-write prices are kept per cache lifetime. The 5-minute and 1-hour
+  prices are written as `cache_write_5m` and `cache_write_1h`, so an older
+  routectl still reads them; any other lifetime goes in a `cache_write`
+  object keyed by seconds (`"cache_write": {"1800": 1.5}`). A key that is
+  not a positive whole number of seconds prices nothing. A row whose
+  `cache_write` object holds more than 16 entries, or prices the 5-minute
+  or 1-hour lifetime differently from its `cache_write_5m` /
+  `cache_write_1h` key, refuses the whole table; a running daemon keeps the
+  table it already holds and logs one WARN. The models.dev `cache_write`
+  price is the 5-minute price.
 - The command prints the model and provider counts and the table date,
   and how many source rows were skipped when any were.
   The fetched URL is logged at INFO without userinfo, query or fragment.

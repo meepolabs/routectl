@@ -579,8 +579,7 @@ fn a_renamed_away_provider_prices_through_its_persisted_kind() {
 }
 
 /// `table` with `rate` for the cache-write lifetime `duration` added to
-/// every row pricing `upstream`. The canonical file format has no spelling
-/// for an arbitrary lifetime, so the row is edited after parsing.
+/// every row pricing `upstream`, edited after parsing.
 fn with_table_cache_write(
     mut table: PriceTable,
     upstream: &str,
@@ -714,4 +713,22 @@ fn the_derived_1h_write_lands_at_3600_unless_a_generic_1h_key_prices_it() {
         assert_eq!(got, Some(expected), "{name}");
         assert_eq!(pricing.cache_write_1h_per_mtok, Some(expected.0), "{name}");
     }
+}
+
+/// A refreshed table row's `cache_write` object reaches the effective price
+/// through parsing and validation, sourced `refreshed`, when no config
+/// prices that lifetime.
+#[test]
+fn a_refreshed_table_lifetime_from_the_file_resolves_as_refreshed() {
+    let refreshed = parse_and_validate(&bytes(&table(json!([
+        { "id": "anthropic", "models": [
+            { "id": UPSTREAM, "input": 3.0, "cache_write": { "1800": 4.5 } },
+        ] },
+    ]))))
+    .expect("table parses");
+
+    let (pricing, sources) = resolve(&config(), Some(&refreshed), None).expect("priced");
+
+    assert_eq!(pricing.cache_write_rates().get(&1800), Some(&4.5));
+    assert_eq!(sources.cache_write_at(1800), PriceSource::Refreshed);
 }

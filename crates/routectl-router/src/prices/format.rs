@@ -3,10 +3,13 @@
 
 use std::fmt;
 
-use serde::de::{self, Deserializer, Visitor};
+use serde::de::{self, Deserializer, IgnoredAny, MapAccess, Visitor};
+use serde::ser::{SerializeMap, Serializer};
 use serde::{Deserialize, Serialize};
 
+use super::validate::MAX_CACHE_WRITE_LIFETIMES;
 use super::{PriceTable, PriceTableError};
+use crate::config::PricingConfig;
 use crate::config_effective::normalized_origin;
 
 /// The only schema version this build reads and writes.
@@ -95,6 +98,85 @@ pub(super) struct RawModel {
     pub(super) cache_write_5m: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) cache_write_1h: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) cache_write: Option<CacheWriteMap>,
+}
+
+impl RawModel {
+    /// The canonical row for `prices`: the 300 and 3600 second lifetimes in
+    /// their legacy keys, which an older reader understands, and every other
+    /// lifetime in `cache_write` keyed by decimal seconds.
+    fn canonical(id: String, prices: &PricingConfig) -> Self {
+        let mut rates = prices.cache_write_rates();
+        let cache_write_5m = rates.remove(&PricingConfig::CACHE_WRITE_5M_SECONDS);
+        let cache_write_1h = rates.remove(&PricingConfig::CACHE_WRITE_1H_SECONDS);
+        let cache_write = (!rates.is_empty()).then(|| {
+            CacheWriteMap(
+                rates
+                    .into_iter()
+                    .map(|(seconds, rate)| (seconds.to_string(), rate))
+                    .collect(),
+            )
+        });
+        Self {
+            id,
+            input: prices.input_per_mtok,
+            output: prices.output_per_mtok,
+            cache_read: prices.cache_read_per_mtok,
+            cache_write_5m,
+            cache_write_1h,
+            cache_write,
+        }
+    }
+}
+
+/// A row's `cache_write` object, in source order: lifetime key (decimal
+/// seconds) and price. Reading keeps at most one entry past
+/// [`MAX_CACHE_WRITE_LIFETIMES`] and skips the rest, so an oversized object
+/// is refused by validation without being materialized; a key repeated
+/// within the cap is a shape error.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub(super) struct CacheWriteMap(pub(super) Vec<(String, f64)>);
+
+impl Serialize for CacheWriteMap {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut map = serializer.serialize_map(Some(self.0.len()))?;
+        for (key, rate) in &self.0 {
+            map.serialize_entry(key, rate)?;
+        }
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for CacheWriteMap {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_map(CacheWriteMapVisitor)
+    }
+}
+
+struct CacheWriteMapVisitor;
+
+impl<'de> Visitor<'de> for CacheWriteMapVisitor {
+    type Value = CacheWriteMap;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("an object of cache-write prices")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<CacheWriteMap, A::Error> {
+        let mut out: Vec<(String, f64)> = Vec::new();
+        while let Some(key) = map.next_key::<String>()? {
+            if out.len() > MAX_CACHE_WRITE_LIFETIMES {
+                map.next_value::<IgnoredAny>()?;
+                continue;
+            }
+            if out.iter().any(|(seen, _)| *seen == key) {
+                return Err(de::Error::custom("cache_write repeats a lifetime key"));
+            }
+            out.push((key, map.next_value()?));
+        }
+        Ok(CacheWriteMap(out))
+    }
 }
 
 pub(super) fn to_canonical_json(table: &PriceTable) -> Result<Vec<u8>, PriceTableError> {
@@ -110,14 +192,7 @@ pub(super) fn to_canonical_json(table: &PriceTable) -> Result<Vec<u8>, PriceTabl
                 models: provider
                     .models
                     .iter()
-                    .map(|(id, prices)| RawModel {
-                        id: id.clone(),
-                        input: prices.input_per_mtok,
-                        output: prices.output_per_mtok,
-                        cache_read: prices.cache_read_per_mtok,
-                        cache_write_5m: prices.cache_write_5m_per_mtok,
-                        cache_write_1h: prices.cache_write_1h_per_mtok,
-                    })
+                    .map(|(id, prices)| RawModel::canonical(id.clone(), prices))
                     .collect(),
             })
             .collect(),

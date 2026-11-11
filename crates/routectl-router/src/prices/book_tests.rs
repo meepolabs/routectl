@@ -318,3 +318,39 @@ fn skipped_rows_log_their_count_once_per_file_state() {
     let rendered = format!("{events:?}");
     assert!(!rendered.contains(unusable_model), "{rendered}");
 }
+
+/// A refreshed copy whose legacy write key and `cache_write` object price one
+/// lifetime differently is refused like any structural fault: the last good
+/// table stays and one WARN names the refusal.
+#[test]
+fn a_copy_with_disagreeing_cache_write_spellings_keeps_the_last_good_table() {
+    let dir = Dir::new();
+    dir.rename_in(&table_bytes("2026-11-01", "acme"), 1_000);
+    let book = PriceBook::new(&dir.file);
+    let good = book.current().expect("good table");
+    let mut conflicting = table(json!([{ "id": "acme", "models": [
+        priced_model("m"),
+        { "id": "n", "cache_write_5m": 1.25, "cache_write": { "300": 1.5 } },
+    ] }]));
+    conflicting["generated_at"] = json!("2026-11-05");
+
+    let events = capture_events(|| {
+        dir.rename_in(&bytes(&conflicting), 2_000);
+        for _ in 0..3 {
+            let kept = book.current().expect("last good kept");
+            assert!(Arc::ptr_eq(&kept, &good));
+        }
+    });
+
+    let warned = warns(&events);
+    assert_eq!(warned.len(), 1, "{events:?}");
+    assert_eq!(warned[0].field("retained_table"), Some("2026-11-01"));
+    assert_eq!(
+        warned[0].field("error"),
+        Some(
+            PriceTableError::CacheWriteAliasConflict
+                .to_string()
+                .as_str()
+        )
+    );
+}

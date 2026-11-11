@@ -4,7 +4,8 @@
 //! The source is an object keyed by provider id; each provider carries an
 //! optional `api` base URL and a `models` object keyed by model id, whose
 //! `cost` holds per-Mtok `input`, `output`, `cache_read` and `cache_write`.
-//! `cache_write` is the 5-minute write tier; the source has no 1-hour tier.
+//! `cache_write` is the 5-minute (300 second) write tier and becomes the
+//! canonical `cache_write_5m`; the source has no other lifetime.
 //! Every other field is ignored.
 
 use std::collections::HashSet;
@@ -72,6 +73,7 @@ impl DevCost {
             cache_read: self.cache_read,
             cache_write_5m: self.cache_write,
             cache_write_1h: None,
+            cache_write: None,
         }
     }
 }

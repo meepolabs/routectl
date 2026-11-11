@@ -18,14 +18,20 @@
 //!       "api_host": "https://opencode.ai/zen/go/v1",
 //!       "models": [
 //!         { "id": "glm-5", "input": 1.0, "output": 3.2, "cache_read": 0.2,
-//!           "cache_write_5m": 1.25, "cache_write_1h": 2.0 }
+//!           "cache_write_5m": 1.25, "cache_write_1h": 2.0,
+//!           "cache_write": { "1800": 1.5 } }
 //!       ]
 //!     }
 //!   ]
 //! }
 //! ```
 //!
-//! Prices are USD per million tokens and every one is optional. `api_host`
+//! Prices are USD per million tokens and every one is optional.
+//! `cache_write` prices cache writes by lifetime, keyed by decimal seconds;
+//! the writer keeps the 300 and 3600 second lifetimes in `cache_write_5m`
+//! and `cache_write_1h`, which an older reader understands, and puts only
+//! other lifetimes in the object (omitted when there are none). A reader
+//! accepts either spelling for 300 and 3600. `api_host`
 //! is optional (first-party providers carry none) and is written with a
 //! lowercased host and no default port; any form the origin normalizer
 //! accepts reads back to the same provider. Unknown fields are
@@ -40,7 +46,10 @@
 //! other than 1, malformed JSON, more than 100000 source model entries
 //! (counted while parsing, priced or not) or 100000 providers, a duplicate
 //! provider, a duplicate (provider, model) row, a `generated_at` that is not
-//! a calendar date, and a table with no priced model are all refused.
+//! a calendar date, a `cache_write` object with more than 16 entries or
+//! whose 300 or 3600 key disagrees with the legacy key beside it, and a
+//! table with no priced model are all refused. A refused file never
+//! replaces the table already held.
 //!
 //! One row is never worth refusing a table for, so a newer writer's rows
 //! stay readable: a provider or model id that is empty, over its byte bound
@@ -50,7 +59,9 @@
 //! `api_host` that does not normalize to an origin leaves its provider
 //! reachable only through the first-party fallback. A price that is not
 //! finite, is negative or exceeds 10000 $/Mtok is dropped to `None`
-//! (unknown, never zero); a known `0` is kept.
+//! (unknown, never zero); a known `0` is kept. A `cache_write` key that is
+//! not the canonical decimal form of a positive 32-bit second count (`0`,
+//! `-5`, `1.5`, `5m`, a leading zero) prices nothing.
 //!
 //! # No download string is rendered
 //!
@@ -272,6 +283,16 @@ pub enum PriceTableError {
     /// One provider lists a model id twice.
     #[error("price table lists a (provider, model) row twice")]
     DuplicateModel,
+    /// A row's `cache_write` object holds more entries than the bound allows.
+    #[error("price table row has more than {limit} cache_write entries")]
+    TooManyCacheWriteLifetimes {
+        /// The per-row entry bound.
+        limit: usize,
+    },
+    /// A row prices the 5-minute or 1-hour cache write differently in its
+    /// legacy key and its `cache_write` object.
+    #[error("price table row prices one cache-write lifetime twice with different values")]
+    CacheWriteAliasConflict,
     /// No model carries any admitted price.
     #[error("price table has no priced model")]
     NoPricedModels,

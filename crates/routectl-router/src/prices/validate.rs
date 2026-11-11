@@ -16,6 +16,8 @@ pub(super) const MAX_PROVIDERS: usize = 100_000;
 pub(super) const MAX_PROVIDER_ID_BYTES: usize = 128;
 pub(super) const MAX_MODEL_ID_BYTES: usize = 512;
 pub(super) const MAX_PRICE_PER_MTOK: f64 = 10_000.0;
+/// Most entries one row's `cache_write` object may hold, valid keys or not.
+pub(super) const MAX_CACHE_WRITE_LIFETIMES: usize = routectl_core::MAX_CACHE_LIFETIME_ENTRIES;
 
 /// Parses and validates a canonical price table.
 pub fn parse_and_validate(bytes: &[u8]) -> Result<PriceTable, PriceTableError> {
@@ -40,8 +42,9 @@ pub(super) const fn check_size(bytes: &[u8]) -> Result<(), PriceTableError> {
 /// the raw table is deserialized.
 ///
 /// Structure fails closed: a bad date, a duplicate provider or (provider,
-/// model) row (usable or not), and a table with no priced model refuse the
-/// whole table. A
+/// model) row (usable or not), a `cache_write` object over its entry cap or
+/// pricing the 300 or 3600 second lifetime differently from the legacy key,
+/// and a table with no priced model refuse the whole table. A
 /// single row a newer writer might shape differently does not: a provider
 /// or model id that is empty, over its byte bound or outside printable
 /// ASCII is skipped and counted (its prices stay unknown and the id is never
@@ -95,21 +98,72 @@ fn validate_models(
         if !seen.insert(model.id.clone()) {
             return Err(PriceTableError::DuplicateModel);
         }
+        let cache_write = cache_write_prices(&model)?;
         if !id_usable(&model.id, MAX_MODEL_ID_BYTES) {
             skipped += 1;
             continue;
         }
-        let prices = PricingConfig {
+        let mut prices = PricingConfig {
             input_per_mtok: model.input.and_then(admit_price),
             output_per_mtok: model.output.and_then(admit_price),
             cache_read_per_mtok: model.cache_read.and_then(admit_price),
-            cache_write_5m_per_mtok: model.cache_write_5m.and_then(admit_price),
-            cache_write_1h_per_mtok: model.cache_write_1h.and_then(admit_price),
-            cache_write_per_mtok: None,
+            ..PricingConfig::default()
         };
+        for (seconds, rate) in cache_write {
+            prices.set_cache_write_rate(seconds, rate);
+        }
         out.insert(model.id, prices);
     }
     Ok((out, skipped))
+}
+
+/// A row's admitted cache-write prices, lifetime seconds -> price, from the
+/// legacy keys and the `cache_write` object together.
+///
+/// The object refuses the table when it holds more than
+/// [`MAX_CACHE_WRITE_LIFETIMES`] entries or prices the 300 or 3600 second
+/// lifetime with a different number than the legacy key beside it. A key
+/// that is not a canonical positive decimal `u32` and a price outside the
+/// admitted range read as unknown.
+fn cache_write_prices(model: &RawModel) -> Result<BTreeMap<u32, f64>, PriceTableError> {
+    let entries = model.cache_write.as_ref().map_or(&[][..], |m| &m.0[..]);
+    if entries.len() > MAX_CACHE_WRITE_LIFETIMES {
+        return Err(PriceTableError::TooManyCacheWriteLifetimes {
+            limit: MAX_CACHE_WRITE_LIFETIMES,
+        });
+    }
+    let legacy = [
+        (PricingConfig::CACHE_WRITE_5M_SECONDS, model.cache_write_5m),
+        (PricingConfig::CACHE_WRITE_1H_SECONDS, model.cache_write_1h),
+    ];
+    let mut raw: BTreeMap<u32, f64> = BTreeMap::new();
+    for (seconds, rate) in entries
+        .iter()
+        .filter_map(|(key, rate)| Some((lifetime_seconds(key)?, *rate)))
+    {
+        raw.insert(seconds, rate);
+    }
+    for (seconds, rate) in legacy {
+        let Some(rate) = rate else { continue };
+        if raw.get(&seconds).is_some_and(|aliased| *aliased != rate) {
+            return Err(PriceTableError::CacheWriteAliasConflict);
+        }
+        raw.insert(seconds, rate);
+    }
+    Ok(raw
+        .into_iter()
+        .filter_map(|(seconds, rate)| Some((seconds, admit_price(rate)?)))
+        .collect())
+}
+
+/// A `cache_write` key's lifetime: the canonical decimal form of a positive
+/// `u32` (no sign, fraction, unit or leading zero), else `None`.
+fn lifetime_seconds(key: &str) -> Option<u32> {
+    if key.is_empty() || !key.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let seconds: u32 = key.parse().ok()?;
+    (seconds > 0 && seconds.to_string() == key).then_some(seconds)
 }
 
 /// Whether `id` can key a lookup: non-empty, within `limit` bytes, and
