@@ -321,7 +321,7 @@ fn handle_invoke_frame(
         other => {
             tracing::debug!(
                 provider = provider_id,
-                event_type = other,
+                event_type = %routectl_core::upstream_text_for_log(other),
                 "bedrock: skipping unknown eventstream frame"
             );
             Ok(None)
@@ -616,6 +616,54 @@ mod tests {
                 message.contains("SENTINEL-CLEAN-TEXT"),
                 "{err_type}: {message}"
             );
+        }
+    }
+
+    /// The DEBUG line for a skipped unknown frame renders the upstream-
+    /// authored `:event-type` scrubbed: a credential- or principal-shaped
+    /// name is redacted while a clean name (and clean text beside a
+    /// redaction) survives verbatim.
+    #[test]
+    fn unknown_event_type_debug_line_is_scrubbed_and_clean_names_survive() {
+        const ARN: &str = "arn:aws:iam::123456789012:role/ops-role";
+        const KEY: &str = "sk-proj-PlantedFrameNameKey0123456789";
+        let rows: [(&str, String, &str, Option<&str>); 4] = [
+            ("arn", ARN.to_string(), "[redacted]", Some(ARN)),
+            ("vendor_key", KEY.to_string(), "[redacted]", Some(KEY)),
+            (
+                "clean_beside_key",
+                format!("sentinelFrame {KEY}"),
+                "sentinelFrame [redacted]",
+                Some(KEY),
+            ),
+            (
+                "clean_sentinel",
+                "sentinelFutureFrame".to_string(),
+                "sentinelFutureFrame",
+                None,
+            ),
+        ];
+        for (name, event_type, expected, planted) in rows {
+            let events = routectl_testkit::capture_events(|| {
+                let res = handle(&event_type, "{}");
+                assert!(matches!(res, Ok(None)), "{name}: {res:?}");
+            });
+
+            let rendered: Vec<_> = events
+                .iter()
+                .filter(|e| e.message.contains("skipping unknown eventstream frame"))
+                .map(|e| e.field("event_type"))
+                .collect();
+            assert_eq!(rendered, [Some(expected)], "{name}: {events:?}");
+            if let Some(planted) = planted {
+                let leaked = events.iter().any(|e| {
+                    e.message.contains(planted) || e.fields.iter().any(|(_, v)| v.contains(planted))
+                });
+                assert!(
+                    !leaked,
+                    "{name}: planted value reached a log line: {events:?}"
+                );
+            }
         }
     }
 

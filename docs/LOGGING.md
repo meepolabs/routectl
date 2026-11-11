@@ -309,14 +309,22 @@ is over 64 KiB or does not parse renders on all three paths as
 `(json body, N bytes, not excerpted)`, N being its byte length. Any
 other body is logged as sanitized text.
 
-Not covered: a credential inside a URL query string (e.g. in
-`server_url`), and a credential inside the value of a non-credential key
-(e.g. a `"Bearer ..."` string under an arbitrary name). Prompt redaction
-does not reach a non-JSON upstream error body, which has no structure to
-walk. Every upstream error body and excerpt, JSON or not, still passes
-the upstream-text scrub (below) before any cap; the one exception is the
+Not covered: the traced request and egress bodies get only the
+key-based redaction above, so a credential inside a URL query string
+(e.g. in `server_url`) or inside the value of a non-credential key
+(e.g. a `"Bearer ..."` string under an arbitrary name) stays readable
+there. Prompt redaction does not reach a non-JSON upstream error body,
+which has no structure to walk. Every upstream error body and excerpt,
+JSON or not, still passes the upstream-text scrub (below) before any
+cap, which also redacts a credential-named query parameter
+(`?token=...`) and the token after `Bearer `; the one exception is the
 WARN `body_excerpt` on the OpenAI-compatible and OpenAI Responses lanes,
-which is capped at 256 characters before it is scrubbed.
+which is capped at 256 characters before it is scrubbed. The scrub
+matches shapes, so upstream text still keeps a secret under a query
+parameter or key whose name is not credential-like (`?sig=...`), an
+opaque secret with no known vendor prefix, a bearer token shorter than
+6 characters (or under 20 with no digit), and a 12-digit account id not
+written after the word `account`.
 
 Two known residual leaks even with the knob ON:
 - `<redacted len=N>` reveals the char count of the original content.

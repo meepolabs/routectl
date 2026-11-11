@@ -1298,11 +1298,12 @@ pub fn trace_egress_body(ingress: &str, body: &serde_json::Value) {
 
 // ---------------------------------------------------------------------
 // Header tracing (4 directions). Opt-in via ROUTECTL_TRACE_HEADERS,
-// gated on TRACE. Secret-bearing headers are redacted on the two
-// upstream-facing directions (dir-2 outgoing request, dir-3 upstream
-// response) before emission; dir-1 (ingress) and dir-4 (egress) emit
-// raw so fixture captures see the real client-side beta / version
-// headers.
+// gated on TRACE. Secret-bearing headers are redacted before emission on
+// dir-1 (ingress), dir-2 (outgoing request) and dir-3 (upstream
+// response; also upstream-text scrubbed); every other header emits
+// verbatim so fixture captures see the real client-side beta / version
+// headers. dir-4 (egress) emits raw: those are routectl's own response
+// headers and carry no upstream secret.
 //
 // PARSING CONTRACT (scripts/capture_fixtures.sh::extract_headers reads
 // these lines back into per-request fixtures):

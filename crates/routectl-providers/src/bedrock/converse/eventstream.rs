@@ -331,7 +331,7 @@ pub fn handle_converse_frame(
         other => {
             tracing::debug!(
                 provider = provider_id,
-                event_type = other,
+                event_type = %routectl_core::upstream_text_for_log(other),
                 "bedrock converse: skipping unknown eventstream frame"
             );
             Ok(vec![])

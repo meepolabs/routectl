@@ -821,6 +821,58 @@ fn unknown_event_type_is_skipped_not_errored() {
     assert!(chunks.is_empty());
 }
 
+/// The DEBUG line for a skipped unknown frame renders the upstream-authored
+/// `:event-type` scrubbed: a credential- or principal-shaped name is
+/// redacted while a clean name (and clean text beside a redaction) survives
+/// verbatim.
+#[test]
+fn unknown_event_type_debug_line_is_scrubbed_and_clean_names_survive() {
+    for (name, event_type, expected, planted) in unknown_frame_scrub_rows() {
+        let events = routectl_testkit::capture_events(|| {
+            let mut state = ConverseStreamState::default();
+            let _ = run(&event_type, "{}", &mut state);
+        });
+
+        let rendered: Vec<_> = events
+            .iter()
+            .filter(|e| e.message.contains("skipping unknown eventstream frame"))
+            .map(|e| e.field("event_type"))
+            .collect();
+        assert_eq!(rendered, [Some(expected)], "{name}: {events:?}");
+        if let Some(planted) = planted {
+            let leaked = events.iter().any(|e| {
+                e.message.contains(planted) || e.fields.iter().any(|(_, v)| v.contains(planted))
+            });
+            assert!(
+                !leaked,
+                "{name}: planted value reached a log line: {events:?}"
+            );
+        }
+    }
+}
+
+/// Named rows of `(row, :event-type, expected rendering, planted value)`.
+fn unknown_frame_scrub_rows() -> [(&'static str, String, &'static str, Option<&'static str>); 4] {
+    const ARN: &str = "arn:aws:iam::123456789012:role/ops-role";
+    const KEY: &str = "sk-proj-PlantedFrameNameKey0123456789";
+    [
+        ("arn", ARN.to_string(), "[redacted]", Some(ARN)),
+        ("vendor_key", KEY.to_string(), "[redacted]", Some(KEY)),
+        (
+            "clean_beside_key",
+            format!("sentinelFrame {KEY}"),
+            "sentinelFrame [redacted]",
+            Some(KEY),
+        ),
+        (
+            "clean_sentinel",
+            "sentinelFutureFrame".to_string(),
+            "sentinelFutureFrame",
+            None,
+        ),
+    ]
+}
+
 /// The wire shape AWS actually sends when it throttles mid-stream:
 /// `:message-type: exception` + `:exception-type: throttlingException`, no
 /// `:event-type`. Classifying on `:event-type` alone made this frame

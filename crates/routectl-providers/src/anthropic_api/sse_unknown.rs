@@ -71,14 +71,14 @@ impl SseState {
     /// is produced at start; the matching ingress reconstructs the
     /// block from `chunk.opaque_events`.
     pub(super) fn open_unknown_block(&mut self, index: u32, value: &Value, provider: &str) {
-        // Sanitize `type_tag` at capture time: `content_block.type` is
-        // upstream-controlled and flows straight into tracing fields;
-        // unsanitized CR, LF, or ANSI control sequences would corrupt
-        // log output on a text subscriber.
-        // Sanitizing here once means every downstream use -- the stored
-        // OpenBlockKind field, the DEBUG log line, and OpaqueCapture -- all
-        // inherit the clean value without per-site guards.
-        let type_tag = routectl_core::sanitize_for_log(
+        // Render `type_tag` log-safe at capture time: `content_block.type`
+        // is upstream-controlled and flows straight into tracing fields, so
+        // it is scrubbed of credential- and principal-shaped text, then
+        // control-filtered and capped. Doing it here once means every
+        // downstream use -- the stored OpenBlockKind field, the DEBUG log
+        // lines, and OpaqueCapture -- inherits the clean value without
+        // per-site guards. The wire bytes ride in `raw_data`, untouched.
+        let type_tag = routectl_core::upstream_text_for_log(
             value
                 .get("type")
                 .and_then(Value::as_str)
@@ -110,7 +110,7 @@ impl SseState {
         tracing::debug!(
             provider = %provider,
             upstream_index = index,
-            block_type = %sanitize_for_log(&type_tag),
+            block_type = %type_tag,
             mode = "v2_capture",
             "anthropic SSE: opening forward-compat opaque content block",
         );
@@ -642,6 +642,69 @@ mod tests {
                 );
             }
             other => panic!("expected ContentBlockDelta, got: {other:?}"),
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Credential scrub of the upstream-controlled block type
+    // -----------------------------------------------------------------
+
+    /// An unknown `content_block.type` is upstream-authored text: every
+    /// log line naming it carries the scrubbed rendering, so a credential-
+    /// or principal-shaped tag is redacted while a clean tag (and clean
+    /// text beside a redaction) survives verbatim.
+    #[test]
+    fn unknown_block_type_in_debug_lines_is_scrubbed_and_clean_tags_survive() {
+        let arn = "arn:aws:iam::123456789012:role/ops-role";
+        let key = "sk-proj-PlantedBlockTypeKey0123456789";
+        let rows: [(&str, String, &str, Option<&str>); 4] = [
+            ("arn", arn.to_string(), "[redacted]", Some(arn)),
+            ("vendor_key", key.to_string(), "[redacted]", Some(key)),
+            (
+                "clean_beside_key",
+                format!("SENTINEL_BLOCK {key}"),
+                "SENTINEL_BLOCK [redacted]",
+                Some(key),
+            ),
+            (
+                "clean_sentinel",
+                "sentinel_future_block".to_string(),
+                "sentinel_future_block",
+                None,
+            ),
+        ];
+        for (name, tag, expected, planted) in rows {
+            let event = serde_json::json!({
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": tag},
+            })
+            .to_string();
+            let events = routectl_testkit::capture_events(|| {
+                let mut state = SseState::default();
+                let _ = state.parse_event("test", &event).unwrap();
+                let _ = state
+                    .parse_event("test", r#"{"type":"content_block_stop","index":0}"#)
+                    .unwrap();
+            });
+
+            let tagged: Vec<_> = events
+                .iter()
+                .filter_map(|e| e.field("block_type"))
+                .collect();
+            assert_eq!(tagged.len(), 2, "{name}: open and close lines: {events:?}");
+            for rendered in tagged {
+                assert_eq!(rendered, expected, "{name}: {events:?}");
+            }
+            if let Some(planted) = planted {
+                let leaked = events.iter().any(|e| {
+                    e.message.contains(planted) || e.fields.iter().any(|(_, v)| v.contains(planted))
+                });
+                assert!(
+                    !leaked,
+                    "{name}: planted value reached a log line: {events:?}"
+                );
+            }
         }
     }
 }
