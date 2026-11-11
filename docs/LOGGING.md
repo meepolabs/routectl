@@ -261,10 +261,14 @@ emits a one-shot `info` line at boot reporting the resolved value
 (`redact_prompts=true|false`) so operators can confirm the setting
 took effect.
 
-The knob also governs one field OUTSIDE the traced bodies. The
-foreign-format reasoning WARN's `skipped_formats` names the `format` tag
-of each reasoning detail the Anthropic translator could not echo. That
-tag is caller-supplied, so the knob applies to it. The split:
+The knob also governs two fields OUTSIDE the traced bodies, both naming
+caller-supplied `format` tags of reasoning details a translator could not
+carry. The foreign-format reasoning WARN's `skipped_formats` names the tag
+of each detail the Anthropic translator could not echo. The OpenAI
+Responses translator's DEBUG line `openai-responses: skipped
+reasoning_details entries with a non-Responses-family format` names the
+tags it skipped in its `formats` field. Both fields follow the same
+split:
 
 - Tag in routectl's recognized vocabulary (`anthropic-claude-v1` and the
   Responses-family tags `openai-responses-v1`, `codex-oauth`,
@@ -1627,7 +1631,7 @@ walk, so its per-attempt lines carry the same text on every surface; the
 | DEBUG | `routectl_router::router::dispatch_loop` | `upstream 401; refreshing auth and retrying once` | `provider`, `model`, `attempt` | Every surface, once per target, on the first upstream 401 of a non-forwarded target (a stream only before content). |
 | DEBUG | `routectl_router::router::dispatch_loop` | `retry decision` | `provider`, `state_key`, `surface`, `attempt`, `status`, `upstream_type`, `retry_after_ms`, `breaker_effect`, `same_provider_retry`, `preserved_upstream_error` | Every surface, once per failed attempt that reaches the fallback decision. `breaker_effect` is `opened` when this attempt's failure debit moved a closed or half-open circuit to open, `parked` when an upstream reset hint parked the circuit open, and `none` otherwise, including a further debit on a circuit that is already open and a failure that does not debit. |
 | DEBUG | `routectl_router::router::dispatch_loop` | `retrying same provider` | `provider`, `model`, `attempt`, `error` | Completions only: streams and token counts never retry the same provider. `[retry] max_attempts = N` allows at most N - 1 of these per client request, shared across every target the walk reaches, so a later target retries only with what an earlier one left. |
-| DEBUG | `routectl_router::router::credential_park` | `gate blocked`, `count_tokens gate blocked` | `provider`, `model`, `gate_kind`, `error` | Every surface, when the refusing gate is a credential park (`gate_kind = credential_parked`); other gate refusals are WARN. |
+| DEBUG | `routectl_router::router::credential_park` | `gate blocked`, `count_tokens gate blocked` | `provider`, `model`, `gate_kind`, `error` | Every surface, when the refusing gate is a credential park or an unusable seat credential (`gate_kind = credential_parked` or `credential_unusable`); other gate refusals are WARN. |
 
 ## Walk summary INFO line
 
@@ -1651,7 +1655,8 @@ successes that leave the circuit where it was stay in the DEBUG `retry
 decision` line above. With the breaker disabled (`circuit_failures
 = 0`), a failed re-test of a circuit that was still open closes it without
 a line; a disabled breaker never logs `breaker_opened`. Each line carries the `event` token and the target's
-`state_key` (sanitized), plus `cooldown_ms` on a park; nothing from the
+`state_key` (sanitized and written as a double-quoted value, so a key with a
+space stays one field), plus `cooldown_ms` on a park; nothing from the
 request or the upstream response.
 
 | Level | Target | `event` | Fields | When |
@@ -1744,7 +1749,7 @@ Summary (grep the `event` field to isolate a kind):
 | `evict` | WARN | `routectl_router::learned_capability` | `learned-capability registry at capacity; evicted oldest entry` |
 | `route_away` | DEBUG / WARN | `routectl_router::router::feature_filter` | `capability negative de-prioritized this target to the tail` (DEBUG) / `capability negative routed this target away; request survives only via the de-prioritized tail` (WARN) |
 | `hard_exclusion` | WARN | `routectl_router::router::feature_filter` | `capability refused on every lane; request excluded before dispatch` |
-| `count_tokens` | DEBUG | `routectl_router::router::count_tokens` | `count_tokens seat terminal; resilience class policy applied` |
+| `count_tokens` | DEBUG | `routectl_router::router::count_tokens` | `count_tokens seat failed; resilience class policy applied` |
 | `invalidation` | WARN | `routectl_router::router` | `catalog/overlay changed across reload; catalog-scoped learned capabilities are evicted at the replay boundary` (no longer emitted) |
 | `strip` | WARN | `routectl_router::router::feature_filter` | `capability_strip_decision` |
 | `suppression` | WARN | `routectl_router::router::capability_learn` | `force_supported override contradicted: masked capability still rejected upstream` / `f2 feature-naming negative suppressed: same-chain f1 already observed for this capability` |
@@ -2161,8 +2166,9 @@ negative lapses and its re-probe succeeds.
 
 Emitted once when a `count_tokens` seat reaches its class/remap/debit
 settle point -- an upstream health error (rate-limit / server / timeout /
-network / overload) that the token-count path surfaces as terminal (it
-never falls back on health). The messages path emits a class-decision
+network / overload). Most such errors end the count; an attempt whose
+`request_timeout_ms` expired walks on to the next capable seat and still
+emits this event for the seat that timed out. The messages path emits a class-decision
 event at every error arm; the token-count path was otherwise silent, so
 this event makes a `count_tokens` breaker debit or park triageable. A
 clean count (the happy path) and a capability walk (a wire-501 that
@@ -2186,7 +2192,7 @@ advances to the next capable seat) do NOT emit it. Safe dimensions only
 DEBUG routectl_router::router::count_tokens event=count_tokens state_key=haiku
   provider=prov status=500 upstream_type= upstream_code=
   effective_class=server_error matched_by=status remapped=false debit=true
-  "count_tokens seat terminal; resilience class policy applied"
+  "count_tokens seat failed; resilience class policy applied"
 ```
 
 ### Capability replay boundary (INFO / ERROR)
@@ -2463,7 +2469,7 @@ Repeat behavior is noted where the line is latched, sampled, or aggregated
 | WARN | `routectl_router::router::replay_repair` | `reasoning_replay_degraded` (once per repair) | Carried reasoning was stripped for `target_lane`. If frequent, pin the session to one lane or scheme. |
 | WARN | `routectl_router::router::dispatch` | `cache_volatile_in_caller_prefix` (once per process per kind) | The client marks volatile content cacheable, so each request writes a cache entry nothing reads: fix the client's breakpoint placement. |
 | WARN | `routectl_router::router::dispatch` | `reasoning context/mode dropped ...` (once per request) | The client's `reasoning.context` / `mode` cannot be represented on `provider`: route Responses-dialect clients to an OpenAI Responses target. |
-| WARN | `routectl_router::router::credential_park` | `gate blocked` (completions and streams), `count_tokens gate blocked` (token counts); fields `provider`, `model`, `gate_kind`, `error` | `provider` is rate-limited or its breaker is open: check upstream health or raise `rpm_limit`. A refusal by a credential park (`gate_kind = credential_parked`) logs at DEBUG instead: the park already warned once when it parked. |
+| WARN | `routectl_router::router::credential_park` | `gate blocked` (completions and streams), `count_tokens gate blocked` (token counts); fields `provider`, `model`, `gate_kind`, `error` | `provider` is rate-limited or its breaker is open: check upstream health or raise `rpm_limit`. A refusal by a credential park (`gate_kind = credential_parked`) or by an unusable seat credential (`gate_kind = credential_unusable`) logs at DEBUG instead: the park and the `seat_unusable` transition each already warned once. |
 | WARN | `routectl_router::router::seat_transitions` | `seat_unusable` event (once per transition) | A seat's credential became unusable; see "Seat transition lines" for the fields and the fix. |
 | WARN | `routectl_router::router::credential_park` | `seat credential rejected; parking the seat` (once per park); fields `account`, `reason`, `parked_for_secs` | The upstream rejected the credential of `account` (the OAuth seat `provider#label`, or `#<provider entry>` for any other credential) for `reason`; every model on that account is skipped for `parked_for_secs`, then each re-tests once and the first success lifts the park for all of them. Re-login or fix the credential. A credentials reload lifts the park of each OAuth seat whose stored record it added, removed or changed, and no other; routectl's own token refresh changes no record, so it lifts nothing. An accepted config reload, including the config half of a SIGHUP, lifts the `#<provider entry>` account of each `[providers]` entry it added, removed or changed, and no OAuth seat; an unchanged entry keeps its park, so a secret rotated behind an unchanged ref (a new env var value or key file content) waits for the park's re-test. A config reload never clears the unusable mark of an account the new build kept as a placeholder seat; a reload whose new router builds any target (a pool seat or a direct model) on an account the previous router held as a placeholder also resets that account at commit, unless the account was marked again since the reload carried its state over; a successful token refresh in between does not count as a mark. A reload changes no park or mark until it commits: a credentials reload that rebuilds the router lifts parks only once the rebuilt router is published, so a failed rebuild keeps every park and placeholder mark; a rejected or failed reload lifts nothing, marks no new placeholder seat, and keeps a park written while it was in flight. A reload that lifts parks logs `reload cleared credential parks; parked seats will be retried` (INFO, fields `source` = `credentials` or `config`, `cleared`). |
 | WARN | `routectl_router::router::dispatch_loop` | `fallback to next` (completions and streams on a fallbackable error; token counts only when the attempt's `request_timeout_ms` expired); fields `provider`, `model`, `state_key`, `error` | An upstream failed and the request moved on: investigate `provider` if it persists. |
@@ -2582,7 +2588,7 @@ with no observation scope counts every counter once per normalize call.
 | Per-request cache breadcrumb (`cache=READ/PROMPT (PCT%)`) | `cache_read` and `input_tokens` on the INFO `request finished` line; `routectl_cli::handlers::usage_capture=debug` for the line. The auto-cache thrash WARN is unchanged. |
 | Capability tail demotion with a supported alternative left (`route_away`, `capability negative de-prioritized this target to the tail`) | `routectl_router::router::feature_filter=debug`. The tail-only arm (the request survives only on the demoted target) stays WARN. |
 | Upstream-reported unsupported capability (`upstream reported an unsupported capability`, target `routectl::feature_unsupported`) | `rc_feature_unsupported_total` on the metrics snapshot; `routectl::feature_unsupported=debug` for the line. A capability that is learned from it logs the `learn` WARN; the request's result is on `request finished`. |
-| Token-count seat terminal (`count_tokens seat terminal; resilience class policy applied`) | `outcome` / `http_status` on the `count_tokens` operation's `request finished` line; `routectl_router::router::count_tokens=debug` for the class, remap and debit. |
+| Token-count seat failure (`count_tokens seat failed; resilience class policy applied`) | `outcome` / `http_status` on the `count_tokens` operation's `request finished` line; `routectl_router::router::count_tokens=debug` for the class, remap and debit. |
 | anthropic-api cloak decision (`anthropic-api cloak applied to outgoing body`) | `routectl_providers::anthropic_api=debug`. Client content the cloak refuses or loses still logs its WARN. |
 | Gemini content-filter finish on a 200 response (`gemini: prompt blocked on 200 surface`, `gemini: candidate blocked on 200 surface`) | The client receives `finish_reason` `content_filter`; `routectl_providers::gemini=debug` for the block reason. |
 | Opaque SSE block stop summary (`anthropic SSE: opaque block closed`) | `routectl_providers::anthropic_api::sse_opaque=debug`. Cap and index-mismatch WARNs are unchanged. |

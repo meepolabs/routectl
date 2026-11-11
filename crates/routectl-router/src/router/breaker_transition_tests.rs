@@ -1,5 +1,5 @@
 //! Each breaker state transition logs exactly one INFO line carrying the
-//! event token and the sanitized state key, and nothing else; a failure or
+//! event token and the sanitized, quoted state key, and nothing else; a failure or
 //! success that leaves the circuit where it was logs no transition.
 
 use std::collections::{BTreeMap, VecDeque};
@@ -15,12 +15,13 @@ use routectl_testkit::{CapturedEvent, with_capture};
 
 use super::super::Router;
 use super::super::outcome_rule::BreakerOutcome;
-use super::{BREAKER_CLOSED, BREAKER_OPENED, BREAKER_PARKED};
+use super::{BREAKER_CLOSED, BREAKER_OPENED, BREAKER_PARKED, log_closed, log_opened, log_parked};
 use crate::config::{Config, ProviderEntry, ProviderRuntimePolicy, RetryPolicy};
 use crate::resolved::ResolvedModel;
 
 const TARGET: &str = "routectl_router::router::breaker_transition";
 const MODEL: &str = "m-test";
+const QUOTED_MODEL: &str = "\"m-test\"";
 const MAX_HONORED_RETRY_AFTER_MS: u64 = 90_000;
 
 #[derive(Clone, Copy, Debug)]
@@ -123,7 +124,7 @@ fn assert_transition(event: &CapturedEvent, token: &str, label: &str) {
     assert_eq!(event.level, tracing::Level::INFO, "{label}: level");
     assert_eq!(
         event.fields,
-        fields(&[("event", token), ("state_key", MODEL)]),
+        fields(&[("event", token), ("state_key", QUOTED_MODEL)]),
         "{label}: fields"
     );
 }
@@ -179,7 +180,7 @@ async fn a_long_retry_after_parks_with_the_clamped_cooldown() {
         got[0].fields,
         fields(&[
             ("event", BREAKER_PARKED),
-            ("state_key", MODEL),
+            ("state_key", QUOTED_MODEL),
             ("cooldown_ms", &MAX_HONORED_RETRY_AFTER_MS.to_string()),
         ])
     );
@@ -272,5 +273,32 @@ async fn the_state_key_is_sanitized() {
     // Assert
     let got = transitions(events);
     assert_eq!(got.len(), 1, "{got:?}");
-    assert_eq!(got[0].field("state_key"), Some("m?[31m"));
+    assert_eq!(got[0].field("state_key"), Some("\"m?[31m\""));
+}
+
+/// `(row, event token, the transition's emitter)`.
+type TransitionRow = (&'static str, &'static str, fn(&str));
+
+#[tokio::test]
+async fn a_state_key_with_a_space_renders_quoted_on_every_transition_line() {
+    // Arrange
+    let key = "pool a#seat b";
+    let want = "\"pool a#seat b\"";
+    let rows: [TransitionRow; 3] = [
+        ("opened", BREAKER_OPENED, log_opened),
+        ("parked", BREAKER_PARKED, |k| {
+            log_parked(k, Duration::from_secs(1))
+        }),
+        ("closed", BREAKER_CLOSED, log_closed),
+    ];
+    for (label, token, emit) in rows {
+        // Act
+        let ((), events) = with_capture(async { emit(key) }).await;
+
+        // Assert
+        let got = transitions(events);
+        assert_eq!(got.len(), 1, "{label}: {got:?}");
+        assert_eq!(got[0].field("event"), Some(token), "{label}");
+        assert_eq!(got[0].field("state_key"), Some(want), "{label}");
+    }
 }

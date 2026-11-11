@@ -407,7 +407,7 @@ async fn a_committed_tail_logs_each_transition_it_settles() {
             .map(|(token, cooldown_ms)| {
                 let mut f = vec![
                     ("event".to_string(), token.to_string()),
-                    ("state_key".to_string(), "m-test".to_string()),
+                    ("state_key".to_string(), "\"m-test\"".to_string()),
                 ];
                 f.extend(cooldown_ms.map(|ms| ("cooldown_ms".to_string(), ms)));
                 f

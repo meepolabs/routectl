@@ -308,7 +308,7 @@ impl SurfaceAdapter for CountAdapter {
             matched_by = matched_by_label(failure.cf.matched_by),
             remapped = failure.remapped,
             debit = failure.debit,
-            "count_tokens seat terminal; resilience class policy applied",
+            "count_tokens seat failed; resilience class policy applied",
         );
     }
 }

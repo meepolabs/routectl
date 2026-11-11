@@ -228,6 +228,39 @@ async fn only_an_expired_count_deadline_walks_and_every_status_zero_failure_debi
     assert_eq!(observed, expected);
 }
 
+#[tokio::test(start_paused = true)]
+async fn a_timeout_that_walks_on_logs_the_seat_failed_message() {
+    // Arrange
+    let second = SeatProvider::new(Behaviour::Answers);
+    let router = router_over(
+        &[
+            (FIRST, SeatProvider::new(Behaviour::Hangs)),
+            (SECOND, second.clone()),
+        ],
+        &[FIRST, SECOND],
+        Some(0),
+    );
+
+    // Act
+    let (end, events) = routectl_testkit::with_capture(count(&router)).await;
+
+    // Assert
+    assert_eq!((shape(&end), second.calls()), ("served".to_string(), 1));
+    let messages: Vec<(String, Option<String>)> = events
+        .into_iter()
+        .filter(|e| e.target == "routectl_router::router::count_tokens")
+        .filter(|e| e.field("event") == Some("count_tokens"))
+        .map(|e| (e.message.clone(), e.field("state_key").map(str::to_string)))
+        .collect();
+    assert_eq!(
+        messages,
+        vec![(
+            "count_tokens seat failed; resilience class policy applied".to_string(),
+            Some(FIRST.to_string()),
+        )]
+    );
+}
+
 /// `(row, the seats and their behaviours, which seats are parked, how the count ends)`.
 type ExhaustionRow = (
     &'static str,
