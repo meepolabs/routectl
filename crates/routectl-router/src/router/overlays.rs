@@ -117,6 +117,11 @@ pub(super) fn apply_layered_overlays(
     // `system`.
     let captured_responses_developer_turns =
         std::mem::take(&mut req.routectl_internal.responses_developer_turns);
+    // So are the members of the client's function_call and reasoning items:
+    // without them a Responses egress on any chain attempt sends those items
+    // without the members the client wrote.
+    let captured_responses_item_members =
+        std::mem::take(&mut req.routectl_internal.responses_item_members);
     // Preserve the ingress-captured verbatim `thinking.display` string:
     // like `responses_input_passthrough`, it is inbound-request data (the
     // client's literal display vocabulary the Anthropic-API egress
@@ -175,6 +180,7 @@ pub(super) fn apply_layered_overlays(
     internal.responses_cache_breakpoints = captured_responses_cache_breakpoints;
     internal.responses_namespaces = captured_responses_namespaces;
     internal.responses_developer_turns = captured_responses_developer_turns;
+    internal.responses_item_members = captured_responses_item_members;
     internal.anthropic_thinking_display = captured_anthropic_thinking_display;
     internal.anthropic_thinking = captured_anthropic_thinking;
     internal.withheld_betas = std::sync::Arc::clone(&target.withheld_betas);

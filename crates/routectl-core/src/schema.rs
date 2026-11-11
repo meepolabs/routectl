@@ -301,6 +301,56 @@ pub struct ResponsesNamespaceCollision {
     pub tool: String,
 }
 
+/// The members of the client's `function_call` and `reasoning` input items
+/// that canonical does not model, each item's members keyed by the wire
+/// identity the Responses egress emits that item under. Canonical folds a
+/// `function_call` into a `tool_calls` entry and a `reasoning` item into
+/// `reasoning_details`, both of which other egresses serialize, so the
+/// members live here, where only the Responses egress reads them.
+///
+/// A key the egress no longer emits (the router dropped the call, or the
+/// reasoning item ships without its id) leaves its entry unemitted; it can
+/// never land on another item.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ResponsesInputItemMembers {
+    /// `function_call` item members, keyed by the item's `call_id` as the
+    /// client wrote it (its `id` when it sent no `call_id`).
+    pub function_call: std::collections::BTreeMap<String, ResponsesItemMemberEntry>,
+    /// `reasoning` item members, keyed by the item `id`.
+    pub reasoning: std::collections::BTreeMap<String, ResponsesItemMemberEntry>,
+    /// Members of an item with no identity to emit them under: a
+    /// `reasoning` item with no `id`, a `function_call` with neither
+    /// `call_id` nor `id`, or a later item repeating a key already taken.
+    pub unkeyed: Vec<ResponsesItemMemberEntry>,
+}
+
+impl ResponsesInputItemMembers {
+    /// True when no item carries a member.
+    pub fn is_empty(&self) -> bool {
+        self.function_call.is_empty() && self.reasoning.is_empty() && self.unkeyed.is_empty()
+    }
+
+    /// Every entry, keyed or not.
+    pub fn entries(&self) -> impl Iterator<Item = &ResponsesItemMemberEntry> {
+        self.function_call
+            .values()
+            .chain(self.reasoning.values())
+            .chain(&self.unkeyed)
+    }
+}
+
+/// One client input item's unmodeled members and where the item sat.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResponsesItemMemberEntry {
+    /// JSON pointer to the item in the client's body (for example
+    /// `/input/3`), which an egress that cannot emit a member declares it
+    /// removed under.
+    pub client_pointer: String,
+    /// The item's members, minus every member the item's canonical form
+    /// models.
+    pub members: Map<String, Value>,
+}
+
 /// One per-block Responses `prompt_cache_breakpoint` the client sent,
 /// recorded by the Responses ingress so a same-dialect Responses egress can
 /// put it back on the `input_text` part it came from. The canonical content
@@ -351,7 +401,7 @@ pub struct ResponsesCacheBreakpoint {
 /// fields (`claude_code_headers`, `stainless_headers`,
 /// `responses_input_passthrough`, `responses_cache_breakpoints`,
 /// `responses_namespaces`, `responses_developer_turns`,
-/// `inbound_session_key`,
+/// `responses_item_members`, `inbound_session_key`,
 /// `forwarded_bearer`, `provenance`, `anthropic_thinking_display`,
 /// `anthropic_thinking`), which
 /// egresses read and re-emit deliberately rather than by serialization.
@@ -555,6 +605,13 @@ pub struct RoutectlInternal {
     /// wrote. Every other egress ignores it. Empty for library consumers
     /// and for every non-Responses ingress.
     pub responses_developer_turns: Vec<usize>,
+
+    /// Unmodeled members of the client's `function_call` and `reasoning`
+    /// input items, captured by the OpenAI Responses ingress. Only the
+    /// Responses egress emits them, onto the item it sends under the same
+    /// identity; a translation egress declares them removed. Empty for
+    /// library consumers and for every non-Responses ingress.
+    pub responses_item_members: ResponsesInputItemMembers,
 
     /// INBOUND per-conversation key captured by EVERY ingress dialect from
     /// a HEADER candidate first, a BODY candidate second. The Anthropic

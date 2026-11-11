@@ -21,7 +21,7 @@ use serde_json::json;
 
 use super::AuthKind;
 use super::messages::{build_input, retain_replayable_reasoning, translate_thinking_part};
-use super::types::ResponseInputItem;
+use super::types::{CarriedMembers, ResponseInputItem};
 
 /// A Fernet-shaped blob, the family the id-validating lanes mint.
 const CODEX_BLOB: &str = "gAAAAABmock-codex-artifact-bytes";
@@ -169,18 +169,21 @@ fn sweep_drops_an_injected_empty_encrypted_content_item() {
             summary: Vec::new(),
             content: Vec::new(),
             encrypted_content: CODEX_BLOB.into(),
+            carried: CarriedMembers::default(),
         },
         ResponseInputItem::Reasoning {
             id: Some("rs_dangling".into()),
             summary: Vec::new(),
             content: Vec::new(),
             encrypted_content: String::new(),
+            carried: CarriedMembers::default(),
         },
         ResponseInputItem::Reasoning {
             id: Some("rs_keep_second".into()),
             summary: Vec::new(),
             content: Vec::new(),
             encrypted_content: MANTLE_BLOB.into(),
+            carried: CarriedMembers::default(),
         },
     ];
 
@@ -217,6 +220,7 @@ fn sweep_leaves_non_reasoning_items_alone() {
             summary: Vec::new(),
             content: Vec::new(),
             encrypted_content: String::new(),
+            carried: CarriedMembers::default(),
         },
     ];
 
@@ -236,6 +240,7 @@ fn summary_only(id: Option<&str>) -> ResponseInputItem {
         }],
         content: Vec::new(),
         encrypted_content: String::new(),
+        carried: CarriedMembers::default(),
     }
 }
 

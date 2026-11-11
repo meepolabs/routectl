@@ -846,6 +846,7 @@ fn append_function_calls_from_tool_calls(
                 Error::Internal(format!("provider `{id}`: serialize tool arguments: {e}"))
             })?,
             namespace: None,
+            carried: CarriedMembers::default(),
         });
     }
     Ok(())
@@ -1008,6 +1009,7 @@ fn lift_reasoning_details(
                 summary: group.summary,
                 content: group.content,
                 encrypted_content,
+                carried: CarriedMembers::default(),
             });
             continue;
         }
@@ -1036,6 +1038,7 @@ fn lift_reasoning_details(
             summary: group.summary,
             content: Vec::new(),
             encrypted_content,
+            carried: CarriedMembers::default(),
         });
     }
     if empty_encrypted_count > 0 {
@@ -1288,6 +1291,7 @@ fn walk_assistant_part(
                     Error::Internal(format!("provider `{id}`: serialize tool arguments: {e}"))
                 })?,
                 namespace: None,
+                carried: CarriedMembers::default(),
             });
         }
         other => {
@@ -1357,6 +1361,7 @@ fn decode_redacted_thinking(data: &str, auth_kind: AuthKind) -> Option<ResponseI
         summary: Vec::new(),
         content: Vec::new(),
         encrypted_content,
+        carried: CarriedMembers::default(),
     })
 }
 
@@ -1387,6 +1392,7 @@ pub(super) fn translate_thinking_part(
         summary,
         content: Vec::new(),
         encrypted_content,
+        carried: CarriedMembers::default(),
     })
 }
 

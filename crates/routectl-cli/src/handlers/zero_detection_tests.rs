@@ -1256,6 +1256,13 @@ fn responses_carrier_cases() -> Vec<Case> {
             responses_provider,
         ),
         case(
+            "responses/function-call-and-reasoning-item-members",
+            Ingress::Responses,
+            item_members_body(),
+            responses_stream(),
+            responses_provider,
+        ),
+        case(
             "responses/codex-shaped-developer-items",
             Ingress::Responses,
             codex_shaped_body(),
@@ -1273,6 +1280,20 @@ fn responses_carrier_cases() -> Vec<Case> {
             )
         },
     ]
+}
+
+/// A Responses request whose signed `reasoning` item carries its `id` and a
+/// member no typed field models, and whose `function_call` item carries an `fc_` id and a member no typed
+/// field models: each must reach the wire on the item the client put it on.
+fn item_members_body() -> Value {
+    json!({"model": ALIAS, "input": [
+        {"type": "message", "role": "user",
+         "content": [{"type": "input_text", "text": "hi"}]},
+        {"type": "reasoning", "id": "rs_1", "summary": [], "encrypted_content": "sig",
+         "zz_reasoning_member": 1},
+        {"type": "function_call", "id": "fc_1", "call_id": "c1", "name": "f",
+         "arguments": "{}", "status": "completed", "zz_future": {"k": "caf\u{e9}"}},
+        {"type": "function_call_output", "call_id": "c1", "output": "42"}]})
 }
 
 /// A synthetic request in the shape a codex client sends: four developer
@@ -1345,8 +1366,9 @@ fn mantle_unmodeled_members_body() -> Value {
                  "source": {"type": "s3", "uri": "s3://planted/key"}},
                 {"type": "agent_message", "id": "am_1", "author": "a", "recipient": "b",
                  "content": [{"type": "input_text", "text": "hand-off"}]},
-                {"type": "function_call", "call_id": "c1", "name": "alpha",
-                 "namespace": "ns", "arguments": "{}"},
+                {"type": "function_call", "id": "fc_1", "call_id": "c1", "name": "alpha",
+                 "namespace": "ns", "arguments": "{}",
+                 "zz_source": {"url": "http://planted.invalid/b"}},
                 {"type": "function_call_output", "call_id": "c1", "output": "42"},
                 {"type": "computer_call_output", "call_id": "c2",
                  "output": {"type": "computer_screenshot", "IMAGE_URL": "s3://planted/k"}}]})
@@ -2129,6 +2151,41 @@ async fn the_walk_surfaces_a_lost_carried_member_on_the_responses_lane() {
             Ingress::Responses.lane()
         )]
     );
+}
+
+/// Positive control for the function_call and reasoning item members: a
+/// member the deposited egress body lost on either item comes back as a
+/// request-leg finding at that item's own path.
+#[tokio::test]
+async fn the_walk_surfaces_a_lost_function_call_or_reasoning_item_member() {
+    for (pointer, kind) in [
+        ("/input/2/id", "function_call"),
+        ("/input/1/zz_reasoning_member", "reasoning"),
+    ] {
+        let probe = Case {
+            tap_drop: Some(pointer),
+            ..case(
+                "responses/function-call-and-reasoning-item-members",
+                Ingress::Responses,
+                item_members_body(),
+                responses_stream(),
+                responses_provider,
+            )
+        };
+
+        let walked = Box::pin(walk_all(vec![probe])).await;
+
+        assert_eq!(walked.total(), 2, "{kind}: one request, both legs");
+        assert_eq!(
+            walked.unexplained(),
+            [format!(
+                "{} request {pointer} missing \
+                 (responses/function-call-and-reasoning-item-members)",
+                Ingress::Responses.lane()
+            )],
+            "{kind}"
+        );
+    }
 }
 
 /// Positive control on each Bedrock lane: a member the deposited egress body

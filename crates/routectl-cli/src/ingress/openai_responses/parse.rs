@@ -54,8 +54,8 @@ use serde_json::{Map, Value};
 use routectl_core::wire_check::{DeclaredEdit, EditKind, EditSite};
 use routectl_core::{
     ChatRequest, ContentPart, Error, KnownContentPart, Message, MessageContent, ReasoningConfig,
-    ReasoningDetail, ReasoningDetailKind, RefusalReason, ResponsesPassthroughItem, Result, Role,
-    SystemContent,
+    ReasoningDetail, ReasoningDetailKind, RefusalReason, ResponsesInputItemMembers,
+    ResponsesPassthroughItem, Result, Role, SystemContent,
 };
 
 use crate::ingress::read_alias_header;
@@ -157,9 +157,11 @@ pub(super) fn translate_request(headers: &HeaderMap, body: Value) -> Result<Chat
                 passthrough,
                 additional_tools,
                 origins: input_origins,
+                item_members,
             } = build_messages(input);
             req.messages = messages.into();
             req.routectl_internal.responses_input_passthrough = passthrough;
+            req.routectl_internal.responses_item_members = item_members;
             origins = input_origins;
             additional_tools
         }
@@ -382,6 +384,8 @@ struct ParsedInput {
     /// input order.
     additional_tools: Vec<Value>,
     origins: InputOrigins,
+    /// Unmodeled members of `function_call` and `reasoning` items.
+    item_members: ResponsesInputItemMembers,
 }
 
 /// Where each canonical message came from in the client's `input[]`. Items
@@ -463,6 +467,7 @@ fn build_messages(input: Value) -> ParsedInput {
             passthrough: Vec::new(),
             additional_tools: Vec::new(),
             origins: InputOrigins::default(),
+            item_members: ResponsesInputItemMembers::default(),
         },
         Value::Array(items) => build_messages_from_items(items),
         // Any other shape is unusable as conversation input; degrade to
@@ -479,6 +484,7 @@ fn build_messages(input: Value) -> ParsedInput {
                 passthrough: Vec::new(),
                 additional_tools: Vec::new(),
                 origins: InputOrigins::default(),
+                item_members: ResponsesInputItemMembers::default(),
             }
         }
     }
@@ -494,6 +500,7 @@ fn build_messages_from_items(items: Vec<Value>) -> ParsedInput {
     // instead of appending it after every modeled item.
     let mut modeled_prefix: usize = 0;
     let mut origins = InputOrigins::default();
+    let mut item_members = ResponsesInputItemMembers::default();
     for (index, item) in items.into_iter().enumerate() {
         let kind = item.get("type").and_then(Value::as_str).unwrap_or("");
         let is_message = kind == "message" || (kind.is_empty() && item.get("role").is_some());
@@ -514,6 +521,7 @@ fn build_messages_from_items(items: Vec<Value>) -> ParsedInput {
                 modeled_prefix += 1;
             }
             "function_call" => {
+                super::item_members::capture_function_call(&mut item_members, index, &item);
                 attach_function_call(&mut messages, &item);
                 modeled_prefix += 1;
             }
@@ -522,6 +530,7 @@ fn build_messages_from_items(items: Vec<Value>) -> ParsedInput {
                 modeled_prefix += 1;
             }
             "reasoning" => {
+                super::item_members::capture_reasoning(&mut item_members, index, &item);
                 attach_reasoning(&mut messages, &item);
                 modeled_prefix += 1;
             }
@@ -560,6 +569,7 @@ fn build_messages_from_items(items: Vec<Value>) -> ParsedInput {
         passthrough,
         additional_tools,
         origins,
+        item_members,
     }
 }
 

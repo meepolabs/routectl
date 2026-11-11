@@ -424,3 +424,40 @@ async fn responses_developer_turns_survive_the_per_attempt_rebuild() {
         "second chain attempt carries the record",
     );
 }
+
+#[tokio::test]
+async fn responses_item_members_survive_the_per_attempt_rebuild() {
+    let (router, first, second) = two_entry_chain();
+    let mut recorded = routectl_core::ResponsesInputItemMembers::default();
+    let mut members = serde_json::Map::new();
+    members.insert("id".into(), json!("fc_1"));
+    recorded.function_call.insert(
+        "call_1".into(),
+        routectl_core::ResponsesItemMemberEntry {
+            client_pointer: "/input/1".into(),
+            members,
+        },
+    );
+    let mut req = ChatRequest {
+        model: "flow".into(),
+        ..Default::default()
+    };
+    req.routectl_internal.responses_item_members = recorded.clone();
+
+    Box::pin(router.complete(req))
+        .await
+        .expect("the second entry serves");
+
+    let first = first.lock();
+    let second = second.lock();
+    assert_eq!(first.len(), 1, "the first entry is tried once");
+    assert_eq!(second.len(), 1, "the chain falls back to the second entry");
+    assert_eq!(
+        first[0].routectl_internal.responses_item_members, recorded,
+        "first chain attempt carries the record",
+    );
+    assert_eq!(
+        second[0].routectl_internal.responses_item_members, recorded,
+        "second chain attempt carries the record",
+    );
+}

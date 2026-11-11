@@ -209,3 +209,76 @@ fn many_developer_items_record_every_kept_developer_turn_in_order() {
     let expected: Vec<usize> = (0..GROUPS).map(|group| group * 3).collect();
     assert_eq!(req.routectl_internal.responses_developer_turns, expected);
 }
+
+/// A `function_call` item's members outside the canonical call ride the
+/// item-member record under its raw `call_id`, and a `reasoning` item's
+/// under its `id`, each with the item's own `/input/N`; no typed member
+/// enters the record.
+#[test]
+fn function_call_and_reasoning_members_ride_the_item_record_without_typed_members() {
+    // Arrange
+    let body = json!({"model": "m", "input": [
+        {"type": "message", "role": "user", "content": "hi"},
+        {"type": "reasoning", "id": "rs_1", "summary": [], "encrypted_content": "sig",
+         "status": "completed"},
+        {"type": "function_call", "id": "fc_1", "call_id": "call.a:1", "name": "f",
+         "namespace": "ns", "arguments": "{}", "status": "completed",
+         "zz_future": {"k": "caf\u{e9}"}}]});
+
+    // Act
+    let req = parse(body);
+
+    // Assert
+    let record = &req.routectl_internal.responses_item_members;
+    let call = &record.function_call["call.a:1"];
+    assert_eq!(call.client_pointer, "/input/2");
+    assert_eq!(
+        call.members,
+        map(json!({"id": "fc_1", "status": "completed", "zz_future": {"k": "caf\u{e9}"}}))
+    );
+    let reasoning = &record.reasoning["rs_1"];
+    assert_eq!(reasoning.client_pointer, "/input/1");
+    assert_eq!(reasoning.members, map(json!({"status": "completed"})));
+    assert!(record.unkeyed.is_empty(), "{record:?}");
+}
+
+/// The typed `call_id` and `arguments` keep the values the call is built
+/// from; the record holds neither, so nothing can replace them.
+#[test]
+fn a_function_calls_typed_members_keep_their_typed_values() {
+    // Arrange
+    let body = json!({"model": "m", "input": [
+        {"type": "function_call", "id": "fc_1", "call_id": "call_1", "name": "f",
+         "arguments": "{\"a\":1}"}]});
+
+    // Act
+    let req = parse(body);
+
+    // Assert
+    let calls = req.messages[0].tool_calls.as_ref().expect("tool calls");
+    assert_eq!(calls[0]["id"], json!("call_1"));
+    assert_eq!(calls[0]["function"]["arguments"], json!("{\"a\":1}"));
+    let members = &req.routectl_internal.responses_item_members.function_call["call_1"].members;
+    assert_eq!(members, &map(json!({"id": "fc_1"})));
+}
+
+/// An item with nothing outside its modeled members records nothing, and
+/// one with no identity to be emitted under is recorded unkeyed.
+#[test]
+fn item_members_without_an_identity_are_recorded_unkeyed() {
+    // Arrange
+    let body = json!({"model": "m", "input": [
+        {"type": "function_call", "call_id": "call_1", "name": "f", "arguments": "{}"},
+        {"type": "reasoning", "summary": [{"type": "summary_text", "text": "t"}],
+         "status": "completed"}]});
+
+    // Act
+    let req = parse(body);
+
+    // Assert
+    let record = &req.routectl_internal.responses_item_members;
+    assert!(record.function_call.is_empty(), "{record:?}");
+    assert!(record.reasoning.is_empty(), "{record:?}");
+    assert_eq!(record.unkeyed.len(), 1, "{record:?}");
+    assert_eq!(record.unkeyed[0].client_pointer, "/input/1");
+}

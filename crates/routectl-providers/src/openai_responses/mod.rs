@@ -68,6 +68,7 @@ pub(crate) mod cookies;
 mod empty_optional;
 pub(crate) mod extras;
 pub use extras::breakpoint_text_digest;
+mod item_members;
 mod mantle_guard;
 #[cfg(feature = "bedrock")]
 mod mantle_media;

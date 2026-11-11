@@ -39,6 +39,7 @@ use super::{
 };
 
 mod breakpoints;
+mod item_members;
 mod parse;
 #[cfg(test)]
 #[path = "parse_carrier_tests.rs"]

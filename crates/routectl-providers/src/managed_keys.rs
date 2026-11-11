@@ -319,12 +319,14 @@ pub fn declare_foreign_keys(tap: Option<&WireTap>, foreign_keys: &[&str]) {
 pub const MESSAGE_CACHE_MARKER: &str = "cache_control";
 
 /// One member a client sent on a carrier node (a message, a typed content
-/// part, a custom tool, a system block): the client-coordinate pattern of the
-/// node, every index a wildcard, and the member's name.
+/// part, a custom tool, a system block) or on a Responses `function_call` or
+/// `reasoning` item: the client-coordinate pointer of the node (a pattern
+/// with every index a wildcard, or for an input item its own `/input/N`), and
+/// the member's name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct CarriedMember<'a> {
     /// Pattern of the node the member sat on, as the client wrote it.
-    pub parent: &'static str,
+    pub parent: &'a str,
     /// The member's name.
     pub key: &'a str,
 }
@@ -332,7 +334,9 @@ pub struct CarriedMember<'a> {
 /// Every member `req`'s carrier nodes hold that a wire of another dialect
 /// cannot carry, one entry per (node pattern, name): the members a
 /// same-dialect egress would emit, plus a message's own `cache_control`,
-/// which no egress forwards. Empty for a carrier-free request.
+/// which no egress forwards, plus the recorded members of a Responses
+/// client's `function_call` and `reasoning` items at their own `/input/N`.
+/// Empty for a carrier-free request.
 pub fn carried_members(req: &ChatRequest) -> BTreeSet<CarriedMember<'_>> {
     let (message, part) = message_patterns(req.routectl_internal.provenance);
     let mut members = BTreeSet::new();
@@ -358,12 +362,15 @@ pub fn carried_members(req: &ChatRequest) -> BTreeSet<CarriedMember<'_>> {
             insert_members(&mut members, "/system/*", block.forwardable_extras());
         }
     }
+    for entry in req.routectl_internal.responses_item_members.entries() {
+        insert_members(&mut members, &entry.client_pointer, entry.members.iter());
+    }
     members
 }
 
 fn insert_members<'a>(
     members: &mut BTreeSet<CarriedMember<'a>>,
-    parent: &'static str,
+    parent: &'a str,
     carried: impl Iterator<Item = (&'a String, &'a Value)>,
 ) {
     members.extend(carried.map(|(key, _)| CarriedMember { parent, key }));

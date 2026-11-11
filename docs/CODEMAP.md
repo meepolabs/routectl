@@ -1240,6 +1240,10 @@ license.
   text digest both match, counting any left unplaced once per request;
   `resolve_parallel_tool_calls` picks the sent `parallel_tool_calls` and its
   declared edit; calls `restamp_namespaces` on the built history
+- `src/openai_responses/item_members.rs` -- puts the recorded members of the
+  client's `function_call` and `reasoning` input items back on the items
+  emitted under the same `call_id` / `id`; withholds, declares and counts
+  (`unknown_member_withheld`) any entry with no emitted item to land on
 - `src/openai_responses/system.rs` -- canonical `system` and `Role::System`
   message text -> Responses `instructions` string
 - `src/openai_responses/request_system_role_tests.rs` -- `include!`d into
@@ -7741,6 +7745,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `prompt_cache_breakpoint` values as `ResponsesCacheBreakpoint` entries
   (post-lift text-block ordinal, text digest, value, client pointer) without
   touching canonical content
+- `src/ingress/openai_responses/item_members.rs` -- records the unmodeled
+  members of `function_call` (by raw `call_id`) and `reasoning` (by `id`)
+  input items with their `/input/N`, into
+  `RoutectlInternal::responses_item_members`
 - `src/ingress/openai_responses/render.rs` -- canonical `ChatResponse` ->
   Responses response body (`object:"response"`, `status`, `output[]` of
   message / function_call / reasoning items, plus one top-level item per

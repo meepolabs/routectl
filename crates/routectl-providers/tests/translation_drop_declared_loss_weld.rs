@@ -469,6 +469,7 @@ const EXPECTED_RESOLVED_LOG_COUNTS: &[(&str, &str, usize)] = &[
         4,
     ),
     ("openai_responses/extras.rs", "responses_text_format", 4),
+    ("openai_responses/item_members.rs", "emit", 1),
     ("openai_responses/mantle_guard.rs", "flush", 1),
     (
         "openai_responses/mantle_guard.rs",

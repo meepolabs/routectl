@@ -21,6 +21,7 @@ use routectl_core::{
 };
 use serde_json::Value;
 
+use super::item_members;
 use super::mantle_guard::{self, ForwardedItem};
 use super::messages::{
     UnknownParts, build_request_input, restamp_namespaces, withholds_forwarded_file_url,
@@ -208,6 +209,7 @@ fn build_input_with_passthrough(
             ) {
                 restamp_namespaces(items, members);
             }
+            place_item_members(id, auth_kind, items, req, tap, tallies.member);
         }
         place_cache_breakpoints(
             id,
@@ -233,6 +235,28 @@ fn build_input_with_passthrough(
         declare_passthrough_relocations(tap, &merged, &passthrough);
     }
     Ok(merged)
+}
+
+/// Put the recorded members of the client's `function_call` and
+/// `reasoning` items back on the items emitted under the same identity. On
+/// Bedrock Mantle none ships: each is declared removed and counted with the
+/// lane's other withholds (see [`mantle_guard`]).
+fn place_item_members(
+    id: &str,
+    auth_kind: AuthKind,
+    items: &mut [ResponseInputItem],
+    req: &ChatRequest,
+    tap: Option<&WireTap>,
+    withheld: &mut extras::UnknownMemberWithheldTally,
+) {
+    let record = &req.routectl_internal.responses_item_members;
+    if auth_kind == AuthKind::BedrockMantle {
+        let carriers = mantle_guard::WithheldCarriers::default();
+        item_members::withhold_all(record, &carriers);
+        carriers.flush(id, tap, withheld);
+        return;
+    }
+    item_members::emit(id, items, record, tap, withheld);
 }
 
 /// Put each client `prompt_cache_breakpoint` back on the `input_text` block

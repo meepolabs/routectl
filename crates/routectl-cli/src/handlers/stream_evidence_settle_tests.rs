@@ -854,7 +854,7 @@ async fn one_reply_yields_the_same_observations_complete_and_streamed() {
         .complete_with_options(complete_req, RouterOptions::default())
         .await;
     assert!(dispatched.result.is_ok(), "complete dispatch");
-    let stream_router = stream_through_walk(stream_router, strict_request()).await;
+    let stream_router = Box::pin(stream_through_walk(stream_router, strict_request())).await;
 
     // Assert
     let complete = resident(&complete_router);
@@ -904,10 +904,10 @@ async fn a_truncated_openai_compat_stream_errors_and_admits_nothing() {
     // Positive control: the same lane and request with a terminated reply
     // does verify, so the zero above is the truncation.
     let upstream = parity_upstream(parity_stream_body()).await;
-    let control = stream_through_walk(
+    let control = Box::pin(stream_through_walk(
         openai_compat_router(&upstream.uri()).await,
         strict_request(),
-    )
+    ))
     .await;
     assert_eq!(verified_entries(&control), 2);
 }

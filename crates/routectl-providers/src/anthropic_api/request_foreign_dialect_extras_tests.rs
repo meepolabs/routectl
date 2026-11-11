@@ -541,3 +541,63 @@ fn an_anthropic_client_carried_member_rides_the_anthropic_wire_uncounted_and_dro
     assert!(!body.to_string().contains("msg_u1"), "{body}");
     assert_eq!(delta, 1);
 }
+
+/// `carrying` plus the recorded members of a Responses client's
+/// `function_call` (at `/input/1`) and `reasoning` (at `/input/2`) items.
+fn carrying_item_members(provenance: RequestProvenance) -> ChatRequest {
+    let entry = |pointer: &str, key: &str, value: Value| {
+        let mut members = serde_json::Map::new();
+        members.insert(key.to_owned(), value);
+        routectl_core::ResponsesItemMemberEntry {
+            client_pointer: pointer.to_owned(),
+            members,
+        }
+    };
+    let mut req = carrying(provenance, json!({}));
+    let record = &mut req.routectl_internal.responses_item_members;
+    record
+        .function_call
+        .insert("call_1".into(), entry("/input/1", "id", json!("fc_zz_1")));
+    record.reasoning.insert(
+        "rs_zz_1".into(),
+        entry("/input/2", "status", json!("zz_done")),
+    );
+    req
+}
+
+/// A Responses client's recorded `function_call` and `reasoning` item
+/// members reach no Anthropic-shape wire: each is declared removed at its
+/// own client item, and the request counts once with the carriers.
+#[test]
+fn a_responses_client_item_record_is_absent_declared_and_counted_once_with_the_carriers() {
+    // Arrange
+    let req = carrying_item_members(RequestProvenance::ResponsesIngress);
+    let removed = |path: &str| {
+        (
+            EditSite::ManagedExtrasStrip,
+            path.to_owned(),
+            EditKind::Remove,
+        )
+    };
+
+    for egress in egresses() {
+        // Act
+        let (wire, delta, seen) = wire_and_deltas(&egress, &req);
+        let edits = declared_edits(&egress, req.clone());
+
+        // Assert
+        let text = wire.to_string();
+        for member in ["fc_zz_1", "zz_done", "msg_u1"] {
+            assert!(!text.contains(member), "{} {member}: {text}", egress.lane);
+        }
+        for path in ["/input/1/id", "/input/2/status", "/input/*/id"] {
+            assert!(
+                edits.contains(&removed(path)),
+                "{} {path}: {edits:?}",
+                egress.lane
+            );
+        }
+        assert_eq!(delta, 1, "{}", egress.lane);
+        assert_eq!(seen, 1, "{}", egress.lane);
+    }
+}

@@ -192,6 +192,10 @@ pub enum ResponseInputItem {
         /// string carries nothing the key's absence does not.
         #[serde(skip_serializing_if = "String::is_empty")]
         encrypted_content: String,
+        /// Members the client sent on the item that this hub does not
+        /// model; see [`CarriedMembers`].
+        #[serde(flatten)]
+        carried: CarriedMembers,
     },
     FunctionCall {
         call_id: String,
@@ -202,6 +206,10 @@ pub enum ResponseInputItem {
         /// against the default one.
         #[serde(skip_serializing_if = "Option::is_none")]
         namespace: Option<String>,
+        /// Members the client sent on the item that this hub does not
+        /// model; see [`CarriedMembers`].
+        #[serde(flatten)]
+        carried: CarriedMembers,
     },
     FunctionCallOutput {
         call_id: String,
@@ -244,6 +252,10 @@ impl CarriedMembers {
 
 /// Member names a `message` input item writes.
 pub const MESSAGE_ITEM_KEYS: &[&str] = &["type", "role", "content"];
+/// Member names a `reasoning` input item writes.
+pub const REASONING_ITEM_KEYS: &[&str] = &["type", "id", "summary", "content", "encrypted_content"];
+/// Member names a `function_call` input item writes.
+pub const FUNCTION_CALL_ITEM_KEYS: &[&str] = &["type", "call_id", "name", "arguments", "namespace"];
 /// Member names a `function_call_output` input item writes.
 pub const FUNCTION_CALL_OUTPUT_ITEM_KEYS: &[&str] = &["type", "call_id", "output"];
 /// Member names an `input_text` block writes.
@@ -497,6 +509,7 @@ mod tests {
             }],
             content: Vec::new(),
             encrypted_content: "sig-abc".to_string(),
+            carried: CarriedMembers::default(),
         };
 
         // Act
@@ -525,6 +538,7 @@ mod tests {
                 text: "detail".to_string(),
             }],
             encrypted_content: "SIG".to_string(),
+            carried: CarriedMembers::default(),
         };
 
         // Act
@@ -551,6 +565,7 @@ mod tests {
             name: "calc".into(),
             arguments: "{\"a\":1}".into(),
             namespace: None,
+            carried: CarriedMembers::default(),
         };
 
         // Act
@@ -749,7 +764,33 @@ mod tests {
     /// Each wire node's reserved list names exactly the members it writes.
     #[test]
     fn reserved_node_members_match_what_each_node_writes() {
-        let rows: [(&str, Value, &[&str]); 5] = [
+        let rows: [(&str, Value, &[&str]); 7] = [
+            (
+                "reasoning",
+                serde_json::to_value(ResponseInputItem::Reasoning {
+                    id: Some("rs".into()),
+                    summary: Vec::new(),
+                    content: vec![ReasoningContentItem::ReasoningText {
+                        text: String::new(),
+                    }],
+                    encrypted_content: "s".into(),
+                    carried: CarriedMembers::default(),
+                })
+                .unwrap(),
+                REASONING_ITEM_KEYS,
+            ),
+            (
+                "function_call",
+                serde_json::to_value(ResponseInputItem::FunctionCall {
+                    call_id: "c".into(),
+                    name: "f".into(),
+                    arguments: String::new(),
+                    namespace: Some("ns".into()),
+                    carried: CarriedMembers::default(),
+                })
+                .unwrap(),
+                FUNCTION_CALL_ITEM_KEYS,
+            ),
             (
                 "message",
                 serde_json::to_value(ResponseInputItem::Message {
