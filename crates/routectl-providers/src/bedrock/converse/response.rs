@@ -23,7 +23,8 @@ use uuid::Uuid;
 use routectl_core::schema::CacheCreation;
 use routectl_core::{
     ChatResponse, Choice, ContentPart, Error, KnownContentPart, Message, MessageContent,
-    ReasoningDetail, ReasoningDetailKind, Result, Role, Usage, sanitize_for_log,
+    ReasoningDetail, ReasoningDetailKind, Result, Role, Usage, parse_cache_lifetime,
+    sanitize_for_log,
 };
 
 use crate::anthropic_api::response::{map_stop_reason, sum_prompt_tokens};
@@ -312,23 +313,16 @@ fn translate_usage(u: &ConverseUsage) -> Usage {
 }
 
 /// Flatten Converse's `cacheDetails: [{inputTokens, ttl}]` array into
-/// the canonical per-TTL object. Multiple entries with the same `ttl`
-/// (shouldn't happen on the wire today but is theoretically possible)
-/// sum together so no token counts get silently lost.
+/// the canonical per-lifetime object. Each `ttl` is a bare duration
+/// (`"5m"`, `"1h"`); entries sharing a lifetime sum with saturation. A
+/// `ttl` the duration grammar refuses contributes nothing to the split;
+/// its tokens stay in `cache_write_input_tokens` as unknown lifetime.
 pub fn translate_cache_details(details: &[ConverseCacheDetail]) -> CacheCreation {
-    CacheCreation::from_lifetimes(details.iter().filter_map(|d| {
-        let seconds = match d.ttl.as_str() {
-            "5m" => 300,
-            "1h" => 3600,
-            // Forward compat: an unknown TTL bucket means a future AWS
-            // value (e.g. "24h"). Drop it from the per-TTL object
-            // rather than coercing into the wrong bucket; it still
-            // contributed to the cache_creation_input_tokens total
-            // upstream.
-            _ => return None,
-        };
-        Some((seconds, d.input_tokens))
-    }))
+    CacheCreation::from_lifetimes(
+        details
+            .iter()
+            .filter_map(|d| Some((parse_cache_lifetime(&d.ttl)?, d.input_tokens))),
+    )
 }
 
 #[cfg(test)]

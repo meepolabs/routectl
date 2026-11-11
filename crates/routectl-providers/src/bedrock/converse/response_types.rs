@@ -156,7 +156,7 @@ pub struct ConverseUsage {
 #[serde(rename_all = "camelCase")]
 pub struct ConverseCacheDetail {
     pub(crate) input_tokens: u32,
-    /// `"5m"` | `"1h"` -- mirrors the request-side `CachePoint.ttl`.
+    /// Bare duration (`"5m"`, `"1h"`); mirrors the request-side `CachePoint.ttl`.
     pub(crate) ttl: String,
 }
 

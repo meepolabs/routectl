@@ -1002,6 +1002,8 @@ list with more narrative.
 
 - **`routectl config show` and `config show --effective` redact every credential-bearing value.** Each `header_extras` value (providers and models) and every string inside `payload_extras` and a model's `additional_request_fields` now prints as `[REDACTED]`, with header names and keys still shown; `bedrock_mantle` creds and `[server.auth] tokens` are redacted like provider key refs; and a secret ref that is not an `env://`, `file://` or `oauth://` pointer prints as `[REDACTED]`.
 
+- **Bedrock Converse cache writes keep every reported lifetime.** A `cacheDetails` entry whose `ttl` is any valid duration (`"30m"`, `"24h"`, not only `"5m"` / `"1h"`) now lands in the per-lifetime cache-write split on complete and streamed responses, and entries sharing a lifetime sum. A `ttl` that is not a valid duration still adds nothing to the split; `cache_creation_input_tokens` is unchanged either way.
+
 ### Security
 
 - **The fixture scrub gate (`scripts/scrub-fixture.sh --check`) catches more credential and task-id shapes.** A vendor key after a percent-encoded boundary (`%22`, `%3D`, `%20`) is now refused like one after a JSON escape; OpenAI keys carrying the `T3BlbkFJ` infix and `sk-None-` keys are refused as `provider-key`; a vendor `req_` id under a JSON `request_id` key is refused as the new `upstream-request-id` class in raw, JSON-escaped, pretty-printed, percent-encoded and percent-encoded JSON-escaped bodies, while the `request-id` response header and the uuid `request_id` in `meta.json` stay accepted; and the scratch task-id class matches case-insensitively, still accepting all-hex slugs.

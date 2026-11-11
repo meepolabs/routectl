@@ -874,6 +874,18 @@ Surfaces: [openai-compat](#openai-compat-surface) -
   that reads as new evidence for the learned layer, not as a contradiction
   of this note.
 
+- **Converse reports cache writes per lifetime as `cacheDetails[].ttl`
+  duration strings, not member names.** Each `ttl` (`"5m"`, `"1h"`,
+  `"30m"`, `"24h"`) parses with the same duration grammar as Anthropic's
+  `ephemeral_<duration>_input_tokens` names, so a new AWS lifetime needs
+  no code change; entries sharing a lifetime sum. A `ttl` the grammar
+  refuses (`"forever"`, `""`, `"0m"`) adds nothing to the split, and its
+  tokens stay in `cacheWriteInputTokens` as unknown lifetime. Handled by
+  `translate_cache_details` in
+  `crates/routectl-providers/src/bedrock/converse/response.rs` for both
+  the complete and the stream path; pinned by
+  `cache_detail_ttls_split_by_parsed_lifetime_identically_on_complete_and_stream`.
+
 ## OpenAI Responses surface
 
 - **Responses and openai-compat forward what their wire types can hold.**

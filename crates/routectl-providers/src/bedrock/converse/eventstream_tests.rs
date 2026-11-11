@@ -10,6 +10,7 @@ use super::*;
 use aws_smithy_types::event_stream::{Header, HeaderValue, Message as AwsMessage};
 use futures::StreamExt;
 use futures::stream as fstream;
+use routectl_core::schema::CacheCreation;
 
 fn make_frame(event_type: &str, payload_json: &str) -> AwsMessage {
     AwsMessage::new(Bytes::from(payload_json.to_string().into_bytes()))
@@ -481,33 +482,113 @@ fn metadata_cache_details_translate_to_per_ttl_breakdown_on_closing_chunk() {
     assert_eq!(cc.get(3600), Some(100));
 }
 
-#[test]
-fn metadata_unknown_ttl_bucket_dropped_from_per_ttl_split_on_closing_chunk() {
-    // Arrange
+struct TtlCase {
+    name: &'static str,
+    details: &'static str,
+    write_total: u32,
+    split: &'static [(u32, u32)],
+}
+
+const TTL_CASES: &[TtlCase] = &[
+    TtlCase {
+        name: "5m",
+        details: r#"[{"inputTokens":75,"ttl":"5m"}]"#,
+        write_total: 75,
+        split: &[(300, 75)],
+    },
+    TtlCase {
+        name: "1h",
+        details: r#"[{"inputTokens":100,"ttl":"1h"}]"#,
+        write_total: 100,
+        split: &[(3600, 100)],
+    },
+    TtlCase {
+        name: "30m",
+        details: r#"[{"inputTokens":40,"ttl":"30m"}]"#,
+        write_total: 40,
+        split: &[(1800, 40)],
+    },
+    TtlCase {
+        name: "24h",
+        details: r#"[{"inputTokens":50,"ttl":"24h"}]"#,
+        write_total: 50,
+        split: &[(86_400, 50)],
+    },
+    TtlCase {
+        name: "two 5m entries sum",
+        details: r#"[{"inputTokens":30,"ttl":"5m"},{"inputTokens":45,"ttl":"5m"}]"#,
+        write_total: 75,
+        split: &[(300, 75)],
+    },
+    TtlCase {
+        name: "forever contributes nothing",
+        details: r#"[{"inputTokens":50,"ttl":"forever"},{"inputTokens":75,"ttl":"5m"}]"#,
+        write_total: 125,
+        split: &[(300, 75)],
+    },
+    TtlCase {
+        name: "empty ttl contributes nothing",
+        details: r#"[{"inputTokens":50,"ttl":""},{"inputTokens":75,"ttl":"5m"}]"#,
+        write_total: 125,
+        split: &[(300, 75)],
+    },
+    TtlCase {
+        name: "0m contributes nothing",
+        details: r#"[{"inputTokens":50,"ttl":"0m"},{"inputTokens":75,"ttl":"5m"}]"#,
+        write_total: 125,
+        split: &[(300, 75)],
+    },
+];
+
+fn complete_path_cache_usage(case: &TtlCase) -> (Option<u32>, Option<CacheCreation>) {
+    let raw: Value = serde_json::from_str(&format!(
+        r#"{{"output":{{"message":{{"role":"assistant","content":[{{"text":"ok"}}]}}}},
+            "stopReason":"end_turn",
+            "usage":{{"inputTokens":0,"outputTokens":5,
+                "cacheWriteInputTokens":{},"cacheDetails":{}}}}}"#,
+        case.write_total, case.details
+    ))
+    .unwrap();
+    let usage = super::super::response::translate("test", &raw)
+        .unwrap()
+        .usage
+        .unwrap();
+    (usage.cache_creation_input_tokens, usage.cache_creation)
+}
+
+fn stream_path_cache_usage(case: &TtlCase) -> (Option<u32>, Option<CacheCreation>) {
     let mut state = ConverseStreamState::default();
-
-    // Act: a future TTL bucket (e.g. "24h") AWS hasn't shipped yet.
     let _ = run("messageStop", r#"{"stopReason":"end_turn"}"#, &mut state);
-    let closing = run(
-        "metadata",
-        r#"{"usage":{"inputTokens":0,"outputTokens":5,
-            "cacheWriteInputTokens":125,
-            "cacheDetails":[
-                {"inputTokens":50,"ttl":"24h"},
-                {"inputTokens":75,"ttl":"5m"}
-            ]}}"#,
-        &mut state,
+    let payload = format!(
+        r#"{{"usage":{{"inputTokens":0,"outputTokens":5,
+            "cacheWriteInputTokens":{},"cacheDetails":{}}}}}"#,
+        case.write_total, case.details
     );
+    let mut closing = run("metadata", &payload, &mut state);
+    assert_eq!(closing.len(), 1, "{}: one closing chunk", case.name);
+    let usage = closing.remove(0).usage.unwrap();
+    (usage.cache_creation_input_tokens, usage.cache_creation)
+}
 
-    // Assert: the unknown bucket is dropped from the per-TTL object
-    // (not coerced into the wrong bucket) but still counts toward the
-    // aggregate, matching the shared translate_cache_details contract.
-    assert_eq!(closing.len(), 1);
-    let u = closing[0].usage.as_ref().unwrap();
-    assert_eq!(u.cache_creation_input_tokens, Some(125));
-    let cc = u.cache_creation.as_ref().unwrap();
-    assert_eq!(cc.get(300), Some(75));
-    assert_eq!(cc.get(3600), None);
+#[test]
+fn cache_detail_ttls_split_by_parsed_lifetime_identically_on_complete_and_stream() {
+    for case in TTL_CASES {
+        // Arrange
+        let expected = CacheCreation::from_lifetimes(case.split.iter().copied());
+
+        // Act
+        let complete = complete_path_cache_usage(case);
+        let stream = stream_path_cache_usage(case);
+
+        // Assert
+        assert_eq!(
+            complete,
+            (Some(case.write_total), Some(expected.clone())),
+            "{}: complete path",
+            case.name
+        );
+        assert_eq!(stream, complete, "{}: stream matches complete", case.name);
+    }
 }
 
 #[test]
