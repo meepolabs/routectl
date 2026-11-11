@@ -15,6 +15,11 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
+/// The lifetime seconds a legacy 5-minute cache-write column stands for.
+pub const LEGACY_5M_SECONDS: u32 = 300;
+/// The lifetime seconds a legacy 1-hour cache-write column stands for.
+pub const LEGACY_1H_SECONDS: u32 = 3600;
+
 /// The bound values of `cache_write_tokens` and `cache_write_lifetimes` for
 /// one row. `None` binds SQL NULL.
 #[derive(Debug, Clone, PartialEq, Eq)]

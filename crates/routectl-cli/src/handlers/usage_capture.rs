@@ -214,10 +214,9 @@ pub(crate) fn is_cache_thrash(
 /// which folds new + cache-read + cache-creation into the cache-INCLUSIVE
 /// canonical `prompt_tokens`. cost.rs prices `input_tokens`, `cache_read`,
 /// and `cache_write_*` as DISJOINT dimensions, so the row must store only
-/// the NEW input here -- subtracting the AGGREGATE cache-creation total
-/// (`cache_creation_input_tokens`), never the per-TTL breakdown (which is
-/// often absent and would under-subtract). Saturating so a malformed
-/// upstream tally can never wrap.
+/// the NEW input here -- subtracting the effective cache-write total (the
+/// stated total, else the split's sum), the same value the row records.
+/// Saturating so a malformed upstream tally can never wrap.
 pub(crate) const fn cache_exclusive_input(
     prompt: u32,
     cache_read: u32,
@@ -226,6 +225,23 @@ pub(crate) const fn cache_exclusive_input(
     prompt
         .saturating_sub(cache_read)
         .saturating_sub(cache_creation)
+}
+
+/// The cache-write total one usage object reports: its stated total, else
+/// the sum of a non-empty lifetime split, else `None`. The input subtraction
+/// and the recorded write total both take this one value, so the tokens
+/// taken out of input are exactly the tokens recorded as written.
+fn effective_cache_write_total(
+    total: Option<u32>,
+    split: Option<&routectl_core::schema::CacheCreation>,
+) -> Option<u64> {
+    total
+        .map(u64::from)
+        .or_else(|| split.filter(|c| !c.is_empty()).map(|c| c.total()))
+}
+
+fn saturate_to_u32(value: u64) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
 }
 
 /// Integer cache-hit percentage: `read * 100 / prompt`, where `prompt` is
@@ -870,18 +886,22 @@ impl UsageCapture {
             self.observed_prompt_total = u.prompt_tokens;
             // Store cache-EXCLUSIVE new input: the canonical `prompt_tokens`
             // is cache-inclusive, but cost.rs prices input / cache_read /
-            // cache_write_* as disjoint dimensions. Subtract the aggregate
-            // cache-read + cache-creation totals so cached tokens are not
-            // billed twice. A fully-cached prompt yields a real Some(0).
+            // cache_write_* as disjoint dimensions. Subtract the cache-read
+            // total and the effective cache-write total so cached tokens are
+            // not billed twice. A fully-cached prompt yields a real Some(0).
+            let write_total = effective_cache_write_total(
+                u.cache_creation_input_tokens,
+                u.cache_creation.as_ref(),
+            );
             self.record.input_tokens = Some(cache_exclusive_input(
                 u.prompt_tokens,
                 u.cache_read_input_tokens.unwrap_or(0),
-                u.cache_creation_input_tokens.unwrap_or(0),
+                saturate_to_u32(write_total.unwrap_or(0)),
             ) as u64);
             self.record.output_tokens = Some(u.completion_tokens as u64);
             self.record.reasoning_tokens = u.reasoning_tokens.map(|v| v as u64);
             self.record.cache_read = u.cache_read_input_tokens.map(|v| v as u64);
-            self.record_cache_writes(u.cache_creation_input_tokens, u.cache_creation.as_ref());
+            self.record_cache_writes(write_total, u.cache_creation.as_ref());
             self.record.server_tool_use = u.server_tool_use.clone();
             // Anthropic returns `service_tier` in the usage extras
             // forward-compat sweep; lift it when present.
@@ -908,6 +928,10 @@ impl UsageCapture {
             }
         }
         if let Some(u) = &chunk.usage {
+            let write_total = effective_cache_write_total(
+                u.cache_creation_input_tokens,
+                u.cache_creation.as_ref(),
+            );
             if let Some(p) = u.prompt_tokens {
                 self.last_prompt = p;
                 // Same cache-INCLUSIVE calibration evidence as the
@@ -923,7 +947,7 @@ impl UsageCapture {
                 self.record.input_tokens = Some(cache_exclusive_input(
                     p,
                     u.cache_read_input_tokens.unwrap_or(0),
-                    u.cache_creation_input_tokens.unwrap_or(0),
+                    saturate_to_u32(write_total.unwrap_or(0)),
                 ) as u64);
             }
             if let Some(c) = u.completion_tokens {
@@ -940,7 +964,7 @@ impl UsageCapture {
                 self.record.cache_read = Some(cr as u64);
             }
             if u.cache_creation_input_tokens.is_some() || u.cache_creation.is_some() {
-                self.record_cache_writes(u.cache_creation_input_tokens, u.cache_creation.as_ref());
+                self.record_cache_writes(write_total, u.cache_creation.as_ref());
             }
             if u.server_tool_use.is_some() {
                 self.record.server_tool_use = u.server_tool_use.clone();
@@ -951,13 +975,14 @@ impl UsageCapture {
 
     /// Stamp the cache-write total and per-lifetime split as one pair from
     /// one usage object, so a stream's later usage never pairs its total
-    /// with an earlier split. The legacy per-TTL columns stay `None`.
+    /// with an earlier split. `total` is the same effective total the input
+    /// subtraction used. The legacy per-TTL columns stay `None`.
     fn record_cache_writes(
         &mut self,
-        total: Option<u32>,
+        total: Option<u64>,
         split: Option<&routectl_core::schema::CacheCreation>,
     ) {
-        self.record.cache_write_tokens = total.map(u64::from);
+        self.record.cache_write_tokens = total;
         self.record.cache_write_lifetimes = split.filter(|c| !c.is_empty()).map(|c| {
             c.iter()
                 .map(|(seconds, tokens)| (seconds, u64::from(tokens)))

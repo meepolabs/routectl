@@ -189,6 +189,40 @@ fn observe_chunk_matches_response_for_same_usage() {
 }
 
 #[test]
+fn a_split_without_a_total_is_both_subtracted_from_input_and_recorded() {
+    // Arrange: a cache-inclusive prompt of 100 new + 600 read + 300 written,
+    // whose usage states the 300 only as a lifetime split with no total.
+    type Observe = fn(&mut UsageCapture);
+    let rows: [(&str, Observe); 2] = [
+        ("complete", |cap| {
+            cap.observe_response(&response_with_cache(Some(1000), Some(600), None, Some(300)));
+        }),
+        ("stream", |cap| {
+            cap.observe_chunk(&chunk_with_cache(Some(1000), Some(600), None, Some(300)));
+        }),
+    ];
+    for (path, observe) in rows {
+        let (mut cap, _w, _dir) = capture();
+
+        // Act
+        observe(&mut cap);
+
+        // Assert: the split sum leaves input and is the recorded write total.
+        assert_eq!(cap.record.input_tokens, Some(100_u64), "{path}: input");
+        assert_eq!(
+            cap.record.cache_write_tokens,
+            Some(300_u64),
+            "{path}: total"
+        );
+        assert_eq!(
+            cap.record.cache_write_lifetimes,
+            Some(std::collections::BTreeMap::from([(300, 300_u64)])),
+            "{path}: split"
+        );
+    }
+}
+
+#[test]
 fn observe_response_absent_usage_leaves_input_none() {
     // Arrange: no usage on the response at all.
     let (mut cap, _w, _dir) = capture();

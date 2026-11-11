@@ -11,8 +11,9 @@
 //! Grammar. A duration is `<positive integer><s|m|h|d>`, lowercase,
 //! fitting `u32` seconds; leading zeros are allowed (`05m` is 300). A member name is `_`-separated
 //! segments, ends in `tokens`, holds exactly one `<digits><unit>` segment
-//! (which must itself be a valid duration), and has no read-side segment
-//! (`read`, `cached`).
+//! (which must itself be a valid duration), and has no read-side segment:
+//! one starting with `read`, `cached` or `cacheread` in any ASCII case, so
+//! `cache_reads_5m_tokens` and `ttl_5m_read_tokens` are refused too.
 
 use std::fmt;
 
@@ -57,7 +58,7 @@ pub fn parse_cache_lifetime_member(name: &str) -> Option<u32> {
     }
     let mut lifetime = None;
     for segment in segments {
-        if segment == "read" || segment == "cached" {
+        if is_read_side(segment) {
             return None;
         }
         if !is_duration_shaped(segment) {
@@ -69,6 +70,18 @@ pub fn parse_cache_lifetime_member(name: &str) -> Option<u32> {
         lifetime = Some(parse_cache_lifetime(segment)?);
     }
     lifetime
+}
+
+/// Prefixes that mark a segment as naming cache reads, compared without
+/// regard to ASCII case.
+const READ_SIDE_PREFIXES: [&str; 3] = ["read", "cached", "cacheread"];
+
+fn is_read_side(segment: &str) -> bool {
+    READ_SIDE_PREFIXES.iter().any(|prefix| {
+        segment
+            .get(..prefix.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+    })
 }
 
 /// `<digits><unit>`, valid or not: a zero or overflowing duration

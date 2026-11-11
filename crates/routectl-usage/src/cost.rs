@@ -13,14 +13,10 @@
 
 use std::collections::BTreeMap;
 
+use crate::cache_writes::{LEGACY_1H_SECONDS, LEGACY_5M_SECONDS};
 use crate::record::UsageRecord;
 
 const TOKENS_PER_MTOK: f64 = 1_000_000.0;
-
-/// The lifetime seconds a record's legacy 5-minute cache-write field stands for.
-const LEGACY_5M_SECONDS: u32 = 300;
-/// The lifetime seconds a record's legacy 1-hour cache-write field stands for.
-const LEGACY_1H_SECONDS: u32 = 3600;
 
 /// Per-million-token rates (USD), one optional rate per billable
 /// dimension. A `None` field means "no price known for this dimension";

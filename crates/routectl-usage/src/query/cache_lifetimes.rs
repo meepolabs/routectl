@@ -16,14 +16,10 @@ use std::collections::{BTreeMap, HashMap};
 
 use rusqlite::{Row, Transaction};
 
+use crate::cache_writes::{LEGACY_1H_SECONDS, LEGACY_5M_SECONDS};
 use crate::db::UsageDb;
 
 use super::{AggRow, GroupKey, QueryError};
-
-/// The lifetime seconds a legacy 5-minute cache-write column stands for.
-const LEGACY_5M_SECONDS: u32 = 300;
-/// The lifetime seconds a legacy 1-hour cache-write column stands for.
-const LEGACY_1H_SECONDS: u32 = 3600;
 
 /// The cache writes of one fine aggregate row, split by how long the written
 /// tokens were cached for.
