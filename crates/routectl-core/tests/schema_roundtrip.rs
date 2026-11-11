@@ -4,7 +4,7 @@
 use routectl_core::{
     CacheControl, ChatChunk, ChatRequest, ChatResponse, ContentPart, CustomTool, KnownContentPart,
     Message, MessageContent, OpaqueSseEvent, Reasoning, ReasoningConfig, ReasoningDetail,
-    ReasoningDetailKind, Role, SystemBlock, SystemContent, ToolDef,
+    ReasoningDetailKind, Role, SystemBlock, SystemContent, ToolDef, UsageDelta,
     cache_control::{Breakpoint, BreakpointPosition},
     upstream_meta::{AnthropicUnifiedQuota, UpstreamMeta},
 };
@@ -793,6 +793,15 @@ const CARRIER_ROWS: &[(&str, CarrierBuilder)] = &[
             extras,
         })
     }),
+    ("usage_delta", |extras| {
+        carrier_value(&UsageDelta {
+            prompt_tokens: Some(10),
+            completion_tokens: Some(2),
+            server_tool_use: Some(json!({"web_search_requests": 1})),
+            extras,
+            ..UsageDelta::default()
+        })
+    }),
 ];
 
 fn populated_extras() -> Map<String, Value> {
@@ -820,7 +829,7 @@ fn canonical_serialization_never_emits_extras() {
 #[test]
 fn canonical_deserialization_never_fills_extras() {
     let extras_member = json!({"caller": {"type": "direct"}});
-    let rows: [(&str, Value, ExtrasLen); 4] = [
+    let rows: [(&str, Value, ExtrasLen); 5] = [
         (
             "message",
             json!({"role": "user", "content": "hi", "extras": extras_member, "caller": 1}),
@@ -850,6 +859,16 @@ fn canonical_deserialization_never_fills_extras() {
             |v| match serde_json::from_value::<ContentPart>(v).unwrap() {
                 ContentPart::Known(KnownContentPart::Text { extras, .. }) => extras.len(),
                 other => panic!("expected a known text part, got {other:?}"),
+            },
+        ),
+        (
+            "usage_delta",
+            json!({"prompt_tokens": 1, "extras": extras_member, "caller": 1}),
+            |v| {
+                serde_json::from_value::<UsageDelta>(v)
+                    .unwrap()
+                    .extras
+                    .len()
             },
         ),
     ];

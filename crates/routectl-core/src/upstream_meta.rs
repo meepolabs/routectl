@@ -7,7 +7,9 @@
 //! an OpenAI Chat Completions stream the envelope metadata the canonical
 //! chunk has no slot for (`OpenAiChatEnvelope`), and on an OpenAI Responses
 //! response the envelope values a Responses ingress echoes
-//! (`ResponsesEnvelope`).
+//! (`ResponsesEnvelope`). It also names the wire dialect whose parser
+//! produced the response, so a render can tell whether unmodeled members
+//! it carries were written in its own dialect (see [`renders_unknowns`]).
 //! Skip-serialized (see the `#[serde(skip)]` fields on `ChatResponse` /
 //! `ChatChunk`); never on the wire.
 //!
@@ -38,6 +40,10 @@
 //! wire terms and only ever describe Anthropic data. Generalizing them
 //! into neutral names would silently conflate semantics across vendors
 //! whose quota models do not actually match.
+
+use serde_json::{Map, Value};
+
+use crate::wire_check::IngressDialect;
 
 /// Transport-internal upstream metadata carried beside a canonical
 /// response. Provider-namespaced: each vendor's non-canonical metadata
@@ -82,6 +88,11 @@ pub struct UpstreamMeta {
     /// no slot for, for a Responses ingress to echo. `None` when the
     /// response or chunk carried none. Not a quota family.
     pub openai_responses: Option<ResponsesEnvelope>,
+    /// The wire dialect of the upstream body this response or chunk was
+    /// parsed from, set by the parser. `None` when the parser does not
+    /// stamp it, which a render must treat as a foreign dialect. Not a
+    /// quota family.
+    pub wire_dialect: Option<IngressDialect>,
 }
 
 impl UpstreamMeta {
@@ -97,6 +108,7 @@ impl UpstreamMeta {
             usage_from_vendor_endpoint: None,
             openai_chat: None,
             openai_responses: None,
+            wire_dialect: None,
         }
     }
 
@@ -110,6 +122,7 @@ impl UpstreamMeta {
             usage_from_vendor_endpoint: None,
             openai_chat: None,
             openai_responses: None,
+            wire_dialect: None,
         }
     }
 
@@ -123,6 +136,7 @@ impl UpstreamMeta {
             usage_from_vendor_endpoint: None,
             openai_chat: None,
             openai_responses: None,
+            wire_dialect: None,
         }
     }
 
@@ -136,6 +150,7 @@ impl UpstreamMeta {
             usage_from_vendor_endpoint: None,
             openai_chat: None,
             openai_responses: None,
+            wire_dialect: None,
         }
     }
 
@@ -152,6 +167,7 @@ impl UpstreamMeta {
                 system_fingerprint: Some(fingerprint),
             }),
             openai_responses: None,
+            wire_dialect: None,
         }
     }
 
@@ -166,6 +182,7 @@ impl UpstreamMeta {
             usage_from_vendor_endpoint: None,
             openai_chat: None,
             openai_responses: Some(envelope),
+            wire_dialect: None,
         }
     }
 
@@ -173,6 +190,14 @@ impl UpstreamMeta {
     #[must_use]
     pub const fn with_usage_from_vendor_endpoint(mut self, from_vendor: bool) -> Self {
         self.usage_from_vendor_endpoint = Some(from_vendor);
+        self
+    }
+
+    /// This carrier with the wire dialect of the parsed upstream body
+    /// recorded.
+    #[must_use]
+    pub const fn with_wire_dialect(mut self, dialect: IngressDialect) -> Self {
+        self.wire_dialect = Some(dialect);
         self
     }
 
@@ -226,6 +251,7 @@ impl UpstreamMeta {
                 (Some(mine), Some(theirs)) => Some(mine.merge(theirs)),
                 (mine, theirs) => mine.or(theirs),
             },
+            wire_dialect: self.wire_dialect.or(other.wire_dialect),
         }
     }
 
@@ -241,6 +267,14 @@ impl UpstreamMeta {
         }
         (self != Self::default()).then_some(self)
     }
+}
+
+/// Whether a render of the `render` dialect may emit the unmodeled members
+/// carried on a response with this `meta`: only when the upstream body was
+/// parsed from that same dialect. An unstamped or absent carrier is
+/// foreign.
+pub fn renders_unknowns(render: IngressDialect, meta: Option<&UpstreamMeta>) -> bool {
+    meta.and_then(|meta| meta.wire_dialect) == Some(render)
 }
 
 /// Provenance of the cache-inclusive prompt count on a chunk's canonical
@@ -466,32 +500,41 @@ pub struct ResponsesEnvelope {
     pub message_item_id: Option<String>,
     /// The raw `created_at` of the response, in epoch seconds.
     pub created_at: Option<i64>,
+    /// Top-level response members canonical does not model, for the
+    /// Responses render alone to re-emit.
+    pub extras: Map<String, Value>,
 }
 
 impl ResponsesEnvelope {
     /// An envelope carrying only a `message` output item id.
-    pub const fn of_message_item_id(id: String) -> Self {
+    pub fn of_message_item_id(id: String) -> Self {
         Self {
             message_item_id: Some(id),
             created_at: None,
+            extras: Map::new(),
         }
     }
 
     /// An envelope carrying only the response `created_at`.
-    pub const fn of_created_at(created_at: i64) -> Self {
+    pub fn of_created_at(created_at: i64) -> Self {
         Self {
             message_item_id: None,
             created_at: Some(created_at),
+            extras: Map::new(),
         }
     }
 
     /// Combine two envelopes that describe the same response. Each field is
-    /// taken from `self` when present there, otherwise from `other`.
+    /// taken from `self` when present there, otherwise from `other`; the
+    /// extras are united, `self` winning a key both carry.
     #[must_use]
     pub fn merge(self, other: Self) -> Self {
+        let mut extras = other.extras;
+        extras.extend(self.extras);
         Self {
             message_item_id: self.message_item_id.or(other.message_item_id),
             created_at: self.created_at.or(other.created_at),
+            extras,
         }
     }
 }
@@ -686,6 +729,7 @@ mod tests {
         ResponsesEnvelope {
             message_item_id: id.map(str::to_string),
             created_at,
+            extras: Map::new(),
         }
     }
 
@@ -866,5 +910,77 @@ mod tests {
             vec![("secondary-used-percent".to_string(), "7".to_string())]
         );
         assert_eq!(echoed, quota);
+    }
+
+    #[test]
+    fn renders_unknowns_only_for_a_carrier_stamped_with_the_render_dialect() {
+        for render in IngressDialect::ALL {
+            // Arrange
+            let unstamped = UpstreamMeta::default();
+            let rows = IngressDialect::ALL.map(|tag| {
+                (
+                    tag.label(),
+                    UpstreamMeta::default().with_wire_dialect(tag),
+                    tag == render,
+                )
+            });
+
+            // Act + Assert
+            assert!(!renders_unknowns(render, None), "{render:?}: no carrier");
+            assert!(
+                !renders_unknowns(render, Some(&unstamped)),
+                "{render:?}: unstamped carrier"
+            );
+            for (tag, meta, expected) in rows {
+                assert_eq!(
+                    renders_unknowns(render, Some(&meta)),
+                    expected,
+                    "{render:?} render, {tag} tag"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn meta_merge_keeps_the_wire_dialect_from_either_side_preferring_self() {
+        // Arrange
+        let anthropic = UpstreamMeta::default().with_wire_dialect(IngressDialect::Anthropic);
+        let responses = UpstreamMeta::from_responses_envelope(ResponsesEnvelope::of_created_at(1))
+            .with_wire_dialect(IngressDialect::Responses);
+        let quota = UpstreamMeta::from_codex(CodexQuota::default());
+
+        // Act
+        let tag_from_other = quota.clone().merge(anthropic.clone()).wire_dialect;
+        let tag_from_self = anthropic.clone().merge(quota).wire_dialect;
+        let both = anthropic.merge(responses).wire_dialect;
+
+        // Assert
+        assert_eq!(tag_from_other, Some(IngressDialect::Anthropic));
+        assert_eq!(tag_from_self, Some(IngressDialect::Anthropic));
+        assert_eq!(both, Some(IngressDialect::Anthropic));
+    }
+
+    fn envelope_extras(pairs: &[(&str, i64)]) -> ResponsesEnvelope {
+        let mut envelope = ResponsesEnvelope::default();
+        for (key, value) in pairs {
+            envelope.extras.insert((*key).into(), Value::from(*value));
+        }
+        envelope
+    }
+
+    #[test]
+    fn responses_envelope_merge_unites_extras_with_self_winning_a_shared_key() {
+        // Arrange
+        let mine = envelope_extras(&[("service_tier", 1), ("shared", 1)]);
+        let theirs = envelope_extras(&[("background", 2), ("shared", 2)]);
+
+        // Act
+        let merged = mine.merge(theirs);
+
+        // Assert
+        assert_eq!(
+            merged.extras,
+            envelope_extras(&[("background", 2), ("service_tier", 1), ("shared", 1)]).extras
+        );
     }
 }

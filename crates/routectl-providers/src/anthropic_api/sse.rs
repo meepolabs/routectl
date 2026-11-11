@@ -713,6 +713,7 @@ impl SseState {
                             .as_ref()
                             .and_then(|u| u.output_tokens_details.as_ref())
                             .and_then(|d| d.thinking_tokens),
+                        extras: serde_json::Map::new(),
                     })
                 } else {
                     None

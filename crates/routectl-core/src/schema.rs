@@ -1331,6 +1331,12 @@ pub struct UsageDelta {
     /// unchanged for the common no-server-tool path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_tool_use: Option<serde_json::Value>,
+    /// Usage members the upstream sent that this delta does not model,
+    /// for a render of the producing dialect to re-emit. Never read or
+    /// written by canonical serde, so a Chat Completions chunk never
+    /// carries them.
+    #[serde(skip)]
+    pub extras: Map<String, Value>,
 }
 
 /// Top-level reasoning content on an assistant message. Mirrors OpenRouter's
