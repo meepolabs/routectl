@@ -1,7 +1,9 @@
 //! The openai-compat response normalization declares, on a tap that checks
 //! the response, exactly the edits it makes: the `reasoning_content` rename
-//! and lift, and `cache_read_input_tokens` lifted from a usage sub-bag. A
-//! tap that does not check the response records nothing.
+//! and lift, and `cache_read_input_tokens` / `cache_creation_input_tokens`
+//! lifted from a usage sub-bag. A tap that does not check the response
+//! records nothing. The cache-write lift itself gives the same total on the
+//! complete and the streaming path.
 
 use routectl_core::wire_check::{EditKind, EditSite, IngressDialect, Leg, WireTap};
 use serde_json::{Value, json};
@@ -47,7 +49,8 @@ fn each_response_lift_is_declared_only_when_it_fires() {
     let details = "/choices/*/message/reasoning_details";
     let r = "/choices/*/message/reasoning";
     let cache = "/usage/cache_read_input_tokens";
-    let rows: [LiftRow; 7] = [
+    let write = "/usage/cache_creation_input_tokens";
+    let rows: [LiftRow; 9] = [
         (
             "lifting dialect, complete body",
             body(reasoning.clone(), no_usage.clone()),
@@ -105,6 +108,27 @@ fn each_response_lift_is_declared_only_when_it_fires() {
                 plain.clone(),
                 json!({"cache_read_input_tokens": 4,
                        "prompt_tokens_details": {"cached_tokens": 4}}),
+            ),
+            ReasoningDialect::OpenAi,
+            false,
+            vec![],
+        ),
+        (
+            "cache write lifted from the OpenAI sub-bag",
+            body(
+                plain.clone(),
+                json!({"prompt_tokens_details": {"cache_write_tokens": 4}}),
+            ),
+            ReasoningDialect::OpenAi,
+            false,
+            vec![(CachedTokensAdd, write, Add)],
+        ),
+        (
+            "cache write already top-level",
+            body(
+                plain.clone(),
+                json!({"cache_creation_input_tokens": 4,
+                       "prompt_tokens_details": {"cache_write_tokens": 4}}),
             ),
             ReasoningDialect::OpenAi,
             false,
@@ -171,4 +195,65 @@ fn a_long_reasoning_stream_declares_each_lift_once() {
     let outcome = diff(&document, &document, LaneClass::Fidelity, edits);
     assert!(!outcome.truncated, "the check must not stop at its budget");
     assert_eq!(edits.len(), 3);
+}
+
+/// One usage object through the complete normalizer and through a terminal
+/// stream chunk: `(complete write total, stream write total)`.
+fn cache_write_totals(usage: &Value) -> (Option<u32>, Option<u32>) {
+    let complete = super::normalize(
+        "t",
+        json!({"id": "c", "model": "m",
+               "choices": [{"index": 0, "finish_reason": "stop",
+                            "message": {"role": "assistant", "content": "x"}}],
+               "usage": usage}),
+        ReasoningDialect::OpenAi,
+    )
+    .expect("complete normalize")
+    .usage
+    .expect("complete usage");
+    let chunk = json!({"id": "c", "model": "m", "choices": [], "usage": usage}).to_string();
+    let stream =
+        crate::openai_compat::sse::parse_event("t", &chunk, ReasoningDialect::OpenAi, &mut 0)
+            .expect("chunk parse")
+            .expect("chunk present")
+            .usage
+            .expect("stream usage");
+    (
+        complete.cache_creation_input_tokens,
+        stream.cache_creation_input_tokens,
+    )
+}
+
+#[test]
+fn cache_write_total_lifts_equally_on_complete_and_stream() {
+    let base = || json!({"prompt_tokens": 100, "completion_tokens": 5, "total_tokens": 105});
+    let with = |extra: Value| {
+        let mut usage = base();
+        for (k, v) in extra.as_object().expect("object") {
+            usage[k] = v.clone();
+        }
+        usage
+    };
+    let rows: [(&str, Value, Option<u32>); 4] = [
+        (
+            "cache_write_tokens becomes the write total",
+            with(json!({"prompt_tokens_details": {"cache_write_tokens": 60, "cached_tokens": 0}})),
+            Some(60),
+        ),
+        (
+            "observed zero write stays zero",
+            with(json!({"prompt_tokens_details": {"cache_write_tokens": 0}})),
+            Some(0),
+        ),
+        (
+            "prompt_cache_miss_tokens alone is never a write",
+            with(json!({"prompt_cache_hit_tokens": 20, "prompt_cache_miss_tokens": 80})),
+            None,
+        ),
+        ("no write field stays absent", base(), None),
+    ];
+
+    for (name, usage, want) in rows {
+        assert_eq!(cache_write_totals(&usage), (want, want), "{name}");
+    }
 }

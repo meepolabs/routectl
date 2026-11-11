@@ -523,6 +523,21 @@ fn lift_chunk_usage_subbags(val: &mut Value) {
             .or_insert(Value::from(n));
     }
 
+    let cache_write = usage
+        .get("prompt_tokens_details")
+        .and_then(|v| v.get("cache_write_tokens"))
+        .and_then(serde_json::Value::as_u64)
+        .map(|n| n.min(u64::from(u32::MAX)));
+    if let Some(n) = cache_write {
+        // Same null-sentinel guard as `reasoning_tokens` above.
+        if matches!(usage.get("cache_creation_input_tokens"), Some(Value::Null)) {
+            usage.remove("cache_creation_input_tokens");
+        }
+        usage
+            .entry("cache_creation_input_tokens")
+            .or_insert(Value::from(n));
+    }
+
     // Sub-bags themselves are unknown to UsageDelta and would be
     // dropped by serde regardless; an explicit remove makes the
     // intention readable in the trace and keeps any future extras

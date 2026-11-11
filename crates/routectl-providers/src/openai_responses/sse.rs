@@ -61,7 +61,7 @@ const BLOCK_TAG_PASSTHROUGH: &str = "passthrough";
 pub(super) const MAX_OUTPUT_BLOCKS: usize = 4096;
 
 use super::empty_optional::EmptyOptionalFilter;
-use super::response::{map_finish_reason, upstream_error_from_failed};
+use super::response::{cache_details, map_finish_reason, upstream_error_from_failed};
 use super::response_types::{ResponsesResponse, ResponsesStreamEvent};
 use super::{AuthKind, lane_format_tag};
 
@@ -797,12 +797,7 @@ impl ResponsesStreamState {
             map_finish_reason(resp.status.as_deref(), incomplete_reason, has_function_call);
 
         let usage_delta = resp.usage.as_ref().map(|u| {
-            let cache_read = u
-                .input_tokens_details
-                .as_ref()
-                .and_then(|v| v.get("cached_tokens"))
-                .and_then(serde_json::Value::as_u64)
-                .map(|n| n as u32);
+            let cache = cache_details(u.input_tokens_details.as_ref());
             let reasoning_tokens = u
                 .output_tokens_details
                 .as_ref()
@@ -814,7 +809,9 @@ impl ResponsesStreamState {
                 completion_tokens: Some(u.output_tokens),
                 total_tokens: Some(u.total_tokens),
                 reasoning_tokens,
-                cache_read_input_tokens: cache_read,
+                cache_creation_input_tokens: cache.write_total,
+                cache_read_input_tokens: cache.read,
+                cache_creation: cache.write_split,
                 ..Default::default()
             }
         });

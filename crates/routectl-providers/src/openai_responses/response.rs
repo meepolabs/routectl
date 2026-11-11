@@ -28,9 +28,10 @@ use std::time::Duration;
 use uuid::Uuid;
 
 use routectl_core::{
-    ChatRequest, ChatResponse, Choice, ContentPart, Error, KnownContentPart, Message,
-    MessageContent, ReasoningDetail, ReasoningDetailKind, RequestObservation, ResponsesEnvelope,
-    Result, Role, UpstreamMeta, Usage, sanitize_for_log, wire_check::WireTap,
+    CacheCreation, ChatRequest, ChatResponse, Choice, ContentPart, Error, KnownContentPart,
+    Message, MessageContent, ReasoningDetail, ReasoningDetailKind, RequestObservation,
+    ResponsesEnvelope, Result, Role, UpstreamMeta, Usage, parse_cache_lifetime_member,
+    sanitize_for_log, wire_check::WireTap,
 };
 
 use super::empty_optional::EmptyOptionalFilter;
@@ -460,17 +461,11 @@ pub fn map_finish_reason(
 
 /// Translate Responses `usage` to canonical `Usage`. The Responses
 /// shape has a clean `input_tokens` / `output_tokens` / `total_tokens`
-/// triple (no Anthropic-style cache splitting at the top level --
-/// cached input lives in `input_tokens_details.cached_tokens` instead).
-/// We surface cached tokens as `cache_read_input_tokens` so OpenAI
-/// clients see consistent cache stats across providers.
+/// triple; cache usage lives in `input_tokens_details` (see
+/// [`cache_details`]). `input_tokens` already includes cache reads and
+/// writes, matching the cache-inclusive canonical `prompt_tokens`.
 fn translate_usage(u: &ResponsesUsage) -> Usage {
-    let cache_read = u
-        .input_tokens_details
-        .as_ref()
-        .and_then(|v| v.get("cached_tokens"))
-        .and_then(serde_json::Value::as_u64)
-        .map(|n| n as u32);
+    let cache = cache_details(u.input_tokens_details.as_ref());
     let reasoning_tokens = u
         .output_tokens_details
         .as_ref()
@@ -482,14 +477,71 @@ fn translate_usage(u: &ResponsesUsage) -> Usage {
         completion_tokens: u.output_tokens,
         total_tokens: u.total_tokens,
         reasoning_tokens,
-        cache_creation_input_tokens: None,
-        cache_read_input_tokens: cache_read,
-        cache_creation: None,
+        cache_creation_input_tokens: cache.write_total,
+        cache_read_input_tokens: cache.read,
+        cache_creation: cache.write_split,
         server_tool_use: None,
         extras: Default::default(),
     };
     usage.derive_total_if_absent();
     usage
+}
+
+/// Prompt-cache usage read from one Responses `input_tokens_details`
+/// object. Each field is `None` when the upstream did not report it; a
+/// reported zero stays `Some(0)`.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(super) struct CacheDetails {
+    /// `cached_tokens`: tokens read from the cache.
+    pub(super) read: Option<u32>,
+    /// `cache_write_tokens`: tokens written to the cache, any lifetime.
+    /// Without it, the sum of the lifetime split.
+    pub(super) write_total: Option<u32>,
+    /// Writes per lifetime, from detail members whose name carries a
+    /// duration (`cache_write_1h_tokens`). `None` when none parsed.
+    pub(super) write_split: Option<CacheCreation>,
+}
+
+/// Read the cache counts out of `input_tokens_details`. The complete and
+/// the streaming translators both call this, so the two paths cannot
+/// disagree about a response's cache usage.
+pub(super) fn cache_details(details: Option<&Value>) -> CacheDetails {
+    let Some(details) = details.and_then(Value::as_object) else {
+        return CacheDetails::default();
+    };
+    let count = |key: &str| details.get(key).and_then(Value::as_u64).map(saturate_u32);
+    let write_split = lifetime_split(details);
+    let write_total = count("cache_write_tokens").or_else(|| {
+        write_split
+            .as_ref()
+            .map(|split| saturate_u32(split.total()))
+    });
+    CacheDetails {
+        read: count("cached_tokens"),
+        write_total,
+        write_split,
+    }
+}
+
+/// The duration-named members of `details` as a lifetime split. Admission
+/// (token value shape, the lifetime cap) is the core type's own, so a
+/// member it refuses counts as unknown lifetime inside the write total.
+fn lifetime_split(details: &serde_json::Map<String, Value>) -> Option<CacheCreation> {
+    let members: serde_json::Map<String, Value> = details
+        .iter()
+        .filter(|(name, _)| parse_cache_lifetime_member(name).is_some())
+        .map(|(name, tokens)| (name.clone(), tokens.clone()))
+        .collect();
+    if members.is_empty() {
+        return None;
+    }
+    serde_json::from_value::<CacheCreation>(Value::Object(members))
+        .ok()
+        .filter(|split| !split.is_empty())
+}
+
+fn saturate_u32(n: u64) -> u32 {
+    u32::try_from(n).unwrap_or(u32::MAX)
 }
 
 /// Split a forward-compat `ResponseOutputItem::Other` Value into the

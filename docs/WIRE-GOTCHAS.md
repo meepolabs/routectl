@@ -118,6 +118,16 @@ Surfaces: [openai-compat](#openai-compat-surface) -
   policy action. Only an operator `payload_extras` value for
   `stream_options.include_usage` is left as configured.
 
+- **Cache writes arrive as `prompt_tokens_details.cache_write_tokens`.**
+  OpenAI-format hosts report cache reads as `cached_tokens` and may report
+  writes as `cache_write_tokens` in the same sub-bag, with no lifetime.
+  Both the complete normalizer (`lift_and_strip_usage_extras`) and the
+  stream chunk lift (`lift_chunk_usage_subbags`) lift it into
+  `cache_creation_input_tokens` as a total with no split, so its lifetime
+  is unknown. A host that sends no write field records no write (never
+  0). DeepSeek's `prompt_cache_miss_tokens` counts uncached input, not
+  writes, and is never read as one.
+
 ## Anthropic API surface
 
 - **A mispaired tool transcript is forwarded; of its pairing defects only
@@ -1026,6 +1036,17 @@ Surfaces: [openai-compat](#openai-compat-surface) -
   forever but emitted by nothing: more than one lane once stamped it, so
   re-emitting it would keep minting artifacts that name no lane and can only
   be treated as unestablished.
+
+- **Responses cache writes ride in `input_tokens_details`.** Beside
+  `cached_tokens` (reads), a public OpenAI Responses usage sample shows
+  `cache_write_tokens` (writes, any lifetime); a detail member whose name carries one duration
+  (`cache_write_1h_tokens`) is read as that lifetime's share through the
+  shared lifetime parser. `cache_details` in `openai_responses/response.rs`
+  is the one reader, used by the complete translator and by the
+  `response.completed` stream path. With no `cache_write_tokens`, the
+  write total is the split's sum; with neither, the write stays absent,
+  never 0. Whether the ChatGPT-OAuth backend sends `cache_write_tokens` at
+  all is unconfirmed, so Codex rows may carry reads only.
 
 - **Replay portability is per-lane, not per-model, and the lanes are not
   interchangeable.** `scheme_of(format)` maps a tag to its validator

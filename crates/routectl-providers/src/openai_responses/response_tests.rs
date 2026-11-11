@@ -614,3 +614,121 @@ fn translate_carries_no_envelope_without_a_message_item_id() {
         assert!(resp.upstream_meta.is_none(), "{name}");
     }
 }
+
+/// Cache counts one usage object yields: (read, write total, split as
+/// `(lifetime seconds, tokens)` pairs).
+type CacheCounts = (Option<u32>, Option<u32>, Option<Vec<(u32, u32)>>);
+
+fn complete_cache_counts(usage: &Value) -> (u32, CacheCounts) {
+    let body = json!({"status": "completed", "output": [], "usage": usage});
+    let u = parse(body).usage.expect("complete usage");
+    let split = u.cache_creation.map(|c| c.iter().collect());
+    (
+        u.prompt_tokens,
+        (
+            u.cache_read_input_tokens,
+            u.cache_creation_input_tokens,
+            split,
+        ),
+    )
+}
+
+fn stream_cache_counts(usage: &Value) -> (u32, CacheCounts) {
+    let mut state = super::super::sse::ResponsesStreamState::default();
+    let event: super::super::response_types::ResponsesStreamEvent = serde_json::from_value(json!({
+        "type": "response.completed",
+        "response": {"id": "r", "model": "m", "status": "completed", "output": [],
+                     "usage": usage}
+    }))
+    .expect("event parse");
+    let chunks = state.parse_event("test", event).expect("event processing");
+    let u = chunks
+        .last()
+        .and_then(|c| c.usage.clone())
+        .expect("stream usage");
+    let split = u.cache_creation.map(|c| c.iter().collect());
+    (
+        u.prompt_tokens.expect("stream prompt tokens"),
+        (
+            u.cache_read_input_tokens,
+            u.cache_creation_input_tokens,
+            split,
+        ),
+    )
+}
+
+/// Every row runs through the complete translator and the streaming
+/// `response.completed` path, which must agree with each other and with
+/// the row's expected counts.
+///
+/// The "documented write sample" row copies the usage shape a public
+/// OpenAI Responses report shows for a fresh prompt (TanStack/ai issue
+/// 1734: input_tokens 1941, input_tokens_details cache_write_tokens 1938,
+/// cached_tokens 0). That shape is a derived claim taken from a
+/// third-party report, not a
+/// capture from this repo's corpus: no committed fixture shows the
+/// ChatGPT-OAuth backend sending `cache_write_tokens`, which is why an
+/// absent field must stay `None` rather than become 0.
+#[test]
+fn cache_usage_is_equal_on_complete_and_stream_paths() {
+    let usage = |details: Option<Value>| {
+        let mut u = json!({"input_tokens": 1941, "output_tokens": 5, "total_tokens": 1946});
+        if let Some(d) = details {
+            u["input_tokens_details"] = d;
+        }
+        u
+    };
+    let rows: [(&str, Value, CacheCounts); 7] = [
+        (
+            "cached only",
+            usage(Some(json!({"cached_tokens": 40}))),
+            (Some(40), None, None),
+        ),
+        (
+            "documented write sample, total with no split",
+            usage(Some(
+                json!({"cache_write_tokens": 1938, "cached_tokens": 0}),
+            )),
+            (Some(0), Some(1938), None),
+        ),
+        (
+            "write total plus a duration-named member is split",
+            usage(Some(json!({
+                "cache_write_tokens": 1938,
+                "cache_write_1h_tokens": 1500,
+                "cached_tokens": 0
+            }))),
+            (Some(0), Some(1938), Some(vec![(3600, 1500)])),
+        ),
+        (
+            "duration-named members alone sum to the total",
+            usage(Some(json!({
+                "cache_write_30m_tokens": 700,
+                "cache_write_1h_tokens": 300
+            }))),
+            (None, Some(1000), Some(vec![(1800, 700), (3600, 300)])),
+        ),
+        (
+            "no write field stays absent",
+            usage(None),
+            (None, None, None),
+        ),
+        (
+            "observed zero write stays zero",
+            usage(Some(json!({"cache_write_tokens": 0, "cached_tokens": 12}))),
+            (Some(12), Some(0), None),
+        ),
+        (
+            "read-side duration name is never a write",
+            usage(Some(json!({"cached_1h_tokens": 9}))),
+            (None, None, None),
+        ),
+    ];
+
+    for (name, usage, want) in rows {
+        let complete = complete_cache_counts(&usage);
+        let stream = stream_cache_counts(&usage);
+        assert_eq!(complete, stream, "{name}: complete and stream differ");
+        assert_eq!(complete, (1941, want), "{name}");
+    }
+}

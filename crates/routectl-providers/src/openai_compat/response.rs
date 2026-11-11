@@ -100,6 +100,10 @@ pub fn normalize(id: &str, raw: Value, dialect: ReasoningDialect) -> Result<Chat
 ///   - `prompt_cache_hit_tokens` (DeepSeek) OR
 ///     `prompt_tokens_details.cached_tokens` (OpenAI) ->
 ///     `cache_read_input_tokens`.
+///   - `prompt_tokens_details.cache_write_tokens` ->
+///     `cache_creation_input_tokens`, as a total with no lifetime split.
+///     DeepSeek's `prompt_cache_miss_tokens` counts uncached input, not
+///     writes, and is never read here.
 ///
 /// DeepSeek precedence: when both `prompt_cache_hit_tokens` and
 /// `prompt_tokens_details.cached_tokens` are present (rare),
@@ -133,6 +137,14 @@ pub(crate) fn lift_and_strip_usage_extras(usage: &mut Usage) -> Vec<&'static str
                     .and_then(serde_json::Value::as_u64)
             })
             .map(|n| n as u32);
+    }
+    if usage.cache_creation_input_tokens.is_none() {
+        usage.cache_creation_input_tokens = usage
+            .extras
+            .get("prompt_tokens_details")
+            .and_then(|v| v.get("cache_write_tokens"))
+            .and_then(serde_json::Value::as_u64)
+            .map(|n| u32::try_from(n).unwrap_or(u32::MAX));
     }
     let mut stripped: Vec<&'static str> = Vec::new();
     for k in OPENAI_COMPAT_USAGE_SUBKEYS {
@@ -318,7 +330,8 @@ pub(crate) fn coalesce_reasoning_content_in_response(mut raw: Value) -> Value {
 /// Declare, on a tap that checks the response, the response edits
 /// normalizing `raw` makes: a `reasoning_content` renamed to `reasoning`
 /// (and, for a dialect that lifts it, moved on into `reasoning_details`),
-/// and `cache_read_input_tokens` lifted from the usage sub-bags. `raw` is a
+/// and `cache_read_input_tokens` / `cache_creation_input_tokens` lifted
+/// from the usage sub-bags. `raw` is a
 /// complete body or one stream chunk, whose choices carry `delta` in place
 /// of `message`; a lifting dialect keeps `reasoning` on a stream only.
 pub(crate) fn declare_response_lifts(
@@ -368,6 +381,21 @@ pub(crate) fn declare_response_lifts(
             tap,
             EditSite::CachedTokensAdd,
             "/usage/cache_read_input_tokens",
+            EditKind::Add,
+        );
+    }
+    let lifts_cache_write = usage
+        .and_then(|u| u.get("cache_creation_input_tokens"))
+        .is_none_or(Value::is_null)
+        && usage.is_some_and(|u| {
+            u.pointer("/prompt_tokens_details/cache_write_tokens")
+                .is_some_and(Value::is_u64)
+        });
+    if lifts_cache_write {
+        crate::wire_declare::declare_response(
+            tap,
+            EditSite::CachedTokensAdd,
+            "/usage/cache_creation_input_tokens",
             EditKind::Add,
         );
     }
