@@ -266,3 +266,125 @@ fn the_cache_logs_read_the_write_total_of_any_lifetime() {
         assert_eq!(summary(&events), vec![want_summary], "{name}");
     }
 }
+
+/// One stream usage chunk, as the capture receives it.
+fn usage_chunk(usage: routectl_core::schema::UsageDelta) -> routectl_core::ChatChunk {
+    routectl_core::ChatChunk {
+        usage: Some(usage),
+        ..Default::default()
+    }
+}
+
+fn split_5m(tokens: u32) -> Option<routectl_core::schema::CacheCreation> {
+    Some(routectl_core::schema::CacheCreation::from_lifetimes([(
+        300, tokens,
+    )]))
+}
+
+fn input_after(chunks: Vec<routectl_core::schema::UsageDelta>) -> Option<u64> {
+    let (mut capture, _rx) = capture();
+    for usage in chunks {
+        capture.observe_chunk(&usage_chunk(usage));
+    }
+    capture.record.input_tokens
+}
+
+#[test]
+fn streamed_input_subtracts_the_latest_cache_totals_from_the_latest_prompt() {
+    use routectl_core::schema::UsageDelta;
+    // Arrange: prompt, cache read and write total arriving in different
+    // chunks and orders; each row's input is prompt - latest read - latest
+    // effective write total.
+    let rows: [(&str, Vec<UsageDelta>, Option<u64>); 6] = [
+        (
+            "split with the prompt, then a mismatching total alone",
+            vec![
+                UsageDelta {
+                    prompt_tokens: Some(1000),
+                    cache_read_input_tokens: Some(600),
+                    cache_creation: split_5m(300),
+                    ..Default::default()
+                },
+                UsageDelta {
+                    cache_creation_input_tokens: Some(200),
+                    ..Default::default()
+                },
+            ],
+            Some(200),
+        ),
+        (
+            "cache read only in a later chunk",
+            vec![
+                UsageDelta {
+                    prompt_tokens: Some(1000),
+                    ..Default::default()
+                },
+                UsageDelta {
+                    cache_read_input_tokens: Some(600),
+                    ..Default::default()
+                },
+            ],
+            Some(400),
+        ),
+        (
+            "prompt in a later chunk than the write",
+            vec![
+                UsageDelta {
+                    cache_creation_input_tokens: Some(300),
+                    ..Default::default()
+                },
+                UsageDelta {
+                    prompt_tokens: Some(1000),
+                    ..Default::default()
+                },
+            ],
+            Some(700),
+        ),
+        (
+            "fully cached prompt",
+            vec![UsageDelta {
+                prompt_tokens: Some(900),
+                cache_read_input_tokens: Some(600),
+                cache_creation_input_tokens: Some(300),
+                ..Default::default()
+            }],
+            Some(0),
+        ),
+        (
+            "no prompt seen",
+            vec![UsageDelta {
+                cache_read_input_tokens: Some(600),
+                cache_creation_input_tokens: Some(300),
+                completion_tokens: Some(7),
+                ..Default::default()
+            }],
+            None,
+        ),
+        ("no usage chunk at all", Vec::new(), None),
+    ];
+
+    for (name, chunks, want) in rows {
+        // Act
+        let input = input_after(chunks);
+
+        // Assert
+        assert_eq!(input, want, "{name}");
+    }
+}
+
+#[test]
+fn anthropic_stream_order_records_the_closing_delta_input() {
+    // Arrange: the real opener-then-closing-delta order through the stream
+    // parser, every cache field on the closing delta (prompt 1000 =
+    // 100 new + 600 read + 300 written).
+    let opener = r#"{"input_tokens":100,"output_tokens":1,"cache_creation_input_tokens":300,"cache_read_input_tokens":600}"#;
+    let delta = r#"{"input_tokens":100,"output_tokens":7,"cache_creation_input_tokens":300,"cache_read_input_tokens":600,"cache_creation":{"ephemeral_5m_input_tokens":300}}"#;
+
+    // Act
+    let record = record_from_stream(opener, delta);
+
+    // Assert
+    assert_eq!(record.input_tokens, Some(100));
+    assert_eq!(record.cache_read, Some(600));
+    assert_eq!(record.cache_write_tokens, Some(300));
+}

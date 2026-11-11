@@ -400,7 +400,9 @@ pub(crate) struct UsageCapture {
     // egress trace line.
     chunks: u64,
     last_finish: Option<String>,
-    last_prompt: u32,
+    /// Latest cache-INCLUSIVE prompt total a stream chunk reported; `None`
+    /// until one does, so a stream with no prompt leaves input unrecorded.
+    last_prompt: Option<u32>,
     last_completion: u32,
     last_total: u32,
     /// Cache-INCLUSIVE prompt total most recently reported by the upstream
@@ -444,7 +446,7 @@ impl UsageCapture {
             finalized: false,
             chunks: 0,
             last_finish: None,
-            last_prompt: 0,
+            last_prompt: None,
             last_completion: 0,
             last_total: 0,
             observed_prompt_total: 0,
@@ -933,22 +935,12 @@ impl UsageCapture {
                 u.cache_creation.as_ref(),
             );
             if let Some(p) = u.prompt_tokens {
-                self.last_prompt = p;
+                self.last_prompt = Some(p);
                 // Same cache-INCLUSIVE calibration evidence as the
                 // non-streaming path takes; the cumulative counters
                 // Anthropic emits on the terminal delta make
                 // last-writer-wins the whole-prompt total.
                 self.observed_prompt_total = p;
-                // Cache-exclusive new input, derived from THIS delta's own
-                // cache fields (Anthropic sends prompt + cache together on
-                // the terminal message_delta), so the per-chunk derivation
-                // stays atomic. `last_prompt` keeps the raw cache-inclusive
-                // value for the egress trace summary.
-                self.record.input_tokens = Some(cache_exclusive_input(
-                    p,
-                    u.cache_read_input_tokens.unwrap_or(0),
-                    saturate_to_u32(write_total.unwrap_or(0)),
-                ) as u64);
             }
             if let Some(c) = u.completion_tokens {
                 self.last_completion = c;
@@ -969,8 +961,26 @@ impl UsageCapture {
             if u.server_tool_use.is_some() {
                 self.record.server_tool_use = u.server_tool_use.clone();
             }
+            self.recompute_stream_input();
         }
         self.observe_quota(chunk.upstream_meta.as_ref());
+    }
+
+    /// Cache-exclusive new input from the latest prompt, cache read and
+    /// effective write total, each of which a stream may report in a
+    /// different chunk. Recomputed after every usage chunk so the input
+    /// always pairs with the cache totals the row will store.
+    fn recompute_stream_input(&mut self) {
+        let Some(prompt) = self.last_prompt else {
+            return;
+        };
+        let cache_read = saturate_to_u32(self.record.cache_read.unwrap_or(0));
+        let write_total = saturate_to_u32(self.cache_write_total());
+        self.record.input_tokens = Some(u64::from(cache_exclusive_input(
+            prompt,
+            cache_read,
+            write_total,
+        )));
     }
 
     /// Stamp the cache-write total and per-lifetime split as one pair from
@@ -1472,9 +1482,10 @@ impl UsageCapture {
             // Non-streaming or pre-upstream exit: no stream to summarize.
             return;
         }
-        let usage = (self.last_prompt != 0 || self.last_completion != 0 || self.last_total != 0)
+        let last_prompt = self.last_prompt.unwrap_or(0);
+        let usage = (last_prompt != 0 || self.last_completion != 0 || self.last_total != 0)
             .then_some(routectl_core::Usage {
-                prompt_tokens: self.last_prompt,
+                prompt_tokens: last_prompt,
                 completion_tokens: self.last_completion,
                 total_tokens: self.last_total,
                 ..Default::default()
