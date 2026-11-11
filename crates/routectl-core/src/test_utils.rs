@@ -44,6 +44,7 @@ pub fn user_msg(text: &str) -> Message {
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -58,6 +59,7 @@ pub fn assistant_text_msg(text: &str) -> Message {
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -77,6 +79,7 @@ pub fn get_weather_tool() -> ToolDef {
         defer_loading: None,
         strict: None,
         type_tag: None,
+        extras: serde_json::Map::new(),
     })
 }
 
@@ -206,12 +209,14 @@ pub mod scenarios {
                 name: "get_weather".into(),
                 input: json!({"location": "San Francisco"}),
                 cache_control: None,
+                extras: serde_json::Map::new(),
             })]),
             reasoning: None,
             reasoning_details: vec![],
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         };
         let tool_result = Message {
             refusal: None,
@@ -222,6 +227,7 @@ pub mod scenarios {
             name: None,
             tool_call_id: Some("toolu_01".into()),
             tool_calls: None,
+            extras: serde_json::Map::new(),
         };
         ChatRequest {
             model: "claude-3-opus".into(),
@@ -306,12 +312,14 @@ pub mod scenarios {
                 text: "Please review the attached document.".into(),
                 citations: None,
                 cache_control: Some(CacheControl::ephemeral_5m()),
+                extras: serde_json::Map::new(),
             })]),
             reasoning: None,
             reasoning_details: vec![],
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         };
 
         let cached_tool = ToolDef::Custom(CustomTool {
@@ -325,6 +333,7 @@ pub mod scenarios {
             defer_loading: None,
             strict: None,
             type_tag: None,
+            extras: serde_json::Map::new(),
         });
 
         let system_with_cc = SystemContent::Blocks(vec![SystemBlock {
@@ -332,6 +341,7 @@ pub mod scenarios {
             text: "You are an assistant with long instructions.".into(),
             cache_control: Some(CacheControl::ephemeral_5m()),
             citations: None,
+            extras: serde_json::Map::new(),
         }]);
 
         ChatRequest {
@@ -377,6 +387,7 @@ pub mod scenarios {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         };
 
         ChatRequest {

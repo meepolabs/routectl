@@ -108,6 +108,7 @@ fn tool_result_message(content: Value) -> Message {
             content,
             is_error: None,
             cache_control: None,
+            extras: serde_json::Map::new(),
         })]),
         reasoning: None,
         reasoning_details: vec![],
@@ -115,6 +116,7 @@ fn tool_result_message(content: Value) -> Message {
         tool_call_id: None,
         tool_calls: None,
         refusal: None,
+        extras: serde_json::Map::new(),
     }
 }
 

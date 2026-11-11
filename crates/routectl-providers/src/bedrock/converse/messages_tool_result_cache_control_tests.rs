@@ -13,6 +13,7 @@ fn text_part_with_cache_control(text: &str, cache_control: Option<CacheControl>)
         text: text.into(),
         citations: None,
         cache_control,
+        extras: serde_json::Map::new(),
     })
 }
 
@@ -268,6 +269,7 @@ fn a_dropped_marked_block_beside_a_tool_result_leaves_no_orphan_cache_point() {
         user_turn(vec![ContentPart::Known(KnownContentPart::ImageUrl {
             image_url: json!({"url": "https://example.com/x.png"}),
             cache_control: Some(CacheControl::ephemeral_5m()),
+            extras: serde_json::Map::new(),
         })]),
     ];
 

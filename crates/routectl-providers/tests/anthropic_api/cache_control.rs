@@ -15,12 +15,14 @@ fn cache_control_on_user_text_block_round_trips_to_wire() {
                 text: "look at this".into(),
                 citations: None,
                 cache_control: Some(CacheControl::ephemeral_5m()),
+                extras: serde_json::Map::new(),
             })]),
             reasoning: None,
             reasoning_details: vec![],
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }],
     );
     // also set top-level for autocache
@@ -52,6 +54,7 @@ fn system_blocks_with_cache_control_emit_array_form() {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }],
     );
     req.system = Some(SystemContent::Blocks(vec![SystemBlock {
@@ -59,6 +62,7 @@ fn system_blocks_with_cache_control_emit_array_form() {
         text: "system prompt with cache".into(),
         cache_control: Some(CacheControl::ephemeral_1h()),
         citations: None,
+        extras: serde_json::Map::new(),
     }]));
 
     let body = provider.normalize_request(&req).unwrap();
@@ -82,6 +86,7 @@ fn anthropic_beta_array_round_trips_into_body() {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }],
     );
     req.anthropic_beta = vec!["context-1m-2025-08-07".into(), "future-flag".into()];
@@ -106,6 +111,7 @@ fn typed_custom_tool_with_cache_control_serializes_correctly() {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }],
     );
     req.tools = Some(vec![ToolDef::Custom(CustomTool {
@@ -116,6 +122,7 @@ fn typed_custom_tool_with_cache_control_serializes_correctly() {
         defer_loading: Some(true),
         strict: Some(true),
         type_tag: None,
+        extras: serde_json::Map::new(),
     })]);
     let body = provider.normalize_request(&req).unwrap();
     let tool = &body["tools"][0];
@@ -143,21 +150,25 @@ fn cache_control_on_builtin_tool_counts_against_breakpoint_cap() {
                     text: "a".into(),
                     citations: None,
                     cache_control: Some(CacheControl::ephemeral_5m()),
+                    extras: serde_json::Map::new(),
                 }),
                 ContentPart::Known(KnownContentPart::Text {
                     text: "b".into(),
                     citations: None,
                     cache_control: Some(CacheControl::ephemeral_5m()),
+                    extras: serde_json::Map::new(),
                 }),
                 ContentPart::Known(KnownContentPart::Text {
                     text: "c".into(),
                     citations: None,
                     cache_control: Some(CacheControl::ephemeral_5m()),
+                    extras: serde_json::Map::new(),
                 }),
                 ContentPart::Known(KnownContentPart::Text {
                     text: "d".into(),
                     citations: None,
                     cache_control: Some(CacheControl::ephemeral_5m()),
+                    extras: serde_json::Map::new(),
                 }),
             ]),
             reasoning: None,
@@ -165,6 +176,7 @@ fn cache_control_on_builtin_tool_counts_against_breakpoint_cap() {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }],
     );
     // Fifth breakpoint: a Builtin tool carrying cache_control in raw
@@ -198,6 +210,7 @@ fn anthropic_builtin_tool_passes_through_verbatim() {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }],
     );
     req.tools = Some(vec![ToolDef::Other(json!({
@@ -238,6 +251,7 @@ fn unknown_content_block_type_passes_through_verbatim() {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }],
     );
     let body = provider.normalize_request(&req).unwrap();
@@ -297,6 +311,7 @@ fn multi_turn_signature_preserved_in_assistant_message() {
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     };
 
     let req = base_req(
@@ -334,12 +349,14 @@ fn tool_role_parts_are_translated_to_anthropic_blocks() {
             content: MessageContent::Parts(vec![ContentPart::Known(KnownContentPart::ImageUrl {
                 image_url: json!({"url": "https://example.com/img.png"}),
                 cache_control: None,
+                extras: serde_json::Map::new(),
             })]),
             reasoning: None,
             reasoning_details: vec![],
             name: None,
             tool_call_id: Some("toolu_01".into()),
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }],
     );
     let body = provider.normalize_request(&req).unwrap();

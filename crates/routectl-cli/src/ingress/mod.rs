@@ -280,6 +280,7 @@ pub(crate) fn lift_system_messages(req: &mut ChatRequest) -> LiftedSystem {
                     text: t.clone(),
                     cache_control: None,
                     citations: None,
+                    extras: serde_json::Map::new(),
                 });
             }
             MessageContent::Parts(parts) => {
@@ -288,6 +289,7 @@ pub(crate) fn lift_system_messages(req: &mut ChatRequest) -> LiftedSystem {
                         text,
                         citations,
                         cache_control,
+                        extras: _,
                     }) = p
                     {
                         lifted_blocks.push(SystemBlock {
@@ -295,6 +297,7 @@ pub(crate) fn lift_system_messages(req: &mut ChatRequest) -> LiftedSystem {
                             text: text.clone(),
                             cache_control: cache_control.clone(),
                             citations: citations.clone(),
+                            extras: serde_json::Map::new(),
                         });
                     }
                 }
@@ -328,6 +331,7 @@ pub(crate) fn lift_system_messages(req: &mut ChatRequest) -> LiftedSystem {
                 text: existing,
                 cache_control: None,
                 citations: None,
+                extras: serde_json::Map::new(),
             }];
             blocks.extend(lifted_blocks);
             req.system = Some(SystemContent::Blocks(blocks));

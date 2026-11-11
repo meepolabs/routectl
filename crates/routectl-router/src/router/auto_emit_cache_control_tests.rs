@@ -41,6 +41,7 @@ fn ok_response(model: String) -> ChatResponse {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
             finish_reason: Some("stop".into()),
             matched_stop_sequence: None,
@@ -179,6 +180,7 @@ fn base_req() -> ChatRequest {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }]
         .into(),
         ..Default::default()
@@ -368,12 +370,14 @@ fn tool_result_msg(tool_use_id: &str, tokens: usize) -> Message {
             content: serde_json::json!(payload),
             is_error: None,
             cache_control: None,
+            extras: serde_json::Map::new(),
         })]),
         reasoning: None,
         reasoning_details: vec![],
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -387,6 +391,7 @@ fn text_msg(role: Role, text: &str) -> Message {
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -536,12 +541,14 @@ fn tool_use_of(id: &str, input: serde_json::Value) -> Message {
             name: "Tool".into(),
             input,
             cache_control: None,
+            extras: serde_json::Map::new(),
         })]),
         reasoning: None,
         reasoning_details: vec![],
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -556,12 +563,14 @@ fn tool_result_of(tool_use_id: &str, content: serde_json::Value) -> Message {
             content,
             is_error: None,
             cache_control: None,
+            extras: serde_json::Map::new(),
         })]),
         reasoning: None,
         reasoning_details: vec![],
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -849,6 +858,7 @@ async fn fallback_targets_decide_independently_without_accumulation() {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }]
         .into(),
         ..Default::default()
@@ -888,6 +898,7 @@ async fn fallback_targets_decide_independently_without_accumulation() {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }]
         .into(),
         ..Default::default()
@@ -983,18 +994,21 @@ fn helper_rolls_back_when_validation_fails() {
         defer_loading: None,
         strict: None,
         type_tag: None,
+        extras: serde_json::Map::new(),
     })]);
     req.system = Some(SystemContent::Blocks(vec![SystemBlock {
         kind: "text".into(),
         text: "s".into(),
         cache_control: Some(CacheControl::ephemeral_5m()),
         citations: None,
+        extras: serde_json::Map::new(),
     }]));
     let part = |t: &str| {
         ContentPart::Known(KnownContentPart::Text {
             text: t.into(),
             citations: None,
             cache_control: Some(CacheControl::ephemeral_5m()),
+            extras: serde_json::Map::new(),
         })
     };
     req.messages = vec![Message {
@@ -1006,6 +1020,7 @@ fn helper_rolls_back_when_validation_fails() {
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     }]
     .into();
     // Sanity: the request already sits at MAX_BREAKPOINTS (1 tool + 1
@@ -1116,12 +1131,14 @@ fn blocks_system_req() -> ChatRequest {
             text: "first block".into(),
             cache_control: None,
             citations: None,
+            extras: serde_json::Map::new(),
         },
         SystemBlock {
             kind: "text".into(),
             text: "second block".into(),
             cache_control: None,
             citations: None,
+            extras: serde_json::Map::new(),
         },
     ]));
     req
@@ -1140,6 +1157,7 @@ fn tools_only_req() -> ChatRequest {
         defer_loading: None,
         strict: None,
         type_tag: None,
+        extras: serde_json::Map::new(),
     })]);
     req
 }
@@ -1209,6 +1227,7 @@ async fn volatile_high_prefix_withholds_the_front_marker_with_a_reason() {
         text: "session 550e8400-e29b-41d4-a716-446655440000 active".into(),
         cache_control: None,
         citations: None,
+        extras: serde_json::Map::new(),
     }]));
     let dispatched = router
         .complete_with_options(req, RouterOptions::new())
@@ -1246,6 +1265,7 @@ fn front_and_terminal_roll_back_together_on_validation_failure() {
             text: t.into(),
             citations: None,
             cache_control: Some(CacheControl::ephemeral_5m()),
+            extras: serde_json::Map::new(),
         })
     };
     req.messages = vec![Message {
@@ -1262,6 +1282,7 @@ fn front_and_terminal_roll_back_together_on_validation_failure() {
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     }]
     .into();
     assert_eq!(
@@ -1296,6 +1317,7 @@ fn rollback_preserves_overlay_mutations_and_every_cache_slot() {
         text: "system after overlay".into(),
         cache_control: None,
         citations: None,
+        extras: serde_json::Map::new(),
     }]));
     // Pre-placement mutations, as overlay / minify would leave them.
     req.max_tokens = Some(4096);
@@ -1309,21 +1331,25 @@ fn rollback_preserves_overlay_mutations_and_every_cache_slot() {
                     text: "p1".into(),
                     citations: None,
                     cache_control: Some(CacheControl::ephemeral_5m()),
+                    extras: serde_json::Map::new(),
                 }),
                 ContentPart::Known(KnownContentPart::Text {
                     text: "p2".into(),
                     citations: None,
                     cache_control: Some(CacheControl::ephemeral_5m()),
+                    extras: serde_json::Map::new(),
                 }),
                 ContentPart::Known(KnownContentPart::Text {
                     text: "p3".into(),
                     citations: None,
                     cache_control: Some(CacheControl::ephemeral_5m()),
+                    extras: serde_json::Map::new(),
                 }),
                 ContentPart::Known(KnownContentPart::Text {
                     text: "p4".into(),
                     citations: None,
                     cache_control: Some(CacheControl::ephemeral_5m()),
+                    extras: serde_json::Map::new(),
                 }),
             ]),
             reasoning: None,
@@ -1331,6 +1357,7 @@ fn rollback_preserves_overlay_mutations_and_every_cache_slot() {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         },
     ]
     .into();
@@ -1418,6 +1445,7 @@ fn no_placement_region_survives_a_validation_rollback() {
             text: t.into(),
             citations: None,
             cache_control: Some(CacheControl::ephemeral_5m()),
+            extras: serde_json::Map::new(),
         })
     };
     req.messages = vec![Message {
@@ -1434,6 +1462,7 @@ fn no_placement_region_survives_a_validation_rollback() {
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     }]
     .into();
     let p = plan(0, false, true, &req);
@@ -1546,6 +1575,7 @@ async fn cache_auto_decision_line_carries_tokens_only() {
         text: SYSTEM_PROBE.into(),
         cache_control: None,
         citations: None,
+        extras: serde_json::Map::new(),
     }]));
     req.messages = vec![text_msg(Role::User, MESSAGE_PROBE)].into();
     req.tools = Some(vec![ToolDef::Custom(CustomTool {
@@ -1556,6 +1586,7 @@ async fn cache_auto_decision_line_carries_tokens_only() {
         defer_loading: None,
         strict: None,
         type_tag: None,
+        extras: serde_json::Map::new(),
     })]);
 
     let (result, lines) = routectl_testkit::capture_lines(Box::pin(router.complete(req))).await;
@@ -2023,6 +2054,7 @@ fn a_rolled_back_target_leaves_the_next_target_a_pristine_canonical_request() {
             text: t.into(),
             citations: None,
             cache_control: Some(CacheControl::ephemeral_5m()),
+            extras: serde_json::Map::new(),
         })
     };
     // Three caller markers: the front + terminal pair takes the validated
@@ -2038,6 +2070,7 @@ fn a_rolled_back_target_leaves_the_next_target_a_pristine_canonical_request() {
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     }]
     .into();
     assert_eq!(
@@ -2307,6 +2340,7 @@ mod converse_front_only {
                 text: "hi".into(),
                 citations: None,
                 cache_control: None,
+                extras: serde_json::Map::new(),
             }),
             ContentPart::Other {
                 type_tag: "some_future_block".into(),

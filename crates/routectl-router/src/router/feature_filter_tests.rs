@@ -61,6 +61,7 @@ impl Provider for CapturingProvider {
                     name: None,
                     tool_call_id: None,
                     tool_calls: None,
+                    extras: serde_json::Map::new(),
                 },
                 finish_reason: Some("stop".into()),
                 matched_stop_sequence: None,
@@ -341,6 +342,7 @@ async fn custom_tools_dont_contribute_feature_keys() {
             defer_loading: None,
             strict: None,
             type_tag: None,
+            extras: serde_json::Map::new(),
         })]),
         ..Default::default()
     };

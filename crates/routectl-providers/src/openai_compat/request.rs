@@ -872,6 +872,7 @@ mod tests {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             }]
             .into(),
             temperature: Some(0.7),
@@ -1202,6 +1203,7 @@ mod tests {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
         );
         let body = normalize(
@@ -1240,6 +1242,7 @@ mod tests {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
         );
         let body = normalize(
@@ -1284,6 +1287,7 @@ mod tests {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
         );
         let body = normalize(
@@ -1321,6 +1325,7 @@ mod tests {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
         );
         let body = normalize(
@@ -1639,12 +1644,14 @@ mod tests {
                 text: "first block".into(),
                 cache_control: None,
                 citations: None,
+                extras: serde_json::Map::new(),
             },
             SystemBlock {
                 kind: "text".into(),
                 text: "second block".into(),
                 cache_control: None,
                 citations: None,
+                extras: serde_json::Map::new(),
             },
         ]));
         let body = normalize(
@@ -1695,6 +1702,7 @@ mod tests {
             text: text.into(),
             cache_control: None,
             citations: None,
+            extras: serde_json::Map::new(),
         };
         for system in [
             SystemContent::Text(String::new()),
@@ -1750,6 +1758,7 @@ mod tests {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
         );
 
@@ -1788,11 +1797,13 @@ mod tests {
                     ContentPart::Known(KnownContentPart::Thinking {
                         thinking: "my trace".into(),
                         signature: None,
+                        extras: serde_json::Map::new(),
                     }),
                     ContentPart::Known(KnownContentPart::Text {
                         text: "answer".into(),
                         citations: None,
                         cache_control: None,
+                        extras: serde_json::Map::new(),
                     }),
                 ]),
                 reasoning: None,
@@ -1800,6 +1811,7 @@ mod tests {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
         );
         assert!(
@@ -1829,12 +1841,14 @@ mod tests {
                 text: "x-anthropic-billing-header: v=1; fp=secret".into(),
                 cache_control: None,
                 citations: None,
+                extras: serde_json::Map::new(),
             },
             SystemBlock {
                 kind: "text".into(),
                 text: "you are helpful".into(),
                 cache_control: None,
                 citations: None,
+                extras: serde_json::Map::new(),
             },
         ]));
         let body = normalize(
@@ -1865,6 +1879,7 @@ mod tests {
             text: "intro x-anthropic-billing-header: not at start".into(),
             cache_control: None,
             citations: None,
+            extras: serde_json::Map::new(),
         }]));
         let body = normalize(
             "test",
@@ -1895,12 +1910,14 @@ mod tests {
                 text: "  \n\tx-anthropic-billing-header: v=1".into(),
                 cache_control: None,
                 citations: None,
+                extras: serde_json::Map::new(),
             },
             SystemBlock {
                 kind: "text".into(),
                 text: "real prompt".into(),
                 cache_control: None,
                 citations: None,
+                extras: serde_json::Map::new(),
             },
         ]));
         let body = normalize(
@@ -1947,6 +1964,7 @@ mod tests {
                     text: (*text).into(),
                     cache_control: None,
                     citations: None,
+                    extras: serde_json::Map::new(),
                 })
                 .collect(),
         ));
@@ -2067,6 +2085,7 @@ mod tests {
                         title: None,
                         citations: None,
                         cache_control: None,
+                        extras: serde_json::Map::new(),
                     },
                 )]),
                 reasoning: None,
@@ -2074,6 +2093,7 @@ mod tests {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
         );
         req
@@ -2152,6 +2172,7 @@ mod tests {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
         );
         req

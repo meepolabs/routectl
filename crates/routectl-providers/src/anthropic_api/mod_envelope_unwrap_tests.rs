@@ -29,6 +29,7 @@ fn wrapped_envelope() -> String {
 fn redacted_part(data: &str) -> ContentPart {
     ContentPart::Known(KnownContentPart::RedactedThinking {
         data: data.to_string(),
+        extras: serde_json::Map::new(),
     })
 }
 
@@ -41,6 +42,7 @@ fn history_with(parts: Vec<ContentPart>) -> ChatRequest {
         text: "answer".into(),
         citations: None,
         cache_control: None,
+        extras: serde_json::Map::new(),
     }));
     ChatRequest {
         model: "claude-sonnet-4-5".into(),
@@ -54,6 +56,7 @@ fn history_with(parts: Vec<ContentPart>) -> ChatRequest {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
             Message {
                 refusal: None,
@@ -64,6 +67,7 @@ fn history_with(parts: Vec<ContentPart>) -> ChatRequest {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
         ]
         .into(),
@@ -150,6 +154,7 @@ fn tool_use_history_with_clear_thinking_edit(tool_use_id: &str) -> ChatRequest {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
             Message {
                 refusal: None,
@@ -164,6 +169,7 @@ fn tool_use_history_with_clear_thinking_edit(tool_use_id: &str) -> ChatRequest {
                     "type": "function",
                     "function": {"name": "calc", "arguments": "{}"}
                 })]),
+                extras: serde_json::Map::new(),
             },
             Message {
                 refusal: None,
@@ -174,6 +180,7 @@ fn tool_use_history_with_clear_thinking_edit(tool_use_id: &str) -> ChatRequest {
                 name: None,
                 tool_call_id: Some(tool_use_id.to_string()),
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
         ]
         .into(),

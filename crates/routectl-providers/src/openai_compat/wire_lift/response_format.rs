@@ -182,6 +182,7 @@ mod tests {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: Map::new(),
             }]
             .into(),
             provider_extras: extras,

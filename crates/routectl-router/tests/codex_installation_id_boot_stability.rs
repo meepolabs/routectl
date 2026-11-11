@@ -54,6 +54,7 @@ fn base_req() -> routectl_core::ChatRequest {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }]
         .into(),
         max_tokens: Some(64),

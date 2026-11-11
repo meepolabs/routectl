@@ -156,6 +156,7 @@ fn freshly_tagged_detail_replays_onto_the_wire_of_its_own_lane() {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             };
             let req = ChatRequest {
                 model: "test-model".into(),

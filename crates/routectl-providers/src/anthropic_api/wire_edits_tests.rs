@@ -574,6 +574,7 @@ fn the_part_predicate_marks_only_unsigned_thinking() {
     let unsigned = ContentPart::Known(KnownContentPart::Thinking {
         thinking: "t".into(),
         signature: None,
+        extras: serde_json::Map::new(),
     });
     let tap = WireTap::default();
 

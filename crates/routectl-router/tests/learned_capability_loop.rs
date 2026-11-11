@@ -261,6 +261,7 @@ fn req_with_features(alias: &str, features: &[&str]) -> ChatRequest {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }]
         .into(),
         tools: Some(
@@ -290,6 +291,7 @@ fn req_with_structured_output(alias: &str) -> ChatRequest {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }]
         .into(),
         provider_extras: Some(json!({

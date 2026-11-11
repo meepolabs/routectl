@@ -45,6 +45,7 @@ fn user_msg(text: &str) -> Message {
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -301,6 +302,7 @@ fn custom_tool(name: &str) -> ToolDef {
         defer_loading: None,
         strict: None,
         type_tag: None,
+        extras: serde_json::Map::new(),
     })
 }
 

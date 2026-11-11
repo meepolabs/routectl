@@ -27,6 +27,7 @@ fn req_with_carrier() -> ChatRequest {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }]
         .into(),
         max_tokens: Some(100_000),
@@ -113,6 +114,7 @@ fn a_probe_shaped_body_serializes_both_thinking_type_and_display() {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }]
         .into(),
         // The minimal canonical state: thinking explicitly active plus a
@@ -155,6 +157,7 @@ fn the_carrier_without_a_reasoning_state_serializes_no_thinking_object() {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }]
         .into(),
         max_tokens: Some(2048),

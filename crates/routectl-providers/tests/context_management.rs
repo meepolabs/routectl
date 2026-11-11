@@ -73,6 +73,7 @@ fn user_msg(text: &str) -> Message {
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -219,6 +220,7 @@ async fn e2e_context_management_strips_key_strips_beta_and_injects_thinking() {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
             Message {
                 refusal: None,
@@ -233,6 +235,7 @@ async fn e2e_context_management_strips_key_strips_beta_and_injects_thinking() {
                     "type": "function",
                     "function": {"name": "calc", "arguments": "{}"}
                 })]),
+                extras: serde_json::Map::new(),
             },
             Message {
                 refusal: None,
@@ -243,6 +246,7 @@ async fn e2e_context_management_strips_key_strips_beta_and_injects_thinking() {
                 name: None,
                 tool_call_id: Some("toolu_t1".into()),
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
         ]
         .into(),

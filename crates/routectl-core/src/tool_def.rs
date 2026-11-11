@@ -33,7 +33,7 @@
 //! missing `name`.
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use crate::cache_control::CacheControl;
 
@@ -82,6 +82,10 @@ pub struct CustomTool {
     /// absence; we round-trip whichever the wire used.
     #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
     pub type_tag: Option<String>,
+    /// Unmodeled wire members of this node, for a same-dialect egress to
+    /// re-emit. Never read or written by canonical serde.
+    #[serde(skip)]
+    pub extras: Map<String, Value>,
 }
 
 fn empty_object_schema() -> Value {
@@ -126,6 +130,7 @@ impl CustomTool {
             defer_loading: None,
             strict,
             type_tag: None,
+            extras: Map::new(),
         })
     }
 
@@ -157,6 +162,7 @@ impl CustomTool {
             defer_loading: None,
             strict: field("strict").and_then(Value::as_bool),
             type_tag: None,
+            extras: Map::new(),
         })
     }
 

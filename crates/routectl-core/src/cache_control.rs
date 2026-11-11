@@ -711,12 +711,14 @@ mod tests {
                 text: text.into(),
                 citations: None,
                 cache_control: cc,
+                extras: serde_json::Map::new(),
             })]),
             reasoning: None,
             reasoning_details: vec![],
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }
     }
 
@@ -768,12 +770,14 @@ mod tests {
                 defer_loading: None,
                 strict: None,
                 type_tag: None,
+                extras: serde_json::Map::new(),
             })]),
             system: Some(SystemContent::Blocks(vec![SystemBlock {
                 kind: "text".into(),
                 text: "sys".into(),
                 cache_control: Some(CacheControl::ephemeral_5m()),
                 citations: None,
+                extras: serde_json::Map::new(),
             }])),
             messages: vec![user_text_msg("hi", Some(CacheControl::ephemeral_5m()))].into(),
             cache_control: Some(CacheControl::ephemeral_5m()),
@@ -802,6 +806,7 @@ mod tests {
                     text: "x".into(),
                     citations: None,
                     cache_control: Some(CacheControl::ephemeral_5m()),
+                    extras: serde_json::Map::new(),
                 })
             })
             .collect();
@@ -816,6 +821,7 @@ mod tests {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             }]
             .into(),
             ..Default::default()
@@ -836,6 +842,7 @@ mod tests {
                 defer_loading: None,
                 strict: None,
                 type_tag: None,
+                extras: serde_json::Map::new(),
             })]),
             messages: vec![user_text_msg("hi", Some(CacheControl::ephemeral_5m()))].into(),
             ..Default::default()
@@ -881,12 +888,14 @@ mod tests {
                 defer_loading: None,
                 strict: None,
                 type_tag: None,
+                extras: serde_json::Map::new(),
             })]),
             system: Some(SystemContent::Blocks(vec![SystemBlock {
                 kind: "text".into(),
                 text: "sys".into(),
                 cache_control: Some(cc_5m()),
                 citations: None,
+                extras: serde_json::Map::new(),
             }])),
             messages: vec![user_text_msg("hi", None), user_text_msg("there", None)].into(),
             ..Default::default()
@@ -1018,6 +1027,7 @@ mod tests {
             defer_loading: None,
             strict: None,
             type_tag: None,
+            extras: serde_json::Map::new(),
         })
     }
 
@@ -1030,6 +1040,7 @@ mod tests {
                     text: (*t).into(),
                     cache_control: None,
                     citations: None,
+                    extras: serde_json::Map::new(),
                 })
                 .collect(),
         )
@@ -1202,12 +1213,14 @@ mod tests {
             text: "  \n ".into(),
             cache_control: None,
             citations: None,
+            extras: serde_json::Map::new(),
         };
         let real = SystemBlock {
             kind: "text".into(),
             text: "hi".into(),
             cache_control: None,
             citations: None,
+            extras: serde_json::Map::new(),
         };
         assert!(!system_block_is_wire_eligible(&blank));
         assert!(system_block_is_wire_eligible(&real));

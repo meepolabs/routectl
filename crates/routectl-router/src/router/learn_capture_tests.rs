@@ -2672,12 +2672,14 @@ fn req_with_tool_result_file() -> ChatRequest {
         content: MessageContent::Parts(vec![ContentPart::Known(KnownContentPart::File {
             file: json!({"filename": "notes.txt", "file_data": "data:text/plain;base64,S0lURQ=="}),
             cache_control: None,
+            extras: serde_json::Map::new(),
         })]),
         reasoning: None,
         reasoning_details: Vec::new(),
         name: None,
         tool_call_id: Some("call_1".into()),
         tool_calls: None,
+        extras: serde_json::Map::new(),
     };
     let tool_call = Message {
         refusal: None,
@@ -2692,6 +2694,7 @@ fn req_with_tool_result_file() -> ChatRequest {
             "type": "function",
             "function": {"name": "read_file", "arguments": "{}"}
         })]),
+        extras: serde_json::Map::new(),
     };
     ChatRequest {
         model: "m1".into(),

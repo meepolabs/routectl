@@ -22,6 +22,7 @@ fn system_block(text: &str) -> SystemBlock {
         text: text.into(),
         cache_control: None,
         citations: None,
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -36,6 +37,7 @@ fn system_with_parts(texts: &[&str]) -> Message {
                         text: (*t).into(),
                         citations: None,
                         cache_control: None,
+                        extras: serde_json::Map::new(),
                     })
                 })
                 .collect(),
@@ -46,6 +48,7 @@ fn system_with_parts(texts: &[&str]) -> Message {
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     }
 }
 

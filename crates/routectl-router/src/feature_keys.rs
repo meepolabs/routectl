@@ -228,6 +228,7 @@ mod tests {
             defer_loading: None,
             strict: None,
             type_tag: None,
+            extras: serde_json::Map::new(),
         })
     }
 
@@ -280,6 +281,7 @@ mod tests {
             defer_loading: None,
             strict,
             type_tag: None,
+            extras: serde_json::Map::new(),
         })
     }
 

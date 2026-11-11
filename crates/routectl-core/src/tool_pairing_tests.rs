@@ -14,6 +14,7 @@ fn message(role: Role, content: MessageContent) -> Message {
         tool_call_id: None,
         tool_calls: None,
         refusal: None,
+        extras: Map::new(),
     }
 }
 
@@ -51,6 +52,7 @@ fn tool_use_part(id: &str) -> ContentPart {
         name: "lookup".into(),
         input: json!({}),
         cache_control: None,
+        extras: Map::new(),
     })
 }
 
@@ -60,6 +62,7 @@ fn tool_result_part(id: &str) -> ContentPart {
         content: json!("result"),
         is_error: None,
         cache_control: None,
+        extras: Map::new(),
     })
 }
 
@@ -78,6 +81,7 @@ fn text_part(text: &str) -> ContentPart {
         text: text.into(),
         citations: None,
         cache_control: None,
+        extras: Map::new(),
     })
 }
 

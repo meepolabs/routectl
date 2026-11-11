@@ -97,6 +97,7 @@ fn req_on(alias: &str) -> ChatRequest {
             tool_call_id: None,
             tool_calls: None,
             refusal: None,
+            extras: serde_json::Map::new(),
         }]
         .into(),
         reasoning: Some(ReasoningConfig {
@@ -451,6 +452,7 @@ fn success_response() -> ChatResponse {
                 tool_call_id: None,
                 tool_calls: None,
                 refusal: None,
+                extras: serde_json::Map::new(),
             },
             finish_reason: Some("stop".into()),
             matched_stop_sequence: None,
@@ -1781,6 +1783,7 @@ fn the_preflight_diagnostic_carries_no_request_or_response_content() {
         tool_call_id: None,
         tool_calls: None,
         refusal: None,
+        extras: serde_json::Map::new(),
     }]
     .into();
     req.routectl_internal.anthropic_thinking_display = Some(DISPLAY_SENTINEL.into());

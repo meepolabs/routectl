@@ -15,6 +15,7 @@ fn signed_thinking_part(text: &str) -> ContentPart {
     ContentPart::Known(KnownContentPart::Thinking {
         thinking: text.into(),
         signature: Some(OMITTED_DISPLAY_SIGNATURE.into()),
+        extras: serde_json::Map::new(),
     })
 }
 
@@ -48,7 +49,7 @@ fn empty_thinking_text_with_a_claude_signature_survives_the_replay_strip() {
         assert!(
             matches!(
                 &parts[0],
-                ContentPart::Known(KnownContentPart::Thinking { thinking, signature })
+                ContentPart::Known(KnownContentPart::Thinking { thinking, signature, extras: _ })
                     if thinking == text
                         && signature.as_deref() == Some(OMITTED_DISPLAY_SIGNATURE)
             ),

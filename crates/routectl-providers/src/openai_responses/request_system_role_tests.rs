@@ -19,6 +19,7 @@ fn system_text(text: &str) -> Message {
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -32,6 +33,7 @@ fn system_parts(texts: &[&str]) -> Message {
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -41,6 +43,7 @@ fn plain_system_block(text: &str) -> SystemBlock {
         text: text.into(),
         cache_control: None,
         citations: None,
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -247,6 +250,7 @@ fn a_request_that_fails_after_the_message_strip_still_counts() {
         user_parts(vec![ContentPart::Known(KnownContentPart::ImageUrl {
             image_url: json!("not-an-object"),
             cache_control: None,
+            extras: serde_json::Map::new(),
         })]),
     ]);
 
@@ -271,6 +275,7 @@ fn system_with_image(text: &str) -> Message {
             ContentPart::Known(KnownContentPart::ImageUrl {
                 image_url: json!({"url": "https://example.com/a.png"}),
                 cache_control: None,
+                extras: serde_json::Map::new(),
             }),
         ]),
         ..system_text(text)
@@ -514,6 +519,7 @@ fn text_source_document_part(text: &str) -> ContentPart {
         title: None,
         citations: None,
         cache_control: None,
+        extras: serde_json::Map::new(),
     })
 }
 

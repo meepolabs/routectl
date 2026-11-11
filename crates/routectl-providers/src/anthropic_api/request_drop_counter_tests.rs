@@ -32,6 +32,7 @@ fn user_turn(text: &str) -> Message {
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -45,6 +46,7 @@ fn system_turn(text: &str) -> Message {
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -54,6 +56,7 @@ fn block(text: &str) -> SystemBlock {
         text: text.into(),
         cache_control: None,
         citations: None,
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -95,6 +98,7 @@ fn every_assembled_request_counts_toward_the_lane_denominator() {
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     }]
     .into();
 
@@ -282,6 +286,7 @@ fn a_request_that_strips_then_fails_assembly_still_counts_the_policy_action() {
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     }]
     .into();
 
@@ -575,10 +580,12 @@ fn system_turn_with_image(text: &str) -> Message {
                 text: text.into(),
                 citations: None,
                 cache_control: None,
+                extras: serde_json::Map::new(),
             }),
             routectl_core::ContentPart::Known(routectl_core::KnownContentPart::ImageUrl {
                 image_url: serde_json::json!({"url": "https://example.com/a.png"}),
                 cache_control: None,
+                extras: serde_json::Map::new(),
             }),
         ]),
         ..system_turn(text)
@@ -805,6 +812,7 @@ fn text_parts(texts: &[&str]) -> MessageContent {
                     text: (*text).into(),
                     citations: None,
                     cache_control: None,
+                    extras: serde_json::Map::new(),
                 })
             })
             .collect(),

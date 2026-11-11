@@ -149,6 +149,7 @@ fn sse_reasoning_round_trips_through_canonical_to_replay_request() {
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     };
     let req = req_with(vec![user_text("ping"), assistant]);
     let v = translate_to_json(&cfg(), &req);
@@ -314,6 +315,7 @@ fn dropped_surfaces_excludes_system_already_logged_at_debug() {
         text: "sys".into(),
         cache_control: Some(CacheControl::ephemeral_5m()),
         citations: None,
+        extras: serde_json::Map::new(),
     }]));
 
     // Act

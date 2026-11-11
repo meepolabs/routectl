@@ -113,6 +113,7 @@ fn message(role: Role, content: MessageContent) -> Message {
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -121,6 +122,7 @@ fn text(t: &str) -> ContentPart {
         text: t.into(),
         citations: None,
         cache_control: None,
+        extras: serde_json::Map::new(),
     })
 }
 
@@ -128,6 +130,7 @@ fn image_url(url: &str) -> ContentPart {
     ContentPart::Known(KnownContentPart::ImageUrl {
         image_url: json!({"url": url}),
         cache_control: None,
+        extras: serde_json::Map::new(),
     })
 }
 
@@ -478,6 +481,7 @@ async fn mantle_does_not_inspect_tool_schemas() {
         defer_loading: None,
         strict: None,
         type_tag: None,
+        extras: serde_json::Map::new(),
     })]);
 
     provider

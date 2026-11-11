@@ -1199,6 +1199,7 @@ mod anthropic_api_config_propagation_tests {
                 tool_call_id: None,
                 tool_calls: None,
                 refusal: None,
+                extras: serde_json::Map::new(),
             }]
             .into(),
             provider_extras: Some(json!({
@@ -1477,6 +1478,7 @@ mod gemini_cloud_code_factory_tests {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             }]
             .into(),
             max_tokens: Some(64),

@@ -47,6 +47,7 @@ fn user(text: &str) -> Message {
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -191,6 +192,7 @@ fn with_user_file_url() -> ChatRequest {
             content: MessageContent::Parts(vec![ContentPart::Known(KnownContentPart::File {
                 file: json!({"file_url": "https://example.com/a.pdf", "file_id": "file-1"}),
                 cache_control: None,
+                extras: serde_json::Map::new(),
             })]),
             ..user("")
         }]
@@ -206,6 +208,7 @@ fn with_fingerprint(rest: Option<&str>) -> ChatRequest {
         text: text.into(),
         cache_control: None,
         citations: None,
+        extras: serde_json::Map::new(),
     };
     let system = match rest {
         Some(rest) => SystemContent::Blocks(vec![block(fingerprint), block(rest)]),

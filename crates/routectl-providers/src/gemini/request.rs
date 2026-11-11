@@ -869,6 +869,7 @@ fn content_part_to_part(
             KnownContentPart::Thinking {
                 thinking,
                 signature,
+                extras: _,
             } => {
                 // Assistant reasoning replayed back as a thought part so
                 // the model can continue its chain-of-thought. The
@@ -1812,6 +1813,7 @@ mod tests {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }
     }
 
@@ -1825,6 +1827,7 @@ mod tests {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }
     }
 
@@ -1838,6 +1841,7 @@ mod tests {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }
     }
 
@@ -1951,12 +1955,14 @@ mod tests {
                     text: String::new(),
                     cache_control: None,
                     citations: None,
+                    extras: serde_json::Map::new(),
                 },
                 SystemBlock {
                     kind: "text".into(),
                     text: "  ".into(),
                     cache_control: None,
                     citations: None,
+                    extras: serde_json::Map::new(),
                 },
             ])),
             ..base_req()
@@ -1982,12 +1988,14 @@ mod tests {
                     text: "  ".into(),
                     cache_control: None,
                     citations: None,
+                    extras: serde_json::Map::new(),
                 },
                 SystemBlock {
                     kind: "text".into(),
                     text: "be helpful".into(),
                     cache_control: None,
                     citations: None,
+                    extras: serde_json::Map::new(),
                 },
             ])),
             ..base_req()
@@ -2058,6 +2066,7 @@ mod tests {
                     "type": "function",
                     "function": {"name": "get_weather", "arguments": "{\"city\":\"Paris\"}"}
                 })]),
+                extras: serde_json::Map::new(),
             }]
             .into(),
             ..Default::default()
@@ -2087,6 +2096,7 @@ mod tests {
                 name: Some("get_weather".into()),
                 tool_call_id: Some("call_1".into()),
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             }]
             .into(),
             ..Default::default()
@@ -2120,6 +2130,7 @@ mod tests {
                 "type": "function",
                 "function": {"name": "get_weather", "arguments": "{}"}
             })]),
+            extras: serde_json::Map::new(),
         };
         let tool_result = Message {
             role: Role::Tool,
@@ -2130,6 +2141,7 @@ mod tests {
             name: None,
             tool_call_id: Some("call_42".into()),
             tool_calls: None,
+            extras: serde_json::Map::new(),
         };
         let req = ChatRequest {
             model: "gemini-2.5-pro".into(),
@@ -2161,6 +2173,7 @@ mod tests {
                 name: "lookup".into(),
                 input: json!({}),
                 cache_control: None,
+                extras: serde_json::Map::new(),
             })]),
             refusal: None,
             reasoning: None,
@@ -2168,6 +2181,7 @@ mod tests {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         };
         let tool_result = Message {
             role: Role::Tool,
@@ -2178,6 +2192,7 @@ mod tests {
             name: None,
             tool_call_id: Some("toolu_7".into()),
             tool_calls: None,
+            extras: serde_json::Map::new(),
         };
         let req = ChatRequest {
             model: "gemini-2.5-pro".into(),
@@ -2210,6 +2225,7 @@ mod tests {
             name: None,
             tool_call_id: Some("unknown_id".into()),
             tool_calls: None,
+            extras: serde_json::Map::new(),
         };
         let req = ChatRequest {
             model: "gemini-2.5-pro".into(),
@@ -2244,6 +2260,7 @@ mod tests {
                 "type": "function",
                 "function": {"name": "canonical_name", "arguments": "{}"}
             })]),
+            extras: serde_json::Map::new(),
         };
         let tool_result = Message {
             role: Role::Tool,
@@ -2254,6 +2271,7 @@ mod tests {
             name: Some("stale_name".into()),
             tool_call_id: Some("call_9".into()),
             tool_calls: None,
+            extras: serde_json::Map::new(),
         };
         let req = ChatRequest {
             model: "gemini-2.5-pro".into(),
@@ -2286,6 +2304,7 @@ mod tests {
                 defer_loading: None,
                 strict: None,
                 type_tag: None,
+                extras: serde_json::Map::new(),
             })]),
             ..Default::default()
         };
@@ -2322,6 +2341,7 @@ mod tests {
                 defer_loading: None,
                 strict: None,
                 type_tag: None,
+                extras: serde_json::Map::new(),
             })]),
             ..Default::default()
         };
@@ -2395,6 +2415,7 @@ mod tests {
                 defer_loading: None,
                 strict: None,
                 type_tag: None,
+                extras: serde_json::Map::new(),
             }),
         ]);
 
@@ -2450,6 +2471,7 @@ mod tests {
                 name: None,
                 tool_call_id: None,
                 tool_calls: Some(tool_calls),
+                extras: serde_json::Map::new(),
             }]
             .into(),
             ..Default::default()
@@ -2595,6 +2617,7 @@ mod tests {
                         name: "get_weather".into(),
                         input: json!({"city": "Paris"}),
                         cache_control: None,
+                        extras: serde_json::Map::new(),
                     },
                 )]),
                 refusal: None,
@@ -2603,6 +2626,7 @@ mod tests {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             }]
             .into(),
             ..Default::default()
@@ -2663,6 +2687,7 @@ mod tests {
                 name: None,
                 tool_call_id: None,
                 tool_calls: Some(vec![signed_call]),
+                extras: serde_json::Map::new(),
             }]
             .into(),
             ..Default::default()
@@ -2734,6 +2759,7 @@ mod tests {
                 defer_loading: None,
                 strict: None,
                 type_tag: None,
+                extras: serde_json::Map::new(),
             })]),
             tool_choice: Some(choice),
             ..Default::default()
@@ -2781,6 +2807,7 @@ mod tests {
                 defer_loading: None,
                 strict: None,
                 type_tag: None,
+                extras: serde_json::Map::new(),
             })]),
             tool_choice: Some(json!("none")),
             ..Default::default()
@@ -3254,6 +3281,7 @@ mod tests {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         };
         let req = ChatRequest {
             model: "gemini-2.5-pro".into(),
@@ -3593,6 +3621,7 @@ mod tests {
             text: "sys".into(),
             cache_control: Some(CacheControl::ephemeral_5m()),
             citations: None,
+            extras: serde_json::Map::new(),
         }]));
 
         // Act
@@ -3677,6 +3706,7 @@ mod tests {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }
     }
 
@@ -3698,6 +3728,7 @@ mod tests {
         ContentPart::Known(KnownContentPart::ImageUrl {
             image_url: json!({"url": url}),
             cache_control: None,
+            extras: serde_json::Map::new(),
         })
     }
 
@@ -3705,6 +3736,7 @@ mod tests {
         ContentPart::Known(KnownContentPart::Image {
             source,
             cache_control: None,
+            extras: serde_json::Map::new(),
         })
     }
 
@@ -3867,6 +3899,7 @@ mod tests {
         ContentPart::Known(KnownContentPart::File {
             file,
             cache_control: None,
+            extras: serde_json::Map::new(),
         })
     }
 
@@ -3876,6 +3909,7 @@ mod tests {
             title: None,
             citations: None,
             cache_control: None,
+            extras: serde_json::Map::new(),
         })
     }
 
@@ -4053,13 +4087,17 @@ mod tests {
     }
 
     fn redacted_thinking_part(data: &str) -> ContentPart {
-        ContentPart::Known(KnownContentPart::RedactedThinking { data: data.into() })
+        ContentPart::Known(KnownContentPart::RedactedThinking {
+            data: data.into(),
+            extras: serde_json::Map::new(),
+        })
     }
 
     fn thinking_part(thinking: &str) -> ContentPart {
         ContentPart::Known(KnownContentPart::Thinking {
             thinking: thinking.into(),
             signature: None,
+            extras: serde_json::Map::new(),
         })
     }
 
@@ -4109,6 +4147,7 @@ mod tests {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }
     }
 

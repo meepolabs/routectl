@@ -265,6 +265,7 @@ fn admitted_request(client_betas: &[&str], cc_session: bool) -> ChatRequest {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }]
         .into(),
         anthropic_beta: client_betas.iter().map(|s| (*s).to_string()).collect(),

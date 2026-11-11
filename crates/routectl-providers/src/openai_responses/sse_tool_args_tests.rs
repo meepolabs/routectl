@@ -504,6 +504,7 @@ fn reader_tool(schema: Value) -> routectl_core::ToolDef {
         defer_loading: None,
         strict: None,
         type_tag: None,
+        extras: serde_json::Map::new(),
     })
 }
 
@@ -714,6 +715,7 @@ fn only_a_call_to_a_filterable_tool_is_held_back_on_the_codex_lane() {
             defer_loading: None,
             strict: None,
             type_tag: None,
+            extras: serde_json::Map::new(),
         }),
     ];
     let mut state = lane_state(AuthKind::ChatgptOauth, &tools, None);
@@ -1014,6 +1016,7 @@ mod through_the_provider {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             }]
             .into(),
             tools: Some(vec![reader_tool(reader_schema())]),

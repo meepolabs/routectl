@@ -495,6 +495,7 @@ fn disabled_req_with_tool_choice(tool_choice: serde_json::Value) -> ChatRequest 
             defer_loading: None,
             strict: None,
             type_tag: None,
+            extras: serde_json::Map::new(),
         },
     )]);
     req.tool_choice = Some(tool_choice);

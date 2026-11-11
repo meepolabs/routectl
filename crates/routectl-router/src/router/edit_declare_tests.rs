@@ -122,6 +122,7 @@ fn text_message(role: Role, text: &str) -> Message {
         tool_call_id: None,
         tool_calls: None,
         refusal: None,
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -459,6 +460,7 @@ fn tool_result_message(content: &str) -> Message {
             content: json!(content),
             is_error: None,
             cache_control: None,
+            extras: serde_json::Map::new(),
         })]),
         ..text_message(Role::User, "")
     }
@@ -472,6 +474,7 @@ fn tool_use_message() -> Message {
             name: "Tool".into(),
             input: json!({}),
             cache_control: None,
+            extras: serde_json::Map::new(),
         })]),
         ..text_message(Role::Assistant, "")
     }
@@ -555,6 +558,7 @@ fn system_blocks_request() -> ChatRequest {
         text: "be brief".into(),
         cache_control: None,
         citations: None,
+        extras: serde_json::Map::new(),
     }]));
     req
 }

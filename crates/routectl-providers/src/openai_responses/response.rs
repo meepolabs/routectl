@@ -156,6 +156,7 @@ fn translate_filtered(
         name: None,
         tool_call_id: None,
         tool_calls,
+        extras: serde_json::Map::new(),
     };
 
     let id = if body.id.is_empty() {
@@ -240,6 +241,7 @@ fn walk_output(
                                 text: text.clone(),
                                 citations: None,
                                 cache_control: None,
+                                extras: serde_json::Map::new(),
                             }));
                         }
                         ResponsesOutputContent::Refusal { refusal } => {
@@ -380,6 +382,7 @@ fn walk_output(
                     name: name.clone(),
                     input: input_value,
                     cache_control: None,
+                    extras: serde_json::Map::new(),
                 }));
             }
             ResponseOutputItem::Other(raw) => {

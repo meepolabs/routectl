@@ -16,6 +16,7 @@ fn user_turn(parts: Vec<ContentPart>) -> Message {
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -31,6 +32,7 @@ fn tool_turn(parts: Vec<ContentPart>) -> Message {
         name: None,
         tool_call_id: Some("toolu_X".into()),
         tool_calls: None,
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -45,12 +47,14 @@ fn raw_tool_result_turn(content: Value) -> Message {
             content,
             is_error: None,
             cache_control: None,
+            extras: serde_json::Map::new(),
         })]),
         reasoning: None,
         reasoning_details: vec![],
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -58,6 +62,7 @@ fn image_part(source: Value) -> ContentPart {
     ContentPart::Known(KnownContentPart::Image {
         source,
         cache_control: None,
+        extras: serde_json::Map::new(),
     })
 }
 
@@ -65,6 +70,7 @@ fn image_url_part(image_url: Value) -> ContentPart {
     ContentPart::Known(KnownContentPart::ImageUrl {
         image_url,
         cache_control: None,
+        extras: serde_json::Map::new(),
     })
 }
 
@@ -73,6 +79,7 @@ fn text_part(text: &str) -> ContentPart {
         text: text.into(),
         citations: None,
         cache_control: None,
+        extras: serde_json::Map::new(),
     })
 }
 
@@ -705,6 +712,7 @@ fn tallies_recorded_before_a_refused_image_still_flush_on_the_error_path() {
             title: Some("notes".into()),
             citations: Some(json!("yes")),
             cache_control: None,
+            extras: serde_json::Map::new(),
         })]),
         assistant_turn(vec![unsigned_detail(Some(0))]),
         user_turn(vec![image_part(json!("not-an-object"))]),

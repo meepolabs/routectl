@@ -36,12 +36,14 @@ fn tool_result_msg(payload: &str) -> Message {
             content: json!(payload),
             is_error: None,
             cache_control: None,
+            extras: serde_json::Map::new(),
         })]),
         reasoning: None,
         reasoning_details: vec![],
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -54,12 +56,14 @@ fn tool_use_msg(payload: &str) -> Message {
             name: "search".into(),
             input: json!(payload),
             cache_control: None,
+            extras: serde_json::Map::new(),
         })]),
         reasoning: None,
         reasoning_details: vec![],
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -73,6 +77,7 @@ fn text_msg(role: Role, text: &str) -> Message {
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     }
 }
 

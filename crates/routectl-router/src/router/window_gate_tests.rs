@@ -84,6 +84,7 @@ fn oversized_request() -> ChatRequest {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }]
         .into(),
         ..Default::default()
@@ -959,6 +960,7 @@ fn request_with_estimate(tokens: u64, max_tokens: Option<u32>) -> ChatRequest {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }]
         .into(),
         ..Default::default()

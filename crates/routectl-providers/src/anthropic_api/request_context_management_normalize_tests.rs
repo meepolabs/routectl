@@ -19,6 +19,7 @@ fn simple_req() -> ChatRequest {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }]
         .into(),
         ..Default::default()
@@ -60,6 +61,7 @@ fn req_with_tool_use_history_and_cm() -> ChatRequest {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
             Message {
                 refusal: None,
@@ -74,6 +76,7 @@ fn req_with_tool_use_history_and_cm() -> ChatRequest {
                     "type": "function",
                     "function": {"name": "calc", "arguments": "{}"}
                 })]),
+                extras: serde_json::Map::new(),
             },
             Message {
                 refusal: None,
@@ -84,6 +87,7 @@ fn req_with_tool_use_history_and_cm() -> ChatRequest {
                 name: None,
                 tool_call_id: Some("toolu_t1".into()),
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
         ]
         .into(),
@@ -160,12 +164,14 @@ fn normalize_strips_billing_system_block() {
             text: "x-anthropic-billing-header: v=1; fp=secret".into(),
             cache_control: None,
             citations: None,
+            extras: serde_json::Map::new(),
         },
         SystemBlock {
             kind: "text".into(),
             text: "you are helpful".into(),
             cache_control: None,
             citations: None,
+            extras: serde_json::Map::new(),
         },
     ]));
     let body =
@@ -218,6 +224,7 @@ fn normalize_strips_billing_from_legacy_system_message() {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         },
         Message {
             refusal: None,
@@ -228,6 +235,7 @@ fn normalize_strips_billing_from_legacy_system_message() {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         },
         Message {
             refusal: None,
@@ -238,6 +246,7 @@ fn normalize_strips_billing_from_legacy_system_message() {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         },
     ]
     .into();
@@ -275,6 +284,7 @@ fn normalize_drops_pure_billing_legacy_system_message() {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         },
         Message {
             refusal: None,
@@ -285,6 +295,7 @@ fn normalize_drops_pure_billing_legacy_system_message() {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         },
     ]
     .into();

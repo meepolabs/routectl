@@ -69,6 +69,7 @@ fn message(content: MessageContent) -> Message {
         tool_call_id: None,
         tool_calls: None,
         refusal: None,
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -215,6 +216,7 @@ fn parity_rows() -> Vec<ParityRow> {
                         text: "found it".into(),
                         citations: None,
                         cache_control: None,
+                        extras: serde_json::Map::new(),
                     }),
                 ])),
                 "stop",

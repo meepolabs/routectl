@@ -132,6 +132,7 @@ mod tests {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }
     }
 
@@ -160,6 +161,7 @@ mod tests {
                             text: (*t).into(),
                             citations: None,
                             cache_control: None,
+                            extras: serde_json::Map::new(),
                         })
                     })
                     .collect(),

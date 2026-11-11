@@ -828,6 +828,7 @@ mod tests {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             }]
             .into(),
             max_tokens: Some(64),
@@ -863,6 +864,7 @@ mod tests {
                 routectl_core::KnownContentPart::Image {
                     source: source.clone(),
                     cache_control: None,
+                    extras: serde_json::Map::new(),
                 },
             )]),
             ..req.messages[0].clone()
@@ -905,6 +907,7 @@ mod tests {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
             Message {
                 refusal: None,
@@ -915,6 +918,7 @@ mod tests {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
             Message {
                 refusal: None,
@@ -925,6 +929,7 @@ mod tests {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
         ]
         .into();
@@ -996,12 +1001,14 @@ mod tests {
             text: "be helpful".into(),
             cache_control: Some(CacheControl::ephemeral_1h()),
             citations: None,
+            extras: serde_json::Map::new(),
         }]));
         std::sync::Arc::make_mut(&mut req.messages)[0].content =
             MessageContent::Parts(vec![ContentPart::Known(KnownContentPart::Text {
                 text: "look".into(),
                 citations: None,
                 cache_control: Some(CacheControl::ephemeral_5m()),
+                extras: serde_json::Map::new(),
             })]);
 
         let body = normalize_request(&cfg, &req).unwrap();
@@ -1040,6 +1047,7 @@ mod tests {
                 text: "look".into(),
                 citations: None,
                 cache_control: None,
+                extras: serde_json::Map::new(),
             })]);
 
         // Act
@@ -1106,6 +1114,7 @@ mod tests {
                 text: "look".into(),
                 citations: None,
                 cache_control: Some(CacheControl::ephemeral_1h()),
+                extras: serde_json::Map::new(),
             })]);
 
         // Act
@@ -1141,6 +1150,7 @@ mod tests {
             text: "be helpful".into(),
             cache_control: Some(CacheControl::ephemeral_1h()),
             citations: None,
+            extras: serde_json::Map::new(),
         }]));
 
         // Act
@@ -1173,12 +1183,14 @@ mod tests {
             text: "be helpful".into(),
             cache_control: Some(CacheControl::ephemeral_1h()),
             citations: None,
+            extras: serde_json::Map::new(),
         }]));
         std::sync::Arc::make_mut(&mut req.messages)[0].content =
             MessageContent::Parts(vec![ContentPart::Known(KnownContentPart::Text {
                 text: "look".into(),
                 citations: None,
                 cache_control: None,
+                extras: serde_json::Map::new(),
             })]);
 
         // Act
@@ -1476,12 +1488,14 @@ mod tests {
                 text: "x-anthropic-billing-header: v=1; fp=secret".into(),
                 cache_control: None,
                 citations: None,
+                extras: serde_json::Map::new(),
             },
             SystemBlock {
                 kind: "text".into(),
                 text: "you are helpful".into(),
                 cache_control: None,
                 citations: None,
+                extras: serde_json::Map::new(),
             },
         ]));
 
@@ -1507,6 +1521,7 @@ mod tests {
             text: "intro x-anthropic-billing-header: not at start".into(),
             cache_control: None,
             citations: None,
+            extras: serde_json::Map::new(),
         }]));
 
         // Act
@@ -1623,6 +1638,7 @@ mod tests {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             }]
             .into(),
             max_tokens: Some(1024),
@@ -1913,11 +1929,13 @@ mod tests {
                 content: MessageContent::Parts(vec![
                     ContentPart::Known(KnownContentPart::RedactedThinking {
                         data: envelope.clone(),
+                        extras: serde_json::Map::new(),
                     }),
                     ContentPart::Known(KnownContentPart::Text {
                         text: "answer".into(),
                         citations: None,
                         cache_control: None,
+                        extras: serde_json::Map::new(),
                     }),
                 ]),
                 reasoning: None,
@@ -1925,6 +1943,7 @@ mod tests {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
         ]
         .into();

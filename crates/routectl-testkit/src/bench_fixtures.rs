@@ -254,6 +254,7 @@ fn tool_to_custom(spec: &ToolSpec) -> ToolDef {
         defer_loading: None,
         strict: None,
         type_tag: None,
+        extras: Map::new(),
     })
 }
 
@@ -280,7 +281,7 @@ fn tool_to_openai_wire(spec: &ToolSpec) -> Value {
     })
 }
 
-const fn msg(role: Role, content: MessageContent) -> Message {
+fn msg(role: Role, content: MessageContent) -> Message {
     Message {
         role,
         content,
@@ -290,14 +291,15 @@ const fn msg(role: Role, content: MessageContent) -> Message {
         tool_call_id: None,
         tool_calls: None,
         refusal: None,
+        extras: Map::new(),
     }
 }
 
-const fn user_text(text: String) -> Message {
+fn user_text(text: String) -> Message {
     msg(Role::User, MessageContent::Text(text))
 }
 
-const fn assistant_text(text: String) -> Message {
+fn assistant_text(text: String) -> Message {
     msg(Role::Assistant, MessageContent::Text(text))
 }
 
@@ -309,11 +311,12 @@ fn assistant_tool_use(id: String, name: String, input: Value) -> Message {
             name,
             input,
             cache_control: None,
+            extras: Map::new(),
         })]),
     )
 }
 
-const fn tool_result_msg(id: String, text: String) -> Message {
+fn tool_result_msg(id: String, text: String) -> Message {
     Message {
         role: Role::Tool,
         content: MessageContent::Text(text),
@@ -323,6 +326,7 @@ const fn tool_result_msg(id: String, text: String) -> Message {
         tool_call_id: Some(id),
         tool_calls: None,
         refusal: None,
+        extras: Map::new(),
     }
 }
 
@@ -332,6 +336,7 @@ fn cached_system_blocks(text: String) -> SystemContent {
         text,
         cache_control: Some(CacheControl::ephemeral_5m()),
         citations: None,
+        extras: Map::new(),
     }])
 }
 
@@ -478,10 +483,12 @@ fn build_large_image(rng: &mut SplitMix64) -> BenchFixture {
                     text: caption.clone(),
                     citations: None,
                     cache_control: None,
+                    extras: Map::new(),
                 }),
                 ContentPart::Known(KnownContentPart::Image {
                     source: source.clone(),
                     cache_control: Some(CacheControl::ephemeral_5m()),
+                    extras: Map::new(),
                 }),
             ]),
         )]

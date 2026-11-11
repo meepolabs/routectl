@@ -66,6 +66,7 @@ fn reader_tool() -> ToolDef {
         defer_loading: None,
         strict: None,
         type_tag: None,
+        extras: serde_json::Map::new(),
     })
 }
 
@@ -81,6 +82,7 @@ fn request(observation: &RequestObservation) -> ChatRequest {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }]
         .into(),
         tools: Some(vec![reader_tool()]),

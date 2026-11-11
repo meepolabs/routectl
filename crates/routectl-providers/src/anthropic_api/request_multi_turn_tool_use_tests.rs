@@ -27,6 +27,7 @@ fn user_msg(text: &str) -> Message {
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -40,6 +41,7 @@ fn assistant_msg(text: &str, tool_calls: Option<Vec<Value>>) -> Message {
         name: None,
         tool_call_id: None,
         tool_calls,
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -112,20 +114,24 @@ fn strips_unsigned_thinking_block_keeps_other_blocks() {
                         text: "Let me think.".into(),
                         citations: None,
                         cache_control: None,
+                        extras: serde_json::Map::new(),
                     }),
                     ContentPart::Known(KnownContentPart::Thinking {
                         thinking: "signed analysis".into(),
                         signature: Some(claude_signature()),
+                        extras: serde_json::Map::new(),
                     }),
                     ContentPart::Known(KnownContentPart::Thinking {
                         thinking: "unsigned analysis".into(),
                         signature: None,
+                        extras: serde_json::Map::new(),
                     }),
                     ContentPart::Known(KnownContentPart::ToolUse {
                         id: "toolu_1".into(),
                         name: "calc".into(),
                         input: json!({"expr": "2+2"}),
                         cache_control: None,
+                        extras: serde_json::Map::new(),
                     }),
                 ]),
                 reasoning: None,
@@ -133,6 +139,7 @@ fn strips_unsigned_thinking_block_keeps_other_blocks() {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
         ]
         .into(),
@@ -193,15 +200,18 @@ fn passes_through_when_all_thinking_signed() {
                     ContentPart::Known(KnownContentPart::Thinking {
                         thinking: "first".into(),
                         signature: Some(claude_signature_variant(0x01)),
+                        extras: serde_json::Map::new(),
                     }),
                     ContentPart::Known(KnownContentPart::Text {
                         text: "answer".into(),
                         citations: None,
                         cache_control: None,
+                        extras: serde_json::Map::new(),
                     }),
                     ContentPart::Known(KnownContentPart::Thinking {
                         thinking: "second".into(),
                         signature: Some(claude_signature_variant(0x02)),
+                        extras: serde_json::Map::new(),
                     }),
                 ]),
                 reasoning: None,
@@ -209,6 +219,7 @@ fn passes_through_when_all_thinking_signed() {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
         ]
         .into(),
@@ -257,6 +268,7 @@ fn drops_assistant_message_when_only_block_was_unsigned_thinking() {
                     KnownContentPart::Thinking {
                         thinking: "let me think".into(),
                         signature: None,
+                        extras: serde_json::Map::new(),
                     },
                 )]),
                 reasoning: None,
@@ -264,6 +276,7 @@ fn drops_assistant_message_when_only_block_was_unsigned_thinking() {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
             user_msg("any update?"),
         ]
@@ -310,6 +323,7 @@ fn drops_unsigned_thinking_only_turn_after_an_empty_forwarded_system_turn() {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
             Message {
                 refusal: None,
@@ -318,6 +332,7 @@ fn drops_unsigned_thinking_only_turn_after_an_empty_forwarded_system_turn() {
                     KnownContentPart::Thinking {
                         thinking: "let me think".into(),
                         signature: None,
+                        extras: serde_json::Map::new(),
                     },
                 )]),
                 reasoning: None,
@@ -325,6 +340,7 @@ fn drops_unsigned_thinking_only_turn_after_an_empty_forwarded_system_turn() {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
             user_msg("any update?"),
         ]
@@ -369,6 +385,7 @@ fn keeps_message_with_only_unsigned_thinking_when_tool_calls_present() {
                     KnownContentPart::Thinking {
                         thinking: "let me think".into(),
                         signature: None,
+                        extras: serde_json::Map::new(),
                     },
                 )]),
                 reasoning: None,
@@ -380,6 +397,7 @@ fn keeps_message_with_only_unsigned_thinking_when_tool_calls_present() {
                     "type": "function",
                     "function": {"name": "calc", "arguments": "{\"x\":1}"}
                 })]),
+                extras: serde_json::Map::new(),
             },
         ]
         .into(),
@@ -435,10 +453,12 @@ fn emits_debug_event_when_stripping_occurs() {
                         text: "answer".into(),
                         citations: None,
                         cache_control: None,
+                        extras: serde_json::Map::new(),
                     }),
                     ContentPart::Known(KnownContentPart::Thinking {
                         thinking: "TOPSECRET-REASONING-PAYLOAD".into(),
                         signature: None,
+                        extras: serde_json::Map::new(),
                     }),
                 ]),
                 reasoning: None,
@@ -446,6 +466,7 @@ fn emits_debug_event_when_stripping_occurs() {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
         ]
         .into(),
@@ -519,6 +540,7 @@ fn tool_message_without_tool_call_id_is_rejected() {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }]
         .into(),
         ..Default::default()
@@ -655,10 +677,12 @@ fn unsigned_thinking_block_is_stripped_not_rejected() {
                         text: "answer".into(),
                         citations: None,
                         cache_control: None,
+                        extras: serde_json::Map::new(),
                     }),
                     ContentPart::Known(KnownContentPart::Thinking {
                         thinking: "let me think".into(),
                         signature: None,
+                        extras: serde_json::Map::new(),
                     }),
                 ]),
                 reasoning: None,
@@ -666,6 +690,7 @@ fn unsigned_thinking_block_is_stripped_not_rejected() {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
         ]
         .into(),
@@ -1216,6 +1241,7 @@ fn tool_choice_none_with_tools_strips_tools_too() {
                 defer_loading: None,
                 strict: None,
                 type_tag: None,
+                extras: serde_json::Map::new(),
             },
         )]),
         ..Default::default()
@@ -1556,16 +1582,19 @@ fn assistant_with_thinking(signature: Option<&str>) -> Message {
                 text: "Let me think.".into(),
                 citations: None,
                 cache_control: None,
+                extras: serde_json::Map::new(),
             }),
             ContentPart::Known(KnownContentPart::Thinking {
                 thinking: "deepseek reasoning".into(),
                 signature: signature.map(std::string::ToString::to_string),
+                extras: serde_json::Map::new(),
             }),
             ContentPart::Known(KnownContentPart::ToolUse {
                 id: "toolu_1".into(),
                 name: "calc".into(),
                 input: json!({"expr": "2+2"}),
                 cache_control: None,
+                extras: serde_json::Map::new(),
             }),
         ]),
         reasoning: None,
@@ -1573,6 +1602,7 @@ fn assistant_with_thinking(signature: Option<&str>) -> Message {
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -1750,6 +1780,7 @@ fn tool_call_id_reject_stays_unconditional_under_preserve() {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }]
         .into(),
         ..Default::default()
@@ -1834,6 +1865,7 @@ fn emit_reasoning_blocks_warns_on_non_anthropic_format() {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
         ]
         .into(),

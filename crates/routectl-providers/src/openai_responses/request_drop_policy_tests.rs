@@ -75,6 +75,7 @@ fn turn_with_reasoning_details(details: Vec<ReasoningDetail>) -> Vec<Message> {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         },
     ]
 }
@@ -824,6 +825,7 @@ fn a_system_only_cache_marker_still_counts_though_the_warn_defers_to_system_rs()
         text: "be helpful".into(),
         cache_control: Some(CacheControl::ephemeral_5m()),
         citations: None,
+        extras: serde_json::Map::new(),
     }]));
 
     // Act

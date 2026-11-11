@@ -41,6 +41,7 @@ fn user_request(model: &str) -> routectl_core::ChatRequest {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }]
         .into(),
         temperature: Some(0.5),
@@ -913,6 +914,7 @@ async fn deepseek_multiturn_strips_reasoning_from_outgoing_body() {
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     });
     msgs.push(Message {
         refusal: None,
@@ -923,6 +925,7 @@ async fn deepseek_multiturn_strips_reasoning_from_outgoing_body() {
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     });
     req.messages = msgs.into();
 
@@ -977,12 +980,14 @@ fn strict_translation_off_warns_and_allows_request() {
                 text: "hi".into(),
                 citations: None,
                 cache_control: Some(CacheControl::ephemeral_5m()),
+                extras: serde_json::Map::new(),
             })]),
             reasoning: None,
             reasoning_details: vec![],
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }]
         .into(),
         cache_control: Some(CacheControl::ephemeral_5m()),
@@ -1018,6 +1023,7 @@ fn strict_translation_on_rejects_canonical_only_fields() {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }]
         .into(),
         cache_control: Some(CacheControl::ephemeral_5m()),
@@ -1778,7 +1784,7 @@ mod mantle {
         format!("{scheme}://{PLANTED_HOST}/{PLANTED_PATH}.png")
     }
 
-    const fn message(role: Role, content: MessageContent) -> Message {
+    fn message(role: Role, content: MessageContent) -> Message {
         Message {
             refusal: None,
             role,
@@ -1788,6 +1794,7 @@ mod mantle {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }
     }
 
@@ -1796,6 +1803,7 @@ mod mantle {
             text: text.into(),
             citations: None,
             cache_control: None,
+            extras: serde_json::Map::new(),
         })
     }
 
@@ -1818,6 +1826,7 @@ mod mantle {
         ContentPart::Known(KnownContentPart::ImageUrl {
             image_url: json!({"url": url}),
             cache_control: None,
+            extras: serde_json::Map::new(),
         })
     }
 
@@ -1825,6 +1834,7 @@ mod mantle {
         ContentPart::Known(KnownContentPart::Image {
             source: json!({"type": "url", "url": url}),
             cache_control: None,
+            extras: serde_json::Map::new(),
         })
     }
 
@@ -1832,6 +1842,7 @@ mod mantle {
         ContentPart::Known(KnownContentPart::File {
             file: json!({"file_url": url}),
             cache_control: None,
+            extras: serde_json::Map::new(),
         })
     }
 
@@ -1855,12 +1866,14 @@ mod mantle {
             name: "screenshot".into(),
             input: json!({}),
             cache_control: None,
+            extras: serde_json::Map::new(),
         });
         let tool_result = ContentPart::Known(KnownContentPart::ToolResult {
             tool_use_id: "toolu_1".into(),
             content: json!([{"type": "image", "source": {"type": "url", "url": url}}]),
             is_error: None,
             cache_control: None,
+            extras: serde_json::Map::new(),
         });
         chat(vec![
             message(Role::User, MessageContent::Text("take one".into())),
@@ -2039,12 +2052,14 @@ mod mantle {
             name: "fetch".into(),
             input: json!({"image_url": planted("s3")}),
             cache_control: None,
+            extras: serde_json::Map::new(),
         });
         let tool_result = ContentPart::Known(KnownContentPart::ToolResult {
             tool_use_id: "toolu_2".into(),
             content: json!("done"),
             is_error: None,
             cache_control: None,
+            extras: serde_json::Map::new(),
         });
         let req = chat(vec![
             message(Role::User, MessageContent::Text("fetch it".into())),

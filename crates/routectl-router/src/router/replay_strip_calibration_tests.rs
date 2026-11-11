@@ -112,6 +112,7 @@ fn success_response() -> ChatResponse {
                 tool_call_id: None,
                 tool_calls: None,
                 refusal: None,
+                extras: serde_json::Map::new(),
             },
             finish_reason: Some("stop".into()),
             matched_stop_sequence: None,
@@ -160,6 +161,7 @@ fn req_carrying_bulky_artifact() -> ChatRequest {
             tool_call_id: None,
             tool_calls: None,
             refusal: None,
+            extras: serde_json::Map::new(),
         }]
         .into(),
         ..Default::default()
@@ -345,6 +347,7 @@ async fn a_dispatch_that_strips_nothing_keeps_the_original_stamp() {
             tool_call_id: None,
             tool_calls: None,
             refusal: None,
+            extras: serde_json::Map::new(),
         }]
         .into(),
         ..Default::default()

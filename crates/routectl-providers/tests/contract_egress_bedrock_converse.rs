@@ -282,6 +282,7 @@ mod scenario_document_tool_result_parts_path {
                             name: "fetch_report".into(),
                             input: json!({"quarter": "Q3"}),
                             cache_control: None,
+                            extras: serde_json::Map::new(),
                         },
                     )]),
                     reasoning: None,
@@ -289,6 +290,7 @@ mod scenario_document_tool_result_parts_path {
                     name: None,
                     tool_call_id: None,
                     tool_calls: None,
+                    extras: serde_json::Map::new(),
                 },
                 Message {
                     refusal: None,
@@ -303,6 +305,7 @@ mod scenario_document_tool_result_parts_path {
                             title: Some("Q3 Report (final)".into()),
                             citations: Some(json!({"enabled": true})),
                             cache_control: None,
+                            extras: serde_json::Map::new(),
                         }),
                         ContentPart::Known(KnownContentPart::Document {
                             source: json!({
@@ -313,6 +316,7 @@ mod scenario_document_tool_result_parts_path {
                             title: Some("appendix_a".into()),
                             citations: None,
                             cache_control: None,
+                            extras: serde_json::Map::new(),
                         }),
                     ]),
                     reasoning: None,
@@ -320,6 +324,7 @@ mod scenario_document_tool_result_parts_path {
                     name: None,
                     tool_call_id: Some("toolu_doc_1".into()),
                     tool_calls: None,
+                    extras: serde_json::Map::new(),
                 },
             ]
             .into(),
@@ -394,6 +399,7 @@ mod scenario_document_tool_result_raw_anthropic_shape {
                         ]),
                         is_error: None,
                         cache_control: None,
+                        extras: serde_json::Map::new(),
                     },
                 )]),
                 reasoning: None,
@@ -401,6 +407,7 @@ mod scenario_document_tool_result_raw_anthropic_shape {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             }]
             .into(),
             max_tokens: Some(1024),
@@ -475,6 +482,7 @@ mod scenario_other_passthrough_round_trip {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             }]
             .into(),
             ..Default::default()

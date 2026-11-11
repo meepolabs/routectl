@@ -70,7 +70,7 @@ fn bedrock_invoke_provider() -> BedrockProvider {
     BedrockProvider::new(cfg, resolved).expect("canonical region")
 }
 
-const fn message(role: Role, content: MessageContent) -> Message {
+fn message(role: Role, content: MessageContent) -> Message {
     Message {
         refusal: None,
         role,
@@ -80,6 +80,7 @@ const fn message(role: Role, content: MessageContent) -> Message {
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     }
 }
 

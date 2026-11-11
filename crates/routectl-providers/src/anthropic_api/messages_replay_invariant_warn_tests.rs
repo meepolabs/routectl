@@ -11,6 +11,7 @@ fn unsigned_thinking_part() -> ContentPart {
     ContentPart::Known(KnownContentPart::Thinking {
         thinking: "reasoning".into(),
         signature: None,
+        extras: serde_json::Map::new(),
     })
 }
 
@@ -19,6 +20,7 @@ fn text_part(text: &str) -> ContentPart {
         text: text.into(),
         citations: None,
         cache_control: None,
+        extras: serde_json::Map::new(),
     })
 }
 
@@ -32,6 +34,7 @@ fn assistant_msg(parts: Vec<ContentPart>) -> Message {
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     }
 }
 

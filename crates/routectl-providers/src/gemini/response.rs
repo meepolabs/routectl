@@ -89,6 +89,7 @@ pub fn translate(provider_id: &str, resp: GenerateContentResponse) -> Result<Cha
         name: None,
         tool_call_id: None,
         tool_calls,
+        extras: serde_json::Map::new(),
     };
 
     let usage = resp.usage_metadata.as_ref().map(translate_usage);

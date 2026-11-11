@@ -352,6 +352,7 @@ fn chat_request_with_an_unmodeled_block() -> ChatRequest {
         reasoning_details: vec![],
         name: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     }]
     .into();
     req
@@ -467,6 +468,7 @@ async fn a_tool_pairing_refusal_on_gemini_carries_its_reason_and_counts_once() {
             reasoning_details: vec![],
             name: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }]
         .into();
 

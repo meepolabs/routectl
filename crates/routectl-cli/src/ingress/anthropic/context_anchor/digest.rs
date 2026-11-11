@@ -248,6 +248,7 @@ fn without_markers(message: &Message) -> Message {
         tool_call_id: message.tool_call_id.clone(),
         tool_calls: message.tool_calls.clone(),
         refusal: message.refusal.clone(),
+        extras: serde_json::Map::new(),
     }
 }
 

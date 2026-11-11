@@ -526,6 +526,7 @@ fn push_message_item(messages: &mut Vec<Message>, item: &Value) {
         tool_call_id: None,
         tool_calls: None,
         refusal: None,
+        extras: Map::new(),
     });
 }
 
@@ -580,6 +581,7 @@ fn parse_content_block(block: &Value) -> Option<ContentPart> {
                 text: text.to_string(),
                 citations: None,
                 cache_control: None,
+                extras: Map::new(),
             }))
         }
         "input_image" => {
@@ -605,6 +607,7 @@ fn parse_content_block(block: &Value) -> Option<ContentPart> {
             Some(ContentPart::Known(KnownContentPart::ImageUrl {
                 image_url: Value::Object(image_url),
                 cache_control: None,
+                extras: Map::new(),
             }))
         }
         // Unknown / future block type: preserve verbatim as Other so the
@@ -647,7 +650,7 @@ fn collapse_parts(parts: Vec<ContentPart>) -> MessageContent {
     MessageContent::Parts(parts)
 }
 
-const fn user_text_message(text: String) -> Message {
+fn user_text_message(text: String) -> Message {
     Message {
         role: Role::User,
         content: MessageContent::Text(text),
@@ -657,6 +660,7 @@ const fn user_text_message(text: String) -> Message {
         tool_call_id: None,
         tool_calls: None,
         refusal: None,
+        extras: Map::new(),
     }
 }
 
@@ -710,6 +714,7 @@ fn attach_function_call(messages: &mut Vec<Message>, item: &Value) {
         tool_call_id: None,
         tool_calls: Some(vec![tool_call]),
         refusal: None,
+        extras: Map::new(),
     });
 }
 
@@ -747,6 +752,7 @@ fn function_call_output_message(item: &Value) -> Message {
         },
         tool_calls: None,
         refusal: None,
+        extras: Map::new(),
     }
 }
 
@@ -817,6 +823,7 @@ fn attach_reasoning(messages: &mut Vec<Message>, item: &Value) {
         tool_call_id: None,
         tool_calls: None,
         refusal: None,
+        extras: Map::new(),
     });
 }
 

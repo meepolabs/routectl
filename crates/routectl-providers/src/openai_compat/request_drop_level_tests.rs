@@ -9,6 +9,7 @@ fn marked_text_part(text: &str) -> ContentPart {
         text: text.into(),
         citations: None,
         cache_control: Some(routectl_core::CacheControl::ephemeral_5m()),
+        extras: serde_json::Map::new(),
     })
 }
 
@@ -18,6 +19,7 @@ fn marked_system() -> routectl_core::SystemContent {
         text: "be helpful".into(),
         cache_control: Some(routectl_core::CacheControl::ephemeral_5m()),
         citations: None,
+        extras: serde_json::Map::new(),
     }])
 }
 
@@ -30,6 +32,7 @@ fn marked_tool() -> ToolDef {
         defer_loading: None,
         strict: None,
         type_tag: None,
+        extras: serde_json::Map::new(),
     })
 }
 
@@ -56,6 +59,7 @@ fn anthropic_only_field_drops_log_once_at_debug() {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         },
     );
     let mut metadata = simple_req("m");

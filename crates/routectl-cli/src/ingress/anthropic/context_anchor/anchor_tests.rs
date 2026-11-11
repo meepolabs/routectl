@@ -40,6 +40,7 @@ pub(super) fn text_block(text: &str) -> SystemBlock {
         text: text.into(),
         cache_control: None,
         citations: None,
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -58,6 +59,7 @@ pub(super) fn tool(name: &str, description: &str) -> ToolDef {
         defer_loading: None,
         strict: None,
         type_tag: None,
+        extras: serde_json::Map::new(),
     })
 }
 
@@ -74,6 +76,7 @@ pub(super) fn text_part(text: &str, cache_control: Option<CacheControl>) -> Know
         text: text.into(),
         citations: None,
         cache_control,
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -85,6 +88,7 @@ pub(super) fn tool_use(id: &str, input: Value) -> Message {
             name: "read_file".into(),
             input,
             cache_control: None,
+            extras: serde_json::Map::new(),
         }],
     )
 }
@@ -97,6 +101,7 @@ pub(super) fn tool_result(id: &str, content: Value) -> Message {
             content,
             is_error: None,
             cache_control: None,
+            extras: serde_json::Map::new(),
         }],
     )
 }

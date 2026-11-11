@@ -896,6 +896,11 @@ pub struct Message {
     /// no wire change on outbound requests).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refusal: Option<String>,
+
+    /// Unmodeled wire members of this node, for a same-dialect egress to
+    /// re-emit. Never read or written by canonical serde.
+    #[serde(skip)]
+    pub extras: Map<String, Value>,
 }
 
 /// A message body: a flat string, typed content parts, or null.
@@ -1655,6 +1660,7 @@ mod tests {
             tool_call_id: None,
             tool_calls: None,
             refusal: None,
+            extras: Map::new(),
         };
         let out = serde_json::to_value(&msg).unwrap();
         assert!(out.get("refusal").is_none(), "got {out}");
@@ -1690,6 +1696,7 @@ mod tests {
                 tool_call_id: None,
                 tool_calls: None,
                 refusal: None,
+                extras: Map::new(),
             },
             finish_reason: Some("stop".into()),
             matched_stop_sequence: None,

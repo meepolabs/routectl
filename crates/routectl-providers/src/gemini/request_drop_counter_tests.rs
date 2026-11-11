@@ -51,6 +51,7 @@ fn req_with_part_beside_text(part: ContentPart, text: &str) -> ChatRequest {
                 text: text.into(),
                 citations: None,
                 cache_control: None,
+                extras: serde_json::Map::new(),
             }),
         ])]
         .into(),
@@ -82,6 +83,7 @@ fn a_clean_request_moves_the_lane_denominator() {
     let dropping = req_with_single_part(ContentPart::Known(KnownContentPart::Image {
         source: json!({"type": "url", "url": "https://example.com/cat.png"}),
         cache_control: None,
+        extras: serde_json::Map::new(),
     }));
     let _ = translate("gemini:test", &dropping).expect("translate ok");
     let clean = base_req();
@@ -107,6 +109,7 @@ fn three_dropped_blocks_of_one_class_count_as_one_drop() {
         ContentPart::Known(KnownContentPart::Image {
             source: json!({"type": "url", "url": "https://example.com/cat.png"}),
             cache_control: None,
+            extras: serde_json::Map::new(),
         })
     };
     let req = ChatRequest {
@@ -139,6 +142,7 @@ fn image_source_drop_bumps_the_counter_once_per_request() {
     let part = ContentPart::Known(KnownContentPart::Image {
         source: json!({"type": "url", "url": "https://example.com/cat.png"}),
         cache_control: None,
+        extras: serde_json::Map::new(),
     });
     let req = req_with_part_beside_text(part, "describe this");
 
@@ -173,6 +177,7 @@ fn base64_image_source_survives_and_counts_no_drop() {
     let part = ContentPart::Known(KnownContentPart::Image {
         source: json!({"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgo="}),
         cache_control: None,
+        extras: serde_json::Map::new(),
     });
     let req = req_with_single_part(part);
 
@@ -520,6 +525,7 @@ fn assistant_with_reasoning(details: Vec<routectl_core::ReasoningDetail>) -> Cha
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
         ]
         .into(),
@@ -684,6 +690,7 @@ fn assistant_with_raw_tool_calls(tool_calls: Vec<Value>) -> ChatRequest {
             name: None,
             tool_call_id: None,
             tool_calls: Some(tool_calls),
+            extras: serde_json::Map::new(),
         }]
         .into(),
         ..Default::default()
@@ -937,6 +944,7 @@ fn schema_keyword_drop_bumps_the_counter_once_per_request() {
             defer_loading: None,
             strict: None,
             type_tag: None,
+            extras: serde_json::Map::new(),
         })]),
         ..Default::default()
     };
@@ -986,6 +994,7 @@ fn gemini_subset_schema_survives_and_counts_no_drop() {
             defer_loading: None,
             strict: None,
             type_tag: None,
+            extras: serde_json::Map::new(),
         })]),
         ..Default::default()
     };
@@ -1188,6 +1197,7 @@ fn tool_request(input_schema: Value) -> ChatRequest {
             defer_loading: None,
             strict: None,
             type_tag: None,
+            extras: serde_json::Map::new(),
         })]),
         ..Default::default()
     }
@@ -1289,6 +1299,7 @@ fn over_depth_tool_schema_refuses_the_request_and_still_flushes_the_tally() {
             defer_loading: None,
             strict: None,
             type_tag: None,
+            extras: serde_json::Map::new(),
         })
     };
     let req = ChatRequest {
@@ -1399,6 +1410,7 @@ fn many_tool_request(count: usize, schema: &Value) -> ChatRequest {
                 defer_loading: None,
                 strict: None,
                 type_tag: None,
+                extras: serde_json::Map::new(),
             })
         })
         .collect();
@@ -1546,6 +1558,7 @@ fn cache_control_drop_bumps_the_counter_once_per_request() {
         text: "cache me".into(),
         citations: None,
         cache_control: Some(CacheControl::ephemeral_5m()),
+        extras: serde_json::Map::new(),
     });
     let req = req_with_part_beside_text(marked, "plain sibling");
 
@@ -1801,10 +1814,12 @@ fn a_non_text_system_part_is_counted_on_the_gemini_lane() {
                         text: "match this".into(),
                         citations: None,
                         cache_control: None,
+                        extras: serde_json::Map::new(),
                     }),
                     ContentPart::Known(KnownContentPart::ImageUrl {
                         image_url: json!({"url": "data:image/png;base64,AAAA"}),
                         cache_control: None,
+                        extras: serde_json::Map::new(),
                     }),
                 ]),
                 reasoning: None,
@@ -1812,11 +1827,13 @@ fn a_non_text_system_part_is_counted_on_the_gemini_lane() {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
             user_with_parts(vec![ContentPart::Known(KnownContentPart::Text {
                 text: "hi".into(),
                 citations: None,
                 cache_control: None,
+                extras: serde_json::Map::new(),
             })]),
         ]
         .into(),

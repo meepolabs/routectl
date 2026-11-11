@@ -160,6 +160,7 @@ mod order_test {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: Map::new(),
             }]
             .into(),
             ..Default::default()
@@ -227,6 +228,7 @@ mod order_test {
                     text: "here".into(),
                     citations: None,
                     cache_control: None,
+                    extras: Map::new(),
                 },
             )]),
             reasoning: None,
@@ -238,6 +240,7 @@ mod order_test {
                 "type": "function",
                 "function": {"name": "calc", "arguments": "{}"}
             })]),
+            extras: Map::new(),
         };
         let req = ChatRequest {
             model: "m".into(),
@@ -251,6 +254,7 @@ mod order_test {
                     name: None,
                     tool_call_id: None,
                     tool_calls: None,
+                    extras: Map::new(),
                 },
                 assistant_msg,
             ]
@@ -296,6 +300,7 @@ mod order_test {
             defer_loading: None,
             strict: None,
             type_tag: None,
+            extras: Map::new(),
         });
         let req = ChatRequest {
             model: "m".into(),
@@ -308,6 +313,7 @@ mod order_test {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: Map::new(),
             }]
             .into(),
             tools: Some(vec![tool]),

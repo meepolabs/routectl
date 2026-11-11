@@ -35,6 +35,7 @@ fn text(role: Role, body: &str) -> Message {
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -222,6 +223,7 @@ fn with_cache_marker() -> ChatRequest {
             text: "cached".into(),
             citations: None,
             cache_control: Some(CacheControl::ephemeral_5m()),
+            extras: serde_json::Map::new(),
         })]),
         ..text(Role::User, "")
     }]
@@ -262,6 +264,7 @@ fn with_fingerprint(rest: &str) -> ChatRequest {
         text: text.into(),
         cache_control: None,
         citations: None,
+        extras: serde_json::Map::new(),
     };
     let system = if rest.is_empty() {
         SystemContent::Text(FINGERPRINT.into())

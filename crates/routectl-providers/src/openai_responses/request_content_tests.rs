@@ -49,12 +49,14 @@ fn user_image_unknown_source_kind_warns_and_drops() {
         content: MessageContent::Parts(vec![ContentPart::Known(KnownContentPart::Image {
             source: json!({"type": "s3", "bucket": "my-bucket", "key": "img.png"}),
             cache_control: None,
+            extras: serde_json::Map::new(),
         })]),
         reasoning: None,
         reasoning_details: Vec::new(),
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     };
     let req = req_with(vec![msg]);
 
@@ -205,12 +207,14 @@ fn user_document_anthropic_shape_still_drops() {
             title: Some("spec.pdf".into()),
             citations: None,
             cache_control: None,
+            extras: serde_json::Map::new(),
         })]),
         reasoning: None,
         reasoning_details: Vec::new(),
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     };
     let req = req_with(vec![msg]);
 
@@ -614,6 +618,7 @@ fn tool_result_unrepresentable_part_drops_and_image_still_ships() {
             title: None,
             citations: None,
             cache_control: None,
+            extras: serde_json::Map::new(),
         }),
         image_part(json!({"type": "url", "url": "https://example.com/shot.png"})),
     ];
@@ -682,6 +687,7 @@ fn tool_role_with_image_part_translates_to_items_array() {
             "data": "iVBORw"
         }),
         cache_control: None,
+        extras: serde_json::Map::new(),
     })];
     let req = req_with(vec![
         user_text("screenshot"),
@@ -710,6 +716,7 @@ fn tool_role_mixed_text_and_image_emits_items_array() {
             text: "here is the screenshot".into(),
             citations: None,
             cache_control: None,
+            extras: serde_json::Map::new(),
         }),
         ContentPart::Known(KnownContentPart::Image {
             source: json!({
@@ -717,6 +724,7 @@ fn tool_role_mixed_text_and_image_emits_items_array() {
                 "url": "https://example.com/shot.png"
             }),
             cache_control: None,
+            extras: serde_json::Map::new(),
         }),
     ];
     let req = req_with(vec![

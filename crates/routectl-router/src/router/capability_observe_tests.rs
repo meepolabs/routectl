@@ -163,6 +163,7 @@ fn assistant_text(text: &str) -> Message {
         tool_call_id: None,
         tool_calls: None,
         refusal: None,
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -768,6 +769,7 @@ fn detector_context_derives_schema_keys_from_strict_tool() {
             defer_loading: None,
             strict: Some(true),
             type_tag: None,
+            extras: serde_json::Map::new(),
         })]),
         ..Default::default()
     };

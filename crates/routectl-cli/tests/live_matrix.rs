@@ -80,6 +80,7 @@ fn make_request(target: &str, max_tokens: u32, stream: bool) -> ChatRequest {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }]
         .into(),
         max_tokens: Some(max_tokens),

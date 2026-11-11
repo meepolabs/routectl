@@ -48,6 +48,7 @@ fn user_msg(text: &str) -> Message {
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -75,6 +76,7 @@ fn anthropic_object_none_tool_choice_suppresses_tool_config_entirely() {
             defer_loading: None,
             strict: None,
             type_tag: None,
+            extras: serde_json::Map::new(),
         })]),
         tool_choice: Some(json!({"type": "none"})),
         ..Default::default()
@@ -224,6 +226,7 @@ fn document_with_existing_text_sibling_does_not_prepend_empty_text() {
                     text: "see the attached report".into(),
                     citations: None,
                     cache_control: None,
+                    extras: serde_json::Map::new(),
                 }),
                 ContentPart::Known(KnownContentPart::Document {
                     source: json!({
@@ -234,6 +237,7 @@ fn document_with_existing_text_sibling_does_not_prepend_empty_text() {
                     title: None,
                     citations: None,
                     cache_control: None,
+                    extras: serde_json::Map::new(),
                 }),
             ]),
             reasoning: None,
@@ -241,6 +245,7 @@ fn document_with_existing_text_sibling_does_not_prepend_empty_text() {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }]
         .into(),
         ..Default::default()
@@ -279,6 +284,7 @@ fn role_tool_with_image_parts_uses_image_variant_not_json_wrap() {
                         text: "see attached".into(),
                         citations: None,
                         cache_control: None,
+                        extras: serde_json::Map::new(),
                     }),
                     ContentPart::Known(KnownContentPart::Image {
                         source: json!({
@@ -287,6 +293,7 @@ fn role_tool_with_image_parts_uses_image_variant_not_json_wrap() {
                             "data": "AAAA",
                         }),
                         cache_control: None,
+                        extras: serde_json::Map::new(),
                     }),
                 ]),
                 reasoning: None,
@@ -294,6 +301,7 @@ fn role_tool_with_image_parts_uses_image_variant_not_json_wrap() {
                 name: None,
                 tool_call_id: Some("toolu_X".into()),
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
         ]
         .into(),
@@ -350,6 +358,7 @@ fn role_tool_with_document_parts_uses_document_variant_not_json_wrap() {
                         title: Some("report.pdf".into()),
                         citations: None,
                         cache_control: None,
+                        extras: serde_json::Map::new(),
                     },
                 )]),
                 reasoning: None,
@@ -357,6 +366,7 @@ fn role_tool_with_document_parts_uses_document_variant_not_json_wrap() {
                 name: None,
                 tool_call_id: Some("toolu_doc".into()),
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
         ]
         .into(),
@@ -475,11 +485,13 @@ fn thinking_block_with_signature_translates_to_converse_reasoning_text() {
                     ContentPart::Known(KnownContentPart::Thinking {
                         thinking: "let me think".into(),
                         signature: Some("sig_abc".into()),
+                        extras: serde_json::Map::new(),
                     }),
                     ContentPart::Known(KnownContentPart::Text {
                         text: "answer".into(),
                         citations: None,
                         cache_control: None,
+                        extras: serde_json::Map::new(),
                     }),
                 ]),
                 reasoning: None,
@@ -487,6 +499,7 @@ fn thinking_block_with_signature_translates_to_converse_reasoning_text() {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
         ]
         .into(),
@@ -540,6 +553,7 @@ fn thinking_block_signature_forwards_verbatim_when_absent_or_empty() {
                         KnownContentPart::Thinking {
                             thinking: "unsigned thought".into(),
                             signature,
+                            extras: serde_json::Map::new(),
                         },
                     )]),
                     reasoning: None,
@@ -547,6 +561,7 @@ fn thinking_block_signature_forwards_verbatim_when_absent_or_empty() {
                     name: None,
                     tool_call_id: None,
                     tool_calls: None,
+                    extras: serde_json::Map::new(),
                 },
             ]
             .into(),
@@ -589,11 +604,13 @@ fn redacted_thinking_translates_to_converse_redacted_content() {
                 content: MessageContent::Parts(vec![
                     ContentPart::Known(KnownContentPart::RedactedThinking {
                         data: "AAECAwQF".into(),
+                        extras: serde_json::Map::new(),
                     }),
                     ContentPart::Known(KnownContentPart::Text {
                         text: "ok".into(),
                         citations: None,
                         cache_control: None,
+                        extras: serde_json::Map::new(),
                     }),
                 ]),
                 reasoning: None,
@@ -601,6 +618,7 @@ fn redacted_thinking_translates_to_converse_redacted_content() {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
         ]
         .into(),
@@ -649,17 +667,20 @@ fn multi_turn_assistant_replay_with_thinking_round_trips_through_converse() {
                     ContentPart::Known(KnownContentPart::Thinking {
                         thinking: "user wants weather; I'll call the tool".into(),
                         signature: Some("sig_round1".into()),
+                        extras: serde_json::Map::new(),
                     }),
                     ContentPart::Known(KnownContentPart::Text {
                         text: "Let me check.".into(),
                         citations: None,
                         cache_control: None,
+                        extras: serde_json::Map::new(),
                     }),
                     ContentPart::Known(KnownContentPart::ToolUse {
                         id: "tu_1".into(),
                         name: "get_weather".into(),
                         input: json!({"location": "Tokyo"}),
                         cache_control: None,
+                        extras: serde_json::Map::new(),
                     }),
                 ]),
                 reasoning: None,
@@ -667,6 +688,7 @@ fn multi_turn_assistant_replay_with_thinking_round_trips_through_converse() {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
             Message {
                 refusal: None,
@@ -677,6 +699,7 @@ fn multi_turn_assistant_replay_with_thinking_round_trips_through_converse() {
                 name: None,
                 tool_call_id: Some("tu_1".into()),
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
         ]
         .into(),
@@ -767,6 +790,7 @@ fn response_to_request_round_trip_preserves_thinking_signature_text_and_tool_use
             let mut parts = vec![ContentPart::Known(KnownContentPart::Thinking {
                 thinking: rd[0].payload["text"].as_str().unwrap_or("").to_string(),
                 signature: Some(sig_from_resp.to_string()),
+                extras: serde_json::Map::new(),
             })];
             parts.extend_from_slice(p);
             parts
@@ -777,11 +801,13 @@ fn response_to_request_round_trip_preserves_thinking_signature_text_and_tool_use
                 ContentPart::Known(KnownContentPart::Thinking {
                     thinking: rd[0].payload["text"].as_str().unwrap_or("").to_string(),
                     signature: Some(sig_from_resp.to_string()),
+                    extras: serde_json::Map::new(),
                 }),
                 ContentPart::Known(KnownContentPart::Text {
                     text: t.clone(),
                     citations: None,
                     cache_control: None,
+                    extras: serde_json::Map::new(),
                 }),
             ]
         }
@@ -797,6 +823,7 @@ fn response_to_request_round_trip_preserves_thinking_signature_text_and_tool_use
         name: None,
         tool_call_id: Some("tu_rt_1".into()),
         tool_calls: None,
+        extras: serde_json::Map::new(),
     };
 
     let req = ChatRequest {
@@ -812,6 +839,7 @@ fn response_to_request_round_trip_preserves_thinking_signature_text_and_tool_use
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
             tool_result_msg,
         ]

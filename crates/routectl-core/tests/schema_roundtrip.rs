@@ -2,13 +2,13 @@
 //! serialize match real-world wire formats and don't lose fields.
 
 use routectl_core::{
-    CacheControl, ChatChunk, ChatRequest, ChatResponse, ContentPart, KnownContentPart,
-    OpaqueSseEvent, Reasoning, ReasoningConfig, ReasoningDetail, ReasoningDetailKind, SystemBlock,
-    SystemContent, ToolDef,
+    CacheControl, ChatChunk, ChatRequest, ChatResponse, ContentPart, CustomTool, KnownContentPart,
+    Message, MessageContent, OpaqueSseEvent, Reasoning, ReasoningConfig, ReasoningDetail,
+    ReasoningDetailKind, Role, SystemBlock, SystemContent, ToolDef,
     cache_control::{Breakpoint, BreakpointPosition},
     upstream_meta::{AnthropicUnifiedQuota, UpstreamMeta},
 };
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 fn roundtrip<T>(input: Value) -> T
 where
@@ -504,6 +504,7 @@ fn system_block_helper_constructs_minimally() {
         text: "you are helpful".into(),
         cache_control: None,
         citations: None,
+        extras: serde_json::Map::new(),
     };
     let v = serde_json::to_value(&block).unwrap();
     assert_eq!(v["type"], "text");
@@ -671,4 +672,192 @@ fn chatresponse_routectl_provider_still_deserializes() {
     // Assert
     assert_eq!(resp.routectl_provider.as_deref(), Some("test"));
     assert!(resp.extras.get("routectl_provider").is_none());
+}
+
+// ---------------------------------------------------------------------------
+// Node-local `extras` carriers: canonical serde never writes or reads them.
+// ---------------------------------------------------------------------------
+
+type CarrierBuilder = fn(Map<String, Value>) -> Value;
+type ExtrasLen = fn(Value) -> usize;
+
+fn carrier_value<T: serde::Serialize>(node: &T) -> Value {
+    serde_json::to_value(node).expect("serialize carrier")
+}
+
+fn part_value(part: KnownContentPart) -> Value {
+    carrier_value(&ContentPart::Known(part))
+}
+
+const CARRIER_ROWS: &[(&str, CarrierBuilder)] = &[
+    ("message", |extras| {
+        carrier_value(&Message {
+            role: Role::User,
+            content: MessageContent::Text("hi".into()),
+            reasoning: None,
+            reasoning_details: vec![],
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+            refusal: None,
+            extras,
+        })
+    }),
+    ("custom_tool", |extras| {
+        carrier_value(&ToolDef::Custom(CustomTool {
+            name: "lookup".into(),
+            description: None,
+            input_schema: json!({"type": "object", "properties": {}}),
+            cache_control: None,
+            defer_loading: None,
+            strict: None,
+            type_tag: None,
+            extras,
+        }))
+    }),
+    ("system_block", |extras| {
+        carrier_value(&SystemBlock {
+            kind: "text".into(),
+            text: "be brief".into(),
+            cache_control: None,
+            citations: None,
+            extras,
+        })
+    }),
+    ("part_text", |extras| {
+        part_value(KnownContentPart::Text {
+            text: "hi".into(),
+            citations: None,
+            cache_control: None,
+            extras,
+        })
+    }),
+    ("part_image", |extras| {
+        part_value(KnownContentPart::Image {
+            source: json!({"type": "base64", "media_type": "image/png", "data": "AAAA"}),
+            cache_control: None,
+            extras,
+        })
+    }),
+    ("part_image_url", |extras| {
+        part_value(KnownContentPart::ImageUrl {
+            image_url: json!({"url": "https://example.com/x.png"}),
+            cache_control: None,
+            extras,
+        })
+    }),
+    ("part_file", |extras| {
+        part_value(KnownContentPart::File {
+            file: json!({"file_id": "file-abc"}),
+            cache_control: None,
+            extras,
+        })
+    }),
+    ("part_document", |extras| {
+        part_value(KnownContentPart::Document {
+            source: json!({"type": "text", "media_type": "text/plain", "data": "doc"}),
+            title: None,
+            citations: None,
+            cache_control: None,
+            extras,
+        })
+    }),
+    ("part_tool_use", |extras| {
+        part_value(KnownContentPart::ToolUse {
+            id: "toolu_01".into(),
+            name: "lookup".into(),
+            input: json!({"q": 1}),
+            cache_control: None,
+            extras,
+        })
+    }),
+    ("part_tool_result", |extras| {
+        part_value(KnownContentPart::ToolResult {
+            tool_use_id: "toolu_01".into(),
+            content: json!("done"),
+            is_error: None,
+            cache_control: None,
+            extras,
+        })
+    }),
+    ("part_thinking", |extras| {
+        part_value(KnownContentPart::Thinking {
+            thinking: "step".into(),
+            signature: None,
+            extras,
+        })
+    }),
+    ("part_redacted_thinking", |extras| {
+        part_value(KnownContentPart::RedactedThinking {
+            data: "opaque".into(),
+            extras,
+        })
+    }),
+];
+
+fn populated_extras() -> Map<String, Value> {
+    let mut extras = Map::new();
+    extras.insert("extras".into(), json!({"nested": true}));
+    extras.insert("caller".into(), json!({"type": "direct"}));
+    extras.insert("na\u{ef}ve".into(), json!("caf\u{e9}"));
+    extras
+}
+
+#[test]
+fn canonical_serialization_never_emits_extras() {
+    for (name, build) in CARRIER_ROWS {
+        // Arrange
+        let empty = serde_json::to_string(&build(Map::new())).unwrap();
+
+        // Act
+        let populated = serde_json::to_string(&build(populated_extras())).unwrap();
+
+        // Assert
+        assert_eq!(populated, empty, "row `{name}` emitted its extras map");
+    }
+}
+
+#[test]
+fn canonical_deserialization_never_fills_extras() {
+    let extras_member = json!({"caller": {"type": "direct"}});
+    let rows: [(&str, Value, ExtrasLen); 4] = [
+        (
+            "message",
+            json!({"role": "user", "content": "hi", "extras": extras_member, "caller": 1}),
+            |v| serde_json::from_value::<Message>(v).unwrap().extras.len(),
+        ),
+        (
+            "custom_tool",
+            json!({"name": "lookup", "extras": extras_member, "caller": 1}),
+            |v| match serde_json::from_value::<ToolDef>(v).unwrap() {
+                ToolDef::Custom(tool) => tool.extras.len(),
+                ToolDef::Other(other) => panic!("expected Custom, got {other}"),
+            },
+        ),
+        (
+            "system_block",
+            json!({"type": "text", "text": "be brief", "extras": extras_member, "caller": 1}),
+            |v| {
+                serde_json::from_value::<SystemBlock>(v)
+                    .unwrap()
+                    .extras
+                    .len()
+            },
+        ),
+        (
+            "part_text",
+            json!({"type": "text", "text": "hi", "extras": extras_member, "caller": 1}),
+            |v| match serde_json::from_value::<ContentPart>(v).unwrap() {
+                ContentPart::Known(KnownContentPart::Text { extras, .. }) => extras.len(),
+                other => panic!("expected a known text part, got {other:?}"),
+            },
+        ),
+    ];
+    for (name, input, filled) in rows {
+        // Act
+        let len = filled(input);
+
+        // Assert
+        assert_eq!(len, 0, "row `{name}` filled extras from the wire");
+    }
 }

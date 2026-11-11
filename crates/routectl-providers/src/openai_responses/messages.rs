@@ -1073,6 +1073,7 @@ fn walk_assistant_part(
         KnownContentPart::Thinking {
             thinking,
             signature,
+            extras: _,
         } => {
             if suppress_thinking_parts {
                 tracing::debug!(
@@ -1089,7 +1090,7 @@ fn walk_assistant_part(
                 ));
             }
         }
-        KnownContentPart::RedactedThinking { data } => {
+        KnownContentPart::RedactedThinking { data, extras: _ } => {
             if suppress_thinking_parts {
                 tracing::debug!(
                     provider = id,
@@ -2295,6 +2296,7 @@ mod tool_calls_field_tests {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }
     }
 
@@ -2321,6 +2323,7 @@ mod tool_calls_field_tests {
                     "type": "function",
                     "function": {"name": "get_weather", "arguments": "{\"city\":\"SF\"}"},
                 })]),
+                extras: serde_json::Map::new(),
             },
             Message {
                 refusal: None,
@@ -2331,6 +2334,7 @@ mod tool_calls_field_tests {
                 name: None,
                 tool_call_id: Some("call_1".into()),
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
         ];
 
@@ -2391,6 +2395,7 @@ mod tool_calls_field_tests {
                 tool_calls: Some(vec![json!({
                     "function": {"name": "f", "arguments": "{}"},
                 })]),
+                extras: serde_json::Map::new(),
             },
         ];
 
@@ -2436,6 +2441,7 @@ mod tool_calls_field_tests {
                         name: "get_weather".into(),
                         input: json!({"city": "SF"}),
                         cache_control: None,
+                        extras: serde_json::Map::new(),
                     },
                 )]),
                 reasoning: None,
@@ -2447,6 +2453,7 @@ mod tool_calls_field_tests {
                     "type": "function",
                     "function": {"name": "get_weather", "arguments": "{\"city\":\"SF\"}"},
                 })]),
+                extras: serde_json::Map::new(),
             },
         ];
 
@@ -2498,6 +2505,7 @@ mod tool_calls_field_tests {
                     "type": "function",
                     "function": {"name": "get_weather", "arguments": "{}"},
                 })]),
+                extras: serde_json::Map::new(),
             },
             Message {
                 refusal: None,
@@ -2508,6 +2516,7 @@ mod tool_calls_field_tests {
                 name: None,
                 tool_call_id: Some(raw.into()),
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
         ];
 
@@ -2549,6 +2558,7 @@ mod tool_calls_field_tests {
                         name: "get_weather".into(),
                         input: json!({}),
                         cache_control: None,
+                        extras: serde_json::Map::new(),
                     },
                 )]),
                 reasoning: None,
@@ -2556,6 +2566,7 @@ mod tool_calls_field_tests {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
             Message {
                 refusal: None,
@@ -2566,6 +2577,7 @@ mod tool_calls_field_tests {
                         content: json!("sunny"),
                         is_error: None,
                         cache_control: None,
+                        extras: serde_json::Map::new(),
                     },
                 )]),
                 reasoning: None,
@@ -2573,6 +2585,7 @@ mod tool_calls_field_tests {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
         ];
 
@@ -2613,6 +2626,7 @@ mod tool_calls_field_tests {
                         name: "f".into(),
                         input: json!({}),
                         cache_control: None,
+                        extras: serde_json::Map::new(),
                     },
                 )]),
                 reasoning: None,
@@ -2620,6 +2634,7 @@ mod tool_calls_field_tests {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
         ];
         let via_field = vec![
@@ -2637,6 +2652,7 @@ mod tool_calls_field_tests {
                     "type": "function",
                     "function": {"name": "f", "arguments": "{}"},
                 })]),
+                extras: serde_json::Map::new(),
             },
         ];
 
@@ -2688,6 +2704,7 @@ mod tool_calls_field_tests {
                     "type": "function",
                     "function": {"name": "f", "arguments": "{}"},
                 })]),
+                extras: serde_json::Map::new(),
             },
             Message {
                 refusal: None,
@@ -2698,6 +2715,7 @@ mod tool_calls_field_tests {
                 name: None,
                 tool_call_id: Some("call_abc-1".into()),
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
         ];
 
@@ -2753,6 +2771,7 @@ mod tool_calls_field_tests {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
         ];
 
@@ -2798,6 +2817,7 @@ mod role_other_field_tests {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }
     }
 
@@ -2811,6 +2831,7 @@ mod role_other_field_tests {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }
     }
 
@@ -2913,6 +2934,7 @@ mod empty_tool_id_policy_tests {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }
     }
 
@@ -2928,6 +2950,7 @@ mod empty_tool_id_policy_tests {
             name: None,
             tool_call_id: tool_call_id.map(str::to_string),
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }
     }
 
@@ -2944,6 +2967,7 @@ mod empty_tool_id_policy_tests {
                     content: json!("sunny"),
                     is_error: None,
                     cache_control: None,
+                    extras: serde_json::Map::new(),
                 },
             )]),
             reasoning: None,
@@ -2951,6 +2975,7 @@ mod empty_tool_id_policy_tests {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }
     }
 
@@ -3026,6 +3051,7 @@ mod empty_tool_id_policy_tests {
                 tool_calls: Some(vec![json!({
                     "function": {"name": "f", "arguments": "{}"},
                 })]),
+                extras: serde_json::Map::new(),
             },
             tool_role_message(Some("")),
         ];
@@ -3134,6 +3160,7 @@ mod part_type_log_injection_tests {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }
     }
 

@@ -137,6 +137,7 @@ mod tests {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             }]
             .into(),
             ..Default::default()
@@ -387,6 +388,7 @@ mod tests {
                 "type": "function",
                 "function": {"name": "lookup", "arguments": "{}"},
             })]),
+            extras: serde_json::Map::new(),
         });
         msgs.push(Message {
             refusal: None,
@@ -397,6 +399,7 @@ mod tests {
             name: None,
             tool_call_id: Some("call_1".into()),
             tool_calls: None,
+            extras: serde_json::Map::new(),
         });
         req.messages = msgs.into();
         req

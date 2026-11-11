@@ -5,7 +5,7 @@
 use super::*;
 use pretty_assertions::assert_eq;
 
-const fn system_parts_msg(parts: Vec<ContentPart>) -> Message {
+fn system_parts_msg(parts: Vec<ContentPart>) -> Message {
     Message {
         refusal: None,
         role: Role::System,
@@ -15,6 +15,7 @@ const fn system_parts_msg(parts: Vec<ContentPart>) -> Message {
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -23,6 +24,7 @@ fn marked_text_part(text: &str) -> ContentPart {
         text: text.into(),
         citations: None,
         cache_control: Some(CacheControl::ephemeral_5m()),
+        extras: serde_json::Map::new(),
     })
 }
 
@@ -118,6 +120,7 @@ fn marker_on_a_forwarded_system_turn_counts_against_the_breakpoint_cap() {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
             system_parts_msg(vec![marked_text_part("fifth marker")]),
             assistant_msg("ok"),

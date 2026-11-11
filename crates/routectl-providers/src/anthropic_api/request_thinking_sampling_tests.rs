@@ -275,6 +275,7 @@ fn forcing(mut req: ChatRequest, tool_choice: Value) -> ChatRequest {
         defer_loading: None,
         strict: None,
         type_tag: None,
+        extras: serde_json::Map::new(),
     })]);
     req.tool_choice = Some(tool_choice);
     req
@@ -348,6 +349,7 @@ fn a_context_cache_miss_is_the_one_case_the_read_over_reports() {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         },
         routectl_core::Message {
             refusal: None,
@@ -362,6 +364,7 @@ fn a_context_cache_miss_is_the_one_case_the_read_over_reports() {
                 "type": "function",
                 "function": {"name": "calc", "arguments": "{}"},
             })]),
+            extras: serde_json::Map::new(),
         },
         routectl_core::Message {
             refusal: None,
@@ -372,6 +375,7 @@ fn a_context_cache_miss_is_the_one_case_the_read_over_reports() {
             name: None,
             tool_call_id: Some("toolu_t1".into()),
             tool_calls: None,
+            extras: serde_json::Map::new(),
         },
     ]
     .into();

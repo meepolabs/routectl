@@ -129,6 +129,7 @@ fn text(role: Role, body: &str) -> Message {
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -143,6 +144,7 @@ fn billing_request(stream: bool) -> (ChatRequest, WireTap) {
             text: "rules".into(),
             cache_control: None,
             citations: None,
+            extras: serde_json::Map::new(),
         }])),
         messages: vec![text(Role::User, "hi")].into(),
         tools: Some(vec![routectl_core::ToolDef::Custom(
@@ -154,6 +156,7 @@ fn billing_request(stream: bool) -> (ChatRequest, WireTap) {
                 defer_loading: None,
                 strict: None,
                 type_tag: None,
+                extras: serde_json::Map::new(),
             },
         )]),
         max_tokens: Some(64),

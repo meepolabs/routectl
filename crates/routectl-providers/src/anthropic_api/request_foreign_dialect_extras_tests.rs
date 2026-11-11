@@ -89,6 +89,7 @@ fn request(provenance: RequestProvenance, extras: Value) -> ChatRequest {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }]
         .into(),
         max_tokens: Some(64),
@@ -213,6 +214,7 @@ fn a_chat_client_parallel_tool_calls_still_folds_into_the_anthropic_tool_choice(
             defer_loading: None,
             strict: None,
             type_tag: None,
+            extras: serde_json::Map::new(),
         },
     )]);
     let egress = &egresses()[0];

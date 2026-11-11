@@ -2759,6 +2759,7 @@ mod table_tests {
             tool_call_id: None,
             tool_calls: None,
             refusal: None,
+            extras: serde_json::Map::new(),
         }]
         .into();
         let before = serde_json::to_string(&req).expect("serializable");

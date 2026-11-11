@@ -608,6 +608,7 @@ pub(super) fn build_probe_request(
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }]
         .into(),
         anthropic_beta: payload.client_betas().to_vec(),

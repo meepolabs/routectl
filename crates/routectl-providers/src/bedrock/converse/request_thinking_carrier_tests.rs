@@ -226,6 +226,7 @@ fn forcing_tool_use(mut req: routectl_core::ChatRequest) -> routectl_core::ChatR
         defer_loading: None,
         strict: None,
         type_tag: None,
+        extras: serde_json::Map::new(),
     })]);
     req.tool_choice = Some(json!("required"));
     req

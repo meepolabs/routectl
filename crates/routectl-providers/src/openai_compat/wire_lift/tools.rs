@@ -142,6 +142,7 @@ mod tests {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             }]
             .into(),
             tools,
@@ -170,6 +171,7 @@ mod tests {
             defer_loading: None,
             strict: None,
             type_tag: None,
+            extras: serde_json::Map::new(),
         });
 
         // Act
@@ -203,6 +205,7 @@ mod tests {
             defer_loading: None,
             strict: Some(true),
             type_tag: None,
+            extras: serde_json::Map::new(),
         });
 
         // Act
@@ -286,6 +289,7 @@ mod tests {
             defer_loading: None,
             strict: None,
             type_tag: None,
+            extras: serde_json::Map::new(),
         });
 
         // Act
@@ -424,6 +428,7 @@ mod tests {
             defer_loading: None,
             strict: None,
             type_tag: None,
+            extras: serde_json::Map::new(),
         });
 
         // Act

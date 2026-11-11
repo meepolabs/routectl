@@ -21,6 +21,7 @@ fn assistant_with_details(details: Vec<ReasoningDetail>) -> Message {
         tool_call_id: None,
         tool_calls: None,
         refusal: None,
+        extras: serde_json::Map::new(),
     }
 }
 

@@ -224,6 +224,7 @@ mod tests {
             text: text.into(),
             cache_control: cc,
             citations: None,
+            extras: serde_json::Map::new(),
         }
     }
 
@@ -412,6 +413,7 @@ mod tests {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }
     }
 
@@ -784,6 +786,7 @@ mod tests {
                     text: "x".into(),
                     citations: None,
                     cache_control: Some(CacheControl::ephemeral_5m()),
+                    extras: serde_json::Map::new(),
                 })
             })
             .collect();
@@ -801,6 +804,7 @@ mod tests {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             }]
             .into(),
             ..Default::default()
@@ -863,10 +867,12 @@ mod tests {
                     text: "match this".into(),
                     citations: None,
                     cache_control: None,
+                    extras: serde_json::Map::new(),
                 }),
                 ContentPart::Known(KnownContentPart::ImageUrl {
                     image_url: serde_json::json!({"url": "https://example.com/a.png"}),
                     cache_control: None,
+                    extras: serde_json::Map::new(),
                 }),
             ]),
             ..sys_msg("unused")

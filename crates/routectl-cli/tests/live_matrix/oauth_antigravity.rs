@@ -258,6 +258,7 @@ fn user_message(prompt: &str) -> Message {
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -279,6 +280,7 @@ fn make_tool_request(target: &str, stream: bool) -> ChatRequest {
         defer_loading: None,
         strict: None,
         type_tag: None,
+        extras: serde_json::Map::new(),
     });
     ChatRequest {
         model: target.to_string(),

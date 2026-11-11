@@ -105,6 +105,7 @@ fn success_response() -> ChatResponse {
                 tool_call_id: None,
                 tool_calls: None,
                 refusal: None,
+                extras: serde_json::Map::new(),
             },
             finish_reason: Some("stop".into()),
             matched_stop_sequence: None,
@@ -132,6 +133,7 @@ fn assistant_with_sentinel_artifact() -> Message {
         tool_call_id: None,
         tool_calls: None,
         refusal: None,
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -155,6 +157,7 @@ fn req_no_artifact() -> ChatRequest {
             tool_call_id: None,
             tool_calls: None,
             refusal: None,
+            extras: serde_json::Map::new(),
         }]
         .into(),
         ..Default::default()

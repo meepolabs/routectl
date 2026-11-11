@@ -32,6 +32,7 @@ fn document_part_with_citations(source: Value, citations: Option<Value>) -> Cont
         title: Some("notes".into()),
         citations,
         cache_control: None,
+        extras: serde_json::Map::new(),
     })
 }
 

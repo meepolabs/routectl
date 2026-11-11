@@ -48,6 +48,7 @@ impl Provider for CountedProvider {
                     name: None,
                     tool_call_id: None,
                     tool_calls: None,
+                    extras: serde_json::Map::new(),
                 },
                 finish_reason: Some("stop".into()),
                 matched_stop_sequence: None,
@@ -341,6 +342,7 @@ impl Provider for StreamingProvider {
                     name: None,
                     tool_call_id: None,
                     tool_calls: None,
+                    extras: serde_json::Map::new(),
                 },
                 finish_reason: Some("stop".into()),
                 matched_stop_sequence: None,
@@ -1485,6 +1487,7 @@ fn oversized_request() -> ChatRequest {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }]
         .into(),
         ..Default::default()

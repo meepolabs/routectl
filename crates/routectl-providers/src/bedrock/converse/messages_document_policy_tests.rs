@@ -12,6 +12,7 @@ fn document_part(source: Value) -> ContentPart {
         title: Some("notes".into()),
         citations: None,
         cache_control: None,
+        extras: serde_json::Map::new(),
     })
 }
 
@@ -19,6 +20,7 @@ fn file_part(file: Value) -> ContentPart {
     ContentPart::Known(KnownContentPart::File {
         file,
         cache_control: None,
+        extras: serde_json::Map::new(),
     })
 }
 
@@ -516,6 +518,7 @@ fn tallies_recorded_before_a_refused_document_still_flush_on_the_error_path() {
             title: Some("notes".into()),
             citations: Some(json!("yes")),
             cache_control: None,
+            extras: serde_json::Map::new(),
         })]),
         assistant_turn(vec![unsigned_detail(Some(0))]),
         user_turn(vec![document_part(json!("not-an-object"))]),

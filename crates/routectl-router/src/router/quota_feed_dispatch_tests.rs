@@ -75,6 +75,7 @@ impl Provider for QuotaProvider {
                     name: None,
                     tool_call_id: None,
                     tool_calls: None,
+                    extras: serde_json::Map::new(),
                 },
                 finish_reason: Some("stop".into()),
                 matched_stop_sequence: None,
@@ -182,6 +183,7 @@ fn req() -> ChatRequest {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }]),
         ..Default::default()
     }

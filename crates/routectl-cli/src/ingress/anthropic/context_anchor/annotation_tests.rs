@@ -36,6 +36,7 @@ fn a_cache_control_key_inside_tool_arguments_is_prompt_data() {
                 name: "set_config".into(),
                 input: json!({"path": "a.toml", "cache_control": value}),
                 cache_control: Some(CacheControl::ephemeral_5m()),
+                extras: serde_json::Map::new(),
             }],
         )
     };

@@ -245,6 +245,7 @@ pub(super) fn normalize_replay_invariants<'a>(
             name: msg.name.clone(),
             tool_call_id: msg.tool_call_id.clone(),
             tool_calls: msg.tool_calls.clone(),
+            extras: serde_json::Map::new(),
         });
     }
 
@@ -437,6 +438,7 @@ fn translate_known_part(k: &KnownContentPart, envelopes: &mut EnvelopeUnwrapTall
             text,
             citations,
             cache_control,
+            extras: _,
         } => ContentBlock::Text {
             text: text.clone(),
             cache_control: cache_control.clone(),
@@ -445,6 +447,7 @@ fn translate_known_part(k: &KnownContentPart, envelopes: &mut EnvelopeUnwrapTall
         KnownContentPart::Image {
             source,
             cache_control,
+            extras: _,
         } => ContentBlock::Image {
             source: source.clone(),
             cache_control: cache_control.clone(),
@@ -466,6 +469,7 @@ fn translate_known_part(k: &KnownContentPart, envelopes: &mut EnvelopeUnwrapTall
         KnownContentPart::ImageUrl {
             image_url,
             cache_control,
+            extras: _,
         } => {
             let url = image_url.get("url").and_then(|v| v.as_str()).unwrap_or("");
             let source = parse_image_url_source(url);
@@ -479,6 +483,7 @@ fn translate_known_part(k: &KnownContentPart, envelopes: &mut EnvelopeUnwrapTall
             title,
             citations,
             cache_control,
+            extras: _,
         } => ContentBlock::Document {
             source: source.clone(),
             title: title.clone(),
@@ -498,6 +503,7 @@ fn translate_known_part(k: &KnownContentPart, envelopes: &mut EnvelopeUnwrapTall
         KnownContentPart::File {
             file,
             cache_control,
+            extras: _,
         } => {
             if let Some((source, title)) = parse_file_document_source(file) {
                 ContentBlock::Document {
@@ -540,6 +546,7 @@ fn translate_known_part(k: &KnownContentPart, envelopes: &mut EnvelopeUnwrapTall
             name,
             input,
             cache_control,
+            extras: _,
         } => ContentBlock::ToolUse {
             id: crate::tool_id::sanitize_tool_id(id).into_owned(),
             name: name.clone(),
@@ -551,6 +558,7 @@ fn translate_known_part(k: &KnownContentPart, envelopes: &mut EnvelopeUnwrapTall
             content,
             is_error,
             cache_control,
+            extras: _,
         } => ContentBlock::ToolResult {
             // Same normalization as the tool_use id it answers, so the
             // pair still correlates on the wire. An empty id stays empty.
@@ -562,6 +570,7 @@ fn translate_known_part(k: &KnownContentPart, envelopes: &mut EnvelopeUnwrapTall
         KnownContentPart::Thinking {
             thinking,
             signature,
+            extras: _,
         } => ContentBlock::Thinking {
             thinking: thinking.clone(),
             // Wire requires signature; absent on canonical means we fall
@@ -571,7 +580,7 @@ fn translate_known_part(k: &KnownContentPart, envelopes: &mut EnvelopeUnwrapTall
             signature: signature.clone().unwrap_or_default(),
             cache_control: None,
         },
-        KnownContentPart::RedactedThinking { data } => ContentBlock::RedactedThinking {
+        KnownContentPart::RedactedThinking { data, extras: _ } => ContentBlock::RedactedThinking {
             data: envelopes.wire_data(data),
             cache_control: None,
         },
@@ -1010,6 +1019,7 @@ fn translate_assistant_content_part(
         name,
         input,
         cache_control,
+        extras: _,
     }) = p
     {
         let tool_id = crate::tool_id::sanitize_tool_id(id).into_owned();
@@ -1981,6 +1991,7 @@ mod translate_file_part_tests {
         ContentPart::Known(KnownContentPart::File {
             file,
             cache_control: None,
+            extras: serde_json::Map::new(),
         })
     }
 
@@ -2057,6 +2068,7 @@ mod translate_file_part_tests {
                 "file_data": "data:application/pdf;base64,JVBERi0xLjQ="
             }),
             cache_control: Some(CacheControl::ephemeral_5m()),
+            extras: serde_json::Map::new(),
         });
         match translate_content_part(&part, &mut passthrough_tally()) {
             ContentBlock::Document { cache_control, .. } => {
@@ -2151,6 +2163,7 @@ mod thinking_signature_tests {
         ContentPart::Known(KnownContentPart::Thinking {
             thinking: "step by step".to_string(),
             signature,
+            extras: serde_json::Map::new(),
         })
     }
 
@@ -2164,6 +2177,7 @@ mod thinking_signature_tests {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }
     }
 
@@ -2257,6 +2271,7 @@ mod thinking_signature_tests {
             text: "answer".to_string(),
             citations: None,
             cache_control: None,
+            extras: serde_json::Map::new(),
         });
         let msg = assistant_with_parts(vec![foreign, e_kept, r_kept, text]);
         let req = ChatRequest {
@@ -2301,6 +2316,7 @@ mod thinking_signature_tests {
             text: "answer".to_string(),
             citations: None,
             cache_control: None,
+            extras: serde_json::Map::new(),
         });
         let req = ChatRequest {
             messages: vec![assistant_with_parts(vec![empty, text])].into(),
@@ -2345,6 +2361,7 @@ mod tool_id_correlation_tests {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }
     }
 
@@ -2362,6 +2379,7 @@ mod tool_id_correlation_tests {
                 "type": "function",
                 "function": {"name": "f", "arguments": "{}"},
             })]),
+            extras: serde_json::Map::new(),
         }
     }
 
@@ -2375,6 +2393,7 @@ mod tool_id_correlation_tests {
             name: None,
             tool_call_id: Some(id.into()),
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }
     }
 
@@ -2581,6 +2600,7 @@ mod tool_id_correlation_tests {
                     name: "f".into(),
                     input: json!({}),
                     cache_control: None,
+                    extras: serde_json::Map::new(),
                 },
             ),
             parts_turn(
@@ -2590,6 +2610,7 @@ mod tool_id_correlation_tests {
                     content: json!("ok"),
                     is_error: None,
                     cache_control: None,
+                    extras: serde_json::Map::new(),
                 },
             ),
         ]
@@ -2686,6 +2707,7 @@ mod role_other_egress_tests {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }
     }
 
@@ -2699,6 +2721,7 @@ mod role_other_egress_tests {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }
     }
 
@@ -2784,6 +2807,7 @@ mod role_other_egress_tests {
             name: None,
             tool_call_id: Some(id.into()),
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }
     }
 
@@ -2842,6 +2866,7 @@ mod empty_content_backstop_tests {
         ContentPart::Known(KnownContentPart::Thinking {
             thinking: "step".to_string(),
             signature: None,
+            extras: serde_json::Map::new(),
         })
     }
 
@@ -2859,6 +2884,7 @@ mod empty_content_backstop_tests {
             name: None,
             tool_call_id: None,
             tool_calls,
+            extras: serde_json::Map::new(),
         }
     }
 
@@ -3072,6 +3098,7 @@ mod tool_use_dedup_tests {
             name: "lookup".to_string(),
             input: json!({"q": "sky"}),
             cache_control: None,
+            extras: serde_json::Map::new(),
         })
     }
 
@@ -3093,6 +3120,7 @@ mod tool_use_dedup_tests {
             name: None,
             tool_call_id: None,
             tool_calls,
+            extras: serde_json::Map::new(),
         }
     }
 
@@ -3276,6 +3304,7 @@ mod tool_use_dedup_tests {
             name: None,
             tool_call_id: Some("toolu_1".to_string()),
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }
     }
 
@@ -3366,6 +3395,7 @@ mod tool_result_coalescing_tests {
             name: None,
             tool_call_id,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }
     }
 
@@ -3524,6 +3554,7 @@ mod tool_result_coalescing_tests {
             text: "cached output".to_string(),
             cache_control: Some(CacheControl::ephemeral_5m()),
             citations: None,
+            extras: serde_json::Map::new(),
         })]);
         let messages = vec![
             assistant("two calls"),

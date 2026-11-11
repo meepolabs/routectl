@@ -41,6 +41,7 @@ fn user_req() -> ChatRequest {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }]
         .into(),
         max_tokens: Some(64),
@@ -77,6 +78,7 @@ fn every_invoke_request_counts_toward_the_lane_denominator() {
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     }]
     .into();
 
@@ -366,10 +368,12 @@ fn system_turn_with_image(text: &str) -> Message {
                 text: text.into(),
                 citations: None,
                 cache_control: None,
+                extras: serde_json::Map::new(),
             }),
             routectl_core::ContentPart::Known(routectl_core::KnownContentPart::ImageUrl {
                 image_url: json!({"url": "https://example.com/a.png"}),
                 cache_control: None,
+                extras: serde_json::Map::new(),
             }),
         ]),
         reasoning: None,
@@ -377,6 +381,7 @@ fn system_turn_with_image(text: &str) -> Message {
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     }
 }
 

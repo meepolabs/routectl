@@ -39,12 +39,14 @@ fn system_content_concatenates_text_blocks_to_instructions() {
             text: "be helpful".into(),
             cache_control: None,
             citations: None,
+            extras: serde_json::Map::new(),
         },
         SystemBlock {
             kind: "text".into(),
             text: "be concise".into(),
             cache_control: None,
             citations: None,
+            extras: serde_json::Map::new(),
         },
     ]));
 
@@ -66,6 +68,7 @@ fn blank_canonical_system_serializes_empty_instructions() {
         text: text.into(),
         cache_control: None,
         citations: None,
+        extras: serde_json::Map::new(),
     };
     for system in [
         SystemContent::Text(String::new()),
@@ -97,6 +100,7 @@ fn system_content_with_cache_control_warns_and_strips() {
         text: "be helpful".into(),
         cache_control: Some(CacheControl::ephemeral_5m()),
         citations: None,
+        extras: serde_json::Map::new(),
     }]));
 
     // Act
@@ -158,11 +162,13 @@ fn assistant_thinking_with_unknown_format_emits_no_reasoning_item() {
         ContentPart::Known(KnownContentPart::Thinking {
             thinking: "step 1".into(),
             signature: Some("sig-xyz".into()),
+            extras: serde_json::Map::new(),
         }),
         ContentPart::Known(KnownContentPart::Text {
             text: "final".into(),
             citations: None,
             cache_control: None,
+            extras: serde_json::Map::new(),
         }),
     ];
     let req = req_with(vec![user_text("ping"), assistant_parts(parts)]);
@@ -192,6 +198,7 @@ fn assistant_thinking_without_signature_emits_no_reasoning_item() {
     let parts = vec![ContentPart::Known(KnownContentPart::Thinking {
         thinking: "hmm".into(),
         signature: None,
+        extras: serde_json::Map::new(),
     })];
     let req = req_with(vec![user_text("ping"), assistant_parts(parts)]);
 
@@ -214,6 +221,7 @@ fn assistant_redacted_thinking_does_not_leak_blob_into_encrypted_content() {
     let secret_blob = "EroBCkYIBxgCKkB_ANTHROPIC_REDACTED_BLOB";
     let parts = vec![ContentPart::Known(KnownContentPart::RedactedThinking {
         data: secret_blob.into(),
+        extras: serde_json::Map::new(),
     })];
     let req = req_with(vec![user_text("ping"), assistant_parts(parts)]);
 
@@ -239,6 +247,7 @@ fn assistant_tool_use_translates_to_function_call() {
         name: "calc".into(),
         input: json!({"a": 1}),
         cache_control: None,
+        extras: serde_json::Map::new(),
     })];
     let req = req_with(vec![user_text("compute"), assistant_parts(parts)]);
 
@@ -287,6 +296,7 @@ fn tool_def_function_translates_with_strict_field() {
         defer_loading: None,
         strict: Some(true),
         type_tag: None,
+        extras: serde_json::Map::new(),
     })]);
 
     // Act
@@ -343,6 +353,7 @@ fn passthrough_item_preserves_original_source_order() {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         },
     ]);
     req.routectl_internal.responses_input_passthrough = vec![ResponsesPassthroughItem {

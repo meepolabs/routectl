@@ -239,6 +239,7 @@ mod tests {
             text: text.into(),
             cache_control: None,
             citations: None,
+            extras: serde_json::Map::new(),
         }
     }
 

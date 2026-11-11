@@ -7,6 +7,7 @@
 //! string form by lifting Role::System messages.
 
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 
 use crate::cache_control::CacheControl;
 
@@ -37,7 +38,11 @@ pub struct SystemBlock {
     pub cache_control: Option<CacheControl>,
     /// Optional citation metadata.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub citations: Option<serde_json::Value>,
+    pub citations: Option<Value>,
+    /// Unmodeled wire members of this node, for a same-dialect egress to
+    /// re-emit. Never read or written by canonical serde.
+    #[serde(skip)]
+    pub extras: Map<String, Value>,
 }
 
 fn default_text_type() -> String {
@@ -114,12 +119,14 @@ mod tests {
                 text: "one".into(),
                 cache_control: None,
                 citations: None,
+                extras: Map::new(),
             },
             SystemBlock {
                 kind: "text".into(),
                 text: "two".into(),
                 cache_control: None,
                 citations: None,
+                extras: Map::new(),
             },
         ]);
         assert_eq!(s.flatten(), "one\ntwo");
@@ -146,12 +153,14 @@ mod tests {
                 text: String::new(),
                 cache_control: None,
                 citations: None,
+                extras: Map::new(),
             },
             SystemBlock {
                 kind: "text".into(),
                 text: "  \n".into(),
                 cache_control: None,
                 citations: None,
+                extras: Map::new(),
             },
         ]);
         assert!(blank.is_blank());
@@ -166,12 +175,14 @@ mod tests {
                 text: "  ".into(),
                 cache_control: None,
                 citations: None,
+                extras: Map::new(),
             },
             SystemBlock {
                 kind: "text".into(),
                 text: "real prompt".into(),
                 cache_control: None,
                 citations: None,
+                extras: Map::new(),
             },
         ]);
         assert!(!mixed.is_blank());
@@ -191,18 +202,21 @@ mod tests {
                 text: "a".into(),
                 cache_control: Some(CacheControl::ephemeral_5m()),
                 citations: None,
+                extras: Map::new(),
             },
             SystemBlock {
                 kind: "text".into(),
                 text: "b".into(),
                 cache_control: None,
                 citations: None,
+                extras: Map::new(),
             },
             SystemBlock {
                 kind: "text".into(),
                 text: "c".into(),
                 cache_control: Some(CacheControl::ephemeral_1h()),
                 citations: None,
+                extras: Map::new(),
             },
         ]);
         let collected: Vec<&str> = s.cache_controls().map(|c| c.effective_ttl()).collect();

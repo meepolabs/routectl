@@ -19,6 +19,7 @@ fn system_text_message(text: &str) -> Message {
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -34,6 +35,7 @@ fn system_parts_message(texts: &[&str]) -> Message {
                         text: (*text).into(),
                         citations: None,
                         cache_control: None,
+                        extras: serde_json::Map::new(),
                     })
                 })
                 .collect(),
@@ -43,6 +45,7 @@ fn system_parts_message(texts: &[&str]) -> Message {
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -56,6 +59,7 @@ fn user_text_message(text: &str) -> Message {
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -65,6 +69,7 @@ fn plain_block(text: &str) -> routectl_core::SystemBlock {
         text: text.into(),
         cache_control: None,
         citations: None,
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -432,12 +437,14 @@ fn req_dropped_document_with_system_fingerprint() -> ChatRequest {
                 title: None,
                 citations: None,
                 cache_control: None,
+                extras: serde_json::Map::new(),
             })]),
             reasoning: None,
             reasoning_details: vec![],
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         },
     );
     req
@@ -454,6 +461,7 @@ fn a_system_turn_with_an_image_rides_in_place_with_every_part() {
                 text: "match this".into(),
                 citations: None,
                 cache_control: None,
+                extras: serde_json::Map::new(),
             }),
             serde_json::from_value(image.clone()).expect("image part"),
         ]),
@@ -616,6 +624,7 @@ fn known_text_part(text: &str) -> ContentPart {
         text: text.into(),
         citations: None,
         cache_control: None,
+        extras: serde_json::Map::new(),
     })
 }
 
@@ -724,6 +733,7 @@ fn text_source_document_part(text: &str) -> ContentPart {
         title: None,
         citations: None,
         cache_control: None,
+        extras: serde_json::Map::new(),
     })
 }
 

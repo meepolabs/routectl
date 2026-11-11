@@ -451,7 +451,7 @@ fn planted(scheme: &str) -> String {
     format!("{scheme}://{PLANTED_HOST}/{PLANTED_PATH}.png")
 }
 
-const fn parts_msg(role: Role, parts: Vec<ContentPart>) -> Message {
+fn parts_msg(role: Role, parts: Vec<ContentPart>) -> Message {
     Message {
         refusal: None,
         role,
@@ -461,6 +461,7 @@ const fn parts_msg(role: Role, parts: Vec<ContentPart>) -> Message {
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -469,6 +470,7 @@ fn user_parts_req(part: ContentPart) -> ChatRequest {
         text: "look".into(),
         citations: None,
         cache_control: None,
+        extras: serde_json::Map::new(),
     });
     base_req(
         "claude-3-opus",
@@ -480,6 +482,7 @@ fn native_image(url: &str) -> ContentPart {
     ContentPart::Known(KnownContentPart::Image {
         source: json!({"type": "url", "url": url}),
         cache_control: None,
+        extras: serde_json::Map::new(),
     })
 }
 
@@ -487,6 +490,7 @@ fn image_url_part(url: &str) -> ContentPart {
     ContentPart::Known(KnownContentPart::ImageUrl {
         image_url: json!({"url": url}),
         cache_control: None,
+        extras: serde_json::Map::new(),
     })
 }
 
@@ -496,6 +500,7 @@ fn url_document(url: &str) -> ContentPart {
         title: None,
         citations: None,
         cache_control: None,
+        extras: serde_json::Map::new(),
     })
 }
 
@@ -503,6 +508,7 @@ fn file_url_part(url: &str) -> ContentPart {
     ContentPart::Known(KnownContentPart::File {
         file: json!({"file_url": url}),
         cache_control: None,
+        extras: serde_json::Map::new(),
     })
 }
 
@@ -514,6 +520,7 @@ fn tool_round_req(input: Value, result_part: ContentPart) -> ChatRequest {
         name: "screenshot".into(),
         input,
         cache_control: None,
+        extras: serde_json::Map::new(),
     });
     let mut tool = parts_msg(Role::Tool, vec![result_part]);
     tool.tool_call_id = Some("toolu_1".into());
@@ -532,6 +539,7 @@ fn text_part(text: &str) -> ContentPart {
         text: text.into(),
         citations: None,
         cache_control: None,
+        extras: serde_json::Map::new(),
     })
 }
 

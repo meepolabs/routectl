@@ -129,10 +129,12 @@ fn lossy_request() -> ChatRequest {
                 text: "be brief".into(),
                 citations: None,
                 cache_control: None,
+                extras: serde_json::Map::new(),
             }),
             ContentPart::Known(KnownContentPart::ImageUrl {
                 image_url: serde_json::json!({"url": "https://example.com/a.png"}),
                 cache_control: None,
+                extras: serde_json::Map::new(),
             }),
         ]),
         reasoning: None,
@@ -140,6 +142,7 @@ fn lossy_request() -> ChatRequest {
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     };
     let user_turn = Message {
         role: Role::User,

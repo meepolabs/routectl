@@ -96,6 +96,7 @@ pub(crate) fn walk_content_blocks(
                     text: text.clone(),
                     citations: citations.clone(),
                     cache_control: None,
+                    extras: serde_json::Map::new(),
                 }));
             }
             ContentBlock::ToolUse {
@@ -117,6 +118,7 @@ pub(crate) fn walk_content_blocks(
                     name: name.clone(),
                     input: input.clone(),
                     cache_control: None,
+                    extras: serde_json::Map::new(),
                 }));
             }
             ContentBlock::ToolResult { .. } => {
@@ -130,6 +132,7 @@ pub(crate) fn walk_content_blocks(
                 parts.push(ContentPart::Known(KnownContentPart::Image {
                     source: source.clone(),
                     cache_control: None,
+                    extras: serde_json::Map::new(),
                 }));
             }
             ContentBlock::Document {
@@ -147,6 +150,7 @@ pub(crate) fn walk_content_blocks(
                     title: title.clone(),
                     citations: citations.clone(),
                     cache_control: None,
+                    extras: serde_json::Map::new(),
                 }));
             }
             ContentBlock::Other {
@@ -347,6 +351,7 @@ pub fn normalize(id: &str, raw: Value) -> Result<ChatResponse> {
         name: None,
         tool_call_id: None,
         tool_calls,
+        extras: serde_json::Map::new(),
     };
 
     Ok(ChatResponse {

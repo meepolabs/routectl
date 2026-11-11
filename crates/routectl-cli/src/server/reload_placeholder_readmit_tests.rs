@@ -229,6 +229,7 @@ fn request() -> ChatRequest {
             tool_call_id: None,
             tool_calls: None,
             refusal: None,
+            extras: serde_json::Map::new(),
         }]
         .into(),
         ..Default::default()

@@ -153,6 +153,7 @@ fn request(tools: bool, observation: &RequestObservation) -> ChatRequest {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }]
         .into(),
         ..Default::default()

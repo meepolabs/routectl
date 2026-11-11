@@ -40,6 +40,7 @@ fn user_msg(text: &str) -> Message {
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -65,6 +66,7 @@ fn request_with_format(format: &str) -> ChatRequest {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
             user_msg("and again"),
         ]

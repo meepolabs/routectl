@@ -74,6 +74,10 @@ pub enum KnownContentPart {
         /// Optional cache breakpoint marker on this block.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cache_control: Option<CacheControl>,
+        /// Unmodeled wire members of this block, for a same-dialect egress
+        /// to re-emit. Never read or written by canonical serde.
+        #[serde(skip)]
+        extras: Map<String, Value>,
     },
     /// Anthropic-shape image block. `source` is `{type: "base64",
     /// media_type, data}` or `{type: "url", url}` depending on Anthropic
@@ -84,6 +88,10 @@ pub enum KnownContentPart {
         /// Optional cache breakpoint marker on this block.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cache_control: Option<CacheControl>,
+        /// Unmodeled wire members of this block, for a same-dialect egress
+        /// to re-emit. Never read or written by canonical serde.
+        #[serde(skip)]
+        extras: Map<String, Value>,
     },
     /// OpenAI-shape image block (`{type: "image_url", image_url: {url,
     /// detail}}`). Kept distinct from `Image` so each ingress emits its
@@ -94,6 +102,10 @@ pub enum KnownContentPart {
         /// Optional cache breakpoint marker on this block.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cache_control: Option<CacheControl>,
+        /// Unmodeled wire members of this block, for a same-dialect egress
+        /// to re-emit. Never read or written by canonical serde.
+        #[serde(skip)]
+        extras: Map<String, Value>,
     },
     /// OpenAI-shape file block (`{type: "file", file: {filename,
     /// file_data}}` for a base64 upload, or `{type: "file", file:
@@ -109,6 +121,10 @@ pub enum KnownContentPart {
         /// Optional cache breakpoint marker on this block.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cache_control: Option<CacheControl>,
+        /// Unmodeled wire members of this block, for a same-dialect egress
+        /// to re-emit. Never read or written by canonical serde.
+        #[serde(skip)]
+        extras: Map<String, Value>,
     },
     /// Anthropic-shape document block. `source` is the document payload
     /// (base64 / url / text); `title` and `citations` carry retrieval
@@ -127,6 +143,10 @@ pub enum KnownContentPart {
         /// Optional cache breakpoint marker on this block.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cache_control: Option<CacheControl>,
+        /// Unmodeled wire members of this block, for a same-dialect egress
+        /// to re-emit. Never read or written by canonical serde.
+        #[serde(skip)]
+        extras: Map<String, Value>,
     },
     /// Tool-call request block emitted by an assistant turn. `id`
     /// matches the corresponding `ToolResult.tool_use_id` on the
@@ -142,6 +162,10 @@ pub enum KnownContentPart {
         /// Optional cache breakpoint marker on this block.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cache_control: Option<CacheControl>,
+        /// Unmodeled wire members of this block, for a same-dialect egress
+        /// to re-emit. Never read or written by canonical serde.
+        #[serde(skip)]
+        extras: Map<String, Value>,
     },
     /// Tool-call response block emitted by a user turn carrying the
     /// tool's output back to the model. `tool_use_id` matches the
@@ -159,6 +183,10 @@ pub enum KnownContentPart {
         /// Optional cache breakpoint marker on this block.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cache_control: Option<CacheControl>,
+        /// Unmodeled wire members of this block, for a same-dialect egress
+        /// to re-emit. Never read or written by canonical serde.
+        #[serde(skip)]
+        extras: Map<String, Value>,
     },
     /// Extended thinking block. `signature` is mandatory for multi-turn
     /// tool-use continuity on Anthropic and is preserved verbatim.
@@ -168,6 +196,10 @@ pub enum KnownContentPart {
         /// Opaque signature required for multi-turn tool-use continuity.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         signature: Option<String>,
+        /// Unmodeled wire members of this block, for a same-dialect egress
+        /// to re-emit. Never read or written by canonical serde.
+        #[serde(skip)]
+        extras: Map<String, Value>,
     },
     /// Redacted-by-Anthropic thinking block. The `data` field is an
     /// opaque encrypted payload AWS / Anthropic substituted for content
@@ -176,6 +208,10 @@ pub enum KnownContentPart {
     RedactedThinking {
         /// Opaque encrypted payload; preserve verbatim, never log.
         data: String,
+        /// Unmodeled wire members of this block, for a same-dialect egress
+        /// to re-emit. Never read or written by canonical serde.
+        #[serde(skip)]
+        extras: Map<String, Value>,
     },
 }
 
@@ -336,6 +372,7 @@ mod tests {
         let part = ContentPart::Known(KnownContentPart::File {
             file: json!({"file_id": "file-abc"}),
             cache_control: None,
+            extras: Map::new(),
         });
         assert_eq!(part.type_tag(), "file");
     }
@@ -366,6 +403,7 @@ mod tests {
             ContentPart::Known(KnownContentPart::Thinking {
                 thinking,
                 signature,
+                extras: _,
             }) => {
                 assert_eq!(thinking, "step by step");
                 assert_eq!(signature.as_deref(), Some("sha256:abc"));
@@ -424,6 +462,7 @@ mod tests {
             text: "hi".into(),
             citations: None,
             cache_control: Some(CacheControl::ephemeral_5m()),
+            extras: Map::new(),
         });
         assert!(known.cache_control().is_some());
         let other = ContentPart::Other {

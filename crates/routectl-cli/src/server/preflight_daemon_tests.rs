@@ -186,6 +186,7 @@ impl Provider for Recorder {
                     tool_call_id: None,
                     tool_calls: None,
                     refusal: None,
+                    extras: serde_json::Map::new(),
                 },
                 finish_reason: Some("stop".into()),
                 matched_stop_sequence: None,

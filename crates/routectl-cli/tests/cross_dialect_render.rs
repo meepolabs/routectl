@@ -189,12 +189,14 @@ fn openai_render_dedupes_tool_use_when_present_in_both_tool_calls_and_parts() {
                         text: "I will call the tool.".into(),
                         citations: None,
                         cache_control: None,
+                        extras: serde_json::Map::new(),
                     }),
                     ContentPart::Known(KnownContentPart::ToolUse {
                         id: "call_dedup".into(),
                         name: "calculator".into(),
                         input: json!({"a": 1, "b": 2}),
                         cache_control: None,
+                        extras: serde_json::Map::new(),
                     }),
                 ]),
                 reasoning: None,
@@ -206,6 +208,7 @@ fn openai_render_dedupes_tool_use_when_present_in_both_tool_calls_and_parts() {
                     "type": "function",
                     "function": {"name": "calculator", "arguments": "{\"a\":1,\"b\":2}"}
                 })]),
+                extras: serde_json::Map::new(),
             },
             finish_reason: Some("tool_calls".into()),
             matched_stop_sequence: None,

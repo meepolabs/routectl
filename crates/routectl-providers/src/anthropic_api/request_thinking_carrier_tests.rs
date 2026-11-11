@@ -35,6 +35,7 @@ pub fn ingress_request(
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }]
         .into(),
         max_tokens: Some(max_tokens),
@@ -263,6 +264,7 @@ fn forcing_tool_use(mut req: ChatRequest) -> ChatRequest {
             defer_loading: None,
             strict: None,
             type_tag: None,
+            extras: serde_json::Map::new(),
         },
     )]);
     req.tool_choice = Some(json!("required"));

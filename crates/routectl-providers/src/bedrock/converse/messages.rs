@@ -864,6 +864,7 @@ fn translate_known_part(
         KnownContentPart::Thinking {
             thinking,
             signature,
+            extras: _,
         } => {
             // The signature rides verbatim, absent or empty included: the
             // wire member is optional, so whether an unsigned replay is
@@ -877,7 +878,7 @@ fn translate_known_part(
                 },
             }))
         }
-        KnownContentPart::RedactedThinking { data } => {
+        KnownContentPart::RedactedThinking { data, extras: _ } => {
             // Pass-through verbatim: canonical schema already holds the
             // base64 string, AWS expects a base64 string. AWS accepts
             // empty/short strings here so no validation needed.
@@ -1850,6 +1851,7 @@ mod tests {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }
     }
 
@@ -1877,6 +1879,7 @@ mod tests {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
         ];
 
@@ -1943,6 +1946,7 @@ mod tests {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
         ];
 
@@ -2006,6 +2010,7 @@ mod tests {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
         ];
 
@@ -2052,6 +2057,7 @@ mod tests {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
         ];
 
@@ -2090,11 +2096,13 @@ mod tests {
                     ContentPart::Known(KnownContentPart::Thinking {
                         thinking: "content-path thinking".into(),
                         signature: Some("sig_content".into()),
+                        extras: serde_json::Map::new(),
                     }),
                     ContentPart::Known(KnownContentPart::Text {
                         text: "result".into(),
                         citations: None,
                         cache_control: None,
+                        extras: serde_json::Map::new(),
                     }),
                 ]),
                 reasoning: None,
@@ -2102,6 +2110,7 @@ mod tests {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
         ];
 
@@ -2146,12 +2155,14 @@ mod tests {
                 title: Some("notes".into()),
                 citations: None,
                 cache_control: None,
+                extras: serde_json::Map::new(),
             })]),
             reasoning: None,
             reasoning_details: vec![],
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }];
 
         // Act
@@ -2195,12 +2206,14 @@ mod tests {
                     "file_data": "data:application/pdf;base64,JVBERi0xLjQ=",
                 }),
                 cache_control: None,
+                extras: serde_json::Map::new(),
             })]),
             reasoning: None,
             reasoning_details: vec![],
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }];
 
         // Act
@@ -2241,10 +2254,12 @@ mod tests {
                     text: "see attached".into(),
                     citations: None,
                     cache_control: None,
+                    extras: serde_json::Map::new(),
                 }),
                 ContentPart::Known(KnownContentPart::File {
                     file: json!({"file_id": "file-abc"}),
                     cache_control: None,
+                    extras: serde_json::Map::new(),
                 }),
             ]),
             reasoning: None,
@@ -2252,6 +2267,7 @@ mod tests {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }];
 
         // Act
@@ -2289,6 +2305,7 @@ mod tests {
                     text: "see attached".into(),
                     citations: None,
                     cache_control: None,
+                    extras: serde_json::Map::new(),
                 }),
                 ContentPart::Known(KnownContentPart::File {
                     file: json!({
@@ -2296,6 +2313,7 @@ mod tests {
                         "file_data": "data:text/plain;base64,aGVsbG8=",
                     }),
                     cache_control: None,
+                    extras: serde_json::Map::new(),
                 }),
             ]),
             reasoning: None,
@@ -2303,6 +2321,7 @@ mod tests {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }];
 
         // Act
@@ -2339,6 +2358,7 @@ mod tests {
                     text: "look at this".into(),
                     citations: None,
                     cache_control: None,
+                    extras: serde_json::Map::new(),
                 }),
                 ContentPart::Known(KnownContentPart::Image {
                     source: json!({
@@ -2347,6 +2367,7 @@ mod tests {
                         "data": "AAAA",
                     }),
                     cache_control: None,
+                    extras: serde_json::Map::new(),
                 }),
             ]),
             reasoning: None,
@@ -2354,6 +2375,7 @@ mod tests {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }];
 
         // Act
@@ -2403,6 +2425,7 @@ mod tests {
                     "type": "function",
                     "function": {"name": "get_weather", "arguments": "{\"city\":\"SF\"}"},
                 })]),
+                extras: serde_json::Map::new(),
             },
             Message {
                 refusal: None,
@@ -2413,6 +2436,7 @@ mod tests {
                 name: None,
                 tool_call_id: Some("call_1".into()),
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
         ];
 
@@ -2471,6 +2495,7 @@ mod tests {
                 tool_calls: Some(vec![json!({
                     "function": {"name": "f", "arguments": "{}"},
                 })]),
+                extras: serde_json::Map::new(),
             },
         ];
 
@@ -2511,6 +2536,7 @@ mod tests {
                         name: "get_weather".into(),
                         input: json!({"city": "SF"}),
                         cache_control: None,
+                        extras: serde_json::Map::new(),
                     },
                 )]),
                 reasoning: None,
@@ -2522,6 +2548,7 @@ mod tests {
                     "type": "function",
                     "function": {"name": "get_weather", "arguments": "{\"city\":\"SF\"}"},
                 })]),
+                extras: serde_json::Map::new(),
             },
         ];
 
@@ -2558,6 +2585,7 @@ mod tests {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
         ];
 
@@ -2594,6 +2622,7 @@ mod tests {
                     "type": "function",
                     "function": {"name": "f", "arguments": "{}"},
                 })]),
+                extras: serde_json::Map::new(),
             },
             Message {
                 refusal: None,
@@ -2604,6 +2633,7 @@ mod tests {
                 name: None,
                 tool_call_id: Some("call.foo:1".into()),
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
         ];
 
@@ -2660,6 +2690,7 @@ mod tests {
                         name: "f".into(),
                         input: json!({}),
                         cache_control: None,
+                        extras: serde_json::Map::new(),
                     },
                 )]),
                 reasoning: None,
@@ -2667,6 +2698,7 @@ mod tests {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
             Message {
                 refusal: None,
@@ -2677,6 +2709,7 @@ mod tests {
                         content: json!("ok"),
                         is_error: None,
                         cache_control: None,
+                        extras: serde_json::Map::new(),
                     },
                 )]),
                 reasoning: None,
@@ -2684,6 +2717,7 @@ mod tests {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
         ];
 
@@ -2745,6 +2779,7 @@ mod tests {
                     "type": "function",
                     "function": {"name": "f", "arguments": "{}"},
                 })]),
+                extras: serde_json::Map::new(),
             },
             Message {
                 refusal: None,
@@ -2755,6 +2790,7 @@ mod tests {
                 name: None,
                 tool_call_id: Some(raw.clone()),
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
         ];
 
@@ -2810,6 +2846,7 @@ mod tests {
                     "type": "function",
                     "function": {"name": "f", "arguments": "{}"},
                 })]),
+                extras: serde_json::Map::new(),
             },
             Message {
                 refusal: None,
@@ -2820,6 +2857,7 @@ mod tests {
                 name: None,
                 tool_call_id: Some("call_abc-1_2".into()),
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
         ];
 
@@ -2882,6 +2920,7 @@ mod tests {
                         "function": {"name": "f", "arguments": "{}"},
                     }),
                 ]),
+                extras: serde_json::Map::new(),
             },
             tool_msg("call.a"),
             tool_msg("call:a"),
@@ -2924,6 +2963,7 @@ mod tests {
             name: None,
             tool_call_id: Some(id.into()),
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }
     }
 
@@ -2945,6 +2985,7 @@ mod tests {
             name: None,
             tool_call_id: Some("tu_null".into()),
             tool_calls: None,
+            extras: serde_json::Map::new(),
         };
 
         // Act
@@ -2987,6 +3028,7 @@ mod tests {
             content,
             is_error: None,
             cache_control: None,
+            extras: serde_json::Map::new(),
         };
         let block = translate_known_part(
             "test",
@@ -3187,6 +3229,7 @@ mod tests {
                     "function": {"name": "get_time", "arguments": "{\"tz\":\"PST\"}"},
                 }),
             ]),
+            extras: serde_json::Map::new(),
         }
     }
 
@@ -3200,6 +3243,7 @@ mod tests {
             name: None,
             tool_call_id: Some(id.into()),
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }
     }
 
@@ -3271,6 +3315,7 @@ mod tests {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
         ];
 
@@ -3306,6 +3351,7 @@ mod tests {
                     "type": "function",
                     "function": {"name": "get_weather", "arguments": "{\"city\":\"SF\"}"},
                 })]),
+                extras: serde_json::Map::new(),
             },
             tool_result_msg("call_1", "sunny"),
         ];
@@ -3442,12 +3488,14 @@ mod tests {
                 title: Some("notes".into()),
                 citations,
                 cache_control: None,
+                extras: serde_json::Map::new(),
             })]),
             reasoning: None,
             reasoning_details: vec![],
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }
     }
 
@@ -3655,6 +3703,7 @@ mod tests {
                 title: Some("notes".into()),
                 citations: Some(malformed.clone()),
                 cache_control: None,
+                extras: serde_json::Map::new(),
             })
         };
         let canonical_parts_turn = Message {
@@ -3675,6 +3724,7 @@ mod tests {
                     ),
                     is_error: None,
                     cache_control: None,
+                    extras: serde_json::Map::new(),
                 },
             )]),
             ..user_msg()
@@ -3721,6 +3771,7 @@ mod tests {
                     routectl_core::KnownContentPart::Image {
                         source: json!("not-an-object"),
                         cache_control: None,
+                        extras: serde_json::Map::new(),
                     },
                 )]),
                 ..user_msg()
@@ -3938,11 +3989,13 @@ mod tests {
                 ContentPart::Known(KnownContentPart::Image {
                     source: json!({"type": HOSTILE, "media_type": "image/png", "data": "aGk="}),
                     cache_control: None,
+                    extras: serde_json::Map::new(),
                 }),
                 // Mapped kind, unmapped media type -> media_type warn-drop.
                 ContentPart::Known(KnownContentPart::Image {
                     source: json!({"type": "base64", "media_type": HOSTILE, "data": "aGk="}),
                     cache_control: None,
+                    extras: serde_json::Map::new(),
                 }),
                 // Forward-compat part -> type_tag drop (DEBUG).
                 ContentPart::Other {
@@ -3956,6 +4009,7 @@ mod tests {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }];
 
         // Act

@@ -24,6 +24,7 @@ fn user_req(system: Option<SystemContent>, tools: Option<Vec<ToolDef>>) -> ChatR
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }]
         .into(),
         ..Default::default()
@@ -39,6 +40,7 @@ fn system_blocks(texts: &[&str]) -> SystemContent {
                 text: (*t).into(),
                 cache_control: None,
                 citations: None,
+                extras: serde_json::Map::new(),
             })
             .collect(),
     )
@@ -53,6 +55,7 @@ fn custom_tool(name: &str) -> ToolDef {
         defer_loading: None,
         strict: None,
         type_tag: None,
+        extras: serde_json::Map::new(),
     })
 }
 

@@ -816,6 +816,7 @@ fn accumulated_response(state: &ResponsesStreamState) -> ChatResponse {
         name: None,
         tool_call_id: None,
         tool_calls: (!tool_calls.is_empty()).then_some(tool_calls),
+        extras: Map::new(),
     };
     ChatResponse {
         id: response_id(state),

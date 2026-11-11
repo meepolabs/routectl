@@ -52,6 +52,7 @@ mod closed_table_presence {
                 tool_call_id: None,
                 tool_calls: None,
                 refusal: None,
+                extras: serde_json::Map::new(),
             }]
             .into(),
             max_tokens: Some(4096),

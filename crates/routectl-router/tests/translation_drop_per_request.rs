@@ -62,6 +62,7 @@ fn text_turn(role: Role, text: &str) -> Message {
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -75,10 +76,12 @@ fn lossy_request(model: &str, slot: &RequestObservation) -> ChatRequest {
                 text: "be brief".into(),
                 citations: None,
                 cache_control: None,
+                extras: serde_json::Map::new(),
             }),
             ContentPart::Known(KnownContentPart::ImageUrl {
                 image_url: json!({"url": "https://example.com/a.png"}),
                 cache_control: None,
+                extras: serde_json::Map::new(),
             }),
         ]),
         ..text_turn(Role::System, "unused")

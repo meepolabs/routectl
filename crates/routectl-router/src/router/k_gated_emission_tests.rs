@@ -78,6 +78,7 @@ impl Provider for CapturingProvider {
                     name: None,
                     tool_call_id: None,
                     tool_calls: None,
+                    extras: serde_json::Map::new(),
                 },
                 finish_reason: Some("stop".into()),
                 matched_stop_sequence: None,
@@ -193,6 +194,7 @@ fn req_with_session(session: Option<&str>) -> ChatRequest {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }]
         .into(),
         system: Some(SystemContent::Blocks(vec![
@@ -201,12 +203,14 @@ fn req_with_session(session: Option<&str>) -> ChatRequest {
                 text: "first block".into(),
                 cache_control: None,
                 citations: None,
+                extras: serde_json::Map::new(),
             },
             SystemBlock {
                 kind: "text".into(),
                 text: "second block".into(),
                 cache_control: None,
                 citations: None,
+                extras: serde_json::Map::new(),
             },
         ])),
         ..Default::default()

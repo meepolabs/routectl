@@ -30,6 +30,7 @@ fn message(role: Role, content: MessageContent) -> Message {
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -58,6 +59,7 @@ fn tools_request() -> ChatRequest {
             defer_loading: None,
             strict: None,
             type_tag: None,
+            extras: serde_json::Map::new(),
         })]),
         ..text_request()
     }
@@ -69,6 +71,7 @@ fn image_request() -> ChatRequest {
         MessageContent::Parts(vec![ContentPart::Known(KnownContentPart::Image {
             source: json!({"type": "base64", "media_type": "image/png", "data": "AAAA"}),
             cache_control: None,
+            extras: serde_json::Map::new(),
         })]),
     )])
 }
@@ -81,6 +84,7 @@ fn tool_result_request() -> ChatRequest {
             content: json!("result body"),
             is_error: None,
             cache_control: None,
+            extras: serde_json::Map::new(),
         })]),
     )])
 }

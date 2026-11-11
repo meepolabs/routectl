@@ -699,6 +699,7 @@ mod tests {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }
     }
 
@@ -712,6 +713,7 @@ mod tests {
                     content,
                     is_error: None,
                     cache_control: cc,
+                    extras: serde_json::Map::new(),
                 },
             )]),
             reasoning: None,
@@ -719,6 +721,7 @@ mod tests {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }
     }
 
@@ -764,12 +767,14 @@ mod tests {
                     text: "frozen".into(),
                     citations: None,
                     cache_control: Some(CacheControl::ephemeral_5m()),
+                    extras: serde_json::Map::new(),
                 })]),
                 reasoning: None,
                 reasoning_details: vec![],
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             }]
             .into(),
             ..Default::default()
@@ -877,6 +882,7 @@ mod tests {
                     name: None,
                     tool_call_id: None,
                     tool_calls: None,
+                    extras: serde_json::Map::new(),
                 },
                 user_text("What is the weather today?"),
             ]
@@ -1426,12 +1432,14 @@ fast = "sonnet"
                 name: "search".into(),
                 input: json!(payload),
                 cache_control: None,
+                extras: serde_json::Map::new(),
             })]),
             reasoning: None,
             reasoning_details: vec![],
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }
     }
 

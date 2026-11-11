@@ -15,6 +15,7 @@ fn st_user(text: &str) -> Message {
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -28,6 +29,7 @@ fn st_assistant(text: &str) -> Message {
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -41,6 +43,7 @@ fn st_system(content: MessageContent) -> Message {
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -54,6 +57,7 @@ fn st_tool(id: &str, text: &str) -> Message {
         name: None,
         tool_call_id: Some(id.to_string()),
         tool_calls: None,
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -62,6 +66,7 @@ fn st_text_part(text: &str) -> ContentPart {
         text: text.to_string(),
         citations: None,
         cache_control: None,
+        extras: serde_json::Map::new(),
     })
 }
 
@@ -84,6 +89,7 @@ fn st_document_text_part(text: &str) -> ContentPart {
         title: None,
         citations: None,
         cache_control: None,
+        extras: serde_json::Map::new(),
     })
 }
 
@@ -352,6 +358,7 @@ fn whole_turn_drop_is_refused_after_a_system_turn() {
     let unsigned_thinking = ContentPart::Known(KnownContentPart::Thinking {
         thinking: "reasoning".into(),
         signature: None,
+        extras: serde_json::Map::new(),
     });
     let req = ChatRequest {
         model: "claude-opus-4-8".into(),
@@ -367,6 +374,7 @@ fn whole_turn_drop_is_refused_after_a_system_turn() {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
             st_user("continue"),
         ]
@@ -410,6 +418,7 @@ fn whole_turn_drop_still_fires_without_a_preceding_system_turn() {
     let unsigned_thinking = ContentPart::Known(KnownContentPart::Thinking {
         thinking: "reasoning".into(),
         signature: None,
+        extras: serde_json::Map::new(),
     });
     let req = ChatRequest {
         model: "claude-opus-4-8".into(),
@@ -424,6 +433,7 @@ fn whole_turn_drop_still_fires_without_a_preceding_system_turn() {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
             st_user("continue"),
         ]
@@ -455,6 +465,7 @@ fn whole_turn_drop_still_fires_after_a_system_turn_on_the_lift_lane() {
     let unsigned_thinking = ContentPart::Known(KnownContentPart::Thinking {
         thinking: "reasoning".into(),
         signature: None,
+        extras: serde_json::Map::new(),
     });
     let req = ChatRequest {
         model: "claude-opus-4-8".into(),
@@ -470,6 +481,7 @@ fn whole_turn_drop_still_fires_after_a_system_turn_on_the_lift_lane() {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
             st_user("continue"),
         ]
@@ -509,12 +521,14 @@ fn st_unsigned_only_assistant() -> Message {
         content: MessageContent::Parts(vec![ContentPart::Known(KnownContentPart::Thinking {
             thinking: "reasoning".into(),
             signature: None,
+            extras: serde_json::Map::new(),
         })]),
         reasoning: None,
         reasoning_details: Vec::new(),
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -626,6 +640,7 @@ fn whole_turn_drop_is_refused_after_a_system_turn_the_screen_forwards() {
     let image = ContentPart::Known(KnownContentPart::Image {
         source: json!({"type": "base64", "media_type": "image/png", "data": "AAAA"}),
         cache_control: None,
+        extras: serde_json::Map::new(),
     });
     let rows: [(&str, Vec<Message>, Vec<&str>); 3] = [
         (
@@ -821,6 +836,7 @@ fn non_blank_and_non_text_forwarded_system_turns_are_kept() {
     let image = ContentPart::Known(KnownContentPart::Image {
         source: json!({"type": "base64", "media_type": "image/png", "data": "AAAA"}),
         cache_control: None,
+        extras: serde_json::Map::new(),
     });
     let messages = vec![
         st_user("hi"),

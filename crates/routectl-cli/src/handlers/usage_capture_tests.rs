@@ -51,6 +51,7 @@ fn capture() -> (UsageCapture, UsageWriter, std::path::PathBuf) {
             tool_call_id: None,
             tool_calls: None,
             refusal: None,
+            extras: serde_json::Map::new(),
         }]
         .into(),
         ..Default::default()
@@ -105,6 +106,7 @@ fn response_with_cache(
                 tool_call_id: None,
                 tool_calls: None,
                 refusal: None,
+                extras: serde_json::Map::new(),
             },
             finish_reason: Some("stop".into()),
             matched_stop_sequence: None,
@@ -301,6 +303,7 @@ fn capture_over_a_readable_db() -> (
             tool_call_id: None,
             tool_calls: None,
             refusal: None,
+            extras: serde_json::Map::new(),
         }]
         .into(),
         ..Default::default()
@@ -527,6 +530,7 @@ fn capture_with_handle() -> (UsageCapture, UsageHandle, UsageWriter, std::path::
             tool_call_id: None,
             tool_calls: None,
             refusal: None,
+            extras: serde_json::Map::new(),
         }]
         .into(),
         ..Default::default()
@@ -1256,6 +1260,7 @@ fn minimal_request() -> routectl_core::ChatRequest {
             tool_call_id: None,
             tool_calls: None,
             refusal: None,
+            extras: serde_json::Map::new(),
         }]
         .into(),
         ..Default::default()
@@ -2326,6 +2331,7 @@ impl routectl_core::Provider for ServingProvider {
                     name: None,
                     tool_call_id: None,
                     tool_calls: None,
+                    extras: serde_json::Map::new(),
                 },
                 finish_reason: Some("stop".into()),
                 matched_stop_sequence: None,
@@ -2405,6 +2411,7 @@ fn session_req(history: &[&str]) -> routectl_core::ChatRequest {
                 tool_call_id: None,
                 tool_calls: None,
                 refusal: None,
+                extras: serde_json::Map::new(),
             })
             .collect::<Vec<_>>()
             .into(),
@@ -2413,6 +2420,7 @@ fn session_req(history: &[&str]) -> routectl_core::ChatRequest {
             text: "stable system prompt".into(),
             cache_control: None,
             citations: None,
+            extras: serde_json::Map::new(),
         }])),
         ..Default::default()
     };

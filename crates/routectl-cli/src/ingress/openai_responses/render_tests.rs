@@ -30,6 +30,7 @@ fn assistant_message(content: MessageContent) -> Message {
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -61,6 +62,7 @@ fn text_part(text: &str) -> ContentPart {
         text: text.to_string(),
         citations: None,
         cache_control: None,
+        extras: serde_json::Map::new(),
     })
 }
 
@@ -781,6 +783,7 @@ fn tool_use_part_is_not_emitted_as_a_content_block() {
             name: "f".into(),
             input: json!({}),
             cache_control: None,
+            extras: serde_json::Map::new(),
         }),
     ]));
     msg.tool_calls = Some(vec![json!({

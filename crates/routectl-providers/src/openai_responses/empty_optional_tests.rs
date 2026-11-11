@@ -14,6 +14,7 @@ fn function_tool(name: &str, schema: Value) -> ToolDef {
         defer_loading: None,
         strict: None,
         type_tag: None,
+        extras: serde_json::Map::new(),
     })
 }
 

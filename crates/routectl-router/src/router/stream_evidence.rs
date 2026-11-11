@@ -242,6 +242,7 @@ impl EvidenceFold {
                 text: self.text,
                 citations: None,
                 cache_control: None,
+                extras: serde_json::Map::new(),
             }));
         }
         if self.has_search_evidence {
@@ -267,6 +268,7 @@ impl EvidenceFold {
                 .has_tool_call
                 .then(|| vec![Value::Object(serde_json::Map::new())]),
             refusal: None,
+            extras: serde_json::Map::new(),
         };
         Some(ChatResponse {
             choices: vec![Choice {

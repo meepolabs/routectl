@@ -158,6 +158,7 @@ impl Provider for Seat {
                     tool_call_id: None,
                     tool_calls: None,
                     refusal: None,
+                    extras: serde_json::Map::new(),
                 },
                 finish_reason: Some("stop".into()),
                 matched_stop_sequence: None,
@@ -234,6 +235,7 @@ fn req_with_field() -> ChatRequest {
             tool_call_id: None,
             tool_calls: None,
             refusal: None,
+            extras: serde_json::Map::new(),
         }]
         .into(),
         // An ACTIVE thinking request alongside the display field, so a drop can be

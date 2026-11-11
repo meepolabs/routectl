@@ -818,6 +818,7 @@ mod tests {
             defer_loading: None,
             strict: None,
             type_tag: None,
+            extras: serde_json::Map::new(),
         });
         let req = ChatRequest {
             model: "test-model".into(),
@@ -919,6 +920,7 @@ mod tests {
                 tool_call_id: None,
                 tool_calls: None,
                 refusal: None,
+                extras: serde_json::Map::new(),
             }]
             .into(),
             ..Default::default()
@@ -959,12 +961,14 @@ mod tests {
                     text: "Stable boilerplate header.".into(),
                     cache_control: None,
                     citations: None,
+                    extras: serde_json::Map::new(),
                 },
                 SystemBlock {
                     kind: "text".into(),
                     text: "run 550e8400-e29b-41d4-a716-446655440000".into(),
                     cache_control: None,
                     citations: None,
+                    extras: serde_json::Map::new(),
                 },
             ])),
             ..Default::default()
@@ -1022,6 +1026,7 @@ mod tests {
                 defer_loading: None,
                 strict: None,
                 type_tag: None,
+                extras: serde_json::Map::new(),
             })]),
             ..Default::default()
         };
@@ -1091,6 +1096,7 @@ mod tests {
             text: text.into(),
             citations: None,
             cache_control: cc,
+            extras: serde_json::Map::new(),
         })
     }
 
@@ -1104,6 +1110,7 @@ mod tests {
             tool_call_id: None,
             tool_calls: None,
             refusal: None,
+            extras: serde_json::Map::new(),
         }
     }
 
@@ -1200,6 +1207,7 @@ mod tests {
                 text: format!("run at 2026-06-18T14:30:00Z ({UUID})"),
                 cache_control: Some(CacheControl::ephemeral_5m()),
                 citations: None,
+                extras: serde_json::Map::new(),
             }])),
             messages: vec![user_msg(vec![part_text("hi", None)])].into(),
             ..Default::default()
@@ -1232,6 +1240,7 @@ mod tests {
                 defer_loading: None,
                 strict: None,
                 type_tag: None,
+                extras: serde_json::Map::new(),
             })]),
             messages: vec![user_msg(vec![part_text("hi", None)])].into(),
             ..Default::default()
@@ -1292,6 +1301,7 @@ mod tests {
             defer_loading: None,
             strict: None,
             type_tag: None,
+            extras: serde_json::Map::new(),
         });
         let later = ToolDef::Custom(CustomTool {
             name: "lookup".into(),
@@ -1301,6 +1311,7 @@ mod tests {
             defer_loading: None,
             strict: None,
             type_tag: None,
+            extras: serde_json::Map::new(),
         });
         let req = ChatRequest {
             model: "test-model".into(),
@@ -1322,6 +1333,7 @@ mod tests {
                 text: format!("run {UUID}"),
                 cache_control: Some(CacheControl::ephemeral_5m()),
                 citations: None,
+                extras: serde_json::Map::new(),
             }])),
             messages: vec![user_msg(vec![part_text(
                 &format!("more {UUID}"),

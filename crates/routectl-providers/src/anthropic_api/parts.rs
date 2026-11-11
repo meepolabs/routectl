@@ -518,6 +518,7 @@ mod strip_text_after_tool_use_tests {
             text: s.into(),
             citations: None,
             cache_control: None,
+            extras: serde_json::Map::new(),
         })
     }
 
@@ -527,6 +528,7 @@ mod strip_text_after_tool_use_tests {
             name: "calc".into(),
             input: serde_json::json!({}),
             cache_control: None,
+            extras: serde_json::Map::new(),
         })
     }
 

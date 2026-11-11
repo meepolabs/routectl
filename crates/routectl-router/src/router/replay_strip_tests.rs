@@ -49,6 +49,7 @@ fn assistant_with(details: Vec<ReasoningDetail>) -> Message {
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -152,6 +153,7 @@ fn reasoning_replay_strip_leaves_request_otherwise_byte_identical() {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
             assistant_with(vec![
                 detail(Some(CODEX_OAUTH), "rs_a"),
@@ -167,6 +169,7 @@ fn reasoning_replay_strip_leaves_request_otherwise_byte_identical() {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
         ]),
         anthropic_beta: vec!["prompt-caching-2024-07-31".to_string()],

@@ -1165,6 +1165,7 @@ fn a_breakpoint_withhold_counts_when_translation_then_fails() {
         KnownContentPart::ImageUrl {
             image_url: json!("not-an-object"),
             cache_control: None,
+            extras: serde_json::Map::new(),
         },
     )]));
     let req = req_with_breakpoints(

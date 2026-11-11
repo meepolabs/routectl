@@ -33,6 +33,7 @@ fn user_text(text: &str) -> Message {
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -46,6 +47,7 @@ fn assistant_parts(parts: Vec<ContentPart>) -> Message {
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -59,6 +61,7 @@ fn assistant_text(text: &str) -> Message {
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -72,6 +75,7 @@ fn tool_message(call_id: &str, output: &str) -> Message {
         name: None,
         tool_call_id: Some(call_id.into()),
         tool_calls: None,
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -121,12 +125,14 @@ fn user_image_base64(media_type: &str, data: &str) -> Message {
                 "data": data
             }),
             cache_control: None,
+            extras: serde_json::Map::new(),
         })]),
         reasoning: None,
         reasoning_details: Vec::new(),
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -140,12 +146,14 @@ fn user_image_url(url: &str) -> Message {
                 "url": url
             }),
             cache_control: None,
+            extras: serde_json::Map::new(),
         })]),
         reasoning: None,
         reasoning_details: Vec::new(),
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -156,12 +164,14 @@ fn user_file(file: Value) -> Message {
         content: MessageContent::Parts(vec![ContentPart::Known(KnownContentPart::File {
             file,
             cache_control: None,
+            extras: serde_json::Map::new(),
         })]),
         reasoning: None,
         reasoning_details: Vec::new(),
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -175,6 +185,7 @@ fn user_parts(parts: Vec<ContentPart>) -> Message {
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -182,6 +193,7 @@ fn image_part(source: Value) -> ContentPart {
     ContentPart::Known(KnownContentPart::Image {
         source,
         cache_control: None,
+        extras: serde_json::Map::new(),
     })
 }
 
@@ -189,6 +201,7 @@ fn image_url_part(image_url: Value) -> ContentPart {
     ContentPart::Known(KnownContentPart::ImageUrl {
         image_url,
         cache_control: None,
+        extras: serde_json::Map::new(),
     })
 }
 
@@ -197,6 +210,7 @@ fn text_part(text: &str) -> ContentPart {
         text: text.into(),
         citations: None,
         cache_control: None,
+        extras: serde_json::Map::new(),
     })
 }
 
@@ -210,6 +224,7 @@ fn tool_message_parts(call_id: &str, parts: Vec<ContentPart>) -> Message {
         name: None,
         tool_call_id: Some(call_id.into()),
         tool_calls: None,
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -221,12 +236,14 @@ fn user_text_part_with_cc(text: &str) -> Message {
             text: text.into(),
             citations: None,
             cache_control: Some(CacheControl::ephemeral_5m()),
+            extras: serde_json::Map::new(),
         })]),
         reasoning: None,
         reasoning_details: Vec::new(),
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -239,5 +256,6 @@ fn custom_tool_with_cc(name: &str) -> ToolDef {
         defer_loading: None,
         strict: None,
         type_tag: None,
+        extras: serde_json::Map::new(),
     })
 }

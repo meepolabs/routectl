@@ -9,6 +9,7 @@ fn file_part(file: Value) -> ContentPart {
     ContentPart::Known(KnownContentPart::File {
         file,
         cache_control: None,
+        extras: serde_json::Map::new(),
     })
 }
 
@@ -160,18 +161,21 @@ fn tool_result_unsupported_parts_drop_from_the_wire_and_count_once() {
         ContentPart::Known(KnownContentPart::Thinking {
             thinking: "marker-dropped-thinking".into(),
             signature: None,
+            extras: serde_json::Map::new(),
         }),
         ContentPart::Known(KnownContentPart::Document {
             source: json!({"type": "base64", "media_type": "application/pdf", "data": "marker-dropped-doc"}),
             title: None,
             citations: None,
             cache_control: None,
+            extras: serde_json::Map::new(),
         }),
         ContentPart::Known(KnownContentPart::ToolUse {
             id: "toolu_nested".into(),
             name: "marker_dropped_tool".into(),
             input: json!({}),
             cache_control: None,
+            extras: serde_json::Map::new(),
         }),
     ];
     let req = req_with(vec![user_text("run"), tool_message_parts("call_d1", parts)]);
@@ -250,6 +254,7 @@ fn an_absent_or_empty_tool_output_id_reaches_the_body_as_an_empty_call_id() {
         content: json!("sunny"),
         is_error: None,
         cache_control: None,
+        extras: serde_json::Map::new(),
     });
     let mut absent_id = tool_message("unused", "sunny");
     absent_id.tool_call_id = None;

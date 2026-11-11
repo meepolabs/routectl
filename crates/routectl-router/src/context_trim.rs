@@ -830,6 +830,7 @@ mod tests {
                     content: json!(payload),
                     is_error: None,
                     cache_control: None,
+                    extras: serde_json::Map::new(),
                 },
             )]),
             reasoning: None,
@@ -837,6 +838,7 @@ mod tests {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }
     }
 
@@ -850,12 +852,14 @@ mod tests {
                 name: "search".into(),
                 input: json!(payload),
                 cache_control: None,
+                extras: serde_json::Map::new(),
             })]),
             reasoning: None,
             reasoning_details: vec![],
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }
     }
 
@@ -869,6 +873,7 @@ mod tests {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }
     }
 
@@ -882,6 +887,7 @@ mod tests {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }
     }
 
@@ -1441,12 +1447,14 @@ mod tests {
                 name: "Tool".into(),
                 input,
                 cache_control: None,
+                extras: serde_json::Map::new(),
             })]),
             reasoning: None,
             reasoning_details: vec![],
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }
     }
 
@@ -1462,6 +1470,7 @@ mod tests {
                     content,
                     is_error: None,
                     cache_control: None,
+                    extras: serde_json::Map::new(),
                 },
             )]),
             reasoning: None,
@@ -1469,6 +1478,7 @@ mod tests {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }
     }
 
@@ -1483,6 +1493,7 @@ mod tests {
                     content,
                     is_error: None,
                     cache_control: None,
+                    extras: serde_json::Map::new(),
                 },
             )]),
             reasoning: None,
@@ -1490,6 +1501,7 @@ mod tests {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }
     }
 

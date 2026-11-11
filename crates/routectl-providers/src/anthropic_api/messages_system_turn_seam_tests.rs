@@ -10,6 +10,7 @@ fn seam_blank_cached_turn() -> Message {
             text: String::new(),
             citations: None,
             cache_control: Some(CacheControl::ephemeral_5m()),
+            extras: serde_json::Map::new(),
         },
     )]))
 }
@@ -235,6 +236,7 @@ fn moved_breakpoint_collapses_into_one_already_on_the_anchor() {
             text: "a".into(),
             citations: None,
             cache_control: Some(CacheControl::ephemeral_1h()),
+            extras: serde_json::Map::new(),
         })]),
         ..st_user("")
     };
@@ -440,6 +442,7 @@ fn seam_image_part() -> ContentPart {
     ContentPart::Known(KnownContentPart::Image {
         source: json!({"type": "base64", "media_type": "image/png", "data": "AAAA"}),
         cache_control: None,
+        extras: serde_json::Map::new(),
     })
 }
 

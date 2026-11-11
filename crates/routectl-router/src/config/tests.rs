@@ -1363,6 +1363,7 @@ async fn trim_to_params_is_identical_across_both_consumers() {
                         tool_call_id: None,
                         tool_calls: None,
                         refusal: None,
+                        extras: serde_json::Map::new(),
                     },
                     finish_reason: Some("stop".into()),
                     matched_stop_sequence: None,
@@ -1393,6 +1394,7 @@ async fn trim_to_params_is_identical_across_both_consumers() {
             tool_call_id: None,
             tool_calls: None,
             refusal: None,
+            extras: serde_json::Map::new(),
         }
     }
 
@@ -1414,6 +1416,7 @@ async fn trim_to_params_is_identical_across_both_consumers() {
                             name: "Tool".into(),
                             input: serde_json::json!({}),
                             cache_control: None,
+                            extras: serde_json::Map::new(),
                         },
                     )]),
                     reasoning: None,
@@ -1422,6 +1425,7 @@ async fn trim_to_params_is_identical_across_both_consumers() {
                     tool_call_id: None,
                     tool_calls: None,
                     refusal: None,
+                    extras: serde_json::Map::new(),
                 },
                 Message {
                     role: Role::User,
@@ -1431,6 +1435,7 @@ async fn trim_to_params_is_identical_across_both_consumers() {
                             content: serde_json::json!(payload),
                             is_error: None,
                             cache_control: None,
+                            extras: serde_json::Map::new(),
                         },
                     )]),
                     reasoning: None,
@@ -1439,6 +1444,7 @@ async fn trim_to_params_is_identical_across_both_consumers() {
                     tool_call_id: None,
                     tool_calls: None,
                     refusal: None,
+                    extras: serde_json::Map::new(),
                 },
                 text_msg(Role::User, "recent turn"),
             ]

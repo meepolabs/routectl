@@ -633,6 +633,7 @@ mod tests {
                     content,
                     is_error: None,
                     cache_control: cc,
+                    extras: serde_json::Map::new(),
                 },
             )]),
             reasoning: None,
@@ -640,6 +641,7 @@ mod tests {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }
     }
 
@@ -651,12 +653,14 @@ mod tests {
                 text: text.into(),
                 citations: None,
                 cache_control: cc,
+                extras: serde_json::Map::new(),
             })]),
             reasoning: None,
             reasoning_details: vec![],
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }
     }
 
@@ -670,6 +674,7 @@ mod tests {
                 text: "calling".into(),
                 citations: None,
                 cache_control: Some(cc),
+                extras: serde_json::Map::new(),
             })]),
             None => MessageContent::Null,
         };
@@ -689,6 +694,7 @@ mod tests {
                     "arguments": arguments,
                 },
             })]),
+            extras: serde_json::Map::new(),
         }
     }
 
@@ -737,6 +743,7 @@ mod tests {
                         name: "search".into(),
                         input: json!(pretty),
                         cache_control: None,
+                        extras: serde_json::Map::new(),
                     },
                 )]),
                 reasoning: None,
@@ -744,6 +751,7 @@ mod tests {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             }]
             .into(),
             ..Default::default()
@@ -1156,6 +1164,7 @@ mod tests {
                     json!({"id": "call_1", "type": "function"}),
                     json!({"id": "call_2", "function": {"name": "noargs"}}),
                 ]),
+                extras: serde_json::Map::new(),
             }]
             .into(),
             ..Default::default()
@@ -1188,6 +1197,7 @@ mod tests {
                     json!({"function": {"name": "f", "arguments": {"q": "x"}}}),
                     json!({"function": {"name": "g", "arguments": 42}}),
                 ]),
+                extras: serde_json::Map::new(),
             }]
             .into(),
             ..Default::default()
@@ -1219,6 +1229,7 @@ mod tests {
                         name: "search".into(),
                         input: json!(tool_use_pretty),
                         cache_control: None,
+                        extras: serde_json::Map::new(),
                     },
                 )]),
                 reasoning: None,
@@ -1230,6 +1241,7 @@ mod tests {
                     "type": "function",
                     "function": {"name": "lookup", "arguments": tool_call_pretty},
                 })]),
+                extras: serde_json::Map::new(),
             }]
             .into(),
             ..Default::default()
@@ -1286,12 +1298,14 @@ mod tests {
                             content: json!(prose),
                             is_error: None,
                             cache_control: None,
+                            extras: serde_json::Map::new(),
                         }),
                         ContentPart::Known(KnownContentPart::ToolUse {
                             id: "toolu_1".into(),
                             name: "search".into(),
                             input: json!(part_pretty),
                             cache_control: None,
+                            extras: serde_json::Map::new(),
                         }),
                     ]),
                     reasoning: None,
@@ -1302,6 +1316,7 @@ mod tests {
                         json!({"function": {"name": "structured", "arguments": {"q": "x"}}}),
                         json!({"function": {"name": "pretty", "arguments": call_pretty}}),
                     ]),
+                    extras: serde_json::Map::new(),
                 },
                 tool_result_msg(json!(later_pretty), None),
             ]

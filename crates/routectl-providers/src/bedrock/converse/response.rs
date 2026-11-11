@@ -60,6 +60,7 @@ pub fn translate(provider_id: &str, body: &Value) -> Result<ChatResponse> {
         name: None,
         tool_call_id: None,
         tool_calls,
+        extras: serde_json::Map::new(),
     };
 
     let matched_stop_sequence = lift_stop_sequence(
@@ -166,6 +167,7 @@ fn walk_content_blocks(
                     text: text.clone(),
                     citations: None,
                     cache_control: None,
+                    extras: serde_json::Map::new(),
                 }));
             }
             ConverseResponseContentBlock::ToolUse { tool_use } => {
@@ -191,6 +193,7 @@ fn walk_content_blocks(
                     name: tool_use.name.clone(),
                     input: tool_use.input.clone(),
                     cache_control: None,
+                    extras: serde_json::Map::new(),
                 }));
             }
             ConverseResponseContentBlock::ReasoningContent { reasoning_content } => {

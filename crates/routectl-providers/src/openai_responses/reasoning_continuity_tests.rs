@@ -44,6 +44,7 @@ fn user_turn(text: &str) -> Message {
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -57,17 +58,22 @@ fn assistant_parts(parts: Vec<ContentPart>) -> Message {
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     }
 }
 
 fn redacted(data: &str) -> ContentPart {
-    ContentPart::Known(KnownContentPart::RedactedThinking { data: data.into() })
+    ContentPart::Known(KnownContentPart::RedactedThinking {
+        data: data.into(),
+        extras: serde_json::Map::new(),
+    })
 }
 
 fn thinking(text: &str, signature: Option<&str>) -> ContentPart {
     ContentPart::Known(KnownContentPart::Thinking {
         thinking: text.into(),
         signature: signature.map(str::to_string),
+        extras: serde_json::Map::new(),
     })
 }
 
@@ -560,6 +566,7 @@ fn a_natively_tagged_same_family_artifact_still_replays() {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         },
     ];
 

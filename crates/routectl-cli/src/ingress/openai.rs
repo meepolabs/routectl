@@ -2410,6 +2410,7 @@ mod tests {
                     name: None,
                     tool_call_id: None,
                     tool_calls: None,
+                    extras: Map::new(),
                 },
                 finish_reason: Some("stop".into()),
                 matched_stop_sequence: None,
@@ -2445,6 +2446,7 @@ mod tests {
                 text: t.into(),
                 citations: None,
                 cache_control: None,
+                extras: Map::new(),
             }));
         }
         parts.push(ContentPart::Known(KnownContentPart::ToolUse {
@@ -2452,6 +2454,7 @@ mod tests {
             name: "get_weather".into(),
             input: json!({ "city": "Paris" }),
             cache_control: None,
+            extras: Map::new(),
         }));
         Choice {
             logprobs: None,
@@ -2472,6 +2475,7 @@ mod tests {
                         "arguments": "{\"city\":\"Paris\"}"
                     }
                 })]),
+                extras: Map::new(),
             },
             finish_reason: Some("tool_calls".into()),
             matched_stop_sequence: None,
@@ -2542,6 +2546,7 @@ mod tests {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: Map::new(),
             },
             finish_reason: Some("stop".into()),
             matched_stop_sequence: None,
@@ -2603,6 +2608,7 @@ mod tests {
                         text: "Checking.".into(),
                         citations: None,
                         cache_control: None,
+                        extras: Map::new(),
                     }),
                     ContentPart::Other {
                         type_tag: "tool_use".into(),
@@ -2615,6 +2621,7 @@ mod tests {
                 name: None,
                 tool_call_id: None,
                 tool_calls: Some(vec![json!({ "id": tool_id, "type": "function" })]),
+                extras: Map::new(),
             },
             finish_reason: Some("tool_calls".into()),
             matched_stop_sequence: None,
@@ -2651,6 +2658,7 @@ mod tests {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: Map::new(),
             },
             finish_reason: Some("stop".into()),
             matched_stop_sequence: None,
@@ -3003,6 +3011,7 @@ mod tests {
                     name: None,
                     tool_call_id: None,
                     tool_calls: None,
+                    extras: Map::new(),
                 },
                 finish_reason: Some("stop".into()),
                 matched_stop_sequence: Some("</answer>".into()),
@@ -3070,6 +3079,7 @@ mod tests {
                     tool_call_id: None,
                     tool_calls: None,
                     refusal: Some("I can't help with that.".into()),
+                    extras: Map::new(),
                 },
                 finish_reason: Some("stop".into()),
                 matched_stop_sequence: None,
@@ -3178,6 +3188,7 @@ mod tests {
                     name: None,
                     tool_call_id: None,
                     tool_calls: None,
+                    extras: Map::new(),
                 },
                 finish_reason: Some(reason.into()),
                 matched_stop_sequence: None,

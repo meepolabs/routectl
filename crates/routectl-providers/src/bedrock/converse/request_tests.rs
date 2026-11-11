@@ -42,6 +42,7 @@ fn user_msg(text: &str) -> Message {
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -98,6 +99,7 @@ fn blank_canonical_system_serializes_no_system_key() {
         text: text.into(),
         cache_control: None,
         citations: None,
+        extras: serde_json::Map::new(),
     };
     for system in [
         SystemContent::Text(String::new()),
@@ -134,6 +136,7 @@ fn system_blocks_with_cache_control_emit_cache_point_after_text() {
             text: "context block".into(),
             cache_control: Some(CacheControl::ephemeral_1h()),
             citations: None,
+            extras: serde_json::Map::new(),
         }])),
         messages: vec![user_msg("hi")].into(),
         ..Default::default()
@@ -170,6 +173,7 @@ fn legacy_system_message_is_lifted_into_top_level_system() {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
             user_msg("hi"),
         ]
@@ -203,6 +207,7 @@ fn custom_tool_translates_to_converse_tool_def() {
             defer_loading: None,
             strict: None,
             type_tag: None,
+            extras: serde_json::Map::new(),
         })]),
         ..Default::default()
     };
@@ -234,6 +239,7 @@ fn tool_with_cache_control_emits_sibling_cache_point_in_tools_array() {
             defer_loading: None,
             strict: None,
             type_tag: None,
+            extras: serde_json::Map::new(),
         })]),
         ..Default::default()
     };
@@ -271,6 +277,7 @@ fn anthropic_builtin_tool_dropped_under_non_strict() {
                 defer_loading: None,
                 strict: None,
                 type_tag: None,
+                extras: serde_json::Map::new(),
             }),
         ]),
         ..Default::default()
@@ -298,6 +305,7 @@ fn tool_choice_string_auto_translates_to_aws_auto_object() {
             defer_loading: None,
             strict: None,
             type_tag: None,
+            extras: serde_json::Map::new(),
         })]),
         tool_choice: Some(json!("auto")),
         ..Default::default()
@@ -322,6 +330,7 @@ fn tool_choice_anthropic_object_translates_to_specific_tool() {
             defer_loading: None,
             strict: None,
             type_tag: None,
+            extras: serde_json::Map::new(),
         })]),
         tool_choice: Some(json!({"type":"tool","name":"calc"})),
         ..Default::default()
@@ -361,6 +370,7 @@ fn tool_choice_with_empty_name_drops_field() {
                 defer_loading: None,
                 strict: None,
                 type_tag: None,
+                extras: serde_json::Map::new(),
             })]),
             tool_choice: Some(tc.clone()),
             ..Default::default()
@@ -461,12 +471,14 @@ fn tool_use_block_in_assistant_content_translates_to_aws_tool_use_block() {
                         text: "computing".into(),
                         citations: None,
                         cache_control: None,
+                        extras: serde_json::Map::new(),
                     }),
                     ContentPart::Known(KnownContentPart::ToolUse {
                         id: "tu_abc".into(),
                         name: "calc".into(),
                         input: json!({"expr": "2+2"}),
                         cache_control: None,
+                        extras: serde_json::Map::new(),
                     }),
                 ]),
                 reasoning: None,
@@ -474,6 +486,7 @@ fn tool_use_block_in_assistant_content_translates_to_aws_tool_use_block() {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
         ]
         .into(),
@@ -516,17 +529,20 @@ fn assistant_text_after_tool_use_is_stripped() {
                         text: "computing".into(),
                         citations: None,
                         cache_control: None,
+                        extras: serde_json::Map::new(),
                     }),
                     ContentPart::Known(KnownContentPart::ToolUse {
                         id: "tu_x".into(),
                         name: "calc".into(),
                         input: json!({"expr": "2+2"}),
                         cache_control: None,
+                        extras: serde_json::Map::new(),
                     }),
                     ContentPart::Known(KnownContentPart::Text {
                         text: "Sure! On it.".into(),
                         citations: None,
                         cache_control: None,
+                        extras: serde_json::Map::new(),
                     }),
                 ]),
                 reasoning: None,
@@ -534,6 +550,7 @@ fn assistant_text_after_tool_use_is_stripped() {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
         ]
         .into(),
@@ -579,6 +596,7 @@ fn tool_message_with_id_emits_user_role_with_tool_result() {
                 name: None,
                 tool_call_id: Some("toolu_X".into()),
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
         ]
         .into(),
@@ -630,6 +648,7 @@ fn tool_message_without_id_forwards_an_empty_tool_use_id() {
                     name: None,
                     tool_call_id,
                     tool_calls: None,
+                    extras: serde_json::Map::new(),
                 },
             ]
             .into(),
@@ -680,6 +699,7 @@ fn openai_shape_tool_history_without_tools_backfills_dummy_tool() {
                     "type": "function",
                     "function": {"name": "calc", "arguments": "{\"expr\":\"2+2\"}"}
                 })]),
+                extras: serde_json::Map::new(),
             },
             Message {
                 refusal: None,
@@ -690,6 +710,7 @@ fn openai_shape_tool_history_without_tools_backfills_dummy_tool() {
                 name: None,
                 tool_call_id: Some("call_1".into()),
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
         ]
         .into(),
@@ -761,12 +782,14 @@ fn document_content_block_translates_to_aws_document_block() {
                 title: Some("report.pdf".into()),
                 citations: None,
                 cache_control: None,
+                extras: serde_json::Map::new(),
             })]),
             reasoning: None,
             reasoning_details: vec![],
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }]
         .into(),
         ..Default::default()
@@ -808,11 +831,13 @@ fn dropped_image_url_with_cache_control_does_not_emit_orphan_cache_point() {
                 ContentPart::Known(KnownContentPart::ImageUrl {
                     image_url: json!({"url": "https://example.com/x.png"}),
                     cache_control: Some(CacheControl::ephemeral_5m()),
+                    extras: serde_json::Map::new(),
                 }),
                 ContentPart::Known(KnownContentPart::Text {
                     text: "anchor".into(),
                     citations: None,
                     cache_control: None,
+                    extras: serde_json::Map::new(),
                 }),
             ]),
             reasoning: None,
@@ -820,6 +845,7 @@ fn dropped_image_url_with_cache_control_does_not_emit_orphan_cache_point() {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }]
         .into(),
         ..Default::default()
@@ -859,6 +885,7 @@ fn other_content_part_passes_through_as_single_key_union() {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }]
         .into(),
         ..Default::default()
@@ -896,6 +923,7 @@ fn other_content_part_empty_extras_emits_empty_object() {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }]
         .into(),
         ..Default::default()
@@ -932,6 +960,7 @@ fn other_content_part_with_cache_control_emits_sibling_cache_point() {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }]
         .into(),
         ..Default::default()
@@ -969,6 +998,7 @@ fn preserved_other_logs_passthrough_not_drop() {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }]
         .into(),
         ..Default::default()
@@ -1029,6 +1059,7 @@ fn tool_result_image_content_uses_image_variant_not_json_wrap() {
                     ]),
                     is_error: None,
                     cache_control: None,
+                    extras: serde_json::Map::new(),
                 },
             )]),
             reasoning: None,
@@ -1036,6 +1067,7 @@ fn tool_result_image_content_uses_image_variant_not_json_wrap() {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }]
         .into(),
         ..Default::default()
@@ -1069,26 +1101,31 @@ fn cache_control_breakpoint_validation_runs_in_converse_path() {
                     text: "a".into(),
                     citations: None,
                     cache_control: Some(CacheControl::ephemeral_5m()),
+                    extras: serde_json::Map::new(),
                 }),
                 ContentPart::Known(KnownContentPart::Text {
                     text: "b".into(),
                     citations: None,
                     cache_control: Some(CacheControl::ephemeral_5m()),
+                    extras: serde_json::Map::new(),
                 }),
                 ContentPart::Known(KnownContentPart::Text {
                     text: "c".into(),
                     citations: None,
                     cache_control: Some(CacheControl::ephemeral_5m()),
+                    extras: serde_json::Map::new(),
                 }),
                 ContentPart::Known(KnownContentPart::Text {
                     text: "d".into(),
                     citations: None,
                     cache_control: Some(CacheControl::ephemeral_5m()),
+                    extras: serde_json::Map::new(),
                 }),
                 ContentPart::Known(KnownContentPart::Text {
                     text: "e".into(),
                     citations: None,
                     cache_control: Some(CacheControl::ephemeral_5m()),
+                    extras: serde_json::Map::new(),
                 }),
             ]),
             reasoning: None,
@@ -1096,6 +1133,7 @@ fn cache_control_breakpoint_validation_runs_in_converse_path() {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }]
         .into(),
         ..Default::default()

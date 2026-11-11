@@ -27,6 +27,7 @@ fn tiny_req() -> ChatRequest {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            extras: serde_json::Map::new(),
         }]
         .into(),
         ..Default::default()
@@ -76,6 +77,7 @@ fn calibration_estimate_is_the_last_dispatched_attempts_estimate() {
         name: None,
         tool_call_id: None,
         tool_calls: None,
+        extras: serde_json::Map::new(),
     }]
     .into();
 

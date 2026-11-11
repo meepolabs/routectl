@@ -117,7 +117,7 @@ const WIRE_CHECK_USER_AGENT: &str = "claude-cli/2.1.0 (external, cli)";
 /// The label the served response carries for its provider.
 const WIRE_CHECK_PROVIDER: &str = "bench-anthropic";
 
-const fn assistant_message(content: MessageContent, tool_calls: Option<Vec<Value>>) -> Message {
+fn assistant_message(content: MessageContent, tool_calls: Option<Vec<Value>>) -> Message {
     Message {
         role: Role::Assistant,
         content,
@@ -127,6 +127,7 @@ const fn assistant_message(content: MessageContent, tool_calls: Option<Vec<Value
         tool_call_id: None,
         tool_calls,
         refusal: None,
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -163,6 +164,7 @@ fn anchor_fixture() -> (ChatRequest, usize) {
                 name: "read_file".into(),
                 input: json!({"path": format!("m{round}.json")}),
                 cache_control: None,
+                extras: serde_json::Map::new(),
             },
         ));
         messages.push(tool_part_message(
@@ -172,6 +174,7 @@ fn anchor_fixture() -> (ChatRequest, usize) {
                 content: Value::String(payload),
                 is_error: None,
                 cache_control: None,
+                extras: serde_json::Map::new(),
             },
         ));
     }

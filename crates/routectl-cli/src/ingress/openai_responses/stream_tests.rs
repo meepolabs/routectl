@@ -711,6 +711,7 @@ fn completed_body_output_matches_non_stream_render_for_text() {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                extras: serde_json::Map::new(),
             },
             finish_reason: Some("stop".into()),
             matched_stop_sequence: None,
