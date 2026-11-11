@@ -434,6 +434,40 @@ fn prompt_caching_verified_on_per_ttl_breakdown() {
 }
 
 #[test]
+fn prompt_caching_per_lifetime_breakdown_counts_any_positive_lifetime() {
+    let rows = [
+        (
+            "30m only write",
+            json!({"ephemeral_30m_input_tokens": 32}),
+            vec![verified_obs(PROMPT_CACHING, CACHE_HIT)],
+        ),
+        (
+            "all lifetimes zero",
+            json!({"ephemeral_5m_input_tokens": 0, "ephemeral_30m_input_tokens": 0}),
+            vec![],
+        ),
+    ];
+    for (row, cache_creation, expected) in rows {
+        let resp = chat_response(json!({
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "done"},
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15,
+                "cache_creation": cache_creation
+            }
+        }));
+        assert_eq!(
+            detect(&DetectorContext::default(), &resp),
+            expected,
+            "{row}"
+        );
+    }
+}
+
+#[test]
 fn prompt_caching_no_observation_on_zero_counters() {
     let resp = chat_response(json!({
         "choices": [{

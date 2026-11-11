@@ -1417,6 +1417,18 @@ for a client that edits, re-orders, or re-renders earlier turns (a re-generated
 system preamble, a re-serialized tool history, an injected per-turn timestamp)
 rather than only appending to them.
 
+### Refused cache-write lifetime member (DEBUG)
+
+| Level | Module target | Key fields | Message |
+|---|---|---|---|
+| DEBUG | `routectl_core::cache_lifetime` | `member=<name>` `reason=<unparsed_name\|non_integer_value\|lifetime_cap>` | `"cache write member refused; its tokens count as unknown lifetime"` |
+
+One line per refused member of an upstream usage `cache_creation` object:
+a name that encodes no single valid lifetime, a value that is not a whole
+token count, or a lifetime past the 16-per-object cap. The member adds
+nothing to the per-lifetime split; the reported write total is unchanged.
+No counter. The member name is sanitized; the value is never logged.
+
 ## Startup cache-policy banner
 
 At server startup, immediately after the `routectl listening on ...` line,

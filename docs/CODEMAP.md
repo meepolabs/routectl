@@ -310,6 +310,9 @@ license.
   token missing its sibling column yields `Unknown`, never a fabricated
   phase/prior). The bool and phase carried by the data variants live in
   sibling ledger fields, not in the verdict token
+- `src/cache_lifetime.rs` -- the cache-write lifetime grammar
+  (`parse_cache_lifetime`, `parse_cache_lifetime_member`,
+  `format_cache_lifetime`) and `CacheCreation`'s wire serde
 - `src/cache_decision.rs` -- the frozen cache-injection decision vocabulary:
   the ten tokens the `cache_auto_decision` log emits and the usage ledger's
   `cache_front_decision` / `cache_terminal_decision` columns persist

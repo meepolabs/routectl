@@ -66,10 +66,7 @@ fn role_chunk_carries_exact_first_event_input_and_cache_fields() {
     assert_eq!(opening.cache_read_input_tokens, Some(91011));
     assert_eq!(
         opening.cache_creation,
-        Some(CacheCreation {
-            ephemeral_5m_input_tokens: Some(5000),
-            ephemeral_1h_input_tokens: Some(678),
-        })
+        Some(CacheCreation::from_lifetimes([(300, 5000), (3600, 678)]))
     );
     assert!(opening.observed_at >= before);
     assert!(

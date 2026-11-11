@@ -72,10 +72,7 @@ async fn invoke_stream_role_chunk_carries_the_opening_breakdown() {
     assert_eq!(opening.cache_read_input_tokens, Some(987));
     assert_eq!(
         opening.cache_creation,
-        Some(CacheCreation {
-            ephemeral_5m_input_tokens: Some(600),
-            ephemeral_1h_input_tokens: Some(54),
-        })
+        Some(CacheCreation::from_lifetimes([(300, 600), (3600, 54)]))
     );
     for later in &chunks[1..] {
         assert!(later.upstream_meta.is_none());

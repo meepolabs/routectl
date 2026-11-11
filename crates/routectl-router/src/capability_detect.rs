@@ -334,10 +334,10 @@ fn has_search_evidence_block(message: &Message) -> bool {
     })
 }
 
-/// Whether a per-TTL cache-creation breakdown reports any tokens written.
+/// Whether a per-lifetime cache-creation breakdown reports any tokens
+/// written, at any lifetime.
 fn cache_creation_populated(creation: &routectl_core::schema::CacheCreation) -> bool {
-    creation.ephemeral_5m_input_tokens.unwrap_or(0) > 0
-        || creation.ephemeral_1h_input_tokens.unwrap_or(0) > 0
+    creation.iter().any(|(_, tokens)| tokens > 0)
 }
 
 /// A verified (`SelfIdentifying`) observation.

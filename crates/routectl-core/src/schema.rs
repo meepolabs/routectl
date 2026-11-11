@@ -1122,15 +1122,68 @@ impl Usage {
     }
 }
 
-/// Per-TTL breakdown of cache writes for one request.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// Per-lifetime breakdown of cache writes for one request: lifetime in
+/// seconds -> tokens written, ordered by lifetime. A zero entry is an
+/// observed zero and is kept, so the Anthropic wire round-trips. Holds at
+/// most [`crate::cache_lifetime::MAX_CACHE_LIFETIME_ENTRIES`] lifetimes.
+///
+/// Wire form (serde in `crate::cache_lifetime`): deserializing parses any
+/// duration-named member (`ephemeral_5m_input_tokens`, `ttl_30m_tokens`);
+/// serializing renders `ephemeral_<duration>_input_tokens`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CacheCreation {
-    /// Tokens written to the 5-minute-TTL cache.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ephemeral_5m_input_tokens: Option<u32>,
-    /// Tokens written to the 1-hour-TTL cache.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ephemeral_1h_input_tokens: Option<u32>,
+    lifetimes: std::collections::BTreeMap<u32, u32>,
+}
+
+impl CacheCreation {
+    /// Build from `(lifetime seconds, tokens)` pairs. A repeated lifetime
+    /// sums with saturation; a new lifetime past the entry cap is dropped.
+    pub fn from_lifetimes(pairs: impl IntoIterator<Item = (u32, u32)>) -> Self {
+        let mut creation = Self::default();
+        for (seconds, tokens) in pairs {
+            creation.add(seconds, tokens);
+        }
+        creation
+    }
+
+    /// Tokens written at `seconds` lifetime, `None` when not reported.
+    pub fn get(&self, seconds: u32) -> Option<u32> {
+        self.lifetimes.get(&seconds).copied()
+    }
+
+    /// `(lifetime seconds, tokens)` pairs in ascending lifetime order.
+    pub fn iter(&self) -> impl Iterator<Item = (u32, u32)> + '_ {
+        self.lifetimes.iter().map(|(s, t)| (*s, *t))
+    }
+
+    /// Sum of tokens over every lifetime.
+    pub fn total(&self) -> u64 {
+        self.lifetimes.values().map(|t| u64::from(*t)).sum()
+    }
+
+    /// Number of lifetimes reported.
+    pub fn len(&self) -> usize {
+        self.lifetimes.len()
+    }
+
+    /// Whether no lifetime is reported.
+    pub fn is_empty(&self) -> bool {
+        self.lifetimes.is_empty()
+    }
+
+    /// Add `tokens` at `seconds`; `false` when the lifetime is new and
+    /// the entry cap is already reached.
+    pub(crate) fn add(&mut self, seconds: u32, tokens: u32) -> bool {
+        if let Some(existing) = self.lifetimes.get_mut(&seconds) {
+            *existing = existing.saturating_add(tokens);
+            return true;
+        }
+        if self.lifetimes.len() >= crate::cache_lifetime::MAX_CACHE_LIFETIME_ENTRIES {
+            return false;
+        }
+        self.lifetimes.insert(seconds, tokens);
+        true
+    }
 }
 
 /// Result of a `count_tokens` probe call. Mirrors Anthropic's

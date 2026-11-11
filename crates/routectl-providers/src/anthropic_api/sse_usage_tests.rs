@@ -331,10 +331,10 @@ fn message_delta_partial_cache_creation_object_merges_per_ttl() {
     let usage = chunk.usage.expect("usage");
     let cc = usage.cache_creation.expect("cache_creation present");
     // 5m: delta's 75 wins over captured 50.
-    assert_eq!(cc.ephemeral_5m_input_tokens, Some(75));
+    assert_eq!(cc.get(300), Some(75));
     // 1h: absent from delta, falls back to captured 100. Pre-fix
     // this would be None (whole-object replacement lost it).
-    assert_eq!(cc.ephemeral_1h_input_tokens, Some(100));
+    assert_eq!(cc.get(3600), Some(100));
 }
 
 /// Anthropic reports server-side tool invocation counts in

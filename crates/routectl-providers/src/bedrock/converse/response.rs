@@ -316,30 +316,19 @@ fn translate_usage(u: &ConverseUsage) -> Usage {
 /// (shouldn't happen on the wire today but is theoretically possible)
 /// sum together so no token counts get silently lost.
 pub fn translate_cache_details(details: &[ConverseCacheDetail]) -> CacheCreation {
-    let mut five_min: Option<u32> = None;
-    let mut one_hour: Option<u32> = None;
-    for d in details {
-        match d.ttl.as_str() {
-            "5m" => {
-                let cur = five_min.unwrap_or(0);
-                five_min = Some(cur.saturating_add(d.input_tokens));
-            }
-            "1h" => {
-                let cur = one_hour.unwrap_or(0);
-                one_hour = Some(cur.saturating_add(d.input_tokens));
-            }
+    CacheCreation::from_lifetimes(details.iter().filter_map(|d| {
+        let seconds = match d.ttl.as_str() {
+            "5m" => 300,
+            "1h" => 3600,
             // Forward compat: an unknown TTL bucket means a future AWS
             // value (e.g. "24h"). Drop it from the per-TTL object
             // rather than coercing into the wrong bucket; it still
             // contributed to the cache_creation_input_tokens total
             // upstream.
-            _ => {}
-        }
-    }
-    CacheCreation {
-        ephemeral_5m_input_tokens: five_min,
-        ephemeral_1h_input_tokens: one_hour,
-    }
+            _ => return None,
+        };
+        Some((seconds, d.input_tokens))
+    }))
 }
 
 #[cfg(test)]
@@ -657,8 +646,8 @@ mod tests {
         let cc = resp.usage.unwrap().cache_creation.unwrap();
 
         // Assert
-        assert_eq!(cc.ephemeral_5m_input_tokens, Some(75));
-        assert_eq!(cc.ephemeral_1h_input_tokens, Some(100));
+        assert_eq!(cc.get(300), Some(75));
+        assert_eq!(cc.get(3600), Some(100));
     }
 
     #[test]

@@ -692,10 +692,7 @@ fn render_response_emits_cache_fields_when_present() {
             total_tokens: 190,
             cache_creation_input_tokens: Some(50),
             cache_read_input_tokens: Some(30),
-            cache_creation: Some(CacheCreation {
-                ephemeral_5m_input_tokens: Some(50),
-                ephemeral_1h_input_tokens: None,
-            }),
+            cache_creation: Some(CacheCreation::from_lifetimes([(300, 50)])),
             ..Default::default()
         }),
         routectl_provider: None,

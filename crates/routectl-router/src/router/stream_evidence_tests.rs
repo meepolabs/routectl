@@ -245,10 +245,7 @@ fn parity_rows() -> Vec<ParityRow> {
                 }),
                 usage_chunk(UsageDelta {
                     prompt_tokens: Some(10),
-                    cache_creation: Some(CacheCreation {
-                        ephemeral_5m_input_tokens: Some(64),
-                        ephemeral_1h_input_tokens: None,
-                    }),
+                    cache_creation: Some(CacheCreation::from_lifetimes([(300, 64)])),
                     ..UsageDelta::default()
                 }),
                 stop_chunk("stop"),
@@ -259,10 +256,7 @@ fn parity_rows() -> Vec<ParityRow> {
                 Some(Usage {
                     prompt_tokens: 10,
                     cache_read_input_tokens: Some(0),
-                    cache_creation: Some(CacheCreation {
-                        ephemeral_5m_input_tokens: Some(64),
-                        ephemeral_1h_input_tokens: None,
-                    }),
+                    cache_creation: Some(CacheCreation::from_lifetimes([(300, 64)])),
                     ..Usage::default()
                 }),
             ),

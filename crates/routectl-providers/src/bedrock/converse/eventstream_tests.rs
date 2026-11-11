@@ -477,8 +477,8 @@ fn metadata_cache_details_translate_to_per_ttl_breakdown_on_closing_chunk() {
     let u = closing[0].usage.as_ref().unwrap();
     assert_eq!(u.cache_creation_input_tokens, Some(175));
     let cc = u.cache_creation.as_ref().unwrap();
-    assert_eq!(cc.ephemeral_5m_input_tokens, Some(75));
-    assert_eq!(cc.ephemeral_1h_input_tokens, Some(100));
+    assert_eq!(cc.get(300), Some(75));
+    assert_eq!(cc.get(3600), Some(100));
 }
 
 #[test]
@@ -506,8 +506,8 @@ fn metadata_unknown_ttl_bucket_dropped_from_per_ttl_split_on_closing_chunk() {
     let u = closing[0].usage.as_ref().unwrap();
     assert_eq!(u.cache_creation_input_tokens, Some(125));
     let cc = u.cache_creation.as_ref().unwrap();
-    assert_eq!(cc.ephemeral_5m_input_tokens, Some(75));
-    assert_eq!(cc.ephemeral_1h_input_tokens, None);
+    assert_eq!(cc.get(300), Some(75));
+    assert_eq!(cc.get(3600), None);
 }
 
 #[test]

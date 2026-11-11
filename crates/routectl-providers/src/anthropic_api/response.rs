@@ -23,7 +23,7 @@ use routectl_core::{
     ReasoningDetail, ReasoningDetailKind, Result, Role, Usage, sanitize_for_log,
 };
 
-use super::types::{AnthropicResponse, AnthropicUsage, ContentBlock};
+use super::types::{AnthropicCacheCreation, AnthropicResponse, AnthropicUsage, ContentBlock};
 
 /// Map Anthropic stop_reason to OpenAI finish_reason.
 pub fn map_stop_reason(stop_reason: Option<&str>) -> Option<String> {
@@ -241,13 +241,22 @@ fn translate_usage(u: &AnthropicUsage) -> Usage {
         reasoning_tokens: u.thinking_tokens(),
         cache_creation_input_tokens: u.cache_creation_input_tokens,
         cache_read_input_tokens: u.cache_read_input_tokens,
-        cache_creation: u.cache_creation.as_ref().map(|c| CacheCreation {
-            ephemeral_5m_input_tokens: c.ephemeral_5m_input_tokens,
-            ephemeral_1h_input_tokens: c.ephemeral_1h_input_tokens,
-        }),
+        cache_creation: u.cache_creation.as_ref().map(core_cache_creation),
         server_tool_use: u.server_tool_use.clone(),
         extras: u.extras.clone(),
     }
+}
+
+/// The wire's fixed 5m / 1h breakdown as the canonical lifetime map.
+pub(super) fn core_cache_creation(c: &AnthropicCacheCreation) -> CacheCreation {
+    CacheCreation::from_lifetimes(
+        [
+            (300, c.ephemeral_5m_input_tokens),
+            (3600, c.ephemeral_1h_input_tokens),
+        ]
+        .into_iter()
+        .filter_map(|(seconds, tokens)| Some((seconds, tokens?))),
+    )
 }
 
 /// Restore the client's original tool names on a normalized response.
@@ -656,8 +665,8 @@ mod tests {
         assert_eq!(u.cache_creation_input_tokens, Some(4096));
         assert_eq!(u.cache_read_input_tokens, Some(8192));
         let cc = u.cache_creation.unwrap();
-        assert_eq!(cc.ephemeral_5m_input_tokens, Some(2048));
-        assert_eq!(cc.ephemeral_1h_input_tokens, Some(2048));
+        assert_eq!(cc.get(300), Some(2048));
+        assert_eq!(cc.get(3600), Some(2048));
     }
 
     #[test]

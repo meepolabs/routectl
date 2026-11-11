@@ -505,10 +505,7 @@ fn message_delta_renders_raw_input_tokens_per_anthropic_spec() {
             total_tokens: Some(12395),
             cache_creation_input_tokens: Some(100),
             cache_read_input_tokens: Some(200),
-            cache_creation: Some(CacheCreation {
-                ephemeral_5m_input_tokens: Some(50),
-                ephemeral_1h_input_tokens: Some(50),
-            }),
+            cache_creation: Some(CacheCreation::from_lifetimes([(300, 50), (3600, 50)])),
             ..Default::default()
         }),
         opaque_events: Vec::new(),

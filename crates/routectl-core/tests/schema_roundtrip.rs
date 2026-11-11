@@ -436,8 +436,8 @@ fn usage_with_cache_stats_round_trips() {
     assert_eq!(u.cache_creation_input_tokens, Some(4096));
     assert_eq!(u.cache_read_input_tokens, Some(8192));
     let cc = u.cache_creation.as_ref().unwrap();
-    assert_eq!(cc.ephemeral_5m_input_tokens, Some(2048));
-    assert_eq!(cc.ephemeral_1h_input_tokens, Some(2048));
+    assert_eq!(cc.get(300), Some(2048));
+    assert_eq!(cc.get(3600), Some(2048));
 }
 
 #[test]

@@ -88,10 +88,7 @@ fn response_with_cache(
         total_tokens: p + 50,
         cache_read_input_tokens: cache_read,
         cache_creation_input_tokens: cache_creation_aggregate,
-        cache_creation: cache_write_5m.map(|v| CacheCreation {
-            ephemeral_5m_input_tokens: Some(v),
-            ephemeral_1h_input_tokens: None,
-        }),
+        cache_creation: cache_write_5m.map(|v| CacheCreation::from_lifetimes([(300, v)])),
         ..Default::default()
     });
     ChatResponse {
@@ -132,10 +129,7 @@ fn chunk_with_cache(
         total_tokens: Some(p + 50),
         cache_read_input_tokens: cache_read,
         cache_creation_input_tokens: cache_creation_aggregate,
-        cache_creation: cache_write_5m.map(|v| CacheCreation {
-            ephemeral_5m_input_tokens: Some(v),
-            ephemeral_1h_input_tokens: None,
-        }),
+        cache_creation: cache_write_5m.map(|v| CacheCreation::from_lifetimes([(300, v)])),
         ..Default::default()
     });
     ChatChunk {

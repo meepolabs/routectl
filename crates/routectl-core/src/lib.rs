@@ -9,6 +9,7 @@
 mod beta_assembly_report;
 pub mod cache_control;
 pub mod cache_decision;
+pub mod cache_lifetime;
 pub mod capability;
 pub(crate) mod cloud_project;
 pub mod config_dir;
@@ -57,6 +58,10 @@ pub use cache_control::{
     Breakpoint, BreakpointPosition, CacheBreakpointSource, CacheControl, FrontSlot, FrozenFloor,
     OwnedBreakpoint, compute_frozen_floor, eligible_system_block_index, front_breakpoint_slot,
     mutable_suffix_start, system_block_is_wire_eligible, validate_source,
+};
+pub use cache_lifetime::{
+    MAX_CACHE_LIFETIME_ENTRIES, format_cache_lifetime, parse_cache_lifetime,
+    parse_cache_lifetime_member,
 };
 pub use capability::{
     BETA_ACCEPTED, CACHE_HIT, COMPUTER_USE, EVIDENCE_CLASSES, EvidenceSource, FORCED_TOOL_CHOICE,

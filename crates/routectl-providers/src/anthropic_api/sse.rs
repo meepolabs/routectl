@@ -16,7 +16,7 @@ use routectl_core::{
     schema::{CacheCreation, ChunkChoice, ChunkDelta, UsageDelta},
 };
 
-use super::response::map_stop_reason;
+use super::response::{core_cache_creation, map_stop_reason};
 use super::sse_opaque::{MAX_OPAQUE_BYTES_PER_BLOCK, MAX_OPAQUE_DELTAS_PER_BLOCK, OpaqueCapture};
 use super::types::SseEvent;
 
@@ -304,10 +304,7 @@ impl SseState {
                         input_tokens: u.input_tokens,
                         cache_creation_input_tokens: u.cache_creation_input_tokens,
                         cache_read_input_tokens: u.cache_read_input_tokens,
-                        cache_creation: u.cache_creation.as_ref().map(|c| CacheCreation {
-                            ephemeral_5m_input_tokens: c.ephemeral_5m_input_tokens,
-                            ephemeral_1h_input_tokens: c.ephemeral_1h_input_tokens,
-                        }),
+                        cache_creation: u.cache_creation.as_ref().map(core_cache_creation),
                     });
                 }
                 // Opening role chunk: an OpenAI-Chat stream opens with
@@ -651,11 +648,11 @@ impl SseState {
                     let cap_cc = cap.and_then(|c| c.cache_creation.as_ref());
                     let cache_creation_5m = pick_placeholder(
                         delta_cc.and_then(|c| c.ephemeral_5m_input_tokens),
-                        cap_cc.and_then(|c| c.ephemeral_5m_input_tokens),
+                        cap_cc.and_then(|c| c.get(300)),
                     );
                     let cache_creation_1h = pick_placeholder(
                         delta_cc.and_then(|c| c.ephemeral_1h_input_tokens),
-                        cap_cc.and_then(|c| c.ephemeral_1h_input_tokens),
+                        cap_cc.and_then(|c| c.get(3600)),
                     );
                     let delta_states_cache_writes = reports_input
                         && usage
@@ -665,15 +662,13 @@ impl SseState {
                         // The delta's own write count is authoritative, so
                         // its breakdown is too; a copied one could
                         // contradict it.
-                        delta_cc.map(|c| CacheCreation {
-                            ephemeral_5m_input_tokens: c.ephemeral_5m_input_tokens,
-                            ephemeral_1h_input_tokens: c.ephemeral_1h_input_tokens,
-                        })
+                        delta_cc.map(core_cache_creation)
                     } else if cache_creation_5m.is_some() || cache_creation_1h.is_some() {
-                        Some(CacheCreation {
-                            ephemeral_5m_input_tokens: cache_creation_5m,
-                            ephemeral_1h_input_tokens: cache_creation_1h,
-                        })
+                        Some(CacheCreation::from_lifetimes(
+                            [(300, cache_creation_5m), (3600, cache_creation_1h)]
+                                .into_iter()
+                                .filter_map(|(seconds, tokens)| Some((seconds, tokens?))),
+                        ))
                     } else {
                         None
                     };

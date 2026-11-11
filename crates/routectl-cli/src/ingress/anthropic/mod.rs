@@ -254,15 +254,8 @@ pub(super) fn cache_fields_into(
     if let Some(n) = cache_read_input_tokens {
         map.insert("cache_read_input_tokens".into(), json!(n));
     }
-    if let Some(c) = cache_creation {
-        let mut cc = Map::new();
-        if let Some(n) = c.ephemeral_5m_input_tokens {
-            cc.insert("ephemeral_5m_input_tokens".into(), json!(n));
-        }
-        if let Some(n) = c.ephemeral_1h_input_tokens {
-            cc.insert("ephemeral_1h_input_tokens".into(), json!(n));
-        }
-        map.insert("cache_creation".into(), Value::Object(cc));
+    if let Some(cc) = cache_creation.and_then(|c| serde_json::to_value(c).ok()) {
+        map.insert("cache_creation".into(), cc);
     }
 }
 

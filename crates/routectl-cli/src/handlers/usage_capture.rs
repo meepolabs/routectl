@@ -880,8 +880,8 @@ impl UsageCapture {
             self.record.reasoning_tokens = u.reasoning_tokens.map(|v| v as u64);
             self.record.cache_read = u.cache_read_input_tokens.map(|v| v as u64);
             if let Some(cc) = &u.cache_creation {
-                self.record.cache_write_5m = cc.ephemeral_5m_input_tokens.map(|v| v as u64);
-                self.record.cache_write_1h = cc.ephemeral_1h_input_tokens.map(|v| v as u64);
+                self.record.cache_write_5m = cc.get(300).map(|v| v as u64);
+                self.record.cache_write_1h = cc.get(3600).map(|v| v as u64);
             }
             self.record.server_tool_use = u.server_tool_use.clone();
             // Anthropic returns `service_tier` in the usage extras
@@ -941,10 +941,10 @@ impl UsageCapture {
                 self.record.cache_read = Some(cr as u64);
             }
             if let Some(cc) = &u.cache_creation {
-                if let Some(v) = cc.ephemeral_5m_input_tokens {
+                if let Some(v) = cc.get(300) {
                     self.record.cache_write_5m = Some(v as u64);
                 }
-                if let Some(v) = cc.ephemeral_1h_input_tokens {
+                if let Some(v) = cc.get(3600) {
                     self.record.cache_write_1h = Some(v as u64);
                 }
             }
