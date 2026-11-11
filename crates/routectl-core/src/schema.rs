@@ -1124,7 +1124,8 @@ impl Usage {
 
 /// Per-lifetime breakdown of cache writes for one request: lifetime in
 /// seconds -> tokens written, ordered by lifetime. A zero entry is an
-/// observed zero and is kept, so the Anthropic wire round-trips. Holds at
+/// observed zero and is kept, so the Anthropic wire round-trips. A
+/// zero-second lifetime has no wire spelling and is never stored. Holds at
 /// most [`crate::cache_lifetime::MAX_CACHE_LIFETIME_ENTRIES`] lifetimes.
 ///
 /// Wire form (serde in `crate::cache_lifetime`): deserializing parses any
@@ -1137,7 +1138,8 @@ pub struct CacheCreation {
 
 impl CacheCreation {
     /// Build from `(lifetime seconds, tokens)` pairs. A repeated lifetime
-    /// sums with saturation; a new lifetime past the entry cap is dropped.
+    /// sums with saturation; a zero-second lifetime, and a new lifetime
+    /// past the entry cap, are dropped.
     pub fn from_lifetimes(pairs: impl IntoIterator<Item = (u32, u32)>) -> Self {
         let mut creation = Self::default();
         for (seconds, tokens) in pairs {
@@ -1171,9 +1173,12 @@ impl CacheCreation {
         self.lifetimes.is_empty()
     }
 
-    /// Add `tokens` at `seconds`; `false` when the lifetime is new and
-    /// the entry cap is already reached.
+    /// Add `tokens` at `seconds`; `false` when `seconds` is zero, or when
+    /// the lifetime is new and the entry cap is already reached.
     pub(crate) fn add(&mut self, seconds: u32, tokens: u32) -> bool {
+        if seconds == 0 {
+            return false;
+        }
         if let Some(existing) = self.lifetimes.get_mut(&seconds) {
             *existing = existing.saturating_add(tokens);
             return true;

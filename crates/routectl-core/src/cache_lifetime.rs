@@ -8,8 +8,8 @@
 //! nothing to the split: its tokens stay inside the reported write total
 //! as unknown lifetime.
 //!
-//! Grammar. A duration is `<positive integer, no leading zero><s|m|h|d>`,
-//! lowercase, fitting `u32` seconds. A member name is `_`-separated
+//! Grammar. A duration is `<positive integer><s|m|h|d>`, lowercase,
+//! fitting `u32` seconds; leading zeros are allowed (`05m` is 300). A member name is `_`-separated
 //! segments, ends in `tokens`, holds exactly one `<digits><unit>` segment
 //! (which must itself be a valid duration), and has no read-side segment
 //! (`read`, `cached`).
@@ -31,16 +31,19 @@ pub const MAX_CACHE_LIFETIME_ENTRIES: usize = 16;
 const UNITS: [(char, u32); 4] = [('d', 86_400), ('h', 3_600), ('m', 60), ('s', 1)];
 
 /// Parse a bare duration string (`"5m"`, `"24h"`) into seconds. `None`
-/// for zero, a sign, a fraction, an uppercase or unknown unit, a leading
-/// zero, or a value past `u32` seconds.
+/// for zero, a sign, a fraction, an uppercase or unknown unit, or a
+/// value past `u32` seconds.
 pub fn parse_cache_lifetime(duration: &str) -> Option<u32> {
     let unit = duration.chars().last()?;
     let digits = &duration[..duration.len() - unit.len_utf8()];
     let (_, scale) = UNITS.iter().find(|(c, _)| *c == unit)?;
-    if digits.is_empty() || digits.starts_with('0') || !digits.bytes().all(|b| b.is_ascii_digit()) {
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
     let count: u32 = digits.parse().ok()?;
+    if count == 0 {
+        return None;
+    }
     count.checked_mul(*scale)
 }
 

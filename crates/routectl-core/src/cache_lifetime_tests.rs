@@ -11,6 +11,7 @@ fn member_names_with_one_duration_parse_to_seconds() {
         ("cache write hours", "cache_write_12h_tokens", 43_200),
         ("seconds unit", "ttl_45s_tokens", 45),
         ("days unit", "ttl_1d_tokens", 86_400),
+        ("zero padded", "ttl_05m_tokens", 300),
     ];
     for (row, name, seconds) in rows {
         assert_eq!(parse_cache_lifetime_member(name), Some(seconds), "{row}");
@@ -19,7 +20,12 @@ fn member_names_with_one_duration_parse_to_seconds() {
 
 #[test]
 fn bare_durations_parse_to_seconds() {
-    let rows = [("5m", 300), ("24h", 86_400)];
+    let rows = [
+        ("5m", 300),
+        ("24h", 86_400),
+        ("05m", 300),
+        ("0000000000000000000005m", 300),
+    ];
     for (duration, seconds) in rows {
         assert_eq!(parse_cache_lifetime(duration), Some(seconds), "{duration}");
     }
@@ -34,6 +40,7 @@ fn member_names_outside_the_grammar_are_refused() {
         ("write total", "cache_creation_input_tokens"),
         ("two durations", "ttl_5m_1h_tokens"),
         ("zero", "ttl_0m_tokens"),
+        ("padded zero", "ttl_00m_tokens"),
         ("signed", "ttl_-5m_tokens"),
         ("fraction", "ttl_1.5h_tokens"),
         ("uppercase unit", "ttl_5M_tokens"),
@@ -49,7 +56,7 @@ fn member_names_outside_the_grammar_are_refused() {
 fn bare_durations_outside_the_grammar_are_refused() {
     let rows = [
         ("zero", "0m"),
-        ("leading zero", "05m"),
+        ("padded zero", "00m"),
         ("no unit", "5"),
         ("no digits", "m"),
         ("empty", ""),
@@ -134,6 +141,19 @@ fn anthropic_wire_round_trips_with_zero_entry_kept() {
         CacheCreation::from_lifetimes([(300, 2540), (3600, 0)])
     );
     assert_eq!(serde_json::to_value(&creation).expect("renders"), wire);
+}
+
+#[test]
+fn zero_second_lifetime_is_dropped_so_construction_round_trips() {
+    let creation = CacheCreation::from_lifetimes([(0, 9), (300, 0)]);
+
+    let wire = serde_json::to_value(&creation).expect("renders");
+
+    assert_eq!(wire, json!({"ephemeral_5m_input_tokens": 0}));
+    assert_eq!(
+        serde_json::from_value::<CacheCreation>(wire).expect("parses"),
+        creation
+    );
 }
 
 #[test]
