@@ -1132,6 +1132,10 @@ mod system_lift_carrier_tests;
 mod openai_message_extras_tests;
 
 #[cfg(test)]
+#[path = "openai_chat_carriers_render_tests.rs"]
+mod openai_chat_carriers_render_tests;
+
+#[cfg(test)]
 #[path = "thinking_carrier_ingress_tests.rs"]
 mod thinking_carrier_ingress_tests;
 

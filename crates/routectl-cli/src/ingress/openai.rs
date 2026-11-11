@@ -19,8 +19,8 @@ use std::any::Any;
 use axum::http::HeaderMap;
 use routectl_core::wire_check::{EditKind, EditSite, IngressDialect};
 use routectl_core::{
-    ChatChunk, ChatRequest, ChatResponse, ContentPart, Error, KnownContentPart, MessageContent,
-    RefusalReason, Result, is_canonical_request_key,
+    ChatChunk, ChatRequest, ChatResponse, ContentPart, Error, KnownContentPart, Message,
+    MessageContent, RefusalReason, Result, is_canonical_request_key, renders_unknowns,
 };
 use serde_json::{Map, Value};
 
@@ -305,6 +305,11 @@ impl IngressAdapter for OpenAiIngress {
         }
         let mut value = serde_json::to_value(&chunk)
             .map_err(|e| Error::Internal(format!("openai ingress: serialize chunk: {e}")))?;
+        if renders_unknowns(IngressDialect::Chat, chunk.upstream_meta.as_ref())
+            && let Some(usage) = chunk.usage.as_ref()
+        {
+            merge_carried_usage_members(&mut value, &usage.extras);
+        }
         surface_cached_tokens_in_usage(&mut value, edits);
         // Stamp the OpenAI streaming envelope a strict SDK requires on
         // `ChatCompletionChunk`: `object:"chat.completion.chunk"`, a
@@ -389,6 +394,9 @@ fn render_openai_response_value(resp: ChatResponse, edits: &mut ResponseEdits) -
         .and_then(|meta| meta.system_fingerprint().map(str::to_string));
     let mut value = serde_json::to_value(&resp)
         .map_err(|e| Error::Internal(format!("openai ingress: serialize response: {e}")))?;
+    if renders_unknowns(IngressDialect::Chat, resp.upstream_meta.as_ref()) {
+        merge_choice_carriers(&mut value, &resp);
+    }
     echo_upstream_system_fingerprint(&mut value, upstream_fingerprint);
     // Surface Anthropic/Bedrock cache-read counts under the standard
     // OpenAI `usage.prompt_tokens_details.cached_tokens` field so an
@@ -408,6 +416,52 @@ fn render_openai_response_value(resp: ChatResponse, edits: &mut ResponseEdits) -
     // keeps its own wire shape (hub-and-spoke).
     apply_openai_response_envelope(&mut value, edits);
     Ok(value)
+}
+
+/// Merge each choice message's carried members, and each typed content
+/// part's, onto the slot it serialized to in `value`. A member the slot
+/// already has is never replaced, and a name the node types stays reserved
+/// even when its typed value is absent.
+fn merge_choice_carriers(value: &mut Value, resp: &ChatResponse) {
+    let Some(slots) = value.get_mut("choices").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for (slot, choice) in slots.iter_mut().zip(&resp.choices) {
+        if let Some(Value::Object(message)) = slot.get_mut("message") {
+            merge_message_carriers(message, &choice.message);
+        }
+    }
+}
+
+fn merge_message_carriers(slot: &mut Map<String, Value>, message: &Message) {
+    merge_absent_members(slot, message.forwardable_extras());
+    let (MessageContent::Parts(parts), Some(Value::Array(part_slots))) =
+        (&message.content, slot.get_mut("content"))
+    else {
+        return;
+    };
+    for (part_slot, part) in part_slots.iter_mut().zip(parts) {
+        if let (ContentPart::Known(known), Value::Object(members)) = (part, part_slot) {
+            merge_absent_members(members, known.forwardable_extras());
+        }
+    }
+}
+
+/// Merge the usage members a chunk carried onto its serialized `usage`,
+/// never replacing a member already there.
+fn merge_carried_usage_members(value: &mut Value, carried: &Map<String, Value>) {
+    if let Some(Value::Object(usage)) = value.get_mut("usage") {
+        merge_absent_members(usage, carried.iter());
+    }
+}
+
+fn merge_absent_members<'a>(
+    target: &mut Map<String, Value>,
+    members: impl Iterator<Item = (&'a String, &'a Value)>,
+) {
+    for (key, value) in members {
+        target.entry(key.clone()).or_insert_with(|| value.clone());
+    }
 }
 
 /// Downcast the generic stream state to this dialect's concrete state.

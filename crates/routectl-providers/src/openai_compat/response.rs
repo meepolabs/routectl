@@ -9,8 +9,9 @@
 //!   - RawThinkTag: regex-strip `<think>...</think>` blocks from content,
 //!     push them as `reasoning_details`.
 
-use serde_json::Value;
+use serde_json::{Map, Value};
 
+use routectl_core::wire_check::IngressDialect;
 use routectl_core::{ChatResponse, Error, Message, MessageContent, Result, UpstreamMeta, Usage};
 
 use super::dialect::ReasoningDialect;
@@ -55,9 +56,12 @@ pub const OPENAI_COMPAT_USAGE_SUBKEYS: &[&str] = &[
 /// Parse an openai-compat wire response into a canonical [`ChatResponse`],
 /// applying dialect-specific reasoning lifting and usage normalization.
 pub fn normalize(id: &str, raw: Value, dialect: ReasoningDialect) -> Result<ChatResponse> {
-    let preprocessed = coalesce_reasoning_content_in_response(raw);
+    let mut preprocessed = coalesce_reasoning_content_in_response(raw);
+    let message_members = split_choice_message_extras(&mut preprocessed);
     let mut resp: ChatResponse = serde_json::from_value(preprocessed)
         .map_err(|e| Error::normalize_response(id, e.to_string()))?;
+    attach_choice_message_extras(&mut resp, message_members);
+    stamp_chat_dialect(&mut resp);
 
     for choice in &mut resp.choices {
         apply_dialect_to_message(id, &mut choice.message, dialect)?;
@@ -153,6 +157,41 @@ pub(crate) fn lift_and_strip_usage_extras(usage: &mut Usage) -> Vec<&'static str
         }
     }
     stripped
+}
+
+/// Split the members a canonical message does not model out of each
+/// choice's `message`, one map per choice in choice order. Runs after the
+/// `reasoning_content` fold, so the folded spelling is a modeled member.
+fn split_choice_message_extras(raw: &mut Value) -> Vec<Map<String, Value>> {
+    let Some(choices) = raw.get_mut("choices").and_then(Value::as_array_mut) else {
+        return Vec::new();
+    };
+    choices
+        .iter_mut()
+        .map(|choice| match choice.get_mut("message") {
+            Some(message) => routectl_core::split_message_extras(std::slice::from_mut(message))
+                .pop()
+                .unwrap_or_default(),
+            None => Map::new(),
+        })
+        .collect()
+}
+
+/// Store each split map on the message of the choice it came from.
+fn attach_choice_message_extras(resp: &mut ChatResponse, members: Vec<Map<String, Value>>) {
+    for (choice, extras) in resp.choices.iter_mut().zip(members) {
+        choice.message.extras = extras;
+    }
+}
+
+/// Record that this response was parsed from a Chat Completions body, so
+/// only a render of that dialect emits its carried members.
+fn stamp_chat_dialect(resp: &mut ChatResponse) {
+    let stamp = UpstreamMeta::default().with_wire_dialect(IngressDialect::Chat);
+    resp.upstream_meta = Some(match resp.upstream_meta.take() {
+        Some(meta) => meta.merge(stamp),
+        None => stamp,
+    });
 }
 
 /// Lift a non-empty upstream `system_fingerprint` out of `extras` onto the
@@ -916,5 +955,63 @@ mod tests {
         );
         let lp = resp.choices[0].logprobs.as_ref().expect("logprobs present");
         assert_eq!(lp["content"][0]["token"], "x");
+    }
+
+    /// Each choice message's unmodeled members land on its carrier, a typed
+    /// part's on the part's carrier, and the response is stamped Chat. The
+    /// `reasoning_content` spelling is folded first, so it is never carried.
+    #[test]
+    fn normalize_carries_message_and_part_members_and_stamps_chat() {
+        let raw = json!({
+            "id": "c", "model": "m",
+            "choices": [
+                {"index": 0, "finish_reason": "stop",
+                 "message": {"role": "assistant", "reasoning_content": "r",
+                             "annotations": [{"type": "url_citation"}],
+                             "note": "caf\u{e9}",
+                             "content": [{"type": "text", "text": "hi", "part_note": 1}]}},
+                {"index": 1, "finish_reason": "stop",
+                 "message": {"role": "assistant", "content": "plain"}}
+            ]
+        });
+
+        let resp = normalize("test", raw, ReasoningDialect::DeepSeek).unwrap();
+
+        let first = &resp.choices[0].message;
+        let carried: Vec<&str> = first.extras.keys().map(String::as_str).collect();
+        assert_eq!(carried, ["annotations", "note"]);
+        assert_eq!(first.extras["note"], json!("caf\u{e9}"));
+        match &first.content {
+            MessageContent::Parts(parts) => match &parts[0] {
+                routectl_core::ContentPart::Known(routectl_core::KnownContentPart::Text {
+                    extras,
+                    ..
+                }) => assert_eq!(extras.get("part_note"), Some(&json!(1))),
+                other => panic!("expected a text part, got {other:?}"),
+            },
+            other => panic!("expected parts, got {other:?}"),
+        }
+        assert_eq!(first.reasoning_details.len(), 1);
+        assert!(resp.choices[1].message.extras.is_empty());
+        assert_eq!(
+            resp.upstream_meta.and_then(|m| m.wire_dialect),
+            Some(IngressDialect::Chat)
+        );
+    }
+
+    /// The Chat stamp sits beside the carried `system_fingerprint` rather
+    /// than replacing it.
+    #[test]
+    fn the_chat_stamp_keeps_the_system_fingerprint() {
+        let mut raw = fake_response("hi");
+        raw["system_fingerprint"] = json!("fp_x");
+
+        let meta = normalize("test", raw, ReasoningDialect::OpenAi)
+            .unwrap()
+            .upstream_meta
+            .expect("meta");
+
+        assert_eq!(meta.wire_dialect, Some(IngressDialect::Chat));
+        assert_eq!(meta.system_fingerprint(), Some("fp_x"));
     }
 }

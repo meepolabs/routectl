@@ -358,6 +358,45 @@ fn chat_stream_with_usage(fingerprint: Option<&str>) -> ResponseTemplate {
     ))
 }
 
+/// A Chat answer whose choice message and its typed part carry members no
+/// canonical field models.
+fn chat_complete_with_message_members() -> ResponseTemplate {
+    ResponseTemplate::new(200).set_body_json(json!({
+        "id": "c1", "object": "chat.completion", "created": 1_700_000_000_i64,
+        "model": UPSTREAM, "system_fingerprint": null,
+        "choices": [{"index": 0, "finish_reason": "stop",
+                     "message": {"role": "assistant",
+                                 "sentinel_message": {"k": "caf\u{e9}"},
+                                 "content": [{"type": "text", "text": "ok",
+                                              "sentinel_part": 1}]}}],
+        "usage": {"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4}
+    }))
+}
+
+/// A Chat stream whose terminal usage object carries a member no usage
+/// field models.
+fn chat_stream_with_usage_members() -> ResponseTemplate {
+    sse_response(sse(
+        &[
+            (
+                None,
+                json!({"id": "c1", "object": "chat.completion.chunk",
+                       "created": 1_700_000_000_i64, "model": UPSTREAM,
+                       "choices": [{"index": 0, "delta": {"role": "assistant", "content": "ok"},
+                                    "finish_reason": "stop"}]}),
+            ),
+            (
+                None,
+                json!({"id": "c1", "object": "chat.completion.chunk",
+                       "created": 1_700_000_000_i64, "model": UPSTREAM, "choices": [],
+                       "usage": {"prompt_tokens": 8, "completion_tokens": 1, "total_tokens": 9,
+                                 "sentinel_usage": {"usd": 0.5}}}),
+            ),
+        ],
+        true,
+    ))
+}
+
 fn chat_complete_with_reasoning_content() -> ResponseTemplate {
     ResponseTemplate::new(200).set_body_json(json!({
         "id": "c1", "object": "chat.completion", "created": 1_700_000_000_i64,
@@ -794,6 +833,21 @@ fn chat_cases() -> Vec<Case> {
                 {"role": "developer", "sentinel_developer": true, "content": "be brief"},
                 {"role": "user", "content": "hi"}]}),
             chat_complete(),
+            chat_provider,
+        ),
+        case(
+            "chat/complete-message-and-part-members",
+            Ingress::Chat,
+            json!({"model": ALIAS, "messages": hi}),
+            chat_complete_with_message_members(),
+            chat_provider,
+        ),
+        case(
+            "chat/stream-usage-members",
+            Ingress::Chat,
+            json!({"model": ALIAS, "stream": true,
+                   "stream_options": {"include_usage": true}, "messages": hi}),
+            chat_stream_with_usage_members(),
             chat_provider,
         ),
         case(
@@ -2129,5 +2183,61 @@ async fn only_an_anthropic_client_receives_response_content_block_members() {
             expected,
             "{row}: estimated_tokens: {text}"
         );
+    }
+}
+
+#[tokio::test]
+async fn only_a_chat_client_receives_chat_message_part_and_usage_members() {
+    let hi = json!([{"role": "user", "content": "hi"}]);
+    // (row, ingress, request body, upstream, members expected)
+    let rows = [
+        (
+            "anthropic client",
+            Ingress::Anthropic,
+            json!({"model": ALIAS, "max_tokens": 16, "messages": hi}),
+            chat_complete_with_message_members(),
+            false,
+        ),
+        (
+            "anthropic stream client",
+            Ingress::Anthropic,
+            json!({"model": ALIAS, "max_tokens": 16, "stream": true, "messages": hi}),
+            chat_stream_with_usage_members(),
+            false,
+        ),
+        (
+            "chat client",
+            Ingress::Chat,
+            json!({"model": ALIAS, "messages": hi}),
+            chat_complete_with_message_members(),
+            true,
+        ),
+        (
+            "chat stream client",
+            Ingress::Chat,
+            json!({"model": ALIAS, "stream": true,
+                   "stream_options": {"include_usage": true}, "messages": hi}),
+            chat_stream_with_usage_members(),
+            true,
+        ),
+    ];
+    for (row, ingress, body, upstream, expected) in rows {
+        // Arrange
+        let streamed = body.get("stream").is_some();
+        let probe = case(row, ingress, body, upstream, chat_provider);
+
+        // Act
+        let (_swap, client) = serve(&probe).await;
+
+        // Assert
+        let text = String::from_utf8_lossy(&client);
+        let members: &[&str] = if streamed {
+            &["sentinel_usage"]
+        } else {
+            &["sentinel_message", "sentinel_part"]
+        };
+        for member in members {
+            assert_eq!(text.contains(member), expected, "{row}: {member}: {text}");
+        }
     }
 }

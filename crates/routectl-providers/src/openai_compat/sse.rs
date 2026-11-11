@@ -10,9 +10,10 @@
 //! chunks. Call `ThinkTagAccumulator::process` instead of `parse_event` when
 //! the dialect is `RawThinkTag`.
 
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use routectl_core::schema::{ChunkChoice, ChunkDelta, UsageDelta};
+use routectl_core::wire_check::IngressDialect;
 use routectl_core::{ChatChunk, Error, Result, UpstreamMeta, UsageInputSource, sanitize_for_log};
 
 use super::dialect::ReasoningDialect;
@@ -321,6 +322,7 @@ pub fn parse_event(
     // and `prompt_cache_hit_tokens` / `prompt_tokens_details
     // .cached_tokens` would never reach canonical.
     lift_chunk_usage_subbags(&mut val);
+    let usage_members = split_usage_members(&mut val);
 
     apply_chunk_dialect(id, &mut val, dialect, reasoning_index)?;
 
@@ -329,9 +331,56 @@ pub fn parse_event(
         .map_err(|e| Error::normalize_response(id, format!("chunk deserialize: {e}")))?;
 
     Ok(Some(carry_system_fingerprint(
-        mark_reported_usage(chunk),
+        mark_reported_usage(carry_usage_members(chunk, usage_members)),
         fingerprint,
     )))
+}
+
+/// Usage member names [`UsageDelta`] models. Every other member of a chunk's
+/// `usage` object is carried for a Chat Completions render.
+const USAGE_DELTA_MEMBERS: [&str; 8] = [
+    "prompt_tokens",
+    "completion_tokens",
+    "total_tokens",
+    "reasoning_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+    "cache_creation",
+    "server_tool_use",
+];
+
+/// Move the members of the chunk's `usage` object that [`UsageDelta`] does
+/// not model out of `val`. Run after the sub-bag lift, so a lifted sub-bag is
+/// never carried.
+fn split_usage_members(val: &mut Value) -> Map<String, Value> {
+    let Some(usage) = val.get_mut("usage").and_then(Value::as_object_mut) else {
+        return Map::new();
+    };
+    let is_modeled = |name: &str| USAGE_DELTA_MEMBERS.contains(&name);
+    if usage.keys().all(|name| is_modeled(name)) {
+        return Map::new();
+    }
+    let (kept, carried) = std::mem::take(usage)
+        .into_iter()
+        .partition(|(name, _)| is_modeled(name));
+    *usage = kept;
+    carried
+}
+
+/// Put `members` on the chunk's usage and stamp the chunk as parsed from a
+/// Chat Completions body, so only a render of that dialect emits them. A
+/// chunk with no usage, or no member to carry, is left as it is.
+fn carry_usage_members(mut chunk: ChatChunk, members: Map<String, Value>) -> ChatChunk {
+    let Some(usage) = chunk.usage.as_mut().filter(|_| !members.is_empty()) else {
+        return chunk;
+    };
+    usage.extras = members;
+    let stamp = UpstreamMeta::default().with_wire_dialect(IngressDialect::Chat);
+    chunk.upstream_meta = Some(match chunk.upstream_meta.take() {
+        Some(meta) => meta.merge(stamp),
+        None => stamp,
+    });
+    chunk
 }
 
 /// The non-empty `system_fingerprint` string a chunk carries, if any.
@@ -394,9 +443,11 @@ fn mark_reported_usage(mut chunk: ChatChunk) -> ChatChunk {
         .as_ref()
         .is_some_and(|u| u.prompt_tokens.is_some())
     {
-        chunk.upstream_meta = Some(UpstreamMeta::from_usage_input_source(
-            UsageInputSource::ExplicitFinal,
-        ));
+        let carrier = UpstreamMeta::from_usage_input_source(UsageInputSource::ExplicitFinal);
+        chunk.upstream_meta = Some(match chunk.upstream_meta.take() {
+            Some(meta) => meta.merge(carrier),
+            None => carrier,
+        });
     }
     chunk
 }
@@ -457,18 +508,24 @@ fn detect_error_envelope(id: &str, val: &Value) -> Option<Error> {
 /// To keep that from being a silent differential vs the loud `parse_event`
 /// serde path, a present-but-undeserializable `usage` key is logged at
 /// debug with the serde error; a missing key stays silent.
-fn extract_chunk_usage(provider_id: &str, val: &mut Value) -> Option<UsageDelta> {
+fn extract_chunk_usage(
+    provider_id: &str,
+    val: &mut Value,
+) -> (Option<UsageDelta>, Map<String, Value>) {
     lift_chunk_usage_subbags(val);
-    let usage = val.get("usage")?;
+    let members = split_usage_members(val);
+    let Some(usage) = val.get("usage") else {
+        return (None, members);
+    };
     match serde_json::from_value(usage.clone()) {
-        Ok(delta) => Some(delta),
+        Ok(delta) => (Some(delta), members),
         Err(e) => {
             tracing::debug!(
                 provider = %provider_id,
                 error = %e,
                 "dropping malformed streaming usage object"
             );
-            None
+            (None, members)
         }
     }
 }
@@ -734,15 +791,16 @@ impl ThinkTagAccumulator {
         // Lift the terminal usage object (sub-bags -> canonical) AFTER
         // the choices loop: `choices_raw` was cloned out of `val`, so
         // no immutable borrow is live and the `&mut val` lift is safe.
-        let usage = extract_chunk_usage(provider_id, &mut val);
-        let chunk = mark_reported_usage(ChatChunk {
+        let (usage, usage_members) = extract_chunk_usage(provider_id, &mut val);
+        let chunk = ChatChunk {
             id: chunk_id,
             model,
             choices: new_choices,
             usage,
             opaque_events: Vec::new(),
             upstream_meta: None,
-        });
+        };
+        let chunk = mark_reported_usage(carry_usage_members(chunk, usage_members));
 
         Ok(Some(carry_system_fingerprint(
             chunk,
@@ -2300,5 +2358,103 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn parse_on_both_paths(raw: &str) -> [(&'static str, ChatChunk); 2] {
+        [
+            (
+                "parse_event",
+                parse_event("p", raw, ReasoningDialect::OpenAi, &mut 0)
+                    .unwrap()
+                    .unwrap(),
+            ),
+            (
+                "process",
+                ThinkTagAccumulator::new()
+                    .process("p", raw)
+                    .unwrap()
+                    .unwrap(),
+            ),
+        ]
+    }
+
+    /// A terminal usage object's unmodeled members ride the usage delta, and
+    /// the chunk is stamped as Chat beside its explicit-final usage source.
+    /// A lifted sub-bag is never carried, and a modeled count stays typed.
+    #[test]
+    fn a_usage_chunk_carries_its_members_with_both_the_chat_stamp_and_its_source() {
+        let raw = json!({"id": "c", "model": "m", "choices": [],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12,
+                      "prompt_tokens_details": {"cached_tokens": 4},
+                      "cost": 0.5, "note": "caf\u{e9}"}})
+        .to_string();
+
+        for (path, chunk) in parse_on_both_paths(&raw) {
+            let meta = chunk.upstream_meta.expect("usage chunk meta");
+            assert_eq!(meta.wire_dialect, Some(IngressDialect::Chat), "{path}");
+            assert_eq!(
+                meta.usage_input_source,
+                Some(UsageInputSource::ExplicitFinal),
+                "{path}"
+            );
+            let usage = chunk.usage.expect("usage delta");
+            assert_eq!(usage.prompt_tokens, Some(10), "{path}");
+            assert_eq!(usage.cache_read_input_tokens, Some(4), "{path}");
+            let carried: Vec<&str> = usage.extras.keys().map(String::as_str).collect();
+            assert_eq!(carried, ["cost", "note"], "{path}");
+            assert_eq!(usage.extras["note"], json!("caf\u{e9}"), "{path}");
+        }
+    }
+
+    /// A usage object holding only modeled members carries nothing, and its
+    /// chunk is not stamped: the meta holds the usage source alone.
+    #[test]
+    fn a_usage_chunk_without_unmodeled_members_is_left_unstamped() {
+        let raw = json!({"id": "c", "model": "m", "choices": [],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12,
+                      "completion_tokens_details": {"reasoning_tokens": 1}}})
+        .to_string();
+
+        for (path, chunk) in parse_on_both_paths(&raw) {
+            assert_eq!(
+                chunk.upstream_meta,
+                Some(UpstreamMeta::from_usage_input_source(
+                    UsageInputSource::ExplicitFinal
+                )),
+                "{path}"
+            );
+            assert!(chunk.usage.expect("usage").extras.is_empty(), "{path}");
+        }
+    }
+
+    /// The modeled usage names are exactly the members a populated
+    /// `UsageDelta` serializes, so a typed field added later is never
+    /// carried as an unmodeled member.
+    #[test]
+    fn modeled_usage_names_match_the_usage_delta_members() {
+        let full = UsageDelta {
+            prompt_tokens: Some(1),
+            completion_tokens: Some(1),
+            total_tokens: Some(1),
+            reasoning_tokens: Some(1),
+            cache_creation_input_tokens: Some(1),
+            cache_read_input_tokens: Some(1),
+            cache_creation: Some(routectl_core::CacheCreation::default()),
+            server_tool_use: Some(json!({})),
+            extras: Map::new(),
+        };
+
+        let serialized = serde_json::to_value(&full).unwrap();
+
+        let mut names: Vec<&str> = serialized
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let mut modeled = USAGE_DELTA_MEMBERS.to_vec();
+        names.sort_unstable();
+        modeled.sort_unstable();
+        assert_eq!(names, modeled);
     }
 }
