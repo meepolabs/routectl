@@ -14,11 +14,12 @@
 //! `system` lifted from the top-level `instructions` field.
 //!
 //! Statefulness contract (see `parse.rs`): routectl is stateless. A
-//! request carrying `previous_response_id` is rejected with a 4xx
-//! because it relies on server-side conversation state routectl never
-//! holds; answering anyway would be a silent wrong answer. A request
-//! carrying `store: true` is accepted -- the current turn is
-//! self-contained -- but the persistence is ignored with a WARN.
+//! request carrying `previous_response_id`, `conversation` or
+//! `background: true` is rejected with a 4xx because it relies on
+//! server-side conversation state routectl never holds; answering anyway
+//! would be a silent wrong answer. A request carrying `store: true` is
+//! accepted -- the current turn is self-contained -- but the persistence
+//! is ignored with a WARN.
 //!
 //! Layout: this file holds the adapter surface, request parsing, and the
 //! statefulness contract. `render.rs` holds the non-streaming renderer

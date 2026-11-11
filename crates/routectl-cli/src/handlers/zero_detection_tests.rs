@@ -109,6 +109,8 @@ enum Egress {
     },
     /// A real openai-responses provider on the Bedrock Mantle surface.
     ResponsesMantle,
+    /// A real openai-responses provider on the ChatGPT-OAuth surface.
+    ResponsesChatgptOauth,
     /// A provider entry speaking another dialect than the client, recorded
     /// on `lane`: a TRANSLATION lane, so only its request leg is compared.
     Translation {
@@ -136,7 +138,7 @@ impl Case {
     /// The lane the check records this case's findings on.
     const fn lane(&self) -> &'static str {
         match self.egress {
-            Egress::Entry(_) => self.ingress.lane(),
+            Egress::Entry(_) | Egress::ResponsesChatgptOauth => self.ingress.lane(),
             Egress::ResponsesMantle => RESPONSES_MANTLE,
             Egress::Translation { lane, .. } => lane,
             Egress::Bedrock {
@@ -160,6 +162,7 @@ impl Case {
             | Egress::Translation { .. } => &[Leg::Request],
             Egress::Entry(_)
             | Egress::ResponsesMantle
+            | Egress::ResponsesChatgptOauth
             | Egress::Bedrock {
                 shape: BedrockShape::Invoke,
                 ..
@@ -1190,6 +1193,16 @@ fn responses_carrier_cases() -> Vec<Case> {
             responses_stream(),
             responses_provider,
         ),
+        Case {
+            egress: Egress::ResponsesChatgptOauth,
+            ..case(
+                "responses-chatgpt-oauth/codex-shaped-developer-items",
+                Ingress::Responses,
+                codex_shaped_body(),
+                responses_stream(),
+                responses_provider,
+            )
+        },
     ]
 }
 
@@ -1516,6 +1529,7 @@ async fn router_for(case: &Case, base: &str) -> Router {
         Egress::Entry(provider) | Egress::Translation { provider, .. } => provider,
         Egress::Bedrock { shape, model_id } => return bedrock_router(shape, model_id, base).await,
         Egress::ResponsesMantle => return responses_mantle_router(base),
+        Egress::ResponsesChatgptOauth => return responses_chatgpt_oauth_router(base),
     };
     let mut retry = RetryPolicy::default();
     retry.max_attempts = 1;
@@ -1649,6 +1663,48 @@ fn responses_mantle_router(origin: &str) -> Router {
             PROVIDER,
             Arc::new(OpenAiResponsesProvider::new(cfg)),
             MANTLE_UPSTREAM,
+        )),
+    )]));
+    router
+}
+
+/// A router whose one target is a real ChatGPT-OAuth Responses provider
+/// dialing `base`, checking every request. Built directly rather than
+/// through the factory, which would resolve an installation id under the
+/// real config folder.
+fn responses_chatgpt_oauth_router(base: &str) -> Router {
+    use routectl_providers::openai_responses::{
+        AuthKind, OpenAiResponsesConfig, OpenAiResponsesProvider,
+    };
+    let entry = ProviderEntry::openai_responses(crate::test_secret::file_ref("k"))
+        .with_openai_responses_auth_kind(AuthKind::ChatgptOauth)
+        .with_account_id_ref(crate::test_secret::file_ref("acct-synthetic"))
+        .with_openai_responses_base_url(base);
+    let mut retry = RetryPolicy::default();
+    retry.max_attempts = 1;
+    let mut config = Config {
+        providers: BTreeMap::from([(PROVIDER.to_string(), entry)]),
+        models: BTreeMap::from([(NICKNAME.to_string(), plain_model())]),
+        aliases: BTreeMap::from([(ALIAS.to_string(), AliasValue::Single(NICKNAME.to_string()))]),
+        retry,
+        ..Default::default()
+    };
+    check_every_request(&mut config);
+    let mut cfg = OpenAiResponsesConfig::new_with_auth(
+        PROVIDER,
+        Arc::new(routectl_core::StaticToken::new("synthetic-bearer")),
+    );
+    cfg.account_id = Some("acct-synthetic".into());
+    cfg.base_url = base.to_string();
+    cfg.auth_kind = AuthKind::ChatgptOauth;
+    let mut router = Router::new(Arc::new(config));
+    router.install_resolved_models(BTreeMap::from([(
+        NICKNAME.to_string(),
+        Arc::new(ResolvedModel::new(
+            NICKNAME,
+            PROVIDER,
+            Arc::new(OpenAiResponsesProvider::new(cfg)),
+            UPSTREAM,
         )),
     )]));
     router

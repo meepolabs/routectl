@@ -34,9 +34,12 @@
 //! - everything else                    -> `provider_extras` (forward-compat)
 //!
 //! Statefulness contract (deterministic, never a silent wrong answer):
-//! - `previous_response_id` present -> 400 (`Error::Validation`). The
-//!   client omitted prior context expecting the server to resolve it;
-//!   routectl is stateless and cannot, so answering would be wrong.
+//! - `previous_response_id` or `conversation` present (non-null) -> 400
+//!   (`Error::Validation`). The client omitted prior context expecting the
+//!   server to resolve it; routectl is stateless and cannot, so answering
+//!   would be wrong.
+//! - `background: true` -> 400. It asks the server to keep the response
+//!   for later retrieval, which a stateless proxy cannot do.
 //! - `store: true` (no previous_response_id) -> accepted, persistence
 //!   ignored with a WARN (once per process). The full turn is present, so the answer is
 //!   correct; retrieval-by-id later just won't work because routectl
@@ -113,10 +116,11 @@ pub(super) fn translate_request(headers: &HeaderMap, body: Value) -> Result<Chat
     };
 
     // Statefulness contract: reject server-side conversation state before
-    // doing any other work. previous_response_id means the client omitted
-    // prior context expecting the server to resolve it -- routectl never
+    // doing any other work. previous_response_id or conversation means the
+    // client omitted prior context expecting the server to resolve it, and
+    // background asks the server to keep the response -- routectl never
     // holds that state, so answering would be a silent wrong answer.
-    reject_previous_response_id(&obj)?;
+    reject_server_state(&obj)?;
     // store:true is accepted (the turn is self-contained) but the
     // persistence intent is ignored; warn so the operator knows
     // retrieval-by-id won't work against a stateless proxy.
@@ -286,24 +290,40 @@ pub(super) fn translate_request(headers: &HeaderMap, body: Value) -> Result<Chat
 // Statefulness contract
 // ---------------------------------------------------------------------------
 
-/// Reject a request carrying a non-null `previous_response_id`. routectl
-/// is stateless: it never persists prior turns, so it cannot resolve a
-/// reference to one. Returning the prior context's continuation anyway
-/// would be a silent wrong answer, so this is a hard 400.
-fn reject_previous_response_id(obj: &Map<String, Value>) -> Result<()> {
-    let present = obj
-        .get("previous_response_id")
-        .is_some_and(|v| !v.is_null());
-    if !present {
+/// Reject a request that relies on server-side state. routectl is
+/// stateless: it never persists prior turns, conversations or responses,
+/// so it cannot resolve a reference to one (`previous_response_id`,
+/// `conversation`) or keep a response for later retrieval (`background:
+/// true`). Answering anyway would be a silent wrong answer, so this is a
+/// hard 400. An explicit `null` (and `background: false`) is the "not set"
+/// shape and passes.
+fn reject_server_state(obj: &Map<String, Value>) -> Result<()> {
+    let Some(member) = server_state_member(obj) else {
         return Ok(());
-    }
+    };
     Err(Error::Validation(
-        "openai-responses ingress: routectl is stateless and does not support server-side \
-         conversation state (previous_response_id). Configure the client to send the full \
-         conversation input each turn (disable store / unset previous_response_id)."
-            .into(),
+        format!(
+            "openai-responses ingress: routectl is stateless and does not support server-side \
+             conversation state ({member}). Configure the client to send the full \
+             conversation input each turn (disable store / unset {member})."
+        ),
         RefusalReason::PreviousResponseId,
     ))
+}
+
+/// The first top-level member of `obj` that asks for server-side state.
+fn server_state_member(obj: &Map<String, Value>) -> Option<&'static str> {
+    let is_set = |key: &str| obj.get(key).is_some_and(|v| !v.is_null());
+    if is_set("previous_response_id") {
+        return Some("previous_response_id");
+    }
+    if is_set("conversation") {
+        return Some("conversation");
+    }
+    if obj.get("background").and_then(Value::as_bool) == Some(true) {
+        return Some("background");
+    }
+    None
 }
 
 /// Latch for [`warn_on_store`]: a client that sends `store: true` sends it
@@ -423,9 +443,9 @@ fn kept_developer_turns(
         .items
         .iter()
         .enumerate()
-        .filter(|(message, _)| !lifted.indices.contains(message))
+        .filter(|(message, _)| lifted.indices.binary_search(message).is_err())
         .enumerate()
-        .filter(|(_, (_, item))| origins.developer.contains(item))
+        .filter(|(_, (_, item))| origins.developer.binary_search(item).is_ok())
         .map(|(kept, _)| kept)
         .collect()
 }

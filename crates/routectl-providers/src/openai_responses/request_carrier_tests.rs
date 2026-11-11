@@ -241,6 +241,45 @@ fn a_kept_system_turn_rides_in_place_with_its_members_and_its_inbound_role() {
     }
 }
 
+/// With many kept system turns, exactly the recorded ones go out as
+/// `developer`, each at its own position.
+#[test]
+fn many_kept_system_turns_take_the_developer_role_exactly_where_recorded() {
+    // Arrange
+    const TURNS: usize = 64;
+    let kept = |index: usize| {
+        with_members(
+            Message {
+                role: Role::System,
+                content: MessageContent::Text(format!("rule {index}")),
+                ..user_text("")
+            },
+            members(&[("id", json!(format!("msg_{index}")))]),
+        )
+    };
+    let mut req = responses_request((0..TURNS).map(kept).collect());
+    let recorded: Vec<usize> = (0..TURNS).filter(|index| index % 3 != 1).collect();
+    req.routectl_internal.responses_developer_turns = recorded.clone();
+
+    // Act
+    let wire = translate_to_json(&cfg(), &req);
+
+    // Assert
+    let roles: Vec<&str> = (0..TURNS)
+        .map(|index| wire["input"][index]["role"].as_str().expect("role"))
+        .collect();
+    let expected: Vec<&str> = (0..TURNS)
+        .map(|index| {
+            if recorded.contains(&index) {
+                "developer"
+            } else {
+                "system"
+            }
+        })
+        .collect();
+    assert_eq!(roles, expected, "{wire}");
+}
+
 /// The developer-turn record names a kept system turn only: a user turn at
 /// that index keeps its own role.
 #[test]

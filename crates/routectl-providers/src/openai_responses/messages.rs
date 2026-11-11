@@ -392,7 +392,7 @@ fn build_input_tallied(
             // TRANSLATION-DROP: structural -- a liftable system turn is lifted into `instructions` by the system translation, and any other system turn is emitted in place below
             Role::System => {
                 if msg.stays_in_place() {
-                    let role = if policy.developer_turns.contains(&index) {
+                    let role = if policy.developer_turns.binary_search(&index).is_ok() {
                         "developer"
                     } else {
                         "system"

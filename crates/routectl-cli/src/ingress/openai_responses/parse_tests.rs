@@ -2014,6 +2014,70 @@ fn previous_response_id_null_is_accepted() {
     assert_eq!(req.messages.len(), 1);
 }
 
+/// A stored conversation or a background response is server-side state
+/// too: each is refused with the same reason and names its field.
+#[test]
+fn conversation_and_background_requests_are_refused_as_server_state() {
+    let rows = [
+        ("conversation id", "conversation", json!("conv_abc")),
+        (
+            "conversation object",
+            "conversation",
+            json!({"id": "conv_abc"}),
+        ),
+        ("background true", "background", json!(true)),
+    ];
+    for (row, field, value) in rows {
+        // Arrange
+        let mut body = json!({"model": "m", "input": "continue"});
+        body[field] = value;
+
+        // Act
+        let err = parse_err(body);
+
+        // Assert
+        assert_eq!(
+            err.refusal_reason(),
+            Some(routectl_core::RefusalReason::PreviousResponseId),
+            "{row}"
+        );
+        match err {
+            Error::Validation(msg, _) => {
+                assert!(msg.contains(field), "{row}: message names {field}: {msg}");
+            }
+            other => panic!("{row}: expected Error::Validation, got {other:?}"),
+        }
+    }
+}
+
+/// The "not set" shapes of the server-state members pass.
+#[test]
+fn null_conversation_and_false_background_are_accepted() {
+    let rows = [
+        ("conversation null", json!({"conversation": null})),
+        ("background false", json!({"background": false})),
+        (
+            "both unset",
+            json!({"conversation": null, "background": false}),
+        ),
+    ];
+    for (row, members) in rows {
+        // Arrange
+        let mut body = json!({"model": "m", "input": "hi"});
+        for (key, value) in members.as_object().expect("object") {
+            body[key] = value.clone();
+        }
+
+        // Act
+        let req = ResponsesIngress
+            .parse_request_value(&HeaderMap::new(), body)
+            .unwrap_or_else(|err| panic!("{row}: refused: {err:?}"));
+
+        // Assert
+        assert_eq!(req.messages.len(), 1, "{row}");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // unmodeled input-item passthrough (ingress -> Responses egress round-trip)
 // ---------------------------------------------------------------------------

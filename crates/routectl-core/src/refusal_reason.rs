@@ -49,10 +49,10 @@ pub enum RefusalReason {
     /// on the Anthropic ingress (`translate_thinking_display`). Scope:
     /// ingress. Class: `Unknown`.
     FieldType,
-    /// The request references a stored previous response, which routectl
-    /// holds no state for and cannot reconstruct. Raised by the Responses
-    /// ingress (`reject_previous_response_id`). Scope: ingress. Class:
-    /// `Unknown`.
+    /// The request relies on server-side state routectl does not hold: it
+    /// references a stored previous response or conversation, or asks for a
+    /// background response kept for later retrieval. Raised by the Responses
+    /// ingress (`reject_server_state`). Scope: ingress. Class: `Unknown`.
     PreviousResponseId,
     /// The request names more distinct beta features than routectl accepts
     /// on one request. Raised by `normalize_client_betas` on the Anthropic

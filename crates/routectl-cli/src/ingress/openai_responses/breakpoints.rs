@@ -59,7 +59,7 @@ pub(super) fn resolve(
     let kept_items: Vec<usize> = message_items
         .iter()
         .enumerate()
-        .filter(|(message, _)| !lifted.contains(message))
+        .filter(|(message, _)| lifted.binary_search(message).is_err())
         .map(|(_, &item)| item)
         .collect();
     let blocks = breakpoint_blocks(messages);

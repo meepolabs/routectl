@@ -178,3 +178,34 @@ fn a_developer_item_with_a_member_stays_in_place_and_is_recorded() {
         "a kept developer item keeps its role: {declared:?}"
     );
 }
+
+/// Across many interleaved items, the record names exactly the kept
+/// developer turns by their post-lift index: lifted developer items and
+/// kept system items in between never shift or join it.
+#[test]
+fn many_developer_items_record_every_kept_developer_turn_in_order() {
+    // Arrange
+    const GROUPS: usize = 64;
+    let mut input = Vec::new();
+    for group in 0..GROUPS {
+        input.push(
+            json!({"type": "message", "role": "developer", "id": format!("msg_d{group}"),
+                          "content": [{"type": "input_text", "text": "kept"}]}),
+        );
+        input.push(json!({"type": "message", "role": "developer", "content": "lifted"}));
+        input.push(
+            json!({"type": "message", "role": "system", "id": format!("msg_s{group}"),
+                          "content": "kept system"}),
+        );
+        input.push(json!({"type": "message", "role": "user", "content": "hi"}));
+    }
+    let body = json!({"model": "m", "input": input});
+
+    // Act
+    let req = parse(body);
+
+    // Assert
+    assert_eq!(req.messages.len(), GROUPS * 3);
+    let expected: Vec<usize> = (0..GROUPS).map(|group| group * 3).collect();
+    assert_eq!(req.routectl_internal.responses_developer_turns, expected);
+}
