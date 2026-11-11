@@ -9,7 +9,7 @@
 //! a routectl writer always asserts it.
 //!
 //! Durability: the temp file is fsynced before the rename, and the
-//! PARENT DIRECTORY is fsynced after it. `rename` is atomic for
+//! PARENT DIRECTORY is fsynced after it on unix. `rename` is atomic for
 //! concurrent readers, but the new directory entry is not durable across
 //! a crash/power loss until the directory itself is flushed -- without
 //! the parent fsync a crash right after this returns can roll the
@@ -18,7 +18,8 @@
 //! parent-fsync failure is fatal is a per-caller choice expressed via
 //! [`FsyncPolicy`]: secret writers demand [`FsyncPolicy::Strict`], while
 //! non-secret consumers may accept the weaker [`FsyncPolicy::BestEffort`]
-//! guarantee.
+//! guarantee. Off unix the parent fsync is not attempted, so neither
+//! policy can fail on it there.
 
 // This writer stays unconditional (not behind the `oauth` feature)
 // because the crate-wide secret-capture primitive consumes it on every
@@ -68,9 +69,9 @@ pub fn write_0600_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
 ///   3. Write the bytes and fsync the temp file.
 ///   4. Atomically rename the temp file over `path`.
 ///   5. Re-chmod `path` to `0o600` as defense-in-depth.
-///   6. Fsync the parent directory so the rename is durable -- fatal
-///      under [`FsyncPolicy::Strict`], swallowed under
-///      [`FsyncPolicy::BestEffort`].
+///   6. On unix, fsync the parent directory so the rename is durable --
+///      fatal under [`FsyncPolicy::Strict`], swallowed under
+///      [`FsyncPolicy::BestEffort`]. Elsewhere this step is skipped.
 ///
 /// Returns a human-readable error string on failure; callers map it to
 /// their own error type. On any error nothing is persisted at `path`
@@ -116,7 +117,9 @@ pub fn write_0600_atomic_with_policy(
         let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
     }
 
-    let parent_fsync = std::fs::File::open(parent).and_then(|d| d.sync_all());
+    let parent_fsync = sync_parent_dir(parent, cfg!(unix), |dir| {
+        std::fs::File::open(dir).and_then(|d| d.sync_all())
+    });
     match fsync_policy {
         FsyncPolicy::Strict => {
             parent_fsync.map_err(|e| format!("fsync parent {}: {e}", parent.display()))?;
@@ -127,6 +130,21 @@ pub fn write_0600_atomic_with_policy(
     }
 
     Ok(())
+}
+
+/// Run `sync` on `parent` when `is_unix`; otherwise succeed without calling
+/// it. Windows has no directory-entry flush through a read-only `File::open`
+/// handle (`FlushFileBuffers` needs `GENERIC_WRITE`), so attempting it there
+/// would fail every [`FsyncPolicy::Strict`] write.
+fn sync_parent_dir(
+    parent: &Path,
+    is_unix: bool,
+    sync: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    if !is_unix {
+        return Ok(());
+    }
+    sync(parent)
 }
 
 /// Create `dir` (and ancestors) if absent and force `0o700`. Idempotent:
@@ -228,6 +246,31 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), b"payload");
         let file_mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(file_mode, 0o600, "file must be 0600, got {file_mode:o}");
+    }
+
+    #[test]
+    fn parent_sync_is_skipped_off_unix_without_calling_sync() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut called = false;
+        let result = sync_parent_dir(dir.path(), false, |_| {
+            called = true;
+            Err(std::io::Error::other("directory flush refused"))
+        });
+        assert!(result.is_ok(), "got: {result:?}");
+        assert!(!called, "the directory sync must not run off unix");
+    }
+
+    #[test]
+    fn parent_sync_error_propagates_on_unix() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut synced = None;
+        let err = sync_parent_dir(dir.path(), true, |p| {
+            synced = Some(p.to_path_buf());
+            Err(std::io::Error::other("directory flush refused"))
+        })
+        .unwrap_err();
+        assert_eq!(err.to_string(), "directory flush refused");
+        assert_eq!(synced.as_deref(), Some(dir.path()));
     }
 
     #[cfg(unix)]
