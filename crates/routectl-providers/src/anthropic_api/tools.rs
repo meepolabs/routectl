@@ -41,11 +41,12 @@ fn translate_custom_tool(c: &CustomTool, carriers: Carriers) -> AnthropicTool {
     }
 }
 
+#[cfg(feature = "bedrock")]
 pub fn translate_tool(td: &ToolDef) -> AnthropicTool {
     translate_tool_carrying(td, Carriers::Withhold)
 }
 
-/// [`translate_tool`], a typed custom tool also emitting the members
+/// Translate one tool, a typed custom tool also emitting the members
 /// `carriers` lets it carry.
 fn translate_tool_carrying(td: &ToolDef, carriers: Carriers) -> AnthropicTool {
     match td {

@@ -953,7 +953,10 @@ fn stop_details_extra_reaches_the_client_undeclared() {
         }),
         routectl_provider: None,
         extras,
-        upstream_meta: None,
+        upstream_meta: Some(
+            routectl_core::UpstreamMeta::default()
+                .with_wire_dialect(routectl_core::wire_check::IngressDialect::Anthropic),
+        ),
     };
     let mut edits = ResponseEdits::recording();
 

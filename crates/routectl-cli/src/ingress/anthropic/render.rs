@@ -84,26 +84,28 @@ pub(super) fn render_messages_response(resp: ChatResponse, edits: &mut ResponseE
             u.cache_read_input_tokens,
             u.cache_creation.as_ref(),
         );
-        let mut usage_obj = Value::Object(usage_map);
-        // Forward-compat: emit unknown usage sub-fields (e.g.
-        // `service_tier`) that flowed into `extras` from upstream.
-        // Typed fields above win on key conflict.
-        if let Some(map) = usage_obj.as_object_mut() {
+        // Unknown usage members (e.g. `service_tier`) parsed from an
+        // Anthropic body. Typed fields above win on key conflict.
+        if carries_unknowns {
             for (k, v) in &u.extras {
-                map.entry(k.clone()).or_insert_with(|| v.clone());
+                usage_map.entry(k.clone()).or_insert_with(|| v.clone());
             }
         }
-        usage_obj
+        Value::Object(usage_map)
     });
     if let Some(u) = usage {
         body.insert("usage".into(), u);
     }
 
-    // Forward-compat: emit unknown response top-level fields (e.g.
-    // `context_management`) that flowed into `ChatResponse.extras`
-    // from upstream. Typed fields above win on key conflict. The
+    // Unknown top-level members (e.g. `context_management`) parsed from an
+    // Anthropic body. Typed fields above win on key conflict. The
     // drop-list belongs here -- routectl owns the egress wire policy.
-    for (k, v) in &resp.extras {
+    let top_level_members = if carries_unknowns {
+        &resp.extras
+    } else {
+        &Map::new()
+    };
+    for (k, v) in top_level_members {
         // Reserved transport-internal carrier name; must never reach a
         // client even if an upstream coincidentally uses the same key.
         if k == "upstream_meta" {

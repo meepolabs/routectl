@@ -742,6 +742,23 @@ sanitized key names (never the values) at `debug`. On openai-compat a
 is the client identity block, and counts as `client_fingerprint_stripped`
 instead.
 
+The same rule covers the members a client puts below the top level that
+routectl does not model: on a message, a content part, a custom tool or a
+system block, and on a Responses `function_call` or `reasoning` input
+item. For a client of the egress's own dialect (or a library caller)
+they are forwarded on the node they came on, beside the typed members,
+which win on a name clash. Every other egress has no slot for them: on
+`anthropic-api`, Bedrock Invoke, Bedrock Converse, `openai-compat`,
+`openai-responses` and `gemini` they are dropped, and a request that
+dropped any counts once as `foreign_dialect_extra` on that lane (on
+`anthropic-api`, Bedrock and `openai-compat`, one count with any
+top-level key it dropped). A Responses client's members are withheld in
+two more cases, counted once per request as `unknown_member_withheld`
+instead: on `auth_kind = "bedrock-mantle"`, which forwards no carried
+member, and, on any auth kind, the members of a `function_call` or
+`reasoning` item that does not ship with the identity the client gave
+it.
+
 The operator layer is never affected: a key set in `payload_extras` is
 sent whatever the client's dialect. To send a field a client of another
 dialect cannot reach the upstream with (a Chat client's `top_k` to

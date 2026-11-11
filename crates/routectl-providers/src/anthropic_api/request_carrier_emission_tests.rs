@@ -110,10 +110,11 @@ fn invoke_body(req: &ChatRequest) -> Value {
 }
 
 fn bodies(req: &ChatRequest) -> Vec<(&'static str, Value)> {
-    let mut out = vec![("anthropic-api", anthropic_body(req))];
-    #[cfg(feature = "bedrock")]
-    out.push(("bedrock-invoke", invoke_body(req)));
-    out
+    vec![
+        ("anthropic-api", anthropic_body(req)),
+        #[cfg(feature = "bedrock")]
+        ("bedrock-invoke", invoke_body(req)),
+    ]
 }
 
 #[test]

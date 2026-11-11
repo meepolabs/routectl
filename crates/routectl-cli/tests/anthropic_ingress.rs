@@ -2884,13 +2884,12 @@ async fn anthropic_egress_from_openai_compat_strips_envelope_fields() {
     );
 }
 
-/// Pin: Anthropic-spec usage field `service_tier` must round-trip
-/// from an openai-compat upstream when present (some openai-compat
-/// hosts now mirror Anthropic's usage shape). The strip list is
-/// narrow enough not to touch this; the test exists to lock that
-/// boundary in place.
+/// Pin: a usage member an openai-compat upstream sends (here
+/// `service_tier`, which some openai-compat hosts mirror from Anthropic's
+/// usage shape) was parsed from a Chat Completions body, so it is not
+/// rendered to an Anthropic client.
 #[tokio::test]
-async fn anthropic_egress_from_openai_compat_preserves_service_tier() {
+async fn anthropic_egress_from_openai_compat_withholds_usage_members() {
     let upstream = MockServer::start().await;
     let body = json!({
         "id": "chatcmpl-tier",
@@ -2927,8 +2926,12 @@ async fn anthropic_egress_from_openai_compat_preserves_service_tier() {
         .unwrap();
     let egress: Value = resp.json().await.unwrap();
     assert_eq!(
-        egress["usage"]["service_tier"], "standard",
-        "service_tier must round-trip from openai-compat upstream to Anthropic egress: {egress}"
+        egress["usage"]["output_tokens"], 5,
+        "usage rendered: {egress}"
+    );
+    assert!(
+        egress["usage"].get("service_tier").is_none(),
+        "a Chat usage member must not reach an Anthropic client: {egress}"
     );
 }
 

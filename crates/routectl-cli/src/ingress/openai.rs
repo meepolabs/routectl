@@ -392,9 +392,15 @@ fn render_openai_response_value(resp: ChatResponse, edits: &mut ResponseEdits) -
         .upstream_meta
         .as_ref()
         .and_then(|meta| meta.system_fingerprint().map(str::to_string));
+    let carries_unknowns = renders_unknowns(IngressDialect::Chat, resp.upstream_meta.as_ref());
+    let resp = if carries_unknowns {
+        resp
+    } else {
+        withhold_unknown_members(resp)
+    };
     let mut value = serde_json::to_value(&resp)
         .map_err(|e| Error::Internal(format!("openai ingress: serialize response: {e}")))?;
-    if renders_unknowns(IngressDialect::Chat, resp.upstream_meta.as_ref()) {
+    if carries_unknowns {
         merge_choice_carriers(&mut value, &resp);
     }
     echo_upstream_system_fingerprint(&mut value, upstream_fingerprint);
@@ -416,6 +422,17 @@ fn render_openai_response_value(resp: ChatResponse, edits: &mut ResponseEdits) -
     // keeps its own wire shape (hub-and-spoke).
     apply_openai_response_envelope(&mut value, edits);
     Ok(value)
+}
+
+/// `resp` without its unknown top-level and usage members, which canonical
+/// serde would otherwise flatten onto the Chat body whatever dialect they
+/// were parsed from.
+fn withhold_unknown_members(mut resp: ChatResponse) -> ChatResponse {
+    resp.extras.clear();
+    if let Some(usage) = resp.usage.as_mut() {
+        usage.extras.clear();
+    }
+    resp
 }
 
 /// Merge each choice message's carried members, and each typed content
@@ -2088,9 +2105,9 @@ mod tests {
         );
     }
 
-    /// An upstream `system_fingerprint` rides canonical `extras` (the
-    /// flatten catchall) and must be mirrored verbatim onto the wire, not
-    /// clobbered with null.
+    /// An upstream `system_fingerprint` left in canonical `extras` (the
+    /// flatten catchall) of a Chat-parsed response must be mirrored
+    /// verbatim onto the wire, not clobbered with null.
     #[test]
     fn render_response_mirrors_upstream_system_fingerprint() {
         // Arrange
@@ -2104,7 +2121,9 @@ mod tests {
             usage: None,
             routectl_provider: None,
             extras,
-            upstream_meta: None,
+            upstream_meta: Some(
+                routectl_core::UpstreamMeta::default().with_wire_dialect(IngressDialect::Chat),
+            ),
         };
 
         // Act

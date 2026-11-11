@@ -118,7 +118,7 @@ pub(crate) fn is_forwardable_media_url(url: &str) -> bool {
 /// direct element of `input`. Mantle does not fetch from tool definitions
 /// today; if it enables image generation, the image generation tool's
 /// `input_image_mask.image_url` is the member to revisit.
-#[cfg(feature = "bedrock")]
+#[cfg(all(feature = "bedrock", feature = "openai-responses"))]
 const TOOL_DECLARING_ITEM_KINDS: [&str; 3] =
     ["additional_tools", "tool_search_output", "mcp_list_tools"];
 
@@ -132,6 +132,7 @@ pub(crate) enum MediaWalkRoot {
     AnthropicMessages,
     /// Responses `input`: the `tools` of a direct `input[i]` item whose
     /// `type` is a tool-declaring kind holds tool definitions.
+    #[cfg(feature = "openai-responses")]
     ResponsesInput,
     /// Content with no tool position (Anthropic `system`, Chat Completions
     /// `messages`): every member is walked.
@@ -187,7 +188,7 @@ const MAX_RENDERED_KEY_LEN: usize = 64;
 ///
 /// It never descends into string values (function-call `arguments` are
 /// JSON-encoded strings). The only other unwalked subtrees are positional,
-/// chosen by `walk_root`: on [`MediaWalkRoot::ResponsesInput`], the `tools`
+/// chosen by `walk_root`: on `MediaWalkRoot::ResponsesInput`, the `tools`
 /// of a direct `input[i]` item whose `type` is `additional_tools`,
 /// `tool_search_output` or `mcp_list_tools` (tool definitions, schemas
 /// included); on [`MediaWalkRoot::AnthropicMessages`], the `input` of a
@@ -285,6 +286,7 @@ fn member_slot(slot: Slot, key: &str) -> Slot {
 #[cfg(feature = "bedrock")]
 fn is_unwalked_member(walk_root: MediaWalkRoot, slot: Slot, kind: Option<&str>, key: &str) -> bool {
     match (walk_root, slot, kind) {
+        #[cfg(feature = "openai-responses")]
         (MediaWalkRoot::ResponsesInput, Slot::RootItem, Some(kind)) => {
             key == "tools" && TOOL_DECLARING_ITEM_KINDS.contains(&kind)
         }
@@ -542,8 +544,9 @@ mod tests {
         const S3: &str = "s3://planted-bucket-zq7/secret-key-path-k3.png";
         const HTTPS: &str = "https://example.com/a.png";
 
-        const WALK_ROOTS: [MediaWalkRoot; 3] = [
+        const WALK_ROOTS: &[MediaWalkRoot] = &[
             MediaWalkRoot::AnthropicMessages,
+            #[cfg(feature = "openai-responses")]
             MediaWalkRoot::ResponsesInput,
             MediaWalkRoot::Content,
         ];
@@ -719,6 +722,15 @@ mod tests {
             json!({"type": "image", "source": {"type": "url", "url": url}})
         }
 
+        #[cfg(feature = "openai-responses")]
+        fn schema_with_url_property() -> Value {
+            json!({
+                "name": "clone",
+                "input_schema": {"type": "object", "properties": {"repo_url": {"type": "string"}}}
+            })
+        }
+
+        #[cfg(feature = "openai-responses")]
         fn tool_definition(url: &str) -> Value {
             json!({
                 "type": "function",
@@ -773,7 +785,7 @@ mod tests {
 
         #[test]
         fn walks_tool_named_members_outside_tool_positions() {
-            for walk_root in WALK_ROOTS {
+            for &walk_root in WALK_ROOTS {
                 for (row, root, expected) in tool_named_member_rows(S3) {
                     let msg = refusal_message_at(walk_root, &root)
                         .unwrap_or_else(|| panic!("{row} ({walk_root:?}): must refuse"));
@@ -784,7 +796,7 @@ mod tests {
 
         #[test]
         fn forwards_https_sources_in_tool_named_members() {
-            for walk_root in WALK_ROOTS {
+            for &walk_root in WALK_ROOTS {
                 for (row, root, _) in tool_named_member_rows(HTTPS) {
                     assert_eq!(
                         refusal_message_at(walk_root, &root),
@@ -831,6 +843,7 @@ mod tests {
                     message_with_part(json!({"type": "text", "text": "t", "meta": search_output})),
                     "`source` at root[0].content[0].meta.tools[0] ",
                 ),
+                #[cfg(feature = "openai-responses")]
                 (
                     "tool_search_output inside a message input item",
                     MediaWalkRoot::ResponsesInput,
@@ -849,12 +862,14 @@ mod tests {
                     json!([{"type": "additional_tools", "tools": [url_image(url)]}]),
                     "`source` at root[0].tools[0] ",
                 ),
+                #[cfg(feature = "openai-responses")]
                 (
                     "tool_search_output as the walk root itself",
                     MediaWalkRoot::ResponsesInput,
                     search_output,
                     "`source` at root.tools[0] ",
                 ),
+                #[cfg(feature = "openai-responses")]
                 (
                     "case-variant Tool_Search_Output root item",
                     MediaWalkRoot::ResponsesInput,
@@ -936,30 +951,30 @@ mod tests {
 
         #[test]
         fn never_descends_into_strings_tool_definitions_or_tool_use_input() {
-            let schema_with_url_property = json!({
-                "name": "clone",
-                "input_schema": {"type": "object", "properties": {"repo_url": {"type": "string"}}}
-            });
             let rows: Vec<(&str, MediaWalkRoot, Value)> = vec![
+                #[cfg(feature = "openai-responses")]
                 (
                     "string argument",
                     MediaWalkRoot::ResponsesInput,
                     json!([{"type": "function_call", "arguments": json!({"image_url": S3}).to_string()}]),
                 ),
+                #[cfg(feature = "openai-responses")]
                 (
                     "additional_tools item tools",
                     MediaWalkRoot::ResponsesInput,
                     json!([{"type": "additional_tools", "role": "developer", "tools": [tool_definition(S3), url_image(S3)]}]),
                 ),
+                #[cfg(feature = "openai-responses")]
                 (
                     "tool_search_output item tools",
                     MediaWalkRoot::ResponsesInput,
                     json!([{"type": "tool_search_output", "tools": [tool_definition(S3), url_image(S3)]}]),
                 ),
+                #[cfg(feature = "openai-responses")]
                 (
                     "mcp_list_tools item tools",
                     MediaWalkRoot::ResponsesInput,
-                    json!([{"type": "mcp_list_tools", "server_label": "s", "tools": [schema_with_url_property, url_image(S3)]}]),
+                    json!([{"type": "mcp_list_tools", "server_label": "s", "tools": [schema_with_url_property(), url_image(S3)]}]),
                 ),
                 (
                     "tool_use content part input",

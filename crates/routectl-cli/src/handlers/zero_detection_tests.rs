@@ -276,6 +276,18 @@ fn anthropic_complete_with_part_members() -> ResponseTemplate {
     }))
 }
 
+/// A complete Anthropic answer whose top level and usage each carry a member
+/// no canonical field models.
+fn anthropic_complete_with_top_level_and_usage_members() -> ResponseTemplate {
+    ResponseTemplate::new(200).set_body_json(json!({
+        "id": "msg_1", "type": "message", "role": "assistant", "model": UPSTREAM,
+        "content": [{"type": "text", "text": "ok"}],
+        "stop_reason": "end_turn", "stop_sequence": null,
+        "sentinel_top": {"k": "caf\u{e9}"},
+        "usage": {"input_tokens": 3, "output_tokens": 1, "sentinel_usage": {"usd": 0.5}}
+    }))
+}
+
 fn anthropic_complete_without_stop_sequence() -> ResponseTemplate {
     ResponseTemplate::new(200).set_body_json(json!({
         "id": "msg_1", "type": "message", "role": "assistant", "model": UPSTREAM,
@@ -392,6 +404,20 @@ fn chat_stream_with_usage_members() -> ResponseTemplate {
         ],
         true,
     ))
+}
+
+/// A complete Chat answer whose top level and usage each carry a member no
+/// canonical field models.
+fn chat_complete_with_top_level_and_usage_members() -> ResponseTemplate {
+    ResponseTemplate::new(200).set_body_json(json!({
+        "id": "c1", "object": "chat.completion", "created": 1_700_000_000_i64,
+        "model": UPSTREAM, "system_fingerprint": null,
+        "sentinel_top": {"k": "caf\u{e9}"},
+        "choices": [{"index": 0, "finish_reason": "stop",
+                     "message": {"role": "assistant", "content": "ok"}}],
+        "usage": {"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4,
+                  "sentinel_usage": {"usd": 0.5}}
+    }))
 }
 
 fn chat_complete_with_reasoning_content() -> ResponseTemplate {
@@ -2484,6 +2510,108 @@ async fn only_a_chat_client_receives_chat_message_part_and_usage_members() {
             &["sentinel_message", "sentinel_part"]
         };
         for member in members {
+            assert_eq!(text.contains(member), expected, "{row}: {member}: {text}");
+        }
+    }
+}
+
+/// A client of another dialect served by openai-compat never receives the
+/// top-level and usage members of a complete Chat answer. Positive control:
+/// the same upstream answer gives a Chat client both.
+#[tokio::test]
+async fn only_a_chat_client_receives_complete_chat_top_level_and_usage_members() {
+    let hi = json!([{"role": "user", "content": "hi"}]);
+    let input = json!([{"type": "message", "role": "user",
+                        "content": [{"type": "input_text", "text": "hi"}]}]);
+    // (row, ingress, request body, members expected)
+    let rows = [
+        (
+            "anthropic client",
+            Ingress::Anthropic,
+            json!({"model": ALIAS, "max_tokens": 16, "messages": hi}),
+            false,
+        ),
+        (
+            "responses client",
+            Ingress::Responses,
+            json!({"model": ALIAS, "input": input}),
+            false,
+        ),
+        (
+            "chat client",
+            Ingress::Chat,
+            json!({"model": ALIAS, "messages": hi}),
+            true,
+        ),
+    ];
+    for (row, ingress, body, expected) in rows {
+        // Arrange
+        let probe = case(
+            row,
+            ingress,
+            body,
+            chat_complete_with_top_level_and_usage_members(),
+            chat_provider,
+        );
+
+        // Act
+        let (_swap, client) = serve(&probe).await;
+
+        // Assert
+        let text = String::from_utf8_lossy(&client);
+        assert!(text.contains("\"usage\""), "{row}: usage rendered: {text}");
+        for member in ["sentinel_top", "sentinel_usage"] {
+            assert_eq!(text.contains(member), expected, "{row}: {member}: {text}");
+        }
+    }
+}
+
+/// A client of another dialect served by anthropic-api never receives the
+/// top-level and usage members of a complete Anthropic answer. Positive
+/// control: the same upstream answer gives an Anthropic client both.
+#[tokio::test]
+async fn only_an_anthropic_client_receives_complete_anthropic_top_level_and_usage_members() {
+    let hi = json!([{"role": "user", "content": "hi"}]);
+    let input = json!([{"type": "message", "role": "user",
+                        "content": [{"type": "input_text", "text": "hi"}]}]);
+    // (row, ingress, request body, members expected)
+    let rows = [
+        (
+            "chat client",
+            Ingress::Chat,
+            json!({"model": ALIAS, "messages": hi}),
+            false,
+        ),
+        (
+            "responses client",
+            Ingress::Responses,
+            json!({"model": ALIAS, "input": input}),
+            false,
+        ),
+        (
+            "anthropic client",
+            Ingress::Anthropic,
+            json!({"model": ALIAS, "max_tokens": 16, "messages": hi}),
+            true,
+        ),
+    ];
+    for (row, ingress, body, expected) in rows {
+        // Arrange
+        let probe = case(
+            row,
+            ingress,
+            body,
+            anthropic_complete_with_top_level_and_usage_members(),
+            anthropic_provider,
+        );
+
+        // Act
+        let (_swap, client) = serve(&probe).await;
+
+        // Assert
+        let text = String::from_utf8_lossy(&client);
+        assert!(text.contains("\"usage\""), "{row}: usage rendered: {text}");
+        for member in ["sentinel_top", "sentinel_usage"] {
             assert_eq!(text.contains(member), expected, "{row}: {member}: {text}");
         }
     }
