@@ -76,13 +76,14 @@ pub fn lift_legacy_system_stripped(
     }
 }
 
-/// The `Role::System` turns carrying a non-text part. An ingress keeps such a
-/// turn in place instead of hoisting its text into the canonical system, so
-/// a lane that cannot ship the turn lifts its text from here.
+/// The `Role::System` turns that stay in place ([`Message::stays_in_place`]).
+/// An ingress keeps such a turn in place instead of hoisting its text into
+/// the canonical system, so a lane that cannot ship the turn lifts its text
+/// from here.
 pub fn kept_system_turns(messages: &[Message]) -> Vec<Message> {
     messages
         .iter()
-        .filter(|m| matches!(m.role, Role::System) && m.content.has_non_text_part())
+        .filter(|m| matches!(m.role, Role::System) && m.stays_in_place())
         .cloned()
         .collect()
 }

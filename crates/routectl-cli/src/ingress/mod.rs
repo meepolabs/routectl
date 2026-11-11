@@ -235,11 +235,12 @@ pub(crate) struct LiftedSystem {
 /// messages were lifted. No-op when there are no System messages.
 ///
 /// A System message carrying any non-text part (an image, a document, a
-/// forward-compat part) is NOT lifted: `req.system` holds text only, so the
-/// whole message stays in `req.messages` at its position, untouched, and
-/// each egress forwards it or counts what its wire cannot carry. A message
-/// mixing text and non-text parts stays whole too; splitting it would
-/// reorder its text ahead of the parts it was written beside.
+/// forward-compat part) or unmodeled members (on the message or on a text
+/// part) is NOT lifted: `req.system` holds text only, so the whole message
+/// stays in `req.messages` at its position, untouched, and each egress
+/// forwards it or counts what its wire cannot carry. A message mixing text
+/// and non-text parts stays whole too; splitting it would reorder its text
+/// ahead of the parts it was written beside.
 ///
 /// Lifting strategy:
 /// - `MessageContent::Text` messages contribute a `SystemBlock` with no
@@ -356,9 +357,9 @@ pub(crate) fn lift_system_messages(req: &mut ChatRequest) -> LiftedSystem {
 }
 
 /// Whether [`lift_system_messages`] moves `m` into `req.system`: a system
-/// turn whose content is text only.
+/// turn that need not stay in place.
 fn is_liftable(m: &Message) -> bool {
-    matches!(m.role, Role::System) && !m.content.has_non_text_part()
+    matches!(m.role, Role::System) && !m.stays_in_place()
 }
 
 /// True when the existing system text or any lifted block is a Claude Code
@@ -1121,6 +1122,10 @@ mod openai_system_lift_tests;
 #[cfg(test)]
 #[path = "system_lift_fingerprint_tests.rs"]
 mod system_lift_fingerprint_tests;
+
+#[cfg(test)]
+#[path = "system_lift_carrier_tests.rs"]
+mod system_lift_carrier_tests;
 
 #[cfg(test)]
 #[path = "thinking_carrier_ingress_tests.rs"]

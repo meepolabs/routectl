@@ -753,7 +753,8 @@ const fn anthropic_tool_cache_control(t: &AnthropicTool) -> Option<&routectl_cor
 /// legacy lift does not run and each `Role::System` turn rides the wire in
 /// place. When false the turns are lift-consumed, so a lane whose target API
 /// has no such role never ships one: with a canonical system present, only the
-/// turns an ingress kept in place for their non-text parts are lifted after it.
+/// turns an ingress kept in place (see `Message::stays_in_place`) are lifted
+/// after it.
 /// Stated at each call site, not defaulted.
 ///
 /// `fingerprint` is the caller-owned per-request tally for the client
@@ -901,9 +902,9 @@ pub(crate) fn normalize_deferring_format_key_warn(
         // warned if it dropped.
         //
         // With a canonical system present the lift takes only the turns an
-        // ingress kept in place for their non-text parts: their text was
-        // never hoisted into the canonical system, so it would otherwise be
-        // lost with them.
+        // ingress kept in place (non-text parts or carried members): their
+        // text was never hoisted into the canonical system, so it would
+        // otherwise be lost with them.
         let mut legacy_dropped = false;
         let lifted_content = if primary.is_some() {
             lift_legacy_system_stripped(&kept_system_turns(&req.messages), &mut legacy_dropped)

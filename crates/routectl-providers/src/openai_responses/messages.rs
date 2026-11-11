@@ -313,15 +313,15 @@ fn build_input_tallied(
     let mut out: Vec<ResponseInputItem> = Vec::with_capacity(messages.len());
     for msg in messages {
         match &msg.role {
-            // A text-only system turn is not lost here: `system.rs` lifts its
+            // A liftable system turn is not lost here: `system.rs` lifts its
             // text into `instructions` after the top-level `req.system`, with
             // the billing/attribution block withheld, so emitting it again as
-            // an input item would duplicate it. A turn carrying a non-text
-            // part has no place in `instructions` and rides in place as a
+            // an input item would duplicate it. A turn that stays in place (a
+            // non-text part, or unmodeled members) rides in place as a
             // `system` message item instead; `system.rs` skips it.
-            // TRANSLATION-DROP: structural -- a text-only system turn is lifted into `instructions` by the system translation, and any other system turn is emitted in place below
+            // TRANSLATION-DROP: structural -- a liftable system turn is lifted into `instructions` by the system translation, and any other system turn is emitted in place below
             Role::System => {
-                if msg.content.has_non_text_part() {
+                if msg.stays_in_place() {
                     translate_system_message(id, auth_kind, unknown, msg, &mut out, tally)?;
                 }
             }

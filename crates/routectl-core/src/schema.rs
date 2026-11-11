@@ -937,6 +937,30 @@ impl MessageContent {
     }
 }
 
+impl Message {
+    /// Whether a system-voice turn must stay at its position in `messages`
+    /// instead of having its text lifted into the canonical system: it
+    /// carries a non-text part, or unmodeled members on the message or on a
+    /// text part. The canonical system holds text blocks only, so lifting
+    /// such a turn would strip what it carries.
+    #[must_use]
+    pub fn stays_in_place(&self) -> bool {
+        if self.content.has_non_text_part() || !self.extras.is_empty() {
+            return true;
+        }
+        match &self.content {
+            MessageContent::Parts(parts) => parts.iter().any(|p| {
+                matches!(
+                    p,
+                    ContentPart::Known(crate::KnownContentPart::Text { extras, .. })
+                        if !extras.is_empty()
+                )
+            }),
+            MessageContent::Text(_) | MessageContent::Null => false,
+        }
+    }
+}
+
 /// Unified reasoning request config. See OpenRouter docs for provider mapping.
 ///
 /// - OpenAI o-series: `effort` -> `reasoning_effort`

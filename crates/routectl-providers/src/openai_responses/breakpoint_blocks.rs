@@ -24,8 +24,8 @@ pub struct BreakpointBlock<'a> {
 /// the order it emits them; a block's index is its breakpoint ordinal.
 ///
 /// A user turn and an unrecognized-role turn emit each non-empty text part.
-/// A system turn emits them only when it also carries a non-text part (a
-/// text-only one is lifted into `instructions`). A system-authority turn
+/// A system turn emits them only when it stays in place (a liftable one is
+/// lifted into `instructions`). A system-authority turn
 /// emits none of its billing/attribution parts. Assistant text ships as
 /// `output_text` and tool output as a `function_call_output`, so neither
 /// adds a block.
@@ -54,7 +54,7 @@ pub fn breakpoint_blocks(messages: &[Message]) -> Vec<BreakpointBlock<'_>> {
 fn emits_input_text(msg: &Message) -> bool {
     match msg.role {
         Role::User | Role::Other(_) => true,
-        Role::System => msg.content.has_non_text_part(),
+        Role::System => msg.stays_in_place(),
         Role::Assistant | Role::Tool => false,
     }
 }

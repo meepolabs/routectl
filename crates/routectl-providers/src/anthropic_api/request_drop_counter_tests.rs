@@ -638,6 +638,78 @@ fn a_forwarded_system_turn_keeps_its_image_and_counts_no_drop() {
     );
 }
 
+/// A text-only system turn whose message carries unmodeled members, as an
+/// ingress keeps it in place instead of lifting it.
+fn system_turn_with_members(text: &str) -> Message {
+    let mut extras = serde_json::Map::new();
+    extras.insert("id".into(), serde_json::json!("msg_kept"));
+    Message {
+        extras,
+        ..system_turn(text)
+    }
+}
+
+/// On a lane that lifts system turns (no Messages-API system role), with a
+/// canonical system present, a kept text-only turn's text is appended to the
+/// wire `system` rather than consumed, and nothing is counted lost: its text
+/// is representable there. The plain text-only turn beside it was hoisted by
+/// the ingress already, so it is consumed and its text must not appear twice.
+#[test]
+fn a_kept_text_only_system_turn_reaches_the_lifted_system_and_counts_no_drop() {
+    let req = ChatRequest {
+        system: Some(SystemContent::Text("be brief".into())),
+        messages: vec![
+            user_turn("hi"),
+            system_turn_with_members("kept rule"),
+            system_turn("already hoisted"),
+            user_turn("again"),
+        ]
+        .into(),
+        ..base_req()
+    };
+
+    let before = system_part_drop_count();
+    let body =
+        normalize("test", &req, false, None, false, false, false).expect("normalize must succeed");
+    let after = system_part_drop_count();
+
+    assert_eq!(after - before, 0, "{body}");
+    assert_eq!(
+        body["system"],
+        serde_json::json!([
+            {"type": "text", "text": "be brief"},
+            {"type": "text", "text": "kept rule"}
+        ]),
+        "{body}"
+    );
+    assert!(!body.to_string().contains("already hoisted"), "{body}");
+    assert!(!body.to_string().contains("msg_kept"), "{body}");
+}
+
+/// Positive control for the row above: the same lane and shape with an
+/// image on the kept turn does count the part the `system` field cannot carry.
+#[test]
+fn a_kept_system_turn_with_an_image_counts_the_unrepresentable_part() {
+    let req = ChatRequest {
+        system: Some(SystemContent::Text("be brief".into())),
+        messages: vec![
+            user_turn("hi"),
+            system_turn_with_image("kept rule"),
+            user_turn("again"),
+        ]
+        .into(),
+        ..base_req()
+    };
+
+    let before = system_part_drop_count();
+    let body =
+        normalize("test", &req, false, None, false, false, false).expect("normalize must succeed");
+    let after = system_part_drop_count();
+
+    assert_eq!(after - before, 1, "{body}");
+    assert_eq!(body["system"][1]["text"], serde_json::json!("kept rule"));
+}
+
 // ---------------------------------------------------------------------------
 // The Mantle credential-bearing field withhold.
 // ---------------------------------------------------------------------------

@@ -309,6 +309,38 @@ fn a_system_turn_with_an_image_rides_in_place_as_a_system_item() {
     );
 }
 
+/// A text-only system turn that carries unmodeled members stays in place:
+/// it rides as one `system` item and its text is not also copied into
+/// `instructions`. The carrier-free turn beside it is the control: its text
+/// still reaches `instructions` and it emits no item.
+#[test]
+fn a_kept_text_only_system_turn_rides_in_place_and_not_in_instructions() {
+    let mut extras = serde_json::Map::new();
+    extras.insert("id".into(), json!("msg_kept"));
+    let kept = Message {
+        extras,
+        ..system_text("kept rule")
+    };
+    let mut req = req_with(vec![
+        user_text("hi"),
+        kept,
+        system_text("lifted rule"),
+        user_text("again"),
+    ]);
+    req.system = Some(SystemContent::Text("be brief".into()));
+
+    let wire = translate_to_json(&cfg_api_key(), &req);
+
+    assert_eq!(wire["instructions"], json!("be brief\n\nlifted rule"));
+    let input = wire["input"].as_array().expect("input array");
+    assert_eq!(input.len(), 3, "{wire}");
+    assert_eq!(input[1]["role"], json!("system"));
+    assert_eq!(
+        input[1]["content"],
+        json!([{"type": "input_text", "text": "kept rule"}])
+    );
+}
+
 /// The fingerprint part of a system turn kept in place is withheld from the
 /// item it rides in and counted once.
 #[test]

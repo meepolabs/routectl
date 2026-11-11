@@ -1023,6 +1023,35 @@ fn breakpoints_on_text_only_content_and_after_a_tool_turn_reattach() {
     assert_eq!(breakpoint_sites(&wire), vec![(0, 0), (2, 0)], "{wire}");
 }
 
+/// A text-only system turn kept in place for its carried members emits an
+/// `input_text` block, so it holds an ordinal: a breakpoint recorded on it
+/// reattaches, and so does one on the user turn after it.
+#[test]
+fn a_breakpoint_on_a_kept_text_only_system_turn_reattaches() {
+    // Arrange
+    let mut extras = serde_json::Map::new();
+    extras.insert("id".into(), json!("msg_kept"));
+    let kept = Message {
+        role: Role::System,
+        extras,
+        ..user_text("rules")
+    };
+    let req = req_with_breakpoints(
+        vec![kept, user_text("alpha")],
+        vec![
+            recorded_breakpoint(Some(0), "rules", "/input/0/content/0"),
+            recorded_breakpoint(Some(1), "alpha", "/input/1/content/0"),
+        ],
+    );
+
+    // Act
+    let wire = translate_to_json(&cfg_api_key(), &req);
+
+    // Assert
+    assert_eq!(wire["input"][0]["role"], "system", "{wire}");
+    assert_eq!(breakpoint_sites(&wire), vec![(0, 0), (1, 0)], "{wire}");
+}
+
 #[test]
 fn unplaced_breakpoints_count_once_and_declare() {
     use routectl_core::wire_check::{EditKind, EditSite};

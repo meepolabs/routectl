@@ -3,10 +3,11 @@
 //! The Responses API has no first-class system role: system content is
 //! collapsed into a top-level `instructions` string. Two canonical surfaces
 //! feed it: the top-level `req.system` first, then the text of every
-//! text-only `Role::System` message in message order (a direct library caller
+//! liftable `Role::System` message in message order (a direct library caller
 //! may put its system prompt in the messages array; the ingresses hoist the
-//! text-only ones into `req.system` before they reach here). A system message
-//! carrying a non-text part is not an entry: it rides `input[]` in place. Each
+//! liftable ones into `req.system` before they reach here). A system message
+//! that stays in place (a non-text part, or unmodeled members) is not an
+//! entry: it rides `input[]` in place. Each
 //! block, message
 //! and part is one entry, and entries join with `"\n\n"` (one blank line) so
 //! boundaries stay visible to the model while the field stays a flat string.
@@ -143,13 +144,14 @@ fn flatten_filtered_system(req: &ChatRequest, withheld: &mut bool) -> Option<Str
     }
 }
 
-/// One entry per text-only `Role::System` message that keeps legitimate text
+/// One entry per liftable `Role::System` message that keeps legitimate text
 /// after the billing/attribution strip, in message order. The strip runs per
 /// part before the parts of one message are joined, so a fingerprint part
 /// cannot hide behind legitimate text at the leading position the predicate
 /// tests.
 ///
-/// A message carrying a non-text part rides in place as an input item (see
+/// A message that stays in place ([`Message::stays_in_place`]: a non-text
+/// part, or unmodeled members) rides in place as an input item (see
 /// `messages::build_input`), so it contributes no entry; it is still screened
 /// here, with the same part rule the in-place withhold applies (which also
 /// matches an unmodeled part carrying the block), so that withhold is
@@ -159,7 +161,7 @@ fn system_role_entries(messages: &[Message], withheld: &mut bool) -> Vec<String>
         .iter()
         .filter(|m| matches!(m.role, Role::System) && !matches!(m.content, MessageContent::Null))
         .filter_map(|message| {
-            if message.content.has_non_text_part() {
+            if message.stays_in_place() {
                 if crate::system_filter::system_message_carries_billing_block(message) {
                     *withheld = true;
                 }
