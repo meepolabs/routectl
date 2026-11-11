@@ -651,10 +651,6 @@ fn credential_key_rule_leaves_non_credential_and_unquoted_values() {
     for (name, input) in rows {
         assert_clean(name, input);
     }
-    assert_clean(
-        "unquoted credential value",
-        &format!("{}={}", "api_key", "unset"),
-    );
 }
 
 #[test]
@@ -816,6 +812,10 @@ fn planted_fixture() -> Vec<String> {
         r#"{\"secret\":\"abc123\"}"#,
         "password='abc123'",
         r#"{\\\"client_secret\\\":\\\"abc123\\\"}"#,
+        "GET https://gw.example/v1/chat?api_key=OPAQUE1&model=x failed",
+        "grant_type=refresh_token&refresh_token=OPAQUE1",
+        "Authorization: Bearer OPAQUE1 was rejected",
+        r#"{"password":"x\\","model":"m"}"#,
     ]
     .into_iter()
     .map(str::to_owned)
@@ -902,7 +902,7 @@ fn log_rendering_filters_controls_and_keeps_clean_text() {
 }
 
 #[test]
-fn value_scrub_rewrites_string_leaves_and_keeps_keys_and_other_leaves() {
+fn value_scrub_rewrites_string_leaves_and_credential_keys_and_keeps_other_leaves() {
     let arn_key = "arn:aws:iam::123456789012:root";
     let mut value = serde_json::json!({
         "error": {
@@ -931,7 +931,331 @@ fn value_scrub_rewrites_string_leaves_and_keeps_keys_and_other_leaves() {
             "ratio": 0.5,
             "type": "access_denied"
         },
-        arn_key: "plain"
+        "[redacted]": "plain"
     });
     assert_eq!(value, expected);
+}
+
+#[test]
+fn value_scrub_judges_a_leaf_with_its_key() {
+    let rows = [
+        (
+            "account id string under accountId",
+            serde_json::json!({"error": {"accountId": "123456789012"}}),
+            serde_json::json!({"error": {"accountId": "[redacted]"}}),
+        ),
+        (
+            "account id number under accountId",
+            serde_json::json!({"accountId": 123_456_789_012_u64}),
+            serde_json::json!({"accountId": "[redacted]"}),
+        ),
+        (
+            "capitalized Account key",
+            serde_json::json!({"Account": "123456789012"}),
+            serde_json::json!({"Account": "[redacted]"}),
+        ),
+        (
+            "arn-shaped key",
+            serde_json::json!({"arn:aws:iam::123456789012:role/ops": "x"}),
+            serde_json::json!({"[redacted]": "x"}),
+        ),
+        (
+            "credential-named key",
+            serde_json::json!({"api_key": "abc123", "model": "m"}),
+            serde_json::json!({"api_key": "[redacted]", "model": "m"}),
+        ),
+        (
+            "tokenizer-symbol key keeps its value",
+            serde_json::json!({"eos_token": "</s>"}),
+            serde_json::json!({"eos_token": "</s>"}),
+        ),
+        (
+            "non-account number under account key",
+            serde_json::json!({"accountCount": 3, "account_name": "ops"}),
+            serde_json::json!({"accountCount": 3, "account_name": "ops"}),
+        ),
+        (
+            "12 digits under a key without account",
+            serde_json::json!({"requestId": "123456789012"}),
+            serde_json::json!({"requestId": "123456789012"}),
+        ),
+    ];
+    for (name, mut value, expected) in rows {
+        scrub_upstream_value(&mut value);
+        assert_eq!(value, expected, "{name}");
+    }
+}
+
+/// Every planted value the text scrub removes from the serialized body is
+/// also absent after the value scrub.
+#[test]
+fn value_scrub_redacts_what_the_text_scrub_redacts_in_the_serialized_body() {
+    let planted = [
+        "123456789012",
+        "arn:aws:iam::123456789012:role/ops",
+        "abc123",
+        "hunter2pass",
+        "Pw0rd123",
+    ];
+    let body = serde_json::json!({
+        "error": {
+            "accountId": "123456789012",
+            "Account": 123_456_789_012_u64,
+            "message": "fetch https://alice:hunter2pass@example.com/x failed",
+            "details": [{"api_key": "abc123"}, {"password": "Pw0rd123"}]
+        },
+        "arn:aws:iam::123456789012:role/ops": "x"
+    });
+    let text_scrubbed = scrub_upstream_text(&body.to_string()).into_owned();
+    let mut value = body;
+    scrub_upstream_value(&mut value);
+    let value_scrubbed = value.to_string();
+    for planted in planted {
+        assert!(
+            !text_scrubbed.contains(planted),
+            "fixture control: text scrub kept {planted:?} in {text_scrubbed}"
+        );
+        assert!(
+            !value_scrubbed.contains(planted),
+            "value scrub kept {planted:?} in {value_scrubbed}"
+        );
+    }
+}
+
+/// The alphanumeric runs of 6+ characters in `text`.
+fn words(text: &str) -> Vec<&str> {
+    text.split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|word| word.len() >= 6)
+        .collect()
+}
+
+#[test]
+fn value_scrub_matches_the_text_scrub_over_the_planted_fixture() {
+    for row in planted_fixture() {
+        for placement in [
+            serde_json::json!({"message": row.clone()}),
+            serde_json::json!({row.clone(): "x"}),
+            serde_json::json!({"error": {"accountId": row.clone()}}),
+        ] {
+            let serialized = placement.to_string();
+            let text_scrubbed = scrub_upstream_text(&serialized).into_owned();
+            let mut value = placement;
+            scrub_upstream_value(&mut value);
+            let value_scrubbed = value.to_string();
+            for word in words(&row) {
+                if !text_scrubbed.contains(word) {
+                    assert!(
+                        !value_scrubbed.contains(word),
+                        "{row:?}: value scrub kept {word:?} in {value_scrubbed}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn credential_shaped_keys_are_redacted_on_the_first_pass() {
+    let jwt = format!(
+        "{}.{}.{}",
+        key("eyJ", "a", 40),
+        "b".repeat(60),
+        "c".repeat(43)
+    );
+    let proj = key("sk-proj-", "p", 156);
+    let rows = [
+        (
+            "jwt-shaped key",
+            format!(r#"{{"{jwt}":"expired"}}"#),
+            jwt.clone(),
+        ),
+        (
+            "project-key-shaped key",
+            format!(r#"{{"{proj}":"quota exceeded"}}"#),
+            proj.clone(),
+        ),
+        (
+            "account id inside a credential-named key",
+            "{'account_123456789012_secret': 'x'}".to_owned(),
+            "123456789012".to_owned(),
+        ),
+    ];
+    for (name, input, planted) in &rows {
+        assert_redacts(name, input, planted);
+        let once = scrub_upstream_text(input).into_owned();
+        assert_eq!(
+            scrub_upstream_text(&once),
+            once,
+            "{name}: second pass changed"
+        );
+    }
+    assert_eq!(
+        scrub_upstream_text("{'account_123456789012_secret': 'x'}"),
+        "{'account_[redacted]_secret': '[redacted]'}"
+    );
+}
+
+#[test]
+fn rules_matching_at_one_position_all_apply() {
+    assert_eq!(
+        scrub_upstream_text("account_123456789012_secret=OPAQUE1 rejected"),
+        "account_[redacted]_secret=[redacted] rejected"
+    );
+}
+
+#[test]
+fn redacts_unquoted_query_and_form_credential_values() {
+    let rows = [
+        (
+            "query string",
+            "GET https://gw.example/v1/chat?api_key=OPAQUE1&model=x failed",
+            "GET https://gw.example/v1/chat?api_key=[redacted]&model=x failed",
+        ),
+        (
+            "form body",
+            "grant_type=refresh_token&refresh_token=OPAQUE1",
+            "grant_type=refresh_token&refresh_token=[redacted]",
+        ),
+        (
+            "value ends at whitespace",
+            "request token=OPAQUE1 rejected",
+            "request token=[redacted] rejected",
+        ),
+        (
+            "value ends at a quote",
+            r#"{"url":"https://x/v1?key=1&access_token=OPAQUE1"}"#,
+            r#"{"url":"https://x/v1?key=1&access_token=[redacted]"}"#,
+        ),
+        (
+            "value ends at an escaped quote",
+            r#"{\"url\":\"https://x/v1?client_secret=OPAQUE1\"}"#,
+            r#"{\"url\":\"https://x/v1?client_secret=[redacted]\"}"#,
+        ),
+        (
+            "unquoted value at the end",
+            "api_key=unset",
+            "api_key=[redacted]",
+        ),
+    ];
+    for (name, input, expected) in rows {
+        assert_redacts(name, input, "OPAQUE1");
+        assert_eq!(scrub_upstream_text(input), expected, "{name}");
+    }
+}
+
+#[test]
+fn redacts_the_token_after_bearer() {
+    let long = "abcdefghijklmnopqrstuvwxyz";
+    let rows = [
+        (
+            "authorization header echo",
+            "Authorization: Bearer OPAQUE1 was rejected".to_owned(),
+            "Authorization: Bearer [redacted] was rejected".to_owned(),
+        ),
+        (
+            "quoted header value",
+            r#"{"headers":"authorization: bearer OPAQUE1=="}"#.to_owned(),
+            r#"{"headers":"authorization: bearer [redacted]"}"#.to_owned(),
+        ),
+        (
+            "long token without a digit",
+            format!("BEARER {long}"),
+            "BEARER [redacted]".to_owned(),
+        ),
+    ];
+    for (name, input, expected) in &rows {
+        assert_eq!(scrub_upstream_text(input), *expected, "{name}");
+    }
+}
+
+#[test]
+fn query_form_and_bearer_rules_leave_ordinary_text() {
+    let rows = [
+        ("sampling parameters", "top_p=0.9&max_tokens=5"),
+        (
+            "query without credentials",
+            "GET /v1/chat?model=x&stream=true",
+        ),
+        ("bearer in prose", "the bearer of bad news"),
+        ("short bearer word with a digit", "Bearer v2 is required"),
+        (
+            "auth scheme name",
+            r#"WWW-Authenticate: Bearer realm="api""#,
+        ),
+        ("credential key with spaced equals", "api_key = unset"),
+        ("empty form value", "api_key=&model=x"),
+        ("grant type naming a token", "grant_type=refresh_token"),
+    ];
+    for (name, input) in rows {
+        assert_clean(name, input);
+    }
+}
+
+#[test]
+fn tokenizer_symbol_keys_keep_their_values() {
+    let rows = [
+        ("eos_token", "{'eos_token': '</s>', 'bos_token': '<s>'}"),
+        (
+            "pad and unk",
+            r#"{"pad_token":"<pad>","unk_token":"<unk>"}"#,
+        ),
+        ("stop_token", r#"{"stop_token":"<|eot_id|>"}"#),
+        (
+            "sep cls mask",
+            r#"{"sep_token":"[SEP]","cls_token":"[CLS]","mask_token":"[MASK]"}"#,
+        ),
+        ("upper case", r#"{"EOS_TOKEN":"</s>"}"#),
+        ("dotted path", r#"{"tokenizer.eos_token":"</s>"}"#),
+        ("form pair", "eos_token=</s>"),
+    ];
+    for (name, input) in rows {
+        assert_clean(name, input);
+    }
+}
+
+/// Accepted over-redaction: a bare `token` key and any other `*_token` key
+/// are judged credential-named, whatever the value means.
+#[test]
+fn other_token_keys_stay_redacted() {
+    let rows = [
+        ("bare token", r#"{"token":"Hello","logprob":-0.1}"#, "Hello"),
+        ("page token", r#"{"next_page_token":"CgVhYmM"}"#, "CgVhYmM"),
+        (
+            "request token",
+            r#"{"clientRequestToken":"job-1234"}"#,
+            "job-1234",
+        ),
+        (
+            "prefix of a vocabulary key",
+            r#"{"xeos_token":"</s>"}"#,
+            "</s>",
+        ),
+    ];
+    for (name, input, planted) in rows {
+        assert_redacts(name, input, planted);
+    }
+}
+
+#[test]
+fn an_even_backslash_run_closes_a_quoted_value() {
+    let rows = [
+        (
+            "escaped backslash before the closing quote",
+            r#"{"password":"x\\","model":"m"}"#,
+            r#"{"password":"[redacted]","model":"m"}"#,
+        ),
+        (
+            "two escaped backslashes",
+            r#"{"password":"x\\\\","model":"m"}"#,
+            r#"{"password":"[redacted]","model":"m"}"#,
+        ),
+        (
+            "escaped quote stays inside",
+            r#"{"password":"x\\\"y","model":"m"}"#,
+            r#"{"password":"[redacted]","model":"m"}"#,
+        ),
+    ];
+    for (name, input, expected) in rows {
+        assert_eq!(scrub_upstream_text(input), expected, "{name}");
+    }
 }

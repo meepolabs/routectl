@@ -16,6 +16,8 @@
 //! credential short of its rule.
 
 use std::borrow::Cow;
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 use std::ops::Range;
 
 use crate::log_safe::{body_key_looks_credential, sanitize_for_log};
@@ -57,42 +59,93 @@ const NBSP: &[u8] = "\u{a0}".as_bytes();
 ///   not parsed, so `://user:pass@` is redacted whatever stands before it.
 ///   The authority runs to `/` (so to an escaped `\/`), never to a bare `\`, so
 ///   a domain user such as `CORP\alice:pw@` is userinfo;
+/// - the opaque token after the word `bearer` (any case, starting a token)
+///   and spaces or tabs: a run of `[A-Za-z0-9._~+/-]` and trailing `=` of
+///   6+ characters carrying a digit, or of 20+ characters, keeping the
+///   word, so prose such as `bearer of bad news` stays;
 /// - the value of a credential-named key (as judged for request bodies:
 ///   `api_key`, `secret`, `password`, `authorization`, a name ending in
 ///   `token` but not `tokens`, and so on; a name of 129+ characters counts
-///   as one), keeping the key: the key, of `[A-Za-z0-9_.-]`, quoted with
-///   `"` or `'` (each optionally backslash-escaped, any depth) then `:` or
-///   `=`, or bare (starting a token) then `=` only, so prose such as
-///   `unexpected token: '}'` stays; optional spaces or tabs around the
-///   separator; then a quoted value. A value already
-///   `[redacted]` is left alone. The value runs to the matching closing quote
-///   (one carrying no more backslashes than the opening one), or else to the
-///   next control character or the end of the text. An unquoted value such
-///   as `max_tokens: 5` is not one.
+///   as one), keeping the key. The tokenizer-symbol keys `eos_token`,
+///   `bos_token`, `pad_token`, `unk_token`, `stop_token`, `sep_token`,
+///   `cls_token` and `mask_token` (whole, or as the last dotted segment)
+///   are not credential-named. The key, of `[A-Za-z0-9_.-]`, is either
+///   quoted with `"` or `'` (each optionally backslash-escaped, any depth)
+///   then `:` or `=` and a quoted value, with optional spaces or tabs around
+///   the separator; or bare (starting a token, so after `?`, `&`, a space
+///   and so on) then `=`. A bare key directly followed by `=` takes a quoted
+///   value or, unquoted, the run up to `&`, whitespace, a control character
+///   or a quote (a query or form pair); a bare key with spaces before `=`
+///   takes a quoted value only. Prose such as `unexpected token: '}'` and an
+///   unquoted `max_tokens: 5` stay. A value already `[redacted]` is left
+///   alone. A quoted value runs to the matching closing quote (one carrying
+///   no more backslashes than the opening one; after an unescaped opening
+///   quote, one preceded by an even run of backslashes), or else to the
+///   next control character or the end of the text.
+///
+/// Every rule sees every byte not already inside a redacted span, so a
+/// credential-shaped key before its value is redacted too.
 #[must_use = "the returned text carries required redactions"]
 pub fn scrub_upstream_text(s: &str) -> Cow<'_, str> {
-    let bytes = s.as_bytes();
-    let mut out: Option<String> = None;
+    let spans = redaction_spans(s.as_bytes());
+    if spans.is_empty() {
+        return Cow::Borrowed(s);
+    }
+    let mut out = String::with_capacity(s.len());
     let mut copied = 0;
+    for span in spans {
+        out.push_str(&s[copied..span.start]);
+        out.push_str(PLACEHOLDER);
+        copied = span.end;
+    }
+    out.push_str(&s[copied..]);
+    Cow::Owned(out)
+}
+
+/// Every span to redact, in order, overlapping spans merged. Every rule
+/// probes every byte up to and including the start of each span found: a
+/// span that starts past its probe position (a value after its key, digits
+/// after `account`) waits in `ahead` while the bytes before it are probed,
+/// so a credential-shaped key is still matched, and its first byte is
+/// probed too, so a credential filling a value is matched to its own end.
+/// The rest of a span is not probed again.
+fn redaction_spans(bytes: &[u8]) -> Vec<Range<usize>> {
+    let mut found = Vec::new();
+    let mut ahead: BinaryHeap<Reverse<(usize, usize)>> = BinaryHeap::new();
     let mut at = 0;
     while at < bytes.len() {
-        let Some(span) = match_at(bytes, at) else {
-            at += 1;
-            continue;
-        };
-        let buf = out.get_or_insert_with(|| String::with_capacity(s.len()));
-        buf.push_str(&s[copied..span.start]);
-        buf.push_str(PLACEHOLDER);
-        copied = span.end;
-        at = span.end.max(at + 1);
+        let mut next = at + 1;
+        while let Some(&Reverse((start, end))) = ahead.peek()
+            && start <= at
+        {
+            ahead.pop();
+            next = next.max(end);
+            found.push(start..end);
+        }
+        for span in match_at(bytes, at).into_iter().flatten() {
+            if span.start > at {
+                ahead.push(Reverse((span.start, span.end)));
+            } else {
+                next = next.max(span.end);
+                found.push(span);
+            }
+        }
+        at = next;
     }
-    match out {
-        None => Cow::Borrowed(s),
-        Some(mut buf) => {
-            buf.push_str(&s[copied..]);
-            Cow::Owned(buf)
+    found.extend(ahead.into_iter().map(|Reverse((start, end))| start..end));
+    merge_overlapping(found)
+}
+
+fn merge_overlapping(mut spans: Vec<Range<usize>>) -> Vec<Range<usize>> {
+    spans.sort_unstable_by_key(|span| span.start);
+    let mut merged: Vec<Range<usize>> = Vec::with_capacity(spans.len());
+    for span in spans {
+        match merged.last_mut() {
+            Some(last) if span.start < last.end => last.end = last.end.max(span.end),
+            _ => merged.push(span),
         }
     }
+    merged
 }
 
 /// Log-line rendering of upstream-authored text: the complete text is
@@ -105,11 +158,17 @@ pub fn upstream_text_for_log(s: &str) -> String {
     sanitize_for_log(&scrub_upstream_text(s))
 }
 
-/// Applies [`scrub_upstream_text`] to every string leaf of a decoded JSON
-/// value, in place. Object keys, numbers, booleans and nulls are left as
-/// they are, and a leaf the scrub leaves unchanged is not rewritten. A
-/// credential held as the whole value of a credential-named key is not a
-/// shape this finds; key-based redaction is a separate pass.
+/// Applies [`scrub_upstream_text`] to a decoded JSON value in place,
+/// redacting what the text scrub redacts in the same value serialized:
+/// every string leaf and every object key is scrubbed (a key the scrub
+/// rewrites is replaced; of keys that scrub to the same text, the last
+/// entry is kept),
+/// and a leaf is judged with its key as context. A non-empty string directly
+/// under a credential-named key (the key rule of [`scrub_upstream_text`])
+/// becomes `[redacted]`, and a 12-digit account id leading a string or
+/// number directly under a key containing `account` (any case) is redacted,
+/// a number becoming a string. Booleans, nulls and leaves the scrub leaves
+/// unchanged are not rewritten.
 pub fn scrub_upstream_value(value: &mut serde_json::Value) {
     match value {
         serde_json::Value::String(text) => {
@@ -118,9 +177,81 @@ pub fn scrub_upstream_value(value: &mut serde_json::Value) {
             }
         }
         serde_json::Value::Array(items) => items.iter_mut().for_each(scrub_upstream_value),
-        serde_json::Value::Object(map) => map.values_mut().for_each(scrub_upstream_value),
+        serde_json::Value::Object(map) => scrub_object(map),
         serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
     }
+}
+
+fn scrub_object(map: &mut serde_json::Map<String, serde_json::Value>) {
+    for (key, child) in map.iter_mut() {
+        scrub_upstream_value(child);
+        scrub_keyed_leaf(key, child);
+    }
+    if map
+        .keys()
+        .any(|key| matches!(scrub_upstream_text(key), Cow::Owned(_)))
+    {
+        *map = std::mem::take(map)
+            .into_iter()
+            .map(|(key, child)| {
+                let scrubbed = match scrub_upstream_text(&key) {
+                    Cow::Owned(scrubbed) => Some(scrubbed),
+                    Cow::Borrowed(_) => None,
+                };
+                (scrubbed.unwrap_or(key), child)
+            })
+            .collect();
+    }
+}
+
+/// Redacts what the text scrub finds in a leaf only with its key before it.
+fn scrub_keyed_leaf(key: &str, leaf: &mut serde_json::Value) {
+    if quoted_key_names_credential(key.as_bytes()) {
+        if let serde_json::Value::String(text) = leaf
+            && !text.is_empty()
+            && text != PLACEHOLDER
+        {
+            PLACEHOLDER.clone_into(text);
+        }
+        return;
+    }
+    if !contains_ci(key.as_bytes(), b"account") {
+        return;
+    }
+    match leaf {
+        serde_json::Value::String(text) => {
+            redact_leading_account_id(text);
+        }
+        serde_json::Value::Number(number) => {
+            let mut text = number.to_string();
+            if redact_leading_account_id(&mut text) {
+                *leaf = serde_json::Value::String(text);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// True when `key` would be judged credential-named between quotes: every
+/// byte a key byte, and the name credential-shaped.
+fn quoted_key_names_credential(key: &[u8]) -> bool {
+    !key.is_empty() && key.iter().all(|&b| is_key_char(b)) && key_names_credential(key)
+}
+
+fn contains_ci(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(needle))
+}
+
+/// Redacts an account id leading `text` as if `account` stood before it;
+/// true when it did.
+fn redact_leading_account_id(text: &mut String) -> bool {
+    let Some(digits) = account_digits_from(text.as_bytes(), 0) else {
+        return false;
+    };
+    text.replace_range(digits, PLACEHOLDER);
+    true
 }
 
 /// True when `text` names an AWS principal or account in an AWS shape: an
@@ -141,14 +272,19 @@ pub fn names_aws_principal(text: &str) -> bool {
     (0..bytes.len()).any(|at| arn_at(bytes, at).is_some() || account_id_at(bytes, at).is_some())
 }
 
-/// The span to redact for a match beginning at `at`, if any rule matches.
-fn match_at(bytes: &[u8], at: usize) -> Option<Range<usize>> {
-    arn_at(bytes, at)
-        .or_else(|| account_id_at(bytes, at))
-        .or_else(|| token_at(bytes, at))
-        .or_else(|| session_token_at(bytes, at))
-        .or_else(|| userinfo_at(bytes, at))
-        .or_else(|| credential_key_value_at(bytes, at))
+/// The span each rule redacts for a match probed at `at`. Every rule is
+/// evaluated, so one rule matching never hides another's match at the same
+/// position. A span may start past `at` (a value after its key).
+fn match_at(bytes: &[u8], at: usize) -> [Option<Range<usize>>; 7] {
+    [
+        arn_at(bytes, at),
+        account_id_at(bytes, at),
+        token_at(bytes, at),
+        session_token_at(bytes, at),
+        userinfo_at(bytes, at),
+        bearer_token_at(bytes, at),
+        credential_key_value_at(bytes, at),
+    ]
 }
 
 const fn is_token_char(b: u8) -> bool {
@@ -258,7 +394,14 @@ fn account_id_at(bytes: &[u8], at: usize) -> Option<Range<usize>> {
     if !has_prefix_ci(bytes, at, b"account") {
         return None;
     }
-    let mut pos = skip_account_separators(bytes, at + "account".len());
+    account_digits_from(bytes, at + "account".len())
+}
+
+/// The account-id digits after the word `account` ends at `from`: the
+/// separators, an optional `id` / `number`, the separators, then exactly
+/// 12 digits.
+fn account_digits_from(bytes: &[u8], from: usize) -> Option<Range<usize>> {
+    let mut pos = skip_account_separators(bytes, from);
     if let Some(word) = [b"id".as_slice(), b"number"]
         .into_iter()
         .find(|word| has_prefix_ci(bytes, pos, word))
@@ -513,10 +656,23 @@ const fn ends_authority(b: u8) -> bool {
 /// treated as credential-named, which keeps the judgment off the heap.
 const MAX_JUDGED_KEY_LEN: usize = 128;
 
-/// The quoted value of a credential-named key starting at `at` (at its
-/// opening quote, or at its first character when bare); the span is the
-/// value alone. A start just after a backslash, or a bare key just after a
-/// `.`, is skipped: the run's own start already judged the same key, and
+/// Model-vocabulary keys whose names end in `token` but whose values are
+/// tokenizer symbols, not credentials.
+const VOCABULARY_TOKEN_KEYS: [&[u8]; 8] = [
+    b"eos_token",
+    b"bos_token",
+    b"pad_token",
+    b"unk_token",
+    b"stop_token",
+    b"sep_token",
+    b"cls_token",
+    b"mask_token",
+];
+
+/// The value of a credential-named key starting at `at` (at its opening
+/// quote, or at its first character when bare); the span is the value
+/// alone. A start just after a backslash, or a bare key just after a `.`,
+/// is skipped: the run's own start already judged the same key, and
 /// skipping keeps a long run of backslashes or dotted segments linear.
 fn credential_key_value_at(bytes: &[u8], at: usize) -> Option<Range<usize>> {
     let prev = at.checked_sub(1).map(|i| bytes[i]);
@@ -532,24 +688,96 @@ fn credential_key_value_at(bytes: &[u8], at: usize) -> Option<Range<usize>> {
     if key_len == 0 {
         return None;
     }
+    let key = &bytes[key_at..key_at + key_len];
     let mut pos = key_at + key_len;
     if let Some(open) = opening {
         let close = quote_at(bytes, pos).filter(|close| close.mark == open.mark)?;
         pos = close.end;
     }
+    if !key_names_credential(key) {
+        return None;
+    }
+    let value = if opening.is_none() && bytes.get(pos) == Some(&b'=') {
+        form_value(bytes, pos + 1)
+    } else {
+        quoted_value_after_separator(bytes, pos, opening.is_some())?
+    };
+    (!value.is_empty() && &bytes[value.clone()] != PLACEHOLDER.as_bytes()).then_some(value)
+}
+
+/// The quoted value after blanks, a `:` (quoted keys only) or `=`, and
+/// blanks, starting at `pos`.
+fn quoted_value_after_separator(
+    bytes: &[u8],
+    pos: usize,
+    quoted_key: bool,
+) -> Option<Range<usize>> {
     let sep = pos + run_len(bytes, pos, is_blank);
     match bytes.get(sep) {
         Some(b'=') => {}
-        Some(b':') if opening.is_some() => {}
+        Some(b':') if quoted_key => {}
         _ => return None,
     }
     let value_quote = quote_at(bytes, sep + 1 + run_len(bytes, sep + 1, is_blank))?;
-    if !key_names_credential(&bytes[key_at..key_at + key_len]) {
+    Some(quoted_value(bytes, &value_quote))
+}
+
+/// A query or form value at `at`: a quoted value, else the run up to `&`,
+/// whitespace, a control character, or a quote (bare or backslash-escaped).
+fn form_value(bytes: &[u8], at: usize) -> Range<usize> {
+    if let Some(open) = quote_at(bytes, at) {
+        return quoted_value(bytes, &open);
+    }
+    let mut pos = at;
+    while let Some(&b) = bytes.get(pos) {
+        if b == b'&' || b.is_ascii_whitespace() || b.is_ascii_control() || b == b'"' || b == b'\'' {
+            break;
+        }
+        if b == b'\\' {
+            let run = run_len(bytes, pos, |b| b == b'\\');
+            if matches!(bytes.get(pos + run), Some(b'"' | b'\'')) {
+                break;
+            }
+            pos += run;
+            continue;
+        }
+        pos += 1;
+    }
+    at..pos
+}
+
+/// The opaque token after `Bearer` (any case, starting a token) and one or
+/// more spaces or tabs; the span is the token alone. The token is the run
+/// of `[A-Za-z0-9._~+/-]` plus trailing `=`, and counts only when it runs
+/// 6+ characters carrying a digit, or 20+ characters, so prose such as
+/// `bearer of bad news` stays.
+fn bearer_token_at(bytes: &[u8], at: usize) -> Option<Range<usize>> {
+    const NAME: &[u8] = b"bearer";
+    if !has_prefix_ci(bytes, at, NAME) || !starts_token(bytes, at) {
         return None;
     }
-    let value = quoted_value(bytes, &value_quote);
-    (!value.is_empty() && &bytes[value.clone()] != PLACEHOLDER.as_bytes()).then_some(value)
+    let gap = run_len(bytes, at + NAME.len(), is_blank);
+    if gap == 0 {
+        return None;
+    }
+    let start = at + NAME.len() + gap;
+    let body = run_len(bytes, start, |b| {
+        b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'~' | b'+' | b'/' | b'-')
+    });
+    let token = &bytes[start..start + body];
+    let carries_digit = token.iter().any(u8::is_ascii_digit);
+    if !((carries_digit && body >= BEARER_TOKEN_MIN) || body >= BEARER_TOKEN_MIN_PLAIN) {
+        return None;
+    }
+    let pad = run_len(bytes, start + body, |b| b == b'=');
+    Some(start..start + body + pad)
 }
+
+/// Shortest bearer token that counts when it carries a digit.
+const BEARER_TOKEN_MIN: usize = 6;
+
+/// Length at which a bearer token with no digit still counts as one.
+const BEARER_TOKEN_MIN_PLAIN: usize = 20;
 
 const fn is_key_char(b: u8) -> bool {
     is_token_char(b) || b == b'.'
@@ -580,13 +808,20 @@ fn quote_at(bytes: &[u8], at: usize) -> Option<Quote> {
 
 /// The value after `open`: up to the first `open.mark` preceded by no more
 /// backslashes than `open` carries (a quote escaped one level deeper stays
-/// inside), else to the next control character or the end.
+/// inside) or, for an unescaped `open`, by an even run of backslashes
+/// (escaped backslashes, kept in the value); else to the next control
+/// character or the end.
 fn quoted_value(bytes: &[u8], open: &Quote) -> Range<usize> {
     let start = open.end;
     let mut backslashes = 0;
     for (pos, &b) in bytes.iter().enumerate().skip(start) {
-        if b == open.mark && backslashes <= open.backslashes {
-            return start..pos - backslashes;
+        if b == open.mark {
+            if open.backslashes == 0 && backslashes % 2 == 0 {
+                return start..pos;
+            }
+            if backslashes <= open.backslashes {
+                return start..pos - backslashes;
+            }
         }
         if b.is_ascii_control() {
             return start..pos;
@@ -597,7 +832,8 @@ fn quoted_value(bytes: &[u8], open: &Quote) -> Range<usize> {
 }
 
 /// Judges an ASCII key by the request-body credential-key rule, which takes
-/// it lowercased.
+/// it lowercased; a model-vocabulary key, whole or as the last dotted
+/// segment, is not credential-named.
 fn key_names_credential(key: &[u8]) -> bool {
     let mut lowered = [0_u8; MAX_JUDGED_KEY_LEN];
     let Some(buf) = lowered.get_mut(..key.len()) else {
@@ -605,6 +841,10 @@ fn key_names_credential(key: &[u8]) -> bool {
     };
     buf.copy_from_slice(key);
     buf.make_ascii_lowercase();
+    let last_segment = buf.rsplit(|&b| b == b'.').next().unwrap_or_default();
+    if VOCABULARY_TOKEN_KEYS.contains(&last_segment) {
+        return false;
+    }
     std::str::from_utf8(buf).is_ok_and(body_key_looks_credential)
 }
 
