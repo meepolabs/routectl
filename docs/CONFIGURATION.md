@@ -703,7 +703,10 @@ model `header_extras` per request:
 
 1. Clone provider's `header_extras` into a working map.
 2. Iterate model's `header_extras`:
-   - auth-reserved keys WARN + drop (see "Reserved-header buckets" below)
+   - auth-reserved keys drop (see "Reserved-header buckets" below). The
+     config advisory `auth-reserved header warning` names the model and
+     header once at `serve` startup and once per accepted config reload;
+     each request logs the drop only at DEBUG
    - managed-reserved keys DEBUG + drop
    - every other key model-wins on collision (last-writer-wins)
 3. List-valued post-pass on `LIST_VALUED_HEADERS` (`anthropic-beta`):

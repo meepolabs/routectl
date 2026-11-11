@@ -9,7 +9,9 @@
 pub enum ReloadFailure {
     /// config.toml could not be read, parsed, or validated.
     ConfigLoadFailed,
-    /// The blocking loader task panicked.
+    /// The blocking loader task did not complete: it panicked or was
+    /// cancelled. The reload WARN's `is_panic` / `is_cancelled` fields say
+    /// which; the token is the same for both.
     LoaderPanicked,
     /// The candidate router could not be built from the loaded config.
     RouterBuildFailed,

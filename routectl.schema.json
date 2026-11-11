@@ -554,7 +554,7 @@
           "additionalProperties": {
             "type": "string"
           },
-          "description": "Extra HTTP headers applied to every outbound request from this\nmodel's route. Merged with the provider's `header_extras` at\ndispatch time; model wins on key collision. The list-valued\n`anthropic-beta` header runs through a comma-split-union-rejoin\npost-pass (ingress -> provider -> model visit order) so all\nthree sources land on one wire header. Auth-reserved keys\n(`authorization`, `x-api-key`, `anthropic-version`) WARN +\ndrop; managed-reserved keys (`host`, `content-type`,\n`content-length`) DEBUG + drop.",
+          "description": "Extra HTTP headers applied to every outbound request from this\nmodel's route. Merged with the provider's `header_extras` at\ndispatch time; model wins on key collision. The list-valued\n`anthropic-beta` header runs through a comma-split-union-rejoin\npost-pass (ingress -> provider -> model visit order) so all\nthree sources land on one wire header. Auth-reserved keys\n(`authorization`, `x-api-key`, `anthropic-version`) drop, logged\nonce as an advisory WARN at startup and per accepted config\nreload, and at DEBUG per request; managed-reserved keys (`host`,\n`content-type`, `content-length`) DEBUG + drop.",
           "type": "object"
         },
         "history_reasoning": {

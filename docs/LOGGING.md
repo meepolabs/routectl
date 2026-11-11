@@ -1591,6 +1591,24 @@ success line, so a declined candidate can never stamp a transition it did
 not make. CONFIGURATION.md, "Context reduction", carries the recovery
 runbook that uses this line.
 
+A declined reload logs one WARN instead. A loader refusal (read, parse or
+validation) is `config reload failed; keeping previous config` on target
+`routectl_cli::server::config_load`, with the redacted loader error in
+`error` on one line: a refusal naming several keys joins them with `"; "`,
+and `reasons` counts them. `serve` at cold start prints the same refusal
+to stderr one reason per line.
+
+```
+config reload failed; keeping previous config path=... \
+  error=`models.gpt.effort_levels` is no longer a model setting: ...; `models.gpt.max_thinking_budget` is no longer a model setting: ... reasons=2
+```
+
+A credentials reload that rebuilds the router logs `credentials reload
+rebuilt the router and swapped it in` (INFO) with `seats_before`,
+`seats_after` and `seat_set_changed`. The rebuild also runs when a seat
+that could not be built is logged in again under the same key, so equal
+counts with `seat_set_changed=false` is that readmit, not a lost seat.
+
 ## Stream first-activity mark
 
 `try_stream_with_first_content` (routectl-router) emits one DEBUG line the
@@ -2417,7 +2435,7 @@ Repeat behavior is noted where the line is latched, sampled, or aggregated
 | WARN / ERROR | `routectl_cli::server::file_watch` | `watch target has no parent directory`, `failed to install fs watch on parent directory`, `watched file was removed`, `reload coordinator channel closed` (WARN); `fs watcher backend error` (ERROR) | Hot reload for that file is off or degraded: raise inotify limits or reload with SIGHUP. A removed file should be restored (in-memory state is kept). A closed coordinator outside shutdown means the reload pipeline is dead: restart. |
 | WARN | `routectl_cli::server` | `WARNING: routectl bound to {host}, exposing your local LLM credentials` | The listener is reachable beyond loopback: bind to loopback unless public exposure is intended and token-protected. |
 | ERROR | `routectl_cli::server::{purge_settlement,serve}` | `capability purge settlements did not finish before the shutdown deadline`, `a capability purge settlement did not complete ...`, `a capability purge settlement could not be accounted for` | The registry and ledger may disagree for a purged key; the daemon stops on purpose in the terminal cases. Check usage DB health, restart, and re-check the purged keys. |
-| WARN | `routectl_cli::server::reload` | `file-watch init failed`, `failed to install SIGHUP handler`, `activation inventory: no OAuth credential store available to probe`, `activation inventory: alias-referenced provider entries have no usable credential`, `credentials reload failed`, `credentials seat-set changed but router rebuild failed`, `config reload failed: ...`, `config reload swapped routing state, but the listed fields require a daemon restart ...` | A reload path is off or a reload was rejected and the previous state kept. Fix the named config or credentials (`routectl doctor` shows why the file is refused; the last rejected reload is shown on `/status/doctor` and the dashboard), set HOME/XDG for OAuth providers, restart for `restart_required` fields, and file a bug for a panicked loader. |
+| WARN | `routectl_cli::server::reload` | `file-watch init failed`, `failed to install SIGHUP handler`, `activation inventory: no OAuth credential store available to probe`, `activation inventory: alias-referenced provider entries have no usable credential`, `credentials reload failed`, `credentials reload needed a router rebuild, but it failed` (`seat_set_changed`), `config reload failed: ...` (the loader one carries `is_panic` / `is_cancelled`), `config reload swapped routing state, but the listed fields require a daemon restart ...` | A reload path is off or a reload was rejected and the previous state kept. Fix the named config or credentials (`routectl doctor` shows why the file is refused; the last rejected reload is shown on `/status/doctor` and the dashboard), set HOME/XDG for OAuth providers, restart for `restart_required` fields, and file a bug for a panicked loader (`is_panic=true`; a cancelled loader is the runtime shutting down). |
 | WARN | `routectl_cli::server::reload_shutdown` | `reload task join failed during shutdown` (`event=reload_task_join_failed`), `reload task did not stop within deadline` (`event=reload_task_deadline_exceeded`, field `deadline_secs`) | A reload task panicked or hung at shutdown: file a bug with the preceding lines; check the usage DB if it recurs. Match on the `event` field, not the message. |
 | ERROR | `routectl_cli::server::seat_driver` | `seat driver stopped before shutdown; managed logins are no longer refreshed in the background`; field `exit` | The background refresh loop ended while the daemon kept serving. Seats still refresh on demand when a request uses them; restart the daemon to restore background refresh, and file a bug with the preceding lines. |
 | WARN | `routectl_cli::server::router_build` | `class policy warning`, `codex identity warning`, `per-block breakpoint warning`, `cloud-code host warning`, `cloud-code model warning`, `auth-reserved header warning` (once per finding at serve startup and at each accepted config reload; a credentials seat-change rebuild repeats none) | A config advisory: adjust or remove the named knob, or accept it. `auth-reserved header warning`: a `[models.X] header_extras` key (`authorization`, `x-api-key`, `anthropic-version`) is dropped from every request; remove it and put credentials in `api_key_ref` / `auth_kind`. |

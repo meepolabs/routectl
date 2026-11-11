@@ -540,8 +540,9 @@ fn log_lifted_parks(resets: &[routectl_router::runtime_state::AccountReset], sou
 }
 
 /// Rebuild the live Router from the unchanged config after a seat-set
-/// change, preserving per-seat runtime state and honoring the
-/// disk-first-keep-old invariant on a build failure. The config is not
+/// change or a changed placeholder seat (whose key set can be unchanged, so
+/// the lines say which with `seat_set_changed`), preserving per-seat runtime
+/// state and honoring the disk-first-keep-old invariant on a build failure. The config is not
 /// re-read (it is unchanged); re-running the startup validators on it is
 /// harmless. Split out of `handle_credentials_reload` to keep that function
 /// under the size ceiling. Returns whether the rebuilt router was published.
@@ -557,7 +558,8 @@ async fn rebuild_router_for_seat_change(
         Err(e) => {
             tracing::warn!(
                 error = %e,
-                "credentials seat-set changed but router rebuild failed; keeping previous router",
+                seat_set_changed = before != after,
+                "credentials reload needed a router rebuild, but it failed; keeping previous router",
             );
             return false;
         }
@@ -586,7 +588,8 @@ async fn rebuild_router_for_seat_change(
     tracing::info!(
         seats_before = before.len(),
         seats_after = after.len(),
-        "credentials seat set changed; router rebuilt and swapped",
+        seat_set_changed = before != after,
+        "credentials reload rebuilt the router and swapped it in",
     );
     true
 }

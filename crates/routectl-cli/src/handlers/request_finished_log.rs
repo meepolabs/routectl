@@ -89,3 +89,39 @@ pub fn emit_request_finished(record: &UsageRecord) {
         "{REQUEST_FINISHED}",
     );
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The sanitize cap on a client-chosen string, in characters.
+    const CAP: usize = 256;
+
+    /// A request id made only of characters the quoted rendering escapes
+    /// renders at its worst case: every kept character doubled, plus the two
+    /// quotes. Past the cap the escaping cannot grow the field further.
+    #[test]
+    fn a_quote_heavy_request_id_renders_within_twice_the_cap_plus_its_quotes() {
+        // Arrange: well past the cap, every character escaped when quoted.
+        let request_id = "\"\\".repeat(CAP);
+        let record = UsageRecord {
+            request_id,
+            ..Default::default()
+        };
+
+        // Act
+        let events = routectl_testkit::capture_events(|| emit_request_finished(&record));
+
+        // Assert
+        let line = events
+            .iter()
+            .find(|e| e.message == REQUEST_FINISHED)
+            .expect("the finished line is emitted");
+        let rendered = line.field("request_id").expect("request_id is on the line");
+        assert_eq!(
+            rendered.chars().count(),
+            2 * CAP + 2,
+            "the bound is reached and not exceeded: {rendered}"
+        );
+    }
+}

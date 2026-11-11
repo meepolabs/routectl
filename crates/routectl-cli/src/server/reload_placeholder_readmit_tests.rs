@@ -340,3 +340,59 @@ async fn a_relogin_readmits_a_placeholder_seat_by_rebuilding_the_router() {
         );
     }
 }
+
+/// The rebuild line says whether the seat set changed: a dead record
+/// re-logged under the same key readmits a placeholder with equal seat
+/// counts and an unchanged set, so the line must not claim a changed set.
+#[tokio::test]
+#[serial_test::serial]
+async fn the_readmit_rebuild_line_says_whether_the_seat_set_changed() {
+    let rows = [
+        ("same key re-logged", SeatA::Dead, "false", 0),
+        ("new key added", SeatA::Absent, "true", 1),
+    ];
+    for (name, seat_a, seat_set_changed, seats_added) in rows {
+        // Arrange
+        let dir = tempfile::tempdir().unwrap();
+        let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", dir.path());
+        let rig = Rig::new(dir.path(), seat_a).await;
+        assert!(
+            rig.swap.load().is_placeholder_account(SEAT_A),
+            "{name}: premise, seat a is a placeholder"
+        );
+        rig.relogin_seat_a();
+
+        // Act
+        let ((), events) = routectl_testkit::with_capture(rig.reload_credentials()).await;
+
+        // Assert
+        let rebuilt: Vec<_> = events
+            .iter()
+            .filter(|e| e.message == "credentials reload rebuilt the router and swapped it in")
+            .collect();
+        assert_eq!(rebuilt.len(), 1, "{name}: {events:#?}");
+        let line = rebuilt[0];
+        assert_eq!(line.level, tracing::Level::INFO, "{name}");
+        assert_eq!(
+            line.field("seat_set_changed"),
+            Some(seat_set_changed),
+            "{name}"
+        );
+        let count = |key| {
+            line.field(key)
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or_else(|| panic!("{name}: {key} in {line:?}"))
+        };
+        assert_eq!(
+            count("seats_after") - count("seats_before"),
+            seats_added,
+            "{name}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| e.message.contains("seat set changed")),
+            "{name}: no line claims a changed set by its wording: {events:#?}"
+        );
+    }
+}

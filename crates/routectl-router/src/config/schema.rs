@@ -956,9 +956,10 @@ pub struct ModelEntry {
     /// `anthropic-beta` header runs through a comma-split-union-rejoin
     /// post-pass (ingress -> provider -> model visit order) so all
     /// three sources land on one wire header. Auth-reserved keys
-    /// (`authorization`, `x-api-key`, `anthropic-version`) WARN +
-    /// drop; managed-reserved keys (`host`, `content-type`,
-    /// `content-length`) DEBUG + drop.
+    /// (`authorization`, `x-api-key`, `anthropic-version`) drop, logged
+    /// once as an advisory WARN at startup and per accepted config
+    /// reload, and at DEBUG per request; managed-reserved keys (`host`,
+    /// `content-type`, `content-length`) DEBUG + drop.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub header_extras: BTreeMap<String, String>,
 

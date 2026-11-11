@@ -137,9 +137,13 @@ pub(super) fn read_parse_validate_config(path: &Path) -> Result<LoadedConfig, Re
             // credential on the failing source line) plus local paths.
             // Route it through the same fail-safe redactor the cold-start
             // seam and `doctor` use before it reaches structured logs.
+            let redacted =
+                crate::commands::parse_error_redaction::redact_config_load_error(&message);
+            let (error, reasons) = single_line_reasons(&redacted);
             tracing::warn!(
                 path = %path.display(),
-                error = %crate::commands::parse_error_redaction::redact_config_load_error(&message),
+                error = %error,
+                reasons,
                 "config reload failed; keeping previous config",
             );
             return Err(ReloadFailure::ConfigLoadFailed);
@@ -154,6 +158,19 @@ pub(super) fn read_parse_validate_config(path: &Path) -> Result<LoadedConfig, Re
     warn_if_config_world_readable(path, &loaded.config, &loaded.raw_text);
 
     Ok(loaded)
+}
+
+/// A multi-line loader error as one log field: its non-empty lines joined
+/// with `"; "`, and how many lines there were. A log shipper splits a field
+/// carrying a newline into separate records, so the reload WARN must stay on
+/// one line; the cold-start error printed to stderr keeps its line breaks.
+fn single_line_reasons(error: &str) -> (String, usize) {
+    let reasons: Vec<&str> = error
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    (reasons.join("; "), reasons.len())
 }
 
 /// Emit a one-time WARN when `path` is group/world-readable AND the
@@ -197,6 +214,10 @@ mod config_load_tests;
 #[cfg(test)]
 #[path = "config_load_removed_key_tests.rs"]
 mod config_load_removed_key_tests;
+
+#[cfg(test)]
+#[path = "config_load_reload_warn_tests.rs"]
+mod config_load_reload_warn_tests;
 
 #[cfg(test)]
 #[path = "config_load_preflight_tests.rs"]
