@@ -41,6 +41,8 @@ license.
 - `src/schema.rs` -- canonical wire types: `ChatRequest`, `ChatResponse`,
   `ChatChunk`, `Message`, `MessageContent` (`has_non_text_part`),
   `ReasoningDetail`, `ReasoningConfig` (`is_off`, `is_off_effort`), `Usage`,
+  `CacheCreation` (per-lifetime cache-write map: lifetime seconds -> tokens,
+  capped at `MAX_CACHE_LIFETIME_ENTRIES`; wire serde in `cache_lifetime.rs`),
   `RequestProvenance`, the Anthropic-ingress native `thinking` carrier
   (`AnthropicThinking`, `ThinkingObject`), and the
   `RoutectlInternal` carrier (resolved per-model knobs plus the
@@ -942,7 +944,8 @@ license.
   `RENDERED_PATH_CHARS` while rendering, so caller-chosen segment names bound
   neither the walk's cost nor the log record's size
 - `src/anthropic_api/response.rs` -- Anthropic response -> canonical
-  `ChatResponse` (content-block walk, stop_reason map, usage cache stats)
+  `ChatResponse` (content-block walk, stop_reason map, usage cache stats;
+  `cache_creation` deserializes straight into the core `CacheCreation`)
 - `src/anthropic_api/sse.rs` -- Anthropic SSE event state machine
   (`message_start`, `content_block_*`, `message_delta`, `message_stop`); the
   content-free `message_start` role chunk carries the captured input usage as
@@ -955,7 +958,10 @@ license.
   opening carrier; `mod.rs` `stream_state_for` sets the vendor flag only for
   the first-party host.
   `stream()` in `mod.rs` MERGES the unified-quota head carrier into that first
-  chunk rather than replacing it. `is_terminal_event` (`message_stop` only) is
+  chunk rather than replacing it. The closing delta's cache-write split: a delta
+  stating its own write total keeps its non-empty split, else the opener's when
+  it sums to that total, else none; a delta stating no total falls back per
+  lifetime to the opener's. `is_terminal_event` (`message_stop` only) is
   the lane's `StreamCompletion` predicate
 - `src/anthropic_api/sse_opaque.rs` -- bounded opaque-event capture per
   unknown content block (per-block caps: 256 KB / 10000 deltas; per-stream
@@ -1062,7 +1068,10 @@ license.
   `StreamedFingerprint` (per-stream dedup of the upstream
   `system_fingerprint` carried on chunk `upstream_meta`);
   `mark_reported_usage` stamps `usage_input_source = ExplicitFinal` on any
-  chunk whose usage carries a prompt count; `detect_error_envelope` maps an
+  chunk whose usage carries a prompt count, and lifts
+  `prompt_tokens_details.cache_write_tokens` into `cache_creation_input_tokens`
+  (a total with no lifetime split; `response.rs` does the same on the complete
+  path); `detect_error_envelope` maps an
   in-band `error` object to `Error::Upstream` with its status clamped via
   `http_client::in_band_error_status`
 - `src/openai_compat/util.rs` -- shared `build_reasoning_detail` helper for
@@ -1266,7 +1275,9 @@ license.
   schema lists in `properties` but not `required` (codex lane, applied by
   `response.rs` and `sse.rs`)
 - `src/openai_responses/response.rs` -- Responses response -> canonical
-  (output walk, finish_reason from status, usage); stamps
+  (output walk, finish_reason from status, usage; `cache_details` reads
+  `input_tokens_details` cached / `cache_write_tokens` and a duration-named
+  per-lifetime split, shared with the streaming path); stamps
   `lane_format_tag(auth_kind)` on every emitted reasoning detail; carries the
   first non-empty `message` item id on `upstream_meta` as a
   `ResponsesEnvelope`; `translate_for_request` runs the codex-lane
@@ -1501,7 +1512,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   assembles the Converse `additionalModelRequestFields` bag; the client
   `metadata` is replaced by the operator's own value
 - `src/bedrock/converse/response.rs` -- Converse response body -> canonical
-  (content walk, stopReason map, cacheDetails -> cache_creation)
+  (content walk, stopReason map, cacheDetails -> cache_creation, each `ttl`
+  parsed by the core duration grammar; an unparseable one stays unknown
+  lifetime inside the write total)
 - `src/bedrock/converse/eventstream.rs` -- ConverseStream binary-frame
   decoder; per-block-index state map; terminal frame `messageStop`; the
   `metadata` usage chunk stamps `usage_input_source = ExplicitFinal` and
@@ -1808,7 +1821,10 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `visible_routectl_provider: bool`, accepted with no effect, and the model facts
   `context_window` / `max_output_tokens` / `pricing: Option<PricingConfig>`);
   `ProviderEntry`/`ModelEntry`/`ServerAuth::redact_secrets` for display; `AliasValue`, `ServerAuth`,
-  `RegistryEntry`/`PricingConfig` pricing table; `CacheConfig` (global
+  `RegistryEntry`/`PricingConfig` pricing table (the legacy 5m/1h write keys
+  plus `cache_write_per_mtok`, a duration-keyed write-price map;
+  `cache_write_rates()` folds them to seconds -> rate, the legacy key winning a
+  shared lifetime, and `set_cache_write_rate` writes one); `CacheConfig` (global
   `[cache]`: `auto_emit_top_level_breakpoint: bool`, default true;
   `k_gated_emission: bool`, default FALSE -- the hot-reloadable switch for
   withholding auto-emitted markers below the emission break-even) and
@@ -1946,7 +1962,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   configured context window, its output fill (`fill_ceiling` ->
   `FillCeiling { tokens, source: FillSource }`, `lowered_by` applying a
   learned ceiling; a pool reads its first resolvable member's egress, so a
-  mixed Invoke / Converse `bedrock` pool follows member order) and its per-field prices with their sources via
+  mixed Invoke / Converse `bedrock` pool follows member order) and its per-field prices with their sources, keyed by
+  `PriceDimension` (input / output / cache read / `CacheWrite(seconds)`, whose
+  `config_key` names the pricing key), via
   `prices::effective_pricing`; `PriceTableDates` dates the two tables the
   view was derived against; `ClassPolicyCell` tags each
   failure class `ClassPolicySource::{Config, BakedDefault}` via
@@ -2218,10 +2236,13 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   `to_canonical_json`), `PriceTableError`; the usage-cost price table module,
   format and rules in its `//!` doc
 - `src/prices/format.rs` -- canonical on-disk serde shapes, `TableDate`, the
-  normalized provider API base
+  normalized provider API base; a row prices 300 s / 3600 s writes in the legacy
+  `cache_write_5m` / `cache_write_1h` keys and every other lifetime in a
+  `cache_write` object keyed by decimal seconds
 - `src/prices/validate.rs` -- `parse_and_validate` and the bounds every table
   passes; duplicate provider and (provider, model) ids are refused before the
-  unusable-id skip
+  unusable-id skip, as is a `cache_write` object over its entry cap or pricing
+  300 / 3600 s differently from the legacy key
 - `src/prices/book.rs` -- `PriceBook`: the refreshed `prices.json`, re-read
   when its mtime or length changes, last good table kept on a refused copy
   with one WARN naming its date; an accepted copy that skipped rows logs one
@@ -2240,7 +2261,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   "Releasing"); its models.dev MIT notice is `src/prices_shipped.NOTICE`
 - `src/prices/effective.rs` -- `effective_pricing`: per-field price precedence
   (`[models.X.pricing]`, `[registry]` whole, refreshed, shipped, derived
-  Anthropic-family 1h write) with a `PriceSource` per field. Tests in
+  Anthropic-family 1h write) with a `PriceSource` per field; `PriceSources`
+  holds the write sources as a lifetime-seconds map. Tests in
   `effective_tests.rs`
 - `src/prices/prices_test_support.rs` -- shared table builders for the price-table
   tests
@@ -5623,8 +5645,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   types, writer (`UsageWriter`/`ShutdownOutcome`), DB opens, migrations and
   downgrade, the read-side query surface and cost estimation; see its `pub use` list
 - `src/record.rs` -- `UsageRecord` (one field per WRITTEN capture column, the
-  v18 request-observation fields, the v19 per-reason skip counts and the v20
-  walk counts included)
+  v18 request-observation fields, the v19 per-reason skip counts, the v20
+  walk counts and the v21 `cache_write_tokens` / `cache_write_lifetimes`
+  write total and per-lifetime split included; new captures leave the legacy
+  `cache_write_5m` / `cache_write_1h` unset)
   and the closed `Outcome`,
   `Operation` and `Harness` enums with their `as_str`/`FromStr` wire tokens
 - `src/capability_event.rs` -- the unified `capability_events` ledger write
@@ -5718,9 +5742,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   drain clears included, with no fixed cap)
 - `src/cost.rs` -- pure leaf-safe cost estimation:
   `estimate_cost(&UsageRecord, &Rates)` and the aggregate-token entry point
-  `estimate_cost_tokens(input, output, reasoning, cache_read, cache_write_5m,
-  cache_write_1h, &Rates) -> Option<CostBreakdown>` (the record path converts
-  its `Option<u64>` fields to `i64` and delegates; per-dimension `tokens *
+  `estimate_cost_tokens(input, output, reasoning, cache_read, &cache_writes,
+  &Rates) -> Option<CostBreakdown>` with `cache_writes` the tokens per
+  lifetime seconds, each priced at its own `Rates.cache_write_per_mtok` entry
+  (the record path converts its `Option<u64>` fields to `i64`, merges its
+  lifetime split with the legacy 5m/1h fields as 300 s / 3600 s, and
+  delegates; per-dimension `tokens *
   rate / 1e6`, `None` when the rate table is fully unpriced, `Some(0.0)` when
   priced with no tokens; reasoning priced only when `Rates.reasoning_per_mtok`
   is set -- the caller sets it to the output rate for a disjoint-reasoning
@@ -5750,7 +5777,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   coalesces the partitions back together after pricing), `AggRow` and re-exports
   the whole read-side surface from its submodules so every symbol stays at
   `routectl_usage::` unchanged. Also the `inference_rows!` predicate every
-  inference-population reader splices in to exclude token-count rows
+  inference-population reader splices in to exclude token-count rows, and
+  `cache_write_total_expr!`, the one both-era write-total expression (the v21
+  total, else legacy 5m + 1h) behind `AggRow::cache_write_tokens` /
+  `cache_write_present`
 - `src/query/deadline.rs` -- `DeadlineGuard::install(db, deadline)`: the
   reusable connection-level read deadline (SQLite progress handler re-checked
   every 10_000 VM ops, detached on every exit path including unwind). Per
@@ -5814,9 +5844,13 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `src/query/cache_lifetimes.rs` -- per-lifetime cache-write sums for pricing:
   `aggregate_with_cache_lifetimes` (the aggregate plus each fine row's
   `CacheWriteLifetimes`: tokens per lifetime seconds, unknown remainder, invalid
-  split flag) and the crate-internal grouped `json_each` read `query` merges
-  into its fine rows (bucketed on the series path); legacy 5m/1h columns merge
-  as 300/3600. The unpriced `aggregate` never runs it
+  split flag) and the crate-internal `read_lifetimes` / `attach` pair `query`
+  merges into its fine rows (bucketed on the series path). The statement
+  returns one row per ledger row with a positive write total (the
+  `cache_write_tokens > 0` partial-index predicate, no SQL grouping) and each
+  raw split is parsed and folded per fine group in Rust; `attach` merges the
+  aggregate's legacy 5m/1h column sums as the 300 s / 3600 s lifetimes. The
+  unpriced `aggregate` never runs it
 - `src/query/would_trim.rs` -- would-trim + K-calibration read queries;
   exports `would_trim_summary`, `shadow_misfire_summary`,
   `near_lossless_attribution_summary`, `k_calibration_summary`,
@@ -5920,8 +5954,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   IMMEDIATE transactions) and the non-migrating read-only opens
   `open_readonly`/`open_readonly_fastfail`; `OpenError`
 - `src/schema.rs` -- the ledger DDL (`requests`, `capability_learn_events`,
-  `capability_events`, `ledger_gaps`, `meta`) and `SCHEMA_VERSION` (20); each
-  version's columns are commented in the DDL itself
+  `capability_events`, `ledger_gaps`, `meta`) and `SCHEMA_VERSION` (21); each
+  version's columns are commented in the DDL itself. Also the v21
+  `CREATE_CACHE_WRITE_TS_START_INDEX` partial index (`WHERE cache_write_tokens
+  > 0`) the per-lifetime write read filters on
 - `src/migrate.rs` -- forward-only schema migration / version stamping against
   the `meta` table (one `migrate_vN_to_vM` step per version, the appended-column
   lists `V18`/`V19`/`V20`/`V21_REQUESTS_COLUMNS`); also `purge_legacy_capability_observations(conn)`, a
@@ -5931,7 +5967,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   marker and delete in one transaction); called from the writer's open, not
   from `db::open`
 - `src/downgrade.rs` -- offline re-stamp rollback: `downgrade_to(path, target)`
-  runs the additive `STEPS` (20 down to 16) to a target in `SUPPORTED_TARGETS`;
+  runs the additive `STEPS` (21 down to 16) to a target in `SUPPORTED_TARGETS`;
   a refusal is a `DowngradeError` that leaves the file untouched
 - `src/retention.rs` -- `prune` (startup-only, best-effort) dropping
   `requests` rows older than the configured retention window, and
@@ -6102,6 +6138,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `src/server/walk_counts_daemon_tests.rs` -- assembled-daemon walk counts on
   the ledger row, over a schema-19 file migrated at boot and read back after a
   restart; declared from `server/mod.rs`
+- `src/server/cache_writes_daemon_tests.rs` -- assembled-daemon prompt-cache
+  writes on the ledger row (complete and streamed, anthropic-api and
+  openai-responses), over a seeded schema-20 file migrated at boot and read
+  back after a restart; declared from `server/mod.rs`
 - `src/server/capability_boundary.rs` -- the replay boundary a
   revision-changing reload must commit BEFORE it publishes the replacement
   router, in two phases. `admit_capability_boundary(usage, router) ->
@@ -6761,7 +6801,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   trace-summary line. Owns the outcome-mapping helpers
   (`outcome_for_dispatch_err`, `error_class_of`; a `LocallyUnavailable` is
   class `locally_unavailable`) and copies the observation's six skip counts
-  and five walk counts onto the row; `mark_body_delivered` stamps the 200; also the auto-cache outcome
+  and five walk counts onto the row, plus the cache-write total and
+  per-lifetime split as one pair from one usage object (the effective total --
+  stated, else the split's sum -- is also what input subtracts); `mark_body_delivered` stamps the 200; also the auto-cache outcome
   signal (`is_cache_thrash` + `emit_cache_outcome`: `cache_auto_outcome` at
   DEBUG when an auto-emitted breakpoint is created-and-read, WARN when
   created-without-read this request). Also owns `StreamStage` +
@@ -6922,7 +6964,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   provenance tokens `override`/`learned`, signal-tier
   tokens) plus the `unavailable` reason codes
   (`no_data`/`schema_mismatch`/`db_busy`/`db_unavailable`/`config_unavailable`/`doctor_unavailable`/`no_config_path`/`query_timeout`)
-- `src/handlers/status/query.rs` -- `QUERY /status/query` (schema_version 2),
+- `src/handlers/status/query.rs` -- `QUERY /status/query` (schema_version 3),
   the grouped windowed aggregate. Three EXCLUSIVE regimes: 405 (method is not
   `QUERY`, guarded by the handler's first extractor), 400 (body outside the
   closed vocabulary -- `deny_unknown_fields` + closed `window`
@@ -6931,7 +6973,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   alias/provider filters -- or over `MAX_BODY_BYTES` (8 KiB), or still arriving
   at the `BODY_READ_TIMEOUT` (1s) read deadline that stops a stalled send from
   parking a concurrency permit; all refused with the FIXED envelope
-  `{"schema_version":2,"error":{"code":"invalid_query",...}}` that never echoes
+  `{"schema_version":3,"error":{"code":"invalid_query",...}}` that never echoes
   serde text or body bytes and never opens the ledger), and 200 for everything
   else including every data-source failure. Runs `routectl_usage::query` under
   the same isolation as the panels (`guard_panel` blocking worker +
@@ -7017,7 +7059,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `guard_panel`'s blocking worker, runs
   `aggregate`/`errors_by_class`/`latest_quota_by_seat`/`would_trim_summary`/`window_observation` over the
   `window_bounds` window, and maps to the aggregates-only `UsagePanel` DTO
-  (schema_version 5: per-`(alias,provider,model,upstream)` rollups + windowed
+  (schema_version 6: per-`(alias,provider,model,upstream)` rollups, each with
+  the both-era `cache_write_tokens` / `cache_write_present`, + windowed
   totals + one per-seat quota snapshot each (`seat` + `provider_kind`, per-row
   `ts_start_ms` freshness) + would-trim summary + the window's `observation`
   block with its walk counts; per-group and totals
@@ -7175,8 +7218,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `view.effective_view(refreshed, shipped) -> EffectiveView` against the
   shared price book's current table and the shipped table, read on the
   blocking worker. Maps to a purpose-built `ConfigPanel` DTO
-  (`SCHEMA_VERSION` 5; model cells carrying the model facts -- context
-  window, fill and per-field prices with sources; class-policy cells with
+  (`SCHEMA_VERSION` 6; model cells carrying the model facts -- context
+  window, fill and per-field prices with sources, each field named by its
+  `PriceDimension::config_key` so an extra priced write lifetime reads
+  `cache_write_per_mtok.<duration>`; class-policy cells with
   kebab class + `config`/`baked-default` source + `debits_breaker` read from
   the router's public `class_debits` so the transient-health set is never
   restated on the wire; capability cells with
@@ -8204,11 +8249,14 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   decides anything, so neither renders a per-token figure for traffic that
   bills by seat.
   `rate_covers(Option<f64>)` is the one completeness predicate (a present,
-  non-negative rate; a known `0` counts). `missing_equivalence_dimensions(&PricingConfig) -> Vec<&'static str>` is the
+  non-negative rate; a known `0` counts). `missing_equivalence_dimensions(&PricingConfig) -> Vec<String>` is the
   DIAGNOSTIC half of the equivalent's complete-or-absent gate: the same
   `rate_covers` rule `usage::rates_cover_used_dimensions` applies, minus
-  the token counts, returning the labels (`input`, `output`, `cache read`, `cache
-  write 5m`, `cache write 1h`) that do not resolve. Reasoning is not among them --
+  the token counts, returning the labels (`input`, `output`, `cache read`, and
+  `cache write <duration>` for 5m, 1h and every other priced lifetime) that do
+  not resolve. `cache_write_spelling_conflicts` lists the lifetimes a pricing
+  block prices under both its legacy key and `cache_write_per_mtok` at
+  different values (the legacy key wins), for doctor. Reasoning is not among them --
   a disjoint-reasoning row bills thinking at the OUTPUT rate. Consumed by
   doctor's `render_equivalence_clause` and `render_unpriced_dimensions_clause`
   (`sections.rs`). `is_complete_or_absent(&PriceSources)` is the one rule for
@@ -8254,7 +8302,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   (`n/a (sub ~$12.34)`, `$5.00 (+sub ~$12.34)`) falling back to the
   equivalent-free strings when no equivalent resolved -- never summed, no new
   column.
-  `--detail` adds cache-write split + nearest-rank p95/max latency
+  Cost prices each row's cache writes per lifetime (`lifetime_priceable_writes`;
+  writes with no known lifetime leave the row unpriced rather than under-priced).
+  `--detail` adds the `cache_wr` column (write total of every lifetime) +
+  nearest-rank p95/max latency
   + wall-time + server-tool counts, plus the advisory would-trim / shadow /
   near-lossless blocks and `render_reduction`: the lossless-minifier outcome
   block (per-decision histogram, summed raw counters, read-time-derived
@@ -8271,8 +8322,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   cap-hit truncation line and the same drop-counter validity caveat, suppressed
   entirely on a window with no suppression. Both the per-group and the footer
   cache-hit-rate flow through ONE shared denominator rule --
-  `cache_prompt_den` (`input + cache_read_billed + cache_write_5m +
-  cache_write_1h`, the cache-INCLUSIVE prompt total, summed only over rows
+  `cache_prompt_den` (`input + cache_read_billed + cache_write_tokens`, the
+  both-era write total, the cache-INCLUSIVE prompt total, summed only over rows
   with `cache_read_present > 0`) fed to `cache_hit_ratio(num, den)` (`None` on
   a degenerate `den <= 0`, rendered `-` not `0%`), so a mixed-provider window
   can never show two contradictory hit%. Footer also reports the total error
@@ -8286,10 +8337,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   the cap, so the grid always covers the window and never exceeds it. The
   footer carries the window's `walk:` line (`render_walk_line` over
   `observation_totals`, marked a lower bound when the ledger recorded a gap)
-- `src/commands/usage_downgrade.rs` -- `routectl usage downgrade --to 19|18|17|16
-  [--db P]`: the offline rollback over `routectl_usage::downgrade_to` (a v20
-  file taken to 16 runs every step); prints the re-stamped path, exits 1 on
-  refusal
+- `src/commands/usage_downgrade.rs` -- `routectl usage downgrade --to
+  20|19|18|17|16 [--db P]`: the offline rollback over
+  `routectl_usage::downgrade_to` (a v21 file taken to 16 runs every step);
+  prints the re-stamped path, exits 1 on refusal
 - `src/commands/opening_accuracy/mod.rs` -- `routectl usage
   --opening-accuracy`, the read-only context meter release-gate report over an
   explicit window: builds `OpeningAccuracyReport` from
@@ -8541,8 +8592,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   exit code.
   `section_pricing`/`pricing_finding` map each `PricingRow` to one
   informational `Pass` naming the selector (provider, kind, upstream), each of
-  the five prices with its source token (`render_price_fields`, an unknown
-  price reading `unknown`, never `$0`) and the price table dates; a
+  the five prices plus one `cache write <duration>` segment per other priced
+  write lifetime, each with its source token (`render_price_fields`, an unknown
+  price reading `unknown`, never `$0`), the price table dates, and a note per
+  write lifetime double-spelled at different values (`render_write_conflicts`,
+  naming the legacy key in force); a
   subscription row adds the API-equivalence clause
   (`render_equivalence_clause`), a priced row no `[registry]` row prices names
   its unpriced dimensions (`render_unpriced_dimensions_clause`), and an
