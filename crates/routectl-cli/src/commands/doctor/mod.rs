@@ -63,15 +63,16 @@ use std::time::Instant;
 
 use routectl_auth::LocalProbe;
 
+use crate::commands::pricing::CacheWriteSpellingConflict;
 use crate::config_folder::LegacyConfigDir;
 use crate::server::reload_failure::ReloadFailureSnapshot;
 use routectl_auth::oauth::types::TokenRecord;
 use routectl_core::ProbeOutcome;
-use routectl_router::prices::PriceSources;
+use routectl_router::prices::{PriceSource, PriceSources};
 use routectl_router::{
     BetaSeedScope, Config, DoctorPanels, DoctorReport, FillCeiling, Finding, LearnedRegistryEntry,
-    MatrixReplaySummary, MatrixWarm, PriceTableDates, PricingConfig, SeedClearMarker, Status,
-    TuningRow, WouldTrimPanel, overall_exit,
+    MatrixReplaySummary, MatrixWarm, PriceDimension, PriceTableDates, PricingConfig,
+    SeedClearMarker, Status, TuningRow, WouldTrimPanel, overall_exit,
 };
 
 use self::gather::{SecretCheck, gather_context};
@@ -492,6 +493,15 @@ struct KnobRow {
 /// view, which resolves them through `routectl_router::prices::effective_pricing`
 /// the way the usage report prices rows, so the diagnostic can never claim a
 /// source the bill does not use.
+/// A config block a model's prices are read from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PricingBlock {
+    /// The model's own `[models.X.pricing]`.
+    Model,
+    /// The `[registry]` row that matches the model.
+    Registry,
+}
+
 struct PricingRow {
     /// The `[models.<nickname>]` key.
     nickname: String,
@@ -509,6 +519,12 @@ struct PricingRow {
     pricing: PricingConfig,
     /// The source of each field of [`Self::pricing`].
     sources: PriceSources,
+    /// Each priced dimension with its value and source, in render order:
+    /// the five fixed fields, then each other priced cache-write lifetime.
+    fields: Vec<(PriceDimension, Option<f64>, PriceSource)>,
+    /// Lifetimes a pricing block feeding this model sets under both
+    /// spellings at different values, each with the block that sets them.
+    write_conflicts: Vec<(PricingBlock, CacheWriteSpellingConflict)>,
     /// Whether a `[registry]` row matched, which wins whole even when it
     /// prices nothing.
     registry_matched: bool,

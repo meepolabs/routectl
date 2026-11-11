@@ -77,26 +77,83 @@ pub struct ModelCell {
 }
 
 impl ModelCell {
-    /// Each price field as `(config key, value, source)`, in the
-    /// `[models.X.pricing]` key order.
-    pub fn price_fields(&self) -> [(&'static str, Option<f64>, PriceSource); 5] {
+    /// Each price field as `(dimension, value, source)`: the five
+    /// `[models.X.pricing]` fields in key order, then one row per other
+    /// priced cache-write lifetime, shortest first.
+    pub fn price_fields(&self) -> Vec<(PriceDimension, Option<f64>, PriceSource)> {
         let p = &self.pricing;
         let s = &self.price_sources;
-        [
-            ("input_per_mtok", p.input_per_mtok, s.input),
-            ("output_per_mtok", p.output_per_mtok, s.output),
-            ("cache_read_per_mtok", p.cache_read_per_mtok, s.cache_read),
+        let five_minutes = PricingConfig::CACHE_WRITE_5M_SECONDS;
+        let one_hour = PricingConfig::CACHE_WRITE_1H_SECONDS;
+        let mut fields = vec![
+            (PriceDimension::Input, p.input_per_mtok, s.input),
+            (PriceDimension::Output, p.output_per_mtok, s.output),
             (
-                "cache_write_5m_per_mtok",
+                PriceDimension::CacheRead,
+                p.cache_read_per_mtok,
+                s.cache_read,
+            ),
+            (
+                PriceDimension::CacheWrite(five_minutes),
                 p.cache_write_5m_per_mtok,
-                s.cache_write_at(PricingConfig::CACHE_WRITE_5M_SECONDS),
+                s.cache_write_at(five_minutes),
             ),
             (
-                "cache_write_1h_per_mtok",
+                PriceDimension::CacheWrite(one_hour),
                 p.cache_write_1h_per_mtok,
-                s.cache_write_at(PricingConfig::CACHE_WRITE_1H_SECONDS),
+                s.cache_write_at(one_hour),
             ),
-        ]
+        ];
+        fields.extend(
+            p.cache_write_rates()
+                .into_iter()
+                .filter(|(seconds, _)| *seconds != five_minutes && *seconds != one_hour)
+                .map(|(seconds, rate)| {
+                    (
+                        PriceDimension::CacheWrite(seconds),
+                        Some(rate),
+                        s.cache_write_at(seconds),
+                    )
+                }),
+        );
+        fields
+    }
+}
+
+/// One priced dimension of a model: a token class, or a cache write of one
+/// lifetime in seconds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PriceDimension {
+    /// Input tokens.
+    Input,
+    /// Output tokens.
+    Output,
+    /// Tokens read from the prompt cache.
+    CacheRead,
+    /// Tokens written to the prompt cache for this many seconds.
+    CacheWrite(u32),
+}
+
+impl PriceDimension {
+    /// The `[models.X.pricing]` key that prices this dimension:
+    /// `cache_write_5m_per_mtok` and `cache_write_1h_per_mtok` for the 300 and
+    /// 3600 second lifetimes, `cache_write_per_mtok.<duration>` for any other.
+    pub fn config_key(self) -> Cow<'static, str> {
+        match self {
+            Self::Input => Cow::Borrowed("input_per_mtok"),
+            Self::Output => Cow::Borrowed("output_per_mtok"),
+            Self::CacheRead => Cow::Borrowed("cache_read_per_mtok"),
+            Self::CacheWrite(PricingConfig::CACHE_WRITE_5M_SECONDS) => {
+                Cow::Borrowed("cache_write_5m_per_mtok")
+            }
+            Self::CacheWrite(PricingConfig::CACHE_WRITE_1H_SECONDS) => {
+                Cow::Borrowed("cache_write_1h_per_mtok")
+            }
+            Self::CacheWrite(seconds) => Cow::Owned(format!(
+                "cache_write_per_mtok.{}",
+                routectl_core::format_cache_lifetime(seconds)
+            )),
+        }
     }
 }
 

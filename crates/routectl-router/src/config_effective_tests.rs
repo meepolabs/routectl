@@ -1121,11 +1121,15 @@ fn model_prices_carry_each_field_source_and_the_view_carries_table_dates() {
     assert_eq!(
         opus.price_fields(),
         [
-            ("input_per_mtok", Some(5.0), PriceSource::Refreshed),
-            ("output_per_mtok", Some(30.0), PriceSource::ModelConfig),
-            ("cache_read_per_mtok", None, PriceSource::Unknown),
-            ("cache_write_5m_per_mtok", None, PriceSource::Unknown),
-            ("cache_write_1h_per_mtok", Some(10.0), PriceSource::Derived),
+            (PriceDimension::Input, Some(5.0), PriceSource::Refreshed),
+            (PriceDimension::Output, Some(30.0), PriceSource::ModelConfig),
+            (PriceDimension::CacheRead, None, PriceSource::Unknown),
+            (PriceDimension::CacheWrite(300), None, PriceSource::Unknown),
+            (
+                PriceDimension::CacheWrite(3600),
+                Some(10.0),
+                PriceSource::Derived
+            ),
         ]
     );
     let refreshed_date = TableDate::parse("2026-11-05");
@@ -1193,9 +1197,137 @@ fn a_model_no_source_prices_reads_unknown_on_every_field() {
     let view = derive_effective_view(&facts_config(), None, None);
 
     let plain = model(&view, "plain");
-    for (key, value, source) in plain.price_fields() {
-        assert_eq!(value, None, "{key}");
-        assert_eq!(source, PriceSource::Unknown, "{key}");
+    let fields = plain.price_fields();
+    assert_eq!(fields.len(), 5, "{fields:?}");
+    for (dimension, value, source) in fields {
+        assert_eq!(value, None, "{dimension:?}");
+        assert_eq!(source, PriceSource::Unknown, "{dimension:?}");
     }
     assert_eq!(view.price_tables, PriceTableDates::default());
+}
+
+/// Every lifetime a source prices beyond 5m and 1h follows the five fixed
+/// fields, shortest first, each with its own source; the 300 and 3600
+/// lifetimes stay in their fixed rows whichever spelling priced them.
+#[test]
+fn price_fields_list_each_extra_priced_lifetime_after_the_fixed_five() {
+    let mut config = facts_config();
+    config.models.get_mut("opus").expect("opus").pricing = Some(PricingConfig {
+        cache_write_5m_per_mtok: Some(3.75),
+        cache_write_per_mtok: Some(
+            [("1h", 6.0), ("30m", 4.5), ("24h", 9.0)]
+                .map(|(key, rate)| (key.to_string(), rate))
+                .into(),
+        ),
+        ..PricingConfig::default()
+    });
+    config.registry.insert(
+        "glm-5".to_string(),
+        crate::config::RegistryEntry {
+            pricing: Some(PricingConfig {
+                cache_write_per_mtok: Some([("90s".to_string(), 0.5)].into()),
+                ..PricingConfig::default()
+            }),
+            provider: None,
+        },
+    );
+
+    let view = derive_effective_view(&config, None, None);
+
+    let rows = [
+        (
+            "model-config lifetimes",
+            "opus",
+            vec![
+                (
+                    PriceDimension::CacheWrite(300),
+                    Some(3.75),
+                    PriceSource::ModelConfig,
+                ),
+                (
+                    PriceDimension::CacheWrite(3600),
+                    Some(6.0),
+                    PriceSource::ModelConfig,
+                ),
+                (
+                    PriceDimension::CacheWrite(1800),
+                    Some(4.5),
+                    PriceSource::ModelConfig,
+                ),
+                (
+                    PriceDimension::CacheWrite(86_400),
+                    Some(9.0),
+                    PriceSource::ModelConfig,
+                ),
+            ],
+        ),
+        (
+            "a registry lifetime below 5m",
+            "plain",
+            vec![
+                (PriceDimension::CacheWrite(300), None, PriceSource::Unknown),
+                (PriceDimension::CacheWrite(3600), None, PriceSource::Unknown),
+                (
+                    PriceDimension::CacheWrite(90),
+                    Some(0.5),
+                    PriceSource::Registry,
+                ),
+            ],
+        ),
+    ];
+    for (name, nickname, expected_writes) in rows {
+        let fields = model(&view, nickname).price_fields();
+        let fixed: Vec<_> = fields.iter().take(3).map(|(d, _, _)| *d).collect();
+        assert_eq!(
+            fixed,
+            [
+                PriceDimension::Input,
+                PriceDimension::Output,
+                PriceDimension::CacheRead
+            ],
+            "{name}"
+        );
+        assert_eq!(fields[3..], expected_writes[..], "{name}");
+    }
+}
+
+#[test]
+fn price_dimension_config_key_names_the_key_that_prices_it() {
+    let rows = [
+        ("input", PriceDimension::Input, "input_per_mtok"),
+        ("output", PriceDimension::Output, "output_per_mtok"),
+        (
+            "cache read",
+            PriceDimension::CacheRead,
+            "cache_read_per_mtok",
+        ),
+        (
+            "5m legacy key",
+            PriceDimension::CacheWrite(300),
+            "cache_write_5m_per_mtok",
+        ),
+        (
+            "1h legacy key",
+            PriceDimension::CacheWrite(3600),
+            "cache_write_1h_per_mtok",
+        ),
+        (
+            "30m map key",
+            PriceDimension::CacheWrite(1800),
+            "cache_write_per_mtok.30m",
+        ),
+        (
+            "24h map key",
+            PriceDimension::CacheWrite(86_400),
+            "cache_write_per_mtok.1d",
+        ),
+        (
+            "90s map key",
+            PriceDimension::CacheWrite(90),
+            "cache_write_per_mtok.90s",
+        ),
+    ];
+    for (name, dimension, expected) in rows {
+        assert_eq!(dimension.config_key(), expected, "{name}");
+    }
 }

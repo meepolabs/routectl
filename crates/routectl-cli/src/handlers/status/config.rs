@@ -12,6 +12,7 @@
 //! per request: a file on disk the daemon REJECTED (routing continues on the
 //! previous generation) never reaches the panel.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use axum::Json;
@@ -33,8 +34,10 @@ use super::{Panel, StatusState, guard_panel, utc_rfc3339};
 /// Wire-shape version of the config panel payload.
 ///
 /// At 4 each model dropped `economics` and gained `context_window`, `fill`
-/// and `prices`. At 5 each model dropped `source` and `verified_at`.
-pub const SCHEMA_VERSION: u32 = 5;
+/// and `prices`. At 5 each model dropped `source` and `verified_at`. At 6
+/// `prices` gained one `cache_write_per_mtok.<duration>` row per priced
+/// cache-write lifetime other than 5m and 1h.
+pub const SCHEMA_VERSION: u32 = 6;
 
 /// The provenance-annotated effective view plus the activation inventory. Every
 /// field is a display-safe projection: model facts and capability verdicts
@@ -160,9 +163,10 @@ struct FillWire {
 #[derive(Debug, Clone, Serialize)]
 struct PriceWire {
     /// The `[models.X.pricing]` key: `input_per_mtok`, `output_per_mtok`,
-    /// `cache_read_per_mtok`, `cache_write_5m_per_mtok` or
-    /// `cache_write_1h_per_mtok`.
-    field: &'static str,
+    /// `cache_read_per_mtok`, `cache_write_5m_per_mtok`,
+    /// `cache_write_1h_per_mtok`, then `cache_write_per_mtok.<duration>`
+    /// (`cache_write_per_mtok.30m`) for each other priced lifetime.
+    field: Cow<'static, str>,
     /// USD per million tokens; `null` when unknown.
     per_mtok: Option<f64>,
     /// `model-config`, `registry`, `refreshed`, `shipped`, `derived` or
@@ -265,12 +269,14 @@ fn map_model(cell: ModelCell, dates: &PriceTableDates) -> ModelCellWire {
 fn map_prices(cell: &ModelCell, dates: &PriceTableDates) -> Vec<PriceWire> {
     cell.price_fields()
         .into_iter()
-        .map(|(field, per_mtok, source)| price_wire(field, per_mtok, source, dates))
+        .map(|(dimension, per_mtok, source)| {
+            price_wire(dimension.config_key(), per_mtok, source, dates)
+        })
         .collect()
 }
 
 fn price_wire(
-    field: &'static str,
+    field: Cow<'static, str>,
     per_mtok: Option<f64>,
     source: PriceSource,
     dates: &PriceTableDates,

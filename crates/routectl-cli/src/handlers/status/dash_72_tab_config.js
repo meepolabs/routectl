@@ -195,9 +195,17 @@
   }
 
   // One price field: its figure and source, the table date beside a table
-  // source. An unpriced field reads "unknown", never zero.
+  // source. An unpriced field reads "unknown", never zero. A lifetime-keyed
+  // field (`cache_write_per_mtok.30m`) reads like the fixed ones
+  // (`cache write 30m`).
+  function priceLabel(field) {
+    var parts = String(field).split('.');
+    var base = parts[0].replace(/_per_mtok$/, '').replace(/_/g, ' ');
+    return (parts.length > 1 ? base + ' ' + parts.slice(1).join('.') : base) + ' $/Mtok';
+  }
+
   function pricePair(p) {
-    var label = String(p.field).replace(/_per_mtok$/, '').replace(/_/g, ' ') + ' $/Mtok';
+    var label = priceLabel(p.field);
     if (p.per_mtok === null || p.per_mtok === undefined) { return [label, 'unknown']; }
     var source = p.table_date ? p.source + ' ' + p.table_date : p.source;
     return [label, String(p.per_mtok) + ' (' + source + ')'];

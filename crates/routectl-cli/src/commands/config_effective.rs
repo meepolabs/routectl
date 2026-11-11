@@ -119,9 +119,11 @@ fn model_facts_line(cell: &ModelCell, dates: &PriceTableDates) -> String {
         || "fill=none".to_string(),
         |fill| format!("fill={}({})", fill.tokens, fill.source.as_str()),
     );
-    let prices = cell
+    let prices: Vec<String> = cell
         .price_fields()
-        .map(|(key, value, source)| price_cell(key, value, source, dates));
+        .into_iter()
+        .map(|(dimension, value, source)| price_cell(&dimension.config_key(), value, source, dates))
+        .collect();
     format!(
         "  {nickname:<20} {window} {fill} {prices}",
         nickname = cell.nickname,
@@ -307,7 +309,7 @@ const fn class_name(class: routectl_router::class_policy::ConfigFailureClass) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use routectl_router::Config;
+    use routectl_router::{Config, PricingConfig};
 
     #[test]
     fn the_settings_block_describes_the_buffer_the_config_was_loaded_from() {
@@ -566,6 +568,35 @@ upstream = "glm-5"
                 "cache_read_per_mtok=unknown",
                 "cache_write_5m_per_mtok=unknown",
                 "cache_write_1h_per_mtok=10(derived)",
+            ]
+        );
+    }
+
+    #[test]
+    fn an_extra_priced_write_lifetime_follows_the_fixed_five_with_its_source() {
+        let mut config = priced_config();
+        config.models.get_mut("glm").expect("glm").pricing = Some(PricingConfig {
+            cache_write_per_mtok: Some([("30m".to_string(), 4.5)].into()),
+            ..PricingConfig::default()
+        });
+        let view = derive_effective_view(&config, None, None);
+
+        let glm = view
+            .models
+            .iter()
+            .find(|m| m.nickname == "glm")
+            .expect("glm cell");
+        let line = model_facts_line(glm, &view.price_tables);
+
+        assert_eq!(
+            line.split_whitespace().skip(3).collect::<Vec<_>>(),
+            [
+                "input_per_mtok=unknown",
+                "output_per_mtok=unknown",
+                "cache_read_per_mtok=unknown",
+                "cache_write_5m_per_mtok=unknown",
+                "cache_write_1h_per_mtok=unknown",
+                "cache_write_per_mtok.30m=4.5(model-config)",
             ]
         );
     }

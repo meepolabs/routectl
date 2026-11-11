@@ -12,13 +12,17 @@ use routectl_core::ProbeOutcome;
 use routectl_router::{
     BetaSeedScope, CapabilityEventRow, CapabilityRebuildSummary, Config, EffectiveView,
     FROZEN_CATALOG_VERSION, FROZEN_OVERLAY_REVISION, FillSource, LearnedCapabilityRegistry,
-    LearnedFills, LearnedLaneProjection, MatrixReplaySummary, ProviderEntry, ReplayTombstone,
-    StateKey, derive_effective_view, rebuild_capabilities_with_values,
+    LearnedFills, LearnedLaneProjection, MatrixReplaySummary, ModelCell, PricingConfig,
+    ProviderEntry, ReplayTombstone, StateKey, derive_effective_view,
+    rebuild_capabilities_with_values,
 };
 
 use crate::commands::doctor_panels::compute_would_trim_panel;
 use crate::commands::parse_error_redaction::redact_config_load_error;
-use crate::commands::pricing::{PriceSnapshot, default_price_book, is_subscription};
+use crate::commands::pricing::{
+    CacheWriteSpellingConflict, PriceSnapshot, cache_write_spelling_conflicts, default_price_book,
+    is_subscription,
+};
 use crate::commands::probe::{PROBE_DEADLINE, probe_all};
 use crate::config_folder::LegacyConfigDir;
 use crate::server::CompositeStore;
@@ -29,7 +33,7 @@ use crate::server::ledger_reader::{
 use super::served::{GatherSources, GatheredLayers, served_layers};
 use super::{
     CapabilityInputs, CapabilityMatrixSource, DoctorContext, KnobRow, LEFTOVER_CATALOG_FILES,
-    LEGACY_FOLDER_NAME_CAP, LegacyFolder, MatrixOrigin, PricingRow,
+    LEGACY_FOLDER_NAME_CAP, LegacyFolder, MatrixOrigin, PricingBlock, PricingRow,
 };
 
 /// The network doctor gather: the no-network context PLUS one upstream
@@ -310,19 +314,51 @@ pub(super) fn derive_pricing_rows(config: &Config, view: &EffectiveView) -> Vec<
             subscription: is_subscription(config, &cell.provider),
             pricing: cell.pricing.clone(),
             sources: cell.price_sources.clone(),
-            registry_matched: registry_matches(config, &cell.provider, &cell.upstream),
+            fields: cell.price_fields(),
+            write_conflicts: write_conflicts(config, cell),
+            registry_matched: registry_pricing(config, &cell.provider, &cell.upstream).is_some(),
             tables: view.price_tables,
         })
         .collect()
 }
 
-/// Whether a `[registry]` row matches `upstream` served through `provider`,
-/// keyed on the entry a pool bills under, as the effective view resolves it.
-fn registry_matches(config: &Config, provider: &str, upstream: &str) -> bool {
+/// The `[registry]` row's pricing that matches `upstream` served through
+/// `provider`, keyed on the entry a pool bills under, as the effective view
+/// resolves it.
+fn registry_pricing<'a>(
+    config: &'a Config,
+    provider: &str,
+    upstream: &str,
+) -> Option<&'a PricingConfig> {
     let billed = config
         .provider_entry_for_target(provider)
         .map_or(provider, |(key, _)| key);
-    config.pricing_for(upstream, billed).is_some()
+    config.pricing_for(upstream, billed)
+}
+
+/// The double-spelled cache-write lifetimes in the model's own pricing
+/// block, then in its matching `[registry]` row.
+fn write_conflicts(
+    config: &Config,
+    cell: &ModelCell,
+) -> Vec<(PricingBlock, CacheWriteSpellingConflict)> {
+    let own = config
+        .models
+        .get(&cell.nickname)
+        .and_then(|entry| entry.pricing.as_ref());
+    let registry = registry_pricing(config, &cell.provider, &cell.upstream);
+    [
+        (PricingBlock::Model, own),
+        (PricingBlock::Registry, registry),
+    ]
+    .into_iter()
+    .filter_map(|(block, pricing)| Some((block, pricing?)))
+    .flat_map(|(block, pricing)| {
+        cache_write_spelling_conflicts(pricing)
+            .into_iter()
+            .map(move |conflict| (block, conflict))
+    })
+    .collect()
 }
 
 /// Rebuild the learned-capability matrix read-only from the usage ledger for

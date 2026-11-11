@@ -635,3 +635,211 @@ fn each_knobs_row_names_model_config_learned_or_default() {
         assert!(f.remediation.is_none(), "{f:?}");
     }
 }
+
+fn lifetime_map(entries: &[(&str, f64)]) -> Option<std::collections::BTreeMap<String, f64>> {
+    Some(
+        entries
+            .iter()
+            .map(|(key, rate)| ((*key).to_string(), *rate))
+            .collect(),
+    )
+}
+
+/// One `anth`-served model per row, each carrying its own pricing block.
+fn own_pricing_config(rows: &[(&str, PricingConfig)]) -> Config {
+    let mut cfg = Config::default();
+    cfg.providers.insert(
+        "anth".to_string(),
+        ProviderEntry::anthropic_api("env://ANTH_KEY"),
+    );
+    for (nickname, pricing) in rows {
+        let mut entry = ModelEntry::new("anth", "unlisted-model");
+        entry.pricing = Some(pricing.clone());
+        cfg.models.insert((*nickname).to_string(), entry);
+    }
+    cfg
+}
+
+/// A model priced for 5m, 1h and 30m writes lists a segment per lifetime
+/// with its source, the 30m one after the fixed five; a lifetime priced in
+/// a `[registry]` row carries the registry source.
+#[test]
+fn each_extra_priced_write_lifetime_gets_its_own_segment() {
+    let mut cfg = own_pricing_config(&[(
+        "lifetimes",
+        PricingConfig {
+            input_per_mtok: Some(3.0),
+            cache_write_5m_per_mtok: Some(3.75),
+            cache_write_per_mtok: lifetime_map(&[("1h", 6.0), ("30m", 4.5)]),
+            ..Default::default()
+        },
+    )]);
+    cfg.models.insert(
+        "registered".to_string(),
+        ModelEntry::new("anth", "operator-priced"),
+    );
+    cfg.registry.insert(
+        "operator-priced".to_string(),
+        RegistryEntry {
+            pricing: Some(PricingConfig {
+                cache_write_per_mtok: lifetime_map(&[("30m", 2.25)]),
+                ..Default::default()
+            }),
+            provider: None,
+        },
+    );
+    let rows = [
+        (
+            "lifetimes",
+            "input $3.00 (model-config), output unknown (unknown), cache read unknown \
+             (unknown), cache write 5m $3.75 (model-config), cache write 1h $6.00 \
+             (model-config), cache write 30m $4.50 (model-config); ",
+        ),
+        (
+            "registered",
+            "cache write 5m unknown (unknown), cache write 1h unknown (unknown), cache write \
+             30m $2.25 (registry); ",
+        ),
+    ];
+
+    let findings = section_pricing(&pricing_context(cfg, &PriceSnapshot::default()));
+
+    for (nickname, fields) in rows {
+        let detail = pricing_detail(&findings, nickname);
+        assert!(detail.contains(fields), "{nickname}: {detail}");
+    }
+}
+
+/// A model with legacy prices only renders the exact row it rendered before
+/// lifetime-keyed prices existed: five segments, no conflict note.
+#[test]
+fn a_legacy_only_pricing_row_renders_unchanged() {
+    let cfg = own_pricing_config(&[(
+        "legacy",
+        PricingConfig {
+            input_per_mtok: Some(3.0),
+            output_per_mtok: Some(15.0),
+            cache_read_per_mtok: Some(0.3),
+            cache_write_5m_per_mtok: Some(3.75),
+            cache_write_1h_per_mtok: Some(6.0),
+            ..Default::default()
+        },
+    )]);
+
+    let findings = section_pricing(&pricing_context(cfg, &PriceSnapshot::default()));
+
+    assert_eq!(
+        pricing_detail(&findings, "legacy"),
+        "priced -- provider anth (kind anthropic-api) upstream unlisted-model; input $3.00 \
+         (model-config), output $15.00 (model-config), cache read $0.30 (model-config), \
+         cache write 5m $3.75 (model-config), cache write 1h $6.00 (model-config); price \
+         tables: refreshed none, shipped none"
+    );
+}
+
+/// A lifetime set under both spellings at different values gets a note naming
+/// the legacy key as the one in force; equal values get none. Either way the
+/// row stays Pass and prices the lifetime at the legacy value.
+#[test]
+fn a_double_spelled_write_lifetime_notes_that_the_legacy_key_wins() {
+    let rows: [(&str, PricingConfig, Option<&str>); 3] = [
+        (
+            "differ-5m",
+            PricingConfig {
+                cache_write_5m_per_mtok: Some(3.75),
+                cache_write_per_mtok: lifetime_map(&[("5m", 4.0)]),
+                ..Default::default()
+            },
+            Some(
+                "[models.differ-5m.pricing] prices the 5m cache write twice: \
+                 cache_write_5m_per_mtok $3.75 is used and cache_write_per_mtok.5m $4.00 is \
+                 ignored (the legacy key wins)",
+            ),
+        ),
+        (
+            "differ-1h",
+            PricingConfig {
+                cache_write_1h_per_mtok: Some(6.0),
+                cache_write_per_mtok: lifetime_map(&[("60m", 7.5)]),
+                ..Default::default()
+            },
+            Some(
+                "[models.differ-1h.pricing] prices the 1h cache write twice: \
+                 cache_write_1h_per_mtok $6.00 is used and cache_write_per_mtok.60m $7.50 is \
+                 ignored (the legacy key wins)",
+            ),
+        ),
+        (
+            "equal-5m",
+            PricingConfig {
+                cache_write_5m_per_mtok: Some(3.75),
+                cache_write_per_mtok: lifetime_map(&[("5m", 3.75)]),
+                ..Default::default()
+            },
+            None,
+        ),
+    ];
+    let cfg = own_pricing_config(
+        &rows
+            .iter()
+            .map(|(nickname, pricing, _)| (*nickname, pricing.clone()))
+            .collect::<Vec<_>>(),
+    );
+
+    let findings = section_pricing(&pricing_context(cfg, &PriceSnapshot::default()));
+
+    for (nickname, pricing, note) in &rows {
+        let detail = pricing_detail(&findings, nickname);
+        match note {
+            Some(note) => assert!(detail.contains(note), "{nickname}: {detail}"),
+            None => assert!(!detail.contains("twice"), "{nickname}: {detail}"),
+        }
+        let legacy = pricing
+            .cache_write_5m_per_mtok
+            .map(|rate| format!("cache write 5m ${rate:.2} (model-config)"))
+            .or_else(|| {
+                pricing
+                    .cache_write_1h_per_mtok
+                    .map(|rate| format!("cache write 1h ${rate:.2} (model-config)"))
+            })
+            .expect("each row sets a legacy key");
+        assert!(detail.contains(&legacy), "{nickname}: {detail}");
+        let finding = findings
+            .iter()
+            .find(|f| f.name == *nickname)
+            .expect("finding");
+        assert_eq!(finding.status, Status::Pass, "{nickname}");
+    }
+}
+
+/// The note also covers a matching `[registry]` row's pricing block.
+#[test]
+fn a_double_spelled_registry_lifetime_is_noted_against_the_registry_row() {
+    let mut cfg = own_pricing_config(&[]);
+    cfg.models.insert(
+        "registered".to_string(),
+        ModelEntry::new("anth", "operator-priced"),
+    );
+    cfg.registry.insert(
+        "operator-priced".to_string(),
+        RegistryEntry {
+            pricing: Some(PricingConfig {
+                cache_write_1h_per_mtok: Some(6.0),
+                cache_write_per_mtok: lifetime_map(&[("1h", 5.0)]),
+                ..Default::default()
+            }),
+            provider: None,
+        },
+    );
+
+    let findings = section_pricing(&pricing_context(cfg, &PriceSnapshot::default()));
+
+    let detail = pricing_detail(&findings, "registered");
+    assert!(
+        detail.contains(
+            "the matching [registry] row prices the 1h cache write twice: \
+             cache_write_1h_per_mtok $6.00 is used and cache_write_per_mtok.1h $5.00 is ignored"
+        ),
+        "{detail}"
+    );
+}

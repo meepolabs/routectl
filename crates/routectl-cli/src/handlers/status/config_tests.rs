@@ -394,7 +394,7 @@ rpm_limit = 40
         .expect("seat-a tuning row");
     assert_eq!(seat_a.tuning.rpm_limit.value, Some(40));
     assert_eq!(seat_a.tuning.rpm_limit.source, TuningSource::Pool);
-    assert_eq!(SCHEMA_VERSION, 5);
+    assert_eq!(SCHEMA_VERSION, 6);
 }
 
 /// Every declared provider field reaches the wire, and the endpoint is the
@@ -701,6 +701,65 @@ fn model_wire_carries_window_fill_and_each_price_with_its_source() {
         "an egress that never sends max_tokens has no fill, configured or not"
     );
     assert_eq!(glm["prices"][0]["source"], "refreshed");
+}
+
+/// A priced lifetime beyond 5m and 1h reaches the wire as its own
+/// `cache_write_per_mtok.<duration>` row after the fixed five, with its
+/// source and, for a table source, the table date.
+#[test]
+fn model_wire_carries_a_row_per_extra_priced_write_lifetime() {
+    let config: Config = toml::from_str(
+        r#"
+version = 2
+
+[providers.compat]
+kind = "openai-compat"
+base_url = "https://compat.example/v1"
+api_key_ref = "env://K"
+
+[models.glm]
+provider = "compat"
+upstream = "glm-5"
+
+[models.glm.pricing]
+cache_write_per_mtok = { "30m" = 4.5 }
+"#,
+    )
+    .expect("valid config");
+    let effective = derive_effective_view(&config, None, None);
+    let panel = build_panel(
+        effective,
+        &ActivationState::default(),
+        None,
+        sample_daemon(),
+    );
+    let json = serde_json::to_value(&panel).expect("panel serializes");
+
+    let prices = wire_model(&json, "glm")["prices"]
+        .as_array()
+        .expect("prices array")
+        .clone();
+
+    let fields: Vec<&str> = prices
+        .iter()
+        .map(|p| p["field"].as_str().expect("field"))
+        .collect();
+    assert_eq!(
+        fields,
+        [
+            "input_per_mtok",
+            "output_per_mtok",
+            "cache_read_per_mtok",
+            "cache_write_5m_per_mtok",
+            "cache_write_1h_per_mtok",
+            "cache_write_per_mtok.30m",
+        ]
+    );
+    assert_eq!(
+        prices[5],
+        serde_json::json!({ "field": "cache_write_per_mtok.30m", "per_mtok": 4.5,
+                            "source": "model-config", "table_date": null })
+    );
 }
 
 #[test]

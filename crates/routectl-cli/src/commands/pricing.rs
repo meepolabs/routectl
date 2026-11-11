@@ -157,3 +157,58 @@ pub(super) const fn rates_from_pricing(pricing: &PricingConfig) -> Rates {
         cache_write_1h_per_mtok: pricing.cache_write_1h_per_mtok,
     }
 }
+
+/// A cache-write lifetime priced twice in one pricing block: by its legacy
+/// key and by a `cache_write_per_mtok` key, at different values. The legacy
+/// key's value is the one every price read uses.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct CacheWriteSpellingConflict {
+    /// The lifetime both keys price, in seconds (300 or 3600).
+    pub(super) seconds: u32,
+    /// The legacy key: `cache_write_5m_per_mtok` or `cache_write_1h_per_mtok`.
+    pub(super) legacy_key: &'static str,
+    /// The legacy key's value, the one in force.
+    pub(super) legacy_rate: f64,
+    /// The `cache_write_per_mtok` key as written.
+    pub(super) map_key: String,
+    /// The `cache_write_per_mtok` value, which nothing reads.
+    pub(super) map_rate: f64,
+}
+
+/// Every lifetime `pricing` prices under both spellings at different values,
+/// in `cache_write_per_mtok` key order. Equal values are not a conflict.
+pub(super) fn cache_write_spelling_conflicts(
+    pricing: &PricingConfig,
+) -> Vec<CacheWriteSpellingConflict> {
+    let legacy = [
+        (
+            PricingConfig::CACHE_WRITE_5M_SECONDS,
+            "cache_write_5m_per_mtok",
+            pricing.cache_write_5m_per_mtok,
+        ),
+        (
+            PricingConfig::CACHE_WRITE_1H_SECONDS,
+            "cache_write_1h_per_mtok",
+            pricing.cache_write_1h_per_mtok,
+        ),
+    ];
+    pricing
+        .cache_write_per_mtok
+        .iter()
+        .flatten()
+        .filter_map(|(map_key, &map_rate)| {
+            let seconds = routectl_core::parse_cache_lifetime(map_key)?;
+            let (_, legacy_key, legacy_rate) = legacy
+                .iter()
+                .find(|(lifetime, _, _)| *lifetime == seconds)?;
+            let legacy_rate = (*legacy_rate)?;
+            (legacy_rate != map_rate).then(|| CacheWriteSpellingConflict {
+                seconds,
+                legacy_key,
+                legacy_rate,
+                map_key: map_key.clone(),
+                map_rate,
+            })
+        })
+        .collect()
+}

@@ -6,15 +6,17 @@ use routectl_auth::oauth::types::TokenRecord;
 use routectl_core::sanitize_for_log_with_cap;
 use routectl_router::{
     ActivationEntry, ActivationStatus, CONFIG_VERSION_REMEDIATION, CURRENT_CONFIG_VERSION,
-    ConfigVersionError, FillSource, Finding, PriceTableDates, PricingConfig, Status, TuningRow,
-    UnresolvedReason, compute_activation, preflight_config_version,
+    ConfigVersionError, FillSource, Finding, PriceDimension, PriceTableDates, PricingConfig,
+    Status, TuningRow, UnresolvedReason, compute_activation, preflight_config_version,
 };
 
-use routectl_router::prices::{PriceSources, TableDate};
+use routectl_router::prices::{PriceSource, PriceSources, TableDate};
 
 use crate::commands::config::MAX_REPORTED_LINE_CHARS;
 use crate::commands::config_effective::{tuning_cells, tuning_kind};
-use crate::commands::pricing::{is_complete_or_absent, missing_equivalence_dimensions};
+use crate::commands::pricing::{
+    CacheWriteSpellingConflict, is_complete_or_absent, missing_equivalence_dimensions,
+};
 use crate::commands::probe::{login_id_for, probe_finding};
 use crate::commands::seat_report::{
     PoolHealth, PoolRow, describe_pool, describe_row, pool_rows, safe, stored_seat_pool_rows,
@@ -25,7 +27,7 @@ use super::gather::{SecretCheck, SecretPresence};
 use super::served::{
     SeatFix, parked_seat_finding, unknown_provider_sentence, unusable_seat_finding,
 };
-use super::{DoctorContext, KnobRow, LegacyFolder, PricingRow};
+use super::{DoctorContext, KnobRow, LegacyFolder, PricingBlock, PricingRow};
 
 /// Probe section: one finding per configured provider, mapped from its
 /// read-only reachability outcome through the shared `probe_finding` seam so
@@ -743,7 +745,8 @@ fn capability_unavailable(redacted: &str) -> Finding {
 }
 
 /// Pricing section: one deterministic row per configured model naming each of
-/// its five prices with the source that gave it, and the date of each price
+/// its five prices, and each other priced cache-write lifetime, with the
+/// source that gave it, and the date of each price
 /// table read. Purely informational -- an unpriced model is a legitimate
 /// configuration -- so no row here can Fail and the section can never move
 /// the exit code.
@@ -769,7 +772,11 @@ pub(super) fn pricing_finding(row: &PricingRow) -> Finding {
         safe(&row.provider_kind),
         safe(&row.upstream)
     );
-    let fields = render_price_fields(&row.pricing, &row.sources);
+    let fields = render_price_fields(&row.fields);
+    let fields = match render_write_conflicts(&row.nickname, &row.write_conflicts) {
+        Some(notes) => format!("{fields}; {notes}"),
+        None => fields,
+    };
     let tables = render_table_dates(row.tables);
     let unpriced = row.sources.is_unknown();
     let detail = if row.subscription {
@@ -803,32 +810,65 @@ pub(super) fn pricing_finding(row: &PricingRow) -> Finding {
     }
 }
 
-/// The five prices in a fixed order, each `<field> <value> (<source>)`. An
-/// unknown price reads `unknown`, never `$0`; a known zero reads `$0.00`.
-fn render_price_fields(pricing: &PricingConfig, sources: &PriceSources) -> String {
-    [
-        ("input", pricing.input_per_mtok, sources.input),
-        ("output", pricing.output_per_mtok, sources.output),
-        (
-            "cache read",
-            pricing.cache_read_per_mtok,
-            sources.cache_read,
+/// The five fixed prices, then one `cache write <duration>` per other priced
+/// cache-write lifetime, each `<field> <value> (<source>)`. An unknown price
+/// reads `unknown`, never `$0`; a known zero reads `$0.00`.
+fn render_price_fields(fields: &[(PriceDimension, Option<f64>, PriceSource)]) -> String {
+    fields
+        .iter()
+        .map(|(dimension, value, source)| {
+            format!(
+                "{} {} ({})",
+                price_label(*dimension),
+                render_rate(*value),
+                source.as_str()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn price_label(dimension: PriceDimension) -> String {
+    match dimension {
+        PriceDimension::Input => "input".to_string(),
+        PriceDimension::Output => "output".to_string(),
+        PriceDimension::CacheRead => "cache read".to_string(),
+        PriceDimension::CacheWrite(seconds) => format!(
+            "cache write {}",
+            routectl_core::format_cache_lifetime(seconds)
         ),
-        (
-            "cache write 5m",
-            pricing.cache_write_5m_per_mtok,
-            sources.cache_write_at(PricingConfig::CACHE_WRITE_5M_SECONDS),
-        ),
-        (
-            "cache write 1h",
-            pricing.cache_write_1h_per_mtok,
-            sources.cache_write_at(PricingConfig::CACHE_WRITE_1H_SECONDS),
-        ),
-    ]
-    .iter()
-    .map(|(label, value, source)| format!("{label} {} ({})", render_rate(*value), source.as_str()))
-    .collect::<Vec<_>>()
-    .join(", ")
+    }
+}
+
+/// One note per cache-write lifetime a pricing block sets under both
+/// spellings at different values, naming the value in force. `None` when
+/// there is no such lifetime.
+fn render_write_conflicts(
+    nickname: &str,
+    conflicts: &[(PricingBlock, CacheWriteSpellingConflict)],
+) -> Option<String> {
+    if conflicts.is_empty() {
+        return None;
+    }
+    let notes: Vec<String> = conflicts
+        .iter()
+        .map(|(block, conflict)| {
+            let block = match block {
+                PricingBlock::Model => format!("[models.{}.pricing]", safe(nickname)),
+                PricingBlock::Registry => "the matching [registry] row".to_string(),
+            };
+            format!(
+                "{block} prices the {} cache write twice: {} {} is used and \
+                 cache_write_per_mtok.{} {} is ignored (the legacy key wins)",
+                routectl_core::format_cache_lifetime(conflict.seconds),
+                conflict.legacy_key,
+                render_rate(Some(conflict.legacy_rate)),
+                safe(&conflict.map_key),
+                render_rate(Some(conflict.map_rate)),
+            )
+        })
+        .collect();
+    Some(notes.join("; "))
 }
 
 /// The date of each price table layer, or `none` for an absent layer.
