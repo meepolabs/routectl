@@ -341,6 +341,10 @@ const UNSET_MEANS_OFF_OR_INHERIT: &[(&str, &str)] = &[
         "PricingConfig.cache_write_5m_per_mtok",
         "inherit: price tables",
     ),
+    (
+        "PricingConfig.cache_write_per_mtok",
+        "inherit: price tables, per lifetime",
+    ),
     ("PricingConfig.input_per_mtok", "inherit: price tables"),
     ("PricingConfig.output_per_mtok", "inherit: price tables"),
     ("ProviderEntry.account_id_ref", "off: no ChatGPT account"),

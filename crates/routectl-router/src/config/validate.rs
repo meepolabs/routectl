@@ -1,6 +1,8 @@
 //! Config version preflight + non-schema validation.
 
-use crate::config::Config;
+use std::collections::BTreeMap;
+
+use crate::config::{Config, PricingConfig};
 
 /// Current config schema version this build writes and fully understands.
 /// `1` -> `2` retires the legacy `[cache_pricing]` override table into the
@@ -180,7 +182,8 @@ pub fn validate_model_token_limits(config: &Config) -> Result<(), String> {
 }
 
 /// Refuse a `[models.X.pricing]` value that is not finite or is negative,
-/// naming every offending dotted key on its own line. A price feeds cost
+/// and a `cache_write_per_mtok` key that is not a cache lifetime, naming
+/// every offending dotted key on its own line. A price feeds cost
 /// arithmetic, where NaN or infinity poisons every sum it joins and a
 /// negative price is never a real rate.
 pub fn validate_model_pricing(config: &Config) -> Result<(), String> {
@@ -189,7 +192,8 @@ pub fn validate_model_pricing(config: &Config) -> Result<(), String> {
         .iter()
         .filter_map(|(nickname, entry)| Some((nickname, entry.pricing.as_ref()?)))
         .flat_map(|(nickname, pricing)| {
-            [
+            let prefix = format!("models.{nickname}.pricing");
+            let fixed = [
                 ("input_per_mtok", pricing.input_per_mtok),
                 ("output_per_mtok", pricing.output_per_mtok),
                 ("cache_read_per_mtok", pricing.cache_read_per_mtok),
@@ -197,18 +201,15 @@ pub fn validate_model_pricing(config: &Config) -> Result<(), String> {
                 ("cache_write_1h_per_mtok", pricing.cache_write_1h_per_mtok),
             ]
             .into_iter()
-            .filter_map(move |(key, value)| {
+            .filter_map(|(key, value)| {
                 let value = value?;
-                let problem = if !value.is_finite() {
-                    "must be a finite number"
-                } else if value < 0.0 {
-                    "must not be negative"
-                } else {
-                    return None;
-                };
-                let path = message_safe_key(&format!("models.{nickname}.pricing.{key}"));
+                let problem = price_value_problem(value)?;
+                let path = message_safe_key(&format!("{prefix}.{key}"));
                 Some(format!("`{path}` is `{value}`; {problem}"))
-            })
+            });
+            let mut lines: Vec<String> = fixed.collect();
+            lines.extend(cache_write_map_problems(pricing, &prefix));
+            lines
         })
         .collect();
     if lines.is_empty() {
@@ -216,6 +217,51 @@ pub fn validate_model_pricing(config: &Config) -> Result<(), String> {
     } else {
         Err(lines.join("\n"))
     }
+}
+
+/// Why `value` is not a usable price, or `None` when it is one.
+const fn price_value_problem(value: f64) -> Option<&'static str> {
+    if !value.is_finite() {
+        Some("must be a finite number")
+    } else if value < 0.0 {
+        Some("must not be negative")
+    } else {
+        None
+    }
+}
+
+/// One line per problem in `pricing.cache_write_per_mtok`, each naming the
+/// dotted key under `prefix` (`models.<nick>.pricing` or
+/// `registry.<pattern>.pricing`): a key that is not a cache lifetime, two
+/// keys naming the same lifetime, or a value that is not finite or is
+/// negative.
+pub fn cache_write_map_problems(pricing: &PricingConfig, prefix: &str) -> Vec<String> {
+    let Some(map) = pricing.cache_write_per_mtok.as_ref() else {
+        return Vec::new();
+    };
+    let mut lifetimes: BTreeMap<u32, &str> = BTreeMap::new();
+    let mut lines = Vec::new();
+    for (key, value) in map {
+        let path = message_safe_key(&format!("{prefix}.cache_write_per_mtok.{key}"));
+        match routectl_core::parse_cache_lifetime(key) {
+            None => lines.push(format!(
+                "`{path}` is not a cache lifetime; write a positive whole number and one of \
+                 s, m, h, d (for example \"30m\")"
+            )),
+            Some(seconds) => {
+                if let Some(first) = lifetimes.insert(seconds, key) {
+                    let first = message_safe_key(first);
+                    lines.push(format!(
+                        "`{path}` names the same cache lifetime as `{first}`; keep one of them"
+                    ));
+                }
+            }
+        }
+        if let Some(problem) = price_value_problem(*value) {
+            lines.push(format!("`{path}` is `{value}`; {problem}"));
+        }
+    }
+    lines
 }
 
 /// The exact `[providers.X]` replacement block named in

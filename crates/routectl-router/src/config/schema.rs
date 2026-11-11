@@ -788,6 +788,59 @@ pub struct PricingConfig {
     /// USD per million tokens written to the 1-hour cache tier. `None` leaves it unpriced.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_write_1h_per_mtok: Option<f64>,
+    /// USD per million tokens written to the cache, keyed by cache lifetime
+    /// (`"5m"`, `"30m"`, `"24h"`: a positive integer and one of `s`, `m`, `h`,
+    /// `d`). A key outside that grammar is refused at load. Where
+    /// `cache_write_5m_per_mtok` or `cache_write_1h_per_mtok` is also set, that
+    /// key prices the 5-minute or 1-hour lifetime. `None` leaves every other
+    /// lifetime unpriced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_per_mtok: Option<BTreeMap<String, f64>>,
+}
+
+impl PricingConfig {
+    /// The cache lifetime, in seconds, `cache_write_5m_per_mtok` prices.
+    pub const CACHE_WRITE_5M_SECONDS: u32 = 300;
+    /// The cache lifetime, in seconds, `cache_write_1h_per_mtok` prices.
+    pub const CACHE_WRITE_1H_SECONDS: u32 = 3600;
+
+    /// Every priced cache-write lifetime, seconds -> USD per million tokens.
+    /// `cache_write_5m_per_mtok` and `cache_write_1h_per_mtok` win the 300 and
+    /// 3600 cells over a `cache_write_per_mtok` key for the same lifetime. A
+    /// key the duration grammar refuses prices nothing.
+    pub fn cache_write_rates(&self) -> BTreeMap<u32, f64> {
+        let mut rates: BTreeMap<u32, f64> = self
+            .cache_write_per_mtok
+            .iter()
+            .flatten()
+            .filter_map(|(key, rate)| Some((routectl_core::parse_cache_lifetime(key)?, *rate)))
+            .collect();
+        let legacy = [
+            (Self::CACHE_WRITE_5M_SECONDS, self.cache_write_5m_per_mtok),
+            (Self::CACHE_WRITE_1H_SECONDS, self.cache_write_1h_per_mtok),
+        ];
+        for (seconds, rate) in legacy {
+            if let Some(rate) = rate {
+                rates.insert(seconds, rate);
+            }
+        }
+        rates
+    }
+
+    /// Price the cache-write lifetime `seconds` at `rate`: the 300 and 3600
+    /// lifetimes in their own keys, any other in `cache_write_per_mtok` under
+    /// its rendered duration.
+    pub fn set_cache_write_rate(&mut self, seconds: u32, rate: f64) {
+        match seconds {
+            Self::CACHE_WRITE_5M_SECONDS => self.cache_write_5m_per_mtok = Some(rate),
+            Self::CACHE_WRITE_1H_SECONDS => self.cache_write_1h_per_mtok = Some(rate),
+            _ => {
+                self.cache_write_per_mtok
+                    .get_or_insert_with(BTreeMap::new)
+                    .insert(routectl_core::format_cache_lifetime(seconds), rate);
+            }
+        }
+    }
 }
 
 /// One row in the `[registry]` table. Keyed by an upstream-id glob
@@ -1092,7 +1145,7 @@ impl ModelEntry {
     }
 
     /// Set the per-model prices.
-    pub const fn with_pricing(mut self, pricing: PricingConfig) -> Self {
+    pub fn with_pricing(mut self, pricing: PricingConfig) -> Self {
         self.pricing = Some(pricing);
         self
     }

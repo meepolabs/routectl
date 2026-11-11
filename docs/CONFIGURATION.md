@@ -3168,9 +3168,9 @@ data)` and a `KEEP (insufficient data)` verdict.
 ## Model prices (`[models.X.pricing]`)
 
 Usage cost and the API-equivalent value of subscription traffic are
-display figures; nothing in routing reads a price. Each of the five
-prices resolves on its own, in this order, and the first source that
-gives a field wins:
+display figures; nothing in routing reads a price. Input, output, cache
+read and the cache-write price of each cache lifetime resolve on their
+own, in this order, and the first source that gives a field wins:
 
 1. **`model-config`**: `[models.X.pricing]` on the served model, while
    that entry still names the served upstream.
@@ -3217,9 +3217,26 @@ cache_write_1h_per_mtok = 6.0   # fixes one figure; the rest come from the table
 
 The fields are those of a `[registry]` pricing row, in USD per million
 tokens: `input_per_mtok`, `output_per_mtok`, `cache_read_per_mtok`,
-`cache_write_5m_per_mtok`, `cache_write_1h_per_mtok`. A non-finite or
-negative value is refused at load, reload and every config edit, naming
-the dotted `models.<nick>.pricing.<field>` path; a known `0` is kept.
+`cache_write_5m_per_mtok`, `cache_write_1h_per_mtok` and
+`cache_write_per_mtok`. A non-finite or negative value is refused at
+load, reload and every config edit, naming the dotted
+`models.<nick>.pricing.<field>` path; a known `0` is kept.
+
+`cache_write_per_mtok` prices cache writes per lifetime. Each key is a
+cache lifetime written as a positive whole number and one unit (`s`,
+`m`, `h` or `d`, lowercase): `"30m"`, `"90m"`, `"24h"`. A key outside
+that grammar (`"thirty"`, `"0m"`, `"5m5m"`), or two keys for the same
+lifetime (`"60m"` and `"1h"`), is refused at load naming the dotted
+`models.<nick>.pricing.cache_write_per_mtok.<key>` path.
+`cache_write_5m_per_mtok` and `cache_write_1h_per_mtok` stay valid and
+price the 5-minute and 1-hour lifetimes; when one of them and a `"5m"` or
+`"1h"` map key are both set, the legacy key wins that lifetime. A
+lifetime no source prices stays unknown.
+
+```toml
+[models.sonnet.pricing]
+cache_write_per_mtok = { "30m" = 4.5 }   # one more lifetime; 5m and 1h come from the tables
+```
 
 ## Pricing registry (`[registry."<pattern>".pricing]`)
 
@@ -3259,10 +3276,13 @@ output_per_mtok         = 1.10   # USD per million output tokens
 cache_read_per_mtok     = 0.07   # USD per million cache-read tokens
 cache_write_5m_per_mtok = 0.50   # USD per million 5-minute cache-write tokens
 cache_write_1h_per_mtok = 0.90   # USD per million 1-hour cache-write tokens
+cache_write_per_mtok    = { "30m" = 0.70 }   # USD per million cache-write tokens, per lifetime
 ```
 
-All five `*_per_mtok` fields are optional and expressed in USD per
-million tokens. A field left unset means that dimension is unpriced and
+All six `*_per_mtok` fields are optional and expressed in USD per
+million tokens; `cache_write_per_mtok` follows the key rules in [Model
+prices](#model-prices-modelsxpricing) and is refused naming the dotted
+`registry."<pattern>".pricing.cache_write_per_mtok.<key>` path. A field left unset means that dimension is unpriced and
 contributes nothing to the estimate. There is intentionally no reasoning
 rate: reasoning tokens are billed as output upstream, so they are never
 a separate cost dimension.

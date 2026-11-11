@@ -309,7 +309,7 @@ pub(super) fn derive_pricing_rows(config: &Config, view: &EffectiveView) -> Vec<
             upstream: cell.upstream.clone(),
             subscription: is_subscription(config, &cell.provider),
             pricing: cell.pricing.clone(),
-            sources: cell.price_sources,
+            sources: cell.price_sources.clone(),
             registry_matched: registry_matches(config, &cell.provider, &cell.upstream),
             tables: view.price_tables,
         })

@@ -766,6 +766,17 @@
             "null"
           ]
         },
+        "cache_write_per_mtok": {
+          "additionalProperties": {
+            "format": "double",
+            "type": "number"
+          },
+          "description": "USD per million tokens written to the cache, keyed by cache lifetime\n(`\"5m\"`, `\"30m\"`, `\"24h\"`: a positive integer and one of `s`, `m`, `h`,\n`d`). A key outside that grammar is refused at load. Where\n`cache_write_5m_per_mtok` or `cache_write_1h_per_mtok` is also set, that\nkey prices the 5-minute or 1-hour lifetime. `None` leaves every other\nlifetime unpriced.",
+          "type": [
+            "object",
+            "null"
+          ]
+        },
         "input_per_mtok": {
           "description": "USD per million input tokens. `None` leaves the input dimension unpriced.",
           "format": "double",

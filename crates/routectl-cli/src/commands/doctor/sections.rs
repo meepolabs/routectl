@@ -817,12 +817,12 @@ fn render_price_fields(pricing: &PricingConfig, sources: &PriceSources) -> Strin
         (
             "cache write 5m",
             pricing.cache_write_5m_per_mtok,
-            sources.cache_write_5m,
+            sources.cache_write_at(PricingConfig::CACHE_WRITE_5M_SECONDS),
         ),
         (
             "cache write 1h",
             pricing.cache_write_1h_per_mtok,
-            sources.cache_write_1h,
+            sources.cache_write_at(PricingConfig::CACHE_WRITE_1H_SECONDS),
         ),
     ]
     .iter()

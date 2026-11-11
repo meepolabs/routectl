@@ -2,6 +2,8 @@
 //! between layers, per-field fill, the registry's whole-row rule, the
 //! derived 1-hour write, subscription providers and persisted-kind pricing.
 
+use std::collections::BTreeMap;
+
 use serde_json::{Value, json};
 
 use super::prices_test_support::{bytes, table};
@@ -37,6 +39,7 @@ fn all_fields(value: f64) -> PricingConfig {
         cache_read_per_mtok: Some(value),
         cache_write_5m_per_mtok: Some(value),
         cache_write_1h_per_mtok: Some(value),
+        cache_write_per_mtok: None,
     }
 }
 
@@ -172,7 +175,11 @@ fn each_source_alone_supplies_the_field_it_carries() {
 
     let (pricing, sources) = resolve(&config(), None, Some(&shipped)).expect("derived");
     assert_eq!(pricing.cache_write_1h_per_mtok, Some(8.0), "derived");
-    assert_eq!(sources.cache_write_1h, PriceSource::Derived, "derived");
+    assert_eq!(
+        sources.cache_write_at(3600),
+        PriceSource::Derived,
+        "derived"
+    );
     assert_eq!(pricing.output_per_mtok, None, "unknown");
     assert_eq!(sources.output, PriceSource::Unknown, "unknown");
 }
@@ -232,8 +239,7 @@ fn each_layer_wins_over_every_layer_below_it() {
                 input: source,
                 output: source,
                 cache_read: source,
-                cache_write_5m: source,
-                cache_write_1h: source,
+                cache_write: [(300, source), (3600, source)].into(),
             },
             "{name}"
         );
@@ -258,7 +264,7 @@ fn a_partial_model_pricing_fills_field_by_field_over_the_table() {
     assert_eq!(pricing.input_per_mtok, Some(4.0));
     assert_eq!(sources.input, PriceSource::Shipped);
     assert_eq!(pricing.cache_write_1h_per_mtok, Some(4.0));
-    assert_eq!(sources.cache_write_1h, PriceSource::Shipped);
+    assert_eq!(sources.cache_write_at(3600), PriceSource::Shipped);
 }
 
 /// A registry row is taken whole: its unset fields stay unknown although
@@ -292,8 +298,7 @@ fn a_registry_row_wins_whole_below_model_config() {
             input: PriceSource::Registry,
             output: PriceSource::Unknown,
             cache_read: PriceSource::ModelConfig,
-            cache_write_5m: PriceSource::Unknown,
-            cache_write_1h: PriceSource::Unknown,
+            cache_write: BTreeMap::new(),
         }
     );
 }
@@ -386,7 +391,7 @@ fn the_1h_write_is_derived_for_the_anthropic_family_only() {
         assert_eq!(pricing.input_per_mtok, Some(5.0), "{name}");
         let got = pricing
             .cache_write_1h_per_mtok
-            .map(|value| (value, sources.cache_write_1h));
+            .map(|value| (value, sources.cache_write_at(3600)));
         assert_eq!(got, expected, "{name}");
     }
 }
@@ -428,7 +433,7 @@ fn a_supplied_1h_write_is_never_replaced_by_the_derived_figure() {
         assert_eq!(
             pricing
                 .cache_write_1h_per_mtok
-                .map(|value| (value, sources.cache_write_1h)),
+                .map(|value| (value, sources.cache_write_at(3600))),
             Some(expected),
             "{name}"
         );
@@ -477,7 +482,7 @@ base_url = "https://openrouter.ai/api/v1"
         assert_eq!(
             pricing
                 .cache_write_1h_per_mtok
-                .map(|value| (value, sources.cache_write_1h)),
+                .map(|value| (value, sources.cache_write_at(3600))),
             expected,
             "{name}"
         );
@@ -570,5 +575,143 @@ fn a_renamed_away_provider_prices_through_its_persisted_kind() {
         let got = effective_pricing(&config(), &subject, None, Some(&shipped))
             .and_then(|(pricing, _)| pricing.input_per_mtok);
         assert_eq!(got, expected, "{name}");
+    }
+}
+
+/// `table` with `rate` for the cache-write lifetime `duration` added to
+/// every row pricing `upstream`. The canonical file format has no spelling
+/// for an arbitrary lifetime, so the row is edited after parsing.
+fn with_table_cache_write(
+    mut table: PriceTable,
+    upstream: &str,
+    duration: &str,
+    rate: f64,
+) -> PriceTable {
+    for provider in &mut table.providers {
+        if let Some(prices) = provider.models.get_mut(upstream) {
+            prices
+                .cache_write_per_mtok
+                .get_or_insert_with(BTreeMap::new)
+                .insert(duration.to_string(), rate);
+        }
+    }
+    table
+}
+
+/// `CONFIG` plus `extra` TOML.
+fn config_with(extra: &str) -> Config {
+    toml::from_str(&format!("{CONFIG}{extra}")).expect("config parses")
+}
+
+/// The generic `cache_write_per_mtok` map prices any lifetime, and the
+/// legacy 5m / 1h keys win their own lifetime over it, in a
+/// `[models.X.pricing]` block and in a `[registry]` row alike.
+#[test]
+fn a_cache_write_map_prices_its_lifetimes_and_the_legacy_keys_win_their_own() {
+    let rows: [(&str, &str, u32, (f64, PriceSource)); 4] = [
+        (
+            "model-config 30m",
+            "[models.m.pricing]\ncache_write_per_mtok = { \"30m\" = 2.0 }\n",
+            1800,
+            (2.0, PriceSource::ModelConfig),
+        ),
+        (
+            "model-config legacy 5m beside a generic 5m",
+            "[models.m.pricing]\ncache_write_5m_per_mtok = 3.75\n\
+             cache_write_per_mtok = { \"5m\" = 9.0 }\n",
+            300,
+            (3.75, PriceSource::ModelConfig),
+        ),
+        (
+            "registry 30m",
+            "[registry.\"claude-*\".pricing]\ncache_write_per_mtok = { \"30m\" = 2.0 }\n",
+            1800,
+            (2.0, PriceSource::Registry),
+        ),
+        (
+            "registry legacy 5m beside a generic 5m",
+            "[registry.\"claude-*\".pricing]\ncache_write_5m_per_mtok = 3.75\n\
+             cache_write_per_mtok = { \"5m\" = 9.0 }\n",
+            300,
+            (3.75, PriceSource::Registry),
+        ),
+    ];
+    for (name, extra, seconds, expected) in rows {
+        let (pricing, sources) = resolve(&config_with(extra), None, None).expect(name);
+
+        let got = pricing
+            .cache_write_rates()
+            .get(&seconds)
+            .map(|rate| (*rate, sources.cache_write_at(seconds)));
+
+        assert_eq!(got, Some(expected), "{name}");
+    }
+}
+
+/// Each lifetime resolves on its own: a model-config price for one lifetime
+/// wins that lifetime only, and the tables keep supplying the others.
+#[test]
+fn a_model_config_lifetime_beats_the_tables_for_that_lifetime_only() {
+    let shipped =
+        with_table_cache_write(table_for(UPSTREAM, &all_fields(4.0)), UPSTREAM, "30m", 4.0);
+    let config = config_with("[models.m.pricing]\ncache_write_per_mtok = { \"30m\" = 2.0 }\n");
+
+    let (pricing, sources) = resolve(&config, None, Some(&shipped)).expect("priced");
+
+    assert_eq!(
+        pricing.cache_write_rates(),
+        BTreeMap::from([(300, 4.0), (1800, 2.0), (3600, 4.0)])
+    );
+    assert_eq!(
+        sources.cache_write,
+        BTreeMap::from([
+            (300, PriceSource::Shipped),
+            (1800, PriceSource::ModelConfig),
+            (3600, PriceSource::Shipped),
+        ])
+    );
+    assert_eq!(sources.input, PriceSource::Shipped);
+}
+
+/// A table lifetime with no higher source keeps the table's price; the
+/// control for the row above.
+#[test]
+fn a_table_lifetime_fills_when_no_higher_source_prices_it() {
+    let shipped =
+        with_table_cache_write(table_for(UPSTREAM, &input_only(4.0)), UPSTREAM, "30m", 4.5);
+
+    let (pricing, sources) = resolve(&config(), None, Some(&shipped)).expect("priced");
+
+    assert_eq!(pricing.cache_write_rates().get(&1800), Some(&4.5));
+    assert_eq!(sources.cache_write_at(1800), PriceSource::Shipped);
+}
+
+/// The derived Anthropic 1-hour write lands at 3600 beside other
+/// lifetimes, and a generic `1h` key from a higher source replaces it.
+#[test]
+fn the_derived_1h_write_lands_at_3600_unless_a_generic_1h_key_prices_it() {
+    let shipped = table_for(UPSTREAM, &input_only(5.0));
+    let rows: [(&str, &str, (f64, PriceSource)); 2] = [
+        (
+            "a 30m model price leaves 3600 to the derived rule",
+            "[models.m.pricing]\ncache_write_per_mtok = { \"30m\" = 2.0 }\n",
+            (10.0, PriceSource::Derived),
+        ),
+        (
+            "a generic 1h model price wins 3600",
+            "[models.m.pricing]\ncache_write_per_mtok = { \"1h\" = 6.0 }\n",
+            (6.0, PriceSource::ModelConfig),
+        ),
+    ];
+    for (name, extra, expected) in rows {
+        let (pricing, sources) = resolve(&config_with(extra), None, Some(&shipped)).expect(name);
+
+        let got = pricing
+            .cache_write_rates()
+            .get(&3600)
+            .map(|rate| (*rate, sources.cache_write_at(3600)));
+
+        assert_eq!(got, Some(expected), "{name}");
+        assert_eq!(pricing.cache_write_1h_per_mtok, Some(expected.0), "{name}");
     }
 }

@@ -40,7 +40,9 @@ pub use validate::{
     preflight_config_version, preflight_raw_config, retired_model_knob_message,
     validate_cache_pricing_retired,
 };
-pub(crate) use validate::{validate_model_pricing, validate_model_token_limits};
+pub(crate) use validate::{
+    cache_write_map_problems, validate_model_pricing, validate_model_token_limits,
+};
 
 /// The parsed `config.toml`: server bind, providers, aliases, models, and
 /// the cross-cutting policy tables the router reads at startup.

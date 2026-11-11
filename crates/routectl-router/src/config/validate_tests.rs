@@ -1166,3 +1166,118 @@ mod model_token_limit_tests {
         assert!(!refusal.contains('\u{1b}'), "{refusal:?}");
     }
 }
+
+mod cache_write_map_tests {
+    use crate::config::Config;
+    use crate::factory::collect_config_validation;
+
+    const MODEL_BLOCK: &str =
+        "[models.m]\nprovider = \"p\"\nupstream = \"u\"\n[models.m.pricing]\n";
+    const REGISTRY_BLOCK: &str = "[registry.\"u-*\".pricing]\n";
+
+    fn errors_for(block: &str, map: &str) -> Vec<String> {
+        let config: Config =
+            toml::from_str(&format!("{block}cache_write_per_mtok = {{ {map} }}\n"))
+                .expect("fixture parses");
+        collect_config_validation(&config).errors
+    }
+
+    /// Every refusal names the full dotted key, under `[models.X.pricing]`
+    /// and `[registry."<pattern>".pricing]` alike; a valid map beside each
+    /// refused one is the positive control.
+    #[test]
+    fn a_bad_cache_write_key_or_value_is_refused_naming_the_dotted_key() {
+        let blocks = [
+            (
+                "model",
+                MODEL_BLOCK,
+                "models.m.pricing.cache_write_per_mtok",
+            ),
+            (
+                "registry",
+                REGISTRY_BLOCK,
+                "registry.\"u-*\".pricing.cache_write_per_mtok",
+            ),
+        ];
+        let rows: [(&str, &str, &str, &str); 6] = [
+            (
+                "word key",
+                "\"thirty\" = 2.0",
+                "thirty",
+                "is not a cache lifetime",
+            ),
+            ("zero key", "\"0m\" = 2.0", "0m", "is not a cache lifetime"),
+            (
+                "two durations",
+                "\"5m5m\" = 2.0",
+                "5m5m",
+                "is not a cache lifetime",
+            ),
+            (
+                "negative value",
+                "\"30m\" = -1.0",
+                "30m",
+                "is `-1`; must not be negative",
+            ),
+            (
+                "nan value",
+                "\"30m\" = nan",
+                "30m",
+                "is `NaN`; must be a finite number",
+            ),
+            (
+                "infinite value",
+                "\"30m\" = inf",
+                "30m",
+                "is `inf`; must be a finite number",
+            ),
+        ];
+        for (block_name, block, prefix) in blocks {
+            for (row, map, key, problem) in rows {
+                let errors = errors_for(block, map);
+
+                let expected = format!("`{prefix}.{key}` {problem}");
+                assert!(
+                    errors.iter().any(|e| e.starts_with(&expected)),
+                    "{block_name} {row}: {errors:?}"
+                );
+            }
+            assert_eq!(
+                errors_for(block, "\"30m\" = 2.0, \"5m\" = 0.0, \"24h\" = 1.5"),
+                Vec::<String>::new(),
+                "{block_name} valid map"
+            );
+        }
+    }
+
+    /// Two spellings of one lifetime inside the map leave no rule for
+    /// which wins, so the second is refused naming both keys.
+    #[test]
+    fn two_map_keys_for_one_lifetime_are_refused() {
+        let errors = errors_for(MODEL_BLOCK, "\"60m\" = 2.0, \"1h\" = 3.0");
+
+        assert_eq!(
+            errors,
+            vec![
+                "`models.m.pricing.cache_write_per_mtok.60m` names the same cache lifetime as \
+                 `1h`; keep one of them"
+                    .to_string()
+            ]
+        );
+    }
+
+    /// A legacy key beside a map key for the same lifetime is not a
+    /// conflict the loader refuses: the legacy key wins that lifetime.
+    #[test]
+    fn a_legacy_key_beside_a_map_key_for_its_lifetime_is_accepted() {
+        let config: Config = toml::from_str(&format!(
+            "{MODEL_BLOCK}cache_write_5m_per_mtok = 3.75\ncache_write_per_mtok = {{ \"5m\" = 9.0 }}\n"
+        ))
+        .expect("fixture parses");
+
+        assert_eq!(
+            collect_config_validation(&config).errors,
+            Vec::<String>::new()
+        );
+    }
+}

@@ -34,6 +34,7 @@ fn a_well_formed_table_parses_and_keeps_its_prices() {
             cache_read_per_mtok: Some(0.15),
             cache_write_5m_per_mtok: Some(1.875),
             cache_write_1h_per_mtok: Some(3.0),
+            cache_write_per_mtok: None,
         })
     );
 }

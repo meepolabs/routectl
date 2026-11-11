@@ -79,7 +79,7 @@ pub struct ModelCell {
 impl ModelCell {
     /// Each price field as `(config key, value, source)`, in the
     /// `[models.X.pricing]` key order.
-    pub const fn price_fields(&self) -> [(&'static str, Option<f64>, PriceSource); 5] {
+    pub fn price_fields(&self) -> [(&'static str, Option<f64>, PriceSource); 5] {
         let p = &self.pricing;
         let s = &self.price_sources;
         [
@@ -89,12 +89,12 @@ impl ModelCell {
             (
                 "cache_write_5m_per_mtok",
                 p.cache_write_5m_per_mtok,
-                s.cache_write_5m,
+                s.cache_write_at(PricingConfig::CACHE_WRITE_5M_SECONDS),
             ),
             (
                 "cache_write_1h_per_mtok",
                 p.cache_write_1h_per_mtok,
-                s.cache_write_1h,
+                s.cache_write_at(PricingConfig::CACHE_WRITE_1H_SECONDS),
             ),
         ]
     }

@@ -65,8 +65,7 @@ fn unknown_sources() -> PriceSources {
         input: PriceSource::Unknown,
         output: PriceSource::Unknown,
         cache_read: PriceSource::Unknown,
-        cache_write_5m: PriceSource::Unknown,
-        cache_write_1h: PriceSource::Unknown,
+        cache_write: std::collections::BTreeMap::new(),
     }
 }
 

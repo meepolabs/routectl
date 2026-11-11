@@ -114,14 +114,7 @@ pub(super) fn rate_covers(rate: Option<f64>) -> bool {
 /// as the operator wrote it. A table gap or a partial `[models.X.pricing]`
 /// block is not a statement that the dimension is free.
 pub(super) fn is_complete_or_absent(sources: &PriceSources) -> bool {
-    ![
-        sources.input,
-        sources.output,
-        sources.cache_read,
-        sources.cache_write_5m,
-        sources.cache_write_1h,
-    ]
-    .contains(&PriceSource::Registry)
+    !sources.iter().any(|source| source == PriceSource::Registry)
 }
 
 /// The rate dimensions an API-equivalent value needs priced, in the order a

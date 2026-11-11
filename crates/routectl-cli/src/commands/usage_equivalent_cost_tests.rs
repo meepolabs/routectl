@@ -48,6 +48,7 @@ fn complete_rates() -> PricingConfig {
         cache_read_per_mtok: Some(0.30),
         cache_write_5m_per_mtok: Some(3.75),
         cache_write_1h_per_mtok: Some(6.0),
+        cache_write_per_mtok: None,
     }
 }
 

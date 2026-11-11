@@ -105,6 +105,7 @@ fn validate_models(
             cache_read_per_mtok: model.cache_read.and_then(admit_price),
             cache_write_5m_per_mtok: model.cache_write_5m.and_then(admit_price),
             cache_write_1h_per_mtok: model.cache_write_1h.and_then(admit_price),
+            cache_write_per_mtok: None,
         };
         out.insert(model.id, prices);
     }
@@ -138,4 +139,5 @@ const fn is_priced(prices: &PricingConfig) -> bool {
         || prices.cache_read_per_mtok.is_some()
         || prices.cache_write_5m_per_mtok.is_some()
         || prices.cache_write_1h_per_mtok.is_some()
+        || prices.cache_write_per_mtok.is_some()
 }

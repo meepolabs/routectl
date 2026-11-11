@@ -1301,6 +1301,25 @@ fn validate_float_fields(config: &Config) -> Result<()> {
     Ok(())
 }
 
+/// Refuse a `[registry."<pattern>".pricing] cache_write_per_mtok` key that is
+/// not a cache lifetime and a value that is not finite or is negative,
+/// naming every offending dotted key on its own line.
+fn validate_registry_cache_write_prices(config: &Config) -> Result<()> {
+    let lines: Vec<String> = config
+        .registry
+        .iter()
+        .filter_map(|(key, entry)| Some((key, entry.pricing.as_ref()?)))
+        .flat_map(|(key, pricing)| {
+            crate::config::cache_write_map_problems(pricing, &format!("registry.\"{key}\".pricing"))
+        })
+        .collect();
+    if lines.is_empty() {
+        Ok(())
+    } else {
+        Err(routectl_core::Error::Config(lines.join("\n")))
+    }
+}
+
 /// Reject a present-but-empty (or whitespace-only) `base_url` on any
 /// provider entry. An explicit `base_url = ""` is an operator typo;
 /// silently routing to a vendor default they did not name is the
@@ -1859,6 +1878,9 @@ pub fn collect_config_validation(config: &Config) -> ConfigValidation {
         errors.push(e);
     }
     if let Err(e) = validate_float_fields(config) {
+        errors.push(bare_validation_message(e));
+    }
+    if let Err(e) = validate_registry_cache_write_prices(config) {
         errors.push(bare_validation_message(e));
     }
     if let Err(e) = validate_base_urls(config) {

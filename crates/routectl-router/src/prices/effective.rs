@@ -1,7 +1,8 @@
 //! Effective per-field pricing for one served target, with the source of
 //! every field.
 //!
-//! Precedence, field by field:
+//! Precedence, field by field, where each cache-write lifetime is its own
+//! field:
 //!
 //! 1. `[models.X.pricing]` on the served model entry.
 //! 2. The matching `[registry]` row. It wins whole and verbatim: a field it
@@ -9,13 +10,15 @@
 //!    figure fill it.
 //! 3. The refreshed table, then the shipped table, each selected for the
 //!    target as the module's provider selection describes.
-//! 4. A derived `cache_write_1h` for the Anthropic family: twice the
+//! 4. A derived 1-hour (3600 s) cache write for the Anthropic family: twice the
 //!    effective input price, only when a refreshed or shipped row was
 //!    selected from the `anthropic` table provider (or for a `bedrock` target
 //!    whose upstream is an Anthropic model) and no source above gives the
 //!    field. A gateway priced from another table provider gets no derived
 //!    figure, whatever its kind.
 //! 5. Unknown.
+
+use std::collections::BTreeMap;
 
 use routectl_core::provider_kind::config as kind;
 use routectl_providers::anthropic_family::{AnthropicFamily, anthropic_family};
@@ -65,7 +68,7 @@ impl PriceSource {
 }
 
 /// The source of each field of an effective [`PricingConfig`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PriceSources {
     /// Source of `input_per_mtok`.
     pub input: PriceSource,
@@ -73,10 +76,10 @@ pub struct PriceSources {
     pub output: PriceSource,
     /// Source of `cache_read_per_mtok`.
     pub cache_read: PriceSource,
-    /// Source of `cache_write_5m_per_mtok`.
-    pub cache_write_5m: PriceSource,
-    /// Source of `cache_write_1h_per_mtok`.
-    pub cache_write_1h: PriceSource,
+    /// Source of each priced cache-write lifetime, keyed by lifetime in
+    /// seconds (see [`PricingConfig::cache_write_rates`]). A lifetime with no
+    /// entry is unknown.
+    pub cache_write: BTreeMap<u32, PriceSource>,
 }
 
 impl PriceSources {
@@ -85,28 +88,35 @@ impl PriceSources {
         input: PriceSource::Unknown,
         output: PriceSource::Unknown,
         cache_read: PriceSource::Unknown,
-        cache_write_5m: PriceSource::Unknown,
-        cache_write_1h: PriceSource::Unknown,
+        cache_write: BTreeMap::new(),
     };
+
+    /// The source of the cache-write price for the lifetime `seconds`.
+    pub fn cache_write_at(&self, seconds: u32) -> PriceSource {
+        self.cache_write
+            .get(&seconds)
+            .copied()
+            .unwrap_or(PriceSource::Unknown)
+    }
+
+    /// Every field's source: input, output, cache read, then each
+    /// cache-write lifetime in ascending order.
+    pub fn iter(&self) -> impl Iterator<Item = PriceSource> + '_ {
+        [self.input, self.output, self.cache_read]
+            .into_iter()
+            .chain(self.cache_write.values().copied())
+    }
 
     /// Whether every field is unknown.
     pub fn is_unknown(&self) -> bool {
-        *self == Self::UNKNOWN
+        self.iter().all(|source| source == PriceSource::Unknown)
     }
 
     /// Whether any field came from a price table layer (`refreshed`,
     /// `shipped` or `derived`). A `[registry]` row wins whole, so a row it
     /// prices never answers true.
     pub fn any_from_table(&self) -> bool {
-        [
-            self.input,
-            self.output,
-            self.cache_read,
-            self.cache_write_5m,
-            self.cache_write_1h,
-        ]
-        .into_iter()
-        .any(PriceSource::is_table)
+        self.iter().any(PriceSource::is_table)
     }
 }
 
@@ -148,31 +158,30 @@ pub fn effective_pricing(
         None => TableRows::select(config, subject, refreshed, shipped),
     };
 
-    let mut layers: Vec<(&PricingConfig, PriceSource)> = Vec::with_capacity(4);
-    layers.extend(model_config.map(|p| (p, PriceSource::ModelConfig)));
-    layers.extend(registry.map(|p| (p, PriceSource::Registry)));
+    let mut layers: Vec<Layer<'_>> = Vec::with_capacity(4);
+    layers.extend(model_config.map(|p| Layer::new(p, PriceSource::ModelConfig)));
+    layers.extend(registry.map(|p| Layer::new(p, PriceSource::Registry)));
     layers.extend(
         tables
             .refreshed
             .as_ref()
-            .map(|row| (&row.prices, PriceSource::Refreshed)),
+            .map(|row| Layer::new(&row.prices, PriceSource::Refreshed)),
     );
     layers.extend(
         tables
             .shipped
             .as_ref()
-            .map(|row| (&row.prices, PriceSource::Shipped)),
+            .map(|row| Layer::new(&row.prices, PriceSource::Shipped)),
     );
 
     let mut pricing = PricingConfig::default();
     let mut sources = PriceSources::UNKNOWN;
-    for field in Field::ALL {
+    for field in Field::all(&layers) {
         if let Some((value, source)) = layers
             .iter()
-            .find_map(|(layer, source)| field.get(layer).map(|v| (v, *source)))
+            .find_map(|layer| field.get(layer).map(|v| (v, layer.source)))
         {
-            *field.value_mut(&mut pricing) = Some(value);
-            *field.source_mut(&mut sources) = source;
+            field.set(&mut pricing, &mut sources, value, source);
         }
     }
 
@@ -260,63 +269,95 @@ impl<'t> TableRows<'t> {
 const ANTHROPIC_TABLE_PROVIDER: &str = "anthropic";
 
 fn derive_1h_write(pricing: &mut PricingConfig, sources: &mut PriceSources) {
-    if pricing.cache_write_1h_per_mtok.is_some() {
+    const ONE_HOUR: u32 = PricingConfig::CACHE_WRITE_1H_SECONDS;
+    if pricing.cache_write_rates().contains_key(&ONE_HOUR) {
         return;
     }
     let Some(input) = pricing.input_per_mtok else {
         return;
     };
-    pricing.cache_write_1h_per_mtok = Some(input * ANTHROPIC_1H_WRITE_INPUT_MULTIPLE);
-    sources.cache_write_1h = PriceSource::Derived;
+    Field::CacheWrite(ONE_HOUR).set(
+        pricing,
+        sources,
+        input * ANTHROPIC_1H_WRITE_INPUT_MULTIPLE,
+        PriceSource::Derived,
+    );
+}
+
+/// One pricing layer with its cache-write prices resolved to lifetimes.
+struct Layer<'a> {
+    pricing: &'a PricingConfig,
+    cache_write: BTreeMap<u32, f64>,
+    source: PriceSource,
+}
+
+impl<'a> Layer<'a> {
+    fn new(pricing: &'a PricingConfig, source: PriceSource) -> Self {
+        Self {
+            pricing,
+            cache_write: pricing.cache_write_rates(),
+            source,
+        }
+    }
 }
 
 /// One price field, addressed the same way in a [`PricingConfig`] and a
-/// [`PriceSources`].
+/// [`PriceSources`]. Each cache-write lifetime is its own field.
 #[derive(Clone, Copy)]
 enum Field {
     Input,
     Output,
     CacheRead,
-    CacheWrite5m,
-    CacheWrite1h,
+    CacheWrite(u32),
 }
 
 impl Field {
-    const ALL: [Self; 5] = [
-        Self::Input,
-        Self::Output,
-        Self::CacheRead,
-        Self::CacheWrite5m,
-        Self::CacheWrite1h,
-    ];
+    /// The fixed fields, then every cache-write lifetime any layer prices,
+    /// in ascending order.
+    fn all(layers: &[Layer<'_>]) -> Vec<Self> {
+        let lifetimes: std::collections::BTreeSet<u32> = layers
+            .iter()
+            .flat_map(|layer| layer.cache_write.keys().copied())
+            .collect();
+        [Self::Input, Self::Output, Self::CacheRead]
+            .into_iter()
+            .chain(lifetimes.into_iter().map(Self::CacheWrite))
+            .collect()
+    }
 
-    const fn get(self, pricing: &PricingConfig) -> Option<f64> {
+    fn get(self, layer: &Layer<'_>) -> Option<f64> {
         match self {
-            Self::Input => pricing.input_per_mtok,
-            Self::Output => pricing.output_per_mtok,
-            Self::CacheRead => pricing.cache_read_per_mtok,
-            Self::CacheWrite5m => pricing.cache_write_5m_per_mtok,
-            Self::CacheWrite1h => pricing.cache_write_1h_per_mtok,
+            Self::Input => layer.pricing.input_per_mtok,
+            Self::Output => layer.pricing.output_per_mtok,
+            Self::CacheRead => layer.pricing.cache_read_per_mtok,
+            Self::CacheWrite(seconds) => layer.cache_write.get(&seconds).copied(),
         }
     }
 
-    const fn value_mut(self, pricing: &mut PricingConfig) -> &mut Option<f64> {
+    fn set(
+        self,
+        pricing: &mut PricingConfig,
+        sources: &mut PriceSources,
+        value: f64,
+        source: PriceSource,
+    ) {
         match self {
-            Self::Input => &mut pricing.input_per_mtok,
-            Self::Output => &mut pricing.output_per_mtok,
-            Self::CacheRead => &mut pricing.cache_read_per_mtok,
-            Self::CacheWrite5m => &mut pricing.cache_write_5m_per_mtok,
-            Self::CacheWrite1h => &mut pricing.cache_write_1h_per_mtok,
-        }
-    }
-
-    const fn source_mut(self, sources: &mut PriceSources) -> &mut PriceSource {
-        match self {
-            Self::Input => &mut sources.input,
-            Self::Output => &mut sources.output,
-            Self::CacheRead => &mut sources.cache_read,
-            Self::CacheWrite5m => &mut sources.cache_write_5m,
-            Self::CacheWrite1h => &mut sources.cache_write_1h,
+            Self::Input => {
+                pricing.input_per_mtok = Some(value);
+                sources.input = source;
+            }
+            Self::Output => {
+                pricing.output_per_mtok = Some(value);
+                sources.output = source;
+            }
+            Self::CacheRead => {
+                pricing.cache_read_per_mtok = Some(value);
+                sources.cache_read = source;
+            }
+            Self::CacheWrite(seconds) => {
+                pricing.set_cache_write_rate(seconds, value);
+                sources.cache_write.insert(seconds, source);
+            }
         }
     }
 }
