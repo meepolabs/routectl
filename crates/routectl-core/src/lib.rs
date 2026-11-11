@@ -15,6 +15,7 @@ pub mod carrier_projection;
 pub(crate) mod cloud_project;
 pub mod config_dir;
 pub mod content_part;
+mod content_part_de;
 pub mod context_reduction;
 mod converse_errors;
 pub mod eligibility;
@@ -23,6 +24,8 @@ pub mod failure_class;
 pub mod failure_scope;
 pub mod identity;
 pub mod log_safe;
+mod member_slots;
+mod message_extras;
 pub mod parsed_error_body;
 pub(crate) mod provider;
 pub mod provider_kind;
@@ -95,6 +98,7 @@ pub use log_safe::{
     trace_structural_summary, trace_upstream_response_headers, trace_upstream_success_body,
     wrap_stream_with_summary,
 };
+pub use message_extras::split_message_extras;
 pub use parsed_error_body::{ParsedErrorBody, UpstreamBody, upstream_message_or_excerpt};
 pub use provider::{ProbeOutcome, Provider};
 pub use reasoning_dialect::{

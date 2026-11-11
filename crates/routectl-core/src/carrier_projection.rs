@@ -22,58 +22,32 @@ use serde::ser::Error as _;
 use serde::{Serialize, Serializer};
 use serde_json::{Map, Value};
 
+use crate::content_part_de::Shape;
+use crate::message_extras::MESSAGE_MEMBERS;
+use crate::system_content::SYSTEM_BLOCK_MEMBERS;
+use crate::tool_def::CUSTOM_TOOL_MEMBERS;
 use crate::{
     ContentPart, CustomTool, KnownContentPart, Message, MessageContent, SystemBlock, SystemContent,
     ToolDef,
 };
 
 /// Every member name `Message` serializes.
-const MESSAGE_KEYS: &[&str] = &[
-    "role",
-    "content",
-    "reasoning",
-    "reasoning_details",
-    "name",
-    "tool_call_id",
-    "tool_calls",
-    "refusal",
-];
+const MESSAGE_KEYS: &[&str] = &MESSAGE_MEMBERS;
 
 /// Every member name `SystemBlock` serializes.
-const SYSTEM_BLOCK_KEYS: &[&str] = &["type", "text", "cache_control", "citations"];
+const SYSTEM_BLOCK_KEYS: &[&str] = &SYSTEM_BLOCK_MEMBERS;
 
 /// Every member name `CustomTool` serializes, plus the `inputSchema` spelling
 /// it accepts for `input_schema`.
-const CUSTOM_TOOL_KEYS: &[&str] = &[
-    "name",
-    "description",
-    "input_schema",
-    "inputSchema",
-    "cache_control",
-    "defer_loading",
-    "strict",
-    "type",
-];
+const CUSTOM_TOOL_KEYS: &[&str] = &CUSTOM_TOOL_MEMBERS;
 
 /// Names reserved on every typed content part: the tag, and the cache marker
 /// routectl manages even on the variants that carry none.
 const PART_MANAGED_KEYS: &[&str] = &["type", "cache_control"];
 
 /// The member names `part`'s variant serializes, the `type` tag excluded.
-const fn part_typed_keys(part: &KnownContentPart) -> &'static [&'static str] {
-    match part {
-        KnownContentPart::Text { .. } => &["text", "citations", "cache_control"],
-        KnownContentPart::Image { .. } => &["source", "cache_control"],
-        KnownContentPart::ImageUrl { .. } => &["image_url", "cache_control"],
-        KnownContentPart::File { .. } => &["file", "cache_control"],
-        KnownContentPart::Document { .. } => &["source", "title", "citations", "cache_control"],
-        KnownContentPart::ToolUse { .. } => &["id", "name", "input", "cache_control"],
-        KnownContentPart::ToolResult { .. } => {
-            &["tool_use_id", "content", "is_error", "cache_control"]
-        }
-        KnownContentPart::Thinking { .. } => &["thinking", "signature"],
-        KnownContentPart::RedactedThinking { .. } => &["data"],
-    }
+fn part_typed_keys(part: &KnownContentPart) -> impl Iterator<Item = &'static str> {
+    Shape::of_part(part).typed_keys()
 }
 
 const fn part_extras(part: &KnownContentPart) -> &Map<String, Value> {
@@ -91,7 +65,7 @@ const fn part_extras(part: &KnownContentPart) -> &Map<String, Value> {
 }
 
 fn is_part_reserved(part: &KnownContentPart, key: &str) -> bool {
-    PART_MANAGED_KEYS.contains(&key) || part_typed_keys(part).contains(&key)
+    PART_MANAGED_KEYS.contains(&key) || part_typed_keys(part).any(|typed| typed == key)
 }
 
 fn has_mergeable(extras: &Map<String, Value>, reserved: &[&str]) -> bool {

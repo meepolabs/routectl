@@ -202,6 +202,15 @@ license.
   (`projection_bytes`, `write_projection`, `RequestPrefix`): canonical JSON
   with each node's carried members merged, typed and managed names reserved;
   for fingerprints and comparisons only, never a wire form
+- `src/content_part_de.rs` -- the single-pass `Deserialize` for
+  `ContentPart` (and `KnownContentPart`): a known shape takes its typed
+  members and keeps every other member in the variant's `extras`; anything
+  else falls to `Other`
+- `src/member_slots.rs` -- one-pass split of a JSON object's members into
+  named typed slots and a leftover map, for the extras-capturing deserializers
+- `src/message_extras.rs` -- `split_message_extras`: the ingress pre-pass
+  that moves members `Message` does not model out of each raw message,
+  one map per message
 - `src/system_content.rs` -- typed top-level `system` field (flat string OR
   array of `SystemBlock` with per-block cache_control); `is_blank` is the
   shared egress screen that keeps a meaningless `system: ""` off every wire

@@ -679,7 +679,6 @@ fn chatresponse_routectl_provider_still_deserializes() {
 // ---------------------------------------------------------------------------
 
 type CarrierBuilder = fn(Map<String, Value>) -> Value;
-type ExtrasLen = fn(Value) -> usize;
 
 fn carrier_value<T: serde::Serialize>(node: &T) -> Value {
     serde_json::to_value(node).expect("serialize carrier")
@@ -826,57 +825,59 @@ fn canonical_serialization_never_emits_extras() {
     }
 }
 
+type ExtrasOf = fn(Value) -> Map<String, Value>;
+
 #[test]
-fn canonical_deserialization_never_fills_extras() {
+fn a_wire_extras_member_is_an_ordinary_leftover_never_the_carrier() {
+    // The derived Message and UsageDelta parses fill nothing (a pre-pass or
+    // a response parser does); the part, custom-tool and system-block parsers
+    // keep every leftover
+    // member, a member literally named `extras` included, under its own name.
     let extras_member = json!({"caller": {"type": "direct"}});
-    let rows: [(&str, Value, ExtrasLen); 5] = [
+    let leftovers = json!({"extras": extras_member, "caller": 1});
+    let rows: [(&str, Value, ExtrasOf, Value); 5] = [
         (
             "message",
             json!({"role": "user", "content": "hi", "extras": extras_member, "caller": 1}),
-            |v| serde_json::from_value::<Message>(v).unwrap().extras.len(),
+            |v| serde_json::from_value::<Message>(v).unwrap().extras,
+            json!({}),
         ),
         (
             "custom_tool",
             json!({"name": "lookup", "extras": extras_member, "caller": 1}),
             |v| match serde_json::from_value::<ToolDef>(v).unwrap() {
-                ToolDef::Custom(tool) => tool.extras.len(),
+                ToolDef::Custom(tool) => tool.extras,
                 ToolDef::Other(other) => panic!("expected Custom, got {other}"),
             },
+            leftovers.clone(),
         ),
         (
             "system_block",
             json!({"type": "text", "text": "be brief", "extras": extras_member, "caller": 1}),
-            |v| {
-                serde_json::from_value::<SystemBlock>(v)
-                    .unwrap()
-                    .extras
-                    .len()
-            },
+            |v| serde_json::from_value::<SystemBlock>(v).unwrap().extras,
+            leftovers.clone(),
         ),
         (
             "part_text",
             json!({"type": "text", "text": "hi", "extras": extras_member, "caller": 1}),
             |v| match serde_json::from_value::<ContentPart>(v).unwrap() {
-                ContentPart::Known(KnownContentPart::Text { extras, .. }) => extras.len(),
+                ContentPart::Known(KnownContentPart::Text { extras, .. }) => extras,
                 other => panic!("expected a known text part, got {other:?}"),
             },
+            leftovers,
         ),
         (
             "usage_delta",
             json!({"prompt_tokens": 1, "extras": extras_member, "caller": 1}),
-            |v| {
-                serde_json::from_value::<UsageDelta>(v)
-                    .unwrap()
-                    .extras
-                    .len()
-            },
+            |v| serde_json::from_value::<UsageDelta>(v).unwrap().extras,
+            json!({}),
         ),
     ];
-    for (name, input, filled) in rows {
+    for (name, input, extras_of, expected) in rows {
         // Act
-        let len = filled(input);
+        let extras = extras_of(input);
 
         // Assert
-        assert_eq!(len, 0, "row `{name}` filled extras from the wire");
+        assert_eq!(Value::Object(extras), expected, "row `{name}`");
     }
 }

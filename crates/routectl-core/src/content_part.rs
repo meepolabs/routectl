@@ -15,13 +15,18 @@
 //!   `cache_control` so cache breakpoints inside future block types still
 //!   show up to the validator.
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{Map, Value};
 
 use crate::cache_control::CacheControl;
 
 /// One block inside a message's `content: [...]` array. See module docs.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Deserialized in one pass (see `content_part_de`): a block whose `type`
+/// names a known shape and whose typed members are well-formed becomes
+/// `Known`, with every other member in that variant's `extras`; any other
+/// object with a string `type` becomes `Other`.
+#[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
 pub enum ContentPart {
     /// A block type the hub introspects; see [`KnownContentPart`].
@@ -60,7 +65,7 @@ pub enum ContentPart {
 /// `thinking`, `redacted_thinking`) are the canonical wire form. The
 /// OpenAI-specific `image_url` block is also a known shape because
 /// existing OpenAI clients rely on it.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum KnownContentPart {
     /// Plain text block. The most common content shape; carried by
@@ -74,8 +79,9 @@ pub enum KnownContentPart {
         /// Optional cache breakpoint marker on this block.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cache_control: Option<CacheControl>,
-        /// Unmodeled wire members of this block, for a same-dialect egress
-        /// to re-emit. Never read or written by canonical serde.
+        /// Unmodeled wire members of this block, filled by the `ContentPart`
+        /// deserializer for a same-dialect egress to re-emit. Never written
+        /// by canonical serialization.
         #[serde(skip)]
         extras: Map<String, Value>,
     },
@@ -88,8 +94,9 @@ pub enum KnownContentPart {
         /// Optional cache breakpoint marker on this block.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cache_control: Option<CacheControl>,
-        /// Unmodeled wire members of this block, for a same-dialect egress
-        /// to re-emit. Never read or written by canonical serde.
+        /// Unmodeled wire members of this block, filled by the `ContentPart`
+        /// deserializer for a same-dialect egress to re-emit. Never written
+        /// by canonical serialization.
         #[serde(skip)]
         extras: Map<String, Value>,
     },
@@ -102,8 +109,9 @@ pub enum KnownContentPart {
         /// Optional cache breakpoint marker on this block.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cache_control: Option<CacheControl>,
-        /// Unmodeled wire members of this block, for a same-dialect egress
-        /// to re-emit. Never read or written by canonical serde.
+        /// Unmodeled wire members of this block, filled by the `ContentPart`
+        /// deserializer for a same-dialect egress to re-emit. Never written
+        /// by canonical serialization.
         #[serde(skip)]
         extras: Map<String, Value>,
     },
@@ -121,8 +129,9 @@ pub enum KnownContentPart {
         /// Optional cache breakpoint marker on this block.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cache_control: Option<CacheControl>,
-        /// Unmodeled wire members of this block, for a same-dialect egress
-        /// to re-emit. Never read or written by canonical serde.
+        /// Unmodeled wire members of this block, filled by the `ContentPart`
+        /// deserializer for a same-dialect egress to re-emit. Never written
+        /// by canonical serialization.
         #[serde(skip)]
         extras: Map<String, Value>,
     },
@@ -143,8 +152,9 @@ pub enum KnownContentPart {
         /// Optional cache breakpoint marker on this block.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cache_control: Option<CacheControl>,
-        /// Unmodeled wire members of this block, for a same-dialect egress
-        /// to re-emit. Never read or written by canonical serde.
+        /// Unmodeled wire members of this block, filled by the `ContentPart`
+        /// deserializer for a same-dialect egress to re-emit. Never written
+        /// by canonical serialization.
         #[serde(skip)]
         extras: Map<String, Value>,
     },
@@ -162,8 +172,9 @@ pub enum KnownContentPart {
         /// Optional cache breakpoint marker on this block.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cache_control: Option<CacheControl>,
-        /// Unmodeled wire members of this block, for a same-dialect egress
-        /// to re-emit. Never read or written by canonical serde.
+        /// Unmodeled wire members of this block, filled by the `ContentPart`
+        /// deserializer for a same-dialect egress to re-emit. Never written
+        /// by canonical serialization.
         #[serde(skip)]
         extras: Map<String, Value>,
     },
@@ -183,8 +194,9 @@ pub enum KnownContentPart {
         /// Optional cache breakpoint marker on this block.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cache_control: Option<CacheControl>,
-        /// Unmodeled wire members of this block, for a same-dialect egress
-        /// to re-emit. Never read or written by canonical serde.
+        /// Unmodeled wire members of this block, filled by the `ContentPart`
+        /// deserializer for a same-dialect egress to re-emit. Never written
+        /// by canonical serialization.
         #[serde(skip)]
         extras: Map<String, Value>,
     },
@@ -196,8 +208,9 @@ pub enum KnownContentPart {
         /// Opaque signature required for multi-turn tool-use continuity.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         signature: Option<String>,
-        /// Unmodeled wire members of this block, for a same-dialect egress
-        /// to re-emit. Never read or written by canonical serde.
+        /// Unmodeled wire members of this block, filled by the `ContentPart`
+        /// deserializer for a same-dialect egress to re-emit. Never written
+        /// by canonical serialization.
         #[serde(skip)]
         extras: Map<String, Value>,
     },
@@ -208,8 +221,9 @@ pub enum KnownContentPart {
     RedactedThinking {
         /// Opaque encrypted payload; preserve verbatim, never log.
         data: String,
-        /// Unmodeled wire members of this block, for a same-dialect egress
-        /// to re-emit. Never read or written by canonical serde.
+        /// Unmodeled wire members of this block, filled by the `ContentPart`
+        /// deserializer for a same-dialect egress to re-emit. Never written
+        /// by canonical serialization.
         #[serde(skip)]
         extras: Map<String, Value>,
     },

@@ -287,7 +287,7 @@ fn every_populated_part() -> Vec<KnownContentPart> {
 #[test]
 fn each_part_reserved_list_matches_its_populated_serialization() {
     for part in every_populated_part() {
-        let mut expected = part_typed_keys(&part).to_vec();
+        let mut expected: Vec<&str> = part_typed_keys(&part).collect();
         expected.push("type");
 
         assert_eq!(

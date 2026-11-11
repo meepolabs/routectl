@@ -36,6 +36,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value};
 
 use crate::cache_control::CacheControl;
+use crate::member_slots::take_members_outside;
 
 /// Tool definition variants. See module docs.
 #[derive(Debug, Clone)]
@@ -82,11 +83,26 @@ pub struct CustomTool {
     /// absence; we round-trip whichever the wire used.
     #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
     pub type_tag: Option<String>,
-    /// Unmodeled wire members of this node, for a same-dialect egress to
-    /// re-emit. Never read or written by canonical serde.
+    /// Unmodeled wire members of this node, filled by the `ToolDef`
+    /// deserializer for a same-dialect egress to re-emit. Never written by
+    /// canonical serialization, and never filled by `CustomTool`'s own
+    /// `Deserialize`.
     #[serde(skip)]
     pub extras: Map<String, Value>,
 }
+
+/// Wire member names [`CustomTool`] models, its `inputSchema` alias
+/// included. Every other member of a custom tool object is an extra.
+pub(crate) const CUSTOM_TOOL_MEMBERS: [&str; 8] = [
+    "name",
+    "description",
+    "input_schema",
+    "inputSchema",
+    "cache_control",
+    "defer_loading",
+    "strict",
+    "type",
+];
 
 fn empty_object_schema() -> Value {
     serde_json::json!({"type": "object", "properties": {}})
@@ -275,18 +291,22 @@ impl<'de> Deserialize<'de> for ToolDef {
             .and_then(|o| o.get("type"))
             .and_then(|t| t.as_str());
         match type_field {
-            // Absent or "custom" -> typed Custom variant. We deserialize
-            // from the same Value (rather than re-serializing) to keep
-            // unknown fields silently ignored, matching today's behavior
-            // for ChatRequest as a whole.
+            // Absent or "custom" -> typed Custom variant, deserialized from
+            // the same Value (rather than re-serialized). Members it does
+            // not model are moved into `extras` first; a legacy `function`
+            // object the lift consumed is gone by then.
             None | Some("custom") => {
-                let value = if type_field.is_none() {
+                let mut value = if type_field.is_none() {
                     lift_bare_function(value)
                 } else {
                     value
                 };
+                let extras = value
+                    .as_object_mut()
+                    .map(|obj| take_members_outside(obj, &CUSTOM_TOOL_MEMBERS))
+                    .unwrap_or_default();
                 serde_json::from_value::<CustomTool>(value)
-                    .map(ToolDef::Custom)
+                    .map(|tool| Self::Custom(CustomTool { extras, ..tool }))
                     .map_err(serde::de::Error::custom)
             }
             // Builtin or unknown discriminator -> opaque passthrough.
@@ -327,6 +347,10 @@ fn lift_bare_function(value: Value) -> Value {
     }
     Value::Object(obj)
 }
+
+#[cfg(test)]
+#[path = "tool_def_extras_tests.rs"]
+mod extras_tests;
 
 #[cfg(test)]
 mod tests {

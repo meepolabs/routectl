@@ -6,10 +6,15 @@
 //! per-block cache markers exactly. The OpenAI ingress emits the flat
 //! string form by lifting Role::System messages.
 
-use serde::{Deserialize, Serialize};
+use std::fmt;
+
+use serde::de::value::SeqAccessDeserializer;
+use serde::de::{self, MapAccess, SeqAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 
 use crate::cache_control::CacheControl;
+use crate::member_slots::{MemberKey, next_member_key};
 
 /// `system` field shape. Untagged: a JSON string parses as `Text(s)`,
 /// an array parses as `Blocks(blocks)`.
@@ -25,7 +30,7 @@ pub enum SystemContent {
 /// One typed text block inside a system array. Mirrors Anthropic's
 /// `TextBlockParam` shape (no image/document blocks are valid here per
 /// spec; we keep the schema strict).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct SystemBlock {
     /// Always `"text"` on the wire. Defaulted on deserialize so callers
     /// can build a `SystemBlock` programmatically without repeating it.
@@ -39,14 +44,117 @@ pub struct SystemBlock {
     /// Optional citation metadata.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub citations: Option<Value>,
-    /// Unmodeled wire members of this node, for a same-dialect egress to
-    /// re-emit. Never read or written by canonical serde.
+    /// Unmodeled wire members of this node, filled by the deserializer for
+    /// a same-dialect egress to re-emit. Never written by canonical
+    /// serialization.
     #[serde(skip)]
     pub extras: Map<String, Value>,
 }
 
 fn default_text_type() -> String {
     "text".into()
+}
+
+/// Wire member names [`SystemBlock`] models, in field order. Every other
+/// member of a system block object is an extra.
+pub(crate) const SYSTEM_BLOCK_MEMBERS: [&str; 4] = ["type", "text", "cache_control", "citations"];
+
+const KIND: usize = 0;
+const TEXT: usize = 1;
+const CACHE_CONTROL: usize = 2;
+const CITATIONS: usize = 3;
+
+/// The positional form serde derives for a struct (fields in order), under
+/// the same type name so its error text names `SystemBlock`.
+mod positional {
+    use serde::Deserialize;
+    use serde_json::Value;
+
+    use super::{CacheControl, default_text_type};
+
+    #[derive(Deserialize)]
+    pub(super) struct SystemBlock {
+        #[serde(rename = "type", default = "default_text_type")]
+        pub(super) kind: String,
+        pub(super) text: String,
+        #[serde(default)]
+        pub(super) cache_control: Option<CacheControl>,
+        #[serde(default)]
+        pub(super) citations: Option<Value>,
+    }
+}
+
+/// Reads typed members straight into their fields as they arrive, so
+/// defaults, null handling, error text and error positions are those of the
+/// derived struct; every other member is kept in `extras`.
+struct SystemBlockVisitor;
+
+impl<'de> Visitor<'de> for SystemBlockVisitor {
+    type Value = SystemBlock;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("struct SystemBlock")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<SystemBlock, A::Error> {
+        let mut kind: Option<String> = None;
+        let mut text: Option<String> = None;
+        let mut cache_control: Option<Option<CacheControl>> = None;
+        let mut citations: Option<Option<Value>> = None;
+        let mut extras = Map::new();
+        while let Some(key) = next_member_key(&mut map, &SYSTEM_BLOCK_MEMBERS)? {
+            match key {
+                MemberKey::Slot(KIND) => set_once(&mut kind, KIND, &mut map)?,
+                MemberKey::Slot(TEXT) => set_once(&mut text, TEXT, &mut map)?,
+                MemberKey::Slot(CACHE_CONTROL) => {
+                    set_once(&mut cache_control, CACHE_CONTROL, &mut map)?;
+                }
+                MemberKey::Slot(CITATIONS) => set_once(&mut citations, CITATIONS, &mut map)?,
+                MemberKey::Slot(_) => unreachable!("slot outside SYSTEM_BLOCK_MEMBERS"),
+                MemberKey::Other(name) => {
+                    extras.insert(name, map.next_value()?);
+                }
+            }
+        }
+        Ok(SystemBlock {
+            kind: kind.unwrap_or_else(default_text_type),
+            text: text.ok_or_else(|| de::Error::missing_field("text"))?,
+            cache_control: cache_control.flatten(),
+            citations: citations.flatten(),
+            extras,
+        })
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, seq: A) -> Result<SystemBlock, A::Error> {
+        let block = positional::SystemBlock::deserialize(SeqAccessDeserializer::new(seq))?;
+        Ok(SystemBlock {
+            kind: block.kind,
+            text: block.text,
+            cache_control: block.cache_control,
+            citations: block.citations,
+            extras: Map::new(),
+        })
+    }
+}
+
+/// Read the value of typed member `slot` into `field`; a second occurrence
+/// is serde's duplicate-field error.
+fn set_once<'de, T: Deserialize<'de>, A: MapAccess<'de>>(
+    field: &mut Option<T>,
+    slot: usize,
+    map: &mut A,
+) -> Result<(), A::Error> {
+    if field.is_some() {
+        return Err(de::Error::duplicate_field(SYSTEM_BLOCK_MEMBERS[slot]));
+    }
+    *field = Some(map.next_value()?);
+    Ok(())
+}
+
+impl<'de> Deserialize<'de> for SystemBlock {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_struct("SystemBlock", &SYSTEM_BLOCK_MEMBERS, SystemBlockVisitor)
+    }
 }
 
 impl SystemContent {
@@ -87,6 +195,10 @@ impl SystemContent {
         blocks.iter().filter_map(|b| b.cache_control.as_ref())
     }
 }
+
+#[cfg(test)]
+#[path = "system_content_extras_tests.rs"]
+mod extras_tests;
 
 #[cfg(test)]
 mod tests {
