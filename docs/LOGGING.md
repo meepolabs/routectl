@@ -1332,7 +1332,7 @@ breakpoint cost against what it returned.
 | `provider`       | The provider name.                                       |
 | `model`          | The served upstream model id.                            |
 | `strategy`       | Always `auto_emitted` for this line.                     |
-| `cache_creation` | Aggregate cache-write tokens (5m + 1h) the upstream reported. |
+| `cache_creation` | Cache-write tokens the upstream reported, over every lifetime (the row's `cache_write_tokens`). |
 | `cache_read`     | Cache-read tokens the upstream reported.                 |
 
 - **DEBUG** (healthy): the auto-emitted breakpoint created a cache entry
@@ -1356,7 +1356,8 @@ the thrash signal above. The message reads `cache=READ/PROMPT (PCT%)`:
   (`cache_read`).
 - **PROMPT** -- the cache-INCLUSIVE prompt total. The usage DB stores a
   cache-EXCLUSIVE `input_tokens`, so this line reconstructs the inclusive
-  prompt as `input_tokens + cache_read + cache_write_5m + cache_write_1h`.
+  prompt as `input_tokens + cache_read + cache_write_tokens`, where
+  `cache_write_tokens` is the write total over every lifetime.
 - **PCT%** -- integer cache-hit percentage, `READ * 100 / PROMPT` (guards
   `PROMPT == 0` -> `0%`).
 

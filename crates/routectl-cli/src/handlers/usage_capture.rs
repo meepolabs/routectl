@@ -881,10 +881,7 @@ impl UsageCapture {
             self.record.output_tokens = Some(u.completion_tokens as u64);
             self.record.reasoning_tokens = u.reasoning_tokens.map(|v| v as u64);
             self.record.cache_read = u.cache_read_input_tokens.map(|v| v as u64);
-            if let Some(cc) = &u.cache_creation {
-                self.record.cache_write_5m = cc.get(300).map(|v| v as u64);
-                self.record.cache_write_1h = cc.get(3600).map(|v| v as u64);
-            }
+            self.record_cache_writes(u.cache_creation_input_tokens, u.cache_creation.as_ref());
             self.record.server_tool_use = u.server_tool_use.clone();
             // Anthropic returns `service_tier` in the usage extras
             // forward-compat sweep; lift it when present.
@@ -942,19 +939,41 @@ impl UsageCapture {
             if let Some(cr) = u.cache_read_input_tokens {
                 self.record.cache_read = Some(cr as u64);
             }
-            if let Some(cc) = &u.cache_creation {
-                if let Some(v) = cc.get(300) {
-                    self.record.cache_write_5m = Some(v as u64);
-                }
-                if let Some(v) = cc.get(3600) {
-                    self.record.cache_write_1h = Some(v as u64);
-                }
+            if u.cache_creation_input_tokens.is_some() || u.cache_creation.is_some() {
+                self.record_cache_writes(u.cache_creation_input_tokens, u.cache_creation.as_ref());
             }
             if u.server_tool_use.is_some() {
                 self.record.server_tool_use = u.server_tool_use.clone();
             }
         }
         self.observe_quota(chunk.upstream_meta.as_ref());
+    }
+
+    /// Stamp the cache-write total and per-lifetime split as one pair from
+    /// one usage object, so a stream's later usage never pairs its total
+    /// with an earlier split. The legacy per-TTL columns stay `None`.
+    fn record_cache_writes(
+        &mut self,
+        total: Option<u32>,
+        split: Option<&routectl_core::schema::CacheCreation>,
+    ) {
+        self.record.cache_write_tokens = total.map(u64::from);
+        self.record.cache_write_lifetimes = split.filter(|c| !c.is_empty()).map(|c| {
+            c.iter()
+                .map(|(seconds, tokens)| (seconds, u64::from(tokens)))
+                .collect()
+        });
+    }
+
+    /// The write total the row will store: the stated total, else the
+    /// split's sum, else zero.
+    fn cache_write_total(&self) -> u64 {
+        routectl_usage::cache_write_columns(
+            self.record.cache_write_tokens,
+            self.record.cache_write_lifetimes.as_ref(),
+        )
+        .tokens
+        .unwrap_or(0)
     }
 
     /// Lift whichever vendor quota snapshot the upstream reported into the
@@ -1351,16 +1370,15 @@ impl UsageCapture {
     /// WARN on thrash (created an entry, got no read this request), debug
     /// on the healthy created-and-read case. No-op for caller-supplied /
     /// skipped strategies and when nothing was created. Counts only --
-    /// never message content / secrets. `cache_creation` is the aggregate
-    /// 5m + 1h write the upstream reported (the per-TTL columns already on
-    /// the record); `cache_read` is the read count.
+    /// never message content / secrets. `cache_creation` is the write
+    /// total the row records, over every lifetime and any unknown-lifetime
+    /// remainder; `cache_read` is the read count.
     fn emit_cache_outcome(&self) {
         let strategy = self.cache_strategy;
         if strategy != Some(AUTO_EMITTED) {
             return;
         }
-        let cache_creation =
-            self.record.cache_write_5m.unwrap_or(0) + self.record.cache_write_1h.unwrap_or(0);
+        let cache_creation = self.cache_write_total();
         let cache_read = self.record.cache_read.unwrap_or(0);
         if cache_creation == 0 {
             // Auto-emitted but the upstream reported no creation: not a
@@ -1394,14 +1412,13 @@ impl UsageCapture {
     /// `cache=READ/PROMPT (PCT%)`. READ is the cache-read token count;
     /// PROMPT is the cache-INCLUSIVE prompt total, reconstructed from the
     /// cache-EXCLUSIVE `input_tokens` the record stores plus the disjoint
-    /// cache columns (`input_tokens + cache_read + cache_write_5m +
-    /// cache_write_1h`). The INFO `request finished` line already carries
+    /// cache columns (`input_tokens + cache_read + cache_write_tokens`).
+    /// The INFO `request finished` line already carries
     /// `cache_read`. Counts / ids / strategy only -- never message content /
     /// secrets / bodies.
     fn emit_cache_summary(&self) {
         let cache_read = self.record.cache_read.unwrap_or(0);
-        let cache_creation =
-            self.record.cache_write_5m.unwrap_or(0) + self.record.cache_write_1h.unwrap_or(0);
+        let cache_creation = self.cache_write_total();
         let prompt = self
             .record
             .input_tokens
@@ -1483,3 +1500,7 @@ mod observation_tests;
 #[cfg(test)]
 #[path = "usage_capture_finished_log_tests.rs"]
 mod finished_log_tests;
+
+#[cfg(test)]
+#[path = "usage_capture_cache_parity_tests.rs"]
+mod cache_parity_tests;

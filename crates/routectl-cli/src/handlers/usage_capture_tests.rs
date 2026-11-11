@@ -155,9 +155,15 @@ fn observe_response_stores_cache_exclusive_input() {
 
     // Assert: input is the cache-EXCLUSIVE new input only.
     assert_eq!(cap.record.input_tokens, Some(100_u64));
-    // The disjoint cache columns are stamped exactly as before.
+    // The disjoint cache columns carry the read, the write total and its
+    // split; the legacy per-TTL columns stay empty.
     assert_eq!(cap.record.cache_read, Some(600_u64));
-    assert_eq!(cap.record.cache_write_5m, Some(300_u64));
+    assert_eq!(cap.record.cache_write_tokens, Some(300_u64));
+    assert_eq!(
+        cap.record.cache_write_lifetimes,
+        Some(std::collections::BTreeMap::from([(300, 300_u64)]))
+    );
+    assert_eq!(cap.record.cache_write_5m, None);
     assert_eq!(cap.record.cache_write_1h, None);
     assert_eq!(cap.record.output_tokens, Some(50_u64));
 }
@@ -174,7 +180,12 @@ fn observe_chunk_matches_response_for_same_usage() {
     // Assert: parity with observe_response -- cache-exclusive new input.
     assert_eq!(cap.record.input_tokens, Some(100_u64));
     assert_eq!(cap.record.cache_read, Some(600_u64));
-    assert_eq!(cap.record.cache_write_5m, Some(300_u64));
+    assert_eq!(cap.record.cache_write_tokens, Some(300_u64));
+    assert_eq!(
+        cap.record.cache_write_lifetimes,
+        Some(std::collections::BTreeMap::from([(300, 300_u64)]))
+    );
+    assert_eq!(cap.record.cache_write_5m, None);
 }
 
 #[test]
