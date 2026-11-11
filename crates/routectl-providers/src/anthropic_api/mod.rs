@@ -22,6 +22,7 @@ use routectl_core::wire_check::{EditKind, EditSite};
 use routectl_core::{
     ChatChunk, ChatRequest, ChatResponse, Error, ParsedErrorBody, Provider, Result, TokenCount,
     debug_upstream_error_body, sanitize_for_log, trace_outgoing_body, trace_upstream_success_body,
+    upstream_text_for_log,
 };
 
 use crate::upstream_error::{CarriedBody, UpstreamErrorRead};
@@ -320,16 +321,13 @@ impl Provider for AnthropicApiProvider {
             )
             .await;
             // Extend the auth-only WARN to all 4xx/5xx so an operator
-            // never has to guess WHY a request failed. Sanitize before
-            // tracing: the upstream may return untrusted control bytes
-            // (CRLF, control chars, very long lines) that would otherwise
-            // corrupt log output on text-format subscribers.
-            let safe_excerpt = sanitize_for_log(&msg);
+            // never has to guess WHY a request failed. Both WARN sinks take
+            // the raw message and render it log-safe themselves.
             crate::upstream_log::warn_upstream_failure(
                 &self.cfg.id,
                 status,
                 Some(&self.cfg.auth_kind),
-                &safe_excerpt,
+                &msg,
                 "anthropic",
             );
             // Beta-decision context: own-token OauthBearer +
@@ -339,7 +337,7 @@ impl Provider for AnthropicApiProvider {
             // without enabling header tracing. Gate is `should_log_beta_4xx`
             // (shared with stream() and count_tokens()).
             if self.should_log_beta_4xx(status, beta_decision.forwarded_leg) {
-                self.log_beta_decision_on_4xx(status, &beta_decision, &safe_excerpt);
+                self.log_beta_decision_on_4xx(status, &beta_decision, &msg);
             }
             // Lane-independent: a mid-conversation system turn is
             // position-gated and model-gated on every lane, so this fires
@@ -534,8 +532,7 @@ impl Provider for AnthropicApiProvider {
         if status >= 400 {
             // Same text-first-then-opportunistic-JSON pattern as
             // `complete()` -- see comment there. Helper extracted at
-            // `read_anthropic_error`. Sanitize the excerpt for the
-            // same reason as `complete()`.
+            // `read_anthropic_error`.
             let (msg, err) = read_anthropic_error(
                 &self.cfg.id,
                 resp,
@@ -543,18 +540,17 @@ impl Provider for AnthropicApiProvider {
                 self.scope_lane(forwarded_leg),
             )
             .await;
-            let safe_excerpt = sanitize_for_log(&msg);
             crate::upstream_log::warn_upstream_failure(
                 &self.cfg.id,
                 status,
                 Some(&self.cfg.auth_kind),
-                &safe_excerpt,
+                &msg,
                 "anthropic",
             );
             // See complete(): own-token OauthBearer + api.anthropic.com
             // lane, 4xx only, via the shared `should_log_beta_4xx` gate.
             if self.should_log_beta_4xx(status, beta_decision.forwarded_leg) {
-                self.log_beta_decision_on_4xx(status, &beta_decision, &safe_excerpt);
+                self.log_beta_decision_on_4xx(status, &beta_decision, &msg);
             }
             // Lane-independent: a mid-conversation system turn is
             // position-gated and model-gated on every lane, so this fires
@@ -839,12 +835,6 @@ impl Provider for AnthropicApiProvider {
                 self.scope_lane(self.forwarded_leg(&req)),
             )
             .await;
-            // Sanitize before tracing: the upstream may return
-            // untrusted control bytes (CRLF, control chars, very
-            // long lines) and `body_excerpt = %msg` would otherwise
-            // emit them verbatim into operator logs. Same posture as
-            // the `complete()` and `stream()` paths above.
-            let safe_excerpt = sanitize_for_log(&msg);
             if status == 501 {
                 // A 501 on count_tokens is a CAPABILITY signal, not a
                 // health failure: the upstream (e.g. an anthropic-api
@@ -857,7 +847,7 @@ impl Provider for AnthropicApiProvider {
                     provider = %self.cfg.id,
                     status,
                     context = "anthropic count_tokens",
-                    body_excerpt = %safe_excerpt,
+                    body_excerpt = %upstream_text_for_log(&msg),
                     "count_tokens unsupported by upstream (501); router walks to next capable seat",
                 );
             } else {
@@ -865,7 +855,7 @@ impl Provider for AnthropicApiProvider {
                     &self.cfg.id,
                     status,
                     Some(&self.cfg.auth_kind),
-                    &safe_excerpt,
+                    &msg,
                     "anthropic count_tokens",
                 );
             }
@@ -874,7 +864,7 @@ impl Provider for AnthropicApiProvider {
             // above, which is a 5xx), via the shared `should_log_beta_4xx`
             // gate.
             if self.should_log_beta_4xx(status, beta_decision.forwarded_leg) {
-                self.log_beta_decision_on_4xx(status, &beta_decision, &safe_excerpt);
+                self.log_beta_decision_on_4xx(status, &beta_decision, &msg);
             }
             // Lane-independent: a mid-conversation system turn is
             // position-gated and model-gated on every lane, so this fires
@@ -1143,6 +1133,10 @@ mod error_parse_tests;
 #[cfg(test)]
 #[path = "principal_403_tests.rs"]
 mod principal_403_tests;
+
+#[cfg(test)]
+#[path = "mod_upstream_warn_scrub_tests.rs"]
+mod upstream_warn_scrub_tests;
 
 // Host-gated reasoning-envelope unwrap on the redacted_thinking egress.
 #[cfg(test)]

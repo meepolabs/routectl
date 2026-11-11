@@ -695,12 +695,16 @@ fn map_gemini_upstream_error(provider_id: &str, read: UpstreamErrorRead) -> Erro
         crate::upstream_error::lift_nested_status_tokens(p.value())
     });
     let msg = upstream_message_or_excerpt(read.text(), read.parsed());
-    let safe_excerpt = if read.hit_cap() {
-        crate::http_client::body_cap_exceeded_message()
-    } else {
-        sanitize_for_log(&msg)
-    };
-    crate::upstream_log::warn_upstream_failure(provider_id, status, None, &safe_excerpt, "gemini");
+    let cap_message = read
+        .hit_cap()
+        .then(crate::http_client::body_cap_exceeded_message);
+    crate::upstream_log::warn_upstream_failure(
+        provider_id,
+        status,
+        None,
+        cap_message.as_deref().unwrap_or(&msg),
+        "gemini",
+    );
     let carried = if read.hit_cap() {
         CarriedBody::Replacement(crate::http_client::body_cap_exceeded_message())
     } else if read.is_native_envelope() || msg == read.text() {

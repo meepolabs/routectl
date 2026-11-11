@@ -12,12 +12,14 @@
 //! `provider` / `context` FIELDS, never interpolated into the message,
 //! so log subscribers can filter on a stable message string.
 
+use routectl_core::upstream_text_for_log;
+
 /// Emit the upstream-failure WARN for one provider. Picks the
 /// "auth failed" message on 401/403 and the generic "upstream error"
-/// message otherwise. The caller MUST pass a `body_excerpt` already
-/// run through `sanitize_for_log` -- the upstream body may carry
-/// untrusted control bytes (CRLF, control chars) that would corrupt
-/// log output otherwise.
+/// message otherwise. Pass the raw upstream text as `body_excerpt`, never
+/// a capped or filtered excerpt: it is rendered through
+/// [`upstream_text_for_log`], which scrubs credentials from the complete
+/// text before control-filtering and capping it.
 ///
 /// `auth_kind` is `Option<&dyn Debug>` because each provider carries
 /// its own `AuthKind` enum (and openai-compat has none). `Some(k)`
@@ -33,6 +35,7 @@ pub fn warn_upstream_failure(
     body_excerpt: &str,
     context: &str,
 ) {
+    let body_excerpt = upstream_text_for_log(body_excerpt);
     let is_auth = status == 401 || status == 403;
     match (is_auth, auth_kind) {
         (true, Some(k)) => tracing::warn!(
@@ -61,10 +64,69 @@ pub fn warn_upstream_failure(
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::warn_upstream_failure;
     use routectl_testkit::CapturedEvent;
     use tracing_test::traced_test;
+
+    /// Clean upstream text every planted row carries; it must survive the
+    /// scrub verbatim, so a sink that drops the excerpt cannot pass.
+    pub const CLEAN_SENTINEL: &str = "upstream-sentinel-kept";
+
+    /// One planted upstream message per row: `(name, message, planted)`.
+    /// `planted` is the fragment that must not reach the log line. The
+    /// last rows hold a credential the old cap-then-filter order hides
+    /// from the scrub: one straddling the 256-character cap, one whose
+    /// separator is a non-ASCII no-break space.
+    pub fn planted_messages() -> Vec<(&'static str, String, &'static str)> {
+        let key_body = "a".repeat(30);
+        let pad = "x".repeat(254 - CLEAN_SENTINEL.len() - 2 - "sk-ant-api03-".len());
+        vec![
+            (
+                "principal arn",
+                format!("{CLEAN_SENTINEL} denied for arn:aws:iam::123456789012:user/alice"),
+                "123456789012",
+            ),
+            (
+                "vendor key",
+                format!("{CLEAN_SENTINEL} invalid x-api-key sk-ant-api03-{key_body}"),
+                "sk-ant-api03-",
+            ),
+            (
+                "url userinfo",
+                format!("{CLEAN_SENTINEL} fetch https://bob:hunter2pass@example.com/x failed"),
+                "hunter2pass",
+            ),
+            (
+                "key straddling the cap",
+                format!("{CLEAN_SENTINEL} {pad} sk-ant-api03-{key_body}"),
+                "sk-ant-api03-",
+            ),
+            (
+                "account id after a no-break space",
+                format!("{CLEAN_SENTINEL} account\u{a0}123456789012 is suspended"),
+                "123456789012",
+            ),
+        ]
+    }
+
+    /// The excerpt carries the clean sentinel and a redaction, and none of
+    /// the planted fragment.
+    pub fn assert_excerpt_scrubbed(row: &str, excerpt: Option<&str>, planted: &str) {
+        let excerpt = excerpt.unwrap_or_else(|| panic!("{row}: no body_excerpt field"));
+        assert!(
+            excerpt.contains(CLEAN_SENTINEL),
+            "{row}: clean sentinel missing from {excerpt:?}"
+        );
+        assert!(
+            excerpt.contains("[redacted]"),
+            "{row}: no redaction in {excerpt:?}"
+        );
+        assert!(
+            !excerpt.contains(planted),
+            "{row}: planted {planted:?} reached {excerpt:?}"
+        );
+    }
 
     #[derive(Debug)]
     enum FakeAuthKind {
@@ -149,6 +211,35 @@ mod tests {
         let auth = with_message(&events, "upstream auth failed");
         assert_eq!(auth.len(), 1, "captured {events:?}");
         assert_eq!(auth[0].field("provider"), Some("openai-compat:control"));
+    }
+
+    #[test]
+    fn every_arm_scrubs_raw_upstream_text_before_capping() {
+        let arms: [(&str, u16, Option<&dyn std::fmt::Debug>, &str); 3] = [
+            (
+                "auth with kind",
+                401,
+                Some(&FakeAuthKind::ApiKey),
+                "upstream auth failed",
+            ),
+            ("auth without kind", 403, None, "upstream auth failed"),
+            ("error", 500, None, "upstream error"),
+        ];
+        for (arm, status, auth_kind, message) in arms {
+            for (row, text, planted) in planted_messages() {
+                let events = routectl_testkit::capture_events(|| {
+                    warn_upstream_failure("anthropic:p", status, auth_kind, &text, "anthropic");
+                });
+
+                let matched = with_message(&events, message);
+                assert_eq!(matched.len(), 1, "{arm}/{row}: captured {events:?}");
+                assert_excerpt_scrubbed(
+                    &format!("{arm}/{row}"),
+                    matched[0].field("body_excerpt"),
+                    planted,
+                );
+            }
+        }
     }
 
     #[traced_test]

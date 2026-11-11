@@ -1449,7 +1449,7 @@ mod helper_tests {
         let debug = format!("{:?}", err.expect("error built"));
 
         assert!(!excerpt.contains("SENTINEL-COMPAT-KEY"), "{excerpt}");
-        assert!(excerpt.contains("<redacted len="), "{excerpt}");
+        assert!(excerpt.contains("[redacted]"), "{excerpt}");
         assert!(!debug.contains("SENTINEL-COMPAT-KEY"), "{debug}");
     }
 

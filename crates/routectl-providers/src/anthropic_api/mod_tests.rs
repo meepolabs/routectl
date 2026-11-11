@@ -3106,8 +3106,8 @@ fn count_system_role_turns_counts_wire_system_messages() {
 /// Division of responsibility, since the previous absence check could not
 /// distinguish the two:
 ///
-/// * `body_excerpt` is the UPSTREAM error message, already run through
-///   `sanitize_for_log` by every call site (control chars replaced,
+/// * `body_excerpt` is the UPSTREAM error message, rendered through
+///   `upstream_text_for_log` (scrubbed, control chars replaced,
 ///   length-capped). Its job is to relay what Anthropic said -- and an
 ///   Anthropic 400 rejecting a beta names that beta in its own message. So
 ///   a beta literal appearing inside the excerpt is upstream text, is not

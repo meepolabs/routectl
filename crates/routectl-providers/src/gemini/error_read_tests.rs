@@ -1,7 +1,8 @@
 //! The API-key lane's non-success read, end to end over HTTP: the
 //! `Retry-After` hint is kept only on a rate-limit status, and an over-cap
 //! error body trips exactly one cap WARN and collapses to the fixed cap
-//! message.
+//! message; and the upstream-failure WARN renders the raw error message
+//! through the scrub.
 
 use super::*;
 use routectl_core::ChatRequest;
@@ -94,4 +95,32 @@ async fn over_cap_error_body_warns_once_and_carries_the_fixed_message() {
     assert_eq!(cap_warns[0].field("path"), Some("error_body"));
     assert_eq!(cap_warns[0].field("status"), Some("429"));
     assert_eq!(cap_warns[0].field("body_truncated"), Some("true"));
+}
+
+#[tokio::test]
+async fn upstream_failure_warn_scrubs_the_raw_message() {
+    let arms = [(500, "upstream error"), (403, "upstream auth failed")];
+    for (status, message) in arms {
+        for (row, text, planted) in crate::upstream_log::tests::planted_messages() {
+            let name = format!("{status}/{row}");
+            let (provider, _server) = provider_answering(
+                ResponseTemplate::new(status).set_body_json(serde_json::json!({
+                    "error": {"code": status, "message": text, "status": "INTERNAL"}
+                })),
+            )
+            .await;
+
+            let (result, events) =
+                routectl_testkit::with_capture(provider.complete(request())).await;
+
+            assert!(result.is_err(), "{name}: expected an error");
+            let warns: Vec<_> = events.iter().filter(|e| e.message == message).collect();
+            assert_eq!(warns.len(), 1, "{name}: captured {events:?}");
+            crate::upstream_log::tests::assert_excerpt_scrubbed(
+                &name,
+                warns[0].field("body_excerpt"),
+                planted,
+            );
+        }
+    }
 }

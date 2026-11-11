@@ -1001,8 +1001,10 @@ impl AnthropicApiProvider {
     /// Anthropic-only structured WARN emitted on a 4xx from the own-token
     /// OauthBearer + api.anthropic.com lane, adjacent to (never replacing)
     /// the shared `upstream_log::warn_upstream_failure` call. Carries just
-    /// the beta-decision context plus the already-sanitized body excerpt --
-    /// no tokens, credentials, or request/response content -- so a
+    /// the beta-decision context plus the upstream message, passed raw and
+    /// rendered here through `upstream_text_for_log` (scrubbed, then
+    /// filtered and capped) -- no tokens, credentials, or request/response
+    /// content -- so a
     /// beta-caused 400 recurrence is diagnosable without enabling header
     /// tracing. Every beta field is a BOUNDED boolean: the composed beta
     /// strings themselves are caller-influenced and are never logged.
@@ -1024,7 +1026,7 @@ impl AnthropicApiProvider {
             has_thinking_token_count_beta = dec.has_thinking_token_count_beta,
             has_effort_beta = dec.has_effort_beta,
             body_has_effort = dec.body_has_effort,
-            body_excerpt = %excerpt,
+            body_excerpt = %routectl_core::upstream_text_for_log(excerpt),
             "anthropic-api oauth 4xx beta decision context",
         );
     }
