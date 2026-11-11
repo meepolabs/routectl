@@ -898,6 +898,19 @@ mod tests {
                     message_with_part(json!({"type": "TOOL_USE", "input": url_image(url)})),
                     "`source` at root[0].content[0].input ",
                 ),
+                (
+                    "tool_use in an array under a message member other than content",
+                    MediaWalkRoot::AnthropicMessages,
+                    json!([{"role": "user", "content": [],
+                            "meta": [{"type": "tool_use", "input": url_image(url)}]}]),
+                    "`source` at root[0].meta[0].input ",
+                ),
+                (
+                    "tool_use in a message that is itself an array",
+                    MediaWalkRoot::AnthropicMessages,
+                    json!([[{"type": "tool_use", "input": url_image(url)}]]),
+                    "`source` at root[0][0].input ",
+                ),
             ]
         }
 

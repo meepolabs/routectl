@@ -613,6 +613,7 @@ fn seam_join(wire: WireMessages) -> (WireMessages, MessageLedger) {
     let user = |text: &str| AnthropicMessage {
         role: AnthropicRole::User,
         content: AnthropicContent::Text(text.into()),
+        extras: serde_json::Map::new(),
     };
     wire.push(0, user("a"), &mut ledger);
     let _ = wire.drop_system_turn(None);
@@ -631,7 +632,7 @@ fn only_an_admitted_tap_tracks_the_origins_a_join_is_declared_from() {
     ];
 
     for (name, tap, tracks, joins) in rows {
-        let (wire, ledger) = seam_join(WireMessages::for_tap(3, tap));
+        let (wire, ledger) = seam_join(WireMessages::for_tap(3, tap, Carriers::Emit));
 
         assert_eq!(wire.origins.is_some(), tracks, "row {name}");
         assert_eq!(wire.merged, joins, "row {name}");

@@ -16,6 +16,7 @@
 
 use routectl_core::{Message, Role, SystemContent};
 
+use super::carriers::Carriers;
 use super::types::{AnthropicSystem, AnthropicSystemBlock};
 
 use crate::system_filter::system_role_texts_stripped;
@@ -28,6 +29,12 @@ use crate::system_filter::system_role_texts_stripped;
 /// blank canonical `req.system` with `SystemContent::is_blank` before
 /// calling, so `system: ""` never reaches an upstream.
 pub fn translate_system(s: &SystemContent) -> AnthropicSystem {
+    translate_system_carrying(s, Carriers::Withhold)
+}
+
+/// [`translate_system`], each block also emitting the members `carriers`
+/// lets it carry.
+pub fn translate_system_carrying(s: &SystemContent, carriers: Carriers) -> AnthropicSystem {
     match s {
         SystemContent::Text(t) => AnthropicSystem::Text(t.clone()),
         SystemContent::Blocks(blocks) => AnthropicSystem::Blocks(
@@ -38,6 +45,7 @@ pub fn translate_system(s: &SystemContent) -> AnthropicSystem {
                     text: b.text.clone(),
                     cache_control: b.cache_control.clone(),
                     citations: b.citations.clone(),
+                    extras: carriers.system_block(b),
                 })
                 .collect(),
         ),
@@ -111,6 +119,7 @@ fn system_blocks(system: AnthropicSystem) -> Vec<AnthropicSystemBlock> {
             text,
             cache_control: None,
             citations: None,
+            extras: serde_json::Map::new(),
         }],
         AnthropicSystem::Blocks(blocks) => blocks,
     }

@@ -59,12 +59,18 @@ pub(super) fn translate_request(headers: &HeaderMap, mut body: Value) -> Result<
         extras.insert("output_config".into(), oc);
     }
 
+    let message_extras = match body.get_mut("messages") {
+        Some(Value::Array(messages)) => routectl_core::split_message_extras(messages),
+        _ => Vec::new(),
+    };
+
     let mut req: ChatRequest = serde_json::from_value(body).map_err(|e| {
         Error::Validation(
             format!("anthropic ingress: invalid body: {e}"),
             RefusalReason::Unparseable,
         )
     })?;
+    attach_message_extras(&mut req, message_extras);
 
     // Same inbound reasoning-payload normalization the openai ingress
     // runs. Shared so the two dialects cannot drift back apart on which
@@ -173,6 +179,19 @@ pub(super) fn translate_request(headers: &HeaderMap, mut body: Value) -> Result<
     declare_max_completion_tokens_fold(&mut req, token_cap_fold);
 
     Ok(req)
+}
+
+/// Give each parsed message the members the pre-pass took from it, by
+/// index. A request carrying none leaves `messages` untouched, so the shared
+/// list is never copied for carrier-free traffic.
+fn attach_message_extras(req: &mut ChatRequest, extras: Vec<Map<String, Value>>) {
+    if extras.iter().all(Map::is_empty) {
+        return;
+    }
+    let messages = std::sync::Arc::make_mut(&mut req.messages);
+    for (message, carried) in messages.iter_mut().zip(extras) {
+        message.extras = carried;
+    }
 }
 
 /// What folding a legacy top-level `output_format` did to the body, as the

@@ -10,6 +10,10 @@
 //! hasher, so verifying a prior prefix and fingerprinting the whole request
 //! cost one pass.
 //!
+//! Each node is hashed through the carrier projection, so the members a
+//! same-dialect egress forwards from a node's carrier count exactly as the
+//! typed members do; a carrier-free node hashes its canonical bytes.
+//!
 //! A `cache_control` is removed only at recognized annotation positions: a
 //! system block, a typed custom tool, a top-level typed content block (and
 //! the unmodeled `server_tool_use`), and a `text` / `image` / `document`
@@ -21,8 +25,8 @@
 use std::io::{self, Write};
 
 use routectl_core::{
-    ChatRequest, ContentPart, KnownContentPart, Message, MessageContent, SystemBlock,
-    SystemContent, ToolDef,
+    ChatRequest, ContentPart, KnownContentPart, Message, MessageContent, Projectable, SystemBlock,
+    SystemContent, ToolDef, projection_bytes, write_projection,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -165,7 +169,13 @@ fn system_value(system: &SystemContent) -> serde_json::Result<Option<Value>> {
 }
 
 fn system_block_value(block: &SystemBlock) -> serde_json::Result<Value> {
-    serde_json::to_value(block).map(without_cache_control)
+    projected_value(block).map(without_cache_control)
+}
+
+/// `node`'s carrier projection as a value. Object keys come back sorted,
+/// the same order a canonical `to_value` gives them.
+fn projected_value<T: Projectable + ?Sized>(node: &T) -> serde_json::Result<Value> {
+    serde_json::from_slice(&projection_bytes(node)?)
 }
 
 fn is_billing_block(text: &str) -> bool {
@@ -174,7 +184,7 @@ fn is_billing_block(text: &str) -> bool {
 
 fn tool_value(tool: &ToolDef) -> serde_json::Result<Value> {
     match tool {
-        ToolDef::Custom(_) => serde_json::to_value(tool).map(without_cache_control),
+        ToolDef::Custom(_) => projected_value(tool).map(without_cache_control),
         ToolDef::Other(value) => Ok(value.clone()),
     }
 }
@@ -185,9 +195,9 @@ fn tool_value(tool: &ToolDef) -> serde_json::Result<Value> {
 /// `input` is the model's own argument object and is hashed verbatim.
 fn write_message(sink: &mut HashSink, message: &Message) -> serde_json::Result<()> {
     if carries_cache_marker(message) {
-        serde_json::to_writer(&mut *sink, &without_markers(message))?;
+        write_projection(&mut *sink, &without_markers(message))?;
     } else {
-        serde_json::to_writer(&mut *sink, message)?;
+        write_projection(&mut *sink, message)?;
     }
     sink.feed(b"\n");
     Ok(())

@@ -714,3 +714,25 @@ fn the_legacy_output_format_fold_declares_exactly_the_edit_it_makes() {
         assert_eq!(legacy_fold_edits(body), want, "{name}");
     }
 }
+
+#[test]
+fn message_members_the_canonical_message_does_not_model_ride_its_carrier() {
+    let body = json!({
+        "model": "claude-test",
+        "messages": [
+            {"role": "user", "content": "hi", "output_config": {"effort": "low"}, "id": "m1"},
+            {"role": "assistant", "content": "ok"}
+        ]
+    });
+
+    let req = translate_request(&HeaderMap::new(), body).unwrap();
+
+    assert_eq!(req.messages[0].extras.len(), 2);
+    assert_eq!(
+        req.messages[0].extras["output_config"],
+        json!({"effort": "low"})
+    );
+    assert_eq!(req.messages[0].extras["id"], json!("m1"));
+    assert!(req.messages[1].extras.is_empty());
+    assert!(matches!(&req.messages[0].content, MessageContent::Text(t) if t == "hi"));
+}

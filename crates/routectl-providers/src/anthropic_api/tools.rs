@@ -20,6 +20,7 @@ use serde_json::{Value, json};
 use routectl_core::wire_check::{EditKind, EditSite, WireTap};
 use routectl_core::{CustomTool, ToolDef};
 
+use super::carriers::Carriers;
 use super::types::AnthropicTool;
 
 /// Anthropic `tool_choice.type` values that force tool use. Pairing
@@ -27,7 +28,7 @@ use super::types::AnthropicTool;
 pub(super) const TOOL_CHOICE_TYPE_ANY: &str = "any";
 pub(super) const TOOL_CHOICE_TYPE_TOOL: &str = "tool";
 
-fn translate_custom_tool(c: &CustomTool) -> AnthropicTool {
+fn translate_custom_tool(c: &CustomTool, carriers: Carriers) -> AnthropicTool {
     AnthropicTool::Custom {
         name: c.name.clone(),
         description: c.description.clone(),
@@ -36,12 +37,19 @@ fn translate_custom_tool(c: &CustomTool) -> AnthropicTool {
         defer_loading: c.defer_loading,
         strict: c.strict,
         type_tag: c.type_tag.clone(),
+        extras: carriers.custom_tool(c),
     }
 }
 
 pub fn translate_tool(td: &ToolDef) -> AnthropicTool {
+    translate_tool_carrying(td, Carriers::Withhold)
+}
+
+/// [`translate_tool`], a typed custom tool also emitting the members
+/// `carriers` lets it carry.
+fn translate_tool_carrying(td: &ToolDef, carriers: Carriers) -> AnthropicTool {
     match td {
-        ToolDef::Custom(c) => translate_custom_tool(c),
+        ToolDef::Custom(c) => translate_custom_tool(c, carriers),
         ToolDef::Other(v) => {
             // Backwards-compat: a legacy OpenAI-shape tool
             // `{type: "function", function: {name, description, parameters}}`
@@ -117,6 +125,7 @@ pub(super) fn translate_tools(
     tools: &[ToolDef],
     tally: &mut HostedMcpToolWithholdTally,
     tap: Option<&WireTap>,
+    carriers: Carriers,
 ) -> Vec<AnthropicTool> {
     for (index, _) in tools
         .iter()
@@ -134,7 +143,7 @@ pub(super) fn translate_tools(
     tools
         .iter()
         .filter(|td| !is_responses_hosted_mcp(td))
-        .map(translate_tool)
+        .map(|td| translate_tool_carrying(td, carriers))
         .collect()
 }
 
@@ -194,6 +203,7 @@ fn openai_function_to_custom(v: &Value) -> Option<AnthropicTool> {
         defer_loading: None,
         strict,
         type_tag: None,
+        extras: serde_json::Map::new(),
     })
 }
 

@@ -654,3 +654,107 @@ fn a_record_retains_no_prompt_text() {
     );
     assert!(!format!("{record:?}").contains(prompt_marker));
 }
+
+// ------------------------------------------------------- carried members
+
+fn with_member(key: &str, value: Value) -> serde_json::Map<String, Value> {
+    std::iter::once((key.to_owned(), value)).collect()
+}
+
+/// Puts one carried member on a message.
+type Placement = fn(&mut Message);
+
+/// The history with one carried member placed by `place` on its first
+/// message, so the prefix the anchor verifies holds it.
+fn history_carrying(place: Placement) -> Vec<Message> {
+    let mut messages = history();
+    place(&mut messages[0]);
+    messages
+}
+
+fn carried_on_the_message(message: &mut Message) {
+    message.extras = with_member("output_config", json!({"effort": "low"}));
+}
+
+fn carried_on_a_marked_part(message: &mut Message) {
+    message.content = MessageContent::Parts(vec![ContentPart::Known(KnownContentPart::Text {
+        text: "Summarize the repository layout.".into(),
+        citations: None,
+        cache_control: Some(CacheControl::ephemeral_5m()),
+        extras: with_member("caller", json!({"type": "direct"})),
+    })]);
+}
+
+/// The same messages with every message and part carrier emptied.
+fn without_carriers(mut messages: Vec<Message>) -> Vec<Message> {
+    for message in &mut messages {
+        message.extras.clear();
+        if let MessageContent::Parts(parts) = &mut message.content {
+            for part in parts {
+                if let ContentPart::Known(KnownContentPart::Text { extras, .. }) = part {
+                    extras.clear();
+                }
+            }
+        }
+    }
+    messages
+}
+
+#[test]
+fn prefixes_differing_only_in_a_carried_member_get_different_anchors() {
+    let rows: [(&str, Placement); 2] = [
+        ("message member", carried_on_the_message),
+        (
+            "member of a part bearing a cache marker",
+            carried_on_a_marked_part,
+        ),
+    ];
+    for (row, place) in rows {
+        let carrying = history_carrying(place);
+        let bare = without_carriers(carrying.clone());
+
+        let carrying_digest = RequestIdentity::measure(&request(carrying), None).digest();
+        let bare_digest = RequestIdentity::measure(&request(bare), None).digest();
+
+        assert!(carrying_digest.is_some(), "{row}");
+        assert_ne!(carrying_digest, bare_digest, "{row}");
+    }
+}
+
+#[test]
+fn a_carried_member_changing_in_the_anchored_prefix_misses() {
+    let prior = request(history_carrying(carried_on_the_message));
+    let mut changed = grown(&history_carrying(carried_on_the_message));
+    changed[0].extras = with_member("output_config", json!({"effort": "high"}));
+    let same = request(grown(&history_carrying(carried_on_the_message)));
+
+    assert_miss(
+        anchor_then_check(&prior, 1_000, &request(changed), &lane()),
+        MissReason::PrefixChanged,
+    );
+    assert_hit(anchor_then_check(&prior, 1_000, &same, &lane()));
+}
+
+#[test]
+fn a_carried_member_on_a_tool_or_a_system_block_changes_the_anchor() {
+    let base = request(history());
+    let mut tool_carrying = base.clone();
+    if let Some(ToolDef::Custom(tool)) = tool_carrying.tools.as_mut().and_then(|t| t.first_mut()) {
+        tool.extras = with_member("eager_input_streaming", json!(true));
+    }
+    let mut system_carrying = base.clone();
+    if let Some(SystemContent::Blocks(blocks)) = system_carrying.system.as_mut() {
+        blocks[1].extras = with_member("origin", json!("hook"));
+    }
+
+    let base_digest = RequestIdentity::measure(&base, None).digest();
+
+    assert_ne!(
+        RequestIdentity::measure(&tool_carrying, None).digest(),
+        base_digest
+    );
+    assert_ne!(
+        RequestIdentity::measure(&system_carrying, None).digest(),
+        base_digest
+    );
+}

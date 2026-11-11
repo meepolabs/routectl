@@ -11,8 +11,9 @@
 //! see carried members, so the projection is handed out only as bytes
 //! ([`projection_bytes`]) or a write into a sink ([`write_projection`]). A
 //! same-dialect egress that builds its wire form itself reads the members
-//! the same rule lets through from [`Message::forwardable_extras`] and
-//! [`KnownContentPart::forwardable_extras`].
+//! the same rule lets through from [`Message::forwardable_extras`],
+//! [`KnownContentPart::forwardable_extras`], [`CustomTool::forwardable_extras`]
+//! and [`SystemBlock::forwardable_extras`].
 //!
 //! A node with no mergeable carrier projects to exactly its canonical
 //! serialization, so the identity of carrier-free traffic does not change.
@@ -92,8 +93,27 @@ impl KnownContentPart {
     }
 }
 
-fn has_mergeable(extras: &Map<String, Value>, reserved: &[&str]) -> bool {
-    extras.keys().any(|key| !reserved.contains(&key.as_str()))
+impl CustomTool {
+    /// The carried members a same-dialect egress may emit on this tool:
+    /// every `extras` member except one named like a member `CustomTool`
+    /// serializes or accepts (`inputSchema`), whether or not that typed
+    /// value is present.
+    pub fn forwardable_extras(&self) -> impl Iterator<Item = (&String, &Value)> {
+        self.extras
+            .iter()
+            .filter(|(key, _)| !CUSTOM_TOOL_KEYS.contains(&key.as_str()))
+    }
+}
+
+impl SystemBlock {
+    /// The carried members a same-dialect egress may emit on this block:
+    /// every `extras` member except one named like a member `SystemBlock`
+    /// serializes, whether or not that typed value is present.
+    pub fn forwardable_extras(&self) -> impl Iterator<Item = (&String, &Value)> {
+        self.extras
+            .iter()
+            .filter(|(key, _)| !SYSTEM_BLOCK_KEYS.contains(&key.as_str()))
+    }
 }
 
 fn part_has_mergeable(part: &KnownContentPart) -> bool {
@@ -116,16 +136,6 @@ fn merge_members<'a>(target: &mut Value, members: impl Iterator<Item = (&'a Stri
     for (key, value) in members {
         target.entry(key.clone()).or_insert_with(|| value.clone());
     }
-}
-
-/// Add each carried member of `extras` that `is_reserved` does not claim to
-/// `target`, never replacing a member `target` already has.
-fn merge_carried(
-    target: &mut Value,
-    extras: &Map<String, Value>,
-    is_reserved: impl Fn(&str) -> bool,
-) {
-    merge_members(target, extras.iter().filter(|(key, _)| !is_reserved(key)));
 }
 
 fn merge_part(slot: &mut Value, part: &ContentPart) {
@@ -239,11 +249,11 @@ impl Projectable for ContentPart {}
 
 impl sealed::Sealed for SystemBlock {
     fn project<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        if !has_mergeable(&self.extras, SYSTEM_BLOCK_KEYS) {
+        if self.forwardable_extras().next().is_none() {
             return self.serialize(serializer);
         }
         project_through_value(self, serializer, |value| {
-            merge_carried(value, &self.extras, |key| SYSTEM_BLOCK_KEYS.contains(&key));
+            merge_members(value, self.forwardable_extras());
         })
     }
 }
@@ -261,11 +271,11 @@ impl Projectable for SystemContent {}
 
 impl sealed::Sealed for CustomTool {
     fn project<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        if !has_mergeable(&self.extras, CUSTOM_TOOL_KEYS) {
+        if self.forwardable_extras().next().is_none() {
             return self.serialize(serializer);
         }
         project_through_value(self, serializer, |value| {
-            merge_carried(value, &self.extras, |key| CUSTOM_TOOL_KEYS.contains(&key));
+            merge_members(value, self.forwardable_extras());
         })
     }
 }

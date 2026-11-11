@@ -77,12 +77,14 @@ use super::tools::{
 // The Bedrock Converse egress composes its bag `thinking` and adaptive
 // effort through the same two functions this egress uses; its tests compare
 // against the canonical translation directly.
+use super::carriers::Carriers;
 #[cfg(all(test, feature = "bedrock"))]
 pub(crate) use super::extras::build_thinking;
 pub(crate) use super::extras::{build_output_config, is_active_thinking_type};
 #[cfg(feature = "bedrock")]
 pub(crate) use super::extras::{client_sent_output_config_effort, compose_thinking};
 pub(crate) use super::system::translate_system;
+use super::system::translate_system_carrying;
 // The billing-aware lift is used by BOTH the anthropic-api orchestrator
 // below and the Bedrock Converse egress, so it is visible crate-wide and
 // needs no feature gate: the orchestrator in this file consumes it in
@@ -891,7 +893,10 @@ pub(crate) fn normalize_deferring_format_key_warn(
     {
         system_parts.record();
     }
-    let primary = filtered_system.as_ref().map(translate_system);
+    let carriers = Carriers::for_request(req);
+    let primary = filtered_system
+        .as_ref()
+        .map(|system| translate_system_carrying(system, carriers));
     let legacy = (system_turns == SystemTurnPolicy::Lift).then(|| {
         // Legacy lift: strip the billing block from the lifted text too.
         // lift_legacy_system_stripped joins Role::System messages into one
@@ -938,6 +943,7 @@ pub(crate) fn normalize_deferring_format_key_warn(
         &mut envelopes,
         fingerprint,
         tap,
+        carriers,
     )?;
     super::wire_edits::declare_tool_id_sanitize(tap, &req.messages, system_turns);
 
@@ -984,7 +990,7 @@ pub(crate) fn normalize_deferring_format_key_warn(
     } else {
         req.tools
             .as_ref()
-            .map(|ts| translate_tools(ts, hosted_mcp, tap))
+            .map(|ts| translate_tools(ts, hosted_mcp, tap, carriers))
     };
 
     let thinking_type = thinking
@@ -1370,6 +1376,11 @@ mod foreign_dialect_extras_tests;
 
 // The sampling clamp and the public thinking-type read key off the emitted
 // thinking type.
+// Carried unknown members on the same-dialect Anthropic-shaped bodies.
+#[cfg(test)]
+#[path = "request_carrier_emission_tests.rs"]
+mod carrier_emission_tests;
+
 #[cfg(test)]
 #[path = "request_thinking_sampling_tests.rs"]
 mod thinking_sampling_tests;

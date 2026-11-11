@@ -62,10 +62,30 @@ pub struct AnthropicRequest {
     pub(crate) anthropic_beta: Vec<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct AnthropicMessage {
     pub(crate) role: AnthropicRole,
     pub(crate) content: AnthropicContent,
+    /// Members the client sent on this message that the wire types do not
+    /// model, emitted after the typed members, which win a name clash.
+    #[serde(skip)]
+    pub(crate) extras: Map<String, Value>,
+}
+
+#[derive(Serialize)]
+struct MessageMembers<'a> {
+    role: &'a AnthropicRole,
+    content: &'a AnthropicContent,
+}
+
+impl Serialize for AnthropicMessage {
+    fn serialize<S: Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+        let typed = MessageMembers {
+            role: &self.role,
+            content: &self.content,
+        };
+        serialize_with_carried(&typed, &self.extras, ser)
+    }
 }
 
 /// Wire role vocabulary of `messages[]`. `System` is a real Anthropic
@@ -101,15 +121,68 @@ pub enum AnthropicSystem {
     Blocks(Vec<AnthropicSystemBlock>),
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct AnthropicSystemBlock {
     #[serde(rename = "type")]
     pub(crate) kind: String,
     pub(crate) text: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub(crate) cache_control: Option<CacheControl>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub(crate) citations: Option<Value>,
+    /// Members the client sent on this block that the wire types do not
+    /// model, emitted after the typed members, which win a name clash.
+    #[serde(skip)]
+    pub(crate) extras: Map<String, Value>,
+}
+
+#[derive(Serialize)]
+struct SystemBlockMembers<'a> {
+    #[serde(rename = "type")]
+    kind: &'a str,
+    text: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_control: Option<&'a CacheControl>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    citations: Option<&'a Value>,
+}
+
+impl Serialize for AnthropicSystemBlock {
+    fn serialize<S: Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+        let typed = SystemBlockMembers {
+            kind: &self.kind,
+            text: &self.text,
+            cache_control: self.cache_control.as_ref(),
+            citations: self.citations.as_ref(),
+        };
+        serialize_with_carried(&typed, &self.extras, ser)
+    }
+}
+
+/// Serialize `typed`, then add each member of `carried` whose name `typed`
+/// did not write. An empty carrier serializes `typed` directly, so a
+/// carrier-free node keeps its exact bytes and pays no intermediate value.
+fn serialize_with_carried<T: Serialize, S: Serializer>(
+    typed: &T,
+    carried: &Map<String, Value>,
+    ser: S,
+) -> Result<S::Ok, S::Error> {
+    if carried.is_empty() {
+        return typed.serialize(ser);
+    }
+    let value = serde_json::to_value(typed).map_err(serde::ser::Error::custom)?;
+    with_carried(value, carried).serialize(ser)
+}
+
+/// `value` with each member of `carried` added where `value` has no member
+/// of that name: typed members win.
+fn with_carried(mut value: Value, carried: &Map<String, Value>) -> Value {
+    if let Value::Object(members) = &mut value {
+        for (key, member) in carried {
+            members.entry(key.clone()).or_insert_with(|| member.clone());
+        }
+    }
+    value
 }
 
 /// One content block in an Anthropic message.
@@ -124,43 +197,67 @@ pub enum ContentBlock {
         text: String,
         cache_control: Option<CacheControl>,
         citations: Option<Value>,
+        extras: Map<String, Value>,
     },
     Image {
         source: Value,
         cache_control: Option<CacheControl>,
+        extras: Map<String, Value>,
     },
     Document {
         source: Value,
         cache_control: Option<CacheControl>,
         title: Option<String>,
         citations: Option<Value>,
+        extras: Map<String, Value>,
     },
     Thinking {
         thinking: String,
         signature: String,
         cache_control: Option<CacheControl>,
+        extras: Map<String, Value>,
     },
     RedactedThinking {
         data: String,
         cache_control: Option<CacheControl>,
+        extras: Map<String, Value>,
     },
     ToolUse {
         id: String,
         name: String,
         input: Value,
         cache_control: Option<CacheControl>,
+        extras: Map<String, Value>,
     },
     ToolResult {
         tool_use_id: String,
         content: Value,
         cache_control: Option<CacheControl>,
         is_error: Option<bool>,
+        extras: Map<String, Value>,
     },
     Other {
         type_tag: String,
         cache_control: Option<CacheControl>,
         extras: Map<String, Value>,
     },
+}
+
+impl ContentBlock {
+    /// Members carried for a same-dialect egress, emitted after the typed
+    /// members. `Other` has none of its own: its payload is its body.
+    const fn carried(&self) -> Option<&Map<String, Value>> {
+        match self {
+            Self::Text { extras, .. }
+            | Self::Image { extras, .. }
+            | Self::Document { extras, .. }
+            | Self::Thinking { extras, .. }
+            | Self::RedactedThinking { extras, .. }
+            | Self::ToolUse { extras, .. }
+            | Self::ToolResult { extras, .. } => Some(extras),
+            Self::Other { .. } => None,
+        }
+    }
 }
 
 impl Serialize for ContentBlock {
@@ -173,6 +270,7 @@ impl Serialize for ContentBlock {
                 text,
                 cache_control,
                 citations,
+                extras: _,
             } => {
                 let mut obj = serde_json::Map::new();
                 obj.insert("type".into(), Value::String("text".into()));
@@ -185,12 +283,14 @@ impl Serialize for ContentBlock {
             Self::Image {
                 source,
                 cache_control,
+                extras: _,
             } => merge_cc(json!({"type": "image", "source": source}), cache_control),
             Self::Document {
                 source,
                 cache_control,
                 title,
                 citations,
+                extras: _,
             } => {
                 let mut obj = serde_json::Map::new();
                 obj.insert("type".into(), Value::String("document".into()));
@@ -207,6 +307,7 @@ impl Serialize for ContentBlock {
                 thinking,
                 signature,
                 cache_control,
+                extras: _,
             } => merge_cc(
                 json!({"type": "thinking", "thinking": thinking, "signature": signature}),
                 cache_control,
@@ -214,6 +315,7 @@ impl Serialize for ContentBlock {
             Self::RedactedThinking {
                 data,
                 cache_control,
+                extras: _,
             } => merge_cc(
                 json!({"type": "redacted_thinking", "data": data}),
                 cache_control,
@@ -223,6 +325,7 @@ impl Serialize for ContentBlock {
                 name,
                 input,
                 cache_control,
+                extras: _,
             } => merge_cc(
                 json!({"type": "tool_use", "id": id, "name": name, "input": input}),
                 cache_control,
@@ -232,6 +335,7 @@ impl Serialize for ContentBlock {
                 content,
                 cache_control,
                 is_error,
+                extras: _,
             } => {
                 let mut obj = serde_json::Map::new();
                 obj.insert("type".into(), Value::String("tool_result".into()));
@@ -252,7 +356,10 @@ impl Serialize for ContentBlock {
                 merge_cc(Value::Object(obj), cache_control)
             }
         };
-        v.serialize(ser)
+        match self.carried() {
+            Some(carried) => with_carried(v, carried).serialize(ser),
+            None => v.serialize(ser),
+        }
     }
 }
 
@@ -287,12 +394,14 @@ impl<'de> Deserialize<'de> for ContentBlock {
                 text: take_str(obj, "text").map_err(D::Error::custom)?,
                 cache_control,
                 citations: obj.remove("citations"),
+                extras: Map::new(),
             }),
             "image" => Ok(Self::Image {
                 source: obj
                     .remove("source")
                     .ok_or_else(|| D::Error::custom("image missing source"))?,
                 cache_control,
+                extras: Map::new(),
             }),
             "document" => {
                 let source = obj
@@ -307,16 +416,19 @@ impl<'de> Deserialize<'de> for ContentBlock {
                     cache_control,
                     title,
                     citations,
+                    extras: Map::new(),
                 })
             }
             "thinking" => Ok(Self::Thinking {
                 thinking: take_str(obj, "thinking").map_err(D::Error::custom)?,
                 signature: take_str(obj, "signature").map_err(D::Error::custom)?,
                 cache_control,
+                extras: Map::new(),
             }),
             "redacted_thinking" => Ok(Self::RedactedThinking {
                 data: take_str(obj, "data").map_err(D::Error::custom)?,
                 cache_control,
+                extras: Map::new(),
             }),
             "tool_use" => Ok(Self::ToolUse {
                 id: take_str(obj, "id").map_err(D::Error::custom)?,
@@ -325,6 +437,7 @@ impl<'de> Deserialize<'de> for ContentBlock {
                     .remove("input")
                     .unwrap_or_else(|| Value::Object(Map::new())),
                 cache_control,
+                extras: Map::new(),
             }),
             "tool_result" => {
                 let tool_use_id = take_str(obj, "tool_use_id").map_err(D::Error::custom)?;
@@ -335,6 +448,7 @@ impl<'de> Deserialize<'de> for ContentBlock {
                     content,
                     cache_control,
                     is_error,
+                    extras: Map::new(),
                 })
             }
             other => Ok(Self::Other {
@@ -450,6 +564,7 @@ pub enum AnthropicTool {
         defer_loading: Option<bool>,
         strict: Option<bool>,
         type_tag: Option<String>,
+        extras: Map<String, Value>,
     },
     Builtin(Value),
 }
@@ -465,6 +580,7 @@ impl Serialize for AnthropicTool {
                 defer_loading,
                 strict,
                 type_tag,
+                extras,
             } => {
                 let mut obj = serde_json::Map::new();
                 if let Some(t) = type_tag {
@@ -486,7 +602,7 @@ impl Serialize for AnthropicTool {
                 if let Some(s) = strict {
                     obj.insert("strict".into(), Value::Bool(*s));
                 }
-                Value::Object(obj).serialize(ser)
+                with_carried(Value::Object(obj), extras).serialize(ser)
             }
             Self::Builtin(v) => v.serialize(ser),
         }
@@ -643,6 +759,7 @@ mod tests {
             text: "hi".into(),
             citations: None,
             cache_control: Some(CacheControl::ephemeral_5m()),
+            extras: serde_json::Map::new(),
         };
         let v = serde_json::to_value(&b).unwrap();
         assert_eq!(v["type"], "text");
@@ -759,6 +876,7 @@ mod tests {
             defer_loading: None,
             strict: None,
             type_tag: None,
+            extras: serde_json::Map::new(),
         };
         let v = serde_json::to_value(&t).unwrap();
         assert_eq!(v["name"], "calculator");

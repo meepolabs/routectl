@@ -204,6 +204,7 @@ fn as_system_blocks(s: AnthropicSystem) -> Vec<AnthropicSystemBlock> {
             text: t,
             cache_control: None,
             citations: None,
+            extras: serde_json::Map::new(),
         }],
         AnthropicSystem::Blocks(b) => b,
     }

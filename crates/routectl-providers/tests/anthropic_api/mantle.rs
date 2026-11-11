@@ -787,3 +787,93 @@ async fn first_party_lane_forwards_media_urls_unchanged() {
         );
     }
 }
+
+/// A user turn whose text part carries `part_extras` and whose message
+/// carries `message_extras`, both unmodeled members a same-dialect client
+/// sent; the request comes from the Anthropic ingress, so both ride the
+/// body.
+fn carrying_req(
+    part_extras: serde_json::Map<String, Value>,
+    message_extras: serde_json::Map<String, Value>,
+) -> ChatRequest {
+    let text = ContentPart::Known(KnownContentPart::Text {
+        text: "look".into(),
+        citations: None,
+        cache_control: None,
+        extras: part_extras,
+    });
+    let mut turn = parts_msg(Role::User, vec![text]);
+    turn.extras = message_extras;
+    let mut req = base_req("claude-3-opus", vec![turn]);
+    req.routectl_internal.provenance = routectl_core::RequestProvenance::AnthropicIngress;
+    req
+}
+
+fn member(key: &str, value: Value) -> serde_json::Map<String, Value> {
+    std::iter::once((key.to_owned(), value)).collect()
+}
+
+fn url_image_value(url: &str) -> Value {
+    json!({"type": "image", "source": {"type": "url", "url": url}})
+}
+
+/// The walker sees inside carried members: a non-https media URL nested in
+/// a part's extras, and a `tool_use`-shaped object in an array under a
+/// message member other than `content`, are refused on Mantle on both the
+/// messages and the count_tokens path.
+#[tokio::test]
+async fn mantle_lane_refuses_unforwardable_media_urls_in_carried_members() {
+    let rows: Vec<(&str, ChatRequest, &str)> = vec![
+        (
+            "part extras image s3",
+            carrying_req(
+                member("meta", url_image_value(&planted("s3"))),
+                serde_json::Map::new(),
+            ),
+            "`source` at messages[0].content[0].meta ",
+        ),
+        (
+            "message extras array holding a tool_use shape",
+            carrying_req(
+                serde_json::Map::new(),
+                member(
+                    "meta",
+                    json!([{"type": "tool_use", "input": url_image_value(&planted("s3"))}]),
+                ),
+            ),
+            "`source` at messages[0].meta[0].input ",
+        ),
+    ];
+
+    for (row, req, field_at) in rows {
+        let mock_server = media_upstream().await;
+        let provider = mantle_provider_bearer(&mock_server.uri()).await;
+
+        let complete = provider.complete(req.clone()).await.map(|_| ());
+        let count = provider.count_tokens(req).await.map(|_| ());
+
+        assert_media_refusal(complete, &format!("{row} (messages)"), field_at);
+        assert_media_refusal(count, &format!("{row} (count_tokens)"), field_at);
+        let received = mock_server.received_requests().await.unwrap();
+        assert!(received.is_empty(), "{row}: no upstream call");
+    }
+}
+
+/// Off Mantle the same carried member is the client's own request and
+/// reaches the first-party upstream as sent.
+#[tokio::test]
+async fn first_party_lane_forwards_a_media_url_in_part_extras() {
+    let meta = url_image_value(&planted("s3"));
+    let req = carrying_req(member("meta", meta.clone()), serde_json::Map::new());
+    let mock_server = media_upstream().await;
+    let provider = make_provider(&mock_server.uri());
+
+    provider
+        .complete(req)
+        .await
+        .expect("first-party lane must forward");
+
+    let received = mock_server.received_requests().await.unwrap();
+    let body: Value = serde_json::from_slice(&received[0].body).unwrap();
+    assert_eq!(body["messages"][0]["content"][0]["meta"], meta, "{body}");
+}

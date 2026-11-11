@@ -325,6 +325,7 @@ fn reasoning_detail_to_thinking_block(
                 thinking: rd.payload["text"].as_str().unwrap_or("").to_string(),
                 signature: signature.to_string(),
                 cache_control: std::option::Option::None,
+                extras: serde_json::Map::new(),
             })
         }
         ReasoningDetailKind::Encrypted => {
@@ -334,6 +335,7 @@ fn reasoning_detail_to_thinking_block(
             Some(ContentBlock::RedactedThinking {
                 data: envelopes.wire_data(rd.payload["data"].as_str().unwrap_or("")),
                 cache_control: std::option::Option::None,
+                extras: serde_json::Map::new(),
             })
         }
         // Summary is an OpenAI Responses construct; not a valid

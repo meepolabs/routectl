@@ -865,6 +865,10 @@ license.
   count. Owned by `request::normalize` and threaded into every construction
   site of a `redacted_thinking` block (content parts, the
   `reasoning_details` replay channel, context-management reinjection)
+- `src/anthropic_api/carriers.rs` -- `Carriers`: whether a request's carried
+  unknown members ride the Anthropic-shaped body (the core same-dialect
+  predicate), and the member set per message, block, custom tool and system
+  block (the core carrier rule); the tool-run union, earlier turn winning
 - `src/anthropic_api/types.rs` -- Anthropic Messages wire types
   (`AnthropicRequest`, content blocks, system, thinking config, usage)
 - `src/anthropic_api/request.rs` -- orchestrator: builds the Anthropic wire

@@ -46,6 +46,7 @@ use routectl_core::{
 use crate::bounded_diagnostics::BoundedLogSample;
 use crate::skipped_format::render_skipped_format;
 
+use super::carriers::Carriers;
 use super::envelope_policy::EnvelopeUnwrapTally;
 #[cfg(test)]
 use super::envelope_policy::passthrough_tally;
@@ -417,9 +418,13 @@ fn message_has_emittable_reasoning(msg: &Message) -> bool {
         .any(is_anthropic_emittable_detail)
 }
 
-fn translate_content_part(p: &ContentPart, envelopes: &mut EnvelopeUnwrapTally) -> ContentBlock {
+fn translate_content_part(
+    p: &ContentPart,
+    envelopes: &mut EnvelopeUnwrapTally,
+    carriers: Carriers,
+) -> ContentBlock {
     match p {
-        ContentPart::Known(k) => translate_known_part(k, envelopes),
+        ContentPart::Known(k) => translate_known_part(k, envelopes, carriers),
         ContentPart::Other {
             type_tag,
             cache_control,
@@ -432,25 +437,32 @@ fn translate_content_part(p: &ContentPart, envelopes: &mut EnvelopeUnwrapTally) 
     }
 }
 
-fn translate_known_part(k: &KnownContentPart, envelopes: &mut EnvelopeUnwrapTally) -> ContentBlock {
+fn translate_known_part(
+    k: &KnownContentPart,
+    envelopes: &mut EnvelopeUnwrapTally,
+    carriers: Carriers,
+) -> ContentBlock {
+    let extras = carriers.part(k);
     match k {
         KnownContentPart::Text {
             text,
             citations,
             cache_control,
-            extras: _,
+            ..
         } => ContentBlock::Text {
             text: text.clone(),
             cache_control: cache_control.clone(),
             citations: citations.clone(),
+            extras,
         },
         KnownContentPart::Image {
             source,
             cache_control,
-            extras: _,
+            ..
         } => ContentBlock::Image {
             source: source.clone(),
             cache_control: cache_control.clone(),
+            extras,
         },
         // OpenAI-shape ImageUrl translates to an Anthropic image
         // block. Two URL shapes need different Anthropic source forms:
@@ -469,13 +481,14 @@ fn translate_known_part(k: &KnownContentPart, envelopes: &mut EnvelopeUnwrapTall
         KnownContentPart::ImageUrl {
             image_url,
             cache_control,
-            extras: _,
+            ..
         } => {
             let url = image_url.get("url").and_then(|v| v.as_str()).unwrap_or("");
             let source = parse_image_url_source(url);
             ContentBlock::Image {
                 source,
                 cache_control: cache_control.clone(),
+                extras,
             }
         }
         KnownContentPart::Document {
@@ -483,12 +496,13 @@ fn translate_known_part(k: &KnownContentPart, envelopes: &mut EnvelopeUnwrapTall
             title,
             citations,
             cache_control,
-            extras: _,
+            ..
         } => ContentBlock::Document {
             source: source.clone(),
             title: title.clone(),
             citations: citations.clone(),
             cache_control: cache_control.clone(),
+            extras,
         },
         // OpenAI-shape file part. A base64 PDF upload
         // (`file.file_data` = `data:application/pdf;base64,<b64>`)
@@ -503,7 +517,7 @@ fn translate_known_part(k: &KnownContentPart, envelopes: &mut EnvelopeUnwrapTall
         KnownContentPart::File {
             file,
             cache_control,
-            extras: _,
+            ..
         } => {
             if let Some((source, title)) = parse_file_document_source(file) {
                 ContentBlock::Document {
@@ -511,6 +525,7 @@ fn translate_known_part(k: &KnownContentPart, envelopes: &mut EnvelopeUnwrapTall
                     title,
                     citations: None,
                     cache_control: cache_control.clone(),
+                    extras,
                 }
             } else {
                 let media_type = file
@@ -532,12 +547,12 @@ fn translate_known_part(k: &KnownContentPart, envelopes: &mut EnvelopeUnwrapTall
                     "cannot translate OpenAI file part to an Anthropic document; \
                  passing the block through verbatim (upstream will reject if unsupported)"
                 );
-                let mut extras = serde_json::Map::new();
-                extras.insert("file".to_string(), file.clone());
+                let mut verbatim = extras;
+                verbatim.insert("file".to_string(), file.clone());
                 ContentBlock::Other {
                     type_tag: "file".to_string(),
                     cache_control: cache_control.clone(),
-                    extras,
+                    extras: verbatim,
                 }
             }
         }
@@ -546,19 +561,20 @@ fn translate_known_part(k: &KnownContentPart, envelopes: &mut EnvelopeUnwrapTall
             name,
             input,
             cache_control,
-            extras: _,
+            ..
         } => ContentBlock::ToolUse {
             id: crate::tool_id::sanitize_tool_id(id).into_owned(),
             name: name.clone(),
             input: input.clone(),
             cache_control: cache_control.clone(),
+            extras,
         },
         KnownContentPart::ToolResult {
             tool_use_id,
             content,
             is_error,
             cache_control,
-            extras: _,
+            ..
         } => ContentBlock::ToolResult {
             // Same normalization as the tool_use id it answers, so the
             // pair still correlates on the wire. An empty id stays empty.
@@ -566,11 +582,12 @@ fn translate_known_part(k: &KnownContentPart, envelopes: &mut EnvelopeUnwrapTall
             content: content.clone(),
             cache_control: cache_control.clone(),
             is_error: *is_error,
+            extras,
         },
         KnownContentPart::Thinking {
             thinking,
             signature,
-            extras: _,
+            ..
         } => ContentBlock::Thinking {
             thinking: thinking.clone(),
             // Wire requires signature; absent on canonical means we fall
@@ -579,10 +596,12 @@ fn translate_known_part(k: &KnownContentPart, envelopes: &mut EnvelopeUnwrapTall
             // a signature.
             signature: signature.clone().unwrap_or_default(),
             cache_control: None,
+            extras,
         },
-        KnownContentPart::RedactedThinking { data, extras: _ } => ContentBlock::RedactedThinking {
+        KnownContentPart::RedactedThinking { data, .. } => ContentBlock::RedactedThinking {
             data: envelopes.wire_data(data),
             cache_control: None,
+            extras,
         },
     }
 }
@@ -723,6 +742,7 @@ fn build_assistant_content(
     message_index: usize,
     msg: &Message,
     envelopes: &mut EnvelopeUnwrapTally,
+    carriers: Carriers,
     skips: &mut ReasoningSkipTally<'_>,
 ) -> Result<AnthropicContent> {
     let has_tool_calls = msg.tool_calls.as_ref().is_some_and(|tc| !tc.is_empty());
@@ -731,13 +751,14 @@ fn build_assistant_content(
         // tool_calls field to re-emit; fall through to the generic
         // content translation (Text or Parts), but strip trailing
         // text-after-tool_use first (see helper docstring).
-        let content = translate_assistant_simple_content(&msg.content, envelopes);
+        let content = translate_assistant_simple_content(&msg.content, envelopes, carriers);
         return Ok(backstop_empty_blocks(content, skips));
     }
 
     let mut blocks =
         emit_reasoning_blocks(message_index, &msg.reasoning_details, envelopes, skips)?;
-    let emitted_tool_ids = append_assistant_message_blocks(&mut blocks, &msg.content, envelopes);
+    let emitted_tool_ids =
+        append_assistant_message_blocks(&mut blocks, &msg.content, envelopes, carriers);
     if let Some(tool_calls) = msg.tool_calls.as_ref() {
         emit_tool_use_blocks_from_calls(id, tool_calls, &mut blocks, &emitted_tool_ids)?;
     }
@@ -773,6 +794,7 @@ fn backstop_empty_blocks(
                 text: String::new(),
                 citations: None,
                 cache_control: None,
+                extras: serde_json::Map::new(),
             }])
         }
         other => other,
@@ -851,6 +873,7 @@ fn emit_tool_use_blocks_from_calls(
             name,
             input,
             cache_control: None,
+            extras: serde_json::Map::new(),
         });
     }
     Ok(())
@@ -934,6 +957,7 @@ fn emit_reasoning_blocks(
                     thinking,
                     signature: signature.to_string(),
                     cache_control: None,
+                    extras: serde_json::Map::new(),
                 });
             }
             ReasoningDetailKind::Encrypted => {
@@ -945,6 +969,7 @@ fn emit_reasoning_blocks(
                 blocks.push(ContentBlock::RedactedThinking {
                     data: envelopes.wire_data(data),
                     cache_control: None,
+                    extras: serde_json::Map::new(),
                 });
             }
             // Neither Summary nor an unrecognized kind (Other) reaches
@@ -976,6 +1001,7 @@ fn append_assistant_message_blocks(
     blocks: &mut Vec<ContentBlock>,
     content: &MessageContent,
     envelopes: &mut EnvelopeUnwrapTally,
+    carriers: Carriers,
 ) -> HashSet<String> {
     let mut emitted_tool_ids: HashSet<String> = HashSet::new();
     match content {
@@ -983,12 +1009,13 @@ fn append_assistant_message_blocks(
             text: t.clone(),
             cache_control: None,
             citations: None,
+            extras: serde_json::Map::new(),
         }),
         MessageContent::Text(_) | MessageContent::Null => {}
         MessageContent::Parts(parts) => {
             let cleaned = strip_text_after_tool_use(parts);
             for p in &cleaned {
-                let (block, tool_id) = translate_assistant_content_part(p, envelopes);
+                let (block, tool_id) = translate_assistant_content_part(p, envelopes, carriers);
                 if let Some(tool_id) = tool_id {
                     emitted_tool_ids.insert(tool_id);
                 }
@@ -1013,25 +1040,12 @@ fn append_assistant_message_blocks(
 fn translate_assistant_content_part(
     p: &ContentPart,
     envelopes: &mut EnvelopeUnwrapTally,
+    carriers: Carriers,
 ) -> (ContentBlock, Option<String>) {
-    if let ContentPart::Known(KnownContentPart::ToolUse {
-        id,
-        name,
-        input,
-        cache_control,
-        extras: _,
-    }) = p
-    {
-        let tool_id = crate::tool_id::sanitize_tool_id(id).into_owned();
-        let block = ContentBlock::ToolUse {
-            id: tool_id,
-            name: name.clone(),
-            input: input.clone(),
-            cache_control: cache_control.clone(),
-        };
-        (block, Some(id.clone()))
-    } else {
-        (translate_content_part(p, envelopes), None)
+    let block = translate_content_part(p, envelopes, carriers);
+    match p {
+        ContentPart::Known(KnownContentPart::ToolUse { id, .. }) => (block, Some(id.clone())),
+        _ => (block, None),
     }
 }
 
@@ -1043,6 +1057,7 @@ fn translate_assistant_content_part(
 fn translate_assistant_simple_content(
     c: &MessageContent,
     envelopes: &mut EnvelopeUnwrapTally,
+    carriers: Carriers,
 ) -> AnthropicContent {
     match c {
         MessageContent::Parts(parts) => {
@@ -1050,13 +1065,13 @@ fn translate_assistant_simple_content(
             AnthropicContent::Blocks(
                 cleaned
                     .iter()
-                    .map(|p| translate_assistant_content_part(p, envelopes).0)
+                    .map(|p| translate_assistant_content_part(p, envelopes, carriers).0)
                     .collect(),
             )
         }
         // Text/Null arms are identical to `translate_simple_content`;
         // delegate to keep them in one place.
-        _ => translate_simple_content(c, envelopes),
+        _ => translate_simple_content(c, envelopes, carriers),
     }
 }
 
@@ -1066,6 +1081,7 @@ fn translate_assistant_simple_content(
 fn translate_simple_content(
     c: &MessageContent,
     envelopes: &mut EnvelopeUnwrapTally,
+    carriers: Carriers,
 ) -> AnthropicContent {
     match c {
         MessageContent::Text(t) => AnthropicContent::Text(t.clone()),
@@ -1073,7 +1089,7 @@ fn translate_simple_content(
         MessageContent::Parts(parts) => AnthropicContent::Blocks(
             parts
                 .iter()
-                .map(|p| translate_content_part(p, envelopes))
+                .map(|p| translate_content_part(p, envelopes, carriers))
                 .collect(),
         ),
     }
@@ -1090,19 +1106,35 @@ fn translate_simple_content(
 /// `push_or_coalesce` merges the same synthesized user turns: real
 /// Anthropic combines consecutive user turns server-side, but a strict
 /// Anthropic-compatible gateway rejects them.
-fn build_tool_message(run: &[&Message], envelopes: &mut EnvelopeUnwrapTally) -> AnthropicMessage {
-    AnthropicMessage {
+///
+/// The joined message carries the union of the run's carried members, the
+/// earlier turn winning a name two of them carry; each later member that
+/// loses is returned as `(canonical index, name)` for the caller to declare.
+fn build_tool_message(
+    run: &[&Message],
+    first: usize,
+    envelopes: &mut EnvelopeUnwrapTally,
+    carriers: Carriers,
+) -> (AnthropicMessage, Vec<(usize, String)>) {
+    let (extras, replaced) = carriers.joined_messages(run, first);
+    let message = AnthropicMessage {
         role: AnthropicRole::User,
         content: AnthropicContent::Blocks(
             run.iter()
                 .copied()
-                .map(|m| build_tool_result_block(m, envelopes))
+                .map(|m| build_tool_result_block(m, envelopes, carriers))
                 .collect(),
         ),
-    }
+        extras,
+    };
+    (message, replaced)
 }
 
-fn build_tool_result_block(msg: &Message, envelopes: &mut EnvelopeUnwrapTally) -> ContentBlock {
+fn build_tool_result_block(
+    msg: &Message,
+    envelopes: &mut EnvelopeUnwrapTally,
+    carriers: Carriers,
+) -> ContentBlock {
     // Sanitize to the same charset the tool_use emit uses so a result
     // for an OpenAI-origin id (`call.foo:1`) still correlates with its
     // tool_use block after both are mapped to the same wire id.
@@ -1117,7 +1149,7 @@ fn build_tool_result_block(msg: &Message, envelopes: &mut EnvelopeUnwrapTally) -
             parts
                 .iter()
                 .map(|p| {
-                    serde_json::to_value(translate_content_part(p, envelopes))
+                    serde_json::to_value(translate_content_part(p, envelopes, carriers))
                         .unwrap_or(Value::Null)
                 })
                 .collect(),
@@ -1129,6 +1161,7 @@ fn build_tool_result_block(msg: &Message, envelopes: &mut EnvelopeUnwrapTally) -
         content: ensure_min_tool_result_content(content_val),
         cache_control: None,
         is_error: None,
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -1193,13 +1226,14 @@ pub(super) fn translate_messages(
     envelopes: &mut EnvelopeUnwrapTally,
     fingerprint: &mut super::request::ClientFingerprintStripTally,
     tap: Option<&routectl_core::wire_check::WireTap>,
+    carriers: Carriers,
 ) -> Result<Vec<AnthropicMessage>> {
     let mut skips = ReasoningSkipTally::new(id);
     let mut system_turns = SystemTurnTally::new(id);
     let out = translate_messages_threaded(
         id,
         messages,
-        WireMessages::for_tap(messages.len(), tap),
+        WireMessages::for_tap(messages.len(), tap, carriers),
         policy,
         envelopes,
         &mut skips,
@@ -1215,10 +1249,30 @@ pub(super) fn translate_messages(
     }
     skips.flush();
     system_turns.flush();
-    let (out, ledger) = out?;
-    ledger.verify(id, out.len())?;
+    let (wire, ledger) = out?;
+    ledger.verify(id, wire.messages.len())?;
     declare_dropped_system_turns(tap, &system_turns);
-    Ok(out)
+    declare_joined_member_rewrites(tap, &wire.joined_member_rewrites);
+    Ok(wire.messages)
+}
+
+/// Declare each carried member of a later turn in a folded tool run that the
+/// earlier turn's same-named member replaced on the joined message.
+fn declare_joined_member_rewrites(
+    tap: Option<&routectl_core::wire_check::WireTap>,
+    rewrites: &[(usize, String)],
+) {
+    for (index, key) in rewrites {
+        if let Some(path) = crate::wire_declare::member_pointer(&format!("/messages/{index}"), key)
+        {
+            super::wire_edits::declare(
+                tap,
+                routectl_core::wire_check::EditSite::DialectFieldStrip,
+                path,
+                routectl_core::wire_check::EditKind::Rewrite,
+            );
+        }
+    }
 }
 
 /// Declare each forwarded system turn the screen dropped, and each same-role
@@ -1260,7 +1314,15 @@ pub(super) fn translate_messages_untallied(
     envelopes: &mut EnvelopeUnwrapTally,
 ) -> Result<Vec<AnthropicMessage>> {
     let mut fingerprint = super::request::ClientFingerprintStripTally::default();
-    translate_messages(id, messages, policy, envelopes, &mut fingerprint, None)
+    translate_messages(
+        id,
+        messages,
+        policy,
+        envelopes,
+        &mut fingerprint,
+        None,
+        Carriers::Emit,
+    )
 }
 
 /// Whether a canonical `Role::System` turn reaches the wire as a
@@ -1448,7 +1510,8 @@ fn translate_messages_threaded(
     envelopes: &mut EnvelopeUnwrapTally,
     skips: &mut ReasoningSkipTally<'_>,
     system_turns: &mut SystemTurnTally<'_>,
-) -> Result<(Vec<AnthropicMessage>, MessageLedger)> {
+) -> Result<(WireMessages, MessageLedger)> {
+    let carriers = wire.carriers;
     let mut ledger = MessageLedger {
         consumed: messages.len(),
         ..MessageLedger::default()
@@ -1465,7 +1528,7 @@ fn translate_messages_threaded(
                     SystemTurnPolicy::Forward => {
                         emit_forwarded_system_turn(
                             i,
-                            &msg.content,
+                            msg,
                             &mut wire,
                             &mut ledger,
                             system_turns,
@@ -1480,7 +1543,8 @@ fn translate_messages_threaded(
                     i,
                     AnthropicMessage {
                         role: AnthropicRole::User,
-                        content: translate_simple_content(&msg.content, envelopes),
+                        content: translate_simple_content(&msg.content, envelopes, carriers),
+                        extras: carriers.message(msg),
                     },
                     &mut ledger,
                 );
@@ -1491,7 +1555,8 @@ fn translate_messages_threaded(
                     i,
                     AnthropicMessage {
                         role: AnthropicRole::Assistant,
-                        content: build_assistant_content(id, i, msg, envelopes, skips)?,
+                        content: build_assistant_content(id, i, msg, envelopes, carriers, skips)?,
+                        extras: carriers.message(msg),
                     },
                     &mut ledger,
                 );
@@ -1501,7 +1566,9 @@ fn translate_messages_threaded(
                 let (run, run_end) = collect_tool_run(messages, i);
                 ledger.tool_turns_consumed += run.len();
                 ledger.tool_runs_emitted += 1;
-                wire.push(i, build_tool_message(&run, envelopes), &mut ledger);
+                let (joined, replaced) = build_tool_message(&run, i, envelopes, carriers);
+                wire.joined_member_rewrites.extend(replaced);
+                wire.push(i, joined, &mut ledger);
                 i = run_end;
             }
             // This function serves callers whose ingress dialect is
@@ -1524,8 +1591,8 @@ fn translate_messages_threaded(
         }
     }
     system_turns.record_merges_skipped(wire.merges_skipped);
-    system_turns.merged_turns = wire.merged;
-    Ok((wire.messages, ledger))
+    system_turns.merged_turns = std::mem::take(&mut wire.merged);
+    Ok((wire, ledger))
 }
 
 /// The wire `messages[]` under construction. A forwarded system turn the
@@ -1550,6 +1617,11 @@ struct WireMessages {
     /// `(into, merged)` canonical indices of each same-role pair joined
     /// across a dropped system turn.
     merged: Vec<(usize, usize)>,
+    /// Whether the request's carried members ride the wire.
+    carriers: Carriers,
+    /// `(canonical index, name)` of each carried member of a later turn in
+    /// a folded tool run that the earlier turn's same-named member replaced.
+    joined_member_rewrites: Vec<(usize, String)>,
 }
 
 /// Where a cache breakpoint carried by a dropped system turn ended up.
@@ -1565,7 +1637,11 @@ enum BreakpointFate {
 impl WireMessages {
     /// An empty list for `capacity` messages, tracking origins only when
     /// `tap` is admitted.
-    fn for_tap(capacity: usize, tap: Option<&routectl_core::wire_check::WireTap>) -> Self {
+    fn for_tap(
+        capacity: usize,
+        tap: Option<&routectl_core::wire_check::WireTap>,
+        carriers: Carriers,
+    ) -> Self {
         let tracks = tap.is_some_and(routectl_core::wire_check::WireTap::is_admitted);
         Self {
             messages: Vec::with_capacity(capacity),
@@ -1573,6 +1649,8 @@ impl WireMessages {
             merges_skipped: 0,
             origins: tracks.then(|| Vec::with_capacity(capacity)),
             merged: Vec::new(),
+            carriers,
+            joined_member_rewrites: Vec::new(),
         }
     }
 
@@ -1711,11 +1789,12 @@ fn content_into_blocks(content: AnthropicContent) -> Vec<ContentBlock> {
     }
 }
 
-const fn plain_text_block(text: String) -> ContentBlock {
+fn plain_text_block(text: String) -> ContentBlock {
     ContentBlock::Text {
         text,
         cache_control: None,
         citations: None,
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -1745,12 +1824,13 @@ fn breakpoint_slot(block: &mut ContentBlock) -> Option<&mut Option<CacheControl>
 /// seam.
 fn emit_forwarded_system_turn(
     index: usize,
-    content: &MessageContent,
+    msg: &Message,
     wire: &mut WireMessages,
     ledger: &mut MessageLedger,
     system_turns: &mut SystemTurnTally<'_>,
     envelopes: &mut EnvelopeUnwrapTally,
 ) {
+    let content = &msg.content;
     let screened = screen_forwarded_system_content(content);
     system_turns.record_billing_stripped(screened.blocks_stripped);
     match screened.verdict {
@@ -1759,7 +1839,8 @@ fn emit_forwarded_system_turn(
                 index,
                 AnthropicMessage {
                     role: AnthropicRole::System,
-                    content: translate_simple_content(&kept, envelopes),
+                    content: translate_simple_content(&kept, envelopes, wire.carriers),
+                    extras: wire.carriers.message(msg),
                 },
                 ledger,
             );
@@ -1800,10 +1881,12 @@ fn emit_other_role_turn(
     system_turns: &mut SystemTurnTally<'_>,
     envelopes: &mut EnvelopeUnwrapTally,
 ) {
+    let carriers = wire.carriers;
     let user_turn =
         |content: &MessageContent, envelopes: &mut EnvelopeUnwrapTally| AnthropicMessage {
             role: AnthropicRole::User,
-            content: translate_simple_content(content, envelopes),
+            content: translate_simple_content(content, envelopes, carriers),
+            extras: carriers.message(msg),
         };
     if !crate::system_filter::system_message_carries_billing_block(msg) {
         wire.push(index, user_turn(&msg.content, envelopes), ledger);
@@ -1983,7 +2066,7 @@ fn collect_tool_run(messages: &[Message], start: usize) -> (Vec<&Message>, usize
 #[cfg(test)]
 mod translate_file_part_tests {
     use super::ContentBlock;
-    use super::{passthrough_tally, translate_content_part};
+    use super::{Carriers, passthrough_tally, translate_content_part};
     use routectl_core::{ContentPart, KnownContentPart};
     use serde_json::json;
 
@@ -2001,7 +2084,7 @@ mod translate_file_part_tests {
             "filename": "draft.pdf",
             "file_data": "data:application/pdf;base64,JVBERi0xLjQ="
         }));
-        match translate_content_part(&part, &mut passthrough_tally()) {
+        match translate_content_part(&part, &mut passthrough_tally(), Carriers::Emit) {
             ContentBlock::Document {
                 source,
                 title,
@@ -2024,7 +2107,7 @@ mod translate_file_part_tests {
         // Anthropic upstream surfaces a clean error rather than a silent
         // drop. The original nested `file` object is preserved.
         let part = file_part(json!({"file_id": "file-abc"}));
-        match translate_content_part(&part, &mut passthrough_tally()) {
+        match translate_content_part(&part, &mut passthrough_tally(), Carriers::Emit) {
             ContentBlock::Other {
                 type_tag, extras, ..
             } => {
@@ -2041,7 +2124,7 @@ mod translate_file_part_tests {
             "filename": "note.txt",
             "file_data": "data:text/plain;base64,aGVsbG8="
         }));
-        match translate_content_part(&part, &mut passthrough_tally()) {
+        match translate_content_part(&part, &mut passthrough_tally(), Carriers::Emit) {
             ContentBlock::Other { type_tag, .. } => assert_eq!(type_tag, "file"),
             other => panic!("expected Other passthrough, got {other:?}"),
         }
@@ -2053,7 +2136,7 @@ mod translate_file_part_tests {
             "filename": "draft.pdf",
             "file_data": "data:application/pdf;base64,"
         }));
-        match translate_content_part(&part, &mut passthrough_tally()) {
+        match translate_content_part(&part, &mut passthrough_tally(), Carriers::Emit) {
             ContentBlock::Other { type_tag, .. } => assert_eq!(type_tag, "file"),
             other => panic!("expected Other passthrough, got {other:?}"),
         }
@@ -2070,7 +2153,7 @@ mod translate_file_part_tests {
             cache_control: Some(CacheControl::ephemeral_5m()),
             extras: serde_json::Map::new(),
         });
-        match translate_content_part(&part, &mut passthrough_tally()) {
+        match translate_content_part(&part, &mut passthrough_tally(), Carriers::Emit) {
             ContentBlock::Document { cache_control, .. } => {
                 assert!(cache_control.is_some());
             }
@@ -2122,9 +2205,12 @@ mod translate_file_part_tests {
             .find(|p| matches!(p, ContentPart::Known(KnownContentPart::Text { .. })))
             .expect("text part present");
 
-        let wire =
-            serde_json::to_value(translate_content_part(text_part, &mut passthrough_tally()))
-                .expect("serialize");
+        let wire = serde_json::to_value(translate_content_part(
+            text_part,
+            &mut passthrough_tally(),
+            Carriers::Emit,
+        ))
+        .expect("serialize");
 
         assert_eq!(wire["type"], "text");
         assert_eq!(wire["text"], "The sky is blue.");
@@ -2878,8 +2964,8 @@ mod role_other_egress_tests {
 #[cfg(test)]
 mod empty_content_backstop_tests {
     use super::{
-        ReasoningSkipTally, SystemTurnPolicy, build_assistant_content, normalize_replay_invariants,
-        passthrough_tally, translate_messages_untallied,
+        Carriers, ReasoningSkipTally, SystemTurnPolicy, build_assistant_content,
+        normalize_replay_invariants, passthrough_tally, translate_messages_untallied,
     };
     use crate::anthropic_api::ANTHROPIC_FORMAT;
     use crate::anthropic_api::types::{AnthropicContent, ContentBlock};
@@ -3095,8 +3181,15 @@ mod empty_content_backstop_tests {
         let mut skips = ReasoningSkipTally::new("anthropic");
         let events = routectl_testkit::capture_events(|| {
             captured = Some(
-                build_assistant_content("anthropic", 0, &msg, &mut passthrough_tally(), &mut skips)
-                    .expect("build must not error"),
+                build_assistant_content(
+                    "anthropic",
+                    0,
+                    &msg,
+                    &mut passthrough_tally(),
+                    Carriers::Emit,
+                    &mut skips,
+                )
+                .expect("build must not error"),
             );
             skips.flush();
         });
@@ -3122,7 +3215,7 @@ mod empty_content_backstop_tests {
 #[cfg(test)]
 mod tool_use_dedup_tests {
     use super::{
-        AnthropicContent, ContentBlock, ReasoningSkipTally, SystemTurnPolicy,
+        AnthropicContent, Carriers, ContentBlock, ReasoningSkipTally, SystemTurnPolicy,
         build_assistant_content, build_tool_message, passthrough_tally,
         translate_messages_untallied,
     };
@@ -3136,8 +3229,15 @@ mod tool_use_dedup_tests {
     /// reachable from a tool_use-only message).
     fn assistant_content_of(msg: &Message) -> AnthropicContent {
         let mut skips = ReasoningSkipTally::new("anthropic");
-        build_assistant_content("anthropic", 0, msg, &mut passthrough_tally(), &mut skips)
-            .expect("build must not error")
+        build_assistant_content(
+            "anthropic",
+            0,
+            msg,
+            &mut passthrough_tally(),
+            Carriers::Emit,
+            &mut skips,
+        )
+        .expect("build must not error")
     }
 
     fn tool_use_part(id: &str) -> ContentPart {
@@ -3356,6 +3456,10 @@ mod tool_use_dedup_tests {
         }
     }
 
+    fn joined(run: &[&Message]) -> AnthropicMessage {
+        build_tool_message(run, 0, &mut passthrough_tally(), Carriers::Emit).0
+    }
+
     fn tool_result_content(m: &AnthropicMessage) -> &Value {
         let AnthropicContent::Blocks(blocks) = &m.content else {
             panic!("expected Blocks content");
@@ -3375,7 +3479,7 @@ mod tool_use_dedup_tests {
     #[test]
     fn null_content_tool_result_maps_to_empty_string() {
         // Arrange / Act
-        let m = build_tool_message(&[&tool_msg(MessageContent::Null)], &mut passthrough_tally());
+        let m = joined(&[&tool_msg(MessageContent::Null)]);
 
         // Assert
         assert_eq!(tool_result_content(&m), &Value::String(String::new()));
@@ -3386,10 +3490,7 @@ mod tool_use_dedup_tests {
     #[test]
     fn empty_parts_tool_result_maps_to_empty_string() {
         // Arrange / Act
-        let m = build_tool_message(
-            &[&tool_msg(MessageContent::Parts(Vec::new()))],
-            &mut passthrough_tally(),
-        );
+        let m = joined(&[&tool_msg(MessageContent::Parts(Vec::new()))]);
 
         // Assert
         assert_eq!(tool_result_content(&m), &Value::String(String::new()));
@@ -3399,10 +3500,7 @@ mod tool_use_dedup_tests {
     #[test]
     fn non_empty_text_tool_result_is_preserved() {
         // Arrange / Act
-        let m = build_tool_message(
-            &[&tool_msg(MessageContent::Text("ok".to_string()))],
-            &mut passthrough_tally(),
-        );
+        let m = joined(&[&tool_msg(MessageContent::Text("ok".to_string()))]);
 
         // Assert
         assert_eq!(tool_result_content(&m), &Value::String("ok".to_string()));

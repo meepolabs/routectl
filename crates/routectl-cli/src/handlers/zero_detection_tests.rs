@@ -1082,9 +1082,28 @@ fn cross_dialect_responses_cases() -> Vec<Case> {
     ]
 }
 
+/// An Anthropic request carrying an unmodeled member at each carrier level:
+/// a per-message `output_config`, a part `caller` and a custom-tool extra.
+fn sub_level_unknowns_body(max_tokens: u32) -> Value {
+    json!({"model": ALIAS, "max_tokens": max_tokens,
+           "tools": [{"name": "lookup", "input_schema": {"type": "object"},
+                      "eager_input_streaming": true}],
+           "messages": [{"role": "user",
+                         "output_config": {"effort": "low"},
+                         "content": [{"type": "text", "text": "hi",
+                                      "caller": {"type": "direct"}}]}]})
+}
+
 fn anthropic_cases() -> Vec<Case> {
     let hi = json!([{"role": "user", "content": "hi"}]);
     vec![
+        case(
+            "anthropic/sub-level-unknowns",
+            Ingress::Anthropic,
+            sub_level_unknowns_body(16),
+            anthropic_complete(),
+            anthropic_provider,
+        ),
         case(
             "anthropic/plain",
             Ingress::Anthropic,
@@ -1190,6 +1209,10 @@ fn bedrock_invoke_cases() -> Vec<Case> {
         invoke(
             "bedrock-invoke/plain",
             json!({"model": ALIAS, "max_tokens": 16, "messages": hi}),
+        ),
+        invoke(
+            "bedrock-invoke/sub-level-unknowns",
+            sub_level_unknowns_body(16),
         ),
         Case {
             upstream: invoke_stream(),

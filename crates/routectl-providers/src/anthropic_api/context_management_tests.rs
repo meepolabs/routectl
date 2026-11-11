@@ -23,6 +23,7 @@ fn thinking_block(thinking: &str, signature: &str) -> ContentBlock {
         thinking: thinking.to_string(),
         signature: signature.to_string(),
         cache_control: None,
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -32,6 +33,7 @@ fn tool_use_block(id: &str) -> ContentBlock {
         name: "tool".to_string(),
         input: serde_json::Value::Object(serde_json::Map::new()),
         cache_control: None,
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -40,6 +42,7 @@ fn text_block(text: &str) -> ContentBlock {
         text: text.to_string(),
         citations: None,
         cache_control: None,
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -306,6 +309,7 @@ fn assistant_with_tool(tool_id: &str) -> AnthropicMessage {
     AnthropicMessage {
         role: AnthropicRole::Assistant,
         content: AnthropicContent::Blocks(vec![tool_use_block(tool_id)]),
+        extras: serde_json::Map::new(),
     }
 }
 
@@ -499,6 +503,7 @@ fn apply_edit_skips_when_thinking_already_precedes_tool_use() {
             thinking_block("already-there", "sig"),
             tool_use_block("t1"),
         ]),
+        extras: serde_json::Map::new(),
     }];
 
     let result = apply_clear_thinking_edit(
@@ -749,6 +754,7 @@ fn apply_edit_two_tool_uses_no_duplicate_thinking() {
     let mut messages = vec![AnthropicMessage {
         role: AnthropicRole::Assistant,
         content: AnthropicContent::Blocks(vec![tool_use_block("tu1"), tool_use_block("tu2")]),
+        extras: serde_json::Map::new(),
     }];
 
     let result = apply_clear_thinking_edit(
@@ -797,6 +803,7 @@ fn apply_edit_some_empty_not_treated_as_miss() {
     let mut messages = vec![AnthropicMessage {
         role: AnthropicRole::Assistant,
         content: AnthropicContent::Blocks(vec![tool_use_block("tA"), tool_use_block("tB")]),
+        extras: serde_json::Map::new(),
     }];
 
     let result = apply_clear_thinking_edit(
@@ -839,6 +846,7 @@ fn apply_edit_cold_cache_idempotency() {
             thinking_block("pre-existing", "sig"),
             tool_use_block("cold-tu"),
         ]),
+        extras: serde_json::Map::new(),
     }];
 
     let result = apply_clear_thinking_edit(

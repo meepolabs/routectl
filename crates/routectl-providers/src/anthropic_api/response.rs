@@ -936,11 +936,13 @@ mod tests {
                     thinking: thinking.to_string(),
                     signature: "EqoCCkYIBxgCKkASDGZvbw==".to_string(),
                     cache_control: None,
+                    extras: serde_json::Map::new(),
                 },
                 ContentBlock::Text {
                     text: "answer".to_string(),
                     cache_control: None,
                     citations: None,
+                    extras: serde_json::Map::new(),
                 },
             ];
 

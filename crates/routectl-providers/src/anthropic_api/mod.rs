@@ -27,6 +27,7 @@ use routectl_core::{
 use crate::upstream_error::{CarriedBody, UpstreamErrorRead};
 use crate::upstream_scope::ScopeLane;
 
+mod carriers;
 mod client;
 mod cloak;
 pub(crate) mod context_management;
